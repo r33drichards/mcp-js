@@ -61,24 +61,24 @@ use std::collections::HashMap;
         let scope = &mut v8::ContextScope::new(scope, context);
     
 
-        let codeType = v8::String::new(scope, &code).unwrap();
+        let v8_string_code = v8::String::new(scope, &code).unwrap();
         
         
-        let script = v8::Script::compile(scope, codeType, None).unwrap();
+        let script = v8::Script::compile(scope, v8_string_code, None).unwrap();
         let result = script.run(scope).unwrap();
         let result = result.to_string(scope).unwrap();
         println!("result: {}", result.to_rust_string_lossy(scope));
 
-        let stringResult = result.to_rust_string_lossy(scope);
+        let string_result = result.to_rust_string_lossy(scope);
 
         Ok(json!({
-            "result": stringResult
+            "result": string_result
         }))
-    });
+    }).unwrap();
     
     // Start the server
     info!("Starting server...");
-    server.start(transport);
+    server.start(transport).unwrap();
 
     Ok(())
 }

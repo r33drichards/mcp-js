@@ -1,0 +1,1 @@
+https://github.com/denoland/deno_core/blob/6c9b294ee4d906c84d69375de69b987d5d04f5f0/core/examples/ts_module_loader.rs
