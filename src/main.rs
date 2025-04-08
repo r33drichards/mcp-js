@@ -1,4 +1,5 @@
 use log::info;
+
 use mcpr::{
     error::MCPError,
     schema::common::{Tool, ToolInputSchema},
@@ -54,7 +55,10 @@ use std::collections::HashMap;
         v8::V8::initialize_platform(platform);
         v8::V8::initialize();
         
-        let isolate = &mut v8::Isolate::new(Default::default());
+        let isolate = &mut v8::Isolate::snapshot_creator(
+            None,
+            None
+        );
         
         let scope = &mut v8::HandleScope::new(isolate);
         let context = v8::Context::new(scope, Default::default());
@@ -62,6 +66,8 @@ use std::collections::HashMap;
     
 
         let v8_string_code = v8::String::new(scope, &code).unwrap();
+
+
         
         
         let script = v8::Script::compile(scope, v8_string_code, None).unwrap();
@@ -70,6 +76,19 @@ use std::collections::HashMap;
         println!("result: {}", result.to_rust_string_lossy(scope));
 
         let string_result = result.to_rust_string_lossy(scope);
+
+        // drop scope
+
+        // cleanup 
+        let snapshot = isolate.create_blob(
+            v8::FunctionCodeHandling::Keep,
+        ).unwrap();
+
+        // save snapshot to file
+        let mut file = std::fs::File::create("snapshot.bin").unwrap();
+
+
+
 
         Ok(json!({
             "result": string_result
