@@ -9,7 +9,7 @@ use v8::OwnedIsolate;
 
 fn main() {
 
-    let code = "x=1;x+=1;x"
+    let code = "x=1;x+=1;x";
 
     let mut isolate: OwnedIsolate;
 
