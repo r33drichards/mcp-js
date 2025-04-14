@@ -13,7 +13,6 @@ use std::collections::HashMap;
 use std::error::Error;
 
 use std::io::Write;
-use v8::OwnedIsolate;
 
 fn eval<'s>(scope: &mut v8::HandleScope<'s>, code: &str) -> Option<v8::Local<'s, v8::Value>> {
     let scope = &mut v8::EscapableHandleScope::new(scope);
