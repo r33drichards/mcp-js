@@ -1,8 +1,6 @@
 use log::info;
 
 use std::io::Write;
-use v8::OwnedIsolate;
-
 
 fn eval<'s>(
     scope: &mut v8::HandleScope<'s>,
