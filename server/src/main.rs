@@ -4,20 +4,16 @@ use clap::Parser;
 use mcpr::{
     error::MCPError,
     schema::common::{Tool, ToolInputSchema},
-    transport::{
-        stdio::StdioTransport,
-        Transport,
-    },
+    transport::{stdio::StdioTransport, Transport},
 };
 use serde_json::{json, Value};
 
-use std::error::Error;
+use log::{debug, error, info, warn};
 use std::collections::HashMap;
-use log::{info, error, debug, warn};
+use std::error::Error;
 
-use v8::OwnedIsolate;
 use std::io::Write;
-
+use v8::OwnedIsolate;
 
 /// CLI arguments
 #[derive(Parser)]
@@ -77,9 +73,9 @@ struct Server<T> {
     transport: Option<T>,
 }
 
-impl<T> Server<T> 
-where 
-    T: Transport
+impl<T> Server<T>
+where
+    T: Transport,
 {
     /// Create a new MCP server with the given configuration
     fn new(config: ServerConfig) -> Self {
@@ -128,7 +124,7 @@ where
     /// Process incoming messages
     fn process_messages(&mut self) -> Result<(), MCPError> {
         info!("Server is running and waiting for client connections...");
-        
+
         loop {
             let message = {
                 let transport = self
@@ -192,7 +188,11 @@ where
     }
 
     /// Handle initialization request
-    fn handle_initialize(&mut self, id: mcpr::schema::json_rpc::RequestId, _params: Option<Value>) -> Result<(), MCPError> {
+    fn handle_initialize(
+        &mut self,
+        id: mcpr::schema::json_rpc::RequestId,
+        _params: Option<Value>,
+    ) -> Result<(), MCPError> {
         let transport = self
             .transport
             .as_mut()
@@ -219,7 +219,11 @@ where
     }
 
     /// Handle tool call request
-    fn handle_tool_call(&mut self, id: mcpr::schema::json_rpc::RequestId, params: Option<Value>) -> Result<(), MCPError> {
+    fn handle_tool_call(
+        &mut self,
+        id: mcpr::schema::json_rpc::RequestId,
+        params: Option<Value>,
+    ) -> Result<(), MCPError> {
         let transport = self
             .transport
             .as_mut()
@@ -236,7 +240,10 @@ where
             .ok_or_else(|| MCPError::Protocol("Missing tool name in parameters".to_string()))?;
 
         let tool_params = params.get("parameters").cloned().unwrap_or(Value::Null);
-        debug!("Tool call: {} with parameters: {:?}", tool_name, tool_params);
+        debug!(
+            "Tool call: {} with parameters: {:?}",
+            tool_name, tool_params
+        );
 
         // Find the tool handler
         let handler = self.tool_handlers.get(tool_name).ok_or_else(|| {
@@ -318,16 +325,16 @@ where
 fn main() -> Result<(), Box<dyn Error>> {
     // Initialize logging
     env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));
-    
+
     // Parse command line arguments
     let args = Args::parse();
-    
+
     // Set log level based on debug flag
     if args.debug {
         log::set_max_level(log::LevelFilter::Debug);
         debug!("Debug logging enabled");
     }
-    
+
     // Configure the server
     let server_config = ServerConfig::new()
         .with_name("mcp-v8-server")
@@ -337,20 +344,30 @@ fn main() -> Result<(), Box<dyn Error>> {
             description: Some("execute javascript".to_string()),
             input_schema: ToolInputSchema {
                 r#type: "object".to_string(),
-                properties: Some([
-                    ("code".to_string(), serde_json::json!({
-                        "type": "string",
-                        "description": "code to executet"
-                    })),
-                    ("session_id".to_string(), serde_json::json!({
-                        "type": "string",
-                        "description": "session id"
-                    })),
-                ].into_iter().collect()),
+                properties: Some(
+                    [
+                        (
+                            "code".to_string(),
+                            serde_json::json!({
+                                "type": "string",
+                                "description": "code to executet"
+                            }),
+                        ),
+                        (
+                            "session_id".to_string(),
+                            serde_json::json!({
+                                "type": "string",
+                                "description": "session id"
+                            }),
+                        ),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
                 required: Some(vec!["code".to_string()]),
             },
         });
-    
+
     // Create the server
     let mut server = Server::new(server_config);
 
@@ -358,15 +375,16 @@ fn main() -> Result<(), Box<dyn Error>> {
     let platform = v8::new_default_platform(0, false).make_shared();
     v8::V8::initialize_platform(platform);
     v8::V8::initialize();
-    
-    
+
     // Register tool handlers
     server.register_tool_handler("javascript", |params: Value| {
-        info!("calling tool javascript with params: {}", params.to_string());
+        info!(
+            "calling tool javascript with params: {}",
+            params.to_string()
+        );
         let code = params.get("code").unwrap().as_str().unwrap();
 
-
-        let mut isolate : OwnedIsolate;
+        let mut isolate: OwnedIsolate;
 
         info!("Creating isolate...");
 
@@ -374,38 +392,35 @@ fn main() -> Result<(), Box<dyn Error>> {
         if let Ok(snapshot) = std::fs::read("snapshot.bin") {
             info!("creating isolate from snapshot...");
             isolate = v8::Isolate::snapshot_creator_from_existing_snapshot(snapshot, None, None);
-
         } else {
             info!("creating isolate from scratch...");
             isolate = v8::Isolate::snapshot_creator(Default::default(), Default::default());
-
         }
 
         info!("Isolate created");
-        
+
         // Create a new isolate for each execution
         let mut string_result = String::new();
-        
-        {
-            info!("Creating scope...");
-            let handle_scope = &mut v8::HandleScope::new(&mut isolate);
-            let context = v8::Context::new(handle_scope, Default::default());
-            let scope = &mut v8::ContextScope::new(handle_scope, context);
 
-            info!("Scope created");
-            info!("creating v8 string from code...");
+        info!("Creating scope...");
+        let handle_scope = &mut v8::HandleScope::new(&mut isolate);
+        let context = v8::Context::new(handle_scope, Default::default());
+        let scope = &mut v8::ContextScope::new(handle_scope, context);
 
-            let v8_string_code = v8::String::new(scope, code).unwrap();
-            let script = match v8::Script::compile(scope, v8_string_code, None) {
-                Some(script) => script,
-                None => {
-                    return Ok(json!({
-                        "error": "Failed to compile JavaScript code"
-                    }))
-                }
-            };
-            info!("v8 string created");
-            info!("running script...");
+        info!("Scope created");
+        info!("creating v8 string from code...");
+
+        let v8_string_code = v8::String::new(scope, code).unwrap();
+        let script = match v8::Script::compile(scope, v8_string_code, None) {
+            Some(script) => script,
+            None => {
+                return Ok(json!({
+                    "error": "Failed to compile JavaScript code"
+                }))
+            }
+        };
+        info!("v8 string created");
+        info!("running script...");
         let result = match script.run(scope) {
             Some(result) => result,
             None => {
@@ -419,42 +434,38 @@ fn main() -> Result<(), Box<dyn Error>> {
         let result_string = result.to_string(scope).unwrap();
         string_result = result_string.to_rust_string_lossy(scope);
         info!("result: {}", string_result);
-    }
-    
-    // All scopes are dropped by here, isolate is no longer borrowed
-    // cleanup
-    info!("creating snapshot");
 
+        // All scopes are dropped by here, isolate is no longer borrowed
+        // cleanup
+        info!("creating snapshot");
 
-    let snapshot = match isolate.create_blob(v8::FunctionCodeHandling::Keep) {
-        Some(snapshot) => snapshot,
-        None => {
-            return Ok(json!({
-                "error": "Failed to create snapshot"
-            }))
-        }
-    };
-    info!("snapshot created");
-    info!("writing snapshot to file snapshot.bin in current directory");
-    let mut file = std::fs::File::create("snapshot.bin").unwrap();
-    file.write_all(&snapshot).unwrap();
+        let snapshot = match isolate.create_blob(v8::FunctionCodeHandling::Keep) {
+            Some(snapshot) => snapshot,
+            None => {
+                return Ok(json!({
+                    "error": "Failed to create snapshot"
+                }))
+            }
+        };
+        info!("snapshot created");
+        info!("writing snapshot to file snapshot.bin in current directory");
+        let mut file = std::fs::File::create("snapshot.bin").unwrap();
+        file.write_all(&snapshot).unwrap();
 
-
-
-    // save snapshot to file
-    // We could create a snapshot here if needed, but it's not necessary for each execution
-    // Let's just return the result
-    Ok(json!({
-        "result": string_result
-    }))
+        // save snapshot to file
+        // We could create a snapshot here if needed, but it's not necessary for each execution
+        // Let's just return the result
+        Ok(json!({
+            "result": string_result
+        }))
     })?;
-    
+
     // Create transport and start the server
     info!("Starting stdio server");
     let transport = StdioTransport::new();
-    
+
     info!("Starting mcp-v8-server...");
     server.start(transport)?;
-    
+
     Ok(())
 }
