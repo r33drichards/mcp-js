@@ -3,3 +3,4 @@ result
 target
 test_*.json
 snapshot.*.bin
+snapshot.bin
