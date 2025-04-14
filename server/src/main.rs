@@ -426,7 +426,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         };
 
 
-        info!("result: {}", string_result);
+        info!("code executed: {}", string_result);
 
 
         info!("snapshot created");
@@ -438,7 +438,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         // We could create a snapshot here if needed, but it's not necessary for each execution
         // Let's just return the result
         Ok(json!({
-            "result": string_result
+            "output": string_result
         }))
     })?;
 
