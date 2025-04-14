@@ -15,6 +15,14 @@ use std::error::Error;
 use std::io::Write;
 use v8::OwnedIsolate;
 
+fn eval<'s>(scope: &mut v8::HandleScope<'s>, code: &str) -> Option<v8::Local<'s, v8::Value>> {
+    let scope = &mut v8::EscapableHandleScope::new(scope);
+    let source = v8::String::new(scope, code).unwrap();
+    let script = v8::Script::compile(scope, source, None).unwrap();
+    let r = script.run(scope);
+    r.map(|v| scope.escape(v))
+}
+
 /// CLI arguments
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -384,73 +392,47 @@ fn main() -> Result<(), Box<dyn Error>> {
         );
         let code = params.get("code").unwrap().as_str().unwrap();
 
-        let mut isolate: OwnedIsolate;
-
-        info!("Creating isolate...");
-
-        // Load snapshot if it exists
-        if let Ok(snapshot) = std::fs::read("snapshot.bin") {
-            info!("creating isolate from snapshot...");
-            isolate = v8::Isolate::snapshot_creator_from_existing_snapshot(snapshot, None, None);
-        } else {
-            info!("creating isolate from scratch...");
-            isolate = v8::Isolate::snapshot_creator(Default::default(), Default::default());
-        }
-
-        info!("Isolate created");
-
         // Create a new isolate for each execution
         let mut string_result = String::new();
 
-        info!("Creating scope...");
-        let handle_scope = &mut v8::HandleScope::new(&mut isolate);
-        let context = v8::Context::new(handle_scope, Default::default());
-        let scope = &mut v8::ContextScope::new(handle_scope, context);
-
-        info!("Scope created");
-        info!("creating v8 string from code...");
-
-        let v8_string_code = v8::String::new(scope, code).unwrap();
-        let script = match v8::Script::compile(scope, v8_string_code, None) {
-            Some(script) => script,
-            None => {
-                return Ok(json!({
-                    "error": "Failed to compile JavaScript code"
-                }))
+        let startup_data = {
+            info!("Creating isolate...");
+            let mut snapshot_creator;        
+            // Load snapshot if it exists
+            if let Ok(snapshot) = std::fs::read("snapshot.bin") {
+                info!("creating isolate from snapshot...");
+                snapshot_creator =
+                    v8::Isolate::snapshot_creator_from_existing_snapshot(snapshot, None, None);
+            } else {
+                info!("creating isolate from scratch...");
+                snapshot_creator =
+                    v8::Isolate::snapshot_creator(Default::default(), Default::default());
             }
-        };
-        info!("v8 string created");
-        info!("running script...");
-        let result = match script.run(scope) {
-            Some(result) => result,
-            None => {
-                return Ok(json!({
-                    "error": "Failed to run JavaScript code"
-                }))
-            }
-        };
-        info!("script ran");
+            info!("Isolate created");
 
-        let result_string = result.to_string(scope).unwrap();
-        string_result = result_string.to_rust_string_lossy(scope);
+            {
+                let scope = &mut v8::HandleScope::new(&mut snapshot_creator);
+                let context = v8::Context::new(scope, Default::default());
+                let scope = &mut v8::ContextScope::new(scope, context);
+                let ouptut = eval(scope, code).unwrap();
+                string_result = ouptut.to_string(scope).unwrap().to_rust_string_lossy(scope);
+
+                scope.set_default_context(context);
+            }
+
+            snapshot_creator
+                .create_blob(v8::FunctionCodeHandling::Clear)
+                .unwrap()
+        };
+
+
         info!("result: {}", string_result);
 
-        // All scopes are dropped by here, isolate is no longer borrowed
-        // cleanup
-        info!("creating snapshot");
 
-        let snapshot = match isolate.create_blob(v8::FunctionCodeHandling::Keep) {
-            Some(snapshot) => snapshot,
-            None => {
-                return Ok(json!({
-                    "error": "Failed to create snapshot"
-                }))
-            }
-        };
         info!("snapshot created");
         info!("writing snapshot to file snapshot.bin in current directory");
         let mut file = std::fs::File::create("snapshot.bin").unwrap();
-        file.write_all(&snapshot).unwrap();
+        file.write_all(&startup_data).unwrap();
 
         // save snapshot to file
         // We could create a snapshot here if needed, but it's not necessary for each execution
