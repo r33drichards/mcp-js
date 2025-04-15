@@ -90,7 +90,7 @@ impl<T: Transport> Client<T> {
         self.transport.send(&message)?;
 
         // Wait for response
-        info!("Waiting for initialization response");
+        eprintln!("Waiting for initialization response");
         let response: JSONRPCMessage = self.transport.receive()?;
         debug!("Received response: {:?}", response);
 
@@ -127,12 +127,12 @@ impl<T: Transport> Client<T> {
         );
 
         let message = JSONRPCMessage::Request(tool_call_request);
-        info!("Calling tool '{}' with parameters: {:?}", tool_name, params);
+        eprintln!("Calling tool '{}' with parameters: {:?}", tool_name, params);
         debug!("Sending tool call request: {:?}", message);
         self.transport.send(&message)?;
 
         // Wait for response
-        info!("Waiting for tool call response");
+        eprintln!("Waiting for tool call response");
         let response: JSONRPCMessage = self.transport.receive()?;
         debug!("Received response: {:?}", response);
 
@@ -170,19 +170,19 @@ impl<T: Transport> Client<T> {
             JSONRPCRequest::new(self.next_request_id(), "shutdown".to_string(), None);
 
         let message = JSONRPCMessage::Request(shutdown_request);
-        info!("Sending shutdown request");
+        eprintln!("Sending shutdown request");
         debug!("Shutdown request: {:?}", message);
         self.transport.send(&message)?;
 
         // Wait for response
-        info!("Waiting for shutdown response");
+        eprintln!("Waiting for shutdown response");
         let response: JSONRPCMessage = self.transport.receive()?;
         debug!("Received response: {:?}", response);
 
         match response {
             JSONRPCMessage::Response(_) => {
                 // Close the transport
-                info!("Closing transport");
+                eprintln!("Closing transport");
                 self.transport.close()?;
                 Ok(())
             }
@@ -207,7 +207,7 @@ impl<T: Transport> Client<T> {
 
 /// Connect to an already running server
 fn connect_to_running_server(command: &str, args: &[&str]) -> Result<(StdioTransport, Option<Child>), Box<dyn Error>> {
-    info!("Connecting to running server with command: {} {}", command, args.join(" "));
+    eprintln!("Connecting to running server with command: {} {}", command, args.join(" "));
     
     // Start a new process that will connect to the server
     let mut process = Command::new(command)
@@ -241,7 +241,7 @@ fn connect_to_running_server(command: &str, args: &[&str]) -> Result<(StdioTrans
 
 /// Start a new server and connect to it
 fn start_and_connect_to_server(server_cmd: &str) -> Result<(StdioTransport, Option<Child>), Box<dyn Error>> {
-    info!("Starting server process: {}", server_cmd);
+    eprintln!("Starting server process: {}", server_cmd);
     
     // Start the server process
     let mut server_process = Command::new(server_cmd)
@@ -266,7 +266,7 @@ fn start_and_connect_to_server(server_cmd: &str) -> Result<(StdioTransport, Opti
     let server_stdin = server_process.stdin.take().ok_or("Failed to get stdin")?;
     let server_stdout = server_process.stdout.take().ok_or("Failed to get stdout")?;
 
-    info!("Using stdio transport");
+    eprintln!("Using stdio transport");
     let transport = StdioTransport::with_reader_writer(
         Box::new(server_stdout),
         Box::new(server_stdin),
@@ -300,21 +300,21 @@ fn main() -> Result<(), Box<dyn Error>> {
     
     // Set timeout
     let timeout = Duration::from_secs(args.timeout);
-    info!("Operation timeout set to {} seconds", args.timeout);
+    eprintln!("Operation timeout set to {} seconds", args.timeout);
     
     // Create transport and server process based on connection mode
     let (transport, server_process) = if args.connect {
-        info!("Connecting to already running server");
+        eprintln!("Connecting to already running server");
         connect_to_running_server(&args.server_cmd, &[])?
     } else {
-        info!("Starting new server process");
+        eprintln!("Starting new server process");
         start_and_connect_to_server(&args.server_cmd)?
     };
     
     let mut client = Client::new(transport);
     
     // Initialize the client with timeout
-    info!("Initializing client...");
+    eprintln!("Initializing client...");
     let start_time = Instant::now();
     let _init_result = loop {
         if start_time.elapsed() >= timeout {
@@ -327,7 +327,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         
         match client.initialize() {
             Ok(result) => {
-                info!("Server info: {:?}", result);
+                eprintln!("Server info: {:?}", result);
                 break result;
             },
             Err(e) => {
@@ -340,14 +340,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     
     if args.interactive {
         // Interactive mode
-        info!("=== mcp-v8-client Interactive Mode ===");
+        eprintln!("=== mcp-v8-client Interactive Mode ===");
         println!("=== mcp-v8-client Interactive Mode ===");
         println!("Type 'exit' or 'quit' to exit");
         
         loop {
             let name = prompt_input("Enter your name (or 'exit' to quit)")?;
             if name.to_lowercase() == "exit" || name.to_lowercase() == "quit" {
-                info!("User requested exit");
+                eprintln!("User requested exit");
                 break;
             }
             
@@ -360,10 +360,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                 Ok(response) => {
                     if let Some(message) = response.get("message") {
                         let msg = message.as_str().unwrap_or("");
-                        info!("Received message: {}", msg);
+                        eprintln!("Received message: {}", msg);
                         println!("{}", msg);
                     } else {
-                        info!("Received response without message field: {:?}", response);
+                        eprintln!("Received response without message field: {:?}", response);
                         println!("Response: {:?}", response);
                     }
                 },
@@ -376,7 +376,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             println!();
         }
         
-        info!("Exiting interactive mode");
+        eprintln!("Exiting interactive mode");
         println!("Exiting interactive mode");
     } else {
         // One-shot mode
@@ -385,7 +385,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             "Name is required in non-interactive mode"
         })?;
         
-        info!("Running in one-shot mode with name: {}", name);
+        eprintln!("Running in one-shot mode with name: {}", name);
         
         // Call the hello tool
         let request = serde_json::json!({
@@ -402,24 +402,24 @@ fn main() -> Result<(), Box<dyn Error>> {
         
         if let Some(message) = response.get("message") {
             let msg = message.as_str().unwrap_or("");
-            info!("Received message: {}", msg);
+            eprintln!("Received message: {}", msg);
             println!("{}", msg);
         } else {
-            info!("Received response without message field: {:?}", response);
+            eprintln!("Received response without message field: {:?}", response);
             println!("Response: {:?}", response);
         }
     }
     
     // Shutdown the client
-    info!("Shutting down client");
+    eprintln!("Shutting down client");
     if let Err(e) = client.shutdown() {
         error!("Error during shutdown: {}", e);
     }
-    info!("Client shutdown complete");
+    eprintln!("Client shutdown complete");
     
     // If we started the server, terminate it gracefully
     if let Some(mut process) = server_process {
-        info!("Terminating server process...");
+        eprintln!("Terminating server process...");
         let _ = process.kill();
     }
     

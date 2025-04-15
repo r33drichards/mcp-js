@@ -110,27 +110,27 @@ where
         self.tool_handlers
             .insert(tool_name.to_string(), Box::new(handler));
 
-        info!("Registered handler for tool '{}'", tool_name);
+        eprintln!("Registered handler for tool '{}'", tool_name);
         Ok(())
     }
 
     /// Start the server with the given transport
     fn start(&mut self, mut transport: T) -> Result<(), MCPError> {
         // Start the transport
-        info!("Starting transport...");
+        eprintln!("Starting transport...");
         transport.start()?;
 
         // Store the transport
         self.transport = Some(transport);
 
         // Process messages
-        info!("Processing messages...");
+        eprintln!("Processing messages...");
         self.process_messages()
     }
 
     /// Process incoming messages
     fn process_messages(&mut self) -> Result<(), MCPError> {
-        info!("Server is running and waiting for client connections...");
+        eprintln!("Server is running and waiting for client connections...");
 
         loop {
             let message = {
@@ -145,7 +145,7 @@ where
                     Err(e) => {
                         // For transport errors, log them but continue waiting
                         // This allows the server to keep running even if there are temporary connection issues
-                        error!("Transport error: {}", e);
+                        eprintln!("Transport error: {}", e);
                         std::thread::sleep(std::time::Duration::from_millis(1000));
                         continue;
                     }
@@ -161,15 +161,18 @@ where
 
                     match method.as_str() {
                         "initialize" => {
-                            info!("Received initialization request");
-                            self.handle_initialize(id, params)?;
+                            eprintln!("Received initialization request");
+                            let res = self.handle_initialize(id, params);
+                            if let Err(e) = res {
+                                eprintln!("Error sending initialization response: {}", e);
+                            }
                         }
                         "tool_call" => {
-                            info!("Received tool call request");
+                            eprintln!("Received tool call request");
                             self.handle_tool_call(id, params)?;
                         }
                         "shutdown" => {
-                            info!("Received shutdown request");
+                            eprintln!("Received shutdown request");
                             self.handle_shutdown(id)?;
                             break;
                         }
@@ -219,10 +222,8 @@ where
         );
 
         // Send the response
-        debug!("Sending initialization response");
-        transport.send(&mcpr::schema::json_rpc::JSONRPCMessage::Response(response))?;
-
-        Ok(())
+        eprintln!("Sending initialization response");
+        transport.send(&mcpr::schema::json_rpc::JSONRPCMessage::Response(response))
     }
 
     /// Handle tool call request
@@ -294,10 +295,11 @@ where
 
         // Send the response
         debug!("Sending shutdown response");
+        eprintln!("Sending shutdown response");
         transport.send(&mcpr::schema::json_rpc::JSONRPCMessage::Response(response))?;
 
         // Close the transport
-        info!("Closing transport");
+        eprintln!("Closing transport");
         transport.close()?;
 
         Ok(())
@@ -322,7 +324,7 @@ where
         );
 
         // Send the error
-        warn!("Sending error response: {}", message);
+        eprintln!("Sending error response: {}", message);
         transport.send(&error)?;
 
         Ok(())
@@ -385,7 +387,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // Register tool handlers
     server.register_tool_handler("javascript", |params: Value| {
-        info!(
+        eprintln!(
             "calling tool javascript with params: {}",
             params.to_string()
         );
@@ -395,19 +397,19 @@ fn main() -> Result<(), Box<dyn Error>> {
         let mut string_result = String::new();
 
         let startup_data = {
-            info!("Creating isolate...");
+            eprintln!("Creating isolate...");
             let mut snapshot_creator;        
             // Load snapshot if it exists
             if let Ok(snapshot) = std::fs::read("snapshot.bin") {
-                info!("creating isolate from snapshot...");
+                eprintln!("creating isolate from snapshot...");
                 snapshot_creator =
                     v8::Isolate::snapshot_creator_from_existing_snapshot(snapshot, None, None);
             } else {
-                info!("creating isolate from scratch...");
+                eprintln!("creating isolate from scratch...");
                 snapshot_creator =
                     v8::Isolate::snapshot_creator(Default::default(), Default::default());
             }
-            info!("Isolate created");
+            eprintln!("Isolate created");
 
             {
                 let scope = &mut v8::HandleScope::new(&mut snapshot_creator);
@@ -425,11 +427,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         };
 
 
-        info!("code executed: {}", string_result);
+        eprintln!("code executed: {}", string_result);
 
 
-        info!("snapshot created");
-        info!("writing snapshot to file snapshot.bin in current directory");
+        eprintln!("snapshot created");
+        eprintln!("writing snapshot to file snapshot.bin in current directory");
         let mut file = std::fs::File::create("snapshot.bin").unwrap();
         file.write_all(&startup_data).unwrap();
 
@@ -442,11 +444,20 @@ fn main() -> Result<(), Box<dyn Error>> {
     })?;
 
     // Create transport and start the server
-    info!("Starting stdio server");
+    eprintln!("Starting stdio server");
     let transport = StdioTransport::new();
 
-    info!("Starting mcp-v8-server...");
-    server.start(transport)?;
+    eprintln!("Starting mcp-v8-server...");
+
+
+    // print to stderr
+    eprintln!("Starting mcp-v8-server...");
+
+    let result = server.start(transport);
+
+    if let Err(e) = result {
+        eprintln!("Server failed to start: {}", e);
+    }
 
     Ok(())
 }

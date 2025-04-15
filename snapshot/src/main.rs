@@ -35,8 +35,8 @@ fn main() {
             .create_blob(v8::FunctionCodeHandling::Clear)
             .unwrap()
     };
-    info!("snapshot created");
-    info!("writing snapshot to file snapshot.bin in current directory");
+    eprintln!("snapshot created");
+    eprintln!("writing snapshot to file snapshot.bin in current directory");
     let mut file = std::fs::File::create("snapshot.bin").unwrap();
     file.write_all(&startup_data).unwrap();
 
