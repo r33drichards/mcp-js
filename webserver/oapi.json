@@ -1,0 +1,129 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "webserver",
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/javascript": {
+      "post": {
+        "description": "Evaluate JavaScript code\n\nEvaluates the provided JavaScript code and returns the result.",
+        "operationId": "handlers_javascript_javascript",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JavaScriptInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JavaScriptOutput"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "# [400 Bad Request](https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400)\nThe request given is wrongly formatted or data asked could not be fulfilled. "
+          },
+          "404": {
+            "description": "# [404 Not Found](https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404)\nThis response is given when you request a page that does not exists."
+          },
+          "422": {
+            "description": "# [422 Unprocessable Entity](https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/422)\nThis response is given when you request body is not correctly formatted. "
+          },
+          "500": {
+            "description": "# [500 Internal Server Error](https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500)\nThis response is given when something wend wrong on the server. "
+          }
+        }
+      }
+    },
+    "/log": {
+      "post": {
+        "description": "Get instance ID from queue\n\nRetrieves the next available EC2 instance ID from the queue.",
+        "operationId": "handlers_log_log",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LogInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LogOutput"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "# [400 Bad Request](https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400)\nThe request given is wrongly formatted or data asked could not be fulfilled. "
+          },
+          "404": {
+            "description": "# [404 Not Found](https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404)\nThis response is given when you request a page that does not exists."
+          },
+          "422": {
+            "description": "# [422 Unprocessable Entity](https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/422)\nThis response is given when you request body is not correctly formatted. "
+          },
+          "500": {
+            "description": "# [500 Internal Server Error](https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/500)\nThis response is given when something wend wrong on the server. "
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "JavaScriptOutput": {
+        "type": "object",
+        "required": [
+          "result"
+        ],
+        "properties": {
+          "result": {
+            "type": "string"
+          }
+        }
+      },
+      "JavaScriptInput": {
+        "type": "object",
+        "required": [
+          "code"
+        ],
+        "properties": {
+          "code": {
+            "type": "string"
+          }
+        }
+      },
+      "LogOutput": {
+        "type": "object"
+      },
+      "LogInput": {
+        "type": "object",
+        "required": [
+          "log"
+        ],
+        "properties": {
+          "log": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

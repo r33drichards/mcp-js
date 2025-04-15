@@ -2,6 +2,8 @@ import { McpServer, ResourceTemplate } from "npm:@modelcontextprotocol/sdk/serve
 import { StdioServerTransport } from "npm:@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "npm:zod";
 
+import { DefaultApi, Configuration } from "./typescript-axios-client-generated";
+
 // Create an MCP server
 const server = new McpServer({
   name: "Demo",
@@ -19,8 +21,20 @@ server.tool("add",
 server.tool("javascript",
   { code: z.string() },
   async ({ code }) => {
-    const result = await eval(code);
-    return { content: [{ type: "text", text: String(result) }] };
+    console.error("javascript", code);
+    const api = new DefaultApi(
+      new Configuration({
+        basePath: "http://localhost:8000"
+      })
+
+    );
+    try {
+      const result = await api.handlersJavascriptJavascript({ code: code });
+      console.error("result", result.data);
+      return { content: [{ type: "text", text: String(result.data.result) }] };
+    } catch (error) {
+      return { content: [{ type: "text", text: String(error) }] };
+    }
   }
 );
 

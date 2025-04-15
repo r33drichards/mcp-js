@@ -1,0 +1,5 @@
+{
+  "imports": {
+    "axios": "npm:axios@^1.8.4"
+  }
+}

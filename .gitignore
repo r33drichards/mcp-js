@@ -4,3 +4,4 @@ target
 test_*.json
 snapshot.*.bin
 snapshot.bin
+.DS_Store
