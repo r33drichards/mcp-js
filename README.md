@@ -57,6 +57,9 @@ cargo run -- --interactive
 ./test.sh
 ```
 
-## Available Tools
 
-- `hello`: A simple tool that greets a person by name
+```
+cd server 
+cargo build
+npx @modelcontextprotocol/inspector target/debug/mcp-v8-server                                                              ~/mcp-v8/
+```

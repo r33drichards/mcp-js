@@ -73,7 +73,7 @@ impl<T: Transport> Client<T> {
     /// Initialize the client
     fn initialize(&mut self) -> Result<Value, MCPError> {
         // Start the transport
-        debug!("Starting transport");
+        eprintln!("Starting transport");
         self.transport.start()?;
 
         // Send initialization request
@@ -86,13 +86,13 @@ impl<T: Transport> Client<T> {
         );
 
         let message = JSONRPCMessage::Request(initialize_request);
-        debug!("Sending initialize request: {:?}", message);
+        eprintln!("Sending initialize request: {:?}", message);
         self.transport.send(&message)?;
 
         // Wait for response
         eprintln!("Waiting for initialization response");
         let response: JSONRPCMessage = self.transport.receive()?;
-        debug!("Received response: {:?}", response);
+        eprintln!("Received response: {:?}", response);
 
         match response {
             JSONRPCMessage::Response(resp) => Ok(resp.result),
@@ -128,13 +128,13 @@ impl<T: Transport> Client<T> {
 
         let message = JSONRPCMessage::Request(tool_call_request);
         eprintln!("Calling tool '{}' with parameters: {:?}", tool_name, params);
-        debug!("Sending tool call request: {:?}", message);
+        eprintln!("Sending tool call request: {:?}", message);
         self.transport.send(&message)?;
 
         // Wait for response
         eprintln!("Waiting for tool call response");
         let response: JSONRPCMessage = self.transport.receive()?;
-        debug!("Received response: {:?}", response);
+        eprintln!("Received response: {:?}", response);
 
         match response {
             JSONRPCMessage::Response(resp) => {
@@ -146,7 +146,7 @@ impl<T: Transport> Client<T> {
                 })?;
 
                 // Parse the result
-                debug!("Parsing result: {:?}", result);
+                eprintln!("Parsing result: {:?}", result);
                 serde_json::from_value(result.clone()).map_err(|e| {
                     error!("Failed to parse result: {}", e);
                     MCPError::Serialization(e)
@@ -171,13 +171,13 @@ impl<T: Transport> Client<T> {
 
         let message = JSONRPCMessage::Request(shutdown_request);
         eprintln!("Sending shutdown request");
-        debug!("Shutdown request: {:?}", message);
+        eprintln!("Shutdown request: {:?}", message);
         self.transport.send(&message)?;
 
         // Wait for response
         eprintln!("Waiting for shutdown response");
         let response: JSONRPCMessage = self.transport.receive()?;
-        debug!("Received response: {:?}", response);
+        eprintln!("Received response: {:?}", response);
 
         match response {
             JSONRPCMessage::Response(_) => {
@@ -222,7 +222,7 @@ fn connect_to_running_server(command: &str, args: &[&str]) -> Result<(StdioTrans
         let stderr_reader = BufReader::new(stderr);
         thread::spawn(move || {
             for line in stderr_reader.lines().map_while(Result::ok) {
-                debug!("Server stderr: {}", line);
+                eprintln!("Server stderr: {}", line);
             }
         });
     }
@@ -255,7 +255,7 @@ fn start_and_connect_to_server(server_cmd: &str) -> Result<(StdioTransport, Opti
         let stderr_reader = BufReader::new(stderr);
         thread::spawn(move || {
             for line in stderr_reader.lines().map_while(Result::ok) {
-                debug!("Server stderr: {}", line);
+                eprintln!("Server stderr: {}", line);
             }
         });
     }
@@ -295,7 +295,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Set log level based on debug flag
     if args.debug {
         log::set_max_level(log::LevelFilter::Debug);
-        debug!("Debug logging enabled");
+        eprintln!("Debug logging enabled");
     }
     
     // Set timeout
@@ -331,7 +331,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 break result;
             },
             Err(e) => {
-                warn!("Initialization attempt failed: {}", e);
+                eprintln!("Initialization attempt failed: {}", e);
                 thread::sleep(Duration::from_millis(500));
                 continue;
             }

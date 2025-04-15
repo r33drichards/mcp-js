@@ -8,7 +8,6 @@ use mcpr::{
 };
 use serde_json::{json, Value};
 
-use log::{debug, error, info, warn};
 use std::collections::HashMap;
 use std::error::Error;
 
@@ -177,7 +176,7 @@ where
                             break;
                         }
                         _ => {
-                            warn!("Unknown method: {}", method);
+                            eprintln!("Unknown method: {}", method);
                             self.send_error(
                                 id,
                                 -32601,
@@ -188,7 +187,7 @@ where
                     }
                 }
                 _ => {
-                    warn!("Unexpected message type");
+                    eprintln!("Unexpected message type");
                     continue;
                 }
             }
@@ -217,12 +216,14 @@ where
                     "name": self.config.name,
                     "version": self.config.version
                 },
-                "tools": self.config.tools
+                "capabilities": {
+                    "tools": self.config.tools
+                }
             }),
         );
 
         // Send the response
-        eprintln!("Sending initialization response");
+        eprintln!("Sending initialization response {:?}", response);
         transport.send(&mcpr::schema::json_rpc::JSONRPCMessage::Response(response))
     }
 
@@ -248,7 +249,7 @@ where
             .ok_or_else(|| MCPError::Protocol("Missing tool name in parameters".to_string()))?;
 
         let tool_params = params.get("parameters").cloned().unwrap_or(Value::Null);
-        debug!(
+        eprintln!(
             "Tool call: {} with parameters: {:?}",
             tool_name, tool_params
         );
@@ -262,20 +263,15 @@ where
         match handler(tool_params) {
             Ok(result) => {
                 // Create tool result response
-                let response = mcpr::schema::json_rpc::JSONRPCResponse::new(
-                    id,
-                    serde_json::json!({
-                        "result": result
-                    }),
-                );
-
-                // Send the response
-                debug!("Sending tool call response: {:?}", result);
+                eprintln!("creating tool result response");
+                let response =
+                    mcpr::schema::json_rpc::JSONRPCResponse::new(id, serde_json::json!(result));
+                eprintln!("sending tool result response");
                 transport.send(&mcpr::schema::json_rpc::JSONRPCMessage::Response(response))?;
             }
             Err(e) => {
                 // Send error response
-                error!("Tool execution failed: {}", e);
+                eprintln!("tool execution failed: {}", e);
                 self.send_error(id, -32000, format!("Tool execution failed: {}", e), None)?;
             }
         }
@@ -294,7 +290,6 @@ where
         let response = mcpr::schema::json_rpc::JSONRPCResponse::new(id, serde_json::json!({}));
 
         // Send the response
-        debug!("Sending shutdown response");
         eprintln!("Sending shutdown response");
         transport.send(&mcpr::schema::json_rpc::JSONRPCMessage::Response(response))?;
 
@@ -333,16 +328,6 @@ where
 
 fn main() -> Result<(), Box<dyn Error>> {
     // Initialize logging
-    env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));
-
-    // Parse command line arguments
-    let args = Args::parse();
-
-    // Set log level based on debug flag
-    if args.debug {
-        log::set_max_level(log::LevelFilter::Debug);
-        debug!("Debug logging enabled");
-    }
 
     // Configure the server
     let server_config = ServerConfig::new()
@@ -398,17 +383,22 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         let startup_data = {
             eprintln!("Creating isolate...");
-            let mut snapshot_creator;        
-            // Load snapshot if it exists
-            if let Ok(snapshot) = std::fs::read("snapshot.bin") {
-                eprintln!("creating isolate from snapshot...");
-                snapshot_creator =
-                    v8::Isolate::snapshot_creator_from_existing_snapshot(snapshot, None, None);
-            } else {
-                eprintln!("creating isolate from scratch...");
-                snapshot_creator =
-                    v8::Isolate::snapshot_creator(Default::default(), Default::default());
-            }
+            let mut snapshot_creator = match std::fs::read("snapshot.bin") {
+                Ok(snapshot) => {
+                    eprintln!("creating isolate from snapshot...");
+                    v8::Isolate::snapshot_creator_from_existing_snapshot(snapshot, None, None)
+                }
+                Err(e) => {
+                    if e.kind() == std::io::ErrorKind::NotFound {
+                        eprintln!("snapshot file not found, creating new isolate...");
+                        v8::Isolate::snapshot_creator(Default::default(), Default::default())
+                    } else {
+                        eprintln!("error creating isolate: {}", e);
+                        return Err(MCPError::Protocol("error creating isolate".to_string()));
+                    }
+                }
+            };
+
             eprintln!("Isolate created");
 
             {
@@ -417,7 +407,6 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let scope = &mut v8::ContextScope::new(scope, context);
                 let ouptut = eval(scope, code).unwrap();
                 string_result = ouptut.to_string(scope).unwrap().to_rust_string_lossy(scope);
-
                 scope.set_default_context(context);
             }
 
@@ -426,9 +415,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .unwrap()
         };
 
-
         eprintln!("code executed: {}", string_result);
-
 
         eprintln!("snapshot created");
         eprintln!("writing snapshot to file snapshot.bin in current directory");
@@ -447,10 +434,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     eprintln!("Starting stdio server");
     let transport = StdioTransport::new();
 
-    eprintln!("Starting mcp-v8-server...");
-
-
-    // print to stderr
     eprintln!("Starting mcp-v8-server...");
 
     let result = server.start(transport);
