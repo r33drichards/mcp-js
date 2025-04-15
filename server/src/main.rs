@@ -407,6 +407,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 let scope = &mut v8::ContextScope::new(scope, context);
                 let ouptut = eval(scope, code).unwrap();
                 string_result = ouptut.to_string(scope).unwrap().to_rust_string_lossy(scope);
+                eprintln!("code executed: {}", string_result);
                 scope.set_default_context(context);
             }
 
@@ -415,7 +416,6 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .unwrap()
         };
 
-        eprintln!("code executed: {}", string_result);
 
         eprintln!("snapshot created");
         eprintln!("writing snapshot to file snapshot.bin in current directory");

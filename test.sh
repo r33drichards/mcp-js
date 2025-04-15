@@ -24,7 +24,7 @@ cd ..
 echo -e "${GREEN}Creating a test input file...${NC}"
 cat > test_input.json << EOF
 {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocol_version":"2024-11-05"}}
-{"jsonrpc":"2.0","id":2,"method":"tool_call","params":{"name":"javascript","parameters":{"code":"x = x === undefined ? 1 : x + 1"}}}
+{"jsonrpc":"2.0","id":2,"method":"tool_call","params":{"name":"javascript","parameters":{"code":"try { x = x + 1 } catch (e) { x = 1 } x;"}}}
 {"jsonrpc":"2.0","id":3,"method":"shutdown","params":{}}
 EOF
 
