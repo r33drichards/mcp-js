@@ -1,3 +1,5 @@
+https://til.simonwillison.net/deno/pyodide-sandbox
+
 # embedding v8 c++ https://v8.dev/docs/embed
 
 # example test https://github.com/denoland/rusty_v8/blob/main/tests/test_api.rs#L5352
