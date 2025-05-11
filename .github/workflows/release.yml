@@ -22,12 +22,27 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-directories: "server"
-
-      - name: Build Linux binary
-        run: cd server && nix develop --command cargo build --release --target x86_64-unknown-linux-gnu
+    #   - install targets 
+      - name: Install targets
+        run: |
+          nix develop --command rustup target add x86_64-apple-darwin
+          nix develop --command rustup target add aarch64-apple-darwin
+          nix develop --command rustup target add x86_64-unknown-linux-gnu
+          nix develop --command rustup target add aarch64-unknown-linux-gnu
 
       - name: Build macOS binary
         run: cd server && nix develop --command cargo zigbuild --release --target x86_64-apple-darwin
+
+    # arm macos
+      - name: Build arm macos binary
+        run: cd server && nix develop --command cargo zigbuild --release --target aarch64-apple-darwin
+  
+      - name: Build Linux binary
+        run: cd server && nix develop --command cargo build --release --target x86_64-unknown-linux-gnu
+
+      # arm linux
+      - name: Build arm linux binary
+        run: cd server && nix develop --command cargo build --release --target aarch64-unknown-linux-gnu
 
       - name: Prepare binaries for release
         run: |
