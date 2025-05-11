@@ -138,7 +138,36 @@ impl GenericService {
         }
     }
 
-    #[tool(description = "run javascript code")]
+    #[tool(description = "
+run javascript code in v8
+
+params:
+- code: the javascript code to run
+- heap: the path to the heap file
+
+returns:
+- output: the output of the javascript code
+- heap: the path to the heap file
+
+you must send a heap file to the client. 
+
+
+The way the runtime works, is that there is no console.log. If you want the results of an execution, you must return it in the last line of code. 
+
+eg:
+
+```js
+const result = 1 + 1;
+result;
+```
+
+would return:
+
+```
+2
+```
+
+")]
     pub async fn run_js(&self, #[tool(param)] code: String, #[tool(param)] heap: String) -> RunJsResponse {
         let output = eval_js(&code, &heap).unwrap();
         RunJsResponse {
