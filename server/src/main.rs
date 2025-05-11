@@ -21,7 +21,7 @@ async fn main() -> Result<()> {
     // Create an instance of our counter router
     let service = GenericService::new(
 
-    ).serve(stdio()).await.inspect_err(|e| {
+    ).await.serve(stdio()).await.inspect_err(|e| {
         tracing::error!("serving error: {:?}", e);
     })?;
 

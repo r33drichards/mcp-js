@@ -15,3 +15,6 @@ tokio = { version = "1.45.0", features = ["rt-multi-thread"] }
 tracing = "0.1.41"
 tracing-subscriber = "0.3.19"
 v8 = "136.0.0"
+aws-config = "0.0.26-alpha"
+aws-sdk-s3 = "0.0.26-alpha"
+async-trait = "0.1"
