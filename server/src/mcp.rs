@@ -1,4 +1,3 @@
-
 use rmcp::{
     model::{ServerCapabilities, ServerInfo},
 
@@ -12,6 +11,8 @@ use std::io::Write;
 use std::sync::Once;
 use v8::{self};
 
+mod heap_storage;
+use crate::mcp::heap_storage::{HeapStorage, FileHeapStorage};
 
 fn eval<'s>(scope: &mut v8::HandleScope<'s>, code: &str) -> Option<v8::Local<'s, v8::Value>> {
     let scope = &mut v8::EscapableHandleScope::new(scope);
@@ -35,22 +36,17 @@ pub fn initialize_v8() {
     });
 }
 
-pub fn eval_js(code: &str, heap: &str) -> Result<String, String> {
+pub fn eval_js(code: &str, heap_name: &str, heap_storage: &dyn HeapStorage) -> Result<String, String> {
     let output;
     let startup_data = {
-        let mut snapshot_creator = match std::fs::read(&heap) {
+        let mut snapshot_creator = match heap_storage.get(heap_name) {
             Ok(snapshot) => {
                 eprintln!("creating isolate from snapshot...");
                 v8::Isolate::snapshot_creator_from_existing_snapshot(snapshot, None, None)
             }
-            Err(e) => {
-                if e.kind() == std::io::ErrorKind::NotFound {
-                    eprintln!("snapshot file not found, creating new isolate...");
-                    v8::Isolate::snapshot_creator(Default::default(), Default::default())
-                } else {
-                    eprintln!("error creating isolate: {}", e);
-                    return Err("Failed to create isolate".to_string());
-                }
+            Err(_) => {
+                eprintln!("snapshot not found, creating new isolate...");
+                v8::Isolate::snapshot_creator(Default::default(), Default::default())
             }
         };
         {
@@ -70,11 +66,9 @@ pub fn eval_js(code: &str, heap: &str) -> Result<String, String> {
             .create_blob(v8::FunctionCodeHandling::Clear)
             .unwrap()
     };
-    // Write snapshot to file
+    // Write snapshot to heap storage
     eprintln!("snapshot created");
-    eprintln!("writing snapshot to file {}", heap);
-    let mut file = std::fs::File::create(heap).unwrap();
-    file.write_all(&startup_data).unwrap();
+    heap_storage.put(heap_name, &startup_data)?;
     Ok(output)
 }
 
@@ -108,9 +102,9 @@ impl DataService for MemoryDataService {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct GenericService {
-
+    heap_storage: std::sync::Arc<dyn HeapStorage>,
 }
 
 // response to run_js
@@ -134,47 +128,21 @@ impl IntoContents for RunJsResponse {
 #[tool(tool_box)]
 impl GenericService {
     pub fn new() -> Self {
+        let heap_storage = std::sync::Arc::new(FileHeapStorage::new("/tmp/mcp_heap_storage"));
         Self {
+            heap_storage,
         }
     }
 
-    #[tool(description = "
-run javascript code in v8
-
-params:
-- code: the javascript code to run
-- heap: the path to the heap file
-
-returns:
-- output: the output of the javascript code
-- heap: the path to the heap file
-
-you must send a heap file to the client. 
-
-
-The way the runtime works, is that there is no console.log. If you want the results of an execution, you must return it in the last line of code. 
-
-eg:
-
-```js
-const result = 1 + 1;
-result;
-```
-
-would return:
-
-```
-2
-```
-
-")]
+    #[tool(description = "run javascript code in v8\n\nparams:\n- code: the javascript code to run\n- heap: the path to the heap file\n\nreturns:\n- output: the output of the javascript code\n- heap: the path to the heap file\n\nyou must send a heap file to the client. \n\n\nThe way the runtime works, is that there is no console.log. If you want the results of an execution, you must return it in the last line of code. \n\neg:\n\n```js\nconst result = 1 + 1;\nresult;\n```\n\nwould return:\n\n```\n2\n```\n\n")]
     pub async fn run_js(&self, #[tool(param)] code: String, #[tool(param)] heap: String) -> RunJsResponse {
-        let output = eval_js(&code, &heap).unwrap();
+        let output = eval_js(&code, &heap, self.heap_storage.as_ref()).unwrap();
         RunJsResponse {
             output,
             heap,
         }
     }
+
 
 }
 
