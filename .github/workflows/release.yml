@@ -30,13 +30,13 @@ jobs:
             os: macos-13
             target: x86_64-apple-darwin
             bin_name: mcp-v8-macos
-            build_cmd: cargo zigbuild --release --target x86_64-apple-darwin
+            build_cmd: cargo build --release --target x86_64-apple-darwin
             out_path: server/target/x86_64-apple-darwin/release/server
           - name: macOS ARM64
             os: macos-14
             target: aarch64-apple-darwin
             bin_name: mcp-v8-macos-arm64
-            build_cmd: cargo zigbuild --release --target aarch64-apple-darwin
+            build_cmd: cargo build --release --target aarch64-apple-darwin
             out_path: server/target/aarch64-apple-darwin/release/server
 
     steps:
