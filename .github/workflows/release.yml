@@ -1,0 +1,35 @@
+name: Release Rust Server
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'   # Triggers on version tags like v1.2.3
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: actions/setup-rust@v1
+        with:
+          rust-version: stable
+
+      - name: Build release binary
+        run: cargo build --release --manifest-path server/Cargo.toml
+
+      - name: Prepare binary for release
+        run: |
+          mkdir -p dist
+          cp server/target/release/server dist/mcp-v8
+        # Replace <your-binary-name> with the actual binary name
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/mcp-v8
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
