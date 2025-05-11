@@ -5,6 +5,7 @@ use rmcp::{
     Error as McpError, RoleServer, ServerHandler, model::*, schemars,
     service::RequestContext, tool,
 };
+use serde_json::json;
 
 
 use std::io::Write;
@@ -34,10 +35,10 @@ pub fn initialize_v8() {
     });
 }
 
-pub fn eval_js(code: &str) -> Result<String, String> {
+pub fn eval_js(code: &str, heap: &str) -> Result<String, String> {
     let output;
     let startup_data = {
-        let mut snapshot_creator = match std::fs::read("snapshot.bin") {
+        let mut snapshot_creator = match std::fs::read(&heap) {
             Ok(snapshot) => {
                 eprintln!("creating isolate from snapshot...");
                 v8::Isolate::snapshot_creator_from_existing_snapshot(snapshot, None, None)
@@ -71,8 +72,8 @@ pub fn eval_js(code: &str) -> Result<String, String> {
     };
     // Write snapshot to file
     eprintln!("snapshot created");
-    eprintln!("writing snapshot to file snapshot.bin in current directory");
-    let mut file = std::fs::File::create("snapshot.bin").unwrap();
+    eprintln!("writing snapshot to file {}", heap);
+    let mut file = std::fs::File::create(heap).unwrap();
     file.write_all(&startup_data).unwrap();
     Ok(output)
 }
@@ -112,6 +113,24 @@ pub struct GenericService {
 
 }
 
+// response to run_js
+#[derive(Debug, Clone)]
+pub struct RunJsResponse {
+    pub output: String,
+    pub heap: String,
+}
+
+impl IntoContents for RunJsResponse {
+    fn into_contents(self) -> Vec<Content> {
+        vec![Content::json(
+            json!({
+                "output": self.output,
+                "heap": self.heap,
+            })
+        ).expect("failed to convert run_js response to content")]
+    }
+}
+
 #[tool(tool_box)]
 impl GenericService {
     pub fn new() -> Self {
@@ -120,11 +139,14 @@ impl GenericService {
     }
 
     #[tool(description = "run javascript code")]
-    pub async fn run_js(&self, #[tool(param)] code: String) -> String {
-        eval_js(&code).unwrap()
+    pub async fn run_js(&self, #[tool(param)] code: String, #[tool(param)] heap: String) -> RunJsResponse {
+        let output = eval_js(&code, &heap).unwrap();
+        RunJsResponse {
+            output,
+            heap,
+        }
     }
 
-    // list tools
 }
 
 #[tool(tool_box)]
