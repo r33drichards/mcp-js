@@ -85,10 +85,15 @@ jobs:
               echo "Processing directory: $dir"
               bin=$(ls "$dir")
               echo "Found binary: $bin in $dir"
-            #   trim dir/ prefix from $dir
               dir_trimmed=$(echo "$dir" | sed 's/^dist\///')
               echo "Copying $dir/$bin to dist/final/$bin-$dir_trimmed"
               cp "$dir/$bin" "dist/final/$bin-$dir_trimmed"
+            fi
+          done
+          # Gzip each binary in dist/final
+          for file in dist/final/*; do
+            if [ -f "$file" ]; then
+              gzip -c "$file" > "$file.gz"
             fi
           done
 
