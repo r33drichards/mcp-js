@@ -98,3 +98,15 @@ cargo run --release -- --directory-path /tmp/mcp-v8-heaps
 
 - **S3**: Set `--s3-bucket <bucket>` to use AWS S3 for heap snapshots (requires AWS credentials).
 - **Filesystem**: Set `--directory-path <path>` to use a local directory for heap snapshots.
+
+## Limitations
+
+While `mcp-v8` provides a powerful and persistent JavaScript execution environment, there are limitations to its runtime. 
+
+- **No `async`/`await` or Promises**: Asynchronous JavaScript is not supported. All code must be synchronous.
+- **No `fetch` or network access**: There is no built-in way to make HTTP requests or access the network.
+- **No `console.log` or standard output**: Output from `console.log` or similar functions will not appear. To return results, ensure the value you want is the last line of your code.
+- **No file system access**: The runtime does not provide access to the local file system or environment variables.
+- **No `npm install` or external packages**: You cannot install or import npm packages. Only standard JavaScript (ECMAScript) built-ins are available.
+- **No timers**: Functions like `setTimeout` and `setInterval` are not available.
+- **No DOM or browser APIs**: This is not a browser environment; there is no access to `window`, `document`, or other browser-specific objects.
