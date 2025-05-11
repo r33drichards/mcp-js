@@ -1,5 +1,3 @@
-
-
 use std::sync::Arc;
 
 use rmcp::{
@@ -9,12 +7,80 @@ use rmcp::{
 use serde_json::json;
 use tokio::sync::Mutex;
 
+use std::io::Write;
+use std::sync::Once;
+use v8::{self};
+
+fn eval<'s>(scope: &mut v8::HandleScope<'s>, code: &str) -> Option<v8::Local<'s, v8::Value>> {
+    let scope = &mut v8::EscapableHandleScope::new(scope);
+    let source = v8::String::new(scope, code).unwrap();
+    let script = v8::Script::compile(scope, source, None).unwrap();
+    let r = script.run(scope);
+    r.map(|v| scope.escape(v))
+}
+
+static INIT: Once = Once::new();
+static mut PLATFORM: Option<v8::SharedRef<v8::Platform>> = None;
+
+pub fn initialize_v8() {
+    INIT.call_once(|| {
+        let platform = v8::new_default_platform(0, false).make_shared();
+        v8::V8::initialize_platform(platform.clone());
+        v8::V8::initialize();
+        unsafe {
+            PLATFORM = Some(platform);
+        }
+    });
+}
+
+pub fn eval_js(code: &str) -> Result<String, String> {
+    let output;
+    let startup_data = {
+        let mut snapshot_creator = match std::fs::read("snapshot.bin") {
+            Ok(snapshot) => {
+                eprintln!("creating isolate from snapshot...");
+                v8::Isolate::snapshot_creator_from_existing_snapshot(snapshot, None, None)
+            }
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    eprintln!("snapshot file not found, creating new isolate...");
+                    v8::Isolate::snapshot_creator(Default::default(), Default::default())
+                } else {
+                    eprintln!("error creating isolate: {}", e);
+                    return Err("Failed to create isolate".to_string());
+                }
+            }
+        };
+        {
+            let scope = &mut v8::HandleScope::new(&mut snapshot_creator);
+            let context = v8::Context::new(scope, Default::default());
+            let scope = &mut v8::ContextScope::new(scope, context);
+
+            let result = eval(scope, code).unwrap();
+
+            let result_str = result
+                .to_string(scope)
+                .ok_or_else(|| "Failed to convert result to string".to_string())?;
+            output = result_str.to_rust_string_lossy(scope);
+            scope.set_default_context(context);
+        }
+        snapshot_creator
+            .create_blob(v8::FunctionCodeHandling::Clear)
+            .unwrap()
+    };
+    // Write snapshot to file
+    eprintln!("snapshot created");
+    eprintln!("writing snapshot to file snapshot.bin in current directory");
+    let mut file = std::fs::File::create("snapshot.bin").unwrap();
+    file.write_all(&startup_data).unwrap();
+    Ok(output)
+}
+
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct StructRequest {
     pub a: i32,
     pub b: i32,
 }
-
 
 // add request for v8
 
@@ -25,21 +91,18 @@ pub struct V8Request {
 }
 
 #[derive(Clone)]
-pub struct V8 {
-}
+pub struct MCPV8 {}
 
 #[tool(tool_box)]
-impl V8 {
+impl MCPV8 {
     #[allow(dead_code)]
     pub fn new() -> Self {
-        Self {
-        }
+        Self {}
     }
 
     fn _create_resource_text(&self, uri: &str, name: &str) -> Resource {
         RawResource::new(uri, name.to_string()).no_annotation()
     }
-
 
     #[tool(description = "Say hello to the client")]
     fn say_hello(&self) -> Result<CallToolResult, McpError> {
@@ -67,19 +130,19 @@ impl V8 {
     }
 
     #[tool(description = "Run the code in the v8 engine")]
-    fn run_code(&self,
-        #[tool(aggr)] request: V8Request
-        ) -> Result<CallToolResult, McpError> {
+    fn run_code(&self, #[tool(aggr)] request: V8Request) -> Result<CallToolResult, McpError> {
         let code = request.code;
         let heap_id = request.heap_id;
-        Ok(CallToolResult::success(vec![Content::text(
-            "hello".to_string(),
-        )]))
+        let ouput = eval_js(&code).unwrap();
+        Ok(CallToolResult::success(vec![Content::json(json!({
+            "output": ouput,
+            "heap_id": heap_id
+        }))?]))
     }
 }
 const_string!(Echo = "echo");
 #[tool(tool_box)]
-impl ServerHandler for V8 {
+impl ServerHandler for MCPV8 {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             protocol_version: ProtocolVersion::V_2024_11_05,
@@ -190,5 +253,4 @@ impl ServerHandler for V8 {
             resource_templates: Vec::new(),
         })
     }
-
 }
