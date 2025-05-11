@@ -85,8 +85,10 @@ jobs:
               echo "Processing directory: $dir"
               bin=$(ls "$dir")
               echo "Found binary: $bin in $dir"
-              echo "Copying $dir/$bin to dist/final/$bin-$dir"
-              cp "$dir/$bin" "dist/final/$bin-$dir"
+            #   trim dir/ prefix from $dir
+              dir_trimmed=$(echo "$dir" | sed 's/^dist\///')
+              echo "Copying $dir/$bin to dist/final/$bin-$dir_trimmed"
+              cp "$dir/$bin" "dist/final/$bin-$dir_trimmed"
             fi
           done
 
