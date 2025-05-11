@@ -10,13 +10,27 @@ A Rust-based Model Context Protocol (MCP) server that exposes a V8 JavaScript ru
 - **Configurable Storage**: Choose between S3 or local directory for heap storage at runtime.
 - **Extensible**: Built for easy extension with new tools or storage backends.
 
+## Installation
+
+The easiest way to install `mcp-v8` is with the provided install script:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/r33drichards/mcp-js/main/install.sh | sudo bash
+```
+
+This will automatically download and install the latest release for your platform to `/usr/local/bin/mcp-v8` (you may be prompted for your password).
+
+Alternatively, you can build from source as described below.
+
 ## Quick Start
 
 ### Prerequisites
-- Rust (nightly toolchain recommended)
+- Rust (nightly toolchain recommended) *(only required if building from source)*
 - (Optional) AWS credentials for S3 storage
 
-### Build the Server
+### Build the Server (Alternative to Install Script)
+
+If you prefer to build from source instead of using the install script:
 
 ```bash
 cd server
@@ -24,6 +38,8 @@ cargo build --release
 ```
 
 ### Run the Server
+
+You can now run the server (whether installed via the script or built from source):
 
 By default, the server uses S3 for heap storage. You can override this with CLI flags:
 
