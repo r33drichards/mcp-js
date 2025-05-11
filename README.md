@@ -12,7 +12,7 @@ A Rust-based Model Context Protocol (MCP) server that exposes a V8 JavaScript ru
 
 ## Installation
 
-The easiest way to install `mcp-v8` is with the provided install script:
+Install `mcp-v8` using the provided install script:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/r33drichards/mcp-js/main/install.sh | sudo bash
@@ -20,43 +20,36 @@ curl -fsSL https://raw.githubusercontent.com/r33drichards/mcp-js/main/install.sh
 
 This will automatically download and install the latest release for your platform to `/usr/local/bin/mcp-v8` (you may be prompted for your password).
 
-Alternatively, you can build from source as described below.
+---
+
+*Advanced users: If you prefer to build from source, see the [Build from Source](#build-from-source) section at the end of this document.*
+
+## Command Line Arguments
+
+`mcp-v8` supports the following command line arguments:
+
+- `--s3-bucket <bucket>`: Use AWS S3 for heap snapshots. Specify the S3 bucket name. (Conflicts with `--directory-path`)
+- `--directory-path <path>`: Use a local directory for heap snapshots. Specify the directory path. (Conflicts with `--s3-bucket`)
+
+**Note:** You must specify either `--s3-bucket` or `--directory-path`. If neither is provided, the server defaults to S3 with the bucket name `test-mcp-js-bucket`.
 
 ## Quick Start
 
-### Prerequisites
-- Rust (nightly toolchain recommended) *(only required if building from source)*
-- (Optional) AWS credentials for S3 storage
-
-### Build the Server (Alternative to Install Script)
-
-If you prefer to build from source instead of using the install script:
+After installation, you can run the server directly. Choose one of the following options:
 
 ```bash
-cd server
-cargo build --release
-```
+# Use S3 for heap storage (recommended for cloud/persistent use)
+mcp-v8 --s3-bucket my-bucket-name
 
-### Run the Server
-
-You can now run the server (whether installed via the script or built from source):
-
-By default, the server uses S3 for heap storage. You can override this with CLI flags:
-
-```bash
-# Use S3 (default or specify bucket)
-cargo run --release -- --s3-bucket my-bucket-name
-
-# Use local filesystem
-directory for heap storage
-cargo run --release -- --directory-path /tmp/mcp-v8-heaps
+# Use local filesystem directory for heap storage (recommended for local development)
+mcp-v8 --directory-path /tmp/mcp-v8-heaps
 ```
 
 ## Integration
 
 ### Claude for Desktop
 
-1. Build the server as above.
+1. Install the server as above.
 2. Open Claude Desktop → Settings → Developer → Edit Config.
 3. Add your server to `claude_desktop_config.json`:
 
@@ -64,7 +57,7 @@ cargo run --release -- --directory-path /tmp/mcp-v8-heaps
 {
   "mcpServers": {
     "js": {
-      "command": "/absolute/path/to/your/mcp-v8/server/target/release/server"
+      "command": "/usr/local/bin/mcp-v8 --s3-bucket my-bucket-name"
     }
   }
 }
@@ -74,14 +67,14 @@ cargo run --release -- --directory-path /tmp/mcp-v8-heaps
 
 ### Cursor
 
-1. Build the server as above.
+1. Install the server as above.
 2. Create or edit `.cursor/mcp.json` in your project root:
 
 ```json
 {
   "mcpServers": {
     "js": {
-      "command": "/absolute/path/to/your/mcp-v8/server/target/release/server"
+      "command": "/usr/local/bin/mcp-v8 --directory-path /tmp/mcp-v8-heaps"
     }
   }
 }
@@ -96,8 +89,15 @@ cargo run --release -- --directory-path /tmp/mcp-v8-heaps
 
 ## Heap Storage Options
 
-- **S3**: Set `--s3-bucket <bucket>` to use AWS S3 for heap snapshots (requires AWS credentials).
-- **Filesystem**: Set `--directory-path <path>` to use a local directory for heap snapshots.
+You can configure heap storage using the following command line arguments:
+
+- **S3**: `--s3-bucket <bucket>`
+  - Example: `mcp-v8 --s3-bucket my-bucket-name`
+  - Requires AWS credentials in your environment.
+- **Filesystem**: `--directory-path <path>`
+  - Example: `mcp-v8 --directory-path /tmp/mcp-v8-heaps`
+
+**Note:** Only one storage backend can be used at a time. If both are provided, the server will return an error.
 
 ## Limitations
 
@@ -110,3 +110,22 @@ While `mcp-v8` provides a powerful and persistent JavaScript execution environme
 - **No `npm install` or external packages**: You cannot install or import npm packages. Only standard JavaScript (ECMAScript) built-ins are available.
 - **No timers**: Functions like `setTimeout` and `setInterval` are not available.
 - **No DOM or browser APIs**: This is not a browser environment; there is no access to `window`, `document`, or other browser-specific objects.
+
+---
+
+## Build from Source (Advanced)
+
+If you prefer to build from source instead of using the install script:
+
+### Prerequisites
+- Rust (nightly toolchain recommended)
+- (Optional) AWS credentials for S3 storage
+
+### Build the Server
+
+```bash
+cd server
+cargo build --release
+```
+
+The built binary will be located at `server/target/release/server`. You can use this path in the integration steps above instead of `/usr/local/bin/mcp-v8` if desired.

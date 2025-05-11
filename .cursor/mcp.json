@@ -1,7 +1,8 @@
 {
     "mcpServers": {
         "js": {
-            "command": "/Users/robertwendt/mcp-v8/server/target/debug/server"
+            "command": "/Users/robertwendt/mcp-v8/server/target/debug/server --s3-bucket test-mcp-js-bucket"
+            
         }
     }
 }
