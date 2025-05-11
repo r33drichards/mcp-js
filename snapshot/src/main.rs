@@ -1,11 +1,11 @@
 use std::io::Write;
 
-fn eval<'s>(scope: &mut v8::HandleScope<'s>, code: &str) -> Option<v8::Local<'s, v8::Value>> {
+fn eval<'s>(scope: &mut v8::HandleScope<'s>, code: &str) -> Result<v8::Local<'s, v8::Value>, String> {
     let scope = &mut v8::EscapableHandleScope::new(scope);
-    let source = v8::String::new(scope, code).unwrap();
-    let script = v8::Script::compile(scope, source, None).unwrap();
-    let r = script.run(scope);
-    r.map(|v| scope.escape(v))
+    let source = v8::String::new(scope, code).ok_or("Failed to create V8 string")?;
+    let script = v8::Script::compile(scope, source, None).ok_or("Failed to compile script")?;
+    let r = script.run(scope).ok_or("Failed to run script")?;
+    Ok(scope.escape(r))
 }
 
 fn main() {
@@ -34,7 +34,7 @@ fn main() {
             let scope = &mut v8::HandleScope::new(&mut snapshot_creator);
             let context = v8::Context::new(scope, Default::default());
             let scope = &mut v8::ContextScope::new(scope, context);
-            let out = eval(
+            let out = match eval(
                 scope,
                 "
 try {
@@ -43,24 +43,48 @@ try {
   x = 1
 }
 x;
-            ",
-            )
-            .unwrap();
+                ",
+            ) {
+                Ok(val) => val,
+                Err(e) => {
+                    eprintln!("eval error: {}", e);
+                    return;
+                }
+            };
+            let out_str = match out.to_string(scope) {
+                Some(s) => s.to_rust_string_lossy(scope),
+                None => {
+                    eprintln!("Failed to convert result to string");
+                    return;
+                }
+            };
             eprintln!(
                 "x = {}",
-                out.to_string(scope).unwrap().to_rust_string_lossy(scope)
+                out_str
             );
-
             scope.set_default_context(context);
         }
-        snapshot_creator
-            .create_blob(v8::FunctionCodeHandling::Clear)
-            .unwrap()
+        match snapshot_creator
+            .create_blob(v8::FunctionCodeHandling::Clear) {
+            Some(blob) => blob,
+            None => {
+                eprintln!("Failed to create V8 snapshot blob");
+                return;
+            }
+        }
     };
 
     // Write snapshot to file
     eprintln!("snapshot created");
     eprintln!("writing snapshot to file snapshot.bin in current directory");
-    let mut file = std::fs::File::create("snapshot.bin").unwrap();
-    file.write_all(&startup_data).unwrap();
+    let mut file = match std::fs::File::create("snapshot.bin") {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("Failed to create snapshot.bin: {}", e);
+            return;
+        }
+    };
+    if let Err(e) = file.write_all(&startup_data) {
+        eprintln!("Failed to write snapshot data: {}", e);
+    }
 }

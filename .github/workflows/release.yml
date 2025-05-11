@@ -85,8 +85,8 @@ jobs:
               echo "Processing directory: $dir"
               bin=$(ls "$dir")
               echo "Found binary: $bin in $dir"
-              echo "Copying $dir/$bin to dist/final/$bin"
-              cp "$dir/$bin" "dist/final/$bin"
+              echo "Copying $dir/$bin to dist/final/$bin-$dir"
+              cp "$dir/$bin" "dist/final/$bin-$dir"
             fi
           done
 

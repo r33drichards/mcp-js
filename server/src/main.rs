@@ -36,10 +36,10 @@ async fn main() -> Result<()> {
 
     tracing::info!(?cli, "Starting MCP server with CLI arguments");
 
-    let heap_storage = if cli.s3_bucket.is_some() {
-        AnyHeapStorage::S3(S3HeapStorage::new(cli.s3_bucket.unwrap()).await)
-    } else if cli.directory_path.is_some() {
-        AnyHeapStorage::File(FileHeapStorage::new(cli.directory_path.unwrap()))
+    let heap_storage = if let Some(bucket) = cli.s3_bucket {
+        AnyHeapStorage::S3(S3HeapStorage::new(bucket).await)
+    } else if let Some(dir) = cli.directory_path {
+        AnyHeapStorage::File(FileHeapStorage::new(dir))
     } else {
         // default to s3
         AnyHeapStorage::S3(S3HeapStorage::new("test-mcp-js-bucket").await)

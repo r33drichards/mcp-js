@@ -16,12 +16,12 @@ use crate::mcp::heap_storage::{HeapStorage, AnyHeapStorage};
 
 
 
-fn eval<'s>(scope: &mut v8::HandleScope<'s>, code: &str) -> Option<v8::Local<'s, v8::Value>> {
+fn eval<'s>(scope: &mut v8::HandleScope<'s>, code: &str) -> Result<v8::Local<'s, v8::Value>, String> {
     let scope = &mut v8::EscapableHandleScope::new(scope);
-    let source = v8::String::new(scope, code).unwrap();
-    let script = v8::Script::compile(scope, source, None).unwrap();
-    let r = script.run(scope);
-    r.map(|v| scope.escape(v))
+    let source = v8::String::new(scope, code).ok_or("Failed to create V8 string")?;
+    let script = v8::Script::compile(scope, source, None).ok_or("Failed to compile script")?;
+    let r = script.run(scope).ok_or("Failed to run script")?;
+    Ok(scope.escape(r))
 }
 
 static INIT: Once = Once::new();
@@ -60,12 +60,13 @@ pub struct RunJsResponse {
 
 impl IntoContents for RunJsResponse {
     fn into_contents(self) -> Vec<Content> {
-        vec![Content::json(
-            json!({
-                "output": self.output,
-                "heap": self.heap,
-            })
-        ).expect("failed to convert run_js response to content")]
+        match Content::json(json!({
+            "output": self.output,
+            "heap": self.heap,
+        })) {
+            Ok(content) => vec![content],
+            Err(e) => vec![Content::text(format!("Failed to convert run_js response to content: {}", e))],
+        }
     }
 }
 
@@ -81,12 +82,9 @@ impl GenericService {
 
     #[tool(description = "run javascript code in v8\n\nparams:\n- code: the javascript code to run\n- heap: the path to the heap file\n\nreturns:\n- output: the output of the javascript code\n- heap: the path to the heap file\n\nyou must send a heap file to the client. \n\n\nThe way the runtime works, is that there is no console.log. If you want the results of an execution, you must return it in the last line of code. \n\neg:\n\n```js\nconst result = 1 + 1;\nresult;\n```\n\nwould return:\n\n```\n2\n```\n\n")]
     pub async fn run_js(&self, #[tool(param)] code: String, #[tool(param)] heap: String) -> RunJsResponse {
-        // 1. Get snapshot data (if any) from heap_storage (async)
         let snapshot = self.heap_storage.get(&heap).await.ok();
-        // 2. Run V8 logic in blocking thread
         let code_clone = code.clone();
         let v8_result = tokio::task::spawn_blocking(move || {
-            // Re-implement the V8 logic here, using snapshot if available
             let mut snapshot_creator = match snapshot {
                 Some(snapshot) => {
                     eprintln!("creating isolate from snapshot...");
@@ -97,32 +95,45 @@ impl GenericService {
                     v8::Isolate::snapshot_creator(Default::default(), Default::default())
                 }
             };
-            let output;
-            {
-                let scope = &mut v8::HandleScope::new(&mut snapshot_creator);
-                let context = v8::Context::new(scope, Default::default());
-                let scope = &mut v8::ContextScope::new(scope, context);
-
-                let result = eval(scope, &code_clone).unwrap();
-
-                let result_str = result
-                    .to_string(scope)
-                    .ok_or_else(|| "Failed to convert result to string".to_string())?;
-                output = result_str.to_rust_string_lossy(scope);
-                scope.set_default_context(context);
+            let output = (|| {
+                let output;
+                {
+                    let scope = &mut v8::HandleScope::new(&mut snapshot_creator);
+                    let context = v8::Context::new(scope, Default::default());
+                    let scope = &mut v8::ContextScope::new(scope, context);
+                    let result = eval(scope, &code_clone)?;
+                    let result_str = result
+                        .to_string(scope)
+                        .ok_or_else(|| "Failed to convert result to string".to_string())?;
+                    output = result_str.to_rust_string_lossy(scope);
+                    scope.set_default_context(context);
+                } // All borrows of snapshot_creator end here
+                let startup_data = snapshot_creator
+                    .create_blob(v8::FunctionCodeHandling::Clear)
+                    .ok_or("Failed to create V8 snapshot blob")?;
+                let startup_data_vec = startup_data.to_vec();
+                Ok::<_, String>((output, startup_data_vec))
+            })();
+            output
+        }).await;
+        match v8_result {
+            Ok(Ok((output, startup_data))) => {
+                if let Err(e) = self.heap_storage.put(&heap, &startup_data).await {
+                    return RunJsResponse {
+                        output: format!("Error saving heap: {}", e),
+                        heap,
+                    };
+                }
+                RunJsResponse { output, heap }
             }
-            let startup_data = snapshot_creator
-                .create_blob(v8::FunctionCodeHandling::Clear)
-                .unwrap();
-            let startup_data_vec = startup_data.to_vec();
-            Ok::<_, String>((output, startup_data_vec))
-        }).await.unwrap();
-        let (output, startup_data) = v8_result.unwrap();
-        // 3. Save new snapshot to heap_storage (async)
-        self.heap_storage.put(&heap, &startup_data).await.unwrap();
-        RunJsResponse {
-            output,
-            heap,
+            Ok(Err(e)) => RunJsResponse {
+                output: format!("V8 error: {}", e),
+                heap,
+            },
+            Err(e) => RunJsResponse {
+                output: format!("Task join error: {}", e),
+                heap,
+            },
         }
     }
 
