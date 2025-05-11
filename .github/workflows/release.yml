@@ -92,6 +92,7 @@ jobs:
           # Gzip each binary in dist/final
           for file in dist/final/*; do
             if [ -f "$file" ]; then
+              chmod +x "$file"
               gzip -c "$file" > "$file.gz"
             fi
           done
