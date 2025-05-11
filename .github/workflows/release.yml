@@ -69,7 +69,7 @@ jobs:
         run: |
           mkdir -p dist/final
           for dir in dist/*; do
-            if [ -d "$dir" ]; then
+            if [ -d "$dir" ] && [ "$dir" != "dist/final" ]; then
               bin=$(ls "$dir")
               cp "$dir/$bin" "dist/final/$dir"
             fi
