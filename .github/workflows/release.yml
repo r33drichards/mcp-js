@@ -8,53 +8,82 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-and-release:
-    runs-on: ubuntu-latest
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - name: Linux x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            bin_name: mcp-v8-linux
+            build_cmd: cargo build --release --target x86_64-unknown-linux-gnu
+            out_path: server/target/x86_64-unknown-linux-gnu/release/server
+          - name: Linux ARM64
+            os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            bin_name: mcp-v8-linux-arm64
+            build_cmd: cargo build --release --target aarch64-unknown-linux-gnu
+            out_path: server/target/aarch64-unknown-linux-gnu/release/server
+          - name: macOS x86_64
+            os: macos-13
+            target: x86_64-apple-darwin
+            bin_name: mcp-v8-macos
+            build_cmd: cargo zigbuild --release --target x86_64-apple-darwin
+            out_path: server/target/x86_64-apple-darwin/release/server
+          - name: macOS ARM64
+            os: macos-14
+            target: aarch64-apple-darwin
+            bin_name: mcp-v8-macos-arm64
+            build_cmd: cargo zigbuild --release --target aarch64-apple-darwin
+            out_path: server/target/aarch64-apple-darwin/release/server
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-    # install nix with determinat nix installer 
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/magic-nix-cache-action@main
       - uses: DeterminateSystems/flake-checker-action@main
       - uses: Swatinem/rust-cache@v2
         with:
           cache-directories: "server"
-    #   - install targets 
-      - name: Install targets
+
+      - name: Install target
+        run: nix develop --command rustup target add ${{ matrix.target }}
+
+      - name: Build
+        run: cd server && nix develop --command ${{ matrix.build_cmd }}
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.bin_name }}
+          path: ${{ matrix.out_path }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Rename and organize binaries
         run: |
-          nix develop --command rustup target add x86_64-apple-darwin
-          nix develop --command rustup target add aarch64-apple-darwin
-          nix develop --command rustup target add x86_64-unknown-linux-gnu
-          nix develop --command rustup target add aarch64-unknown-linux-gnu
-
-      - name: Build macOS binary
-        run: cd server && nix develop --command cargo zigbuild --release --target x86_64-apple-darwin
-
-    # arm macos
-      - name: Build arm macos binary
-        run: cd server && nix develop --command cargo zigbuild --release --target aarch64-apple-darwin
-  
-      - name: Build Linux binary
-        run: cd server && nix develop --command cargo build --release --target x86_64-unknown-linux-gnu
-
-      # arm linux
-      - name: Build arm linux binary
-        run: cd server && nix develop --command cargo build --release --target aarch64-unknown-linux-gnu
-
-      - name: Prepare binaries for release
-        run: |
-          mkdir -p dist
-          cp server/target/x86_64-unknown-linux-gnu/release/server dist/mcp-v8-linux
-          cp server/target/x86_64-apple-darwin/release/server dist/mcp-v8-macos
+          mkdir -p dist/final
+          for dir in dist/*; do
+            if [ -d "$dir" ]; then
+              bin=$(ls "$dir")
+              cp "$dir/$bin" "dist/final/$dir"
+            fi
+          done
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            dist/mcp-v8-linux
-            dist/mcp-v8-macos
+          files: dist/final/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
