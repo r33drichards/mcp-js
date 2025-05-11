@@ -7,6 +7,7 @@
       rustup
       deno
       cacert
+      cargo-zigbuild
     ];
     RUSTC_VERSION = pkgs.lib.readFile ./rust-toolchain;
     # https://github.com/rust-lang/rust-bindgen#environment-variables
