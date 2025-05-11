@@ -15,7 +15,6 @@ A Rust-based Model Context Protocol (MCP) server that exposes a V8 JavaScript ru
 ### Prerequisites
 - Rust (nightly toolchain recommended)
 - (Optional) AWS credentials for S3 storage
-- Node.js (for some MCP client integrations)
 
 ### Build the Server
 
