@@ -5,6 +5,8 @@ on:
     tags:
       - 'v*.*.*'   # Triggers on version tags like v1.2.3
 
+  workflow_dispatch:
+
 jobs:
   build-and-release:
     runs-on: ubuntu-latest
@@ -13,13 +15,12 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Rust
-        uses: actions/setup-rust@v1
-        with:
-          rust-version: stable
-
-      - name: Build release binary
-        run: cargo build --release --manifest-path server/Cargo.toml
+    # install nix with determinat nix installer 
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - uses: DeterminateSystems/flake-checker-action@main
+      - name: Run `nix build`
+        run: cd server && nix develop --command cargo build --release
 
       - name: Prepare binary for release
         run: |
