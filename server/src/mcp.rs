@@ -95,26 +95,43 @@ impl GenericService {
                     v8::Isolate::snapshot_creator(Default::default(), Default::default())
                 }
             };
-            let output = (|| {
-                let output;
-                {
-                    let scope = &mut v8::HandleScope::new(&mut snapshot_creator);
-                    let context = v8::Context::new(scope, Default::default());
-                    let scope = &mut v8::ContextScope::new(scope, context);
-                    let result = eval(scope, &code_clone)?;
-                    let result_str = result
-                        .to_string(scope)
-                        .ok_or_else(|| "Failed to convert result to string".to_string())?;
-                    output = result_str.to_rust_string_lossy(scope);
-                    scope.set_default_context(context);
-                } // All borrows of snapshot_creator end here
-                let startup_data = snapshot_creator
-                    .create_blob(v8::FunctionCodeHandling::Clear)
-                    .ok_or("Failed to create V8 snapshot blob")?;
-                let startup_data_vec = startup_data.to_vec();
-                Ok::<_, String>((output, startup_data_vec))
-            })();
-            output
+            // Always call create_blob before dropping snapshot_creator
+            let mut output_result: Result<String, String> = Err("Unknown error".to_string());
+            {
+                let scope = &mut v8::HandleScope::new(&mut snapshot_creator);
+                let context = v8::Context::new(scope, Default::default());
+                let scope = &mut v8::ContextScope::new(scope, context);
+                let result = eval(scope, &code_clone);
+                match result {
+                    Ok(result) => {
+                        let result_str = result
+                            .to_string(scope)
+                            .ok_or_else(|| "Failed to convert result to string".to_string());
+                        match result_str {
+                            Ok(s) => {
+                                output_result = Ok(s.to_rust_string_lossy(scope));
+                            }
+                            Err(e) => {
+                                output_result = Err(e);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        output_result = Err(e);
+                    }
+                }
+                scope.set_default_context(context);
+            }
+            // Always call create_blob before returning
+            let startup_data = match snapshot_creator.create_blob(v8::FunctionCodeHandling::Clear) {
+                Some(blob) => blob,
+                None => return Ok::<_, std::convert::Infallible>((format!("V8 error: Failed to create V8 snapshot blob"), vec![])),
+            };
+            let startup_data_vec = startup_data.to_vec();
+            match output_result {
+                Ok(output) => Ok::<_, std::convert::Infallible>((output, startup_data_vec)),
+                Err(e) => Ok::<_, std::convert::Infallible>((format!("V8 error: {}", e), startup_data_vec)),
+            }
         }).await;
         match v8_result {
             Ok(Ok((output, startup_data))) => {
