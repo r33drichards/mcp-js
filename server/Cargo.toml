@@ -18,3 +18,4 @@ v8 = "136.0.0"
 aws-config = "0.0.26-alpha"
 aws-sdk-s3 = "0.0.26-alpha"
 async-trait = "0.1"
+clap = { version = "4.5", features = ["derive"] }
