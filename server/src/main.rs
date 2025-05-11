@@ -4,6 +4,7 @@ use tracing_subscriber::{self};
 
 mod mcp;
 use mcp::{GenericService, initialize_v8};
+use mcp::heap_storage::{AnyHeapStorage, S3HeapStorage};
 
 /// npx @modelcontextprotocol/inspector cargo run -p mcp-server-examples --example std_io
 #[tokio::main]
@@ -20,6 +21,7 @@ async fn main() -> Result<()> {
 
     // Create an instance of our counter router
     let service = GenericService::new(
+        AnyHeapStorage::S3(S3HeapStorage::new("test-mcp-js-bucket").await),
 
     ).await.serve(stdio()).await.inspect_err(|e| {
         tracing::error!("serving error: {:?}", e);

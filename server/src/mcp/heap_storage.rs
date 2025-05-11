@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use aws_sdk_s3::{Client as S3Client};
+use aws_sdk_s3::Client as S3Client;
 use aws_sdk_s3::ByteStream;
 
 use aws_config;
@@ -12,11 +12,15 @@ pub trait HeapStorage: Send + Sync + 'static {
     async fn get(&self, name: &str) -> Result<Vec<u8>, String>;
 }
 
+#[derive(Clone)]
 pub struct FileHeapStorage {
     dir: PathBuf,
 }
 
 impl FileHeapStorage {
+
+    // ignore dead_code warning
+    #[allow(dead_code)]
     pub fn new(dir: impl Into<PathBuf>) -> Self {
         let dir = dir.into();
         std::fs::create_dir_all(&dir).ok();
@@ -36,6 +40,7 @@ impl HeapStorage for FileHeapStorage {
     }
 }
 
+#[derive(Clone)]
 pub struct S3HeapStorage {
     bucket: String,
     client: Arc<S3Client>,
@@ -93,10 +98,15 @@ impl HeapStorage for S3HeapStorage {
     }
 }
 
+#[derive(Clone)]
 pub enum AnyHeapStorage {
+    #[allow(dead_code)]
     File(FileHeapStorage),
     S3(S3HeapStorage),
 }
+
+
+
 
 #[async_trait::async_trait]
 impl HeapStorage for AnyHeapStorage {

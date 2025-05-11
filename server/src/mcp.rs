@@ -10,8 +10,8 @@ use serde_json::json;
 use std::sync::Once;
 use v8::{self};
 
-mod heap_storage;
-use crate::mcp::heap_storage::{HeapStorage, S3HeapStorage};
+pub(crate) mod heap_storage;
+use crate::mcp::heap_storage::{HeapStorage, AnyHeapStorage};
 
 
 
@@ -48,7 +48,7 @@ pub trait DataService: Send + Sync + 'static {
 
 #[derive(Clone)]
 pub struct GenericService {
-    heap_storage: std::sync::Arc<dyn HeapStorage>,
+    heap_storage: AnyHeapStorage,
 }
 
 // response to run_js
@@ -71,9 +71,9 @@ impl IntoContents for RunJsResponse {
 
 #[tool(tool_box)]
 impl GenericService {
-    pub async fn new() -> Self {
-        // let heap_storage = std::sync::Arc::new(FileHeapStorage::new("/tmp/mcp_heap_storage"));
-        let heap_storage = std::sync::Arc::new(S3HeapStorage::new("test-mcp-js-bucket").await);
+    pub async fn new(
+        heap_storage: AnyHeapStorage,
+    ) -> Self {
         Self {
             heap_storage,
         }
@@ -85,7 +85,6 @@ impl GenericService {
         let snapshot = self.heap_storage.get(&heap).await.ok();
         // 2. Run V8 logic in blocking thread
         let code_clone = code.clone();
-        let heap_clone = heap.clone();
         let v8_result = tokio::task::spawn_blocking(move || {
             // Re-implement the V8 logic here, using snapshot if available
             let mut snapshot_creator = match snapshot {
