@@ -16,10 +16,10 @@
           app = pkgs.rustPlatform.buildRustPackage {
           pname = "app";
             version = "0.0.1";
-            src = ./.;
+            src = ./server;
 
             cargoLock = {
-              lockFile = ./Cargo.lock;
+              lockFile = ./server/Cargo.lock;
             };
 
             nativeBuildInputs = [ 

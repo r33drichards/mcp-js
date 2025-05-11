@@ -1,68 +1,85 @@
-# mcp-v8 - MCP Project
+# mcp-v8: V8 JavaScript MCP Server
 
-A complete MCP project with both client and server components, using stdio transport.
+A Rust-based Model Context Protocol (MCP) server that exposes a V8 JavaScript runtime as a tool for AI agents like Claude and Cursor. Supports persistent heap snapshots via S3 or local filesystem, and is ready for integration with modern AI development environments.
 
 ## Features
 
-- **Robust Communication**: Reliable stdio transport with proper error handling and timeout management
-- **Multiple Connection Methods**: Connect to an already running server or start a new server process
-- **Interactive Mode**: Choose tools and provide parameters interactively
-- **One-shot Mode**: Run queries directly from the command line
-- **Comprehensive Logging**: Detailed logging for debugging and monitoring
+- **V8 JavaScript Execution**: Run arbitrary JavaScript code in a secure, isolated V8 engine.
+- **Heap Snapshots**: Persist and restore V8 heap state between runs, supporting both S3 and local file storage.
+- **MCP Protocol**: Implements the Model Context Protocol for seamless tool integration with Claude, Cursor, and other MCP clients.
+- **Configurable Storage**: Choose between S3 or local directory for heap storage at runtime.
+- **Extensible**: Built for easy extension with new tools or storage backends.
 
-## Project Structure
+## Quick Start
 
-- `client/`: The MCP client implementation
-- `server/`: The MCP server implementation with tools
-- `test.sh`: A test script to run both client and server
+### Prerequisites
+- Rust (nightly toolchain recommended)
+- (Optional) AWS credentials for S3 storage
+- Node.js (for some MCP client integrations)
 
-## Building
-
-```bash
-# Build the server
-cd server
-cargo build
-
-# Build the client
-cd ../client
-cargo build
-```
-
-
-
-
-## Running
-
-### Start the Server
+### Build the Server
 
 ```bash
 cd server
-cargo run
+cargo build --release
 ```
 
-### Run the Client
+### Run the Server
+
+By default, the server uses S3 for heap storage. You can override this with CLI flags:
 
 ```bash
-cd client
-cargo run -- --name "Your Name"
+# Use S3 (default or specify bucket)
+cargo run --release -- --s3-bucket my-bucket-name
+
+# Use local filesystem
+directory for heap storage
+cargo run --release -- --directory-path /tmp/mcp-v8-heaps
 ```
 
-### Interactive Mode
+## Integration
 
-```bash
-cd client
-cargo run -- --interactive
+### Claude for Desktop
+
+1. Build the server as above.
+2. Open Claude Desktop → Settings → Developer → Edit Config.
+3. Add your server to `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "js": {
+      "command": "/absolute/path/to/your/mcp-v8/server/target/release/server"
+    }
+  }
+}
 ```
 
-## Testing
+4. Restart Claude Desktop. The new tools will appear under the hammer icon.
 
-```bash
-./test.sh
+### Cursor
+
+1. Build the server as above.
+2. Create or edit `.cursor/mcp.json` in your project root:
+
+```json
+{
+  "mcpServers": {
+    "js": {
+      "command": "/absolute/path/to/your/mcp-v8/server/target/release/server"
+    }
+  }
+}
 ```
 
+3. Restart Cursor. The MCP tools will be available in the UI.
 
-```
-cd server 
-cargo build
-npx @modelcontextprotocol/inspector target/debug/mcp-v8-server                                                              ~/mcp-v8/
-```
+## Example Usage
+
+- Ask Claude or Cursor: "Run this JavaScript: `1 + 2`"
+- Use heap snapshots to persist state between runs.
+
+## Heap Storage Options
+
+- **S3**: Set `--s3-bucket <bucket>` to use AWS S3 for heap snapshots (requires AWS credentials).
+- **Filesystem**: Set `--directory-path <path>` to use a local directory for heap snapshots.
