@@ -8,7 +8,6 @@ A Rust-based Model Context Protocol (MCP) server that exposes a V8 JavaScript ru
 - **Heap Snapshots**: Persist and restore V8 heap state between runs, supporting both S3 and local file storage.
 - **MCP Protocol**: Implements the Model Context Protocol for seamless tool integration with Claude, Cursor, and other MCP clients.
 - **Configurable Storage**: Choose between S3 or local directory for heap storage at runtime.
-- **Extensible**: Built for easy extension with new tools or storage backends.
 
 ## Installation
 
