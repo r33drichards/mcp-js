@@ -41,8 +41,8 @@ async fn main() -> Result<()> {
     } else if let Some(dir) = cli.directory_path {
         AnyHeapStorage::File(FileHeapStorage::new(dir))
     } else {
-        // default to s3
-        AnyHeapStorage::S3(S3HeapStorage::new("test-mcp-js-bucket").await)
+        // default to file /tmp/mcp-v8-heaps
+        AnyHeapStorage::File(FileHeapStorage::new("/tmp/mcp-v8-heaps"))
     };
 
 
