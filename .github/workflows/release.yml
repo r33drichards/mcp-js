@@ -67,11 +67,23 @@ jobs:
 
       - name: Rename and organize binaries
         run: |
+          echo "Listing dist directory:"
+          ls -l dist
+          echo "Listing all subdirectories in dist:"
+          for dir in dist/*; do
+            if [ -d "$dir" ]; then
+              echo "Contents of $dir:"
+              ls -l "$dir"
+            fi
+          done
           mkdir -p dist/final
           for dir in dist/*; do
             if [ -d "$dir" ] && [ "$dir" != "dist/final" ]; then
+              echo "Processing directory: $dir"
               bin=$(ls "$dir")
-              cp "$dir/$bin" "dist/final/$dir"
+              echo "Found binary: $bin in $dir"
+              echo "Copying $dir/$bin to dist/final/$bin"
+              cp "$dir/$bin" "dist/final/$bin"
             fi
           done
 
