@@ -1,0 +1,7 @@
+{
+    "mcpServers": {
+        "js": {
+            "command": "/Users/robertwendt/mcp-v8/server/target/debug/server"
+        }
+    }
+}

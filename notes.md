@@ -1,5 +1,9 @@
 https://til.simonwillison.net/deno/pyodide-sandbox
 https://news.ycombinator.com/item?id=43691230
+https://cran.r-project.org/web/packages/V8/vignettes/npm.html
+
+https://github.com/modelcontextprotocol/rust-sdk/blob/main/examples/servers/src/std_io.rs
+
 # embedding v8 c++ https://v8.dev/docs/embed
 
 # example test https://github.com/denoland/rusty_v8/blob/main/tests/test_api.rs#L5352
