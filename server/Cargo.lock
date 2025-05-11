@@ -754,8 +754,7 @@ checksum = "2b15c43186be67a4fd63bee50d0303afffcef381492ebe2c5d87f324e1b8815c"
 [[package]]
 name = "rmcp"
 version = "0.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "33a0110d28bd076f39e14bfd5b0340216dd18effeb5d02b43215944cc3e5c751"
+source = "git+https://github.com/modelcontextprotocol/rust-sdk?branch=main#787cc015b719773f66d4ac32e695b9a0079e12ef"
 dependencies = [
  "base64",
  "chrono",
@@ -775,8 +774,7 @@ dependencies = [
 [[package]]
 name = "rmcp-macros"
 version = "0.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a6e2b2fd7497540489fa2db285edd43b7ed14c49157157438664278da6e42a7a"
+source = "git+https://github.com/modelcontextprotocol/rust-sdk?branch=main#787cc015b719773f66d4ac32e695b9a0079e12ef"
 dependencies = [
  "proc-macro2",
  "quote",

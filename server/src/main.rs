@@ -3,11 +3,12 @@ use rmcp::{ServiceExt, transport::stdio};
 use tracing_subscriber::{self};
 
 mod mcp;
-use mcp::MCPV8;
+use mcp::{GenericService, initialize_v8};
 
 /// npx @modelcontextprotocol/inspector cargo run -p mcp-server-examples --example std_io
 #[tokio::main]
 async fn main() -> Result<()> {
+    initialize_v8();
     // Initialize the tracing subscriber with file and stdout logging
     tracing_subscriber::fmt()
         // .with_env_filter(EnvFilter::from_default_env().add_directive(tracing::Level::DEBUG.into()))
@@ -18,7 +19,9 @@ async fn main() -> Result<()> {
     tracing::info!("Starting MCP server");
 
     // Create an instance of our counter router
-    let service = MCPV8::new().serve(stdio()).await.inspect_err(|e| {
+    let service = GenericService::new(
+
+    ).serve(stdio()).await.inspect_err(|e| {
         tracing::error!("serving error: {:?}", e);
     })?;
 
