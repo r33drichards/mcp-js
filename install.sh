@@ -6,7 +6,7 @@ INSTALL_DIR="/usr/local/bin"
 
 # Detect latest version if not specified
 if [ -z "$MCP_V8_VERSION" ]; then
-  MCP_V8_VERSION=$(curl -s "https://api.github.com/repos/$REPO/releases/latest" | grep -oP '"tag_name": "\K(.*)(?=")')
+  MCP_V8_VERSION=$(curl -s "https://api.github.com/repos/$REPO/releases/latest" | grep '"tag_name":' | sed -E 's/.*"tag_name": "([^"]+)".*/\1/')
 fi
 
 if [ -z "$MCP_V8_VERSION" ]; then
