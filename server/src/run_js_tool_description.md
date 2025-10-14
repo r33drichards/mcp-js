@@ -11,7 +11,22 @@ returns:
 you must send a heap file to the client.
 
 
+
+## Limitations
+
+While `mcp-v8` provides a powerful and persistent JavaScript execution environment, there are limitations to its runtime. 
+
+- **No `async`/`await` or Promises**: Asynchronous JavaScript is not supported. All code must be synchronous.
+- **No `fetch` or network access**: There is no built-in way to make HTTP requests or access the network.
+- **No `console.log` or standard output**: Output from `console.log` or similar functions will not appear. To return results, ensure the value you want is the last line of your code.
+- **No file system access**: The runtime does not provide access to the local file system or environment variables.
+- **No `npm install` or external packages**: You cannot install or import npm packages. Only standard JavaScript (ECMAScript) built-ins are available.
+- **No timers**: Functions like `setTimeout` and `setInterval` are not available.
+- **No DOM or browser APIs**: This is not a browser environment; there is no access to `window`, `document`, or other browser-specific objects.
+
+
 The way the runtime works, is that there is no console.log. If you want the results of an execution, you must return it in the last line of code.
+
 
 eg:
 
