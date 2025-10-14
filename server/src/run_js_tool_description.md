@@ -1,3 +1,51 @@
+run javascript code in v8
+
+params:
+- code: the javascript code to run
+- heap: the path to the heap file
+
+returns:
+- output: the output of the javascript code
+- heap: the path to the heap file
+
+you must send a heap file to the client.
+
+
+The way the runtime works, is that there is no console.log. If you want the results of an execution, you must return it in the last line of code.
+
+eg:
+
+```js
+const result = 1 + 1;
+result;
+```
+
+would return:
+
+```
+2
+```
+
+you must also jsonify an object, and return it as a string to see its content.
+
+eg:
+
+```js
+const obj = {
+  a: 1,
+  b: 2,
+};
+JSON.stringify(obj);
+```
+
+would return:
+
+```
+{"a":1,"b":2}
+```
+
+the source code of the runtime is this 
+```rust
 use rmcp::{
     model::{ServerCapabilities, ServerInfo},
 
@@ -181,3 +229,5 @@ impl ServerHandler for GenericService {
         Ok(self.get_info())
     }
 }
+```
+
