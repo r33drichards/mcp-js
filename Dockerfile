@@ -47,9 +47,10 @@ USER mcpuser
 # Default to using local filesystem storage
 ENV HEAP_STORAGE_PATH=/tmp/mcp-v8-heaps
 
-# Expose HTTP port (default 8080)
+# Expose HTTP port (Railway will set PORT env var)
 EXPOSE 8080
 
-# Default command: run HTTP server on port 8080 with local storage
+# Default command: run HTTP server with port from PORT env var and local storage
+# Railway will automatically set PORT environment variable
 # Users can override with their own command to use S3 or different settings
-CMD ["mcp-v8", "--http-port", "8080", "--directory-path", "/tmp/mcp-v8-heaps"]
+CMD ["mcp-v8", "--directory-path", "/tmp/mcp-v8-heaps"]
