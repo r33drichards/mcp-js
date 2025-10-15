@@ -22,7 +22,7 @@ jobs:
           cache-directories: "server"
 
       - name: Run tests
-        run: cd server && nix develop --command cargo test
+        run: cd server && nix develop --command cargo test -- --test-threads=1
 
       - name: Run tests with output
         run: cd server && nix develop --command cargo test -- --nocapture --test-threads=1

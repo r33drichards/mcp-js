@@ -6,7 +6,7 @@ use tokio::time::sleep;
 
 /// Start the MCP server for testing
 pub async fn start_server(port: u16, heap_dir: &str) -> Result<tokio::process::Child, std::io::Error> {
-    let child = Command::new("cargo")
+    let child = Command::new(env!("CARGO"))
         .args(&["run", "--", "--directory-path", heap_dir, "--http-port", &port.to_string()])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

@@ -19,7 +19,7 @@ struct StdioServer {
 impl StdioServer {
     /// Start a new stdio MCP server for testing
     async fn start(heap_dir: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        let mut child = Command::new("cargo")
+        let mut child = Command::new(env!("CARGO"))
             .args(&["run", "--", "--directory-path", heap_dir])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -57,6 +57,16 @@ impl StdioServer {
         // Parse response
         let response: Value = serde_json::from_str(&response_line)?;
         Ok(response)
+    }
+
+    /// Send a notification (no response expected)
+    async fn send_notification(&mut self, notification: Value) -> Result<(), Box<dyn std::error::Error>> {
+        let notification_str = serde_json::to_string(&notification)?;
+        let notification_with_newline = format!("{}\n", notification_str);
+
+        self.stdin.write_all(notification_with_newline.as_bytes()).await?;
+        self.stdin.flush().await?;
+        Ok(())
     }
 
     /// Stop the server
@@ -125,6 +135,12 @@ async fn test_stdio_run_js_execution() -> Result<(), Box<dyn std::error::Error>>
 
     server.send_message(initialize_msg).await?;
 
+    // Send initialized notification (required by MCP protocol)
+    server.send_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized"
+    })).await?;
+
     // Call run_js tool
     let tool_call_msg = json!({
         "jsonrpc": "2.0",
@@ -181,6 +197,12 @@ async fn test_stdio_heap_persistence() -> Result<(), Box<dyn std::error::Error>>
     });
 
     server.send_message(initialize_msg).await?;
+
+    // Send initialized notification (required by MCP protocol)
+    server.send_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized"
+    })).await?;
 
     // Set a variable in the heap
     let set_var_msg = json!({
@@ -248,6 +270,12 @@ async fn test_stdio_invalid_javascript_error() -> Result<(), Box<dyn std::error:
 
     server.send_message(initialize_msg).await?;
 
+    // Send initialized notification (required by MCP protocol)
+    server.send_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized"
+    })).await?;
+
     // Send invalid JavaScript
     let invalid_js_msg = json!({
         "jsonrpc": "2.0",
@@ -308,6 +336,12 @@ async fn test_stdio_sequential_operations() -> Result<(), Box<dyn std::error::Er
 
     server.send_message(initialize_msg).await?;
 
+    // Send initialized notification (required by MCP protocol)
+    server.send_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized"
+    })).await?;
+
     // Perform multiple sequential operations
     let operations = vec![
         ("var counter = 0; counter", "0"),
@@ -365,6 +399,12 @@ async fn test_stdio_multiple_heaps() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     server.send_message(initialize_msg).await?;
+
+    // Send initialized notification (required by MCP protocol)
+    server.send_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized"
+    })).await?;
 
     // Set variable in heap A
     let set_heap_a = json!({
@@ -463,6 +503,12 @@ async fn test_stdio_complex_javascript() -> Result<(), Box<dyn std::error::Error
     });
 
     server.send_message(initialize_msg).await?;
+
+    // Send initialized notification (required by MCP protocol)
+    server.send_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized"
+    })).await?;
 
     // Test array operations
     let array_op = json!({
