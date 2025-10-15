@@ -94,7 +94,7 @@ async fn http_handler(req: Request<Incoming>, heap_storage: AnyHeapStorage) -> R
 }
 
 async fn start_http_server(heap_storage: AnyHeapStorage, port: u16) -> Result<()> {
-    let addr = format!("127.0.0.1:{}", port);
+    let addr = format!("0.0.0.0:{}", port);
     let tcp_listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("HTTP server listening on {}", addr);
 
