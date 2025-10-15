@@ -21,6 +21,9 @@ jobs:
         with:
           cache-directories: "server"
 
+      - name: Build server
+        run: cd server && nix develop --command bash -c "cargo build"
+
       - name: Run tests
         run: cd server && nix develop --command bash -c "cargo test -- --test-threads=1"
 
