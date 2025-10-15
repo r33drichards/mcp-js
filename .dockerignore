@@ -1,0 +1,34 @@
+# Git files
+.git
+.gitignore
+.github
+
+# Build artifacts
+server/target
+snapshot/target
+**/target
+
+# Development files
+.cursor
+.envrc
+notes.md
+
+# Nix files (not needed in container)
+flake.nix
+flake.lock
+shell.nix
+
+# Documentation
+README.md
+LICENSE
+
+# IDE files
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
