@@ -1,0 +1,29 @@
+name: Test
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/flake-checker-action@main
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-directories: "server"
+
+      - name: Run tests
+        run: cd server && nix develop --command cargo test
+
+      - name: Run tests with output
+        run: cd server && nix develop --command cargo test -- --nocapture --test-threads=1
+        if: failure()
