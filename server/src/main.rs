@@ -27,7 +27,8 @@ struct Cli {
     directory_path: Option<String>,
 
     /// HTTP port to listen on (if not specified, uses stdio transport)
-    #[arg(long)]
+    /// Falls back to PORT environment variable, then defaults to stdio if neither is set
+    #[arg(long, env = "PORT")]
     http_port: Option<u16>,
 }
 
