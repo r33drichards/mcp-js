@@ -19,3 +19,5 @@ aws-config = "0.0.26-alpha"
 aws-sdk-s3 = "0.0.26-alpha"
 async-trait = "0.1"
 clap = { version = "4.5", features = ["derive"] }
+hyper = { version = "1.5.2", features = ["server", "http1"] }
+hyper-util = { version = "0.1.10", features = ["tokio"] }
