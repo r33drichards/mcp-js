@@ -24,6 +24,67 @@ fn eval<'s>(scope: &mut v8::HandleScope<'s>, code: &str) -> Result<v8::Local<'s,
     Ok(scope.escape(r))
 }
 
+// Execute JS in a stateless isolate (no snapshot creation)
+fn execute_stateless(code: String) -> Result<String, String> {
+    let isolate = &mut v8::Isolate::new(Default::default());
+    let scope = &mut v8::HandleScope::new(isolate);
+    let context = v8::Context::new(scope, Default::default());
+    let scope = &mut v8::ContextScope::new(scope, context);
+
+    let result = eval(scope, &code)?;
+    match result.to_string(scope) {
+        Some(s) => Ok(s.to_rust_string_lossy(scope)),
+        None => Err("Failed to convert result to string".to_string()),
+    }
+}
+
+// Execute JS with snapshot support (preserves heap state)
+fn execute_stateful(code: String, snapshot: Option<Vec<u8>>) -> Result<(String, Vec<u8>), String> {
+    let mut snapshot_creator = match snapshot {
+        Some(snapshot) => {
+            eprintln!("creating isolate from snapshot...");
+            v8::Isolate::snapshot_creator_from_existing_snapshot(snapshot, None, None)
+        }
+        None => {
+            eprintln!("snapshot not found, creating new isolate...");
+            v8::Isolate::snapshot_creator(Default::default(), Default::default())
+        }
+    };
+
+    let mut output_result: Result<String, String> = Err("Unknown error".to_string());
+    {
+        let scope = &mut v8::HandleScope::new(&mut snapshot_creator);
+        let context = v8::Context::new(scope, Default::default());
+        let scope = &mut v8::ContextScope::new(scope, context);
+        let result = eval(scope, &code);
+        match result {
+            Ok(result) => {
+                let result_str = result
+                    .to_string(scope)
+                    .ok_or_else(|| "Failed to convert result to string".to_string());
+                match result_str {
+                    Ok(s) => {
+                        output_result = Ok(s.to_rust_string_lossy(scope));
+                    }
+                    Err(e) => {
+                        output_result = Err(e);
+                    }
+                }
+            }
+            Err(e) => {
+                output_result = Err(e);
+            }
+        }
+        scope.set_default_context(context);
+    }
+
+    let startup_data = snapshot_creator.create_blob(v8::FunctionCodeHandling::Clear)
+        .ok_or("Failed to create V8 snapshot blob".to_string())?;
+    let startup_data_vec = startup_data.to_vec();
+
+    output_result.map(|output| (output, startup_data_vec))
+}
+
 static INIT: Once = Once::new();
 static mut PLATFORM: Option<v8::SharedRef<v8::Platform>> = None;
 
@@ -51,7 +112,7 @@ pub struct GenericService {
     heap_storage: AnyHeapStorage,
 }
 
-// response to run_js
+// response to run_js (stateful)
 #[derive(Debug, Clone)]
 pub struct RunJsResponse {
     pub output: String,
@@ -70,6 +131,23 @@ impl IntoContents for RunJsResponse {
     }
 }
 
+// response to run_js (stateless)
+#[derive(Debug, Clone)]
+pub struct RunJsStatelessResponse {
+    pub output: String,
+}
+
+impl IntoContents for RunJsStatelessResponse {
+    fn into_contents(self) -> Vec<Content> {
+        match Content::json(json!({
+            "output": self.output,
+        })) {
+            Ok(content) => vec![content],
+            Err(e) => vec![Content::text(format!("Failed to convert run_js response to content: {}", e))],
+        }
+    }
+}
+
 #[tool(tool_box)]
 impl GenericService {
     pub fn new(
@@ -80,113 +158,61 @@ impl GenericService {
         }
     }
 
+    /// Execute JavaScript code in a stateless isolate (no heap persistence)
+    #[tool(description = "Execute JavaScript code in a fresh, stateless V8 isolate. Each execution starts with a clean environment.")]
+    pub async fn run_js_stateless(&self, #[tool(param)] code: String) -> RunJsStatelessResponse {
+        // Only available in stateless mode
+        if !matches!(self.heap_storage, AnyHeapStorage::Noop(_)) {
+            return RunJsStatelessResponse {
+                output: "Error: run_js_stateless is only available in stateless mode. Use run_js instead.".to_string(),
+            };
+        }
+
+        let v8_result = tokio::task::spawn_blocking(move || execute_stateless(code)).await;
+
+        match v8_result {
+            Ok(Ok(output)) => RunJsStatelessResponse { output },
+            Ok(Err(e)) => RunJsStatelessResponse {
+                output: format!("V8 error: {}", e),
+            },
+            Err(e) => RunJsStatelessResponse {
+                output: format!("Task join error: {}", e),
+            },
+        }
+    }
+
+    /// Execute JavaScript code with heap persistence
     #[tool(description = include_str!("run_js_tool_description.md"))]
     pub async fn run_js(&self, #[tool(param)] code: String, #[tool(param)] heap: String) -> RunJsResponse {
+        // Not available in stateless mode
+        if matches!(self.heap_storage, AnyHeapStorage::Noop(_)) {
+            return RunJsResponse {
+                output: "Error: run_js is not available in stateless mode. Use run_js_stateless instead.".to_string(),
+                heap,
+            };
+        }
+
         let snapshot = self.heap_storage.get(&heap).await.ok();
-        let is_stateless = snapshot.is_none() && matches!(self.heap_storage, AnyHeapStorage::Noop(_));
-        let code_clone = code.clone();
+        let v8_result = tokio::task::spawn_blocking(move || execute_stateful(code, snapshot)).await;
 
-        if is_stateless {
-            // Stateless mode: use a regular isolate, no snapshot creation
-            let v8_result = tokio::task::spawn_blocking(move || {
-                let isolate = &mut v8::Isolate::new(Default::default());
-                let scope = &mut v8::HandleScope::new(isolate);
-                let context = v8::Context::new(scope, Default::default());
-                let scope = &mut v8::ContextScope::new(scope, context);
-
-                let result = eval(scope, &code_clone);
-                match result {
-                    Ok(result) => {
-                        match result.to_string(scope) {
-                            Some(s) => Ok::<String, String>(s.to_rust_string_lossy(scope)),
-                            None => Err("Failed to convert result to string".to_string()),
-                        }
-                    }
-                    Err(e) => Err(e),
+        match v8_result {
+            Ok(Ok((output, startup_data))) => {
+                if let Err(e) = self.heap_storage.put(&heap, &startup_data).await {
+                    return RunJsResponse {
+                        output: format!("Error saving heap: {}", e),
+                        heap,
+                    };
                 }
-            }).await;
-
-            match v8_result {
-                Ok(Ok(output)) => RunJsResponse { output, heap },
-                Ok(Err(e)) => RunJsResponse {
-                    output: format!("V8 error: {}", e),
-                    heap,
-                },
-                Err(e) => RunJsResponse {
-                    output: format!("Task join error: {}", e),
-                    heap,
-                },
+                RunJsResponse { output, heap }
             }
-        } else {
-            // Stateful mode: use snapshot creator to preserve heap state
-            let v8_result = tokio::task::spawn_blocking(move || {
-                let mut snapshot_creator = match snapshot {
-                    Some(snapshot) => {
-                        eprintln!("creating isolate from snapshot...");
-                        v8::Isolate::snapshot_creator_from_existing_snapshot(snapshot, None, None)
-                    }
-                    None => {
-                        eprintln!("snapshot not found, creating new isolate...");
-                        v8::Isolate::snapshot_creator(Default::default(), Default::default())
-                    }
-                };
-                // Always call create_blob before dropping snapshot_creator
-                let mut output_result: Result<String, String> = Err("Unknown error".to_string());
-                {
-                    let scope = &mut v8::HandleScope::new(&mut snapshot_creator);
-                    let context = v8::Context::new(scope, Default::default());
-                    let scope = &mut v8::ContextScope::new(scope, context);
-                    let result = eval(scope, &code_clone);
-                    match result {
-                        Ok(result) => {
-                            let result_str = result
-                                .to_string(scope)
-                                .ok_or_else(|| "Failed to convert result to string".to_string());
-                            match result_str {
-                                Ok(s) => {
-                                    output_result = Ok(s.to_rust_string_lossy(scope));
-                                }
-                                Err(e) => {
-                                    output_result = Err(e);
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            output_result = Err(e);
-                        }
-                    }
-                    scope.set_default_context(context);
-                }
-                // Always call create_blob before returning
-                let startup_data = match snapshot_creator.create_blob(v8::FunctionCodeHandling::Clear) {
-                    Some(blob) => blob,
-                    None => return Ok::<_, std::convert::Infallible>((format!("V8 error: Failed to create V8 snapshot blob"), vec![])),
-                };
-                let startup_data_vec = startup_data.to_vec();
-                match output_result {
-                    Ok(output) => Ok::<_, std::convert::Infallible>((output, startup_data_vec)),
-                    Err(e) => Ok::<_, std::convert::Infallible>((format!("V8 error: {}", e), startup_data_vec)),
-                }
-            }).await;
-            match v8_result {
-                Ok(Ok((output, startup_data))) => {
-                    if let Err(e) = self.heap_storage.put(&heap, &startup_data).await {
-                        return RunJsResponse {
-                            output: format!("Error saving heap: {}", e),
-                            heap,
-                        };
-                    }
-                    RunJsResponse { output, heap }
-                }
-                Ok(Err(e)) => RunJsResponse {
-                    output: format!("V8 error: {}", e),
-                    heap,
-                },
-                Err(e) => RunJsResponse {
-                    output: format!("Task join error: {}", e),
-                    heap,
-                },
-            }
+            Ok(Err(e)) => RunJsResponse {
+                output: format!("V8 error: {}", e),
+                heap,
+            },
+            Err(e) => RunJsResponse {
+                output: format!("Task join error: {}", e),
+                heap,
+            },
         }
     }
 
