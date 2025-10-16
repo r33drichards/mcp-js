@@ -71,7 +71,6 @@ async fn main() -> Result<()> {
     } else {
         tracing::info!("Starting stdio transport");
         let service = GenericService::new(heap_storage)
-            .await
             .serve(stdio())
             .await
             .inspect_err(|e| {
@@ -88,7 +87,6 @@ async fn http_handler(req: Request<Incoming>, heap_storage: AnyHeapStorage) -> R
     tokio::spawn(async move {
         let upgraded = hyper::upgrade::on(req).await?;
         let service = GenericService::new(heap_storage)
-            .await
             .serve(TokioIo::new(upgraded))
             .await?;
         service.waiting().await?;
@@ -162,8 +160,7 @@ async fn start_sse_server(heap_storage: AnyHeapStorage, port: u16) -> Result<()>
 
     // Register the service with SSE server
     sse_server.with_service(move || {
-        let storage = heap_storage.clone();
-        async move { GenericService::new(storage).await }
+        GenericService::new(heap_storage.clone())
     });
 
     // Wait for Ctrl+C

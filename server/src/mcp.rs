@@ -1,7 +1,7 @@
 use rmcp::{
     model::{ServerCapabilities, ServerInfo},
 
-    Error as McpError, RoleServer, ServerHandler, model::*, schemars,
+    Error as McpError, RoleServer, ServerHandler, model::*,
     service::RequestContext, tool,
 };
 use serde_json::json;
@@ -72,7 +72,7 @@ impl IntoContents for RunJsResponse {
 
 #[tool(tool_box)]
 impl GenericService {
-    pub async fn new(
+    pub fn new(
         heap_storage: AnyHeapStorage,
     ) -> Self {
         Self {
