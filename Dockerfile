@@ -52,4 +52,6 @@ EXPOSE 8080
 
 # Default command: run HTTP server on port 8080 with local storage
 # Users can override with their own command to use S3 or different settings
-CMD ["mcp-v8", "--http-port", "8080", "--directory-path", "/tmp/mcp-v8-heaps"]
+# CMD ["mcp-v8", "--http-port", "8080", "--directory-path", "/tmp/mcp-v8-heaps"]
+CMD ["mcp-v8", "--sse-port", "8080", "--directory-path", "/tmp/mcp-v8-heaps"]
+

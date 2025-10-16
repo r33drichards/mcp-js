@@ -84,6 +84,48 @@ cargo test --test stdio_e2e
 
 **Current status:** ✅ All 8 E2E tests
 
+### sse_integration.rs
+Basic integration tests for SSE (Server-Sent Events) transport that verify:
+- SSE endpoint format (/sse and /message)
+- SSE connection setup
+- MCP message format for SSE
+- POST message format to SSE server
+- run_js tool call message format
+- JavaScript execution scenarios
+- Heap naming conventions
+- Error response format
+- SSE keep-alive configuration
+- SSE server configuration
+
+These tests **do not** require a running server and test protocol compliance and message formatting.
+
+**Run with:**
+```bash
+cargo test --test sse_integration
+```
+
+**Current status:** ✅ All tests passing
+
+### sse_e2e.rs
+End-to-end integration tests for SSE transport that test:
+- SSE server startup and connection acceptance
+- HTTP POST messages to SSE server
+- MCP initialize handshake via SSE
+- JavaScript execution via `run_js` tool
+- Heap persistence across multiple calls
+- Error handling for invalid JavaScript
+- Sequential operations with state preservation
+- SSE keep-alive behavior
+
+These tests spawn the actual server process with SSE transport enabled.
+
+**Run with:**
+```bash
+cargo test --test sse_e2e
+```
+
+**Current status:** ✅ E2E tests for SSE transport
+
 ## Test Structure
 
 ```
@@ -94,7 +136,9 @@ tests/
 ├── http_integration.rs   # HTTP basic integration tests
 ├── http_e2e.rs           # HTTP end-to-end tests
 ├── stdio_integration.rs  # Stdio basic integration tests
-└── stdio_e2e.rs          # Stdio end-to-end tests
+├── stdio_e2e.rs          # Stdio end-to-end tests
+├── sse_integration.rs    # SSE basic integration tests
+└── sse_e2e.rs            # SSE end-to-end tests
 ```
 
 ## Running All Tests
@@ -113,6 +157,10 @@ cargo test --test http_e2e
 # Stdio tests
 cargo test --test stdio_integration
 cargo test --test stdio_e2e
+
+# SSE tests
+cargo test --test sse_integration
+cargo test --test sse_e2e
 ```
 
 ### Run ignored tests (requires server):
@@ -140,14 +188,21 @@ The integration tests cover:
    - Process spawning and management
    - Graceful shutdown
 
-3. **MCP Protocol**
-   - Initialize handshake (both HTTP and stdio)
+3. **SSE Transport**
+   - Server-Sent Events streaming
+   - HTTP POST for client messages
+   - SSE endpoint (/sse) and message endpoint (/message)
+   - Keep-alive messages
+   - Concurrent SSE connections
+
+4. **MCP Protocol**
+   - Initialize handshake (HTTP, stdio, and SSE)
    - Tool calls (run_js)
    - JSON-RPC message format
    - Error responses
    - Message ID tracking
 
-4. **JavaScript Execution**
+5. **JavaScript Execution**
    - Simple expressions (1 + 1)
    - Variable assignment and persistence
    - Heap storage and retrieval
@@ -168,9 +223,11 @@ To add a new test:
 1. For basic protocol/format tests:
    - HTTP: add to `http_integration.rs`
    - Stdio: add to `stdio_integration.rs`
+   - SSE: add to `sse_integration.rs`
 2. For full e2e tests requiring a server:
    - HTTP: add to `http_e2e.rs` and mark with `#[ignore]`
    - Stdio: add to `stdio_e2e.rs`
+   - SSE: add to `sse_e2e.rs`
 3. For shared test utilities, add to `common/mod.rs`
 
 ### Example Test Structures:
@@ -233,13 +290,15 @@ This will run:
 - All HTTP integration tests (`http_integration.rs`)
 - All stdio integration tests (`stdio_integration.rs`)
 - All stdio E2E tests (`stdio_e2e.rs`) - these spawn their own server process
+- All SSE integration tests (`sse_integration.rs`)
+- All SSE E2E tests (`sse_e2e.rs`) - these spawn their own server process
 
 The HTTP E2E tests can be run in CI by:
 1. Starting the HTTP server in background: `cargo run -- --directory-path /tmp/test-heaps --http-port 8765 &`
 2. Running `cargo test --test http_e2e -- --ignored`
 3. Stopping the server
 
-The stdio E2E tests are already included in the default test run since they manage their own server process lifecycle.
+The stdio and SSE E2E tests are already included in the default test run since they manage their own server process lifecycle.
 
 ## Troubleshooting
 
@@ -272,6 +331,28 @@ The stdio E2E tests are already included in the default test run since they mana
 - Verify newline-delimited JSON format
 - Check for extra whitespace or formatting issues
 - Ensure server output goes to stdout (not stderr)
+
+### SSE Tests
+
+**Tests fail to connect:**
+- Ensure the SSE server is running on the expected port
+- Check that the port is not already in use
+- Verify firewall settings allow HTTP connections
+
+**Timeout errors:**
+- Increase timeout durations in test code
+- Check server logs for SSE connection errors
+- Verify SSE endpoint (/sse) and message endpoint (/message) are accessible
+
+**Server spawn errors:**
+- Ensure project compiles: `cargo build`
+- Verify all dependencies are available (including reqwest for HTTP client)
+- Check that test has permissions to spawn child processes
+
+**SSE stream errors:**
+- Verify server is sending proper SSE format (event: message, data: ...)
+- Check that keep-alive messages are being sent
+- Ensure POST requests to /message endpoint are properly formatted
 
 ### General
 
