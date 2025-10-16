@@ -7,6 +7,8 @@
       rustup
       deno
       cacert
+      openssl
+      pkg-config
     ];
     RUSTC_VERSION = pkgs.lib.readFile ./rust-toolchain;
     # https://github.com/rust-lang/rust-bindgen#environment-variables
