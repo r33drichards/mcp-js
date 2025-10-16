@@ -21,7 +21,7 @@ async-trait = "0.1"
 clap = { version = "4.5", features = ["derive"] }
 hyper = { version = "1.5.2", features = ["server", "http1"] }
 hyper-util = { version = "0.1.10", features = ["tokio"] }
-tokio-util = "0.7"
+tokio-util = { version = "0.7", features = ["sync"] }
 
 [dev-dependencies]
 tokio-test = "0.4"
