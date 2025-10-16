@@ -160,8 +160,7 @@ async fn start_sse_server(heap_storage: AnyHeapStorage, port: u16) -> Result<()>
 
     // Register the service with SSE server
     sse_server.with_service(move || {
-        let storage = heap_storage.clone();
-        async move { GenericService::new(storage).await }
+        GenericService::new(heap_storage.clone())
     });
 
     // Wait for Ctrl+C
