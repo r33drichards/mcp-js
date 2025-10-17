@@ -151,16 +151,16 @@ async fn start_sse_server(heap_storage: AnyHeapStorage, port: u16) -> Result<()>
         tracing::info!("SSE server shutting down");
     });
 
-    // Spawn the server task
+    // Register the service BEFORE spawning the server task
+    sse_server.with_service(move || {
+        GenericService::new(heap_storage.clone())
+    });
+
+    // Spawn the server task AFTER registering the service
     tokio::spawn(async move {
         if let Err(e) = server.await {
             tracing::error!("SSE server error: {:?}", e);
         }
-    });
-
-    // Register the service with SSE server
-    sse_server.with_service(move || {
-        GenericService::new(heap_storage.clone())
     });
 
     // Wait for Ctrl+C
