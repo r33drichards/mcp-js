@@ -67,7 +67,6 @@ async fn main() -> Result<()> {
         } else {
             tracing::info!("Starting stdio transport in stateless mode");
             let service = StatelessService::new()
-                .await
                 .serve(stdio())
                 .await
                 .inspect_err(|e| {
@@ -96,7 +95,6 @@ async fn main() -> Result<()> {
         } else {
             tracing::info!("Starting stdio transport in stateful mode");
             let service = StatefulService::new(heap_storage)
-                .await
                 .serve(stdio())
                 .await
                 .inspect_err(|e| {
@@ -115,7 +113,6 @@ async fn http_handler_stateless(req: Request<Incoming>) -> Result<hyper::Respons
     tokio::spawn(async move {
         let upgraded = hyper::upgrade::on(req).await?;
         let service = StatelessService::new()
-            .await
             .serve(TokioIo::new(upgraded))
             .await?;
         service.waiting().await?;
@@ -159,7 +156,6 @@ async fn http_handler_stateful(req: Request<Incoming>, heap_storage: AnyHeapStor
     tokio::spawn(async move {
         let upgraded = hyper::upgrade::on(req).await?;
         let service = StatefulService::new(heap_storage)
-            .await
             .serve(TokioIo::new(upgraded))
             .await?;
         service.waiting().await?;
