@@ -32,9 +32,6 @@ RUN apt-get update && apt-get install -y \
 # Create non-root user for security
 RUN useradd -m -u 1000 mcpuser
 
-# Create directory for heap storage with proper permissions
-RUN mkdir -p /tmp/mcp-v8-heaps && chown mcpuser:mcpuser /tmp/mcp-v8-heaps
-
 # Copy the binary from builder
 COPY --from=builder /app/server/target/release/server /usr/local/bin/mcp-v8
 
@@ -44,14 +41,10 @@ RUN chown mcpuser:mcpuser /usr/local/bin/mcp-v8
 # Switch to non-root user
 USER mcpuser
 
-# Default to using local filesystem storage
-ENV HEAP_STORAGE_PATH=/tmp/mcp-v8-heaps
-
-# Expose HTTP port (default 8080)
+# Expose SSE port (default 8080)
 EXPOSE 8080
 
-# Default command: run HTTP server on port 8080 with local storage
-# Users can override with their own command to use S3 or different settings
-# CMD ["mcp-v8", "--http-port", "8080", "--directory-path", "/tmp/mcp-v8-heaps"]
-CMD ["mcp-v8", "--sse-port", "8080", "--directory-path", "/tmp/mcp-v8-heaps"]
+# Default command: run SSE server on port 8080 in stateless mode
+# Users can override with their own command to use stateful mode with --directory-path or --s3-bucket
+CMD ["mcp-v8", "--sse-port", "8080", "--stateless"]
 
