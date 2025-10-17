@@ -173,6 +173,25 @@ Stateful mode persists the V8 heap state between executions using either S3 or l
 
 3. Restart Cursor. The MCP tools will be available in the UI.
 
+### Claude (Web/Cloud) via Railway
+
+You can also use the hosted version on Railway without installing anything locally:
+
+**Option 1: Using Claude Settings**
+
+1. Go to Claude's connectors settings page
+2. Add a new custom connector:
+   - **Name**: "mcp-v8"
+   - **URL**: `https://mcp-js-production.up.railway.app/sse`
+
+**Option 2: Using Claude Code CLI**
+
+```bash
+claude mcp add mcp-v8 -t sse https://mcp-js-production.up.railway.app/sse
+```
+
+Then test by running `claude` and asking: "Run this JavaScript: `[1,2,3].map(x => x * 2)`"
+
 ## Example Usage
 
 - Ask Claude or Cursor: "Run this JavaScript: `1 + 2`"
