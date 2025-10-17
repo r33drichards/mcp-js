@@ -161,7 +161,7 @@ impl StatelessService {
     }
 
     /// Execute JavaScript code in a fresh, stateless V8 isolate. Each execution starts with a clean environment.
-    #[tool(description = "Execute JavaScript code in a stateless V8 isolate. No state is preserved between executions.")]
+    #[tool(description = include_str!("run_js_tool_stateless.md"))]
     pub async fn run_js(&self, #[tool(param)] code: String) -> RunJsStatelessResponse {
         let v8_result = tokio::task::spawn_blocking(move || execute_stateless(code)).await;
 
