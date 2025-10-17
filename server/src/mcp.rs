@@ -156,7 +156,7 @@ impl IntoContents for RunJsStatelessResponse {
 // Stateless service implementation
 #[tool(tool_box)]
 impl StatelessService {
-    pub async fn new() -> Self {
+    pub fn new() -> Self {
         Self
     }
 
@@ -180,7 +180,7 @@ impl StatelessService {
 // Stateful service implementation
 #[tool(tool_box)]
 impl StatefulService {
-    pub async fn new(heap_storage: AnyHeapStorage) -> Self {
+    pub fn new(heap_storage: AnyHeapStorage) -> Self {
         Self { heap_storage }
     }
 
