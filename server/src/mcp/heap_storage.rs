@@ -99,32 +99,10 @@ impl HeapStorage for S3HeapStorage {
 }
 
 #[derive(Clone)]
-pub struct NoopHeapStorage;
-
-impl NoopHeapStorage {
-    pub fn new() -> Self {
-        Self
-    }
-}
-
-#[async_trait]
-impl HeapStorage for NoopHeapStorage {
-    async fn put(&self, _name: &str, _data: &[u8]) -> Result<(), String> {
-        // Do nothing in stateless mode
-        Ok(())
-    }
-    async fn get(&self, _name: &str) -> Result<Vec<u8>, String> {
-        // Always return error so we create fresh isolates
-        Err("Stateless mode - no heap storage".to_string())
-    }
-}
-
-#[derive(Clone)]
 pub enum AnyHeapStorage {
     #[allow(dead_code)]
     File(FileHeapStorage),
     S3(S3HeapStorage),
-    Noop(NoopHeapStorage),
 }
 
 
@@ -136,14 +114,12 @@ impl HeapStorage for AnyHeapStorage {
         match self {
             AnyHeapStorage::File(inner) => inner.put(name, data).await,
             AnyHeapStorage::S3(inner) => inner.put(name, data).await,
-            AnyHeapStorage::Noop(inner) => inner.put(name, data).await,
         }
     }
     async fn get(&self, name: &str) -> Result<Vec<u8>, String> {
         match self {
             AnyHeapStorage::File(inner) => inner.get(name).await,
             AnyHeapStorage::S3(inner) => inner.get(name).await,
-            AnyHeapStorage::Noop(inner) => inner.get(name).await,
         }
     }
 } 

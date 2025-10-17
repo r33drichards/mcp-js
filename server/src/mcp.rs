@@ -107,124 +107,145 @@ pub trait DataService: Send + Sync + 'static {
     fn set_data(&mut self, data: String);
 }
 
+// Stateful service with heap persistence
 #[derive(Clone)]
-pub struct GenericService {
+pub struct StatefulService {
     heap_storage: AnyHeapStorage,
 }
 
-// response to run_js
+// Stateless service without heap persistence
+#[derive(Clone)]
+pub struct StatelessService;
+
+// response to run_js (stateful - with heap)
 #[derive(Debug, Clone)]
-pub struct RunJsResponse {
+pub struct RunJsStatefulResponse {
     pub output: String,
-    pub heap: Option<String>,
+    pub heap: String,
 }
 
-impl IntoContents for RunJsResponse {
+impl IntoContents for RunJsStatefulResponse {
     fn into_contents(self) -> Vec<Content> {
-        let json_obj = if let Some(heap) = self.heap {
-            json!({
-                "output": self.output,
-                "heap": heap,
-            })
-        } else {
-            json!({
-                "output": self.output,
-            })
-        };
-
-        match Content::json(json_obj) {
+        match Content::json(json!({
+            "output": self.output,
+            "heap": self.heap,
+        })) {
             Ok(content) => vec![content],
             Err(e) => vec![Content::text(format!("Failed to convert run_js response to content: {}", e))],
         }
     }
 }
 
-#[tool(tool_box)]
-impl GenericService {
-    pub fn new(
-        heap_storage: AnyHeapStorage,
-    ) -> Self {
-        Self {
-            heap_storage,
+// response to run_js (stateless - no heap)
+#[derive(Debug, Clone)]
+pub struct RunJsStatelessResponse {
+    pub output: String,
+}
+
+impl IntoContents for RunJsStatelessResponse {
+    fn into_contents(self) -> Vec<Content> {
+        match Content::json(json!({
+            "output": self.output,
+        })) {
+            Ok(content) => vec![content],
+            Err(e) => vec![Content::text(format!("Failed to convert run_js response to content: {}", e))],
         }
     }
+}
 
-    /// Execute JavaScript code. In stateful mode (default), the heap parameter allows you to persist state across executions.
-    /// In stateless mode (--stateless flag), the heap parameter is optional and will be ignored.
+// Stateless service implementation
+#[tool(tool_box)]
+impl StatelessService {
+    pub async fn new() -> Self {
+        Self
+    }
+
+    /// Execute JavaScript code in a fresh, stateless V8 isolate. Each execution starts with a clean environment.
+    #[tool(description = "Execute JavaScript code in a stateless V8 isolate. No state is preserved between executions.")]
+    pub async fn run_js(&self, #[tool(param)] code: String) -> RunJsStatelessResponse {
+        let v8_result = tokio::task::spawn_blocking(move || execute_stateless(code)).await;
+
+        match v8_result {
+            Ok(Ok(output)) => RunJsStatelessResponse { output },
+            Ok(Err(e)) => RunJsStatelessResponse {
+                output: format!("V8 error: {}", e),
+            },
+            Err(e) => RunJsStatelessResponse {
+                output: format!("Task join error: {}", e),
+            },
+        }
+    }
+}
+
+// Stateful service implementation
+#[tool(tool_box)]
+impl StatefulService {
+    pub async fn new(heap_storage: AnyHeapStorage) -> Self {
+        Self { heap_storage }
+    }
+
+    /// Execute JavaScript code with heap persistence. The heap parameter identifies the execution context.
     #[tool(description = include_str!("run_js_tool_description.md"))]
-    pub async fn run_js(
-        &self,
-        #[tool(param)] code: String,
-        #[tool(param)] heap: Option<String>
-    ) -> RunJsResponse {
-        let is_stateless = matches!(self.heap_storage, AnyHeapStorage::Noop(_));
+    pub async fn run_js(&self, #[tool(param)] code: String, #[tool(param)] heap: String) -> RunJsStatefulResponse {
+        let snapshot = self.heap_storage.get(&heap).await.ok();
+        let v8_result = tokio::task::spawn_blocking(move || execute_stateful(code, snapshot)).await;
 
-        if is_stateless {
-            // Stateless mode: use a regular isolate, no snapshot creation
-            let v8_result = tokio::task::spawn_blocking(move || execute_stateless(code)).await;
-
-            match v8_result {
-                Ok(Ok(output)) => RunJsResponse { output, heap: None },
-                Ok(Err(e)) => RunJsResponse {
-                    output: format!("V8 error: {}", e),
-                    heap: None,
-                },
-                Err(e) => RunJsResponse {
-                    output: format!("Task join error: {}", e),
-                    heap: None,
-                },
-            }
-        } else {
-            // Stateful mode: require heap parameter
-            let heap_name = match heap {
-                Some(h) => h,
-                None => {
-                    return RunJsResponse {
-                        output: "Error: heap parameter is required in stateful mode".to_string(),
-                        heap: None,
+        match v8_result {
+            Ok(Ok((output, startup_data))) => {
+                if let Err(e) = self.heap_storage.put(&heap, &startup_data).await {
+                    return RunJsStatefulResponse {
+                        output: format!("Error saving heap: {}", e),
+                        heap,
                     };
                 }
-            };
-
-            let snapshot = self.heap_storage.get(&heap_name).await.ok();
-            let v8_result = tokio::task::spawn_blocking(move || execute_stateful(code, snapshot)).await;
-
-            match v8_result {
-                Ok(Ok((output, startup_data))) => {
-                    if let Err(e) = self.heap_storage.put(&heap_name, &startup_data).await {
-                        return RunJsResponse {
-                            output: format!("Error saving heap: {}", e),
-                            heap: Some(heap_name),
-                        };
-                    }
-                    RunJsResponse { output, heap: Some(heap_name) }
-                }
-                Ok(Err(e)) => RunJsResponse {
-                    output: format!("V8 error: {}", e),
-                    heap: Some(heap_name),
-                },
-                Err(e) => RunJsResponse {
-                    output: format!("Task join error: {}", e),
-                    heap: Some(heap_name),
-                },
+                RunJsStatefulResponse { output, heap }
             }
+            Ok(Err(e)) => RunJsStatefulResponse {
+                output: format!("V8 error: {}", e),
+                heap,
+            },
+            Err(e) => RunJsStatefulResponse {
+                output: format!("Task join error: {}", e),
+                heap,
+            },
         }
     }
-
-
 }
 
 #[tool(tool_box)]
-impl ServerHandler for GenericService {
+impl ServerHandler for StatelessService {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
-            instructions: Some("generic data service".into()),
+            instructions: Some("JavaScript execution service (stateless mode - no heap persistence)".into()),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             ..Default::default()
         }
     }
 
-    
+    async fn initialize(
+        &self,
+        _request: InitializeRequestParam,
+        context: RequestContext<RoleServer>,
+    ) -> Result<InitializeResult, McpError> {
+        if let Some(http_request_part) = context.extensions.get::<axum::http::request::Parts>() {
+            let initialize_headers = &http_request_part.headers;
+            let initialize_uri = &http_request_part.uri;
+            tracing::info!(?initialize_headers, %initialize_uri, "initialize from http server");
+        }
+        Ok(self.get_info())
+    }
+}
+
+#[tool(tool_box)]
+impl ServerHandler for StatefulService {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo {
+            instructions: Some("JavaScript execution service (stateful mode - with heap persistence)".into()),
+            capabilities: ServerCapabilities::builder().enable_tools().build(),
+            ..Default::default()
+        }
+    }
+
     async fn initialize(
         &self,
         _request: InitializeRequestParam,
