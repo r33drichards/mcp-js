@@ -112,36 +112,27 @@ pub struct GenericService {
     heap_storage: AnyHeapStorage,
 }
 
-// response to run_js (stateful)
+// response to run_js
 #[derive(Debug, Clone)]
 pub struct RunJsResponse {
     pub output: String,
-    pub heap: String,
+    pub heap: Option<String>,
 }
 
 impl IntoContents for RunJsResponse {
     fn into_contents(self) -> Vec<Content> {
-        match Content::json(json!({
-            "output": self.output,
-            "heap": self.heap,
-        })) {
-            Ok(content) => vec![content],
-            Err(e) => vec![Content::text(format!("Failed to convert run_js response to content: {}", e))],
-        }
-    }
-}
+        let json_obj = if let Some(heap) = self.heap {
+            json!({
+                "output": self.output,
+                "heap": heap,
+            })
+        } else {
+            json!({
+                "output": self.output,
+            })
+        };
 
-// response to run_js (stateless)
-#[derive(Debug, Clone)]
-pub struct RunJsStatelessResponse {
-    pub output: String,
-}
-
-impl IntoContents for RunJsStatelessResponse {
-    fn into_contents(self) -> Vec<Content> {
-        match Content::json(json!({
-            "output": self.output,
-        })) {
+        match Content::json(json_obj) {
             Ok(content) => vec![content],
             Err(e) => vec![Content::text(format!("Failed to convert run_js response to content: {}", e))],
         }
@@ -158,61 +149,65 @@ impl GenericService {
         }
     }
 
-    /// Execute JavaScript code in a stateless isolate (no heap persistence)
-    #[tool(description = "Execute JavaScript code in a fresh, stateless V8 isolate. Each execution starts with a clean environment.")]
-    pub async fn run_js_stateless(&self, #[tool(param)] code: String) -> RunJsStatelessResponse {
-        // Only available in stateless mode
-        if !matches!(self.heap_storage, AnyHeapStorage::Noop(_)) {
-            return RunJsStatelessResponse {
-                output: "Error: run_js_stateless is only available in stateless mode. Use run_js instead.".to_string(),
-            };
-        }
-
-        let v8_result = tokio::task::spawn_blocking(move || execute_stateless(code)).await;
-
-        match v8_result {
-            Ok(Ok(output)) => RunJsStatelessResponse { output },
-            Ok(Err(e)) => RunJsStatelessResponse {
-                output: format!("V8 error: {}", e),
-            },
-            Err(e) => RunJsStatelessResponse {
-                output: format!("Task join error: {}", e),
-            },
-        }
-    }
-
-    /// Execute JavaScript code with heap persistence
+    /// Execute JavaScript code. In stateful mode (default), the heap parameter allows you to persist state across executions.
+    /// In stateless mode (--stateless flag), the heap parameter is optional and will be ignored.
     #[tool(description = include_str!("run_js_tool_description.md"))]
-    pub async fn run_js(&self, #[tool(param)] code: String, #[tool(param)] heap: String) -> RunJsResponse {
-        // Not available in stateless mode
-        if matches!(self.heap_storage, AnyHeapStorage::Noop(_)) {
-            return RunJsResponse {
-                output: "Error: run_js is not available in stateless mode. Use run_js_stateless instead.".to_string(),
-                heap,
-            };
-        }
+    pub async fn run_js(
+        &self,
+        #[tool(param)] code: String,
+        #[tool(param)] heap: Option<String>
+    ) -> RunJsResponse {
+        let is_stateless = matches!(self.heap_storage, AnyHeapStorage::Noop(_));
 
-        let snapshot = self.heap_storage.get(&heap).await.ok();
-        let v8_result = tokio::task::spawn_blocking(move || execute_stateful(code, snapshot)).await;
+        if is_stateless {
+            // Stateless mode: use a regular isolate, no snapshot creation
+            let v8_result = tokio::task::spawn_blocking(move || execute_stateless(code)).await;
 
-        match v8_result {
-            Ok(Ok((output, startup_data))) => {
-                if let Err(e) = self.heap_storage.put(&heap, &startup_data).await {
+            match v8_result {
+                Ok(Ok(output)) => RunJsResponse { output, heap: None },
+                Ok(Err(e)) => RunJsResponse {
+                    output: format!("V8 error: {}", e),
+                    heap: None,
+                },
+                Err(e) => RunJsResponse {
+                    output: format!("Task join error: {}", e),
+                    heap: None,
+                },
+            }
+        } else {
+            // Stateful mode: require heap parameter
+            let heap_name = match heap {
+                Some(h) => h,
+                None => {
                     return RunJsResponse {
-                        output: format!("Error saving heap: {}", e),
-                        heap,
+                        output: "Error: heap parameter is required in stateful mode".to_string(),
+                        heap: None,
                     };
                 }
-                RunJsResponse { output, heap }
+            };
+
+            let snapshot = self.heap_storage.get(&heap_name).await.ok();
+            let v8_result = tokio::task::spawn_blocking(move || execute_stateful(code, snapshot)).await;
+
+            match v8_result {
+                Ok(Ok((output, startup_data))) => {
+                    if let Err(e) = self.heap_storage.put(&heap_name, &startup_data).await {
+                        return RunJsResponse {
+                            output: format!("Error saving heap: {}", e),
+                            heap: Some(heap_name),
+                        };
+                    }
+                    RunJsResponse { output, heap: Some(heap_name) }
+                }
+                Ok(Err(e)) => RunJsResponse {
+                    output: format!("V8 error: {}", e),
+                    heap: Some(heap_name),
+                },
+                Err(e) => RunJsResponse {
+                    output: format!("Task join error: {}", e),
+                    heap: Some(heap_name),
+                },
             }
-            Ok(Err(e)) => RunJsResponse {
-                output: format!("V8 error: {}", e),
-                heap,
-            },
-            Err(e) => RunJsResponse {
-                output: format!("Task join error: {}", e),
-                heap,
-            },
         }
     }
 
