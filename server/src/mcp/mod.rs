@@ -168,7 +168,7 @@ impl StatelessService {
     }
 
     /// Execute JavaScript code in a fresh, stateless V8 isolate. Each execution starts with a clean environment.
-    #[tool(description = include_str!("run_js_tool_stateless.md"))]
+    #[tool(description = include_str!("../run_js_tool_stateless.md"))]
     pub async fn run_js(&self, #[tool(param)] code: String) -> RunJsStatelessResponse {
         let v8_result = tokio::task::spawn_blocking(move || execute_stateless(code)).await;
 
@@ -228,7 +228,7 @@ impl StatefulService {
     }
 
     /// Execute JavaScript code with heap persistence. The heap_uri parameter must be a URI (e.g., file://my-heap or s3://my-heap)
-    #[tool(description = include_str!("run_js_tool_description.md"))]
+    #[tool(description = include_str!("../run_js_tool_description.md"))]
     pub async fn run_js(&self, #[tool(param)] code: String, #[tool(param)] heap_uri: String) -> RunJsStatefulResponse {
         // Check if heap exists
         match self.heap_storage.exists_by_uri(&heap_uri).await {
