@@ -11,7 +11,7 @@ use base64::Engine;
 use std::sync::Once;
 use v8::{self};
 
-pub(crate) mod heap_storage;
+pub mod heap_storage;
 use crate::mcp::heap_storage::AnyHeapStorage;
 
 
@@ -98,6 +98,12 @@ pub fn initialize_v8() {
             PLATFORM = Some(platform);
         }
     });
+}
+
+// Public wrapper for integration testing
+// Note: This is exposed for integration tests and should not be used in production
+pub fn execute_stateful_for_test(code: String, snapshot: Option<Vec<u8>>) -> Result<(String, Vec<u8>), String> {
+    execute_stateful(code, snapshot)
 }
 
 
