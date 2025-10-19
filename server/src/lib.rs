@@ -3,8 +3,5 @@
 
 pub mod mcp;
 
-// Re-export initialize_v8 and test helper for integration tests
+// Re-export initialize_v8 for integration tests
 pub use mcp::initialize_v8;
-
-// Export execute_stateful for integration tests
-pub use mcp::execute_stateful_for_test;
