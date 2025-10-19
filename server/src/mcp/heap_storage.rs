@@ -10,6 +10,9 @@ use async_trait::async_trait;
 pub trait HeapStorage: Send + Sync + 'static {
     async fn put(&self, name: &str, data: &[u8]) -> Result<(), String>;
     async fn get(&self, name: &str) -> Result<Vec<u8>, String>;
+    async fn list(&self) -> Result<Vec<String>, String>;
+    async fn delete(&self, name: &str) -> Result<(), String>;
+    async fn exists(&self, name: &str) -> Result<bool, String>;
 }
 
 #[derive(Clone)]
@@ -37,6 +40,25 @@ impl HeapStorage for FileHeapStorage {
     async fn get(&self, name: &str) -> Result<Vec<u8>, String> {
         let path = self.dir.join(name);
         std::fs::read(path).map_err(|e| e.to_string())
+    }
+    async fn list(&self) -> Result<Vec<String>, String> {
+        let entries = std::fs::read_dir(&self.dir).map_err(|e| e.to_string())?;
+        let mut names = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|e| e.to_string())?;
+            if let Some(name) = entry.file_name().to_str() {
+                names.push(name.to_string());
+            }
+        }
+        Ok(names)
+    }
+    async fn delete(&self, name: &str) -> Result<(), String> {
+        let path = self.dir.join(name);
+        std::fs::remove_file(path).map_err(|e| e.to_string())
+    }
+    async fn exists(&self, name: &str) -> Result<bool, String> {
+        let path = self.dir.join(name);
+        Ok(path.exists())
     }
 }
 
@@ -86,6 +108,54 @@ impl S3HeapStorage {
         let data = output.body.collect().await.map_err(|e| e.to_string())?;
         Ok(data.into_bytes().to_vec())
     }
+
+    async fn list_blocking(&self) -> Result<Vec<String>, String> {
+        let client = self.client.clone();
+        let bucket = self.bucket.clone();
+        let output = client
+            .list_objects_v2()
+            .bucket(bucket)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        let names = output
+            .contents
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|obj| obj.key.as_ref().map(|k| k.to_string()))
+            .collect();
+        Ok(names)
+    }
+
+    async fn delete_blocking(&self, name: &str) -> Result<(), String> {
+        let client = self.client.clone();
+        let bucket = self.bucket.clone();
+        let name = name.to_string();
+        client
+            .delete_object()
+            .bucket(bucket)
+            .key(name)
+            .send()
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    async fn exists_blocking(&self, name: &str) -> Result<bool, String> {
+        let client = self.client.clone();
+        let bucket = self.bucket.clone();
+        let name = name.to_string();
+        match client
+            .head_object()
+            .bucket(bucket)
+            .key(name)
+            .send()
+            .await
+        {
+            Ok(_) => Ok(true),
+            Err(_) => Ok(false),
+        }
+    }
 }
 
 #[async_trait]
@@ -95,6 +165,15 @@ impl HeapStorage for S3HeapStorage {
     }
     async fn get(&self, name: &str) -> Result<Vec<u8>, String> {
         self.get_blocking(name).await
+    }
+    async fn list(&self) -> Result<Vec<String>, String> {
+        self.list_blocking().await
+    }
+    async fn delete(&self, name: &str) -> Result<(), String> {
+        self.delete_blocking(name).await
+    }
+    async fn exists(&self, name: &str) -> Result<bool, String> {
+        self.exists_blocking(name).await
     }
 }
 
@@ -120,6 +199,24 @@ impl HeapStorage for AnyHeapStorage {
         match self {
             AnyHeapStorage::File(inner) => inner.get(name).await,
             AnyHeapStorage::S3(inner) => inner.get(name).await,
+        }
+    }
+    async fn list(&self) -> Result<Vec<String>, String> {
+        match self {
+            AnyHeapStorage::File(inner) => inner.list().await,
+            AnyHeapStorage::S3(inner) => inner.list().await,
+        }
+    }
+    async fn delete(&self, name: &str) -> Result<(), String> {
+        match self {
+            AnyHeapStorage::File(inner) => inner.delete(name).await,
+            AnyHeapStorage::S3(inner) => inner.delete(name).await,
+        }
+    }
+    async fn exists(&self, name: &str) -> Result<bool, String> {
+        match self {
+            AnyHeapStorage::File(inner) => inner.exists(name).await,
+            AnyHeapStorage::S3(inner) => inner.exists(name).await,
         }
     }
 } 

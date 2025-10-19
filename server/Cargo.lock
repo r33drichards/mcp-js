@@ -2227,6 +2227,7 @@ dependencies = [
  "aws-config",
  "aws-sdk-s3",
  "axum",
+ "base64 0.22.1",
  "clap",
  "futures",
  "hyper 1.6.0",
