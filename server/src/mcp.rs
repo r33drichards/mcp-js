@@ -11,7 +11,7 @@ use base64::Engine;
 use std::sync::Once;
 use v8::{self};
 
-pub(crate) mod heap_storage;
+pub mod heap_storage;
 use crate::mcp::heap_storage::AnyHeapStorage;
 
 

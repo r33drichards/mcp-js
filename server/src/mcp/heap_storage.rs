@@ -5,7 +5,6 @@ use aws_sdk_s3::ByteStream;
 use aws_config;
 use std::sync::Arc;
 use async_trait::async_trait;
-use http::Uri;
 
 #[async_trait]
 pub trait HeapStorage: Send + Sync + 'static {
@@ -190,15 +189,40 @@ impl MultiHeapStorage {
     }
 
     fn parse_uri(&self, uri: &str) -> Result<(String, String), String> {
-        let parsed = uri.parse::<Uri>().map_err(|e| format!("Invalid URI: {}", e))?;
+        // Manual URI parsing to handle both simple names and absolute paths
+        // Supports: file://name, file:///path, s3://name, s3:///path
 
-        let scheme = parsed.scheme_str().ok_or("URI must have a scheme")?;
-        let path = parsed.path();
-
-        match scheme {
-            "file" | "s3" => Ok((scheme.to_string(), path.to_string())),
-            _ => Err(format!("Invalid URI scheme: {}. Must be file:// or s3://", scheme))
+        if !uri.contains("://") {
+            return Err("URI must have a scheme (e.g., file:// or s3://)".to_string());
         }
+
+        let parts: Vec<&str> = uri.splitn(2, "://").collect();
+        if parts.len() != 2 {
+            return Err("Invalid URI format".to_string());
+        }
+
+        let scheme = parts[0];
+        let remainder = parts[1];
+
+        if scheme != "file" && scheme != "s3" {
+            return Err(format!("Invalid URI scheme: {}. Must be file:// or s3://", scheme));
+        }
+
+        // Extract the name from the remainder
+        // For "my-heap" or "/my-heap" or "/absolute/path/heap"
+        let name = if remainder.starts_with('/') {
+            // URI like "file:///my-heap" or "file:///absolute/path/heap"
+            remainder.strip_prefix('/').unwrap_or(remainder).to_string()
+        } else {
+            // URI like "file://my-heap"
+            remainder.to_string()
+        };
+
+        if name.is_empty() {
+            return Err("URI must specify a heap name".to_string());
+        }
+
+        Ok((scheme.to_string(), name))
     }
 
     async fn get_by_uri(&self, uri: &str) -> Result<Vec<u8>, String> {
