@@ -13,19 +13,19 @@ use tokio_util::sync::CancellationToken;
 
 mod mcp;
 use mcp::{StatelessService, StatefulService, initialize_v8};
-use mcp::heap_storage::{AnyHeapStorage, S3HeapStorage, FileHeapStorage};
+use mcp::heap_storage::{AnyHeapStorage, S3HeapStorage, FileHeapStorage, MultiHeapStorage};
 
 /// Command line arguments for configuring heap storage
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
 
-    /// S3 bucket name (required if --use-s3)
-    #[arg(long, conflicts_with_all = ["directory_path", "stateless"])]
+    /// S3 bucket name for S3 storage backend
+    #[arg(long)]
     s3_bucket: Option<String>,
 
-    /// Directory path for filesystem storage (required if --use-filesystem)
-    #[arg(long, conflicts_with_all = ["s3_bucket", "stateless"])]
+    /// Directory path for filesystem storage backend
+    #[arg(long)]
     directory_path: Option<String>,
 
     /// Run in stateless mode - no heap snapshots are saved or loaded
@@ -77,13 +77,27 @@ async fn main() -> Result<()> {
         }
     } else {
         // Stateful mode - with heap persistence
-        let heap_storage = if let Some(bucket) = cli.s3_bucket {
-            AnyHeapStorage::S3(S3HeapStorage::new(bucket).await)
-        } else if let Some(dir) = cli.directory_path {
-            AnyHeapStorage::File(FileHeapStorage::new(dir))
+        // Support both file and S3 storage simultaneously
+        let file_storage = cli.directory_path.map(FileHeapStorage::new)
+            .or_else(|| Some(FileHeapStorage::new("/tmp/mcp-v8-heaps")));
+
+        let s3_storage = if let Some(bucket) = cli.s3_bucket {
+            Some(S3HeapStorage::new(bucket).await)
         } else {
-            // default to file /tmp/mcp-v8-heaps
-            AnyHeapStorage::File(FileHeapStorage::new("/tmp/mcp-v8-heaps"))
+            None
+        };
+
+        let heap_storage = if file_storage.is_some() && s3_storage.is_some() {
+            tracing::info!("Starting with both file and S3 storage backends");
+            AnyHeapStorage::Multi(MultiHeapStorage::new(file_storage, s3_storage))
+        } else if let Some(s3) = s3_storage {
+            tracing::info!("Starting with S3 storage backend only");
+            AnyHeapStorage::S3(s3)
+        } else if let Some(file) = file_storage {
+            tracing::info!("Starting with file storage backend only");
+            AnyHeapStorage::File(file)
+        } else {
+            unreachable!("Should have at least one storage backend")
         };
 
         if let Some(port) = cli.http_port {

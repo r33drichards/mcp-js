@@ -12,7 +12,7 @@ use std::sync::Once;
 use v8::{self};
 
 pub(crate) mod heap_storage;
-use crate::mcp::heap_storage::{HeapStorage, AnyHeapStorage};
+use crate::mcp::heap_storage::AnyHeapStorage;
 
 
 
@@ -221,24 +221,14 @@ impl StatefulService {
         Self { heap_storage }
     }
 
-    /// Execute JavaScript code with heap persistence. The heap_uri parameter must be a URI in the format heap://heap-name
+    /// Execute JavaScript code with heap persistence. The heap_uri parameter must be a URI (e.g., file://my-heap or s3://my-heap)
     #[tool(description = include_str!("run_js_tool_description.md"))]
     pub async fn run_js(&self, #[tool(param)] code: String, #[tool(param)] heap_uri: String) -> RunJsStatefulResponse {
-        // Parse the URI to extract the heap name
-        let heap_name = if let Some(name) = heap_uri.strip_prefix("heap://") {
-            name.to_string()
-        } else {
-            return RunJsStatefulResponse {
-                output: format!("Invalid heap URI: {}. Must be in format heap://heap-name", heap_uri),
-                heap: heap_uri,
-            };
-        };
-
         // Check if heap exists
-        match self.heap_storage.exists(&heap_name).await {
+        match self.heap_storage.exists_by_uri(&heap_uri).await {
             Ok(false) => {
                 return RunJsStatefulResponse {
-                    output: format!("Heap '{}' does not exist. Use create_heap tool to create it first.", heap_name),
+                    output: format!("Heap '{}' does not exist. Use create_heap tool to create it first.", heap_uri),
                     heap: heap_uri,
                 };
             }
@@ -251,12 +241,12 @@ impl StatefulService {
             Ok(true) => {}
         }
 
-        let snapshot = self.heap_storage.get(&heap_name).await.ok();
+        let snapshot = self.heap_storage.get_by_uri(&heap_uri).await.ok();
         let v8_result = tokio::task::spawn_blocking(move || execute_stateful(code, snapshot)).await;
 
         match v8_result {
             Ok(Ok((output, startup_data))) => {
-                if let Err(e) = self.heap_storage.put(&heap_name, &startup_data).await {
+                if let Err(e) = self.heap_storage.put_by_uri(&heap_uri, &startup_data).await {
                     return RunJsStatefulResponse {
                         output: format!("Error saving heap: {}", e),
                         heap: heap_uri,
@@ -275,23 +265,15 @@ impl StatefulService {
         }
     }
 
-    /// Create a new heap for storing JavaScript execution state
-    #[tool(description = "Create a new heap with the given name. Returns the heap URI that can be used with run_js.")]
-    pub async fn create_heap(&self, #[tool(param)] heap_name: String) -> CreateHeapResponse {
-        // Validate heap name (alphanumeric, hyphens, underscores only)
-        if !heap_name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
-            return CreateHeapResponse {
-                heap_uri: String::new(),
-                message: format!("Invalid heap name: '{}'. Use only alphanumeric characters, hyphens, and underscores.", heap_name),
-            };
-        }
-
+    /// Create a new heap for storing JavaScript execution state. URI must be file://name or s3://name
+    #[tool(description = "Create a new heap with the given URI (e.g., file://my-heap or s3://my-heap). Returns the heap URI that can be used with run_js.")]
+    pub async fn create_heap(&self, #[tool(param)] heap_uri: String) -> CreateHeapResponse {
         // Check if heap already exists
-        match self.heap_storage.exists(&heap_name).await {
+        match self.heap_storage.exists_by_uri(&heap_uri).await {
             Ok(true) => {
                 return CreateHeapResponse {
-                    heap_uri: format!("heap://{}", heap_name),
-                    message: format!("Heap '{}' already exists.", heap_name),
+                    heap_uri: heap_uri.clone(),
+                    message: format!("Heap '{}' already exists.", heap_uri),
                 };
             }
             Err(e) => {
@@ -310,15 +292,15 @@ impl StatefulService {
 
         match v8_result {
             Ok(Ok((_output, startup_data))) => {
-                if let Err(e) = self.heap_storage.put(&heap_name, &startup_data).await {
+                if let Err(e) = self.heap_storage.put_by_uri(&heap_uri, &startup_data).await {
                     return CreateHeapResponse {
                         heap_uri: String::new(),
                         message: format!("Error creating heap: {}", e),
                     };
                 }
                 CreateHeapResponse {
-                    heap_uri: format!("heap://{}", heap_name),
-                    message: format!("Successfully created heap '{}'", heap_name),
+                    heap_uri: heap_uri.clone(),
+                    message: format!("Successfully created heap '{}'", heap_uri),
                 }
             }
             Ok(Err(e)) => CreateHeapResponse {
@@ -333,14 +315,14 @@ impl StatefulService {
     }
 
     /// Delete an existing heap
-    #[tool(description = "Delete an existing heap by name. This operation cannot be undone.")]
-    pub async fn delete_heap(&self, #[tool(param)] heap_name: String) -> DeleteHeapResponse {
-        match self.heap_storage.delete(&heap_name).await {
+    #[tool(description = "Delete an existing heap by URI (e.g., file://my-heap or s3://my-heap). This operation cannot be undone.")]
+    pub async fn delete_heap(&self, #[tool(param)] heap_uri: String) -> DeleteHeapResponse {
+        match self.heap_storage.delete_by_uri(&heap_uri).await {
             Ok(()) => DeleteHeapResponse {
-                message: format!("Successfully deleted heap '{}'", heap_name),
+                message: format!("Successfully deleted heap '{}'", heap_uri),
             },
             Err(e) => DeleteHeapResponse {
-                message: format!("Error deleting heap '{}': {}", heap_name, e),
+                message: format!("Error deleting heap '{}': {}", heap_uri, e),
             },
         }
     }
@@ -401,16 +383,16 @@ impl ServerHandler for StatefulService {
         _request: Option<PaginatedRequestParam>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
-        // Get list of heaps from storage
-        let heap_names = self.heap_storage.list().await
+        // Get list of heaps from storage (returns URIs like file://name or s3://name)
+        let heap_uris = self.heap_storage.list_all().await
             .map_err(|e| McpError::internal_error(format!("Failed to list heaps: {}", e), None))?;
 
-        let resources: Vec<Resource> = heap_names
+        let resources: Vec<Resource> = heap_uris
             .into_iter()
-            .map(|name| {
+            .map(|uri| {
                 RawResource::new(
-                    format!("heap://{}", name),
-                    name.clone(),
+                    uri.clone(),
+                    uri.clone(),
                 ).no_annotation()
             })
             .collect();
@@ -428,29 +410,19 @@ impl ServerHandler for StatefulService {
     ) -> Result<ReadResourceResult, McpError> {
         let uri = request.uri;
 
-        // Parse the URI to extract the heap name
-        let heap_name = if let Some(name) = uri.strip_prefix("heap://") {
-            name
-        } else {
-            return Err(McpError::invalid_params(
-                format!("Invalid heap URI: {}. Must be in format heap://heap-name", uri),
-                None
-            ));
-        };
-
         // Check if heap exists
-        let exists = self.heap_storage.exists(heap_name).await
+        let exists = self.heap_storage.exists_by_uri(&uri).await
             .map_err(|e| McpError::internal_error(format!("Failed to check heap existence: {}", e), None))?;
 
         if !exists {
             return Err(McpError::resource_not_found(
-                format!("Heap '{}' not found", heap_name),
+                format!("Heap '{}' not found", uri),
                 Some(json!({ "uri": uri }))
             ));
         }
 
         // Get the heap snapshot data
-        let snapshot_data = self.heap_storage.get(heap_name).await
+        let snapshot_data = self.heap_storage.get_by_uri(&uri).await
             .map_err(|e| McpError::internal_error(format!("Failed to read heap: {}", e), None))?;
 
         // Encode as base64 for binary data
