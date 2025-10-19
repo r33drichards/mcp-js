@@ -5,6 +5,7 @@ use aws_sdk_s3::ByteStream;
 use aws_config;
 use std::sync::Arc;
 use async_trait::async_trait;
+use http::Uri;
 
 #[async_trait]
 pub trait HeapStorage: Send + Sync + 'static {
@@ -189,12 +190,14 @@ impl MultiHeapStorage {
     }
 
     fn parse_uri<'a>(&self, uri: &'a str) -> Result<(&'a str, &'a str), String> {
-        if let Some(path) = uri.strip_prefix("file://") {
-            Ok(("file", path))
-        } else if let Some(key) = uri.strip_prefix("s3://") {
-            Ok(("s3", key))
-        } else {
-            Err(format!("Invalid URI scheme: {}. Must be file:// or s3://", uri))
+        let parsed = uri.parse::<Uri>().map_err(|e| format!("Invalid URI: {}", e))?;
+
+        let scheme = parsed.scheme_str().ok_or("URI must have a scheme")?;
+        let path = parsed.path();
+
+        match scheme {
+            "file" | "s3" => Ok((scheme, path)),
+            _ => Err(format!("Invalid URI scheme: {}. Must be file:// or s3://", scheme))
         }
     }
 
@@ -277,9 +280,6 @@ impl MultiHeapStorage {
 
 #[derive(Clone)]
 pub enum AnyHeapStorage {
-    #[allow(dead_code)]
-    File(FileHeapStorage),
-    S3(S3HeapStorage),
     Multi(MultiHeapStorage),
 }
 
@@ -287,74 +287,46 @@ pub enum AnyHeapStorage {
 
 
 impl AnyHeapStorage {
+    fn parse_uri<'a>(&self, uri: &'a str) -> Result<(&'a str, &'a str), String> {
+        let parsed = uri.parse::<Uri>().map_err(|e| format!("Invalid URI: {}", e))?;
+
+        let scheme = parsed.scheme_str().ok_or("URI must have a scheme")?;
+        let path = parsed.path();
+
+        match scheme {
+            "file" | "s3" => Ok((scheme, path)),
+            _ => Err(format!("Invalid URI scheme: {}. Must be file:// or s3://", scheme))
+        }
+    }
+
     // URI-based methods for Multi storage
     pub async fn get_by_uri(&self, uri: &str) -> Result<Vec<u8>, String> {
         match self {
             AnyHeapStorage::Multi(inner) => inner.get_by_uri(uri).await,
-            AnyHeapStorage::File(inner) => {
-                let path = uri.strip_prefix("file://").ok_or("URI must start with file://")?;
-                inner.get(path).await
-            }
-            AnyHeapStorage::S3(inner) => {
-                let key = uri.strip_prefix("s3://").ok_or("URI must start with s3://")?;
-                inner.get(key).await
-            }
         }
     }
 
     pub async fn put_by_uri(&self, uri: &str, data: &[u8]) -> Result<(), String> {
         match self {
             AnyHeapStorage::Multi(inner) => inner.put_by_uri(uri, data).await,
-            AnyHeapStorage::File(inner) => {
-                let path = uri.strip_prefix("file://").ok_or("URI must start with file://")?;
-                inner.put(path, data).await
-            }
-            AnyHeapStorage::S3(inner) => {
-                let key = uri.strip_prefix("s3://").ok_or("URI must start with s3://")?;
-                inner.put(key, data).await
-            }
         }
     }
 
     pub async fn delete_by_uri(&self, uri: &str) -> Result<(), String> {
         match self {
             AnyHeapStorage::Multi(inner) => inner.delete_by_uri(uri).await,
-            AnyHeapStorage::File(inner) => {
-                let path = uri.strip_prefix("file://").ok_or("URI must start with file://")?;
-                inner.delete(path).await
-            }
-            AnyHeapStorage::S3(inner) => {
-                let key = uri.strip_prefix("s3://").ok_or("URI must start with s3://")?;
-                inner.delete(key).await
-            }
         }
     }
 
     pub async fn exists_by_uri(&self, uri: &str) -> Result<bool, String> {
         match self {
             AnyHeapStorage::Multi(inner) => inner.exists_by_uri(uri).await,
-            AnyHeapStorage::File(inner) => {
-                let path = uri.strip_prefix("file://").ok_or("URI must start with file://")?;
-                inner.exists(path).await
-            }
-            AnyHeapStorage::S3(inner) => {
-                let key = uri.strip_prefix("s3://").ok_or("URI must start with s3://")?;
-                inner.exists(key).await
-            }
         }
     }
 
     pub async fn list_all(&self) -> Result<Vec<String>, String> {
         match self {
             AnyHeapStorage::Multi(inner) => inner.list_all().await,
-            AnyHeapStorage::File(inner) => {
-                let names = inner.list().await?;
-                Ok(names.into_iter().map(|name| format!("file://{}", name)).collect())
-            }
-            AnyHeapStorage::S3(inner) => {
-                let names = inner.list().await?;
-                Ok(names.into_iter().map(|name| format!("s3://{}", name)).collect())
-            }
         }
     }
 }
@@ -363,36 +335,26 @@ impl AnyHeapStorage {
 impl HeapStorage for AnyHeapStorage {
     async fn put(&self, name: &str, data: &[u8]) -> Result<(), String> {
         match self {
-            AnyHeapStorage::File(inner) => inner.put(name, data).await,
-            AnyHeapStorage::S3(inner) => inner.put(name, data).await,
             AnyHeapStorage::Multi(_) => Err("Use put_by_uri for Multi storage".to_string()),
         }
     }
     async fn get(&self, name: &str) -> Result<Vec<u8>, String> {
         match self {
-            AnyHeapStorage::File(inner) => inner.get(name).await,
-            AnyHeapStorage::S3(inner) => inner.get(name).await,
             AnyHeapStorage::Multi(_) => Err("Use get_by_uri for Multi storage".to_string()),
         }
     }
     async fn list(&self) -> Result<Vec<String>, String> {
         match self {
-            AnyHeapStorage::File(inner) => inner.list().await,
-            AnyHeapStorage::S3(inner) => inner.list().await,
             AnyHeapStorage::Multi(_) => Err("Use list_all for Multi storage".to_string()),
         }
     }
     async fn delete(&self, name: &str) -> Result<(), String> {
         match self {
-            AnyHeapStorage::File(inner) => inner.delete(name).await,
-            AnyHeapStorage::S3(inner) => inner.delete(name).await,
             AnyHeapStorage::Multi(_) => Err("Use delete_by_uri for Multi storage".to_string()),
         }
     }
     async fn exists(&self, name: &str) -> Result<bool, String> {
         match self {
-            AnyHeapStorage::File(inner) => inner.exists(name).await,
-            AnyHeapStorage::S3(inner) => inner.exists(name).await,
             AnyHeapStorage::Multi(_) => Err("Use exists_by_uri for Multi storage".to_string()),
         }
     }

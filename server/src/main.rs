@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 
 mod mcp;
 use mcp::{StatelessService, StatefulService, initialize_v8};
-use mcp::heap_storage::{AnyHeapStorage, S3HeapStorage, FileHeapStorage, MultiHeapStorage};
+use mcp::heap_storage::{AnyHeapStorage, MultiHeapStorage, S3HeapStorage, FileHeapStorage};
 
 /// Command line arguments for configuring heap storage
 #[derive(Parser, Debug)]
@@ -87,18 +87,10 @@ async fn main() -> Result<()> {
             None
         };
 
-        let heap_storage = if file_storage.is_some() && s3_storage.is_some() {
-            tracing::info!("Starting with both file and S3 storage backends");
-            AnyHeapStorage::Multi(MultiHeapStorage::new(file_storage, s3_storage))
-        } else if let Some(s3) = s3_storage {
-            tracing::info!("Starting with S3 storage backend only");
-            AnyHeapStorage::S3(s3)
-        } else if let Some(file) = file_storage {
-            tracing::info!("Starting with file storage backend only");
-            AnyHeapStorage::File(file)
-        } else {
-            unreachable!("Should have at least one storage backend")
-        };
+        // Always use MultiHeapStorage, which can handle both file and S3
+        tracing::info!("Starting with multi-backend storage (file: {}, s3: {})",
+            file_storage.is_some(), s3_storage.is_some());
+        let heap_storage = AnyHeapStorage::Multi(MultiHeapStorage::new(file_storage, s3_storage));
 
         if let Some(port) = cli.http_port {
             tracing::info!("Starting HTTP transport in stateful mode on port {}", port);
