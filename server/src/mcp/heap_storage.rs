@@ -189,28 +189,28 @@ impl MultiHeapStorage {
         Self { file, s3 }
     }
 
-    fn parse_uri<'a>(&self, uri: &'a str) -> Result<(&'a str, &'a str), String> {
+    fn parse_uri(&self, uri: &str) -> Result<(String, String), String> {
         let parsed = uri.parse::<Uri>().map_err(|e| format!("Invalid URI: {}", e))?;
 
         let scheme = parsed.scheme_str().ok_or("URI must have a scheme")?;
         let path = parsed.path();
 
         match scheme {
-            "file" | "s3" => Ok((scheme, path)),
+            "file" | "s3" => Ok((scheme.to_string(), path.to_string())),
             _ => Err(format!("Invalid URI scheme: {}. Must be file:// or s3://", scheme))
         }
     }
 
     async fn get_by_uri(&self, uri: &str) -> Result<Vec<u8>, String> {
         let (scheme, path) = self.parse_uri(uri)?;
-        match scheme {
+        match scheme.as_str() {
             "file" => {
                 let storage = self.file.as_ref().ok_or("File storage not configured")?;
-                storage.get(path).await
+                storage.get(&path).await
             }
             "s3" => {
                 let storage = self.s3.as_ref().ok_or("S3 storage not configured")?;
-                storage.get(path).await
+                storage.get(&path).await
             }
             _ => Err(format!("Unsupported scheme: {}", scheme)),
         }
@@ -218,14 +218,14 @@ impl MultiHeapStorage {
 
     async fn put_by_uri(&self, uri: &str, data: &[u8]) -> Result<(), String> {
         let (scheme, path) = self.parse_uri(uri)?;
-        match scheme {
+        match scheme.as_str() {
             "file" => {
                 let storage = self.file.as_ref().ok_or("File storage not configured")?;
-                storage.put(path, data).await
+                storage.put(&path, data).await
             }
             "s3" => {
                 let storage = self.s3.as_ref().ok_or("S3 storage not configured")?;
-                storage.put(path, data).await
+                storage.put(&path, data).await
             }
             _ => Err(format!("Unsupported scheme: {}", scheme)),
         }
@@ -233,14 +233,14 @@ impl MultiHeapStorage {
 
     async fn delete_by_uri(&self, uri: &str) -> Result<(), String> {
         let (scheme, path) = self.parse_uri(uri)?;
-        match scheme {
+        match scheme.as_str() {
             "file" => {
                 let storage = self.file.as_ref().ok_or("File storage not configured")?;
-                storage.delete(path).await
+                storage.delete(&path).await
             }
             "s3" => {
                 let storage = self.s3.as_ref().ok_or("S3 storage not configured")?;
-                storage.delete(path).await
+                storage.delete(&path).await
             }
             _ => Err(format!("Unsupported scheme: {}", scheme)),
         }
@@ -248,14 +248,14 @@ impl MultiHeapStorage {
 
     async fn exists_by_uri(&self, uri: &str) -> Result<bool, String> {
         let (scheme, path) = self.parse_uri(uri)?;
-        match scheme {
+        match scheme.as_str() {
             "file" => {
                 let storage = self.file.as_ref().ok_or("File storage not configured")?;
-                storage.exists(path).await
+                storage.exists(&path).await
             }
             "s3" => {
                 let storage = self.s3.as_ref().ok_or("S3 storage not configured")?;
-                storage.exists(path).await
+                storage.exists(&path).await
             }
             _ => Err(format!("Unsupported scheme: {}", scheme)),
         }
@@ -287,18 +287,6 @@ pub enum AnyHeapStorage {
 
 
 impl AnyHeapStorage {
-    fn parse_uri<'a>(&self, uri: &'a str) -> Result<(&'a str, &'a str), String> {
-        let parsed = uri.parse::<Uri>().map_err(|e| format!("Invalid URI: {}", e))?;
-
-        let scheme = parsed.scheme_str().ok_or("URI must have a scheme")?;
-        let path = parsed.path();
-
-        match scheme {
-            "file" | "s3" => Ok((scheme, path)),
-            _ => Err(format!("Invalid URI scheme: {}. Must be file:// or s3://", scheme))
-        }
-    }
-
     // URI-based methods for Multi storage
     pub async fn get_by_uri(&self, uri: &str) -> Result<Vec<u8>, String> {
         match self {
@@ -333,12 +321,12 @@ impl AnyHeapStorage {
 
 #[async_trait::async_trait]
 impl HeapStorage for AnyHeapStorage {
-    async fn put(&self, name: &str, data: &[u8]) -> Result<(), String> {
+    async fn put(&self, _name: &str, _data: &[u8]) -> Result<(), String> {
         match self {
             AnyHeapStorage::Multi(_) => Err("Use put_by_uri for Multi storage".to_string()),
         }
     }
-    async fn get(&self, name: &str) -> Result<Vec<u8>, String> {
+    async fn get(&self, _name: &str) -> Result<Vec<u8>, String> {
         match self {
             AnyHeapStorage::Multi(_) => Err("Use get_by_uri for Multi storage".to_string()),
         }
@@ -348,12 +336,12 @@ impl HeapStorage for AnyHeapStorage {
             AnyHeapStorage::Multi(_) => Err("Use list_all for Multi storage".to_string()),
         }
     }
-    async fn delete(&self, name: &str) -> Result<(), String> {
+    async fn delete(&self, _name: &str) -> Result<(), String> {
         match self {
             AnyHeapStorage::Multi(_) => Err("Use delete_by_uri for Multi storage".to_string()),
         }
     }
-    async fn exists(&self, name: &str) -> Result<bool, String> {
+    async fn exists(&self, _name: &str) -> Result<bool, String> {
         match self {
             AnyHeapStorage::Multi(_) => Err("Use exists_by_uri for Multi storage".to_string()),
         }
