@@ -30,3 +30,8 @@ tokio-test = "0.4"
 reqwest = { version = "0.12", features = ["json", "cookies", "stream"] }
 uuid = { version = "1.0", features = ["v4"] }
 futures = "0.3"
+chrono = "0.4"
+
+[lib]
+name = "mcp_server"
+path = "src/lib.rs"

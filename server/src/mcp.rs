@@ -100,6 +100,12 @@ pub fn initialize_v8() {
     });
 }
 
+// Public wrapper for integration testing
+// Note: This is exposed for integration tests and should not be used in production
+pub fn execute_stateful_for_test(code: String, snapshot: Option<Vec<u8>>) -> Result<(String, Vec<u8>), String> {
+    execute_stateful(code, snapshot)
+}
+
 
 
 #[allow(dead_code)]
