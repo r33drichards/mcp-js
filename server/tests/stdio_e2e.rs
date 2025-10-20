@@ -141,16 +141,30 @@ async fn test_stdio_run_js_execution() -> Result<(), Box<dyn std::error::Error>>
         "method": "notifications/initialized"
     })).await?;
 
+    // Create the heap first
+    let create_heap_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "create_heap",
+            "arguments": {
+                "heap_uri": "file://stdio-test-heap"
+            }
+        }
+    });
+    server.send_message(create_heap_msg).await?;
+
     // Call run_js tool
     let tool_call_msg = json!({
         "jsonrpc": "2.0",
-        "id": 2,
+        "id": 3,
         "method": "tools/call",
         "params": {
             "name": "run_js",
             "arguments": {
                 "code": "1 + 1",
-                "heap": "stdio-test-heap"
+                "heap_uri": "file://stdio-test-heap"
             }
         }
     });
@@ -159,7 +173,7 @@ async fn test_stdio_run_js_execution() -> Result<(), Box<dyn std::error::Error>>
 
     // Verify response
     assert_eq!(response["jsonrpc"], "2.0");
-    assert_eq!(response["id"], 2);
+    assert_eq!(response["id"], 3);
     assert!(response["result"].is_object(), "Should have result object");
 
     // Check for output in result
@@ -204,16 +218,30 @@ async fn test_stdio_heap_persistence() -> Result<(), Box<dyn std::error::Error>>
         "method": "notifications/initialized"
     })).await?;
 
+    // Create the heap first
+    let create_heap_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "create_heap",
+            "arguments": {
+                "heap_uri": "file://persistence-test-heap"
+            }
+        }
+    });
+    server.send_message(create_heap_msg).await?;
+
     // Set a variable in the heap
     let set_var_msg = json!({
         "jsonrpc": "2.0",
-        "id": 2,
+        "id": 3,
         "method": "tools/call",
         "params": {
             "name": "run_js",
             "arguments": {
                 "code": "var persistentValue = 42; persistentValue",
-                "heap": "persistence-test-heap"
+                "heap_uri": "file://persistence-test-heap"
             }
         }
     });
@@ -224,13 +252,13 @@ async fn test_stdio_heap_persistence() -> Result<(), Box<dyn std::error::Error>>
     // Read the variable from the heap in a second call
     let read_var_msg = json!({
         "jsonrpc": "2.0",
-        "id": 3,
+        "id": 4,
         "method": "tools/call",
         "params": {
             "name": "run_js",
             "arguments": {
                 "code": "persistentValue",
-                "heap": "persistence-test-heap"
+                "heap_uri": "file://persistence-test-heap"
             }
         }
     });
@@ -276,16 +304,30 @@ async fn test_stdio_invalid_javascript_error() -> Result<(), Box<dyn std::error:
         "method": "notifications/initialized"
     })).await?;
 
+    // Create the heap first
+    let create_heap_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "create_heap",
+            "arguments": {
+                "heap_uri": "file://error-test-heap"
+            }
+        }
+    });
+    server.send_message(create_heap_msg).await?;
+
     // Send invalid JavaScript
     let invalid_js_msg = json!({
         "jsonrpc": "2.0",
-        "id": 2,
+        "id": 3,
         "method": "tools/call",
         "params": {
             "name": "run_js",
             "arguments": {
                 "code": "this is not valid javascript!!!",
-                "heap": "error-test-heap"
+                "heap_uri": "file://error-test-heap"
             }
         }
     });
@@ -294,7 +336,7 @@ async fn test_stdio_invalid_javascript_error() -> Result<(), Box<dyn std::error:
 
     // The server should return a response
     assert_eq!(response["jsonrpc"], "2.0");
-    assert_eq!(response["id"], 2);
+    assert_eq!(response["id"], 3);
 
     // It should have error information
     let has_error = response["error"].is_object() ||
@@ -342,6 +384,20 @@ async fn test_stdio_sequential_operations() -> Result<(), Box<dyn std::error::Er
         "method": "notifications/initialized"
     })).await?;
 
+    // Create the heap first
+    let create_heap_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "create_heap",
+            "arguments": {
+                "heap_uri": "file://sequential-test-heap"
+            }
+        }
+    });
+    server.send_message(create_heap_msg).await?;
+
     // Perform multiple sequential operations
     let operations = vec![
         ("var counter = 0; counter", "0"),
@@ -353,13 +409,13 @@ async fn test_stdio_sequential_operations() -> Result<(), Box<dyn std::error::Er
     for (idx, (code, expected)) in operations.iter().enumerate() {
         let msg = json!({
             "jsonrpc": "2.0",
-            "id": idx + 2,
+            "id": idx + 3,
             "method": "tools/call",
             "params": {
                 "name": "run_js",
                 "arguments": {
                     "code": code,
-                    "heap": "sequential-test-heap"
+                    "heap_uri": "file://sequential-test-heap"
                 }
             }
         });
@@ -406,16 +462,44 @@ async fn test_stdio_multiple_heaps() -> Result<(), Box<dyn std::error::Error>> {
         "method": "notifications/initialized"
     })).await?;
 
+    // Create heap A
+    let create_heap_a = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "create_heap",
+            "arguments": {
+                "heap_uri": "file://heap-a"
+            }
+        }
+    });
+    server.send_message(create_heap_a).await?;
+
+    // Create heap B
+    let create_heap_b = json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": {
+            "name": "create_heap",
+            "arguments": {
+                "heap_uri": "file://heap-b"
+            }
+        }
+    });
+    server.send_message(create_heap_b).await?;
+
     // Set variable in heap A
     let set_heap_a = json!({
         "jsonrpc": "2.0",
-        "id": 2,
+        "id": 4,
         "method": "tools/call",
         "params": {
             "name": "run_js",
             "arguments": {
                 "code": "var heapValue = 'A'; heapValue",
-                "heap": "heap-a"
+                "heap_uri": "file://heap-a"
             }
         }
     });
@@ -426,13 +510,13 @@ async fn test_stdio_multiple_heaps() -> Result<(), Box<dyn std::error::Error>> {
     // Set variable in heap B
     let set_heap_b = json!({
         "jsonrpc": "2.0",
-        "id": 3,
+        "id": 5,
         "method": "tools/call",
         "params": {
             "name": "run_js",
             "arguments": {
                 "code": "var heapValue = 'B'; heapValue",
-                "heap": "heap-b"
+                "heap_uri": "file://heap-b"
             }
         }
     });
@@ -443,13 +527,13 @@ async fn test_stdio_multiple_heaps() -> Result<(), Box<dyn std::error::Error>> {
     // Read from heap A - should still be 'A'
     let read_heap_a = json!({
         "jsonrpc": "2.0",
-        "id": 4,
+        "id": 6,
         "method": "tools/call",
         "params": {
             "name": "run_js",
             "arguments": {
                 "code": "heapValue",
-                "heap": "heap-a"
+                "heap_uri": "file://heap-a"
             }
         }
     });
@@ -461,13 +545,13 @@ async fn test_stdio_multiple_heaps() -> Result<(), Box<dyn std::error::Error>> {
     // Read from heap B - should still be 'B'
     let read_heap_b = json!({
         "jsonrpc": "2.0",
-        "id": 5,
+        "id": 7,
         "method": "tools/call",
         "params": {
             "name": "run_js",
             "arguments": {
                 "code": "heapValue",
-                "heap": "heap-b"
+                "heap_uri": "file://heap-b"
             }
         }
     });
@@ -510,16 +594,30 @@ async fn test_stdio_complex_javascript() -> Result<(), Box<dyn std::error::Error
         "method": "notifications/initialized"
     })).await?;
 
+    // Create the heap first
+    let create_heap_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "create_heap",
+            "arguments": {
+                "heap_uri": "file://complex-test-heap"
+            }
+        }
+    });
+    server.send_message(create_heap_msg).await?;
+
     // Test array operations
     let array_op = json!({
         "jsonrpc": "2.0",
-        "id": 2,
+        "id": 3,
         "method": "tools/call",
         "params": {
             "name": "run_js",
             "arguments": {
                 "code": "[1, 2, 3, 4, 5].reduce((a, b) => a + b, 0)",
-                "heap": "complex-test-heap"
+                "heap_uri": "file://complex-test-heap"
             }
         }
     });
@@ -531,13 +629,13 @@ async fn test_stdio_complex_javascript() -> Result<(), Box<dyn std::error::Error
     // Test object operations
     let object_op = json!({
         "jsonrpc": "2.0",
-        "id": 3,
+        "id": 4,
         "method": "tools/call",
         "params": {
             "name": "run_js",
             "arguments": {
                 "code": "var obj = {a: 1, b: 2, c: 3}; Object.keys(obj).length",
-                "heap": "complex-test-heap"
+                "heap_uri": "file://complex-test-heap"
             }
         }
     });
@@ -560,6 +658,723 @@ async fn test_stdio_graceful_shutdown() -> Result<(), Box<dyn std::error::Error>
     // Just start and stop the server - should not panic or hang
     server.stop().await;
 
+    common::cleanup_heap_dir(&heap_dir);
+    Ok(())
+}
+
+/// Test create_heap tool functionality
+#[tokio::test]
+async fn test_stdio_create_heap_tool() -> Result<(), Box<dyn std::error::Error>> {
+    let heap_dir = common::create_temp_heap_dir();
+    let mut server = StdioServer::start(&heap_dir).await?;
+
+    // Initialize
+    let initialize_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {
+                "name": "stdio-e2e-test",
+                "version": "1.0.0"
+            }
+        }
+    });
+
+    server.send_message(initialize_msg).await?;
+
+    // Send initialized notification
+    server.send_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized"
+    })).await?;
+
+    // Create a new heap
+    let create_heap_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "create_heap",
+            "arguments": {
+                "heap_uri": "file://test-heap-resource"
+            }
+        }
+    });
+
+    let response = server.send_message(create_heap_msg).await?;
+
+    // Verify response
+    assert_eq!(response["jsonrpc"], "2.0");
+    assert_eq!(response["id"], 2);
+    assert!(response["result"].is_object(), "Should have result object");
+
+    // Check that the response contains the heap URI
+    let content_str = serde_json::to_string(&response["result"]["content"])?;
+    assert!(content_str.contains("file://test-heap-resource"),
+            "Should return heap URI in response");
+    assert!(content_str.contains("Successfully created heap"),
+            "Should contain success message");
+
+    server.stop().await;
+    common::cleanup_heap_dir(&heap_dir);
+    Ok(())
+}
+
+/// Test create_heap with invalid heap name
+#[tokio::test]
+async fn test_stdio_create_heap_invalid_name() -> Result<(), Box<dyn std::error::Error>> {
+    let heap_dir = common::create_temp_heap_dir();
+    let mut server = StdioServer::start(&heap_dir).await?;
+
+    // Initialize
+    let initialize_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {
+                "name": "stdio-e2e-test",
+                "version": "1.0.0"
+            }
+        }
+    });
+
+    server.send_message(initialize_msg).await?;
+
+    // Send initialized notification
+    server.send_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized"
+    })).await?;
+
+    // Try to create heap with invalid name (contains spaces and special chars)
+    let create_heap_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "create_heap",
+            "arguments": {
+                "heap_uri": "file://invalid heap name!"
+            }
+        }
+    });
+
+    let response = server.send_message(create_heap_msg).await?;
+
+    // The file storage will actually accept this, so we should check that it either:
+    // 1. Succeeds (file system allows spaces in names), or
+    // 2. Returns an error if the filesystem doesn't support it
+    // Just verify we get a valid response
+    assert!(response["result"].is_object(), "Should have result object");
+
+    server.stop().await;
+    common::cleanup_heap_dir(&heap_dir);
+    Ok(())
+}
+
+/// Test delete_heap tool functionality
+#[tokio::test]
+async fn test_stdio_delete_heap_tool() -> Result<(), Box<dyn std::error::Error>> {
+    let heap_dir = common::create_temp_heap_dir();
+    let mut server = StdioServer::start(&heap_dir).await?;
+
+    // Initialize
+    let initialize_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {
+                "name": "stdio-e2e-test",
+                "version": "1.0.0"
+            }
+        }
+    });
+
+    server.send_message(initialize_msg).await?;
+
+    // Send initialized notification
+    server.send_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized"
+    })).await?;
+
+    // Create a heap first
+    let create_heap_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "create_heap",
+            "arguments": {
+                "heap_uri": "file://heap-to-delete"
+            }
+        }
+    });
+
+    server.send_message(create_heap_msg).await?;
+
+    // Delete the heap
+    let delete_heap_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": {
+            "name": "delete_heap",
+            "arguments": {
+                "heap_uri": "file://heap-to-delete"
+            }
+        }
+    });
+
+    let response = server.send_message(delete_heap_msg).await?;
+
+    // Verify response
+    assert_eq!(response["jsonrpc"], "2.0");
+    assert_eq!(response["id"], 3);
+    assert!(response["result"].is_object(), "Should have result object");
+
+    let content_str = serde_json::to_string(&response["result"]["content"])?;
+    assert!(content_str.contains("Successfully deleted heap"),
+            "Should return success message");
+
+    server.stop().await;
+    common::cleanup_heap_dir(&heap_dir);
+    Ok(())
+}
+
+/// Test list_resources MCP endpoint
+#[tokio::test]
+async fn test_stdio_list_resources() -> Result<(), Box<dyn std::error::Error>> {
+    let heap_dir = common::create_temp_heap_dir();
+    let mut server = StdioServer::start(&heap_dir).await?;
+
+    // Initialize
+    let initialize_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {
+                "name": "stdio-e2e-test",
+                "version": "1.0.0"
+            }
+        }
+    });
+
+    server.send_message(initialize_msg).await?;
+
+    // Send initialized notification
+    server.send_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized"
+    })).await?;
+
+    // Create some heaps
+    for heap_name in &["resource-heap-1", "resource-heap-2", "resource-heap-3"] {
+        let heap_uri = format!("file://{}", heap_name);
+        let create_msg = json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "create_heap",
+                "arguments": {
+                    "heap_uri": heap_uri
+                }
+            }
+        });
+        server.send_message(create_msg).await?;
+    }
+
+    // List resources
+    let list_resources_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "resources/list",
+        "params": {}
+    });
+
+    let response = server.send_message(list_resources_msg).await?;
+
+    // Verify response
+    assert_eq!(response["jsonrpc"], "2.0");
+    assert_eq!(response["id"], 3);
+    assert!(response["result"].is_object(), "Should have result object");
+    assert!(response["result"]["resources"].is_array(), "Should have resources array");
+
+    let resources = response["result"]["resources"].as_array().unwrap();
+    assert!(resources.len() >= 3, "Should have at least 3 resources");
+
+    // Verify that our heaps are in the list with correct URIs
+    let resources_str = serde_json::to_string(&resources)?;
+    assert!(resources_str.contains("file://resource-heap-1"),
+            "Should contain resource-heap-1");
+    assert!(resources_str.contains("file://resource-heap-2"),
+            "Should contain resource-heap-2");
+    assert!(resources_str.contains("file://resource-heap-3"),
+            "Should contain resource-heap-3");
+
+    server.stop().await;
+    common::cleanup_heap_dir(&heap_dir);
+    Ok(())
+}
+
+/// Test read_resource MCP endpoint
+#[tokio::test]
+async fn test_stdio_read_resource() -> Result<(), Box<dyn std::error::Error>> {
+    let heap_dir = common::create_temp_heap_dir();
+    let mut server = StdioServer::start(&heap_dir).await?;
+
+    // Initialize
+    let initialize_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {
+                "name": "stdio-e2e-test",
+                "version": "1.0.0"
+            }
+        }
+    });
+
+    server.send_message(initialize_msg).await?;
+
+    // Send initialized notification
+    server.send_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized"
+    })).await?;
+
+    // Create a heap
+    let create_heap_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "create_heap",
+            "arguments": {
+                "heap_uri": "file://readable-heap"
+            }
+        }
+    });
+
+    server.send_message(create_heap_msg).await?;
+
+    // Execute some code to modify the heap
+    let run_js_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": {
+            "name": "run_js",
+            "arguments": {
+                "code": "var testData = 'resource test'; testData",
+                "heap_uri": "file://readable-heap"
+            }
+        }
+    });
+
+    server.send_message(run_js_msg).await?;
+
+    // Read the heap resource
+    let read_resource_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 4,
+        "method": "resources/read",
+        "params": {
+            "uri": "file://readable-heap"
+        }
+    });
+
+    let response = server.send_message(read_resource_msg).await?;
+
+    // Verify response
+    assert_eq!(response["jsonrpc"], "2.0");
+    assert_eq!(response["id"], 4);
+    assert!(response["result"].is_object(), "Should have result object");
+    assert!(response["result"]["contents"].is_array(), "Should have contents array");
+
+    let contents = response["result"]["contents"].as_array().unwrap();
+    assert!(!contents.is_empty(), "Should have at least one content item");
+
+    // Verify the content has blob data (base64-encoded snapshot)
+    let first_content = &contents[0];
+    assert!(first_content["blob"].is_string(), "Should have blob field with base64 data");
+    // Check mimeType if present - the rmcp SDK may serialize this differently
+    if !first_content["mimeType"].is_null() {
+        assert_eq!(first_content["mimeType"], "application/octet-stream",
+                   "Should have correct MIME type");
+    }
+    assert_eq!(first_content["uri"], "file://readable-heap",
+               "Should have correct URI");
+
+    // Verify the blob is non-empty base64
+    let blob = first_content["blob"].as_str().unwrap();
+    assert!(!blob.is_empty(), "Blob should not be empty");
+    assert!(blob.chars().all(|c| c.is_alphanumeric() || c == '+' || c == '/' || c == '='),
+            "Blob should be valid base64");
+
+    server.stop().await;
+    common::cleanup_heap_dir(&heap_dir);
+    Ok(())
+}
+
+/// Test read_resource with invalid URI
+#[tokio::test]
+async fn test_stdio_read_resource_invalid_uri() -> Result<(), Box<dyn std::error::Error>> {
+    let heap_dir = common::create_temp_heap_dir();
+    let mut server = StdioServer::start(&heap_dir).await?;
+
+    // Initialize
+    let initialize_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {
+                "name": "stdio-e2e-test",
+                "version": "1.0.0"
+            }
+        }
+    });
+
+    server.send_message(initialize_msg).await?;
+
+    // Send initialized notification
+    server.send_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized"
+    })).await?;
+
+    // Try to read a resource with invalid URI (not heap://)
+    let read_resource_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "resources/read",
+        "params": {
+            "uri": "invalid://not-a-heap"
+        }
+    });
+
+    let response = server.send_message(read_resource_msg).await?;
+
+    // Should return error
+    assert_eq!(response["jsonrpc"], "2.0");
+    assert_eq!(response["id"], 2);
+    assert!(response["error"].is_object(), "Should have error object for invalid URI");
+
+    let error_msg = response["error"]["message"].as_str().unwrap();
+    assert!(error_msg.contains("Invalid") || error_msg.contains("URI") || error_msg.contains("file://") || error_msg.contains("s3://"),
+            "Error should mention invalid URI format");
+
+    server.stop().await;
+    common::cleanup_heap_dir(&heap_dir);
+    Ok(())
+}
+
+/// Test read_resource with non-existent heap
+#[tokio::test]
+async fn test_stdio_read_resource_not_found() -> Result<(), Box<dyn std::error::Error>> {
+    let heap_dir = common::create_temp_heap_dir();
+    let mut server = StdioServer::start(&heap_dir).await?;
+
+    // Initialize
+    let initialize_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {
+                "name": "stdio-e2e-test",
+                "version": "1.0.0"
+            }
+        }
+    });
+
+    server.send_message(initialize_msg).await?;
+
+    // Send initialized notification
+    server.send_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized"
+    })).await?;
+
+    // Try to read a non-existent heap
+    let read_resource_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "resources/read",
+        "params": {
+            "uri": "file://non-existent-heap"
+        }
+    });
+
+    let response = server.send_message(read_resource_msg).await?;
+
+    // Should return error
+    assert_eq!(response["jsonrpc"], "2.0");
+    assert_eq!(response["id"], 2);
+    assert!(response["error"].is_object(), "Should have error object for non-existent heap");
+
+    let error_msg = response["error"]["message"].as_str().unwrap();
+    assert!(error_msg.contains("not found") || error_msg.contains("Heap"),
+            "Error should mention heap not found");
+
+    server.stop().await;
+    common::cleanup_heap_dir(&heap_dir);
+    Ok(())
+}
+
+/// Test complete heap lifecycle: create, use, list, read, delete
+#[tokio::test]
+async fn test_stdio_heap_resource_lifecycle() -> Result<(), Box<dyn std::error::Error>> {
+    let heap_dir = common::create_temp_heap_dir();
+    let mut server = StdioServer::start(&heap_dir).await?;
+
+    // Initialize
+    let initialize_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {
+                "name": "stdio-e2e-test",
+                "version": "1.0.0"
+            }
+        }
+    });
+
+    server.send_message(initialize_msg).await?;
+
+    // Send initialized notification
+    server.send_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized"
+    })).await?;
+
+    // 1. Create a heap
+    let create_heap_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "create_heap",
+            "arguments": {
+                "heap_uri": "file://lifecycle-heap"
+            }
+        }
+    });
+
+    let create_response = server.send_message(create_heap_msg).await?;
+    assert!(create_response["result"].is_object(), "Create should succeed");
+
+    // 2. Use the heap with run_js
+    let run_js_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": {
+            "name": "run_js",
+            "arguments": {
+                "code": "var lifecycleData = {value: 123}; lifecycleData.value",
+                "heap_uri": "file://lifecycle-heap"
+            }
+        }
+    });
+
+    let run_response = server.send_message(run_js_msg).await?;
+    assert!(run_response["result"].is_object(), "Run should succeed");
+
+    // 3. List resources - should include our heap
+    let list_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 4,
+        "method": "resources/list",
+        "params": {}
+    });
+
+    let list_response = server.send_message(list_msg).await?;
+    let resources_str = serde_json::to_string(&list_response["result"]["resources"])?;
+    assert!(resources_str.contains("file://lifecycle-heap"),
+            "Heap should appear in resources list");
+
+    // 4. Read the heap resource
+    let read_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 5,
+        "method": "resources/read",
+        "params": {
+            "uri": "file://lifecycle-heap"
+        }
+    });
+
+    let read_response = server.send_message(read_msg).await?;
+    assert!(read_response["result"]["contents"].is_array(), "Read should succeed");
+    assert!(!read_response["result"]["contents"].as_array().unwrap().is_empty(),
+            "Should have content");
+
+    // 5. Delete the heap
+    let delete_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 6,
+        "method": "tools/call",
+        "params": {
+            "name": "delete_heap",
+            "arguments": {
+                "heap_uri": "file://lifecycle-heap"
+            }
+        }
+    });
+
+    let delete_response = server.send_message(delete_msg).await?;
+    assert!(delete_response["result"].is_object(), "Delete should succeed");
+
+    // 6. List resources again - heap should be gone
+    let list_msg2 = json!({
+        "jsonrpc": "2.0",
+        "id": 7,
+        "method": "resources/list",
+        "params": {}
+    });
+
+    let list_response2 = server.send_message(list_msg2).await?;
+    let resources_str2 = serde_json::to_string(&list_response2["result"]["resources"])?;
+    assert!(!resources_str2.contains("file://lifecycle-heap"),
+            "Heap should not appear in resources list after deletion");
+
+    server.stop().await;
+    common::cleanup_heap_dir(&heap_dir);
+    Ok(())
+}
+
+/// Test run_js with non-existent heap URI
+#[tokio::test]
+async fn test_stdio_run_js_nonexistent_heap() -> Result<(), Box<dyn std::error::Error>> {
+    let heap_dir = common::create_temp_heap_dir();
+    let mut server = StdioServer::start(&heap_dir).await?;
+
+    // Initialize
+    let initialize_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {
+                "name": "stdio-e2e-test",
+                "version": "1.0.0"
+            }
+        }
+    });
+
+    server.send_message(initialize_msg).await?;
+
+    // Send initialized notification
+    server.send_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized"
+    })).await?;
+
+    // Try to run JS on a heap that doesn't exist
+    let run_js_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "run_js",
+            "arguments": {
+                "code": "1 + 1",
+                "heap_uri": "file://does-not-exist"
+            }
+        }
+    });
+
+    let response = server.send_message(run_js_msg).await?;
+
+    // Should return error message about non-existent heap
+    assert!(response["result"].is_object(), "Should have result");
+    let content_str = serde_json::to_string(&response["result"]["content"])?;
+    assert!(content_str.contains("does not exist") || content_str.contains("create_heap"),
+            "Should indicate heap doesn't exist");
+
+    server.stop().await;
+    common::cleanup_heap_dir(&heap_dir);
+    Ok(())
+}
+
+/// Test run_js with invalid heap URI format
+#[tokio::test]
+async fn test_stdio_run_js_invalid_heap_uri() -> Result<(), Box<dyn std::error::Error>> {
+    let heap_dir = common::create_temp_heap_dir();
+    let mut server = StdioServer::start(&heap_dir).await?;
+
+    // Initialize
+    let initialize_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {
+                "name": "stdio-e2e-test",
+                "version": "1.0.0"
+            }
+        }
+    });
+
+    server.send_message(initialize_msg).await?;
+
+    // Send initialized notification
+    server.send_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized"
+    })).await?;
+
+    // Try to run JS with invalid URI format (not heap://)
+    let run_js_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "run_js",
+            "arguments": {
+                "code": "1 + 1",
+                "heap_uri": "not-a-valid-uri"
+            }
+        }
+    });
+
+    let response = server.send_message(run_js_msg).await?;
+
+    // Should return error message about invalid URI
+    assert!(response["result"].is_object(), "Should have result");
+    let content_str = serde_json::to_string(&response["result"]["content"])?;
+    assert!(content_str.contains("Invalid") || content_str.contains("URI") || content_str.contains("file://") || content_str.contains("s3://"),
+            "Should indicate invalid URI format");
+
+    server.stop().await;
     common::cleanup_heap_dir(&heap_dir);
     Ok(())
 }
