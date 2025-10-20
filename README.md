@@ -29,8 +29,8 @@ This will automatically download and install the latest release for your platfor
 
 `mcp-v8` supports the following command line arguments:
 
-- `--s3-bucket <bucket>`: Use AWS S3 for heap snapshots. Specify the S3 bucket name. (Conflicts with `--directory-path` and `--stateless`)
-- `--directory-path <path>`: Use a local directory for heap snapshots. Specify the directory path. (Conflicts with `--s3-bucket` and `--stateless`)
+- `--s3-bucket <bucket>`: Use AWS S3 for heap snapshots. Specify the S3 bucket name. (Conflicts with `--stateless`)
+- `--directory-path <path>`: Use a local directory for heap snapshots. Specify the directory path. (Conflicts with `--stateless`)
 - `--stateless`: Run in stateless mode - no heap snapshots are saved or loaded. Each JavaScript execution starts with a fresh V8 isolate. (Conflicts with `--s3-bucket` and `--directory-path`)
 - `--http-port <port>`: Enable HTTP transport on the specified port. If not provided, the server uses stdio transport (default).
 - `--sse-port <port>`: Enable SSE (Server-Sent Events) transport on the specified port. (Conflicts with `--http-port`)
