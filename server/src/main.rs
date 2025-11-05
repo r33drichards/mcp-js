@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 
 mod mcp;
 use mcp::{StatelessService, StatefulService, initialize_v8};
-use mcp::heap_storage::{AnyHeapStorage, S3HeapStorage, FileHeapStorage};
+use mcp::heap_storage::{AnyHeapStorage, S3HeapStorage, FileHeapStorage, RedisHeapStorage};
 
 /// Command line arguments for configuring heap storage
 #[derive(Parser, Debug)]
@@ -21,15 +21,19 @@ use mcp::heap_storage::{AnyHeapStorage, S3HeapStorage, FileHeapStorage};
 struct Cli {
 
     /// S3 bucket name (required if --use-s3)
-    #[arg(long, conflicts_with_all = ["directory_path", "stateless"])]
+    #[arg(long, conflicts_with_all = ["directory_path", "redis_url", "stateless"])]
     s3_bucket: Option<String>,
 
     /// Directory path for filesystem storage (required if --use-filesystem)
-    #[arg(long, conflicts_with_all = ["s3_bucket", "stateless"])]
+    #[arg(long, conflicts_with_all = ["s3_bucket", "redis_url", "stateless"])]
     directory_path: Option<String>,
 
+    /// Redis connection URL (e.g., redis://localhost:6379)
+    #[arg(long, conflicts_with_all = ["s3_bucket", "directory_path", "stateless"])]
+    redis_url: Option<String>,
+
     /// Run in stateless mode - no heap snapshots are saved or loaded
-    #[arg(long, conflicts_with_all = ["s3_bucket", "directory_path"])]
+    #[arg(long, conflicts_with_all = ["s3_bucket", "directory_path", "redis_url"])]
     stateless: bool,
 
     /// HTTP port to listen on (if not specified, uses stdio transport)
@@ -81,6 +85,14 @@ async fn main() -> Result<()> {
             AnyHeapStorage::S3(S3HeapStorage::new(bucket).await)
         } else if let Some(dir) = cli.directory_path {
             AnyHeapStorage::File(FileHeapStorage::new(dir))
+        } else if let Some(redis_url) = cli.redis_url {
+            match RedisHeapStorage::new(redis_url).await {
+                Ok(storage) => AnyHeapStorage::Redis(storage),
+                Err(e) => {
+                    tracing::error!("Failed to initialize Redis storage: {}", e);
+                    return Err(anyhow::anyhow!("Redis initialization failed: {}", e));
+                }
+            }
         } else {
             // default to file /tmp/mcp-v8-heaps
             AnyHeapStorage::File(FileHeapStorage::new("/tmp/mcp-v8-heaps"))

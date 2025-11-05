@@ -5,6 +5,8 @@ use aws_sdk_s3::ByteStream;
 use aws_config;
 use std::sync::Arc;
 use async_trait::async_trait;
+use redis::aio::ConnectionManager;
+use redis::AsyncCommands;
 
 #[async_trait]
 pub trait HeapStorage: Send + Sync + 'static {
@@ -99,10 +101,45 @@ impl HeapStorage for S3HeapStorage {
 }
 
 #[derive(Clone)]
+pub struct RedisHeapStorage {
+    connection: ConnectionManager,
+}
+
+impl RedisHeapStorage {
+    pub async fn new(redis_url: impl Into<String>) -> Result<Self, String> {
+        let url = redis_url.into();
+        let client = redis::Client::open(url)
+            .map_err(|e| format!("Failed to create Redis client: {}", e))?;
+        let connection = ConnectionManager::new(client)
+            .await
+            .map_err(|e| format!("Failed to connect to Redis: {}", e))?;
+        Ok(Self { connection })
+    }
+}
+
+#[async_trait]
+impl HeapStorage for RedisHeapStorage {
+    async fn put(&self, name: &str, data: &[u8]) -> Result<(), String> {
+        let mut conn = self.connection.clone();
+        conn.set::<_, _, ()>(name, data)
+            .await
+            .map_err(|e| format!("Redis SET error: {}", e))
+    }
+
+    async fn get(&self, name: &str) -> Result<Vec<u8>, String> {
+        let mut conn = self.connection.clone();
+        conn.get(name)
+            .await
+            .map_err(|e| format!("Redis GET error: {}", e))
+    }
+}
+
+#[derive(Clone)]
 pub enum AnyHeapStorage {
     #[allow(dead_code)]
     File(FileHeapStorage),
     S3(S3HeapStorage),
+    Redis(RedisHeapStorage),
 }
 
 
@@ -114,12 +151,14 @@ impl HeapStorage for AnyHeapStorage {
         match self {
             AnyHeapStorage::File(inner) => inner.put(name, data).await,
             AnyHeapStorage::S3(inner) => inner.put(name, data).await,
+            AnyHeapStorage::Redis(inner) => inner.put(name, data).await,
         }
     }
     async fn get(&self, name: &str) -> Result<Vec<u8>, String> {
         match self {
             AnyHeapStorage::File(inner) => inner.get(name).await,
             AnyHeapStorage::S3(inner) => inner.get(name).await,
+            AnyHeapStorage::Redis(inner) => inner.get(name).await,
         }
     }
 } 

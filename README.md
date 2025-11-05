@@ -5,10 +5,10 @@ A Rust-based Model Context Protocol (MCP) server that exposes a V8 JavaScript ru
 ## Features
 
 - **V8 JavaScript Execution**: Run arbitrary JavaScript code in a secure, isolated V8 engine.
-- **Heap Snapshots**: Persist and restore V8 heap state between runs, supporting both S3 and local file storage.
+- **Heap Snapshots**: Persist and restore V8 heap state between runs, supporting S3, Redis, and local file storage.
 - **Stateless Mode**: Optional mode for fresh executions without heap persistence, ideal for serverless environments.
 - **MCP Protocol**: Implements the Model Context Protocol for seamless tool integration with Claude, Cursor, and other MCP clients.
-- **Configurable Storage**: Choose between S3, local directory, or stateless mode at runtime.
+- **Configurable Storage**: Choose between S3, Redis, local directory, or stateless mode at runtime.
 - **Multiple Transports**: Supports stdio, HTTP, and SSE (Server-Sent Events) transport protocols.
 
 ## Installation
@@ -29,13 +29,14 @@ This will automatically download and install the latest release for your platfor
 
 `mcp-v8` supports the following command line arguments:
 
-- `--s3-bucket <bucket>`: Use AWS S3 for heap snapshots. Specify the S3 bucket name. (Conflicts with `--stateless`)
-- `--directory-path <path>`: Use a local directory for heap snapshots. Specify the directory path. (Conflicts with `--stateless`)
-- `--stateless`: Run in stateless mode - no heap snapshots are saved or loaded. Each JavaScript execution starts with a fresh V8 isolate. (Conflicts with `--s3-bucket` and `--directory-path`)
+- `--s3-bucket <bucket>`: Use AWS S3 for heap snapshots. Specify the S3 bucket name. (Conflicts with `--redis-url`, `--directory-path`, and `--stateless`)
+- `--redis-url <url>`: Use Redis for heap snapshots. Specify the Redis connection URL (e.g., `redis://localhost:6379`). (Conflicts with `--s3-bucket`, `--directory-path`, and `--stateless`)
+- `--directory-path <path>`: Use a local directory for heap snapshots. Specify the directory path. (Conflicts with `--s3-bucket`, `--redis-url`, and `--stateless`)
+- `--stateless`: Run in stateless mode - no heap snapshots are saved or loaded. Each JavaScript execution starts with a fresh V8 isolate. (Conflicts with `--s3-bucket`, `--redis-url`, and `--directory-path`)
 - `--http-port <port>`: Enable HTTP transport on the specified port. If not provided, the server uses stdio transport (default).
 - `--sse-port <port>`: Enable SSE (Server-Sent Events) transport on the specified port. (Conflicts with `--http-port`)
 
-**Note:** For heap storage, if neither `--s3-bucket`, `--directory-path`, nor `--stateless` is provided, the server defaults to using `/tmp/mcp-v8-heaps` as the local directory.
+**Note:** For heap storage, if none of `--s3-bucket`, `--redis-url`, `--directory-path`, or `--stateless` is provided, the server defaults to using `/tmp/mcp-v8-heaps` as the local directory.
 
 ## Quick Start
 
@@ -46,6 +47,9 @@ After installation, you can run the server directly. Choose one of the following
 ```bash
 # Use S3 for heap storage (recommended for cloud/persistent use)
 mcp-v8 --s3-bucket my-bucket-name
+
+# Use Redis for heap storage (recommended for distributed/scalable deployments)
+mcp-v8 --redis-url redis://localhost:6379
 
 # Use local filesystem directory for heap storage (recommended for local development)
 mcp-v8 --directory-path /tmp/mcp-v8-heaps
@@ -65,6 +69,9 @@ mcp-v8 --directory-path /tmp/mcp-v8-heaps --http-port 8080
 # Start HTTP server on port 8080 with S3 storage
 mcp-v8 --s3-bucket my-bucket-name --http-port 8080
 
+# Start HTTP server on port 8080 with Redis storage
+mcp-v8 --redis-url redis://localhost:6379 --http-port 8080
+
 # Start HTTP server on port 8080 in stateless mode
 mcp-v8 --stateless --http-port 8080
 ```
@@ -82,6 +89,9 @@ Server-Sent Events (SSE) transport for streaming responses:
 ```bash
 # Start SSE server on port 8081 with local filesystem storage
 mcp-v8 --directory-path /tmp/mcp-v8-heaps --sse-port 8081
+
+# Start SSE server on port 8081 with Redis storage
+mcp-v8 --redis-url redis://localhost:6379 --sse-port 8081
 
 # Start SSE server on port 8081 in stateless mode
 mcp-v8 --stateless --sse-port 8081
@@ -160,6 +170,17 @@ Stateful mode persists the V8 heap state between executions using either S3 or l
 }
 ```
 
+**Stateful mode with Redis:**
+```json
+{
+  "mcpServers": {
+    "js": {
+      "command": "/usr/local/bin/mcp-v8 --redis-url redis://localhost:6379"
+    }
+  }
+}
+```
+
 **Stateless mode:**
 ```json
 {
@@ -205,6 +226,13 @@ You can configure heap storage using the following command line arguments:
   - Example: `mcp-v8 --s3-bucket my-bucket-name`
   - Requires AWS credentials in your environment.
   - Ideal for cloud deployments and sharing state across instances.
+- **Redis**: `--redis-url <url>`
+  - Example: `mcp-v8 --redis-url redis://localhost:6379`
+  - Requires a running Redis instance.
+  - Connection URL format: `redis://[user:password@]host[:port][/database]`
+  - Supports Redis authentication and database selection.
+  - Ideal for distributed deployments, horizontal scaling, and high-performance caching.
+  - Perfect for microservices architectures where multiple instances need shared state.
 - **Filesystem**: `--directory-path <path>`
   - Example: `mcp-v8 --directory-path /tmp/mcp-v8-heaps`
   - Stores heap snapshots locally on disk.
