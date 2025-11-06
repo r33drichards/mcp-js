@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 
 mod mcp;
 use mcp::{StatelessService, StatefulService, initialize_v8};
-use mcp::heap_storage::{AnyHeapStorage, S3HeapStorage, FileHeapStorage};
+use mcp::heap_storage::{AnyHeapStorage, S3HeapStorage, FileHeapStorage, InMemoryHeapStorage};
 
 /// Command line arguments for configuring heap storage
 #[derive(Parser, Debug)]
@@ -21,15 +21,19 @@ use mcp::heap_storage::{AnyHeapStorage, S3HeapStorage, FileHeapStorage};
 struct Cli {
 
     /// S3 bucket name (required if --use-s3)
-    #[arg(long, conflicts_with_all = ["directory_path", "stateless"])]
+    #[arg(long, conflicts_with_all = ["directory_path", "stateless", "in_memory"])]
     s3_bucket: Option<String>,
 
     /// Directory path for filesystem storage (required if --use-filesystem)
-    #[arg(long, conflicts_with_all = ["s3_bucket", "stateless"])]
+    #[arg(long, conflicts_with_all = ["s3_bucket", "stateless", "in_memory"])]
     directory_path: Option<String>,
 
+    /// Use in-memory heap storage (perfect for debugging - heaps stored in RAM)
+    #[arg(long, conflicts_with_all = ["s3_bucket", "directory_path", "stateless"])]
+    in_memory: bool,
+
     /// Run in stateless mode - no heap snapshots are saved or loaded
-    #[arg(long, conflicts_with_all = ["s3_bucket", "directory_path"])]
+    #[arg(long, conflicts_with_all = ["s3_bucket", "directory_path", "in_memory"])]
     stateless: bool,
 
     /// HTTP port to listen on (if not specified, uses stdio transport)
@@ -78,11 +82,17 @@ async fn main() -> Result<()> {
     } else {
         // Stateful mode - with heap persistence
         let heap_storage = if let Some(bucket) = cli.s3_bucket {
+            tracing::info!("Using S3 heap storage with bucket: {}", bucket);
             AnyHeapStorage::S3(S3HeapStorage::new(bucket).await)
         } else if let Some(dir) = cli.directory_path {
+            tracing::info!("Using file-based heap storage at: {}", dir);
             AnyHeapStorage::File(FileHeapStorage::new(dir))
+        } else if cli.in_memory {
+            tracing::info!("Using in-memory heap storage (all heaps stored in RAM)");
+            AnyHeapStorage::InMemory(InMemoryHeapStorage::new())
         } else {
             // default to file /tmp/mcp-v8-heaps
+            tracing::info!("Using default file-based heap storage at: /tmp/mcp-v8-heaps");
             AnyHeapStorage::File(FileHeapStorage::new("/tmp/mcp-v8-heaps"))
         };
 

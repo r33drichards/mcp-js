@@ -5,6 +5,8 @@ use aws_sdk_s3::ByteStream;
 use aws_config;
 use std::sync::Arc;
 use async_trait::async_trait;
+use std::collections::HashMap;
+use tokio::sync::RwLock;
 
 #[async_trait]
 pub trait HeapStorage: Send + Sync + 'static {
@@ -98,11 +100,71 @@ impl HeapStorage for S3HeapStorage {
     }
 }
 
+/// In-memory heap storage using HashMap
+/// Perfect for debugging, testing, or when persistence isn't needed
+#[derive(Clone)]
+pub struct InMemoryHeapStorage {
+    store: Arc<RwLock<HashMap<String, Vec<u8>>>>,
+}
+
+impl InMemoryHeapStorage {
+    pub fn new() -> Self {
+        Self {
+            store: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// Get the number of heaps currently stored
+    pub async fn len(&self) -> usize {
+        self.store.read().await.len()
+    }
+
+    /// Check if the store is empty
+    pub async fn is_empty(&self) -> bool {
+        self.store.read().await.is_empty()
+    }
+
+    /// Clear all stored heaps
+    pub async fn clear(&self) {
+        self.store.write().await.clear();
+    }
+
+    /// List all heap names
+    pub async fn list_heaps(&self) -> Vec<String> {
+        self.store.read().await.keys().cloned().collect()
+    }
+}
+
+impl Default for InMemoryHeapStorage {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl HeapStorage for InMemoryHeapStorage {
+    async fn put(&self, name: &str, data: &[u8]) -> Result<(), String> {
+        let mut store = self.store.write().await;
+        store.insert(name.to_string(), data.to_vec());
+        tracing::debug!("Stored heap '{}' ({} bytes) in memory", name, data.len());
+        Ok(())
+    }
+
+    async fn get(&self, name: &str) -> Result<Vec<u8>, String> {
+        let store = self.store.read().await;
+        store
+            .get(name)
+            .cloned()
+            .ok_or_else(|| format!("Heap '{}' not found in memory", name))
+    }
+}
+
 #[derive(Clone)]
 pub enum AnyHeapStorage {
     #[allow(dead_code)]
     File(FileHeapStorage),
     S3(S3HeapStorage),
+    InMemory(InMemoryHeapStorage),
 }
 
 
@@ -114,12 +176,14 @@ impl HeapStorage for AnyHeapStorage {
         match self {
             AnyHeapStorage::File(inner) => inner.put(name, data).await,
             AnyHeapStorage::S3(inner) => inner.put(name, data).await,
+            AnyHeapStorage::InMemory(inner) => inner.put(name, data).await,
         }
     }
     async fn get(&self, name: &str) -> Result<Vec<u8>, String> {
         match self {
             AnyHeapStorage::File(inner) => inner.get(name).await,
             AnyHeapStorage::S3(inner) => inner.get(name).await,
+            AnyHeapStorage::InMemory(inner) => inner.get(name).await,
         }
     }
 } 
