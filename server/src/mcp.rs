@@ -8,12 +8,16 @@ use serde_json::json;
 
 
 use std::sync::Once;
+use std::cell::RefCell;
 use v8::{self};
 
 pub(crate) mod heap_storage;
 use crate::mcp::heap_storage::{HeapStorage, AnyHeapStorage};
 
-
+// Thread-local storage for console.log output
+thread_local! {
+    static CONSOLE_LOGS: RefCell<Vec<String>> = RefCell::new(Vec::new());
+}
 
 
 fn eval<'s>(scope: &mut v8::HandleScope<'s>, code: &str) -> Result<v8::Local<'s, v8::Value>, String> {
@@ -41,7 +45,10 @@ fn console_log(
             .unwrap_or_else(|| "[object]".to_string());
         output.push(str_val);
     }
-    println!("{}", output.join(""));
+    let log_line = output.join("");
+    CONSOLE_LOGS.with(|logs| {
+        logs.borrow_mut().push(log_line);
+    });
 }
 
 // Create a global template with console.log support
@@ -67,6 +74,11 @@ fn create_global_template<'s>(
 
 // Execute JS in a stateless isolate (no snapshot creation)
 fn execute_stateless(code: String) -> Result<String, String> {
+    // Clear console logs before execution
+    CONSOLE_LOGS.with(|logs| {
+        logs.borrow_mut().clear();
+    });
+
     let isolate = &mut v8::Isolate::new(Default::default());
     let scope = &mut v8::HandleScope::new(isolate);
     let global_template = create_global_template(scope);
@@ -77,14 +89,30 @@ fn execute_stateless(code: String) -> Result<String, String> {
     let scope = &mut v8::ContextScope::new(scope, context);
 
     let result = eval(scope, &code)?;
-    match result.to_string(scope) {
-        Some(s) => Ok(s.to_rust_string_lossy(scope)),
-        None => Err("Failed to convert result to string".to_string()),
+    let result_str = match result.to_string(scope) {
+        Some(s) => s.to_rust_string_lossy(scope),
+        None => return Err("Failed to convert result to string".to_string()),
+    };
+
+    // Retrieve console logs and combine with result
+    let logs = CONSOLE_LOGS.with(|logs| {
+        logs.borrow().join("\n")
+    });
+
+    if logs.is_empty() {
+        Ok(result_str)
+    } else {
+        Ok(format!("{}\n{}", logs, result_str))
     }
 }
 
 // Execute JS with snapshot support (preserves heap state)
 fn execute_stateful(code: String, snapshot: Option<Vec<u8>>) -> Result<(String, Vec<u8>), String> {
+    // Clear console logs before execution
+    CONSOLE_LOGS.with(|logs| {
+        logs.borrow_mut().clear();
+    });
+
     let mut snapshot_creator = match snapshot {
         Some(snapshot) => {
             eprintln!("creating isolate from snapshot...");
@@ -113,7 +141,17 @@ fn execute_stateful(code: String, snapshot: Option<Vec<u8>>) -> Result<(String, 
                     .ok_or_else(|| "Failed to convert result to string".to_string());
                 match result_str {
                     Ok(s) => {
-                        output_result = Ok(s.to_rust_string_lossy(scope));
+                        let result_str = s.to_rust_string_lossy(scope);
+                        // Retrieve console logs and combine with result
+                        let logs = CONSOLE_LOGS.with(|logs| {
+                            logs.borrow().join("\n")
+                        });
+                        let combined_output = if logs.is_empty() {
+                            result_str
+                        } else {
+                            format!("{}\n{}", logs, result_str)
+                        };
+                        output_result = Ok(combined_output);
                     }
                     Err(e) => {
                         output_result = Err(e);
