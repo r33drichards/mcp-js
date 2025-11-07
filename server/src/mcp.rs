@@ -11,6 +11,7 @@ use std::sync::Once;
 use v8::{self};
 
 pub(crate) mod heap_storage;
+pub use crate::mcp::heap_storage::MemoryHeapStorage;
 use crate::mcp::heap_storage::{HeapStorage, AnyHeapStorage};
 
 
