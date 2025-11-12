@@ -29,7 +29,6 @@ fn eval<'s>(scope: &mut v8::HandleScope<'s>, code: &str) -> Result<v8::Local<'s,
 
 // Struct to hold resource storage for V8 callbacks
 struct IsolateData {
-    runtime_handle: tokio::runtime::Handle,
     resource_storage: Arc<dyn ResourceStorage>,
 }
 
@@ -62,10 +61,7 @@ fn resource_read_callback(
         }
     };
 
-    let storage = isolate_data.resource_storage.clone();
-    let result = isolate_data.runtime_handle.block_on(async {
-        storage.read(&uri).await
-    });
+    let result = isolate_data.resource_storage.read(&uri);
 
     match result {
         Ok(content) => {
@@ -98,10 +94,7 @@ fn resource_list_callback(
         }
     };
 
-    let storage = isolate_data.resource_storage.clone();
-    let result = isolate_data.runtime_handle.block_on(async {
-        storage.list(&uri).await
-    });
+    let result = isolate_data.resource_storage.list(&uri);
 
     match result {
         Ok(entries) => {
@@ -146,10 +139,7 @@ fn resource_write_callback(
         }
     };
 
-    let storage = isolate_data.resource_storage.clone();
-    let result = isolate_data.runtime_handle.block_on(async {
-        storage.write(&uri, &content).await
-    });
+    let result = isolate_data.resource_storage.write(&uri, &content);
 
     match result {
         Ok(()) => {
@@ -182,10 +172,7 @@ fn resource_delete_callback(
         }
     };
 
-    let storage = isolate_data.resource_storage.clone();
-    let result = isolate_data.runtime_handle.block_on(async {
-        storage.delete(&uri).await
-    });
+    let result = isolate_data.resource_storage.delete(&uri);
 
     match result {
         Ok(()) => {
@@ -246,12 +233,11 @@ fn create_context_with_resources<'s>(
 }
 
 // Execute JS in a stateless isolate (no snapshot creation)
-fn execute_stateless(code: String, resource_storage: Arc<dyn ResourceStorage>, runtime_handle: tokio::runtime::Handle) -> Result<String, String> {
+fn execute_stateless(code: String, resource_storage: Arc<dyn ResourceStorage>) -> Result<String, String> {
     let isolate = &mut v8::Isolate::new(Default::default());
 
     // Set up isolate data for resource callbacks
     let isolate_data = Arc::new(IsolateData {
-        runtime_handle,
         resource_storage,
     });
     isolate.set_slot(isolate_data);
@@ -268,7 +254,7 @@ fn execute_stateless(code: String, resource_storage: Arc<dyn ResourceStorage>, r
 }
 
 // Execute JS with snapshot support (preserves heap state)
-fn execute_stateful(code: String, snapshot: Option<Vec<u8>>, resource_storage: Arc<dyn ResourceStorage>, runtime_handle: tokio::runtime::Handle) -> Result<(String, Vec<u8>), String> {
+fn execute_stateful(code: String, snapshot: Option<Vec<u8>>, resource_storage: Arc<dyn ResourceStorage>) -> Result<(String, Vec<u8>), String> {
     let mut snapshot_creator = match snapshot {
         Some(snapshot) => {
             eprintln!("creating isolate from snapshot...");
@@ -282,7 +268,6 @@ fn execute_stateful(code: String, snapshot: Option<Vec<u8>>, resource_storage: A
 
     // Set up isolate data for resource callbacks
     let isolate_data = Arc::new(IsolateData {
-        runtime_handle,
         resource_storage,
     });
     snapshot_creator.set_slot(isolate_data);
@@ -403,8 +388,7 @@ impl StatelessService {
     #[tool(description = include_str!("run_js_tool_stateless.md"))]
     pub async fn run_js(&self, #[tool(param)] code: String) -> RunJsStatelessResponse {
         let resource_storage = self.resource_storage.clone();
-        let runtime_handle = tokio::runtime::Handle::current();
-        let v8_result = tokio::task::spawn_blocking(move || execute_stateless(code, resource_storage, runtime_handle)).await;
+        let v8_result = tokio::task::spawn_blocking(move || execute_stateless(code, resource_storage)).await;
 
         match v8_result {
             Ok(Ok(output)) => RunJsStatelessResponse { output },
@@ -430,8 +414,7 @@ impl StatefulService {
     pub async fn run_js(&self, #[tool(param)] code: String, #[tool(param)] heap: String) -> RunJsStatefulResponse {
         let snapshot = self.heap_storage.get(&heap).await.ok();
         let resource_storage = self.resource_storage.clone();
-        let runtime_handle = tokio::runtime::Handle::current();
-        let v8_result = tokio::task::spawn_blocking(move || execute_stateful(code, snapshot, resource_storage, runtime_handle)).await;
+        let v8_result = tokio::task::spawn_blocking(move || execute_stateful(code, snapshot, resource_storage)).await;
 
         match v8_result {
             Ok(Ok((output, startup_data))) => {

@@ -1,13 +1,11 @@
-use async_trait::async_trait;
 use std::path::PathBuf;
 
-/// Trait for resource storage operations
-#[async_trait]
+/// Trait for resource storage operations (synchronous)
 pub trait ResourceStorage: Send + Sync + 'static {
-    async fn read(&self, uri: &str) -> Result<String, String>;
-    async fn list(&self, uri: &str) -> Result<Vec<String>, String>;
-    async fn write(&self, uri: &str, content: &str) -> Result<(), String>;
-    async fn delete(&self, uri: &str) -> Result<(), String>;
+    fn read(&self, uri: &str) -> Result<String, String>;
+    fn list(&self, uri: &str) -> Result<Vec<String>, String>;
+    fn write(&self, uri: &str, content: &str) -> Result<(), String>;
+    fn delete(&self, uri: &str) -> Result<(), String>;
 }
 
 /// File-based resource storage implementation
@@ -62,16 +60,14 @@ impl FileResourceStorage {
     }
 }
 
-#[async_trait]
 impl ResourceStorage for FileResourceStorage {
-    async fn read(&self, uri: &str) -> Result<String, String> {
+    fn read(&self, uri: &str) -> Result<String, String> {
         let path = self.resolve_uri(uri)?;
-        tokio::fs::read_to_string(path)
-            .await
+        std::fs::read_to_string(path)
             .map_err(|e| format!("Failed to read file: {}", e))
     }
 
-    async fn list(&self, uri: &str) -> Result<Vec<String>, String> {
+    fn list(&self, uri: &str) -> Result<Vec<String>, String> {
         let path = self.resolve_uri(uri)?;
 
         if !path.exists() {
@@ -82,14 +78,12 @@ impl ResourceStorage for FileResourceStorage {
             return Err("Path is not a directory".to_string());
         }
 
-        let mut entries = tokio::fs::read_dir(path)
-            .await
+        let entries = std::fs::read_dir(path)
             .map_err(|e| format!("Failed to read directory: {}", e))?;
 
         let mut results = Vec::new();
-        while let Some(entry) = entries.next_entry()
-            .await
-            .map_err(|e| format!("Failed to read directory entry: {}", e))? {
+        for entry in entries {
+            let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
             if let Some(name) = entry.file_name().to_str() {
                 results.push(name.to_string());
             }
@@ -98,22 +92,20 @@ impl ResourceStorage for FileResourceStorage {
         Ok(results)
     }
 
-    async fn write(&self, uri: &str, content: &str) -> Result<(), String> {
+    fn write(&self, uri: &str, content: &str) -> Result<(), String> {
         let path = self.resolve_uri(uri)?;
 
         // Create parent directories if they don't exist
         if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
+            std::fs::create_dir_all(parent)
                 .map_err(|e| format!("Failed to create parent directories: {}", e))?;
         }
 
-        tokio::fs::write(path, content)
-            .await
+        std::fs::write(path, content)
             .map_err(|e| format!("Failed to write file: {}", e))
     }
 
-    async fn delete(&self, uri: &str) -> Result<(), String> {
+    fn delete(&self, uri: &str) -> Result<(), String> {
         let path = self.resolve_uri(uri)?;
 
         if !path.exists() {
@@ -121,12 +113,10 @@ impl ResourceStorage for FileResourceStorage {
         }
 
         if path.is_dir() {
-            tokio::fs::remove_dir_all(path)
-                .await
+            std::fs::remove_dir_all(path)
                 .map_err(|e| format!("Failed to delete directory: {}", e))
         } else {
-            tokio::fs::remove_file(path)
-                .await
+            std::fs::remove_file(path)
                 .map_err(|e| format!("Failed to delete file: {}", e))
         }
     }
