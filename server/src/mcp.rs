@@ -13,7 +13,7 @@ use v8::{self};
 pub(crate) mod heap_storage;
 pub(crate) mod resource_storage;
 use crate::mcp::heap_storage::{HeapStorage, AnyHeapStorage};
-use crate::mcp::resource_storage::{ResourceStorage, FileResourceStorage};
+use crate::mcp::resource_storage::ResourceStorage;
 use std::sync::Arc;
 
 
@@ -238,7 +238,7 @@ fn create_context_with_resources<'s>(
     );
 
     // Create context with custom global template
-    v8::Context::new_from_template(scope, global_template)
+    v8::Context::new(scope, global_template)
 }
 
 // Execute JS in a stateless isolate (no snapshot creation)

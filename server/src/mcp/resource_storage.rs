@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// Trait for resource storage operations
 #[async_trait]
