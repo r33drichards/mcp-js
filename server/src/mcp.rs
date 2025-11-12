@@ -11,7 +11,10 @@ use std::sync::Once;
 use v8::{self};
 
 pub(crate) mod heap_storage;
+pub(crate) mod resource_storage;
 use crate::mcp::heap_storage::{HeapStorage, AnyHeapStorage};
+use crate::mcp::resource_storage::{ResourceStorage, FileResourceStorage};
+use std::sync::Arc;
 
 
 
@@ -24,11 +27,234 @@ fn eval<'s>(scope: &mut v8::HandleScope<'s>, code: &str) -> Result<v8::Local<'s,
     Ok(scope.escape(r))
 }
 
+// Struct to hold resource storage for V8 callbacks
+struct IsolateData {
+    runtime_handle: tokio::runtime::Handle,
+    resource_storage: Arc<dyn ResourceStorage>,
+}
+
+// Helper to throw JavaScript errors
+fn throw_error(scope: &mut v8::HandleScope, message: &str) {
+    let error_msg = v8::String::new(scope, message).unwrap();
+    let error = v8::Exception::error(scope, error_msg);
+    scope.throw_exception(error);
+}
+
+// V8 callback for resource.read(uri)
+fn resource_read_callback(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let isolate_data = match scope.get_slot::<Arc<IsolateData>>() {
+        Some(data) => data.clone(),
+        None => {
+            throw_error(scope, "Internal error: isolate data not found");
+            return;
+        }
+    };
+
+    let uri = match args.get(0).to_string(scope) {
+        Some(s) => s.to_rust_string_lossy(scope),
+        None => {
+            throw_error(scope, "resource.read(): URI string required as first argument");
+            return;
+        }
+    };
+
+    let storage = isolate_data.resource_storage.clone();
+    let result = isolate_data.runtime_handle.block_on(async {
+        storage.read(&uri).await
+    });
+
+    match result {
+        Ok(content) => {
+            let v8_str = v8::String::new(scope, &content).unwrap();
+            rv.set(v8_str.into());
+        }
+        Err(e) => throw_error(scope, &format!("resource.read() failed: {}", e)),
+    }
+}
+
+// V8 callback for resource.list(uri)
+fn resource_list_callback(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let isolate_data = match scope.get_slot::<Arc<IsolateData>>() {
+        Some(data) => data.clone(),
+        None => {
+            throw_error(scope, "Internal error: isolate data not found");
+            return;
+        }
+    };
+
+    let uri = match args.get(0).to_string(scope) {
+        Some(s) => s.to_rust_string_lossy(scope),
+        None => {
+            throw_error(scope, "resource.list(): URI string required as first argument");
+            return;
+        }
+    };
+
+    let storage = isolate_data.resource_storage.clone();
+    let result = isolate_data.runtime_handle.block_on(async {
+        storage.list(&uri).await
+    });
+
+    match result {
+        Ok(entries) => {
+            let array = v8::Array::new(scope, entries.len() as i32);
+            for (i, entry) in entries.iter().enumerate() {
+                let v8_str = v8::String::new(scope, entry).unwrap();
+                array.set_index(scope, i as u32, v8_str.into());
+            }
+            rv.set(array.into());
+        }
+        Err(e) => throw_error(scope, &format!("resource.list() failed: {}", e)),
+    }
+}
+
+// V8 callback for resource.write(uri, content)
+fn resource_write_callback(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let isolate_data = match scope.get_slot::<Arc<IsolateData>>() {
+        Some(data) => data.clone(),
+        None => {
+            throw_error(scope, "Internal error: isolate data not found");
+            return;
+        }
+    };
+
+    let uri = match args.get(0).to_string(scope) {
+        Some(s) => s.to_rust_string_lossy(scope),
+        None => {
+            throw_error(scope, "resource.write(): URI string required as first argument");
+            return;
+        }
+    };
+
+    let content = match args.get(1).to_string(scope) {
+        Some(s) => s.to_rust_string_lossy(scope),
+        None => {
+            throw_error(scope, "resource.write(): content string required as second argument");
+            return;
+        }
+    };
+
+    let storage = isolate_data.resource_storage.clone();
+    let result = isolate_data.runtime_handle.block_on(async {
+        storage.write(&uri, &content).await
+    });
+
+    match result {
+        Ok(()) => {
+            let success = v8::Boolean::new(scope, true);
+            rv.set(success.into());
+        }
+        Err(e) => throw_error(scope, &format!("resource.write() failed: {}", e)),
+    }
+}
+
+// V8 callback for resource.delete(uri)
+fn resource_delete_callback(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let isolate_data = match scope.get_slot::<Arc<IsolateData>>() {
+        Some(data) => data.clone(),
+        None => {
+            throw_error(scope, "Internal error: isolate data not found");
+            return;
+        }
+    };
+
+    let uri = match args.get(0).to_string(scope) {
+        Some(s) => s.to_rust_string_lossy(scope),
+        None => {
+            throw_error(scope, "resource.delete(): URI string required as first argument");
+            return;
+        }
+    };
+
+    let storage = isolate_data.resource_storage.clone();
+    let result = isolate_data.runtime_handle.block_on(async {
+        storage.delete(&uri).await
+    });
+
+    match result {
+        Ok(()) => {
+            let success = v8::Boolean::new(scope, true);
+            rv.set(success.into());
+        }
+        Err(e) => throw_error(scope, &format!("resource.delete() failed: {}", e)),
+    }
+}
+
+// Helper function to create a V8 context with resource functions
+fn create_context_with_resources<'s>(
+    scope: &mut v8::HandleScope<'s, ()>,
+) -> v8::Local<'s, v8::Context> {
+    // Create an object template for the global object
+    let global_template = v8::ObjectTemplate::new(scope);
+
+    // Create the 'resource' object template
+    let resource_obj_template = v8::ObjectTemplate::new(scope);
+
+    // Add resource methods
+    let read_fn = v8::FunctionTemplate::new(scope, resource_read_callback);
+    resource_obj_template.set(
+        v8::String::new(scope, "read").unwrap().into(),
+        read_fn.into(),
+    );
+
+    let list_fn = v8::FunctionTemplate::new(scope, resource_list_callback);
+    resource_obj_template.set(
+        v8::String::new(scope, "list").unwrap().into(),
+        list_fn.into(),
+    );
+
+    let write_fn = v8::FunctionTemplate::new(scope, resource_write_callback);
+    resource_obj_template.set(
+        v8::String::new(scope, "write").unwrap().into(),
+        write_fn.into(),
+    );
+
+    let delete_fn = v8::FunctionTemplate::new(scope, resource_delete_callback);
+    resource_obj_template.set(
+        v8::String::new(scope, "delete").unwrap().into(),
+        delete_fn.into(),
+    );
+
+    // Add 'resource' to global
+    global_template.set(
+        v8::String::new(scope, "resource").unwrap().into(),
+        resource_obj_template.into(),
+    );
+
+    // Create context with custom global template
+    v8::Context::new_from_template(scope, global_template)
+}
+
 // Execute JS in a stateless isolate (no snapshot creation)
-fn execute_stateless(code: String) -> Result<String, String> {
+fn execute_stateless(code: String, resource_storage: Arc<dyn ResourceStorage>) -> Result<String, String> {
     let isolate = &mut v8::Isolate::new(Default::default());
+
+    // Set up isolate data for resource callbacks
+    let runtime_handle = tokio::runtime::Handle::current();
+    let isolate_data = Arc::new(IsolateData {
+        runtime_handle,
+        resource_storage,
+    });
+    isolate.set_slot(isolate_data);
+
     let scope = &mut v8::HandleScope::new(isolate);
-    let context = v8::Context::new(scope, Default::default());
+    let context = create_context_with_resources(scope);
     let scope = &mut v8::ContextScope::new(scope, context);
 
     let result = eval(scope, &code)?;
@@ -39,7 +265,7 @@ fn execute_stateless(code: String) -> Result<String, String> {
 }
 
 // Execute JS with snapshot support (preserves heap state)
-fn execute_stateful(code: String, snapshot: Option<Vec<u8>>) -> Result<(String, Vec<u8>), String> {
+fn execute_stateful(code: String, snapshot: Option<Vec<u8>>, resource_storage: Arc<dyn ResourceStorage>) -> Result<(String, Vec<u8>), String> {
     let mut snapshot_creator = match snapshot {
         Some(snapshot) => {
             eprintln!("creating isolate from snapshot...");
@@ -51,10 +277,18 @@ fn execute_stateful(code: String, snapshot: Option<Vec<u8>>) -> Result<(String, 
         }
     };
 
+    // Set up isolate data for resource callbacks
+    let runtime_handle = tokio::runtime::Handle::current();
+    let isolate_data = Arc::new(IsolateData {
+        runtime_handle,
+        resource_storage,
+    });
+    snapshot_creator.set_slot(isolate_data);
+
     let mut output_result: Result<String, String> = Err("Unknown error".to_string());
     {
         let scope = &mut v8::HandleScope::new(&mut snapshot_creator);
-        let context = v8::Context::new(scope, Default::default());
+        let context = create_context_with_resources(scope);
         let scope = &mut v8::ContextScope::new(scope, context);
         let result = eval(scope, &code);
         match result {
@@ -111,11 +345,14 @@ pub trait DataService: Send + Sync + 'static {
 #[derive(Clone)]
 pub struct StatefulService {
     heap_storage: AnyHeapStorage,
+    resource_storage: Arc<dyn ResourceStorage>,
 }
 
 // Stateless service without heap persistence
 #[derive(Clone)]
-pub struct StatelessService;
+pub struct StatelessService {
+    resource_storage: Arc<dyn ResourceStorage>,
+}
 
 // response to run_js (stateful - with heap)
 #[derive(Debug, Clone)]
@@ -156,14 +393,15 @@ impl IntoContents for RunJsStatelessResponse {
 // Stateless service implementation
 #[tool(tool_box)]
 impl StatelessService {
-    pub fn new() -> Self {
-        Self
+    pub fn new(resource_storage: Arc<dyn ResourceStorage>) -> Self {
+        Self { resource_storage }
     }
 
     /// Execute JavaScript code in a fresh, stateless V8 isolate. Each execution starts with a clean environment.
     #[tool(description = include_str!("run_js_tool_stateless.md"))]
     pub async fn run_js(&self, #[tool(param)] code: String) -> RunJsStatelessResponse {
-        let v8_result = tokio::task::spawn_blocking(move || execute_stateless(code)).await;
+        let resource_storage = self.resource_storage.clone();
+        let v8_result = tokio::task::spawn_blocking(move || execute_stateless(code, resource_storage)).await;
 
         match v8_result {
             Ok(Ok(output)) => RunJsStatelessResponse { output },
@@ -180,15 +418,16 @@ impl StatelessService {
 // Stateful service implementation
 #[tool(tool_box)]
 impl StatefulService {
-    pub fn new(heap_storage: AnyHeapStorage) -> Self {
-        Self { heap_storage }
+    pub fn new(heap_storage: AnyHeapStorage, resource_storage: Arc<dyn ResourceStorage>) -> Self {
+        Self { heap_storage, resource_storage }
     }
 
     /// Execute JavaScript code with heap persistence. The heap parameter identifies the execution context.
     #[tool(description = include_str!("run_js_tool_description.md"))]
     pub async fn run_js(&self, #[tool(param)] code: String, #[tool(param)] heap: String) -> RunJsStatefulResponse {
         let snapshot = self.heap_storage.get(&heap).await.ok();
-        let v8_result = tokio::task::spawn_blocking(move || execute_stateful(code, snapshot)).await;
+        let resource_storage = self.resource_storage.clone();
+        let v8_result = tokio::task::spawn_blocking(move || execute_stateful(code, snapshot, resource_storage)).await;
 
         match v8_result {
             Ok(Ok((output, startup_data))) => {

@@ -5,6 +5,7 @@ A Rust-based Model Context Protocol (MCP) server that exposes a V8 JavaScript ru
 ## Features
 
 - **V8 JavaScript Execution**: Run arbitrary JavaScript code in a secure, isolated V8 engine.
+- **Resource Functions**: Built-in file system operations (`resource.read()`, `resource.list()`, `resource.write()`, `resource.delete()`) for managed file access within JavaScript.
 - **Heap Snapshots**: Persist and restore V8 heap state between runs, supporting both S3 and local file storage.
 - **Stateless Mode**: Optional mode for fresh executions without heap persistence, ideal for serverless environments.
 - **MCP Protocol**: Implements the Model Context Protocol for seamless tool integration with Claude, Cursor, and other MCP clients.
@@ -32,6 +33,7 @@ This will automatically download and install the latest release for your platfor
 - `--s3-bucket <bucket>`: Use AWS S3 for heap snapshots. Specify the S3 bucket name. (Conflicts with `--stateless`)
 - `--directory-path <path>`: Use a local directory for heap snapshots. Specify the directory path. (Conflicts with `--stateless`)
 - `--stateless`: Run in stateless mode - no heap snapshots are saved or loaded. Each JavaScript execution starts with a fresh V8 isolate. (Conflicts with `--s3-bucket` and `--directory-path`)
+- `--resource-directory <path>`: Directory path for resource storage (file system access from JavaScript). Defaults to `/tmp/mcp-v8-resources`.
 - `--http-port <port>`: Enable HTTP transport on the specified port. If not provided, the server uses stdio transport (default).
 - `--sse-port <port>`: Enable SSE (Server-Sent Events) transport on the specified port. (Conflicts with `--http-port`)
 
@@ -197,6 +199,69 @@ Then test by running `claude` and asking: "Run this JavaScript: `[1,2,3].map(x =
 - Ask Claude or Cursor: "Run this JavaScript: `1 + 2`"
 - Use heap snapshots to persist state between runs.
 
+## Resource Functions
+
+The V8 runtime includes built-in resource functions for managed file system access. These functions are available globally in your JavaScript code and operate within a sandboxed directory.
+
+### Available Functions
+
+#### `resource.read(uri)`
+Read the contents of a file.
+
+```javascript
+// Read a file
+const content = resource.read("data/example.txt");
+// or with file:// URI scheme
+const content = resource.read("file:///data/example.txt");
+```
+
+#### `resource.list(uri)`
+List files and directories in a directory.
+
+```javascript
+// List files in a directory
+const files = resource.list("data");
+// Returns: ["file1.txt", "file2.txt", "subdir"]
+```
+
+#### `resource.write(uri, content)`
+Write content to a file (creates parent directories if needed).
+
+```javascript
+// Write to a file
+resource.write("data/output.txt", "Hello, world!");
+```
+
+#### `resource.delete(uri)`
+Delete a file or directory.
+
+```javascript
+// Delete a file
+resource.delete("data/temp.txt");
+```
+
+### Security
+
+- All file operations are sandboxed to the directory specified by `--resource-directory` (default: `/tmp/mcp-v8-resources`)
+- Path traversal attempts (e.g., `../../../etc/passwd`) are blocked
+- URIs can use `file://` scheme or relative paths
+
+### Example
+
+```javascript
+// Write some data
+resource.write("users/alice.json", JSON.stringify({ name: "Alice", age: 30 }));
+
+// Read it back
+const data = JSON.parse(resource.read("users/alice.json"));
+
+// List files
+const files = resource.list("users");
+
+// Clean up
+resource.delete("users/alice.json");
+```
+
 ## Heap Storage Options
 
 You can configure heap storage using the following command line arguments:
@@ -218,12 +283,12 @@ You can configure heap storage using the following command line arguments:
 
 ## Limitations
 
-While `mcp-v8` provides a powerful and persistent JavaScript execution environment, there are limitations to its runtime. 
+While `mcp-v8` provides a powerful and persistent JavaScript execution environment, there are limitations to its runtime.
 
 - **No `async`/`await` or Promises**: Asynchronous JavaScript is not supported. All code must be synchronous.
 - **No `fetch` or network access**: There is no built-in way to make HTTP requests or access the network.
 - **No `console.log` or standard output**: Output from `console.log` or similar functions will not appear. To return results, ensure the value you want is the last line of your code.
-- **No file system access**: The runtime does not provide access to the local file system or environment variables.
+- **Sandboxed file system access**: File operations via `resource.*` functions are restricted to the configured resource directory. See [Resource Functions](#resource-functions) for details.
 - **No `npm install` or external packages**: You cannot install or import npm packages. Only standard JavaScript (ECMAScript) built-ins are available.
 - **No timers**: Functions like `setTimeout` and `setInterval` are not available.
 - **No DOM or browser APIs**: This is not a browser environment; there is no access to `window`, `document`, or other browser-specific objects.
