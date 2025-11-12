@@ -237,8 +237,12 @@ fn create_context_with_resources<'s>(
         resource_obj_template.into(),
     );
 
-    // Create context with custom global template
-    v8::Context::new(scope, global_template)
+    // Create context with custom global template using ContextOptions
+    let context_options = v8::ContextOptions {
+        global_template: Some(global_template),
+        ..Default::default()
+    };
+    v8::Context::new(scope, context_options)
 }
 
 // Execute JS in a stateless isolate (no snapshot creation)
