@@ -246,11 +246,10 @@ fn create_context_with_resources<'s>(
 }
 
 // Execute JS in a stateless isolate (no snapshot creation)
-fn execute_stateless(code: String, resource_storage: Arc<dyn ResourceStorage>) -> Result<String, String> {
+fn execute_stateless(code: String, resource_storage: Arc<dyn ResourceStorage>, runtime_handle: tokio::runtime::Handle) -> Result<String, String> {
     let isolate = &mut v8::Isolate::new(Default::default());
 
     // Set up isolate data for resource callbacks
-    let runtime_handle = tokio::runtime::Handle::current();
     let isolate_data = Arc::new(IsolateData {
         runtime_handle,
         resource_storage,
@@ -269,7 +268,7 @@ fn execute_stateless(code: String, resource_storage: Arc<dyn ResourceStorage>) -
 }
 
 // Execute JS with snapshot support (preserves heap state)
-fn execute_stateful(code: String, snapshot: Option<Vec<u8>>, resource_storage: Arc<dyn ResourceStorage>) -> Result<(String, Vec<u8>), String> {
+fn execute_stateful(code: String, snapshot: Option<Vec<u8>>, resource_storage: Arc<dyn ResourceStorage>, runtime_handle: tokio::runtime::Handle) -> Result<(String, Vec<u8>), String> {
     let mut snapshot_creator = match snapshot {
         Some(snapshot) => {
             eprintln!("creating isolate from snapshot...");
@@ -282,7 +281,6 @@ fn execute_stateful(code: String, snapshot: Option<Vec<u8>>, resource_storage: A
     };
 
     // Set up isolate data for resource callbacks
-    let runtime_handle = tokio::runtime::Handle::current();
     let isolate_data = Arc::new(IsolateData {
         runtime_handle,
         resource_storage,
@@ -405,7 +403,8 @@ impl StatelessService {
     #[tool(description = include_str!("run_js_tool_stateless.md"))]
     pub async fn run_js(&self, #[tool(param)] code: String) -> RunJsStatelessResponse {
         let resource_storage = self.resource_storage.clone();
-        let v8_result = tokio::task::spawn_blocking(move || execute_stateless(code, resource_storage)).await;
+        let runtime_handle = tokio::runtime::Handle::current();
+        let v8_result = tokio::task::spawn_blocking(move || execute_stateless(code, resource_storage, runtime_handle)).await;
 
         match v8_result {
             Ok(Ok(output)) => RunJsStatelessResponse { output },
@@ -431,7 +430,8 @@ impl StatefulService {
     pub async fn run_js(&self, #[tool(param)] code: String, #[tool(param)] heap: String) -> RunJsStatefulResponse {
         let snapshot = self.heap_storage.get(&heap).await.ok();
         let resource_storage = self.resource_storage.clone();
-        let v8_result = tokio::task::spawn_blocking(move || execute_stateful(code, snapshot, resource_storage)).await;
+        let runtime_handle = tokio::runtime::Handle::current();
+        let v8_result = tokio::task::spawn_blocking(move || execute_stateful(code, snapshot, resource_storage, runtime_handle)).await;
 
         match v8_result {
             Ok(Ok((output, startup_data))) => {
