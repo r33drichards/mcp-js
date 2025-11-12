@@ -183,53 +183,53 @@ fn resource_delete_callback(
     }
 }
 
-// Helper function to create a V8 context with resource functions
-fn create_context_with_resources<'s>(
-    scope: &mut v8::HandleScope<'s, ()>,
-) -> v8::Local<'s, v8::Context> {
-    // Create an object template for the global object
-    let global_template = v8::ObjectTemplate::new(scope);
+// Helper function to add resource functions to a context's global object
+// This must be done AFTER context creation because native callbacks cannot be serialized in snapshots
+fn add_resource_functions_to_context<'s>(
+    scope: &mut v8::HandleScope<'s>,
+    context: v8::Local<'s, v8::Context>,
+) {
+    let scope = &mut v8::ContextScope::new(scope, context);
 
-    // Create the 'resource' object template
-    let resource_obj_template = v8::ObjectTemplate::new(scope);
+    // Create the 'resource' object
+    let resource_obj = v8::Object::new(scope);
 
-    // Add resource methods
-    let read_fn = v8::FunctionTemplate::new(scope, resource_read_callback);
-    resource_obj_template.set(
-        v8::String::new(scope, "read").unwrap().into(),
-        read_fn.into(),
-    );
+    // Create and add read function
+    let read_fn_name = v8::String::new(scope, "read").unwrap();
+    let read_fn_template = v8::FunctionTemplate::new(scope, resource_read_callback);
+    let read_fn = read_fn_template
+        .get_function(scope)
+        .expect("Failed to create read function");
+    resource_obj.set(scope, read_fn_name.into(), read_fn.into());
 
-    let list_fn = v8::FunctionTemplate::new(scope, resource_list_callback);
-    resource_obj_template.set(
-        v8::String::new(scope, "list").unwrap().into(),
-        list_fn.into(),
-    );
+    // Create and add list function
+    let list_fn_name = v8::String::new(scope, "list").unwrap();
+    let list_fn_template = v8::FunctionTemplate::new(scope, resource_list_callback);
+    let list_fn = list_fn_template
+        .get_function(scope)
+        .expect("Failed to create list function");
+    resource_obj.set(scope, list_fn_name.into(), list_fn.into());
 
-    let write_fn = v8::FunctionTemplate::new(scope, resource_write_callback);
-    resource_obj_template.set(
-        v8::String::new(scope, "write").unwrap().into(),
-        write_fn.into(),
-    );
+    // Create and add write function
+    let write_fn_name = v8::String::new(scope, "write").unwrap();
+    let write_fn_template = v8::FunctionTemplate::new(scope, resource_write_callback);
+    let write_fn = write_fn_template
+        .get_function(scope)
+        .expect("Failed to create write function");
+    resource_obj.set(scope, write_fn_name.into(), write_fn.into());
 
-    let delete_fn = v8::FunctionTemplate::new(scope, resource_delete_callback);
-    resource_obj_template.set(
-        v8::String::new(scope, "delete").unwrap().into(),
-        delete_fn.into(),
-    );
+    // Create and add delete function
+    let delete_fn_name = v8::String::new(scope, "delete").unwrap();
+    let delete_fn_template = v8::FunctionTemplate::new(scope, resource_delete_callback);
+    let delete_fn = delete_fn_template
+        .get_function(scope)
+        .expect("Failed to create delete function");
+    resource_obj.set(scope, delete_fn_name.into(), delete_fn.into());
 
-    // Add 'resource' to global
-    global_template.set(
-        v8::String::new(scope, "resource").unwrap().into(),
-        resource_obj_template.into(),
-    );
-
-    // Create context with custom global template using ContextOptions
-    let context_options = v8::ContextOptions {
-        global_template: Some(global_template),
-        ..Default::default()
-    };
-    v8::Context::new(scope, context_options)
+    // Add 'resource' object to global
+    let global = context.global(scope);
+    let resource_key = v8::String::new(scope, "resource").unwrap();
+    global.set(scope, resource_key.into(), resource_obj.into());
 }
 
 // Execute JS in a stateless isolate (no snapshot creation)
@@ -243,7 +243,11 @@ fn execute_stateless(code: String, resource_storage: Arc<dyn ResourceStorage>) -
     isolate.set_slot(isolate_data);
 
     let scope = &mut v8::HandleScope::new(isolate);
-    let context = create_context_with_resources(scope);
+    let context = v8::Context::new(scope);
+
+    // Add resource functions to the context (must be done after context creation)
+    add_resource_functions_to_context(scope, context);
+
     let scope = &mut v8::ContextScope::new(scope, context);
 
     let result = eval(scope, &code)?;
@@ -275,7 +279,11 @@ fn execute_stateful(code: String, snapshot: Option<Vec<u8>>, resource_storage: A
     let mut output_result: Result<String, String> = Err("Unknown error".to_string());
     {
         let scope = &mut v8::HandleScope::new(&mut snapshot_creator);
-        let context = create_context_with_resources(scope);
+        let context = v8::Context::new(scope);
+
+        // Add resource functions to the context (must be done after context creation)
+        add_resource_functions_to_context(scope, context);
+
         let scope = &mut v8::ContextScope::new(scope, context);
         let result = eval(scope, &code);
         match result {
