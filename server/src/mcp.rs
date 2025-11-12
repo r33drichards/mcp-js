@@ -8,12 +8,16 @@ use serde_json::json;
 
 
 use std::sync::Once;
+use std::cell::RefCell;
 use v8::{self};
 
 pub(crate) mod heap_storage;
 use crate::mcp::heap_storage::{HeapStorage, AnyHeapStorage};
 
-
+// Thread-local storage for console.log output
+thread_local! {
+    static CONSOLE_LOGS: RefCell<Vec<String>> = RefCell::new(Vec::new());
+}
 
 
 fn eval<'s>(scope: &mut v8::HandleScope<'s>, code: &str) -> Result<v8::Local<'s, v8::Value>, String> {
@@ -24,22 +28,91 @@ fn eval<'s>(scope: &mut v8::HandleScope<'s>, code: &str) -> Result<v8::Local<'s,
     Ok(scope.escape(r))
 }
 
+// Console.log callback function
+fn console_log(
+    scope: &mut v8::HandleScope,
+    args: v8::FunctionCallbackArguments,
+    _retval: v8::ReturnValue,
+) {
+    let mut output = Vec::new();
+    for i in 0..args.length() {
+        if i > 0 {
+            output.push(" ".to_string());
+        }
+        let arg = args.get(i);
+        let str_val = arg.to_string(scope)
+            .map(|s| s.to_rust_string_lossy(scope))
+            .unwrap_or_else(|| "[object]".to_string());
+        output.push(str_val);
+    }
+    let log_line = output.join("");
+    CONSOLE_LOGS.with(|logs| {
+        logs.borrow_mut().push(log_line);
+    });
+}
+
+// Create a global template with console.log support
+fn create_global_template<'s>(
+    scope: &mut v8::HandleScope<'s, ()>,
+) -> v8::Local<'s, v8::ObjectTemplate> {
+    let global = v8::ObjectTemplate::new(scope);
+
+    // Create console object
+    let console = v8::ObjectTemplate::new(scope);
+
+    // Add console.log method
+    let log_fn = v8::FunctionTemplate::new(scope, console_log);
+    let log_name = v8::String::new(scope, "log").unwrap();
+    console.set(log_name.into(), log_fn.into());
+
+    // Attach console to global
+    let console_name = v8::String::new(scope, "console").unwrap();
+    global.set(console_name.into(), console.into());
+
+    global
+}
+
 // Execute JS in a stateless isolate (no snapshot creation)
 fn execute_stateless(code: String) -> Result<String, String> {
+    // Clear console logs before execution
+    CONSOLE_LOGS.with(|logs| {
+        logs.borrow_mut().clear();
+    });
+
     let isolate = &mut v8::Isolate::new(Default::default());
     let scope = &mut v8::HandleScope::new(isolate);
-    let context = v8::Context::new(scope, Default::default());
+    let global_template = create_global_template(scope);
+    let context = v8::Context::new(scope, v8::ContextOptions {
+        global_template: Some(global_template),
+        ..Default::default()
+    });
     let scope = &mut v8::ContextScope::new(scope, context);
 
     let result = eval(scope, &code)?;
-    match result.to_string(scope) {
-        Some(s) => Ok(s.to_rust_string_lossy(scope)),
-        None => Err("Failed to convert result to string".to_string()),
+    let result_str = match result.to_string(scope) {
+        Some(s) => s.to_rust_string_lossy(scope),
+        None => return Err("Failed to convert result to string".to_string()),
+    };
+
+    // Retrieve console logs and combine with result
+    let logs = CONSOLE_LOGS.with(|logs| {
+        logs.borrow().join("\n")
+    });
+
+    if logs.is_empty() {
+        Ok(result_str)
+    } else {
+        Ok(format!("{}\n{}", logs, result_str))
     }
 }
 
 // Execute JS with snapshot support (preserves heap state)
 fn execute_stateful(code: String, snapshot: Option<Vec<u8>>) -> Result<(String, Vec<u8>), String> {
+    // Clear console logs before execution
+    CONSOLE_LOGS.with(|logs| {
+        logs.borrow_mut().clear();
+    });
+
     let mut snapshot_creator = match snapshot {
         Some(snapshot) => {
             eprintln!("creating isolate from snapshot...");
@@ -54,7 +127,11 @@ fn execute_stateful(code: String, snapshot: Option<Vec<u8>>) -> Result<(String, 
     let mut output_result: Result<String, String> = Err("Unknown error".to_string());
     {
         let scope = &mut v8::HandleScope::new(&mut snapshot_creator);
-        let context = v8::Context::new(scope, Default::default());
+        let global_template = create_global_template(scope);
+        let context = v8::Context::new(scope, v8::ContextOptions {
+            global_template: Some(global_template),
+            ..Default::default()
+        });
         let scope = &mut v8::ContextScope::new(scope, context);
         let result = eval(scope, &code);
         match result {
@@ -64,7 +141,17 @@ fn execute_stateful(code: String, snapshot: Option<Vec<u8>>) -> Result<(String, 
                     .ok_or_else(|| "Failed to convert result to string".to_string());
                 match result_str {
                     Ok(s) => {
-                        output_result = Ok(s.to_rust_string_lossy(scope));
+                        let result_str = s.to_rust_string_lossy(scope);
+                        // Retrieve console logs and combine with result
+                        let logs = CONSOLE_LOGS.with(|logs| {
+                            logs.borrow().join("\n")
+                        });
+                        let combined_output = if logs.is_empty() {
+                            result_str
+                        } else {
+                            format!("{}\n{}", logs, result_str)
+                        };
+                        output_result = Ok(combined_output);
                     }
                     Err(e) => {
                         output_result = Err(e);
