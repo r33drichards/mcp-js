@@ -49,3 +49,16 @@ pub fn create_temp_heap_dir() -> String {
 pub fn cleanup_heap_dir(dir: &str) {
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// Create a temporary directory for resource storage
+pub fn create_temp_resource_dir() -> String {
+    let temp_dir = std::env::temp_dir();
+    let resource_dir = temp_dir.join(format!("mcp-test-resources-{}", std::process::id()));
+    std::fs::create_dir_all(&resource_dir).ok();
+    resource_dir.to_string_lossy().to_string()
+}
+
+/// Clean up temporary resource directory
+pub fn cleanup_resource_dir(dir: &str) {
+    let _ = std::fs::remove_dir_all(dir);
+}

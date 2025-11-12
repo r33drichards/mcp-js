@@ -40,6 +40,29 @@ impl StdioServer {
         })
     }
 
+    /// Start a new stdio MCP server with custom resource directory
+    async fn start_with_resources(heap_dir: &str, resource_dir: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        let mut child = Command::new(env!("CARGO"))
+            .args(&["run", "--", "--directory-path", heap_dir, "--resource-directory", resource_dir])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()) // Suppress server logs during tests
+            .spawn()?;
+
+        let stdin = child.stdin.take().expect("Failed to get stdin");
+        let stdout = child.stdout.take().expect("Failed to get stdout");
+        let stdout = BufReader::new(stdout);
+
+        // Give server time to initialize
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        Ok(StdioServer {
+            child,
+            stdin,
+            stdout,
+        })
+    }
+
     /// Send a message to the server and read the response
     async fn send_message(&mut self, message: Value) -> Result<Value, Box<dyn std::error::Error>> {
         // Serialize message as newline-delimited JSON
@@ -561,5 +584,513 @@ async fn test_stdio_graceful_shutdown() -> Result<(), Box<dyn std::error::Error>
     server.stop().await;
 
     common::cleanup_heap_dir(&heap_dir);
+    Ok(())
+}
+// ==================== Resource Function Tests ====================
+
+/// Test resource.write() and resource.read()
+#[tokio::test]
+async fn test_stdio_resource_write_and_read() -> Result<(), Box<dyn std::error::Error>> {
+    let heap_dir = common::create_temp_heap_dir();
+    let resource_dir = common::create_temp_resource_dir();
+    let mut server = StdioServer::start_with_resources(&heap_dir, &resource_dir).await?;
+
+    // Initialize
+    let initialize_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {
+                "name": "stdio-e2e-test",
+                "version": "1.0.0"
+            }
+        }
+    });
+    server.send_message(initialize_msg).await?;
+
+    // Write a file using resource.write()
+    let write_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "run_js",
+            "arguments": {
+                "code": "resource.write('test.txt', 'Hello, World!'); 'written'",
+                "heap": "resource-test-heap"
+            }
+        }
+    });
+
+    let response = server.send_message(write_msg).await?;
+    assert!(response["result"].is_object(), "Write should succeed");
+    let content_str = serde_json::to_string(&response["result"]["content"])?;
+    assert!(content_str.contains("written"), "Should return 'written'");
+
+    // Read the file using resource.read()
+    let read_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": {
+            "name": "run_js",
+            "arguments": {
+                "code": "resource.read('test.txt')",
+                "heap": "resource-test-heap"
+            }
+        }
+    });
+
+    let response2 = server.send_message(read_msg).await?;
+    assert!(response2["result"].is_object(), "Read should succeed");
+    let content_str2 = serde_json::to_string(&response2["result"]["content"])?;
+    assert!(content_str2.contains("Hello, World!"), "Should read back the written content");
+
+    server.stop().await;
+    common::cleanup_heap_dir(&heap_dir);
+    common::cleanup_resource_dir(&resource_dir);
+    Ok(())
+}
+
+/// Test resource.list()
+#[tokio::test]
+async fn test_stdio_resource_list() -> Result<(), Box<dyn std::error::Error>> {
+    let heap_dir = common::create_temp_heap_dir();
+    let resource_dir = common::create_temp_resource_dir();
+    let mut server = StdioServer::start_with_resources(&heap_dir, &resource_dir).await?;
+
+    // Initialize
+    let initialize_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {
+                "name": "stdio-e2e-test",
+                "version": "1.0.0"
+            }
+        }
+    });
+    server.send_message(initialize_msg).await?;
+
+    // Create multiple files
+    let create_files_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "run_js",
+            "arguments": {
+                "code": r#"
+                    resource.write('file1.txt', 'content1');
+                    resource.write('file2.txt', 'content2');
+                    resource.write('file3.txt', 'content3');
+                    'created'
+                "#,
+                "heap": "resource-test-heap"
+            }
+        }
+    });
+    server.send_message(create_files_msg).await?;
+
+    // List files
+    let list_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": {
+            "name": "run_js",
+            "arguments": {
+                "code": "JSON.stringify(resource.list('/'))",
+                "heap": "resource-test-heap"
+            }
+        }
+    });
+
+    let response = server.send_message(list_msg).await?;
+    assert!(response["result"].is_object(), "List should succeed");
+    let content_str = serde_json::to_string(&response["result"]["content"])?;
+    assert!(content_str.contains("file1.txt"), "Should list file1.txt");
+    assert!(content_str.contains("file2.txt"), "Should list file2.txt");
+    assert!(content_str.contains("file3.txt"), "Should list file3.txt");
+
+    server.stop().await;
+    common::cleanup_heap_dir(&heap_dir);
+    common::cleanup_resource_dir(&resource_dir);
+    Ok(())
+}
+
+/// Test resource.delete()
+#[tokio::test]
+async fn test_stdio_resource_delete() -> Result<(), Box<dyn std::error::Error>> {
+    let heap_dir = common::create_temp_heap_dir();
+    let resource_dir = common::create_temp_resource_dir();
+    let mut server = StdioServer::start_with_resources(&heap_dir, &resource_dir).await?;
+
+    // Initialize
+    let initialize_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {
+                "name": "stdio-e2e-test",
+                "version": "1.0.0"
+            }
+        }
+    });
+    server.send_message(initialize_msg).await?;
+
+    // Create a file
+    let write_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "run_js",
+            "arguments": {
+                "code": "resource.write('to-delete.txt', 'temporary'); 'written'",
+                "heap": "resource-test-heap"
+            }
+        }
+    });
+    server.send_message(write_msg).await?;
+
+    // Delete the file
+    let delete_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": {
+            "name": "run_js",
+            "arguments": {
+                "code": "resource.delete('to-delete.txt'); 'deleted'",
+                "heap": "resource-test-heap"
+            }
+        }
+    });
+
+    let response = server.send_message(delete_msg).await?;
+    assert!(response["result"].is_object(), "Delete should succeed");
+    let content_str = serde_json::to_string(&response["result"]["content"])?;
+    assert!(content_str.contains("deleted"), "Should return 'deleted'");
+
+    // Try to read the deleted file - should fail
+    let read_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 4,
+        "method": "tools/call",
+        "params": {
+            "name": "run_js",
+            "arguments": {
+                "code": "try { resource.read('to-delete.txt'); 'should-not-reach' } catch(e) { 'error-caught' }",
+                "heap": "resource-test-heap"
+            }
+        }
+    });
+
+    let response2 = server.send_message(read_msg).await?;
+    let content_str2 = serde_json::to_string(&response2["result"]["content"])?;
+    assert!(content_str2.contains("error-caught"), "Should throw error when reading deleted file");
+
+    server.stop().await;
+    common::cleanup_heap_dir(&heap_dir);
+    common::cleanup_resource_dir(&resource_dir);
+    Ok(())
+}
+
+/// Test resource functions with nested directories
+#[tokio::test]
+async fn test_stdio_resource_nested_directories() -> Result<(), Box<dyn std::error::Error>> {
+    let heap_dir = common::create_temp_heap_dir();
+    let resource_dir = common::create_temp_resource_dir();
+    let mut server = StdioServer::start_with_resources(&heap_dir, &resource_dir).await?;
+
+    // Initialize
+    let initialize_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {
+                "name": "stdio-e2e-test",
+                "version": "1.0.0"
+            }
+        }
+    });
+    server.send_message(initialize_msg).await?;
+
+    // Write to nested directory (should create parent dirs)
+    let write_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "run_js",
+            "arguments": {
+                "code": "resource.write('users/alice/profile.json', JSON.stringify({name: 'Alice'})); 'written'",
+                "heap": "resource-test-heap"
+            }
+        }
+    });
+
+    let response = server.send_message(write_msg).await?;
+    assert!(response["result"].is_object(), "Write to nested dir should succeed");
+
+    // Read from nested directory
+    let read_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": {
+            "name": "run_js",
+            "arguments": {
+                "code": "resource.read('users/alice/profile.json')",
+                "heap": "resource-test-heap"
+            }
+        }
+    });
+
+    let response2 = server.send_message(read_msg).await?;
+    let content_str = serde_json::to_string(&response2["result"]["content"])?;
+    assert!(content_str.contains("Alice"), "Should read nested file content");
+
+    // List directory
+    let list_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 4,
+        "method": "tools/call",
+        "params": {
+            "name": "run_js",
+            "arguments": {
+                "code": "JSON.stringify(resource.list('users/alice'))",
+                "heap": "resource-test-heap"
+            }
+        }
+    });
+
+    let response3 = server.send_message(list_msg).await?;
+    let content_str2 = serde_json::to_string(&response3["result"]["content"])?;
+    assert!(content_str2.contains("profile.json"), "Should list files in nested directory");
+
+    server.stop().await;
+    common::cleanup_heap_dir(&heap_dir);
+    common::cleanup_resource_dir(&resource_dir);
+    Ok(())
+}
+
+/// Test resource function error handling for invalid operations
+#[tokio::test]
+async fn test_stdio_resource_error_handling() -> Result<(), Box<dyn std::error::Error>> {
+    let heap_dir = common::create_temp_heap_dir();
+    let resource_dir = common::create_temp_resource_dir();
+    let mut server = StdioServer::start_with_resources(&heap_dir, &resource_dir).await?;
+
+    // Initialize
+    let initialize_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {
+                "name": "stdio-e2e-test",
+                "version": "1.0.0"
+            }
+        }
+    });
+    server.send_message(initialize_msg).await?;
+
+    // Try to read non-existent file
+    let read_missing_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "run_js",
+            "arguments": {
+                "code": "try { resource.read('nonexistent.txt'); 'should-not-reach' } catch(e) { 'error' }",
+                "heap": "resource-test-heap"
+            }
+        }
+    });
+
+    let response = server.send_message(read_missing_msg).await?;
+    let content_str = serde_json::to_string(&response["result"]["content"])?;
+    assert!(content_str.contains("error"), "Should throw error for non-existent file");
+
+    // Try to list non-existent directory
+    let list_missing_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": {
+            "name": "run_js",
+            "arguments": {
+                "code": "try { resource.list('nonexistent-dir'); 'should-not-reach' } catch(e) { 'error' }",
+                "heap": "resource-test-heap"
+            }
+        }
+    });
+
+    let response2 = server.send_message(list_missing_msg).await?;
+    let content_str2 = serde_json::to_string(&response2["result"]["content"])?;
+    assert!(content_str2.contains("error"), "Should throw error for non-existent directory");
+
+    server.stop().await;
+    common::cleanup_heap_dir(&heap_dir);
+    common::cleanup_resource_dir(&resource_dir);
+    Ok(())
+}
+
+/// Test resource function with file:// URI scheme
+#[tokio::test]
+async fn test_stdio_resource_file_uri_scheme() -> Result<(), Box<dyn std::error::Error>> {
+    let heap_dir = common::create_temp_heap_dir();
+    let resource_dir = common::create_temp_resource_dir();
+    let mut server = StdioServer::start_with_resources(&heap_dir, &resource_dir).await?;
+
+    // Initialize
+    let initialize_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {
+                "name": "stdio-e2e-test",
+                "version": "1.0.0"
+            }
+        }
+    });
+    server.send_message(initialize_msg).await?;
+
+    // Write using file:// URI
+    let write_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "run_js",
+            "arguments": {
+                "code": "resource.write('file:///test-uri.txt', 'URI test'); 'written'",
+                "heap": "resource-test-heap"
+            }
+        }
+    });
+
+    let response = server.send_message(write_msg).await?;
+    assert!(response["result"].is_object(), "Write with file:// URI should succeed");
+
+    // Read using file:// URI
+    let read_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": {
+            "name": "run_js",
+            "arguments": {
+                "code": "resource.read('file:///test-uri.txt')",
+                "heap": "resource-test-heap"
+            }
+        }
+    });
+
+    let response2 = server.send_message(read_msg).await?;
+    let content_str = serde_json::to_string(&response2["result"]["content"])?;
+    assert!(content_str.contains("URI test"), "Should read file with file:// URI");
+
+    server.stop().await;
+    common::cleanup_heap_dir(&heap_dir);
+    common::cleanup_resource_dir(&resource_dir);
+    Ok(())
+}
+
+/// Test complex resource operations with JSON data
+#[tokio::test]
+async fn test_stdio_resource_json_operations() -> Result<(), Box<dyn std::error::Error>> {
+    let heap_dir = common::create_temp_heap_dir();
+    let resource_dir = common::create_temp_resource_dir();
+    let mut server = StdioServer::start_with_resources(&heap_dir, &resource_dir).await?;
+
+    // Initialize
+    let initialize_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {
+                "name": "stdio-e2e-test",
+                "version": "1.0.0"
+            }
+        }
+    });
+    server.send_message(initialize_msg).await?;
+
+    // Write JSON data
+    let write_json_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "run_js",
+            "arguments": {
+                "code": r#"
+                    var users = [
+                        {id: 1, name: 'Alice', age: 30},
+                        {id: 2, name: 'Bob', age: 25},
+                        {id: 3, name: 'Charlie', age: 35}
+                    ];
+                    resource.write('users.json', JSON.stringify(users, null, 2));
+                    'written'
+                "#,
+                "heap": "resource-test-heap"
+            }
+        }
+    });
+
+    let response = server.send_message(write_json_msg).await?;
+    assert!(response["result"].is_object(), "Write JSON should succeed");
+
+    // Read and process JSON data
+    let read_process_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": {
+            "name": "run_js",
+            "arguments": {
+                "code": r#"
+                    var data = JSON.parse(resource.read('users.json'));
+                    var names = data.map(function(u) { return u.name; });
+                    JSON.stringify(names)
+                "#,
+                "heap": "resource-test-heap"
+            }
+        }
+    });
+
+    let response2 = server.send_message(read_process_msg).await?;
+    let content_str = serde_json::to_string(&response2["result"]["content"])?;
+    assert!(content_str.contains("Alice"), "Should process JSON data");
+    assert!(content_str.contains("Bob"), "Should process JSON data");
+    assert!(content_str.contains("Charlie"), "Should process JSON data");
+
+    server.stop().await;
+    common::cleanup_heap_dir(&heap_dir);
+    common::cleanup_resource_dir(&resource_dir);
     Ok(())
 }
