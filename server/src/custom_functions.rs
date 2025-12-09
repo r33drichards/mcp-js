@@ -25,8 +25,16 @@
 
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Mutex, LazyLock};
 use v8;
+
+/// External references for V8 snapshots - must include all native callbacks
+/// that might be referenced in snapshots
+static EXTERNAL_REFS: LazyLock<v8::ExternalReferences> = LazyLock::new(|| {
+    v8::ExternalReferences::new(&[v8::ExternalReference {
+        function: custom_function_callback.map_fn_to(),
+    }])
+});
 
 /// Type alias for custom function implementations
 ///
@@ -288,13 +296,20 @@ pub fn execute_with_custom_functions_stateful(
     // Register functions for this thread
     register_functions(functions);
 
+    // Get external references for snapshot support
+    let external_refs = &*EXTERNAL_REFS;
+
     let result = {
         let mut snapshot_creator = match snapshot {
             Some(snapshot) => {
-                v8::Isolate::snapshot_creator_from_existing_snapshot(snapshot, None, None)
+                v8::Isolate::snapshot_creator_from_existing_snapshot(
+                    snapshot,
+                    Some(external_refs),
+                    None,
+                )
             }
             None => {
-                v8::Isolate::snapshot_creator(Default::default(), Default::default())
+                v8::Isolate::snapshot_creator(Some(external_refs), Default::default())
             }
         };
 
