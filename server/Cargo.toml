@@ -3,6 +3,18 @@ name = "server"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "server"
+path = "src/main.rs"
+
+[[example]]
+name = "custom_functions"
+path = "examples/custom_functions.rs"
+
 [dependencies]
 anyhow = "1.0.98"
 axum = "0.8.4"
