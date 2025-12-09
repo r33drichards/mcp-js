@@ -11,9 +11,8 @@ use hyper_util::rt::TokioIo;
 use rmcp::transport::sse_server::{SseServer, SseServerConfig};
 use tokio_util::sync::CancellationToken;
 
-mod mcp;
-use mcp::{StatelessService, StatefulService, initialize_v8};
-use mcp::heap_storage::{AnyHeapStorage, S3HeapStorage, FileHeapStorage};
+use server::mcp::{StatelessService, StatefulService, initialize_v8};
+use server::mcp::heap_storage::{AnyHeapStorage, S3HeapStorage, FileHeapStorage};
 
 /// Command line arguments for configuring heap storage
 #[derive(Parser, Debug)]
