@@ -17,16 +17,12 @@ jobs:
 
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/flake-checker-action@main
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-directories: "server"
-
       - name: Build server
-        run: cd server && nix develop --command bash -c "cargo build"
+        run: nix develop --command bash -c "cd server && cargo build"
 
       - name: Run tests
-        run: cd server && nix develop --command bash -c "cargo test -- --test-threads=1"
+        run: nix develop --command bash -c "cd server && cargo test -- --test-threads=1"
 
       - name: Run tests with output
-        run: cd server && nix develop --command bash -c "cargo test -- --nocapture --test-threads=1"
+        run: nix develop --command bash -c "cd server && cargo test -- --nocapture --test-threads=1"
         if: failure()

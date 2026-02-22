@@ -50,7 +50,7 @@ jobs:
         run: nix develop --command rustup target add ${{ matrix.target }}
 
       - name: Build
-        run: cd server && nix develop --command ${{ matrix.build_cmd }}
+        run: nix develop --command bash -c "cd server && ${{ matrix.build_cmd }}"
 
       - name: Upload binary
         uses: actions/upload-artifact@v4
