@@ -9,7 +9,7 @@ on:
 jobs:
   fuzz:
     name: Fuzz V8 Unsafe Code
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, railway]
 
     strategy:
       fail-fast: false
