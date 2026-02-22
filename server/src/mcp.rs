@@ -10,13 +10,13 @@ use serde_json::json;
 use std::sync::Once;
 use v8::{self};
 
-pub(crate) mod heap_storage;
+pub mod heap_storage;
 use crate::mcp::heap_storage::{HeapStorage, AnyHeapStorage};
 
 
 
 
-fn eval<'s>(scope: &mut v8::HandleScope<'s>, code: &str) -> Result<v8::Local<'s, v8::Value>, String> {
+pub fn eval<'s>(scope: &mut v8::HandleScope<'s>, code: &str) -> Result<v8::Local<'s, v8::Value>, String> {
     let scope = &mut v8::EscapableHandleScope::new(scope);
     let source = v8::String::new(scope, code).ok_or("Failed to create V8 string")?;
     let script = v8::Script::compile(scope, source, None).ok_or("Failed to compile script")?;
@@ -25,7 +25,7 @@ fn eval<'s>(scope: &mut v8::HandleScope<'s>, code: &str) -> Result<v8::Local<'s,
 }
 
 // Execute JS in a stateless isolate (no snapshot creation)
-fn execute_stateless(code: String) -> Result<String, String> {
+pub fn execute_stateless(code: String) -> Result<String, String> {
     let isolate = &mut v8::Isolate::new(Default::default());
     let scope = &mut v8::HandleScope::new(isolate);
     let context = v8::Context::new(scope, Default::default());
@@ -39,7 +39,7 @@ fn execute_stateless(code: String) -> Result<String, String> {
 }
 
 // Execute JS with snapshot support (preserves heap state)
-fn execute_stateful(code: String, snapshot: Option<Vec<u8>>) -> Result<(String, Vec<u8>), String> {
+pub fn execute_stateful(code: String, snapshot: Option<Vec<u8>>) -> Result<(String, Vec<u8>), String> {
     let mut snapshot_creator = match snapshot {
         Some(snapshot) => {
             eprintln!("creating isolate from snapshot...");

@@ -3,10 +3,18 @@ name = "server"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "server"
+path = "src/main.rs"
+
 [dependencies]
 anyhow = "1.0.98"
 axum = "0.8.4"
-rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", branch = "main", features = ["transport-io", "transport-sse-server"] }
+rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", rev = "787cc015b719773f66d4ac32e695b9a0079e12ef", features = ["transport-io", "transport-sse-server"] }
 
 # rmcp = { version = "0.1.5", }
 serde = "1.0.219"

@@ -1,0 +1,1 @@
+try { undefined.x } catch(e) { e.message }
