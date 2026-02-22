@@ -40,8 +40,8 @@ struct Cli {
     #[arg(long, conflicts_with = "http_port")]
     sse_port: Option<u16>,
 
-    /// Maximum V8 heap memory per isolate in megabytes (default: 128)
-    #[arg(long, default_value = "128")]
+    /// Maximum V8 heap memory per isolate in megabytes (default: 8, max: 64)
+    #[arg(long, default_value = "8", value_parser = clap::value_parser!(usize).range(1..=64))]
     heap_memory_max: usize,
 }
 

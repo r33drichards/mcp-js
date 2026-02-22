@@ -24,7 +24,7 @@ pub fn eval<'s>(scope: &mut v8::HandleScope<'s>, code: &str) -> Result<v8::Local
     Ok(scope.escape(r))
 }
 
-pub const DEFAULT_HEAP_MEMORY_MAX_MB: usize = 128;
+pub const DEFAULT_HEAP_MEMORY_MAX_MB: usize = 8;
 
 /// Snapshot envelope: magic header + FNV-1a checksum + minimum size.
 ///
