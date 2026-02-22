@@ -81,30 +81,20 @@ pub fn execute_stateful(code: String, snapshot: Option<Vec<u8>>, heap_memory_max
     };
     install_heap_limit_callback(&mut snapshot_creator);
 
-    let mut output_result: Result<String, String> = Err("Unknown error".to_string());
+    let output_result;
     {
         let scope = &mut v8::HandleScope::new(&mut snapshot_creator);
         let context = v8::Context::new(scope, Default::default());
         let scope = &mut v8::ContextScope::new(scope, context);
-        let result = eval(scope, &code);
-        match result {
+        output_result = match eval(scope, &code) {
             Ok(result) => {
-                let result_str = result
+                result
                     .to_string(scope)
-                    .ok_or_else(|| "Failed to convert result to string".to_string());
-                match result_str {
-                    Ok(s) => {
-                        output_result = Ok(s.to_rust_string_lossy(scope));
-                    }
-                    Err(e) => {
-                        output_result = Err(e);
-                    }
-                }
+                    .ok_or_else(|| "Failed to convert result to string".to_string())
+                    .map(|s| s.to_rust_string_lossy(scope))
             }
-            Err(e) => {
-                output_result = Err(e);
-            }
-        }
+            Err(e) => Err(e),
+        };
         scope.set_default_context(context);
     }
 

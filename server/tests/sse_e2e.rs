@@ -135,7 +135,8 @@ struct SseServer {
 }
 
 impl SseServer {
-    /// Start a new SSE MCP server for testing
+    /// Start a new SSE MCP server for testing.
+    /// Polls the server until it accepts connections (up to 10 seconds).
     async fn start(port: u16, heap_dir: &str) -> Result<Self, Box<dyn std::error::Error>> {
         use tokio::process::Command;
         use std::process::Stdio;
@@ -149,8 +150,17 @@ impl SseServer {
 
         let base_url = format!("http://127.0.0.1:{}", port);
 
-        // Give server time to start
-        sleep(Duration::from_millis(1000)).await;
+        // Poll until the server is accepting connections (up to 10 seconds)
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            match tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port)).await {
+                Ok(_) => break,
+                Err(_) if tokio::time::Instant::now() < deadline => {
+                    sleep(Duration::from_millis(100)).await;
+                }
+                Err(e) => return Err(format!("Server failed to start within 10s: {}", e).into()),
+            }
+        }
 
         Ok(SseServer {
             child: Some(child),
