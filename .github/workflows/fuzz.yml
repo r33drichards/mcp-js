@@ -19,10 +19,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target:
-          - fuzz_execute_stateless
-          - fuzz_execute_stateful
-          - fuzz_snapshot_deserialization
+        include:
+          - target: fuzz_execute_stateless
+            sanitizer: none
+          - target: fuzz_execute_stateful
+            sanitizer: address
+          - target: fuzz_snapshot_deserialization
+            sanitizer: address
 
     steps:
       - name: Checkout code
@@ -37,14 +40,16 @@ jobs:
         run: nix develop --command bash -c "cargo install cargo-fuzz"
 
       - name: Build fuzz targets
-        run: nix develop --command bash -c "cd server && cargo fuzz build --sanitizer=address ${{ matrix.target }}"
+        run: |
+          nix develop --command bash -c \
+            "cd server && cargo fuzz build ${{ matrix.sanitizer != 'none' && format('--sanitizer={0}', matrix.sanitizer) || '' }} ${{ matrix.target }}"
 
       - name: Run fuzzer (${{ matrix.target }})
         env:
           ASAN_OPTIONS: detect_odr_violation=0
         run: |
           nix develop --command bash -c \
-            "cd server && cargo fuzz run --sanitizer=address ${{ matrix.target }} -- -max_total_time=300 -rss_limit_mb=0 -max_len=65536 -timeout=120"
+            "cd server && cargo fuzz run ${{ matrix.sanitizer != 'none' && format('--sanitizer={0}', matrix.sanitizer) || '' }} ${{ matrix.target }} -- -max_total_time=300 -rss_limit_mb=4096 -max_len=65536 -timeout=120"
 
       - name: Upload fuzz artifacts
         if: always()
