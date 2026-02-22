@@ -23,8 +23,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - uses: DeterminateSystems/nix-installer-action@main
-      - uses: DeterminateSystems/flake-checker-action@main
+      - name: Install Nix
+        uses: cachix/install-nix-action@v30
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
       - name: Install cargo-fuzz
         run: nix develop --command bash -c "cargo install cargo-fuzz"
 
