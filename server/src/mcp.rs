@@ -27,12 +27,23 @@ pub fn eval<'s>(scope: &mut v8::HandleScope<'s>, code: &str) -> Result<v8::Local
 pub const DEFAULT_HEAP_MEMORY_MAX_MB: usize = 512;
 
 /// Snapshot envelope: magic header + FNV-1a checksum.
-/// V8's Snapshot::Initialize calls abort() on invalid data, which cannot be
-/// caught by Rust. A magic header alone is insufficient because ASAN/libfuzzer
-/// CMP instrumentation discovers string comparisons and synthesizes matching
-/// inputs. The checksum makes it computationally infeasible for the fuzzer to
-/// generate a valid envelope, since it would need to mutate both the checksum
-/// and the payload consistently.
+///
+/// V8's Snapshot::Initialize calls abort() on invalid snapshot data, which
+/// cannot be caught by Rust's panic machinery. To prevent this, we wrap
+/// snapshots in an envelope that is validated before the data reaches V8.
+///
+/// The envelope is stored atomically with the snapshot data (rather than as
+/// a separate storage key) so that the checksum and payload cannot go out of
+/// sync — e.g., if the snapshot updates but a separately-stored checksum
+/// doesn't, or vice versa.
+///
+/// Format: [MCPV8SNAP\0 (10 bytes)] [FNV-1a checksum (4 bytes)] [V8 snapshot payload]
+///
+/// A magic header alone is insufficient because libfuzzer's CMP
+/// instrumentation discovers string comparisons and synthesizes matching
+/// inputs (~1500 iterations). The checksum makes it computationally
+/// infeasible for the fuzzer to generate a valid envelope, since it would
+/// need to mutate both the checksum and the payload consistently.
 const SNAPSHOT_MAGIC: &[u8] = b"MCPV8SNAP\x00";
 const SNAPSHOT_HEADER_LEN: usize = 10 + 4; // magic (10) + checksum (4)
 
