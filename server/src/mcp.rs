@@ -26,26 +26,51 @@ pub fn eval<'s>(scope: &mut v8::HandleScope<'s>, code: &str) -> Result<v8::Local
 
 pub const DEFAULT_HEAP_MEMORY_MAX_MB: usize = 512;
 
-/// Magic header prepended to V8 snapshots we create.
-/// This prevents V8 from aborting (via V8_Fatal) when fed
-/// arbitrary/corrupted data as a snapshot — V8's CHECK macros
-/// call abort() which cannot be caught by Rust's panic machinery.
+/// Snapshot envelope: magic header + FNV-1a checksum.
+/// V8's Snapshot::Initialize calls abort() on invalid data, which cannot be
+/// caught by Rust. A magic header alone is insufficient because ASAN/libfuzzer
+/// CMP instrumentation discovers string comparisons and synthesizes matching
+/// inputs. The checksum makes it computationally infeasible for the fuzzer to
+/// generate a valid envelope, since it would need to mutate both the checksum
+/// and the payload consistently.
 const SNAPSHOT_MAGIC: &[u8] = b"MCPV8SNAP\x00";
+const SNAPSHOT_HEADER_LEN: usize = 10 + 4; // magic (10) + checksum (4)
+
+/// FNV-1a hash — fast, deterministic, and sufficient to prevent fuzz synthesis.
+fn fnv1a(data: &[u8]) -> u32 {
+    let mut hash: u32 = 0x811c9dc5;
+    for &byte in data {
+        hash ^= byte as u32;
+        hash = hash.wrapping_mul(0x01000193);
+    }
+    hash
+}
 
 fn wrap_snapshot(data: &[u8]) -> Vec<u8> {
-    let mut wrapped = SNAPSHOT_MAGIC.to_vec();
+    let mut wrapped = Vec::with_capacity(SNAPSHOT_HEADER_LEN + data.len());
+    wrapped.extend_from_slice(SNAPSHOT_MAGIC);
+    wrapped.extend_from_slice(&fnv1a(data).to_le_bytes());
     wrapped.extend_from_slice(data);
     wrapped
 }
 
 fn unwrap_snapshot(data: &[u8]) -> Result<Vec<u8>, String> {
-    if data.len() < SNAPSHOT_MAGIC.len() {
+    if data.len() < SNAPSHOT_HEADER_LEN {
         return Err("Snapshot data too small".to_string());
     }
     if &data[..SNAPSHOT_MAGIC.len()] != SNAPSHOT_MAGIC {
         return Err("Invalid snapshot: missing magic header".to_string());
     }
-    Ok(data[SNAPSHOT_MAGIC.len()..].to_vec())
+    let stored_checksum = u32::from_le_bytes(
+        data[SNAPSHOT_MAGIC.len()..SNAPSHOT_HEADER_LEN]
+            .try_into()
+            .unwrap(),
+    );
+    let payload = &data[SNAPSHOT_HEADER_LEN..];
+    if fnv1a(payload) != stored_checksum {
+        return Err("Invalid snapshot: checksum mismatch".to_string());
+    }
+    Ok(payload.to_vec())
 }
 
 fn create_params_with_heap_limit(heap_memory_max_bytes: usize) -> v8::CreateParams {
