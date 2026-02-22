@@ -33,13 +33,12 @@ jobs:
         run: nix develop --command bash -c "cargo install cargo-fuzz"
 
       - name: Build fuzz targets
-        run: cd server && nix develop --command bash -c "cargo fuzz build ${{ matrix.target }}"
+        run: nix develop --command bash -c "cd server && cargo fuzz build ${{ matrix.target }}"
 
       - name: Run fuzzer (${{ matrix.target }})
         run: |
-          cd server && nix develop --command bash -c \
-            "cargo fuzz run ${{ matrix.target }} -- -max_total_time=300 -rss_limit_mb=4096"
-        continue-on-error: true
+          nix develop --command bash -c \
+            "cd server && cargo fuzz run ${{ matrix.target }} -- -max_total_time=300 -rss_limit_mb=4096"
 
       - name: Upload fuzz artifacts
         if: always()
