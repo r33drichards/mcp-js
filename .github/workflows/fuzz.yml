@@ -13,7 +13,7 @@ concurrency:
 jobs:
   fuzz:
     name: Fuzz V8 Unsafe Code
-    runs-on: [self-hosted, railway]
+    runs-on: ubuntu-latest
 
     strategy:
       fail-fast: false
@@ -28,10 +28,10 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Nix
-        uses: cachix/install-nix-action@v30
-        with:
-          extra_nix_config: |
-            experimental-features = nix-command flakes
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Enable Flakes
+        uses: DeterminateSystems/flake-checker-action@main
       - name: Install cargo-fuzz
         run: nix develop --command bash -c "cargo install cargo-fuzz"
 
