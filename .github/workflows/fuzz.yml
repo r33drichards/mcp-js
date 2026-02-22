@@ -1,0 +1,58 @@
+name: Fuzz
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  fuzz:
+    name: Fuzz V8 Unsafe Code
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - fuzz_execute_stateless
+          - fuzz_execute_stateful
+          - fuzz_snapshot_deserialization
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/flake-checker-action@main
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-directories: "server"
+
+      - name: Install cargo-fuzz
+        run: nix develop --command bash -c "cargo install cargo-fuzz"
+
+      - name: Build fuzz targets
+        run: cd server && nix develop --command bash -c "cargo fuzz build ${{ matrix.target }}"
+
+      - name: Run fuzzer (${{ matrix.target }})
+        run: |
+          cd server && nix develop --command bash -c \
+            "cargo fuzz run ${{ matrix.target }} -- -max_total_time=300 -rss_limit_mb=4096"
+        continue-on-error: true
+
+      - name: Upload fuzz artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: server/fuzz/artifacts/
+          if-no-files-found: ignore
+
+      - name: Upload corpus
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-corpus-${{ matrix.target }}
+          path: server/fuzz/corpus/${{ matrix.target }}/
+          if-no-files-found: ignore

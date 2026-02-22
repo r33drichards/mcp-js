@@ -24,9 +24,16 @@ pub fn eval<'s>(scope: &mut v8::HandleScope<'s>, code: &str) -> Result<v8::Local
     Ok(scope.escape(r))
 }
 
+pub const DEFAULT_HEAP_MEMORY_MAX_MB: usize = 512;
+
+fn create_params_with_heap_limit(heap_memory_max_bytes: usize) -> v8::CreateParams {
+    v8::CreateParams::default().heap_limits(0, heap_memory_max_bytes)
+}
+
 // Execute JS in a stateless isolate (no snapshot creation)
-pub fn execute_stateless(code: String) -> Result<String, String> {
-    let isolate = &mut v8::Isolate::new(Default::default());
+pub fn execute_stateless(code: String, heap_memory_max_bytes: usize) -> Result<String, String> {
+    let params = create_params_with_heap_limit(heap_memory_max_bytes);
+    let isolate = &mut v8::Isolate::new(params);
     let scope = &mut v8::HandleScope::new(isolate);
     let context = v8::Context::new(scope, Default::default());
     let scope = &mut v8::ContextScope::new(scope, context);
@@ -39,15 +46,16 @@ pub fn execute_stateless(code: String) -> Result<String, String> {
 }
 
 // Execute JS with snapshot support (preserves heap state)
-pub fn execute_stateful(code: String, snapshot: Option<Vec<u8>>) -> Result<(String, Vec<u8>), String> {
+pub fn execute_stateful(code: String, snapshot: Option<Vec<u8>>, heap_memory_max_bytes: usize) -> Result<(String, Vec<u8>), String> {
+    let params = Some(create_params_with_heap_limit(heap_memory_max_bytes));
     let mut snapshot_creator = match snapshot {
         Some(snapshot) => {
             eprintln!("creating isolate from snapshot...");
-            v8::Isolate::snapshot_creator_from_existing_snapshot(snapshot, None, None)
+            v8::Isolate::snapshot_creator_from_existing_snapshot(snapshot, None, params)
         }
         None => {
             eprintln!("snapshot not found, creating new isolate...");
-            v8::Isolate::snapshot_creator(Default::default(), Default::default())
+            v8::Isolate::snapshot_creator(None, params)
         }
     };
 
@@ -111,11 +119,14 @@ pub trait DataService: Send + Sync + 'static {
 #[derive(Clone)]
 pub struct StatefulService {
     heap_storage: AnyHeapStorage,
+    heap_memory_max_bytes: usize,
 }
 
 // Stateless service without heap persistence
 #[derive(Clone)]
-pub struct StatelessService;
+pub struct StatelessService {
+    heap_memory_max_bytes: usize,
+}
 
 // response to run_js (stateful - with heap)
 #[derive(Debug, Clone)]
@@ -156,14 +167,23 @@ impl IntoContents for RunJsStatelessResponse {
 // Stateless service implementation
 #[tool(tool_box)]
 impl StatelessService {
-    pub fn new() -> Self {
-        Self
+    pub fn new(heap_memory_max_bytes: usize) -> Self {
+        Self { heap_memory_max_bytes }
     }
 
     /// Execute JavaScript code in a fresh, stateless V8 isolate. Each execution starts with a clean environment.
     #[tool(description = include_str!("run_js_tool_stateless.md"))]
-    pub async fn run_js(&self, #[tool(param)] code: String) -> RunJsStatelessResponse {
-        let v8_result = tokio::task::spawn_blocking(move || execute_stateless(code)).await;
+    pub async fn run_js(
+        &self,
+        #[tool(param)] code: String,
+        #[tool(param)]
+        #[serde(default)]
+        heap_memory_max_mb: Option<usize>,
+    ) -> RunJsStatelessResponse {
+        let max_bytes = heap_memory_max_mb
+            .map(|mb| mb * 1024 * 1024)
+            .unwrap_or(self.heap_memory_max_bytes);
+        let v8_result = tokio::task::spawn_blocking(move || execute_stateless(code, max_bytes)).await;
 
         match v8_result {
             Ok(Ok(output)) => RunJsStatelessResponse { output },
@@ -180,15 +200,25 @@ impl StatelessService {
 // Stateful service implementation
 #[tool(tool_box)]
 impl StatefulService {
-    pub fn new(heap_storage: AnyHeapStorage) -> Self {
-        Self { heap_storage }
+    pub fn new(heap_storage: AnyHeapStorage, heap_memory_max_bytes: usize) -> Self {
+        Self { heap_storage, heap_memory_max_bytes }
     }
 
     /// Execute JavaScript code with heap persistence. The heap parameter identifies the execution context.
     #[tool(description = include_str!("run_js_tool_description.md"))]
-    pub async fn run_js(&self, #[tool(param)] code: String, #[tool(param)] heap: String) -> RunJsStatefulResponse {
+    pub async fn run_js(
+        &self,
+        #[tool(param)] code: String,
+        #[tool(param)] heap: String,
+        #[tool(param)]
+        #[serde(default)]
+        heap_memory_max_mb: Option<usize>,
+    ) -> RunJsStatefulResponse {
+        let max_bytes = heap_memory_max_mb
+            .map(|mb| mb * 1024 * 1024)
+            .unwrap_or(self.heap_memory_max_bytes);
         let snapshot = self.heap_storage.get(&heap).await.ok();
-        let v8_result = tokio::task::spawn_blocking(move || execute_stateful(code, snapshot)).await;
+        let v8_result = tokio::task::spawn_blocking(move || execute_stateful(code, snapshot, max_bytes)).await;
 
         match v8_result {
             Ok(Ok((output, startup_data))) => {

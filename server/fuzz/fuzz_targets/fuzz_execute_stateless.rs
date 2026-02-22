@@ -22,5 +22,6 @@ fuzz_target!(|data: &[u8]| {
 
     // We don't care whether the JS succeeds or fails; we care that V8 doesn't
     // crash, corrupt memory, or trigger undefined behavior.
-    let _ = server::mcp::execute_stateless(code);
+    let max_bytes = server::mcp::DEFAULT_HEAP_MEMORY_MAX_MB * 1024 * 1024;
+    let _ = server::mcp::execute_stateless(code, max_bytes);
 });

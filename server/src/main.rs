@@ -39,6 +39,10 @@ struct Cli {
     /// SSE port to listen on (if not specified, uses stdio transport)
     #[arg(long, conflicts_with = "http_port")]
     sse_port: Option<u16>,
+
+    /// Maximum V8 heap memory per isolate in megabytes (default: 512)
+    #[arg(long, default_value = "512")]
+    heap_memory_max: usize,
 }
 
 /// npx @modelcontextprotocol/inspector cargo run -p mcp-server-examples --example std_io
@@ -56,17 +60,20 @@ async fn main() -> Result<()> {
 
     tracing::info!(?cli, "Starting MCP server with CLI arguments");
 
+    let heap_memory_max_bytes = cli.heap_memory_max * 1024 * 1024;
+    tracing::info!("V8 heap memory limit: {} MB ({} bytes)", cli.heap_memory_max, heap_memory_max_bytes);
+
     if cli.stateless {
         // Stateless mode - no heap persistence
         if let Some(port) = cli.http_port {
             tracing::info!("Starting HTTP transport in stateless mode on port {}", port);
-            start_http_server_stateless(port).await?;
+            start_http_server_stateless(port, heap_memory_max_bytes).await?;
         } else if let Some(port) = cli.sse_port {
             tracing::info!("Starting SSE transport in stateless mode on port {}", port);
-            start_sse_server_stateless(port).await?;
+            start_sse_server_stateless(port, heap_memory_max_bytes).await?;
         } else {
             tracing::info!("Starting stdio transport in stateless mode");
-            let service = StatelessService::new()
+            let service = StatelessService::new(heap_memory_max_bytes)
                 .serve(stdio())
                 .await
                 .inspect_err(|e| {
@@ -88,13 +95,13 @@ async fn main() -> Result<()> {
 
         if let Some(port) = cli.http_port {
             tracing::info!("Starting HTTP transport in stateful mode on port {}", port);
-            start_http_server_stateful(heap_storage, port).await?;
+            start_http_server_stateful(heap_storage, port, heap_memory_max_bytes).await?;
         } else if let Some(port) = cli.sse_port {
             tracing::info!("Starting SSE transport in stateful mode on port {}", port);
-            start_sse_server_stateful(heap_storage, port).await?;
+            start_sse_server_stateful(heap_storage, port, heap_memory_max_bytes).await?;
         } else {
             tracing::info!("Starting stdio transport in stateful mode");
-            let service = StatefulService::new(heap_storage)
+            let service = StatefulService::new(heap_storage, heap_memory_max_bytes)
                 .serve(stdio())
                 .await
                 .inspect_err(|e| {
@@ -109,10 +116,10 @@ async fn main() -> Result<()> {
 }
 
 // Stateless HTTP handlers
-async fn http_handler_stateless(req: Request<Incoming>) -> Result<hyper::Response<String>, hyper::Error> {
+async fn http_handler_stateless(req: Request<Incoming>, heap_memory_max_bytes: usize) -> Result<hyper::Response<String>, hyper::Error> {
     tokio::spawn(async move {
         let upgraded = hyper::upgrade::on(req).await?;
-        let service = StatelessService::new()
+        let service = StatelessService::new(heap_memory_max_bytes)
             .serve(TokioIo::new(upgraded))
             .await?;
         service.waiting().await?;
@@ -126,7 +133,7 @@ async fn http_handler_stateless(req: Request<Incoming>) -> Result<hyper::Respons
     Ok(response)
 }
 
-async fn start_http_server_stateless(port: u16) -> Result<()> {
+async fn start_http_server_stateless(port: u16, heap_memory_max_bytes: usize) -> Result<()> {
     let addr = format!("0.0.0.0:{}", port);
     let tcp_listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("HTTP server (stateless) listening on {}", addr);
@@ -136,7 +143,7 @@ async fn start_http_server_stateless(port: u16) -> Result<()> {
         tracing::info!("Accepted connection from: {}", addr);
 
         let service = hyper::service::service_fn(move |req| {
-            http_handler_stateless(req)
+            http_handler_stateless(req, heap_memory_max_bytes)
         });
 
         let conn = hyper::server::conn::http1::Builder::new()
@@ -152,10 +159,10 @@ async fn start_http_server_stateless(port: u16) -> Result<()> {
 }
 
 // Stateful HTTP handlers
-async fn http_handler_stateful(req: Request<Incoming>, heap_storage: AnyHeapStorage) -> Result<hyper::Response<String>, hyper::Error> {
+async fn http_handler_stateful(req: Request<Incoming>, heap_storage: AnyHeapStorage, heap_memory_max_bytes: usize) -> Result<hyper::Response<String>, hyper::Error> {
     tokio::spawn(async move {
         let upgraded = hyper::upgrade::on(req).await?;
-        let service = StatefulService::new(heap_storage)
+        let service = StatefulService::new(heap_storage, heap_memory_max_bytes)
             .serve(TokioIo::new(upgraded))
             .await?;
         service.waiting().await?;
@@ -169,7 +176,7 @@ async fn http_handler_stateful(req: Request<Incoming>, heap_storage: AnyHeapStor
     Ok(response)
 }
 
-async fn start_http_server_stateful(heap_storage: AnyHeapStorage, port: u16) -> Result<()> {
+async fn start_http_server_stateful(heap_storage: AnyHeapStorage, port: u16, heap_memory_max_bytes: usize) -> Result<()> {
     let addr = format!("0.0.0.0:{}", port);
     let tcp_listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("HTTP server (stateful) listening on {}", addr);
@@ -180,7 +187,7 @@ async fn start_http_server_stateful(heap_storage: AnyHeapStorage, port: u16) -> 
         let heap_storage_clone = heap_storage.clone();
 
         let service = hyper::service::service_fn(move |req| {
-            http_handler_stateful(req, heap_storage_clone.clone())
+            http_handler_stateful(req, heap_storage_clone.clone(), heap_memory_max_bytes)
         });
 
         let conn = hyper::server::conn::http1::Builder::new()
@@ -196,7 +203,7 @@ async fn start_http_server_stateful(heap_storage: AnyHeapStorage, port: u16) -> 
 }
 
 // Stateless SSE server
-async fn start_sse_server_stateless(port: u16) -> Result<()> {
+async fn start_sse_server_stateless(port: u16, heap_memory_max_bytes: usize) -> Result<()> {
     let addr = format!("0.0.0.0:{}", port).parse()?;
 
     let config = SseServerConfig {
@@ -223,7 +230,7 @@ async fn start_sse_server_stateless(port: u16) -> Result<()> {
 
     // Register the service BEFORE spawning the server task
     sse_server.with_service(move || {
-        StatelessService::new()
+        StatelessService::new(heap_memory_max_bytes)
     });
 
     // Spawn the server task AFTER registering the service
@@ -242,7 +249,7 @@ async fn start_sse_server_stateless(port: u16) -> Result<()> {
 }
 
 // Stateful SSE server
-async fn start_sse_server_stateful(heap_storage: AnyHeapStorage, port: u16) -> Result<()> {
+async fn start_sse_server_stateful(heap_storage: AnyHeapStorage, port: u16, heap_memory_max_bytes: usize) -> Result<()> {
     let addr = format!("0.0.0.0:{}", port).parse()?;
 
     let config = SseServerConfig {
@@ -269,7 +276,7 @@ async fn start_sse_server_stateful(heap_storage: AnyHeapStorage, port: u16) -> R
 
     // Register the service BEFORE spawning the server task
     sse_server.with_service(move || {
-        StatefulService::new(heap_storage.clone())
+        StatefulService::new(heap_storage.clone(), heap_memory_max_bytes)
     });
 
     // Spawn the server task AFTER registering the service

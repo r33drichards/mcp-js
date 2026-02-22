@@ -31,5 +31,6 @@ fuzz_target!(|data: &[u8]| {
     let snapshot = Some(data.to_vec());
     let code = "1".to_string();
 
-    let _ = server::mcp::execute_stateful(code, snapshot);
+    let max_bytes = server::mcp::DEFAULT_HEAP_MEMORY_MAX_MB * 1024 * 1024;
+    let _ = server::mcp::execute_stateful(code, snapshot, max_bytes);
 });
