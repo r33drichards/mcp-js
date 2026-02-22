@@ -70,41 +70,31 @@ pub fn execute_stateless(code: String, heap_memory_max_bytes: usize) -> Result<S
 pub fn execute_stateful(code: String, snapshot: Option<Vec<u8>>, heap_memory_max_bytes: usize) -> Result<(String, Vec<u8>), String> {
     let params = Some(create_params_with_heap_limit(heap_memory_max_bytes));
     let mut snapshot_creator = match snapshot {
-        Some(snapshot) => {
+        Some(snapshot) if !snapshot.is_empty() => {
             eprintln!("creating isolate from snapshot...");
             v8::Isolate::snapshot_creator_from_existing_snapshot(snapshot, None, params)
         }
-        None => {
+        _ => {
             eprintln!("snapshot not found, creating new isolate...");
             v8::Isolate::snapshot_creator(None, params)
         }
     };
     install_heap_limit_callback(&mut snapshot_creator);
 
-    let mut output_result: Result<String, String> = Err("Unknown error".to_string());
+    let output_result;
     {
         let scope = &mut v8::HandleScope::new(&mut snapshot_creator);
         let context = v8::Context::new(scope, Default::default());
         let scope = &mut v8::ContextScope::new(scope, context);
-        let result = eval(scope, &code);
-        match result {
+        output_result = match eval(scope, &code) {
             Ok(result) => {
-                let result_str = result
+                result
                     .to_string(scope)
-                    .ok_or_else(|| "Failed to convert result to string".to_string());
-                match result_str {
-                    Ok(s) => {
-                        output_result = Ok(s.to_rust_string_lossy(scope));
-                    }
-                    Err(e) => {
-                        output_result = Err(e);
-                    }
-                }
+                    .map(|s| s.to_rust_string_lossy(scope))
+                    .ok_or_else(|| "Failed to convert result to string".to_string())
             }
-            Err(e) => {
-                output_result = Err(e);
-            }
-        }
+            Err(e) => Err(e),
+        };
         scope.set_default_context(context);
     }
 
