@@ -10,24 +10,20 @@ fn ensure_v8() {
     });
 }
 
-// Fuzz V8 snapshot deserialization specifically by always providing the raw
-// fuzzer bytes as a snapshot blob. This is the most security-critical fuzz
-// target because:
+// Fuzz V8 snapshot deserialization by passing raw fuzzer bytes as a snapshot
+// blob. This verifies that the snapshot envelope validation in
+// execute_stateful correctly rejects arbitrary/corrupted data before it
+// reaches V8's C++ snapshot deserializer (which would abort the process).
 //
-//   - V8 snapshot deserialization involves unsafe C++ code that parses a
-//     binary format to reconstruct a full V8 heap
-//   - Malformed snapshots could trigger out-of-bounds reads/writes,
-//     use-after-free, or type confusion in V8's deserializer
-//   - The `execute_stateful` function passes user-controlled bytes directly
-//     to `v8::Isolate::snapshot_creator_from_existing_snapshot`
-//
-// A minimal valid JS string is used as code so the fuzzer focuses its
-// mutation energy on the snapshot bytes.
+// Prior to the envelope validation fix, this target found that V8's
+// Snapshot::Initialize calls V8_Fatal (abort) on invalid snapshot data,
+// crashing the process. The fix wraps snapshots with a magic header that
+// is validated before passing data to V8.
 fuzz_target!(|data: &[u8]| {
     ensure_v8();
 
-    // Always pass fuzzer data as a snapshot — this maximizes coverage of
-    // the snapshot deserialization code path.
+    // Always pass fuzzer data as a snapshot — this exercises the snapshot
+    // validation code path.
     let snapshot = Some(data.to_vec());
     let code = "1".to_string();
 

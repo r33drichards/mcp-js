@@ -26,6 +26,28 @@ pub fn eval<'s>(scope: &mut v8::HandleScope<'s>, code: &str) -> Result<v8::Local
 
 pub const DEFAULT_HEAP_MEMORY_MAX_MB: usize = 512;
 
+/// Magic header prepended to V8 snapshots we create.
+/// This prevents V8 from aborting (via V8_Fatal) when fed
+/// arbitrary/corrupted data as a snapshot — V8's CHECK macros
+/// call abort() which cannot be caught by Rust's panic machinery.
+const SNAPSHOT_MAGIC: &[u8] = b"MCPV8SNAP\x00";
+
+fn wrap_snapshot(data: &[u8]) -> Vec<u8> {
+    let mut wrapped = SNAPSHOT_MAGIC.to_vec();
+    wrapped.extend_from_slice(data);
+    wrapped
+}
+
+fn unwrap_snapshot(data: &[u8]) -> Result<Vec<u8>, String> {
+    if data.len() < SNAPSHOT_MAGIC.len() {
+        return Err("Snapshot data too small".to_string());
+    }
+    if &data[..SNAPSHOT_MAGIC.len()] != SNAPSHOT_MAGIC {
+        return Err("Invalid snapshot: missing magic header".to_string());
+    }
+    Ok(data[SNAPSHOT_MAGIC.len()..].to_vec())
+}
+
 fn create_params_with_heap_limit(heap_memory_max_bytes: usize) -> v8::CreateParams {
     v8::CreateParams::default().heap_limits(0, heap_memory_max_bytes)
 }
@@ -69,10 +91,19 @@ pub fn execute_stateless(code: String, heap_memory_max_bytes: usize) -> Result<S
 // Execute JS with snapshot support (preserves heap state)
 pub fn execute_stateful(code: String, snapshot: Option<Vec<u8>>, heap_memory_max_bytes: usize) -> Result<(String, Vec<u8>), String> {
     let params = Some(create_params_with_heap_limit(heap_memory_max_bytes));
-    let mut snapshot_creator = match snapshot {
-        Some(snapshot) if !snapshot.is_empty() => {
+
+    // Validate and unwrap snapshot data before passing to V8.
+    // V8's Snapshot::Initialize calls V8_Fatal (abort) on invalid data,
+    // which cannot be caught, so we must validate first.
+    let raw_snapshot = match snapshot {
+        Some(data) if !data.is_empty() => Some(unwrap_snapshot(&data)?),
+        _ => None,
+    };
+
+    let mut snapshot_creator = match raw_snapshot {
+        Some(raw) if !raw.is_empty() => {
             eprintln!("creating isolate from snapshot...");
-            v8::Isolate::snapshot_creator_from_existing_snapshot(snapshot, None, params)
+            v8::Isolate::snapshot_creator_from_existing_snapshot(raw, None, params)
         }
         _ => {
             eprintln!("snapshot not found, creating new isolate...");
@@ -100,7 +131,7 @@ pub fn execute_stateful(code: String, snapshot: Option<Vec<u8>>, heap_memory_max
 
     let startup_data = snapshot_creator.create_blob(v8::FunctionCodeHandling::Clear)
         .ok_or("Failed to create V8 snapshot blob".to_string())?;
-    let startup_data_vec = startup_data.to_vec();
+    let startup_data_vec = wrap_snapshot(&startup_data);
 
     output_result.map(|output| (output, startup_data_vec))
 }

@@ -19,14 +19,10 @@ struct StatefulInput {
 }
 
 // Fuzz the stateful V8 execution path with arbitrary JavaScript code and
-// optional heap snapshot data. This targets two unsafe surfaces:
-//   1. V8 script compilation and execution (same as stateless)
-//   2. V8 snapshot deserialization — feeding arbitrary bytes as a serialized
-//      V8 heap, which exercises unsafe snapshot parsing in the V8 engine.
-//
-// The snapshot deserialization path is particularly interesting because
-// corrupted or adversarial snapshot blobs could trigger memory safety
-// issues in V8's C++ deserialization code.
+// optional heap snapshot data. This verifies that:
+//   1. V8 script compilation and execution handles arbitrary code safely
+//   2. The snapshot envelope validation rejects invalid/corrupted data
+//      gracefully (returning Err) instead of letting V8 abort the process
 fuzz_target!(|input: StatefulInput| {
     ensure_v8();
 
@@ -37,8 +33,8 @@ fuzz_target!(|input: StatefulInput| {
     };
 
     // Run stateful execution — we don't care about the result, only that
-    // V8 handles arbitrary inputs without memory corruption.
-    // Use a small heap limit for fuzzing to avoid process-level OOM
+    // it doesn't crash. Invalid snapshots should be rejected by the
+    // envelope validation before reaching V8.
     let max_bytes = 64 * 1024 * 1024;
     let _ = server::mcp::execute_stateful(input.code, snapshot, max_bytes);
 });

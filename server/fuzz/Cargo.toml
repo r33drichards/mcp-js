@@ -36,3 +36,4 @@ doc = false
 name = "fuzz_snapshot_deserialization"
 path = "fuzz_targets/fuzz_snapshot_deserialization.rs"
 doc = false
+
