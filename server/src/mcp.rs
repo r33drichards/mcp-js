@@ -30,10 +30,31 @@ fn create_params_with_heap_limit(heap_memory_max_bytes: usize) -> v8::CreatePara
     v8::CreateParams::default().heap_limits(0, heap_memory_max_bytes)
 }
 
+/// Callback invoked when V8 heap usage approaches the configured limit.
+/// Instead of letting V8 call FatalProcessOutOfMemory (which aborts the process),
+/// we terminate JS execution so the error can be returned gracefully.
+unsafe extern "C" fn near_heap_limit_callback(
+    data: *mut std::ffi::c_void,
+    current_heap_limit: usize,
+    _initial_heap_limit: usize,
+) -> usize {
+    let isolate = unsafe { &mut *(data as *mut v8::Isolate) };
+    isolate.terminate_execution();
+    // Return an increased limit to give V8 room to unwind gracefully
+    // after termination is requested
+    current_heap_limit * 2
+}
+
+fn install_heap_limit_callback(isolate: &mut v8::Isolate) {
+    let isolate_ptr = isolate as *mut v8::Isolate as *mut std::ffi::c_void;
+    isolate.add_near_heap_limit_callback(near_heap_limit_callback, isolate_ptr);
+}
+
 // Execute JS in a stateless isolate (no snapshot creation)
 pub fn execute_stateless(code: String, heap_memory_max_bytes: usize) -> Result<String, String> {
     let params = create_params_with_heap_limit(heap_memory_max_bytes);
     let isolate = &mut v8::Isolate::new(params);
+    install_heap_limit_callback(isolate);
     let scope = &mut v8::HandleScope::new(isolate);
     let context = v8::Context::new(scope, Default::default());
     let scope = &mut v8::ContextScope::new(scope, context);
@@ -58,6 +79,7 @@ pub fn execute_stateful(code: String, snapshot: Option<Vec<u8>>, heap_memory_max
             v8::Isolate::snapshot_creator(None, params)
         }
     };
+    install_heap_limit_callback(&mut snapshot_creator);
 
     let mut output_result: Result<String, String> = Err("Unknown error".to_string());
     {

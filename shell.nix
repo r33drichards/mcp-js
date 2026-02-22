@@ -9,6 +9,8 @@
       cacert
       openssl
       pkg-config
+      # Provides libstdc++.so.6 needed by ASAN-instrumented fuzz targets
+      stdenv.cc.cc.lib
     ];
     RUSTC_VERSION = pkgs.lib.readFile ./rust-toolchain;
     # https://github.com/rust-lang/rust-bindgen#environment-variables
