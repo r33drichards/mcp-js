@@ -17,10 +17,6 @@ jobs:
 
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/flake-checker-action@main
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-directories: "server"
-
       - name: Build server
         run: nix develop --command bash -c "cd server && cargo build"
 

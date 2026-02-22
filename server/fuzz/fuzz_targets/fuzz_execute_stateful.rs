@@ -38,6 +38,7 @@ fuzz_target!(|input: StatefulInput| {
 
     // Run stateful execution — we don't care about the result, only that
     // V8 handles arbitrary inputs without memory corruption.
-    let max_bytes = server::mcp::DEFAULT_HEAP_MEMORY_MAX_MB * 1024 * 1024;
+    // Use a small heap limit for fuzzing to avoid process-level OOM
+    let max_bytes = 64 * 1024 * 1024;
     let _ = server::mcp::execute_stateful(input.code, snapshot, max_bytes);
 });

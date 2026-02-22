@@ -25,10 +25,6 @@ jobs:
 
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/flake-checker-action@main
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-directories: "server"
-
       - name: Install cargo-fuzz
         run: nix develop --command bash -c "cargo install cargo-fuzz"
 
