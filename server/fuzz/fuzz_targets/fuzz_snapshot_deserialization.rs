@@ -29,5 +29,6 @@ fuzz_target!(|data: &[u8]| {
 
     // Use a small heap limit for fuzzing to avoid process-level OOM
     let max_bytes = 64 * 1024 * 1024;
-    let _ = server::mcp::execute_stateful(code, snapshot, max_bytes);
+    let timeout_secs = 5;
+    let _ = server::mcp::execute_stateful(code, snapshot, max_bytes, timeout_secs);
 });
