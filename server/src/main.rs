@@ -41,8 +41,8 @@ struct Cli {
     sse_port: Option<u16>,
 
     /// Maximum V8 heap memory per isolate in megabytes (default: 8, max: 64)
-    #[arg(long, default_value = "8", value_parser = clap::value_parser!(usize).range(1..=64))]
-    heap_memory_max: usize,
+    #[arg(long, default_value = "8", value_parser = clap::value_parser!(u64).range(1..=64))]
+    heap_memory_max: u64,
 }
 
 /// npx @modelcontextprotocol/inspector cargo run -p mcp-server-examples --example std_io
@@ -60,7 +60,7 @@ async fn main() -> Result<()> {
 
     tracing::info!(?cli, "Starting MCP server with CLI arguments");
 
-    let heap_memory_max_bytes = cli.heap_memory_max * 1024 * 1024;
+    let heap_memory_max_bytes = (cli.heap_memory_max as usize) * 1024 * 1024;
     tracing::info!("V8 heap memory limit: {} MB ({} bytes)", cli.heap_memory_max, heap_memory_max_bytes);
 
     if cli.stateless {
