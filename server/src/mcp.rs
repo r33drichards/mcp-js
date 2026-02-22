@@ -8,6 +8,8 @@ use serde_json::json;
 
 
 use std::sync::Once;
+use std::sync::mpsc;
+use std::time::Duration;
 use v8::{self};
 
 pub mod heap_storage;
@@ -25,6 +27,7 @@ pub fn eval<'s>(scope: &mut v8::HandleScope<'s>, code: &str) -> Result<v8::Local
 }
 
 pub const DEFAULT_HEAP_MEMORY_MAX_MB: usize = 8;
+pub const DEFAULT_EXECUTION_TIMEOUT_SECS: u64 = 30;
 
 /// Snapshot envelope: magic header + FNV-1a checksum + minimum size.
 ///
@@ -116,11 +119,26 @@ fn install_heap_limit_callback(isolate: &mut v8::Isolate) {
     isolate.add_near_heap_limit_callback(near_heap_limit_callback, isolate_ptr);
 }
 
+/// Install an execution timeout on the isolate.
+/// Returns a guard that must be dropped (or signalled) after execution completes
+/// to cancel the timer thread.
+fn install_execution_timeout(isolate: &mut v8::Isolate, timeout_secs: u64) -> mpsc::Sender<()> {
+    let handle = isolate.thread_safe_handle();
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        if rx.recv_timeout(Duration::from_secs(timeout_secs)).is_err() {
+            handle.terminate_execution();
+        }
+    });
+    tx
+}
+
 // Execute JS in a stateless isolate (no snapshot creation)
-pub fn execute_stateless(code: String, heap_memory_max_bytes: usize) -> Result<String, String> {
+pub fn execute_stateless(code: String, heap_memory_max_bytes: usize, timeout_secs: u64) -> Result<String, String> {
     let params = create_params_with_heap_limit(heap_memory_max_bytes);
     let isolate = &mut v8::Isolate::new(params);
     install_heap_limit_callback(isolate);
+    let _timeout_guard = install_execution_timeout(isolate, timeout_secs);
     let scope = &mut v8::HandleScope::new(isolate);
     let context = v8::Context::new(scope, Default::default());
     let scope = &mut v8::ContextScope::new(scope, context);
@@ -133,7 +151,7 @@ pub fn execute_stateless(code: String, heap_memory_max_bytes: usize) -> Result<S
 }
 
 // Execute JS with snapshot support (preserves heap state)
-pub fn execute_stateful(code: String, snapshot: Option<Vec<u8>>, heap_memory_max_bytes: usize) -> Result<(String, Vec<u8>), String> {
+pub fn execute_stateful(code: String, snapshot: Option<Vec<u8>>, heap_memory_max_bytes: usize, timeout_secs: u64) -> Result<(String, Vec<u8>), String> {
     let params = Some(create_params_with_heap_limit(heap_memory_max_bytes));
 
     // Validate and unwrap snapshot data before passing to V8.
@@ -155,6 +173,7 @@ pub fn execute_stateful(code: String, snapshot: Option<Vec<u8>>, heap_memory_max
         }
     };
     install_heap_limit_callback(&mut snapshot_creator);
+    let _timeout_guard = install_execution_timeout(&mut snapshot_creator, timeout_secs);
 
     let output_result;
     {
@@ -207,12 +226,14 @@ pub trait DataService: Send + Sync + 'static {
 pub struct StatefulService {
     heap_storage: AnyHeapStorage,
     heap_memory_max_bytes: usize,
+    execution_timeout_secs: u64,
 }
 
 // Stateless service without heap persistence
 #[derive(Clone)]
 pub struct StatelessService {
     heap_memory_max_bytes: usize,
+    execution_timeout_secs: u64,
 }
 
 // response to run_js (stateful - with heap)
@@ -254,8 +275,8 @@ impl IntoContents for RunJsStatelessResponse {
 // Stateless service implementation
 #[tool(tool_box)]
 impl StatelessService {
-    pub fn new(heap_memory_max_bytes: usize) -> Self {
-        Self { heap_memory_max_bytes }
+    pub fn new(heap_memory_max_bytes: usize, execution_timeout_secs: u64) -> Self {
+        Self { heap_memory_max_bytes, execution_timeout_secs }
     }
 
     /// Execute JavaScript code in a fresh, stateless V8 isolate. Each execution starts with a clean environment.
@@ -266,11 +287,15 @@ impl StatelessService {
         #[tool(param)]
         #[serde(default)]
         heap_memory_max_mb: Option<usize>,
+        #[tool(param)]
+        #[serde(default)]
+        execution_timeout_secs: Option<u64>,
     ) -> RunJsStatelessResponse {
         let max_bytes = heap_memory_max_mb
             .map(|mb| mb * 1024 * 1024)
             .unwrap_or(self.heap_memory_max_bytes);
-        let v8_result = tokio::task::spawn_blocking(move || execute_stateless(code, max_bytes)).await;
+        let timeout = execution_timeout_secs.unwrap_or(self.execution_timeout_secs);
+        let v8_result = tokio::task::spawn_blocking(move || execute_stateless(code, max_bytes, timeout)).await;
 
         match v8_result {
             Ok(Ok(output)) => RunJsStatelessResponse { output },
@@ -287,8 +312,8 @@ impl StatelessService {
 // Stateful service implementation
 #[tool(tool_box)]
 impl StatefulService {
-    pub fn new(heap_storage: AnyHeapStorage, heap_memory_max_bytes: usize) -> Self {
-        Self { heap_storage, heap_memory_max_bytes }
+    pub fn new(heap_storage: AnyHeapStorage, heap_memory_max_bytes: usize, execution_timeout_secs: u64) -> Self {
+        Self { heap_storage, heap_memory_max_bytes, execution_timeout_secs }
     }
 
     /// Execute JavaScript code with heap persistence. The heap parameter identifies the execution context.
@@ -300,12 +325,16 @@ impl StatefulService {
         #[tool(param)]
         #[serde(default)]
         heap_memory_max_mb: Option<usize>,
+        #[tool(param)]
+        #[serde(default)]
+        execution_timeout_secs: Option<u64>,
     ) -> RunJsStatefulResponse {
         let max_bytes = heap_memory_max_mb
             .map(|mb| mb * 1024 * 1024)
             .unwrap_or(self.heap_memory_max_bytes);
+        let timeout = execution_timeout_secs.unwrap_or(self.execution_timeout_secs);
         let snapshot = self.heap_storage.get(&heap).await.ok();
-        let v8_result = tokio::task::spawn_blocking(move || execute_stateful(code, snapshot, max_bytes)).await;
+        let v8_result = tokio::task::spawn_blocking(move || execute_stateful(code, snapshot, max_bytes, timeout)).await;
 
         match v8_result {
             Ok(Ok((output, startup_data))) => {

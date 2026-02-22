@@ -36,5 +36,7 @@ fuzz_target!(|input: StatefulInput| {
     // it doesn't crash. Invalid snapshots should be rejected by the
     // envelope validation before reaching V8.
     let max_bytes = 64 * 1024 * 1024;
-    let _ = server::mcp::execute_stateful(input.code, snapshot, max_bytes);
+    // Use a short timeout to prevent slow-unit failures from pathological inputs
+    let timeout_secs = 5;
+    let _ = server::mcp::execute_stateful(input.code, snapshot, max_bytes, timeout_secs);
 });
