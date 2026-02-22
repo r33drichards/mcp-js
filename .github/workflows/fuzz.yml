@@ -34,7 +34,7 @@ jobs:
       - name: Run fuzzer (${{ matrix.target }})
         run: |
           nix develop --command bash -c \
-            "cd server && cargo fuzz run ${{ matrix.target }} -- -max_total_time=300 -rss_limit_mb=4096"
+            "cd server && cargo fuzz run ${{ matrix.target }} -- -max_total_time=300 -rss_limit_mb=6144"
 
       - name: Upload fuzz artifacts
         if: always()

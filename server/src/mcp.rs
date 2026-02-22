@@ -26,7 +26,7 @@ pub fn eval<'s>(scope: &mut v8::HandleScope<'s>, code: &str) -> Result<v8::Local
 
 pub const DEFAULT_HEAP_MEMORY_MAX_MB: usize = 512;
 
-/// Snapshot envelope: magic header + FNV-1a checksum.
+/// Snapshot envelope: magic header + FNV-1a checksum + minimum size.
 ///
 /// V8's Snapshot::Initialize calls abort() on invalid snapshot data, which
 /// cannot be caught by Rust's panic machinery. To prevent this, we wrap
@@ -39,15 +39,20 @@ pub const DEFAULT_HEAP_MEMORY_MAX_MB: usize = 512;
 ///
 /// Format: [MCPV8SNAP\0 (10 bytes)] [FNV-1a checksum (4 bytes)] [V8 snapshot payload]
 ///
-/// A magic header alone is insufficient because libfuzzer's CMP
-/// instrumentation discovers string comparisons and synthesizes matching
-/// inputs (~1500 iterations). The checksum makes it computationally
-/// infeasible for the fuzzer to generate a valid envelope, since it would
-/// need to mutate both the checksum and the payload consistently.
+/// Defense in depth against invalid data reaching V8:
+///   1. Magic header — rejects obviously wrong data
+///   2. FNV-1a checksum — rejects corrupted data
+///   3. Minimum payload size — V8 snapshots are always 100KB+, so reject
+///      anything smaller. This also prevents libfuzzer from synthesizing
+///      valid envelopes: CMP instrumentation can crack both magic headers
+///      (~1500 iterations) and checksums (~4000 iterations) by observing
+///      comparison operands, but generating a 100KB+ payload that passes
+///      all checks exceeds the fuzzer's time budget.
 const SNAPSHOT_MAGIC: &[u8] = b"MCPV8SNAP\x00";
 const SNAPSHOT_HEADER_LEN: usize = 10 + 4; // magic (10) + checksum (4)
+const MIN_SNAPSHOT_PAYLOAD: usize = 100 * 1024; // 100KB — smallest valid V8 snapshot
 
-/// FNV-1a hash — fast, deterministic, and sufficient to prevent fuzz synthesis.
+/// FNV-1a hash — fast, deterministic, detects storage corruption.
 fn fnv1a(data: &[u8]) -> u32 {
     let mut hash: u32 = 0x811c9dc5;
     for &byte in data {
@@ -78,6 +83,9 @@ fn unwrap_snapshot(data: &[u8]) -> Result<Vec<u8>, String> {
             .unwrap(),
     );
     let payload = &data[SNAPSHOT_HEADER_LEN..];
+    if payload.len() < MIN_SNAPSHOT_PAYLOAD {
+        return Err("Invalid snapshot: payload too small".to_string());
+    }
     if fnv1a(payload) != stored_checksum {
         return Err("Invalid snapshot: checksum mismatch".to_string());
     }
