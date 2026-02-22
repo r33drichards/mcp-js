@@ -8,8 +8,11 @@ use serde_json::json;
 
 
 use std::sync::Once;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use v8::{self};
 
 pub mod heap_storage;
@@ -99,6 +102,18 @@ fn create_params_with_heap_limit(heap_memory_max_bytes: usize) -> v8::CreatePara
     v8::CreateParams::default().heap_limits(0, heap_memory_max_bytes)
 }
 
+/// Data passed to the near-heap-limit callback so it can both terminate
+/// execution and signal that OOM was the cause.
+struct HeapLimitCallbackData {
+    isolate_ptr: *mut v8::Isolate,
+    oom_flag: Arc<AtomicBool>,
+}
+
+// Safety: The raw pointer is only dereferenced inside the callback which
+// runs on the same thread that created the isolate.
+unsafe impl Send for HeapLimitCallbackData {}
+unsafe impl Sync for HeapLimitCallbackData {}
+
 /// Callback invoked when V8 heap usage approaches the configured limit.
 /// Instead of letting V8 call FatalProcessOutOfMemory (which aborts the process),
 /// we terminate JS execution so the error can be returned gracefully.
@@ -107,53 +122,119 @@ unsafe extern "C" fn near_heap_limit_callback(
     current_heap_limit: usize,
     _initial_heap_limit: usize,
 ) -> usize {
-    let isolate = unsafe { &mut *(data as *mut v8::Isolate) };
+    let cb_data = unsafe { &*(data as *const HeapLimitCallbackData) };
+    cb_data.oom_flag.store(true, Ordering::SeqCst);
+    let isolate = unsafe { &mut *cb_data.isolate_ptr };
     isolate.terminate_execution();
     // Return an increased limit to give V8 room to unwind gracefully
     // after termination is requested
     current_heap_limit * 2
 }
 
-fn install_heap_limit_callback(isolate: &mut v8::Isolate) {
-    let isolate_ptr = isolate as *mut v8::Isolate as *mut std::ffi::c_void;
-    isolate.add_near_heap_limit_callback(near_heap_limit_callback, isolate_ptr);
+/// Install the near-heap-limit callback on the isolate.
+/// Returns a raw pointer to the callback data that must be freed after the
+/// isolate is dropped (via `Box::from_raw`).
+fn install_heap_limit_callback(
+    isolate: &mut v8::Isolate,
+    oom_flag: Arc<AtomicBool>,
+) -> *mut HeapLimitCallbackData {
+    let data = Box::new(HeapLimitCallbackData {
+        isolate_ptr: isolate as *mut v8::Isolate,
+        oom_flag,
+    });
+    let data_ptr = Box::into_raw(data);
+    isolate.add_near_heap_limit_callback(
+        near_heap_limit_callback,
+        data_ptr as *mut std::ffi::c_void,
+    );
+    data_ptr
 }
 
 /// Install an execution timeout on the isolate.
 /// Returns a guard that must be dropped (or signalled) after execution completes
 /// to cancel the timer thread.
-fn install_execution_timeout(isolate: &mut v8::Isolate, timeout_secs: u64) -> mpsc::Sender<()> {
+fn install_execution_timeout(
+    isolate: &mut v8::Isolate,
+    timeout_secs: u64,
+    timeout_flag: Arc<AtomicBool>,
+) -> mpsc::Sender<()> {
     let handle = isolate.thread_safe_handle();
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         if rx.recv_timeout(Duration::from_secs(timeout_secs)).is_err() {
+            timeout_flag.store(true, Ordering::SeqCst);
             handle.terminate_execution();
         }
     });
     tx
 }
 
+/// Map a generic V8 execution error to a descriptive message based on
+/// which termination flag was set.
+fn classify_termination_error(
+    oom_flag: &AtomicBool,
+    timeout_flag: &AtomicBool,
+    original_error: String,
+) -> String {
+    if oom_flag.load(Ordering::SeqCst) {
+        "Out of memory: V8 heap limit exceeded. Try increasing heap_memory_max_mb.".to_string()
+    } else if timeout_flag.load(Ordering::SeqCst) {
+        "Execution timed out: script exceeded the time limit. Try increasing execution_timeout_secs.".to_string()
+    } else {
+        original_error
+    }
+}
+
 // Execute JS in a stateless isolate (no snapshot creation)
 pub fn execute_stateless(code: String, heap_memory_max_bytes: usize, timeout_secs: u64) -> Result<String, String> {
-    let params = create_params_with_heap_limit(heap_memory_max_bytes);
-    let isolate = &mut v8::Isolate::new(params);
-    install_heap_limit_callback(isolate);
-    let _timeout_guard = install_execution_timeout(isolate, timeout_secs);
-    let scope = &mut v8::HandleScope::new(isolate);
-    let context = v8::Context::new(scope, Default::default());
-    let scope = &mut v8::ContextScope::new(scope, context);
+    let oom_flag = Arc::new(AtomicBool::new(false));
+    let timeout_flag = Arc::new(AtomicBool::new(false));
 
-    let result = eval(scope, &code)?;
-    match result.to_string(scope) {
-        Some(s) => Ok(s.to_rust_string_lossy(scope)),
-        None => Err("Failed to convert result to string".to_string()),
+    let oom_clone = oom_flag.clone();
+    let timeout_clone = timeout_flag.clone();
+
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let params = create_params_with_heap_limit(heap_memory_max_bytes);
+        let mut isolate = v8::Isolate::new(params);
+
+        let cb_data_ptr = install_heap_limit_callback(&mut isolate, oom_clone);
+        let _timeout_guard = install_execution_timeout(&mut isolate, timeout_secs, timeout_clone);
+
+        let eval_result = {
+            let scope = &mut v8::HandleScope::new(&mut isolate);
+            let context = v8::Context::new(scope, Default::default());
+            let scope = &mut v8::ContextScope::new(scope, context);
+
+            match eval(scope, &code) {
+                Ok(value) => match value.to_string(scope) {
+                    Some(s) => Ok(s.to_rust_string_lossy(scope)),
+                    None => Err("Failed to convert result to string".to_string()),
+                },
+                Err(e) => Err(e),
+            }
+        };
+
+        // Clean up callback data after scope is dropped but before isolate is dropped.
+        // The callback won't fire again since we're past all V8 execution.
+        drop(isolate);
+        unsafe { let _ = Box::from_raw(cb_data_ptr); }
+
+        eval_result
+    }));
+
+    match result {
+        Ok(Ok(output)) => Ok(output),
+        Ok(Err(e)) => Err(classify_termination_error(&oom_flag, &timeout_flag, e)),
+        Err(_panic) => Err(classify_termination_error(
+            &oom_flag,
+            &timeout_flag,
+            "V8 execution panicked unexpectedly".to_string(),
+        )),
     }
 }
 
 // Execute JS with snapshot support (preserves heap state)
 pub fn execute_stateful(code: String, snapshot: Option<Vec<u8>>, heap_memory_max_bytes: usize, timeout_secs: u64) -> Result<(String, Vec<u8>), String> {
-    let params = Some(create_params_with_heap_limit(heap_memory_max_bytes));
-
     // Validate and unwrap snapshot data before passing to V8.
     // V8's Snapshot::Initialize calls V8_Fatal (abort) on invalid data,
     // which cannot be caught, so we must validate first.
@@ -162,41 +243,65 @@ pub fn execute_stateful(code: String, snapshot: Option<Vec<u8>>, heap_memory_max
         _ => None,
     };
 
-    let mut snapshot_creator = match raw_snapshot {
-        Some(raw) if !raw.is_empty() => {
-            eprintln!("creating isolate from snapshot...");
-            v8::Isolate::snapshot_creator_from_existing_snapshot(raw, None, params)
-        }
-        _ => {
-            eprintln!("snapshot not found, creating new isolate...");
-            v8::Isolate::snapshot_creator(None, params)
-        }
-    };
-    install_heap_limit_callback(&mut snapshot_creator);
-    let _timeout_guard = install_execution_timeout(&mut snapshot_creator, timeout_secs);
+    let oom_flag = Arc::new(AtomicBool::new(false));
+    let timeout_flag = Arc::new(AtomicBool::new(false));
 
-    let output_result;
-    {
-        let scope = &mut v8::HandleScope::new(&mut snapshot_creator);
-        let context = v8::Context::new(scope, Default::default());
-        let scope = &mut v8::ContextScope::new(scope, context);
-        output_result = match eval(scope, &code) {
-            Ok(result) => {
-                result
-                    .to_string(scope)
-                    .map(|s| s.to_rust_string_lossy(scope))
-                    .ok_or_else(|| "Failed to convert result to string".to_string())
+    let oom_clone = oom_flag.clone();
+    let timeout_clone = timeout_flag.clone();
+
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let params = Some(create_params_with_heap_limit(heap_memory_max_bytes));
+
+        let mut snapshot_creator = match raw_snapshot {
+            Some(raw) if !raw.is_empty() => {
+                eprintln!("creating isolate from snapshot...");
+                v8::Isolate::snapshot_creator_from_existing_snapshot(raw, None, params)
             }
-            Err(e) => Err(e),
+            _ => {
+                eprintln!("snapshot not found, creating new isolate...");
+                v8::Isolate::snapshot_creator(None, params)
+            }
         };
-        scope.set_default_context(context);
+
+        let cb_data_ptr = install_heap_limit_callback(&mut snapshot_creator, oom_clone);
+        let _timeout_guard = install_execution_timeout(&mut snapshot_creator, timeout_secs, timeout_clone);
+
+        let output_result;
+        {
+            let scope = &mut v8::HandleScope::new(&mut snapshot_creator);
+            let context = v8::Context::new(scope, Default::default());
+            let scope = &mut v8::ContextScope::new(scope, context);
+            output_result = match eval(scope, &code) {
+                Ok(result) => {
+                    result
+                        .to_string(scope)
+                        .map(|s| s.to_rust_string_lossy(scope))
+                        .ok_or_else(|| "Failed to convert result to string".to_string())
+                }
+                Err(e) => Err(e),
+            };
+            scope.set_default_context(context);
+        }
+
+        // Clean up callback data — snapshot_creator is still alive but we're
+        // past all JS execution, so the callback won't fire again.
+        unsafe { let _ = Box::from_raw(cb_data_ptr); }
+
+        let startup_data = snapshot_creator.create_blob(v8::FunctionCodeHandling::Clear)
+            .ok_or("Failed to create V8 snapshot blob".to_string())?;
+        let startup_data_vec = wrap_snapshot(&startup_data);
+
+        output_result.map(|output| (output, startup_data_vec))
+    }));
+
+    match result {
+        Ok(inner) => inner.map_err(|e| classify_termination_error(&oom_flag, &timeout_flag, e)),
+        Err(_panic) => Err(classify_termination_error(
+            &oom_flag,
+            &timeout_flag,
+            "V8 execution panicked unexpectedly".to_string(),
+        )),
     }
-
-    let startup_data = snapshot_creator.create_blob(v8::FunctionCodeHandling::Clear)
-        .ok_or("Failed to create V8 snapshot blob".to_string())?;
-    let startup_data_vec = wrap_snapshot(&startup_data);
-
-    output_result.map(|output| (output, startup_data_vec))
 }
 
 static INIT: Once = Once::new();
