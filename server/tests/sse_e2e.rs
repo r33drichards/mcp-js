@@ -128,6 +128,12 @@ async fn get_session_endpoint(
     Err("Failed to extract session endpoint".into())
 }
 
+/// Find an available port by briefly binding to port 0
+fn find_available_port() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.local_addr().unwrap().port()
+}
+
 /// Helper structure to manage SSE server process
 struct SseServer {
     child: Option<tokio::process::Child>,
@@ -135,27 +141,42 @@ struct SseServer {
 }
 
 impl SseServer {
-    /// Start a new SSE MCP server for testing
-    async fn start(port: u16, heap_dir: &str) -> Result<Self, Box<dyn std::error::Error>> {
+    /// Start a new SSE MCP server on a random available port
+    async fn start(heap_dir: &str) -> Result<Self, Box<dyn std::error::Error>> {
         use tokio::process::Command;
         use std::process::Stdio;
 
-        let child = Command::new(env!("CARGO"))
-            .args(&["run", "--", "--directory-path", heap_dir, "--sse-port", &port.to_string()])
+        let port = find_available_port();
+
+        let child = Command::new(env!("CARGO_BIN_EXE_server"))
+            .args(&["--directory-path", heap_dir, "--sse-port", &port.to_string()])
             .stdin(Stdio::null())
-            .stdout(Stdio::inherit())  // Show server stdout
-            .stderr(Stdio::inherit())  // Show server stderr
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
             .spawn()?;
 
         let base_url = format!("http://127.0.0.1:{}", port);
 
-        // Give server time to start
-        sleep(Duration::from_millis(1000)).await;
+        // Poll until server accepts connections (up to 10s)
+        let client = reqwest::Client::new();
+        let sse_url = format!("{}/sse", base_url);
+        for _ in 0..100 {
+            if client
+                .get(&sse_url)
+                .timeout(Duration::from_millis(100))
+                .send()
+                .await
+                .is_ok()
+            {
+                return Ok(SseServer {
+                    child: Some(child),
+                    base_url,
+                });
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
 
-        Ok(SseServer {
-            child: Some(child),
-            base_url,
-        })
+        Err("Server did not become ready within 10s".into())
     }
 
     /// Stop the server
@@ -185,9 +206,7 @@ impl Drop for SseServer {
 #[tokio::test]
 async fn test_sse_server_startup() -> Result<(), Box<dyn std::error::Error>> {
     let heap_dir = common::create_temp_heap_dir();
-    let port = 9001;
-
-    let mut server = SseServer::start(port, &heap_dir).await?;
+    let mut server = SseServer::start(&heap_dir).await?;
 
     // Try to connect to SSE endpoint
     let client = reqwest::Client::new();
@@ -210,9 +229,7 @@ async fn test_sse_server_startup() -> Result<(), Box<dyn std::error::Error>> {
 #[tokio::test]
 async fn test_sse_post_message() -> Result<(), Box<dyn std::error::Error>> {
     let heap_dir = common::create_temp_heap_dir();
-    let port = 9002;
-
-    let mut server = SseServer::start(port, &heap_dir).await?;
+    let mut server = SseServer::start(&heap_dir).await?;
     let client = reqwest::Client::new();
 
     // Get the session endpoint from the SSE stream
@@ -249,9 +266,7 @@ async fn test_sse_post_message() -> Result<(), Box<dyn std::error::Error>> {
 #[tokio::test]
 async fn test_sse_initialize_handshake() -> Result<(), Box<dyn std::error::Error>> {
     let heap_dir = common::create_temp_heap_dir();
-    let port = 9003;
-
-    let mut server = SseServer::start(port, &heap_dir).await?;
+    let mut server = SseServer::start(&heap_dir).await?;
     let client = reqwest::Client::builder()
         .build()?;
 
@@ -288,9 +303,7 @@ async fn test_sse_initialize_handshake() -> Result<(), Box<dyn std::error::Error
 #[tokio::test]
 async fn test_sse_run_js_execution() -> Result<(), Box<dyn std::error::Error>> {
     let heap_dir = common::create_temp_heap_dir();
-    let port = 9004;
-
-    let mut server = SseServer::start(port, &heap_dir).await?;
+    let mut server = SseServer::start(&heap_dir).await?;
     let client = reqwest::Client::builder()
         .build()?;
 
@@ -340,9 +353,7 @@ async fn test_sse_run_js_execution() -> Result<(), Box<dyn std::error::Error>> {
 #[tokio::test]
 async fn test_sse_heap_persistence() -> Result<(), Box<dyn std::error::Error>> {
     let heap_dir = common::create_temp_heap_dir();
-    let port = 9005;
-
-    let mut server = SseServer::start(port, &heap_dir).await?;
+    let mut server = SseServer::start(&heap_dir).await?;
     let client = reqwest::Client::builder()
         .build()?;
 
@@ -392,9 +403,7 @@ async fn test_sse_heap_persistence() -> Result<(), Box<dyn std::error::Error>> {
 #[tokio::test]
 async fn test_sse_invalid_javascript_error() -> Result<(), Box<dyn std::error::Error>> {
     let heap_dir = common::create_temp_heap_dir();
-    let port = 9006;
-
-    let mut server = SseServer::start(port, &heap_dir).await?;
+    let mut server = SseServer::start(&heap_dir).await?;
     let client = reqwest::Client::builder()
         .build()?;
 
@@ -445,9 +454,7 @@ async fn test_sse_invalid_javascript_error() -> Result<(), Box<dyn std::error::E
 #[tokio::test]
 async fn test_sse_sequential_operations() -> Result<(), Box<dyn std::error::Error>> {
     let heap_dir = common::create_temp_heap_dir();
-    let port = 9007;
-
-    let mut server = SseServer::start(port, &heap_dir).await?;
+    let mut server = SseServer::start(&heap_dir).await?;
     let client = reqwest::Client::builder()
         .build()?;
 
@@ -496,9 +503,7 @@ async fn test_sse_sequential_operations() -> Result<(), Box<dyn std::error::Erro
 #[tokio::test]
 async fn test_sse_keepalive() -> Result<(), Box<dyn std::error::Error>> {
     let heap_dir = common::create_temp_heap_dir();
-    let port = 9008;
-
-    let mut server = SseServer::start(port, &heap_dir).await?;
+    let mut server = SseServer::start(&heap_dir).await?;
 
     // Connect to SSE endpoint
     let sse_url = format!("{}/sse", server.base_url);
