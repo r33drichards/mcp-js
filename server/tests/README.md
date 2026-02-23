@@ -211,7 +211,7 @@ The integration tests cover:
    - Sequential operations with state preservation
 
 5. **Heap Management**
-   - Content-addressed heap hash format (8-char hex)
+   - Content-addressed heap hash format (64-char hex, SHA-256)
    - Persistence across calls via content hash threading
    - Multiple independent heaps (via distinct content hashes)
    - Isolation between different heaps
