@@ -28,6 +28,7 @@
             outputHashes = {
               "rmcp-0.1.5" = "sha256-3IPIlk1zIIemtJ4YeWgV4Qe3NyyR0I/nvDeqDebxyl4=";
             };
+            allowBuiltinFetchGit = true;
           };
 
           nativeBuildInputs = with pkgs; [
