@@ -102,10 +102,10 @@ async fn main() -> Result<()> {
     tracing::info!("V8 heap memory limit: {} MB ({} bytes)", cli.heap_memory_max, heap_memory_max_bytes);
     tracing::info!("V8 execution timeout: {} seconds", execution_timeout_secs);
 
-    // Cluster mode requires --http-port for MCP client transport.
-    if cli.cluster_port.is_some() && cli.http_port.is_none() {
+    // Cluster mode requires --http-port or --sse-port (stdio has no stdin as a service).
+    if cli.cluster_port.is_some() && cli.http_port.is_none() && cli.sse_port.is_none() {
         anyhow::bail!(
-            "Cluster mode requires --http-port (only HTTP transport is supported in cluster mode)"
+            "Cluster mode requires --http-port or --sse-port (stdio transport is not supported in cluster mode)"
         );
     }
 
