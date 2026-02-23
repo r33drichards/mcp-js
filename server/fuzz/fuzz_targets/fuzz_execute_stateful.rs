@@ -7,7 +7,7 @@ static INIT: Once = Once::new();
 
 fn ensure_v8() {
     INIT.call_once(|| {
-        server::mcp::initialize_v8();
+        server::engine::initialize_v8();
     });
 }
 
@@ -38,5 +38,5 @@ fuzz_target!(|input: StatefulInput| {
     let max_bytes = 64 * 1024 * 1024;
     // Use a short timeout to prevent slow-unit failures from pathological inputs
     let timeout_secs = 5;
-    let _ = server::mcp::execute_stateful(input.code, snapshot, max_bytes, timeout_secs);
+    let _ = server::engine::execute_stateful(input.code, snapshot, max_bytes, timeout_secs);
 });

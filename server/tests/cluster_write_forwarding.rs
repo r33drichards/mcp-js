@@ -301,7 +301,7 @@ async fn test_writes_resume_after_reelection() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn test_session_log_replication_through_raft() {
-    use server::mcp::session_log::{SessionLog, SessionLogEntry};
+    use server::engine::session_log::{SessionLog, SessionLogEntry};
 
     let ports = cluster_ports_3(19700);
 

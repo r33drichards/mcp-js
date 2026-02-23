@@ -9,7 +9,7 @@ static INIT: Once = Once::new();
 
 fn ensure_v8() {
     INIT.call_once(|| {
-        server::mcp::initialize_v8();
+        server::engine::initialize_v8();
     });
 }
 
@@ -32,7 +32,7 @@ fn test_stateless_small_heap_limit_rejects_large_allocation() {
 
     // 5 MB heap limit — too small for a 2M-element string array
     let max_bytes = 5 * 1024 * 1024;
-    let result = server::mcp::execute_stateless(MEMORY_HOG_JS.to_string(), max_bytes, server::mcp::DEFAULT_EXECUTION_TIMEOUT_SECS);
+    let result = server::engine::execute_stateless(MEMORY_HOG_JS.to_string(), max_bytes, server::engine::DEFAULT_EXECUTION_TIMEOUT_SECS);
 
     assert!(
         result.is_err(),
@@ -45,8 +45,8 @@ fn test_stateless_small_heap_limit_rejects_large_allocation() {
 fn test_stateless_default_limit_allows_small_code() {
     ensure_v8();
 
-    let max_bytes = server::mcp::DEFAULT_HEAP_MEMORY_MAX_MB * 1024 * 1024;
-    let result = server::mcp::execute_stateless(SMALL_JS.to_string(), max_bytes, server::mcp::DEFAULT_EXECUTION_TIMEOUT_SECS);
+    let max_bytes = server::engine::DEFAULT_HEAP_MEMORY_MAX_MB * 1024 * 1024;
+    let result = server::engine::execute_stateless(SMALL_JS.to_string(), max_bytes, server::engine::DEFAULT_EXECUTION_TIMEOUT_SECS);
 
     assert!(
         result.is_ok(),
@@ -62,7 +62,7 @@ fn test_stateless_generous_limit_allows_large_allocation() {
 
     // 256 MB — should be plenty for 2M strings
     let max_bytes = 256 * 1024 * 1024;
-    let result = server::mcp::execute_stateless(MEMORY_HOG_JS.to_string(), max_bytes, server::mcp::DEFAULT_EXECUTION_TIMEOUT_SECS);
+    let result = server::engine::execute_stateless(MEMORY_HOG_JS.to_string(), max_bytes, server::engine::DEFAULT_EXECUTION_TIMEOUT_SECS);
 
     assert!(
         result.is_ok(),
@@ -78,7 +78,7 @@ fn test_stateful_small_heap_limit_rejects_large_allocation() {
 
     // 5 MB heap limit — too small for a 2M-element string array
     let max_bytes = 5 * 1024 * 1024;
-    let result = server::mcp::execute_stateful(MEMORY_HOG_JS.to_string(), None, max_bytes, server::mcp::DEFAULT_EXECUTION_TIMEOUT_SECS);
+    let result = server::engine::execute_stateful(MEMORY_HOG_JS.to_string(), None, max_bytes, server::engine::DEFAULT_EXECUTION_TIMEOUT_SECS);
 
     assert!(
         result.is_err(),
@@ -91,8 +91,8 @@ fn test_stateful_small_heap_limit_rejects_large_allocation() {
 fn test_stateful_default_limit_allows_small_code() {
     ensure_v8();
 
-    let max_bytes = server::mcp::DEFAULT_HEAP_MEMORY_MAX_MB * 1024 * 1024;
-    let result = server::mcp::execute_stateful(SMALL_JS.to_string(), None, max_bytes, server::mcp::DEFAULT_EXECUTION_TIMEOUT_SECS);
+    let max_bytes = server::engine::DEFAULT_HEAP_MEMORY_MAX_MB * 1024 * 1024;
+    let result = server::engine::execute_stateful(SMALL_JS.to_string(), None, max_bytes, server::engine::DEFAULT_EXECUTION_TIMEOUT_SECS);
 
     assert!(
         result.is_ok(),
@@ -110,7 +110,7 @@ fn test_stateful_generous_limit_allows_large_allocation() {
 
     // 256 MB — should be plenty for 2M strings
     let max_bytes = 256 * 1024 * 1024;
-    let result = server::mcp::execute_stateful(MEMORY_HOG_JS.to_string(), None, max_bytes, server::mcp::DEFAULT_EXECUTION_TIMEOUT_SECS);
+    let result = server::engine::execute_stateful(MEMORY_HOG_JS.to_string(), None, max_bytes, server::engine::DEFAULT_EXECUTION_TIMEOUT_SECS);
 
     assert!(
         result.is_ok(),
@@ -129,8 +129,8 @@ fn test_different_limits_produce_different_outcomes() {
     let small_limit = 5 * 1024 * 1024;
     let large_limit = 256 * 1024 * 1024;
 
-    let small_result = server::mcp::execute_stateless(MEMORY_HOG_JS.to_string(), small_limit, server::mcp::DEFAULT_EXECUTION_TIMEOUT_SECS);
-    let large_result = server::mcp::execute_stateless(MEMORY_HOG_JS.to_string(), large_limit, server::mcp::DEFAULT_EXECUTION_TIMEOUT_SECS);
+    let small_result = server::engine::execute_stateless(MEMORY_HOG_JS.to_string(), small_limit, server::engine::DEFAULT_EXECUTION_TIMEOUT_SECS);
+    let large_result = server::engine::execute_stateless(MEMORY_HOG_JS.to_string(), large_limit, server::engine::DEFAULT_EXECUTION_TIMEOUT_SECS);
 
     assert!(
         small_result.is_err(),

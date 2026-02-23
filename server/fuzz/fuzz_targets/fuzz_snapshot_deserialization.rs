@@ -6,7 +6,7 @@ static INIT: Once = Once::new();
 
 fn ensure_v8() {
     INIT.call_once(|| {
-        server::mcp::initialize_v8();
+        server::engine::initialize_v8();
     });
 }
 
@@ -30,5 +30,5 @@ fuzz_target!(|data: &[u8]| {
     // Use a small heap limit for fuzzing to avoid process-level OOM
     let max_bytes = 64 * 1024 * 1024;
     let timeout_secs = 5;
-    let _ = server::mcp::execute_stateful(code, snapshot, max_bytes, timeout_secs);
+    let _ = server::engine::execute_stateful(code, snapshot, max_bytes, timeout_secs);
 });
