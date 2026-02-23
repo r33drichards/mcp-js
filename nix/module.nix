@@ -29,16 +29,10 @@ in
       description = "Port for the Raft cluster HTTP server.";
     };
 
-    ssePort = lib.mkOption {
-      type = lib.types.nullOr lib.types.port;
-      default = null;
-      description = "Port for the SSE MCP transport. Null to disable.";
-    };
-
     httpPort = lib.mkOption {
-      type = lib.types.nullOr lib.types.port;
-      default = null;
-      description = "Port for the HTTP MCP transport. Null to disable.";
+      type = lib.types.port;
+      default = 3000;
+      description = "Port for the HTTP MCP transport (required in cluster mode).";
     };
 
     dataDir = lib.mkOption {
@@ -109,6 +103,8 @@ in
               (toString cfg.clusterPort)
               "--node-id"
               cfg.nodeId
+              "--http-port"
+              (toString cfg.httpPort)
               "--heartbeat-interval"
               (toString cfg.heartbeatInterval)
               "--election-timeout-min"
@@ -122,19 +118,9 @@ in
               (lib.concatStringsSep "," cfg.peers)
             ];
 
-            sseArgs = lib.optionals (cfg.ssePort != null) [
-              "--sse-port"
-              (toString cfg.ssePort)
-            ];
-
-            httpArgs = lib.optionals (cfg.httpPort != null) [
-              "--http-port"
-              (toString cfg.httpPort)
-            ];
-
             statelessArgs = lib.optionals cfg.stateless [ "--stateless" ];
           in
-          lib.concatStringsSep " " (baseArgs ++ peerArgs ++ sseArgs ++ httpArgs ++ statelessArgs);
+          lib.concatStringsSep " " (baseArgs ++ peerArgs ++ statelessArgs);
 
         Restart = "on-failure";
         RestartSec = "2s";
@@ -152,9 +138,6 @@ in
       ];
     };
 
-    networking.firewall.allowedTCPPorts =
-      [ cfg.clusterPort ]
-      ++ lib.optionals (cfg.ssePort != null) [ cfg.ssePort ]
-      ++ lib.optionals (cfg.httpPort != null) [ cfg.httpPort ];
+    networking.firewall.allowedTCPPorts = [ cfg.clusterPort cfg.httpPort ];
   };
 }
