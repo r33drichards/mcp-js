@@ -96,30 +96,30 @@ impl HeapStorage for S3HeapStorage {
     }
 }
 
-/// S3 storage with a local filesystem write-through cache.
-/// On put: writes to both the local FS cache and S3.
-/// On get: checks the FS cache first; falls back to S3 and caches the result locally.
+/// Write-through cache that wraps any primary HeapStorage with a local filesystem cache.
+/// On put: writes to both the local FS cache and the primary storage.
+/// On get: checks the FS cache first; falls back to the primary and caches the result locally.
 #[derive(Clone)]
-pub struct S3WithFsCacheHeapStorage {
-    s3: S3HeapStorage,
+pub struct WriteThroughCacheHeapStorage<P: HeapStorage + Clone> {
+    primary: P,
     cache: FileHeapStorage,
 }
 
-impl S3WithFsCacheHeapStorage {
-    pub async fn new(bucket: impl Into<String>, cache_dir: impl Into<PathBuf>) -> Self {
+impl<P: HeapStorage + Clone> WriteThroughCacheHeapStorage<P> {
+    pub fn new(primary: P, cache_dir: impl Into<PathBuf>) -> Self {
         Self {
-            s3: S3HeapStorage::new(bucket).await,
+            primary,
             cache: FileHeapStorage::new(cache_dir),
         }
     }
 }
 
 #[async_trait]
-impl HeapStorage for S3WithFsCacheHeapStorage {
+impl<P: HeapStorage + Clone> HeapStorage for WriteThroughCacheHeapStorage<P> {
     async fn put(&self, name: &str, data: &[u8]) -> Result<(), String> {
-        // Write-through: write to both FS cache and S3
+        // Write-through: write to both FS cache and primary
         self.cache.put(name, data).await?;
-        self.s3.put(name, data).await?;
+        self.primary.put(name, data).await?;
         Ok(())
     }
     async fn get(&self, name: &str) -> Result<Vec<u8>, String> {
@@ -127,8 +127,8 @@ impl HeapStorage for S3WithFsCacheHeapStorage {
         if let Ok(data) = self.cache.get(name).await {
             return Ok(data);
         }
-        // Cache miss: fetch from S3 and populate cache
-        let data = self.s3.get(name).await?;
+        // Cache miss: fetch from primary and populate cache
+        let data = self.primary.get(name).await?;
         // Best-effort cache population; don't fail if local write fails
         if let Err(e) = self.cache.put(name, &data).await {
             tracing::warn!("Failed to populate FS cache for {}: {}", name, e);
@@ -136,6 +136,9 @@ impl HeapStorage for S3WithFsCacheHeapStorage {
         Ok(data)
     }
 }
+
+/// S3 with local filesystem write-through cache.
+pub type S3WithFsCacheHeapStorage = WriteThroughCacheHeapStorage<S3HeapStorage>;
 
 #[derive(Clone)]
 pub enum AnyHeapStorage {

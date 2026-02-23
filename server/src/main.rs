@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 
 mod mcp;
 use mcp::{StatelessService, StatefulService, initialize_v8, DEFAULT_EXECUTION_TIMEOUT_SECS};
-use mcp::heap_storage::{AnyHeapStorage, S3HeapStorage, S3WithFsCacheHeapStorage, FileHeapStorage};
+use mcp::heap_storage::{AnyHeapStorage, S3HeapStorage, WriteThroughCacheHeapStorage, FileHeapStorage};
 use mcp::session_log::SessionLog;
 
 /// Command line arguments for configuring heap storage
@@ -102,7 +102,10 @@ async fn main() -> Result<()> {
         let heap_storage = if let Some(bucket) = cli.s3_bucket {
             if let Some(cache_dir) = cli.cache_dir {
                 tracing::info!("Using S3 storage with FS write-through cache at {}", cache_dir);
-                AnyHeapStorage::S3WithFsCache(S3WithFsCacheHeapStorage::new(bucket, cache_dir).await)
+                AnyHeapStorage::S3WithFsCache(WriteThroughCacheHeapStorage::new(
+                    S3HeapStorage::new(bucket).await,
+                    cache_dir,
+                ))
             } else {
                 AnyHeapStorage::S3(S3HeapStorage::new(bucket).await)
             }
