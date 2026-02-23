@@ -282,6 +282,8 @@ jobs:
     runs-on: [self-hosted, railway]
     needs: load-test
     if: always()
+    permissions:
+      pull-requests: write
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -316,12 +318,36 @@ jobs:
           script: |
             const fs = require('fs');
             const reportPath = 'results/benchmark-report.md';
-            if (fs.existsSync(reportPath)) {
-              const report = fs.readFileSync(reportPath, 'utf8');
+            if (!fs.existsSync(reportPath)) {
+              console.log('No report file found, skipping comment');
+              return;
+            }
+            const report = fs.readFileSync(reportPath, 'utf8');
+            const marker = '<!-- load-test-report -->';
+            const body = marker + '\n' + report;
+
+            // Find existing comment to update (avoid duplicates on re-runs)
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find(c => c.body.includes(marker));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body: body,
+              });
+              console.log(`Updated existing comment ${existing.id}`);
+            } else {
               await github.rest.issues.createComment({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: context.issue.number,
-                body: report
+                body: body,
               });
+              console.log('Created new comment');
             }
