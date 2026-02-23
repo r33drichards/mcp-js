@@ -24,7 +24,9 @@ fuzz_target!(|data: &[u8]| {
     // crash, corrupt memory, or trigger undefined behavior.
     // Use a small heap limit for fuzzing to avoid process-level OOM
     let max_bytes = 64 * 1024 * 1024;
-    // Use a short timeout to prevent slow-unit failures from pathological inputs
-    let timeout_secs = 5;
+    // timeout_secs = 0 → run synchronously (no thread spawning).
+    // This avoids leaking zombie threads when V8 compilation is stuck on
+    // pathological inputs. libFuzzer's own -timeout flag handles the watchdog.
+    let timeout_secs = 0;
     let _ = server::engine::execute_stateless(code, max_bytes, timeout_secs);
 });

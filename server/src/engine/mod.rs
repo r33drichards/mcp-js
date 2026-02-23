@@ -168,14 +168,62 @@ pub fn eval<'s>(scope: &mut v8::HandleScope<'s>, code: &str) -> Result<v8::Local
 
 // ── Stateless / stateful V8 execution ───────────────────────────────────
 //
-// V8 work runs on a dedicated thread. The caller enforces a wall-clock
-// timeout via `recv_timeout`, which covers BOTH compilation and execution.
-// On timeout, `terminate_execution` is called as best-effort to interrupt
-// V8 (works for execution; compilation may take longer to respond).
-// The `IsolateHandle` is shared via `Arc<Mutex<Option>>` and cleared
-// before the isolate is dropped, preventing use-after-free.
+// When timeout_secs > 0, V8 work runs on a dedicated thread and the
+// caller enforces a wall-clock timeout via `recv_timeout` (covers both
+// compilation and execution). On timeout, `terminate_execution` is called
+// as best-effort. The `IsolateHandle` is shared via `Arc<Mutex<Option>>`
+// and cleared before the isolate is dropped, preventing use-after-free.
+//
+// When timeout_secs == 0, V8 runs synchronously on the current thread
+// (no timeout). This is used by the fuzz target, which relies on
+// libFuzzer's own `-timeout` flag instead of spawning threads that can
+// leak when V8 compilation is stuck.
+
+/// Core stateless V8 execution — runs on the calling thread, no timeout.
+fn execute_stateless_inline(code: &str, heap_memory_max_bytes: usize) -> Result<String, String> {
+    let oom_flag = Arc::new(AtomicBool::new(false));
+
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let params = create_params_with_heap_limit(heap_memory_max_bytes);
+        let mut isolate = v8::Isolate::new(params);
+        let cb_data_ptr = install_heap_limit_callback(&mut isolate, oom_flag.clone());
+
+        let eval_result = {
+            let scope = &mut v8::HandleScope::new(&mut isolate);
+            let context = v8::Context::new(scope, Default::default());
+            let scope = &mut v8::ContextScope::new(scope, context);
+
+            match eval(scope, code) {
+                Ok(value) => match value.to_string(scope) {
+                    Some(s) => Ok(s.to_rust_string_lossy(scope)),
+                    None => Err("Failed to convert result to string".to_string()),
+                },
+                Err(e) => Err(e),
+            }
+        };
+
+        drop(isolate);
+        unsafe { let _ = Box::from_raw(cb_data_ptr); }
+
+        eval_result
+    }));
+
+    match result {
+        Ok(Ok(output)) => Ok(output),
+        Ok(Err(e)) => Err(classify_termination_error(&oom_flag, false, e)),
+        Err(_panic) => Err(classify_termination_error(
+            &oom_flag, false, "V8 execution panicked unexpectedly".to_string(),
+        )),
+    }
+}
 
 pub fn execute_stateless(code: String, heap_memory_max_bytes: usize, timeout_secs: u64) -> Result<String, String> {
+    // timeout_secs == 0 means run synchronously (no thread, no timeout).
+    // Used by fuzz targets to avoid leaking threads on pathological inputs.
+    if timeout_secs == 0 {
+        return execute_stateless_inline(&code, heap_memory_max_bytes);
+    }
+
     let oom_flag = Arc::new(AtomicBool::new(false));
     let isolate_handle: Arc<Mutex<Option<v8::IsolateHandle>>> = Arc::new(Mutex::new(None));
 
