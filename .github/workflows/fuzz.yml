@@ -40,7 +40,11 @@ jobs:
         run: nix develop --command bash -c "cd server && cargo fuzz build --sanitizer=address ${{ matrix.target }}"
 
       - name: Run fuzzer (${{ matrix.target }})
-
+        env:
+          # Cap ASAN quarantine to prevent RSS from ballooning over many
+          # V8 isolate create/destroy cycles. Default quarantine grows
+          # unbounded and easily hits 4GB+ with V8.
+          ASAN_OPTIONS: quarantine_size_mb=64:malloc_context_size=5
         run: |
           nix develop --command bash -c \
             "cd server && cargo fuzz run --sanitizer=address ${{ matrix.target }} -- -max_total_time=300 -rss_limit_mb=4096 -max_len=65536 -timeout=120"
