@@ -26,9 +26,10 @@ let
       -config ${openssl_cnf}
   '';
   node_cert = runWithOpenSSL "node.pem" ''
+    cp ${ca_pem} ca.pem
     openssl x509 \
       -req -in ${node_csr} \
-      -CA ${ca_pem} -CAkey ${ca_key} \
+      -CA ca.pem -CAkey ${ca_key} \
       -CAcreateserial -out $out \
       -days 365 -extensions v3_req \
       -extfile ${openssl_cnf}
@@ -42,9 +43,10 @@ let
       -config ${client_openssl_cnf}
   '';
   client_cert = runWithOpenSSL "client.pem" ''
+    cp ${ca_pem} ca.pem
     openssl x509 \
       -req -in ${client_csr} \
-      -CA ${ca_pem} -CAkey ${ca_key} \
+      -CA ca.pem -CAkey ${ca_key} \
       -CAcreateserial -out $out \
       -days 365 -extensions v3_req \
       -extfile ${client_openssl_cnf}
