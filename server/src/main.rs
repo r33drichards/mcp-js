@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 
 mod mcp;
 use mcp::{StatelessService, StatefulService, initialize_v8, DEFAULT_EXECUTION_TIMEOUT_SECS};
-use mcp::heap_storage::{AnyHeapStorage, S3HeapStorage, FileHeapStorage};
+use mcp::heap_storage::{AnyHeapStorage, S3HeapStorage, WriteThroughCacheHeapStorage, FileHeapStorage};
 use mcp::session_log::SessionLog;
 
 /// Command line arguments for configuring heap storage
@@ -24,6 +24,10 @@ struct Cli {
     /// S3 bucket name (required if --use-s3)
     #[arg(long, conflicts_with_all = ["directory_path", "stateless"])]
     s3_bucket: Option<String>,
+
+    /// Local filesystem cache directory for S3 write-through caching (only used with --s3-bucket)
+    #[arg(long, requires = "s3_bucket")]
+    cache_dir: Option<String>,
 
     /// Directory path for filesystem storage (required if --use-filesystem)
     #[arg(long, conflicts_with_all = ["s3_bucket", "stateless"])]
@@ -96,7 +100,15 @@ async fn main() -> Result<()> {
     } else {
         // Stateful mode - with heap persistence
         let heap_storage = if let Some(bucket) = cli.s3_bucket {
-            AnyHeapStorage::S3(S3HeapStorage::new(bucket).await)
+            if let Some(cache_dir) = cli.cache_dir {
+                tracing::info!("Using S3 storage with FS write-through cache at {}", cache_dir);
+                AnyHeapStorage::S3WithFsCache(WriteThroughCacheHeapStorage::new(
+                    S3HeapStorage::new(bucket).await,
+                    cache_dir,
+                ))
+            } else {
+                AnyHeapStorage::S3(S3HeapStorage::new(bucket).await)
+            }
         } else if let Some(dir) = cli.directory_path {
             AnyHeapStorage::File(FileHeapStorage::new(dir))
         } else {
