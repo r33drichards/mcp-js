@@ -91,6 +91,30 @@ function pickUrl() {
   return url;
 }
 
+// ── SSE response parsing ────────────────────────────────────────────────
+// The /mcp endpoint returns text/event-stream (SSE) for tools/call requests.
+// Extract the JSON-RPC result from the SSE event data.
+function parseSSEResponse(body) {
+  if (!body) return null;
+  // SSE format: "event: message\ndata: {json}\n\n"
+  const lines = body.split("\n");
+  for (const line of lines) {
+    if (line.startsWith("data: ")) {
+      try {
+        return JSON.parse(line.substring(6));
+      } catch (e) {
+        // continue to next data line
+      }
+    }
+  }
+  // Might be plain JSON (non-SSE)
+  try {
+    return JSON.parse(body);
+  } catch (e) {
+    return null;
+  }
+}
+
 // ── Main test function ──────────────────────────────────────────────────
 // Each iteration: initialize a session on one node, then execute one JS snippet.
 
@@ -99,11 +123,11 @@ export default function () {
   const reqId = Math.floor(Math.random() * 1e9);
   const snippet = JS_SNIPPETS[Math.floor(Math.random() * JS_SNIPPETS.length)];
 
-  // 1. Initialize MCP session
+  // 1. Initialize MCP session (returns application/json — completes immediately)
   const initRes = http.post(
     `${baseUrl}/mcp`,
     makeInitPayload(reqId),
-    { headers: JSON_HEADERS, tags: { phase: "init" } }
+    { headers: JSON_HEADERS, tags: { phase: "init" }, timeout: "10s" }
   );
 
   initDuration.add(initRes.timings.duration);
@@ -120,6 +144,10 @@ export default function () {
     "";
 
   // 2. Execute JS via tools/call
+  // The server returns text/event-stream (SSE) for requests with a session ID.
+  // The SSE stream stays open with keep-alive, so we must set a timeout to
+  // avoid blocking forever. The actual response arrives quickly; the timeout
+  // just ensures the connection gets cleaned up.
   const execHeaders = Object.assign({}, JSON_HEADERS);
   if (sessionId) {
     execHeaders["Mcp-Session-Id"] = sessionId;
@@ -128,22 +156,20 @@ export default function () {
   const execRes = http.post(
     `${baseUrl}/mcp`,
     makeToolCallPayload(reqId + 1, snippet),
-    { headers: execHeaders, tags: { phase: "exec" } }
+    { headers: execHeaders, tags: { phase: "exec" }, timeout: "10s" }
   );
 
   jsExecDuration.add(execRes.timings.duration);
   jsExecCount.add(1);
 
+  const parsed = parseSSEResponse(execRes.body);
   const ok = check(execRes, {
     "status 200": (r) => r.status === 200,
-    "has result": (r) => {
-      try {
-        const body = JSON.parse(r.body);
-        return body.result !== undefined || body.id !== undefined;
-      } catch (e) {
-        // SSE responses start with "event:" – still valid
-        return r.body && r.body.length > 0;
+    "has result": () => {
+      if (parsed) {
+        return parsed.result !== undefined || parsed.id !== undefined;
       }
+      return execRes.body && execRes.body.length > 0;
     },
   });
 
@@ -213,6 +239,10 @@ export function handleSummary(data) {
   return output;
 }
 
+function safeFixed(val, digits) {
+  return val != null ? val.toFixed(digits) : "N/A";
+}
+
 function textSummary(data) {
   let out = `\n${"=".repeat(60)}\n`;
   out += `  Load Test Results: ${TOPOLOGY} @ ${TARGET_RATE} req/s\n`;
@@ -235,11 +265,11 @@ function textSummary(data) {
   if (m.js_exec_duration) {
     const d = m.js_exec_duration.values;
     out += `  Exec Duration:\n`;
-    out += `    avg:  ${d.avg.toFixed(2)} ms\n`;
-    out += `    p50:  ${d["p(50)"] ? d["p(50)"].toFixed(2) : "N/A"} ms\n`;
-    out += `    p95:  ${d["p(95)"].toFixed(2)} ms\n`;
-    out += `    p99:  ${d["p(99)"].toFixed(2)} ms\n`;
-    out += `    max:  ${d.max.toFixed(2)} ms\n`;
+    out += `    avg:  ${safeFixed(d.avg, 2)} ms\n`;
+    out += `    p50:  ${safeFixed(d["p(50)"], 2)} ms\n`;
+    out += `    p95:  ${safeFixed(d["p(95)"], 2)} ms\n`;
+    out += `    p99:  ${safeFixed(d["p(99)"], 2)} ms\n`;
+    out += `    max:  ${safeFixed(d.max, 2)} ms\n`;
   }
   if (m.dropped_iterations) {
     out += `  Dropped Iterations: ${m.dropped_iterations.values.count}\n`;
