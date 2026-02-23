@@ -53,6 +53,8 @@
             clang
             llvmPackages.bintools
             pkg-config
+            curl
+            cacert
           ];
 
           buildInputs = with pkgs; [
