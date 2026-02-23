@@ -85,16 +85,16 @@ let
   # ── Peer list ─────────────────────────────────────────────────────────
 
   allPeerAddrs = [
-    "node1:4000"
-    "node2:4000"
-    "node3:4000"
-    "node4:4000"
-    "node5:4000"
+    "node1@node1:4000"
+    "node2@node2:4000"
+    "node3@node3:4000"
+    "node4@node4:4000"
+    "node5@node5:4000"
   ];
 
   peersFor =
     nodeId:
-    builtins.filter (p: !(pkgs.lib.hasPrefix "${nodeId}:" p)) allPeerAddrs;
+    builtins.filter (p: !(pkgs.lib.hasPrefix "${nodeId}@" p)) allPeerAddrs;
 
   # ── Shared node configuration ─────────────────────────────────────────
 

@@ -501,7 +501,7 @@ impl StatefulService {
                         code: code_for_log,
                         timestamp: chrono::Utc::now().to_rfc3339(),
                     };
-                    if let Err(e) = log.append(session_name, entry) {
+                    if let Err(e) = log.append(session_name, entry).await {
                         tracing::warn!("Failed to log session entry: {}", e);
                     }
                 }
@@ -523,7 +523,7 @@ impl StatefulService {
     #[tool(description = "List all named sessions. Returns an array of session names that have been used with the session parameter in run_js.")]
     pub async fn list_sessions(&self) -> ListSessionsResponse {
         match &self.session_log {
-            Some(log) => match log.list_sessions() {
+            Some(log) => match log.list_sessions().await {
                 Ok(sessions) => ListSessionsResponse { sessions },
                 Err(e) => ListSessionsResponse {
                     sessions: vec![format!("Error: {}", e)],
@@ -549,7 +549,7 @@ impl StatefulService {
                 let parsed_fields = fields.map(|f| {
                     f.split(',').map(|s| s.trim().to_string()).collect::<Vec<_>>()
                 });
-                match log.list_entries(&session, parsed_fields) {
+                match log.list_entries(&session, parsed_fields).await {
                     Ok(entries) => ListSessionSnapshotsResponse { entries },
                     Err(e) => ListSessionSnapshotsResponse {
                         entries: vec![serde_json::json!({"error": e})],

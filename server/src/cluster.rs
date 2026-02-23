@@ -97,10 +97,33 @@ pub struct GetResponse {
 pub struct ClusterConfig {
     pub node_id: String,
     pub peers: Vec<String>, // "host:port" of other nodes
+    /// Mapping from node_id → peer address (host:port).
+    /// Populated when peers are specified as "id@host:port".
+    pub peer_addrs: HashMap<String, String>,
     pub cluster_port: u16,
     pub heartbeat_interval: Duration,
     pub election_timeout_min: Duration,
     pub election_timeout_max: Duration,
+}
+
+impl ClusterConfig {
+    /// Parse a peer list that may contain entries in either "host:port" or
+    /// "node_id@host:port" format.  Returns (peers, peer_addrs) where peers
+    /// is the list of addresses and peer_addrs maps node_id → address for
+    /// entries that included an id.
+    pub fn parse_peers(raw: &[String]) -> (Vec<String>, HashMap<String, String>) {
+        let mut peers = Vec::new();
+        let mut peer_addrs = HashMap::new();
+        for entry in raw {
+            if let Some((id, addr)) = entry.split_once('@') {
+                peers.push(addr.to_string());
+                peer_addrs.insert(id.to_string(), addr.to_string());
+            } else {
+                peers.push(entry.clone());
+            }
+        }
+        (peers, peer_addrs)
+    }
 }
 
 impl Default for ClusterConfig {
@@ -108,6 +131,7 @@ impl Default for ClusterConfig {
         Self {
             node_id: "node1".to_string(),
             peers: Vec::new(),
+            peer_addrs: HashMap::new(),
             cluster_port: 4000,
             heartbeat_interval: Duration::from_millis(100),
             election_timeout_min: Duration::from_millis(300),
@@ -721,6 +745,54 @@ impl ClusterNode {
         Err("timeout waiting for commit".to_string())
     }
 
+    /// Write a key-value pair, forwarding to the leader if this node is a
+    /// follower.  Requires `peer_addrs` to be populated so the leader's
+    /// network address can be resolved from its node-id.
+    pub async fn put_or_forward(&self, key: String, value: String) -> Result<(), String> {
+        {
+            let state = self.state.read().await;
+            if state.role == Role::Leader {
+                drop(state);
+                return self.put(key, value).await;
+            }
+        }
+
+        // We are not the leader – try to forward.
+        let leader_id = {
+            let state = self.state.read().await;
+            state.leader_id.clone()
+        };
+
+        match leader_id {
+            Some(id) => {
+                let leader_addr = self
+                    .config
+                    .peer_addrs
+                    .get(&id)
+                    .ok_or_else(|| format!("unknown leader address for node '{}'", id))?;
+                let url = format!("http://{}/data/put", leader_addr);
+                let req = PutRequest {
+                    key,
+                    value,
+                };
+                let resp = self
+                    .http_client
+                    .post(&url)
+                    .json(&req)
+                    .send()
+                    .await
+                    .map_err(|e| format!("failed to forward to leader: {}", e))?;
+                if resp.status().is_success() {
+                    Ok(())
+                } else {
+                    let body = resp.text().await.unwrap_or_default();
+                    Err(format!("leader returned error: {}", body))
+                }
+            }
+            None => Err("no leader elected yet".to_string()),
+        }
+    }
+
     /// Read a key. Can be called on any node (returns locally committed data).
     pub async fn get(&self, key: &str) -> Result<Option<String>, String> {
         let data_tree = self.db.open_tree("data").map_err(|e| e.to_string())?;
@@ -729,6 +801,20 @@ impl ClusterNode {
             Ok(None) => Ok(None),
             Err(e) => Err(e.to_string()),
         }
+    }
+
+    /// Scan all keys with the given prefix from the replicated data tree.
+    /// Returns (key, value) pairs sorted lexicographically.
+    pub fn scan_prefix(&self, prefix: &str) -> Result<Vec<(String, String)>, String> {
+        let data_tree = self.db.open_tree("data").map_err(|e| e.to_string())?;
+        let mut results = Vec::new();
+        for item in data_tree.scan_prefix(prefix.as_bytes()) {
+            let (key, value) = item.map_err(|e| e.to_string())?;
+            let key_str = String::from_utf8_lossy(&key).to_string();
+            let val_str = String::from_utf8_lossy(&value).to_string();
+            results.push((key_str, val_str));
+        }
+        Ok(results)
     }
 
     /// Return the current status of this node.
@@ -816,7 +902,7 @@ async fn route(
             match read_body(req).await.and_then(|b| {
                 serde_json::from_slice::<PutRequest>(&b).map_err(|e| e.to_string())
             }) {
-                Ok(put_req) => match node.put(put_req.key, put_req.value).await {
+                Ok(put_req) => match node.put_or_forward(put_req.key, put_req.value).await {
                     Ok(()) => json_response(200, &serde_json::json!({"ok": true})),
                     Err(e) => error_response(503, &e),
                 },

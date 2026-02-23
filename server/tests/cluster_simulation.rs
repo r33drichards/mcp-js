@@ -8,6 +8,7 @@
 //!   3. Crashed nodes can rejoin without deadlock.
 
 use server::cluster::{ClusterConfig, ClusterNode, Role};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
@@ -27,9 +28,17 @@ fn make_config(idx: usize, ports: &[u16; 5]) -> ClusterConfig {
         .map(|(_, p)| format!("127.0.0.1:{}", p))
         .collect();
 
+    let peer_addrs: HashMap<String, String> = ports
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != idx)
+        .map(|(i, p)| (format!("node{}", i + 1), format!("127.0.0.1:{}", p)))
+        .collect();
+
     ClusterConfig {
         node_id,
         peers,
+        peer_addrs,
         cluster_port: ports[idx],
         heartbeat_interval: Duration::from_millis(80),
         election_timeout_min: Duration::from_millis(250),

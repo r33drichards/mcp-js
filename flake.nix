@@ -90,6 +90,10 @@
             inherit pkgs;
             mcp-js = self.packages.x86_64-linux.default;
           });
+          load-balancing-test = pkgs.nixosTest (import ./tests/nixos/load-balancing.nix {
+            inherit pkgs;
+            mcp-js = self.packages.x86_64-linux.default;
+          });
         };
     };
 }

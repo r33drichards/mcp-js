@@ -14,22 +14,23 @@ fn temp_session_log() -> SessionLog {
     SessionLog::from_config(sled::Config::new().temporary(true)).expect("failed to open temp sled")
 }
 
-#[test]
-fn test_basic_append_and_list() {
+#[tokio::test]
+async fn test_basic_append_and_list() {
     let log = temp_session_log();
 
     // Initially no sessions
-    let sessions = log.list_sessions().unwrap();
+    let sessions = log.list_sessions().await.unwrap();
     assert!(sessions.is_empty());
 
     // Append to a session
     let seq = log
         .append("my-session", make_entry(None, "hash_a", "1 + 1"))
+        .await
         .unwrap();
     assert!(seq > 0 || seq == 0); // just check it returns
 
     // Session should now appear
-    let sessions = log.list_sessions().unwrap();
+    let sessions = log.list_sessions().await.unwrap();
     assert_eq!(sessions, vec!["my-session"]);
 
     // Append another entry
@@ -37,10 +38,11 @@ fn test_basic_append_and_list() {
         "my-session",
         make_entry(Some("hash_a"), "hash_b", "2 + 2"),
     )
+    .await
     .unwrap();
 
     // List entries
-    let entries = log.list_entries("my-session", None).unwrap();
+    let entries = log.list_entries("my-session", None).await.unwrap();
     assert_eq!(entries.len(), 2);
 
     // First entry
@@ -54,50 +56,54 @@ fn test_basic_append_and_list() {
     assert_eq!(entries[1]["code"], "2 + 2");
 }
 
-#[test]
-fn test_multiple_sessions() {
+#[tokio::test]
+async fn test_multiple_sessions() {
     let log = temp_session_log();
 
     log.append("session-a", make_entry(None, "h1", "code1"))
+        .await
         .unwrap();
     log.append("session-b", make_entry(None, "h2", "code2"))
+        .await
         .unwrap();
     log.append("session-a", make_entry(Some("h1"), "h3", "code3"))
+        .await
         .unwrap();
 
-    let mut sessions = log.list_sessions().unwrap();
+    let mut sessions = log.list_sessions().await.unwrap();
     sessions.sort();
     assert_eq!(sessions, vec!["session-a", "session-b"]);
 
-    let a_entries = log.list_entries("session-a", None).unwrap();
+    let a_entries = log.list_entries("session-a", None).await.unwrap();
     assert_eq!(a_entries.len(), 2);
 
-    let b_entries = log.list_entries("session-b", None).unwrap();
+    let b_entries = log.list_entries("session-b", None).await.unwrap();
     assert_eq!(b_entries.len(), 1);
 }
 
-#[test]
-fn test_get_latest() {
+#[tokio::test]
+async fn test_get_latest() {
     let log = temp_session_log();
 
     // No entries yet
-    assert!(log.get_latest("empty").unwrap().is_none());
+    assert!(log.get_latest("empty").await.unwrap().is_none());
 
-    log.append("s", make_entry(None, "h1", "c1")).unwrap();
-    log.append("s", make_entry(Some("h1"), "h2", "c2")).unwrap();
-    log.append("s", make_entry(Some("h2"), "h3", "c3")).unwrap();
+    log.append("s", make_entry(None, "h1", "c1")).await.unwrap();
+    log.append("s", make_entry(Some("h1"), "h2", "c2")).await.unwrap();
+    log.append("s", make_entry(Some("h2"), "h3", "c3")).await.unwrap();
 
-    let latest = log.get_latest("s").unwrap().unwrap();
+    let latest = log.get_latest("s").await.unwrap().unwrap();
     assert_eq!(latest.output_heap, "h3");
     assert_eq!(latest.code, "c3");
 }
 
-#[test]
-fn test_field_filtering() {
+#[tokio::test]
+async fn test_field_filtering() {
     let log = temp_session_log();
 
-    log.append("s", make_entry(None, "h1", "code1")).unwrap();
+    log.append("s", make_entry(None, "h1", "code1")).await.unwrap();
     log.append("s", make_entry(Some("h1"), "h2", "code2"))
+        .await
         .unwrap();
 
     // Request only output_heap and code
@@ -106,6 +112,7 @@ fn test_field_filtering() {
             "s",
             Some(vec!["output_heap".to_string(), "code".to_string()]),
         )
+        .await
         .unwrap();
 
     assert_eq!(entries.len(), 2);
@@ -121,6 +128,7 @@ fn test_field_filtering() {
     // Request with index
     let entries = log
         .list_entries("s", Some(vec!["index".to_string(), "output_heap".to_string()]))
+        .await
         .unwrap();
     let obj = entries[0].as_object().unwrap();
     assert!(obj.contains_key("index"));
@@ -128,23 +136,24 @@ fn test_field_filtering() {
     assert!(!obj.contains_key("code"));
 }
 
-#[test]
-fn test_empty_session_entries() {
+#[tokio::test]
+async fn test_empty_session_entries() {
     let log = temp_session_log();
 
     // Listing entries for a non-existent session should return empty (open_tree creates it lazily)
-    let entries = log.list_entries("nonexistent", None).unwrap();
+    let entries = log.list_entries("nonexistent", None).await.unwrap();
     assert!(entries.is_empty());
 }
 
-#[test]
-fn test_monotonic_sequence_numbers() {
+#[tokio::test]
+async fn test_monotonic_sequence_numbers() {
     let log = temp_session_log();
 
     let mut seqs = Vec::new();
     for i in 0..10 {
         let seq = log
             .append("s", make_entry(None, &format!("h{}", i), &format!("c{}", i)))
+            .await
             .unwrap();
         seqs.push(seq);
     }
@@ -168,6 +177,7 @@ async fn test_concurrent_writes_same_session() {
                 "concurrent-session",
                 make_entry(None, &format!("hash_{}", i), &format!("code_{}", i)),
             )
+            .await
             .unwrap()
         }));
     }
@@ -183,7 +193,7 @@ async fn test_concurrent_writes_same_session() {
     assert_eq!(seqs.len(), num_tasks);
 
     // All entries should be present
-    let entries = log.list_entries("concurrent-session", None).unwrap();
+    let entries = log.list_entries("concurrent-session", None).await.unwrap();
     assert_eq!(entries.len(), num_tasks);
 
     // Entries should be in sequence order (sled iterates by key order = big-endian u64)
@@ -212,6 +222,7 @@ async fn test_concurrent_writes_different_sessions() {
                     &session_name,
                     make_entry(None, &format!("h_{}_{}", s, i), &format!("c_{}_{}", s, i)),
                 )
+                .await
                 .unwrap()
             }));
         }
@@ -225,6 +236,7 @@ async fn test_concurrent_writes_different_sessions() {
     for s in 0..num_sessions {
         let entries = log
             .list_entries(&format!("session_{}", s), None)
+            .await
             .unwrap();
         assert_eq!(
             entries.len(),
@@ -236,7 +248,7 @@ async fn test_concurrent_writes_different_sessions() {
         );
     }
 
-    let mut sessions = log.list_sessions().unwrap();
+    let mut sessions = log.list_sessions().await.unwrap();
     sessions.sort();
     assert_eq!(sessions.len(), num_sessions);
 }
@@ -260,6 +272,7 @@ async fn test_read_write_atomicity() {
                         &format!("code_{}", i),
                     ),
                 )
+                .await
                 .unwrap();
         }
     });
@@ -270,6 +283,7 @@ async fn test_read_write_atomicity() {
         for _ in 0..200 {
             let entries = reader_log
                 .list_entries("atomic-session", None)
+                .await
                 .unwrap();
 
             // Entry count should only increase
@@ -305,6 +319,6 @@ async fn test_read_write_atomicity() {
     reader.await.unwrap();
 
     // Final state: all entries present
-    let entries = log.list_entries("atomic-session", None).unwrap();
+    let entries = log.list_entries("atomic-session", None).await.unwrap();
     assert_eq!(entries.len(), num_writes);
 }
