@@ -3,6 +3,7 @@ run javascript code in v8
 params:
 - code: the javascript code to run
 - heap (optional): content hash from a previous execution to resume that session, or omit for a fresh session
+- session (optional): a human-readable session name. When provided, a log entry is written recording the input heap, output heap, executed code, and timestamp. Use list_sessions and list_session_snapshots to browse session history.
 - heap_memory_max_mb (optional): maximum V8 heap memory in megabytes (1–64, default: 8). Override the server default for this execution.
 - execution_timeout_secs (optional): maximum execution time in seconds (1–300, default: 30). Override the server default for this execution.
 

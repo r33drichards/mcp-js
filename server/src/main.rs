@@ -14,6 +14,7 @@ use tokio_util::sync::CancellationToken;
 mod mcp;
 use mcp::{StatelessService, StatefulService, initialize_v8, DEFAULT_EXECUTION_TIMEOUT_SECS};
 use mcp::heap_storage::{AnyHeapStorage, S3HeapStorage, FileHeapStorage};
+use mcp::session_log::SessionLog;
 
 /// Command line arguments for configuring heap storage
 #[derive(Parser, Debug)]
@@ -47,6 +48,10 @@ struct Cli {
     /// Maximum execution timeout in seconds (default: 30, max: 300)
     #[arg(long, default_value_t = DEFAULT_EXECUTION_TIMEOUT_SECS, value_parser = clap::value_parser!(u64).range(1..=300))]
     execution_timeout: u64,
+
+    /// Path to the sled database for session logging (default: /tmp/mcp-v8-sessions)
+    #[arg(long, default_value = "/tmp/mcp-v8-sessions", conflicts_with = "stateless")]
+    session_db_path: String,
 }
 
 /// npx @modelcontextprotocol/inspector cargo run -p mcp-server-examples --example std_io
@@ -99,15 +104,26 @@ async fn main() -> Result<()> {
             AnyHeapStorage::File(FileHeapStorage::new("/tmp/mcp-v8-heaps"))
         };
 
+        let session_log = match SessionLog::new(&cli.session_db_path) {
+            Ok(log) => {
+                tracing::info!("Session log opened at {}", cli.session_db_path);
+                Some(log)
+            }
+            Err(e) => {
+                tracing::warn!("Failed to open session log at {}: {}. Session logging disabled.", cli.session_db_path, e);
+                None
+            }
+        };
+
         if let Some(port) = cli.http_port {
             tracing::info!("Starting HTTP transport in stateful mode on port {}", port);
-            start_http_server_stateful(heap_storage, port, heap_memory_max_bytes, execution_timeout_secs).await?;
+            start_http_server_stateful(heap_storage, session_log, port, heap_memory_max_bytes, execution_timeout_secs).await?;
         } else if let Some(port) = cli.sse_port {
             tracing::info!("Starting SSE transport in stateful mode on port {}", port);
-            start_sse_server_stateful(heap_storage, port, heap_memory_max_bytes, execution_timeout_secs).await?;
+            start_sse_server_stateful(heap_storage, session_log, port, heap_memory_max_bytes, execution_timeout_secs).await?;
         } else {
             tracing::info!("Starting stdio transport in stateful mode");
-            let service = StatefulService::new(heap_storage, heap_memory_max_bytes, execution_timeout_secs)
+            let service = StatefulService::new(heap_storage, session_log, heap_memory_max_bytes, execution_timeout_secs)
                 .serve(stdio())
                 .await
                 .inspect_err(|e| {
@@ -165,10 +181,10 @@ async fn start_http_server_stateless(port: u16, heap_memory_max_bytes: usize, ex
 }
 
 // Stateful HTTP handlers
-async fn http_handler_stateful(req: Request<Incoming>, heap_storage: AnyHeapStorage, heap_memory_max_bytes: usize, execution_timeout_secs: u64) -> Result<hyper::Response<String>, hyper::Error> {
+async fn http_handler_stateful(req: Request<Incoming>, heap_storage: AnyHeapStorage, session_log: Option<SessionLog>, heap_memory_max_bytes: usize, execution_timeout_secs: u64) -> Result<hyper::Response<String>, hyper::Error> {
     tokio::spawn(async move {
         let upgraded = hyper::upgrade::on(req).await?;
-        let service = StatefulService::new(heap_storage, heap_memory_max_bytes, execution_timeout_secs)
+        let service = StatefulService::new(heap_storage, session_log, heap_memory_max_bytes, execution_timeout_secs)
             .serve(TokioIo::new(upgraded))
             .await?;
         service.waiting().await?;
@@ -182,7 +198,7 @@ async fn http_handler_stateful(req: Request<Incoming>, heap_storage: AnyHeapStor
     Ok(response)
 }
 
-async fn start_http_server_stateful(heap_storage: AnyHeapStorage, port: u16, heap_memory_max_bytes: usize, execution_timeout_secs: u64) -> Result<()> {
+async fn start_http_server_stateful(heap_storage: AnyHeapStorage, session_log: Option<SessionLog>, port: u16, heap_memory_max_bytes: usize, execution_timeout_secs: u64) -> Result<()> {
     let addr = format!("0.0.0.0:{}", port);
     let tcp_listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("HTTP server (stateful) listening on {}", addr);
@@ -191,9 +207,10 @@ async fn start_http_server_stateful(heap_storage: AnyHeapStorage, port: u16, hea
         let (stream, addr) = tcp_listener.accept().await?;
         tracing::info!("Accepted connection from: {}", addr);
         let heap_storage_clone = heap_storage.clone();
+        let session_log_clone = session_log.clone();
 
         let service = hyper::service::service_fn(move |req| {
-            http_handler_stateful(req, heap_storage_clone.clone(), heap_memory_max_bytes, execution_timeout_secs)
+            http_handler_stateful(req, heap_storage_clone.clone(), session_log_clone.clone(), heap_memory_max_bytes, execution_timeout_secs)
         });
 
         let conn = hyper::server::conn::http1::Builder::new()
@@ -255,7 +272,7 @@ async fn start_sse_server_stateless(port: u16, heap_memory_max_bytes: usize, exe
 }
 
 // Stateful SSE server
-async fn start_sse_server_stateful(heap_storage: AnyHeapStorage, port: u16, heap_memory_max_bytes: usize, execution_timeout_secs: u64) -> Result<()> {
+async fn start_sse_server_stateful(heap_storage: AnyHeapStorage, session_log: Option<SessionLog>, port: u16, heap_memory_max_bytes: usize, execution_timeout_secs: u64) -> Result<()> {
     let addr = format!("0.0.0.0:{}", port).parse()?;
 
     let config = SseServerConfig {
@@ -282,7 +299,7 @@ async fn start_sse_server_stateful(heap_storage: AnyHeapStorage, port: u16, heap
 
     // Register the service BEFORE spawning the server task
     sse_server.with_service(move || {
-        StatefulService::new(heap_storage.clone(), heap_memory_max_bytes, execution_timeout_secs)
+        StatefulService::new(heap_storage.clone(), session_log.clone(), heap_memory_max_bytes, execution_timeout_secs)
     });
 
     // Spawn the server task AFTER registering the service
