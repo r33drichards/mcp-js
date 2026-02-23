@@ -1,0 +1,30 @@
+version: "3.8"
+
+# Single-node MCP-JS with nginx reverse proxy.
+# Used as a baseline for load test comparison against the 3-node cluster.
+#
+# Usage:
+#   docker compose -f docker-compose.single-node.yml up --build
+#
+# The server is accessible at http://localhost:8080/mcp
+
+services:
+  # ── Nginx reverse proxy (same layer as cluster tests) ──────────────────
+  lb:
+    image: nginx:alpine
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./nginx-single.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - node1
+
+  # ── Single MCP-JS node ─────────────────────────────────────────────────
+  node1:
+    build: .
+    command:
+      - mcp-v8
+      - --http-port=3000
+      - --stateless
+    expose:
+      - "3000"

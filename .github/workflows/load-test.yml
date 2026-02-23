@@ -1,0 +1,255 @@
+name: Load Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: "Duration per test run (k6 duration string)"
+        default: "60s"
+      rates:
+        description: "Comma-separated target rates (req/s)"
+        default: "1000,10000,100000"
+
+concurrency:
+  group: load-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  load-test:
+    name: Benchmark (${{ matrix.topology }}-${{ matrix.mode }})
+    runs-on: [self-hosted, railway]
+    timeout-minutes: 120
+
+    strategy:
+      fail-fast: false
+      matrix:
+        topology:
+          - single
+          - cluster
+        mode:
+          - stateless
+          - stateful
+
+    env:
+      DURATION: ${{ github.event.inputs.duration || '60s' }}
+      RATES: ${{ github.event.inputs.rates || '1000,10000,100000' }}
+      LABEL: ${{ matrix.topology }}-${{ matrix.mode }}
+
+    steps:
+      # ── Setup ────────────────────────────────────────────────────────
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install k6
+        run: |
+          if ! command -v k6 &> /dev/null; then
+            curl -fsSL https://github.com/grafana/k6/releases/download/v0.55.0/k6-v0.55.0-linux-amd64.tar.gz \
+              | tar xzf - --strip-components=1 -C /usr/local/bin k6-v0.55.0-linux-amd64/k6
+          fi
+          k6 version
+
+      - name: Install jq
+        run: |
+          if ! command -v jq &> /dev/null; then
+            apt-get update -qq && apt-get install -yqq jq
+          fi
+
+      # ── Build Docker image ──────────────────────────────────────────
+      - name: Build MCP-V8 Docker image
+        run: docker build -t mcp-v8:loadtest .
+
+      # ── Select compose file ─────────────────────────────────────────
+      - name: Select compose file for ${{ env.LABEL }}
+        run: |
+          case "${{ matrix.topology }}-${{ matrix.mode }}" in
+            single-stateless)  COMPOSE_FILE=docker-compose.single-node.yml ;;
+            single-stateful)   COMPOSE_FILE=docker-compose.single-node-stateful.yml ;;
+            cluster-stateless) COMPOSE_FILE=docker-compose.cluster-stateless.yml ;;
+            cluster-stateful)  COMPOSE_FILE=docker-compose.cluster.yml ;;
+          esac
+          echo "COMPOSE_FILE=$COMPOSE_FILE" >> "$GITHUB_ENV"
+          echo "Using compose file: $COMPOSE_FILE"
+
+      # ── Start target environment ────────────────────────────────────
+      - name: Start ${{ env.LABEL }} environment
+        run: docker compose -f "$COMPOSE_FILE" up -d --build --wait
+
+      - name: Wait for services to be healthy
+        run: |
+          echo "Waiting for MCP server to accept connections..."
+          for i in $(seq 1 60); do
+            if curl -sf -o /dev/null -X POST http://localhost:8080/mcp \
+              -H 'Content-Type: application/json' \
+              -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"healthcheck","version":"1.0.0"}}}'; then
+              echo "Server is ready (attempt $i)"
+              break
+            fi
+            if [ "$i" -eq 60 ]; then
+              echo "ERROR: Server did not become ready in 120s"
+              docker compose -f "$COMPOSE_FILE" logs
+              exit 1
+            fi
+            echo "Attempt $i/60 — not ready yet"
+            sleep 2
+          done
+
+          # For cluster topology, wait for Raft leader election
+          if [ "${{ matrix.topology }}" = "cluster" ]; then
+            echo "Waiting for Raft leader election..."
+            for i in $(seq 1 30); do
+              STATUS=$(docker compose -f "$COMPOSE_FILE" exec -T node1 \
+                curl -sf http://localhost:4000/raft/status 2>/dev/null || echo '{}')
+              ROLE=$(echo "$STATUS" | jq -r '.role // empty' 2>/dev/null || true)
+              if [ "$ROLE" = "Leader" ] || [ "$ROLE" = "Follower" ]; then
+                echo "Raft cluster is operational (node1 role: $ROLE)"
+                break
+              fi
+              echo "Attempt $i/30 — waiting for Raft..."
+              sleep 2
+            done
+          fi
+
+      # ── Smoke test ──────────────────────────────────────────────────
+      - name: Smoke test — execute JS through MCP
+        run: |
+          echo "Testing JS execution via MCP protocol..."
+
+          # Initialize session
+          INIT_RESP=$(curl -sf -X POST http://localhost:8080/mcp \
+            -H 'Content-Type: application/json' \
+            -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoketest","version":"1.0.0"}}}')
+          echo "Init response: $INIT_RESP"
+
+          # Extract session ID
+          SESSION_ID=$(curl -sI -X POST http://localhost:8080/mcp \
+            -H 'Content-Type: application/json' \
+            -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoketest","version":"1.0.0"}}}' \
+            | grep -i 'mcp-session-id' | cut -d: -f2 | tr -d ' \r' || true)
+          echo "Session ID: ${SESSION_ID:-none}"
+
+          # Execute JS
+          EXEC_RESP=$(curl -sf -X POST http://localhost:8080/mcp \
+            -H 'Content-Type: application/json' \
+            ${SESSION_ID:+-H "Mcp-Session-Id: $SESSION_ID"} \
+            -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"run_js","arguments":{"code":"1 + 1"}}}')
+          echo "Exec response: $EXEC_RESP"
+
+          if [ -z "$EXEC_RESP" ]; then
+            echo "ERROR: No response from JS execution"
+            exit 1
+          fi
+          echo "Smoke test passed"
+
+      # ── Load tests at each rate ─────────────────────────────────────
+      - name: Run load tests
+        run: |
+          mkdir -p results
+
+          IFS=',' read -ra RATE_ARRAY <<< "$RATES"
+          for RATE in "${RATE_ARRAY[@]}"; do
+            echo ""
+            echo "============================================================"
+            echo "  Running: ${LABEL} @ ${RATE} req/s for ${DURATION}"
+            echo "============================================================"
+            echo ""
+
+            k6 run \
+              --out json=results/raw-${LABEL}-${RATE}.json \
+              -e TARGET_URL=http://localhost:8080 \
+              -e TARGET_RATE="${RATE}" \
+              -e DURATION="${DURATION}" \
+              -e TOPOLOGY="${LABEL}" \
+              loadtest/k6-load-test.js \
+              || true  # Don't fail the job if thresholds aren't met
+
+            # Move the generated result file into results/
+            if [ -f "results-${LABEL}-${RATE}rps.json" ]; then
+              mv "results-${LABEL}-${RATE}rps.json" results/
+            fi
+
+            echo ""
+            echo "Cooling down between test runs..."
+            sleep 10
+          done
+
+      # ── Tear down ───────────────────────────────────────────────────
+      - name: Stop environment
+        if: always()
+        run: |
+          docker compose -f "$COMPOSE_FILE" down -v --remove-orphans 2>/dev/null || true
+
+      # ── Generate report ─────────────────────────────────────────────
+      - name: Generate benchmark report
+        if: always()
+        run: |
+          chmod +x loadtest/generate-report.sh
+          loadtest/generate-report.sh results || true
+
+      # ── Upload artifacts ────────────────────────────────────────────
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: load-test-results-${{ env.LABEL }}
+          path: results/
+          if-no-files-found: ignore
+
+  # ── Comparison report (runs after all benchmarks complete) ──────────
+  report:
+    name: Generate Comparison Report
+    runs-on: [self-hosted, railway]
+    needs: load-test
+    if: always()
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install jq
+        run: |
+          if ! command -v jq &> /dev/null; then
+            apt-get update -qq && apt-get install -yqq jq
+          fi
+
+      - name: Download all results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: load-test-results-*
+          path: results/
+          merge-multiple: true
+        continue-on-error: true
+
+      - name: Generate combined report
+        run: |
+          chmod +x loadtest/generate-report.sh
+          loadtest/generate-report.sh results || echo "Report generation failed (some results may be missing)"
+
+      - name: Upload combined report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: load-test-benchmark-report
+          path: |
+            results/benchmark-report.md
+            results/benchmark-summary.json
+          if-no-files-found: ignore
+
+      - name: Post report as PR comment
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const reportPath = 'results/benchmark-report.md';
+            if (fs.existsSync(reportPath)) {
+              const report = fs.readFileSync(reportPath, 'utf8');
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: report
+              });
+            }
