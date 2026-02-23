@@ -3,6 +3,7 @@ run javascript code in v8
 params:
 - code: the javascript code to run
 - heap (optional): content hash from a previous execution to resume that session, or omit for a fresh session
+- session (optional): a human-readable session name. When provided, a log entry is written recording the input heap, output heap, executed code, and timestamp. Use list_sessions and list_session_snapshots to browse session history.
 - heap_memory_max_mb (optional): maximum V8 heap memory in megabytes (1–64, default: 8). Override the server default for this execution.
 - execution_timeout_secs (optional): maximum execution time in seconds (1–300, default: 30). Override the server default for this execution.
 
@@ -65,53 +66,78 @@ the source code of the runtime is this
 ```rust
 // Execute JS with snapshot support (preserves heap state)
 pub fn execute_stateful(code: String, snapshot: Option<Vec<u8>>, heap_memory_max_bytes: usize, timeout_secs: u64) -> Result<(String, Vec<u8>, String), String> {
-    let params = Some(create_params_with_heap_limit(heap_memory_max_bytes));
-
     let raw_snapshot = match snapshot {
         Some(data) if !data.is_empty() => Some(unwrap_snapshot(&data)?),
         _ => None,
     };
 
-    let mut snapshot_creator = match raw_snapshot {
-        Some(raw) if !raw.is_empty() => {
-            v8::Isolate::snapshot_creator_from_existing_snapshot(raw, None, params)
-        }
-        _ => {
-            v8::Isolate::snapshot_creator(None, params)
-        }
-    };
-    install_heap_limit_callback(&mut snapshot_creator);
-    let _timeout_guard = install_execution_timeout(&mut snapshot_creator, timeout_secs);
+    let oom_flag = Arc::new(AtomicBool::new(false));
+    let timeout_flag = Arc::new(AtomicBool::new(false));
 
-    let output_result;
-    {
-        let scope = &mut v8::HandleScope::new(&mut snapshot_creator);
-        let context = v8::Context::new(scope, Default::default());
-        let scope = &mut v8::ContextScope::new(scope, context);
-        output_result = match eval(scope, &code) {
-            Ok(result) => {
-                result
-                    .to_string(scope)
-                    .map(|s| s.to_rust_string_lossy(scope))
-                    .ok_or_else(|| "Failed to convert result to string".to_string())
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let params = Some(create_params_with_heap_limit(heap_memory_max_bytes));
+
+        let mut snapshot_creator = match raw_snapshot {
+            Some(raw) if !raw.is_empty() => {
+                v8::Isolate::snapshot_creator_from_existing_snapshot(raw, None, params)
             }
-            Err(e) => Err(e),
+            _ => {
+                v8::Isolate::snapshot_creator(None, params)
+            }
         };
-        scope.set_default_context(context);
+
+        let cb_data_ptr = install_heap_limit_callback(&mut snapshot_creator, oom_flag.clone());
+        let _timeout_guard = install_execution_timeout(&mut snapshot_creator, timeout_secs, timeout_flag.clone());
+
+        let output_result;
+        {
+            let scope = &mut v8::HandleScope::new(&mut snapshot_creator);
+            let context = v8::Context::new(scope, Default::default());
+            let scope = &mut v8::ContextScope::new(scope, context);
+            output_result = match eval(scope, &code) {
+                Ok(result) => {
+                    result
+                        .to_string(scope)
+                        .map(|s| s.to_rust_string_lossy(scope))
+                        .ok_or_else(|| "Failed to convert result to string".to_string())
+                }
+                Err(e) => Err(e),
+            };
+            scope.set_default_context(context);
+        }
+
+        unsafe { let _ = Box::from_raw(cb_data_ptr); }
+
+        let startup_data = snapshot_creator.create_blob(v8::FunctionCodeHandling::Clear)
+            .ok_or("Failed to create V8 snapshot blob".to_string())?;
+        let wrapped = wrap_snapshot(&startup_data);
+
+        output_result.map(|output| (output, wrapped.data, wrapped.content_hash))
+    }));
+
+    match result {
+        Ok(inner) => inner.map_err(|e| classify_termination_error(&oom_flag, &timeout_flag, e)),
+        Err(_panic) => Err(classify_termination_error(
+            &oom_flag,
+            &timeout_flag,
+            "V8 execution panicked unexpectedly".to_string(),
+        )),
     }
-
-    let startup_data = snapshot_creator.create_blob(v8::FunctionCodeHandling::Clear)
-        .ok_or("Failed to create V8 snapshot blob".to_string())?;
-    let wrapped = wrap_snapshot(&startup_data);
-
-    output_result.map(|output| (output, wrapped.data, wrapped.content_hash))
 }
 
-// Stateful service implementation
+// Stateful service with heap persistence
+#[derive(Clone)]
+pub struct StatefulService {
+    heap_storage: AnyHeapStorage,
+    session_log: Option<SessionLog>,
+    heap_memory_max_bytes: usize,
+    execution_timeout_secs: u64,
+}
+
 #[tool(tool_box)]
 impl StatefulService {
-    pub fn new(heap_storage: AnyHeapStorage, heap_memory_max_bytes: usize, execution_timeout_secs: u64) -> Self {
-        Self { heap_storage, heap_memory_max_bytes, execution_timeout_secs }
+    pub fn new(heap_storage: AnyHeapStorage, session_log: Option<SessionLog>, heap_memory_max_bytes: usize, execution_timeout_secs: u64) -> Self {
+        Self { heap_storage, session_log, heap_memory_max_bytes, execution_timeout_secs }
     }
 
     #[tool(description = include_str!("run_js_tool_description.md"))]
@@ -121,6 +147,9 @@ impl StatefulService {
         #[tool(param)]
         #[serde(default)]
         heap: Option<String>,
+        #[tool(param)]
+        #[serde(default)]
+        session: Option<String>,
         #[tool(param)]
         #[serde(default)]
         heap_memory_max_mb: Option<usize>,
@@ -136,6 +165,7 @@ impl StatefulService {
             Some(h) if !h.is_empty() => self.heap_storage.get(h).await.ok(),
             _ => None,
         };
+        let code_for_log = code.clone();
         let v8_result = tokio::task::spawn_blocking(move || execute_stateful(code, snapshot, max_bytes, timeout)).await;
 
         match v8_result {
@@ -146,6 +176,20 @@ impl StatefulService {
                         heap: content_hash,
                     };
                 }
+
+                // Log to session if session name is provided and session log is available
+                if let (Some(session_name), Some(log)) = (&session, &self.session_log) {
+                    let entry = SessionLogEntry {
+                        input_heap: heap.clone(),
+                        output_heap: content_hash.clone(),
+                        code: code_for_log,
+                        timestamp: chrono::Utc::now().to_rfc3339(),
+                    };
+                    if let Err(e) = log.append(session_name, entry) {
+                        tracing::warn!("Failed to log session entry: {}", e);
+                    }
+                }
+
                 RunJsStatefulResponse { output, heap: content_hash }
             }
             Ok(Err(e)) => RunJsStatefulResponse {

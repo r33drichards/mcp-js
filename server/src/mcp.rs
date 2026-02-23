@@ -17,7 +17,9 @@ use v8::{self};
 use sha2::{Sha256, Digest};
 
 pub mod heap_storage;
+pub mod session_log;
 use crate::mcp::heap_storage::{HeapStorage, AnyHeapStorage};
+use crate::mcp::session_log::{SessionLog, SessionLogEntry};
 
 
 
@@ -323,16 +325,11 @@ pub fn initialize_v8() {
 
 
 
-#[allow(dead_code)]
-pub trait DataService: Send + Sync + 'static {
-    fn get_data(&self) -> String;
-    fn set_data(&mut self, data: String);
-}
-
 // Stateful service with heap persistence
 #[derive(Clone)]
 pub struct StatefulService {
     heap_storage: AnyHeapStorage,
+    session_log: Option<SessionLog>,
     heap_memory_max_bytes: usize,
     execution_timeout_secs: u64,
 }
@@ -380,6 +377,40 @@ impl IntoContents for RunJsStatelessResponse {
     }
 }
 
+// Response for list_sessions
+#[derive(Debug, Clone)]
+pub struct ListSessionsResponse {
+    pub sessions: Vec<String>,
+}
+
+impl IntoContents for ListSessionsResponse {
+    fn into_contents(self) -> Vec<Content> {
+        match Content::json(json!({
+            "sessions": self.sessions,
+        })) {
+            Ok(content) => vec![content],
+            Err(e) => vec![Content::text(format!("Failed to convert list_sessions response: {}", e))],
+        }
+    }
+}
+
+// Response for list_session_snapshots
+#[derive(Debug, Clone)]
+pub struct ListSessionSnapshotsResponse {
+    pub entries: Vec<serde_json::Value>,
+}
+
+impl IntoContents for ListSessionSnapshotsResponse {
+    fn into_contents(self) -> Vec<Content> {
+        match Content::json(json!({
+            "entries": self.entries,
+        })) {
+            Ok(content) => vec![content],
+            Err(e) => vec![Content::text(format!("Failed to convert list_session_snapshots response: {}", e))],
+        }
+    }
+}
+
 // Stateless service implementation
 #[tool(tool_box)]
 impl StatelessService {
@@ -420,8 +451,8 @@ impl StatelessService {
 // Stateful service implementation
 #[tool(tool_box)]
 impl StatefulService {
-    pub fn new(heap_storage: AnyHeapStorage, heap_memory_max_bytes: usize, execution_timeout_secs: u64) -> Self {
-        Self { heap_storage, heap_memory_max_bytes, execution_timeout_secs }
+    pub fn new(heap_storage: AnyHeapStorage, session_log: Option<SessionLog>, heap_memory_max_bytes: usize, execution_timeout_secs: u64) -> Self {
+        Self { heap_storage, session_log, heap_memory_max_bytes, execution_timeout_secs }
     }
 
     /// Execute JavaScript code with heap persistence. The heap parameter is the content hash from a previous execution.
@@ -432,6 +463,9 @@ impl StatefulService {
         #[tool(param)]
         #[serde(default)]
         heap: Option<String>,
+        #[tool(param)]
+        #[serde(default)]
+        session: Option<String>,
         #[tool(param)]
         #[serde(default)]
         heap_memory_max_mb: Option<usize>,
@@ -447,6 +481,7 @@ impl StatefulService {
             Some(h) if !h.is_empty() => self.heap_storage.get(h).await.ok(),
             _ => None,
         };
+        let code_for_log = code.clone();
         let v8_result = tokio::task::spawn_blocking(move || execute_stateful(code, snapshot, max_bytes, timeout)).await;
 
         match v8_result {
@@ -457,6 +492,20 @@ impl StatefulService {
                         heap: content_hash,
                     };
                 }
+
+                // Log to session if session name is provided and session log is available
+                if let (Some(session_name), Some(log)) = (&session, &self.session_log) {
+                    let entry = SessionLogEntry {
+                        input_heap: heap.clone(),
+                        output_heap: content_hash.clone(),
+                        code: code_for_log,
+                        timestamp: chrono::Utc::now().to_rfc3339(),
+                    };
+                    if let Err(e) = log.append(session_name, entry) {
+                        tracing::warn!("Failed to log session entry: {}", e);
+                    }
+                }
+
                 RunJsStatefulResponse { output, heap: content_hash }
             }
             Ok(Err(e)) => RunJsStatefulResponse {
@@ -466,6 +515,49 @@ impl StatefulService {
             Err(e) => RunJsStatefulResponse {
                 output: format!("Task join error: {}", e),
                 heap: heap.unwrap_or_default(),
+            },
+        }
+    }
+
+    /// List all named sessions in the session log.
+    #[tool(description = "List all named sessions. Returns an array of session names that have been used with the session parameter in run_js.")]
+    pub async fn list_sessions(&self) -> ListSessionsResponse {
+        match &self.session_log {
+            Some(log) => match log.list_sessions() {
+                Ok(sessions) => ListSessionsResponse { sessions },
+                Err(e) => ListSessionsResponse {
+                    sessions: vec![format!("Error: {}", e)],
+                },
+            },
+            None => ListSessionsResponse {
+                sessions: vec!["Session log not configured".to_string()],
+            },
+        }
+    }
+
+    /// List all log entries for a named session.
+    #[tool(description = "List all log entries for a named session. Each entry contains the input heap hash, output heap hash, code executed, and timestamp. Use the fields parameter to select specific fields (comma-separated: index,input_heap,output_heap,code,timestamp).")]
+    pub async fn list_session_snapshots(
+        &self,
+        #[tool(param)] session: String,
+        #[tool(param)]
+        #[serde(default)]
+        fields: Option<String>,
+    ) -> ListSessionSnapshotsResponse {
+        match &self.session_log {
+            Some(log) => {
+                let parsed_fields = fields.map(|f| {
+                    f.split(',').map(|s| s.trim().to_string()).collect::<Vec<_>>()
+                });
+                match log.list_entries(&session, parsed_fields) {
+                    Ok(entries) => ListSessionSnapshotsResponse { entries },
+                    Err(e) => ListSessionSnapshotsResponse {
+                        entries: vec![serde_json::json!({"error": e})],
+                    },
+                }
+            }
+            None => ListSessionSnapshotsResponse {
+                entries: vec![serde_json::json!({"error": "Session log not configured"})],
             },
         }
     }
