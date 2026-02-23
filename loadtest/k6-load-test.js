@@ -1,5 +1,5 @@
 import http from "k6/http";
-import { check, sleep } from "k6";
+import { check } from "k6";
 import { Counter, Rate, Trend } from "k6/metrics";
 
 // ── Custom metrics ──────────────────────────────────────────────────────
@@ -9,16 +9,17 @@ const jsExecCount = new Counter("js_exec_count");
 const initDuration = new Trend("mcp_init_duration", true);
 
 // ── Configuration from environment ──────────────────────────────────────
-const TARGET_URL = __ENV.TARGET_URL || "http://localhost:8080";
+// TARGET_URLS: comma-separated list of base URLs (for cluster round-robin)
+const TARGET_URLS = (__ENV.TARGET_URLS || __ENV.TARGET_URL || "http://localhost:3001")
+  .split(",")
+  .map((u) => u.trim());
 const TARGET_RATE = parseInt(__ENV.TARGET_RATE || "1000");
 const DURATION = __ENV.DURATION || "60s";
 const TOPOLOGY = __ENV.TOPOLOGY || "unknown";
 
 // ── Scenario configuration ──────────────────────────────────────────────
-// The workflow sets TARGET_RATE to 1000, 10000, or 100000.
-// We use constant-arrival-rate to attempt the target req/s regardless of
-// response time.  Pre-allocated VUs are set generously so k6 has enough
-// goroutines to keep up.
+// constant-arrival-rate attempts exactly TARGET_RATE iterations/sec
+// regardless of response time.
 export const options = {
   scenarios: {
     mcp_load: {
@@ -26,15 +27,13 @@ export const options = {
       rate: TARGET_RATE,
       timeUnit: "1s",
       duration: DURATION,
-      // Start with enough VUs; each VU handles one request at a time.
-      // For high rates we need many VUs since each request blocks on I/O.
       preAllocatedVUs: Math.min(TARGET_RATE * 2, 50000),
       maxVUs: Math.min(TARGET_RATE * 4, 100000),
     },
   },
   thresholds: {
-    js_exec_success: ["rate>0.90"],       // >=90% success
-    js_exec_duration: ["p(95)<10000"],    // p95 < 10s
+    js_exec_success: ["rate>0.90"],
+    js_exec_duration: ["p(95)<10000"],
   },
   tags: {
     topology: TOPOLOGY,
@@ -69,9 +68,7 @@ function makeToolCallPayload(id, code) {
   });
 }
 
-// A set of lightweight JS snippets to execute.  We rotate through them to
-// avoid any caching effects while keeping execution cost low (we want to
-// measure throughput, not V8 compute time).
+// Lightweight JS snippets — rotate to avoid caching effects.
 const JS_SNIPPETS = [
   "1 + 1",
   "Math.sqrt(144)",
@@ -85,16 +82,26 @@ const JS_SNIPPETS = [
 
 const JSON_HEADERS = { "Content-Type": "application/json" };
 
+// Simple round-robin counter for distributing across cluster nodes.
+let rrCounter = 0;
+
+function pickUrl() {
+  const url = TARGET_URLS[rrCounter % TARGET_URLS.length];
+  rrCounter++;
+  return url;
+}
+
 // ── Main test function ──────────────────────────────────────────────────
-// Each iteration: initialize a session, then execute one JS snippet.
+// Each iteration: initialize a session on one node, then execute one JS snippet.
 
 export default function () {
+  const baseUrl = pickUrl();
   const reqId = Math.floor(Math.random() * 1e9);
   const snippet = JS_SNIPPETS[Math.floor(Math.random() * JS_SNIPPETS.length)];
 
   // 1. Initialize MCP session
   const initRes = http.post(
-    `${TARGET_URL}/mcp`,
+    `${baseUrl}/mcp`,
     makeInitPayload(reqId),
     { headers: JSON_HEADERS, tags: { phase: "init" } }
   );
@@ -119,7 +126,7 @@ export default function () {
   }
 
   const execRes = http.post(
-    `${TARGET_URL}/mcp`,
+    `${baseUrl}/mcp`,
     makeToolCallPayload(reqId + 1, snippet),
     { headers: execHeaders, tags: { phase: "exec" } }
   );
@@ -132,7 +139,6 @@ export default function () {
     "has result": (r) => {
       try {
         const body = JSON.parse(r.body);
-        // MCP responses can be direct JSON-RPC or SSE-wrapped
         return body.result !== undefined || body.id !== undefined;
       } catch (e) {
         // SSE responses start with "event:" – still valid
@@ -151,6 +157,7 @@ export function handleSummary(data) {
     topology: TOPOLOGY,
     target_rate: TARGET_RATE,
     duration: DURATION,
+    target_urls: TARGET_URLS,
     metrics: {
       js_exec_count:
         data.metrics.js_exec_count
@@ -202,14 +209,14 @@ export function handleSummary(data) {
   const filename = `results-${TOPOLOGY}-${TARGET_RATE}rps.json`;
   const output = {};
   output[filename] = JSON.stringify(summary, null, 2);
-  output["stdout"] = textSummary(data, { indent: "  ", enableColors: true });
+  output["stdout"] = textSummary(data);
   return output;
 }
 
-function textSummary(data, opts) {
-  // k6 built-in text summary
+function textSummary(data) {
   let out = `\n${"=".repeat(60)}\n`;
   out += `  Load Test Results: ${TOPOLOGY} @ ${TARGET_RATE} req/s\n`;
+  out += `  Target URLs: ${TARGET_URLS.join(", ")}\n`;
   out += `${"=".repeat(60)}\n\n`;
 
   const m = data.metrics;
