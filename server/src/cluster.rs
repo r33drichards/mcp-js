@@ -44,6 +44,10 @@ pub struct AppendEntriesRequest {
     pub prev_log_term: u64,
     pub entries: Vec<LogEntry>,
     pub leader_commit: u64,
+    /// Current peer set from the leader, so followers can track membership
+    /// changes. Absent (None) for backwards compatibility with older nodes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_addrs: Option<HashMap<String, String>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -75,6 +79,8 @@ pub struct ClusterStatus {
     pub commit_index: u64,
     pub last_applied: u64,
     pub log_length: u64,
+    pub peers: Vec<String>,
+    pub peer_addrs: HashMap<String, String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -89,6 +95,17 @@ pub struct GetResponse {
     pub value: Option<String>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct JoinRequest {
+    pub node_id: String,
+    pub addr: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LeaveRequest {
+    pub node_id: String,
+}
+
 // ============================================================================
 // Configuration
 // ============================================================================
@@ -97,10 +114,37 @@ pub struct GetResponse {
 pub struct ClusterConfig {
     pub node_id: String,
     pub peers: Vec<String>, // "host:port" of other nodes
+    /// Mapping from node_id → peer address (host:port).
+    /// Populated when peers are specified as "id@host:port".
+    pub peer_addrs: HashMap<String, String>,
     pub cluster_port: u16,
+    /// The externally-reachable address of this node (e.g. "myhost:4000").
+    /// Used so this node can advertise itself in the peer_addrs map.
+    /// Defaults to "127.0.0.1:{cluster_port}" if not set.
+    pub advertise_addr: Option<String>,
     pub heartbeat_interval: Duration,
     pub election_timeout_min: Duration,
     pub election_timeout_max: Duration,
+}
+
+impl ClusterConfig {
+    /// Parse a peer list that may contain entries in either "host:port" or
+    /// "node_id@host:port" format.  Returns (peers, peer_addrs) where peers
+    /// is the list of addresses and peer_addrs maps node_id → address for
+    /// entries that included an id.
+    pub fn parse_peers(raw: &[String]) -> (Vec<String>, HashMap<String, String>) {
+        let mut peers = Vec::new();
+        let mut peer_addrs = HashMap::new();
+        for entry in raw {
+            if let Some((id, addr)) = entry.split_once('@') {
+                peers.push(addr.to_string());
+                peer_addrs.insert(id.to_string(), addr.to_string());
+            } else {
+                peers.push(entry.clone());
+            }
+        }
+        (peers, peer_addrs)
+    }
 }
 
 impl Default for ClusterConfig {
@@ -108,7 +152,9 @@ impl Default for ClusterConfig {
         Self {
             node_id: "node1".to_string(),
             peers: Vec::new(),
+            peer_addrs: HashMap::new(),
             cluster_port: 4000,
+            advertise_addr: None,
             heartbeat_interval: Duration::from_millis(100),
             election_timeout_min: Duration::from_millis(300),
             election_timeout_max: Duration::from_millis(500),
@@ -133,6 +179,11 @@ pub struct RaftState {
     pub match_index: HashMap<String, u64>,
     // Timing
     pub last_heartbeat: Instant,
+    // Dynamic peer set (addresses used for Raft RPCs)
+    pub peers: Vec<String>,
+    // node_id → address mapping for write forwarding and peer resolution.
+    // Includes this node itself so followers can resolve any node id.
+    pub peer_addrs: HashMap<String, String>,
 }
 
 impl RaftState {
@@ -148,6 +199,8 @@ impl RaftState {
             next_index: HashMap::new(),
             match_index: HashMap::new(),
             last_heartbeat: Instant::now(),
+            peers: Vec::new(),
+            peer_addrs: HashMap::new(),
         }
     }
 
@@ -198,6 +251,35 @@ impl ClusterNode {
             raft_state.log.sort_by_key(|e| e.index);
         }
 
+        // Initialize peer set: start with CLI seed peers, then merge any
+        // persisted peers (from previous dynamic joins).
+        raft_state.peers = config.peers.clone();
+        raft_state.peer_addrs = config.peer_addrs.clone();
+
+        // Include self in peer_addrs so it gets propagated to followers
+        let self_addr = config
+            .advertise_addr
+            .clone()
+            .unwrap_or_else(|| format!("127.0.0.1:{}", config.cluster_port));
+        raft_state
+            .peer_addrs
+            .insert(config.node_id.clone(), self_addr);
+
+        if let Ok(Some(data)) = db.get("raft_peers") {
+            if let Ok(persisted) =
+                serde_json::from_slice::<HashMap<String, String>>(&data)
+            {
+                for (id, addr) in persisted {
+                    if !raft_state.peer_addrs.values().any(|a| a == &addr)
+                        && !raft_state.peers.contains(&addr)
+                    {
+                        raft_state.peers.push(addr.clone());
+                    }
+                    raft_state.peer_addrs.entry(id).or_insert(addr);
+                }
+            }
+        }
+
         let http_client = reqwest::Client::builder()
             .timeout(Duration::from_millis(500))
             .connect_timeout(Duration::from_millis(200))
@@ -243,6 +325,13 @@ impl ClusterNode {
     }
 
     // --- Persistence helpers ------------------------------------------------
+
+    fn persist_peers(&self, state: &RaftState) {
+        let _ = self.db.insert(
+            "raft_peers",
+            serde_json::to_vec(&state.peer_addrs).unwrap().as_slice(),
+        );
+    }
 
     fn persist_meta(&self, state: &RaftState) {
         let meta = serde_json::json!({
@@ -308,7 +397,7 @@ impl ClusterNode {
     }
 
     async fn start_election(self: &Arc<Self>) {
-        let (term, last_log_index, last_log_term, peer_count) = {
+        let (term, last_log_index, last_log_term, peers) = {
             let mut state = self.state.write().await;
             state.current_term += 1;
             state.role = Role::Candidate;
@@ -319,9 +408,11 @@ impl ClusterNode {
                 state.current_term,
                 state.last_log_index(),
                 state.last_log_term(),
-                self.config.peers.len(),
+                state.peers.clone(),
             )
         };
+
+        let peer_count = peers.len();
 
         tracing::info!(
             "[{}] Starting election for term {}",
@@ -334,7 +425,7 @@ impl ClusterNode {
 
         // Send RequestVote RPCs to all peers in parallel
         let mut handles = Vec::new();
-        for peer in &self.config.peers {
+        for peer in &peers {
             let req = RequestVoteRequest {
                 term,
                 candidate_id: self.config.node_id.clone(),
@@ -376,7 +467,7 @@ impl ClusterNode {
                 state.role = Role::Leader;
                 state.leader_id = Some(self.config.node_id.clone());
                 let last_index = state.last_log_index();
-                for peer in &self.config.peers {
+                for peer in &state.peers.clone() {
                     state.next_index.insert(peer.clone(), last_index + 1);
                     state.match_index.insert(peer.clone(), 0);
                 }
@@ -414,7 +505,10 @@ impl ClusterNode {
     }
 
     async fn send_append_entries_to_all(self: &Arc<Self>) {
-        let peers = self.config.peers.clone();
+        let peers = {
+            let state = self.state.read().await;
+            state.peers.clone()
+        };
         let mut handles = Vec::new();
 
         for peer in peers {
@@ -433,7 +527,7 @@ impl ClusterNode {
     }
 
     async fn send_append_entries_to_peer(self: &Arc<Self>, peer: &str) {
-        let (term, leader_id, prev_log_index, prev_log_term, entries, leader_commit) = {
+        let (term, leader_id, prev_log_index, prev_log_term, entries, leader_commit, current_peer_addrs) = {
             let state = self.state.read().await;
             if state.role != Role::Leader {
                 return;
@@ -455,6 +549,7 @@ impl ClusterNode {
                 .filter(|e| e.index >= next_idx)
                 .cloned()
                 .collect();
+            // peer_addrs already includes self (set during initialization)
             (
                 state.current_term,
                 self.config.node_id.clone(),
@@ -462,6 +557,7 @@ impl ClusterNode {
                 prev_term,
                 entries,
                 state.commit_index,
+                state.peer_addrs.clone(),
             )
         };
 
@@ -472,6 +568,7 @@ impl ClusterNode {
             prev_log_term,
             entries: entries.clone(),
             leader_commit,
+            peer_addrs: Some(current_peer_addrs),
         };
 
         let url = format!("http://{}/raft/append-entries", peer);
@@ -515,7 +612,7 @@ impl ClusterNode {
             return;
         }
 
-        let peer_count = self.config.peers.len();
+        let peer_count = state.peers.len();
         let majority = (peer_count + 1) / 2 + 1;
 
         // Find the highest N such that a majority of match_index[i] >= N
@@ -523,7 +620,7 @@ impl ClusterNode {
         let last_idx = state.last_log_index();
         for n in (state.commit_index + 1..=last_idx).rev() {
             let mut replication_count: usize = 1; // count self
-            for peer in &self.config.peers {
+            for peer in &state.peers.clone() {
                 if state.match_index.get(peer).copied().unwrap_or(0) >= n {
                     replication_count += 1;
                 }
@@ -573,6 +670,43 @@ impl ClusterNode {
         state.leader_id = Some(req.leader_id.clone());
         state.last_heartbeat = Instant::now();
         self.heartbeat_notify.notify_one();
+
+        // Apply peer set from the leader if provided
+        if let Some(leader_peer_addrs) = &req.peer_addrs {
+            let mut changed = false;
+            for (id, addr) in leader_peer_addrs {
+                // Skip self
+                if id == &self.config.node_id {
+                    continue;
+                }
+                if !state.peer_addrs.contains_key(id) {
+                    state.peers.push(addr.clone());
+                    state.peer_addrs.insert(id.clone(), addr.clone());
+                    changed = true;
+                } else if state.peer_addrs.get(id) != Some(addr) {
+                    // Address changed
+                    if let Some(old_addr) = state.peer_addrs.insert(id.clone(), addr.clone()) {
+                        state.peers.retain(|p| p != &old_addr);
+                    }
+                    state.peers.push(addr.clone());
+                    changed = true;
+                }
+            }
+            // Remove peers that the leader no longer has (excluding self)
+            let leader_ids: std::collections::HashSet<&String> = leader_peer_addrs.keys().collect();
+            let local_ids: Vec<String> = state.peer_addrs.keys().cloned().collect();
+            for id in local_ids {
+                if id != self.config.node_id && !leader_ids.contains(&id) {
+                    if let Some(addr) = state.peer_addrs.remove(&id) {
+                        state.peers.retain(|p| p != &addr);
+                        changed = true;
+                    }
+                }
+            }
+            if changed {
+                self.persist_peers(&state);
+            }
+        }
 
         // Log consistency check
         if req.prev_log_index > 0 {
@@ -721,6 +855,207 @@ impl ClusterNode {
         Err("timeout waiting for commit".to_string())
     }
 
+    /// Write a key-value pair, forwarding to the leader if this node is a
+    /// follower.  Uses the dynamic peer_addrs table to resolve the leader's
+    /// network address from its node-id.
+    pub async fn put_or_forward(&self, key: String, value: String) -> Result<(), String> {
+        let (is_leader, leader_id, leader_addr) = {
+            let state = self.state.read().await;
+            let lid = state.leader_id.clone();
+            let addr = lid
+                .as_ref()
+                .and_then(|id| state.peer_addrs.get(id).cloned());
+            (state.role == Role::Leader, lid, addr)
+        };
+
+        if is_leader {
+            return self.put(key, value).await;
+        }
+
+        // We are not the leader – try to forward.
+        match leader_id {
+            Some(id) => {
+                let leader_addr = leader_addr
+                    .ok_or_else(|| format!("unknown leader address for node '{}'", id))?;
+                let url = format!("http://{}/data/put", leader_addr);
+                let req = PutRequest {
+                    key,
+                    value,
+                };
+                let resp = self
+                    .http_client
+                    .post(&url)
+                    .json(&req)
+                    .send()
+                    .await
+                    .map_err(|e| format!("failed to forward to leader: {}", e))?;
+                if resp.status().is_success() {
+                    Ok(())
+                } else {
+                    let body = resp.text().await.unwrap_or_default();
+                    Err(format!("leader returned error: {}", body))
+                }
+            }
+            None => Err("no leader elected yet".to_string()),
+        }
+    }
+
+    // --- Dynamic Membership ------------------------------------------------
+
+    /// Add a peer to the cluster.  Must be called on the leader.
+    /// The peer is immediately added to the active peer set and persisted.
+    pub async fn add_peer(&self, node_id: String, addr: String) -> Result<(), String> {
+        let mut state = self.state.write().await;
+        if state.role != Role::Leader {
+            return Err(format!(
+                "not the leader; current leader: {:?}",
+                state.leader_id
+            ));
+        }
+
+        // Idempotent: skip if already present
+        if state.peer_addrs.contains_key(&node_id) {
+            return Ok(());
+        }
+
+        state.peers.push(addr.clone());
+        state.peer_addrs.insert(node_id.clone(), addr.clone());
+
+        // Initialize replication state for the new peer
+        let last_index = state.last_log_index();
+        state.next_index.insert(addr.clone(), last_index + 1);
+        state.match_index.insert(addr.clone(), 0);
+
+        self.persist_peers(&state);
+        tracing::info!("[{}] Added peer {}@{}", self.config.node_id, node_id, addr);
+        Ok(())
+    }
+
+    /// Remove a peer from the cluster.  Must be called on the leader.
+    pub async fn remove_peer(&self, node_id: String) -> Result<(), String> {
+        let mut state = self.state.write().await;
+        if state.role != Role::Leader {
+            return Err(format!(
+                "not the leader; current leader: {:?}",
+                state.leader_id
+            ));
+        }
+
+        if let Some(addr) = state.peer_addrs.remove(&node_id) {
+            state.peers.retain(|p| p != &addr);
+            state.next_index.remove(&addr);
+            state.match_index.remove(&addr);
+            self.persist_peers(&state);
+            tracing::info!(
+                "[{}] Removed peer {}@{}",
+                self.config.node_id,
+                node_id,
+                addr
+            );
+            Ok(())
+        } else {
+            Err(format!("peer '{}' not found", node_id))
+        }
+    }
+
+    /// Handle a join request.  If this node is the leader it adds the peer
+    /// directly; otherwise it forwards to the leader.
+    pub async fn handle_join(&self, req: JoinRequest) -> Result<(), String> {
+        {
+            let state = self.state.read().await;
+            if state.role == Role::Leader {
+                drop(state);
+                return self.add_peer(req.node_id, req.addr).await;
+            }
+        }
+
+        // Forward to the leader
+        let (leader_id, leader_addr) = {
+            let state = self.state.read().await;
+            let lid = state.leader_id.clone();
+            let addr = lid
+                .as_ref()
+                .and_then(|id| state.peer_addrs.get(id).cloned());
+            (lid, addr)
+        };
+
+        match (leader_id, leader_addr) {
+            (Some(_), Some(addr)) => {
+                let url = format!("http://{}/raft/join", addr);
+                let resp = self
+                    .http_client
+                    .post(&url)
+                    .json(&req)
+                    .send()
+                    .await
+                    .map_err(|e| format!("failed to forward join to leader: {}", e))?;
+                if resp.status().is_success() {
+                    // Also update our own peer set locally so we don't wait
+                    // for the next heartbeat to discover the new peer.
+                    let mut state = self.state.write().await;
+                    if !state.peer_addrs.contains_key(&req.node_id) {
+                        state.peers.push(req.addr.clone());
+                        state.peer_addrs.insert(req.node_id, req.addr);
+                        self.persist_peers(&state);
+                    }
+                    Ok(())
+                } else {
+                    let body = resp.text().await.unwrap_or_default();
+                    Err(format!("leader returned error: {}", body))
+                }
+            }
+            _ => Err("no leader elected yet".to_string()),
+        }
+    }
+
+    /// Handle a leave request.  If this node is the leader it removes the
+    /// peer directly; otherwise it forwards to the leader.
+    pub async fn handle_leave(&self, req: LeaveRequest) -> Result<(), String> {
+        {
+            let state = self.state.read().await;
+            if state.role == Role::Leader {
+                drop(state);
+                return self.remove_peer(req.node_id).await;
+            }
+        }
+
+        // Forward to the leader
+        let (leader_id, leader_addr) = {
+            let state = self.state.read().await;
+            let lid = state.leader_id.clone();
+            let addr = lid
+                .as_ref()
+                .and_then(|id| state.peer_addrs.get(id).cloned());
+            (lid, addr)
+        };
+
+        match (leader_id, leader_addr) {
+            (Some(_), Some(addr)) => {
+                let url = format!("http://{}/raft/leave", addr);
+                let resp = self
+                    .http_client
+                    .post(&url)
+                    .json(&req)
+                    .send()
+                    .await
+                    .map_err(|e| format!("failed to forward leave to leader: {}", e))?;
+                if resp.status().is_success() {
+                    // Remove from local peer set too
+                    let mut state = self.state.write().await;
+                    if let Some(addr) = state.peer_addrs.remove(&req.node_id) {
+                        state.peers.retain(|p| p != &addr);
+                        self.persist_peers(&state);
+                    }
+                    Ok(())
+                } else {
+                    let body = resp.text().await.unwrap_or_default();
+                    Err(format!("leader returned error: {}", body))
+                }
+            }
+            _ => Err("no leader elected yet".to_string()),
+        }
+    }
+
     /// Read a key. Can be called on any node (returns locally committed data).
     pub async fn get(&self, key: &str) -> Result<Option<String>, String> {
         let data_tree = self.db.open_tree("data").map_err(|e| e.to_string())?;
@@ -729,6 +1064,20 @@ impl ClusterNode {
             Ok(None) => Ok(None),
             Err(e) => Err(e.to_string()),
         }
+    }
+
+    /// Scan all keys with the given prefix from the replicated data tree.
+    /// Returns (key, value) pairs sorted lexicographically.
+    pub fn scan_prefix(&self, prefix: &str) -> Result<Vec<(String, String)>, String> {
+        let data_tree = self.db.open_tree("data").map_err(|e| e.to_string())?;
+        let mut results = Vec::new();
+        for item in data_tree.scan_prefix(prefix.as_bytes()) {
+            let (key, value) = item.map_err(|e| e.to_string())?;
+            let key_str = String::from_utf8_lossy(&key).to_string();
+            let val_str = String::from_utf8_lossy(&value).to_string();
+            results.push((key_str, val_str));
+        }
+        Ok(results)
     }
 
     /// Return the current status of this node.
@@ -742,6 +1091,8 @@ impl ClusterNode {
             commit_index: state.commit_index,
             last_applied: state.last_applied,
             log_length: state.log.len() as u64,
+            peers: state.peers.clone(),
+            peer_addrs: state.peer_addrs.clone(),
         }
     }
 }
@@ -812,11 +1163,35 @@ async fn route(
             json_response(200, &status)
         }
 
+        (Method::POST, "/raft/join") => {
+            match read_body(req).await.and_then(|b| {
+                serde_json::from_slice::<JoinRequest>(&b).map_err(|e| e.to_string())
+            }) {
+                Ok(join_req) => match node.handle_join(join_req).await {
+                    Ok(()) => json_response(200, &serde_json::json!({"ok": true})),
+                    Err(e) => error_response(503, &e),
+                },
+                Err(e) => error_response(400, &e),
+            }
+        }
+
+        (Method::POST, "/raft/leave") => {
+            match read_body(req).await.and_then(|b| {
+                serde_json::from_slice::<LeaveRequest>(&b).map_err(|e| e.to_string())
+            }) {
+                Ok(leave_req) => match node.handle_leave(leave_req).await {
+                    Ok(()) => json_response(200, &serde_json::json!({"ok": true})),
+                    Err(e) => error_response(503, &e),
+                },
+                Err(e) => error_response(400, &e),
+            }
+        }
+
         (Method::POST, "/data/put") => {
             match read_body(req).await.and_then(|b| {
                 serde_json::from_slice::<PutRequest>(&b).map_err(|e| e.to_string())
             }) {
-                Ok(put_req) => match node.put(put_req.key, put_req.value).await {
+                Ok(put_req) => match node.put_or_forward(put_req.key, put_req.value).await {
                     Ok(()) => json_response(200, &serde_json::json!({"ok": true})),
                     Err(e) => error_response(503, &e),
                 },

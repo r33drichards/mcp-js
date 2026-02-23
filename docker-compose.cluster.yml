@@ -1,0 +1,84 @@
+version: "3.8"
+
+# 3-node MCP-JS cluster with nginx load balancer.
+#
+# Usage:
+#   docker compose -f docker-compose.cluster.yml up --build
+#
+# The load balancer is accessible at http://localhost:8080/mcp
+
+services:
+  # ── Nginx load balancer ──────────────────────────────────────────────
+  lb:
+    image: nginx:alpine
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./nginx-cluster.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - node1
+      - node2
+      - node3
+
+  # ── MCP-JS cluster nodes ─────────────────────────────────────────────
+  node1:
+    build: .
+    command:
+      - mcp-v8
+      - --http-port=3000
+      - --directory-path=/data/heaps
+      - --session-db-path=/data/sessions
+      - --cluster-port=4000
+      - --node-id=node1
+      - --peers=node2@node2:4000,node3@node3:4000
+      - --heartbeat-interval=200
+      - --election-timeout-min=1000
+      - --election-timeout-max=2000
+    volumes:
+      - node1-data:/data
+    expose:
+      - "3000"
+      - "4000"
+
+  node2:
+    build: .
+    command:
+      - mcp-v8
+      - --http-port=3000
+      - --directory-path=/data/heaps
+      - --session-db-path=/data/sessions
+      - --cluster-port=4000
+      - --node-id=node2
+      - --peers=node1@node1:4000,node3@node3:4000
+      - --heartbeat-interval=200
+      - --election-timeout-min=1000
+      - --election-timeout-max=2000
+    volumes:
+      - node2-data:/data
+    expose:
+      - "3000"
+      - "4000"
+
+  node3:
+    build: .
+    command:
+      - mcp-v8
+      - --http-port=3000
+      - --directory-path=/data/heaps
+      - --session-db-path=/data/sessions
+      - --cluster-port=4000
+      - --node-id=node3
+      - --peers=node1@node1:4000,node2@node2:4000
+      - --heartbeat-interval=200
+      - --election-timeout-min=1000
+      - --election-timeout-max=2000
+    volumes:
+      - node3-data:/data
+    expose:
+      - "3000"
+      - "4000"
+
+volumes:
+  node1-data:
+  node2-data:
+  node3-data:

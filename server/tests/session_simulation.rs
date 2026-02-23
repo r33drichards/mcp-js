@@ -15,14 +15,14 @@ fn make_entry(input: Option<&str>, output: &str, code: &str) -> SessionLogEntry 
 }
 
 /// Simulate a workload: append N entries to a session, then verify.
-fn run_workload(log: &SessionLog, session: &str, count: usize) -> Vec<u64> {
+async fn run_workload(log: &SessionLog, session: &str, count: usize) -> Vec<u64> {
     let mut seqs = Vec::new();
     let mut prev_hash: Option<String> = None;
 
     for i in 0..count {
         let output = format!("hash_{}", i);
         let entry = make_entry(prev_hash.as_deref(), &output, &format!("step_{}", i));
-        let seq = log.append(session, entry).unwrap();
+        let seq = log.append(session, entry).await.unwrap();
         seqs.push(seq);
         prev_hash = Some(output);
     }
@@ -31,8 +31,8 @@ fn run_workload(log: &SessionLog, session: &str, count: usize) -> Vec<u64> {
 }
 
 /// Verify that a session contains the expected chain of entries.
-fn verify_chain(log: &SessionLog, session: &str, expected_count: usize) {
-    let entries = log.list_entries(session, None).unwrap();
+async fn verify_chain(log: &SessionLog, session: &str, expected_count: usize) {
+    let entries = log.list_entries(session, None).await.unwrap();
     assert_eq!(
         entries.len(),
         expected_count,
@@ -72,8 +72,8 @@ fn verify_chain(log: &SessionLog, session: &str, expected_count: usize) {
     }
 }
 
-#[test]
-fn test_flush_and_recovery() {
+#[tokio::test]
+async fn test_flush_and_recovery() {
     // Use a real (non-temporary) path so we can reopen after drop.
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("session_db");
@@ -82,7 +82,7 @@ fn test_flush_and_recovery() {
     // Phase 1: write entries and flush
     {
         let log = SessionLog::new(db_path_str).unwrap();
-        run_workload(&log, "recovery-session", 10);
+        run_workload(&log, "recovery-session", 10).await;
         log.flush().unwrap();
         // Drop triggers close
     }
@@ -90,16 +90,16 @@ fn test_flush_and_recovery() {
     // Phase 2: reopen and verify all flushed entries survived
     {
         let log = SessionLog::new(db_path_str).unwrap();
-        verify_chain(&log, "recovery-session", 10);
+        verify_chain(&log, "recovery-session", 10).await;
 
         // Sessions list should include our session
-        let sessions = log.list_sessions().unwrap();
+        let sessions = log.list_sessions().await.unwrap();
         assert!(sessions.contains(&"recovery-session".to_string()));
     }
 }
 
-#[test]
-fn test_crash_recovery_partial_flush() {
+#[tokio::test]
+async fn test_crash_recovery_partial_flush() {
     // Simulate: write some entries, flush, write more (unflushed), drop (crash), reopen.
     // Flushed entries must survive. Unflushed entries may or may not survive (sled
     // makes no guarantee for unflushed data on crash), but whatever is present
@@ -116,7 +116,7 @@ fn test_crash_recovery_partial_flush() {
         let log = SessionLog::new(db_path_str).unwrap();
 
         // Write and flush first batch
-        run_workload(&log, "partial-session", flushed_count);
+        run_workload(&log, "partial-session", flushed_count).await;
         log.flush().unwrap();
 
         // Write more without flushing (simulating crash before flush)
@@ -127,6 +127,7 @@ fn test_crash_recovery_partial_flush() {
                 "partial-session",
                 make_entry(Some(&prev), &output, &format!("step_{}", i)),
             )
+            .await
             .unwrap();
             prev = output;
         }
@@ -136,7 +137,7 @@ fn test_crash_recovery_partial_flush() {
     // Phase 2: reopen and verify
     {
         let log = SessionLog::new(db_path_str).unwrap();
-        let entries = log.list_entries("partial-session", None).unwrap();
+        let entries = log.list_entries("partial-session", None).await.unwrap();
 
         // At least the flushed entries must survive
         assert!(
@@ -160,8 +161,8 @@ fn test_crash_recovery_partial_flush() {
     }
 }
 
-#[test]
-fn test_repeated_open_close_cycles() {
+#[tokio::test]
+async fn test_repeated_open_close_cycles() {
     // Open, write, close, reopen, write more — multiple cycles.
     // Verify cumulative state is correct after each reopen.
     let dir = tempfile::tempdir().unwrap();
@@ -188,6 +189,7 @@ fn test_repeated_open_close_cycles() {
                 "cycle-session",
                 make_entry(prev.as_deref(), &output, &format!("step_{}", idx)),
             )
+            .await
             .unwrap();
             prev = Some(output);
         }
@@ -195,7 +197,7 @@ fn test_repeated_open_close_cycles() {
         log.flush().unwrap();
 
         // Verify total entries so far
-        let entries = log.list_entries("cycle-session", None).unwrap();
+        let entries = log.list_entries("cycle-session", None).await.unwrap();
         assert_eq!(
             entries.len(),
             (cycle + 1) * entries_per_cycle,
@@ -226,6 +228,7 @@ async fn test_concurrent_session_writers_no_duplicates() {
                     "shared-session",
                     make_entry(None, &format!("w1_hash_{}", i), &format!("w1_code_{}", i)),
                 )
+                .await
                 .unwrap();
             seqs.push(seq);
         }
@@ -241,6 +244,7 @@ async fn test_concurrent_session_writers_no_duplicates() {
                     "shared-session",
                     make_entry(None, &format!("w2_hash_{}", i), &format!("w2_code_{}", i)),
                 )
+                .await
                 .unwrap();
             seqs.push(seq);
         }
@@ -262,7 +266,7 @@ async fn test_concurrent_session_writers_no_duplicates() {
     );
 
     // Total entries should be 2 * num_per_writer
-    let entries = log.list_entries("shared-session", None).unwrap();
+    let entries = log.list_entries("shared-session", None).await.unwrap();
     assert_eq!(entries.len(), num_per_writer * 2);
 
     // All entries should be valid
@@ -277,8 +281,8 @@ async fn test_concurrent_session_writers_no_duplicates() {
     }
 }
 
-#[test]
-fn test_deterministic_workload_replay() {
+#[tokio::test]
+async fn test_deterministic_workload_replay() {
     // Run the exact same workload twice on two separate DBs.
     // The resulting entries should be identical (excluding sequence numbers,
     // which depend on global sled state).
@@ -288,11 +292,11 @@ fn test_deterministic_workload_replay() {
         SessionLog::from_config(sled::Config::new().temporary(true)).expect("open temp sled");
 
     let count = 20;
-    run_workload(&log1, "deterministic", count);
-    run_workload(&log2, "deterministic", count);
+    run_workload(&log1, "deterministic", count).await;
+    run_workload(&log2, "deterministic", count).await;
 
-    let entries1 = log1.list_entries("deterministic", None).unwrap();
-    let entries2 = log2.list_entries("deterministic", None).unwrap();
+    let entries1 = log1.list_entries("deterministic", None).await.unwrap();
+    let entries2 = log2.list_entries("deterministic", None).await.unwrap();
 
     assert_eq!(entries1.len(), entries2.len());
 
@@ -305,28 +309,30 @@ fn test_deterministic_workload_replay() {
     }
 }
 
-#[test]
-fn test_linearizable_session_operations() {
+#[tokio::test]
+async fn test_linearizable_session_operations() {
     // Simulate a sequence of operations and verify the observed results
     // are consistent with a serial execution.
     let log =
         SessionLog::from_config(sled::Config::new().temporary(true)).expect("open temp sled");
 
     // Operation sequence: append, append, list, append, get_latest, list
-    log.append("linear", make_entry(None, "h0", "c0")).unwrap();
+    log.append("linear", make_entry(None, "h0", "c0")).await.unwrap();
     log.append("linear", make_entry(Some("h0"), "h1", "c1"))
+        .await
         .unwrap();
 
-    let entries = log.list_entries("linear", None).unwrap();
+    let entries = log.list_entries("linear", None).await.unwrap();
     assert_eq!(entries.len(), 2);
 
     log.append("linear", make_entry(Some("h1"), "h2", "c2"))
+        .await
         .unwrap();
 
-    let latest = log.get_latest("linear").unwrap().unwrap();
+    let latest = log.get_latest("linear").await.unwrap().unwrap();
     assert_eq!(latest.output_heap, "h2");
 
-    let entries = log.list_entries("linear", None).unwrap();
+    let entries = log.list_entries("linear", None).await.unwrap();
     assert_eq!(entries.len(), 3);
 
     // Verify full chain manually (uses h0/h1/h2 naming, not hash_N)

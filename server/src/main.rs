@@ -2,14 +2,11 @@ use anyhow::Result;
 use rmcp::{ServiceExt, transport::stdio};
 use tracing_subscriber::{self};
 use clap::Parser;
-use hyper::{
-    Request, StatusCode,
-    body::Incoming,
-    header::{HeaderValue, UPGRADE},
-};
-use hyper_util::rt::TokioIo;
 use rmcp::transport::sse_server::{SseServer, SseServerConfig};
+use rmcp::transport::StreamableHttpServer;
+use rmcp::transport::streamable_http_server::axum::StreamableHttpServerConfig;
 use tokio_util::sync::CancellationToken;
+use std::sync::Arc;
 
 mod mcp;
 mod cluster;
@@ -39,11 +36,11 @@ struct Cli {
     #[arg(long, conflicts_with_all = ["s3_bucket", "directory_path"])]
     stateless: bool,
 
-    /// HTTP port to listen on (if not specified, uses stdio transport)
+    /// HTTP port using Streamable HTTP transport (MCP 2025-03-26+, load-balanceable)
     #[arg(long, conflicts_with = "sse_port")]
     http_port: Option<u16>,
 
-    /// SSE port to listen on (if not specified, uses stdio transport)
+    /// SSE port using the older HTTP+SSE transport
     #[arg(long, conflicts_with = "http_port")]
     sse_port: Option<u16>,
 
@@ -69,9 +66,20 @@ struct Cli {
     #[arg(long, default_value = "node1")]
     node_id: String,
 
-    /// Comma-separated list of peer addresses (host:port)
+    /// Comma-separated list of seed peer addresses. Format: id@host:port or host:port.
+    /// Peers can also join dynamically via POST /raft/join.
     #[arg(long, value_delimiter = ',')]
     peers: Vec<String>,
+
+    /// Join an existing cluster by contacting this seed address (host:port).
+    /// The node will register itself with the cluster leader via /raft/join.
+    #[arg(long)]
+    join: Option<String>,
+
+    /// Advertise address for this node (host:port). Used for peer discovery
+    /// and write forwarding. Defaults to <node-id>:<cluster-port>.
+    #[arg(long)]
+    advertise_addr: Option<String>,
 
     /// Heartbeat interval in milliseconds
     #[arg(long, default_value = "100")]
@@ -86,13 +94,10 @@ struct Cli {
     election_timeout_max: u64,
 }
 
-/// npx @modelcontextprotocol/inspector cargo run -p mcp-server-examples --example std_io
 #[tokio::main]
 async fn main() -> Result<()> {
     initialize_v8();
-    // Initialize the tracing subscriber with file and stdout logging
     tracing_subscriber::fmt()
-        // .with_env_filter(EnvFilter::from_default_env().add_directive(tracing::Level::DEBUG.into()))
         .with_writer(std::io::stderr)
         .with_ansi(false)
         .init();
@@ -106,19 +111,24 @@ async fn main() -> Result<()> {
     tracing::info!("V8 heap memory limit: {} MB ({} bytes)", cli.heap_memory_max, heap_memory_max_bytes);
     tracing::info!("V8 execution timeout: {} seconds", execution_timeout_secs);
 
-    // Cluster mode requires --http-port or --sse-port (stdio has no stdin as a service).
+    // Cluster mode requires --http-port or --sse-port.
     if cli.cluster_port.is_some() && cli.http_port.is_none() && cli.sse_port.is_none() {
         anyhow::bail!(
             "Cluster mode requires --http-port or --sse-port (stdio transport is not supported in cluster mode)"
         );
     }
 
-    // Start cluster node if cluster_port is specified
-    if let Some(cluster_port) = cli.cluster_port {
+    // Parse peer list (supports both "host:port" and "id@host:port" formats).
+    let (peer_addrs_list, peer_addrs_map) = ClusterConfig::parse_peers(&cli.peers);
+
+    // Start cluster node if cluster_port is specified.
+    let cluster_node: Option<Arc<ClusterNode>> = if let Some(cluster_port) = cli.cluster_port {
         let cluster_config = ClusterConfig {
             node_id: cli.node_id.clone(),
-            peers: cli.peers.clone(),
+            peers: peer_addrs_list,
+            peer_addrs: peer_addrs_map,
             cluster_port,
+            advertise_addr: cli.advertise_addr.clone().or_else(|| Some(format!("{}:{}", cli.node_id, cluster_port))),
             heartbeat_interval: std::time::Duration::from_millis(cli.heartbeat_interval),
             election_timeout_min: std::time::Duration::from_millis(cli.election_timeout_min),
             election_timeout_max: std::time::Duration::from_millis(cli.election_timeout_max),
@@ -128,16 +138,44 @@ async fn main() -> Result<()> {
         let cluster_db = sled::open(&cluster_db_path)
             .expect("Failed to open cluster sled database");
 
-        let cluster_node = ClusterNode::new(cluster_config, cluster_db);
-        cluster_node.start().await;
+        let node = ClusterNode::new(cluster_config, cluster_db);
+        node.start().await;
         tracing::info!("Cluster node {} started on port {}", cli.node_id, cluster_port);
-    }
+
+        // If --join is specified, register with an existing cluster member.
+        if let Some(ref seed_addr) = cli.join {
+            let my_addr = cli.advertise_addr.clone().unwrap_or_else(|| format!("{}:{}", cli.node_id, cluster_port));
+            tracing::info!("Joining cluster via seed node {}", seed_addr);
+            let join_req = cluster::JoinRequest {
+                node_id: cli.node_id.clone(),
+                addr: my_addr,
+            };
+            let client = reqwest::Client::new();
+            let url = format!("http://{}/raft/join", seed_addr);
+            match client.post(&url).json(&join_req).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    tracing::info!("Successfully joined cluster via {}", seed_addr);
+                }
+                Ok(resp) => {
+                    let body = resp.text().await.unwrap_or_default();
+                    tracing::warn!("Join request returned error: {}", body);
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to join cluster via {}: {}", seed_addr, e);
+                }
+            }
+        }
+
+        Some(node)
+    } else {
+        None
+    };
 
     if cli.stateless {
         // Stateless mode - no heap persistence
         if let Some(port) = cli.http_port {
-            tracing::info!("Starting HTTP transport in stateless mode on port {}", port);
-            start_http_server_stateless(port, heap_memory_max_bytes, execution_timeout_secs).await?;
+            tracing::info!("Starting Streamable HTTP transport in stateless mode on port {}", port);
+            start_streamable_http_stateless(port, heap_memory_max_bytes, execution_timeout_secs).await?;
         } else if let Some(port) = cli.sse_port {
             tracing::info!("Starting SSE transport in stateless mode on port {}", port);
             start_sse_server_stateless(port, heap_memory_max_bytes, execution_timeout_secs).await?;
@@ -149,7 +187,6 @@ async fn main() -> Result<()> {
                 .inspect_err(|e| {
                     tracing::error!("serving error: {:?}", e);
                 })?;
-
             service.waiting().await?;
         }
     } else {
@@ -167,13 +204,18 @@ async fn main() -> Result<()> {
         } else if let Some(dir) = cli.directory_path {
             AnyHeapStorage::File(FileHeapStorage::new(dir))
         } else {
-            // default to file /tmp/mcp-v8-heaps
             AnyHeapStorage::File(FileHeapStorage::new("/tmp/mcp-v8-heaps"))
         };
 
         let session_log = match SessionLog::new(&cli.session_db_path) {
             Ok(log) => {
                 tracing::info!("Session log opened at {}", cli.session_db_path);
+                let log = if let Some(ref cn) = cluster_node {
+                    tracing::info!("Session log will use Raft cluster for replication");
+                    log.with_cluster(cn.clone())
+                } else {
+                    log
+                };
                 Some(log)
             }
             Err(e) => {
@@ -183,8 +225,8 @@ async fn main() -> Result<()> {
         };
 
         if let Some(port) = cli.http_port {
-            tracing::info!("Starting HTTP transport in stateful mode on port {}", port);
-            start_http_server_stateful(heap_storage, session_log, port, heap_memory_max_bytes, execution_timeout_secs).await?;
+            tracing::info!("Starting Streamable HTTP transport in stateful mode on port {}", port);
+            start_streamable_http_stateful(heap_storage, session_log, port, heap_memory_max_bytes, execution_timeout_secs).await?;
         } else if let Some(port) = cli.sse_port {
             tracing::info!("Starting SSE transport in stateful mode on port {}", port);
             start_sse_server_stateful(heap_storage, session_log, port, heap_memory_max_bytes, execution_timeout_secs).await?;
@@ -196,7 +238,6 @@ async fn main() -> Result<()> {
                 .inspect_err(|e| {
                     tracing::error!("serving error: {:?}", e);
                 })?;
-
             service.waiting().await?;
         }
     }
@@ -204,95 +245,60 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-// Stateless HTTP handlers
-async fn http_handler_stateless(req: Request<Incoming>, heap_memory_max_bytes: usize, execution_timeout_secs: u64) -> Result<hyper::Response<String>, hyper::Error> {
-    tokio::spawn(async move {
-        let upgraded = hyper::upgrade::on(req).await?;
-        let service = StatelessService::new(heap_memory_max_bytes, execution_timeout_secs)
-            .serve(TokioIo::new(upgraded))
-            .await?;
-        service.waiting().await?;
-        anyhow::Result::<()>::Ok(())
+// ── Streamable HTTP transport (--http-port) ─────────────────────────────
+
+async fn start_streamable_http_stateless(port: u16, heap_memory_max_bytes: usize, execution_timeout_secs: u64) -> Result<()> {
+    let bind: std::net::SocketAddr = format!("0.0.0.0:{}", port).parse()?;
+    let ct = CancellationToken::new();
+
+    let config = StreamableHttpServerConfig {
+        bind,
+        path: "/mcp".to_string(),
+        ct: ct.clone(),
+        sse_keep_alive: Some(std::time::Duration::from_secs(15)),
+    };
+
+    let server = StreamableHttpServer::serve_with_config(config).await?;
+    tracing::info!("Streamable HTTP server (stateless) listening on {}", bind);
+
+    server.with_service(move || {
+        StatelessService::new(heap_memory_max_bytes, execution_timeout_secs)
     });
-    let mut response = hyper::Response::new(String::new());
-    *response.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
-    response
-        .headers_mut()
-        .insert(UPGRADE, HeaderValue::from_static("mcp"));
-    Ok(response)
+
+    tokio::signal::ctrl_c().await?;
+    tracing::info!("Received Ctrl+C, shutting down");
+    ct.cancel();
+
+    Ok(())
 }
 
-async fn start_http_server_stateless(port: u16, heap_memory_max_bytes: usize, execution_timeout_secs: u64) -> Result<()> {
-    let addr = format!("0.0.0.0:{}", port);
-    let tcp_listener = tokio::net::TcpListener::bind(&addr).await?;
-    tracing::info!("HTTP server (stateless) listening on {}", addr);
+async fn start_streamable_http_stateful(heap_storage: AnyHeapStorage, session_log: Option<SessionLog>, port: u16, heap_memory_max_bytes: usize, execution_timeout_secs: u64) -> Result<()> {
+    let bind: std::net::SocketAddr = format!("0.0.0.0:{}", port).parse()?;
+    let ct = CancellationToken::new();
 
-    loop {
-        let (stream, addr) = tcp_listener.accept().await?;
-        tracing::info!("Accepted connection from: {}", addr);
+    let config = StreamableHttpServerConfig {
+        bind,
+        path: "/mcp".to_string(),
+        ct: ct.clone(),
+        sse_keep_alive: Some(std::time::Duration::from_secs(15)),
+    };
 
-        let service = hyper::service::service_fn(move |req| {
-            http_handler_stateless(req, heap_memory_max_bytes, execution_timeout_secs)
-        });
+    let server = StreamableHttpServer::serve_with_config(config).await?;
+    tracing::info!("Streamable HTTP server (stateful) listening on {}", bind);
 
-        let conn = hyper::server::conn::http1::Builder::new()
-            .serve_connection(TokioIo::new(stream), service)
-            .with_upgrades();
-
-        tokio::spawn(async move {
-            if let Err(err) = conn.await {
-                tracing::error!("Connection error: {:?}", err);
-            }
-        });
-    }
-}
-
-// Stateful HTTP handlers
-async fn http_handler_stateful(req: Request<Incoming>, heap_storage: AnyHeapStorage, session_log: Option<SessionLog>, heap_memory_max_bytes: usize, execution_timeout_secs: u64) -> Result<hyper::Response<String>, hyper::Error> {
-    tokio::spawn(async move {
-        let upgraded = hyper::upgrade::on(req).await?;
-        let service = StatefulService::new(heap_storage, session_log, heap_memory_max_bytes, execution_timeout_secs)
-            .serve(TokioIo::new(upgraded))
-            .await?;
-        service.waiting().await?;
-        anyhow::Result::<()>::Ok(())
+    server.with_service(move || {
+        StatefulService::new(heap_storage.clone(), session_log.clone(), heap_memory_max_bytes, execution_timeout_secs)
     });
-    let mut response = hyper::Response::new(String::new());
-    *response.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
-    response
-        .headers_mut()
-        .insert(UPGRADE, HeaderValue::from_static("mcp"));
-    Ok(response)
+
+    tokio::signal::ctrl_c().await?;
+    tracing::info!("Received Ctrl+C, shutting down");
+    ct.cancel();
+
+    Ok(())
 }
 
-async fn start_http_server_stateful(heap_storage: AnyHeapStorage, session_log: Option<SessionLog>, port: u16, heap_memory_max_bytes: usize, execution_timeout_secs: u64) -> Result<()> {
-    let addr = format!("0.0.0.0:{}", port);
-    let tcp_listener = tokio::net::TcpListener::bind(&addr).await?;
-    tracing::info!("HTTP server (stateful) listening on {}", addr);
+// ── SSE transport (--sse-port) ──────────────────────────────────────────
 
-    loop {
-        let (stream, addr) = tcp_listener.accept().await?;
-        tracing::info!("Accepted connection from: {}", addr);
-        let heap_storage_clone = heap_storage.clone();
-        let session_log_clone = session_log.clone();
-
-        let service = hyper::service::service_fn(move |req| {
-            http_handler_stateful(req, heap_storage_clone.clone(), session_log_clone.clone(), heap_memory_max_bytes, execution_timeout_secs)
-        });
-
-        let conn = hyper::server::conn::http1::Builder::new()
-            .serve_connection(TokioIo::new(stream), service)
-            .with_upgrades();
-
-        tokio::spawn(async move {
-            if let Err(err) = conn.await {
-                tracing::error!("Connection error: {:?}", err);
-            }
-        });
-    }
-}
-
-// Stateless SSE server
 async fn start_sse_server_stateless(port: u16, heap_memory_max_bytes: usize, execution_timeout_secs: u64) -> Result<()> {
     let addr = format!("0.0.0.0:{}", port).parse()?;
 
@@ -312,25 +318,21 @@ async fn start_sse_server_stateless(port: u16, heap_memory_max_bytes: usize, exe
     let ct = sse_server.config.ct.clone();
     let ct_shutdown = ct.child_token();
 
-    // Start the HTTP server with graceful shutdown
     let server = axum::serve(listener, router).with_graceful_shutdown(async move {
         ct_shutdown.cancelled().await;
         tracing::info!("SSE server shutting down");
     });
 
-    // Register the service BEFORE spawning the server task
     sse_server.with_service(move || {
         StatelessService::new(heap_memory_max_bytes, execution_timeout_secs)
     });
 
-    // Spawn the server task AFTER registering the service
     tokio::spawn(async move {
         if let Err(e) = server.await {
             tracing::error!("SSE server error: {:?}", e);
         }
     });
 
-    // Wait for Ctrl+C
     tokio::signal::ctrl_c().await?;
     tracing::info!("Received Ctrl+C, shutting down SSE server");
     ct.cancel();
@@ -338,7 +340,6 @@ async fn start_sse_server_stateless(port: u16, heap_memory_max_bytes: usize, exe
     Ok(())
 }
 
-// Stateful SSE server
 async fn start_sse_server_stateful(heap_storage: AnyHeapStorage, session_log: Option<SessionLog>, port: u16, heap_memory_max_bytes: usize, execution_timeout_secs: u64) -> Result<()> {
     let addr = format!("0.0.0.0:{}", port).parse()?;
 
@@ -358,25 +359,21 @@ async fn start_sse_server_stateful(heap_storage: AnyHeapStorage, session_log: Op
     let ct = sse_server.config.ct.clone();
     let ct_shutdown = ct.child_token();
 
-    // Start the HTTP server with graceful shutdown
     let server = axum::serve(listener, router).with_graceful_shutdown(async move {
         ct_shutdown.cancelled().await;
         tracing::info!("SSE server shutting down");
     });
 
-    // Register the service BEFORE spawning the server task
     sse_server.with_service(move || {
         StatefulService::new(heap_storage.clone(), session_log.clone(), heap_memory_max_bytes, execution_timeout_secs)
     });
 
-    // Spawn the server task AFTER registering the service
     tokio::spawn(async move {
         if let Err(e) = server.await {
             tracing::error!("SSE server error: {:?}", e);
         }
     });
 
-    // Wait for Ctrl+C
     tokio::signal::ctrl_c().await?;
     tracing::info!("Received Ctrl+C, shutting down SSE server");
     ct.cancel();
