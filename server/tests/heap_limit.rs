@@ -3,7 +3,7 @@
 /// These tests verify that the heap_limits parameter correctly constrains
 /// V8 isolate memory usage, preventing unbounded heap growth.
 
-use std::sync::Once;
+use std::sync::{Arc, Mutex, Once};
 
 static INIT: Once = Once::new();
 
@@ -11,6 +11,10 @@ fn ensure_v8() {
     INIT.call_once(|| {
         server::engine::initialize_v8();
     });
+}
+
+fn no_handle() -> Arc<Mutex<Option<v8::IsolateHandle>>> {
+    Arc::new(Mutex::new(None))
 }
 
 /// JS code that allocates a large amount of memory by building a huge array of strings.
@@ -32,7 +36,7 @@ fn test_stateless_small_heap_limit_rejects_large_allocation() {
 
     // 5 MB heap limit — too small for a 2M-element string array
     let max_bytes = 5 * 1024 * 1024;
-    let result = server::engine::execute_stateless(MEMORY_HOG_JS.to_string(), max_bytes, server::engine::DEFAULT_EXECUTION_TIMEOUT_SECS);
+    let (result, _oom) = server::engine::execute_stateless(MEMORY_HOG_JS, max_bytes, no_handle());
 
     assert!(
         result.is_err(),
@@ -46,7 +50,7 @@ fn test_stateless_default_limit_allows_small_code() {
     ensure_v8();
 
     let max_bytes = server::engine::DEFAULT_HEAP_MEMORY_MAX_MB * 1024 * 1024;
-    let result = server::engine::execute_stateless(SMALL_JS.to_string(), max_bytes, server::engine::DEFAULT_EXECUTION_TIMEOUT_SECS);
+    let (result, _oom) = server::engine::execute_stateless(SMALL_JS, max_bytes, no_handle());
 
     assert!(
         result.is_ok(),
@@ -62,7 +66,7 @@ fn test_stateless_generous_limit_allows_large_allocation() {
 
     // 256 MB — should be plenty for 2M strings
     let max_bytes = 256 * 1024 * 1024;
-    let result = server::engine::execute_stateless(MEMORY_HOG_JS.to_string(), max_bytes, server::engine::DEFAULT_EXECUTION_TIMEOUT_SECS);
+    let (result, _oom) = server::engine::execute_stateless(MEMORY_HOG_JS, max_bytes, no_handle());
 
     assert!(
         result.is_ok(),
@@ -78,7 +82,7 @@ fn test_stateful_small_heap_limit_rejects_large_allocation() {
 
     // 5 MB heap limit — too small for a 2M-element string array
     let max_bytes = 5 * 1024 * 1024;
-    let result = server::engine::execute_stateful(MEMORY_HOG_JS.to_string(), None, max_bytes, server::engine::DEFAULT_EXECUTION_TIMEOUT_SECS);
+    let (result, _oom) = server::engine::execute_stateful(MEMORY_HOG_JS, None, max_bytes, no_handle());
 
     assert!(
         result.is_err(),
@@ -92,7 +96,7 @@ fn test_stateful_default_limit_allows_small_code() {
     ensure_v8();
 
     let max_bytes = server::engine::DEFAULT_HEAP_MEMORY_MAX_MB * 1024 * 1024;
-    let result = server::engine::execute_stateful(SMALL_JS.to_string(), None, max_bytes, server::engine::DEFAULT_EXECUTION_TIMEOUT_SECS);
+    let (result, _oom) = server::engine::execute_stateful(SMALL_JS, None, max_bytes, no_handle());
 
     assert!(
         result.is_ok(),
@@ -110,7 +114,7 @@ fn test_stateful_generous_limit_allows_large_allocation() {
 
     // 256 MB — should be plenty for 2M strings
     let max_bytes = 256 * 1024 * 1024;
-    let result = server::engine::execute_stateful(MEMORY_HOG_JS.to_string(), None, max_bytes, server::engine::DEFAULT_EXECUTION_TIMEOUT_SECS);
+    let (result, _oom) = server::engine::execute_stateful(MEMORY_HOG_JS, None, max_bytes, no_handle());
 
     assert!(
         result.is_ok(),
@@ -129,8 +133,8 @@ fn test_different_limits_produce_different_outcomes() {
     let small_limit = 5 * 1024 * 1024;
     let large_limit = 256 * 1024 * 1024;
 
-    let small_result = server::engine::execute_stateless(MEMORY_HOG_JS.to_string(), small_limit, server::engine::DEFAULT_EXECUTION_TIMEOUT_SECS);
-    let large_result = server::engine::execute_stateless(MEMORY_HOG_JS.to_string(), large_limit, server::engine::DEFAULT_EXECUTION_TIMEOUT_SECS);
+    let (small_result, _) = server::engine::execute_stateless(MEMORY_HOG_JS, small_limit, no_handle());
+    let (large_result, _) = server::engine::execute_stateless(MEMORY_HOG_JS, large_limit, no_handle());
 
     assert!(
         small_result.is_err(),

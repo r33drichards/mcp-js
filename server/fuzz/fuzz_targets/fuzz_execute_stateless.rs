@@ -1,6 +1,6 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use std::sync::Once;
+use std::sync::{Arc, Mutex, Once};
 
 static INIT: Once = Once::new();
 
@@ -18,16 +18,13 @@ fuzz_target!(|data: &[u8]| {
     ensure_v8();
 
     // Treat the fuzzer input as a UTF-8 string (lossy — V8 must handle any input)
-    let code = String::from_utf8_lossy(data).into_owned();
+    let code = String::from_utf8_lossy(data);
 
     // We don't care whether the JS succeeds or fails; we care that V8 doesn't
     // crash, corrupt memory, or trigger undefined behavior.
     // Use the production default (8MB) — with ASAN overhead, larger heaps
     // can cause OOM on CI runners.
     let max_bytes = 8 * 1024 * 1024;
-    // timeout_secs = 0 → run synchronously (no thread spawning).
-    // This avoids leaking zombie threads when V8 compilation is stuck on
-    // pathological inputs. libFuzzer's own -timeout flag handles the watchdog.
-    let timeout_secs = 0;
-    let _ = server::engine::execute_stateless(code, max_bytes, timeout_secs);
+    let handle = Arc::new(Mutex::new(None));
+    let _ = server::engine::execute_stateless(&code, max_bytes, handle);
 });

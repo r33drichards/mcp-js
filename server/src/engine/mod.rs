@@ -5,11 +5,12 @@ use std::sync::Once;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
 use std::time::Duration;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use v8::{self};
 use sha2::{Sha256, Digest};
+
+use tokio::sync::Semaphore;
 
 use crate::engine::heap_storage::{HeapStorage, AnyHeapStorage};
 use crate::engine::session_log::{SessionLog, SessionLogEntry};
@@ -82,7 +83,7 @@ fn wrap_snapshot(data: &[u8]) -> WrappedSnapshot {
     }
 }
 
-fn unwrap_snapshot(data: &[u8]) -> Result<Vec<u8>, String> {
+pub fn unwrap_snapshot(data: &[u8]) -> Result<Vec<u8>, String> {
     if data.len() < SNAPSHOT_HEADER_LEN {
         return Err("Snapshot data too small".to_string());
     }
@@ -168,24 +169,27 @@ pub fn eval<'s>(scope: &mut v8::HandleScope<'s>, code: &str) -> Result<v8::Local
 
 // ── Stateless / stateful V8 execution ───────────────────────────────────
 //
-// When timeout_secs > 0, V8 work runs on a dedicated thread and the
-// caller enforces a wall-clock timeout via `recv_timeout` (covers both
-// compilation and execution). On timeout, `terminate_execution` is called
-// as best-effort. The `IsolateHandle` is shared via `Arc<Mutex<Option>>`
-// and cleared before the isolate is dropped, preventing use-after-free.
-//
-// When timeout_secs == 0, V8 runs synchronously on the current thread
-// (no timeout). This is used by the fuzz target, which relies on
-// libFuzzer's own `-timeout` flag instead of spawning threads that can
-// leak when V8 compilation is stuck.
+// V8 always runs on the calling thread. An `IsolateHandle` is published
+// for external cancellation (used by `run_js` for async timeout via
+// `tokio::select!`). Tests and fuzz targets pass a no-op handle.
 
-/// Core stateless V8 execution — runs on the calling thread, no timeout.
-fn execute_stateless_inline(code: &str, heap_memory_max_bytes: usize) -> Result<String, String> {
+/// Stateless V8 execution — runs V8 on the calling thread. Publishes an
+/// IsolateHandle for external cancellation (e.g. async timeout in `run_js`).
+/// Returns (result, oom_flag).
+pub fn execute_stateless(
+    code: &str,
+    heap_memory_max_bytes: usize,
+    isolate_handle: Arc<Mutex<Option<v8::IsolateHandle>>>,
+) -> (Result<String, String>, bool) {
     let oom_flag = Arc::new(AtomicBool::new(false));
 
     let result = catch_unwind(AssertUnwindSafe(|| {
         let params = create_params_with_heap_limit(heap_memory_max_bytes);
         let mut isolate = v8::Isolate::new(params);
+
+        // Publish handle immediately so caller can terminate us.
+        *isolate_handle.lock().unwrap() = Some(isolate.thread_safe_handle());
+
         let cb_data_ptr = install_heap_limit_callback(&mut isolate, oom_flag.clone());
 
         let eval_result = {
@@ -202,181 +206,34 @@ fn execute_stateless_inline(code: &str, heap_memory_max_bytes: usize) -> Result<
             }
         };
 
+        // Clear handle BEFORE destroying isolate.
+        *isolate_handle.lock().unwrap() = None;
         drop(isolate);
         unsafe { let _ = Box::from_raw(cb_data_ptr); }
 
         eval_result
     }));
 
+    let oom = oom_flag.load(Ordering::SeqCst);
     match result {
-        Ok(Ok(output)) => Ok(output),
-        Ok(Err(e)) => Err(classify_termination_error(&oom_flag, false, e)),
-        Err(_panic) => Err(classify_termination_error(
+        Ok(Ok(output)) => (Ok(output), oom),
+        Ok(Err(e)) => (Err(classify_termination_error(&oom_flag, false, e)), oom),
+        Err(_panic) => (Err(classify_termination_error(
             &oom_flag, false, "V8 execution panicked unexpectedly".to_string(),
-        )),
+        )), oom),
     }
 }
 
-pub fn execute_stateless(code: String, heap_memory_max_bytes: usize, timeout_secs: u64) -> Result<String, String> {
-    // timeout_secs == 0 means run synchronously (no thread, no timeout).
-    // Used by fuzz targets to avoid leaking threads on pathological inputs.
-    if timeout_secs == 0 {
-        return execute_stateless_inline(&code, heap_memory_max_bytes);
-    }
 
-    let oom_flag = Arc::new(AtomicBool::new(false));
-    let isolate_handle: Arc<Mutex<Option<v8::IsolateHandle>>> = Arc::new(Mutex::new(None));
-
-    let oom_clone = oom_flag.clone();
-    let handle_clone = isolate_handle.clone();
-
-    let (tx, rx) = mpsc::channel();
-
-    std::thread::spawn(move || {
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            let params = create_params_with_heap_limit(heap_memory_max_bytes);
-            let mut isolate = v8::Isolate::new(params);
-
-            // Publish handle immediately — before compilation — so the caller
-            // can terminate us during either compilation or execution.
-            *handle_clone.lock().unwrap() = Some(isolate.thread_safe_handle());
-
-            let cb_data_ptr = install_heap_limit_callback(&mut isolate, oom_clone);
-
-            let eval_result = {
-                let scope = &mut v8::HandleScope::new(&mut isolate);
-                let context = v8::Context::new(scope, Default::default());
-                let scope = &mut v8::ContextScope::new(scope, context);
-
-                match eval(scope, &code) {
-                    Ok(value) => match value.to_string(scope) {
-                        Some(s) => Ok(s.to_rust_string_lossy(scope)),
-                        None => Err("Failed to convert result to string".to_string()),
-                    },
-                    Err(e) => Err(e),
-                }
-            };
-
-            // Clear handle BEFORE destroying isolate (Mutex prevents races
-            // with a concurrent terminate_execution call from the timeout path).
-            *handle_clone.lock().unwrap() = None;
-            drop(isolate);
-            unsafe { let _ = Box::from_raw(cb_data_ptr); }
-
-            eval_result
-        }));
-
-        let _ = tx.send(result);
-    });
-
-    // Wall-clock timeout — covers both compilation and execution.
-    match rx.recv_timeout(Duration::from_secs(timeout_secs)) {
-        Ok(Ok(Ok(output))) => Ok(output),
-        Ok(Ok(Err(e))) => Err(classify_termination_error(&oom_flag, false, e)),
-        Ok(Err(_panic)) => Err(classify_termination_error(
-            &oom_flag, false, "V8 execution panicked unexpectedly".to_string(),
-        )),
-        Err(mpsc::RecvTimeoutError::Timeout) => {
-            // Best-effort: interrupt V8 (works for execution, may help for compilation)
-            if let Some(h) = isolate_handle.lock().unwrap().as_ref() {
-                h.terminate_execution();
-            }
-            Err("Execution timed out: script exceeded the time limit. Try increasing execution_timeout_secs.".to_string())
-        }
-        Err(mpsc::RecvTimeoutError::Disconnected) => {
-            Err("V8 execution thread panicked unexpectedly".to_string())
-        }
-    }
-}
-
-pub fn execute_stateful(code: String, snapshot: Option<Vec<u8>>, heap_memory_max_bytes: usize, timeout_secs: u64) -> Result<(String, Vec<u8>, String), String> {
-    let raw_snapshot = match snapshot {
-        Some(data) if !data.is_empty() => Some(unwrap_snapshot(&data)?),
-        _ => None,
-    };
-
-    // timeout_secs == 0 means run synchronously (no thread, no timeout).
-    if timeout_secs == 0 {
-        return execute_stateful_inline(&code, raw_snapshot, heap_memory_max_bytes);
-    }
-
-    let oom_flag = Arc::new(AtomicBool::new(false));
-    let isolate_handle: Arc<Mutex<Option<v8::IsolateHandle>>> = Arc::new(Mutex::new(None));
-
-    let oom_clone = oom_flag.clone();
-    let handle_clone = isolate_handle.clone();
-
-    let (tx, rx) = mpsc::channel();
-
-    std::thread::spawn(move || {
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            let params = Some(create_params_with_heap_limit(heap_memory_max_bytes));
-
-            let mut snapshot_creator = match raw_snapshot {
-                Some(raw) if !raw.is_empty() => {
-                    eprintln!("creating isolate from snapshot...");
-                    v8::Isolate::snapshot_creator_from_existing_snapshot(raw, None, params)
-                }
-                _ => {
-                    eprintln!("snapshot not found, creating new isolate...");
-                    v8::Isolate::snapshot_creator(None, params)
-                }
-            };
-
-            *handle_clone.lock().unwrap() = Some(snapshot_creator.thread_safe_handle());
-
-            let cb_data_ptr = install_heap_limit_callback(&mut snapshot_creator, oom_clone);
-
-            let output_result;
-            {
-                let scope = &mut v8::HandleScope::new(&mut snapshot_creator);
-                let context = v8::Context::new(scope, Default::default());
-                let scope = &mut v8::ContextScope::new(scope, context);
-                output_result = match eval(scope, &code) {
-                    Ok(result) => {
-                        result
-                            .to_string(scope)
-                            .map(|s| s.to_rust_string_lossy(scope))
-                            .ok_or_else(|| "Failed to convert result to string".to_string())
-                    }
-                    Err(e) => Err(e),
-                };
-                scope.set_default_context(context);
-            }
-
-            // Clear handle before snapshot_creator is consumed
-            *handle_clone.lock().unwrap() = None;
-            unsafe { let _ = Box::from_raw(cb_data_ptr); }
-
-            let startup_data = snapshot_creator.create_blob(v8::FunctionCodeHandling::Clear)
-                .ok_or("Failed to create V8 snapshot blob".to_string())?;
-            let wrapped = wrap_snapshot(&startup_data);
-
-            output_result.map(|output| (output, wrapped.data, wrapped.content_hash))
-        }));
-
-        let _ = tx.send(result);
-    });
-
-    match rx.recv_timeout(Duration::from_secs(timeout_secs)) {
-        Ok(Ok(inner)) => inner.map_err(|e| classify_termination_error(&oom_flag, false, e)),
-        Ok(Err(_panic)) => Err(classify_termination_error(
-            &oom_flag, false, "V8 execution panicked unexpectedly".to_string(),
-        )),
-        Err(mpsc::RecvTimeoutError::Timeout) => {
-            if let Some(h) = isolate_handle.lock().unwrap().as_ref() {
-                h.terminate_execution();
-            }
-            Err("Execution timed out: script exceeded the time limit. Try increasing execution_timeout_secs.".to_string())
-        }
-        Err(mpsc::RecvTimeoutError::Disconnected) => {
-            Err("V8 execution thread panicked unexpectedly".to_string())
-        }
-    }
-}
-
-/// Core stateful V8 execution — runs on the calling thread, no timeout.
-fn execute_stateful_inline(code: &str, raw_snapshot: Option<Vec<u8>>, heap_memory_max_bytes: usize) -> Result<(String, Vec<u8>, String), String> {
+/// Stateful V8 execution — runs V8 on the calling thread. Publishes an
+/// IsolateHandle for external cancellation (e.g. async timeout in `run_js`).
+/// Takes raw (already unwrapped) snapshot data. Returns (result, oom_flag).
+pub fn execute_stateful(
+    code: &str,
+    raw_snapshot: Option<Vec<u8>>,
+    heap_memory_max_bytes: usize,
+    isolate_handle: Arc<Mutex<Option<v8::IsolateHandle>>>,
+) -> (Result<(String, Vec<u8>, String), String>, bool) {
     let oom_flag = Arc::new(AtomicBool::new(false));
 
     let result = catch_unwind(AssertUnwindSafe(|| {
@@ -392,6 +249,9 @@ fn execute_stateful_inline(code: &str, raw_snapshot: Option<Vec<u8>>, heap_memor
                 v8::Isolate::snapshot_creator(None, params)
             }
         };
+
+        // Publish handle immediately so caller can terminate us.
+        *isolate_handle.lock().unwrap() = Some(snapshot_creator.thread_safe_handle());
 
         let cb_data_ptr = install_heap_limit_callback(&mut snapshot_creator, oom_flag.clone());
 
@@ -412,6 +272,8 @@ fn execute_stateful_inline(code: &str, raw_snapshot: Option<Vec<u8>>, heap_memor
             scope.set_default_context(context);
         }
 
+        // Clear handle before snapshot_creator is consumed.
+        *isolate_handle.lock().unwrap() = None;
         unsafe { let _ = Box::from_raw(cb_data_ptr); }
 
         let startup_data = snapshot_creator.create_blob(v8::FunctionCodeHandling::Clear)
@@ -421,16 +283,19 @@ fn execute_stateful_inline(code: &str, raw_snapshot: Option<Vec<u8>>, heap_memor
         output_result.map(|output| (output, wrapped.data, wrapped.content_hash))
     }));
 
+    let oom = oom_flag.load(Ordering::SeqCst);
     match result {
-        Ok(inner) => inner.map_err(|e| classify_termination_error(&oom_flag, false, e)),
-        Err(_panic) => Err(classify_termination_error(
+        Ok(Ok(triple)) => (Ok(triple), oom),
+        Ok(Err(e)) => (Err(classify_termination_error(&oom_flag, false, e)), oom),
+        Err(_panic) => (Err(classify_termination_error(
             &oom_flag, false, "V8 execution panicked unexpectedly".to_string(),
-        )),
+        )), oom),
     }
 }
 
 // ── Engine ──────────────────────────────────────────────────────────────
 
+#[derive(Debug)]
 pub struct JsResult {
     pub output: String,
     pub heap: Option<String>,
@@ -442,6 +307,7 @@ pub struct Engine {
     session_log: Option<SessionLog>,
     heap_memory_max_bytes: usize,
     execution_timeout_secs: u64,
+    v8_semaphore: Arc<Semaphore>,
 }
 
 impl Engine {
@@ -449,12 +315,13 @@ impl Engine {
         self.heap_storage.is_some()
     }
 
-    pub fn new_stateless(heap_memory_max_bytes: usize, execution_timeout_secs: u64) -> Self {
+    pub fn new_stateless(heap_memory_max_bytes: usize, execution_timeout_secs: u64, max_concurrent: usize) -> Self {
         Self {
             heap_storage: None,
             session_log: None,
             heap_memory_max_bytes,
             execution_timeout_secs,
+            v8_semaphore: Arc::new(Semaphore::new(max_concurrent)),
         }
     }
 
@@ -463,16 +330,22 @@ impl Engine {
         session_log: Option<SessionLog>,
         heap_memory_max_bytes: usize,
         execution_timeout_secs: u64,
+        max_concurrent: usize,
     ) -> Self {
         Self {
             heap_storage: Some(heap_storage),
             session_log,
             heap_memory_max_bytes,
             execution_timeout_secs,
+            v8_semaphore: Arc::new(Semaphore::new(max_concurrent)),
         }
     }
 
     /// Core execution — used by both MCP and API.
+    ///
+    /// Acquires a semaphore permit to bound concurrent V8 executions,
+    /// runs V8 on tokio's blocking pool (single thread per request),
+    /// and enforces wall-clock timeout at the async layer via `tokio::select!`.
     pub async fn run_js(
         &self,
         code: String,
@@ -485,33 +358,77 @@ impl Engine {
             .map(|mb| mb * 1024 * 1024)
             .unwrap_or(self.heap_memory_max_bytes);
         let timeout = execution_timeout_secs.unwrap_or(self.execution_timeout_secs);
+        let timeout_dur = Duration::from_secs(timeout);
+
+        // Bound concurrent V8 executions to avoid OS thread exhaustion.
+        let _permit = self.v8_semaphore.acquire().await
+            .map_err(|_| "V8 semaphore closed".to_string())?;
+
+        let isolate_handle: Arc<Mutex<Option<v8::IsolateHandle>>> = Arc::new(Mutex::new(None));
 
         match &self.heap_storage {
             None => {
                 // Stateless mode
-                let v8_result = tokio::task::spawn_blocking(move || {
-                    execute_stateless(code, max_bytes, timeout)
-                }).await;
+                let ih = isolate_handle.clone();
+                let mut join_handle = tokio::task::spawn_blocking(move || {
+                    execute_stateless(&code, max_bytes, ih)
+                });
 
-                match v8_result {
-                    Ok(Ok(output)) => Ok(JsResult { output, heap: None }),
-                    Ok(Err(e)) => Err(e),
-                    Err(e) => Err(format!("Task join error: {}", e)),
+                tokio::select! {
+                    biased;
+                    res = &mut join_handle => {
+                        match res {
+                            Ok((Ok(output), _oom)) => Ok(JsResult { output, heap: None }),
+                            Ok((Err(e), _oom)) => Err(e),
+                            Err(e) => Err(format!("Task join error: {}", e)),
+                        }
+                    }
+                    _ = tokio::time::sleep(timeout_dur) => {
+                        if let Some(h) = isolate_handle.lock().unwrap().as_ref() {
+                            h.terminate_execution();
+                        }
+                        // Wait for the blocking task to finish cleanup (holds permit until done).
+                        let _ = join_handle.await;
+                        Err("Execution timed out: script exceeded the time limit. Try increasing execution_timeout_secs.".to_string())
+                    }
                 }
             }
             Some(storage) => {
-                // Stateful mode
+                // Stateful mode — unwrap snapshot before entering blocking task.
                 let snapshot = match &heap {
                     Some(h) if !h.is_empty() => storage.get(h).await.ok(),
                     _ => None,
                 };
+                let raw_snapshot = match snapshot {
+                    Some(data) if !data.is_empty() => Some(unwrap_snapshot(&data)?),
+                    _ => None,
+                };
+
                 let code_for_log = code.clone();
-                let v8_result = tokio::task::spawn_blocking(move || {
-                    execute_stateful(code, snapshot, max_bytes, timeout)
-                }).await;
+                let ih = isolate_handle.clone();
+                let mut join_handle = tokio::task::spawn_blocking(move || {
+                    execute_stateful(&code, raw_snapshot, max_bytes, ih)
+                });
+
+                let v8_result = tokio::select! {
+                    biased;
+                    res = &mut join_handle => {
+                        match res {
+                            Ok((result, _oom)) => result,
+                            Err(e) => Err(format!("Task join error: {}", e)),
+                        }
+                    }
+                    _ = tokio::time::sleep(timeout_dur) => {
+                        if let Some(h) = isolate_handle.lock().unwrap().as_ref() {
+                            h.terminate_execution();
+                        }
+                        let _ = join_handle.await;
+                        Err("Execution timed out: script exceeded the time limit. Try increasing execution_timeout_secs.".to_string())
+                    }
+                };
 
                 match v8_result {
-                    Ok(Ok((output, startup_data, content_hash))) => {
+                    Ok((output, startup_data, content_hash)) => {
                         if let Err(e) = storage.put(&content_hash, &startup_data).await {
                             return Err(format!("Error saving heap: {}", e));
                         }
@@ -530,8 +447,7 @@ impl Engine {
 
                         Ok(JsResult { output, heap: Some(content_hash) })
                     }
-                    Ok(Err(e)) => Err(e),
-                    Err(e) => Err(format!("Task join error: {}", e)),
+                    Err(e) => Err(e),
                 }
             }
         }

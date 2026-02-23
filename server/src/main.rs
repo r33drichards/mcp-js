@@ -17,6 +17,10 @@ use engine::session_log::SessionLog;
 use mcp::McpService;
 use cluster::{ClusterConfig, ClusterNode};
 
+fn default_max_concurrent() -> usize {
+    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4)
+}
+
 /// Command line arguments for configuring heap storage
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -53,6 +57,10 @@ struct Cli {
     /// Maximum execution timeout in seconds (default: 30, max: 300)
     #[arg(long, default_value_t = DEFAULT_EXECUTION_TIMEOUT_SECS, value_parser = clap::value_parser!(u64).range(1..=300))]
     execution_timeout: u64,
+
+    /// Maximum concurrent V8 executions (default: CPU core count)
+    #[arg(long, default_value_t = default_max_concurrent())]
+    max_concurrent_executions: usize,
 
     /// Path to the sled database for session logging (default: /tmp/mcp-v8-sessions)
     #[arg(long, default_value = "/tmp/mcp-v8-sessions", conflicts_with = "stateless")]
@@ -112,6 +120,7 @@ async fn main() -> Result<()> {
     let execution_timeout_secs = cli.execution_timeout;
     tracing::info!("V8 heap memory limit: {} MB ({} bytes)", cli.heap_memory_max, heap_memory_max_bytes);
     tracing::info!("V8 execution timeout: {} seconds", execution_timeout_secs);
+    tracing::info!("Max concurrent V8 executions: {}", cli.max_concurrent_executions);
 
     // Cluster mode requires --http-port or --sse-port.
     if cli.cluster_port.is_some() && cli.http_port.is_none() && cli.sse_port.is_none() {
@@ -176,7 +185,7 @@ async fn main() -> Result<()> {
     // ── Build Engine ────────────────────────────────────────────────────
     let engine = if cli.stateless {
         tracing::info!("Creating stateless engine");
-        Engine::new_stateless(heap_memory_max_bytes, execution_timeout_secs)
+        Engine::new_stateless(heap_memory_max_bytes, execution_timeout_secs, cli.max_concurrent_executions)
     } else {
         let heap_storage = if let Some(bucket) = cli.s3_bucket {
             if let Some(cache_dir) = cli.cache_dir {
@@ -212,7 +221,7 @@ async fn main() -> Result<()> {
         };
 
         tracing::info!("Creating stateful engine");
-        Engine::new_stateful(heap_storage, session_log, heap_memory_max_bytes, execution_timeout_secs)
+        Engine::new_stateful(heap_storage, session_log, heap_memory_max_bytes, execution_timeout_secs, cli.max_concurrent_executions)
     };
 
     // ── Start transport ─────────────────────────────────────────────────

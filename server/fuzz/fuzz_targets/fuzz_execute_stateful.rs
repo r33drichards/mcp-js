@@ -1,7 +1,7 @@
 #![no_main]
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use std::sync::Once;
+use std::sync::{Arc, Mutex, Once};
 
 static INIT: Once = Once::new();
 
@@ -26,21 +26,21 @@ struct StatefulInput {
 fuzz_target!(|input: StatefulInput| {
     ensure_v8();
 
-    let snapshot = if input.has_snapshot {
-        Some(input.snapshot_bytes)
+    let raw_snapshot = if input.has_snapshot {
+        // Validate envelope — invalid data is rejected here, not inside V8.
+        match server::engine::unwrap_snapshot(&input.snapshot_bytes) {
+            Ok(raw) => Some(raw),
+            Err(_) => None,
+        }
     } else {
         None
     };
 
     // Run stateful execution — we don't care about the result, only that
-    // it doesn't crash. Invalid snapshots should be rejected by the
-    // envelope validation before reaching V8.
+    // it doesn't crash.
     // Use the production default (8MB) — with ASAN overhead, larger heaps
     // can cause OOM on CI runners.
     let max_bytes = 8 * 1024 * 1024;
-    // timeout_secs = 0 → run synchronously (no thread spawning).
-    // Avoids leaking zombie threads on pathological inputs.
-    // libFuzzer's own -timeout flag handles the watchdog.
-    let timeout_secs = 0;
-    let _ = server::engine::execute_stateful(input.code, snapshot, max_bytes, timeout_secs);
+    let handle = Arc::new(Mutex::new(None));
+    let _ = server::engine::execute_stateful(&input.code, raw_snapshot, max_bytes, handle);
 });
