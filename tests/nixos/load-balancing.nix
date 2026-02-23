@@ -47,6 +47,13 @@ let
           "node3:3000" = {};
         };
       };
+      upstreams.mcp_cluster_api = {
+        servers = {
+          "node1:4000" = {};
+          "node2:4000" = {};
+          "node3:4000" = {};
+        };
+      };
       virtualHosts.default = {
         default = true;
         locations."/mcp" = {
@@ -62,7 +69,7 @@ let
           '';
         };
         locations."/health" = {
-          proxyPass = "http://mcp_cluster/raft/status";
+          proxyPass = "http://mcp_cluster_api/raft/status";
         };
       };
     };
