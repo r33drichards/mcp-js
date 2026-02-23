@@ -106,10 +106,11 @@ fi
 # ── Health check ───────────────────────────────────────────────────────
 echo ""
 echo "Waiting for servers to be ready..."
+
 IFS=',' read -ra URLS <<< "$TARGET_URLS"
 for URL in "${URLS[@]}"; do
   for i in $(seq 1 30); do
-    if curl -sf --max-time 5 -o /dev/null -X POST "${URL}/api/exec" \
+    if curl -sf --max-time 10 -o /dev/null -X POST "${URL}/api/exec" \
       -H 'Content-Type: application/json' \
       -d '{"code":"1"}' 2>/dev/null; then
       echo "  ${URL} ready"

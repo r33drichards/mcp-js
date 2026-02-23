@@ -7,52 +7,15 @@ use rmcp::transport::StreamableHttpServer;
 use rmcp::transport::streamable_http_server::axum::StreamableHttpServerConfig;
 use tokio_util::sync::CancellationToken;
 use std::sync::Arc;
-use axum::{Router, Json, extract::State, http::StatusCode, routing::post};
-
+mod engine;
 mod mcp;
+mod api;
 mod cluster;
-use mcp::{StatelessService, StatefulService, initialize_v8, execute_stateless, DEFAULT_EXECUTION_TIMEOUT_SECS};
-use mcp::heap_storage::{AnyHeapStorage, S3HeapStorage, WriteThroughCacheHeapStorage, FileHeapStorage};
-use mcp::session_log::SessionLog;
+use engine::{initialize_v8, Engine, DEFAULT_EXECUTION_TIMEOUT_SECS};
+use engine::heap_storage::{AnyHeapStorage, S3HeapStorage, WriteThroughCacheHeapStorage, FileHeapStorage};
+use engine::session_log::SessionLog;
+use mcp::McpService;
 use cluster::{ClusterConfig, ClusterNode};
-
-// ── Plain HTTP /api/exec endpoint ───────────────────────────────────────
-
-#[derive(serde::Deserialize)]
-struct ExecRequest {
-    code: String,
-}
-
-#[derive(serde::Serialize)]
-struct ExecResponse {
-    output: String,
-}
-
-#[derive(Clone)]
-struct ExecState {
-    heap_memory_max_bytes: usize,
-    execution_timeout_secs: u64,
-}
-
-async fn exec_handler(
-    State(state): State<ExecState>,
-    Json(req): Json<ExecRequest>,
-) -> (StatusCode, Json<ExecResponse>) {
-    let max_bytes = state.heap_memory_max_bytes;
-    let timeout = state.execution_timeout_secs;
-
-    match tokio::task::spawn_blocking(move || execute_stateless(req.code, max_bytes, timeout)).await {
-        Ok(Ok(output)) => (StatusCode::OK, Json(ExecResponse { output })),
-        Ok(Err(e)) => (StatusCode::OK, Json(ExecResponse { output: format!("V8 error: {}", e) })),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ExecResponse { output: format!("Task error: {}", e) })),
-    }
-}
-
-fn exec_router(heap_memory_max_bytes: usize, execution_timeout_secs: u64) -> Router {
-    Router::new()
-        .route("/api/exec", post(exec_handler))
-        .with_state(ExecState { heap_memory_max_bytes, execution_timeout_secs })
-}
 
 /// Command line arguments for configuring heap storage
 #[derive(Parser, Debug)]
@@ -210,26 +173,11 @@ async fn main() -> Result<()> {
         None
     };
 
-    if cli.stateless {
-        // Stateless mode - no heap persistence
-        if let Some(port) = cli.http_port {
-            tracing::info!("Starting Streamable HTTP transport in stateless mode on port {}", port);
-            start_streamable_http_stateless(port, heap_memory_max_bytes, execution_timeout_secs).await?;
-        } else if let Some(port) = cli.sse_port {
-            tracing::info!("Starting SSE transport in stateless mode on port {}", port);
-            start_sse_server_stateless(port, heap_memory_max_bytes, execution_timeout_secs).await?;
-        } else {
-            tracing::info!("Starting stdio transport in stateless mode");
-            let service = StatelessService::new(heap_memory_max_bytes, execution_timeout_secs)
-                .serve(stdio())
-                .await
-                .inspect_err(|e| {
-                    tracing::error!("serving error: {:?}", e);
-                })?;
-            service.waiting().await?;
-        }
+    // ── Build Engine ────────────────────────────────────────────────────
+    let engine = if cli.stateless {
+        tracing::info!("Creating stateless engine");
+        Engine::new_stateless(heap_memory_max_bytes, execution_timeout_secs)
     } else {
-        // Stateful mode - with heap persistence
         let heap_storage = if let Some(bucket) = cli.s3_bucket {
             if let Some(cache_dir) = cli.cache_dir {
                 tracing::info!("Using S3 storage with FS write-through cache at {}", cache_dir);
@@ -263,22 +211,26 @@ async fn main() -> Result<()> {
             }
         };
 
-        if let Some(port) = cli.http_port {
-            tracing::info!("Starting Streamable HTTP transport in stateful mode on port {}", port);
-            start_streamable_http_stateful(heap_storage, session_log, port, heap_memory_max_bytes, execution_timeout_secs).await?;
-        } else if let Some(port) = cli.sse_port {
-            tracing::info!("Starting SSE transport in stateful mode on port {}", port);
-            start_sse_server_stateful(heap_storage, session_log, port, heap_memory_max_bytes, execution_timeout_secs).await?;
-        } else {
-            tracing::info!("Starting stdio transport in stateful mode");
-            let service = StatefulService::new(heap_storage, session_log, heap_memory_max_bytes, execution_timeout_secs)
-                .serve(stdio())
-                .await
-                .inspect_err(|e| {
-                    tracing::error!("serving error: {:?}", e);
-                })?;
-            service.waiting().await?;
-        }
+        tracing::info!("Creating stateful engine");
+        Engine::new_stateful(heap_storage, session_log, heap_memory_max_bytes, execution_timeout_secs)
+    };
+
+    // ── Start transport ─────────────────────────────────────────────────
+    if let Some(port) = cli.http_port {
+        tracing::info!("Starting Streamable HTTP transport on port {}", port);
+        start_streamable_http(engine, port).await?;
+    } else if let Some(port) = cli.sse_port {
+        tracing::info!("Starting SSE transport on port {}", port);
+        start_sse_server(engine, port).await?;
+    } else {
+        tracing::info!("Starting stdio transport");
+        let service = McpService::new(engine)
+            .serve(stdio())
+            .await
+            .inspect_err(|e| {
+                tracing::error!("serving error: {:?}", e);
+            })?;
+        service.waiting().await?;
     }
 
     Ok(())
@@ -286,7 +238,7 @@ async fn main() -> Result<()> {
 
 // ── Streamable HTTP transport (--http-port) ─────────────────────────────
 
-async fn start_streamable_http_stateless(port: u16, heap_memory_max_bytes: usize, execution_timeout_secs: u64) -> Result<()> {
+async fn start_streamable_http(engine: Engine, port: u16) -> Result<()> {
     let bind: std::net::SocketAddr = format!("0.0.0.0:{}", port).parse()?;
     let ct = CancellationToken::new();
 
@@ -298,13 +250,15 @@ async fn start_streamable_http_stateless(port: u16, heap_memory_max_bytes: usize
     };
 
     let (server, mcp_router) = StreamableHttpServer::new(config);
-    let merged = mcp_router.merge(exec_router(heap_memory_max_bytes, execution_timeout_secs));
+
+    // Merge MCP router with plain HTTP API router
+    let app = mcp_router.merge(api::api_router(engine.clone()));
 
     let listener = tokio::net::TcpListener::bind(bind).await?;
-    tracing::info!("Streamable HTTP server (stateless) listening on {}", bind);
+    tracing::info!("Streamable HTTP server listening on {}", bind);
 
     let ct_shutdown = ct.child_token();
-    let axum_server = axum::serve(listener, merged).with_graceful_shutdown(async move {
+    let axum_server = axum::serve(listener, app).with_graceful_shutdown(async move {
         ct_shutdown.cancelled().await;
         tracing::info!("Streamable HTTP server shutting down");
     });
@@ -314,48 +268,7 @@ async fn start_streamable_http_stateless(port: u16, heap_memory_max_bytes: usize
         }
     });
 
-    server.with_service(move || {
-        StatelessService::new(heap_memory_max_bytes, execution_timeout_secs)
-    });
-
-    tokio::signal::ctrl_c().await?;
-    tracing::info!("Received Ctrl+C, shutting down");
-    ct.cancel();
-
-    Ok(())
-}
-
-async fn start_streamable_http_stateful(heap_storage: AnyHeapStorage, session_log: Option<SessionLog>, port: u16, heap_memory_max_bytes: usize, execution_timeout_secs: u64) -> Result<()> {
-    let bind: std::net::SocketAddr = format!("0.0.0.0:{}", port).parse()?;
-    let ct = CancellationToken::new();
-
-    let config = StreamableHttpServerConfig {
-        bind,
-        path: "/mcp".to_string(),
-        ct: ct.clone(),
-        sse_keep_alive: Some(std::time::Duration::from_secs(15)),
-    };
-
-    let (server, mcp_router) = StreamableHttpServer::new(config);
-    let merged = mcp_router.merge(exec_router(heap_memory_max_bytes, execution_timeout_secs));
-
-    let listener = tokio::net::TcpListener::bind(bind).await?;
-    tracing::info!("Streamable HTTP server (stateful) listening on {}", bind);
-
-    let ct_shutdown = ct.child_token();
-    let axum_server = axum::serve(listener, merged).with_graceful_shutdown(async move {
-        ct_shutdown.cancelled().await;
-        tracing::info!("Streamable HTTP server shutting down");
-    });
-    tokio::spawn(async move {
-        if let Err(e) = axum_server.await {
-            tracing::error!("Streamable HTTP server error: {:?}", e);
-        }
-    });
-
-    server.with_service(move || {
-        StatefulService::new(heap_storage.clone(), session_log.clone(), heap_memory_max_bytes, execution_timeout_secs)
-    });
+    server.with_service(move || McpService::new(engine.clone()));
 
     tokio::signal::ctrl_c().await?;
     tracing::info!("Received Ctrl+C, shutting down");
@@ -366,7 +279,7 @@ async fn start_streamable_http_stateful(heap_storage: AnyHeapStorage, session_lo
 
 // ── SSE transport (--sse-port) ──────────────────────────────────────────
 
-async fn start_sse_server_stateless(port: u16, heap_memory_max_bytes: usize, execution_timeout_secs: u64) -> Result<()> {
+async fn start_sse_server(engine: Engine, port: u16) -> Result<()> {
     let addr = format!("0.0.0.0:{}", port).parse()?;
 
     let config = SseServerConfig {
@@ -377,63 +290,23 @@ async fn start_sse_server_stateless(port: u16, heap_memory_max_bytes: usize, exe
         sse_keep_alive: Some(std::time::Duration::from_secs(15)),
     };
 
-    let (sse_server, router) = SseServer::new(config);
+    let (sse_server, sse_router) = SseServer::new(config);
+
+    // Merge SSE router with plain HTTP API router
+    let app = sse_router.merge(api::api_router(engine.clone()));
 
     let listener = tokio::net::TcpListener::bind(sse_server.config.bind).await?;
-    tracing::info!("SSE server (stateless) listening on {}", sse_server.config.bind);
+    tracing::info!("SSE server listening on {}", sse_server.config.bind);
 
     let ct = sse_server.config.ct.clone();
     let ct_shutdown = ct.child_token();
 
-    let server = axum::serve(listener, router).with_graceful_shutdown(async move {
+    let server = axum::serve(listener, app).with_graceful_shutdown(async move {
         ct_shutdown.cancelled().await;
         tracing::info!("SSE server shutting down");
     });
 
-    sse_server.with_service(move || {
-        StatelessService::new(heap_memory_max_bytes, execution_timeout_secs)
-    });
-
-    tokio::spawn(async move {
-        if let Err(e) = server.await {
-            tracing::error!("SSE server error: {:?}", e);
-        }
-    });
-
-    tokio::signal::ctrl_c().await?;
-    tracing::info!("Received Ctrl+C, shutting down SSE server");
-    ct.cancel();
-
-    Ok(())
-}
-
-async fn start_sse_server_stateful(heap_storage: AnyHeapStorage, session_log: Option<SessionLog>, port: u16, heap_memory_max_bytes: usize, execution_timeout_secs: u64) -> Result<()> {
-    let addr = format!("0.0.0.0:{}", port).parse()?;
-
-    let config = SseServerConfig {
-        bind: addr,
-        sse_path: "/sse".to_string(),
-        post_path: "/message".to_string(),
-        ct: CancellationToken::new(),
-        sse_keep_alive: Some(std::time::Duration::from_secs(15)),
-    };
-
-    let (sse_server, router) = SseServer::new(config);
-
-    let listener = tokio::net::TcpListener::bind(sse_server.config.bind).await?;
-    tracing::info!("SSE server (stateful) listening on {}", sse_server.config.bind);
-
-    let ct = sse_server.config.ct.clone();
-    let ct_shutdown = ct.child_token();
-
-    let server = axum::serve(listener, router).with_graceful_shutdown(async move {
-        ct_shutdown.cancelled().await;
-        tracing::info!("SSE server shutting down");
-    });
-
-    sse_server.with_service(move || {
-        StatefulService::new(heap_storage.clone(), session_log.clone(), heap_memory_max_bytes, execution_timeout_secs)
-    });
+    sse_server.with_service(move || McpService::new(engine.clone()));
 
     tokio::spawn(async move {
         if let Err(e) = server.await {

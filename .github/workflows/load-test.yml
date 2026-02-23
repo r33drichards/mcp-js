@@ -143,7 +143,7 @@ jobs:
           for URL in "${URLS[@]}"; do
             echo "Checking ${URL}..."
             for i in $(seq 1 60); do
-              if curl -sf --max-time 5 -o /dev/null -X POST "${URL}/api/exec" \
+              if curl -sf --max-time 10 -o /dev/null -X POST "${URL}/api/exec" \
                 -H 'Content-Type: application/json' \
                 -d '{"code":"1"}' 2>/dev/null; then
                 echo "${URL} is ready (attempt ${i})"
@@ -175,20 +175,27 @@ jobs:
           fi
 
       # ── Smoke test ──────────────────────────────────────────────────
-      - name: Smoke test — execute JS via /api/exec
+      - name: Smoke test — POST /api/exec
         run: |
           IFS=',' read -ra URLS <<< "$TARGET_URLS"
           URL="${URLS[0]}"
 
-          echo "Testing JS execution via /api/exec on ${URL}..."
-
-          EXEC_RESP=$(curl -sf --max-time 10 -X POST "${URL}/api/exec" \
+          echo "=== Smoke test: POST /api/exec on ${URL} ==="
+          RESP=$(curl -sf --max-time 10 -X POST "${URL}/api/exec" \
             -H 'Content-Type: application/json' \
             -d '{"code":"1 + 1"}')
-          echo "Exec response: $EXEC_RESP"
+          echo "Response: $RESP"
 
-          if [ -z "$EXEC_RESP" ]; then
-            echo "ERROR: No response from JS execution"
+          if [ -z "$RESP" ]; then
+            echo "ERROR: No response from /api/exec"
+            cat /tmp/loadtest/*.log || true
+            exit 1
+          fi
+
+          # Verify the output field contains "2"
+          OUTPUT=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('output',''))" 2>/dev/null || true)
+          if [ "$OUTPUT" != "2" ]; then
+            echo "ERROR: Expected output '2', got '${OUTPUT}'"
             cat /tmp/loadtest/*.log || true
             exit 1
           fi

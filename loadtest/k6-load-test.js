@@ -52,7 +52,7 @@ const JS_SNIPPETS = [
   "[1,2,3,4,5].filter(n => n % 2 === 0).map(n => n * 10)",
 ];
 
-const JSON_HEADERS = { "Content-Type": "application/json" };
+const HEADERS = { "Content-Type": "application/json" };
 
 // Simple round-robin counter for distributing across cluster nodes.
 let rrCounter = 0;
@@ -64,17 +64,17 @@ function pickUrl() {
 }
 
 // ── Main test function ──────────────────────────────────────────────────
-// Each iteration: POST to /api/exec with a JS snippet, get plain JSON back.
-
+// Each iteration: single POST /api/exec with JSON body
 export default function () {
   const baseUrl = pickUrl();
   const snippet = JS_SNIPPETS[Math.floor(Math.random() * JS_SNIPPETS.length)];
 
-  const res = http.post(
-    `${baseUrl}/api/exec`,
-    JSON.stringify({ code: snippet }),
-    { headers: JSON_HEADERS, timeout: "30s" }
-  );
+  const payload = JSON.stringify({ code: snippet });
+
+  const res = http.post(`${baseUrl}/api/exec`, payload, {
+    headers: HEADERS,
+    timeout: "10s",
+  });
 
   jsExecDuration.add(res.timings.duration);
   jsExecCount.add(1);
@@ -85,7 +85,7 @@ export default function () {
       try {
         const body = JSON.parse(r.body);
         return body.output !== undefined;
-      } catch (e) {
+      } catch (_) {
         return false;
       }
     },

@@ -59,7 +59,7 @@ cat >> "$OUTPUT_MD" << 'FOOTER'
 
 - **Target Rate**: The configured constant-arrival-rate (requests/second k6 attempts)
 - **Actual Iter/s**: Achieved iterations per second (each iteration = 1 POST /api/exec)
-- **HTTP Req/s**: Total HTTP requests per second (1:1 with iterations)
+- **HTTP Req/s**: Total HTTP requests per second (1 per iteration)
 - **Dropped**: Iterations k6 couldn't schedule because VUs were exhausted (indicates server saturation)
 - **Topology**: `single` = 1 MCP-V8 node; `cluster` = 3 MCP-V8 nodes with Raft
 FOOTER
