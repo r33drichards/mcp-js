@@ -63,6 +63,12 @@
 
           LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
 
+          # Integration/e2e tests start servers and make HTTP requests,
+          # which does not work inside the Nix build sandbox.  The NixOS
+          # VM test (checks.x86_64-linux.cluster-test) covers integration
+          # testing instead.
+          doCheck = false;
+
           # Allow network access for rusty_v8 binary download during build.
           # In a strict sandbox you must prefetch the archive and point
           # RUSTY_V8_ARCHIVE to it instead.
