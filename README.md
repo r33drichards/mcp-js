@@ -270,3 +270,53 @@ cargo build --release
 ```
 
 The built binary will be located at `server/target/release/server`. You can use this path in the integration steps above instead of `/usr/local/bin/mcp-v8` if desired.
+
+<!-- load-test-report -->
+# MCP-V8 Load Test Benchmark Report
+
+Comparison of single-node vs 3-node cluster at various request rates.
+
+## Results
+
+ran on railway gha runners on [pr](https://github.com/r33drichards/mcp-js/pull/36#issuecomment-3946074130)
+
+| Topology | Target Rate | Actual Iter/s | HTTP Req/s | Exec Avg (ms) | Exec p95 (ms) | Exec p99 (ms) | Success % | Dropped | Max VUs |
+|----------|-------------|---------------|------------|----------------|----------------|----------------|-----------|---------|---------|
+| cluster-stateful | 100/s | 99.5 | 99.5 | 44.9 | 196.88 | 416.99 | 100% | 31 | 41 |
+| cluster-stateful | 200/s | 199.6 | 199.6 | 23.22 | 79.32 | 131.13 | 100% | 13 | 33 |
+| cluster-stateless | 1000/s | 999.9 | 999.9 | 3.82 | 7.72 | 13.09 | 100% | 0 | 100 |
+| cluster-stateless | 100/s | 100 | 100 | 3.67 | 5.65 | 8.03 | 100% | 0 | 10 |
+| cluster-stateless | 200/s | 200 | 200 | 3.56 | 5.9 | 8.61 | 100% | 0 | 20 |
+| cluster-stateless | 500/s | 500 | 500 | 3.42 | 5.85 | 9.2 | 100% | 0 | 50 |
+| single-stateful | 100/s | 99.1 | 99.1 | 215.12 | 362.5 | 376.6 | 100% | 32 | 42 |
+| single-stateful | 200/s | 97.8 | 97.8 | 1948.82 | 2212.55 | 2960.96 | 100% | 5939 | 200 |
+| single-stateless | 1000/s | 977.1 | 977.1 | 60.98 | 482.98 | 602.38 | 100% | 843 | 561 |
+| single-stateless | 100/s | 100 | 100 | 3.71 | 5.73 | 8.73 | 100% | 0 | 10 |
+| single-stateless | 200/s | 200 | 200 | 3.61 | 5.43 | 7.74 | 100% | 0 | 20 |
+| single-stateless | 500/s | 500 | 500 | 4.67 | 8.49 | 27.98 | 100% | 0 | 50 |
+
+## P95 Latency
+
+| Topology | Rate | P95 (ms) | |
+|----------|------|----------|-|
+| cluster-stateful | 100/s | 196.88 | `█████████████████████` |
+| cluster-stateful | 200/s | 79.32 | `█████████████████` |
+| cluster-stateless | 100/s | 5.65 | `███████` |
+| cluster-stateless | 200/s | 5.9 | `███████` |
+| cluster-stateless | 500/s | 5.85 | `███████` |
+| cluster-stateless | 1000/s | 7.72 | `████████` |
+| single-stateful | 100/s | 362.5 | `███████████████████████` |
+| single-stateful | 200/s | 2212.55 | `██████████████████████████████` |
+| single-stateless | 100/s | 5.73 | `███████` |
+| single-stateless | 200/s | 5.43 | `██████` |
+| single-stateless | 500/s | 8.49 | `████████` |
+| single-stateless | 1000/s | 482.98 | `████████████████████████` |
+
+## Notes
+
+- **Target Rate**: The configured constant-arrival-rate (requests/second k6 attempts)
+- **Actual Iter/s**: Achieved iterations per second (each iteration = 1 POST /api/exec)
+- **HTTP Req/s**: Total HTTP requests per second (1 per iteration)
+- **Dropped**: Iterations k6 couldn't schedule because VUs were exhausted (indicates server saturation)
+- **Topology**: `single` = 1 MCP-V8 node; `cluster` = 3 MCP-V8 nodes with Raft
+
