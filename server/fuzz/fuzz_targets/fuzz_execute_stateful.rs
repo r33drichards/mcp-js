@@ -1,13 +1,13 @@
 #![no_main]
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use std::sync::Once;
+use std::sync::{Arc, Mutex, Once};
 
 static INIT: Once = Once::new();
 
 fn ensure_v8() {
     INIT.call_once(|| {
-        server::mcp::initialize_v8();
+        server::engine::initialize_v8();
     });
 }
 
@@ -26,17 +26,21 @@ struct StatefulInput {
 fuzz_target!(|input: StatefulInput| {
     ensure_v8();
 
-    let snapshot = if input.has_snapshot {
-        Some(input.snapshot_bytes)
+    let raw_snapshot = if input.has_snapshot {
+        // Validate envelope — invalid data is rejected here, not inside V8.
+        match server::engine::unwrap_snapshot(&input.snapshot_bytes) {
+            Ok(raw) => Some(raw),
+            Err(_) => None,
+        }
     } else {
         None
     };
 
     // Run stateful execution — we don't care about the result, only that
-    // it doesn't crash. Invalid snapshots should be rejected by the
-    // envelope validation before reaching V8.
-    let max_bytes = 64 * 1024 * 1024;
-    // Use a short timeout to prevent slow-unit failures from pathological inputs
-    let timeout_secs = 5;
-    let _ = server::mcp::execute_stateful(input.code, snapshot, max_bytes, timeout_secs);
+    // it doesn't crash.
+    // Use the production default (8MB) — with ASAN overhead, larger heaps
+    // can cause OOM on CI runners.
+    let max_bytes = 8 * 1024 * 1024;
+    let handle = Arc::new(Mutex::new(None));
+    let _ = server::engine::execute_stateful(&input.code, raw_snapshot, max_bytes, handle);
 });

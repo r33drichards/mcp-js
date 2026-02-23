@@ -3,7 +3,7 @@
 /// Uses FileHeapStorage as the primary backend (standing in for S3)
 /// so the write-through cache logic can be exercised without AWS credentials.
 
-use server::mcp::heap_storage::{FileHeapStorage, HeapStorage, WriteThroughCacheHeapStorage};
+use server::engine::heap_storage::{FileHeapStorage, HeapStorage, WriteThroughCacheHeapStorage};
 use std::path::PathBuf;
 
 fn temp_dir(suffix: &str) -> PathBuf {

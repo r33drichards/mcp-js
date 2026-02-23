@@ -1,32 +1,36 @@
 /// Tests for parameter configurations: timeout and heap_memory_max_mb behavior.
 ///
-/// These tests reproduce issues found during manual testing:
-/// 1. OOM with small heap causes a thread panic ("Task join error") instead of a graceful error
-/// 2. Timeout and OOM both produce generic "Failed to run script" instead of descriptive messages
+/// Timeout tests use Engine::run_js (the production async path with
+/// tokio::select! timeout). OOM tests call execute_stateless/execute_stateful
+/// directly since they don't need timeout management.
 
-use std::sync::Once;
+use std::sync::{Arc, Mutex, Once};
+use server::engine::{Engine, initialize_v8};
 
 static INIT: Once = Once::new();
 
 fn ensure_v8() {
     INIT.call_once(|| {
-        server::mcp::initialize_v8();
+        initialize_v8();
     });
 }
 
-// ── Timeout tests ──────────────────────────────────────────────────────────
+fn no_handle() -> Arc<Mutex<Option<v8::IsolateHandle>>> {
+    Arc::new(Mutex::new(None))
+}
 
-/// An infinite loop with a short timeout should return a descriptive timeout error,
-/// not the generic "Failed to run script".
-#[test]
-fn test_timeout_produces_descriptive_error() {
+// ── Timeout tests (async, using Engine::run_js) ─────────────────────────
+
+/// An infinite loop with a short timeout should return a descriptive timeout error.
+#[tokio::test]
+async fn test_timeout_produces_descriptive_error() {
     ensure_v8();
 
-    let code = "while (true) {}".to_string();
-    let heap_bytes = 64 * 1024 * 1024; // 64MB - plenty of memory
-    let timeout_secs = 2;
-
-    let result = server::mcp::execute_stateless(code, heap_bytes, timeout_secs);
+    let engine = Engine::new_stateless(64 * 1024 * 1024, 2, 4);
+    let result = engine.run_js(
+        "while (true) {}".to_string(),
+        None, None, None, None,
+    ).await;
 
     assert!(result.is_err(), "Infinite loop should fail, got: {:?}", result);
     let err = result.unwrap_err();
@@ -37,15 +41,18 @@ fn test_timeout_produces_descriptive_error() {
 }
 
 /// Timeout should also work correctly in stateful mode.
-#[test]
-fn test_timeout_stateful_produces_descriptive_error() {
+#[tokio::test]
+async fn test_timeout_stateful_produces_descriptive_error() {
     ensure_v8();
 
-    let code = "while (true) {}".to_string();
-    let heap_bytes = 64 * 1024 * 1024;
-    let timeout_secs = 2;
-
-    let result = server::mcp::execute_stateful(code, None, heap_bytes, timeout_secs);
+    let heap_storage = server::engine::heap_storage::AnyHeapStorage::File(
+        server::engine::heap_storage::FileHeapStorage::new("/tmp/mcp-v8-test-timeout-stateful"),
+    );
+    let engine = Engine::new_stateful(heap_storage, None, 64 * 1024 * 1024, 2, 4);
+    let result = engine.run_js(
+        "while (true) {}".to_string(),
+        None, None, None, None,
+    ).await;
 
     assert!(result.is_err(), "Infinite loop should fail, got: {:?}", result);
     let err = result.unwrap_err();
@@ -55,26 +62,23 @@ fn test_timeout_stateful_produces_descriptive_error() {
     );
 }
 
-// ── OOM tests ──────────────────────────────────────────────────────────────
+// ── OOM tests (direct V8 calls) ─────────────────────────────────────────
 
-/// Allocating a huge array with a small heap should return a descriptive OOM error,
-/// not crash the thread or return "Failed to run script".
+/// Allocating a huge array with a small heap should return a descriptive OOM error.
 #[test]
 fn test_oom_produces_descriptive_error_not_crash() {
     ensure_v8();
 
-    // 50M element array with 16MB heap - this previously caused a thread panic
     let code = r#"
         var arr = [];
         for (var i = 0; i < 50000000; i++) {
             arr.push("item_" + i);
         }
         arr.length;
-    "#.to_string();
+    "#;
     let heap_bytes = 16 * 1024 * 1024; // 16MB
-    let timeout_secs = 30;
 
-    let result = server::mcp::execute_stateless(code, heap_bytes, timeout_secs);
+    let (result, _oom) = server::engine::execute_stateless(code, heap_bytes, no_handle());
 
     assert!(result.is_err(), "Huge allocation with small heap should fail, got: {:?}", result);
     let err = result.unwrap_err();
@@ -95,11 +99,10 @@ fn test_oom_stateful_produces_descriptive_error_not_crash() {
             arr.push("item_" + i);
         }
         arr.length;
-    "#.to_string();
+    "#;
     let heap_bytes = 16 * 1024 * 1024; // 16MB
-    let timeout_secs = 30;
 
-    let result = server::mcp::execute_stateful(code, None, heap_bytes, timeout_secs);
+    let (result, _oom) = server::engine::execute_stateful(code, None, heap_bytes, no_handle());
 
     assert!(result.is_err(), "Huge allocation with small heap should fail, got: {:?}", result);
     let err = result.unwrap_err();
@@ -109,22 +112,21 @@ fn test_oom_stateful_produces_descriptive_error_not_crash() {
     );
 }
 
-// ── Sanity checks ──────────────────────────────────────────────────────────
+// ── Sanity checks ────────────────────────────────────────────────────────
 
 /// A fast computation with generous limits should succeed.
 #[test]
-fn test_fast_computation_with_timeout_succeeds() {
+fn test_fast_computation_succeeds() {
     ensure_v8();
 
     let code = r#"
         var sum = 0;
         for (var i = 0; i < 1000000; i++) { sum += i; }
         sum;
-    "#.to_string();
+    "#;
     let heap_bytes = 64 * 1024 * 1024;
-    let timeout_secs = 5;
 
-    let result = server::mcp::execute_stateless(code, heap_bytes, timeout_secs);
+    let (result, _oom) = server::engine::execute_stateless(code, heap_bytes, no_handle());
 
     assert!(result.is_ok(), "Fast computation should succeed, got: {:?}", result);
     assert_eq!(result.unwrap(), "499999500000");
@@ -135,11 +137,9 @@ fn test_fast_computation_with_timeout_succeeds() {
 fn test_bare_call_default_params() {
     ensure_v8();
 
-    let code = "1 + 1".to_string();
-    let heap_bytes = server::mcp::DEFAULT_HEAP_MEMORY_MAX_MB * 1024 * 1024;
-    let timeout_secs = server::mcp::DEFAULT_EXECUTION_TIMEOUT_SECS;
+    let heap_bytes = server::engine::DEFAULT_HEAP_MEMORY_MAX_MB * 1024 * 1024;
 
-    let result = server::mcp::execute_stateless(code, heap_bytes, timeout_secs);
+    let (result, _oom) = server::engine::execute_stateless("1 + 1", heap_bytes, no_handle());
 
     assert!(result.is_ok(), "Simple expression should succeed, got: {:?}", result);
     assert_eq!(result.unwrap(), "2");

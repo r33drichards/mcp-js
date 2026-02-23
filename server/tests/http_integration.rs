@@ -3,14 +3,13 @@ use tokio::net::TcpStream;
 use serde_json::{json, Value};
 use std::time::Duration;
 
-/// Helper function to start the HTTP MCP server in the background for testing
-async fn start_test_server(port: u16) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        // Simulate starting the server on the given port
-        // In a real scenario, you would import and call your server's start function
-        let addr = format!("127.0.0.1:{}", port);
-        let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
+/// Helper function to start the HTTP MCP server in the background for testing.
+/// Returns the join handle and the dynamically assigned port.
+async fn start_test_server() -> (tokio::task::JoinHandle<()>, u16) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
 
+    let handle = tokio::spawn(async move {
         // Accept one connection for testing
         let (stream, _) = listener.accept().await.unwrap();
 
@@ -29,17 +28,15 @@ async fn start_test_server(port: u16) -> tokio::task::JoinHandle<()> {
                 Err(_) => break,
             }
         }
-    })
+    });
+
+    (handle, port)
 }
 
 /// Test basic HTTP connection to the server
 #[tokio::test]
 async fn test_http_connection() {
-    let port = 9876;
-    let _server = start_test_server(port).await;
-
-    // Give server time to start
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let (_server, port) = start_test_server().await;
 
     // Connect to the server
     let result = TcpStream::connect(format!("127.0.0.1:{}", port)).await;
@@ -49,11 +46,7 @@ async fn test_http_connection() {
 /// Test HTTP upgrade request
 #[tokio::test]
 async fn test_http_upgrade_request() {
-    let port = 9877;
-    let _server = start_test_server(port).await;
-
-    // Give server time to start
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let (_server, port) = start_test_server().await;
 
     let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port))
         .await
@@ -182,13 +175,11 @@ async fn test_invalid_javascript_handling() {
 /// Test concurrent connections
 #[tokio::test]
 async fn test_concurrent_connections() {
-    let port = 9878;
-
     // Try to create multiple connection attempts
     let tasks: Vec<_> = (0..3).map(|_| {
         tokio::spawn(async move {
-            // Each task attempts to connect
-            let addr = format!("127.0.0.1:{}", port);
+            // Each task attempts to connect to a port that likely isn't listening
+            let addr = "127.0.0.1:1";
             // Connection may fail since server isn't running, but we test the logic
             let _ = tokio::time::timeout(
                 Duration::from_millis(100),

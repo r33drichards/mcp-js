@@ -1,18 +1,18 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use std::sync::Once;
+use std::sync::{Arc, Mutex, Once};
 
 static INIT: Once = Once::new();
 
 fn ensure_v8() {
     INIT.call_once(|| {
-        server::mcp::initialize_v8();
+        server::engine::initialize_v8();
     });
 }
 
 // Fuzz V8 snapshot deserialization by passing raw fuzzer bytes as a snapshot
 // blob. This verifies that the snapshot envelope validation in
-// execute_stateful correctly rejects arbitrary/corrupted data before it
+// unwrap_snapshot correctly rejects arbitrary/corrupted data before it
 // reaches V8's C++ snapshot deserializer (which would abort the process).
 //
 // Prior to the envelope validation fix, this target found that V8's
@@ -22,13 +22,14 @@ fn ensure_v8() {
 fuzz_target!(|data: &[u8]| {
     ensure_v8();
 
-    // Always pass fuzzer data as a snapshot — this exercises the snapshot
-    // validation code path.
-    let snapshot = Some(data.to_vec());
-    let code = "1".to_string();
+    // Validate the envelope — this is the code path under test.
+    let raw_snapshot = match server::engine::unwrap_snapshot(data) {
+        Ok(raw) => Some(raw),
+        Err(_) => return, // Correctly rejected — nothing more to test.
+    };
 
-    // Use a small heap limit for fuzzing to avoid process-level OOM
+    // If validation passes (extremely unlikely with random data), run V8.
     let max_bytes = 64 * 1024 * 1024;
-    let timeout_secs = 5;
-    let _ = server::mcp::execute_stateful(code, snapshot, max_bytes, timeout_secs);
+    let handle = Arc::new(Mutex::new(None));
+    let _ = server::engine::execute_stateful("1", raw_snapshot, max_bytes, handle);
 });

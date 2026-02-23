@@ -1,0 +1,358 @@
+name: Load Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: "Duration per test run (k6 duration string)"
+        default: "60s"
+      rates:
+        description: "Comma-separated target rates (req/s)"
+        default: "100,200,500,1000"
+
+concurrency:
+  group: load-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  load-test:
+    name: Benchmark (${{ matrix.topology }}-${{ matrix.mode }})
+    runs-on: [self-hosted, railway]
+    timeout-minutes: 120
+
+    strategy:
+      fail-fast: false
+      matrix:
+        topology:
+          - single
+          - cluster
+        mode:
+          - stateless
+          - stateful
+
+    env:
+      DURATION: ${{ github.event.inputs.duration || '60s' }}
+      LABEL: ${{ matrix.topology }}-${{ matrix.mode }}
+
+    steps:
+      # ── Setup ────────────────────────────────────────────────────────
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v30
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Install k6
+        run: |
+          if ! command -v k6 &> /dev/null; then
+            curl -fsSL https://github.com/grafana/k6/releases/download/v0.55.0/k6-v0.55.0-linux-amd64.tar.gz \
+              | tar xzf - --strip-components=1 -C /usr/local/bin k6-v0.55.0-linux-amd64/k6
+          fi
+          k6 version
+
+      # ── Build ───────────────────────────────────────────────────────
+      - name: Build MCP-V8 binary
+        run: nix develop --command bash -c "cd server && cargo build --release"
+
+      - name: Verify binary
+        run: |
+          ls -lh server/target/release/server
+
+      # ── Prepare data directories ────────────────────────────────────
+      - name: Create data directories
+        run: |
+          rm -rf /tmp/loadtest
+          mkdir -p /tmp/loadtest/node1/heaps /tmp/loadtest/node1/sessions
+          mkdir -p /tmp/loadtest/node2/heaps /tmp/loadtest/node2/sessions
+          mkdir -p /tmp/loadtest/node3/heaps /tmp/loadtest/node3/sessions
+
+      # ── Start server(s) ─────────────────────────────────────────────
+      - name: Start ${{ env.LABEL }} server(s)
+        run: |
+          BINARY="$(pwd)/server/target/release/server"
+
+          if [ "${{ matrix.topology }}" = "single" ]; then
+            # ── Single node ─────────────────────────────────
+            if [ "${{ matrix.mode }}" = "stateful" ]; then
+              ARGS="--http-port=3001 --directory-path=/tmp/loadtest/node1/heaps --session-db-path=/tmp/loadtest/node1/sessions"
+            else
+              ARGS="--http-port=3001 --stateless"
+            fi
+
+            echo "Starting single node on port 3001..."
+            nix develop --command bash -c "$BINARY $ARGS" \
+              > /tmp/loadtest/node1.log 2>&1 &
+            echo $! > /tmp/loadtest/node1.pid
+
+            echo "TARGET_URLS=http://127.0.0.1:3001" >> "$GITHUB_ENV"
+
+          else
+            # ── 3-node cluster ──────────────────────────────
+            for i in 1 2 3; do
+              HTTP_PORT=$((3000 + i))
+              CLUSTER_PORT=$((4000 + i))
+              NODE_ID="node${i}"
+
+              # Build peer list (all nodes except self)
+              PEERS=""
+              for j in 1 2 3; do
+                if [ "$j" -ne "$i" ]; then
+                  [ -n "$PEERS" ] && PEERS="${PEERS},"
+                  PEERS="${PEERS}node${j}@127.0.0.1:$((4000 + j))"
+                fi
+              done
+
+              if [ "${{ matrix.mode }}" = "stateful" ]; then
+                MODE_ARGS="--directory-path=/tmp/loadtest/${NODE_ID}/heaps --session-db-path=/tmp/loadtest/${NODE_ID}/sessions"
+              else
+                MODE_ARGS="--stateless"
+              fi
+
+              echo "Starting ${NODE_ID} on HTTP ${HTTP_PORT}, cluster ${CLUSTER_PORT}..."
+              nix develop --command bash -c \
+                "$BINARY --http-port=${HTTP_PORT} ${MODE_ARGS} \
+                  --cluster-port=${CLUSTER_PORT} \
+                  --node-id=${NODE_ID} \
+                  --peers=${PEERS} \
+                  --advertise-addr=127.0.0.1:${CLUSTER_PORT} \
+                  --heartbeat-interval=200 \
+                  --election-timeout-min=1000 \
+                  --election-timeout-max=2000" \
+                > /tmp/loadtest/${NODE_ID}.log 2>&1 &
+              echo $! > /tmp/loadtest/${NODE_ID}.pid
+            done
+
+            echo "TARGET_URLS=http://127.0.0.1:3001,http://127.0.0.1:3002,http://127.0.0.1:3003" >> "$GITHUB_ENV"
+          fi
+
+      # ── Health check ────────────────────────────────────────────────
+      - name: Wait for services to be healthy
+        run: |
+          echo "Waiting for server(s) to accept connections..."
+
+          IFS=',' read -ra URLS <<< "$TARGET_URLS"
+
+          for URL in "${URLS[@]}"; do
+            echo "Checking ${URL}..."
+            for i in $(seq 1 60); do
+              if curl -sf --max-time 10 -o /dev/null -X POST "${URL}/api/exec" \
+                -H 'Content-Type: application/json' \
+                -d '{"code":"1"}' 2>/dev/null; then
+                echo "${URL} is ready (attempt ${i})"
+                break
+              fi
+              if [ "$i" -eq 60 ]; then
+                echo "ERROR: ${URL} did not become ready in 120s"
+                echo "--- Server logs ---"
+                cat /tmp/loadtest/*.log || true
+                exit 1
+              fi
+              sleep 2
+            done
+          done
+
+          # For cluster topology, wait for Raft leader election
+          if [ "${{ matrix.topology }}" = "cluster" ]; then
+            echo "Waiting for Raft leader election..."
+            for i in $(seq 1 30); do
+              ROLE=$(curl -sf http://127.0.0.1:4001/raft/status 2>/dev/null \
+                | python3 -c "import sys,json; print(json.load(sys.stdin).get('role',''))" 2>/dev/null || true)
+              if [ "$ROLE" = "Leader" ] || [ "$ROLE" = "Follower" ]; then
+                echo "Raft cluster is operational (node1 role: ${ROLE})"
+                break
+              fi
+              echo "Attempt ${i}/30 — waiting for Raft..."
+              sleep 2
+            done
+          fi
+
+      # ── Smoke test ──────────────────────────────────────────────────
+      - name: Smoke test — POST /api/exec
+        run: |
+          IFS=',' read -ra URLS <<< "$TARGET_URLS"
+          URL="${URLS[0]}"
+
+          echo "=== Smoke test: POST /api/exec on ${URL} ==="
+          RESP=$(curl -sf --max-time 10 -X POST "${URL}/api/exec" \
+            -H 'Content-Type: application/json' \
+            -d '{"code":"1 + 1"}')
+          echo "Response: $RESP"
+
+          if [ -z "$RESP" ]; then
+            echo "ERROR: No response from /api/exec"
+            cat /tmp/loadtest/*.log || true
+            exit 1
+          fi
+
+          # Verify the output field contains "2"
+          OUTPUT=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('output',''))" 2>/dev/null || true)
+          if [ "$OUTPUT" != "2" ]; then
+            echo "ERROR: Expected output '2', got '${OUTPUT}'"
+            cat /tmp/loadtest/*.log || true
+            exit 1
+          fi
+          echo "Smoke test passed"
+
+      # ── Load tests at each rate ─────────────────────────────────────
+      - name: Run load tests
+        run: |
+          mkdir -p results
+
+          if [ "${{ matrix.mode }}" = "stateful" ]; then
+            RATES="100,200"
+          else
+            RATES="${{ github.event.inputs.rates || '100,200,500,1000' }}"
+          fi
+
+          IFS=',' read -ra RATE_ARRAY <<< "$RATES"
+          for RATE in "${RATE_ARRAY[@]}"; do
+            echo ""
+            echo "============================================================"
+            echo "  Running: ${LABEL} @ ${RATE} req/s for ${DURATION}"
+            echo "============================================================"
+            echo ""
+
+            k6 run \
+              --out json=results/raw-${LABEL}-${RATE}.json \
+              -e TARGET_URLS="${TARGET_URLS}" \
+              -e TARGET_RATE="${RATE}" \
+              -e DURATION="${DURATION}" \
+              -e TOPOLOGY="${LABEL}" \
+              loadtest/k6-load-test.js \
+              || true  # Don't fail the job if thresholds aren't met
+
+            # k6 handleSummary writes the result file in CWD
+            if [ -f "results-${LABEL}-${RATE}rps.json" ]; then
+              mv "results-${LABEL}-${RATE}rps.json" results/
+            fi
+
+            echo ""
+            echo "Cooling down between test runs..."
+            sleep 10
+          done
+
+      # ── Collect server logs ─────────────────────────────────────────
+      - name: Collect server logs
+        if: always()
+        run: |
+          mkdir -p results
+          cp /tmp/loadtest/*.log results/ 2>/dev/null || true
+
+      # ── Tear down ───────────────────────────────────────────────────
+      - name: Stop server(s)
+        if: always()
+        run: |
+          for pidfile in /tmp/loadtest/*.pid; do
+            if [ -f "$pidfile" ]; then
+              PID=$(cat "$pidfile")
+              echo "Stopping PID ${PID}..."
+              kill "$PID" 2>/dev/null || true
+            fi
+          done
+          sleep 2
+          for pidfile in /tmp/loadtest/*.pid; do
+            if [ -f "$pidfile" ]; then
+              PID=$(cat "$pidfile")
+              kill -9 "$PID" 2>/dev/null || true
+            fi
+          done
+          rm -rf /tmp/loadtest
+
+      # ── Generate report ─────────────────────────────────────────────
+      - name: Generate benchmark report
+        if: always()
+        run: |
+          chmod +x loadtest/generate-report.sh
+          loadtest/generate-report.sh results || true
+
+      # ── Upload artifacts ────────────────────────────────────────────
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: load-test-results-${{ env.LABEL }}
+          path: results/
+          if-no-files-found: ignore
+
+  # ── Comparison report (runs after all benchmarks complete) ──────────
+  report:
+    name: Generate Comparison Report
+    runs-on: [self-hosted, railway]
+    needs: load-test
+    if: always()
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: load-test-results-*
+          path: results/
+          merge-multiple: true
+        continue-on-error: true
+
+      - name: Generate combined report
+        run: |
+          chmod +x loadtest/generate-report.sh
+          loadtest/generate-report.sh results || echo "Report generation failed (some results may be missing)"
+
+      - name: Upload combined report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: load-test-benchmark-report
+          path: |
+            results/benchmark-report.md
+            results/benchmark-summary.json
+          if-no-files-found: ignore
+
+      - name: Post report as PR comment
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const reportPath = 'results/benchmark-report.md';
+            if (!fs.existsSync(reportPath)) {
+              console.log('No report file found, skipping comment');
+              return;
+            }
+            const report = fs.readFileSync(reportPath, 'utf8');
+            const marker = '<!-- load-test-report -->';
+            const body = marker + '\n' + report;
+
+            // Find existing comment to update (avoid duplicates on re-runs)
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find(c => c.body.includes(marker));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body: body,
+              });
+              console.log(`Updated existing comment ${existing.id}`);
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: body,
+              });
+              console.log('Created new comment');
+            }

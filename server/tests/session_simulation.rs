@@ -2,7 +2,7 @@
 //! simulation testing philosophy. Tests crash/recovery semantics and
 //! concurrent workload correctness.
 
-use server::mcp::session_log::{SessionLog, SessionLogEntry};
+use server::engine::session_log::{SessionLog, SessionLogEntry};
 use std::sync::Arc;
 
 fn make_entry(input: Option<&str>, output: &str, code: &str) -> SessionLogEntry {
