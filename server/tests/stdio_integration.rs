@@ -51,6 +51,7 @@ async fn test_stdio_message_serialization() {
 /// Test run_js tool call message format for stdio
 #[tokio::test]
 async fn test_stdio_run_js_message_format() {
+    // heap is optional — omit for fresh session
     let tool_call = json!({
         "jsonrpc": "2.0",
         "id": 2,
@@ -58,8 +59,7 @@ async fn test_stdio_run_js_message_format() {
         "params": {
             "name": "run_js",
             "arguments": {
-                "code": "1 + 1",
-                "heap": "stdio-test-heap"
+                "code": "1 + 1"
             }
         }
     });
@@ -68,7 +68,22 @@ async fn test_stdio_run_js_message_format() {
     assert_eq!(tool_call["method"], "tools/call");
     assert_eq!(tool_call["params"]["name"], "run_js");
     assert!(tool_call["params"]["arguments"]["code"].is_string());
-    assert!(tool_call["params"]["arguments"]["heap"].is_string());
+
+    // heap can also be provided as a content hash for resuming
+    let tool_call_with_heap = json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": {
+            "name": "run_js",
+            "arguments": {
+                "code": "1 + 1",
+                "heap": "a1b2c3d4"
+            }
+        }
+    });
+
+    assert!(tool_call_with_heap["params"]["arguments"]["heap"].is_string());
 }
 
 /// Test JavaScript code scenarios for stdio transport
@@ -90,8 +105,7 @@ async fn test_stdio_javascript_scenarios() {
             "params": {
                 "name": "run_js",
                 "arguments": {
-                    "code": code,
-                    "heap": "test-heap"
+                    "code": code
                 }
             }
         });
@@ -144,17 +158,22 @@ async fn test_stdio_error_response_format() {
     assert!(error_response["error"]["message"].is_string());
 }
 
-/// Test heap naming conventions for stdio
+/// Test content-addressed heap hash format
 #[tokio::test]
-async fn test_stdio_heap_naming() {
-    let valid_heap_names = vec![
-        "test-heap",
-        "user-123-session",
-        "calculation_workspace",
-        "heap.with.dots",
+async fn test_stdio_heap_hash_format() {
+    // Content-addressed heap hashes are 8-character lowercase hex strings
+    let valid_hashes = vec![
+        "a1b2c3d4",
+        "00000000",
+        "ffffffff",
+        "deadbeef",
     ];
 
-    for name in valid_heap_names {
+    for hash in valid_hashes {
+        assert_eq!(hash.len(), 8, "Hash should be 8 characters");
+        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()),
+                "Hash should be hex: {}", hash);
+
         let message = json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -163,13 +182,12 @@ async fn test_stdio_heap_naming() {
                 "name": "run_js",
                 "arguments": {
                     "code": "1",
-                    "heap": name
+                    "heap": hash
                 }
             }
         });
 
-        assert!(!name.is_empty());
-        assert_eq!(message["params"]["arguments"]["heap"], name);
+        assert_eq!(message["params"]["arguments"]["heap"], hash);
     }
 }
 
@@ -191,8 +209,7 @@ async fn test_stdio_invalid_javascript_scenarios() {
             "params": {
                 "name": "run_js",
                 "arguments": {
-                    "code": code,
-                    "heap": "test-heap"
+                    "code": code
                 }
             }
         });

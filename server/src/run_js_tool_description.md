@@ -2,15 +2,13 @@ run javascript code in v8
 
 params:
 - code: the javascript code to run
-- heap: the path to the heap file
+- heap (optional): content hash from a previous execution to resume that session, or omit for a fresh session
 - heap_memory_max_mb (optional): maximum V8 heap memory in megabytes (1–64, default: 8). Override the server default for this execution.
 - execution_timeout_secs (optional): maximum execution time in seconds (1–300, default: 30). Override the server default for this execution.
 
 returns:
 - output: the output of the javascript code
-- heap: the path to the heap file
-
-you must send a heap file to the client.
+- heap: content hash of the new heap snapshot — pass this in the next call to resume the session
 
 
 
@@ -61,12 +59,12 @@ would return:
 {"a":1,"b":2}
 ```
 
-you are running in stateful mode, so the heap is persisted between executions.
+you are running in stateful mode with content-addressed heap storage. Each execution returns a content hash for the heap snapshot — pass it back as the `heap` parameter in the next call to resume from that state. Omit `heap` for a fresh session.
 the source code of the runtime is this
 
 ```rust
 // Execute JS with snapshot support (preserves heap state)
-pub fn execute_stateful(code: String, snapshot: Option<Vec<u8>>, heap_memory_max_bytes: usize, timeout_secs: u64) -> Result<(String, Vec<u8>), String> {
+pub fn execute_stateful(code: String, snapshot: Option<Vec<u8>>, heap_memory_max_bytes: usize, timeout_secs: u64) -> Result<(String, Vec<u8>, String), String> {
     let params = Some(create_params_with_heap_limit(heap_memory_max_bytes));
 
     let raw_snapshot = match snapshot {
@@ -104,9 +102,9 @@ pub fn execute_stateful(code: String, snapshot: Option<Vec<u8>>, heap_memory_max
 
     let startup_data = snapshot_creator.create_blob(v8::FunctionCodeHandling::Clear)
         .ok_or("Failed to create V8 snapshot blob".to_string())?;
-    let startup_data_vec = wrap_snapshot(&startup_data);
+    let wrapped = wrap_snapshot(&startup_data);
 
-    output_result.map(|output| (output, startup_data_vec))
+    output_result.map(|output| (output, wrapped.data, wrapped.content_hash))
 }
 
 // Stateful service implementation
@@ -120,7 +118,9 @@ impl StatefulService {
     pub async fn run_js(
         &self,
         #[tool(param)] code: String,
-        #[tool(param)] heap: String,
+        #[tool(param)]
+        #[serde(default)]
+        heap: Option<String>,
         #[tool(param)]
         #[serde(default)]
         heap_memory_max_mb: Option<usize>,
@@ -132,26 +132,29 @@ impl StatefulService {
             .map(|mb| mb * 1024 * 1024)
             .unwrap_or(self.heap_memory_max_bytes);
         let timeout = execution_timeout_secs.unwrap_or(self.execution_timeout_secs);
-        let snapshot = self.heap_storage.get(&heap).await.ok();
+        let snapshot = match &heap {
+            Some(h) if !h.is_empty() => self.heap_storage.get(h).await.ok(),
+            _ => None,
+        };
         let v8_result = tokio::task::spawn_blocking(move || execute_stateful(code, snapshot, max_bytes, timeout)).await;
 
         match v8_result {
-            Ok(Ok((output, startup_data))) => {
-                if let Err(e) = self.heap_storage.put(&heap, &startup_data).await {
+            Ok(Ok((output, startup_data, content_hash))) => {
+                if let Err(e) = self.heap_storage.put(&content_hash, &startup_data).await {
                     return RunJsStatefulResponse {
                         output: format!("Error saving heap: {}", e),
-                        heap,
+                        heap: content_hash,
                     };
                 }
-                RunJsStatefulResponse { output, heap }
+                RunJsStatefulResponse { output, heap: content_hash }
             }
             Ok(Err(e)) => RunJsStatefulResponse {
                 output: format!("V8 error: {}", e),
-                heap,
+                heap: heap.unwrap_or_default(),
             },
             Err(e) => RunJsStatefulResponse {
                 output: format!("Task join error: {}", e),
-                heap,
+                heap: heap.unwrap_or_default(),
             },
         }
     }

@@ -63,8 +63,7 @@ async fn test_sse_post_message_format() {
         "params": {
             "name": "run_js",
             "arguments": {
-                "code": "1 + 1",
-                "heap": "test-heap"
+                "code": "1 + 1"
             }
         }
     });
@@ -108,8 +107,7 @@ async fn test_sse_mcp_tool_call_format() {
         "params": {
             "name": "run_js",
             "arguments": {
-                "code": "console.log('Hello from SSE')",
-                "heap": "sse-test-heap"
+                "code": "console.log('Hello from SSE')"
             }
         }
     });
@@ -140,20 +138,20 @@ async fn test_sse_javascript_execution_scenarios() {
     assert!(true);
 }
 
-/// Test heap storage naming for SSE
+/// Test content-addressed heap hash format for SSE
 #[tokio::test]
-async fn test_sse_heap_naming() {
-    let heap_names = vec![
-        "sse-test-heap",
-        "sse-session-123",
-        "sse-calculation-workspace",
+async fn test_sse_heap_hash_format() {
+    // Content-addressed heap hashes are 8-character lowercase hex strings
+    let valid_hashes = vec![
+        "a1b2c3d4",
+        "00000000",
+        "ffffffff",
     ];
 
-    // Verify heap names are valid strings
-    for name in heap_names {
-        assert!(!name.is_empty());
-        assert!(!name.contains('/'));  // No path separators
-        assert!(name.starts_with("sse-") || name.contains("sse"));
+    for hash in valid_hashes {
+        assert_eq!(hash.len(), 8, "Hash should be 8 characters");
+        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()),
+                "Hash should be hex: {}", hash);
     }
 }
 
@@ -170,8 +168,7 @@ async fn test_sse_invalid_javascript_handling() {
     for code in invalid_codes {
         // These should be handled gracefully by the server
         let request = json!({
-            "code": code,
-            "heap": "sse-test-heap"
+            "code": code
         });
         assert!(request.is_object());
     }

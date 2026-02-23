@@ -99,7 +99,7 @@ fn test_stateful_default_limit_allows_small_code() {
         "Simple JS should succeed with default heap limit in stateful mode, but got: {:?}",
         result
     );
-    let (output, snapshot) = result.unwrap();
+    let (output, snapshot, _content_hash) = result.unwrap();
     assert_eq!(output, "2");
     assert!(!snapshot.is_empty(), "Snapshot should be non-empty");
 }
@@ -117,7 +117,7 @@ fn test_stateful_generous_limit_allows_large_allocation() {
         "Large allocation should succeed with 256MB heap limit in stateful mode, but got: {:?}",
         result
     );
-    let (output, _) = result.unwrap();
+    let (output, _, _) = result.unwrap();
     assert_eq!(output, "2000000");
 }
 

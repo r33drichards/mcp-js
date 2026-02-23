@@ -323,8 +323,7 @@ async fn test_sse_run_js_execution() -> Result<(), Box<dyn std::error::Error>> {
         "params": {
             "name": "run_js",
             "arguments": {
-                "code": "1 + 1",
-                "heap": "sse-test-heap"
+                "code": "1 + 1"
             }
         }
     });
@@ -376,8 +375,7 @@ async fn test_sse_heap_persistence() -> Result<(), Box<dyn std::error::Error>> {
         "params": {
             "name": "run_js",
             "arguments": {
-                "code": "var sseValue = 100; sseValue",
-                "heap": "sse-persistence-heap"
+                "code": "var sseValue = 100; sseValue"
             }
         }
     });
@@ -429,8 +427,7 @@ async fn test_sse_invalid_javascript_error() -> Result<(), Box<dyn std::error::E
         "params": {
             "name": "run_js",
             "arguments": {
-                "code": "this is not valid javascript at all!!!",
-                "heap": "sse-error-heap"
+                "code": "this is not valid javascript at all!!!"
             }
         }
     });
@@ -483,8 +480,7 @@ async fn test_sse_sequential_operations() -> Result<(), Box<dyn std::error::Erro
         "params": {
             "name": "run_js",
             "arguments": {
-                "code": "var counter = 0; counter = counter + 5; counter",
-                "heap": "sse-sequential-heap"
+                "code": "var counter = 0; counter = counter + 5; counter"
             }
         }
     });
