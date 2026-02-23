@@ -12,9 +12,11 @@ use rmcp::transport::sse_server::{SseServer, SseServerConfig};
 use tokio_util::sync::CancellationToken;
 
 mod mcp;
+mod cluster;
 use mcp::{StatelessService, StatefulService, initialize_v8, DEFAULT_EXECUTION_TIMEOUT_SECS};
 use mcp::heap_storage::{AnyHeapStorage, S3HeapStorage, FileHeapStorage};
 use mcp::session_log::SessionLog;
+use cluster::{ClusterConfig, ClusterNode};
 
 /// Command line arguments for configuring heap storage
 #[derive(Parser, Debug)]
@@ -52,6 +54,32 @@ struct Cli {
     /// Path to the sled database for session logging (default: /tmp/mcp-v8-sessions)
     #[arg(long, default_value = "/tmp/mcp-v8-sessions", conflicts_with = "stateless")]
     session_db_path: String,
+
+    // ── Cluster options ────────────────────────────────────────────────
+
+    /// Port for the Raft cluster HTTP server. Enables cluster mode when set.
+    #[arg(long)]
+    cluster_port: Option<u16>,
+
+    /// Unique node identifier within the cluster
+    #[arg(long, default_value = "node1")]
+    node_id: String,
+
+    /// Comma-separated list of peer addresses (host:port)
+    #[arg(long, value_delimiter = ',')]
+    peers: Vec<String>,
+
+    /// Heartbeat interval in milliseconds
+    #[arg(long, default_value = "100")]
+    heartbeat_interval: u64,
+
+    /// Minimum election timeout in milliseconds
+    #[arg(long, default_value = "300")]
+    election_timeout_min: u64,
+
+    /// Maximum election timeout in milliseconds
+    #[arg(long, default_value = "500")]
+    election_timeout_max: u64,
 }
 
 /// npx @modelcontextprotocol/inspector cargo run -p mcp-server-examples --example std_io
@@ -73,6 +101,26 @@ async fn main() -> Result<()> {
     let execution_timeout_secs = cli.execution_timeout;
     tracing::info!("V8 heap memory limit: {} MB ({} bytes)", cli.heap_memory_max, heap_memory_max_bytes);
     tracing::info!("V8 execution timeout: {} seconds", execution_timeout_secs);
+
+    // Start cluster node if cluster_port is specified
+    if let Some(cluster_port) = cli.cluster_port {
+        let cluster_config = ClusterConfig {
+            node_id: cli.node_id.clone(),
+            peers: cli.peers.clone(),
+            cluster_port,
+            heartbeat_interval: std::time::Duration::from_millis(cli.heartbeat_interval),
+            election_timeout_min: std::time::Duration::from_millis(cli.election_timeout_min),
+            election_timeout_max: std::time::Duration::from_millis(cli.election_timeout_max),
+        };
+
+        let cluster_db_path = format!("{}/cluster-{}", cli.session_db_path, cli.node_id);
+        let cluster_db = sled::open(&cluster_db_path)
+            .expect("Failed to open cluster sled database");
+
+        let cluster_node = ClusterNode::new(cluster_config, cluster_db);
+        cluster_node.start().await;
+        tracing::info!("Cluster node {} started on port {}", cli.node_id, cluster_port);
+    }
 
     if cli.stateless {
         // Stateless mode - no heap persistence

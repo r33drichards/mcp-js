@@ -33,6 +33,10 @@ chrono = { version = "0.4", features = ["serde"] }
 hyper = { version = "1.5.2", features = ["server", "http1"] }
 hyper-util = { version = "0.1.10", features = ["tokio"] }
 tokio-util = "0.7"
+rand = "0.8"
+http-body-util = "0.1"
+reqwest = { version = "0.12", features = ["json"] }
+futures = "0.3"
 
 [dev-dependencies]
 tokio-test = "0.4"
