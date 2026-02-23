@@ -5,7 +5,7 @@ A Rust-based Model Context Protocol (MCP) server that exposes a V8 JavaScript ru
 ## Features
 
 - **V8 JavaScript Execution**: Run arbitrary JavaScript code in a secure, isolated V8 engine.
-- **Content-Addressed Heap Snapshots**: Persist and restore V8 heap state between runs using content-addressed storage (FNV-1a hash keys), supporting both S3 and local file storage.
+- **Content-Addressed Heap Snapshots**: Persist and restore V8 heap state between runs using content-addressed storage, supporting both S3 and local file storage.
 - **Stateless Mode**: Optional mode for fresh executions without heap persistence, ideal for serverless environments.
 - **MCP Protocol**: Implements the Model Context Protocol for seamless tool integration with Claude, Cursor, and other MCP clients.
 - **Configurable Storage**: Choose between S3, local directory, or stateless mode at runtime.
