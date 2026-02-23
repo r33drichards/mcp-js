@@ -94,6 +94,20 @@ if [ ${#FILES[@]} -gt 1 ]; then
     printf '%0.s█' $(seq 1 "$width")
   }
 
+  # Log-scale bar: width proportional to log(value)/log(max)
+  draw_bar_log() {
+    local val="$1" max_val="$2" max_width=30
+    if [ "$max_val" -le 1 ] || [ "$val" -le 0 ]; then
+      [ "$val" -gt 0 ] && echo "█" || echo ""
+      return
+    fi
+    # Use awk for floating-point log math
+    local width
+    width=$(awk -v v="$val" -v m="$max_val" -v w="$max_width" \
+      'BEGIN { if(v<=0||m<=1){print 1}else{r=log(v)/log(m)*w; if(r<1)r=1; printf "%d",r+0.5} }')
+    printf '%0.s█' $(seq 1 "$width")
+  }
+
   # ── Chart 1: Throughput ──────────────────────────────────────────────
   echo "" >> "$OUTPUT_MD"
   echo "## Throughput" >> "$OUTPUT_MD"
@@ -138,7 +152,7 @@ if [ ${#FILES[@]} -gt 1 ]; then
       [ -z "$f" ] && continue
       v_raw=$(jq -r '.metrics.js_exec_duration_p95 // 0 | . * 100 | round / 100' "$f")
       v_int=$(jq -r '.metrics.js_exec_duration_p95 // 0 | round' "$f")
-      bar=$(draw_bar "$v_int" "$max_p95")
+      bar=$(draw_bar_log "$v_int" "$max_p95")
       echo "| ${topo} | ${r}/s | ${v_raw} | \`${bar}\` |" >> "$OUTPUT_MD"
     done
   done
