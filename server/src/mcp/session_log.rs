@@ -13,7 +13,6 @@ pub struct SessionLog {
     db: sled::Db,
 }
 
-#[allow(dead_code)]
 impl SessionLog {
     pub fn new(path: &str) -> Result<Self, String> {
         let db = sled::open(path).map_err(|e| format!("Failed to open sled db: {}", e))?;

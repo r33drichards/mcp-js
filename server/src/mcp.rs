@@ -325,12 +325,6 @@ pub fn initialize_v8() {
 
 
 
-#[allow(dead_code)]
-pub trait DataService: Send + Sync + 'static {
-    fn get_data(&self) -> String;
-    fn set_data(&mut self, data: String);
-}
-
 // Stateful service with heap persistence
 #[derive(Clone)]
 pub struct StatefulService {

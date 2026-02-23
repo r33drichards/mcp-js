@@ -19,8 +19,6 @@ pub struct FileHeapStorage {
 
 impl FileHeapStorage {
 
-    // ignore dead_code warning
-    #[allow(dead_code)]
     pub fn new(dir: impl Into<PathBuf>) -> Self {
         let dir = dir.into();
         std::fs::create_dir_all(&dir).ok();
@@ -100,7 +98,6 @@ impl HeapStorage for S3HeapStorage {
 
 #[derive(Clone)]
 pub enum AnyHeapStorage {
-    #[allow(dead_code)]
     File(FileHeapStorage),
     S3(S3HeapStorage),
 }
