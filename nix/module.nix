@@ -82,6 +82,18 @@ in
       default = null;
       description = "Path to CA certificate file for cluster communication.";
     };
+
+    advertiseAddr = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = "Externally-reachable address (host:port) for this node. Defaults to <nodeId>:<clusterPort>.";
+    };
+
+    join = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = "Seed address (host:port) to join an existing cluster dynamically.";
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -119,8 +131,18 @@ in
             ];
 
             statelessArgs = lib.optionals cfg.stateless [ "--stateless" ];
+
+            advertiseArgs = lib.optionals (cfg.advertiseAddr != null) [
+              "--advertise-addr"
+              cfg.advertiseAddr
+            ];
+
+            joinArgs = lib.optionals (cfg.join != null) [
+              "--join"
+              cfg.join
+            ];
           in
-          lib.concatStringsSep " " (baseArgs ++ peerArgs ++ statelessArgs);
+          lib.concatStringsSep " " (baseArgs ++ peerArgs ++ statelessArgs ++ advertiseArgs ++ joinArgs);
 
         Restart = "on-failure";
         RestartSec = "2s";

@@ -36,10 +36,11 @@ fn make_config(idx: usize, ports: &[u16; 5]) -> ClusterConfig {
         .collect();
 
     ClusterConfig {
-        node_id,
+        node_id: node_id.clone(),
         peers,
         peer_addrs,
         cluster_port: ports[idx],
+        advertise_addr: Some(format!("127.0.0.1:{}", ports[idx])),
         heartbeat_interval: Duration::from_millis(80),
         election_timeout_min: Duration::from_millis(250),
         election_timeout_max: Duration::from_millis(500),

@@ -66,9 +66,20 @@ struct Cli {
     #[arg(long, default_value = "node1")]
     node_id: String,
 
-    /// Comma-separated list of peer addresses. Format: id@host:port or host:port
+    /// Comma-separated list of seed peer addresses. Format: id@host:port or host:port.
+    /// Peers can also join dynamically via POST /raft/join.
     #[arg(long, value_delimiter = ',')]
     peers: Vec<String>,
+
+    /// Join an existing cluster by contacting this seed address (host:port).
+    /// The node will register itself with the cluster leader via /raft/join.
+    #[arg(long)]
+    join: Option<String>,
+
+    /// Advertise address for this node (host:port). Used for peer discovery
+    /// and write forwarding. Defaults to <node-id>:<cluster-port>.
+    #[arg(long)]
+    advertise_addr: Option<String>,
 
     /// Heartbeat interval in milliseconds
     #[arg(long, default_value = "100")]
@@ -117,6 +128,7 @@ async fn main() -> Result<()> {
             peers: peer_addrs_list,
             peer_addrs: peer_addrs_map,
             cluster_port,
+            advertise_addr: cli.advertise_addr.clone().or_else(|| Some(format!("{}:{}", cli.node_id, cluster_port))),
             heartbeat_interval: std::time::Duration::from_millis(cli.heartbeat_interval),
             election_timeout_min: std::time::Duration::from_millis(cli.election_timeout_min),
             election_timeout_max: std::time::Duration::from_millis(cli.election_timeout_max),
@@ -129,6 +141,31 @@ async fn main() -> Result<()> {
         let node = ClusterNode::new(cluster_config, cluster_db);
         node.start().await;
         tracing::info!("Cluster node {} started on port {}", cli.node_id, cluster_port);
+
+        // If --join is specified, register with an existing cluster member.
+        if let Some(ref seed_addr) = cli.join {
+            let my_addr = cli.advertise_addr.clone().unwrap_or_else(|| format!("{}:{}", cli.node_id, cluster_port));
+            tracing::info!("Joining cluster via seed node {}", seed_addr);
+            let join_req = cluster::JoinRequest {
+                node_id: cli.node_id.clone(),
+                addr: my_addr,
+            };
+            let client = reqwest::Client::new();
+            let url = format!("http://{}/raft/join", seed_addr);
+            match client.post(&url).json(&join_req).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    tracing::info!("Successfully joined cluster via {}", seed_addr);
+                }
+                Ok(resp) => {
+                    let body = resp.text().await.unwrap_or_default();
+                    tracing::warn!("Join request returned error: {}", body);
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to join cluster via {}: {}", seed_addr, e);
+                }
+            }
+        }
+
         Some(node)
     } else {
         None

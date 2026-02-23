@@ -34,10 +34,11 @@ fn make_config_3(idx: usize, ports: &[u16; 3]) -> ClusterConfig {
         .collect();
 
     ClusterConfig {
-        node_id,
+        node_id: node_id.clone(),
         peers,
         peer_addrs,
         cluster_port: ports[idx],
+        advertise_addr: Some(format!("127.0.0.1:{}", ports[idx])),
         heartbeat_interval: Duration::from_millis(80),
         election_timeout_min: Duration::from_millis(250),
         election_timeout_max: Duration::from_millis(500),
@@ -397,6 +398,229 @@ async fn test_session_log_replication_through_raft() {
     println!("Session log replication through Raft: PASSED");
 
     drop(local_db);
+    for node in &nodes {
+        node.shutdown();
+    }
+    sleep(Duration::from_millis(200)).await;
+}
+
+// ---------------------------------------------------------------------------
+// Test 5: Dynamic peer join
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn test_dynamic_peer_join() {
+    use server::cluster::JoinRequest;
+
+    // Start a 2-node cluster, then dynamically add a 3rd node.
+    let ports: [u16; 3] = [19800, 19801, 19802];
+
+    // Initially only start node1 and node2
+    let config1 = {
+        let mut pa = HashMap::new();
+        pa.insert("node2".to_string(), format!("127.0.0.1:{}", ports[1]));
+        ClusterConfig {
+            node_id: "node1".to_string(),
+            peers: vec![format!("127.0.0.1:{}", ports[1])],
+            peer_addrs: pa,
+            cluster_port: ports[0],
+            advertise_addr: Some(format!("127.0.0.1:{}", ports[0])),
+            heartbeat_interval: Duration::from_millis(80),
+            election_timeout_min: Duration::from_millis(250),
+            election_timeout_max: Duration::from_millis(500),
+        }
+    };
+    let config2 = {
+        let mut pa = HashMap::new();
+        pa.insert("node1".to_string(), format!("127.0.0.1:{}", ports[0]));
+        ClusterConfig {
+            node_id: "node2".to_string(),
+            peers: vec![format!("127.0.0.1:{}", ports[0])],
+            peer_addrs: pa,
+            cluster_port: ports[1],
+            advertise_addr: Some(format!("127.0.0.1:{}", ports[1])),
+            heartbeat_interval: Duration::from_millis(80),
+            election_timeout_min: Duration::from_millis(250),
+            election_timeout_max: Duration::from_millis(500),
+        }
+    };
+
+    let db1 = temp_sled("dyn-join-node1");
+    let db2 = temp_sled("dyn-join-node2");
+
+    let node1 = ClusterNode::new(config1, db1);
+    let node2 = ClusterNode::new(config2, db2);
+    node1.start().await;
+    node2.start().await;
+
+    let initial_nodes = vec![node1.clone(), node2.clone()];
+
+    // Wait for leader among the initial 2 nodes
+    let leader_idx = wait_for_leader(&initial_nodes, Duration::from_secs(15))
+        .await
+        .expect("No leader elected in initial 2-node cluster");
+    let leader = &initial_nodes[leader_idx];
+
+    println!("Initial leader: node{}", leader_idx + 1);
+
+    // Write some data before node3 joins
+    leader
+        .put("before-join".to_string(), "initial".to_string())
+        .await
+        .expect("Initial write should succeed");
+
+    // Now start node3 with no seed peers, and have it join via the leader
+    let config3 = ClusterConfig {
+        node_id: "node3".to_string(),
+        peers: vec![], // no seed peers
+        peer_addrs: HashMap::new(),
+        cluster_port: ports[2],
+        advertise_addr: Some(format!("127.0.0.1:{}", ports[2])),
+        heartbeat_interval: Duration::from_millis(80),
+        election_timeout_min: Duration::from_millis(250),
+        election_timeout_max: Duration::from_millis(500),
+    };
+    let db3 = temp_sled("dyn-join-node3");
+    let node3 = ClusterNode::new(config3, db3);
+    node3.start().await;
+
+    // Send join request to the leader
+    leader
+        .handle_join(JoinRequest {
+            node_id: "node3".to_string(),
+            addr: format!("127.0.0.1:{}", ports[2]),
+        })
+        .await
+        .expect("Join should succeed on leader");
+
+    // Also tell node3 about the existing peers so it can participate
+    {
+        let mut state = node3.state.write().await;
+        state.peers.push(format!("127.0.0.1:{}", ports[0]));
+        state.peers.push(format!("127.0.0.1:{}", ports[1]));
+        state.peer_addrs.insert("node1".to_string(), format!("127.0.0.1:{}", ports[0]));
+        state.peer_addrs.insert("node2".to_string(), format!("127.0.0.1:{}", ports[1]));
+    }
+
+    // Wait for data to replicate to node3
+    assert!(
+        wait_for_key(&node3, "before-join", "initial", Duration::from_secs(10)).await,
+        "node3: pre-join data not replicated after joining"
+    );
+
+    // Write new data and verify it reaches node3
+    leader
+        .put("after-join".to_string(), "new-data".to_string())
+        .await
+        .expect("Post-join write should succeed");
+
+    assert!(
+        wait_for_key(&node3, "after-join", "new-data", Duration::from_secs(5)).await,
+        "node3: post-join data not replicated"
+    );
+
+    // Wait a bit for node3 to learn leader_id via heartbeats
+    sleep(Duration::from_secs(2)).await;
+
+    // Verify node3 can forward writes back through the cluster
+    node3
+        .put_or_forward("from-node3".to_string(), "hello".to_string())
+        .await
+        .expect("put_or_forward from dynamically joined node3 should succeed");
+
+    for node in &[&node1, &node2] {
+        assert!(
+            wait_for_key(node, "from-node3", "hello", Duration::from_secs(5)).await,
+            "data from node3 not replicated"
+        );
+    }
+
+    println!("Dynamic peer join: PASSED");
+
+    for node in &[&node1, &node2, &node3] {
+        node.shutdown();
+    }
+    sleep(Duration::from_millis(200)).await;
+}
+
+// ---------------------------------------------------------------------------
+// Test 6: Dynamic peer leave
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn test_dynamic_peer_leave() {
+    use server::cluster::LeaveRequest;
+
+    let ports = cluster_ports_3(19900);
+
+    let mut nodes: Vec<Arc<ClusterNode>> = Vec::new();
+    for i in 0..3 {
+        let config = make_config_3(i, &ports);
+        let db = temp_sled(&format!("dyn-leave-node{}", i + 1));
+        let node = ClusterNode::new(config, db);
+        node.start().await;
+        nodes.push(node);
+    }
+
+    let leader_idx = wait_for_leader(&nodes, Duration::from_secs(15))
+        .await
+        .expect("No leader elected");
+
+    let leader = &nodes[leader_idx];
+    println!("Leader: node{}", leader_idx + 1);
+
+    // Write data with all 3 nodes
+    leader
+        .put("pre-leave".to_string(), "ok".to_string())
+        .await
+        .expect("Pre-leave write should succeed");
+
+    // Remove a follower from the cluster
+    let leaving_idx = (leader_idx + 1) % 3;
+    let leaving_id = format!("node{}", leaving_idx + 1);
+
+    leader
+        .handle_leave(LeaveRequest {
+            node_id: leaving_id.clone(),
+        })
+        .await
+        .expect("Leave should succeed");
+
+    println!("Removed {} from cluster", leaving_id);
+
+    // Shut down the leaving node
+    nodes[leaving_idx].shutdown();
+    sleep(Duration::from_millis(500)).await;
+
+    // The remaining 2 nodes should still be able to write (quorum = 2/2)
+    leader
+        .put("post-leave".to_string(), "still-working".to_string())
+        .await
+        .expect("Post-leave write should succeed with 2-node cluster");
+
+    // Verify on the other surviving node
+    let other_idx = (leader_idx + 2) % 3;
+    assert!(
+        wait_for_key(
+            &nodes[other_idx],
+            "post-leave",
+            "still-working",
+            Duration::from_secs(5)
+        )
+        .await,
+        "Post-leave data not replicated"
+    );
+
+    // Verify the leader's peer set no longer contains the leaving node
+    let status = leader.status().await;
+    assert!(
+        !status.peer_addrs.contains_key(&leaving_id),
+        "leaving node should not be in peer_addrs: {:?}",
+        status.peer_addrs
+    );
+
+    println!("Dynamic peer leave: PASSED");
+
     for node in &nodes {
         node.shutdown();
     }

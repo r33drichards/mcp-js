@@ -40,3 +40,10 @@ jobs:
             --print-build-logs \
             --no-link \
             -L
+
+      - name: Run NixOS load-balancing integration test
+        run: |
+          nix build .#checks.x86_64-linux.load-balancing-test \
+            --print-build-logs \
+            --no-link \
+            -L
