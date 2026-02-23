@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # generate-report.sh — Combine individual k6 JSON results into a
-# markdown comparison table with Mermaid charts and a single JSON summary.
+# markdown comparison table with text-based charts and a single JSON summary.
 set -euo pipefail
 
 RESULTS_DIR="${1:-.}"
@@ -78,115 +78,88 @@ for f in "${FILES[@]}"; do
   echo "| ${topology} | ${target}/s | ${iters} | ${http_rps} | ${avg} | ${p95} | ${p99} | ${success}% | ${dropped} | ${vus} |" >> "$OUTPUT_MD"
 done
 
-# ── Mermaid charts ───────────────────────────────────────────────────────
-# Only generate charts if we have more than one data point.
+# ── Text-based visual charts ─────────────────────────────────────────────
+# Unicode bar charts that render in any markdown viewer (GitHub, terminals, etc.)
 if [ ${#FILES[@]} -gt 1 ]; then
 
-  # Build x-axis labels from rates
-  x_labels=""
-  for r in "${RATES[@]}"; do
-    [ -n "$x_labels" ] && x_labels="${x_labels}, "
-    if [ "$r" -ge 1000 ]; then
-      x_labels="${x_labels}\"$(( r / 1000 ))k/s\""
-    else
-      x_labels="${x_labels}\"${r}/s\""
+  # Helper: draw a bar of width proportional to value/max (max 30 chars)
+  draw_bar() {
+    local val="$1" max_val="$2" max_width=30
+    if [ "$max_val" -eq 0 ] || [ "$val" -eq 0 ]; then
+      echo ""
+      return
     fi
-  done
+    local width=$(( val * max_width / max_val ))
+    [ "$width" -lt 1 ] && width=1
+    printf '%0.s█' $(seq 1 "$width")
+  }
 
   # ── Chart 1: Throughput ──────────────────────────────────────────────
   echo "" >> "$OUTPUT_MD"
   echo "## Throughput" >> "$OUTPUT_MD"
   echo "" >> "$OUTPUT_MD"
-  echo '```mermaid' >> "$OUTPUT_MD"
-  echo "xychart-beta" >> "$OUTPUT_MD"
-  echo "    title \"Actual Throughput (iterations/sec)\"" >> "$OUTPUT_MD"
-  echo "    x-axis \"Target Rate\" [${x_labels}]" >> "$OUTPUT_MD"
-  echo "    y-axis \"Iterations/sec\"" >> "$OUTPUT_MD"
+  echo "| Topology | Rate | Actual | |" >> "$OUTPUT_MD"
+  echo "|----------|------|--------|-|" >> "$OUTPUT_MD"
+
+  # Find max throughput for scaling bars
+  max_iters=0
+  for f in "${FILES[@]}"; do
+    v=$(jq -r '.metrics.iterations_per_sec // 0 | round' "$f")
+    [ "$v" -gt "$max_iters" ] && max_iters="$v"
+  done
 
   for topo in "${TOPOLOGIES[@]}"; do
-    vals=""
     for r in "${RATES[@]}"; do
       f=$(find_file "$topo" "$r")
-      if [ -n "$f" ]; then
-        v=$(jq -r '.metrics.iterations_per_sec // 0 | round' "$f")
-      else
-        v=0
-      fi
-      [ -n "$vals" ] && vals="${vals}, "
-      vals="${vals}${v}"
+      [ -z "$f" ] && continue
+      v=$(jq -r '.metrics.iterations_per_sec // 0 | round' "$f")
+      bar=$(draw_bar "$v" "$max_iters")
+      echo "| ${topo} | ${r}/s | ${v}/s | \`${bar}\` |" >> "$OUTPUT_MD"
     done
-    echo "    bar [${vals}]" >> "$OUTPUT_MD"
   done
-
-  echo '```' >> "$OUTPUT_MD"
-  # Legend for bar series (mermaid doesn't label multiple bar series)
-  echo "" >> "$OUTPUT_MD"
-  legend=""
-  i=1
-  for topo in "${TOPOLOGIES[@]}"; do
-    [ -n "$legend" ] && legend="${legend} · "
-    legend="${legend}**Series ${i}**: ${topo}"
-    i=$((i + 1))
-  done
-  echo "> ${legend}" >> "$OUTPUT_MD"
 
   # ── Chart 2: P95 Latency ────────────────────────────────────────────
   echo "" >> "$OUTPUT_MD"
   echo "## P95 Latency" >> "$OUTPUT_MD"
   echo "" >> "$OUTPUT_MD"
-  echo '```mermaid' >> "$OUTPUT_MD"
-  echo "xychart-beta" >> "$OUTPUT_MD"
-  echo "    title \"P95 Execution Latency (ms)\"" >> "$OUTPUT_MD"
-  echo "    x-axis \"Target Rate\" [${x_labels}]" >> "$OUTPUT_MD"
-  echo "    y-axis \"Latency (ms)\"" >> "$OUTPUT_MD"
+  echo "| Topology | Rate | P95 (ms) | |" >> "$OUTPUT_MD"
+  echo "|----------|------|----------|-|" >> "$OUTPUT_MD"
+
+  max_p95=0
+  for f in "${FILES[@]}"; do
+    v=$(jq -r '.metrics.js_exec_duration_p95 // 0 | round' "$f")
+    [ "$v" -gt "$max_p95" ] && max_p95="$v"
+  done
+  [ "$max_p95" -eq 0 ] && max_p95=1
 
   for topo in "${TOPOLOGIES[@]}"; do
-    vals=""
     for r in "${RATES[@]}"; do
       f=$(find_file "$topo" "$r")
-      if [ -n "$f" ]; then
-        v=$(jq -r '.metrics.js_exec_duration_p95 // 0 | . * 100 | round / 100' "$f")
-      else
-        v=0
-      fi
-      [ -n "$vals" ] && vals="${vals}, "
-      vals="${vals}${v}"
+      [ -z "$f" ] && continue
+      v_raw=$(jq -r '.metrics.js_exec_duration_p95 // 0 | . * 100 | round / 100' "$f")
+      v_int=$(jq -r '.metrics.js_exec_duration_p95 // 0 | round' "$f")
+      bar=$(draw_bar "$v_int" "$max_p95")
+      echo "| ${topo} | ${r}/s | ${v_raw} | \`${bar}\` |" >> "$OUTPUT_MD"
     done
-    echo "    bar [${vals}]" >> "$OUTPUT_MD"
   done
-
-  echo '```' >> "$OUTPUT_MD"
-  echo "" >> "$OUTPUT_MD"
-  echo "> ${legend}" >> "$OUTPUT_MD"
 
   # ── Chart 3: Success Rate ───────────────────────────────────────────
   echo "" >> "$OUTPUT_MD"
   echo "## Success Rate" >> "$OUTPUT_MD"
   echo "" >> "$OUTPUT_MD"
-  echo '```mermaid' >> "$OUTPUT_MD"
-  echo "xychart-beta" >> "$OUTPUT_MD"
-  echo "    title \"Success Rate (%)\"" >> "$OUTPUT_MD"
-  echo "    x-axis \"Target Rate\" [${x_labels}]" >> "$OUTPUT_MD"
-  echo "    y-axis \"Success %\" 0 --> 100" >> "$OUTPUT_MD"
+  echo "| Topology | Rate | Success | |" >> "$OUTPUT_MD"
+  echo "|----------|------|--------|-|" >> "$OUTPUT_MD"
 
   for topo in "${TOPOLOGIES[@]}"; do
-    vals=""
     for r in "${RATES[@]}"; do
       f=$(find_file "$topo" "$r")
-      if [ -n "$f" ]; then
-        v=$(jq -r '.metrics.js_exec_success_rate // 0 | . * 1000 | round / 10' "$f")
-      else
-        v=0
-      fi
-      [ -n "$vals" ] && vals="${vals}, "
-      vals="${vals}${v}"
+      [ -z "$f" ] && continue
+      v=$(jq -r '.metrics.js_exec_success_rate // 0 | . * 1000 | round / 10' "$f")
+      v_int=$(jq -r '.metrics.js_exec_success_rate // 0 | . * 100 | round' "$f")
+      bar=$(draw_bar "$v_int" 100)
+      echo "| ${topo} | ${r}/s | ${v}% | \`${bar}\` |" >> "$OUTPUT_MD"
     done
-    echo "    bar [${vals}]" >> "$OUTPUT_MD"
   done
-
-  echo '```' >> "$OUTPUT_MD"
-  echo "" >> "$OUTPUT_MD"
-  echo "> ${legend}" >> "$OUTPUT_MD"
 
 fi
 

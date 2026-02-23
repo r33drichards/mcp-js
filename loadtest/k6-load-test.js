@@ -32,7 +32,7 @@ export const options = {
   },
   thresholds: {
     js_exec_success: ["rate>0.90"],
-    js_exec_duration: ["p(95)<10000"],
+    js_exec_duration: ["p(95)<10000", "p(99)<30000"],
   },
   tags: {
     topology: TOPOLOGY,
