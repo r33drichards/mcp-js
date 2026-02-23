@@ -308,6 +308,11 @@ pub struct Engine {
     heap_memory_max_bytes: usize,
     execution_timeout_secs: u64,
     v8_semaphore: Arc<Semaphore>,
+    /// V8's SnapshotCreator is not safe to run concurrently — multiple
+    /// snapshot_creator instances on parallel threads cause SIGSEGV.
+    /// This mutex serializes stateful V8 execution while stateless
+    /// requests proceed in full parallelism.
+    snapshot_mutex: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Engine {
@@ -322,6 +327,7 @@ impl Engine {
             heap_memory_max_bytes,
             execution_timeout_secs,
             v8_semaphore: Arc::new(Semaphore::new(max_concurrent)),
+            snapshot_mutex: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -338,6 +344,7 @@ impl Engine {
             heap_memory_max_bytes,
             execution_timeout_secs,
             v8_semaphore: Arc::new(Semaphore::new(max_concurrent)),
+            snapshot_mutex: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -406,7 +413,12 @@ impl Engine {
 
                 let code_for_log = code.clone();
                 let ih = isolate_handle.clone();
+
+                // V8 SnapshotCreator segfaults under concurrent use — serialize
+                // stateful V8 work while keeping the async timeout wrapper.
+                let snap_mutex = self.snapshot_mutex.clone();
                 let mut join_handle = tokio::task::spawn_blocking(move || {
+                    let _guard = snap_mutex.blocking_lock();
                     execute_stateful(&code, raw_snapshot, max_bytes, ih)
                 });
 
