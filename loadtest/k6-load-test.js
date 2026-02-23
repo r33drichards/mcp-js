@@ -30,6 +30,7 @@ export const options = {
       maxVUs: Math.min(TARGET_RATE, 5000),
     },
   },
+  summaryTrendStats: ["avg", "min", "med", "max", "p(90)", "p(95)", "p(99)"],
   thresholds: {
     js_exec_success: ["rate>0.90"],
     js_exec_duration: ["p(95)<10000", "p(99)<30000"],

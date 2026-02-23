@@ -82,18 +82,6 @@ done
 # Unicode bar charts that render in any markdown viewer (GitHub, terminals, etc.)
 if [ ${#FILES[@]} -gt 1 ]; then
 
-  # Helper: draw a bar of width proportional to value/max (max 30 chars)
-  draw_bar() {
-    local val="$1" max_val="$2" max_width=30
-    if [ "$max_val" -eq 0 ] || [ "$val" -eq 0 ]; then
-      echo ""
-      return
-    fi
-    local width=$(( val * max_width / max_val ))
-    [ "$width" -lt 1 ] && width=1
-    printf '%0.s█' $(seq 1 "$width")
-  }
-
   # Log-scale bar: width proportional to log(value)/log(max)
   draw_bar_log() {
     local val="$1" max_val="$2" max_width=30
@@ -108,31 +96,7 @@ if [ ${#FILES[@]} -gt 1 ]; then
     printf '%0.s█' $(seq 1 "$width")
   }
 
-  # ── Chart 1: Throughput ──────────────────────────────────────────────
-  echo "" >> "$OUTPUT_MD"
-  echo "## Throughput" >> "$OUTPUT_MD"
-  echo "" >> "$OUTPUT_MD"
-  echo "| Topology | Rate | Actual | |" >> "$OUTPUT_MD"
-  echo "|----------|------|--------|-|" >> "$OUTPUT_MD"
-
-  # Find max throughput for scaling bars
-  max_iters=0
-  for f in "${FILES[@]}"; do
-    v=$(jq -r '.metrics.iterations_per_sec // 0 | round' "$f")
-    [ "$v" -gt "$max_iters" ] && max_iters="$v"
-  done
-
-  for topo in "${TOPOLOGIES[@]}"; do
-    for r in "${RATES[@]}"; do
-      f=$(find_file "$topo" "$r")
-      [ -z "$f" ] && continue
-      v=$(jq -r '.metrics.iterations_per_sec // 0 | round' "$f")
-      bar=$(draw_bar "$v" "$max_iters")
-      echo "| ${topo} | ${r}/s | ${v}/s | \`${bar}\` |" >> "$OUTPUT_MD"
-    done
-  done
-
-  # ── Chart 2: P95 Latency ────────────────────────────────────────────
+  # ── Chart: P95 Latency (log scale) ──────────────────────────────────
   echo "" >> "$OUTPUT_MD"
   echo "## P95 Latency" >> "$OUTPUT_MD"
   echo "" >> "$OUTPUT_MD"
@@ -154,24 +118,6 @@ if [ ${#FILES[@]} -gt 1 ]; then
       v_int=$(jq -r '.metrics.js_exec_duration_p95 // 0 | round' "$f")
       bar=$(draw_bar_log "$v_int" "$max_p95")
       echo "| ${topo} | ${r}/s | ${v_raw} | \`${bar}\` |" >> "$OUTPUT_MD"
-    done
-  done
-
-  # ── Chart 3: Success Rate ───────────────────────────────────────────
-  echo "" >> "$OUTPUT_MD"
-  echo "## Success Rate" >> "$OUTPUT_MD"
-  echo "" >> "$OUTPUT_MD"
-  echo "| Topology | Rate | Success | |" >> "$OUTPUT_MD"
-  echo "|----------|------|--------|-|" >> "$OUTPUT_MD"
-
-  for topo in "${TOPOLOGIES[@]}"; do
-    for r in "${RATES[@]}"; do
-      f=$(find_file "$topo" "$r")
-      [ -z "$f" ] && continue
-      v=$(jq -r '.metrics.js_exec_success_rate // 0 | . * 1000 | round / 10' "$f")
-      v_int=$(jq -r '.metrics.js_exec_success_rate // 0 | . * 100 | round' "$f")
-      bar=$(draw_bar "$v_int" 100)
-      echo "| ${topo} | ${r}/s | ${v}% | \`${bar}\` |" >> "$OUTPUT_MD"
     done
   done
 
