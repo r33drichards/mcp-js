@@ -11,7 +11,7 @@ Basic integration tests that verify:
 - MCP protocol message structure
 - JSON-RPC message format
 - JavaScript execution scenarios
-- Heap naming conventions
+- Content-addressed heap hash format
 - Error handling
 - Concurrent connections
 
@@ -51,7 +51,7 @@ Basic integration tests for stdio transport that verify:
 - Newline-delimited JSON serialization
 - run_js tool call message format
 - JavaScript execution scenarios
-- Heap naming conventions
+- Content-addressed heap hash format
 - Error response format
 - Message ID tracking
 
@@ -92,7 +92,7 @@ Basic integration tests for SSE (Server-Sent Events) transport that verify:
 - POST message format to SSE server
 - run_js tool call message format
 - JavaScript execution scenarios
-- Heap naming conventions
+- Content-addressed heap hash format
 - Error response format
 - SSE keep-alive configuration
 - SSE server configuration
@@ -211,9 +211,9 @@ The integration tests cover:
    - Sequential operations with state preservation
 
 5. **Heap Management**
-   - Heap naming conventions
-   - Persistence across calls
-   - Multiple independent heaps
+   - Content-addressed heap hash format (64-char hex, SHA-256)
+   - Persistence across calls via content hash threading
+   - Multiple independent heaps (via distinct content hashes)
    - Isolation between different heaps
 
 ## Adding New Tests

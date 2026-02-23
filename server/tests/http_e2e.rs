@@ -164,8 +164,7 @@ async fn test_run_js_tool_execution() -> Result<(), Box<dyn std::error::Error>> 
         "params": {
             "name": "run_js",
             "arguments": {
-                "code": "1 + 1",
-                "heap": "test-e2e-heap"
+                "code": "1 + 1"
             }
         }
     });
@@ -225,7 +224,7 @@ async fn test_heap_persistence() -> Result<(), Box<dyn std::error::Error>> {
         send_mcp_message(&mut stream, initialize_msg)
     ).await??;
 
-    // Set a variable in heap
+    // Set a variable in a fresh heap
     let set_var_msg = json!({
         "jsonrpc": "2.0",
         "id": 2,
@@ -233,8 +232,7 @@ async fn test_heap_persistence() -> Result<(), Box<dyn std::error::Error>> {
         "params": {
             "name": "run_js",
             "arguments": {
-                "code": "var myValue = 42; myValue",
-                "heap": "persistence-test-heap"
+                "code": "var myValue = 42; myValue"
             }
         }
     });
@@ -247,7 +245,11 @@ async fn test_heap_persistence() -> Result<(), Box<dyn std::error::Error>> {
     // Verify first call succeeded
     assert!(response1["result"].is_object());
 
-    // Read the variable from heap in second call
+    // Extract content hash from first response
+    let heap_hash = common::extract_heap_hash(&response1)
+        .expect("First response should contain a heap content hash");
+
+    // Read the variable from heap using the content hash
     let read_var_msg = json!({
         "jsonrpc": "2.0",
         "id": 3,
@@ -256,7 +258,7 @@ async fn test_heap_persistence() -> Result<(), Box<dyn std::error::Error>> {
             "name": "run_js",
             "arguments": {
                 "code": "myValue",
-                "heap": "persistence-test-heap"
+                "heap": heap_hash
             }
         }
     });
@@ -317,8 +319,7 @@ async fn test_invalid_javascript_error() -> Result<(), Box<dyn std::error::Error
         "params": {
             "name": "run_js",
             "arguments": {
-                "code": "this is not valid javascript!!!",
-                "heap": "error-test-heap"
+                "code": "this is not valid javascript!!!"
             }
         }
     });

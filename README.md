@@ -5,7 +5,7 @@ A Rust-based Model Context Protocol (MCP) server that exposes a V8 JavaScript ru
 ## Features
 
 - **V8 JavaScript Execution**: Run arbitrary JavaScript code in a secure, isolated V8 engine.
-- **Heap Snapshots**: Persist and restore V8 heap state between runs, supporting both S3 and local file storage.
+- **Content-Addressed Heap Snapshots**: Persist and restore V8 heap state between runs using content-addressed storage (FNV-1a hash keys), supporting both S3 and local file storage.
 - **Stateless Mode**: Optional mode for fresh executions without heap persistence, ideal for serverless environments.
 - **MCP Protocol**: Implements the Model Context Protocol for seamless tool integration with Claude, Cursor, and other MCP clients.
 - **Configurable Storage**: Choose between S3, local directory, or stateless mode at runtime.
@@ -103,11 +103,14 @@ Stateless mode runs each JavaScript execution in a fresh V8 isolate without any 
 
 ### Stateful Mode (default)
 
-Stateful mode persists the V8 heap state between executions using either S3 or local filesystem storage.
+Stateful mode persists the V8 heap state between executions using content-addressed storage backed by either S3 or local filesystem.
+
+Each execution returns a `heap` content hash (e.g., `"a1b2c3d4"`) that identifies the snapshot. Pass this hash in the next `run_js` call to resume from that state. Omit `heap` to start a fresh session.
 
 **Benefits:**
 - **State persistence**: Variables and objects persist between runs
-- **Faster subsequent runs**: Preloaded context and data
+- **Content-addressed**: Snapshots are keyed by their FNV-1a hash — no naming collisions, safe concurrent access, and natural deduplication
+- **Immutable snapshots**: Once written, a snapshot at a given hash never changes
 - **Perfect for**: Interactive sessions, building up complex state over time
 
 **Example use case:** Building a data structure incrementally, maintaining session state, or reusing expensive computations.
@@ -195,7 +198,7 @@ Then test by running `claude` and asking: "Run this JavaScript: `[1,2,3].map(x =
 ## Example Usage
 
 - Ask Claude or Cursor: "Run this JavaScript: `1 + 2`"
-- Use heap snapshots to persist state between runs.
+- Use content-addressed heap snapshots to persist state between runs. The `run_js` tool returns a `heap` content hash after each execution — pass it back in the next call to resume that session.
 
 ## Heap Storage Options
 

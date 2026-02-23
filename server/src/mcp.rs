@@ -14,6 +14,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use v8::{self};
+use sha2::{Sha256, Digest};
 
 pub mod heap_storage;
 use crate::mcp::heap_storage::{HeapStorage, AnyHeapStorage};
@@ -32,7 +33,7 @@ pub fn eval<'s>(scope: &mut v8::HandleScope<'s>, code: &str) -> Result<v8::Local
 pub const DEFAULT_HEAP_MEMORY_MAX_MB: usize = 8;
 pub const DEFAULT_EXECUTION_TIMEOUT_SECS: u64 = 30;
 
-/// Snapshot envelope: magic header + FNV-1a checksum + minimum size.
+/// Snapshot envelope: magic header + SHA-256 checksum + minimum size.
 ///
 /// V8's Snapshot::Initialize calls abort() on invalid snapshot data, which
 /// cannot be caught by Rust's panic machinery. To prevent this, we wrap
@@ -43,37 +44,41 @@ pub const DEFAULT_EXECUTION_TIMEOUT_SECS: u64 = 30;
 /// sync — e.g., if the snapshot updates but a separately-stored checksum
 /// doesn't, or vice versa.
 ///
-/// Format: [MCPV8SNAP\0 (10 bytes)] [FNV-1a checksum (4 bytes)] [V8 snapshot payload]
+/// Format: [MCPV8SNAP\0 (10 bytes)] [SHA-256 checksum (32 bytes)] [V8 snapshot payload]
 ///
 /// Defense in depth against invalid data reaching V8:
 ///   1. Magic header — rejects obviously wrong data
-///   2. FNV-1a checksum — rejects corrupted data
+///   2. SHA-256 checksum — rejects corrupted data
 ///   3. Minimum payload size — V8 snapshots are always 100KB+, so reject
 ///      anything smaller. This also prevents libfuzzer from synthesizing
-///      valid envelopes: CMP instrumentation can crack both magic headers
-///      (~1500 iterations) and checksums (~4000 iterations) by observing
-///      comparison operands, but generating a 100KB+ payload that passes
-///      all checks exceeds the fuzzer's time budget.
+///      valid envelopes.
 const SNAPSHOT_MAGIC: &[u8] = b"MCPV8SNAP\x00";
-const SNAPSHOT_HEADER_LEN: usize = 10 + 4; // magic (10) + checksum (4)
+const SNAPSHOT_HEADER_LEN: usize = 10 + 32; // magic (10) + SHA-256 checksum (32)
 const MIN_SNAPSHOT_PAYLOAD: usize = 100 * 1024; // 100KB — smallest valid V8 snapshot
 
-/// FNV-1a hash — fast, deterministic, detects storage corruption.
-fn fnv1a(data: &[u8]) -> u32 {
-    let mut hash: u32 = 0x811c9dc5;
-    for &byte in data {
-        hash ^= byte as u32;
-        hash = hash.wrapping_mul(0x01000193);
-    }
-    hash
+/// Compute SHA-256 digest of the given data.
+fn sha256_hash(data: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    hasher.finalize().into()
 }
 
-fn wrap_snapshot(data: &[u8]) -> Vec<u8> {
+struct WrappedSnapshot {
+    data: Vec<u8>,
+    content_hash: String,
+}
+
+fn wrap_snapshot(data: &[u8]) -> WrappedSnapshot {
+    let hash = sha256_hash(data);
     let mut wrapped = Vec::with_capacity(SNAPSHOT_HEADER_LEN + data.len());
     wrapped.extend_from_slice(SNAPSHOT_MAGIC);
-    wrapped.extend_from_slice(&fnv1a(data).to_le_bytes());
+    wrapped.extend_from_slice(&hash);
     wrapped.extend_from_slice(data);
-    wrapped
+    let content_hash = hash.iter().map(|b| format!("{:02x}", b)).collect::<String>();
+    WrappedSnapshot {
+        data: wrapped,
+        content_hash,
+    }
 }
 
 fn unwrap_snapshot(data: &[u8]) -> Result<Vec<u8>, String> {
@@ -83,16 +88,14 @@ fn unwrap_snapshot(data: &[u8]) -> Result<Vec<u8>, String> {
     if &data[..SNAPSHOT_MAGIC.len()] != SNAPSHOT_MAGIC {
         return Err("Invalid snapshot: missing magic header".to_string());
     }
-    let stored_checksum = u32::from_le_bytes(
-        data[SNAPSHOT_MAGIC.len()..SNAPSHOT_HEADER_LEN]
-            .try_into()
-            .unwrap(),
-    );
+    let stored_checksum: [u8; 32] = data[SNAPSHOT_MAGIC.len()..SNAPSHOT_HEADER_LEN]
+        .try_into()
+        .unwrap();
     let payload = &data[SNAPSHOT_HEADER_LEN..];
     if payload.len() < MIN_SNAPSHOT_PAYLOAD {
         return Err("Invalid snapshot: payload too small".to_string());
     }
-    if fnv1a(payload) != stored_checksum {
+    if sha256_hash(payload) != stored_checksum {
         return Err("Invalid snapshot: checksum mismatch".to_string());
     }
     Ok(payload.to_vec())
@@ -234,7 +237,7 @@ pub fn execute_stateless(code: String, heap_memory_max_bytes: usize, timeout_sec
 }
 
 // Execute JS with snapshot support (preserves heap state)
-pub fn execute_stateful(code: String, snapshot: Option<Vec<u8>>, heap_memory_max_bytes: usize, timeout_secs: u64) -> Result<(String, Vec<u8>), String> {
+pub fn execute_stateful(code: String, snapshot: Option<Vec<u8>>, heap_memory_max_bytes: usize, timeout_secs: u64) -> Result<(String, Vec<u8>, String), String> {
     // Validate and unwrap snapshot data before passing to V8.
     // V8's Snapshot::Initialize calls V8_Fatal (abort) on invalid data,
     // which cannot be caught, so we must validate first.
@@ -289,9 +292,9 @@ pub fn execute_stateful(code: String, snapshot: Option<Vec<u8>>, heap_memory_max
 
         let startup_data = snapshot_creator.create_blob(v8::FunctionCodeHandling::Clear)
             .ok_or("Failed to create V8 snapshot blob".to_string())?;
-        let startup_data_vec = wrap_snapshot(&startup_data);
+        let wrapped = wrap_snapshot(&startup_data);
 
-        output_result.map(|output| (output, startup_data_vec))
+        output_result.map(|output| (output, wrapped.data, wrapped.content_hash))
     }));
 
     match result {
@@ -421,12 +424,14 @@ impl StatefulService {
         Self { heap_storage, heap_memory_max_bytes, execution_timeout_secs }
     }
 
-    /// Execute JavaScript code with heap persistence. The heap parameter identifies the execution context.
+    /// Execute JavaScript code with heap persistence. The heap parameter is the content hash from a previous execution.
     #[tool(description = include_str!("run_js_tool_description.md"))]
     pub async fn run_js(
         &self,
         #[tool(param)] code: String,
-        #[tool(param)] heap: String,
+        #[tool(param)]
+        #[serde(default)]
+        heap: Option<String>,
         #[tool(param)]
         #[serde(default)]
         heap_memory_max_mb: Option<usize>,
@@ -438,26 +443,29 @@ impl StatefulService {
             .map(|mb| mb * 1024 * 1024)
             .unwrap_or(self.heap_memory_max_bytes);
         let timeout = execution_timeout_secs.unwrap_or(self.execution_timeout_secs);
-        let snapshot = self.heap_storage.get(&heap).await.ok();
+        let snapshot = match &heap {
+            Some(h) if !h.is_empty() => self.heap_storage.get(h).await.ok(),
+            _ => None,
+        };
         let v8_result = tokio::task::spawn_blocking(move || execute_stateful(code, snapshot, max_bytes, timeout)).await;
 
         match v8_result {
-            Ok(Ok((output, startup_data))) => {
-                if let Err(e) = self.heap_storage.put(&heap, &startup_data).await {
+            Ok(Ok((output, startup_data, content_hash))) => {
+                if let Err(e) = self.heap_storage.put(&content_hash, &startup_data).await {
                     return RunJsStatefulResponse {
                         output: format!("Error saving heap: {}", e),
-                        heap,
+                        heap: content_hash,
                     };
                 }
-                RunJsStatefulResponse { output, heap }
+                RunJsStatefulResponse { output, heap: content_hash }
             }
             Ok(Err(e)) => RunJsStatefulResponse {
                 output: format!("V8 error: {}", e),
-                heap,
+                heap: heap.unwrap_or_default(),
             },
             Err(e) => RunJsStatefulResponse {
                 output: format!("Task join error: {}", e),
-                heap,
+                heap: heap.unwrap_or_default(),
             },
         }
     }

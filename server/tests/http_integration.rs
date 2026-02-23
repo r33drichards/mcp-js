@@ -112,8 +112,7 @@ async fn test_mcp_tool_call_format() {
         "params": {
             "name": "run_js",
             "arguments": {
-                "code": "1 + 1",
-                "heap": "test-heap"
+                "code": "1 + 1"
             }
         }
     });
@@ -144,19 +143,20 @@ async fn test_javascript_execution_scenarios() {
     assert!(true);
 }
 
-/// Test heap storage naming
+/// Test content-addressed heap hash format
 #[tokio::test]
-async fn test_heap_naming() {
-    let heap_names = vec![
-        "test-heap",
-        "user-session-123",
-        "calculation-workspace",
+async fn test_heap_hash_format() {
+    // Content-addressed heap hashes are 64-character lowercase hex strings (SHA-256)
+    let valid_hashes = vec![
+        "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2",
+        "0000000000000000000000000000000000000000000000000000000000000000",
+        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
     ];
 
-    // Verify heap names are valid strings
-    for name in heap_names {
-        assert!(!name.is_empty());
-        assert!(!name.contains('/'));  // No path separators
+    for hash in valid_hashes {
+        assert_eq!(hash.len(), 64, "Hash should be 64 characters");
+        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()),
+                "Hash should be hex: {}", hash);
     }
 }
 
@@ -173,8 +173,7 @@ async fn test_invalid_javascript_handling() {
     for code in invalid_codes {
         // These should be handled gracefully by the server
         let request = json!({
-            "code": code,
-            "heap": "test-heap"
+            "code": code
         });
         assert!(request.is_object());
     }
