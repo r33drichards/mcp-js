@@ -136,16 +136,16 @@ jobs:
       # ── Health check ────────────────────────────────────────────────
       - name: Wait for services to be healthy
         run: |
-          echo "Waiting for MCP server(s) to accept connections..."
+          echo "Waiting for server(s) to accept connections..."
 
           IFS=',' read -ra URLS <<< "$TARGET_URLS"
 
           for URL in "${URLS[@]}"; do
             echo "Checking ${URL}..."
             for i in $(seq 1 60); do
-              if curl -sf -o /dev/null -X POST "${URL}/mcp" \
+              if curl -sf --max-time 5 -o /dev/null -X POST "${URL}/api/exec" \
                 -H 'Content-Type: application/json' \
-                -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"healthcheck","version":"1.0.0"}}}' 2>/dev/null; then
+                -d '{"code":"1"}' 2>/dev/null; then
                 echo "${URL} is ready (attempt ${i})"
                 break
               fi
@@ -175,30 +175,16 @@ jobs:
           fi
 
       # ── Smoke test ──────────────────────────────────────────────────
-      - name: Smoke test — execute JS through MCP
+      - name: Smoke test — execute JS via /api/exec
         run: |
           IFS=',' read -ra URLS <<< "$TARGET_URLS"
           URL="${URLS[0]}"
 
-          echo "Testing JS execution via MCP protocol on ${URL}..."
+          echo "Testing JS execution via /api/exec on ${URL}..."
 
-          # The /mcp endpoint uses SSE (text/event-stream) with keep-alive,
-          # so curl will hang without --max-time.
-          INIT_RESP=$(curl -sf --max-time 30 -X POST "${URL}/mcp" \
+          EXEC_RESP=$(curl -sf --max-time 10 -X POST "${URL}/api/exec" \
             -H 'Content-Type: application/json' \
-            -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoketest","version":"1.0.0"}}}')
-          echo "Init response: $INIT_RESP"
-
-          SESSION_ID=$(curl -sI --max-time 30 -X POST "${URL}/mcp" \
-            -H 'Content-Type: application/json' \
-            -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoketest","version":"1.0.0"}}}' \
-            | grep -i 'mcp-session-id' | cut -d: -f2 | tr -d ' \r' || true)
-          echo "Session ID: ${SESSION_ID:-none}"
-
-          EXEC_RESP=$(curl -sf --max-time 30 -X POST "${URL}/mcp" \
-            -H 'Content-Type: application/json' \
-            ${SESSION_ID:+-H "Mcp-Session-Id: $SESSION_ID"} \
-            -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"run_js","arguments":{"code":"1 + 1"}}}')
+            -d '{"code":"1 + 1"}')
           echo "Exec response: $EXEC_RESP"
 
           if [ -z "$EXEC_RESP" ]; then

@@ -109,9 +109,9 @@ echo "Waiting for servers to be ready..."
 IFS=',' read -ra URLS <<< "$TARGET_URLS"
 for URL in "${URLS[@]}"; do
   for i in $(seq 1 30); do
-    if curl -sf --max-time 5 -o /dev/null -X POST "${URL}/mcp" \
+    if curl -sf --max-time 5 -o /dev/null -X POST "${URL}/api/exec" \
       -H 'Content-Type: application/json' \
-      -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"healthcheck","version":"1.0.0"}}}' 2>/dev/null; then
+      -d '{"code":"1"}' 2>/dev/null; then
       echo "  ${URL} ready"
       break
     fi

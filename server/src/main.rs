@@ -7,13 +7,52 @@ use rmcp::transport::StreamableHttpServer;
 use rmcp::transport::streamable_http_server::axum::StreamableHttpServerConfig;
 use tokio_util::sync::CancellationToken;
 use std::sync::Arc;
+use axum::{Router, Json, extract::State, http::StatusCode, routing::post};
 
 mod mcp;
 mod cluster;
-use mcp::{StatelessService, StatefulService, initialize_v8, DEFAULT_EXECUTION_TIMEOUT_SECS};
+use mcp::{StatelessService, StatefulService, initialize_v8, execute_stateless, DEFAULT_EXECUTION_TIMEOUT_SECS};
 use mcp::heap_storage::{AnyHeapStorage, S3HeapStorage, WriteThroughCacheHeapStorage, FileHeapStorage};
 use mcp::session_log::SessionLog;
 use cluster::{ClusterConfig, ClusterNode};
+
+// ── Plain HTTP /api/exec endpoint ───────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+struct ExecRequest {
+    code: String,
+}
+
+#[derive(serde::Serialize)]
+struct ExecResponse {
+    output: String,
+}
+
+#[derive(Clone)]
+struct ExecState {
+    heap_memory_max_bytes: usize,
+    execution_timeout_secs: u64,
+}
+
+async fn exec_handler(
+    State(state): State<ExecState>,
+    Json(req): Json<ExecRequest>,
+) -> (StatusCode, Json<ExecResponse>) {
+    let max_bytes = state.heap_memory_max_bytes;
+    let timeout = state.execution_timeout_secs;
+
+    match tokio::task::spawn_blocking(move || execute_stateless(req.code, max_bytes, timeout)).await {
+        Ok(Ok(output)) => (StatusCode::OK, Json(ExecResponse { output })),
+        Ok(Err(e)) => (StatusCode::OK, Json(ExecResponse { output: format!("V8 error: {}", e) })),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ExecResponse { output: format!("Task error: {}", e) })),
+    }
+}
+
+fn exec_router(heap_memory_max_bytes: usize, execution_timeout_secs: u64) -> Router {
+    Router::new()
+        .route("/api/exec", post(exec_handler))
+        .with_state(ExecState { heap_memory_max_bytes, execution_timeout_secs })
+}
 
 /// Command line arguments for configuring heap storage
 #[derive(Parser, Debug)]
@@ -258,8 +297,22 @@ async fn start_streamable_http_stateless(port: u16, heap_memory_max_bytes: usize
         sse_keep_alive: Some(std::time::Duration::from_secs(15)),
     };
 
-    let server = StreamableHttpServer::serve_with_config(config).await?;
+    let (server, mcp_router) = StreamableHttpServer::new(config);
+    let merged = mcp_router.merge(exec_router(heap_memory_max_bytes, execution_timeout_secs));
+
+    let listener = tokio::net::TcpListener::bind(bind).await?;
     tracing::info!("Streamable HTTP server (stateless) listening on {}", bind);
+
+    let ct_shutdown = ct.child_token();
+    let axum_server = axum::serve(listener, merged).with_graceful_shutdown(async move {
+        ct_shutdown.cancelled().await;
+        tracing::info!("Streamable HTTP server shutting down");
+    });
+    tokio::spawn(async move {
+        if let Err(e) = axum_server.await {
+            tracing::error!("Streamable HTTP server error: {:?}", e);
+        }
+    });
 
     server.with_service(move || {
         StatelessService::new(heap_memory_max_bytes, execution_timeout_secs)
@@ -283,8 +336,22 @@ async fn start_streamable_http_stateful(heap_storage: AnyHeapStorage, session_lo
         sse_keep_alive: Some(std::time::Duration::from_secs(15)),
     };
 
-    let server = StreamableHttpServer::serve_with_config(config).await?;
+    let (server, mcp_router) = StreamableHttpServer::new(config);
+    let merged = mcp_router.merge(exec_router(heap_memory_max_bytes, execution_timeout_secs));
+
+    let listener = tokio::net::TcpListener::bind(bind).await?;
     tracing::info!("Streamable HTTP server (stateful) listening on {}", bind);
+
+    let ct_shutdown = ct.child_token();
+    let axum_server = axum::serve(listener, merged).with_graceful_shutdown(async move {
+        ct_shutdown.cancelled().await;
+        tracing::info!("Streamable HTTP server shutting down");
+    });
+    tokio::spawn(async move {
+        if let Err(e) = axum_server.await {
+            tracing::error!("Streamable HTTP server error: {:?}", e);
+        }
+    });
 
     server.with_service(move || {
         StatefulService::new(heap_storage.clone(), session_log.clone(), heap_memory_max_bytes, execution_timeout_secs)

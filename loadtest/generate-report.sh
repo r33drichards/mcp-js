@@ -58,10 +58,10 @@ cat >> "$OUTPUT_MD" << 'FOOTER'
 ## Notes
 
 - **Target Rate**: The configured constant-arrival-rate (requests/second k6 attempts)
-- **Actual Iter/s**: Achieved iterations per second (each iteration = 1 init + 1 tool call)
-- **HTTP Req/s**: Total HTTP requests per second (2x iterations since each iteration makes 2 HTTP calls)
+- **Actual Iter/s**: Achieved iterations per second (each iteration = 1 POST /api/exec)
+- **HTTP Req/s**: Total HTTP requests per second (1:1 with iterations)
 - **Dropped**: Iterations k6 couldn't schedule because VUs were exhausted (indicates server saturation)
-- **Topology**: `single` = 1 MCP-V8 node behind nginx; `cluster` = 3 MCP-V8 nodes with Raft + nginx LB
+- **Topology**: `single` = 1 MCP-V8 node; `cluster` = 3 MCP-V8 nodes with Raft
 FOOTER
 
 echo "Report written to ${OUTPUT_MD}"

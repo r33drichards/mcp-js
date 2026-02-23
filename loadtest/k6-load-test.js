@@ -6,7 +6,6 @@ import { Counter, Rate, Trend } from "k6/metrics";
 const jsExecDuration = new Trend("js_exec_duration", true);
 const jsExecSuccess = new Rate("js_exec_success");
 const jsExecCount = new Counter("js_exec_count");
-const initDuration = new Trend("mcp_init_duration", true);
 
 // ── Configuration from environment ──────────────────────────────────────
 // TARGET_URLS: comma-separated list of base URLs (for cluster round-robin)
@@ -41,33 +40,6 @@ export const options = {
   },
 };
 
-// ── MCP JSON-RPC payloads ───────────────────────────────────────────────
-
-function makeInitPayload(id) {
-  return JSON.stringify({
-    jsonrpc: "2.0",
-    id: id,
-    method: "initialize",
-    params: {
-      protocolVersion: "2024-11-05",
-      capabilities: {},
-      clientInfo: { name: "k6-loadtest", version: "1.0.0" },
-    },
-  });
-}
-
-function makeToolCallPayload(id, code) {
-  return JSON.stringify({
-    jsonrpc: "2.0",
-    id: id,
-    method: "tools/call",
-    params: {
-      name: "run_js",
-      arguments: { code: code },
-    },
-  });
-}
-
 // Lightweight JS snippets — rotate to avoid caching effects.
 const JS_SNIPPETS = [
   "1 + 1",
@@ -91,85 +63,31 @@ function pickUrl() {
   return url;
 }
 
-// ── SSE response parsing ────────────────────────────────────────────────
-// The /mcp endpoint returns text/event-stream (SSE) for tools/call requests.
-// Extract the JSON-RPC result from the SSE event data.
-function parseSSEResponse(body) {
-  if (!body) return null;
-  // SSE format: "event: message\ndata: {json}\n\n"
-  const lines = body.split("\n");
-  for (const line of lines) {
-    if (line.startsWith("data: ")) {
-      try {
-        return JSON.parse(line.substring(6));
-      } catch (e) {
-        // continue to next data line
-      }
-    }
-  }
-  // Might be plain JSON (non-SSE)
-  try {
-    return JSON.parse(body);
-  } catch (e) {
-    return null;
-  }
-}
-
 // ── Main test function ──────────────────────────────────────────────────
-// Each iteration: initialize a session on one node, then execute one JS snippet.
+// Each iteration: POST to /api/exec with a JS snippet, get plain JSON back.
 
 export default function () {
   const baseUrl = pickUrl();
-  const reqId = Math.floor(Math.random() * 1e9);
   const snippet = JS_SNIPPETS[Math.floor(Math.random() * JS_SNIPPETS.length)];
 
-  // 1. Initialize MCP session (returns application/json — completes immediately)
-  const initRes = http.post(
-    `${baseUrl}/mcp`,
-    makeInitPayload(reqId),
-    { headers: JSON_HEADERS, tags: { phase: "init" }, timeout: "10s" }
+  const res = http.post(
+    `${baseUrl}/api/exec`,
+    JSON.stringify({ code: snippet }),
+    { headers: JSON_HEADERS, timeout: "30s" }
   );
 
-  initDuration.add(initRes.timings.duration);
-
-  if (initRes.status !== 200) {
-    jsExecSuccess.add(false);
-    return;
-  }
-
-  // Extract session header (rmcp uses Mcp-Session-Id)
-  const sessionId =
-    initRes.headers["Mcp-Session-Id"] ||
-    initRes.headers["mcp-session-id"] ||
-    "";
-
-  // 2. Execute JS via tools/call
-  // The server returns text/event-stream (SSE) for requests with a session ID.
-  // The SSE stream stays open with keep-alive, so we must set a timeout to
-  // avoid blocking forever. The actual response arrives quickly; the timeout
-  // just ensures the connection gets cleaned up.
-  const execHeaders = Object.assign({}, JSON_HEADERS);
-  if (sessionId) {
-    execHeaders["Mcp-Session-Id"] = sessionId;
-  }
-
-  const execRes = http.post(
-    `${baseUrl}/mcp`,
-    makeToolCallPayload(reqId + 1, snippet),
-    { headers: execHeaders, tags: { phase: "exec" }, timeout: "10s" }
-  );
-
-  jsExecDuration.add(execRes.timings.duration);
+  jsExecDuration.add(res.timings.duration);
   jsExecCount.add(1);
 
-  const parsed = parseSSEResponse(execRes.body);
-  const ok = check(execRes, {
+  const ok = check(res, {
     "status 200": (r) => r.status === 200,
-    "has result": () => {
-      if (parsed) {
-        return parsed.result !== undefined || parsed.id !== undefined;
+    "has output": (r) => {
+      try {
+        const body = JSON.parse(r.body);
+        return body.output !== undefined;
+      } catch (e) {
+        return false;
       }
-      return execRes.body && execRes.body.length > 0;
     },
   });
 
