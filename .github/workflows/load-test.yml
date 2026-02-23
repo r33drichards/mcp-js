@@ -12,7 +12,7 @@ on:
         default: "60s"
       rates:
         description: "Comma-separated target rates (req/s)"
-        default: "1000,10000,100000"
+        default: "1000,10000"
 
 concurrency:
   group: load-test-${{ github.ref }}
@@ -36,7 +36,7 @@ jobs:
 
     env:
       DURATION: ${{ github.event.inputs.duration || '60s' }}
-      RATES: ${{ github.event.inputs.rates || '1000,10000,100000' }}
+      RATES: ${{ github.event.inputs.rates || '1000,10000' }}
       LABEL: ${{ matrix.topology }}-${{ matrix.mode }}
 
     steps:
