@@ -182,18 +182,20 @@ jobs:
 
           echo "Testing JS execution via MCP protocol on ${URL}..."
 
-          INIT_RESP=$(curl -sf -X POST "${URL}/mcp" \
+          # The /mcp endpoint uses SSE (text/event-stream) with keep-alive,
+          # so curl will hang without --max-time.
+          INIT_RESP=$(curl -sf --max-time 30 -X POST "${URL}/mcp" \
             -H 'Content-Type: application/json' \
             -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoketest","version":"1.0.0"}}}')
           echo "Init response: $INIT_RESP"
 
-          SESSION_ID=$(curl -sI -X POST "${URL}/mcp" \
+          SESSION_ID=$(curl -sI --max-time 30 -X POST "${URL}/mcp" \
             -H 'Content-Type: application/json' \
             -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoketest","version":"1.0.0"}}}' \
             | grep -i 'mcp-session-id' | cut -d: -f2 | tr -d ' \r' || true)
           echo "Session ID: ${SESSION_ID:-none}"
 
-          EXEC_RESP=$(curl -sf -X POST "${URL}/mcp" \
+          EXEC_RESP=$(curl -sf --max-time 30 -X POST "${URL}/mcp" \
             -H 'Content-Type: application/json' \
             ${SESSION_ID:+-H "Mcp-Session-Id: $SESSION_ID"} \
             -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"run_js","arguments":{"code":"1 + 1"}}}')
