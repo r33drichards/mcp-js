@@ -3,6 +3,7 @@ pub mod session_log;
 
 use std::sync::Once;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
@@ -143,73 +144,14 @@ fn install_heap_limit_callback(
     data_ptr
 }
 
-/// Guard that cancels the execution timeout thread.
-///
-/// The timeout thread holds an `IsolateHandle` (raw pointer to the V8 isolate).
-/// The original bug: on normal completion, the `Sender` was dropped which caused
-/// `recv_timeout` to return `Disconnected`, and the old code treated that the
-/// same as a timeout — calling `terminate_execution()` on the already-freed
-/// isolate (use-after-free → segfault → server crash under load).
-///
-/// Fix: the guard always sends an explicit `Ok(())` signal before the isolate is
-/// dropped, and the timeout thread only calls `terminate_execution` on an actual
-/// timeout (not on disconnect). This is safe without joining because:
-///   - Normal path: guard sends `()`, thread receives `Ok(())`, exits without
-///     touching the isolate.
-///   - Timeout path: the isolate is still alive (V8 is blocking), so
-///     `terminate_execution` is safe. After V8 returns, the guard sends `()`
-///     but the thread has already exited.
-///   - Disconnect path: only possible if the guard is leaked (mem::forget) or
-///     during process teardown — the thread does NOT touch the isolate.
-struct TimeoutGuard {
-    cancel: Option<mpsc::Sender<()>>,
-}
-
-impl Drop for TimeoutGuard {
-    fn drop(&mut self) {
-        // Send cancellation signal so the thread sees Ok(()) and exits cleanly.
-        // No join needed — the thread will exit on its own.
-        if let Some(tx) = self.cancel.take() {
-            let _ = tx.send(());
-        }
-    }
-}
-
-fn install_execution_timeout(
-    isolate: &mut v8::Isolate,
-    timeout_secs: u64,
-    timeout_flag: Arc<AtomicBool>,
-) -> TimeoutGuard {
-    let handle = isolate.thread_safe_handle();
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        match rx.recv_timeout(Duration::from_secs(timeout_secs)) {
-            Ok(()) => {} // Normal completion — do nothing
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                // Execution timed out — isolate is still alive (V8 is blocking),
-                // terminate it so the caller gets an error instead of hanging.
-                timeout_flag.store(true, Ordering::SeqCst);
-                handle.terminate_execution();
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                // Sender dropped without sending (e.g. panic, mem::forget).
-                // The isolate may already be destroyed — do NOT touch it.
-            }
-        }
-    });
-    TimeoutGuard {
-        cancel: Some(tx),
-    }
-}
-
 fn classify_termination_error(
     oom_flag: &AtomicBool,
-    timeout_flag: &AtomicBool,
+    timed_out: bool,
     original_error: String,
 ) -> String {
     if oom_flag.load(Ordering::SeqCst) {
         "Out of memory: V8 heap limit exceeded. Try increasing heap_memory_max_mb.".to_string()
-    } else if timeout_flag.load(Ordering::SeqCst) {
+    } else if timed_out {
         "Execution timed out: script exceeded the time limit. Try increasing execution_timeout_secs.".to_string()
     } else {
         original_error
@@ -225,52 +167,77 @@ pub fn eval<'s>(scope: &mut v8::HandleScope<'s>, code: &str) -> Result<v8::Local
 }
 
 // ── Stateless / stateful V8 execution ───────────────────────────────────
+//
+// V8 work runs on a dedicated thread. The caller enforces a wall-clock
+// timeout via `recv_timeout`, which covers BOTH compilation and execution.
+// On timeout, `terminate_execution` is called as best-effort to interrupt
+// V8 (works for execution; compilation may take longer to respond).
+// The `IsolateHandle` is shared via `Arc<Mutex<Option>>` and cleared
+// before the isolate is dropped, preventing use-after-free.
 
 pub fn execute_stateless(code: String, heap_memory_max_bytes: usize, timeout_secs: u64) -> Result<String, String> {
     let oom_flag = Arc::new(AtomicBool::new(false));
-    let timeout_flag = Arc::new(AtomicBool::new(false));
+    let isolate_handle: Arc<Mutex<Option<v8::IsolateHandle>>> = Arc::new(Mutex::new(None));
 
     let oom_clone = oom_flag.clone();
-    let timeout_clone = timeout_flag.clone();
+    let handle_clone = isolate_handle.clone();
 
-    let result = catch_unwind(AssertUnwindSafe(|| {
-        let params = create_params_with_heap_limit(heap_memory_max_bytes);
-        let mut isolate = v8::Isolate::new(params);
+    let (tx, rx) = mpsc::channel();
 
-        let cb_data_ptr = install_heap_limit_callback(&mut isolate, oom_clone);
-        let _timeout_guard = install_execution_timeout(&mut isolate, timeout_secs, timeout_clone);
+    std::thread::spawn(move || {
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let params = create_params_with_heap_limit(heap_memory_max_bytes);
+            let mut isolate = v8::Isolate::new(params);
 
-        let eval_result = {
-            let scope = &mut v8::HandleScope::new(&mut isolate);
-            let context = v8::Context::new(scope, Default::default());
-            let scope = &mut v8::ContextScope::new(scope, context);
+            // Publish handle immediately — before compilation — so the caller
+            // can terminate us during either compilation or execution.
+            *handle_clone.lock().unwrap() = Some(isolate.thread_safe_handle());
 
-            match eval(scope, &code) {
-                Ok(value) => match value.to_string(scope) {
-                    Some(s) => Ok(s.to_rust_string_lossy(scope)),
-                    None => Err("Failed to convert result to string".to_string()),
-                },
-                Err(e) => Err(e),
-            }
-        };
+            let cb_data_ptr = install_heap_limit_callback(&mut isolate, oom_clone);
 
-        // _timeout_guard is dropped here (sends cancel signal to timeout thread),
-        // then isolate is dropped (safe because timeout thread won't touch it).
-        // Rust drops in reverse declaration order: _timeout_guard before isolate.
-        drop(isolate);
-        unsafe { let _ = Box::from_raw(cb_data_ptr); }
+            let eval_result = {
+                let scope = &mut v8::HandleScope::new(&mut isolate);
+                let context = v8::Context::new(scope, Default::default());
+                let scope = &mut v8::ContextScope::new(scope, context);
 
-        eval_result
-    }));
+                match eval(scope, &code) {
+                    Ok(value) => match value.to_string(scope) {
+                        Some(s) => Ok(s.to_rust_string_lossy(scope)),
+                        None => Err("Failed to convert result to string".to_string()),
+                    },
+                    Err(e) => Err(e),
+                }
+            };
 
-    match result {
-        Ok(Ok(output)) => Ok(output),
-        Ok(Err(e)) => Err(classify_termination_error(&oom_flag, &timeout_flag, e)),
-        Err(_panic) => Err(classify_termination_error(
-            &oom_flag,
-            &timeout_flag,
-            "V8 execution panicked unexpectedly".to_string(),
+            // Clear handle BEFORE destroying isolate (Mutex prevents races
+            // with a concurrent terminate_execution call from the timeout path).
+            *handle_clone.lock().unwrap() = None;
+            drop(isolate);
+            unsafe { let _ = Box::from_raw(cb_data_ptr); }
+
+            eval_result
+        }));
+
+        let _ = tx.send(result);
+    });
+
+    // Wall-clock timeout — covers both compilation and execution.
+    match rx.recv_timeout(Duration::from_secs(timeout_secs)) {
+        Ok(Ok(Ok(output))) => Ok(output),
+        Ok(Ok(Err(e))) => Err(classify_termination_error(&oom_flag, false, e)),
+        Ok(Err(_panic)) => Err(classify_termination_error(
+            &oom_flag, false, "V8 execution panicked unexpectedly".to_string(),
         )),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            // Best-effort: interrupt V8 (works for execution, may help for compilation)
+            if let Some(h) = isolate_handle.lock().unwrap().as_ref() {
+                h.terminate_execution();
+            }
+            Err("Execution timed out: script exceeded the time limit. Try increasing execution_timeout_secs.".to_string())
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            Err("V8 execution thread panicked unexpectedly".to_string())
+        }
     }
 }
 
@@ -281,64 +248,77 @@ pub fn execute_stateful(code: String, snapshot: Option<Vec<u8>>, heap_memory_max
     };
 
     let oom_flag = Arc::new(AtomicBool::new(false));
-    let timeout_flag = Arc::new(AtomicBool::new(false));
+    let isolate_handle: Arc<Mutex<Option<v8::IsolateHandle>>> = Arc::new(Mutex::new(None));
 
     let oom_clone = oom_flag.clone();
-    let timeout_clone = timeout_flag.clone();
+    let handle_clone = isolate_handle.clone();
 
-    let result = catch_unwind(AssertUnwindSafe(|| {
-        let params = Some(create_params_with_heap_limit(heap_memory_max_bytes));
+    let (tx, rx) = mpsc::channel();
 
-        let mut snapshot_creator = match raw_snapshot {
-            Some(raw) if !raw.is_empty() => {
-                eprintln!("creating isolate from snapshot...");
-                v8::Isolate::snapshot_creator_from_existing_snapshot(raw, None, params)
-            }
-            _ => {
-                eprintln!("snapshot not found, creating new isolate...");
-                v8::Isolate::snapshot_creator(None, params)
-            }
-        };
+    std::thread::spawn(move || {
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let params = Some(create_params_with_heap_limit(heap_memory_max_bytes));
 
-        let cb_data_ptr = install_heap_limit_callback(&mut snapshot_creator, oom_clone);
-        let _timeout_guard = install_execution_timeout(&mut snapshot_creator, timeout_secs, timeout_clone);
-
-        let output_result;
-        {
-            let scope = &mut v8::HandleScope::new(&mut snapshot_creator);
-            let context = v8::Context::new(scope, Default::default());
-            let scope = &mut v8::ContextScope::new(scope, context);
-            output_result = match eval(scope, &code) {
-                Ok(result) => {
-                    result
-                        .to_string(scope)
-                        .map(|s| s.to_rust_string_lossy(scope))
-                        .ok_or_else(|| "Failed to convert result to string".to_string())
+            let mut snapshot_creator = match raw_snapshot {
+                Some(raw) if !raw.is_empty() => {
+                    eprintln!("creating isolate from snapshot...");
+                    v8::Isolate::snapshot_creator_from_existing_snapshot(raw, None, params)
                 }
-                Err(e) => Err(e),
+                _ => {
+                    eprintln!("snapshot not found, creating new isolate...");
+                    v8::Isolate::snapshot_creator(None, params)
+                }
             };
-            scope.set_default_context(context);
-        }
 
-        // _timeout_guard dropped here (sends cancel), then cb_data freed.
-        // snapshot_creator is consumed by create_blob below (not dropped via Drop).
-        drop(_timeout_guard);
-        unsafe { let _ = Box::from_raw(cb_data_ptr); }
+            *handle_clone.lock().unwrap() = Some(snapshot_creator.thread_safe_handle());
 
-        let startup_data = snapshot_creator.create_blob(v8::FunctionCodeHandling::Clear)
-            .ok_or("Failed to create V8 snapshot blob".to_string())?;
-        let wrapped = wrap_snapshot(&startup_data);
+            let cb_data_ptr = install_heap_limit_callback(&mut snapshot_creator, oom_clone);
 
-        output_result.map(|output| (output, wrapped.data, wrapped.content_hash))
-    }));
+            let output_result;
+            {
+                let scope = &mut v8::HandleScope::new(&mut snapshot_creator);
+                let context = v8::Context::new(scope, Default::default());
+                let scope = &mut v8::ContextScope::new(scope, context);
+                output_result = match eval(scope, &code) {
+                    Ok(result) => {
+                        result
+                            .to_string(scope)
+                            .map(|s| s.to_rust_string_lossy(scope))
+                            .ok_or_else(|| "Failed to convert result to string".to_string())
+                    }
+                    Err(e) => Err(e),
+                };
+                scope.set_default_context(context);
+            }
 
-    match result {
-        Ok(inner) => inner.map_err(|e| classify_termination_error(&oom_flag, &timeout_flag, e)),
-        Err(_panic) => Err(classify_termination_error(
-            &oom_flag,
-            &timeout_flag,
-            "V8 execution panicked unexpectedly".to_string(),
+            // Clear handle before snapshot_creator is consumed
+            *handle_clone.lock().unwrap() = None;
+            unsafe { let _ = Box::from_raw(cb_data_ptr); }
+
+            let startup_data = snapshot_creator.create_blob(v8::FunctionCodeHandling::Clear)
+                .ok_or("Failed to create V8 snapshot blob".to_string())?;
+            let wrapped = wrap_snapshot(&startup_data);
+
+            output_result.map(|output| (output, wrapped.data, wrapped.content_hash))
+        }));
+
+        let _ = tx.send(result);
+    });
+
+    match rx.recv_timeout(Duration::from_secs(timeout_secs)) {
+        Ok(Ok(inner)) => inner.map_err(|e| classify_termination_error(&oom_flag, false, e)),
+        Ok(Err(_panic)) => Err(classify_termination_error(
+            &oom_flag, false, "V8 execution panicked unexpectedly".to_string(),
         )),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            if let Some(h) = isolate_handle.lock().unwrap().as_ref() {
+                h.terminate_execution();
+            }
+            Err("Execution timed out: script exceeded the time limit. Try increasing execution_timeout_secs.".to_string())
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            Err("V8 execution thread panicked unexpectedly".to_string())
+        }
     }
 }
 
