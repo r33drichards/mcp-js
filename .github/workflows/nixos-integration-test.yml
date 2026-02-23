@@ -7,10 +7,19 @@ on:
     branches: [ main ]
 
 jobs:
-  nixos-cluster-test:
-    name: 5-Node Cluster Integration Test
+  nixos-test:
+    name: ${{ matrix.name }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: 5-Node Cluster Integration Test
+            check: cluster-test
+          - name: Load-Balancing Integration Test
+            check: load-balancing-test
 
     steps:
       - name: Checkout code
@@ -34,9 +43,9 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
-      - name: Run NixOS cluster integration test
+      - name: Run ${{ matrix.name }}
         run: |
-          nix build .#checks.x86_64-linux.cluster-test \
+          nix build .#checks.x86_64-linux.${{ matrix.check }} \
             --print-build-logs \
             --no-link \
             -L
