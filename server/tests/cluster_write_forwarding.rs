@@ -122,11 +122,23 @@ async fn test_follower_write_forwarding() {
 
     println!("Writing through follower node{}", follower_idx + 1);
 
-    // Write through the follower using put_or_forward
-    follower
-        .put_or_forward("forwarded-key".to_string(), "forwarded-value".to_string())
-        .await
-        .expect("put_or_forward from follower should succeed");
+    // Write through the follower using put_or_forward.
+    // The follower may not yet know the leader (hasn't received a heartbeat),
+    // so retry for a short while.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        match follower
+            .put_or_forward("forwarded-key".to_string(), "forwarded-value".to_string())
+            .await
+        {
+            Ok(()) => break,
+            Err(e) if tokio::time::Instant::now() < deadline => {
+                println!("put_or_forward not ready yet: {e}, retrying...");
+                sleep(Duration::from_millis(200)).await;
+            }
+            Err(e) => panic!("put_or_forward from follower should succeed: {e}"),
+        }
+    }
 
     // Verify the data is replicated to all nodes
     for (i, node) in nodes.iter().enumerate() {
