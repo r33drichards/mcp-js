@@ -10,6 +10,10 @@ use async_trait::async_trait;
 pub trait HeapStorage: Send + Sync + 'static {
     async fn put(&self, name: &str, data: &[u8]) -> Result<(), String>;
     async fn get(&self, name: &str) -> Result<Vec<u8>, String>;
+    /// List all staged (uncommitted) keys.
+    async fn list_staged(&self) -> Result<Vec<String>, String>;
+    /// Delete a key from storage.
+    async fn delete(&self, name: &str) -> Result<(), String>;
 }
 
 #[derive(Clone)]
@@ -37,6 +41,22 @@ impl HeapStorage for FileHeapStorage {
     async fn get(&self, name: &str) -> Result<Vec<u8>, String> {
         let path = self.dir.join(name);
         std::fs::read(path).map_err(|e| e.to_string())
+    }
+    async fn list_staged(&self) -> Result<Vec<String>, String> {
+        let entries = std::fs::read_dir(&self.dir).map_err(|e| e.to_string())?;
+        let mut staged = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.contains("_staged_") {
+                staged.push(name);
+            }
+        }
+        Ok(staged)
+    }
+    async fn delete(&self, name: &str) -> Result<(), String> {
+        let path = self.dir.join(name);
+        std::fs::remove_file(path).map_err(|e| e.to_string())
     }
 }
 
@@ -96,6 +116,37 @@ impl HeapStorage for S3HeapStorage {
     async fn get(&self, name: &str) -> Result<Vec<u8>, String> {
         self.get_blocking(name).await
     }
+    async fn list_staged(&self) -> Result<Vec<String>, String> {
+        // List S3 objects with "_staged_" in the key
+        let output = self
+            .client
+            .list_objects_v2()
+            .bucket(&self.bucket)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut staged = Vec::new();
+        if let Some(contents) = output.contents {
+            for obj in contents {
+                if let Some(key) = obj.key {
+                    if key.contains("_staged_") {
+                        staged.push(key);
+                    }
+                }
+            }
+        }
+        Ok(staged)
+    }
+    async fn delete(&self, name: &str) -> Result<(), String> {
+        self.client
+            .delete_object()
+            .bucket(&self.bucket)
+            .key(name)
+            .send()
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
 }
 
 #[derive(Clone)]
@@ -120,6 +171,18 @@ impl HeapStorage for AnyHeapStorage {
         match self {
             AnyHeapStorage::File(inner) => inner.get(name).await,
             AnyHeapStorage::S3(inner) => inner.get(name).await,
+        }
+    }
+    async fn list_staged(&self) -> Result<Vec<String>, String> {
+        match self {
+            AnyHeapStorage::File(inner) => inner.list_staged().await,
+            AnyHeapStorage::S3(inner) => inner.list_staged().await,
+        }
+    }
+    async fn delete(&self, name: &str) -> Result<(), String> {
+        match self {
+            AnyHeapStorage::File(inner) => inner.delete(name).await,
+            AnyHeapStorage::S3(inner) => inner.delete(name).await,
         }
     }
 } 

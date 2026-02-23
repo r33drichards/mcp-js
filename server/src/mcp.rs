@@ -17,6 +17,9 @@ use v8::{self};
 
 pub mod heap_storage;
 use crate::mcp::heap_storage::{HeapStorage, AnyHeapStorage};
+use crate::raft::RaftNode;
+use crate::raft::store::SledStore;
+use crate::raft::types::{Command, SnapshotRef};
 
 
 
@@ -326,10 +329,12 @@ pub trait DataService: Send + Sync + 'static {
     fn set_data(&mut self, data: String);
 }
 
-// Stateful service with heap persistence
+// Stateful service with heap persistence and Raft-backed WAL
 #[derive(Clone)]
 pub struct StatefulService {
     heap_storage: AnyHeapStorage,
+    raft: RaftNode,
+    store: SledStore,
     heap_memory_max_bytes: usize,
     execution_timeout_secs: u64,
 }
@@ -417,8 +422,14 @@ impl StatelessService {
 // Stateful service implementation
 #[tool(tool_box)]
 impl StatefulService {
-    pub fn new(heap_storage: AnyHeapStorage, heap_memory_max_bytes: usize, execution_timeout_secs: u64) -> Self {
-        Self { heap_storage, heap_memory_max_bytes, execution_timeout_secs }
+    pub fn new(
+        heap_storage: AnyHeapStorage,
+        raft: RaftNode,
+        store: SledStore,
+        heap_memory_max_bytes: usize,
+        execution_timeout_secs: u64,
+    ) -> Self {
+        Self { heap_storage, raft, store, heap_memory_max_bytes, execution_timeout_secs }
     }
 
     /// Execute JavaScript code with heap persistence. The heap parameter identifies the execution context.
@@ -438,18 +449,48 @@ impl StatefulService {
             .map(|mb| mb * 1024 * 1024)
             .unwrap_or(self.heap_memory_max_bytes);
         let timeout = execution_timeout_secs.unwrap_or(self.execution_timeout_secs);
-        let snapshot = self.heap_storage.get(&heap).await.ok();
+
+        // 1. Read current snapshot ref from Raft state machine
+        let state = self.store.get_state().await;
+        let snapshot = if let Some(snap_ref) = state.sessions.get(&heap) {
+            self.heap_storage.get(&snap_ref.key).await.ok()
+        } else {
+            None
+        };
+
+        // 2. Execute V8
         let v8_result = tokio::task::spawn_blocking(move || execute_stateful(code, snapshot, max_bytes, timeout)).await;
 
         match v8_result {
             Ok(Ok((output, startup_data))) => {
-                if let Err(e) = self.heap_storage.put(&heap, &startup_data).await {
+                // 3. Write heap bytes to a staged key, computing sha256
+                use sha2::{Sha256, Digest};
+                let sha256: [u8; 32] = Sha256::digest(&startup_data).into();
+                let staged_key = format!("{}_staged_{}", heap, uuid::Uuid::new_v4());
+
+                if let Err(e) = self.heap_storage.put(&staged_key, &startup_data).await {
                     return RunJsStatefulResponse {
-                        output: format!("Error saving heap: {}", e),
+                        output: format!("Error staging heap: {}", e),
                         heap,
                     };
                 }
-                RunJsStatefulResponse { output, heap }
+
+                // 4. Commit through Raft
+                let cmd = Command::Execute {
+                    session_id: heap.clone(),
+                    result_ref: SnapshotRef {
+                        key: staged_key,
+                        sha256,
+                    },
+                };
+
+                match self.raft.client_write(cmd).await {
+                    Ok(_) => RunJsStatefulResponse { output, heap },
+                    Err(e) => RunJsStatefulResponse {
+                        output: format!("Raft commit error: {}", e),
+                        heap,
+                    },
+                }
             }
             Ok(Err(e)) => RunJsStatefulResponse {
                 output: format!("V8 error: {}", e),
