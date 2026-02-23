@@ -22,8 +22,9 @@ fuzz_target!(|data: &[u8]| {
 
     // We don't care whether the JS succeeds or fails; we care that V8 doesn't
     // crash, corrupt memory, or trigger undefined behavior.
-    // Use a small heap limit for fuzzing to avoid process-level OOM
-    let max_bytes = 64 * 1024 * 1024;
+    // Use the production default (8MB) — with ASAN overhead, larger heaps
+    // can cause OOM on CI runners.
+    let max_bytes = 8 * 1024 * 1024;
     // timeout_secs = 0 → run synchronously (no thread spawning).
     // This avoids leaking zombie threads when V8 compilation is stuck on
     // pathological inputs. libFuzzer's own -timeout flag handles the watchdog.

@@ -35,8 +35,12 @@ fuzz_target!(|input: StatefulInput| {
     // Run stateful execution — we don't care about the result, only that
     // it doesn't crash. Invalid snapshots should be rejected by the
     // envelope validation before reaching V8.
-    let max_bytes = 64 * 1024 * 1024;
-    // Use a short timeout to prevent slow-unit failures from pathological inputs
-    let timeout_secs = 5;
+    // Use the production default (8MB) — with ASAN overhead, larger heaps
+    // can cause OOM on CI runners.
+    let max_bytes = 8 * 1024 * 1024;
+    // timeout_secs = 0 → run synchronously (no thread spawning).
+    // Avoids leaking zombie threads on pathological inputs.
+    // libFuzzer's own -timeout flag handles the watchdog.
+    let timeout_secs = 0;
     let _ = server::engine::execute_stateful(input.code, snapshot, max_bytes, timeout_secs);
 });

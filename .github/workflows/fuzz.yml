@@ -43,7 +43,7 @@ jobs:
 
         run: |
           nix develop --command bash -c \
-            "cd server && cargo fuzz run --sanitizer=address ${{ matrix.target }} -- -max_total_time=300 -rss_limit_mb=0 -max_len=65536 -timeout=120"
+            "cd server && cargo fuzz run --sanitizer=address ${{ matrix.target }} -- -max_total_time=300 -rss_limit_mb=4096 -max_len=65536 -timeout=120"
 
       - name: Upload fuzz artifacts
         if: always()

@@ -295,6 +295,11 @@ pub fn execute_stateful(code: String, snapshot: Option<Vec<u8>>, heap_memory_max
         _ => None,
     };
 
+    // timeout_secs == 0 means run synchronously (no thread, no timeout).
+    if timeout_secs == 0 {
+        return execute_stateful_inline(&code, raw_snapshot, heap_memory_max_bytes);
+    }
+
     let oom_flag = Arc::new(AtomicBool::new(false));
     let isolate_handle: Arc<Mutex<Option<v8::IsolateHandle>>> = Arc::new(Mutex::new(None));
 
@@ -367,6 +372,60 @@ pub fn execute_stateful(code: String, snapshot: Option<Vec<u8>>, heap_memory_max
         Err(mpsc::RecvTimeoutError::Disconnected) => {
             Err("V8 execution thread panicked unexpectedly".to_string())
         }
+    }
+}
+
+/// Core stateful V8 execution — runs on the calling thread, no timeout.
+fn execute_stateful_inline(code: &str, raw_snapshot: Option<Vec<u8>>, heap_memory_max_bytes: usize) -> Result<(String, Vec<u8>, String), String> {
+    let oom_flag = Arc::new(AtomicBool::new(false));
+
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let params = Some(create_params_with_heap_limit(heap_memory_max_bytes));
+
+        let mut snapshot_creator = match raw_snapshot {
+            Some(raw) if !raw.is_empty() => {
+                eprintln!("creating isolate from snapshot...");
+                v8::Isolate::snapshot_creator_from_existing_snapshot(raw, None, params)
+            }
+            _ => {
+                eprintln!("snapshot not found, creating new isolate...");
+                v8::Isolate::snapshot_creator(None, params)
+            }
+        };
+
+        let cb_data_ptr = install_heap_limit_callback(&mut snapshot_creator, oom_flag.clone());
+
+        let output_result;
+        {
+            let scope = &mut v8::HandleScope::new(&mut snapshot_creator);
+            let context = v8::Context::new(scope, Default::default());
+            let scope = &mut v8::ContextScope::new(scope, context);
+            output_result = match eval(scope, code) {
+                Ok(result) => {
+                    result
+                        .to_string(scope)
+                        .map(|s| s.to_rust_string_lossy(scope))
+                        .ok_or_else(|| "Failed to convert result to string".to_string())
+                }
+                Err(e) => Err(e),
+            };
+            scope.set_default_context(context);
+        }
+
+        unsafe { let _ = Box::from_raw(cb_data_ptr); }
+
+        let startup_data = snapshot_creator.create_blob(v8::FunctionCodeHandling::Clear)
+            .ok_or("Failed to create V8 snapshot blob".to_string())?;
+        let wrapped = wrap_snapshot(&startup_data);
+
+        output_result.map(|output| (output, wrapped.data, wrapped.content_hash))
+    }));
+
+    match result {
+        Ok(inner) => inner.map_err(|e| classify_termination_error(&oom_flag, false, e)),
+        Err(_panic) => Err(classify_termination_error(
+            &oom_flag, false, "V8 execution panicked unexpectedly".to_string(),
+        )),
     }
 }
 
