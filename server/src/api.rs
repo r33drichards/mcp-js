@@ -50,7 +50,7 @@ async fn exec_handler(
             }),
         ),
         Err(e) => (
-            StatusCode::OK,
+            StatusCode::INTERNAL_SERVER_ERROR,
             Json(ExecResponse {
                 output: format!("Error: {}", e),
                 heap: None,

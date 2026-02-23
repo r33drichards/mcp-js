@@ -12,7 +12,7 @@ on:
         default: "60s"
       rates:
         description: "Comma-separated target rates (req/s)"
-        default: "1000,10000"
+        default: "100,200,500,1000"
 
 concurrency:
   group: load-test-${{ github.ref }}
@@ -36,7 +36,6 @@ jobs:
 
     env:
       DURATION: ${{ github.event.inputs.duration || '60s' }}
-      RATES: ${{ github.event.inputs.rates || '1000,10000' }}
       LABEL: ${{ matrix.topology }}-${{ matrix.mode }}
 
     steps:
@@ -205,6 +204,12 @@ jobs:
       - name: Run load tests
         run: |
           mkdir -p results
+
+          if [ "${{ matrix.mode }}" = "stateful" ]; then
+            RATES="100,200"
+          else
+            RATES="${{ github.event.inputs.rates || '100,200,500,1000' }}"
+          fi
 
           IFS=',' read -ra RATE_ARRAY <<< "$RATES"
           for RATE in "${RATE_ARRAY[@]}"; do

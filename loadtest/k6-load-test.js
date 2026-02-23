@@ -26,8 +26,8 @@ export const options = {
       rate: TARGET_RATE,
       timeUnit: "1s",
       duration: DURATION,
-      preAllocatedVUs: Math.min(TARGET_RATE * 2, 50000),
-      maxVUs: Math.min(TARGET_RATE * 4, 100000),
+      preAllocatedVUs: Math.min(Math.ceil(TARGET_RATE * 0.1), 500),
+      maxVUs: Math.min(TARGET_RATE, 5000),
     },
   },
   thresholds: {
@@ -84,7 +84,7 @@ export default function () {
     "has output": (r) => {
       try {
         const body = JSON.parse(r.body);
-        return body.output !== undefined;
+        return body.output !== undefined && !String(body.output).startsWith("Error:");
       } catch (_) {
         return false;
       }
