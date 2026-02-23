@@ -34,6 +34,9 @@ This will automatically download and install the latest release for your platfor
 - `--stateless`: Run in stateless mode - no heap snapshots are saved or loaded. Each JavaScript execution starts with a fresh V8 isolate. (Conflicts with `--s3-bucket` and `--directory-path`)
 - `--http-port <port>`: Enable HTTP transport on the specified port. If not provided, the server uses stdio transport (default).
 - `--sse-port <port>`: Enable SSE (Server-Sent Events) transport on the specified port. (Conflicts with `--http-port`)
+- `--heap-memory-max <megabytes>`: Maximum V8 heap memory per isolate in megabytes (1–64, default: 8).
+- `--execution-timeout <seconds>`: Maximum execution timeout in seconds (1–300, default: 30).
+- `--session-db-path <path>`: Path to the sled database used for session logging (default: `/tmp/mcp-v8-sessions`). Only applies in stateful mode. (Conflicts with `--stateless`)
 
 **Note:** For heap storage, if neither `--s3-bucket`, `--directory-path`, nor `--stateless` is provided, the server defaults to using `/tmp/mcp-v8-heaps` as the local directory.
 
@@ -114,6 +117,24 @@ Each execution returns a `heap` content hash (e.g., `"a1b2c3d4"`) that identifie
 - **Perfect for**: Interactive sessions, building up complex state over time
 
 **Example use case:** Building a data structure incrementally, maintaining session state, or reusing expensive computations.
+
+#### Named Sessions
+
+You can tag executions with a human-readable **session name** by passing the `session` parameter to `run_js`. When a session name is provided, the server logs each execution (input heap, output heap, code, and timestamp) to an embedded sled database.
+
+Two additional tools are available in stateful mode for browsing session history:
+
+- **`list_sessions`** — Returns an array of all session names that have been used.
+- **`list_session_snapshots`** — Returns the log entries for a given session. Accepts a required `session` parameter and an optional `fields` parameter (comma-separated) to select specific fields: `index`, `input_heap`, `output_heap`, `code`, `timestamp`.
+
+The session database path defaults to `/tmp/mcp-v8-sessions` and can be overridden with `--session-db-path`.
+
+**Example workflow:**
+
+1. Call `run_js` with `code: "var x = 1; x;"` and `session: "my-project"` — the execution is logged.
+2. Pass the returned `heap` hash and `session: "my-project"` in subsequent calls to continue and log the session.
+3. Call `list_sessions` to see `["my-project"]`.
+4. Call `list_session_snapshots` with `session: "my-project"` to see the full execution history.
 
 ## Integration
 

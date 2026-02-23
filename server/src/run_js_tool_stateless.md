@@ -65,18 +65,44 @@ the source code of the runtime is this
 ```rust
 // Execute JS in a stateless isolate (no snapshot creation)
 pub fn execute_stateless(code: String, heap_memory_max_bytes: usize, timeout_secs: u64) -> Result<String, String> {
-    let params = create_params_with_heap_limit(heap_memory_max_bytes);
-    let isolate = &mut v8::Isolate::new(params);
-    install_heap_limit_callback(isolate);
-    let _timeout_guard = install_execution_timeout(isolate, timeout_secs);
-    let scope = &mut v8::HandleScope::new(isolate);
-    let context = v8::Context::new(scope, Default::default());
-    let scope = &mut v8::ContextScope::new(scope, context);
+    let oom_flag = Arc::new(AtomicBool::new(false));
+    let timeout_flag = Arc::new(AtomicBool::new(false));
 
-    let result = eval(scope, &code)?;
-    match result.to_string(scope) {
-        Some(s) => Ok(s.to_rust_string_lossy(scope)),
-        None => Err("Failed to convert result to string".to_string()),
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let params = create_params_with_heap_limit(heap_memory_max_bytes);
+        let mut isolate = v8::Isolate::new(params);
+
+        let cb_data_ptr = install_heap_limit_callback(&mut isolate, oom_flag.clone());
+        let _timeout_guard = install_execution_timeout(&mut isolate, timeout_secs, timeout_flag.clone());
+
+        let eval_result = {
+            let scope = &mut v8::HandleScope::new(&mut isolate);
+            let context = v8::Context::new(scope, Default::default());
+            let scope = &mut v8::ContextScope::new(scope, context);
+
+            match eval(scope, &code) {
+                Ok(value) => match value.to_string(scope) {
+                    Some(s) => Ok(s.to_rust_string_lossy(scope)),
+                    None => Err("Failed to convert result to string".to_string()),
+                },
+                Err(e) => Err(e),
+            }
+        };
+
+        drop(isolate);
+        unsafe { let _ = Box::from_raw(cb_data_ptr); }
+
+        eval_result
+    }));
+
+    match result {
+        Ok(Ok(output)) => Ok(output),
+        Ok(Err(e)) => Err(classify_termination_error(&oom_flag, &timeout_flag, e)),
+        Err(_panic) => Err(classify_termination_error(
+            &oom_flag,
+            &timeout_flag,
+            "V8 execution panicked unexpectedly".to_string(),
+        )),
     }
 }
 
