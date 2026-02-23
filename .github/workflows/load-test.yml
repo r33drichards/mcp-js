@@ -65,7 +65,6 @@ jobs:
       - name: Verify binary
         run: |
           ls -lh server/target/release/server
-          file server/target/release/server
 
       # ── Prepare data directories ────────────────────────────────────
       - name: Create data directories
