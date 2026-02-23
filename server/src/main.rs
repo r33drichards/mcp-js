@@ -103,6 +103,10 @@ async fn main() -> Result<()> {
     tracing::info!("V8 execution timeout: {} seconds", execution_timeout_secs);
 
     // Start cluster node if cluster_port is specified
+    let cluster_only = cli.cluster_port.is_some()
+        && cli.http_port.is_none()
+        && cli.sse_port.is_none();
+
     if let Some(cluster_port) = cli.cluster_port {
         let cluster_config = ClusterConfig {
             node_id: cli.node_id.clone(),
@@ -120,6 +124,15 @@ async fn main() -> Result<()> {
         let cluster_node = ClusterNode::new(cluster_config, cluster_db);
         cluster_node.start().await;
         tracing::info!("Cluster node {} started on port {}", cli.node_id, cluster_port);
+    }
+
+    // If running in cluster-only mode (no MCP transport requested),
+    // just wait for a shutdown signal instead of starting stdio.
+    if cluster_only {
+        tracing::info!("Running in cluster-only mode, waiting for shutdown signal");
+        tokio::signal::ctrl_c().await?;
+        tracing::info!("Received shutdown signal, exiting");
+        return Ok(());
     }
 
     if cli.stateless {
