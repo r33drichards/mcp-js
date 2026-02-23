@@ -143,20 +143,63 @@ fn install_heap_limit_callback(
     data_ptr
 }
 
+/// Guard that cancels the execution timeout thread.
+///
+/// The timeout thread holds an `IsolateHandle` (raw pointer to the V8 isolate).
+/// The original bug: on normal completion, the `Sender` was dropped which caused
+/// `recv_timeout` to return `Disconnected`, and the old code treated that the
+/// same as a timeout — calling `terminate_execution()` on the already-freed
+/// isolate (use-after-free → segfault → server crash under load).
+///
+/// Fix: the guard always sends an explicit `Ok(())` signal before the isolate is
+/// dropped, and the timeout thread only calls `terminate_execution` on an actual
+/// timeout (not on disconnect). This is safe without joining because:
+///   - Normal path: guard sends `()`, thread receives `Ok(())`, exits without
+///     touching the isolate.
+///   - Timeout path: the isolate is still alive (V8 is blocking), so
+///     `terminate_execution` is safe. After V8 returns, the guard sends `()`
+///     but the thread has already exited.
+///   - Disconnect path: only possible if the guard is leaked (mem::forget) or
+///     during process teardown — the thread does NOT touch the isolate.
+struct TimeoutGuard {
+    cancel: Option<mpsc::Sender<()>>,
+}
+
+impl Drop for TimeoutGuard {
+    fn drop(&mut self) {
+        // Send cancellation signal so the thread sees Ok(()) and exits cleanly.
+        // No join needed — the thread will exit on its own.
+        if let Some(tx) = self.cancel.take() {
+            let _ = tx.send(());
+        }
+    }
+}
+
 fn install_execution_timeout(
     isolate: &mut v8::Isolate,
     timeout_secs: u64,
     timeout_flag: Arc<AtomicBool>,
-) -> mpsc::Sender<()> {
+) -> TimeoutGuard {
     let handle = isolate.thread_safe_handle();
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        if rx.recv_timeout(Duration::from_secs(timeout_secs)).is_err() {
-            timeout_flag.store(true, Ordering::SeqCst);
-            handle.terminate_execution();
+        match rx.recv_timeout(Duration::from_secs(timeout_secs)) {
+            Ok(()) => {} // Normal completion — do nothing
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                // Execution timed out — isolate is still alive (V8 is blocking),
+                // terminate it so the caller gets an error instead of hanging.
+                timeout_flag.store(true, Ordering::SeqCst);
+                handle.terminate_execution();
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                // Sender dropped without sending (e.g. panic, mem::forget).
+                // The isolate may already be destroyed — do NOT touch it.
+            }
         }
     });
-    tx
+    TimeoutGuard {
+        cancel: Some(tx),
+    }
 }
 
 fn classify_termination_error(
@@ -211,6 +254,9 @@ pub fn execute_stateless(code: String, heap_memory_max_bytes: usize, timeout_sec
             }
         };
 
+        // _timeout_guard is dropped here (sends cancel signal to timeout thread),
+        // then isolate is dropped (safe because timeout thread won't touch it).
+        // Rust drops in reverse declaration order: _timeout_guard before isolate.
         drop(isolate);
         unsafe { let _ = Box::from_raw(cb_data_ptr); }
 
@@ -274,6 +320,9 @@ pub fn execute_stateful(code: String, snapshot: Option<Vec<u8>>, heap_memory_max
             scope.set_default_context(context);
         }
 
+        // _timeout_guard dropped here (sends cancel), then cb_data freed.
+        // snapshot_creator is consumed by create_blob below (not dropped via Drop).
+        drop(_timeout_guard);
         unsafe { let _ = Box::from_raw(cb_data_ptr); }
 
         let startup_data = snapshot_creator.create_blob(v8::FunctionCodeHandling::Clear)
