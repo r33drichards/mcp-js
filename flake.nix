@@ -12,6 +12,18 @@
     (flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs { inherit system; };
+
+        # Patched replace-workspace-values that handles the 'version' key
+        # in workspace-inherited dependencies.  Upstream nixpkgs script
+        # does not handle this, causing builds to fail for crates (like
+        # rmcp) that specify  version = "X"  alongside  workspace = true.
+        patchedReplaceWorkspaceValues = pkgs.writers.writePython3Bin
+          "replace-workspace-values"
+          {
+            libraries = with pkgs.python3Packages; [ tomli tomli-w ];
+            flakeIgnore = [ "E501" "W503" ];
+          }
+          (builtins.readFile ./nix/replace-workspace-values.py);
       in {
         devShells.default = import ./shell.nix { inherit pkgs; };
 
@@ -23,13 +35,19 @@
           pname = "mcp-js-server";
           version = "0.1.0";
           src = ./server;
-          cargoLock = {
-            lockFile = ./server/Cargo.lock;
-            outputHashes = {
-              "rmcp-0.1.5" = "sha256-3IPIlk1zIIemtJ4YeWgV4Qe3NyyR0I/nvDeqDebxyl4=";
-            };
-            allowBuiltinFetchGit = true;
-          };
+
+          # Use cargoDeps with a patched vendor step instead of cargoHash
+          # so we can inject our fixed replace-workspace-values script.
+          cargoDeps = (pkgs.rustPlatform.fetchCargoVendor {
+            src = ./server;
+            hash = "sha256-T/lxK1WeiumAZy8GzKeh9DiLqom2RMH2vvvNA0W+jw4=";
+          }).overrideAttrs (old: {
+            nativeBuildInputs = map (dep:
+              if (dep.name or "") == "replace-workspace-values"
+              then patchedReplaceWorkspaceValues
+              else dep
+            ) (old.nativeBuildInputs or []);
+          });
 
           nativeBuildInputs = with pkgs; [
             clang
