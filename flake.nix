@@ -23,7 +23,12 @@
           pname = "mcp-js-server";
           version = "0.1.0";
           src = ./server;
-          cargoLock.lockFile = ./server/Cargo.lock;
+          cargoLock = {
+            lockFile = ./server/Cargo.lock;
+            outputHashes = {
+              "rmcp-0.1.5" = "sha256-3IPIlk1zIIemtJ4YeWgV4Qe3NyyR0I/nvDeqDebxyl4=";
+            };
+          };
 
           nativeBuildInputs = with pkgs; [
             clang
