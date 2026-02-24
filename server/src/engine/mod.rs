@@ -31,6 +31,9 @@ use wasmparser::Validator;
 
 pub const DEFAULT_HEAP_MEMORY_MAX_MB: usize = 8;
 pub const DEFAULT_EXECUTION_TIMEOUT_SECS: u64 = 30;
+/// Default maximum native memory (bytes) a WASM module may declare when no
+/// per-module limit is set. 16 MiB.
+pub const DEFAULT_WASM_MAX_BYTES: usize = 16 * 1024 * 1024;
 /// Minimum heap memory in MB. V8 needs at least this much for internal
 /// bookkeeping — smaller values cause `FatalProcessOutOfMemory` → `abort()`
 /// before the near-heap-limit callback can fire.
@@ -494,7 +497,7 @@ fn wasm_has_imports(bytes: &[u8]) -> bool {
 pub fn inject_wasm_modules(
     scope: &mut v8::ContextScope<v8::HandleScope>,
     modules: &[WasmModule],
-    heap_memory_max_bytes: usize,
+    wasm_default_max_bytes: usize,
 ) -> Result<(), String> {
     if modules.is_empty() {
         return Ok(());
@@ -532,7 +535,7 @@ pub fn inject_wasm_modules(
             .map_err(|e| format!("Invalid WASM module '{}': {}", m.name, e))?;
 
         // Reject modules declaring resources that exceed the per-module budget.
-        let limit = m.max_memory_bytes.unwrap_or(heap_memory_max_bytes);
+        let limit = m.max_memory_bytes.unwrap_or(wasm_default_max_bytes);
         validate_wasm_resources(&m.name, &m.bytes, limit)?;
 
         // Compile WASM bytes directly via V8's native API — no JS string generation.
@@ -631,6 +634,7 @@ pub fn execute_stateless(
     heap_memory_max_bytes: usize,
     isolate_handle: Arc<Mutex<Option<v8::IsolateHandle>>>,
     wasm_modules: &[WasmModule],
+    wasm_default_max_bytes: usize,
 ) -> (Result<String, String>, bool) {
     let oom_flag = Arc::new(AtomicBool::new(false));
 
@@ -650,7 +654,7 @@ pub fn execute_stateless(
 
             // Inject WASM modules as globals via native V8 API.
             // Do NOT early-return here — cb_data_ptr must be freed below.
-            match inject_wasm_modules(scope, wasm_modules, heap_memory_max_bytes) {
+            match inject_wasm_modules(scope, wasm_modules, wasm_default_max_bytes) {
                 Err(e) => Err(e),
                 Ok(()) => match eval(scope, code) {
                     Ok(value) => match value.to_string(scope) {
@@ -691,6 +695,7 @@ pub fn execute_stateful(
     heap_memory_max_bytes: usize,
     isolate_handle: Arc<Mutex<Option<v8::IsolateHandle>>>,
     wasm_modules: &[WasmModule],
+    wasm_default_max_bytes: usize,
 ) -> (Result<(String, Vec<u8>, String), String>, bool) {
     let oom_flag = Arc::new(AtomicBool::new(false));
 
@@ -722,7 +727,7 @@ pub fn execute_stateful(
             // Inject WASM modules as globals via native V8 API.
             // Do NOT early-return here — create_blob() must be called below
             // to prevent SnapshotCreator's destructor from panicking.
-            output_result = match inject_wasm_modules(scope, wasm_modules, heap_memory_max_bytes) {
+            output_result = match inject_wasm_modules(scope, wasm_modules, wasm_default_max_bytes) {
                 Err(e) => Err(e),
                 Ok(()) => match eval(scope, code) {
                     Ok(result) => {
@@ -782,7 +787,7 @@ pub struct WasmModule {
     pub name: String,
     pub bytes: Vec<u8>,
     /// Max native memory (bytes) this module may declare (linear memory + tables).
-    /// Defaults to heap_memory_max_bytes when None.
+    /// Defaults to wasm_default_max_bytes when None.
     pub max_memory_bytes: Option<usize>,
 }
 
@@ -798,6 +803,8 @@ pub struct Engine {
     /// This mutex serializes stateful V8 execution while stateless
     /// requests proceed in full parallelism.
     snapshot_mutex: Arc<tokio::sync::Mutex<()>>,
+    /// Default max native memory (bytes) for WASM modules without a per-module limit.
+    wasm_default_max_bytes: usize,
     /// WASM modules to inject as globals before every execution.
     wasm_modules: Arc<Vec<WasmModule>>,
 }
@@ -815,6 +822,7 @@ impl Engine {
             execution_timeout_secs,
             v8_semaphore: Arc::new(Semaphore::new(max_concurrent)),
             snapshot_mutex: Arc::new(tokio::sync::Mutex::new(())),
+            wasm_default_max_bytes: DEFAULT_WASM_MAX_BYTES,
             wasm_modules: Arc::new(Vec::new()),
         }
     }
@@ -833,8 +841,15 @@ impl Engine {
             execution_timeout_secs,
             v8_semaphore: Arc::new(Semaphore::new(max_concurrent)),
             snapshot_mutex: Arc::new(tokio::sync::Mutex::new(())),
+            wasm_default_max_bytes: DEFAULT_WASM_MAX_BYTES,
             wasm_modules: Arc::new(Vec::new()),
         }
+    }
+
+    /// Set the default max native memory for WASM modules without a per-module limit.
+    pub fn with_wasm_default_max_bytes(mut self, bytes: usize) -> Self {
+        self.wasm_default_max_bytes = bytes;
+        self
     }
 
     /// Set WASM modules to inject as globals before every execution.
@@ -876,8 +891,9 @@ impl Engine {
                 // Stateless mode
                 let ih = isolate_handle.clone();
                 let wasm = self.wasm_modules.clone();
+                let wasm_default = self.wasm_default_max_bytes;
                 let mut join_handle = tokio::task::spawn_blocking(move || {
-                    execute_stateless(&code, max_bytes, ih, &wasm)
+                    execute_stateless(&code, max_bytes, ih, &wasm, wasm_default)
                 });
 
                 tokio::select! {
@@ -913,13 +929,14 @@ impl Engine {
                 let code_for_log = code.clone();
                 let ih = isolate_handle.clone();
                 let wasm = self.wasm_modules.clone();
+                let wasm_default = self.wasm_default_max_bytes;
 
                 // V8 SnapshotCreator segfaults under concurrent use — serialize
                 // stateful V8 work while keeping the async timeout wrapper.
                 let snap_mutex = self.snapshot_mutex.clone();
                 let mut join_handle = tokio::task::spawn_blocking(move || {
                     let _guard = snap_mutex.blocking_lock();
-                    execute_stateful(&code, raw_snapshot, max_bytes, ih, &wasm)
+                    execute_stateful(&code, raw_snapshot, max_bytes, ih, &wasm, wasm_default)
                 });
 
                 let v8_result = tokio::select! {

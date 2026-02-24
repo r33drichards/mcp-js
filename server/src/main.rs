@@ -119,6 +119,13 @@ struct Cli {
     /// Object value: {"name": {"path": "/path/to/module.wasm", "max_memory_bytes": 16777216}}
     #[arg(long = "wasm-config", value_name = "PATH")]
     wasm_config: Option<String>,
+
+    /// Default max native memory for WASM modules without a per-module limit.
+    /// Supports suffixes: k/K (KiB), m/M (MiB), g/G (GiB), or raw bytes.
+    /// This is separate from --heap-memory-max (JS heap); WASM linear memory
+    /// is allocated as native memory outside the V8 heap.
+    #[arg(long = "wasm-default-max-memory", default_value = "16m")]
+    wasm_default_max_memory: String,
 }
 
 #[tokio::main]
@@ -199,7 +206,11 @@ async fn main() -> Result<()> {
         None
     };
 
-    // ── Load WASM modules ────────────────────────────────────────────────
+    // ── WASM configuration ─────────────────────────────────────────────
+    let wasm_default_max_bytes = parse_memory_size(&cli.wasm_default_max_memory)
+        .map_err(|e| anyhow::anyhow!("Invalid --wasm-default-max-memory: {}", e))?;
+    tracing::info!("WASM default max memory: {} bytes ({} MiB)", wasm_default_max_bytes, wasm_default_max_bytes / 1024 / 1024);
+
     let wasm_modules = load_wasm_modules(&cli.wasm_modules, &cli.wasm_config)?;
     if !wasm_modules.is_empty() {
         tracing::info!("Loaded {} WASM module(s): {}", wasm_modules.len(),
@@ -248,6 +259,7 @@ async fn main() -> Result<()> {
         Engine::new_stateful(heap_storage, session_log, heap_memory_max_bytes, execution_timeout_secs, cli.max_concurrent_executions)
     };
 
+    let engine = engine.with_wasm_default_max_bytes(wasm_default_max_bytes);
     let engine = if wasm_modules.is_empty() { engine } else { engine.with_wasm_modules(wasm_modules) };
 
     // ── Start transport ─────────────────────────────────────────────────
