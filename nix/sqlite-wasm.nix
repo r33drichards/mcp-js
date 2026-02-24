@@ -19,7 +19,11 @@ pkgs.stdenv.mkDerivation {
     # Emscripten needs a writable cache directory
     export EM_CACHE=$(mktemp -d)
 
-    emcc sqlite3.c \
+    # Copy the minimal in-memory VFS into the build directory
+    # (sqlite3.h is already here from the amalgamation source)
+    cp ${../examples/sqlite-wasm/memvfs.c} memvfs.c
+
+    emcc sqlite3.c memvfs.c \
       -o sqlite3.wasm \
       -O2 \
       -sSTANDALONE_WASM=1 \
