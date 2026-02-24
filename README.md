@@ -10,7 +10,9 @@ A Rust-based Model Context Protocol (MCP) server that exposes a V8 JavaScript ru
 - **Stateless Mode**: Optional mode for fresh executions without heap persistence, ideal for serverless environments.
 - **MCP Protocol**: Implements the Model Context Protocol for seamless tool integration with Claude, Cursor, and other MCP clients.
 - **Configurable Storage**: Choose between S3, local directory, or stateless mode at runtime.
-- **Multiple Transports**: Supports stdio, HTTP, and SSE (Server-Sent Events) transport protocols.
+- **Multiple Transports**: Supports stdio, Streamable HTTP (MCP 2025-03-26+), and SSE (Server-Sent Events) transport protocols.
+- **Clustering**: Optional Raft-based clustering for distributed coordination, replicated session logging, and horizontal scaling.
+- **Concurrency Control**: Configurable concurrent V8 execution limits with semaphore-based throttling.
 
 ## Installation
 
@@ -30,16 +32,42 @@ This will automatically download and install the latest release for your platfor
 
 `mcp-v8` supports the following command line arguments:
 
+### Storage Options
+
 - `--s3-bucket <bucket>`: Use AWS S3 for heap snapshots. Specify the S3 bucket name. (Conflicts with `--stateless`)
+- `--cache-dir <path>`: Local filesystem cache directory for S3 write-through caching. Reduces latency by caching snapshots locally. (Requires `--s3-bucket`)
 - `--directory-path <path>`: Use a local directory for heap snapshots. Specify the directory path. (Conflicts with `--stateless`)
 - `--stateless`: Run in stateless mode - no heap snapshots are saved or loaded. Each JavaScript execution starts with a fresh V8 isolate. (Conflicts with `--s3-bucket` and `--directory-path`)
-- `--http-port <port>`: Enable HTTP transport on the specified port. If not provided, the server uses stdio transport (default).
-- `--sse-port <port>`: Enable SSE (Server-Sent Events) transport on the specified port. (Conflicts with `--http-port`)
-- `--heap-memory-max <megabytes>`: Maximum V8 heap memory per isolate in megabytes (1–64, default: 8).
-- `--execution-timeout <seconds>`: Maximum execution timeout in seconds (1–300, default: 30).
-- `--session-db-path <path>`: Path to the sled database used for session logging (default: `/tmp/mcp-v8-sessions`). Only applies in stateful mode. (Conflicts with `--stateless`)
 
 **Note:** For heap storage, if neither `--s3-bucket`, `--directory-path`, nor `--stateless` is provided, the server defaults to using `/tmp/mcp-v8-heaps` as the local directory.
+
+### Transport Options
+
+- `--http-port <port>`: Enable Streamable HTTP transport (MCP 2025-03-26+) on the specified port. Serves the MCP endpoint at `/mcp` and a plain API at `/api/exec`. If not provided, the server uses stdio transport (default). (Conflicts with `--sse-port`)
+- `--sse-port <port>`: Enable SSE (Server-Sent Events) transport on the specified port. Exposes `/sse` for the event stream and `/message` for client requests. (Conflicts with `--http-port`)
+
+### Execution Limits
+
+- `--heap-memory-max <megabytes>`: Maximum V8 heap memory per isolate in megabytes (1–64, default: 8).
+- `--execution-timeout <seconds>`: Maximum execution timeout in seconds (1–300, default: 30).
+- `--max-concurrent-executions <n>`: Maximum number of concurrent V8 executions (default: CPU core count). Controls how many JavaScript executions can run in parallel.
+
+### Session Logging
+
+- `--session-db-path <path>`: Path to the sled database used for session logging (default: `/tmp/mcp-v8-sessions`). Only applies in stateful mode. (Conflicts with `--stateless`)
+
+### Cluster Options
+
+These options enable Raft-based clustering for distributed coordination and replicated session logging.
+
+- `--cluster-port <port>`: Port for the Raft cluster HTTP server. Enables cluster mode when set. (Requires `--http-port` or `--sse-port`)
+- `--node-id <id>`: Unique node identifier within the cluster (default: `node1`).
+- `--peers <peers>`: Comma-separated list of seed peer addresses. Format: `id@host:port` or `host:port`. Peers can also join dynamically via `POST /raft/join`.
+- `--join <address>`: Join an existing cluster by contacting this seed address (`host:port`). The node registers itself with the cluster leader.
+- `--advertise-addr <addr>`: Advertise address for this node (`host:port`). Used for peer discovery and write forwarding. Defaults to `<node-id>:<cluster-port>`.
+- `--heartbeat-interval <ms>`: Raft heartbeat interval in milliseconds (default: 100).
+- `--election-timeout-min <ms>`: Minimum election timeout in milliseconds (default: 300).
+- `--election-timeout-max <ms>`: Maximum election timeout in milliseconds (default: 500).
 
 ## Quick Start
 
@@ -58,9 +86,9 @@ mcp-v8 --directory-path /tmp/mcp-v8-heaps
 mcp-v8 --stateless
 ```
 
-### HTTP Transport
+### HTTP Transport (Streamable HTTP)
 
-The HTTP transport uses the HTTP/1.1 upgrade mechanism to switch from HTTP to the MCP protocol:
+The HTTP transport uses the Streamable HTTP protocol (MCP 2025-03-26+), which supports bidirectional communication over standard HTTP. The MCP endpoint is served at `/mcp`:
 
 ```bash
 # Start HTTP server on port 8080 with local filesystem storage
@@ -73,8 +101,11 @@ mcp-v8 --s3-bucket my-bucket-name --http-port 8080
 mcp-v8 --stateless --http-port 8080
 ```
 
+The HTTP transport also exposes a plain HTTP API at `POST /api/exec` for direct JavaScript execution without MCP framing.
+
 The HTTP transport is useful for:
 - Network-based MCP clients
+- Load-balanced and horizontally-scaled deployments
 - Testing and debugging with tools like the MCP Inspector
 - Containerized deployments
 - Remote MCP server access
@@ -109,11 +140,11 @@ Stateless mode runs each JavaScript execution in a fresh V8 isolate without any 
 
 Stateful mode persists the V8 heap state between executions using content-addressed storage backed by either S3 or local filesystem.
 
-Each execution returns a `heap` content hash (e.g., `"a1b2c3d4"`) that identifies the snapshot. Pass this hash in the next `run_js` call to resume from that state. Omit `heap` to start a fresh session.
+Each execution returns a `heap` content hash (a 64-character SHA-256 hex string) that identifies the snapshot. Pass this hash in the next `run_js` call to resume from that state. Omit `heap` to start a fresh session.
 
 **Benefits:**
 - **State persistence**: Variables and objects persist between runs
-- **Content-addressed**: Snapshots are keyed by their FNV-1a hash — no naming collisions, safe concurrent access, and natural deduplication
+- **Content-addressed**: Snapshots are keyed by their SHA-256 hash — no naming collisions, safe concurrent access, and natural deduplication
 - **Immutable snapshots**: Once written, a snapshot at a given hash never changes
 - **Perfect for**: Interactive sessions, building up complex state over time
 
@@ -150,7 +181,20 @@ The session database path defaults to `/tmp/mcp-v8-sessions` and can be overridd
 {
   "mcpServers": {
     "js": {
-      "command": "/usr/local/bin/mcp-v8 --s3-bucket my-bucket-name"
+      "command": "mcp-v8",
+      "args": ["--s3-bucket", "my-bucket-name"]
+    }
+  }
+}
+```
+
+**Stateful mode with local filesystem:**
+```json
+{
+  "mcpServers": {
+    "js": {
+      "command": "mcp-v8",
+      "args": ["--directory-path", "/tmp/mcp-v8-heaps"]
     }
   }
 }
@@ -161,13 +205,34 @@ The session database path defaults to `/tmp/mcp-v8-sessions` and can be overridd
 {
   "mcpServers": {
     "js": {
-      "command": "/usr/local/bin/mcp-v8 --stateless"
+      "command": "mcp-v8",
+      "args": ["--stateless"]
     }
   }
 }
 ```
 
 4. Restart Claude Desktop. The new tools will appear under the hammer icon.
+
+### Claude Code CLI
+
+Add the MCP server to Claude Code using the `claude mcp add` command:
+
+**Stdio transport (local):**
+```bash
+# Stateful mode with local filesystem
+claude mcp add mcp-v8 -- mcp-v8 --directory-path /tmp/mcp-v8-heaps
+
+# Stateless mode
+claude mcp add mcp-v8 -- mcp-v8 --stateless
+```
+
+**SSE transport (remote):**
+```bash
+claude mcp add mcp-v8 -t sse https://mcp-js-production.up.railway.app/sse
+```
+
+Then test by running `claude` and asking: "Run this JavaScript: `[1,2,3].map(x => x * 2)`"
 
 ### Cursor
 
@@ -179,7 +244,8 @@ The session database path defaults to `/tmp/mcp-v8-sessions` and can be overridd
 {
   "mcpServers": {
     "js": {
-      "command": "/usr/local/bin/mcp-v8 --directory-path /tmp/mcp-v8-heaps"
+      "command": "mcp-v8",
+      "args": ["--directory-path", "/tmp/mcp-v8-heaps"]
     }
   }
 }
@@ -190,7 +256,8 @@ The session database path defaults to `/tmp/mcp-v8-sessions` and can be overridd
 {
   "mcpServers": {
     "js": {
-      "command": "/usr/local/bin/mcp-v8 --stateless"
+      "command": "mcp-v8",
+      "args": ["--stateless"]
     }
   }
 }
@@ -202,20 +269,10 @@ The session database path defaults to `/tmp/mcp-v8-sessions` and can be overridd
 
 You can also use the hosted version on Railway without installing anything locally:
 
-**Option 1: Using Claude Settings**
-
 1. Go to Claude's connectors settings page
 2. Add a new custom connector:
    - **Name**: "mcp-v8"
    - **URL**: `https://mcp-js-production.up.railway.app/sse`
-
-**Option 2: Using Claude Code CLI**
-
-```bash
-claude mcp add mcp-v8 -t sse https://mcp-js-production.up.railway.app/sse
-```
-
-Then test by running `claude` and asking: "Run this JavaScript: `[1,2,3].map(x => x * 2)`"
 
 ## Example Usage
 
@@ -230,6 +287,10 @@ You can configure heap storage using the following command line arguments:
   - Example: `mcp-v8 --s3-bucket my-bucket-name`
   - Requires AWS credentials in your environment.
   - Ideal for cloud deployments and sharing state across instances.
+- **S3 with write-through cache**: `--s3-bucket <bucket> --cache-dir <path>`
+  - Example: `mcp-v8 --s3-bucket my-bucket-name --cache-dir /tmp/mcp-v8-cache`
+  - Reads from local cache first, writes to both local cache and S3.
+  - Reduces latency for repeated snapshot access.
 - **Filesystem**: `--directory-path <path>`
   - Example: `mcp-v8 --directory-path /tmp/mcp-v8-heaps`
   - Stores heap snapshots locally on disk.

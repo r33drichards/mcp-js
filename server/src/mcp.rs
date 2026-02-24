@@ -100,7 +100,7 @@ impl McpService {
         }
     }
 
-    #[tool(description = "List all named sessions. Returns an array of session names that have been used with the session parameter in run_js.")]
+    #[tool(description = "List all named sessions (stateful mode only). Returns an array of session names that have been used with the session parameter in run_js.")]
     pub async fn list_sessions(&self) -> ListSessionsResponse {
         match self.engine.list_sessions().await {
             Ok(sessions) => ListSessionsResponse { sessions },
@@ -110,7 +110,7 @@ impl McpService {
         }
     }
 
-    #[tool(description = "List all log entries for a named session. Each entry contains the input heap hash, output heap hash, code executed, and timestamp. Use the fields parameter to select specific fields (comma-separated: index,input_heap,output_heap,code,timestamp).")]
+    #[tool(description = "List all log entries for a named session (stateful mode only). Each entry contains the input heap hash, output heap hash, code executed, and timestamp. Use the fields parameter to select specific fields (comma-separated: index,input_heap,output_heap,code,timestamp).")]
     pub async fn list_session_snapshots(
         &self,
         #[tool(param)] session: String,

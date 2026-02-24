@@ -1,50 +1,33 @@
 # SSE Transport Implementation
 
-This document describes the SSE (Server-Sent Events) transport implementation added to the MCP server.
+This document describes the SSE (Server-Sent Events) transport implementation in the MCP server.
 
 ## Overview
 
-The server now supports three transport methods:
+The server supports three transport methods:
 1. **stdio** (default) - Standard input/output transport
-2. **HTTP** - HTTP upgrade transport
-3. **SSE** - Server-Sent Events transport (newly added)
+2. **Streamable HTTP** (`--http-port`) - Bidirectional HTTP transport (MCP 2025-03-26+), serves MCP at `/mcp` and a plain API at `/api/exec`
+3. **SSE** (`--sse-port`) - Server-Sent Events transport
 
 ## Implementation Details
 
-### Dependencies Added
+### Dependencies
 
-The following dependencies were added to `server/Cargo.toml`:
+The SSE transport uses the following crates from the MCP Rust SDK:
 
 ```toml
-# SSE transport support
-rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", branch = "main", features = ["transport-io", "transport-sse-server"] }
+rmcp = { ..., features = ["transport-io", "transport-sse-server"] }
 tokio-util = { version = "0.7", features = ["sync"] }
 ```
 
-### Code Changes
+### Code Structure
 
-#### Main Imports
-Added SSE server imports to `server/src/main.rs`:
-
-```rust
-use rmcp::transport::sse_server::{SseServer, SseServerConfig};
-use tokio_util::sync::CancellationToken;
-```
-
-#### CLI Arguments
-Added `--sse-port` option to choose SSE transport:
-
-```rust
-/// SSE port to listen on (if not specified, uses stdio transport)
-#[arg(long, conflicts_with = "http_port")]
-sse_port: Option<u16>,
-```
+The SSE server is implemented in `server/src/main.rs` via the `start_sse_server()` function. It creates an `SseServer` from the `rmcp` crate and merges its router with the plain HTTP API router from `server/src/api.rs`.
 
 #### SSE Server Function
-Implemented `start_sse_server()` function based on the Rust SDK examples:
 
 ```rust
-async fn start_sse_server(heap_storage: AnyHeapStorage, port: u16) -> Result<()> {
+async fn start_sse_server(engine: Engine, port: u16) -> Result<()> {
     let addr = format!("0.0.0.0:{}", port).parse()?;
 
     let config = SseServerConfig {
@@ -55,36 +38,29 @@ async fn start_sse_server(heap_storage: AnyHeapStorage, port: u16) -> Result<()>
         sse_keep_alive: Some(std::time::Duration::from_secs(15)),
     };
 
-    let (sse_server, router) = SseServer::new(config);
+    let (sse_server, sse_router) = SseServer::new(config);
+
+    // Merge SSE router with plain HTTP API router
+    let app = sse_router.merge(api::api_router(engine.clone()));
 
     let listener = tokio::net::TcpListener::bind(sse_server.config.bind).await?;
-    tracing::info!("SSE server listening on {}", sse_server.config.bind);
 
     let ct = sse_server.config.ct.clone();
     let ct_shutdown = ct.child_token();
 
-    // Start the HTTP server with graceful shutdown
-    let server = axum::serve(listener, router).with_graceful_shutdown(async move {
+    let server = axum::serve(listener, app).with_graceful_shutdown(async move {
         ct_shutdown.cancelled().await;
-        tracing::info!("SSE server shutting down");
     });
 
-    // Spawn the server task
+    sse_server.with_service(move || McpService::new(engine.clone()));
+
     tokio::spawn(async move {
         if let Err(e) = server.await {
             tracing::error!("SSE server error: {:?}", e);
         }
     });
 
-    // Register the service with SSE server
-    sse_server.with_service(move || {
-        let storage = heap_storage.clone();
-        async move { GenericService::new(storage).await }
-    });
-
-    // Wait for Ctrl+C
     tokio::signal::ctrl_c().await?;
-    tracing::info!("Received Ctrl+C, shutting down SSE server");
     ct.cancel();
 
     Ok(())
@@ -95,32 +71,28 @@ async fn start_sse_server(heap_storage: AnyHeapStorage, port: u16) -> Result<()>
 
 ### Starting the SSE Server
 
-To start the server with SSE transport on port 8000:
-
 ```bash
-cargo run -p server -- --sse-port 8000
-```
-
-With custom heap storage:
-
-```bash
-# With filesystem storage
-cargo run -p server -- --sse-port 8000 --directory-path /path/to/heaps
+# With local filesystem storage
+mcp-v8 --sse-port 8000 --directory-path /tmp/mcp-v8-heaps
 
 # With S3 storage
-cargo run -p server -- --sse-port 8000 --s3-bucket my-bucket
+mcp-v8 --sse-port 8000 --s3-bucket my-bucket
+
+# Stateless mode
+mcp-v8 --sse-port 8000 --stateless
 ```
 
 ### SSE Endpoints
 
-When the SSE server is running, it exposes two endpoints:
+When the SSE server is running, it exposes:
 
 1. **SSE endpoint**: `http://localhost:8000/sse` - For receiving server-sent events
 2. **Message endpoint**: `http://localhost:8000/message` - For sending messages to the server
+3. **API endpoint**: `http://localhost:8000/api/exec` - Plain HTTP API for direct JavaScript execution
 
 ### Client Connection
 
-To connect a client to the SSE server, use the `SseClientTransport`:
+To connect a client to the SSE server using the MCP Rust SDK:
 
 ```rust
 use rmcp::{ServiceExt, transport::SseClientTransport, model::*};
@@ -143,7 +115,7 @@ async fn main() -> Result<()> {
 
     let client = client_info.serve(transport).await?;
 
-    // Use the client...
+    // List available tools
     let tools = client.list_tools(Default::default()).await?;
     println!("Available tools: {:#?}", tools);
 
@@ -156,8 +128,8 @@ async fn main() -> Result<()> {
 - **Keep-alive**: The server sends keep-alive messages every 15 seconds to maintain the connection
 - **Graceful shutdown**: Supports Ctrl+C for graceful shutdown
 - **Concurrent connections**: Handles multiple concurrent SSE connections
-- **Tool support**: Exposes the same MCP tools (like `run_js`) as other transports
-- **Heap storage**: Supports both file-based and S3-based heap storage
+- **Tool support**: Exposes the same MCP tools (`run_js`, `list_sessions`, `list_session_snapshots`) as other transports
+- **Plain HTTP API**: Also serves `POST /api/exec` for direct JavaScript execution without MCP framing
 
 ## Architecture
 
@@ -171,16 +143,12 @@ The SSE implementation follows the MCP (Model Context Protocol) specification:
 
 ## Comparison with Other Transports
 
-| Transport | Use Case | Pros | Cons |
-|-----------|----------|------|------|
-| stdio | CLI tools, local processes | Simple, low overhead | Single connection only |
-| HTTP | Web applications | Standard protocol, firewall-friendly | Requires upgrade negotiation |
-| SSE | Browser clients, streaming | Browser-native, simple setup | HTTP-based overhead |
+| Transport | Flag | Use Case | Pros | Cons |
+|-----------|------|----------|------|------|
+| stdio | (default) | CLI tools, local processes | Simple, low overhead | Single connection only |
+| Streamable HTTP | `--http-port` | Web apps, load-balanced deployments | Standard HTTP, scalable, supports `/api/exec` | Newer protocol (MCP 2025-03-26+) |
+| SSE | `--sse-port` | Browser clients, streaming | Browser-native, simple setup, supports `/api/exec` | Unidirectional server→client stream |
 
 ## References
 
-- Implementation based on: https://github.com/modelcontextprotocol/rust-sdk/tree/main/examples
-- Key examples used:
-  - `examples/servers/src/counter_sse.rs` - Simple SSE server
-  - `examples/servers/src/complex_auth_sse.rs` - SSE with authentication
-  - `examples/clients/src/sse.rs` - SSE client
+- MCP Rust SDK: https://github.com/modelcontextprotocol/rust-sdk
