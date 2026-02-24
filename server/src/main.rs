@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rmcp::{ServiceExt, transport::stdio};
+use rmcp::{ServerHandler, ServiceExt, transport::stdio};
 use tracing_subscriber::{self};
 use clap::Parser;
 use rmcp::transport::sse_server::{SseServer, SseServerConfig};
@@ -14,7 +14,7 @@ mod cluster;
 use engine::{initialize_v8, Engine, DEFAULT_EXECUTION_TIMEOUT_SECS};
 use engine::heap_storage::{AnyHeapStorage, S3HeapStorage, WriteThroughCacheHeapStorage, FileHeapStorage};
 use engine::session_log::SessionLog;
-use mcp::McpService;
+use mcp::{McpService, StatelessMcpService};
 use cluster::{ClusterConfig, ClusterNode};
 
 fn default_max_concurrent() -> usize {
@@ -227,19 +227,37 @@ async fn main() -> Result<()> {
     // ── Start transport ─────────────────────────────────────────────────
     if let Some(port) = cli.http_port {
         tracing::info!("Starting Streamable HTTP transport on port {}", port);
-        start_streamable_http(engine, port).await?;
+        if engine.is_stateful() {
+            start_streamable_http(engine, port, |e| McpService::new(e)).await?;
+        } else {
+            start_streamable_http(engine, port, |e| StatelessMcpService::new(e)).await?;
+        }
     } else if let Some(port) = cli.sse_port {
         tracing::info!("Starting SSE transport on port {}", port);
-        start_sse_server(engine, port).await?;
+        if engine.is_stateful() {
+            start_sse_server(engine, port, |e| McpService::new(e)).await?;
+        } else {
+            start_sse_server(engine, port, |e| StatelessMcpService::new(e)).await?;
+        }
     } else {
         tracing::info!("Starting stdio transport");
-        let service = McpService::new(engine)
-            .serve(stdio())
-            .await
-            .inspect_err(|e| {
-                tracing::error!("serving error: {:?}", e);
-            })?;
-        service.waiting().await?;
+        if engine.is_stateful() {
+            let service = McpService::new(engine)
+                .serve(stdio())
+                .await
+                .inspect_err(|e| {
+                    tracing::error!("serving error: {:?}", e);
+                })?;
+            service.waiting().await?;
+        } else {
+            let service = StatelessMcpService::new(engine)
+                .serve(stdio())
+                .await
+                .inspect_err(|e| {
+                    tracing::error!("serving error: {:?}", e);
+                })?;
+            service.waiting().await?;
+        }
     }
 
     Ok(())
@@ -247,7 +265,11 @@ async fn main() -> Result<()> {
 
 // ── Streamable HTTP transport (--http-port) ─────────────────────────────
 
-async fn start_streamable_http(engine: Engine, port: u16) -> Result<()> {
+async fn start_streamable_http<S, F>(engine: Engine, port: u16, make_service: F) -> Result<()>
+where
+    S: ServerHandler + Send + Sync + 'static,
+    F: Fn(Engine) -> S + Send + Sync + Clone + 'static,
+{
     let bind: std::net::SocketAddr = format!("0.0.0.0:{}", port).parse()?;
     let ct = CancellationToken::new();
 
@@ -277,7 +299,7 @@ async fn start_streamable_http(engine: Engine, port: u16) -> Result<()> {
         }
     });
 
-    server.with_service(move || McpService::new(engine.clone()));
+    server.with_service(move || make_service(engine.clone()));
 
     tokio::signal::ctrl_c().await?;
     tracing::info!("Received Ctrl+C, shutting down");
@@ -288,7 +310,11 @@ async fn start_streamable_http(engine: Engine, port: u16) -> Result<()> {
 
 // ── SSE transport (--sse-port) ──────────────────────────────────────────
 
-async fn start_sse_server(engine: Engine, port: u16) -> Result<()> {
+async fn start_sse_server<S, F>(engine: Engine, port: u16, make_service: F) -> Result<()>
+where
+    S: ServerHandler + Send + Sync + 'static,
+    F: Fn(Engine) -> S + Send + Sync + Clone + 'static,
+{
     let addr = format!("0.0.0.0:{}", port).parse()?;
 
     let config = SseServerConfig {
@@ -315,7 +341,7 @@ async fn start_sse_server(engine: Engine, port: u16) -> Result<()> {
         tracing::info!("SSE server shutting down");
     });
 
-    sse_server.with_service(move || McpService::new(engine.clone()));
+    sse_server.with_service(move || make_service(engine.clone()));
 
     tokio::spawn(async move {
         if let Err(e) = server.await {
