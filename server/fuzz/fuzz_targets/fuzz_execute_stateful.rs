@@ -42,5 +42,5 @@ fuzz_target!(|input: StatefulInput| {
     // can cause OOM on CI runners.
     let max_bytes = 8 * 1024 * 1024;
     let handle = Arc::new(Mutex::new(None));
-    let _ = server::engine::execute_stateful(&input.code, raw_snapshot, max_bytes, handle, &[]);
+    let _ = server::engine::execute_stateful(&input.code, raw_snapshot, max_bytes, handle, &[], &Default::default());
 });

@@ -17,7 +17,7 @@ axum = "0.8.4"
 rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", rev = "787cc015b719773f66d4ac32e695b9a0079e12ef", features = ["transport-io", "transport-sse-server", "transport-streamable-http-server"] }
 
 # rmcp = { version = "0.1.5", }
-serde = "1.0.219"
+serde = "=1.0.219"
 serde_json = "1.0.140"
 tokio = { version = "1.45.0", features = ["rt-multi-thread", "process", "signal", "time", "sync", "macros"] }
 tracing = "0.1.41"
@@ -45,6 +45,8 @@ rand = "0.8"
 http-body-util = "0.1"
 reqwest = { version = "0.12", features = ["json"] }
 futures = "0.3"
+regorus = "0.2"
+ureq = "3"
 
 [dev-dependencies]
 tokio-test = "0.4"
@@ -54,3 +56,4 @@ futures = "0.3"
 tempfile = "3"
 chrono = { version = "0.4", features = ["serde"] }
 sled = "0.34"
+wat = "1"

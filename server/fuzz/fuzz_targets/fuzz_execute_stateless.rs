@@ -26,5 +26,5 @@ fuzz_target!(|data: &[u8]| {
     // can cause OOM on CI runners.
     let max_bytes = 8 * 1024 * 1024;
     let handle = Arc::new(Mutex::new(None));
-    let _ = server::engine::execute_stateless(&code, max_bytes, handle, &[]);
+    let _ = server::engine::execute_stateless(&code, max_bytes, handle, &[], &Default::default());
 });

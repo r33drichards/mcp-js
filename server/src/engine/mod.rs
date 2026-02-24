@@ -1,5 +1,6 @@
 pub mod heap_storage;
 pub mod session_log;
+pub mod wasm_host;
 
 use std::sync::Once;
 use std::sync::Arc;
@@ -394,63 +395,14 @@ pub fn strip_typescript_types(code: &str) -> Result<String, String> {
 }
 
 /// Compile and instantiate WASM modules using V8's native API, binding their
-/// exports as global variables.
-///
-/// Uses `v8::WasmModuleObject::compile` to compile raw `.wasm` bytes directly
-/// (no JS string serialization), then instantiates via the `WebAssembly.Instance`
-/// constructor and sets each module's `.exports` on the global object.
+/// exports as global variables. Delegates to `wasm_host::inject_wasm_modules_with_imports`
+/// which handles both the zero-import path and the host-import path (with OPA policy).
 pub fn inject_wasm_modules(
     scope: &mut v8::ContextScope<v8::HandleScope>,
     modules: &[WasmModule],
+    host_config: &wasm_host::WasmHostConfig,
 ) -> Result<(), String> {
-    if modules.is_empty() {
-        return Ok(());
-    }
-
-    let global = scope.get_current_context().global(scope);
-
-    // Look up WebAssembly.Instance constructor once.
-    let wa_key = v8::String::new(scope, "WebAssembly")
-        .ok_or("Failed to create 'WebAssembly' string")?;
-    let wa_obj = global
-        .get(scope, wa_key.into())
-        .ok_or("WebAssembly not found on global")?;
-    let wa_obj: v8::Local<v8::Object> = wa_obj.try_into()
-        .map_err(|_| "WebAssembly is not an object")?;
-
-    let instance_key = v8::String::new(scope, "Instance")
-        .ok_or("Failed to create 'Instance' string")?;
-    let instance_ctor = wa_obj
-        .get(scope, instance_key.into())
-        .ok_or("WebAssembly.Instance not found")?;
-    let instance_ctor: v8::Local<v8::Function> = instance_ctor.try_into()
-        .map_err(|_| "WebAssembly.Instance is not a function")?;
-
-    let exports_key = v8::String::new(scope, "exports")
-        .ok_or("Failed to create 'exports' string")?;
-
-    for m in modules {
-        // Compile WASM bytes directly via V8's native API — no JS string generation.
-        let module_obj = v8::WasmModuleObject::compile(scope, &m.bytes)
-            .ok_or_else(|| format!("Failed to compile WASM module '{}'", m.name))?;
-
-        // Instantiate: new WebAssembly.Instance(compiledModule)
-        let instance = instance_ctor
-            .new_instance(scope, &[module_obj.into()])
-            .ok_or_else(|| format!("Failed to instantiate WASM module '{}'", m.name))?;
-
-        // Extract .exports from the instance.
-        let exports = instance
-            .get(scope, exports_key.into())
-            .ok_or_else(|| format!("Failed to get exports from WASM module '{}'", m.name))?;
-
-        // Bind exports as a global variable.
-        let name_key = v8::String::new(scope, &m.name)
-            .ok_or_else(|| format!("Failed to create global name for WASM module '{}'", m.name))?;
-        global.set(scope, name_key.into(), exports);
-    }
-
-    Ok(())
+    wasm_host::inject_wasm_modules_with_imports(scope, modules, host_config)
 }
 
 pub fn eval<'s>(scope: &mut v8::HandleScope<'s>, code: &str) -> Result<v8::Local<'s, v8::Value>, String> {
@@ -475,6 +427,7 @@ pub fn execute_stateless(
     heap_memory_max_bytes: usize,
     isolate_handle: Arc<Mutex<Option<v8::IsolateHandle>>>,
     wasm_modules: &[WasmModule],
+    wasm_host_config: &wasm_host::WasmHostConfig,
 ) -> (Result<String, String>, bool) {
     let oom_flag = Arc::new(AtomicBool::new(false));
 
@@ -493,7 +446,7 @@ pub fn execute_stateless(
             let scope = &mut v8::ContextScope::new(scope, context);
 
             // Inject WASM modules as globals via native V8 API.
-            if let Err(e) = inject_wasm_modules(scope, wasm_modules) {
+            if let Err(e) = inject_wasm_modules(scope, wasm_modules, wasm_host_config) {
                 return Err(e);
             }
 
@@ -535,6 +488,7 @@ pub fn execute_stateful(
     heap_memory_max_bytes: usize,
     isolate_handle: Arc<Mutex<Option<v8::IsolateHandle>>>,
     wasm_modules: &[WasmModule],
+    wasm_host_config: &wasm_host::WasmHostConfig,
 ) -> (Result<(String, Vec<u8>, String), String>, bool) {
     let oom_flag = Arc::new(AtomicBool::new(false));
 
@@ -564,7 +518,7 @@ pub fn execute_stateful(
             let scope = &mut v8::ContextScope::new(scope, context);
 
             // Inject WASM modules as globals via native V8 API.
-            if let Err(e) = inject_wasm_modules(scope, wasm_modules) {
+            if let Err(e) = inject_wasm_modules(scope, wasm_modules, wasm_host_config) {
                 scope.set_default_context(context);
                 return Err(e);
             }
@@ -633,6 +587,8 @@ pub struct Engine {
     snapshot_mutex: Arc<tokio::sync::Mutex<()>>,
     /// WASM modules to inject as globals before every execution.
     wasm_modules: Arc<Vec<WasmModule>>,
+    /// WASM host import configuration (OPA policy engine).
+    wasm_host_config: Arc<wasm_host::WasmHostConfig>,
 }
 
 impl Engine {
@@ -649,6 +605,7 @@ impl Engine {
             v8_semaphore: Arc::new(Semaphore::new(max_concurrent)),
             snapshot_mutex: Arc::new(tokio::sync::Mutex::new(())),
             wasm_modules: Arc::new(Vec::new()),
+            wasm_host_config: Arc::new(wasm_host::WasmHostConfig::default()),
         }
     }
 
@@ -667,12 +624,19 @@ impl Engine {
             v8_semaphore: Arc::new(Semaphore::new(max_concurrent)),
             snapshot_mutex: Arc::new(tokio::sync::Mutex::new(())),
             wasm_modules: Arc::new(Vec::new()),
+            wasm_host_config: Arc::new(wasm_host::WasmHostConfig::default()),
         }
     }
 
     /// Set WASM modules to inject as globals before every execution.
     pub fn with_wasm_modules(mut self, modules: Vec<WasmModule>) -> Self {
         self.wasm_modules = Arc::new(modules);
+        self
+    }
+
+    /// Set WASM host import configuration (OPA policy engine).
+    pub fn with_wasm_host_config(mut self, config: wasm_host::WasmHostConfig) -> Self {
+        self.wasm_host_config = Arc::new(config);
         self
     }
 
@@ -709,8 +673,9 @@ impl Engine {
                 // Stateless mode
                 let ih = isolate_handle.clone();
                 let wasm = self.wasm_modules.clone();
+                let host_cfg = self.wasm_host_config.clone();
                 let mut join_handle = tokio::task::spawn_blocking(move || {
-                    execute_stateless(&code, max_bytes, ih, &wasm)
+                    execute_stateless(&code, max_bytes, ih, &wasm, &host_cfg)
                 });
 
                 tokio::select! {
@@ -746,13 +711,14 @@ impl Engine {
                 let code_for_log = code.clone();
                 let ih = isolate_handle.clone();
                 let wasm = self.wasm_modules.clone();
+                let host_cfg = self.wasm_host_config.clone();
 
                 // V8 SnapshotCreator segfaults under concurrent use — serialize
                 // stateful V8 work while keeping the async timeout wrapper.
                 let snap_mutex = self.snapshot_mutex.clone();
                 let mut join_handle = tokio::task::spawn_blocking(move || {
                     let _guard = snap_mutex.blocking_lock();
-                    execute_stateful(&code, raw_snapshot, max_bytes, ih, &wasm)
+                    execute_stateful(&code, raw_snapshot, max_bytes, ih, &wasm, &host_cfg)
                 });
 
                 let v8_result = tokio::select! {

@@ -12,6 +12,7 @@ mod mcp;
 mod api;
 mod cluster;
 use engine::{initialize_v8, Engine, WasmModule, DEFAULT_EXECUTION_TIMEOUT_SECS};
+use engine::wasm_host::WasmHostConfig;
 use engine::heap_storage::{AnyHeapStorage, S3HeapStorage, WriteThroughCacheHeapStorage, FileHeapStorage};
 use engine::session_log::SessionLog;
 use mcp::{McpService, StatelessMcpService};
@@ -115,6 +116,20 @@ struct Cli {
     /// Format: {"name": "/path/to/module.wasm", ...}
     #[arg(long = "wasm-config", value_name = "PATH")]
     wasm_config: Option<String>,
+
+    // ── WASM host import / OPA policy options ────────────────────────
+
+    /// Path to a Rego (.rego) policy file for WASM host imports.
+    /// The policy must define `data.wasm.authz.allow` as a boolean rule.
+    /// When set, WASM modules can import host_read_file, host_write_file,
+    /// and host_fetch — each call is evaluated against this policy.
+    #[arg(long = "wasm-policy", value_name = "PATH")]
+    wasm_policy: Option<String>,
+
+    /// Optional JSON data file for the WASM host import policy.
+    /// Loaded as `data` in the Rego evaluation context.
+    #[arg(long = "wasm-policy-data", value_name = "PATH", requires = "wasm_policy")]
+    wasm_policy_data: Option<String>,
 }
 
 #[tokio::main]
@@ -202,6 +217,33 @@ async fn main() -> Result<()> {
             wasm_modules.iter().map(|m| m.name.as_str()).collect::<Vec<_>>().join(", "));
     }
 
+    // ── Load WASM host import policy (OPA / Rego) ─────────────────────
+    let wasm_host_config = if let Some(policy_path) = &cli.wasm_policy {
+        let policy_src = std::fs::read_to_string(policy_path)
+            .map_err(|e| anyhow::anyhow!("Failed to read WASM policy '{}': {}", policy_path, e))?;
+        let mut rego_engine = regorus::Engine::new();
+        rego_engine
+            .add_policy(policy_path.clone(), policy_src)
+            .map_err(|e| anyhow::anyhow!("Failed to parse WASM policy '{}': {}", policy_path, e))?;
+
+        if let Some(data_path) = &cli.wasm_policy_data {
+            let data_str = std::fs::read_to_string(data_path)
+                .map_err(|e| anyhow::anyhow!("Failed to read policy data '{}': {}", data_path, e))?;
+            let data_val = regorus::Value::from_json_str(&data_str)
+                .map_err(|e| anyhow::anyhow!("Invalid JSON in policy data '{}': {}", data_path, e))?;
+            rego_engine
+                .add_data(data_val)
+                .map_err(|e| anyhow::anyhow!("Failed to load policy data: {}", e))?;
+        }
+
+        tracing::info!("WASM host import policy loaded from {}", policy_path);
+        WasmHostConfig {
+            policy_engine: Some(rego_engine),
+        }
+    } else {
+        WasmHostConfig::default()
+    };
+
     // ── Build Engine ────────────────────────────────────────────────────
     let engine = if cli.stateless {
         tracing::info!("Creating stateless engine");
@@ -245,6 +287,7 @@ async fn main() -> Result<()> {
     };
 
     let engine = if wasm_modules.is_empty() { engine } else { engine.with_wasm_modules(wasm_modules) };
+    let engine = engine.with_wasm_host_config(wasm_host_config);
 
     // ── Start transport ─────────────────────────────────────────────────
     if let Some(port) = cli.http_port {
