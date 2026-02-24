@@ -334,6 +334,70 @@ This uses synchronous compilation (`WebAssembly.Module` / `WebAssembly.Instance`
 
 Alternatively, you can pre-load `.wasm` files at server startup using `--wasm-module` or `--wasm-config` so they are available as globals in every execution without inline byte arrays. See [WASM Module Options](#wasm-module-options) for details.
 
+### Loading `.wasm` Files
+
+Instead of embedding raw bytes in JavaScript, you can compile a `.wasm` file once and load it at server startup. The module's exports are then available as a global variable in every execution.
+
+**1. Create a WASM module**
+
+Write a WebAssembly Text Format (`.wat`) file and compile it with [`wat2wasm`](https://github.com/WebAssembly/wabt):
+
+```wat
+;; math.wat — exports add(i32, i32) -> i32
+(module
+  (func $add (param i32 i32) (result i32)
+    local.get 0
+    local.get 1
+    i32.add)
+  (export "add" (func $add)))
+```
+
+```bash
+wat2wasm math.wat -o math.wasm
+```
+
+**2. Start the server with the module**
+
+```bash
+# Single module
+mcp-v8 --stateless --wasm-module math=./math.wasm
+
+# Multiple modules
+mcp-v8 --stateless \
+  --wasm-module math=./math.wasm \
+  --wasm-module physics=./physics.wasm
+```
+
+Or use a JSON config file for many modules:
+
+```json
+{
+  "math": "./math.wasm",
+  "physics": "./physics.wasm"
+}
+```
+
+```bash
+mcp-v8 --stateless --wasm-config wasm-modules.json
+```
+
+**3. Call exports from JavaScript**
+
+The module's exports are available directly on the global variable:
+
+```javascript
+math.add(2, 3);          // → 5
+math.add(100, 200);      // → 300
+```
+
+When multiple modules are loaded, each is its own global:
+
+```javascript
+var sum = math.add(10, 5);           // 15
+var product = physics.multiply(3, 4); // 12
+sum + product;                        // → 27
+```
+
 ## Heap Storage Options
 
 You can configure heap storage using the following command line arguments:
