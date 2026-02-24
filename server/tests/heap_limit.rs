@@ -145,3 +145,64 @@ fn test_different_limits_produce_different_outcomes() {
         "256MB limit should allow large allocation"
     );
 }
+
+// ── Typed-array OOM (hard crash regression) ──────────────────────────────
+
+/// Typed arrays (Uint8Array) allocate backing stores outside V8's managed
+/// JS heap, so an OOM from unbounded typed-array growth can terminate the
+/// isolate at a lower level than normal JS-heap OOM — causing a hard crash
+/// ("Error occurred during tool execution") instead of a clean error.
+///
+/// This test reproduces the scenario: allocate 1 MB Uint8Array chunks in a
+/// loop with an 8 MB heap limit, and asserts the engine returns an error
+/// rather than crashing the process.
+const TYPED_ARRAY_OOM_JS: &str = r#"
+let totalBytes = 0;
+const chunks = [];
+try {
+  while (true) {
+    const buf = new Uint8Array(1024 * 1024); // 1MB at a time
+    buf.fill(0xFF);
+    chunks.push(buf);
+    totalBytes += buf.length;
+  }
+} catch(e) {
+  `Allocated ${chunks.length} x 1MB chunks = ${totalBytes / 1e6}MB before OOM`
+}
+"#;
+
+#[test]
+fn test_typed_array_oom_does_not_crash_stateless() {
+    ensure_v8();
+
+    // 8 MB heap — typed array backing stores will exceed this quickly
+    let heap_bytes = 8 * 1024 * 1024;
+    let (result, _oom) = server::engine::execute_stateless(TYPED_ARRAY_OOM_JS, heap_bytes, no_handle());
+
+    // We don't care whether it's Ok (the JS catch fired) or Err (V8 killed it) —
+    // the critical thing is that we *get here* instead of a process crash.
+    // If this is an Err, the message should be descriptive.
+    if let Err(ref e) = result {
+        assert!(
+            !e.contains("Error occurred during tool execution"),
+            "Typed-array OOM should produce a V8-level error, not a hard crash. Got: {}",
+            e,
+        );
+    }
+}
+
+#[test]
+fn test_typed_array_oom_does_not_crash_stateful() {
+    ensure_v8();
+
+    let heap_bytes = 8 * 1024 * 1024;
+    let (result, _oom) = server::engine::execute_stateful(TYPED_ARRAY_OOM_JS, None, heap_bytes, no_handle());
+
+    if let Err(ref e) = result {
+        assert!(
+            !e.contains("Error occurred during tool execution"),
+            "Typed-array OOM should produce a V8-level error, not a hard crash. Got: {}",
+            e,
+        );
+    }
+}
