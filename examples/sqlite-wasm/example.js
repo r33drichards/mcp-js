@@ -58,12 +58,34 @@ var wasiStubs = {
 
 var memory; // will be set from the module's exported memory
 
-var instance = new WebAssembly.Instance(__wasm_sqlite, {
+// Build import object dynamically — enumerate the module's imports and
+// provide stubs for anything not explicitly handled above.  This makes
+// the example resilient to different Emscripten versions which may add
+// or remove WASI / env imports.
+var knownImports = {
     wasi_snapshot_preview1: wasiStubs,
     env: {
         emscripten_notify_memory_growth: function () {},
     },
-});
+};
+
+var moduleImports = WebAssembly.Module.imports(__wasm_sqlite);
+var importObject = {};
+for (var i = 0; i < moduleImports.length; i++) {
+    var imp = moduleImports[i];
+    if (!importObject[imp.module]) {
+        importObject[imp.module] = {};
+    }
+    // Use the known stub if available, otherwise provide a no-op.
+    var known = knownImports[imp.module];
+    if (known && known[imp.name] !== undefined) {
+        importObject[imp.module][imp.name] = known[imp.name];
+    } else if (imp.kind === "function") {
+        importObject[imp.module][imp.name] = function () { return 0; };
+    }
+}
+
+var instance = new WebAssembly.Instance(__wasm_sqlite, importObject);
 
 var exports = instance.exports;
 memory = exports.memory;
