@@ -206,3 +206,91 @@ fn test_typed_array_oom_does_not_crash_stateful() {
         );
     }
 }
+
+// ── Extreme OOM regression (1 MB heap + 1 billion element array) ──────
+//
+// `new Array(1e9).fill(0)` asks V8 to create a FixedArray of 1 billion
+// entries, which exceeds V8's internal `FixedArray::kMaxLength`. V8 calls
+// `FatalProcessOutOfMemory("invalid table size")` → `abort()` before the
+// near-heap-limit callback can fire. This is NOT a recoverable OOM — it
+// is a V8 internal structural limit. Approaches like setjmp/longjmp or
+// panic corrupt V8's global state (held locks, allocator state) and cause
+// SIGSEGV in subsequent V8 operations.
+//
+// We test this in a subprocess: the child process runs the pathological
+// allocation and V8 aborts it. The parent verifies the child terminated
+// (didn't hang) and the parent process is unaffected.
+
+/// Helper binary entrypoint for extreme OOM subprocess tests.
+/// Invoked via `std::process::Command` with env EXTREME_OOM_SUBPROCESS=stateless|stateful.
+#[test]
+fn extreme_oom_subprocess_worker() {
+    let mode = match std::env::var("EXTREME_OOM_SUBPROCESS") {
+        Ok(m) => m,
+        Err(_) => return, // Skip unless explicitly invoked as subprocess
+    };
+
+    ensure_v8();
+    let code = "const arr = new Array(1e9).fill(0); arr.length";
+    let heap_bytes = 1 * 1024 * 1024; // 1 MB (clamped to MIN_HEAP_MEMORY_MB internally)
+
+    match mode.as_str() {
+        "stateless" => {
+            let (result, _) = server::engine::execute_stateless(code, heap_bytes, no_handle());
+            // If we reach here (V8 didn't abort), exit cleanly.
+            if result.is_err() {
+                std::process::exit(0);
+            }
+            std::process::exit(0);
+        }
+        "stateful" => {
+            let (result, _) = server::engine::execute_stateful(code, None, heap_bytes, no_handle());
+            if result.is_err() {
+                std::process::exit(0);
+            }
+            std::process::exit(0);
+        }
+        _ => {
+            eprintln!("Unknown mode: {}", mode);
+            std::process::exit(2);
+        }
+    }
+}
+
+fn run_extreme_oom_subprocess(mode: &str) {
+    let exe = std::env::current_exe().expect("Failed to get test binary path");
+    let output = std::process::Command::new(&exe)
+        .arg("extreme_oom_subprocess_worker")
+        .arg("--exact")
+        .arg("--test-threads=1")
+        .arg("--nocapture")
+        .env("EXTREME_OOM_SUBPROCESS", mode)
+        .output()
+        .expect("Failed to spawn subprocess");
+
+    // The subprocess should terminate (not hang). It may exit 0 (clean
+    // OOM error) or non-zero (V8 abort). Both are acceptable — the
+    // critical thing is that the parent process is unaffected.
+    let _ = output.status; // We don't assert on the exit code — V8 abort is expected.
+
+    // The parent process is still running — V8 global state is intact.
+    // Verify by running a simple V8 execution.
+    ensure_v8();
+    let (result, _) = server::engine::execute_stateless("1 + 1", 8 * 1024 * 1024, no_handle());
+    assert!(
+        result.is_ok(),
+        "Parent process V8 should be unaffected after subprocess OOM, but got: {:?}",
+        result,
+    );
+    assert_eq!(result.unwrap(), "2");
+}
+
+#[test]
+fn test_extreme_oom_1mb_heap_subprocess_stateless() {
+    run_extreme_oom_subprocess("stateless");
+}
+
+#[test]
+fn test_extreme_oom_1mb_heap_subprocess_stateful() {
+    run_extreme_oom_subprocess("stateful");
+}

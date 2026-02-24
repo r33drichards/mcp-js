@@ -133,13 +133,75 @@ impl McpService {
 #[tool(tool_box)]
 impl ServerHandler for McpService {
     fn get_info(&self) -> ServerInfo {
-        let mode = if self.engine.is_stateful() {
-            "stateful mode - with heap persistence"
-        } else {
-            "stateless mode - no heap persistence"
-        };
         ServerInfo {
-            instructions: Some(format!("JavaScript execution service ({})", mode)),
+            instructions: Some("JavaScript execution service (stateful mode - with heap persistence)".to_string()),
+            capabilities: ServerCapabilities::builder().enable_tools().build(),
+            ..Default::default()
+        }
+    }
+
+    async fn initialize(
+        &self,
+        _request: InitializeRequestParam,
+        context: RequestContext<RoleServer>,
+    ) -> Result<InitializeResult, McpError> {
+        if let Some(http_request_part) = context.extensions.get::<axum::http::request::Parts>() {
+            let initialize_headers = &http_request_part.headers;
+            let initialize_uri = &http_request_part.uri;
+            tracing::info!(?initialize_headers, %initialize_uri, "initialize from http server");
+        }
+        Ok(self.get_info())
+    }
+}
+
+// ── StatelessMcpService ─────────────────────────────────────────────────
+//
+// Stateless mode: only exposes `run_js` with no heap/session parameters.
+// This prevents agents from attempting to use stateful features that
+// don't exist in this mode.
+
+#[derive(Clone)]
+pub struct StatelessMcpService {
+    engine: Engine,
+}
+
+impl StatelessMcpService {
+    pub fn new(engine: Engine) -> Self {
+        Self { engine }
+    }
+}
+
+#[tool(tool_box)]
+impl StatelessMcpService {
+    #[tool(description = include_str!("run_js_tool_stateless.md"))]
+    pub async fn run_js(
+        &self,
+        #[tool(param)] code: String,
+        #[tool(param)]
+        #[serde(default)]
+        heap_memory_max_mb: Option<usize>,
+        #[tool(param)]
+        #[serde(default)]
+        execution_timeout_secs: Option<u64>,
+    ) -> RunJsResponse {
+        match self.engine.run_js(code, None, None, heap_memory_max_mb, execution_timeout_secs).await {
+            Ok(result) => RunJsResponse {
+                output: result.output,
+                heap: None,
+            },
+            Err(e) => RunJsResponse {
+                output: format!("V8 error: {}", e),
+                heap: None,
+            },
+        }
+    }
+}
+
+#[tool(tool_box)]
+impl ServerHandler for StatelessMcpService {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo {
+            instructions: Some("JavaScript execution service (stateless mode)".to_string()),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             ..Default::default()
         }

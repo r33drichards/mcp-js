@@ -4,7 +4,7 @@ TypeScript support is type removal only — types are stripped before execution,
 
 params:
 - code: the javascript or typescript code to run
-- heap_memory_max_mb (optional): maximum V8 heap memory in megabytes (1–64, default: 8). Override the server default for this execution.
+- heap_memory_max_mb (optional): maximum V8 heap memory in megabytes (4–64, default: 8). Override the server default for this execution.
 - execution_timeout_secs (optional): maximum execution time in seconds (1–300, default: 30). Override the server default for this execution.
 
 returns:
@@ -58,74 +58,4 @@ would return:
 ```
 
 
-you are running in stateless mode, so the heap is not persisted between executions.
-the source code of the runtime is this
-
-```rust
-/// Stateless V8 execution — runs V8 on the calling thread. Publishes an
-/// IsolateHandle for external cancellation (e.g. async timeout in `run_js`).
-/// Returns (result, oom_flag).
-pub fn execute_stateless(
-    code: &str,
-    heap_memory_max_bytes: usize,
-    isolate_handle: Arc<Mutex<Option<v8::IsolateHandle>>>,
-) -> (Result<String, String>, bool) {
-    let oom_flag = Arc::new(AtomicBool::new(false));
-
-    let result = catch_unwind(AssertUnwindSafe(|| {
-        let params = create_params_with_heap_limit(heap_memory_max_bytes);
-        let mut isolate = v8::Isolate::new(params);
-
-        // Publish handle immediately so caller can terminate us.
-        *isolate_handle.lock().unwrap() = Some(isolate.thread_safe_handle());
-
-        let cb_data_ptr = install_heap_limit_callback(&mut isolate, oom_flag.clone());
-
-        let eval_result = {
-            let scope = &mut v8::HandleScope::new(&mut isolate);
-            let context = v8::Context::new(scope, Default::default());
-            let scope = &mut v8::ContextScope::new(scope, context);
-
-            match eval(scope, code) {
-                Ok(value) => match value.to_string(scope) {
-                    Some(s) => Ok(s.to_rust_string_lossy(scope)),
-                    None => Err("Failed to convert result to string".to_string()),
-                },
-                Err(e) => Err(e),
-            }
-        };
-
-        // Clear handle BEFORE destroying isolate.
-        *isolate_handle.lock().unwrap() = None;
-        drop(isolate);
-        unsafe { let _ = Box::from_raw(cb_data_ptr); }
-
-        eval_result
-    }));
-
-    let oom = oom_flag.load(Ordering::SeqCst);
-    match result {
-        Ok(Ok(output)) => (Ok(output), oom),
-        Ok(Err(e)) => (Err(classify_termination_error(&oom_flag, false, e)), oom),
-        Err(_panic) => (Err(classify_termination_error(
-            &oom_flag, false, "V8 execution panicked unexpectedly".to_string(),
-        )), oom),
-    }
-}
-
-// Engine.run_js handles TypeScript stripping, timeout enforcement,
-// and concurrency control:
-pub async fn run_js(
-    &self,
-    code: String,
-    heap: Option<String>,
-    session: Option<String>,
-    heap_memory_max_mb: Option<usize>,
-    execution_timeout_secs: Option<u64>,
-) -> Result<JsResult, String> {
-    // Strip TypeScript types before V8 execution (no-op for plain JS)
-    let code = strip_typescript_types(&code)?;
-    // ... acquires semaphore permit, runs execute_stateless on
-    // blocking thread with async timeout via tokio::select! ...
-}
-```
+Each execution starts with a fresh V8 isolate — no state is carried between calls.

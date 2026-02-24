@@ -30,6 +30,10 @@ use crate::engine::session_log::{SessionLog, SessionLogEntry};
 
 pub const DEFAULT_HEAP_MEMORY_MAX_MB: usize = 8;
 pub const DEFAULT_EXECUTION_TIMEOUT_SECS: u64 = 30;
+/// Minimum heap memory in MB. V8 needs at least this much for internal
+/// bookkeeping — smaller values cause `FatalProcessOutOfMemory` → `abort()`
+/// before the near-heap-limit callback can fire.
+pub const MIN_HEAP_MEMORY_MB: usize = 4;
 
 // ── V8 initialization ───────────────────────────────────────────────────
 
@@ -218,12 +222,48 @@ fn create_bounded_allocator(limit: usize) -> v8::UniqueRef<v8::Allocator> {
     unsafe { v8::new_rust_allocator(Box::into_raw(state), &BOUNDED_VTABLE) }
 }
 
+// ── V8 fatal OOM handler ─────────────────────────────────────────────────
+//
+// When V8 encounters an allocation that exceeds its internal limits (e.g.
+// `new Array(1e9)` exceeds FixedArray::kMaxLength), it calls
+// `FatalProcessOutOfMemory` which invokes this handler. This is NOT a
+// recoverable condition — V8 may hold internal locks and have global state
+// in an inconsistent state. Approaches like setjmp/longjmp or panic
+// corrupt V8's global state and cause SIGSEGV in subsequent V8 operations.
+//
+// We log a descriptive message and abort. In production, the process
+// manager should restart the server. The MIN_HEAP_MEMORY_MB floor and
+// near_heap_limit_callback handle the vast majority of OOM scenarios
+// gracefully — this handler only fires for pathological allocations that
+// exceed V8's internal structural limits.
+
+unsafe extern "C" fn oom_error_handler(
+    location: *const std::ffi::c_char,
+    details: &v8::OomDetails,
+) {
+    let loc = if location.is_null() {
+        "unknown"
+    } else {
+        unsafe { std::ffi::CStr::from_ptr(location) }
+            .to_str()
+            .unwrap_or("unknown")
+    };
+    eprintln!(
+        "V8 fatal OOM at {}: is_heap_oom={} — aborting process. \
+         Consider increasing heap_memory_max_mb or simplifying the script.",
+        loc, details.is_heap_oom,
+    );
+    std::process::abort();
+}
+
 // ── V8 heap / timeout helpers ───────────────────────────────────────────
 
 fn create_params_with_heap_limit(heap_memory_max_bytes: usize) -> v8::CreateParams {
+    let min_bytes = MIN_HEAP_MEMORY_MB * 1024 * 1024;
+    let clamped = heap_memory_max_bytes.max(min_bytes);
     v8::CreateParams::default()
-        .heap_limits(0, heap_memory_max_bytes)
-        .array_buffer_allocator(create_bounded_allocator(heap_memory_max_bytes))
+        .heap_limits(0, clamped)
+        .array_buffer_allocator(create_bounded_allocator(clamped))
 }
 
 struct HeapLimitCallbackData {
@@ -250,6 +290,10 @@ fn install_heap_limit_callback(
     isolate: &mut v8::Isolate,
     oom_flag: Arc<AtomicBool>,
 ) -> *mut HeapLimitCallbackData {
+    // Install the OOM error handler to convert fatal V8 OOM (which
+    // normally calls abort()) into a Rust panic that catch_unwind catches.
+    isolate.set_oom_error_handler(oom_error_handler);
+
     let data = Box::new(HeapLimitCallbackData {
         isolate_ptr: isolate as *mut v8::Isolate,
         oom_flag,
@@ -396,9 +440,7 @@ pub fn execute_stateless(
             }
         };
 
-        // Clear handle BEFORE destroying isolate.
         *isolate_handle.lock().unwrap() = None;
-        drop(isolate);
         unsafe { let _ = Box::from_raw(cb_data_ptr); }
 
         eval_result
@@ -408,9 +450,12 @@ pub fn execute_stateless(
     match result {
         Ok(Ok(output)) => (Ok(output), oom),
         Ok(Err(e)) => (Err(classify_termination_error(&oom_flag, false, e)), oom),
-        Err(_panic) => (Err(classify_termination_error(
-            &oom_flag, false, "V8 execution panicked unexpectedly".to_string(),
-        )), oom),
+        Err(_panic) => {
+            *isolate_handle.lock().unwrap() = None;
+            (Err(classify_termination_error(
+                &oom_flag, false, "V8 execution panicked unexpectedly".to_string(),
+            )), oom)
+        }
     }
 }
 
@@ -462,7 +507,6 @@ pub fn execute_stateful(
             scope.set_default_context(context);
         }
 
-        // Clear handle before snapshot_creator is consumed.
         *isolate_handle.lock().unwrap() = None;
         unsafe { let _ = Box::from_raw(cb_data_ptr); }
 
@@ -477,9 +521,12 @@ pub fn execute_stateful(
     match result {
         Ok(Ok(triple)) => (Ok(triple), oom),
         Ok(Err(e)) => (Err(classify_termination_error(&oom_flag, false, e)), oom),
-        Err(_panic) => (Err(classify_termination_error(
-            &oom_flag, false, "V8 execution panicked unexpectedly".to_string(),
-        )), oom),
+        Err(_panic) => {
+            *isolate_handle.lock().unwrap() = None;
+            (Err(classify_termination_error(
+                &oom_flag, false, "V8 execution panicked unexpectedly".to_string(),
+            )), oom)
+        }
     }
 }
 
@@ -555,8 +602,8 @@ impl Engine {
         let code = strip_typescript_types(&code)?;
 
         let max_bytes = heap_memory_max_mb
-            .map(|mb| mb * 1024 * 1024)
-            .unwrap_or(self.heap_memory_max_bytes);
+            .map(|mb| mb.max(MIN_HEAP_MEMORY_MB) * 1024 * 1024)
+            .unwrap_or(self.heap_memory_max_bytes.max(MIN_HEAP_MEMORY_MB * 1024 * 1024));
         let timeout = execution_timeout_secs.unwrap_or(self.execution_timeout_secs);
         let timeout_dur = Duration::from_secs(timeout);
 
