@@ -5,6 +5,7 @@ A Rust-based Model Context Protocol (MCP) server that exposes a V8 JavaScript ru
 ## Features
 
 - **V8 JavaScript Execution**: Run arbitrary JavaScript code in a secure, isolated V8 engine.
+- **TypeScript Support**: Run TypeScript code directly — types are stripped before execution using [SWC](https://swc.rs/). This is type removal only, not type checking.
 - **Content-Addressed Heap Snapshots**: Persist and restore V8 heap state between runs using content-addressed storage, supporting both S3 and local file storage.
 - **Stateless Mode**: Optional mode for fresh executions without heap persistence, ideal for serverless environments.
 - **MCP Protocol**: Implements the Model Context Protocol for seamless tool integration with Claude, Cursor, and other MCP clients.
@@ -251,6 +252,7 @@ While `mcp-v8` provides a powerful and persistent JavaScript execution environme
 - **No `npm install` or external packages**: You cannot install or import npm packages. Only standard JavaScript (ECMAScript) built-ins are available.
 - **No timers**: Functions like `setTimeout` and `setInterval` are not available.
 - **No DOM or browser APIs**: This is not a browser environment; there is no access to `window`, `document`, or other browser-specific objects.
+- **TypeScript: type removal only**: TypeScript type annotations are stripped before execution. No type checking is performed — invalid types are silently removed, not reported as errors.
 
 ---
 

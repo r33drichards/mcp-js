@@ -1,10 +1,9 @@
-{ pkgs ? import <nixpkgs> {} }:
+{ pkgs ? import <nixpkgs> {}, rustToolchain ? null }:
   pkgs.mkShell rec {
     buildInputs = with pkgs; [
+      (if rustToolchain != null then rustToolchain else rustup)
       clang
-      # Replace llvmPackages with llvmPackages_X, where X is the latest LLVM version (at the time of writing, 16)
       llvmPackages.bintools
-      rustup
       deno
       cacert
       openssl
@@ -12,12 +11,10 @@
       # Provides libstdc++.so.6 needed by ASAN-instrumented fuzz targets
       stdenv.cc.cc.lib
     ];
-    RUSTC_VERSION = pkgs.lib.readFile ./rust-toolchain;
     # https://github.com/rust-lang/rust-bindgen#environment-variables
     LIBCLANG_PATH = pkgs.lib.makeLibraryPath [ pkgs.llvmPackages_latest.libclang.lib ];
     shellHook = ''
       export PATH=$PATH:''${CARGO_HOME:-~/.cargo}/bin
-      export PATH=$PATH:''${RUSTUP_HOME:-~/.rustup}/toolchains/$RUSTC_VERSION-x86_64-unknown-linux-gnu/bin/
       # Set SSL certificate path
       export SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt
       # Set library path for OpenSSL

@@ -28,6 +28,14 @@ aws-sdk-s3 = "0.0.26-alpha"
 async-trait = "0.1"
 clap = { version = "4.5", features = ["derive"] }
 sha2 = "0.10"
+swc_core = { version = "17", features = [
+    "common",
+    "ecma_codegen",
+    "ecma_parser",
+    "ecma_transforms",
+    "ecma_transforms_typescript",
+    "ecma_visit",
+] }
 sled = "0.34"
 chrono = { version = "0.4", features = ["serde"] }
 hyper = { version = "1.5.2", features = ["server", "http1"] }
