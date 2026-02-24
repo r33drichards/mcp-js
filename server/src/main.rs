@@ -105,14 +105,18 @@ struct Cli {
 
     // ── WASM module options ──────────────────────────────────────────
 
-    /// Pre-load a WASM module as a global. Format: name=/path/to/module.wasm
+    /// Pre-load a WASM module as a global. Format: name=/path/to/module.wasm[:max_memory]
     /// The module's exports will be available as a global variable with the given name.
+    /// Optional memory suffix caps the module's native memory (linear memory + tables).
+    /// Supported suffixes: raw bytes, k/K (KiB), m/M (MiB), g/G (GiB).
+    /// Examples: math=/path.wasm  math=/path.wasm:16m  math=/path.wasm:1048576
     /// Can be specified multiple times for multiple modules.
-    #[arg(long = "wasm-module", value_name = "NAME=PATH")]
+    #[arg(long = "wasm-module", value_name = "NAME=PATH[:LIMIT]")]
     wasm_modules: Vec<String>,
 
-    /// Path to a JSON config file mapping global names to .wasm file paths.
-    /// Format: {"name": "/path/to/module.wasm", ...}
+    /// Path to a JSON config file mapping global names to .wasm file paths or objects.
+    /// String value: {"name": "/path/to/module.wasm"}
+    /// Object value: {"name": {"path": "/path/to/module.wasm", "max_memory_bytes": 16777216}}
     #[arg(long = "wasm-config", value_name = "PATH")]
     wasm_config: Option<String>,
 }
@@ -388,35 +392,75 @@ fn load_wasm_modules(
 ) -> Result<Vec<WasmModule>> {
     let mut modules = Vec::new();
 
-    // Parse CLI --wasm-module flags (format: name=/path/to/file.wasm)
+    // Parse CLI --wasm-module flags (format: name=/path/to/file.wasm[:max_memory])
     for entry in cli_modules {
-        let (name, path) = entry.split_once('=')
+        let (name, rest) = entry.split_once('=')
             .ok_or_else(|| anyhow::anyhow!(
-                "Invalid --wasm-module format: '{}'. Expected name=/path/to/file.wasm", entry
+                "Invalid --wasm-module format: '{}'. Expected name=/path/to/file.wasm[:max_memory]", entry
             ))?;
         let name = name.trim().to_string();
-        let path = path.trim();
+        let rest = rest.trim();
         validate_wasm_name(&name)?;
+
+        // Split path and optional :max_memory suffix.
+        // Scan from the right for ':' that isn't part of a Windows drive letter (e.g. C:\).
+        let (path, max_memory_bytes) = match rest.rfind(':') {
+            Some(pos) if pos > 0 && !rest[..pos].ends_with(|c: char| c.is_ascii_alphabetic() && pos == 1) => {
+                let suffix = &rest[pos + 1..];
+                if suffix.is_empty() {
+                    (rest, None)
+                } else {
+                    match parse_memory_size(suffix) {
+                        Ok(size) => (&rest[..pos], Some(size)),
+                        Err(_) => {
+                            // Not a valid size suffix — treat entire rest as path
+                            (rest, None)
+                        }
+                    }
+                }
+            }
+            _ => (rest, None),
+        };
+
         let bytes = std::fs::read(path)
             .map_err(|e| anyhow::anyhow!("Failed to read WASM file '{}': {}", path, e))?;
-        modules.push(WasmModule { name, bytes });
+        modules.push(WasmModule { name, bytes, max_memory_bytes });
     }
 
-    // Parse --wasm-config JSON file (format: {"name": "/path/to/file.wasm", ...})
+    // Parse --wasm-config JSON file.
+    // String value: {"name": "/path/to/file.wasm"}
+    // Object value: {"name": {"path": "/path/to/file.wasm", "max_memory_bytes": 16777216}}
     if let Some(config_path) = config_path {
         let config_str = std::fs::read_to_string(config_path)
             .map_err(|e| anyhow::anyhow!("Failed to read WASM config '{}': {}", config_path, e))?;
         let config: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&config_str)
             .map_err(|e| anyhow::anyhow!("Invalid JSON in WASM config '{}': {}", config_path, e))?;
         for (name, value) in config {
-            let path = value.as_str()
-                .ok_or_else(|| anyhow::anyhow!(
-                    "WASM config value for '{}' must be a string path, got: {}", name, value
-                ))?;
+            let (path, max_memory_bytes) = if let Some(s) = value.as_str() {
+                (s.to_string(), None)
+            } else if let Some(obj) = value.as_object() {
+                let path = obj.get("path")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow::anyhow!(
+                        "WASM config object for '{}' must have a \"path\" string field", name
+                    ))?
+                    .to_string();
+                let max_mem = obj.get("max_memory_bytes")
+                    .map(|v| v.as_u64().ok_or_else(|| anyhow::anyhow!(
+                        "WASM config \"max_memory_bytes\" for '{}' must be a positive integer", name
+                    )))
+                    .transpose()?
+                    .map(|v| v as usize);
+                (path, max_mem)
+            } else {
+                anyhow::bail!(
+                    "WASM config value for '{}' must be a string path or object, got: {}", name, value
+                );
+            };
             validate_wasm_name(&name)?;
-            let bytes = std::fs::read(path)
+            let bytes = std::fs::read(&path)
                 .map_err(|e| anyhow::anyhow!("Failed to read WASM file '{}': {}", path, e))?;
-            modules.push(WasmModule { name, bytes });
+            modules.push(WasmModule { name, bytes, max_memory_bytes });
         }
     }
 
@@ -429,6 +473,25 @@ fn load_wasm_modules(
     }
 
     Ok(modules)
+}
+
+/// Parse a human-readable memory size string into bytes.
+/// Supports raw bytes ("1048576") and suffixes: k/K (KiB), m/M (MiB), g/G (GiB).
+fn parse_memory_size(s: &str) -> Result<usize> {
+    let s = s.trim();
+    if s.is_empty() {
+        anyhow::bail!("Empty memory size");
+    }
+    let (num_str, multiplier) = match s.as_bytes().last() {
+        Some(b'k' | b'K') => (&s[..s.len() - 1], 1024usize),
+        Some(b'm' | b'M') => (&s[..s.len() - 1], 1024 * 1024),
+        Some(b'g' | b'G') => (&s[..s.len() - 1], 1024 * 1024 * 1024),
+        _ => (s, 1),
+    };
+    let num: usize = num_str.parse()
+        .map_err(|_| anyhow::anyhow!("Invalid memory size: '{}'", s))?;
+    num.checked_mul(multiplier)
+        .ok_or_else(|| anyhow::anyhow!("Memory size overflow: '{}'", s))
 }
 
 /// Validate that a WASM module name is a valid JS identifier.

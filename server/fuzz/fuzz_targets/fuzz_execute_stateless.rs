@@ -41,6 +41,7 @@ fuzz_target!(|input: StatelessInput| {
         .map(|(i, m)| WasmModule {
             name: format!("m{}", i),
             bytes: m.bytes,
+            max_memory_bytes: None,
         })
         .collect();
 

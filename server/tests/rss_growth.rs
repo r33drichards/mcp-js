@@ -102,6 +102,7 @@ fn test_rss_growth_stateless_with_invalid_wasm() {
             let modules = vec![WasmModule {
                 name: "m".to_string(),
                 bytes: vec![0xde, 0xad, 0xbe, 0xef],
+                max_memory_bytes: None,
             }];
             let _ = execute_stateless("1", heap_bytes, handle, &modules);
         },

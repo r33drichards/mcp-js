@@ -394,31 +394,33 @@ pub fn strip_typescript_types(code: &str) -> Result<String, String> {
     })
 }
 
-/// Maximum initial WASM memory pages allowed per module.
-/// Each page is 64 KiB, so 256 pages = 16 MiB.
-/// V8 allocates native (non-heap) memory for WASM memories during
-/// compilation, bypassing JS heap limits and our BoundedAllocator.
-const MAX_WASM_MEMORY_PAGES: u64 = 256;
+/// Size of a single WASM memory page in bytes (64 KiB per the spec).
+const WASM_PAGE_BYTES: u64 = 65_536;
 
-/// Maximum initial WASM table elements allowed per module.
-const MAX_WASM_TABLE_ELEMENTS: u64 = 10_000;
+/// Estimated bytes per WASM table element (funcref/externref pointer + V8 overhead).
+const WASM_TABLE_ELEMENT_BYTES: u64 = 8;
 
-/// Validate that a WASM module's resource declarations won't cause V8 to
-/// OOM during compilation. Checks both direct declarations (memory/table
-/// sections) and imported memories/tables, since both affect native memory.
-fn validate_wasm_resources(name: &str, bytes: &[u8]) -> Result<(), String> {
+/// Validate that a WASM module's resource declarations fit within the
+/// allocated heap budget. Checks both direct declarations (memory/table
+/// sections) and imported memories/tables, since both cause V8 to allocate
+/// native memory outside the JS heap during compilation.
+fn validate_wasm_resources(name: &str, bytes: &[u8], max_memory_bytes: usize) -> Result<(), String> {
     use wasmparser::{Parser, Payload, TypeRef};
+
+    let budget = max_memory_bytes as u64;
+    let max_pages = budget / WASM_PAGE_BYTES;
+    let max_table_elements = budget / WASM_TABLE_ELEMENT_BYTES;
 
     for payload in Parser::new(0).parse_all(bytes) {
         match payload {
             Ok(Payload::MemorySection(reader)) => {
                 for mem in reader {
                     let mem = mem.map_err(|e| format!("Invalid WASM module '{}': {}", name, e))?;
-                    if mem.initial > MAX_WASM_MEMORY_PAGES {
+                    if mem.initial > max_pages {
                         return Err(format!(
-                            "WASM module '{}': memory too large ({} pages = {} MiB, max {} pages = {} MiB)",
+                            "WASM module '{}': memory too large ({} pages = {} MiB, budget allows {} pages = {} MiB)",
                             name, mem.initial, mem.initial * 64 / 1024,
-                            MAX_WASM_MEMORY_PAGES, MAX_WASM_MEMORY_PAGES * 64 / 1024,
+                            max_pages, max_pages * 64 / 1024,
                         ));
                     }
                 }
@@ -426,10 +428,10 @@ fn validate_wasm_resources(name: &str, bytes: &[u8]) -> Result<(), String> {
             Ok(Payload::TableSection(reader)) => {
                 for table in reader {
                     let table = table.map_err(|e| format!("Invalid WASM module '{}': {}", name, e))?;
-                    if table.ty.initial > MAX_WASM_TABLE_ELEMENTS {
+                    if table.ty.initial > max_table_elements {
                         return Err(format!(
-                            "WASM module '{}': table too large ({} elements, max {})",
-                            name, table.ty.initial, MAX_WASM_TABLE_ELEMENTS,
+                            "WASM module '{}': table too large ({} elements, budget allows {})",
+                            name, table.ty.initial, max_table_elements,
                         ));
                     }
                 }
@@ -439,19 +441,19 @@ fn validate_wasm_resources(name: &str, bytes: &[u8]) -> Result<(), String> {
                     let import = import.map_err(|e| format!("Invalid WASM module '{}': {}", name, e))?;
                     match import.ty {
                         TypeRef::Memory(mem) => {
-                            if mem.initial > MAX_WASM_MEMORY_PAGES {
+                            if mem.initial > max_pages {
                                 return Err(format!(
-                                    "WASM module '{}': imported memory too large ({} pages = {} MiB, max {} pages = {} MiB)",
+                                    "WASM module '{}': imported memory too large ({} pages = {} MiB, budget allows {} pages = {} MiB)",
                                     name, mem.initial, mem.initial * 64 / 1024,
-                                    MAX_WASM_MEMORY_PAGES, MAX_WASM_MEMORY_PAGES * 64 / 1024,
+                                    max_pages, max_pages * 64 / 1024,
                                 ));
                             }
                         }
                         TypeRef::Table(table_ty) => {
-                            if table_ty.initial > MAX_WASM_TABLE_ELEMENTS {
+                            if table_ty.initial > max_table_elements {
                                 return Err(format!(
-                                    "WASM module '{}': imported table too large ({} elements, max {})",
-                                    name, table_ty.initial, MAX_WASM_TABLE_ELEMENTS,
+                                    "WASM module '{}': imported table too large ({} elements, budget allows {})",
+                                    name, table_ty.initial, max_table_elements,
                                 ));
                             }
                         }
@@ -492,6 +494,7 @@ fn wasm_has_imports(bytes: &[u8]) -> bool {
 pub fn inject_wasm_modules(
     scope: &mut v8::ContextScope<v8::HandleScope>,
     modules: &[WasmModule],
+    heap_memory_max_bytes: usize,
 ) -> Result<(), String> {
     if modules.is_empty() {
         return Ok(());
@@ -528,9 +531,9 @@ pub fn inject_wasm_modules(
         Validator::new().validate_all(&m.bytes)
             .map_err(|e| format!("Invalid WASM module '{}': {}", m.name, e))?;
 
-        // Reject modules declaring resources large enough to OOM V8's native
-        // allocator during compilation (memory pages, table elements).
-        validate_wasm_resources(&m.name, &m.bytes)?;
+        // Reject modules declaring resources that exceed the per-module budget.
+        let limit = m.max_memory_bytes.unwrap_or(heap_memory_max_bytes);
+        validate_wasm_resources(&m.name, &m.bytes, limit)?;
 
         // Compile WASM bytes directly via V8's native API — no JS string generation.
         let module_obj = v8::WasmModuleObject::compile(scope, &m.bytes)
@@ -647,7 +650,7 @@ pub fn execute_stateless(
 
             // Inject WASM modules as globals via native V8 API.
             // Do NOT early-return here — cb_data_ptr must be freed below.
-            match inject_wasm_modules(scope, wasm_modules) {
+            match inject_wasm_modules(scope, wasm_modules, heap_memory_max_bytes) {
                 Err(e) => Err(e),
                 Ok(()) => match eval(scope, code) {
                     Ok(value) => match value.to_string(scope) {
@@ -719,7 +722,7 @@ pub fn execute_stateful(
             // Inject WASM modules as globals via native V8 API.
             // Do NOT early-return here — create_blob() must be called below
             // to prevent SnapshotCreator's destructor from panicking.
-            output_result = match inject_wasm_modules(scope, wasm_modules) {
+            output_result = match inject_wasm_modules(scope, wasm_modules, heap_memory_max_bytes) {
                 Err(e) => Err(e),
                 Ok(()) => match eval(scope, code) {
                     Ok(result) => {
@@ -778,6 +781,9 @@ pub struct JsResult {
 pub struct WasmModule {
     pub name: String,
     pub bytes: Vec<u8>,
+    /// Max native memory (bytes) this module may declare (linear memory + tables).
+    /// Defaults to heap_memory_max_bytes when None.
+    pub max_memory_bytes: Option<usize>,
 }
 
 #[derive(Clone)]

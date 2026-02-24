@@ -26,6 +26,7 @@ fuzz_target!(|data: &[u8]| {
     let modules = vec![WasmModule {
         name: "m".to_string(),
         bytes: data.to_vec(),
+        max_memory_bytes: Some(8 * 1024 * 1024),
     }];
 
     // We don't care about the result; we care that V8 doesn't crash.
