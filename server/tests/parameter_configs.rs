@@ -29,7 +29,7 @@ async fn test_timeout_produces_descriptive_error() {
     let engine = Engine::new_stateless(64 * 1024 * 1024, 2, 4);
     let result = engine.run_js(
         "while (true) {}".to_string(),
-        None, None, None, None,
+        None, None, None, None, None,
     ).await;
 
     assert!(result.is_err(), "Infinite loop should fail, got: {:?}", result);
@@ -51,7 +51,7 @@ async fn test_timeout_stateful_produces_descriptive_error() {
     let engine = Engine::new_stateful(heap_storage, None, 64 * 1024 * 1024, 2, 4);
     let result = engine.run_js(
         "while (true) {}".to_string(),
-        None, None, None, None,
+        None, None, None, None, None,
     ).await;
 
     assert!(result.is_err(), "Infinite loop should fail, got: {:?}", result);
@@ -78,7 +78,7 @@ fn test_oom_produces_descriptive_error_not_crash() {
     "#;
     let heap_bytes = 16 * 1024 * 1024; // 16MB
 
-    let (result, _oom) = server::engine::execute_stateless(code, heap_bytes, no_handle(), &[], heap_bytes);
+    let (result, _oom) = server::engine::execute_stateless(code, heap_bytes, no_handle(), &[], heap_bytes, None);
 
     assert!(result.is_err(), "Huge allocation with small heap should fail, got: {:?}", result);
     let err = result.unwrap_err();
@@ -102,7 +102,7 @@ fn test_oom_stateful_produces_descriptive_error_not_crash() {
     "#;
     let heap_bytes = 16 * 1024 * 1024; // 16MB
 
-    let (result, _oom) = server::engine::execute_stateful(code, None, heap_bytes, no_handle(), &[], heap_bytes);
+    let (result, _oom) = server::engine::execute_stateful(code, None, heap_bytes, no_handle(), &[], heap_bytes, None);
 
     assert!(result.is_err(), "Huge allocation with small heap should fail, got: {:?}", result);
     let err = result.unwrap_err();
@@ -126,10 +126,10 @@ fn test_fast_computation_succeeds() {
     "#;
     let heap_bytes = 64 * 1024 * 1024;
 
-    let (result, _oom) = server::engine::execute_stateless(code, heap_bytes, no_handle(), &[], heap_bytes);
+    let (result, _oom) = server::engine::execute_stateless(code, heap_bytes, no_handle(), &[], heap_bytes, None);
 
     assert!(result.is_ok(), "Fast computation should succeed, got: {:?}", result);
-    assert_eq!(result.unwrap(), "499999500000");
+    assert_eq!(result.unwrap().result, "499999500000");
 }
 
 /// Bare call with no special params should work fine.
@@ -139,8 +139,8 @@ fn test_bare_call_default_params() {
 
     let heap_bytes = server::engine::DEFAULT_HEAP_MEMORY_MAX_MB * 1024 * 1024;
 
-    let (result, _oom) = server::engine::execute_stateless("1 + 1", heap_bytes, no_handle(), &[], heap_bytes);
+    let (result, _oom) = server::engine::execute_stateless("1 + 1", heap_bytes, no_handle(), &[], heap_bytes, None);
 
     assert!(result.is_ok(), "Simple expression should succeed, got: {:?}", result);
-    assert_eq!(result.unwrap(), "2");
+    assert_eq!(result.unwrap().result, "2");
 }

@@ -19,6 +19,8 @@ struct ExecRequest {
     heap_memory_max_mb: Option<usize>,
     #[serde(default)]
     execution_timeout_secs: Option<u64>,
+    #[serde(default)]
+    stdin: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -26,6 +28,10 @@ struct ExecResponse {
     output: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     heap: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    stdout: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    stderr: Vec<String>,
 }
 
 async fn exec_handler(
@@ -39,6 +45,7 @@ async fn exec_handler(
             req.session,
             req.heap_memory_max_mb,
             req.execution_timeout_secs,
+            req.stdin,
         )
         .await
     {
@@ -47,6 +54,8 @@ async fn exec_handler(
             Json(ExecResponse {
                 output: result.output,
                 heap: result.heap,
+                stdout: result.stdout,
+                stderr: result.stderr,
             }),
         ),
         Err(e) => (
@@ -54,6 +63,8 @@ async fn exec_handler(
             Json(ExecResponse {
                 output: format!("Error: {}", e),
                 heap: None,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
             }),
         ),
     }

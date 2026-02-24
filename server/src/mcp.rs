@@ -13,15 +13,24 @@ use crate::engine::Engine;
 pub struct RunJsResponse {
     pub output: String,
     pub heap: Option<String>,
+    pub stdout: Vec<String>,
+    pub stderr: Vec<String>,
 }
 
 impl IntoContents for RunJsResponse {
     fn into_contents(self) -> Vec<Content> {
-        let value = match self.heap {
-            Some(h) => json!({ "output": self.output, "heap": h }),
-            None => json!({ "output": self.output }),
-        };
-        match Content::json(value) {
+        let mut value = serde_json::Map::new();
+        value.insert("output".to_string(), json!(self.output));
+        if let Some(h) = self.heap {
+            value.insert("heap".to_string(), json!(h));
+        }
+        if !self.stdout.is_empty() {
+            value.insert("stdout".to_string(), json!(self.stdout));
+        }
+        if !self.stderr.is_empty() {
+            value.insert("stderr".to_string(), json!(self.stderr));
+        }
+        match Content::json(serde_json::Value::Object(value)) {
             Ok(content) => vec![content],
             Err(e) => vec![Content::text(format!("Failed to convert run_js response to content: {}", e))],
         }
@@ -87,15 +96,22 @@ impl McpService {
         #[tool(param)]
         #[serde(default)]
         execution_timeout_secs: Option<u64>,
+        #[tool(param)]
+        #[serde(default)]
+        stdin: Option<String>,
     ) -> RunJsResponse {
-        match self.engine.run_js(code, heap, session, heap_memory_max_mb, execution_timeout_secs).await {
+        match self.engine.run_js(code, heap, session, heap_memory_max_mb, execution_timeout_secs, stdin).await {
             Ok(result) => RunJsResponse {
                 output: result.output,
                 heap: result.heap,
+                stdout: result.stdout,
+                stderr: result.stderr,
             },
             Err(e) => RunJsResponse {
                 output: format!("V8 error: {}", e),
                 heap: None,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
             },
         }
     }
@@ -183,15 +199,22 @@ impl StatelessMcpService {
         #[tool(param)]
         #[serde(default)]
         execution_timeout_secs: Option<u64>,
+        #[tool(param)]
+        #[serde(default)]
+        stdin: Option<String>,
     ) -> RunJsResponse {
-        match self.engine.run_js(code, None, None, heap_memory_max_mb, execution_timeout_secs).await {
+        match self.engine.run_js(code, None, None, heap_memory_max_mb, execution_timeout_secs, stdin).await {
             Ok(result) => RunJsResponse {
                 output: result.output,
                 heap: None,
+                stdout: result.stdout,
+                stderr: result.stderr,
             },
             Err(e) => RunJsResponse {
                 output: format!("V8 error: {}", e),
                 heap: None,
+                stdout: Vec::new(),
+                stderr: Vec::new(),
             },
         }
     }

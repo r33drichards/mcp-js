@@ -33,7 +33,7 @@ const inst = new WebAssembly.Instance(mod);
 inst.exports.add(21, 21);
 "#;
 
-    let result = engine.run_js(code.to_string(), None, None, None, None).await;
+    let result = engine.run_js(code.to_string(), None, None, None, None, None).await;
 
     assert!(result.is_ok(), "WASM add should execute, got: {:?}", result);
     assert_eq!(result.unwrap().output, "42");
@@ -57,7 +57,7 @@ const wasmBytes = new Uint8Array([
 WebAssembly.validate(wasmBytes);
 "#;
 
-    let result = engine.run_js(code.to_string(), None, None, None, None).await;
+    let result = engine.run_js(code.to_string(), None, None, None, None, None).await;
 
     assert!(result.is_ok(), "WASM validate should execute, got: {:?}", result);
     assert_eq!(result.unwrap().output, "true");
@@ -74,7 +74,7 @@ const invalidBytes = new Uint8Array([0x00, 0x01, 0x02, 0x03]);
 WebAssembly.validate(invalidBytes);
 "#;
 
-    let result = engine.run_js(code.to_string(), None, None, None, None).await;
+    let result = engine.run_js(code.to_string(), None, None, None, None, None).await;
 
     assert!(result.is_ok(), "WASM validate on invalid bytes should execute, got: {:?}", result);
     assert_eq!(result.unwrap().output, "false");
@@ -101,7 +101,7 @@ const inst = new WebAssembly.Instance(mod);
 inst.exports.multiply(6, 7);
 "#;
 
-    let result = engine.run_js(code.to_string(), None, None, None, None).await;
+    let result = engine.run_js(code.to_string(), None, None, None, None, None).await;
 
     assert!(result.is_ok(), "WASM multiply should execute, got: {:?}", result);
     assert_eq!(result.unwrap().output, "42");
@@ -123,7 +123,7 @@ try {
 }
 "#;
 
-    let result = engine.run_js(code.to_string(), None, None, None, None).await;
+    let result = engine.run_js(code.to_string(), None, None, None, None, None).await;
 
     assert!(result.is_ok(), "WASM compile error test should execute, got: {:?}", result);
     assert_eq!(result.unwrap().output, "true");
@@ -164,7 +164,7 @@ async fn test_wasm_global_module_add() {
             WasmModule { name: "math".to_string(), bytes: add_wasm_bytes(), max_memory_bytes: None },
         ]);
 
-    let result = engine.run_js("math.add(21, 21);".to_string(), None, None, None, None).await;
+    let result = engine.run_js("math.add(21, 21);".to_string(), None, None, None, None, None).await;
 
     assert!(result.is_ok(), "Global WASM add should work, got: {:?}", result);
     assert_eq!(result.unwrap().output, "42");
@@ -181,7 +181,7 @@ async fn test_wasm_multiple_global_modules() {
         ]);
 
     let code = "adder.add(10, 5) + multiplier.multiply(3, 4);";
-    let result = engine.run_js(code.to_string(), None, None, None, None).await;
+    let result = engine.run_js(code.to_string(), None, None, None, None, None).await;
 
     assert!(result.is_ok(), "Multiple global WASM modules should work, got: {:?}", result);
     assert_eq!(result.unwrap().output, "27"); // 15 + 12
@@ -204,7 +204,7 @@ for (var i = 0; i < 5; i++) {
 JSON.stringify(results);
 "#;
 
-    let result = engine.run_js(code.to_string(), None, None, None, None).await;
+    let result = engine.run_js(code.to_string(), None, None, None, None, None).await;
 
     assert!(result.is_ok(), "WASM global with user code should work, got: {:?}", result);
     assert_eq!(result.unwrap().output, "[0,2,4,6,8]");
@@ -217,7 +217,7 @@ async fn test_wasm_no_modules_no_preamble() {
     let engine = Engine::new_stateless(8 * 1024 * 1024, 30, 4);
 
     // typeof should be "undefined" if no WASM globals are injected
-    let result = engine.run_js("typeof math;".to_string(), None, None, None, None).await;
+    let result = engine.run_js("typeof math;".to_string(), None, None, None, None, None).await;
 
     assert!(result.is_ok(), "No modules should mean no globals, got: {:?}", result);
     assert_eq!(result.unwrap().output, "undefined");
@@ -243,7 +243,7 @@ async fn test_wasm_load_from_filepath() {
             WasmModule { name: "math".to_string(), bytes, max_memory_bytes: None },
         ]);
 
-    let result = engine.run_js("math.add(21, 21);".to_string(), None, None, None, None).await;
+    let result = engine.run_js("math.add(21, 21);".to_string(), None, None, None, None, None).await;
 
     assert!(result.is_ok(), "WASM loaded from filepath should work, got: {:?}", result);
     assert_eq!(result.unwrap().output, "42");
@@ -262,7 +262,7 @@ async fn test_wasm_module_global_exposed_for_no_imports() {
 
     // __wasm_math should be a WebAssembly.Module
     let code = "__wasm_math instanceof WebAssembly.Module;";
-    let result = engine.run_js(code.to_string(), None, None, None, None).await;
+    let result = engine.run_js(code.to_string(), None, None, None, None, None).await;
     assert!(result.is_ok(), "Module global should exist, got: {:?}", result);
     assert_eq!(result.unwrap().output, "true");
 }
@@ -280,7 +280,7 @@ async fn test_wasm_module_global_manual_instantiation() {
 var inst = new WebAssembly.Instance(__wasm_math);
 inst.exports.add(100, 200);
 "#;
-    let result = engine.run_js(code.to_string(), None, None, None, None).await;
+    let result = engine.run_js(code.to_string(), None, None, None, None, None).await;
     assert!(result.is_ok(), "Manual instantiation should work, got: {:?}", result);
     assert_eq!(result.unwrap().output, "300");
 }
@@ -319,7 +319,7 @@ async fn test_wasm_module_with_imports_not_auto_instantiated() {
 
     // The auto-instantiated `mymod` should NOT exist (module has imports)
     let code = "typeof mymod;";
-    let result = engine.run_js(code.to_string(), None, None, None, None).await;
+    let result = engine.run_js(code.to_string(), None, None, None, None, None).await;
     assert!(result.is_ok(), "Should execute, got: {:?}", result);
     assert_eq!(result.unwrap().output, "undefined");
 }
@@ -340,7 +340,7 @@ var inst = new WebAssembly.Instance(__wasm_mymod, {
 });
 inst.exports.triple(10);
 "#;
-    let result = engine.run_js(code.to_string(), None, None, None, None).await;
+    let result = engine.run_js(code.to_string(), None, None, None, None, None).await;
     assert!(result.is_ok(), "Manual instantiation with imports should work, got: {:?}", result);
     assert_eq!(result.unwrap().output, "30"); // double(10) + 10 = 20 + 10 = 30
 }

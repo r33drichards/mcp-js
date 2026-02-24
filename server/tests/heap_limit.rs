@@ -36,7 +36,7 @@ fn test_stateless_small_heap_limit_rejects_large_allocation() {
 
     // 5 MB heap limit — too small for a 2M-element string array
     let max_bytes = 5 * 1024 * 1024;
-    let (result, _oom) = server::engine::execute_stateless(MEMORY_HOG_JS, max_bytes, no_handle(), &[], max_bytes);
+    let (result, _oom) = server::engine::execute_stateless(MEMORY_HOG_JS, max_bytes, no_handle(), &[], max_bytes, None);
 
     assert!(
         result.is_err(),
@@ -50,14 +50,14 @@ fn test_stateless_default_limit_allows_small_code() {
     ensure_v8();
 
     let max_bytes = server::engine::DEFAULT_HEAP_MEMORY_MAX_MB * 1024 * 1024;
-    let (result, _oom) = server::engine::execute_stateless(SMALL_JS, max_bytes, no_handle(), &[], max_bytes);
+    let (result, _oom) = server::engine::execute_stateless(SMALL_JS, max_bytes, no_handle(), &[], max_bytes, None);
 
     assert!(
         result.is_ok(),
         "Simple JS should succeed with default heap limit, but got: {:?}",
         result
     );
-    assert_eq!(result.unwrap(), "2");
+    assert_eq!(result.unwrap().result, "2");
 }
 
 #[test]
@@ -66,14 +66,14 @@ fn test_stateless_generous_limit_allows_large_allocation() {
 
     // 256 MB — should be plenty for 2M strings
     let max_bytes = 256 * 1024 * 1024;
-    let (result, _oom) = server::engine::execute_stateless(MEMORY_HOG_JS, max_bytes, no_handle(), &[], max_bytes);
+    let (result, _oom) = server::engine::execute_stateless(MEMORY_HOG_JS, max_bytes, no_handle(), &[], max_bytes, None);
 
     assert!(
         result.is_ok(),
         "Large allocation should succeed with 256MB heap limit, but got: {:?}",
         result
     );
-    assert_eq!(result.unwrap(), "2000000");
+    assert_eq!(result.unwrap().result, "2000000");
 }
 
 #[test]
@@ -82,7 +82,7 @@ fn test_stateful_small_heap_limit_rejects_large_allocation() {
 
     // 5 MB heap limit — too small for a 2M-element string array
     let max_bytes = 5 * 1024 * 1024;
-    let (result, _oom) = server::engine::execute_stateful(MEMORY_HOG_JS, None, max_bytes, no_handle(), &[], max_bytes);
+    let (result, _oom) = server::engine::execute_stateful(MEMORY_HOG_JS, None, max_bytes, no_handle(), &[], max_bytes, None);
 
     assert!(
         result.is_err(),
@@ -96,15 +96,15 @@ fn test_stateful_default_limit_allows_small_code() {
     ensure_v8();
 
     let max_bytes = server::engine::DEFAULT_HEAP_MEMORY_MAX_MB * 1024 * 1024;
-    let (result, _oom) = server::engine::execute_stateful(SMALL_JS, None, max_bytes, no_handle(), &[], max_bytes);
+    let (result, _oom) = server::engine::execute_stateful(SMALL_JS, None, max_bytes, no_handle(), &[], max_bytes, None);
 
     assert!(
         result.is_ok(),
         "Simple JS should succeed with default heap limit in stateful mode, but got: {:?}",
         result
     );
-    let (output, snapshot, _content_hash) = result.unwrap();
-    assert_eq!(output, "2");
+    let (exec, snapshot, _content_hash) = result.unwrap();
+    assert_eq!(exec.result, "2");
     assert!(!snapshot.is_empty(), "Snapshot should be non-empty");
 }
 
@@ -114,15 +114,15 @@ fn test_stateful_generous_limit_allows_large_allocation() {
 
     // 256 MB — should be plenty for 2M strings
     let max_bytes = 256 * 1024 * 1024;
-    let (result, _oom) = server::engine::execute_stateful(MEMORY_HOG_JS, None, max_bytes, no_handle(), &[], max_bytes);
+    let (result, _oom) = server::engine::execute_stateful(MEMORY_HOG_JS, None, max_bytes, no_handle(), &[], max_bytes, None);
 
     assert!(
         result.is_ok(),
         "Large allocation should succeed with 256MB heap limit in stateful mode, but got: {:?}",
         result
     );
-    let (output, _, _) = result.unwrap();
-    assert_eq!(output, "2000000");
+    let (exec, _, _) = result.unwrap();
+    assert_eq!(exec.result, "2000000");
 }
 
 #[test]
@@ -133,8 +133,8 @@ fn test_different_limits_produce_different_outcomes() {
     let small_limit = 5 * 1024 * 1024;
     let large_limit = 256 * 1024 * 1024;
 
-    let (small_result, _) = server::engine::execute_stateless(MEMORY_HOG_JS, small_limit, no_handle(), &[], small_limit);
-    let (large_result, _) = server::engine::execute_stateless(MEMORY_HOG_JS, large_limit, no_handle(), &[], large_limit);
+    let (small_result, _) = server::engine::execute_stateless(MEMORY_HOG_JS, small_limit, no_handle(), &[], small_limit, None);
+    let (large_result, _) = server::engine::execute_stateless(MEMORY_HOG_JS, large_limit, no_handle(), &[], large_limit, None);
 
     assert!(
         small_result.is_err(),
@@ -177,7 +177,7 @@ fn test_typed_array_oom_does_not_crash_stateless() {
 
     // 8 MB heap — typed array backing stores will exceed this quickly
     let heap_bytes = 8 * 1024 * 1024;
-    let (result, _oom) = server::engine::execute_stateless(TYPED_ARRAY_OOM_JS, heap_bytes, no_handle(), &[], heap_bytes);
+    let (result, _oom) = server::engine::execute_stateless(TYPED_ARRAY_OOM_JS, heap_bytes, no_handle(), &[], heap_bytes, None);
 
     // We don't care whether it's Ok (the JS catch fired) or Err (V8 killed it) —
     // the critical thing is that we *get here* instead of a process crash.
@@ -196,7 +196,7 @@ fn test_typed_array_oom_does_not_crash_stateful() {
     ensure_v8();
 
     let heap_bytes = 8 * 1024 * 1024;
-    let (result, _oom) = server::engine::execute_stateful(TYPED_ARRAY_OOM_JS, None, heap_bytes, no_handle(), &[], heap_bytes);
+    let (result, _oom) = server::engine::execute_stateful(TYPED_ARRAY_OOM_JS, None, heap_bytes, no_handle(), &[], heap_bytes, None);
 
     if let Err(ref e) = result {
         assert!(
@@ -236,7 +236,7 @@ fn extreme_oom_subprocess_worker() {
 
     match mode.as_str() {
         "stateless" => {
-            let (result, _) = server::engine::execute_stateless(code, heap_bytes, no_handle(), &[], heap_bytes);
+            let (result, _) = server::engine::execute_stateless(code, heap_bytes, no_handle(), &[], heap_bytes, None);
             // If we reach here (V8 didn't abort), exit cleanly.
             if result.is_err() {
                 std::process::exit(0);
@@ -244,7 +244,7 @@ fn extreme_oom_subprocess_worker() {
             std::process::exit(0);
         }
         "stateful" => {
-            let (result, _) = server::engine::execute_stateful(code, None, heap_bytes, no_handle(), &[], heap_bytes);
+            let (result, _) = server::engine::execute_stateful(code, None, heap_bytes, no_handle(), &[], heap_bytes, None);
             if result.is_err() {
                 std::process::exit(0);
             }
@@ -276,13 +276,13 @@ fn run_extreme_oom_subprocess(mode: &str) {
     // The parent process is still running — V8 global state is intact.
     // Verify by running a simple V8 execution.
     ensure_v8();
-    let (result, _) = server::engine::execute_stateless("1 + 1", 8 * 1024 * 1024, no_handle(), &[], 16 * 1024 * 1024);
+    let (result, _) = server::engine::execute_stateless("1 + 1", 8 * 1024 * 1024, no_handle(), &[], 16 * 1024 * 1024, None);
     assert!(
         result.is_ok(),
         "Parent process V8 should be unaffected after subprocess OOM, but got: {:?}",
         result,
     );
-    assert_eq!(result.unwrap(), "2");
+    assert_eq!(result.unwrap().result, "2");
 }
 
 #[test]

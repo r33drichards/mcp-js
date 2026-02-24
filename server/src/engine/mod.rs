@@ -620,6 +620,83 @@ fn format_trycatch_exception(tc_scope: &mut v8::TryCatch<v8::EscapableHandleScop
     }
 }
 
+// ── Console I/O buffering ───────────────────────────────────────────────
+//
+// Console is implemented as pure JS so it serializes cleanly in V8
+// snapshots (native callbacks require registered external references
+// which SnapshotCreator rejects). The `__stdout__` and `__stderr__`
+// arrays are read back into Rust after eval completes.
+// A `__stdin__` global is optionally set so that the output of a
+// previous execution can be piped as input to the next.
+
+/// JS preamble that resets console buffers before each execution.
+const CONSOLE_PREAMBLE: &str = r#"var __stdout__ = [];
+var __stderr__ = [];
+var console = {
+    log: function() { var a = []; for (var i = 0; i < arguments.length; i++) a.push(String(arguments[i])); __stdout__.push(a.join(' ')); },
+    info: function() { var a = []; for (var i = 0; i < arguments.length; i++) a.push(String(arguments[i])); __stdout__.push(a.join(' ')); },
+    error: function() { var a = []; for (var i = 0; i < arguments.length; i++) a.push(String(arguments[i])); __stderr__.push(a.join(' ')); },
+    warn: function() { var a = []; for (var i = 0; i < arguments.length; i++) a.push(String(arguments[i])); __stderr__.push(a.join(' ')); },
+};
+undefined;"#;
+
+/// Inject `__stdin__` global and pure-JS `console` into the V8 context.
+fn inject_io(
+    scope: &mut v8::ContextScope<v8::HandleScope>,
+    stdin: Option<&str>,
+) {
+    let global = scope.get_current_context().global(scope);
+
+    // Inject __stdin__ as a global string (if provided).
+    if let Some(input) = stdin {
+        let key = v8::String::new(scope, "__stdin__").unwrap();
+        let val = v8::String::new(scope, input).unwrap();
+        global.set(scope, key.into(), val.into());
+    }
+
+    // Inject pure-JS console (resets __stdout__/__stderr__ each time).
+    let _ = eval(scope, CONSOLE_PREAMBLE);
+}
+
+/// Read a JS string-array global (e.g. `__stdout__`) into a `Vec<String>`.
+fn read_string_array(
+    scope: &mut v8::ContextScope<v8::HandleScope>,
+    name: &str,
+) -> Vec<String> {
+    let global = scope.get_current_context().global(scope);
+    let key = match v8::String::new(scope, name) {
+        Some(k) => k,
+        None => return Vec::new(),
+    };
+    let val = match global.get(scope, key.into()) {
+        Some(v) => v,
+        None => return Vec::new(),
+    };
+    let arr: v8::Local<v8::Array> = match val.try_into() {
+        Ok(a) => a,
+        Err(_) => return Vec::new(),
+    };
+    let len = arr.length();
+    let mut result = Vec::with_capacity(len as usize);
+    for i in 0..len {
+        if let Some(elem) = arr.get_index(scope, i) {
+            result.push(elem.to_rust_string_lossy(scope));
+        }
+    }
+    result
+}
+
+/// Output from a single V8 execution (shared by stateless and stateful paths).
+#[derive(Debug, Clone)]
+pub struct ExecOutput {
+    /// The `.toString()` of the last expression evaluated.
+    pub result: String,
+    /// Lines captured from `console.log` / `console.info`.
+    pub stdout: Vec<String>,
+    /// Lines captured from `console.error` / `console.warn`.
+    pub stderr: Vec<String>,
+}
+
 // ── Stateless / stateful V8 execution ───────────────────────────────────
 //
 // V8 always runs on the calling thread. An `IsolateHandle` is published
@@ -635,7 +712,8 @@ pub fn execute_stateless(
     isolate_handle: Arc<Mutex<Option<v8::IsolateHandle>>>,
     wasm_modules: &[WasmModule],
     wasm_default_max_bytes: usize,
-) -> (Result<String, String>, bool) {
+    stdin: Option<&str>,
+) -> (Result<ExecOutput, String>, bool) {
     let oom_flag = Arc::new(AtomicBool::new(false));
 
     let result = catch_unwind(AssertUnwindSafe(|| {
@@ -647,14 +725,17 @@ pub fn execute_stateless(
 
         let cb_data_ptr = install_heap_limit_callback(&mut isolate, oom_flag.clone());
 
-        let eval_result = {
+        let (eval_result, stdout, stderr) = {
             let scope = &mut v8::HandleScope::new(&mut isolate);
             let context = v8::Context::new(scope, Default::default());
             let scope = &mut v8::ContextScope::new(scope, context);
 
+            // Inject console and __stdin__ before user code and WASM modules.
+            inject_io(scope, stdin);
+
             // Inject WASM modules as globals via native V8 API.
             // Do NOT early-return here — cb_data_ptr must be freed below.
-            match inject_wasm_modules(scope, wasm_modules, wasm_default_max_bytes) {
+            let eval_result = match inject_wasm_modules(scope, wasm_modules, wasm_default_max_bytes) {
                 Err(e) => Err(e),
                 Ok(()) => match eval(scope, code) {
                     Ok(value) => match value.to_string(scope) {
@@ -663,13 +744,19 @@ pub fn execute_stateless(
                     },
                     Err(e) => Err(e),
                 },
-            }
+            };
+
+            // Read console output from JS arrays.
+            let stdout = read_string_array(scope, "__stdout__");
+            let stderr = read_string_array(scope, "__stderr__");
+
+            (eval_result, stdout, stderr)
         };
 
         *isolate_handle.lock().unwrap() = None;
         unsafe { let _ = Box::from_raw(cb_data_ptr); }
 
-        eval_result
+        eval_result.map(|result| ExecOutput { result, stdout, stderr })
     }));
 
     let oom = oom_flag.load(Ordering::SeqCst);
@@ -696,7 +783,8 @@ pub fn execute_stateful(
     isolate_handle: Arc<Mutex<Option<v8::IsolateHandle>>>,
     wasm_modules: &[WasmModule],
     wasm_default_max_bytes: usize,
-) -> (Result<(String, Vec<u8>, String), String>, bool) {
+    stdin: Option<&str>,
+) -> (Result<(ExecOutput, Vec<u8>, String), String>, bool) {
     let oom_flag = Arc::new(AtomicBool::new(false));
 
     let result = catch_unwind(AssertUnwindSafe(|| {
@@ -718,11 +806,14 @@ pub fn execute_stateful(
 
         let cb_data_ptr = install_heap_limit_callback(&mut snapshot_creator, oom_flag.clone());
 
-        let output_result;
+        let (output_result, stdout, stderr);
         {
             let scope = &mut v8::HandleScope::new(&mut snapshot_creator);
             let context = v8::Context::new(scope, Default::default());
             let scope = &mut v8::ContextScope::new(scope, context);
+
+            // Inject console and __stdin__ before user code and WASM modules.
+            inject_io(scope, stdin);
 
             // Inject WASM modules as globals via native V8 API.
             // Do NOT early-return here — create_blob() must be called below
@@ -739,6 +830,11 @@ pub fn execute_stateful(
                     Err(e) => Err(e),
                 },
             };
+
+            // Read console output from JS arrays before scope drops.
+            stdout = read_string_array(scope, "__stdout__");
+            stderr = read_string_array(scope, "__stderr__");
+
             scope.set_default_context(context);
         }
 
@@ -750,11 +846,11 @@ pub fn execute_stateful(
         let blob_result = snapshot_creator.create_blob(v8::FunctionCodeHandling::Clear);
 
         match output_result {
-            Ok(output) => {
+            Ok(result_str) => {
                 let startup_data = blob_result
                     .ok_or("Failed to create V8 snapshot blob".to_string())?;
                 let wrapped = wrap_snapshot(&startup_data);
-                Ok((output, wrapped.data, wrapped.content_hash))
+                Ok((ExecOutput { result: result_str, stdout, stderr }, wrapped.data, wrapped.content_hash))
             }
             Err(e) => Err(e),
         }
@@ -779,6 +875,10 @@ pub fn execute_stateful(
 pub struct JsResult {
     pub output: String,
     pub heap: Option<String>,
+    /// Lines captured from `console.log` / `console.info`.
+    pub stdout: Vec<String>,
+    /// Lines captured from `console.error` / `console.warn`.
+    pub stderr: Vec<String>,
 }
 
 /// A pre-loaded WASM module: human-readable name + raw `.wasm` bytes.
@@ -870,6 +970,7 @@ impl Engine {
         session: Option<String>,
         heap_memory_max_mb: Option<usize>,
         execution_timeout_secs: Option<u64>,
+        stdin: Option<String>,
     ) -> Result<JsResult, String> {
         // Strip TypeScript types before V8 execution (no-op for plain JS)
         let code = strip_typescript_types(&code)?;
@@ -893,14 +994,19 @@ impl Engine {
                 let wasm = self.wasm_modules.clone();
                 let wasm_default = self.wasm_default_max_bytes;
                 let mut join_handle = tokio::task::spawn_blocking(move || {
-                    execute_stateless(&code, max_bytes, ih, &wasm, wasm_default)
+                    execute_stateless(&code, max_bytes, ih, &wasm, wasm_default, stdin.as_deref())
                 });
 
                 tokio::select! {
                     biased;
                     res = &mut join_handle => {
                         match res {
-                            Ok((Ok(output), _oom)) => Ok(JsResult { output, heap: None }),
+                            Ok((Ok(exec), _oom)) => Ok(JsResult {
+                                output: exec.result,
+                                heap: None,
+                                stdout: exec.stdout,
+                                stderr: exec.stderr,
+                            }),
                             Ok((Err(e), _oom)) => Err(e),
                             Err(e) => Err(format!("Task join error: {}", e)),
                         }
@@ -936,7 +1042,7 @@ impl Engine {
                 let snap_mutex = self.snapshot_mutex.clone();
                 let mut join_handle = tokio::task::spawn_blocking(move || {
                     let _guard = snap_mutex.blocking_lock();
-                    execute_stateful(&code, raw_snapshot, max_bytes, ih, &wasm, wasm_default)
+                    execute_stateful(&code, raw_snapshot, max_bytes, ih, &wasm, wasm_default, stdin.as_deref())
                 });
 
                 let v8_result = tokio::select! {
@@ -957,7 +1063,7 @@ impl Engine {
                 };
 
                 match v8_result {
-                    Ok((output, startup_data, content_hash)) => {
+                    Ok((exec, startup_data, content_hash)) => {
                         if let Err(e) = storage.put(&content_hash, &startup_data).await {
                             return Err(format!("Error saving heap: {}", e));
                         }
@@ -974,7 +1080,12 @@ impl Engine {
                             }
                         }
 
-                        Ok(JsResult { output, heap: Some(content_hash) })
+                        Ok(JsResult {
+                            output: exec.result,
+                            heap: Some(content_hash),
+                            stdout: exec.stdout,
+                            stderr: exec.stderr,
+                        })
                     }
                     Err(e) => Err(e),
                 }
