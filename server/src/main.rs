@@ -11,7 +11,7 @@ mod engine;
 mod mcp;
 mod api;
 mod cluster;
-use engine::{initialize_v8, Engine, DEFAULT_EXECUTION_TIMEOUT_SECS};
+use engine::{initialize_v8, Engine, WasmModule, DEFAULT_EXECUTION_TIMEOUT_SECS};
 use engine::heap_storage::{AnyHeapStorage, S3HeapStorage, WriteThroughCacheHeapStorage, FileHeapStorage};
 use engine::session_log::SessionLog;
 use mcp::{McpService, StatelessMcpService};
@@ -102,6 +102,19 @@ struct Cli {
     /// Maximum election timeout in milliseconds
     #[arg(long, default_value = "500")]
     election_timeout_max: u64,
+
+    // ── WASM module options ──────────────────────────────────────────
+
+    /// Pre-load a WASM module as a global. Format: name=/path/to/module.wasm
+    /// The module's exports will be available as a global variable with the given name.
+    /// Can be specified multiple times for multiple modules.
+    #[arg(long = "wasm-module", value_name = "NAME=PATH")]
+    wasm_modules: Vec<String>,
+
+    /// Path to a JSON config file mapping global names to .wasm file paths.
+    /// Format: {"name": "/path/to/module.wasm", ...}
+    #[arg(long = "wasm-config", value_name = "PATH")]
+    wasm_config: Option<String>,
 }
 
 #[tokio::main]
@@ -182,6 +195,13 @@ async fn main() -> Result<()> {
         None
     };
 
+    // ── Load WASM modules ────────────────────────────────────────────────
+    let wasm_modules = load_wasm_modules(&cli.wasm_modules, &cli.wasm_config)?;
+    if !wasm_modules.is_empty() {
+        tracing::info!("Loaded {} WASM module(s): {}", wasm_modules.len(),
+            wasm_modules.iter().map(|m| m.name.as_str()).collect::<Vec<_>>().join(", "));
+    }
+
     // ── Build Engine ────────────────────────────────────────────────────
     let engine = if cli.stateless {
         tracing::info!("Creating stateless engine");
@@ -223,6 +243,8 @@ async fn main() -> Result<()> {
         tracing::info!("Creating stateful engine");
         Engine::new_stateful(heap_storage, session_log, heap_memory_max_bytes, execution_timeout_secs, cli.max_concurrent_executions)
     };
+
+    let engine = if wasm_modules.is_empty() { engine } else { engine.with_wasm_modules(wasm_modules) };
 
     // ── Start transport ─────────────────────────────────────────────────
     if let Some(port) = cli.http_port {
@@ -353,5 +375,76 @@ where
     tracing::info!("Received Ctrl+C, shutting down SSE server");
     ct.cancel();
 
+    Ok(())
+}
+
+// ── WASM module loading ──────────────────────────────────────────────────
+
+/// Parse `--wasm-module name=/path` flags and optional `--wasm-config` JSON file,
+/// read `.wasm` bytes from disk, and return validated `WasmModule` entries.
+fn load_wasm_modules(
+    cli_modules: &[String],
+    config_path: &Option<String>,
+) -> Result<Vec<WasmModule>> {
+    let mut modules = Vec::new();
+
+    // Parse CLI --wasm-module flags (format: name=/path/to/file.wasm)
+    for entry in cli_modules {
+        let (name, path) = entry.split_once('=')
+            .ok_or_else(|| anyhow::anyhow!(
+                "Invalid --wasm-module format: '{}'. Expected name=/path/to/file.wasm", entry
+            ))?;
+        let name = name.trim().to_string();
+        let path = path.trim();
+        validate_wasm_name(&name)?;
+        let bytes = std::fs::read(path)
+            .map_err(|e| anyhow::anyhow!("Failed to read WASM file '{}': {}", path, e))?;
+        modules.push(WasmModule { name, bytes });
+    }
+
+    // Parse --wasm-config JSON file (format: {"name": "/path/to/file.wasm", ...})
+    if let Some(config_path) = config_path {
+        let config_str = std::fs::read_to_string(config_path)
+            .map_err(|e| anyhow::anyhow!("Failed to read WASM config '{}': {}", config_path, e))?;
+        let config: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&config_str)
+            .map_err(|e| anyhow::anyhow!("Invalid JSON in WASM config '{}': {}", config_path, e))?;
+        for (name, value) in config {
+            let path = value.as_str()
+                .ok_or_else(|| anyhow::anyhow!(
+                    "WASM config value for '{}' must be a string path, got: {}", name, value
+                ))?;
+            validate_wasm_name(&name)?;
+            let bytes = std::fs::read(path)
+                .map_err(|e| anyhow::anyhow!("Failed to read WASM file '{}': {}", path, e))?;
+            modules.push(WasmModule { name, bytes });
+        }
+    }
+
+    // Check for duplicate names
+    let mut seen = std::collections::HashSet::new();
+    for m in &modules {
+        if !seen.insert(&m.name) {
+            anyhow::bail!("Duplicate WASM module name: '{}'", m.name);
+        }
+    }
+
+    Ok(modules)
+}
+
+/// Validate that a WASM module name is a valid JS identifier.
+fn validate_wasm_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        anyhow::bail!("WASM module name cannot be empty");
+    }
+    let mut chars = name.chars();
+    let first = chars.next().unwrap();
+    if !first.is_ascii_alphabetic() && first != '_' && first != '$' {
+        anyhow::bail!("WASM module name '{}' must start with a letter, underscore, or dollar sign", name);
+    }
+    for c in chars {
+        if !c.is_ascii_alphanumeric() && c != '_' && c != '$' {
+            anyhow::bail!("WASM module name '{}' contains invalid character '{}'", name, c);
+        }
+    }
     Ok(())
 }

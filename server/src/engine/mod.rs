@@ -393,6 +393,29 @@ pub fn strip_typescript_types(code: &str) -> Result<String, String> {
     })
 }
 
+/// Generate a JS preamble that compiles, instantiates, and binds WASM modules as globals.
+///
+/// Each module's raw bytes are emitted as a `Uint8Array` literal, synchronously compiled
+/// via `WebAssembly.Module`, instantiated via `WebAssembly.Instance`, and its `.exports`
+/// object is assigned to a global variable with the configured name.
+pub fn wasm_preamble(modules: &[WasmModule]) -> String {
+    if modules.is_empty() {
+        return String::new();
+    }
+    let mut preamble = String::new();
+    for m in modules {
+        let bytes_str = m.bytes.iter()
+            .map(|b| format!("0x{:02x}", b))
+            .collect::<Vec<_>>()
+            .join(",");
+        preamble.push_str(&format!(
+            "var {} = new WebAssembly.Instance(new WebAssembly.Module(new Uint8Array([{}]))).exports;\n",
+            m.name, bytes_str,
+        ));
+    }
+    preamble
+}
+
 pub fn eval<'s>(scope: &mut v8::HandleScope<'s>, code: &str) -> Result<v8::Local<'s, v8::Value>, String> {
     let scope = &mut v8::EscapableHandleScope::new(scope);
     let source = v8::String::new(scope, code).ok_or("Failed to create V8 string")?;
@@ -538,6 +561,13 @@ pub struct JsResult {
     pub heap: Option<String>,
 }
 
+/// A pre-loaded WASM module: human-readable name + raw `.wasm` bytes.
+#[derive(Clone, Debug)]
+pub struct WasmModule {
+    pub name: String,
+    pub bytes: Vec<u8>,
+}
+
 #[derive(Clone)]
 pub struct Engine {
     heap_storage: Option<AnyHeapStorage>,
@@ -550,6 +580,8 @@ pub struct Engine {
     /// This mutex serializes stateful V8 execution while stateless
     /// requests proceed in full parallelism.
     snapshot_mutex: Arc<tokio::sync::Mutex<()>>,
+    /// WASM modules to inject as globals before every execution.
+    wasm_modules: Arc<Vec<WasmModule>>,
 }
 
 impl Engine {
@@ -565,6 +597,7 @@ impl Engine {
             execution_timeout_secs,
             v8_semaphore: Arc::new(Semaphore::new(max_concurrent)),
             snapshot_mutex: Arc::new(tokio::sync::Mutex::new(())),
+            wasm_modules: Arc::new(Vec::new()),
         }
     }
 
@@ -582,7 +615,14 @@ impl Engine {
             execution_timeout_secs,
             v8_semaphore: Arc::new(Semaphore::new(max_concurrent)),
             snapshot_mutex: Arc::new(tokio::sync::Mutex::new(())),
+            wasm_modules: Arc::new(Vec::new()),
         }
+    }
+
+    /// Set WASM modules to inject as globals before every execution.
+    pub fn with_wasm_modules(mut self, modules: Vec<WasmModule>) -> Self {
+        self.wasm_modules = Arc::new(modules);
+        self
     }
 
     /// Core execution — used by both MCP and API.
@@ -600,6 +640,14 @@ impl Engine {
     ) -> Result<JsResult, String> {
         // Strip TypeScript types before V8 execution (no-op for plain JS)
         let code = strip_typescript_types(&code)?;
+
+        // Prepend WASM module initialization if any modules are configured.
+        let code = if self.wasm_modules.is_empty() {
+            code
+        } else {
+            let preamble = wasm_preamble(&self.wasm_modules);
+            format!("{}{}", preamble, code)
+        };
 
         let max_bytes = heap_memory_max_mb
             .map(|mb| mb.max(MIN_HEAP_MEMORY_MB) * 1024 * 1024)

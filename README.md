@@ -70,6 +70,38 @@ These options enable Raft-based clustering for distributed coordination and repl
 - `--election-timeout-min <ms>`: Minimum election timeout in milliseconds (default: 300).
 - `--election-timeout-max <ms>`: Maximum election timeout in milliseconds (default: 500).
 
+### WASM Module Options
+
+Pre-load WebAssembly modules that are available as global variables in every JavaScript execution.
+
+- `--wasm-module <name>=<path>`: Pre-load a `.wasm` file and expose its exports as a global variable with the given name. Can be specified multiple times for multiple modules.
+- `--wasm-config <path>`: Path to a JSON config file mapping global names to `.wasm` file paths. Format: `{"name": "/path/to/module.wasm", ...}`.
+
+Both options can be used together. CLI flags and config file entries are merged; duplicate names cause an error.
+
+**Example — CLI flags:**
+```bash
+mcp-v8 --stateless --wasm-module math=/path/to/math.wasm --wasm-module crypto=/path/to/crypto.wasm
+```
+
+**Example — Config file** (`wasm-modules.json`):
+```json
+{
+  "math": "/path/to/math.wasm",
+  "crypto": "/path/to/crypto.wasm"
+}
+```
+```bash
+mcp-v8 --stateless --wasm-config wasm-modules.json
+```
+
+After loading, the module exports are available directly in JavaScript:
+```javascript
+math.add(21, 21); // → 42
+```
+
+**Note:** Only self-contained WASM modules (no imports) are supported. Modules requiring imported memory, tables, or other imports will fail to instantiate.
+
 ## Quick Start
 
 After installation, you can run the server directly. Choose one of the following options:
@@ -299,6 +331,8 @@ inst.exports.add(21, 21); // → 42
 ```
 
 This uses synchronous compilation (`WebAssembly.Module` / `WebAssembly.Instance`), which works within the V8 runtime. The async APIs (`WebAssembly.compile`, `WebAssembly.instantiate` returning Promises) are not supported since the runtime does not support async/await.
+
+Alternatively, you can pre-load `.wasm` files at server startup using `--wasm-module` or `--wasm-config` so they are available as globals in every execution without inline byte arrays. See [WASM Module Options](#wasm-module-options) for details.
 
 ## Heap Storage Options
 
