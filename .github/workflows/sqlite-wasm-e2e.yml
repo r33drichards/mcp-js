@@ -41,7 +41,7 @@ jobs:
           # Start server in HTTP mode with the SQLite WASM module
           $SERVER_BIN --stateless --http-port 8080 \
             --wasm-module sqlite="$WASM_PATH" \
-            --heap-memory-max 128 &
+            --heap-memory-max 64 &
           SERVER_PID=$!
 
           # Ensure we always clean up the server process
