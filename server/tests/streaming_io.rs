@@ -7,7 +7,7 @@
 /// - Composing executions by piping output → stdin
 
 use std::sync::{Arc, Mutex, Once};
-use server::engine::{Engine, initialize_v8, execute_stateless, execute_stateful};
+use server::engine::{Engine, initialize_v8, execute_stateless, execute_stateful, PipelineStage};
 
 static INIT: Once = Once::new();
 
@@ -271,4 +271,168 @@ async fn test_engine_no_console_output_when_none() {
     assert_eq!(jr.output, "2");
     assert!(jr.stdout.is_empty());
     assert!(jr.stderr.is_empty());
+}
+
+// ── Pipeline tests ────────────────────────────────────────────────────
+
+fn code_stage(code: &str) -> PipelineStage {
+    PipelineStage {
+        code: Some(code.to_string()),
+        heap: None,
+        heap_memory_max_mb: None,
+        execution_timeout_secs: None,
+    }
+}
+
+fn heap_stage(hash: &str) -> PipelineStage {
+    PipelineStage {
+        code: None,
+        heap: Some(hash.to_string()),
+        heap_memory_max_mb: None,
+        execution_timeout_secs: None,
+    }
+}
+
+#[tokio::test]
+async fn test_pipeline_code_only_three_stages() {
+    ensure_v8();
+    let engine = Engine::new_stateless(HEAP, 30, 4);
+
+    let result = engine.run_pipeline(
+        vec![
+            code_stage("JSON.stringify([1, 2, 3, 4, 5])"),
+            code_stage("JSON.stringify(JSON.parse(__stdin__).map(function(x) { return x * 2; }))"),
+            code_stage("JSON.parse(__stdin__).reduce(function(a, b) { return a + b; }, 0)"),
+        ],
+        None,
+    ).await;
+
+    assert!(result.is_ok(), "Pipeline should succeed, got: {:?}", result);
+    let pr = result.unwrap();
+    assert_eq!(pr.stages.len(), 3);
+    assert_eq!(pr.stages[0].output, "[1,2,3,4,5]");
+    assert_eq!(pr.stages[1].output, "[2,4,6,8,10]");
+    assert_eq!(pr.stages[2].output, "30");
+}
+
+#[tokio::test]
+async fn test_pipeline_single_stage() {
+    ensure_v8();
+    let engine = Engine::new_stateless(HEAP, 30, 4);
+
+    let result = engine.run_pipeline(vec![code_stage("42")], None).await;
+
+    assert!(result.is_ok());
+    let pr = result.unwrap();
+    assert_eq!(pr.stages.len(), 1);
+    assert_eq!(pr.stages[0].output, "42");
+    assert_eq!(pr.stages[0].index, 0);
+}
+
+#[tokio::test]
+async fn test_pipeline_empty_stages_error() {
+    ensure_v8();
+    let engine = Engine::new_stateless(HEAP, 30, 4);
+
+    let result = engine.run_pipeline(vec![], None).await;
+
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("at least one stage"));
+}
+
+#[tokio::test]
+async fn test_pipeline_both_code_and_heap_error() {
+    ensure_v8();
+    let engine = Engine::new_stateless(HEAP, 30, 4);
+
+    let result = engine.run_pipeline(
+        vec![PipelineStage {
+            code: Some("1".to_string()),
+            heap: Some("abc".to_string()),
+            heap_memory_max_mb: None,
+            execution_timeout_secs: None,
+        }],
+        None,
+    ).await;
+
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("not both"));
+}
+
+#[tokio::test]
+async fn test_pipeline_neither_code_nor_heap_error() {
+    ensure_v8();
+    let engine = Engine::new_stateless(HEAP, 30, 4);
+
+    let result = engine.run_pipeline(
+        vec![PipelineStage {
+            code: None,
+            heap: None,
+            heap_memory_max_mb: None,
+            execution_timeout_secs: None,
+        }],
+        None,
+    ).await;
+
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("must provide code or heap"));
+}
+
+#[tokio::test]
+async fn test_pipeline_stage_failure_reports_index() {
+    ensure_v8();
+    let engine = Engine::new_stateless(HEAP, 30, 4);
+
+    let result = engine.run_pipeline(
+        vec![
+            code_stage("10"),
+            code_stage("this_function_does_not_exist()"),
+        ],
+        None,
+    ).await;
+
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("stage 1"));
+}
+
+#[tokio::test]
+async fn test_pipeline_output_pipes_to_stdin() {
+    ensure_v8();
+    let engine = Engine::new_stateless(HEAP, 30, 4);
+
+    let result = engine.run_pipeline(
+        vec![
+            code_stage("10"),
+            code_stage("parseInt(__stdin__) * 2"),
+            code_stage("parseInt(__stdin__) + 1"),
+        ],
+        None,
+    ).await;
+
+    assert!(result.is_ok());
+    let pr = result.unwrap();
+    assert_eq!(pr.stages[0].output, "10");
+    assert_eq!(pr.stages[1].output, "20");
+    assert_eq!(pr.stages[2].output, "21");
+}
+
+#[tokio::test]
+async fn test_pipeline_console_output_per_stage() {
+    ensure_v8();
+    let engine = Engine::new_stateless(HEAP, 30, 4);
+
+    let result = engine.run_pipeline(
+        vec![
+            code_stage(r#"console.log("stage0"); "a""#),
+            code_stage(r#"console.error("stage1err"); "b""#),
+        ],
+        None,
+    ).await;
+
+    assert!(result.is_ok());
+    let pr = result.unwrap();
+    assert_eq!(pr.stages[0].stdout, vec!["stage0"]);
+    assert!(pr.stages[0].stderr.is_empty());
+    assert!(pr.stages[1].stdout.is_empty());
+    assert_eq!(pr.stages[1].stderr, vec!["stage1err"]);
 }

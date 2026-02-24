@@ -6,6 +6,7 @@ use rmcp::{
 use serde_json::json;
 
 use crate::engine::Engine;
+use crate::engine::{PipelineStage, PipelineResult};
 
 // ── MCP response types ──────────────────────────────────────────────────
 
@@ -65,6 +66,56 @@ impl IntoContents for ListSessionSnapshotsResponse {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct RunPipelineResponse {
+    pub result: Option<PipelineResult>,
+    pub error: Option<String>,
+}
+
+impl IntoContents for RunPipelineResponse {
+    fn into_contents(self) -> Vec<Content> {
+        if let Some(err) = self.error {
+            let mut value = serde_json::Map::new();
+            value.insert("error".to_string(), json!(err));
+            match Content::json(serde_json::Value::Object(value)) {
+                Ok(content) => vec![content],
+                Err(_) => vec![Content::text(format!("Pipeline error: {}", err))],
+            }
+        } else if let Some(result) = self.result {
+            match serde_json::to_value(&result) {
+                Ok(val) => match Content::json(val) {
+                    Ok(content) => vec![content],
+                    Err(e) => vec![Content::text(format!("Failed to convert pipeline response: {}", e))],
+                },
+                Err(e) => vec![Content::text(format!("Failed to serialize pipeline response: {}", e))],
+            }
+        } else {
+            vec![Content::text("Empty pipeline response")]
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct GetBufferResponse {
+    pub content: Option<String>,
+    pub error: Option<String>,
+}
+
+impl IntoContents for GetBufferResponse {
+    fn into_contents(self) -> Vec<Content> {
+        if let Some(err) = self.error {
+            match Content::json(json!({"error": err})) {
+                Ok(content) => vec![content],
+                Err(_) => vec![Content::text(format!("Buffer error: {}", err))],
+            }
+        } else if let Some(content) = self.content {
+            vec![Content::text(content)]
+        } else {
+            vec![Content::text("")]
+        }
+    }
+}
+
 // ── McpService ──────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -116,6 +167,28 @@ impl McpService {
         }
     }
 
+    #[tool(description = include_str!("run_pipeline_tool_description.md"))]
+    pub async fn run_pipeline(
+        &self,
+        #[tool(param)] stages: Vec<serde_json::Value>,
+        #[tool(param)]
+        #[serde(default)]
+        session: Option<String>,
+    ) -> RunPipelineResponse {
+        let parsed: Result<Vec<PipelineStage>, _> = stages
+            .into_iter()
+            .enumerate()
+            .map(|(i, v)| serde_json::from_value(v).map_err(|e| format!("Invalid stage {}: {}", i, e)))
+            .collect();
+        match parsed {
+            Ok(pipeline_stages) => match self.engine.run_pipeline(pipeline_stages, session).await {
+                Ok(result) => RunPipelineResponse { result: Some(result), error: None },
+                Err(e) => RunPipelineResponse { result: None, error: Some(e) },
+            },
+            Err(e) => RunPipelineResponse { result: None, error: Some(e) },
+        }
+    }
+
     #[tool(description = "List all named sessions (stateful mode only). Returns an array of session names that have been used with the session parameter in run_js.")]
     pub async fn list_sessions(&self) -> ListSessionsResponse {
         match self.engine.list_sessions().await {
@@ -142,6 +215,17 @@ impl McpService {
             Err(e) => ListSessionSnapshotsResponse {
                 entries: vec![serde_json::json!({"error": e})],
             },
+        }
+    }
+
+    #[tool(description = "Retrieve a stored buffer by its content hash. Buffers are created by run_pipeline and referenced via output_ref, stdout_ref, and stderr_ref in stage results.")]
+    pub async fn get_buffer(
+        &self,
+        #[tool(param)] hash: String,
+    ) -> GetBufferResponse {
+        match self.engine.get_buffer(hash).await {
+            Ok(content) => GetBufferResponse { content: Some(content), error: None },
+            Err(e) => GetBufferResponse { content: None, error: Some(e) },
         }
     }
 }
@@ -216,6 +300,25 @@ impl StatelessMcpService {
                 stdout: Vec::new(),
                 stderr: Vec::new(),
             },
+        }
+    }
+
+    #[tool(description = include_str!("run_pipeline_tool_stateless.md"))]
+    pub async fn run_pipeline(
+        &self,
+        #[tool(param)] stages: Vec<serde_json::Value>,
+    ) -> RunPipelineResponse {
+        let parsed: Result<Vec<PipelineStage>, _> = stages
+            .into_iter()
+            .enumerate()
+            .map(|(i, v)| serde_json::from_value(v).map_err(|e| format!("Invalid stage {}: {}", i, e)))
+            .collect();
+        match parsed {
+            Ok(pipeline_stages) => match self.engine.run_pipeline(pipeline_stages, None).await {
+                Ok(result) => RunPipelineResponse { result: Some(result), error: None },
+                Err(e) => RunPipelineResponse { result: None, error: Some(e) },
+            },
+            Err(e) => RunPipelineResponse { result: None, error: Some(e) },
         }
     }
 }

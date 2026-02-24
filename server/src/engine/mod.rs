@@ -1,3 +1,4 @@
+pub mod buffer_store;
 pub mod heap_storage;
 pub mod session_log;
 
@@ -11,6 +12,7 @@ use std::ffi::c_void;
 use std::alloc::{Layout, alloc_zeroed, alloc, dealloc};
 use v8::{self};
 use sha2::{Sha256, Digest};
+use serde::{Deserialize, Serialize};
 
 use swc_core::common::{
     comments::SingleThreadedComments,
@@ -25,6 +27,7 @@ use swc_core::ecma::transforms::typescript::strip;
 
 use tokio::sync::Semaphore;
 
+use crate::engine::buffer_store::{BufferStore, BufferRef};
 use crate::engine::heap_storage::{HeapStorage, AnyHeapStorage};
 use crate::engine::session_log::{SessionLog, SessionLogEntry};
 use wasmparser::Validator;
@@ -881,6 +884,46 @@ pub struct JsResult {
     pub stderr: Vec<String>,
 }
 
+// ── Pipeline types ─────────────────────────────────────────────────────
+
+/// A pipeline stage is either a code execution or a heap module load — never both.
+#[derive(Clone, Debug, Deserialize)]
+pub struct PipelineStage {
+    /// JavaScript code to execute. Mutually exclusive with `heap`.
+    #[serde(default)]
+    pub code: Option<String>,
+    /// Heap snapshot hash to load as a reusable module. Mutually exclusive with `code`.
+    #[serde(default)]
+    pub heap: Option<String>,
+    #[serde(default)]
+    pub heap_memory_max_mb: Option<usize>,
+    #[serde(default)]
+    pub execution_timeout_secs: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct StageResult {
+    pub index: usize,
+    pub output: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_ref: Option<BufferRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub heap: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub stdout: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stdout_ref: Option<BufferRef>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub stderr: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stderr_ref: Option<BufferRef>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct PipelineResult {
+    pub stages: Vec<StageResult>,
+}
+
 /// A pre-loaded WASM module: human-readable name + raw `.wasm` bytes.
 #[derive(Clone, Debug)]
 pub struct WasmModule {
@@ -895,6 +938,7 @@ pub struct WasmModule {
 pub struct Engine {
     heap_storage: Option<AnyHeapStorage>,
     session_log: Option<SessionLog>,
+    buffer_store: Option<BufferStore>,
     heap_memory_max_bytes: usize,
     execution_timeout_secs: u64,
     v8_semaphore: Arc<Semaphore>,
@@ -918,6 +962,7 @@ impl Engine {
         Self {
             heap_storage: None,
             session_log: None,
+            buffer_store: None,
             heap_memory_max_bytes,
             execution_timeout_secs,
             v8_semaphore: Arc::new(Semaphore::new(max_concurrent)),
@@ -937,6 +982,7 @@ impl Engine {
         Self {
             heap_storage: Some(heap_storage),
             session_log,
+            buffer_store: None,
             heap_memory_max_bytes,
             execution_timeout_secs,
             v8_semaphore: Arc::new(Semaphore::new(max_concurrent)),
@@ -944,6 +990,12 @@ impl Engine {
             wasm_default_max_bytes: DEFAULT_WASM_MAX_BYTES,
             wasm_modules: Arc::new(Vec::new()),
         }
+    }
+
+    /// Set the buffer store for persisting pipeline output buffers.
+    pub fn with_buffer_store(mut self, buffer_store: BufferStore) -> Self {
+        self.buffer_store = Some(buffer_store);
+        self
     }
 
     /// Set the default max native memory for WASM modules without a per-module limit.
@@ -1093,6 +1145,80 @@ impl Engine {
         }
     }
 
+    /// Execute a pipeline of stages sequentially, piping output→stdin and
+    /// chaining heap snapshots between stages.  Each stage is either a code
+    /// execution or a heap module load — never both.
+    pub async fn run_pipeline(
+        &self,
+        stages: Vec<PipelineStage>,
+        session: Option<String>,
+    ) -> Result<PipelineResult, String> {
+        if stages.is_empty() {
+            return Err("Pipeline must have at least one stage".to_string());
+        }
+
+        let mut results: Vec<StageResult> = Vec::new();
+        let mut prev_output: Option<String> = None;
+        let mut prev_heap: Option<String> = None;
+
+        for (i, stage) in stages.into_iter().enumerate() {
+            if stage.code.is_some() && stage.heap.is_some() {
+                return Err(format!("Pipeline stage {}: provide code or heap, not both", i));
+            }
+            if stage.code.is_none() && stage.heap.is_none() {
+                return Err(format!("Pipeline stage {}: must provide code or heap", i));
+            }
+
+            let stdin = prev_output.clone();
+
+            let (heap, code) = if let Some(heap_hash) = stage.heap {
+                // Heap stage: load the specified heap, run no-op code
+                (Some(heap_hash), "undefined".to_string())
+            } else {
+                // Code stage: inherit heap from previous stage
+                (prev_heap.clone(), stage.code.unwrap())
+            };
+
+            let js_result = self.run_js(
+                code,
+                heap,
+                session.clone(),
+                stage.heap_memory_max_mb,
+                stage.execution_timeout_secs,
+                stdin,
+            ).await.map_err(|e| format!("Pipeline stage {} failed: {}", i, e))?;
+
+            prev_output = Some(js_result.output.clone());
+            prev_heap = js_result.heap.clone();
+
+            // Store buffers in BufferStore when available
+            let (output_ref, stdout_ref, stderr_ref) = if let Some(ref bs) = self.buffer_store {
+                let o = bs.put_string(&js_result.output).await
+                    .map_err(|e| format!("Pipeline stage {} buffer store error: {}", i, e))?;
+                let so = bs.put_lines(&js_result.stdout).await
+                    .map_err(|e| format!("Pipeline stage {} buffer store error: {}", i, e))?;
+                let se = bs.put_lines(&js_result.stderr).await
+                    .map_err(|e| format!("Pipeline stage {} buffer store error: {}", i, e))?;
+                (o, so, se)
+            } else {
+                (None, None, None)
+            };
+
+            results.push(StageResult {
+                index: i,
+                output: js_result.output,
+                output_ref,
+                heap: js_result.heap,
+                stdout: js_result.stdout,
+                stdout_ref,
+                stderr: js_result.stderr,
+                stderr_ref,
+            });
+        }
+
+        Ok(PipelineResult { stages: results })
+    }
+
     pub async fn list_sessions(&self) -> Result<Vec<String>, String> {
         match &self.session_log {
             Some(log) => log.list_sessions().await,
@@ -1108,6 +1234,14 @@ impl Engine {
         match &self.session_log {
             Some(log) => log.list_entries(&session, fields).await,
             None => Err("Session log not configured".to_string()),
+        }
+    }
+
+    /// Retrieve a stored buffer by its content hash.
+    pub async fn get_buffer(&self, hash: String) -> Result<String, String> {
+        match &self.buffer_store {
+            Some(bs) => bs.get_string(&hash).await,
+            None => Err("Buffer store not configured".to_string()),
         }
     }
 }

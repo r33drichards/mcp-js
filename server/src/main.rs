@@ -12,6 +12,7 @@ mod mcp;
 mod api;
 mod cluster;
 use engine::{initialize_v8, Engine, WasmModule, DEFAULT_EXECUTION_TIMEOUT_SECS};
+use engine::buffer_store::BufferStore;
 use engine::heap_storage::{AnyHeapStorage, S3HeapStorage, WriteThroughCacheHeapStorage, FileHeapStorage};
 use engine::session_log::SessionLog;
 use mcp::{McpService, StatelessMcpService};
@@ -255,8 +256,17 @@ async fn main() -> Result<()> {
             }
         };
 
+        // BufferStore reuses the same HeapStorage backend and sled DB
+        // for persisting pipeline output buffers.
+        let buffer_store = {
+            let buffer_db = sled::open(&cli.session_db_path)
+                .map_err(|e| anyhow::anyhow!("Failed to open buffer sled db: {}", e))?;
+            BufferStore::new(heap_storage.clone(), buffer_db)
+        };
+
         tracing::info!("Creating stateful engine");
         Engine::new_stateful(heap_storage, session_log, heap_memory_max_bytes, execution_timeout_secs, cli.max_concurrent_executions)
+            .with_buffer_store(buffer_store)
     };
 
     let engine = engine.with_wasm_default_max_bytes(wasm_default_max_bytes);
