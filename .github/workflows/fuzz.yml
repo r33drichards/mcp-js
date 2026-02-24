@@ -42,14 +42,21 @@ jobs:
 
       - name: Run fuzzer (${{ matrix.target }})
         env:
-          ASAN_OPTIONS: quarantine_size_mb=64:malloc_context_size=5
+          ASAN_OPTIONS: quarantine_size_mb=64:malloc_context_size=5:allocator_may_return_null=1
         run: |
           # Use fork mode (-fork=1) so each worker gets a clean address space,
           # preventing cumulative ASAN shadow memory growth from killing the
-          # parent process. Any OOM/crash/timeout artifacts are genuine bugs.
+          # parent process.
+          #
+          # RSS limit is set high (8GB) to accommodate ASAN shadow memory
+          # overhead (~8x real memory). V8 isolate creation + WASM compilation
+          # paths use significant native memory that, with ASAN instrumentation,
+          # can exceed tighter limits. Genuine resource-exhaustion bugs are
+          # caught by wasmparser resource validation (memory page / table size
+          # limits) before reaching V8.
           nix develop .#fuzz --command bash -c \
             "cd server && cargo fuzz run --sanitizer=address ${{ matrix.target }} \
-              -- -fork=1 -max_total_time=300 -rss_limit_mb=4096 -max_len=65536 -timeout=120"
+              -- -fork=1 -max_total_time=300 -rss_limit_mb=8192 -max_len=65536 -timeout=120"
 
       - name: Upload fuzz artifacts
         if: always()

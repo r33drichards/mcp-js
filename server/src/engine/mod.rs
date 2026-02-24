@@ -394,6 +394,78 @@ pub fn strip_typescript_types(code: &str) -> Result<String, String> {
     })
 }
 
+/// Maximum initial WASM memory pages allowed per module.
+/// Each page is 64 KiB, so 256 pages = 16 MiB.
+/// V8 allocates native (non-heap) memory for WASM memories during
+/// compilation, bypassing JS heap limits and our BoundedAllocator.
+const MAX_WASM_MEMORY_PAGES: u64 = 256;
+
+/// Maximum initial WASM table elements allowed per module.
+const MAX_WASM_TABLE_ELEMENTS: u64 = 10_000;
+
+/// Validate that a WASM module's resource declarations won't cause V8 to
+/// OOM during compilation. Checks both direct declarations (memory/table
+/// sections) and imported memories/tables, since both affect native memory.
+fn validate_wasm_resources(name: &str, bytes: &[u8]) -> Result<(), String> {
+    use wasmparser::{Parser, Payload, TypeRef};
+
+    for payload in Parser::new(0).parse_all(bytes) {
+        match payload {
+            Ok(Payload::MemorySection(reader)) => {
+                for mem in reader {
+                    let mem = mem.map_err(|e| format!("Invalid WASM module '{}': {}", name, e))?;
+                    if mem.initial > MAX_WASM_MEMORY_PAGES {
+                        return Err(format!(
+                            "WASM module '{}': memory too large ({} pages = {} MiB, max {} pages = {} MiB)",
+                            name, mem.initial, mem.initial * 64 / 1024,
+                            MAX_WASM_MEMORY_PAGES, MAX_WASM_MEMORY_PAGES * 64 / 1024,
+                        ));
+                    }
+                }
+            }
+            Ok(Payload::TableSection(reader)) => {
+                for table in reader {
+                    let table = table.map_err(|e| format!("Invalid WASM module '{}': {}", name, e))?;
+                    if table.ty.initial > MAX_WASM_TABLE_ELEMENTS {
+                        return Err(format!(
+                            "WASM module '{}': table too large ({} elements, max {})",
+                            name, table.ty.initial, MAX_WASM_TABLE_ELEMENTS,
+                        ));
+                    }
+                }
+            }
+            Ok(Payload::ImportSection(reader)) => {
+                for import in reader {
+                    let import = import.map_err(|e| format!("Invalid WASM module '{}': {}", name, e))?;
+                    match import.ty {
+                        TypeRef::Memory(mem) => {
+                            if mem.initial > MAX_WASM_MEMORY_PAGES {
+                                return Err(format!(
+                                    "WASM module '{}': imported memory too large ({} pages = {} MiB, max {} pages = {} MiB)",
+                                    name, mem.initial, mem.initial * 64 / 1024,
+                                    MAX_WASM_MEMORY_PAGES, MAX_WASM_MEMORY_PAGES * 64 / 1024,
+                                ));
+                            }
+                        }
+                        TypeRef::Table(table_ty) => {
+                            if table_ty.initial > MAX_WASM_TABLE_ELEMENTS {
+                                return Err(format!(
+                                    "WASM module '{}': imported table too large ({} elements, max {})",
+                                    name, table_ty.initial, MAX_WASM_TABLE_ELEMENTS,
+                                ));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Err(_) => break, // Structural errors caught by Validator
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// Check if a WASM module has any imports (used to decide whether
 /// auto-instantiation without an imports object is possible).
 fn wasm_has_imports(bytes: &[u8]) -> bool {
@@ -455,6 +527,10 @@ pub fn inject_wasm_modules(
         // before V8 gets a chance to allocate unbounded memory.
         Validator::new().validate_all(&m.bytes)
             .map_err(|e| format!("Invalid WASM module '{}': {}", m.name, e))?;
+
+        // Reject modules declaring resources large enough to OOM V8's native
+        // allocator during compilation (memory pages, table elements).
+        validate_wasm_resources(&m.name, &m.bytes)?;
 
         // Compile WASM bytes directly via V8's native API — no JS string generation.
         let module_obj = v8::WasmModuleObject::compile(scope, &m.bytes)
