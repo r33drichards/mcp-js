@@ -12,6 +12,17 @@ use std::alloc::{Layout, alloc_zeroed, alloc, dealloc};
 use v8::{self};
 use sha2::{Sha256, Digest};
 
+use swc_core::common::{
+    comments::SingleThreadedComments,
+    sync::Lrc,
+    Globals, Mark, SourceMap, GLOBALS,
+};
+use swc_core::ecma::visit::swc_ecma_ast::Pass;
+use swc_core::ecma::codegen::{text_writer::JsWriter, Emitter};
+use swc_core::ecma::parser::{lexer::Lexer, Parser, StringInput, Syntax, TsSyntax};
+use swc_core::ecma::transforms::base::{fixer::fixer, hygiene::hygiene, resolver};
+use swc_core::ecma::transforms::typescript::strip;
+
 use tokio::sync::Semaphore;
 
 use crate::engine::heap_storage::{HeapStorage, AnyHeapStorage};
@@ -265,6 +276,79 @@ fn classify_termination_error(
     }
 }
 
+// ── TypeScript type stripping ────────────────────────────────────────────
+//
+// Uses SWC to strip TypeScript type annotations from the input code,
+// producing plain JavaScript that V8 can execute. This is type *removal*
+// only — no type checking is performed. Plain JavaScript passes through
+// unchanged.
+
+pub fn strip_typescript_types(code: &str) -> Result<String, String> {
+    let cm: Lrc<SourceMap> = Default::default();
+
+    let fm = cm.new_source_file(
+        swc_core::common::FileName::Anon.into(),
+        code.into(),
+    );
+
+    let comments = SingleThreadedComments::default();
+
+    let lexer = Lexer::new(
+        Syntax::Typescript(TsSyntax {
+            tsx: true,
+            ..Default::default()
+        }),
+        Default::default(),
+        StringInput::from(&*fm),
+        Some(&comments),
+    );
+
+    let mut parser = Parser::new_from(lexer);
+
+    let mut program = parser
+        .parse_program()
+        .map_err(|e| format!("TypeScript parse error: {:?}", e))?;
+
+    // Report non-fatal parse errors but don't fail on them
+    for e in parser.take_errors() {
+        eprintln!("TypeScript parse warning: {:?}", e);
+    }
+
+    let globals = Globals::default();
+    GLOBALS.set(&globals, || {
+        let unresolved_mark = Mark::new();
+        let top_level_mark = Mark::new();
+
+        // Conduct identifier scope analysis
+        resolver(unresolved_mark, top_level_mark, true).process(&mut program);
+
+        // Remove typescript types
+        strip(unresolved_mark, top_level_mark).process(&mut program);
+
+        // Fix up any identifiers with the same name, but different contexts
+        hygiene().process(&mut program);
+
+        // Ensure that we have enough parenthesis
+        fixer(Some(&comments)).process(&mut program);
+
+        let mut buf = vec![];
+        {
+            let mut emitter = Emitter {
+                cfg: swc_core::ecma::codegen::Config::default(),
+                cm: cm.clone(),
+                comments: Some(&comments),
+                wr: JsWriter::new(cm.clone(), "\n", &mut buf, None),
+            };
+
+            emitter
+                .emit_program(&program)
+                .map_err(|e| format!("Failed to emit JavaScript: {:?}", e))?;
+        }
+
+        String::from_utf8(buf).map_err(|e| format!("Non-UTF8 output: {}", e))
+    })
+}
+
 pub fn eval<'s>(scope: &mut v8::HandleScope<'s>, code: &str) -> Result<v8::Local<'s, v8::Value>, String> {
     let scope = &mut v8::EscapableHandleScope::new(scope);
     let source = v8::String::new(scope, code).ok_or("Failed to create V8 string")?;
@@ -467,6 +551,9 @@ impl Engine {
         heap_memory_max_mb: Option<usize>,
         execution_timeout_secs: Option<u64>,
     ) -> Result<JsResult, String> {
+        // Strip TypeScript types before V8 execution (no-op for plain JS)
+        let code = strip_typescript_types(&code)?;
+
         let max_bytes = heap_memory_max_mb
             .map(|mb| mb * 1024 * 1024)
             .unwrap_or(self.heap_memory_max_bytes);
