@@ -1,5 +1,6 @@
 use server::engine::heap_tags::HeapTagStore;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 fn temp_tag_store() -> HeapTagStore {
     HeapTagStore::from_config(sled::Config::new().temporary(true)).expect("failed to open temp sled")
@@ -156,4 +157,153 @@ async fn test_query_excludes_empty_tags() {
     let results = store.query_by_tags(filter).await.unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].heap, "heap_a");
+}
+
+/// Two writers concurrently merge different keys into the same heap.
+/// After both complete, the result must contain ALL keys from both writers.
+#[tokio::test]
+async fn test_concurrent_merge_different_keys() {
+    let store = Arc::new(temp_tag_store());
+    let heap = "concurrent_heap";
+
+    // Spawn many pairs of concurrent writers to increase the chance of
+    // exposing a race condition if the implementation is non-atomic.
+    for _ in 0..50 {
+        // Reset the heap to a clean state each iteration
+        store.set_tags(heap, HashMap::new()).await.unwrap();
+
+        let store_a = Arc::clone(&store);
+        let store_b = Arc::clone(&store);
+
+        let handle_a = tokio::spawn(async move {
+            let mut tags = HashMap::new();
+            tags.insert("foo".to_string(), "bar".to_string());
+            store_a.merge_tags("concurrent_heap", tags).await.unwrap();
+        });
+
+        let handle_b = tokio::spawn(async move {
+            let mut tags = HashMap::new();
+            tags.insert("baz".to_string(), "blah".to_string());
+            store_b.merge_tags("concurrent_heap", tags).await.unwrap();
+        });
+
+        handle_a.await.unwrap();
+        handle_b.await.unwrap();
+
+        let result = store.get_tags(heap).await.unwrap();
+        assert_eq!(
+            result.get("foo").map(|s| s.as_str()),
+            Some("bar"),
+            "Writer A's key 'foo' was lost in concurrent merge"
+        );
+        assert_eq!(
+            result.get("baz").map(|s| s.as_str()),
+            Some("blah"),
+            "Writer B's key 'baz' was lost in concurrent merge"
+        );
+        assert_eq!(result.len(), 2, "Expected exactly 2 keys after concurrent merge");
+    }
+}
+
+/// Many writers concurrently merge distinct keys into the same heap.
+/// Verifies no keys are lost under higher contention.
+#[tokio::test]
+async fn test_concurrent_merge_many_writers() {
+    let store = Arc::new(temp_tag_store());
+    let heap = "many_writers_heap";
+    let num_writers = 20;
+
+    let mut handles = Vec::new();
+    for i in 0..num_writers {
+        let store_clone = Arc::clone(&store);
+        let key = format!("key_{}", i);
+        let value = format!("value_{}", i);
+        handles.push(tokio::spawn(async move {
+            let mut tags = HashMap::new();
+            tags.insert(key, value);
+            store_clone.merge_tags("many_writers_heap", tags).await.unwrap();
+        }));
+    }
+
+    for handle in handles {
+        handle.await.unwrap();
+    }
+
+    let result = store.get_tags(heap).await.unwrap();
+    assert_eq!(
+        result.len(),
+        num_writers,
+        "Expected {} keys but got {}. Some writes were lost!",
+        num_writers,
+        result.len()
+    );
+    for i in 0..num_writers {
+        let key = format!("key_{}", i);
+        let expected_value = format!("value_{}", i);
+        assert_eq!(
+            result.get(&key).map(|s| s.as_str()),
+            Some(expected_value.as_str()),
+            "Key '{}' was lost or corrupted",
+            key
+        );
+    }
+}
+
+/// Two writers concurrently merge the SAME key with different values.
+/// Both keys from each writer should survive; for the contested key,
+/// one of the two values must win (last-writer-wins), but neither
+/// writer's OTHER keys should be lost.
+#[tokio::test]
+async fn test_concurrent_merge_same_key_no_collateral_loss() {
+    let store = Arc::new(temp_tag_store());
+    let heap = "same_key_heap";
+
+    for _ in 0..50 {
+        store.set_tags(heap, HashMap::new()).await.unwrap();
+
+        let store_a = Arc::clone(&store);
+        let store_b = Arc::clone(&store);
+
+        // Writer A: sets "shared" to "from_a" AND "only_a" to "a_val"
+        let handle_a = tokio::spawn(async move {
+            let mut tags = HashMap::new();
+            tags.insert("shared".to_string(), "from_a".to_string());
+            tags.insert("only_a".to_string(), "a_val".to_string());
+            store_a.merge_tags("same_key_heap", tags).await.unwrap();
+        });
+
+        // Writer B: sets "shared" to "from_b" AND "only_b" to "b_val"
+        let handle_b = tokio::spawn(async move {
+            let mut tags = HashMap::new();
+            tags.insert("shared".to_string(), "from_b".to_string());
+            tags.insert("only_b".to_string(), "b_val".to_string());
+            store_b.merge_tags("same_key_heap", tags).await.unwrap();
+        });
+
+        handle_a.await.unwrap();
+        handle_b.await.unwrap();
+
+        let result = store.get_tags(heap).await.unwrap();
+
+        // The contested "shared" key must have one of the two values
+        let shared_val = result.get("shared").expect("'shared' key must exist");
+        assert!(
+            shared_val == "from_a" || shared_val == "from_b",
+            "Expected 'shared' to be 'from_a' or 'from_b', got '{}'",
+            shared_val
+        );
+
+        // Non-contested keys must BOTH survive — no collateral data loss
+        assert_eq!(
+            result.get("only_a").map(|s| s.as_str()),
+            Some("a_val"),
+            "Writer A's non-contested key 'only_a' was lost"
+        );
+        assert_eq!(
+            result.get("only_b").map(|s| s.as_str()),
+            Some("b_val"),
+            "Writer B's non-contested key 'only_b' was lost"
+        );
+        assert_eq!(result.len(), 3, "Expected exactly 3 keys (shared + only_a + only_b)");
+    }
 }

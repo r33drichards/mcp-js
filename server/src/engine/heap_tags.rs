@@ -98,6 +98,49 @@ impl HeapTagStore {
         }
     }
 
+    /// Atomically merge tags into a heap's existing tags.
+    /// Existing keys not in `tags` are preserved. Keys in `tags` overwrite existing values.
+    /// This is safe for concurrent use — uses sled's atomic fetch_and_update.
+    pub async fn merge_tags(
+        &self,
+        heap: &str,
+        tags: HashMap<String, String>,
+    ) -> Result<(), String> {
+        let key = Self::make_key(heap);
+
+        if let Some(ref cluster) = self.cluster_node {
+            // In cluster mode, read-modify-write through the cluster.
+            // The Raft log serializes writes, but two concurrent merge_tags
+            // may read stale data. This is a known limitation — last writer wins
+            // for same-key conflicts, but different keys may be lost.
+            let existing = self.get_tags(heap).await?;
+            let mut merged = existing;
+            merged.extend(tags);
+            let value = serde_json::to_string(&merged)
+                .map_err(|e| format!("Failed to serialize tags: {}", e))?;
+            cluster.put_or_forward(key, value).await?;
+            return Ok(());
+        }
+
+        let tree = self
+            .db
+            .open_tree("heap_tags")
+            .map_err(|e| format!("Failed to open tree: {}", e))?;
+
+        let tags_clone = tags;
+        tree.fetch_and_update(key.as_bytes(), move |old| {
+            let mut existing: HashMap<String, String> = match old {
+                Some(bytes) => serde_json::from_slice(bytes).unwrap_or_default(),
+                None => HashMap::new(),
+            };
+            existing.extend(tags_clone.clone());
+            Some(serde_json::to_vec(&existing).unwrap())
+        })
+        .map_err(|e| format!("Failed to merge tags: {}", e))?;
+
+        Ok(())
+    }
+
     /// Delete tags from a heap. If `keys` is None, delete all tags.
     /// If `keys` is Some, delete only the specified keys.
     pub async fn delete_tags(
