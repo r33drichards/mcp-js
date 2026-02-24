@@ -272,7 +272,7 @@ cargo build --release
 The built binary will be located at `server/target/release/server`. You can use this path in the integration steps above instead of `/usr/local/bin/mcp-v8` if desired.
 
 <!-- load-test-report -->
-# MCP-V8 Load Test Benchmark Report
+# MCP-V8 Load Test Benchmark Report v0.1.0
 
 Comparison of single-node vs 3-node cluster at various request rates.
 
