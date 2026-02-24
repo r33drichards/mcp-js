@@ -394,12 +394,29 @@ pub fn strip_typescript_types(code: &str) -> Result<String, String> {
     })
 }
 
-/// Compile and instantiate WASM modules using V8's native API, binding their
-/// exports as global variables.
+/// Check if a WASM module has any imports (used to decide whether
+/// auto-instantiation without an imports object is possible).
+fn wasm_has_imports(bytes: &[u8]) -> bool {
+    use wasmparser::{Parser, Payload};
+    for payload in Parser::new(0).parse_all(bytes) {
+        if let Ok(Payload::ImportSection(reader)) = payload {
+            return reader.count() > 0;
+        }
+    }
+    false
+}
+
+/// Compile and inject WASM modules using V8's native API.
+///
+/// For every module, the compiled `WebAssembly.Module` is exposed as a global
+/// named `__wasm_<name>`. This allows JavaScript code to instantiate modules
+/// that require an imports object (e.g. WASI modules like SQLite).
+///
+/// Modules with **no imports** are also auto-instantiated and their exports
+/// bound as a global named `<name>` (backwards-compatible behaviour).
 ///
 /// Uses `v8::WasmModuleObject::compile` to compile raw `.wasm` bytes directly
-/// (no JS string serialization), then instantiates via the `WebAssembly.Instance`
-/// constructor and sets each module's `.exports` on the global object.
+/// (no JS string serialization).
 pub fn inject_wasm_modules(
     scope: &mut v8::ContextScope<v8::HandleScope>,
     modules: &[WasmModule],
@@ -443,20 +460,39 @@ pub fn inject_wasm_modules(
         let module_obj = v8::WasmModuleObject::compile(scope, &m.bytes)
             .ok_or_else(|| format!("Failed to compile WASM module '{}'", m.name))?;
 
-        // Instantiate: new WebAssembly.Instance(compiledModule)
-        let instance = instance_ctor
-            .new_instance(scope, &[module_obj.into()])
-            .ok_or_else(|| format!("Failed to instantiate WASM module '{}'", m.name))?;
+        let has_imports = wasm_has_imports(&m.bytes);
+        let module_val: v8::Local<v8::Value> = module_obj.into();
 
-        // Extract .exports from the instance.
-        let exports = instance
-            .get(scope, exports_key.into())
-            .ok_or_else(|| format!("Failed to get exports from WASM module '{}'", m.name))?;
+        // Always expose the compiled WebAssembly.Module as __wasm_<name>.
+        // This lets JS code instantiate modules that need an imports object:
+        //   var instance = new WebAssembly.Instance(__wasm_sqlite, { ... });
+        let module_global_name = format!("__wasm_{}", m.name);
+        let module_key = v8::String::new(scope, &module_global_name)
+            .ok_or_else(|| format!("Failed to create module global name for '{}'", m.name))?;
+        global.set(scope, module_key.into(), module_val);
 
-        // Bind exports as a global variable.
-        let name_key = v8::String::new(scope, &m.name)
-            .ok_or_else(|| format!("Failed to create global name for WASM module '{}'", m.name))?;
-        global.set(scope, name_key.into(), exports);
+        if has_imports {
+            // Module requires imports — skip auto-instantiation.
+            // The compiled WebAssembly.Module is available as __wasm_<name>
+            // for manual instantiation in JavaScript.
+            eprintln!(
+                "WASM module '{}' has imports — available as '{}' for manual instantiation in JS",
+                m.name, module_global_name
+            );
+        } else {
+            // No imports needed — auto-instantiate and expose exports as <name>.
+            let instance = instance_ctor
+                .new_instance(scope, &[module_val])
+                .ok_or_else(|| format!("Failed to instantiate WASM module '{}'", m.name))?;
+
+            let exports = instance
+                .get(scope, exports_key.into())
+                .ok_or_else(|| format!("Failed to get exports from WASM module '{}'", m.name))?;
+
+            let name_key = v8::String::new(scope, &m.name)
+                .ok_or_else(|| format!("Failed to create global name for WASM module '{}'", m.name))?;
+            global.set(scope, name_key.into(), exports);
+        }
     }
 
     Ok(())

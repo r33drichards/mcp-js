@@ -58,6 +58,9 @@
         # NOTE: v8 (rusty_v8) requires a pre-built static library.  Set
         # RUSTY_V8_ARCHIVE to the path of the .a file if the automatic
         # download does not work inside the Nix sandbox.
+        # SQLite compiled to WASM via Emscripten — used by the sqlite-wasm example.
+        packages.sqlite-wasm = import ./nix/sqlite-wasm.nix { inherit pkgs; };
+
         packages.default = rustPlatform.buildRustPackage {
           pname = "mcp-js-server";
           version = "0.1.0";

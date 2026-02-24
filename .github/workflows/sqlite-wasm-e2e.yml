@@ -1,0 +1,83 @@
+name: SQLite WASM E2E Test
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  sqlite-wasm-e2e:
+    name: SQLite WASM E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+        with:
+          extra-conf: |
+            sandbox = relaxed
+
+      - uses: DeterminateSystems/flake-checker-action@main
+
+      - name: Build SQLite WASM
+        run: nix build .#sqlite-wasm --print-build-logs -L
+
+      - name: Build mcp-v8
+        run: nix build .#default --print-build-logs -L
+
+      - name: Run SQLite WASM E2E test
+        run: |
+          WASM_PATH=$(nix build .#sqlite-wasm --print-out-paths)/sqlite3.wasm
+          SERVER_BIN=$(nix build .#default --print-out-paths)/bin/server
+
+          echo "WASM: $WASM_PATH"
+          echo "Server: $SERVER_BIN"
+
+          # Start server in HTTP mode with the SQLite WASM module
+          $SERVER_BIN --stateless --http-port 8080 \
+            --wasm-module sqlite="$WASM_PATH" \
+            --heap-memory-max 32 &
+          SERVER_PID=$!
+
+          # Wait for server to be ready (up to 30s)
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8080/api/exec \
+              -H 'Content-Type: application/json' \
+              -d '{"code": "1+1"}' > /dev/null 2>&1; then
+              echo "Server is ready"
+              break
+            fi
+            sleep 1
+          done
+
+          # Run the SQLite WASM example
+          RESULT=$(curl -sf http://localhost:8080/api/exec \
+            -H 'Content-Type: application/json' \
+            -d "$(jq -Rs '{code: .}' < examples/sqlite-wasm/example.js)")
+
+          echo "Result: $RESULT"
+
+          # Parse and verify the output
+          OUTPUT=$(echo "$RESULT" | jq -r '.output')
+          echo "Output: $OUTPUT"
+
+          # Verify we got 3 users back
+          echo "$OUTPUT" | jq -e '.users | length == 3'
+
+          # Verify users are sorted by age (Bob=25, Alice=30, Charlie=35)
+          echo "$OUTPUT" | jq -e '.users[0].name == "Bob"'
+          echo "$OUTPUT" | jq -e '.users[1].name == "Alice"'
+          echo "$OUTPUT" | jq -e '.users[2].name == "Charlie"'
+
+          # Verify stats
+          echo "$OUTPUT" | jq -e '.stats.count == 3'
+          echo "$OUTPUT" | jq -e '.stats.avg_age == 30'
+
+          echo "SQLite WASM E2E test passed!"
+
+          kill $SERVER_PID

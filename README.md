@@ -100,7 +100,18 @@ After loading, the module exports are available directly in JavaScript:
 math.add(21, 21); // → 42
 ```
 
-**Note:** Only self-contained WASM modules (no imports) are supported. Modules requiring imported memory, tables, or other imports will fail to instantiate.
+**Modules with imports** (e.g. WASI modules like SQLite) are also supported. When a module has imports, auto-instantiation is skipped and the compiled `WebAssembly.Module` is exposed as `__wasm_<name>`. Your JavaScript code can then instantiate it with the required imports:
+```javascript
+// __wasm_sqlite is the compiled WebAssembly.Module
+var instance = new WebAssembly.Instance(__wasm_sqlite, {
+    wasi_snapshot_preview1: { /* WASI stubs */ },
+});
+instance.exports.sqlite3_open(/* ... */);
+```
+
+Self-contained modules (no imports) are auto-instantiated as before — their exports are set directly on `<name>`, and the compiled Module is also available as `__wasm_<name>`.
+
+See the [SQLite WASM example](examples/sqlite-wasm/) for a complete working example.
 
 ## Quick Start
 
@@ -333,6 +344,31 @@ inst.exports.add(21, 21); // → 42
 This uses synchronous compilation (`WebAssembly.Module` / `WebAssembly.Instance`), which works within the V8 runtime. The async APIs (`WebAssembly.compile`, `WebAssembly.instantiate` returning Promises) are not supported since the runtime does not support async/await.
 
 Alternatively, you can pre-load `.wasm` files at server startup using `--wasm-module` or `--wasm-config` so they are available as globals in every execution without inline byte arrays. See [WASM Module Options](#wasm-module-options) for details.
+
+### SQLite WASM
+
+Run a full SQLite database inside mcp-v8 using [SQLite WASM](https://github.com/sqlite/sqlite-wasm):
+
+```bash
+# Build the WASM module (requires Emscripten)
+./examples/sqlite-wasm/build.sh
+
+# Start the server with SQLite pre-loaded
+mcp-v8 --stateless --wasm-module sqlite=examples/sqlite-wasm/sqlite3.wasm
+```
+
+Then run SQL from JavaScript:
+
+```javascript
+var db = new SQLite();
+db.exec("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, age INTEGER)");
+db.exec("INSERT INTO users (name, age) VALUES ('Alice', 30)");
+var result = db.query("SELECT * FROM users");
+db.close();
+JSON.stringify(result.rows);  // → [{"id":1,"name":"Alice","age":30}]
+```
+
+See [`examples/sqlite-wasm/`](examples/sqlite-wasm/) for the full example including the SQLite wrapper code and WASI import stubs.
 
 ### Loading `.wasm` Files
 
