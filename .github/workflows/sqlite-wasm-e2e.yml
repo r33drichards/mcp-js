@@ -41,8 +41,12 @@ jobs:
           # Start server in HTTP mode with the SQLite WASM module
           $SERVER_BIN --stateless --http-port 8080 \
             --wasm-module sqlite="$WASM_PATH" \
-            --heap-memory-max 32 &
+            --heap-memory-max 128 &
           SERVER_PID=$!
+
+          # Ensure we always clean up the server process
+          cleanup() { kill $SERVER_PID 2>/dev/null || true; }
+          trap cleanup EXIT
 
           # Wait for server to be ready (up to 30s)
           for i in $(seq 1 30); do
@@ -55,12 +59,21 @@ jobs:
             sleep 1
           done
 
-          # Run the SQLite WASM example
-          RESULT=$(curl -sf http://localhost:8080/api/exec \
+          # Run the SQLite WASM example — capture response even on HTTP errors
+          HTTP_CODE=$(curl -s -o /tmp/response.json -w '%{http_code}' \
+            http://localhost:8080/api/exec \
             -H 'Content-Type: application/json' \
             -d "$(jq -Rs '{code: .}' < examples/sqlite-wasm/example.js)")
 
+          RESULT=$(cat /tmp/response.json)
+          echo "HTTP status: $HTTP_CODE"
           echo "Result: $RESULT"
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "ERROR: Server returned HTTP $HTTP_CODE"
+            echo "Response body: $RESULT"
+            exit 1
+          fi
 
           # Parse and verify the output
           OUTPUT=$(echo "$RESULT" | jq -r '.output')
@@ -79,5 +92,3 @@ jobs:
           echo "$OUTPUT" | jq -e '.stats.avg_age == 30'
 
           echo "SQLite WASM E2E test passed!"
-
-          kill $SERVER_PID

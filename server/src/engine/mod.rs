@@ -500,10 +500,42 @@ pub fn inject_wasm_modules(
 
 pub fn eval<'s>(scope: &mut v8::HandleScope<'s>, code: &str) -> Result<v8::Local<'s, v8::Value>, String> {
     let scope = &mut v8::EscapableHandleScope::new(scope);
-    let source = v8::String::new(scope, code).ok_or("Failed to create V8 string")?;
-    let script = v8::Script::compile(scope, source, None).ok_or("Failed to compile script")?;
-    let r = script.run(scope).ok_or("Failed to run script")?;
-    Ok(scope.escape(r))
+    let tc_scope = &mut v8::TryCatch::new(scope);
+
+    let source = v8::String::new(tc_scope, code).ok_or("Failed to create V8 string")?;
+
+    let script = match v8::Script::compile(tc_scope, source, None) {
+        Some(s) => s,
+        None => {
+            let msg = format_trycatch_exception(tc_scope);
+            return Err(format!("Failed to compile script: {}", msg));
+        }
+    };
+
+    match script.run(tc_scope) {
+        Some(r) => Ok(tc_scope.escape(r)),
+        None => {
+            let msg = format_trycatch_exception(tc_scope);
+            Err(msg)
+        }
+    }
+}
+
+/// Extract a human-readable error message from a TryCatch scope.
+fn format_trycatch_exception(tc_scope: &mut v8::TryCatch<v8::EscapableHandleScope>) -> String {
+    if let Some(exception) = tc_scope.exception() {
+        if let Some(msg) = tc_scope.message() {
+            let text = msg.get(tc_scope).to_rust_string_lossy(tc_scope);
+            let line = msg.get_line_number(tc_scope).unwrap_or(0);
+            if line > 0 {
+                return format!("{} (line {})", text, line);
+            }
+            return text;
+        }
+        exception.to_rust_string_lossy(tc_scope)
+    } else {
+        "Unknown error".to_string()
+    }
 }
 
 // ── Stateless / stateful V8 execution ───────────────────────────────────
