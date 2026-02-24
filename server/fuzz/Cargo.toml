@@ -40,3 +40,8 @@ name = "fuzz_snapshot_deserialization"
 path = "fuzz_targets/fuzz_snapshot_deserialization.rs"
 doc = false
 
+[[bin]]
+name = "fuzz_wasm_compile"
+path = "fuzz_targets/fuzz_wasm_compile.rs"
+doc = false
+

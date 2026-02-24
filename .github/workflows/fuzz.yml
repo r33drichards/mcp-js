@@ -32,6 +32,8 @@ jobs:
             sanitizer: none
           - target: fuzz_execute_stateful
             sanitizer: none
+          - target: fuzz_wasm_compile
+            sanitizer: none
 
     steps:
       - name: Checkout code
