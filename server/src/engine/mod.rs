@@ -27,6 +27,7 @@ use tokio::sync::Semaphore;
 
 use crate::engine::heap_storage::{HeapStorage, AnyHeapStorage};
 use crate::engine::session_log::{SessionLog, SessionLogEntry};
+use wasmparser::Validator;
 
 pub const DEFAULT_HEAP_MEMORY_MAX_MB: usize = 8;
 pub const DEFAULT_EXECUTION_TIMEOUT_SECS: u64 = 30;
@@ -430,6 +431,14 @@ pub fn inject_wasm_modules(
         .ok_or("Failed to create 'exports' string")?;
 
     for m in modules {
+        // Pre-validate WASM bytes with wasmparser before handing them to V8.
+        // V8's WASM compiler allocates native (non-heap) memory that isn't bounded
+        // by our JS heap limits, so malformed modules can OOM the process.
+        // wasmparser is a lightweight, safe validator that rejects invalid modules
+        // before V8 gets a chance to allocate unbounded memory.
+        Validator::new().validate_all(&m.bytes)
+            .map_err(|e| format!("Invalid WASM module '{}': {}", m.name, e))?;
+
         // Compile WASM bytes directly via V8's native API — no JS string generation.
         let module_obj = v8::WasmModuleObject::compile(scope, &m.bytes)
             .ok_or_else(|| format!("Failed to compile WASM module '{}'", m.name))?;
