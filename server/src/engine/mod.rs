@@ -4,9 +4,11 @@ pub mod session_log;
 use std::sync::Once;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::ffi::c_void;
+use std::alloc::{Layout, alloc_zeroed, alloc, dealloc};
 use v8::{self};
 use sha2::{Sha256, Digest};
 
@@ -103,10 +105,114 @@ pub fn unwrap_snapshot(data: &[u8]) -> Result<Vec<u8>, String> {
     Ok(payload.to_vec())
 }
 
+// ── Bounded ArrayBuffer allocator ────────────────────────────────────────
+//
+// Typed arrays (Uint8Array, etc.) allocate backing stores through V8's
+// ArrayBuffer::Allocator, which lives outside the managed JS heap. The
+// default allocator uses malloc/calloc and has no size limit — when the
+// system runs out of memory V8 calls FatalProcessOutOfMemory → abort().
+//
+// This custom allocator tracks total allocated bytes and returns null when
+// the limit is exceeded. V8 treats a null return as an allocation failure
+// and throws a JS-level RangeError instead of aborting the process.
+
+struct BoundedAllocatorState {
+    allocated: AtomicUsize,
+    limit: usize,
+}
+
+const ARRAY_BUF_ALIGN: usize = 16; // match platform malloc alignment
+
+unsafe extern "C" fn bounded_allocate(
+    state: &BoundedAllocatorState,
+    len: usize,
+) -> *mut c_void {
+    if len == 0 {
+        return std::ptr::null_mut();
+    }
+    // Atomically reserve space; undo if over limit.
+    let prev = state.allocated.fetch_add(len, Ordering::SeqCst);
+    if prev.saturating_add(len) > state.limit {
+        state.allocated.fetch_sub(len, Ordering::SeqCst);
+        return std::ptr::null_mut();
+    }
+    let Ok(layout) = Layout::from_size_align(len, ARRAY_BUF_ALIGN) else {
+        state.allocated.fetch_sub(len, Ordering::SeqCst);
+        return std::ptr::null_mut();
+    };
+    let ptr = unsafe { alloc_zeroed(layout) };
+    if ptr.is_null() {
+        state.allocated.fetch_sub(len, Ordering::SeqCst);
+        return std::ptr::null_mut();
+    }
+    ptr as *mut c_void
+}
+
+unsafe extern "C" fn bounded_allocate_uninitialized(
+    state: &BoundedAllocatorState,
+    len: usize,
+) -> *mut c_void {
+    if len == 0 {
+        return std::ptr::null_mut();
+    }
+    let prev = state.allocated.fetch_add(len, Ordering::SeqCst);
+    if prev.saturating_add(len) > state.limit {
+        state.allocated.fetch_sub(len, Ordering::SeqCst);
+        return std::ptr::null_mut();
+    }
+    let Ok(layout) = Layout::from_size_align(len, ARRAY_BUF_ALIGN) else {
+        state.allocated.fetch_sub(len, Ordering::SeqCst);
+        return std::ptr::null_mut();
+    };
+    let ptr = unsafe { alloc(layout) };
+    if ptr.is_null() {
+        state.allocated.fetch_sub(len, Ordering::SeqCst);
+        return std::ptr::null_mut();
+    }
+    ptr as *mut c_void
+}
+
+unsafe extern "C" fn bounded_free(
+    state: &BoundedAllocatorState,
+    data: *mut c_void,
+    len: usize,
+) {
+    if data.is_null() || len == 0 {
+        return;
+    }
+    let Ok(layout) = Layout::from_size_align(len, ARRAY_BUF_ALIGN) else {
+        return;
+    };
+    unsafe { dealloc(data as *mut u8, layout) };
+    state.allocated.fetch_sub(len, Ordering::SeqCst);
+}
+
+unsafe extern "C" fn bounded_drop(state: *const BoundedAllocatorState) {
+    drop(unsafe { Box::from_raw(state as *mut BoundedAllocatorState) });
+}
+
+static BOUNDED_VTABLE: v8::RustAllocatorVtable<BoundedAllocatorState> =
+    v8::RustAllocatorVtable {
+        allocate: bounded_allocate,
+        allocate_uninitialized: bounded_allocate_uninitialized,
+        free: bounded_free,
+        drop: bounded_drop,
+    };
+
+fn create_bounded_allocator(limit: usize) -> v8::UniqueRef<v8::Allocator> {
+    let state = Box::new(BoundedAllocatorState {
+        allocated: AtomicUsize::new(0),
+        limit,
+    });
+    unsafe { v8::new_rust_allocator(Box::into_raw(state), &BOUNDED_VTABLE) }
+}
+
 // ── V8 heap / timeout helpers ───────────────────────────────────────────
 
 fn create_params_with_heap_limit(heap_memory_max_bytes: usize) -> v8::CreateParams {
-    v8::CreateParams::default().heap_limits(0, heap_memory_max_bytes)
+    v8::CreateParams::default()
+        .heap_limits(0, heap_memory_max_bytes)
+        .array_buffer_allocator(create_bounded_allocator(heap_memory_max_bytes))
 }
 
 struct HeapLimitCallbackData {

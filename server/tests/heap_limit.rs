@@ -172,7 +172,6 @@ try {
 "#;
 
 #[test]
-#[ignore] // Currently crashes the process (SIGSEGV) — un-ignore once typed-array OOM is handled
 fn test_typed_array_oom_does_not_crash_stateless() {
     ensure_v8();
 
@@ -193,7 +192,6 @@ fn test_typed_array_oom_does_not_crash_stateless() {
 }
 
 #[test]
-#[ignore] // Currently crashes the process (SIGSEGV) — un-ignore once typed-array OOM is handled
 fn test_typed_array_oom_does_not_crash_stateful() {
     ensure_v8();
 
