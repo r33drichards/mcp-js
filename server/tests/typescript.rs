@@ -94,7 +94,7 @@ async fn test_typescript_basic_types() {
 
     let result = engine.run_js(
         "let x: number = 42; x;".to_string(),
-        None, None, None, None,
+        None, None, None, None, None,
     ).await;
 
     assert!(result.is_ok(), "Typed variable should execute, got: {:?}", result);
@@ -108,7 +108,7 @@ async fn test_typescript_function_with_types() {
 
     let result = engine.run_js(
         "function add(a: number, b: number): number { return a + b; } add(3, 4);".to_string(),
-        None, None, None, None,
+        None, None, None, None, None,
     ).await;
 
     assert!(result.is_ok(), "Typed function should execute, got: {:?}", result);
@@ -122,7 +122,7 @@ async fn test_typescript_arrow_function_with_types() {
 
     let result = engine.run_js(
         "const multiply = (a: number, b: number): number => a * b; multiply(6, 7);".to_string(),
-        None, None, None, None,
+        None, None, None, None, None,
     ).await;
 
     assert!(result.is_ok(), "Typed arrow function should execute, got: {:?}", result);
@@ -143,7 +143,7 @@ async fn test_typescript_interface_and_object() {
         JSON.stringify(p);
     "#;
 
-    let result = engine.run_js(ts.to_string(), None, None, None, None).await;
+    let result = engine.run_js(ts.to_string(), None, None, None, None, None).await;
 
     assert!(result.is_ok(), "Interface + typed object should execute, got: {:?}", result);
     assert_eq!(result.unwrap().output, r#"{"name":"Alice","age":30}"#);
@@ -159,7 +159,7 @@ async fn test_typescript_generics_execution() {
         identity<number>(99);
     "#;
 
-    let result = engine.run_js(ts.to_string(), None, None, None, None).await;
+    let result = engine.run_js(ts.to_string(), None, None, None, None, None).await;
 
     assert!(result.is_ok(), "Generic function should execute, got: {:?}", result);
     assert_eq!(result.unwrap().output, "99");
@@ -176,7 +176,7 @@ async fn test_typescript_type_alias_execution() {
         val;
     "#;
 
-    let result = engine.run_js(ts.to_string(), None, None, None, None).await;
+    let result = engine.run_js(ts.to_string(), None, None, None, None, None).await;
 
     assert!(result.is_ok(), "Type alias should execute, got: {:?}", result);
     assert_eq!(result.unwrap().output, "hello");
@@ -197,7 +197,7 @@ async fn test_typescript_enum_execution() {
         Direction.Down;
     "#;
 
-    let result = engine.run_js(ts.to_string(), None, None, None, None).await;
+    let result = engine.run_js(ts.to_string(), None, None, None, None, None).await;
 
     assert!(result.is_ok(), "Enum should execute, got: {:?}", result);
     assert_eq!(result.unwrap().output, "1");
@@ -229,7 +229,7 @@ async fn test_typescript_class_with_types() {
         new Calculator(10).add(5).add(3).result();
     "#;
 
-    let result = engine.run_js(ts.to_string(), None, None, None, None).await;
+    let result = engine.run_js(ts.to_string(), None, None, None, None, None).await;
 
     assert!(result.is_ok(), "Typed class should execute, got: {:?}", result);
     assert_eq!(result.unwrap().output, "18");
@@ -242,7 +242,7 @@ async fn test_typescript_as_cast() {
 
     let result = engine.run_js(
         "const x = (42 as number); x;".to_string(),
-        None, None, None, None,
+        None, None, None, None, None,
     ).await;
 
     assert!(result.is_ok(), "'as' cast should execute, got: {:?}", result);
@@ -256,7 +256,7 @@ async fn test_plain_javascript_still_works() {
 
     let result = engine.run_js(
         "var sum = 0; for (var i = 0; i < 10; i++) { sum += i; } sum;".to_string(),
-        None, None, None, None,
+        None, None, None, None, None,
     ).await;
 
     assert!(result.is_ok(), "Plain JS should still work, got: {:?}", result);

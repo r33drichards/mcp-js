@@ -5,6 +5,7 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 use crate::engine::Engine;
 
@@ -19,6 +20,8 @@ struct ExecRequest {
     heap_memory_max_mb: Option<usize>,
     #[serde(default)]
     execution_timeout_secs: Option<u64>,
+    #[serde(default)]
+    tags: Option<HashMap<String, String>>,
 }
 
 #[derive(Serialize)]
@@ -39,6 +42,7 @@ async fn exec_handler(
             req.session,
             req.heap_memory_max_mb,
             req.execution_timeout_secs,
+            req.tags,
         )
         .await
     {

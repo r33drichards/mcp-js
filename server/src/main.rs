@@ -13,6 +13,7 @@ mod api;
 mod cluster;
 use engine::{initialize_v8, Engine, WasmModule, DEFAULT_EXECUTION_TIMEOUT_SECS};
 use engine::heap_storage::{AnyHeapStorage, S3HeapStorage, WriteThroughCacheHeapStorage, FileHeapStorage};
+use engine::heap_tags::HeapTagStore;
 use engine::session_log::SessionLog;
 use mcp::{McpService, StatelessMcpService};
 use cluster::{ClusterConfig, ClusterNode};
@@ -255,8 +256,25 @@ async fn main() -> Result<()> {
             }
         };
 
+        let heap_tag_db_path = format!("{}/heap-tags", cli.session_db_path);
+        let heap_tag_store = match HeapTagStore::new(&heap_tag_db_path) {
+            Ok(store) => {
+                tracing::info!("Heap tag store opened at {}", heap_tag_db_path);
+                let store = if let Some(ref cn) = cluster_node {
+                    store.with_cluster(cn.clone())
+                } else {
+                    store
+                };
+                Some(store)
+            }
+            Err(e) => {
+                tracing::warn!("Failed to open heap tag store at {}: {}. Heap tagging disabled.", heap_tag_db_path, e);
+                None
+            }
+        };
+
         tracing::info!("Creating stateful engine");
-        Engine::new_stateful(heap_storage, session_log, heap_memory_max_bytes, execution_timeout_secs, cli.max_concurrent_executions)
+        Engine::new_stateful(heap_storage, session_log, heap_tag_store, heap_memory_max_bytes, execution_timeout_secs, cli.max_concurrent_executions)
     };
 
     let engine = engine.with_wasm_default_max_bytes(wasm_default_max_bytes);
