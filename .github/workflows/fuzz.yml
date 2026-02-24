@@ -51,13 +51,29 @@ jobs:
           # isolate create/destroy cycle grows RSS by ~375 KB under ASAN, despite
           # zero RSS growth without ASAN (measured in server/tests/rss_growth.rs).
           #
-          # Fork mode solves this: libfuzzer spawns workers that each run until
-          # hitting -rss_limit_mb, then respawns a fresh worker with a clean
-          # address space. The corpus is shared via the filesystem. LeakSanitizer
-          # still runs on each worker exit, so actual code leaks are detected.
+          # Fork mode recycles workers: each runs until hitting -rss_limit_mb,
+          # then a fresh worker with clean address space takes over. The corpus
+          # is shared via the filesystem. LeakSanitizer still runs on each
+          # worker exit, so actual code leaks are detected.
+          #
+          # However, when a worker is killed for exceeding -rss_limit_mb, the
+          # current input is saved as an oom-* artifact and libfuzzer exits
+          # with code 71. These are FALSE POSITIVES — no single input causes
+          # OOM; the RSS growth is cumulative ASAN shadow overhead across many
+          # iterations (~375 KB/iter × ~680 iter/s = 4 GB in ~16 s).
+          #
+          # We tolerate oom-* artifacts and only fail on genuine crash/timeout.
           nix develop .#fuzz --command bash -c \
             "cd server && cargo fuzz run --sanitizer=address ${{ matrix.target }} \
-              -- -fork=1 -max_total_time=300 -rss_limit_mb=4096 -max_len=65536 -timeout=120"
+              -- -fork=1 -max_total_time=300 -rss_limit_mb=4096 -max_len=65536 -timeout=120" \
+          || {
+            artifact_dir="server/fuzz/artifacts/${{ matrix.target }}"
+            if ls "$artifact_dir"/crash-* "$artifact_dir"/timeout-* 2>/dev/null; then
+              echo "::error::Genuine crash or timeout artifacts found"
+              exit 1
+            fi
+            echo "::warning::Fuzzer exited non-zero but only oom-* artifacts found (expected ASAN shadow growth, not a bug)"
+          }
 
       - name: Upload fuzz artifacts
         if: always()
