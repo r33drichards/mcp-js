@@ -6,6 +6,7 @@ A Rust-based Model Context Protocol (MCP) server that exposes a V8 JavaScript ru
 
 - **V8 JavaScript Execution**: Run arbitrary JavaScript code in a secure, isolated V8 engine.
 - **TypeScript Support**: Run TypeScript code directly — types are stripped before execution using [SWC](https://swc.rs/). This is type removal only, not type checking.
+- **WebAssembly Support**: Compile and run WASM modules using the standard `WebAssembly` JavaScript API (`WebAssembly.Module`, `WebAssembly.Instance`, `WebAssembly.validate`).
 - **Content-Addressed Heap Snapshots**: Persist and restore V8 heap state between runs using content-addressed storage, supporting both S3 and local file storage.
 - **Stateless Mode**: Optional mode for fresh executions without heap persistence, ideal for serverless environments.
 - **MCP Protocol**: Implements the Model Context Protocol for seamless tool integration with Claude, Cursor, and other MCP clients.
@@ -279,6 +280,26 @@ You can also use the hosted version on Railway without installing anything local
 - Ask Claude or Cursor: "Run this JavaScript: `1 + 2`"
 - Use content-addressed heap snapshots to persist state between runs. The `run_js` tool returns a `heap` content hash after each execution — pass it back in the next call to resume that session.
 
+### WebAssembly
+
+You can compile and run WebAssembly modules using the standard `WebAssembly` JavaScript API:
+
+```javascript
+const wasmBytes = new Uint8Array([
+  0x00,0x61,0x73,0x6d, // magic
+  0x01,0x00,0x00,0x00, // version
+  0x01,0x07,0x01,0x60,0x02,0x7f,0x7f,0x01,0x7f, // type: (i32,i32)->i32
+  0x03,0x02,0x01,0x00, // function section
+  0x07,0x07,0x01,0x03,0x61,0x64,0x64,0x00,0x00, // export "add"
+  0x0a,0x09,0x01,0x07,0x00,0x20,0x00,0x20,0x01,0x6a,0x0b // body: local.get 0, local.get 1, i32.add
+]);
+const mod = new WebAssembly.Module(wasmBytes);
+const inst = new WebAssembly.Instance(mod);
+inst.exports.add(21, 21); // → 42
+```
+
+This uses synchronous compilation (`WebAssembly.Module` / `WebAssembly.Instance`), which works within the V8 runtime. The async APIs (`WebAssembly.compile`, `WebAssembly.instantiate` returning Promises) are not supported since the runtime does not support async/await.
+
 ## Heap Storage Options
 
 You can configure heap storage using the following command line arguments:
@@ -313,6 +334,7 @@ While `mcp-v8` provides a powerful and persistent JavaScript execution environme
 - **No `npm install` or external packages**: You cannot install or import npm packages. Only standard JavaScript (ECMAScript) built-ins are available.
 - **No timers**: Functions like `setTimeout` and `setInterval` are not available.
 - **No DOM or browser APIs**: This is not a browser environment; there is no access to `window`, `document`, or other browser-specific objects.
+- **WebAssembly: synchronous API only**: `WebAssembly.Module`, `WebAssembly.Instance`, and `WebAssembly.validate` work. The async APIs (`WebAssembly.compile`, `WebAssembly.instantiate` returning Promises) are not supported.
 - **TypeScript: type removal only**: TypeScript type annotations are stripped before execution. No type checking is performed — invalid types are silently removed, not reported as errors.
 
 ---
