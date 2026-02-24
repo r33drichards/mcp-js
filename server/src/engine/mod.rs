@@ -1,6 +1,8 @@
 pub mod heap_storage;
+pub mod heap_tags;
 pub mod session_log;
 
+use std::collections::HashMap;
 use std::sync::Once;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -26,6 +28,7 @@ use swc_core::ecma::transforms::typescript::strip;
 use tokio::sync::Semaphore;
 
 use crate::engine::heap_storage::{HeapStorage, AnyHeapStorage};
+use crate::engine::heap_tags::{HeapTagStore, HeapTagEntry};
 use crate::engine::session_log::{SessionLog, SessionLogEntry};
 use wasmparser::Validator;
 
@@ -795,6 +798,7 @@ pub struct WasmModule {
 pub struct Engine {
     heap_storage: Option<AnyHeapStorage>,
     session_log: Option<SessionLog>,
+    heap_tag_store: Option<HeapTagStore>,
     heap_memory_max_bytes: usize,
     execution_timeout_secs: u64,
     v8_semaphore: Arc<Semaphore>,
@@ -818,6 +822,7 @@ impl Engine {
         Self {
             heap_storage: None,
             session_log: None,
+            heap_tag_store: None,
             heap_memory_max_bytes,
             execution_timeout_secs,
             v8_semaphore: Arc::new(Semaphore::new(max_concurrent)),
@@ -830,6 +835,7 @@ impl Engine {
     pub fn new_stateful(
         heap_storage: AnyHeapStorage,
         session_log: Option<SessionLog>,
+        heap_tag_store: Option<HeapTagStore>,
         heap_memory_max_bytes: usize,
         execution_timeout_secs: u64,
         max_concurrent: usize,
@@ -837,6 +843,7 @@ impl Engine {
         Self {
             heap_storage: Some(heap_storage),
             session_log,
+            heap_tag_store,
             heap_memory_max_bytes,
             execution_timeout_secs,
             v8_semaphore: Arc::new(Semaphore::new(max_concurrent)),
@@ -870,6 +877,7 @@ impl Engine {
         session: Option<String>,
         heap_memory_max_mb: Option<usize>,
         execution_timeout_secs: Option<u64>,
+        tags: Option<HashMap<String, String>>,
     ) -> Result<JsResult, String> {
         // Strip TypeScript types before V8 execution (no-op for plain JS)
         let code = strip_typescript_types(&code)?;
@@ -974,6 +982,12 @@ impl Engine {
                             }
                         }
 
+                        if let (Some(t), Some(tag_store)) = (tags, &self.heap_tag_store) {
+                            if let Err(e) = tag_store.set_tags(&content_hash, t).await {
+                                tracing::warn!("Failed to store heap tags: {}", e);
+                            }
+                        }
+
                         Ok(JsResult { output, heap: Some(content_hash) })
                     }
                     Err(e) => Err(e),
@@ -997,6 +1011,45 @@ impl Engine {
         match &self.session_log {
             Some(log) => log.list_entries(&session, fields).await,
             None => Err("Session log not configured".to_string()),
+        }
+    }
+
+    pub async fn get_heap_tags(&self, heap: String) -> Result<HashMap<String, String>, String> {
+        match &self.heap_tag_store {
+            Some(store) => store.get_tags(&heap).await,
+            None => Err("Heap tag store not configured".to_string()),
+        }
+    }
+
+    pub async fn set_heap_tags(
+        &self,
+        heap: String,
+        tags: HashMap<String, String>,
+    ) -> Result<(), String> {
+        match &self.heap_tag_store {
+            Some(store) => store.set_tags(&heap, tags).await,
+            None => Err("Heap tag store not configured".to_string()),
+        }
+    }
+
+    pub async fn delete_heap_tags(
+        &self,
+        heap: String,
+        keys: Option<Vec<String>>,
+    ) -> Result<(), String> {
+        match &self.heap_tag_store {
+            Some(store) => store.delete_tags(&heap, keys).await,
+            None => Err("Heap tag store not configured".to_string()),
+        }
+    }
+
+    pub async fn query_heaps_by_tags(
+        &self,
+        filter: HashMap<String, String>,
+    ) -> Result<Vec<HeapTagEntry>, String> {
+        match &self.heap_tag_store {
+            Some(store) => store.query_by_tags(filter).await,
+            None => Err("Heap tag store not configured".to_string()),
         }
     }
 }

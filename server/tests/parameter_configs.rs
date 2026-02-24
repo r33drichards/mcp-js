@@ -29,7 +29,7 @@ async fn test_timeout_produces_descriptive_error() {
     let engine = Engine::new_stateless(64 * 1024 * 1024, 2, 4);
     let result = engine.run_js(
         "while (true) {}".to_string(),
-        None, None, None, None,
+        None, None, None, None, None,
     ).await;
 
     assert!(result.is_err(), "Infinite loop should fail, got: {:?}", result);
@@ -48,10 +48,10 @@ async fn test_timeout_stateful_produces_descriptive_error() {
     let heap_storage = server::engine::heap_storage::AnyHeapStorage::File(
         server::engine::heap_storage::FileHeapStorage::new("/tmp/mcp-v8-test-timeout-stateful"),
     );
-    let engine = Engine::new_stateful(heap_storage, None, 64 * 1024 * 1024, 2, 4);
+    let engine = Engine::new_stateful(heap_storage, None, None, 64 * 1024 * 1024, 2, 4);
     let result = engine.run_js(
         "while (true) {}".to_string(),
-        None, None, None, None,
+        None, None, None, None, None,
     ).await;
 
     assert!(result.is_err(), "Infinite loop should fail, got: {:?}", result);

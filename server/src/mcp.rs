@@ -4,8 +4,10 @@ use rmcp::{
     service::RequestContext, tool,
 };
 use serde_json::json;
+use std::collections::HashMap;
 
 use crate::engine::Engine;
+use crate::engine::heap_tags::HeapTagEntry;
 
 // ── MCP response types ──────────────────────────────────────────────────
 
@@ -56,6 +58,56 @@ impl IntoContents for ListSessionSnapshotsResponse {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct GetHeapTagsResponse {
+    pub tags: HashMap<String, String>,
+}
+
+impl IntoContents for GetHeapTagsResponse {
+    fn into_contents(self) -> Vec<Content> {
+        match Content::json(json!({ "tags": self.tags })) {
+            Ok(content) => vec![content],
+            Err(e) => vec![Content::text(format!("Failed to convert get_heap_tags response: {}", e))],
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct OkResponse {
+    pub ok: bool,
+    pub error: Option<String>,
+}
+
+impl IntoContents for OkResponse {
+    fn into_contents(self) -> Vec<Content> {
+        let value = match self.error {
+            Some(e) => json!({ "ok": self.ok, "error": e }),
+            None => json!({ "ok": self.ok }),
+        };
+        match Content::json(value) {
+            Ok(content) => vec![content],
+            Err(e) => vec![Content::text(format!("Failed to convert response: {}", e))],
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct QueryHeapTagsResponse {
+    pub results: Vec<HeapTagEntry>,
+}
+
+impl IntoContents for QueryHeapTagsResponse {
+    fn into_contents(self) -> Vec<Content> {
+        let entries: Vec<serde_json::Value> = self.results.into_iter().map(|e| {
+            json!({ "heap": e.heap, "tags": e.tags })
+        }).collect();
+        match Content::json(json!({ "results": entries })) {
+            Ok(content) => vec![content],
+            Err(e) => vec![Content::text(format!("Failed to convert query_heaps_by_tags response: {}", e))],
+        }
+    }
+}
+
 // ── McpService ──────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -87,8 +139,11 @@ impl McpService {
         #[tool(param)]
         #[serde(default)]
         execution_timeout_secs: Option<u64>,
+        #[tool(param)]
+        #[serde(default)]
+        tags: Option<HashMap<String, String>>,
     ) -> RunJsResponse {
-        match self.engine.run_js(code, heap, session, heap_memory_max_mb, execution_timeout_secs).await {
+        match self.engine.run_js(code, heap, session, heap_memory_max_mb, execution_timeout_secs, tags).await {
             Ok(result) => RunJsResponse {
                 output: result.output,
                 heap: result.heap,
@@ -125,6 +180,72 @@ impl McpService {
             Ok(entries) => ListSessionSnapshotsResponse { entries },
             Err(e) => ListSessionSnapshotsResponse {
                 entries: vec![serde_json::json!({"error": e})],
+            },
+        }
+    }
+
+    #[tool(description = "Get tags for a heap snapshot (stateful mode only). Returns a map of key-value tags associated with the given heap content hash.")]
+    pub async fn get_heap_tags(
+        &self,
+        #[tool(param)] heap: String,
+    ) -> GetHeapTagsResponse {
+        match self.engine.get_heap_tags(heap).await {
+            Ok(tags) => GetHeapTagsResponse { tags },
+            Err(e) => GetHeapTagsResponse {
+                tags: {
+                    let mut m = HashMap::new();
+                    m.insert("error".to_string(), e);
+                    m
+                },
+            },
+        }
+    }
+
+    #[tool(description = "Set or replace tags on a heap snapshot (stateful mode only). Provide a map of key-value string pairs. This replaces all existing tags for the heap.")]
+    pub async fn set_heap_tags(
+        &self,
+        #[tool(param)] heap: String,
+        #[tool(param)] tags: HashMap<String, String>,
+    ) -> OkResponse {
+        match self.engine.set_heap_tags(heap, tags).await {
+            Ok(()) => OkResponse { ok: true, error: None },
+            Err(e) => OkResponse { ok: false, error: Some(e) },
+        }
+    }
+
+    #[tool(description = "Delete tags from a heap snapshot (stateful mode only). If keys is provided (comma-separated), only those tag keys are removed. If keys is omitted, all tags are deleted.")]
+    pub async fn delete_heap_tags(
+        &self,
+        #[tool(param)] heap: String,
+        #[tool(param)]
+        #[serde(default)]
+        keys: Option<String>,
+    ) -> OkResponse {
+        let parsed_keys = keys.map(|k| {
+            k.split(',').map(|s| s.trim().to_string()).collect::<Vec<_>>()
+        });
+        match self.engine.delete_heap_tags(heap, parsed_keys).await {
+            Ok(()) => OkResponse { ok: true, error: None },
+            Err(e) => OkResponse { ok: false, error: Some(e) },
+        }
+    }
+
+    #[tool(description = "Query heap snapshots by tags (stateful mode only). Provide a map of key-value pairs to match. Returns all heaps whose tags contain all the specified key-value pairs.")]
+    pub async fn query_heaps_by_tags(
+        &self,
+        #[tool(param)] tags: HashMap<String, String>,
+    ) -> QueryHeapTagsResponse {
+        match self.engine.query_heaps_by_tags(tags).await {
+            Ok(results) => QueryHeapTagsResponse { results },
+            Err(e) => QueryHeapTagsResponse {
+                results: vec![HeapTagEntry {
+                    heap: "error".to_string(),
+                    tags: {
+                        let mut m = HashMap::new();
+                        m.insert("error".to_string(), e);
+                        m
+                    },
+                }],
             },
         }
     }
@@ -184,7 +305,7 @@ impl StatelessMcpService {
         #[serde(default)]
         execution_timeout_secs: Option<u64>,
     ) -> RunJsResponse {
-        match self.engine.run_js(code, None, None, heap_memory_max_mb, execution_timeout_secs).await {
+        match self.engine.run_js(code, None, None, heap_memory_max_mb, execution_timeout_secs, None).await {
             Ok(result) => RunJsResponse {
                 output: result.output,
                 heap: None,
