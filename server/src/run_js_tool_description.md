@@ -4,7 +4,7 @@ TypeScript support is type removal only — types are stripped before execution,
 
 params:
 - code: the javascript or typescript code to run
-- heap (optional): content hash from a previous execution to resume that session, or omit for a fresh session
+- heap (optional): content hash (SHA-256 hex string) from a previous execution to resume that session, or omit for a fresh session
 - session (optional): a human-readable session name. When provided, a log entry is written recording the input heap, output heap, executed code, and timestamp. Use list_sessions and list_session_snapshots to browse session history.
 - heap_memory_max_mb (optional): maximum V8 heap memory in megabytes (1–64, default: 8). Override the server default for this execution.
 - execution_timeout_secs (optional): maximum execution time in seconds (1–300, default: 30). Override the server default for this execution.
@@ -16,8 +16,6 @@ returns:
 
 
 ## Limitations
-
-While `mcp-v8` provides a powerful and persistent JavaScript execution environment, there are limitations to its runtime. 
 
 - **No `async`/`await` or Promises**: Asynchronous JavaScript is not supported. All code must be synchronous.
 - **No `fetch` or network access**: There is no built-in way to make HTTP requests or access the network.
@@ -62,19 +60,20 @@ would return:
 {"a":1,"b":2}
 ```
 
-you are running in stateful mode with content-addressed heap storage. Each execution returns a content hash for the heap snapshot — pass it back as the `heap` parameter in the next call to resume from that state. Omit `heap` for a fresh session.
+In stateful mode, each execution returns a SHA-256 content hash for the heap snapshot — pass it back as the `heap` parameter in the next call to resume from that state. Omit `heap` for a fresh session. In stateless mode, no heap is returned and each execution starts fresh.
 the source code of the runtime is this
 
 ```rust
-// Execute JS with snapshot support (preserves heap state)
-pub fn execute_stateful(code: String, snapshot: Option<Vec<u8>>, heap_memory_max_bytes: usize, timeout_secs: u64) -> Result<(String, Vec<u8>, String), String> {
-    let raw_snapshot = match snapshot {
-        Some(data) if !data.is_empty() => Some(unwrap_snapshot(&data)?),
-        _ => None,
-    };
-
+/// Stateful V8 execution — runs V8 on the calling thread. Publishes an
+/// IsolateHandle for external cancellation (e.g. async timeout in `run_js`).
+/// Takes raw (already unwrapped) snapshot data. Returns (result, oom_flag).
+pub fn execute_stateful(
+    code: &str,
+    raw_snapshot: Option<Vec<u8>>,
+    heap_memory_max_bytes: usize,
+    isolate_handle: Arc<Mutex<Option<v8::IsolateHandle>>>,
+) -> (Result<(String, Vec<u8>, String), String>, bool) {
     let oom_flag = Arc::new(AtomicBool::new(false));
-    let timeout_flag = Arc::new(AtomicBool::new(false));
 
     let result = catch_unwind(AssertUnwindSafe(|| {
         let params = Some(create_params_with_heap_limit(heap_memory_max_bytes));
@@ -88,15 +87,17 @@ pub fn execute_stateful(code: String, snapshot: Option<Vec<u8>>, heap_memory_max
             }
         };
 
+        // Publish handle immediately so caller can terminate us.
+        *isolate_handle.lock().unwrap() = Some(snapshot_creator.thread_safe_handle());
+
         let cb_data_ptr = install_heap_limit_callback(&mut snapshot_creator, oom_flag.clone());
-        let _timeout_guard = install_execution_timeout(&mut snapshot_creator, timeout_secs, timeout_flag.clone());
 
         let output_result;
         {
             let scope = &mut v8::HandleScope::new(&mut snapshot_creator);
             let context = v8::Context::new(scope, Default::default());
             let scope = &mut v8::ContextScope::new(scope, context);
-            output_result = match eval(scope, &code) {
+            output_result = match eval(scope, code) {
                 Ok(result) => {
                     result
                         .to_string(scope)
@@ -108,6 +109,8 @@ pub fn execute_stateful(code: String, snapshot: Option<Vec<u8>>, heap_memory_max
             scope.set_default_context(context);
         }
 
+        // Clear handle before snapshot_creator is consumed.
+        *isolate_handle.lock().unwrap() = None;
         unsafe { let _ = Box::from_raw(cb_data_ptr); }
 
         let startup_data = snapshot_creator.create_blob(v8::FunctionCodeHandling::Clear)
@@ -117,92 +120,30 @@ pub fn execute_stateful(code: String, snapshot: Option<Vec<u8>>, heap_memory_max
         output_result.map(|output| (output, wrapped.data, wrapped.content_hash))
     }));
 
+    let oom = oom_flag.load(Ordering::SeqCst);
     match result {
-        Ok(inner) => inner.map_err(|e| classify_termination_error(&oom_flag, &timeout_flag, e)),
-        Err(_panic) => Err(classify_termination_error(
-            &oom_flag,
-            &timeout_flag,
-            "V8 execution panicked unexpectedly".to_string(),
-        )),
+        Ok(Ok(triple)) => (Ok(triple), oom),
+        Ok(Err(e)) => (Err(classify_termination_error(&oom_flag, false, e)), oom),
+        Err(_panic) => (Err(classify_termination_error(
+            &oom_flag, false, "V8 execution panicked unexpectedly".to_string(),
+        )), oom),
     }
 }
 
-// Stateful service with heap persistence
-#[derive(Clone)]
-pub struct StatefulService {
-    heap_storage: AnyHeapStorage,
-    session_log: Option<SessionLog>,
-    heap_memory_max_bytes: usize,
-    execution_timeout_secs: u64,
-}
-
-#[tool(tool_box)]
-impl StatefulService {
-    pub fn new(heap_storage: AnyHeapStorage, session_log: Option<SessionLog>, heap_memory_max_bytes: usize, execution_timeout_secs: u64) -> Self {
-        Self { heap_storage, session_log, heap_memory_max_bytes, execution_timeout_secs }
-    }
-
-    #[tool(description = include_str!("run_js_tool_description.md"))]
-    pub async fn run_js(
-        &self,
-        #[tool(param)] code: String,
-        #[tool(param)]
-        #[serde(default)]
-        heap: Option<String>,
-        #[tool(param)]
-        #[serde(default)]
-        session: Option<String>,
-        #[tool(param)]
-        #[serde(default)]
-        heap_memory_max_mb: Option<usize>,
-        #[tool(param)]
-        #[serde(default)]
-        execution_timeout_secs: Option<u64>,
-    ) -> RunJsStatefulResponse {
-        let max_bytes = heap_memory_max_mb
-            .map(|mb| mb * 1024 * 1024)
-            .unwrap_or(self.heap_memory_max_bytes);
-        let timeout = execution_timeout_secs.unwrap_or(self.execution_timeout_secs);
-        let snapshot = match &heap {
-            Some(h) if !h.is_empty() => self.heap_storage.get(h).await.ok(),
-            _ => None,
-        };
-        let code_for_log = code.clone();
-        let v8_result = tokio::task::spawn_blocking(move || execute_stateful(code, snapshot, max_bytes, timeout)).await;
-
-        match v8_result {
-            Ok(Ok((output, startup_data, content_hash))) => {
-                if let Err(e) = self.heap_storage.put(&content_hash, &startup_data).await {
-                    return RunJsStatefulResponse {
-                        output: format!("Error saving heap: {}", e),
-                        heap: content_hash,
-                    };
-                }
-
-                // Log to session if session name is provided and session log is available
-                if let (Some(session_name), Some(log)) = (&session, &self.session_log) {
-                    let entry = SessionLogEntry {
-                        input_heap: heap.clone(),
-                        output_heap: content_hash.clone(),
-                        code: code_for_log,
-                        timestamp: chrono::Utc::now().to_rfc3339(),
-                    };
-                    if let Err(e) = log.append(session_name, entry) {
-                        tracing::warn!("Failed to log session entry: {}", e);
-                    }
-                }
-
-                RunJsStatefulResponse { output, heap: content_hash }
-            }
-            Ok(Err(e)) => RunJsStatefulResponse {
-                output: format!("V8 error: {}", e),
-                heap: heap.unwrap_or_default(),
-            },
-            Err(e) => RunJsStatefulResponse {
-                output: format!("Task join error: {}", e),
-                heap: heap.unwrap_or_default(),
-            },
-        }
-    }
+// Engine.run_js handles TypeScript stripping, timeout enforcement,
+// concurrency control, heap storage, and session logging:
+pub async fn run_js(
+    &self,
+    code: String,
+    heap: Option<String>,
+    session: Option<String>,
+    heap_memory_max_mb: Option<usize>,
+    execution_timeout_secs: Option<u64>,
+) -> Result<JsResult, String> {
+    // Strip TypeScript types before V8 execution (no-op for plain JS)
+    let code = strip_typescript_types(&code)?;
+    // ... acquires semaphore permit, loads snapshot from storage,
+    // runs execute_stateful on blocking thread with async timeout,
+    // saves resulting snapshot, logs to session if named ...
 }
 ```

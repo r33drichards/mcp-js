@@ -1,6 +1,6 @@
 # Docker Guide for mcp-v8
 
-This guide explains how to build and run the mcp-v8 HTTP server using Docker.
+This guide explains how to build and run the mcp-v8 server using Docker.
 
 ## Building the Docker Image
 
@@ -19,13 +19,13 @@ The build process:
 
 ## Running the Container
 
-### Basic HTTP Server (Local Storage)
+### Streamable HTTP Server (Local Storage)
 
 ```bash
 docker run -p 8080:8080 mcp-v8:latest
 ```
 
-This starts the HTTP server on port 8080 with local filesystem storage.
+This starts the Streamable HTTP server on port 8080 with local filesystem storage. The MCP endpoint is served at `/mcp` and a plain API at `/api/exec`.
 
 ### Custom Port
 
@@ -51,6 +51,33 @@ docker run -p 8080:8080 \
   mcp-v8:latest \
   mcp-v8 --http-port 8080 --s3-bucket your-bucket-name
 ```
+
+### With S3 and Write-Through Cache
+
+```bash
+docker run -p 8080:8080 \
+  -e AWS_ACCESS_KEY_ID=your_access_key \
+  -e AWS_SECRET_ACCESS_KEY=your_secret_key \
+  -e AWS_REGION=us-east-1 \
+  mcp-v8:latest \
+  mcp-v8 --http-port 8080 --s3-bucket your-bucket-name --cache-dir /tmp/mcp-v8-cache
+```
+
+### Stateless Mode
+
+```bash
+docker run -p 8080:8080 mcp-v8:latest mcp-v8 --http-port 8080 --stateless
+```
+
+No heap persistence — each execution starts with a fresh V8 isolate.
+
+### SSE Transport
+
+```bash
+docker run -p 8081:8081 mcp-v8:latest mcp-v8 --sse-port 8081 --directory-path /tmp/mcp-v8-heaps
+```
+
+Exposes `/sse` for the event stream and `/message` for client requests.
 
 ## Docker Compose
 
@@ -80,16 +107,27 @@ Run with:
 docker-compose up -d
 ```
 
-## Testing the HTTP Server
+See also the pre-configured compose files in the repository root:
+- `docker-compose.single-stateful.yml` — Single node, stateful
+- `docker-compose.single-stateless.yml` — Single node, stateless
+- `docker-compose.cluster-stateful.yml` — 3-node Raft cluster, stateful
+- `docker-compose.cluster-stateless.yml` — 3-node Raft cluster, stateless
+
+## Testing the Server
 
 Once running, test the connection:
 
 ```bash
-# Test basic connectivity
-curl http://localhost:8080
+# Test basic connectivity (Streamable HTTP)
+curl http://localhost:8080/mcp
+
+# Test the plain HTTP API directly
+curl -X POST http://localhost:8080/api/exec \
+  -H "Content-Type: application/json" \
+  -d '{"code": "1 + 2"}'
 
 # Use MCP Inspector
-npx @modelcontextprotocol/inspector http://localhost:8080
+npx @modelcontextprotocol/inspector http://localhost:8080/mcp
 ```
 
 ## Environment Variables
