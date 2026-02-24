@@ -493,16 +493,16 @@ pub fn execute_stateless(
             let scope = &mut v8::ContextScope::new(scope, context);
 
             // Inject WASM modules as globals via native V8 API.
-            if let Err(e) = inject_wasm_modules(scope, wasm_modules) {
-                return Err(e);
-            }
-
-            match eval(scope, code) {
-                Ok(value) => match value.to_string(scope) {
-                    Some(s) => Ok(s.to_rust_string_lossy(scope)),
-                    None => Err("Failed to convert result to string".to_string()),
-                },
+            // Do NOT early-return here — cb_data_ptr must be freed below.
+            match inject_wasm_modules(scope, wasm_modules) {
                 Err(e) => Err(e),
+                Ok(()) => match eval(scope, code) {
+                    Ok(value) => match value.to_string(scope) {
+                        Some(s) => Ok(s.to_rust_string_lossy(scope)),
+                        None => Err("Failed to convert result to string".to_string()),
+                    },
+                    Err(e) => Err(e),
+                },
             }
         };
 
@@ -564,19 +564,19 @@ pub fn execute_stateful(
             let scope = &mut v8::ContextScope::new(scope, context);
 
             // Inject WASM modules as globals via native V8 API.
-            if let Err(e) = inject_wasm_modules(scope, wasm_modules) {
-                scope.set_default_context(context);
-                return Err(e);
-            }
-
-            output_result = match eval(scope, code) {
-                Ok(result) => {
-                    result
-                        .to_string(scope)
-                        .map(|s| s.to_rust_string_lossy(scope))
-                        .ok_or_else(|| "Failed to convert result to string".to_string())
-                }
+            // Do NOT early-return here — create_blob() must be called below
+            // to prevent SnapshotCreator's destructor from panicking.
+            output_result = match inject_wasm_modules(scope, wasm_modules) {
                 Err(e) => Err(e),
+                Ok(()) => match eval(scope, code) {
+                    Ok(result) => {
+                        result
+                            .to_string(scope)
+                            .map(|s| s.to_rust_string_lossy(scope))
+                            .ok_or_else(|| "Failed to convert result to string".to_string())
+                    }
+                    Err(e) => Err(e),
+                },
             };
             scope.set_default_context(context);
         }
@@ -584,11 +584,19 @@ pub fn execute_stateful(
         *isolate_handle.lock().unwrap() = None;
         unsafe { let _ = Box::from_raw(cb_data_ptr); }
 
-        let startup_data = snapshot_creator.create_blob(v8::FunctionCodeHandling::Clear)
-            .ok_or("Failed to create V8 snapshot blob".to_string())?;
-        let wrapped = wrap_snapshot(&startup_data);
+        // Always call create_blob before snapshot_creator is dropped —
+        // V8's SnapshotCreator destructor panics if create_blob was never called.
+        let blob_result = snapshot_creator.create_blob(v8::FunctionCodeHandling::Clear);
 
-        output_result.map(|output| (output, wrapped.data, wrapped.content_hash))
+        match output_result {
+            Ok(output) => {
+                let startup_data = blob_result
+                    .ok_or("Failed to create V8 snapshot blob".to_string())?;
+                let wrapped = wrap_snapshot(&startup_data);
+                Ok((output, wrapped.data, wrapped.content_hash))
+            }
+            Err(e) => Err(e),
+        }
     }));
 
     let oom = oom_flag.load(Ordering::SeqCst);
