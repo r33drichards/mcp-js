@@ -222,3 +222,29 @@ async fn test_wasm_no_modules_no_preamble() {
     assert!(result.is_ok(), "No modules should mean no globals, got: {:?}", result);
     assert_eq!(result.unwrap().output, "undefined");
 }
+
+// ── File-path loading tests ──────────────────────────────────────────────
+
+/// Test loading a WASM module from a `.wasm` file on disk.
+#[tokio::test]
+async fn test_wasm_load_from_filepath() {
+    ensure_v8();
+
+    let wasm_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("add.wasm");
+
+    let bytes = std::fs::read(&wasm_path)
+        .unwrap_or_else(|e| panic!("Failed to read {}: {}", wasm_path.display(), e));
+
+    let engine = Engine::new_stateless(8 * 1024 * 1024, 30, 4)
+        .with_wasm_modules(vec![
+            WasmModule { name: "math".to_string(), bytes },
+        ]);
+
+    let result = engine.run_js("math.add(21, 21);".to_string(), None, None, None, None).await;
+
+    assert!(result.is_ok(), "WASM loaded from filepath should work, got: {:?}", result);
+    assert_eq!(result.unwrap().output, "42");
+}
