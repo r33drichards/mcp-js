@@ -1,17 +1,43 @@
 {
   description = "MCP JS – JavaScript execution over the Model Context Protocol";
 
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-  inputs.flake-utils.url = "github:numtide/flake-utils";
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    flake-utils.url = "github:numtide/flake-utils";
+    rust-overlay = {
+      url = "github:oxalica/rust-overlay";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+  };
 
-  outputs = { self, nixpkgs, flake-utils, ... }:
+  outputs = { self, nixpkgs, flake-utils, rust-overlay, ... }:
     let
       # NixOS module – importable by any NixOS configuration
       nixosModules.mcp-js = import ./nix/module.nix;
     in
     (flake-utils.lib.eachDefaultSystem (system:
       let
-        pkgs = import nixpkgs { inherit system; };
+        pkgs = import nixpkgs {
+          inherit system;
+          overlays = [ rust-overlay.overlays.default ];
+        };
+
+        # Single Rust toolchain used for both building and development.
+        # Using stable latest ensures all deps (including SWC) compile,
+        # while rust-overlay keeps it consistent across nix build & nix develop.
+        rustToolchain = pkgs.rust-bin.stable.latest.default.override {
+          extensions = [ "rust-src" "rustfmt" "clippy" ];
+        };
+
+        # Nightly toolchain for cargo-fuzz (requires -Z flags)
+        rustNightly = pkgs.rust-bin.nightly.latest.default.override {
+          extensions = [ "rust-src" "rustfmt" "clippy" ];
+        };
+
+        rustPlatform = pkgs.makeRustPlatform {
+          cargo = rustToolchain;
+          rustc = rustToolchain;
+        };
 
         # Patched replace-workspace-values that handles the 'version' key
         # in workspace-inherited dependencies.  Upstream nixpkgs script
@@ -25,20 +51,21 @@
           }
           (builtins.readFile ./nix/replace-workspace-values.py);
       in {
-        devShells.default = import ./shell.nix { inherit pkgs; };
+        devShells.default = import ./shell.nix { inherit pkgs rustToolchain; };
+        devShells.fuzz = import ./shell.nix { inherit pkgs; rustToolchain = rustNightly; };
 
         # Package – builds the server binary using rustPlatform.
         # NOTE: v8 (rusty_v8) requires a pre-built static library.  Set
         # RUSTY_V8_ARCHIVE to the path of the .a file if the automatic
         # download does not work inside the Nix sandbox.
-        packages.default = pkgs.rustPlatform.buildRustPackage {
+        packages.default = rustPlatform.buildRustPackage {
           pname = "mcp-js-server";
           version = "0.1.0";
           src = ./server;
 
           # Use cargoDeps with a patched vendor step instead of cargoHash
           # so we can inject our fixed replace-workspace-values script.
-          cargoDeps = (pkgs.rustPlatform.fetchCargoVendor {
+          cargoDeps = (rustPlatform.fetchCargoVendor {
             src = ./server;
             hash = "sha256-6KUPMqNCl+N5dRMQ2TF4LAMFt33roBoveJXphVsnByM=";
           }).overrideAttrs (old: {

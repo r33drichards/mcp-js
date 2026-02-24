@@ -43,16 +43,16 @@ jobs:
           extra_nix_config: |
             experimental-features = nix-command flakes
       - name: Install cargo-fuzz
-        run: nix develop --command bash -c "cargo install cargo-fuzz"
+        run: nix develop .#fuzz --command bash -c "cargo install cargo-fuzz"
 
       - name: Build fuzz targets
-        run: nix develop --command bash -c "cd server && cargo fuzz build --sanitizer=${{ matrix.sanitizer }} ${{ matrix.target }}"
+        run: nix develop .#fuzz --command bash -c "cd server && cargo fuzz build --sanitizer=${{ matrix.sanitizer }} ${{ matrix.target }}"
 
       - name: Run fuzzer (${{ matrix.target }})
         env:
           ASAN_OPTIONS: quarantine_size_mb=64:malloc_context_size=5
         run: |
-          nix develop --command bash -c \
+          nix develop .#fuzz --command bash -c \
             "cd server && cargo fuzz run --sanitizer=${{ matrix.sanitizer }} ${{ matrix.target }} -- -max_total_time=300 -rss_limit_mb=4096 -max_len=65536 -timeout=120"
 
       - name: Upload fuzz artifacts
