@@ -6,6 +6,7 @@ A Rust-based Model Context Protocol (MCP) server that exposes a V8 JavaScript ru
 
 - **V8 JavaScript Execution**: Run arbitrary JavaScript code in a secure, isolated V8 engine.
 - **TypeScript Support**: Run TypeScript code directly — types are stripped before execution using [SWC](https://swc.rs/). This is type removal only, not type checking.
+- **WebAssembly Support**: Compile and run WASM modules using the standard `WebAssembly` JavaScript API (`WebAssembly.Module`, `WebAssembly.Instance`, `WebAssembly.validate`).
 - **Content-Addressed Heap Snapshots**: Persist and restore V8 heap state between runs using content-addressed storage, supporting both S3 and local file storage.
 - **Stateless Mode**: Optional mode for fresh executions without heap persistence, ideal for serverless environments.
 - **MCP Protocol**: Implements the Model Context Protocol for seamless tool integration with Claude, Cursor, and other MCP clients.
@@ -68,6 +69,38 @@ These options enable Raft-based clustering for distributed coordination and repl
 - `--heartbeat-interval <ms>`: Raft heartbeat interval in milliseconds (default: 100).
 - `--election-timeout-min <ms>`: Minimum election timeout in milliseconds (default: 300).
 - `--election-timeout-max <ms>`: Maximum election timeout in milliseconds (default: 500).
+
+### WASM Module Options
+
+Pre-load WebAssembly modules that are available as global variables in every JavaScript execution.
+
+- `--wasm-module <name>=<path>`: Pre-load a `.wasm` file and expose its exports as a global variable with the given name. Can be specified multiple times for multiple modules.
+- `--wasm-config <path>`: Path to a JSON config file mapping global names to `.wasm` file paths. Format: `{"name": "/path/to/module.wasm", ...}`.
+
+Both options can be used together. CLI flags and config file entries are merged; duplicate names cause an error.
+
+**Example — CLI flags:**
+```bash
+mcp-v8 --stateless --wasm-module math=/path/to/math.wasm --wasm-module crypto=/path/to/crypto.wasm
+```
+
+**Example — Config file** (`wasm-modules.json`):
+```json
+{
+  "math": "/path/to/math.wasm",
+  "crypto": "/path/to/crypto.wasm"
+}
+```
+```bash
+mcp-v8 --stateless --wasm-config wasm-modules.json
+```
+
+After loading, the module exports are available directly in JavaScript:
+```javascript
+math.add(21, 21); // → 42
+```
+
+**Note:** Only self-contained WASM modules (no imports) are supported. Modules requiring imported memory, tables, or other imports will fail to instantiate.
 
 ## Quick Start
 
@@ -279,6 +312,92 @@ You can also use the hosted version on Railway without installing anything local
 - Ask Claude or Cursor: "Run this JavaScript: `1 + 2`"
 - Use content-addressed heap snapshots to persist state between runs. The `run_js` tool returns a `heap` content hash after each execution — pass it back in the next call to resume that session.
 
+### WebAssembly
+
+You can compile and run WebAssembly modules using the standard `WebAssembly` JavaScript API:
+
+```javascript
+const wasmBytes = new Uint8Array([
+  0x00,0x61,0x73,0x6d, // magic
+  0x01,0x00,0x00,0x00, // version
+  0x01,0x07,0x01,0x60,0x02,0x7f,0x7f,0x01,0x7f, // type: (i32,i32)->i32
+  0x03,0x02,0x01,0x00, // function section
+  0x07,0x07,0x01,0x03,0x61,0x64,0x64,0x00,0x00, // export "add"
+  0x0a,0x09,0x01,0x07,0x00,0x20,0x00,0x20,0x01,0x6a,0x0b // body: local.get 0, local.get 1, i32.add
+]);
+const mod = new WebAssembly.Module(wasmBytes);
+const inst = new WebAssembly.Instance(mod);
+inst.exports.add(21, 21); // → 42
+```
+
+This uses synchronous compilation (`WebAssembly.Module` / `WebAssembly.Instance`), which works within the V8 runtime. The async APIs (`WebAssembly.compile`, `WebAssembly.instantiate` returning Promises) are not supported since the runtime does not support async/await.
+
+Alternatively, you can pre-load `.wasm` files at server startup using `--wasm-module` or `--wasm-config` so they are available as globals in every execution without inline byte arrays. See [WASM Module Options](#wasm-module-options) for details.
+
+### Loading `.wasm` Files
+
+Instead of embedding raw bytes in JavaScript, you can compile a `.wasm` file once and load it at server startup. The module's exports are then available as a global variable in every execution.
+
+**1. Create a WASM module**
+
+Write a WebAssembly Text Format (`.wat`) file and compile it with [`wat2wasm`](https://github.com/WebAssembly/wabt):
+
+```wat
+;; math.wat — exports add(i32, i32) -> i32
+(module
+  (func $add (param i32 i32) (result i32)
+    local.get 0
+    local.get 1
+    i32.add)
+  (export "add" (func $add)))
+```
+
+```bash
+wat2wasm math.wat -o math.wasm
+```
+
+**2. Start the server with the module**
+
+```bash
+# Single module
+mcp-v8 --stateless --wasm-module math=./math.wasm
+
+# Multiple modules
+mcp-v8 --stateless \
+  --wasm-module math=./math.wasm \
+  --wasm-module physics=./physics.wasm
+```
+
+Or use a JSON config file for many modules:
+
+```json
+{
+  "math": "./math.wasm",
+  "physics": "./physics.wasm"
+}
+```
+
+```bash
+mcp-v8 --stateless --wasm-config wasm-modules.json
+```
+
+**3. Call exports from JavaScript**
+
+The module's exports are available directly on the global variable:
+
+```javascript
+math.add(2, 3);          // → 5
+math.add(100, 200);      // → 300
+```
+
+When multiple modules are loaded, each is its own global:
+
+```javascript
+var sum = math.add(10, 5);           // 15
+var product = physics.multiply(3, 4); // 12
+sum + product;                        // → 27
+```
+
 ## Heap Storage Options
 
 You can configure heap storage using the following command line arguments:
@@ -313,6 +432,7 @@ While `mcp-v8` provides a powerful and persistent JavaScript execution environme
 - **No `npm install` or external packages**: You cannot install or import npm packages. Only standard JavaScript (ECMAScript) built-ins are available.
 - **No timers**: Functions like `setTimeout` and `setInterval` are not available.
 - **No DOM or browser APIs**: This is not a browser environment; there is no access to `window`, `document`, or other browser-specific objects.
+- **WebAssembly: synchronous API only**: `WebAssembly.Module`, `WebAssembly.Instance`, and `WebAssembly.validate` work. The async APIs (`WebAssembly.compile`, `WebAssembly.instantiate` returning Promises) are not supported.
 - **TypeScript: type removal only**: TypeScript type annotations are stripped before execution. No type checking is performed — invalid types are silently removed, not reported as errors.
 
 ---

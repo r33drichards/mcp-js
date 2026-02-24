@@ -27,6 +27,7 @@ use tokio::sync::Semaphore;
 
 use crate::engine::heap_storage::{HeapStorage, AnyHeapStorage};
 use crate::engine::session_log::{SessionLog, SessionLogEntry};
+use wasmparser::Validator;
 
 pub const DEFAULT_HEAP_MEMORY_MAX_MB: usize = 8;
 pub const DEFAULT_EXECUTION_TIMEOUT_SECS: u64 = 30;
@@ -393,6 +394,74 @@ pub fn strip_typescript_types(code: &str) -> Result<String, String> {
     })
 }
 
+/// Compile and instantiate WASM modules using V8's native API, binding their
+/// exports as global variables.
+///
+/// Uses `v8::WasmModuleObject::compile` to compile raw `.wasm` bytes directly
+/// (no JS string serialization), then instantiates via the `WebAssembly.Instance`
+/// constructor and sets each module's `.exports` on the global object.
+pub fn inject_wasm_modules(
+    scope: &mut v8::ContextScope<v8::HandleScope>,
+    modules: &[WasmModule],
+) -> Result<(), String> {
+    if modules.is_empty() {
+        return Ok(());
+    }
+
+    let global = scope.get_current_context().global(scope);
+
+    // Look up WebAssembly.Instance constructor once.
+    let wa_key = v8::String::new(scope, "WebAssembly")
+        .ok_or("Failed to create 'WebAssembly' string")?;
+    let wa_obj = global
+        .get(scope, wa_key.into())
+        .ok_or("WebAssembly not found on global")?;
+    let wa_obj: v8::Local<v8::Object> = wa_obj.try_into()
+        .map_err(|_| "WebAssembly is not an object")?;
+
+    let instance_key = v8::String::new(scope, "Instance")
+        .ok_or("Failed to create 'Instance' string")?;
+    let instance_ctor = wa_obj
+        .get(scope, instance_key.into())
+        .ok_or("WebAssembly.Instance not found")?;
+    let instance_ctor: v8::Local<v8::Function> = instance_ctor.try_into()
+        .map_err(|_| "WebAssembly.Instance is not a function")?;
+
+    let exports_key = v8::String::new(scope, "exports")
+        .ok_or("Failed to create 'exports' string")?;
+
+    for m in modules {
+        // Pre-validate WASM bytes with wasmparser before handing them to V8.
+        // V8's WASM compiler allocates native (non-heap) memory that isn't bounded
+        // by our JS heap limits, so malformed modules can OOM the process.
+        // wasmparser is a lightweight, safe validator that rejects invalid modules
+        // before V8 gets a chance to allocate unbounded memory.
+        Validator::new().validate_all(&m.bytes)
+            .map_err(|e| format!("Invalid WASM module '{}': {}", m.name, e))?;
+
+        // Compile WASM bytes directly via V8's native API — no JS string generation.
+        let module_obj = v8::WasmModuleObject::compile(scope, &m.bytes)
+            .ok_or_else(|| format!("Failed to compile WASM module '{}'", m.name))?;
+
+        // Instantiate: new WebAssembly.Instance(compiledModule)
+        let instance = instance_ctor
+            .new_instance(scope, &[module_obj.into()])
+            .ok_or_else(|| format!("Failed to instantiate WASM module '{}'", m.name))?;
+
+        // Extract .exports from the instance.
+        let exports = instance
+            .get(scope, exports_key.into())
+            .ok_or_else(|| format!("Failed to get exports from WASM module '{}'", m.name))?;
+
+        // Bind exports as a global variable.
+        let name_key = v8::String::new(scope, &m.name)
+            .ok_or_else(|| format!("Failed to create global name for WASM module '{}'", m.name))?;
+        global.set(scope, name_key.into(), exports);
+    }
+
+    Ok(())
+}
+
 pub fn eval<'s>(scope: &mut v8::HandleScope<'s>, code: &str) -> Result<v8::Local<'s, v8::Value>, String> {
     let scope = &mut v8::EscapableHandleScope::new(scope);
     let source = v8::String::new(scope, code).ok_or("Failed to create V8 string")?;
@@ -414,6 +483,7 @@ pub fn execute_stateless(
     code: &str,
     heap_memory_max_bytes: usize,
     isolate_handle: Arc<Mutex<Option<v8::IsolateHandle>>>,
+    wasm_modules: &[WasmModule],
 ) -> (Result<String, String>, bool) {
     let oom_flag = Arc::new(AtomicBool::new(false));
 
@@ -431,12 +501,17 @@ pub fn execute_stateless(
             let context = v8::Context::new(scope, Default::default());
             let scope = &mut v8::ContextScope::new(scope, context);
 
-            match eval(scope, code) {
-                Ok(value) => match value.to_string(scope) {
-                    Some(s) => Ok(s.to_rust_string_lossy(scope)),
-                    None => Err("Failed to convert result to string".to_string()),
-                },
+            // Inject WASM modules as globals via native V8 API.
+            // Do NOT early-return here — cb_data_ptr must be freed below.
+            match inject_wasm_modules(scope, wasm_modules) {
                 Err(e) => Err(e),
+                Ok(()) => match eval(scope, code) {
+                    Ok(value) => match value.to_string(scope) {
+                        Some(s) => Ok(s.to_rust_string_lossy(scope)),
+                        None => Err("Failed to convert result to string".to_string()),
+                    },
+                    Err(e) => Err(e),
+                },
             }
         };
 
@@ -468,6 +543,7 @@ pub fn execute_stateful(
     raw_snapshot: Option<Vec<u8>>,
     heap_memory_max_bytes: usize,
     isolate_handle: Arc<Mutex<Option<v8::IsolateHandle>>>,
+    wasm_modules: &[WasmModule],
 ) -> (Result<(String, Vec<u8>, String), String>, bool) {
     let oom_flag = Arc::new(AtomicBool::new(false));
 
@@ -495,14 +571,21 @@ pub fn execute_stateful(
             let scope = &mut v8::HandleScope::new(&mut snapshot_creator);
             let context = v8::Context::new(scope, Default::default());
             let scope = &mut v8::ContextScope::new(scope, context);
-            output_result = match eval(scope, code) {
-                Ok(result) => {
-                    result
-                        .to_string(scope)
-                        .map(|s| s.to_rust_string_lossy(scope))
-                        .ok_or_else(|| "Failed to convert result to string".to_string())
-                }
+
+            // Inject WASM modules as globals via native V8 API.
+            // Do NOT early-return here — create_blob() must be called below
+            // to prevent SnapshotCreator's destructor from panicking.
+            output_result = match inject_wasm_modules(scope, wasm_modules) {
                 Err(e) => Err(e),
+                Ok(()) => match eval(scope, code) {
+                    Ok(result) => {
+                        result
+                            .to_string(scope)
+                            .map(|s| s.to_rust_string_lossy(scope))
+                            .ok_or_else(|| "Failed to convert result to string".to_string())
+                    }
+                    Err(e) => Err(e),
+                },
             };
             scope.set_default_context(context);
         }
@@ -510,11 +593,19 @@ pub fn execute_stateful(
         *isolate_handle.lock().unwrap() = None;
         unsafe { let _ = Box::from_raw(cb_data_ptr); }
 
-        let startup_data = snapshot_creator.create_blob(v8::FunctionCodeHandling::Clear)
-            .ok_or("Failed to create V8 snapshot blob".to_string())?;
-        let wrapped = wrap_snapshot(&startup_data);
+        // Always call create_blob before snapshot_creator is dropped —
+        // V8's SnapshotCreator destructor panics if create_blob was never called.
+        let blob_result = snapshot_creator.create_blob(v8::FunctionCodeHandling::Clear);
 
-        output_result.map(|output| (output, wrapped.data, wrapped.content_hash))
+        match output_result {
+            Ok(output) => {
+                let startup_data = blob_result
+                    .ok_or("Failed to create V8 snapshot blob".to_string())?;
+                let wrapped = wrap_snapshot(&startup_data);
+                Ok((output, wrapped.data, wrapped.content_hash))
+            }
+            Err(e) => Err(e),
+        }
     }));
 
     let oom = oom_flag.load(Ordering::SeqCst);
@@ -538,6 +629,13 @@ pub struct JsResult {
     pub heap: Option<String>,
 }
 
+/// A pre-loaded WASM module: human-readable name + raw `.wasm` bytes.
+#[derive(Clone, Debug)]
+pub struct WasmModule {
+    pub name: String,
+    pub bytes: Vec<u8>,
+}
+
 #[derive(Clone)]
 pub struct Engine {
     heap_storage: Option<AnyHeapStorage>,
@@ -550,6 +648,8 @@ pub struct Engine {
     /// This mutex serializes stateful V8 execution while stateless
     /// requests proceed in full parallelism.
     snapshot_mutex: Arc<tokio::sync::Mutex<()>>,
+    /// WASM modules to inject as globals before every execution.
+    wasm_modules: Arc<Vec<WasmModule>>,
 }
 
 impl Engine {
@@ -565,6 +665,7 @@ impl Engine {
             execution_timeout_secs,
             v8_semaphore: Arc::new(Semaphore::new(max_concurrent)),
             snapshot_mutex: Arc::new(tokio::sync::Mutex::new(())),
+            wasm_modules: Arc::new(Vec::new()),
         }
     }
 
@@ -582,7 +683,14 @@ impl Engine {
             execution_timeout_secs,
             v8_semaphore: Arc::new(Semaphore::new(max_concurrent)),
             snapshot_mutex: Arc::new(tokio::sync::Mutex::new(())),
+            wasm_modules: Arc::new(Vec::new()),
         }
+    }
+
+    /// Set WASM modules to inject as globals before every execution.
+    pub fn with_wasm_modules(mut self, modules: Vec<WasmModule>) -> Self {
+        self.wasm_modules = Arc::new(modules);
+        self
     }
 
     /// Core execution — used by both MCP and API.
@@ -617,8 +725,9 @@ impl Engine {
             None => {
                 // Stateless mode
                 let ih = isolate_handle.clone();
+                let wasm = self.wasm_modules.clone();
                 let mut join_handle = tokio::task::spawn_blocking(move || {
-                    execute_stateless(&code, max_bytes, ih)
+                    execute_stateless(&code, max_bytes, ih, &wasm)
                 });
 
                 tokio::select! {
@@ -653,13 +762,14 @@ impl Engine {
 
                 let code_for_log = code.clone();
                 let ih = isolate_handle.clone();
+                let wasm = self.wasm_modules.clone();
 
                 // V8 SnapshotCreator segfaults under concurrent use — serialize
                 // stateful V8 work while keeping the async timeout wrapper.
                 let snap_mutex = self.snapshot_mutex.clone();
                 let mut join_handle = tokio::task::spawn_blocking(move || {
                     let _guard = snap_mutex.blocking_lock();
-                    execute_stateful(&code, raw_snapshot, max_bytes, ih)
+                    execute_stateful(&code, raw_snapshot, max_bytes, ih, &wasm)
                 });
 
                 let v8_result = tokio::select! {

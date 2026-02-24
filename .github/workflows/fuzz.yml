@@ -19,19 +19,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          # Snapshot deserialization doesn't create V8 isolates repeatedly,
-          # so ASAN overhead is manageable.
-          - target: fuzz_snapshot_deserialization
-            sanitizer: address
-          # V8 execution targets create/destroy isolates every iteration.
-          # V8 reserves huge virtual memory regions that ASAN shadows,
-          # causing 16GB+ RSS even with 8MB heap. Use no sanitizer for
-          # these — they still catch crashes, aborts, and panics.
-          - target: fuzz_execute_stateless
-            sanitizer: none
-          - target: fuzz_execute_stateful
-            sanitizer: none
+        target:
+          - fuzz_snapshot_deserialization
+          - fuzz_execute_stateless
+          - fuzz_execute_stateful
+          - fuzz_wasm_compile
 
     steps:
       - name: Checkout code
@@ -46,14 +38,18 @@ jobs:
         run: nix develop .#fuzz --command bash -c "cargo install cargo-fuzz"
 
       - name: Build fuzz targets
-        run: nix develop .#fuzz --command bash -c "cd server && cargo fuzz build --sanitizer=${{ matrix.sanitizer }} ${{ matrix.target }}"
+        run: nix develop .#fuzz --command bash -c "cd server && cargo fuzz build --sanitizer=address ${{ matrix.target }}"
 
       - name: Run fuzzer (${{ matrix.target }})
         env:
           ASAN_OPTIONS: quarantine_size_mb=64:malloc_context_size=5
         run: |
+          # Use fork mode (-fork=1) so each worker gets a clean address space,
+          # preventing cumulative ASAN shadow memory growth from killing the
+          # parent process. Any OOM/crash/timeout artifacts are genuine bugs.
           nix develop .#fuzz --command bash -c \
-            "cd server && cargo fuzz run --sanitizer=${{ matrix.sanitizer }} ${{ matrix.target }} -- -max_total_time=300 -rss_limit_mb=4096 -max_len=65536 -timeout=120"
+            "cd server && cargo fuzz run --sanitizer=address ${{ matrix.target }} \
+              -- -fork=1 -max_total_time=300 -rss_limit_mb=4096 -max_len=65536 -timeout=120"
 
       - name: Upload fuzz artifacts
         if: always()

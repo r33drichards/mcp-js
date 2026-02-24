@@ -31,5 +31,5 @@ fuzz_target!(|data: &[u8]| {
     // If validation passes (extremely unlikely with random data), run V8.
     let max_bytes = 64 * 1024 * 1024;
     let handle = Arc::new(Mutex::new(None));
-    let _ = server::engine::execute_stateful("1", raw_snapshot, max_bytes, handle);
+    let _ = server::engine::execute_stateful("1", raw_snapshot, max_bytes, handle, &[]);
 });
