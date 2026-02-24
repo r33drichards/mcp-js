@@ -161,7 +161,7 @@ async fn test_wasm_global_module_add() {
     ensure_v8();
     let engine = Engine::new_stateless(8 * 1024 * 1024, 30, 4)
         .with_wasm_modules(vec![
-            WasmModule { name: "math".to_string(), bytes: add_wasm_bytes() },
+            WasmModule { name: "math".to_string(), bytes: add_wasm_bytes(), max_memory_bytes: None },
         ]);
 
     let result = engine.run_js("math.add(21, 21);".to_string(), None, None, None, None).await;
@@ -176,8 +176,8 @@ async fn test_wasm_multiple_global_modules() {
     ensure_v8();
     let engine = Engine::new_stateless(8 * 1024 * 1024, 30, 4)
         .with_wasm_modules(vec![
-            WasmModule { name: "adder".to_string(), bytes: add_wasm_bytes() },
-            WasmModule { name: "multiplier".to_string(), bytes: multiply_wasm_bytes() },
+            WasmModule { name: "adder".to_string(), bytes: add_wasm_bytes(), max_memory_bytes: None },
+            WasmModule { name: "multiplier".to_string(), bytes: multiply_wasm_bytes(), max_memory_bytes: None },
         ]);
 
     let code = "adder.add(10, 5) + multiplier.multiply(3, 4);";
@@ -193,7 +193,7 @@ async fn test_wasm_global_with_user_code() {
     ensure_v8();
     let engine = Engine::new_stateless(8 * 1024 * 1024, 30, 4)
         .with_wasm_modules(vec![
-            WasmModule { name: "calc".to_string(), bytes: add_wasm_bytes() },
+            WasmModule { name: "calc".to_string(), bytes: add_wasm_bytes(), max_memory_bytes: None },
         ]);
 
     let code = r#"
@@ -240,7 +240,7 @@ async fn test_wasm_load_from_filepath() {
 
     let engine = Engine::new_stateless(8 * 1024 * 1024, 30, 4)
         .with_wasm_modules(vec![
-            WasmModule { name: "math".to_string(), bytes },
+            WasmModule { name: "math".to_string(), bytes, max_memory_bytes: None },
         ]);
 
     let result = engine.run_js("math.add(21, 21);".to_string(), None, None, None, None).await;
@@ -257,7 +257,7 @@ async fn test_wasm_module_global_exposed_for_no_imports() {
     ensure_v8();
     let engine = Engine::new_stateless(8 * 1024 * 1024, 30, 4)
         .with_wasm_modules(vec![
-            WasmModule { name: "math".to_string(), bytes: add_wasm_bytes() },
+            WasmModule { name: "math".to_string(), bytes: add_wasm_bytes(), max_memory_bytes: None },
         ]);
 
     // __wasm_math should be a WebAssembly.Module
@@ -273,7 +273,7 @@ async fn test_wasm_module_global_manual_instantiation() {
     ensure_v8();
     let engine = Engine::new_stateless(8 * 1024 * 1024, 30, 4)
         .with_wasm_modules(vec![
-            WasmModule { name: "math".to_string(), bytes: add_wasm_bytes() },
+            WasmModule { name: "math".to_string(), bytes: add_wasm_bytes(), max_memory_bytes: None },
         ]);
 
     let code = r#"
@@ -314,7 +314,7 @@ async fn test_wasm_module_with_imports_not_auto_instantiated() {
     ensure_v8();
     let engine = Engine::new_stateless(8 * 1024 * 1024, 30, 4)
         .with_wasm_modules(vec![
-            WasmModule { name: "mymod".to_string(), bytes: wasm_with_import_bytes() },
+            WasmModule { name: "mymod".to_string(), bytes: wasm_with_import_bytes(), max_memory_bytes: None },
         ]);
 
     // The auto-instantiated `mymod` should NOT exist (module has imports)
@@ -330,7 +330,7 @@ async fn test_wasm_module_with_imports_manual_instantiation() {
     ensure_v8();
     let engine = Engine::new_stateless(8 * 1024 * 1024, 30, 4)
         .with_wasm_modules(vec![
-            WasmModule { name: "mymod".to_string(), bytes: wasm_with_import_bytes() },
+            WasmModule { name: "mymod".to_string(), bytes: wasm_with_import_bytes(), max_memory_bytes: None },
         ]);
 
     // Manually instantiate with the required import

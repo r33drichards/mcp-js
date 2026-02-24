@@ -54,6 +54,7 @@ fuzz_target!(|input: StatefulInput| {
         .map(|(i, m)| WasmModule {
             name: format!("m{}", i),
             bytes: m.bytes,
+            max_memory_bytes: None,
         })
         .collect();
 
@@ -62,6 +63,7 @@ fuzz_target!(|input: StatefulInput| {
     // Use the production default (8MB) — with ASAN overhead, larger heaps
     // can cause OOM on CI runners.
     let max_bytes = 8 * 1024 * 1024;
+    let wasm_default = 8 * 1024 * 1024;
     let handle = Arc::new(Mutex::new(None));
-    let _ = server::engine::execute_stateful(&input.code, raw_snapshot, max_bytes, handle, &modules);
+    let _ = server::engine::execute_stateful(&input.code, raw_snapshot, max_bytes, handle, &modules, wasm_default);
 });

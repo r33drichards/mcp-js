@@ -26,10 +26,12 @@ fuzz_target!(|data: &[u8]| {
     let modules = vec![WasmModule {
         name: "m".to_string(),
         bytes: data.to_vec(),
+        max_memory_bytes: Some(8 * 1024 * 1024),
     }];
 
     // We don't care about the result; we care that V8 doesn't crash.
     let max_bytes = 8 * 1024 * 1024;
+    let wasm_default = 8 * 1024 * 1024;
     let handle = Arc::new(Mutex::new(None));
-    let _ = server::engine::execute_stateless("1", max_bytes, handle, &modules);
+    let _ = server::engine::execute_stateless("1", max_bytes, handle, &modules, wasm_default);
 });
