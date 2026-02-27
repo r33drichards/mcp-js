@@ -5,7 +5,4 @@ edition = "2021"
 description = ""
 
 [dependencies]
-
-env_logger = "0.10"
-log = "0.4"
-v8 = "136.0.0"
+deno_core = "0.381"

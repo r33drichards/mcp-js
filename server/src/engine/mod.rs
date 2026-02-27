@@ -3,7 +3,6 @@ pub mod heap_tags;
 pub mod session_log;
 
 use std::collections::HashMap;
-use std::sync::Once;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -11,7 +10,8 @@ use std::time::Duration;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ffi::c_void;
 use std::alloc::{Layout, alloc_zeroed, alloc, dealloc};
-use v8::{self};
+use deno_core::v8;
+use deno_core::{JsRuntime, JsRuntimeForSnapshot, RuntimeOptions};
 use sha2::{Sha256, Digest};
 
 use swc_core::common::{
@@ -37,25 +37,17 @@ pub const DEFAULT_EXECUTION_TIMEOUT_SECS: u64 = 30;
 /// Default maximum native memory (bytes) a WASM module may declare when no
 /// per-module limit is set. 16 MiB.
 pub const DEFAULT_WASM_MAX_BYTES: usize = 16 * 1024 * 1024;
-/// Minimum heap memory in MB. V8 needs at least this much for internal
-/// bookkeeping — smaller values cause `FatalProcessOutOfMemory` → `abort()`
-/// before the near-heap-limit callback can fire.
-pub const MIN_HEAP_MEMORY_MB: usize = 4;
+/// Minimum heap memory in MB. deno_core runs bootstrap JavaScript during
+/// JsRuntime creation (before our near-heap-limit callback is installed).
+/// The heap must be large enough for this bootstrap to complete — smaller
+/// values cause `FatalProcessOutOfMemory` → `abort()`.
+pub const MIN_HEAP_MEMORY_MB: usize = 8;
 
 // ── V8 initialization ───────────────────────────────────────────────────
 
-static INIT: Once = Once::new();
-static mut PLATFORM: Option<v8::SharedRef<v8::Platform>> = None;
-
 pub fn initialize_v8() {
-    INIT.call_once(|| {
-        let platform = v8::new_default_platform(0, false).make_shared();
-        v8::V8::initialize_platform(platform.clone());
-        v8::V8::initialize();
-        unsafe {
-            PLATFORM = Some(platform);
-        }
-    });
+    // deno_core initializes V8 automatically on first JsRuntime creation.
+    // Kept for backward compatibility with callers (main.rs, tests, fuzz).
 }
 
 // ── Snapshot envelope ───────────────────────────────────────────────────
@@ -498,7 +490,7 @@ fn wasm_has_imports(bytes: &[u8]) -> bool {
 /// Uses `v8::WasmModuleObject::compile` to compile raw `.wasm` bytes directly
 /// (no JS string serialization).
 pub fn inject_wasm_modules(
-    scope: &mut v8::ContextScope<v8::HandleScope>,
+    runtime: &mut JsRuntime,
     modules: &[WasmModule],
     wasm_default_max_bytes: usize,
 ) -> Result<(), String> {
@@ -506,6 +498,7 @@ pub fn inject_wasm_modules(
         return Ok(());
     }
 
+    deno_core::scope!(scope, runtime);
     let global = scope.get_current_context().global(scope);
 
     // Look up WebAssembly.Instance constructor once.
@@ -583,54 +576,30 @@ pub fn inject_wasm_modules(
     Ok(())
 }
 
-pub fn eval<'s>(scope: &mut v8::HandleScope<'s>, code: &str) -> Result<v8::Local<'s, v8::Value>, String> {
-    let scope = &mut v8::EscapableHandleScope::new(scope);
-    let tc_scope = &mut v8::TryCatch::new(scope);
-
-    let source = v8::String::new(tc_scope, code).ok_or("Failed to create V8 string")?;
-
-    let script = match v8::Script::compile(tc_scope, source, None) {
-        Some(s) => s,
-        None => {
-            let msg = format_trycatch_exception(tc_scope);
-            return Err(format!("Failed to compile script: {}", msg));
-        }
-    };
-
-    match script.run(tc_scope) {
-        Some(r) => Ok(tc_scope.escape(r)),
-        None => {
-            let msg = format_trycatch_exception(tc_scope);
-            Err(msg)
-        }
-    }
-}
-
-/// Extract a human-readable error message from a TryCatch scope.
-fn format_trycatch_exception(tc_scope: &mut v8::TryCatch<v8::EscapableHandleScope>) -> String {
-    if let Some(exception) = tc_scope.exception() {
-        if let Some(msg) = tc_scope.message() {
-            let text = msg.get(tc_scope).to_rust_string_lossy(tc_scope);
-            let line = msg.get_line_number(tc_scope).unwrap_or(0);
-            if line > 0 {
-                return format!("{} (line {})", text, line);
-            }
-            return text;
-        }
-        exception.to_rust_string_lossy(tc_scope)
-    } else {
-        "Unknown error".to_string()
-    }
-}
-
-// ── Stateless / stateful V8 execution ───────────────────────────────────
+// ── Stateless / stateful execution via deno_core ─────────────────────────
 //
-// V8 always runs on the calling thread. An `IsolateHandle` is published
-// for external cancellation (used by `run_js` for async timeout via
-// `tokio::select!`). Tests and fuzz targets pass a no-op handle.
+// deno_core's JsRuntime wraps V8 Isolate + Context + event loop.
+// An IsolateHandle is published for external cancellation (used by
+// `run_js` for async timeout via `tokio::select!`).
+// Tests and fuzz targets pass a no-op handle.
 
-/// Stateless V8 execution — runs V8 on the calling thread. Publishes an
-/// IsolateHandle for external cancellation (e.g. async timeout in `run_js`).
+/// Helper: execute code on a JsRuntime and return the string result.
+/// Expects WASM modules to have already been injected.
+fn execute_and_stringify(runtime: &mut JsRuntime, code: &str) -> Result<String, String> {
+    let global_value = runtime
+        .execute_script("<eval>", code.to_string())
+        .map_err(|e| format!("{}", e))?;
+
+    deno_core::scope!(scope, runtime);
+    let local = v8::Local::new(scope, global_value);
+    local
+        .to_string(scope)
+        .map(|s| s.to_rust_string_lossy(scope))
+        .ok_or_else(|| "Failed to convert result to string".to_string())
+}
+
+/// Stateless execution — creates a fresh JsRuntime (no snapshot).
+/// Publishes an IsolateHandle for external cancellation.
 /// Returns (result, oom_flag).
 pub fn execute_stateless(
     code: &str,
@@ -643,30 +612,25 @@ pub fn execute_stateless(
 
     let result = catch_unwind(AssertUnwindSafe(|| {
         let params = create_params_with_heap_limit(heap_memory_max_bytes);
-        let mut isolate = v8::Isolate::new(params);
+        let mut runtime = JsRuntime::new(RuntimeOptions {
+            create_params: Some(params),
+            ..Default::default()
+        });
 
         // Publish handle immediately so caller can terminate us.
-        *isolate_handle.lock().unwrap() = Some(isolate.thread_safe_handle());
+        *isolate_handle.lock().unwrap() = Some(
+            runtime.v8_isolate().thread_safe_handle()
+        );
 
-        let cb_data_ptr = install_heap_limit_callback(&mut isolate, oom_flag.clone());
+        let cb_data_ptr = install_heap_limit_callback(
+            runtime.v8_isolate(), oom_flag.clone()
+        );
 
-        let eval_result = {
-            let scope = &mut v8::HandleScope::new(&mut isolate);
-            let context = v8::Context::new(scope, Default::default());
-            let scope = &mut v8::ContextScope::new(scope, context);
-
-            // Inject WASM modules as globals via native V8 API.
-            // Do NOT early-return here — cb_data_ptr must be freed below.
-            match inject_wasm_modules(scope, wasm_modules, wasm_default_max_bytes) {
-                Err(e) => Err(e),
-                Ok(()) => match eval(scope, code) {
-                    Ok(value) => match value.to_string(scope) {
-                        Some(s) => Ok(s.to_rust_string_lossy(scope)),
-                        None => Err("Failed to convert result to string".to_string()),
-                    },
-                    Err(e) => Err(e),
-                },
-            }
+        // Inject WASM modules as globals via V8 native API.
+        // Do NOT early-return here — cb_data_ptr must be freed below.
+        let eval_result = match inject_wasm_modules(&mut runtime, wasm_modules, wasm_default_max_bytes) {
+            Err(e) => Err(e),
+            Ok(()) => execute_and_stringify(&mut runtime, code),
         };
 
         *isolate_handle.lock().unwrap() = None;
@@ -688,9 +652,8 @@ pub fn execute_stateless(
     }
 }
 
-
-/// Stateful V8 execution — runs V8 on the calling thread. Publishes an
-/// IsolateHandle for external cancellation (e.g. async timeout in `run_js`).
+/// Stateful execution — creates a JsRuntimeForSnapshot, executes code,
+/// then takes a snapshot. Publishes an IsolateHandle for external cancellation.
 /// Takes raw (already unwrapped) snapshot data. Returns (result, oom_flag).
 pub fn execute_stateful(
     code: &str,
@@ -703,60 +666,61 @@ pub fn execute_stateful(
     let oom_flag = Arc::new(AtomicBool::new(false));
 
     let result = catch_unwind(AssertUnwindSafe(|| {
-        let params = Some(create_params_with_heap_limit(heap_memory_max_bytes));
+        let params = create_params_with_heap_limit(heap_memory_max_bytes);
 
-        let mut snapshot_creator = match raw_snapshot {
-            Some(raw) if !raw.is_empty() => {
+        // Box::leak to get &'static [u8] required by RuntimeOptions::startup_snapshot.
+        // We reclaim the memory after the runtime is consumed by snapshot().
+        let leaked_snapshot: Option<(*mut [u8], &'static [u8])> = raw_snapshot
+            .filter(|d| !d.is_empty())
+            .map(|data| {
                 eprintln!("creating isolate from snapshot...");
-                v8::Isolate::snapshot_creator_from_existing_snapshot(raw, None, params)
-            }
-            _ => {
-                eprintln!("snapshot not found, creating new isolate...");
-                v8::Isolate::snapshot_creator(None, params)
-            }
-        };
+                let ptr = Box::into_raw(data.into_boxed_slice());
+                let static_ref: &'static [u8] = unsafe { &*ptr };
+                (ptr, static_ref)
+            });
+
+        if leaked_snapshot.is_none() {
+            eprintln!("snapshot not found, creating new isolate...");
+        }
+
+        let startup_snapshot = leaked_snapshot.as_ref().map(|(_, s)| *s);
+
+        let mut runtime = JsRuntimeForSnapshot::new(RuntimeOptions {
+            create_params: Some(params),
+            startup_snapshot,
+            ..Default::default()
+        });
 
         // Publish handle immediately so caller can terminate us.
-        *isolate_handle.lock().unwrap() = Some(snapshot_creator.thread_safe_handle());
+        *isolate_handle.lock().unwrap() = Some(
+            runtime.v8_isolate().thread_safe_handle()
+        );
 
-        let cb_data_ptr = install_heap_limit_callback(&mut snapshot_creator, oom_flag.clone());
+        let cb_data_ptr = install_heap_limit_callback(
+            runtime.v8_isolate(), oom_flag.clone()
+        );
 
-        let output_result;
-        {
-            let scope = &mut v8::HandleScope::new(&mut snapshot_creator);
-            let context = v8::Context::new(scope, Default::default());
-            let scope = &mut v8::ContextScope::new(scope, context);
-
-            // Inject WASM modules as globals via native V8 API.
-            // Do NOT early-return here — create_blob() must be called below
-            // to prevent SnapshotCreator's destructor from panicking.
-            output_result = match inject_wasm_modules(scope, wasm_modules, wasm_default_max_bytes) {
-                Err(e) => Err(e),
-                Ok(()) => match eval(scope, code) {
-                    Ok(result) => {
-                        result
-                            .to_string(scope)
-                            .map(|s| s.to_rust_string_lossy(scope))
-                            .ok_or_else(|| "Failed to convert result to string".to_string())
-                    }
-                    Err(e) => Err(e),
-                },
-            };
-            scope.set_default_context(context);
-        }
+        // Inject WASM modules as globals via V8 native API.
+        // Do NOT early-return here — snapshot() must be called below.
+        let output_result = match inject_wasm_modules(&mut runtime, wasm_modules, wasm_default_max_bytes) {
+            Err(e) => Err(e),
+            Ok(()) => execute_and_stringify(&mut runtime, code),
+        };
 
         *isolate_handle.lock().unwrap() = None;
         unsafe { let _ = Box::from_raw(cb_data_ptr); }
 
-        // Always call create_blob before snapshot_creator is dropped —
-        // V8's SnapshotCreator destructor panics if create_blob was never called.
-        let blob_result = snapshot_creator.create_blob(v8::FunctionCodeHandling::Clear);
+        // Consume runtime to create snapshot (replaces snapshot_creator.create_blob).
+        let snapshot_data = runtime.snapshot();
+
+        // Reclaim leaked snapshot input memory (safe: runtime is consumed).
+        if let Some((ptr, _)) = leaked_snapshot {
+            unsafe { let _ = Box::from_raw(ptr); }
+        }
 
         match output_result {
             Ok(output) => {
-                let startup_data = blob_result
-                    .ok_or("Failed to create V8 snapshot blob".to_string())?;
-                let wrapped = wrap_snapshot(&startup_data);
+                let wrapped = wrap_snapshot(&snapshot_data);
                 Ok((output, wrapped.data, wrapped.content_hash))
             }
             Err(e) => Err(e),

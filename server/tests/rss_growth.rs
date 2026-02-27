@@ -20,7 +20,7 @@ fn ensure_v8() {
     });
 }
 
-fn no_handle() -> Arc<Mutex<Option<v8::IsolateHandle>>> {
+fn no_handle() -> Arc<Mutex<Option<deno_core::v8::IsolateHandle>>> {
     Arc::new(Mutex::new(None))
 }
 
