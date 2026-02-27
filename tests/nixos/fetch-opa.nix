@@ -86,6 +86,7 @@ in
 
   testScript = ''
     import json
+    import shlex
 
     machine.start()
     machine.wait_for_unit("opa.service")
@@ -99,53 +100,53 @@ in
 
     def exec_js(code):
         """Execute JS code via mcp-js /api/exec endpoint and return parsed response."""
-        escaped = code.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$")
+        body = json.dumps({"code": code})
         raw = machine.succeed(
-            f'curl -sf -X POST http://localhost:3000/api/exec '
-            f'-H "Content-Type: application/json" '
-            f'-d \'{{"code": "{escaped}"}}\''
+            "curl -sf -X POST http://localhost:3000/api/exec "
+            "-H 'Content-Type: application/json' "
+            "-d " + shlex.quote(body)
         )
         return json.loads(raw)
 
     # ── Test 1: Allowed fetch (GET to /allowed/) ────────────────────────
 
     with subtest("should allow GET fetch to permitted path"):
-        result = exec_js('JSON.stringify(fetch("http://localhost:8080/allowed/data").json())')
-        print(f"Allowed fetch result: {result}")
-        assert "Error" not in result["output"], f"Expected success, got: {result}"
+        result = exec_js("JSON.stringify(fetch(\"http://localhost:8080/allowed/data\").json())")
+        print("Allowed fetch result: " + str(result))
+        assert "Error" not in result["output"], "Expected success, got: " + str(result)
         body = json.loads(result["output"])
-        assert body["message"] == "hello from allowed endpoint", f"Unexpected body: {body}"
+        assert body["message"] == "hello from allowed endpoint", "Unexpected body: " + str(body)
 
     # ── Test 2: Denied fetch (wrong path prefix) ────────────────────────
 
     with subtest("should deny fetch to non-allowed path"):
-        result = exec_js('try { fetch("http://localhost:8080/denied/secret"); "no error" } catch(e) { e.message }')
-        print(f"Denied-by-path result: {result}")
+        result = exec_js("try { fetch(\"http://localhost:8080/denied/secret\"); \"no error\" } catch(e) { e.message }")
+        print("Denied-by-path result: " + str(result))
         assert "denied by policy" in result["output"], \
-            f"Expected 'denied by policy' error, got: {result}"
+            "Expected denied by policy error, got: " + str(result)
 
     # ── Test 3: Denied fetch (wrong method) ─────────────────────────────
 
     with subtest("should deny POST fetch even to allowed path"):
-        result = exec_js('try { fetch("http://localhost:8080/allowed/data", {method: "POST"}); "no error" } catch(e) { e.message }')
-        print(f"Denied-by-method result: {result}")
+        result = exec_js("try { fetch(\"http://localhost:8080/allowed/data\", {method: \"POST\"}); \"no error\" } catch(e) { e.message }")
+        print("Denied-by-method result: " + str(result))
         assert "denied by policy" in result["output"], \
-            f"Expected 'denied by policy' error, got: {result}"
+            "Expected denied by policy error, got: " + str(result)
 
     # ── Test 4: Denied fetch (wrong host) ───────────────────────────────
 
     with subtest("should deny fetch to non-allowed host"):
-        result = exec_js('try { fetch("http://example.com/allowed/data"); "no error" } catch(e) { e.message }')
-        print(f"Denied-by-host result: {result}")
+        result = exec_js("try { fetch(\"http://example.com/allowed/data\"); \"no error\" } catch(e) { e.message }")
+        print("Denied-by-host result: " + str(result))
         # Could be "denied by policy" or a connection error — either is acceptable.
         assert "no error" not in result["output"], \
-            f"Expected an error for non-allowed host, got: {result}"
+            "Expected an error for non-allowed host, got: " + str(result)
 
     # ── Test 5: Verify fetch is available (typeof check) ────────────────
 
     with subtest("should have fetch available when OPA is configured"):
-        result = exec_js('typeof fetch')
-        print(f"typeof fetch: {result}")
-        assert result["output"] == "function", f"Expected 'function', got: {result}"
+        result = exec_js("typeof fetch")
+        print("typeof fetch: " + str(result))
+        assert result["output"] == "function", "Expected function, got: " + str(result)
   '';
 }
