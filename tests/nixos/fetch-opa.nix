@@ -159,14 +159,37 @@ in
 
     with subtest("should work with Promise.then callback syntax"):
         result = exec_js("""
-            var _result = "pending";
             Promise.resolve(fetch("http://localhost:8080/allowed/data"))
-                .then(function(resp) { _result = JSON.stringify(resp.json()); });
-            _result
+                .then(function(resp) { return JSON.stringify(resp.json()); })
         """)
         print("Promise.then fetch result: " + str(result))
         body = json.loads(result["output"])
         assert body["message"] == "hello from allowed endpoint", \
             "Unexpected Promise.then body: " + str(result)
+
+    # ── Test 8: Nested async fetch calls ──────────────────────────────
+
+    with subtest("should work with nested async fetch calls"):
+        result = exec_js("""
+            (async () => {
+                const first = await fetch("http://localhost:8080/allowed/data");
+                const body = first.json();
+                const second = await fetch("http://localhost:8080/allowed/data");
+                const body2 = second.json();
+                return JSON.stringify({
+                    first: body.message,
+                    second: body2.message,
+                    combined: body.message + " + " + body2.message
+                });
+            })()
+        """)
+        print("Nested async fetch result: " + str(result))
+        body = json.loads(result["output"])
+        assert body["first"] == "hello from allowed endpoint", \
+            "Unexpected first fetch: " + str(body)
+        assert body["second"] == "hello from allowed endpoint", \
+            "Unexpected second fetch: " + str(body)
+        assert body["combined"] == "hello from allowed endpoint + hello from allowed endpoint", \
+            "Unexpected combined: " + str(body)
   '';
 }
