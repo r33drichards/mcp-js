@@ -138,5 +138,35 @@ in
         result = exec_js("typeof fetch")
         print("typeof fetch: " + str(result))
         assert result["output"] == "function", "Expected function, got: " + str(result)
+
+    # ── Test 6: Fetch with async/await syntax ─────────────────────────
+
+    with subtest("should work with async/await syntax"):
+        result = exec_js("""
+            (async () => {
+                const resp = await fetch("http://localhost:8080/allowed/data");
+                return JSON.stringify(resp.json());
+            })()
+        """)
+        print("Async/await fetch result: " + str(result))
+        # await on a sync value passes through; the async IIFE returns a Promise.
+        # If the runtime resolves it, we get JSON; otherwise we get [object Promise].
+        body = json.loads(result["output"])
+        assert body["message"] == "hello from allowed endpoint", \
+            "Unexpected async/await body: " + str(result)
+
+    # ── Test 7: Fetch with Promise .then() callback syntax ────────────
+
+    with subtest("should work with Promise.then callback syntax"):
+        result = exec_js("""
+            var _result = "pending";
+            Promise.resolve(fetch("http://localhost:8080/allowed/data"))
+                .then(function(resp) { _result = JSON.stringify(resp.json()); });
+            _result
+        """)
+        print("Promise.then fetch result: " + str(result))
+        body = json.loads(result["output"])
+        assert body["message"] == "hello from allowed endpoint", \
+            "Unexpected Promise.then body: " + str(result)
   '';
 }
