@@ -587,17 +587,59 @@ pub fn inject_wasm_modules(
 
 /// Helper: execute code on a JsRuntime and return the string result.
 /// Expects WASM modules to have already been injected.
+/// If the result is a Promise, runs the event loop to resolve it.
 fn execute_and_stringify(runtime: &mut JsRuntime, code: &str) -> Result<String, String> {
     let global_value = runtime
         .execute_script("<eval>", code.to_string())
         .map_err(|e| format!("{}", e))?;
 
-    deno_core::scope!(scope, runtime);
-    let local = v8::Local::new(scope, global_value);
-    local
-        .to_string(scope)
-        .map(|s| s.to_rust_string_lossy(scope))
-        .ok_or_else(|| "Failed to convert result to string".to_string())
+    // Check if the result is a Promise; if so, run the event loop to resolve it.
+    let is_promise = {
+        deno_core::scope!(scope, runtime);
+        let local = v8::Local::new(scope, &global_value);
+        local.is_promise()
+    };
+
+    if is_promise {
+        // Run the event loop to process microtasks and resolve the Promise.
+        let handle = tokio::runtime::Handle::current();
+        handle
+            .block_on(runtime.run_event_loop(Default::default()))
+            .map_err(|e| format!("{}", e))?;
+
+        deno_core::scope!(scope, runtime);
+        let local = v8::Local::new(scope, &global_value);
+        let promise: v8::Local<v8::Promise> = local
+            .try_into()
+            .map_err(|_| "Failed to cast to Promise".to_string())?;
+        match promise.state() {
+            v8::PromiseState::Fulfilled => {
+                let result = promise.result(scope);
+                result
+                    .to_string(scope)
+                    .map(|s| s.to_rust_string_lossy(scope))
+                    .ok_or_else(|| "Failed to convert Promise result to string".to_string())
+            }
+            v8::PromiseState::Rejected => {
+                let result = promise.result(scope);
+                let err_str = result
+                    .to_string(scope)
+                    .map(|s| s.to_rust_string_lossy(scope))
+                    .unwrap_or_else(|| "Unknown Promise rejection".to_string());
+                Err(err_str)
+            }
+            v8::PromiseState::Pending => {
+                Err("Promise did not resolve after running event loop".to_string())
+            }
+        }
+    } else {
+        deno_core::scope!(scope, runtime);
+        let local = v8::Local::new(scope, global_value);
+        local
+            .to_string(scope)
+            .map(|s| s.to_rust_string_lossy(scope))
+            .ok_or_else(|| "Failed to convert result to string".to_string())
+    }
 }
 
 /// Stateless execution — creates a fresh JsRuntime (no snapshot).
