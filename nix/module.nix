@@ -119,16 +119,19 @@ in
           let
             baseArgs = [
               "${cfg.package}/bin/server"
+              "--node-id"
+              cfg.nodeId
+              "--http-port"
+              (toString cfg.httpPort)
+            ];
+
+            storageArgs = lib.optionals (!cfg.stateless) [
               "--directory-path"
               cfg.dataDir
               "--session-db-path"
               "${cfg.dataDir}/sessions"
               "--cluster-port"
               (toString cfg.clusterPort)
-              "--node-id"
-              cfg.nodeId
-              "--http-port"
-              (toString cfg.httpPort)
               "--heartbeat-interval"
               (toString cfg.heartbeatInterval)
               "--election-timeout-min"
@@ -161,7 +164,7 @@ in
               cfg.opaFetchPolicy
             ];
           in
-          lib.concatStringsSep " " (baseArgs ++ peerArgs ++ statelessArgs ++ advertiseArgs ++ joinArgs ++ opaArgs);
+          lib.concatStringsSep " " (baseArgs ++ storageArgs ++ peerArgs ++ statelessArgs ++ advertiseArgs ++ joinArgs ++ opaArgs);
 
         Restart = "on-failure";
         RestartSec = "2s";
