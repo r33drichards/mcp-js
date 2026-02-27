@@ -1,5 +1,7 @@
+pub mod fetch;
 pub mod heap_storage;
 pub mod heap_tags;
+pub mod opa;
 pub mod session_log;
 
 use std::collections::HashMap;
@@ -607,8 +609,14 @@ pub fn execute_stateless(
     isolate_handle: Arc<Mutex<Option<v8::IsolateHandle>>>,
     wasm_modules: &[WasmModule],
     wasm_default_max_bytes: usize,
+    fetch_config: Option<&fetch::FetchConfig>,
 ) -> (Result<String, String>, bool) {
     let oom_flag = Arc::new(AtomicBool::new(false));
+
+    // Set up thread-local fetch config before V8 execution.
+    if let Some(fc) = fetch_config {
+        fetch::set_thread_fetch_config(fc.clone());
+    }
 
     let result = catch_unwind(AssertUnwindSafe(|| {
         let params = create_params_with_heap_limit(heap_memory_max_bytes);
@@ -630,7 +638,15 @@ pub fn execute_stateless(
         // Do NOT early-return here — cb_data_ptr must be freed below.
         let eval_result = match inject_wasm_modules(&mut runtime, wasm_modules, wasm_default_max_bytes) {
             Err(e) => Err(e),
-            Ok(()) => execute_and_stringify(&mut runtime, code),
+            Ok(()) => {
+                // Inject fetch() if OPA is configured.
+                if fetch_config.is_some() {
+                    if let Err(e) = fetch::inject_fetch(&mut runtime) {
+                        return Err(e);
+                    }
+                }
+                execute_and_stringify(&mut runtime, code)
+            }
         };
 
         *isolate_handle.lock().unwrap() = None;
@@ -638,6 +654,9 @@ pub fn execute_stateless(
 
         eval_result
     }));
+
+    // Always clean up thread-local.
+    fetch::clear_thread_fetch_config();
 
     let oom = oom_flag.load(Ordering::SeqCst);
     match result {
@@ -662,8 +681,14 @@ pub fn execute_stateful(
     isolate_handle: Arc<Mutex<Option<v8::IsolateHandle>>>,
     wasm_modules: &[WasmModule],
     wasm_default_max_bytes: usize,
+    fetch_config: Option<&fetch::FetchConfig>,
 ) -> (Result<(String, Vec<u8>, String), String>, bool) {
     let oom_flag = Arc::new(AtomicBool::new(false));
+
+    // Set up thread-local fetch config before V8 execution.
+    if let Some(fc) = fetch_config {
+        fetch::set_thread_fetch_config(fc.clone());
+    }
 
     let result = catch_unwind(AssertUnwindSafe(|| {
         let params = create_params_with_heap_limit(heap_memory_max_bytes);
@@ -704,7 +729,15 @@ pub fn execute_stateful(
         // Do NOT early-return here — snapshot() must be called below.
         let output_result = match inject_wasm_modules(&mut runtime, wasm_modules, wasm_default_max_bytes) {
             Err(e) => Err(e),
-            Ok(()) => execute_and_stringify(&mut runtime, code),
+            Ok(()) => {
+                // Inject fetch() if OPA is configured.
+                if fetch_config.is_some() {
+                    if let Err(e) = fetch::inject_fetch(&mut runtime) {
+                        return Err(e);
+                    }
+                }
+                execute_and_stringify(&mut runtime, code)
+            }
         };
 
         *isolate_handle.lock().unwrap() = None;
@@ -726,6 +759,9 @@ pub fn execute_stateful(
             Err(e) => Err(e),
         }
     }));
+
+    // Always clean up thread-local.
+    fetch::clear_thread_fetch_config();
 
     let oom = oom_flag.load(Ordering::SeqCst);
     match result {
@@ -775,6 +811,8 @@ pub struct Engine {
     wasm_default_max_bytes: usize,
     /// WASM modules to inject as globals before every execution.
     wasm_modules: Arc<Vec<WasmModule>>,
+    /// OPA-gated fetch configuration. When Some, `fetch()` is injected into the JS runtime.
+    fetch_config: Option<Arc<fetch::FetchConfig>>,
 }
 
 impl Engine {
@@ -793,6 +831,7 @@ impl Engine {
             snapshot_mutex: Arc::new(tokio::sync::Mutex::new(())),
             wasm_default_max_bytes: DEFAULT_WASM_MAX_BYTES,
             wasm_modules: Arc::new(Vec::new()),
+            fetch_config: None,
         }
     }
 
@@ -814,6 +853,7 @@ impl Engine {
             snapshot_mutex: Arc::new(tokio::sync::Mutex::new(())),
             wasm_default_max_bytes: DEFAULT_WASM_MAX_BYTES,
             wasm_modules: Arc::new(Vec::new()),
+            fetch_config: None,
         }
     }
 
@@ -826,6 +866,12 @@ impl Engine {
     /// Set WASM modules to inject as globals before every execution.
     pub fn with_wasm_modules(mut self, modules: Vec<WasmModule>) -> Self {
         self.wasm_modules = Arc::new(modules);
+        self
+    }
+
+    /// Enable OPA-gated fetch() in the JS runtime.
+    pub fn with_fetch_config(mut self, config: fetch::FetchConfig) -> Self {
+        self.fetch_config = Some(Arc::new(config));
         self
     }
 
@@ -864,8 +910,9 @@ impl Engine {
                 let ih = isolate_handle.clone();
                 let wasm = self.wasm_modules.clone();
                 let wasm_default = self.wasm_default_max_bytes;
+                let fc = self.fetch_config.clone();
                 let mut join_handle = tokio::task::spawn_blocking(move || {
-                    execute_stateless(&code, max_bytes, ih, &wasm, wasm_default)
+                    execute_stateless(&code, max_bytes, ih, &wasm, wasm_default, fc.as_deref())
                 });
 
                 tokio::select! {
@@ -902,13 +949,14 @@ impl Engine {
                 let ih = isolate_handle.clone();
                 let wasm = self.wasm_modules.clone();
                 let wasm_default = self.wasm_default_max_bytes;
+                let fc = self.fetch_config.clone();
 
                 // V8 SnapshotCreator segfaults under concurrent use — serialize
                 // stateful V8 work while keeping the async timeout wrapper.
                 let snap_mutex = self.snapshot_mutex.clone();
                 let mut join_handle = tokio::task::spawn_blocking(move || {
                     let _guard = snap_mutex.blocking_lock();
-                    execute_stateful(&code, raw_snapshot, max_bytes, ih, &wasm, wasm_default)
+                    execute_stateful(&code, raw_snapshot, max_bytes, ih, &wasm, wasm_default, fc.as_deref())
                 });
 
                 let v8_result = tokio::select! {

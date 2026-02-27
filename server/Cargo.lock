@@ -2760,6 +2760,7 @@ dependencies = [
  "cookie",
  "cookie_store",
  "encoding_rs",
+ "futures-channel",
  "futures-core",
  "futures-util",
  "h2 0.4.12",
@@ -3199,6 +3200,7 @@ dependencies = [
  "tokio-util 0.7.15",
  "tracing",
  "tracing-subscriber",
+ "url",
  "uuid",
  "wasmparser",
 ]
