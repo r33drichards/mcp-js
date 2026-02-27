@@ -20,6 +20,8 @@ jobs:
             check: cluster-test
           - name: Load-Balancing Integration Test
             check: load-balancing-test
+          - name: Fetch OPA Integration Test
+            check: fetch-opa-test
 
     steps:
       - name: Checkout code
