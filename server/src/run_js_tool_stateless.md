@@ -15,7 +15,7 @@ returns:
 ## Limitations
 
 - **No `async`/`await` or Promises**: Asynchronous JavaScript is not supported. All code must be synchronous.
-- **No `fetch` or network access**: There is no built-in way to make HTTP requests or access the network.
+- **No `fetch` or network access by default**: When the server is started with `--opa-url`, a synchronous `fetch(url, opts?)` function becomes available. Each request is checked against an OPA policy before execution. The response object has `.ok`, `.status`, `.statusText`, `.url`, `.headers.get(name)`, `.text()`, and `.json()` methods. Without `--opa-url`, there is no network access.
 - **No `console.log` or standard output**: Output from `console.log` or similar functions will not appear. To return results, ensure the value you want is the last line of your code.
 - **No file system access**: The runtime does not provide access to the local file system or environment variables.
 - **No `npm install` or external packages**: You cannot install or import npm packages. Only standard JavaScript (ECMAScript) built-ins are available.

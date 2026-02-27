@@ -88,7 +88,7 @@
           # so we can inject our fixed replace-workspace-values script.
           cargoDeps = (rustPlatform.fetchCargoVendor {
             src = ./server;
-            hash = "sha256-9G0jkDJ7i1HcNsVdxs0/YTuntXKIW4ffHjF6TtNnzoA=";
+            hash = "sha256-NGkhSme6dz87DBinfNBikRJutv2MwsNGCfBLS3hSDvs=";
           }).overrideAttrs (old: {
             nativeBuildInputs = map (dep:
               if (dep.name or "") == "replace-workspace-values"
@@ -136,6 +136,10 @@
             mcp-js = self.packages.x86_64-linux.default;
           });
           load-balancing-test = pkgs.nixosTest (import ./tests/nixos/load-balancing.nix {
+            inherit pkgs;
+            mcp-js = self.packages.x86_64-linux.default;
+          });
+          fetch-opa-test = pkgs.nixosTest (import ./tests/nixos/fetch-opa.nix {
             inherit pkgs;
             mcp-js = self.packages.x86_64-linux.default;
           });

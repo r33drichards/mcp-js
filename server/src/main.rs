@@ -12,6 +12,7 @@ mod mcp;
 mod api;
 mod cluster;
 use engine::{initialize_v8, Engine, WasmModule, DEFAULT_EXECUTION_TIMEOUT_SECS};
+use engine::fetch::FetchConfig;
 use engine::heap_storage::{AnyHeapStorage, S3HeapStorage, WriteThroughCacheHeapStorage, FileHeapStorage};
 use engine::heap_tags::HeapTagStore;
 use engine::session_log::SessionLog;
@@ -127,6 +128,19 @@ struct Cli {
     /// is allocated as native memory outside the V8 heap.
     #[arg(long = "wasm-default-max-memory", default_value = "16m")]
     wasm_default_max_memory: String,
+
+    // ── OPA / fetch options ──────────────────────────────────────────────
+
+    /// OPA server URL for policy-gated operations. When set, fetch() becomes
+    /// available in the JS runtime, with each request checked against OPA.
+    /// Example: http://localhost:8181
+    #[arg(long = "opa-url", value_name = "URL")]
+    opa_url: Option<String>,
+
+    /// OPA policy path for fetch requests (appended to /v1/data/).
+    /// Default: "mcp/fetch". The policy must return {"allow": true} to permit a request.
+    #[arg(long = "opa-fetch-policy", default_value = "mcp/fetch", requires = "opa_url")]
+    opa_fetch_policy: String,
 }
 
 #[tokio::main]
@@ -279,6 +293,14 @@ async fn main() -> Result<()> {
 
     let engine = engine.with_wasm_default_max_bytes(wasm_default_max_bytes);
     let engine = if wasm_modules.is_empty() { engine } else { engine.with_wasm_modules(wasm_modules) };
+
+    // ── OPA / fetch ─────────────────────────────────────────────────────
+    let engine = if let Some(opa_url) = cli.opa_url {
+        tracing::info!("OPA enabled: {} (fetch policy: {})", opa_url, cli.opa_fetch_policy);
+        engine.with_fetch_config(FetchConfig::new(opa_url, cli.opa_fetch_policy))
+    } else {
+        engine
+    };
 
     // ── Start transport ─────────────────────────────────────────────────
     if let Some(port) = cli.http_port {

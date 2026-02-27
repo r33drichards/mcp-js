@@ -94,6 +94,18 @@ in
       default = null;
       description = "Seed address (host:port) to join an existing cluster dynamically.";
     };
+
+    opaUrl = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = "OPA server URL for policy-gated fetch. When set, fetch() becomes available in the JS runtime.";
+    };
+
+    opaFetchPolicy = lib.mkOption {
+      type = lib.types.str;
+      default = "mcp/fetch";
+      description = "OPA policy path for fetch requests (appended to /v1/data/).";
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -107,16 +119,19 @@ in
           let
             baseArgs = [
               "${cfg.package}/bin/server"
+              "--node-id"
+              cfg.nodeId
+              "--http-port"
+              (toString cfg.httpPort)
+            ];
+
+            storageArgs = lib.optionals (!cfg.stateless) [
               "--directory-path"
               cfg.dataDir
               "--session-db-path"
               "${cfg.dataDir}/sessions"
               "--cluster-port"
               (toString cfg.clusterPort)
-              "--node-id"
-              cfg.nodeId
-              "--http-port"
-              (toString cfg.httpPort)
               "--heartbeat-interval"
               (toString cfg.heartbeatInterval)
               "--election-timeout-min"
@@ -141,8 +156,15 @@ in
               "--join"
               cfg.join
             ];
+
+            opaArgs = lib.optionals (cfg.opaUrl != null) [
+              "--opa-url"
+              cfg.opaUrl
+              "--opa-fetch-policy"
+              cfg.opaFetchPolicy
+            ];
           in
-          lib.concatStringsSep " " (baseArgs ++ peerArgs ++ statelessArgs ++ advertiseArgs ++ joinArgs);
+          lib.concatStringsSep " " (baseArgs ++ storageArgs ++ peerArgs ++ statelessArgs ++ advertiseArgs ++ joinArgs ++ opaArgs);
 
         Restart = "on-failure";
         RestartSec = "2s";

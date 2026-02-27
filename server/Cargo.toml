@@ -44,6 +44,7 @@ tokio-util = "0.7"
 rand = "0.8"
 http-body-util = "0.1"
 reqwest = { version = "0.12", features = ["json"] }
+url = "2"
 futures = "0.3"
 wasmparser = "0.225"
 
