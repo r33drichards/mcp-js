@@ -14,6 +14,7 @@ A Rust-based Model Context Protocol (MCP) server that exposes a V8 JavaScript ru
 - **Multiple Transports**: Supports stdio, Streamable HTTP (MCP 2025-03-26+), and SSE (Server-Sent Events) transport protocols.
 - **Clustering**: Optional Raft-based clustering for distributed coordination, replicated session logging, and horizontal scaling.
 - **Concurrency Control**: Configurable concurrent V8 execution limits with semaphore-based throttling.
+- **OPA-Gated Fetch**: Optional `fetch()` function for JavaScript, with every HTTP request checked against an [Open Policy Agent](https://www.openpolicyagent.org/) policy before execution.
 
 ## Installation
 
@@ -69,6 +70,20 @@ These options enable Raft-based clustering for distributed coordination and repl
 - `--heartbeat-interval <ms>`: Raft heartbeat interval in milliseconds (default: 100).
 - `--election-timeout-min <ms>`: Minimum election timeout in milliseconds (default: 300).
 - `--election-timeout-max <ms>`: Maximum election timeout in milliseconds (default: 500).
+
+### OPA / Fetch Options
+
+These options enable an OPA-gated `fetch()` function in the JavaScript runtime. When `--opa-url` is set, a synchronous `fetch(url, opts?)` global becomes available. Every outbound HTTP request is first checked against an OPA policy — the request is only made if the policy returns `{"allow": true}`.
+
+- `--opa-url <URL>`: OPA server URL (e.g. `http://localhost:8181`). Enables `fetch()` in the JS runtime.
+- `--opa-fetch-policy <path>`: OPA policy path appended to `/v1/data/` (default: `mcp/fetch`). Requires `--opa-url`.
+
+**Example:**
+```bash
+mcp-v8 --stateless --http-port 3000 \
+  --opa-url http://localhost:8181 \
+  --opa-fetch-policy mcp/fetch
+```
 
 ### WASM Module Options
 
@@ -370,6 +385,71 @@ JSON.stringify(result.rows);  // → [{"id":1,"name":"Alice","age":30}]
 
 See [`examples/sqlite-wasm/`](examples/sqlite-wasm/) for the full example including the SQLite wrapper code and WASI import stubs.
 
+### OPA-Gated Fetch
+
+When the server is started with `--opa-url`, JavaScript code can use a synchronous `fetch(url, opts?)` function. Every request is checked against an OPA policy before the HTTP call is made.
+
+**1. Write an OPA policy**
+
+Create a Rego policy that controls which requests are allowed:
+
+```rego
+package mcp.fetch
+
+default allow = false
+
+# Allow GET requests to a specific API host
+allow if {
+    input.method == "GET"
+    input.url_parsed.host == "api.example.com"
+    startswith(input.url_parsed.path, "/public/")
+}
+```
+
+The policy input includes:
+- `operation`: always `"fetch"`
+- `url`: the full URL string
+- `method`: HTTP method (e.g. `"GET"`, `"POST"`)
+- `headers`: request headers (keys normalized to lowercase)
+- `url_parsed`: parsed URL components — `scheme`, `host`, `port`, `path`, `query`
+
+**2. Start the server with OPA enabled**
+
+```bash
+mcp-v8 --stateless --http-port 3000 \
+  --opa-url http://localhost:8181 \
+  --opa-fetch-policy mcp/fetch
+```
+
+**3. Use `fetch()` in JavaScript**
+
+```javascript
+const resp = fetch("https://api.example.com/public/data");
+resp.status;       // 200
+resp.ok;           // true
+resp.text();       // response body as string
+resp.json();       // parsed JSON
+resp.headers.get("content-type"); // header value
+```
+
+The response object supports:
+- Properties: `.ok`, `.status`, `.statusText`, `.url`, `.redirected`, `.type`, `.bodyUsed`
+- Methods: `.text()`, `.json()`, `.clone()`
+- Headers: `.headers.get(name)`, `.headers.has(name)`, `.headers.entries()`, `.headers.keys()`, `.headers.values()`, `.headers.forEach(fn)`
+
+`fetch()` also accepts an options object:
+
+```javascript
+const resp = fetch("https://api.example.com/data", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ key: "value" })
+});
+JSON.stringify(resp.json());
+```
+
+If the OPA policy denies a request, `fetch()` throws an error.
+
 ### Loading `.wasm` Files
 
 Instead of embedding raw bytes in JavaScript, you can compile a `.wasm` file once and load it at server startup. The module's exports are then available as a global variable in every execution.
@@ -462,7 +542,7 @@ You can configure heap storage using the following command line arguments:
 While `mcp-v8` provides a powerful and persistent JavaScript execution environment, there are limitations to its runtime. 
 
 - **No `async`/`await` or Promises**: Asynchronous JavaScript is not supported. All code must be synchronous.
-- **No `fetch` or network access**: There is no built-in way to make HTTP requests or access the network.
+- **No `fetch` or network access by default**: When the server is started with `--opa-url`, a synchronous `fetch(url, opts?)` function becomes available. Each request is checked against an OPA policy before execution. Without `--opa-url`, there is no network access. See [OPA-Gated Fetch](#opa-gated-fetch) for details.
 - **No `console.log` or standard output**: Output from `console.log` or similar functions will not appear. To return results, ensure the value you want is the last line of your code.
 - **No file system access**: The runtime does not provide access to the local file system or environment variables.
 - **No `npm install` or external packages**: You cannot install or import npm packages. Only standard JavaScript (ECMAScript) built-ins are available.
