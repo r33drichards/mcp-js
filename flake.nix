@@ -50,14 +50,32 @@
             flakeIgnore = [ "E501" "W503" ];
           }
           (builtins.readFile ./nix/replace-workspace-values.py);
-      in {
-        devShells.default = import ./shell.nix { inherit pkgs rustToolchain; };
-        devShells.fuzz = import ./shell.nix { inherit pkgs; rustToolchain = rustNightly; };
 
-        # Package – builds the server binary using rustPlatform.
-        # NOTE: v8 (rusty_v8) requires a pre-built static library.  Set
-        # RUSTY_V8_ARCHIVE to the path of the .a file if the automatic
-        # download does not work inside the Nix sandbox.
+        # Pre-fetched rusty_v8 static library.
+        # The v8 crate's build.rs tries to download this at build time,
+        # which fails inside the Nix sandbox and on network-restricted
+        # CI runners.  Pre-fetching and setting RUSTY_V8_ARCHIVE avoids
+        # any network access during build.
+        rustyV8Version = "145.0.0";
+        rustyV8Target = {
+          "x86_64-linux"   = "x86_64-unknown-linux-gnu";
+          "aarch64-linux"  = "aarch64-unknown-linux-gnu";
+          "x86_64-darwin"  = "x86_64-apple-darwin";
+          "aarch64-darwin" = "aarch64-apple-darwin";
+        }.${system};
+        rustyV8Archive = pkgs.fetchurl {
+          url = "https://github.com/denoland/rusty_v8/releases/download/v${rustyV8Version}/librusty_v8_release_${rustyV8Target}.a.gz";
+          hash = {
+            "x86_64-linux"   = "sha256-chV1PAx40UH3Ute5k3lLrgfhih39Rm3KqE+mTna6ysE=";
+            "aarch64-linux"  = "sha256-4IivYskhUSsMLZY97+g23UtUYh4p5jk7CzhMbMyqXyY=";
+            "x86_64-darwin"  = "sha256-1jUuC+z7saQfPYILNyRJanD4+zOOhXU2ac/LFoytwho=";
+            "aarch64-darwin" = "sha256-yHa1eydVCrfYGgrZANbzgmmf25p7ui1VMas2A7BhG6k=";
+          }.${system};
+        };
+      in {
+        devShells.default = import ./shell.nix { inherit pkgs rustToolchain rustyV8Archive; };
+        devShells.fuzz = import ./shell.nix { inherit pkgs rustyV8Archive; rustToolchain = rustNightly; };
+
         # SQLite compiled to WASM via Emscripten — used by the sqlite-wasm example.
         packages.sqlite-wasm = import ./nix/sqlite-wasm.nix { inherit pkgs; };
 
@@ -83,8 +101,6 @@
             clang
             llvmPackages.bintools
             pkg-config
-            curl
-            cacert
           ];
 
           buildInputs = with pkgs; [
@@ -93,16 +109,15 @@
 
           LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
 
+          # Point v8 build.rs to the pre-fetched static library so it
+          # doesn't try to download during the sandboxed build.
+          RUSTY_V8_ARCHIVE = "${rustyV8Archive}";
+
           # Integration/e2e tests start servers and make HTTP requests,
           # which does not work inside the Nix build sandbox.  The NixOS
           # VM test (checks.x86_64-linux.cluster-test) covers integration
           # testing instead.
           doCheck = false;
-
-          # Allow network access for rusty_v8 binary download during build.
-          # In a strict sandbox you must prefetch the archive and point
-          # RUSTY_V8_ARCHIVE to it instead.
-          __noChroot = true;
 
           meta.mainProgram = "server";
         };

@@ -1,4 +1,4 @@
-{ pkgs ? import <nixpkgs> {}, rustToolchain ? null }:
+{ pkgs ? import <nixpkgs> {}, rustToolchain ? null, rustyV8Archive ? null }:
   pkgs.mkShell rec {
     buildInputs = with pkgs; [
       (if rustToolchain != null then rustToolchain else rustup)
@@ -19,7 +19,10 @@
       export SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt
       # Set library path for OpenSSL
       export LD_LIBRARY_PATH=${pkgs.lib.makeLibraryPath buildInputs}:$LD_LIBRARY_PATH
-      '';
+    '' + pkgs.lib.optionalString (rustyV8Archive != null) ''
+      # Point v8 build.rs to the pre-fetched static library
+      export RUSTY_V8_ARCHIVE=${rustyV8Archive}
+    '';
     # Add precompiled library to rustc search path
     RUSTFLAGS = (builtins.map (a: ''-L ${a}/lib'') [
       # add libraries here (e.g. pkgs.libvmi)
