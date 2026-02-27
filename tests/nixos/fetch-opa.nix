@@ -21,12 +21,10 @@ let
 
   # ── Static JSON served by nginx ──────────────────────────────────────
 
-  allowedResponse = pkgs.writeText "data.json" ''
-    {"message": "hello from allowed endpoint"}
-  '';
-
-  deniedResponse = pkgs.writeText "secret.json" ''
-    {"secret": "you should not see this"}
+  staticFiles = pkgs.runCommand "test-static" {} ''
+    mkdir -p $out/allowed $out/denied
+    echo '{"message": "hello from allowed endpoint"}' > $out/allowed/data
+    echo '{"secret": "you should not see this"}' > $out/denied/secret
   '';
 in
 
@@ -65,18 +63,10 @@ in
         enable = true;
         virtualHosts.target = {
           listen = [{ addr = "127.0.0.1"; port = 8080; }];
-          locations."/allowed/data" = {
-            alias = "${allowedResponse}";
-            extraConfig = ''
-              default_type application/json;
-            '';
-          };
-          locations."/denied/secret" = {
-            alias = "${deniedResponse}";
-            extraConfig = ''
-              default_type application/json;
-            '';
-          };
+          root = "${staticFiles}";
+          extraConfig = ''
+            default_type application/json;
+          '';
         };
       };
 
