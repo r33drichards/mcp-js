@@ -5,11 +5,13 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Blocking OPA client — safe to use inside `spawn_blocking` threads.
+/// Async OPA client. When called from a synchronous V8 callback inside
+/// `spawn_blocking`, use `tokio::runtime::Handle::current().block_on()`
+/// to bridge into the async runtime.
 #[derive(Clone, Debug)]
 pub struct OpaClient {
     base_url: String,
-    client: reqwest::blocking::Client,
+    client: reqwest::Client,
 }
 
 #[derive(Serialize)]
@@ -29,7 +31,7 @@ struct OpaResult {
 
 impl OpaClient {
     pub fn new(base_url: String) -> Self {
-        let client = reqwest::blocking::Client::builder()
+        let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(5))
             .build()
             .expect("Failed to create OPA HTTP client");
@@ -41,7 +43,7 @@ impl OpaClient {
     ///
     /// `policy_path` is appended to `/v1/data/` — e.g. `"mcp/fetch"` becomes
     /// `POST {base_url}/v1/data/mcp/fetch`.
-    pub fn evaluate<T: Serialize>(&self, policy_path: &str, input: &T) -> Result<bool, String> {
+    pub async fn evaluate<T: Serialize>(&self, policy_path: &str, input: &T) -> Result<bool, String> {
         let url = format!("{}/v1/data/{}", self.base_url.trim_end_matches('/'), policy_path);
         let body = OpaRequest { input };
 
@@ -50,6 +52,7 @@ impl OpaClient {
             .post(&url)
             .json(&body)
             .send()
+            .await
             .map_err(|e| format!("OPA request failed: {}", e))?;
 
         if !resp.status().is_success() {
@@ -58,6 +61,7 @@ impl OpaClient {
 
         let opa_resp: OpaResponse = resp
             .json()
+            .await
             .map_err(|e| format!("Failed to parse OPA response: {}", e))?;
 
         Ok(opa_resp

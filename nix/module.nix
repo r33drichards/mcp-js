@@ -94,6 +94,18 @@ in
       default = null;
       description = "Seed address (host:port) to join an existing cluster dynamically.";
     };
+
+    opaUrl = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = "OPA server URL for policy-gated fetch. When set, fetch() becomes available in the JS runtime.";
+    };
+
+    opaFetchPolicy = lib.mkOption {
+      type = lib.types.str;
+      default = "mcp/fetch";
+      description = "OPA policy path for fetch requests (appended to /v1/data/).";
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -141,8 +153,15 @@ in
               "--join"
               cfg.join
             ];
+
+            opaArgs = lib.optionals (cfg.opaUrl != null) [
+              "--opa-url"
+              cfg.opaUrl
+              "--opa-fetch-policy"
+              cfg.opaFetchPolicy
+            ];
           in
-          lib.concatStringsSep " " (baseArgs ++ peerArgs ++ statelessArgs ++ advertiseArgs ++ joinArgs);
+          lib.concatStringsSep " " (baseArgs ++ peerArgs ++ statelessArgs ++ advertiseArgs ++ joinArgs ++ opaArgs);
 
         Restart = "on-failure";
         RestartSec = "2s";

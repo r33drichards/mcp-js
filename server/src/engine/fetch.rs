@@ -32,12 +32,12 @@ use super::opa::OpaClient;
 pub struct FetchConfig {
     pub opa_client: OpaClient,
     pub opa_policy_path: String,
-    pub http_client: reqwest::blocking::Client,
+    pub http_client: reqwest::Client,
 }
 
 impl FetchConfig {
     pub fn new(opa_url: String, opa_policy_path: String) -> Self {
-        let http_client = reqwest::blocking::Client::builder()
+        let http_client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .expect("Failed to create fetch HTTP client");
@@ -220,6 +220,10 @@ const FETCH_JS_WRAPPER: &str = r#"
 /// Extracts string arguments from JS, delegates to `do_fetch` for the
 /// OPA policy check + HTTP request (pure Rust, no V8 types), then converts
 /// the result back to a V8 string.
+///
+/// Since `do_fetch` is async, we bridge into the tokio runtime using
+/// `Handle::block_on()`. This is safe because V8 callbacks run inside
+/// `spawn_blocking` threads where the tokio runtime handle is available.
 fn fetch_callback(
     scope: &mut v8::PinScope<'_, '_>,
     args: v8::FunctionCallbackArguments,
@@ -231,7 +235,9 @@ fn fetch_callback(
     let headers_json = arg_to_string(scope, &args, 2);
     let body = arg_to_string(scope, &args, 3);
 
-    let result = do_fetch(url_str, method, headers_json, body);
+    // Bridge sync V8 callback → async do_fetch via the tokio runtime handle.
+    let handle = tokio::runtime::Handle::current();
+    let result = handle.block_on(do_fetch(url_str, method, headers_json, body));
 
     let json_str = match result {
         Ok(json) => json,
@@ -260,7 +266,7 @@ fn arg_to_string(
 // ── Pure-Rust fetch implementation (no V8 types) ─────────────────────────
 
 /// Execute an OPA-gated HTTP fetch. All V8 interaction happens in the caller.
-fn do_fetch(
+async fn do_fetch(
     url_str: Option<String>,
     method: Option<String>,
     headers_json: Option<String>,
@@ -294,76 +300,84 @@ fn do_fetch(
         url_parsed,
     };
 
-    // Evaluate OPA policy and execute request using thread-local config
-    FETCH_CONFIG.with(|cell| {
+    // Extract config from thread-local (clone to release the borrow before await).
+    let (opa_client, opa_policy_path, http_client) = FETCH_CONFIG.with(|cell| {
         let borrow = cell.borrow();
         let config = borrow
             .as_ref()
             .ok_or_else(|| "fetch: internal error — no fetch config on this thread".to_string())?;
+        Ok::<_, String>((
+            config.opa_client.clone(),
+            config.opa_policy_path.clone(),
+            config.http_client.clone(),
+        ))
+    })?;
 
-        let allowed = config
-            .opa_client
-            .evaluate(&config.opa_policy_path, &policy_input)?;
+    // Evaluate OPA policy
+    let allowed = opa_client
+        .evaluate(&opa_policy_path, &policy_input)
+        .await?;
 
-        if !allowed {
-            return Err(format!(
-                "fetch denied by policy: {} {} is not allowed",
-                method, url_str
-            ));
-        }
+    if !allowed {
+        return Err(format!(
+            "fetch denied by policy: {} {} is not allowed",
+            method, url_str
+        ));
+    }
 
-        // Execute the HTTP request
-        let mut req_builder = config.http_client.request(
-            method
-                .parse::<reqwest::Method>()
-                .map_err(|e| format!("fetch: invalid method '{}': {}", method, e))?,
-            &url_str,
-        );
+    // Execute the HTTP request
+    let mut req_builder = http_client.request(
+        method
+            .parse::<reqwest::Method>()
+            .map_err(|e| format!("fetch: invalid method '{}': {}", method, e))?,
+        &url_str,
+    );
 
-        for (k, v) in &headers {
-            req_builder = req_builder.header(k.as_str(), v.as_str());
-        }
+    for (k, v) in &headers {
+        req_builder = req_builder.header(k.as_str(), v.as_str());
+    }
 
-        if let Some(body) = body {
-            req_builder = req_builder.body(body);
-        }
+    if let Some(body) = body {
+        req_builder = req_builder.body(body);
+    }
 
-        let resp = req_builder
-            .send()
-            .map_err(|e| format!("fetch: request failed: {}", e))?;
+    let resp = req_builder
+        .send()
+        .await
+        .map_err(|e| format!("fetch: request failed: {}", e))?;
 
-        let status = resp.status().as_u16();
-        let status_text = resp
-            .status()
-            .canonical_reason()
-            .unwrap_or("")
-            .to_string();
-        let final_url = resp.url().to_string();
+    let status = resp.status().as_u16();
+    let status_text = resp
+        .status()
+        .canonical_reason()
+        .unwrap_or("")
+        .to_string();
+    let final_url = resp.url().to_string();
 
-        let resp_headers: HashMap<String, String> = resp
-            .headers()
-            .iter()
-            .map(|(k, v)| {
-                (
-                    k.as_str().to_string(),
-                    v.to_str().unwrap_or("").to_string(),
-                )
-            })
-            .collect();
+    let resp_headers: HashMap<String, String> = resp
+        .headers()
+        .iter()
+        .map(|(k, v)| {
+            (
+                k.as_str().to_string(),
+                v.to_str().unwrap_or("").to_string(),
+            )
+        })
+        .collect();
 
-        let resp_body = resp
-            .text()
-            .map_err(|e| format!("fetch: failed to read response body: {}", e))?;
+    let resp_body = resp
+        .text()
+        .await
+        .map_err(|e| format!("fetch: failed to read response body: {}", e))?;
 
-        let result = serde_json::json!({
-            "status": status,
-            "statusText": status_text,
-            "url": final_url,
-            "headers": resp_headers,
-            "body": resp_body,
-            "redirected": final_url != url_str,
-        });
+    let result = serde_json::json!({
+        "status": status,
+        "statusText": status_text,
+        "url": final_url,
+        "headers": resp_headers,
+        "body": resp_body,
+        "redirected": final_url != url_str,
+    });
 
-        Ok(result.to_string())
-    })
+    Ok(result.to_string())
 }

@@ -139,6 +139,10 @@
             inherit pkgs;
             mcp-js = self.packages.x86_64-linux.default;
           });
+          fetch-opa-test = pkgs.nixosTest (import ./tests/nixos/fetch-opa.nix {
+            inherit pkgs;
+            mcp-js = self.packages.x86_64-linux.default;
+          });
         };
     };
 }
