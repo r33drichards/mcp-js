@@ -11,7 +11,7 @@ let
 
     default allow = false
 
-    allow {
+    allow if {
         input.method == "GET"
         input.url_parsed.host == "localhost"
         input.url_parsed.port == 8080
