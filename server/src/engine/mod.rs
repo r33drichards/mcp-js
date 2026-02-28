@@ -272,6 +272,20 @@ struct HeapLimitCallbackData {
     oom_flag: Arc<AtomicBool>,
 }
 
+/// RAII guard that frees the HeapLimitCallbackData on drop, ensuring no
+/// leak even when catch_unwind catches a panic from deno_core/V8.
+struct HeapLimitGuard {
+    ptr: *mut HeapLimitCallbackData,
+}
+
+impl Drop for HeapLimitGuard {
+    fn drop(&mut self) {
+        if !self.ptr.is_null() {
+            unsafe { let _ = Box::from_raw(self.ptr); }
+        }
+    }
+}
+
 unsafe impl Send for HeapLimitCallbackData {}
 unsafe impl Sync for HeapLimitCallbackData {}
 
@@ -681,9 +695,9 @@ pub fn execute_stateless(
         let cb_data_ptr = install_heap_limit_callback(
             runtime.v8_isolate(), oom_flag.clone()
         );
+        let _heap_guard = HeapLimitGuard { ptr: cb_data_ptr };
 
         // Inject WASM modules as globals via V8 native API.
-        // Do NOT early-return here — cb_data_ptr must be freed below.
         let eval_result = match inject_wasm_modules(&mut runtime, wasm_modules, wasm_default_max_bytes) {
             Err(e) => Err(e),
             Ok(()) => {
@@ -698,7 +712,6 @@ pub fn execute_stateless(
         };
 
         *isolate_handle.lock().unwrap() = None;
-        unsafe { let _ = Box::from_raw(cb_data_ptr); }
 
         eval_result
     }));
@@ -775,6 +788,7 @@ pub fn execute_stateful(
         let cb_data_ptr = install_heap_limit_callback(
             runtime.v8_isolate(), oom_flag.clone()
         );
+        let _heap_guard = HeapLimitGuard { ptr: cb_data_ptr };
 
         // Inject WASM modules as globals via V8 native API.
         // Do NOT early-return here — snapshot() must be called below.
@@ -792,7 +806,6 @@ pub fn execute_stateful(
         };
 
         *isolate_handle.lock().unwrap() = None;
-        unsafe { let _ = Box::from_raw(cb_data_ptr); }
 
         // Consume runtime to create snapshot (replaces snapshot_creator.create_blob).
         let snapshot_data = runtime.snapshot();
