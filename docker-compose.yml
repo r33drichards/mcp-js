@@ -8,9 +8,8 @@ services:
       - ./policies:/policies:ro
 
   mcp-js:
-    image: docker.io/wholelottahoopla/mcp-js:latest
+    build: .
     command:
-      - mcp-v8
       - --http-port=3000
       - --directory-path=/data/heaps
       - --session-db-path=/data/sessions

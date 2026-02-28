@@ -23,7 +23,6 @@ services:
   node1:
     build: .
     command:
-      - mcp-v8
       - --http-port=3000
       - --stateless
     expose:
