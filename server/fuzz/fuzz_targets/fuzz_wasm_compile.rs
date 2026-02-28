@@ -30,7 +30,7 @@ fuzz_target!(|data: &[u8]| {
     }];
 
     // We don't care about the result; we care that V8 doesn't crash.
-    let max_bytes = 8 * 1024 * 1024;
+    let max_bytes = 64 * 1024 * 1024;
     let wasm_default = 8 * 1024 * 1024;
     let handle = Arc::new(Mutex::new(None));
     let _ = server::engine::execute_stateless("1", max_bytes, handle, &modules, wasm_default, None);

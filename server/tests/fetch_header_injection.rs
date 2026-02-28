@@ -94,10 +94,14 @@ async fn fetch_and_get_echoed_headers(
 ) -> HashMap<String, String> {
     // JS code: call fetch, parse the echoed JSON, re-stringify so V8
     // returns a proper JSON string (not "[object Object]").
+    // Wrapped in an async IIFE because fetch() is async and top-level
+    // await is not available in script (non-module) context.
     let code = format!(
         r#"
-        const resp = await fetch("{echo_url}", {js_extra});
-        JSON.stringify(await resp.json());
+        (async () => {{
+            const resp = await fetch("{echo_url}", {js_extra});
+            return JSON.stringify(await resp.json());
+        }})()
         "#,
         echo_url = echo_url,
         js_extra = js_extra,

@@ -139,7 +139,7 @@ async fn op_fetch(
     #[string] url: String,
     #[string] method: String,
     #[string] headers_json: String,
-    #[string] body: Option<String>,
+    #[string] body: String,
 ) -> Result<String, JsErrorBox> {
     // Clone config from OpState before any .await (Rc is !Send).
     let (opa_client, opa_policy_path, http_client, header_rules) = {
@@ -153,6 +153,9 @@ async fn op_fetch(
             config.header_rules.clone(),
         )
     };
+
+    // Convert empty string (from JS null body) to None.
+    let body = if body.is_empty() { None } else { Some(body) };
 
     do_fetch(url, method, headers_json, body, opa_client, opa_policy_path, http_client, header_rules)
         .await
@@ -225,7 +228,7 @@ const FETCH_JS_WRAPPER: &str = r#"
         const opts = init || {};
         const method = (opts.method || 'GET').toUpperCase();
         const headers = opts.headers || {};
-        const body = opts.body !== undefined ? String(opts.body) : null;
+        const body = opts.body !== undefined ? String(opts.body) : "";
 
         // Normalize headers to plain object with lowercase keys
         const normalizedHeaders = {};
