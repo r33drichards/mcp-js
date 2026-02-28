@@ -96,8 +96,8 @@ async fn fetch_and_get_echoed_headers(
     // returns a proper JSON string (not "[object Object]").
     let code = format!(
         r#"
-        const resp = fetch("{echo_url}", {js_extra});
-        JSON.stringify(resp.json());
+        const resp = await fetch("{echo_url}", {js_extra});
+        JSON.stringify(await resp.json());
         "#,
         echo_url = echo_url,
         js_extra = js_extra,

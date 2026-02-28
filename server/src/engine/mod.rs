@@ -655,17 +655,23 @@ pub fn execute_stateless(
 ) -> (Result<String, String>, bool) {
     let oom_flag = Arc::new(AtomicBool::new(false));
 
-    // Set up thread-local fetch config before V8 execution.
-    if let Some(fc) = fetch_config {
-        fetch::set_thread_fetch_config(fc.clone());
-    }
-
     let result = catch_unwind(AssertUnwindSafe(|| {
         let params = create_params_with_heap_limit(heap_memory_max_bytes);
+        let extensions = if fetch_config.is_some() {
+            vec![fetch::create_extension()]
+        } else {
+            vec![]
+        };
         let mut runtime = JsRuntime::new(RuntimeOptions {
             create_params: Some(params),
+            extensions,
             ..Default::default()
         });
+
+        // Put fetch config in OpState if OPA is configured.
+        if let Some(fc) = fetch_config {
+            runtime.op_state().borrow_mut().put(fc.clone());
+        }
 
         // Publish handle immediately so caller can terminate us.
         *isolate_handle.lock().unwrap() = Some(
@@ -681,7 +687,7 @@ pub fn execute_stateless(
         let eval_result = match inject_wasm_modules(&mut runtime, wasm_modules, wasm_default_max_bytes) {
             Err(e) => Err(e),
             Ok(()) => {
-                // Inject fetch() if OPA is configured.
+                // Inject fetch() JS wrapper if OPA is configured.
                 if fetch_config.is_some() {
                     if let Err(e) = fetch::inject_fetch(&mut runtime) {
                         return Err(e);
@@ -696,9 +702,6 @@ pub fn execute_stateless(
 
         eval_result
     }));
-
-    // Always clean up thread-local.
-    fetch::clear_thread_fetch_config();
 
     let oom = oom_flag.load(Ordering::SeqCst);
     match result {
@@ -727,11 +730,6 @@ pub fn execute_stateful(
 ) -> (Result<(String, Vec<u8>, String), String>, bool) {
     let oom_flag = Arc::new(AtomicBool::new(false));
 
-    // Set up thread-local fetch config before V8 execution.
-    if let Some(fc) = fetch_config {
-        fetch::set_thread_fetch_config(fc.clone());
-    }
-
     let result = catch_unwind(AssertUnwindSafe(|| {
         let params = create_params_with_heap_limit(heap_memory_max_bytes);
 
@@ -752,11 +750,22 @@ pub fn execute_stateful(
 
         let startup_snapshot = leaked_snapshot.as_ref().map(|(_, s)| *s);
 
+        let extensions = if fetch_config.is_some() {
+            vec![fetch::create_extension()]
+        } else {
+            vec![]
+        };
         let mut runtime = JsRuntimeForSnapshot::new(RuntimeOptions {
             create_params: Some(params),
             startup_snapshot,
+            extensions,
             ..Default::default()
         });
+
+        // Put fetch config in OpState if OPA is configured.
+        if let Some(fc) = fetch_config {
+            runtime.op_state().borrow_mut().put(fc.clone());
+        }
 
         // Publish handle immediately so caller can terminate us.
         *isolate_handle.lock().unwrap() = Some(
@@ -772,7 +781,7 @@ pub fn execute_stateful(
         let output_result = match inject_wasm_modules(&mut runtime, wasm_modules, wasm_default_max_bytes) {
             Err(e) => Err(e),
             Ok(()) => {
-                // Inject fetch() if OPA is configured.
+                // Inject fetch() JS wrapper if OPA is configured.
                 if fetch_config.is_some() {
                     if let Err(e) = fetch::inject_fetch(&mut runtime) {
                         return Err(e);
@@ -801,9 +810,6 @@ pub fn execute_stateful(
             Err(e) => Err(e),
         }
     }));
-
-    // Always clean up thread-local.
-    fetch::clear_thread_fetch_config();
 
     let oom = oom_flag.load(Ordering::SeqCst);
     match result {
