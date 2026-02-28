@@ -1,26 +1,26 @@
-//! OPA-gated `fetch()` implementation for the V8 JavaScript runtime.
+//! OPA-gated `fetch()` implementation for the JavaScript runtime.
 //!
-//! Injects a synchronous, web-standards-like `fetch(url, opts?)` global
-//! function into the V8 runtime. Each request is evaluated against an OPA
-//! policy before execution.
+//! Uses a deno_core async op (`op_fetch`) to perform truly non-blocking HTTP
+//! requests. Each request is evaluated against an OPA policy before execution.
 //!
-//! The Response object mirrors the web Fetch API shape (synchronous variant):
+//! The `fetch()` function follows the web standard Fetch API:
 //! ```js
-//! const resp = fetch("https://example.com");
-//! resp.ok           // boolean
-//! resp.status       // number
-//! resp.statusText   // string
-//! resp.url          // string
-//! resp.headers      // Headers object with .get(name)
-//! resp.text()       // body as string
-//! resp.json()       // parsed JSON
+//! const resp = await fetch("https://example.com");
+//! resp.ok              // boolean
+//! resp.status          // number
+//! resp.statusText      // string
+//! resp.url             // string
+//! resp.headers         // Headers object with .get(name)
+//! await resp.text()    // body as string (Promise)
+//! await resp.json()    // parsed JSON (Promise)
 //! ```
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
-use deno_core::v8;
-use deno_core::JsRuntime;
+use deno_core::{JsRuntime, OpState, op2};
+use deno_error::JsErrorBox;
 use serde::Serialize;
 
 use super::opa::OpaClient;
@@ -28,6 +28,7 @@ use super::opa::OpaClient;
 // ── Configuration ────────────────────────────────────────────────────────
 
 /// Configuration for the fetch() function, including OPA policy settings.
+/// Stored in deno_core's `OpState` for access from async ops.
 #[derive(Clone, Debug)]
 pub struct FetchConfig {
     pub opa_client: OpaClient,
@@ -47,24 +48,6 @@ impl FetchConfig {
             http_client,
         }
     }
-}
-
-// ── Thread-local for V8 callback context ─────────────────────────────────
-//
-// V8 function callbacks (`extern "C" fn`) can't capture closures. Since
-// each V8 execution runs on a single thread inside `spawn_blocking`, a
-// thread-local carries the config into the callback.
-
-thread_local! {
-    static FETCH_CONFIG: RefCell<Option<FetchConfig>> = const { RefCell::new(None) };
-}
-
-pub fn set_thread_fetch_config(config: FetchConfig) {
-    FETCH_CONFIG.with(|c| *c.borrow_mut() = Some(config));
-}
-
-pub fn clear_thread_fetch_config() {
-    FETCH_CONFIG.with(|c| *c.borrow_mut() = None);
 }
 
 // ── OPA policy input ─────────────────────────────────────────────────────
@@ -87,44 +70,66 @@ struct UrlParsed {
     query: String,
 }
 
-// ── Inject fetch() into the V8 global scope ──────────────────────────────
+// ── Async deno_core op ──────────────────────────────────────────────────
 
-/// Inject a global `fetch` function into the V8 runtime.
-/// Must be called after the runtime is created but before user code runs.
-pub fn inject_fetch(runtime: &mut JsRuntime) -> Result<(), String> {
-    // First, inject the native __fetch_native callback
-    {
-        deno_core::scope!(scope, runtime);
-        let global = scope.get_current_context().global(scope);
-
-        let fetch_fn = v8::Function::new(scope, fetch_callback)
-            .ok_or("Failed to create fetch function")?;
-
-        let key = v8::String::new(scope, "__fetch_native")
-            .ok_or("Failed to create __fetch_native string")?;
-        global.set(scope, key.into(), fetch_fn.into());
-    }
-
-    // Then, define the JS wrapper that builds the Response object
-    runtime
-        .execute_script(
-            "<fetch-setup>",
-            FETCH_JS_WRAPPER.to_string(),
+/// Async op: performs an OPA-gated HTTP fetch. Called from JS via
+/// `Deno.core.ops.op_fetch(url, method, headersJson, body)`.
+/// Returns a JSON string with {status, statusText, url, headers, body}.
+#[op2(async)]
+#[string]
+async fn op_fetch(
+    state: Rc<RefCell<OpState>>,
+    #[string] url: String,
+    #[string] method: String,
+    #[string] headers_json: String,
+    #[string] body: Option<String>,
+) -> Result<String, JsErrorBox> {
+    // Clone config from OpState before any .await (Rc is !Send).
+    let (opa_client, opa_policy_path, http_client) = {
+        let state = state.borrow();
+        let config = state.try_borrow::<FetchConfig>()
+            .ok_or_else(|| JsErrorBox::generic("fetch: internal error — no fetch config available"))?;
+        (
+            config.opa_client.clone(),
+            config.opa_policy_path.clone(),
+            config.http_client.clone(),
         )
-        .map_err(|e| format!("Failed to install fetch wrapper: {}", e))?;
+    };
 
+    do_fetch(url, method, headers_json, body, opa_client, opa_policy_path, http_client)
+        .await
+        .map_err(|e| JsErrorBox::generic(e))
+}
+
+// ── Extension registration ──────────────────────────────────────────────
+
+deno_core::extension!(
+    fetch_ext,
+    ops = [op_fetch],
+);
+
+/// Create the fetch extension for use in `RuntimeOptions::extensions`.
+pub fn create_extension() -> deno_core::Extension {
+    fetch_ext::init()
+}
+
+// ── Inject fetch() JS wrapper into the global scope ─────────────────────
+
+/// Inject the `globalThis.fetch` JS wrapper. Must be called after the
+/// runtime is created (with the fetch extension) but before user code runs.
+pub fn inject_fetch(runtime: &mut JsRuntime) -> Result<(), String> {
+    runtime
+        .execute_script("<fetch-setup>", FETCH_JS_WRAPPER.to_string())
+        .map_err(|e| format!("Failed to install fetch wrapper: {}", e))?;
     Ok(())
 }
 
-/// JavaScript wrapper that provides the web-standards-like Response API.
-/// The native `__fetch_native(url, method, headersJson, body)` returns a
-/// JSON string with {status, statusText, url, headers, body}. This wrapper
-/// parses it into a proper Response-like object.
+/// JavaScript wrapper that provides the web-standard Fetch API.
+/// The async op `Deno.core.ops.op_fetch(url, method, headersJson, body)`
+/// returns a Promise<string> with JSON {status, statusText, url, headers, body}.
+/// This wrapper parses it into a proper Response-like object.
 const FETCH_JS_WRAPPER: &str = r#"
 (function() {
-    const nativeFetch = globalThis.__fetch_native;
-    delete globalThis.__fetch_native;
-
     function Headers(init) {
         this._map = {};
         if (init) {
@@ -154,7 +159,7 @@ const FETCH_JS_WRAPPER: &str = r#"
         }
     };
 
-    globalThis.fetch = function fetch(resource, init) {
+    globalThis.fetch = async function fetch(resource, init) {
         if (typeof resource !== 'string') {
             throw new TypeError('fetch: first argument must be a URL string');
         }
@@ -173,12 +178,10 @@ const FETCH_JS_WRAPPER: &str = r#"
         }
 
         const headersJson = JSON.stringify(normalizedHeaders);
-        const rawResult = nativeFetch(resource, method, headersJson, body);
-        const result = JSON.parse(rawResult);
 
-        if (result.error) {
-            throw new Error(result.error);
-        }
+        // Async op — truly non-blocking, returns a Promise
+        const rawResult = await Deno.core.ops.op_fetch(resource, method, headersJson, body);
+        const result = JSON.parse(rawResult);
 
         const responseBody = result.body;
         const responseHeaders = new Headers(result.headers);
@@ -192,8 +195,8 @@ const FETCH_JS_WRAPPER: &str = r#"
             redirected: result.redirected || false,
             type: 'basic',
             bodyUsed: false,
-            text: function() { return responseBody; },
-            json: function() { return JSON.parse(responseBody); },
+            text: function() { return Promise.resolve(responseBody); },
+            json: function() { return Promise.resolve(JSON.parse(responseBody)); },
             clone: function() {
                 return {
                     ok: this.ok,
@@ -204,8 +207,8 @@ const FETCH_JS_WRAPPER: &str = r#"
                     redirected: this.redirected,
                     type: this.type,
                     bodyUsed: false,
-                    text: function() { return responseBody; },
-                    json: function() { return JSON.parse(responseBody); },
+                    text: function() { return Promise.resolve(responseBody); },
+                    json: function() { return Promise.resolve(JSON.parse(responseBody)); },
                 };
             }
         };
@@ -213,70 +216,18 @@ const FETCH_JS_WRAPPER: &str = r#"
 })();
 "#;
 
-// ── V8 native callback ──────────────────────────────────────────────────
-
-/// V8 native function: `__fetch_native(url, method, headersJson, body) -> jsonString`
-///
-/// Extracts string arguments from JS, delegates to `do_fetch` for the
-/// OPA policy check + HTTP request (pure Rust, no V8 types), then converts
-/// the result back to a V8 string.
-///
-/// Since `do_fetch` is async, we bridge into the tokio runtime using
-/// `Handle::block_on()`. This is safe because V8 callbacks run inside
-/// `spawn_blocking` threads where the tokio runtime handle is available.
-fn fetch_callback(
-    scope: &mut v8::PinScope<'_, '_>,
-    args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    // Extract all JS arguments up-front so the rest is pure Rust.
-    let url_str = arg_to_string(scope, &args, 0);
-    let method = arg_to_string(scope, &args, 1);
-    let headers_json = arg_to_string(scope, &args, 2);
-    let body = arg_to_string(scope, &args, 3);
-
-    // Bridge sync V8 callback → async do_fetch via the tokio runtime handle.
-    let handle = tokio::runtime::Handle::current();
-    let result = handle.block_on(do_fetch(url_str, method, headers_json, body));
-
-    let json_str = match result {
-        Ok(json) => json,
-        Err(err) => serde_json::json!({ "error": err }).to_string(),
-    };
-
-    if let Some(v8_str) = v8::String::new(scope, &json_str) {
-        rv.set(v8_str.into());
-    }
-}
-
-/// Extract a JS argument as a Rust String.
-fn arg_to_string(
-    scope: &v8::PinScope<'_, '_>,
-    args: &v8::FunctionCallbackArguments,
-    index: i32,
-) -> Option<String> {
-    let val = args.get(index);
-    if val.is_undefined() || val.is_null() {
-        return None;
-    }
-    val.to_string(scope)
-        .map(|s| s.to_rust_string_lossy(scope))
-}
-
 // ── Pure-Rust fetch implementation (no V8 types) ─────────────────────────
 
 /// Execute an OPA-gated HTTP fetch. All V8 interaction happens in the caller.
 async fn do_fetch(
-    url_str: Option<String>,
-    method: Option<String>,
-    headers_json: Option<String>,
+    url_str: String,
+    method: String,
+    headers_json: String,
     body: Option<String>,
+    opa_client: OpaClient,
+    opa_policy_path: String,
+    http_client: reqwest::Client,
 ) -> Result<String, String> {
-    let url_str = url_str
-        .ok_or_else(|| "fetch: missing or invalid URL argument".to_string())?;
-    let method = method.unwrap_or_else(|| "GET".to_string());
-    let headers_json = headers_json.unwrap_or_else(|| "{}".to_string());
-
     let headers: HashMap<String, String> = serde_json::from_str(&headers_json)
         .map_err(|e| format!("fetch: invalid headers JSON: {}", e))?;
 
@@ -299,19 +250,6 @@ async fn do_fetch(
         headers: headers.clone(),
         url_parsed,
     };
-
-    // Extract config from thread-local (clone to release the borrow before await).
-    let (opa_client, opa_policy_path, http_client) = FETCH_CONFIG.with(|cell| {
-        let borrow = cell.borrow();
-        let config = borrow
-            .as_ref()
-            .ok_or_else(|| "fetch: internal error — no fetch config on this thread".to_string())?;
-        Ok::<_, String>((
-            config.opa_client.clone(),
-            config.opa_policy_path.clone(),
-            config.http_client.clone(),
-        ))
-    })?;
 
     // Evaluate OPA policy
     let allowed = opa_client

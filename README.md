@@ -4,6 +4,7 @@ A Rust-based Model Context Protocol (MCP) server that exposes a V8 JavaScript ru
 
 ## Features
 
+- **Async/Await Support**: Full support for `async`/`await` and Promises via the deno_core event loop.
 - **V8 JavaScript Execution**: Run arbitrary JavaScript code in a secure, isolated V8 engine.
 - **TypeScript Support**: Run TypeScript code directly — types are stripped before execution using [SWC](https://swc.rs/). This is type removal only, not type checking.
 - **WebAssembly Support**: Compile and run WASM modules using the standard `WebAssembly` JavaScript API (`WebAssembly.Module`, `WebAssembly.Instance`, `WebAssembly.validate`).
@@ -14,7 +15,7 @@ A Rust-based Model Context Protocol (MCP) server that exposes a V8 JavaScript ru
 - **Multiple Transports**: Supports stdio, Streamable HTTP (MCP 2025-03-26+), and SSE (Server-Sent Events) transport protocols.
 - **Clustering**: Optional Raft-based clustering for distributed coordination, replicated session logging, and horizontal scaling.
 - **Concurrency Control**: Configurable concurrent V8 execution limits with semaphore-based throttling.
-- **OPA-Gated Fetch**: Optional `fetch()` function for JavaScript, with every HTTP request checked against an [Open Policy Agent](https://www.openpolicyagent.org/) policy before execution.
+- **OPA-Gated Fetch**: Optional `fetch()` function for JavaScript following the web standard Fetch API, with every HTTP request checked against an [Open Policy Agent](https://www.openpolicyagent.org/) policy before execution.
 
 ## Installation
 
@@ -73,7 +74,7 @@ These options enable Raft-based clustering for distributed coordination and repl
 
 ### OPA / Fetch Options
 
-These options enable an OPA-gated `fetch()` function in the JavaScript runtime. When `--opa-url` is set, a synchronous `fetch(url, opts?)` global becomes available. Every outbound HTTP request is first checked against an OPA policy — the request is only made if the policy returns `{"allow": true}`.
+These options enable an OPA-gated `fetch()` function in the JavaScript runtime. When `--opa-url` is set, a `fetch(url, opts?)` global becomes available. `fetch()` follows the web standard Fetch API — it returns a Promise that resolves to a Response object. Every outbound HTTP request is first checked against an OPA policy — the request is only made if the policy returns `{"allow": true}`.
 
 - `--opa-url <URL>`: OPA server URL (e.g. `http://localhost:8181`). Enables `fetch()` in the JS runtime.
 - `--opa-fetch-policy <path>`: OPA policy path appended to `/v1/data/` (default: `mcp/fetch`). Requires `--opa-url`.
@@ -356,7 +357,7 @@ const inst = new WebAssembly.Instance(mod);
 inst.exports.add(21, 21); // → 42
 ```
 
-This uses synchronous compilation (`WebAssembly.Module` / `WebAssembly.Instance`), which works within the V8 runtime. The async APIs (`WebAssembly.compile`, `WebAssembly.instantiate` returning Promises) are not supported since the runtime does not support async/await.
+Both synchronous (`WebAssembly.Module` / `WebAssembly.Instance`) and async (`WebAssembly.compile`, `WebAssembly.instantiate`) WebAssembly APIs are supported. The runtime resolves Promises automatically via the event loop.
 
 Alternatively, you can pre-load `.wasm` files at server startup using `--wasm-module` or `--wasm-config` so they are available as globals in every execution without inline byte arrays. See [WASM Module Options](#wasm-module-options) for details.
 
@@ -387,7 +388,7 @@ See [`examples/sqlite-wasm/`](examples/sqlite-wasm/) for the full example includ
 
 ### OPA-Gated Fetch
 
-When the server is started with `--opa-url`, JavaScript code can use a synchronous `fetch(url, opts?)` function. Every request is checked against an OPA policy before the HTTP call is made.
+When the server is started with `--opa-url`, JavaScript code can use a `fetch(url, opts?)` function following the web standard Fetch API. Every request is checked against an OPA policy before the HTTP call is made.
 
 **1. Write an OPA policy**
 
@@ -424,31 +425,31 @@ mcp-v8 --stateless --http-port 3000 \
 **3. Use `fetch()` in JavaScript**
 
 ```javascript
-const resp = fetch("https://api.example.com/public/data");
-resp.status;       // 200
-resp.ok;           // true
-resp.text();       // response body as string
-resp.json();       // parsed JSON
+const resp = await fetch("https://api.example.com/public/data");
+resp.status;              // 200
+resp.ok;                  // true
+await resp.text();        // response body as string
+await resp.json();        // parsed JSON
 resp.headers.get("content-type"); // header value
 ```
 
 The response object supports:
 - Properties: `.ok`, `.status`, `.statusText`, `.url`, `.redirected`, `.type`, `.bodyUsed`
-- Methods: `.text()`, `.json()`, `.clone()`
+- Methods: `.text()`, `.json()`, `.clone()` (`.text()` and `.json()` return Promises)
 - Headers: `.headers.get(name)`, `.headers.has(name)`, `.headers.entries()`, `.headers.keys()`, `.headers.values()`, `.headers.forEach(fn)`
 
 `fetch()` also accepts an options object:
 
 ```javascript
-const resp = fetch("https://api.example.com/data", {
+const resp = await fetch("https://api.example.com/data", {
   method: "POST",
   headers: { "Content-Type": "application/json" },
   body: JSON.stringify({ key: "value" })
 });
-JSON.stringify(resp.json());
+JSON.stringify(await resp.json());
 ```
 
-If the OPA policy denies a request, `fetch()` throws an error.
+If the OPA policy denies a request, the Promise returned by `fetch()` is rejected with an error.
 
 ### Loading `.wasm` Files
 
@@ -541,14 +542,14 @@ You can configure heap storage using the following command line arguments:
 
 While `mcp-v8` provides a powerful and persistent JavaScript execution environment, there are limitations to its runtime. 
 
-- **No `async`/`await` or Promises**: Asynchronous JavaScript is not supported. All code must be synchronous.
-- **No `fetch` or network access by default**: When the server is started with `--opa-url`, a synchronous `fetch(url, opts?)` function becomes available. Each request is checked against an OPA policy before execution. Without `--opa-url`, there is no network access. See [OPA-Gated Fetch](#opa-gated-fetch) for details.
+- **`async`/`await` and Promises**: Fully supported. If your code returns a Promise, the runtime resolves it automatically.
+- **No `fetch` or network access by default**: When the server is started with `--opa-url`, a `fetch(url, opts?)` function becomes available following the web standard Fetch API. Each request is checked against an OPA policy before execution. Without `--opa-url`, there is no network access. See [OPA-Gated Fetch](#opa-gated-fetch) for details.
 - **No `console.log` or standard output**: Output from `console.log` or similar functions will not appear. To return results, ensure the value you want is the last line of your code.
 - **No file system access**: The runtime does not provide access to the local file system or environment variables.
 - **No `npm install` or external packages**: You cannot install or import npm packages. Only standard JavaScript (ECMAScript) built-ins are available.
 - **No timers**: Functions like `setTimeout` and `setInterval` are not available.
 - **No DOM or browser APIs**: This is not a browser environment; there is no access to `window`, `document`, or other browser-specific objects.
-- **WebAssembly: synchronous API only**: `WebAssembly.Module`, `WebAssembly.Instance`, and `WebAssembly.validate` work. The async APIs (`WebAssembly.compile`, `WebAssembly.instantiate` returning Promises) are not supported.
+- **WebAssembly**: Both synchronous (`WebAssembly.Module`, `WebAssembly.Instance`, `WebAssembly.validate`) and async (`WebAssembly.compile`, `WebAssembly.instantiate`) APIs are supported.
 - **TypeScript: type removal only**: TypeScript type annotations are stripped before execution. No type checking is performed — invalid types are silently removed, not reported as errors.
 
 ---

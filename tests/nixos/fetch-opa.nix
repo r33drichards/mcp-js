@@ -101,7 +101,12 @@ in
     # ── Test 1: Allowed fetch (GET to /allowed/) ────────────────────────
 
     with subtest("should allow GET fetch to permitted path"):
-        result = exec_js("JSON.stringify(fetch(\"http://localhost:8080/allowed/data\").json())")
+        result = exec_js("""
+            (async () => {
+                const resp = await fetch("http://localhost:8080/allowed/data");
+                return JSON.stringify(await resp.json());
+            })()
+        """)
         print("Allowed fetch result: " + str(result))
         assert "Error" not in result["output"], "Expected success, got: " + str(result)
         body = json.loads(result["output"])
@@ -110,7 +115,12 @@ in
     # ── Test 2: Denied fetch (wrong path prefix) ────────────────────────
 
     with subtest("should deny fetch to non-allowed path"):
-        result = exec_js("try { fetch(\"http://localhost:8080/denied/secret\"); \"no error\" } catch(e) { e.message }")
+        result = exec_js("""
+            (async () => {
+                try { await fetch("http://localhost:8080/denied/secret"); return "no error"; }
+                catch(e) { return e.message; }
+            })()
+        """)
         print("Denied-by-path result: " + str(result))
         assert "denied by policy" in result["output"], \
             "Expected denied by policy error, got: " + str(result)
@@ -118,7 +128,12 @@ in
     # ── Test 3: Denied fetch (wrong method) ─────────────────────────────
 
     with subtest("should deny POST fetch even to allowed path"):
-        result = exec_js("try { fetch(\"http://localhost:8080/allowed/data\", {method: \"POST\"}); \"no error\" } catch(e) { e.message }")
+        result = exec_js("""
+            (async () => {
+                try { await fetch("http://localhost:8080/allowed/data", {method: "POST"}); return "no error"; }
+                catch(e) { return e.message; }
+            })()
+        """)
         print("Denied-by-method result: " + str(result))
         assert "denied by policy" in result["output"], \
             "Expected denied by policy error, got: " + str(result)
@@ -126,7 +141,12 @@ in
     # ── Test 4: Denied fetch (wrong host) ───────────────────────────────
 
     with subtest("should deny fetch to non-allowed host"):
-        result = exec_js("try { fetch(\"http://example.com/allowed/data\"); \"no error\" } catch(e) { e.message }")
+        result = exec_js("""
+            (async () => {
+                try { await fetch("http://example.com/allowed/data"); return "no error"; }
+                catch(e) { return e.message; }
+            })()
+        """)
         print("Denied-by-host result: " + str(result))
         # Could be "denied by policy" or a connection error — either is acceptable.
         assert "no error" not in result["output"], \
@@ -145,12 +165,10 @@ in
         result = exec_js("""
             (async () => {
                 const resp = await fetch("http://localhost:8080/allowed/data");
-                return JSON.stringify(resp.json());
+                return JSON.stringify(await resp.json());
             })()
         """)
         print("Async/await fetch result: " + str(result))
-        # await on a sync value passes through; the async IIFE returns a Promise.
-        # If the runtime resolves it, we get JSON; otherwise we get [object Promise].
         body = json.loads(result["output"])
         assert body["message"] == "hello from allowed endpoint", \
             "Unexpected async/await body: " + str(result)
@@ -159,8 +177,9 @@ in
 
     with subtest("should work with Promise.then callback syntax"):
         result = exec_js("""
-            Promise.resolve(fetch("http://localhost:8080/allowed/data"))
-                .then(function(resp) { return JSON.stringify(resp.json()); })
+            fetch("http://localhost:8080/allowed/data")
+                .then(function(resp) { return resp.json(); })
+                .then(function(data) { return JSON.stringify(data); })
         """)
         print("Promise.then fetch result: " + str(result))
         body = json.loads(result["output"])
@@ -173,9 +192,9 @@ in
         result = exec_js("""
             (async () => {
                 const first = await fetch("http://localhost:8080/allowed/data");
-                const body = first.json();
+                const body = await first.json();
                 const second = await fetch("http://localhost:8080/allowed/data");
-                const body2 = second.json();
+                const body2 = await second.json();
                 return JSON.stringify({
                     first: body.message,
                     second: body2.message,
