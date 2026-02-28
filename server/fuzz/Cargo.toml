@@ -17,6 +17,9 @@ serde = ">=1.0,<1.0.220"
 [dependencies.server]
 path = ".."
 
+[dependencies.deno_core]
+version = "0.381"
+
 # Override rmcp to use the same git source as the server crate
 [patch.crates-io]
 rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", rev = "787cc015b719773f66d4ac32e695b9a0079e12ef" }
