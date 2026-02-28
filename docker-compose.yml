@@ -15,7 +15,7 @@ services:
       - --session-db-path=/data/sessions
       - --opa-url=http://opa:8181
     tmpfs:
-      - /data
+      - /data:uid=1000,gid=1000
     ports:
       - "3000:3000"
     depends_on:
