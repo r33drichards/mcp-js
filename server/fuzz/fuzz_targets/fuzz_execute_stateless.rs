@@ -9,6 +9,10 @@ static INIT: Once = Once::new();
 fn ensure_v8() {
     INIT.call_once(|| {
         server::engine::initialize_v8();
+        // Override libfuzzer's abort-on-panic hook so that catch_unwind in
+        // execute_stateless can handle panics in deno_core/V8 gracefully.
+        // Real crashes (ASAN, signals) are still caught by libfuzzer.
+        std::panic::set_hook(Box::new(|_| {}));
     });
 }
 
