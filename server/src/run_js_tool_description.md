@@ -18,8 +18,8 @@ returns:
 
 ## Limitations
 
-- **No `async`/`await` or Promises**: Asynchronous JavaScript is not supported. All code must be synchronous.
-- **No `fetch` or network access by default**: When the server is started with `--opa-url`, a synchronous `fetch(url, opts?)` function becomes available. Each request is checked against an OPA policy before execution. The response object has `.ok`, `.status`, `.statusText`, `.url`, `.headers.get(name)`, `.text()`, and `.json()` methods. Without `--opa-url`, there is no network access.
+- **`async`/`await` and Promises**: Fully supported. If your code returns a Promise, the runtime resolves it automatically.
+- **No `fetch` or network access by default**: When the server is started with `--opa-url`, a `fetch(url, opts?)` function becomes available. `fetch()` follows the web standard Fetch API — it returns a Promise that resolves to a Response object. Use `await` to get the response: `const resp = await fetch(url)`. The response object has `.ok`, `.status`, `.statusText`, `.url`, `.headers.get(name)`, `.text()`, and `.json()` methods (`.text()` and `.json()` also return Promises). Each request is checked against an OPA policy before execution. Without `--opa-url`, there is no network access.
 - **No `console.log` or standard output**: Output from `console.log` or similar functions will not appear. To return results, ensure the value you want is the last line of your code.
 - **No file system access**: The runtime does not provide access to the local file system or environment variables.
 - **No `npm install` or external packages**: You cannot install or import npm packages. Only standard JavaScript (ECMAScript) built-ins are available.
@@ -60,6 +60,21 @@ would return:
 ```
 {"a":1,"b":2}
 ```
+
+async/await is supported. The runtime resolves top-level Promises automatically:
+
+eg:
+
+```js
+async function fetchData() {
+  const resp = await fetch("https://api.example.com/data");
+  const data = await resp.json();
+  return JSON.stringify(data);
+}
+fetchData();
+```
+
+would return the JSON response as a string.
 
 In stateful mode, each execution returns a SHA-256 content hash for the heap snapshot — pass it back as the `heap` parameter in the next call to resume from that state. Omit `heap` for a fresh session. In stateless mode, no heap is returned and each execution starts fresh.
 the source code of the runtime is this

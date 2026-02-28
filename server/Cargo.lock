@@ -3181,6 +3181,7 @@ dependencies = [
  "chrono",
  "clap",
  "deno_core",
+ "deno_error",
  "futures",
  "http-body-util",
  "hyper 1.6.0",
