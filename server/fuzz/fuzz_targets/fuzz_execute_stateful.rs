@@ -8,6 +8,9 @@ static INIT: Once = Once::new();
 
 fn ensure_v8() {
     INIT.call_once(|| {
+        // Disable V8 background threads (Maglev JIT, TurboFan, concurrent GC)
+        // to prevent cumulative memory exhaustion across fuzz iterations.
+        deno_core::v8::V8::set_flags_from_string("--single-threaded");
         server::engine::initialize_v8();
     });
 }

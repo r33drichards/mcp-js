@@ -7,6 +7,12 @@ static INIT: Once = Once::new();
 
 fn ensure_v8() {
     INIT.call_once(|| {
+        // Disable V8 background threads (Maglev JIT, TurboFan, concurrent GC)
+        // to prevent cumulative memory exhaustion across fuzz iterations.
+        // Without this, background compilation threads accumulate memory that
+        // isn't freed between iterations, causing fatal OOM after ~2500 runs.
+        // WASM compilation still works synchronously on the main thread.
+        deno_core::v8::V8::set_flags_from_string("--single-threaded");
         server::engine::initialize_v8();
     });
 }
