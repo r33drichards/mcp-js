@@ -254,6 +254,14 @@ unsafe extern "C" fn oom_error_handler(
          Consider increasing heap_memory_max_mb or simplifying the script.",
         loc, details.is_heap_oom,
     );
+    // In fuzz builds, exit cleanly so libFuzzer doesn't treat resource
+    // exhaustion as a crash finding. V8's background JIT threads can
+    // accumulate memory across iterations, triggering OOM that isn't a
+    // security bug. The near_heap_limit_callback handles real heap OOM
+    // gracefully; this handler only fires for unrecoverable V8 internals.
+    #[cfg(fuzzing)]
+    std::process::exit(0);
+    #[cfg(not(fuzzing))]
     std::process::abort();
 }
 
