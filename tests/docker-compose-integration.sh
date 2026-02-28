@@ -54,6 +54,15 @@ wait_for_ready() {
     i=$((i + 1))
   done
   echo "  ERROR: mcp-js did not become ready in time."
+  echo ""
+  echo "==> Container status:"
+  docker compose -f "$COMPOSE_FILE" ps
+  echo ""
+  echo "==> mcp-js logs:"
+  docker compose -f "$COMPOSE_FILE" logs mcp-js
+  echo ""
+  echo "==> opa logs:"
+  docker compose -f "$COMPOSE_FILE" logs opa
   exit 1
 }
 
@@ -87,7 +96,7 @@ fi
 
 echo ""
 echo "==> Test 2: fetch() to allowed domain (registry.npmjs.org)"
-RESULT=$(exec_js '{"code":"const r = fetch(\"https://registry.npmjs.org/\"); r.ok;"}')
+RESULT=$(exec_js '{"code":"(async () => { const r = await fetch(\"https://registry.npmjs.org/\"); return r.ok; })()"}')
 OUTPUT=$(echo "$RESULT" | jq -r '.output')
 if [ "$OUTPUT" = "true" ]; then
   pass "fetch() to allowed domain returned ok=true"
@@ -101,7 +110,7 @@ echo ""
 echo "==> Test 3: fetch() to blocked domain (evil.example.com)"
 HTTP_CODE=$(curl -s -o /tmp/mcp-test-deny.json -w "%{http_code}" -X POST "$BASE_URL/api/exec" \
   -H "Content-Type: application/json" \
-  -d '{"code":"fetch(\"https://evil.example.com/\");"}')
+  -d '{"code":"(async () => { const r = await fetch(\"https://evil.example.com/\"); return r.ok; })()"}')
 BODY=$(cat /tmp/mcp-test-deny.json)
 if [ "$HTTP_CODE" = "500" ] && echo "$BODY" | grep -qi "denied\|policy"; then
   pass "fetch() to blocked domain was denied by policy (HTTP $HTTP_CODE)"

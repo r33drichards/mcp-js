@@ -38,6 +38,9 @@ COPY --from=builder /app/server/target/release/server /usr/local/bin/mcp-v8
 # Set ownership
 RUN chown mcpuser:mcpuser /usr/local/bin/mcp-v8
 
+# Create default data directory for stateful mode (heaps, sessions, etc.)
+RUN mkdir -p /data && chown mcpuser:mcpuser /data
+
 # Switch to non-root user
 USER mcpuser
 

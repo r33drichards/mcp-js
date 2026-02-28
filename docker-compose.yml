@@ -15,12 +15,9 @@ services:
       - --directory-path=/data/heaps
       - --session-db-path=/data/sessions
       - --opa-url=http://opa:8181
-    volumes:
-      - mcp-js-data:/data
+    tmpfs:
+      - /data
     ports:
       - "3000:3000"
     depends_on:
       - opa
-
-volumes:
-  mcp-js-data:
