@@ -16,6 +16,7 @@ A Rust-based Model Context Protocol (MCP) server that exposes a V8 JavaScript ru
 - **Clustering**: Optional Raft-based clustering for distributed coordination, replicated session logging, and horizontal scaling.
 - **Concurrency Control**: Configurable concurrent V8 execution limits with semaphore-based throttling.
 - **OPA-Gated Fetch**: Optional `fetch()` function for JavaScript following the web standard Fetch API, with every HTTP request checked against an [Open Policy Agent](https://www.openpolicyagent.org/) policy before execution.
+- **Fetch Header Injection**: Automatically inject headers (e.g., auth tokens, API keys) into outgoing fetch requests based on host and method matching rules, configured via CLI flags or a JSON config file.
 
 ## Installation
 
@@ -78,6 +79,8 @@ These options enable an OPA-gated `fetch()` function in the JavaScript runtime. 
 
 - `--opa-url <URL>`: OPA server URL (e.g. `http://localhost:8181`). Enables `fetch()` in the JS runtime.
 - `--opa-fetch-policy <path>`: OPA policy path appended to `/v1/data/` (default: `mcp/fetch`). Requires `--opa-url`.
+- `--fetch-header <RULE>`: Inject headers into fetch requests matching host/method rules. Format: `host=<host>,header=<name>,value=<val>[,methods=GET;POST]`. Can be specified multiple times. Requires `--opa-url`. See [Fetch Header Injection](#fetch-header-injection) for details.
+- `--fetch-header-config <PATH>`: Path to a JSON file with header injection rules. Format: `[{"host": "...", "methods": [...], "headers": {...}}]`. Requires `--opa-url`. See [Fetch Header Injection](#fetch-header-injection) for details.
 
 **Example:**
 ```bash
@@ -450,6 +453,87 @@ JSON.stringify(await resp.json());
 ```
 
 If the OPA policy denies a request, the Promise returned by `fetch()` is rejected with an error.
+
+### Fetch Header Injection
+
+When using OPA-gated fetch, you can configure automatic header injection rules that add headers to outgoing `fetch()` requests based on the target host and HTTP method. This is useful for injecting authentication tokens, API keys, or other credentials without embedding them in JavaScript code.
+
+Header injection rules are evaluated per-request. If a rule's host pattern and method filter match, its headers are injected into the request. **User-provided headers always take precedence** — a rule will not overwrite a header that JavaScript code already set.
+
+#### CLI Flags (`--fetch-header`)
+
+Use `--fetch-header` to define rules inline. The format is:
+
+```
+host=<host>,header=<name>,value=<val>[,methods=GET;POST]
+```
+
+- `host` — Host to match (exact or wildcard, see below). **Required.**
+- `header` — Header name to inject. **Required.**
+- `value` — Header value to inject. **Required.**
+- `methods` — Semicolon-separated HTTP methods to match. **Optional.** If omitted, the rule applies to all methods.
+
+Can be specified multiple times for multiple rules:
+
+```bash
+mcp-v8 --stateless --opa-url http://localhost:8181 \
+  --fetch-header "host=api.github.com,header=Authorization,value=Bearer ghp_xxxx" \
+  --fetch-header "host=api.example.com,header=X-API-Key,value=secret123"
+```
+
+#### JSON Config File (`--fetch-header-config`)
+
+For managing many rules, use a JSON config file. Each rule can inject multiple headers at once:
+
+```json
+[
+  {
+    "host": "api.github.com",
+    "methods": ["GET", "POST"],
+    "headers": {
+      "Authorization": "Bearer ghp_xxxx",
+      "X-GitHub-Api-Version": "2022-11-28"
+    }
+  },
+  {
+    "host": "*.example.com",
+    "headers": {
+      "X-API-Key": "secret123"
+    }
+  }
+]
+```
+
+```bash
+mcp-v8 --stateless --opa-url http://localhost:8181 \
+  --fetch-header-config headers.json
+```
+
+Both `--fetch-header` and `--fetch-header-config` can be used together — their rules are merged.
+
+#### Host Matching
+
+- **Exact match**: `api.github.com` matches only `api.github.com`.
+- **Wildcard**: `*.github.com` matches `api.github.com`, `github.com`, and `sub.api.github.com`.
+- Host matching is **case-insensitive**.
+
+#### Header Precedence
+
+Headers set explicitly in JavaScript `fetch()` calls always win. Injection rules only add headers that are not already present:
+
+```javascript
+// Rule: host=api.example.com, header=Authorization, value=Bearer injected
+
+// Header is injected (not set by code):
+await fetch("https://api.example.com/data");
+// → request includes Authorization: Bearer injected
+
+// User header takes precedence:
+await fetch("https://api.example.com/data", {
+  headers: { "Authorization": "Bearer my-own-token" }
+});
+// → request includes Authorization: Bearer my-own-token (rule skipped)
+```
 
 ### Loading `.wasm` Files
 
