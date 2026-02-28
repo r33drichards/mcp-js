@@ -23,7 +23,6 @@ services:
   node1:
     build: .
     command:
-      - mcp-v8
       - --http-port=3000
       - --directory-path=/data/heaps
       - --session-db-path=/data/sessions
