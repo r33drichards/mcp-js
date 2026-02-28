@@ -1,0 +1,33 @@
+name: Docker Compose Integration Test
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - Dockerfile
+      - docker-compose.yml
+      - policies/**
+      - tests/docker-compose-integration.sh
+  pull_request:
+    branches: [main]
+    paths:
+      - Dockerfile
+      - docker-compose.yml
+      - policies/**
+      - tests/docker-compose-integration.sh
+  schedule:
+    - cron: "0 6 * * *" # daily at 06:00 UTC
+  workflow_dispatch:
+
+jobs:
+  integration-test:
+    name: Docker Compose Integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run integration tests
+        run: ./tests/docker-compose-integration.sh

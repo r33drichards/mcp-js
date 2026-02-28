@@ -6,3 +6,18 @@ services:
       - "8181:8181"
     volumes:
       - ./policies:/policies:ro
+
+  mcp-js:
+    image: docker.io/wholelottahoopla/mcp-js:latest
+    command:
+      - mcp-v8
+      - --http-port=3000
+      - --directory-path=/data/heaps
+      - --session-db-path=/data/sessions
+      - --opa-url=http://opa:8181
+    tmpfs:
+      - /data
+    ports:
+      - "3000:3000"
+    depends_on:
+      - opa
