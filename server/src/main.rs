@@ -141,6 +141,17 @@ struct Cli {
     /// Default: "mcp/fetch". The policy must return {"allow": true} to permit a request.
     #[arg(long = "opa-fetch-policy", default_value = "mcp/fetch", requires = "opa_url")]
     opa_fetch_policy: String,
+
+    /// Inject headers into fetch requests matching host/method rules.
+    /// Format: host=<host>,header=<name>,value=<val>[,methods=GET;POST]
+    /// Can be specified multiple times.
+    #[arg(long = "fetch-header", value_name = "RULE", requires = "opa_url")]
+    fetch_headers: Vec<String>,
+
+    /// Path to a JSON file with header injection rules.
+    /// Format: [{"host": "api.github.com", "methods": ["GET","POST"], "headers": {"Authorization": "Bearer ..."}}]
+    #[arg(long = "fetch-header-config", value_name = "PATH", requires = "opa_url")]
+    fetch_header_config: Option<String>,
 }
 
 #[tokio::main]
@@ -297,7 +308,13 @@ async fn main() -> Result<()> {
     // ── OPA / fetch ─────────────────────────────────────────────────────
     let engine = if let Some(opa_url) = cli.opa_url {
         tracing::info!("OPA enabled: {} (fetch policy: {})", opa_url, cli.opa_fetch_policy);
-        engine.with_fetch_config(FetchConfig::new(opa_url, cli.opa_fetch_policy))
+        let header_rules = load_fetch_header_rules(&cli.fetch_headers, &cli.fetch_header_config)?;
+        if !header_rules.is_empty() {
+            tracing::info!("Loaded {} fetch header injection rule(s)", header_rules.len());
+        }
+        let fetch_config = FetchConfig::new(opa_url, cli.opa_fetch_policy)
+            .with_header_rules(header_rules);
+        engine.with_fetch_config(fetch_config)
     } else {
         engine
     };
@@ -562,4 +579,73 @@ fn validate_wasm_name(name: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+// ── Fetch header injection rule loading ──────────────────────────────────
+
+/// Load fetch header injection rules from CLI flags and/or a JSON config file.
+fn load_fetch_header_rules(
+    cli_rules: &[String],
+    config_path: &Option<String>,
+) -> Result<Vec<engine::fetch::HeaderRule>> {
+    let mut rules = Vec::new();
+
+    for entry in cli_rules {
+        rules.push(parse_fetch_header_cli(entry)?);
+    }
+
+    if let Some(path) = config_path {
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| anyhow::anyhow!("Failed to read fetch header config '{}': {}", path, e))?;
+        let mut file_rules: Vec<engine::fetch::HeaderRule> = serde_json::from_str(&content)
+            .map_err(|e| anyhow::anyhow!("Invalid JSON in fetch header config '{}': {}", path, e))?;
+        // Normalize methods to uppercase
+        for rule in &mut file_rules {
+            rule.methods = rule.methods.iter().map(|m| m.to_uppercase()).collect();
+        }
+        rules.extend(file_rules);
+    }
+
+    Ok(rules)
+}
+
+/// Parse a `--fetch-header` CLI string into a `HeaderRule`.
+/// Format: host=<host>,header=<name>,value=<val>[,methods=GET;POST]
+fn parse_fetch_header_cli(s: &str) -> Result<engine::fetch::HeaderRule> {
+    let mut host = None;
+    let mut methods = Vec::new();
+    let mut header_name = None;
+    let mut header_value = None;
+
+    for part in s.split(',') {
+        let (key, val) = part.split_once('=')
+            .ok_or_else(|| anyhow::anyhow!(
+                "Invalid --fetch-header segment '{}'. Expected key=value", part
+            ))?;
+        match key.trim() {
+            "host" => host = Some(val.trim().to_string()),
+            "methods" => {
+                methods = val.split(';')
+                    .map(|m| m.trim().to_uppercase())
+                    .filter(|m| !m.is_empty())
+                    .collect();
+            }
+            "header" => header_name = Some(val.trim().to_string()),
+            "value" => header_value = Some(val.to_string()),
+            other => anyhow::bail!(
+                "Unknown key '{}' in --fetch-header. Expected: host, methods, header, value", other
+            ),
+        }
+    }
+
+    let name = header_name.ok_or_else(|| anyhow::anyhow!("--fetch-header missing 'header'"))?;
+    let value = header_value.ok_or_else(|| anyhow::anyhow!("--fetch-header missing 'value'"))?;
+    let mut headers = std::collections::HashMap::new();
+    headers.insert(name, value);
+
+    Ok(engine::fetch::HeaderRule {
+        host: host.ok_or_else(|| anyhow::anyhow!("--fetch-header missing 'host'"))?,
+        methods,
+        headers,
+    })
 }

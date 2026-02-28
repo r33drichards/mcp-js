@@ -12,6 +12,10 @@ fn ensure_v8() {
         // to prevent cumulative memory exhaustion across fuzz iterations.
         deno_core::v8::V8::set_flags_from_string("--single-threaded");
         server::engine::initialize_v8();
+        // Override libfuzzer's abort-on-panic hook so that catch_unwind in
+        // execute_stateful can handle panics in deno_core/V8 gracefully.
+        // Real crashes (ASAN, signals) are still caught by libfuzzer.
+        std::panic::set_hook(Box::new(|_| {}));
     });
 }
 

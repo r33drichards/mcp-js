@@ -14,6 +14,10 @@ fn ensure_v8() {
         // WASM compilation still works synchronously on the main thread.
         deno_core::v8::V8::set_flags_from_string("--single-threaded");
         server::engine::initialize_v8();
+        // Override libfuzzer's abort-on-panic hook so that catch_unwind in
+        // execute_stateless can handle panics in deno_core/V8 gracefully.
+        // Real crashes (ASAN, signals) are still caught by libfuzzer.
+        std::panic::set_hook(Box::new(|_| {}));
     });
 }
 
@@ -36,7 +40,7 @@ fuzz_target!(|data: &[u8]| {
     }];
 
     // We don't care about the result; we care that V8 doesn't crash.
-    let max_bytes = 8 * 1024 * 1024;
+    let max_bytes = 64 * 1024 * 1024;
     let wasm_default = 8 * 1024 * 1024;
     let handle = Arc::new(Mutex::new(None));
     let _ = server::engine::execute_stateless("1", max_bytes, handle, &modules, wasm_default, None);

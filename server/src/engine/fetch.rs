@@ -21,7 +21,7 @@ use std::rc::Rc;
 
 use deno_core::{JsRuntime, OpState, op2};
 use deno_error::JsErrorBox;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::opa::OpaClient;
 
@@ -34,6 +34,7 @@ pub struct FetchConfig {
     pub opa_client: OpaClient,
     pub opa_policy_path: String,
     pub http_client: reqwest::Client,
+    pub header_rules: Vec<HeaderRule>,
 }
 
 impl FetchConfig {
@@ -46,6 +47,62 @@ impl FetchConfig {
             opa_client: OpaClient::new(opa_url),
             opa_policy_path,
             http_client,
+            header_rules: Vec::new(),
+        }
+    }
+
+    pub fn with_header_rules(mut self, rules: Vec<HeaderRule>) -> Self {
+        self.header_rules = rules;
+        self
+    }
+}
+
+/// A rule for injecting headers into outgoing fetch requests.
+#[derive(Clone, Debug, Deserialize)]
+pub struct HeaderRule {
+    /// Host to match (exact match or leading-wildcard like "*.github.com"). Case-insensitive.
+    pub host: String,
+    /// HTTP methods to match (e.g., ["GET", "POST"]). Empty means all methods.
+    #[serde(default)]
+    pub methods: Vec<String>,
+    /// Headers to inject. Keys are header names, values are header values.
+    pub headers: HashMap<String, String>,
+}
+
+impl HeaderRule {
+    fn matches(&self, request_host: &str, request_method: &str) -> bool {
+        if !self.methods.is_empty() {
+            let method_upper = request_method.to_uppercase();
+            if !self.methods.iter().any(|m| m.eq_ignore_ascii_case(&method_upper)) {
+                return false;
+            }
+        }
+
+        let pattern = self.host.to_lowercase();
+        let host = request_host.to_lowercase();
+
+        if let Some(suffix) = pattern.strip_prefix('*') {
+            // "*.github.com" matches "api.github.com" and "github.com"
+            host == pattern[2..] || host.ends_with(suffix)
+        } else {
+            host == pattern
+        }
+    }
+}
+
+/// Apply header injection rules. User-provided headers take precedence.
+pub fn apply_header_rules(
+    rules: &[HeaderRule],
+    host: &str,
+    method: &str,
+    headers: &mut HashMap<String, String>,
+) {
+    for rule in rules {
+        if rule.matches(host, method) {
+            for (k, v) in &rule.headers {
+                let key = k.to_lowercase();
+                headers.entry(key).or_insert_with(|| v.clone());
+            }
         }
     }
 }
@@ -82,10 +139,10 @@ async fn op_fetch(
     #[string] url: String,
     #[string] method: String,
     #[string] headers_json: String,
-    #[string] body: Option<String>,
+    #[string] body: String,
 ) -> Result<String, JsErrorBox> {
     // Clone config from OpState before any .await (Rc is !Send).
-    let (opa_client, opa_policy_path, http_client) = {
+    let (opa_client, opa_policy_path, http_client, header_rules) = {
         let state = state.borrow();
         let config = state.try_borrow::<FetchConfig>()
             .ok_or_else(|| JsErrorBox::generic("fetch: internal error — no fetch config available"))?;
@@ -93,10 +150,14 @@ async fn op_fetch(
             config.opa_client.clone(),
             config.opa_policy_path.clone(),
             config.http_client.clone(),
+            config.header_rules.clone(),
         )
     };
 
-    do_fetch(url, method, headers_json, body, opa_client, opa_policy_path, http_client)
+    // Convert empty string (from JS null body) to None.
+    let body = if body.is_empty() { None } else { Some(body) };
+
+    do_fetch(url, method, headers_json, body, opa_client, opa_policy_path, http_client, header_rules)
         .await
         .map_err(|e| JsErrorBox::generic(e))
 }
@@ -167,7 +228,7 @@ const FETCH_JS_WRAPPER: &str = r#"
         const opts = init || {};
         const method = (opts.method || 'GET').toUpperCase();
         const headers = opts.headers || {};
-        const body = opts.body !== undefined ? String(opts.body) : null;
+        const body = opts.body !== undefined ? String(opts.body) : "";
 
         // Normalize headers to plain object with lowercase keys
         const normalizedHeaders = {};
@@ -227,17 +288,23 @@ async fn do_fetch(
     opa_client: OpaClient,
     opa_policy_path: String,
     http_client: reqwest::Client,
+    header_rules: Vec<HeaderRule>,
 ) -> Result<String, String> {
-    let headers: HashMap<String, String> = serde_json::from_str(&headers_json)
+    let mut headers: HashMap<String, String> = serde_json::from_str(&headers_json)
         .map_err(|e| format!("fetch: invalid headers JSON: {}", e))?;
 
     // Parse URL into components for OPA policy input
     let parsed_url = url::Url::parse(&url_str)
         .map_err(|e| format!("fetch: invalid URL '{}': {}", url_str, e))?;
 
+    let url_host = parsed_url.host_str().unwrap_or("").to_string();
+
+    // Apply header injection rules. User-provided headers take precedence.
+    apply_header_rules(&header_rules, &url_host, &method, &mut headers);
+
     let url_parsed = UrlParsed {
         scheme: parsed_url.scheme().to_string(),
-        host: parsed_url.host_str().unwrap_or("").to_string(),
+        host: url_host,
         port: parsed_url.port(),
         path: parsed_url.path().to_string(),
         query: parsed_url.query().unwrap_or("").to_string(),
@@ -318,4 +385,130 @@ async fn do_fetch(
     });
 
     Ok(result.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_header_rule_exact_host_match() {
+        let rule = HeaderRule {
+            host: "api.github.com".to_string(),
+            methods: vec![],
+            headers: HashMap::from([("authorization".into(), "Bearer tok".into())]),
+        };
+        assert!(rule.matches("api.github.com", "GET"));
+        assert!(rule.matches("api.github.com", "POST"));
+        assert!(!rule.matches("other.github.com", "GET"));
+        assert!(!rule.matches("github.com", "GET"));
+    }
+
+    #[test]
+    fn test_header_rule_wildcard_host_match() {
+        let rule = HeaderRule {
+            host: "*.github.com".to_string(),
+            methods: vec![],
+            headers: HashMap::new(),
+        };
+        assert!(rule.matches("api.github.com", "GET"));
+        assert!(rule.matches("github.com", "GET"));
+        assert!(rule.matches("sub.api.github.com", "GET"));
+        assert!(!rule.matches("github.org", "GET"));
+    }
+
+    #[test]
+    fn test_header_rule_case_insensitive_host() {
+        let rule = HeaderRule {
+            host: "API.GitHub.COM".to_string(),
+            methods: vec![],
+            headers: HashMap::new(),
+        };
+        assert!(rule.matches("api.github.com", "GET"));
+        assert!(rule.matches("API.GITHUB.COM", "GET"));
+    }
+
+    #[test]
+    fn test_header_rule_method_filter() {
+        let rule = HeaderRule {
+            host: "example.com".to_string(),
+            methods: vec!["GET".to_string(), "POST".to_string()],
+            headers: HashMap::new(),
+        };
+        assert!(rule.matches("example.com", "GET"));
+        assert!(rule.matches("example.com", "post"));
+        assert!(!rule.matches("example.com", "DELETE"));
+    }
+
+    #[test]
+    fn test_header_rule_empty_methods_matches_all() {
+        let rule = HeaderRule {
+            host: "example.com".to_string(),
+            methods: vec![],
+            headers: HashMap::new(),
+        };
+        assert!(rule.matches("example.com", "GET"));
+        assert!(rule.matches("example.com", "POST"));
+        assert!(rule.matches("example.com", "DELETE"));
+        assert!(rule.matches("example.com", "PATCH"));
+    }
+
+    #[test]
+    fn test_apply_header_rules_injects_when_absent() {
+        let rules = vec![HeaderRule {
+            host: "example.com".to_string(),
+            methods: vec![],
+            headers: HashMap::from([("authorization".into(), "Bearer injected".into())]),
+        }];
+        let mut headers = HashMap::new();
+        apply_header_rules(&rules, "example.com", "GET", &mut headers);
+        assert_eq!(headers["authorization"], "Bearer injected");
+    }
+
+    #[test]
+    fn test_apply_header_rules_user_headers_take_precedence() {
+        let rules = vec![HeaderRule {
+            host: "example.com".to_string(),
+            methods: vec![],
+            headers: HashMap::from([("authorization".into(), "Bearer injected".into())]),
+        }];
+        let mut headers = HashMap::new();
+        headers.insert("authorization".to_string(), "Bearer user-provided".to_string());
+        apply_header_rules(&rules, "example.com", "GET", &mut headers);
+        assert_eq!(headers["authorization"], "Bearer user-provided");
+    }
+
+    #[test]
+    fn test_apply_header_rules_no_match() {
+        let rules = vec![HeaderRule {
+            host: "example.com".to_string(),
+            methods: vec!["POST".to_string()],
+            headers: HashMap::from([("authorization".into(), "Bearer tok".into())]),
+        }];
+        let mut headers = HashMap::new();
+
+        // Host mismatch
+        apply_header_rules(&rules, "other.com", "POST", &mut headers);
+        assert!(headers.is_empty());
+
+        // Method mismatch
+        apply_header_rules(&rules, "example.com", "GET", &mut headers);
+        assert!(headers.is_empty());
+    }
+
+    #[test]
+    fn test_apply_header_rules_multiple_headers() {
+        let rules = vec![HeaderRule {
+            host: "example.com".to_string(),
+            methods: vec![],
+            headers: HashMap::from([
+                ("authorization".into(), "Bearer tok".into()),
+                ("x-custom".into(), "custom-value".into()),
+            ]),
+        }];
+        let mut headers = HashMap::new();
+        apply_header_rules(&rules, "example.com", "GET", &mut headers);
+        assert_eq!(headers["authorization"], "Bearer tok");
+        assert_eq!(headers["x-custom"], "custom-value");
+    }
 }
