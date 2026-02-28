@@ -1,8 +1,0 @@
-[package]
-name = "snapshot"
-version = "0.1.0"
-edition = "2021"
-description = ""
-
-[dependencies]
-deno_core = "0.381"
