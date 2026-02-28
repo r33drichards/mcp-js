@@ -657,9 +657,14 @@ pub fn execute_stateless(
 
     let result = catch_unwind(AssertUnwindSafe(|| {
         let params = create_params_with_heap_limit(heap_memory_max_bytes);
+        let extensions = if fetch_config.is_some() {
+            vec![fetch::create_extension()]
+        } else {
+            vec![]
+        };
         let mut runtime = JsRuntime::new(RuntimeOptions {
             create_params: Some(params),
-            extensions: vec![fetch::create_extension()],
+            extensions,
             ..Default::default()
         });
 
@@ -745,10 +750,15 @@ pub fn execute_stateful(
 
         let startup_snapshot = leaked_snapshot.as_ref().map(|(_, s)| *s);
 
+        let extensions = if fetch_config.is_some() {
+            vec![fetch::create_extension()]
+        } else {
+            vec![]
+        };
         let mut runtime = JsRuntimeForSnapshot::new(RuntimeOptions {
             create_params: Some(params),
             startup_snapshot,
-            extensions: vec![fetch::create_extension()],
+            extensions,
             ..Default::default()
         });
 
