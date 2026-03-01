@@ -42,6 +42,44 @@ fn test_dynamic_import_not_detected() {
     assert!(!has_module_syntax(r#"const m = import("./foo.js");"#));
 }
 
+// ── top-level await detection ───────────────────────────────────────────
+
+#[test]
+fn test_top_level_await_detected() {
+    assert!(has_module_syntax("const x = await Promise.resolve(42);"));
+    assert!(has_module_syntax("await fetch('http://example.com');"));
+    assert!(has_module_syntax("const result = await (async () => 1)();"));
+}
+
+#[test]
+fn test_await_inside_async_function_not_detected() {
+    // `await` inside an async function body is NOT top-level
+    assert!(!has_module_syntax("async function foo() { await bar(); }"));
+    assert!(!has_module_syntax("const f = async () => { await bar(); };"));
+    assert!(!has_module_syntax("const obj = { async method() { await bar(); } };"));
+}
+
+#[test]
+fn test_await_in_string_not_detected() {
+    assert!(!has_module_syntax(r#"const s = "await something";"#));
+    assert!(!has_module_syntax(r#"const s = 'await something';"#));
+    assert!(!has_module_syntax("const s = `await something`;"));
+}
+
+#[test]
+fn test_await_in_comment_not_detected() {
+    assert!(!has_module_syntax("// await something"));
+    assert!(!has_module_syntax("/* await something */"));
+    assert!(!has_module_syntax("/* multi\nawait\nline */\nconst x = 1;"));
+}
+
+#[test]
+fn test_await_like_identifier_not_detected() {
+    // `awaiter` or `_await` should not be detected as `await`
+    assert!(!has_module_syntax("const awaiter = 1;"));
+    assert!(!has_module_syntax("function _await() {}"));
+}
+
 #[test]
 fn test_npm_specifier_detected() {
     assert!(has_module_syntax(
@@ -216,6 +254,39 @@ async fn run_and_wait(engine: &Engine, code: &str) -> Result<String, String> {
         }
     }
     Err("Execution did not complete within timeout".to_string())
+}
+
+// ── Top-level await execution ────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_top_level_await_resolves() {
+    ensure_v8();
+    let engine = create_test_engine();
+
+    let code = r#"
+const result = await Promise.resolve(42);
+console.log("got", result);
+"#;
+
+    let result = run_and_wait(&engine, code).await;
+    assert!(result.is_ok(), "Top-level await should succeed: {:?}", result);
+}
+
+#[tokio::test]
+async fn test_top_level_await_with_async_iife_also_works() {
+    ensure_v8();
+    let engine = create_test_engine();
+
+    // The old workaround should still work
+    let code = r#"
+const result = await (async () => {
+    return await Promise.resolve(99);
+})();
+console.log("got", result);
+"#;
+
+    let result = run_and_wait(&engine, code).await;
+    assert!(result.is_ok(), "Top-level await with IIFE should succeed: {:?}", result);
 }
 
 // ── Plain JS unaffected ─────────────────────────────────────────────────

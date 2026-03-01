@@ -112,3 +112,42 @@ async fn test_stateless_shell_computation_with_output() {
     let output = value["output"].as_str().expect("Should have output");
     assert!(output.contains("sum is 15"), "Output should contain 'sum is 15', got: {}", output);
 }
+
+#[tokio::test]
+async fn test_stateless_shell_top_level_await() {
+    ensure_v8();
+    let engine = create_test_engine();
+    let service = StatelessMcpService::new(engine);
+
+    let code = r#"
+        const result = await Promise.resolve(42);
+        console.log("result is", result);
+    "#;
+
+    let resp = service.run_js(code.to_string(), None, None).await;
+    let value = parse_response(resp);
+
+    assert!(value["error"].is_null(), "Top-level await should not error: {:?}", value);
+    let output = value["output"].as_str().expect("Should have output");
+    assert!(output.contains("result is 42"), "Output should contain 'result is 42', got: {}", output);
+}
+
+#[tokio::test]
+async fn test_stateless_shell_top_level_await_async_chain() {
+    ensure_v8();
+    let engine = create_test_engine();
+    let service = StatelessMcpService::new(engine);
+
+    let code = r#"
+        const a = await Promise.resolve(10);
+        const b = await Promise.resolve(20);
+        console.log(a + b);
+    "#;
+
+    let resp = service.run_js(code.to_string(), None, None).await;
+    let value = parse_response(resp);
+
+    assert!(value["error"].is_null(), "Chained top-level await should not error: {:?}", value);
+    let output = value["output"].as_str().expect("Should have output");
+    assert!(output.contains("30"), "Output should contain '30', got: {}", output);
+}
