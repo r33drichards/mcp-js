@@ -6,7 +6,7 @@
 ///   cargo test --test module_imports -- --ignored
 
 use std::sync::{Arc, Once};
-use server::engine::{initialize_v8, has_module_syntax, prepare_module_result, Engine};
+use server::engine::{initialize_v8, has_module_syntax, Engine};
 use server::engine::execution::ExecutionRegistry;
 
 // ── has_module_syntax unit tests ────────────────────────────────────────
@@ -53,57 +53,6 @@ fn test_jsr_specifier_detected() {
     assert!(has_module_syntax(
         r#"import { camelCase } from "jsr:@luca/cases@1.0.0";"#
     ));
-}
-
-// ── prepare_module_result unit tests ────────────────────────────────────
-
-#[test]
-fn test_prepare_wraps_last_expression() {
-    let code = "import { foo } from \"bar\";\nconst x = foo();\nx;";
-    let result = prepare_module_result(code);
-    assert!(
-        result.contains("globalThis.__result__"),
-        "Should wrap last expression: {}",
-        result
-    );
-    assert!(
-        result.contains("globalThis.__result__ = (x)"),
-        "Should capture expression 'x': {}",
-        result
-    );
-}
-
-#[test]
-fn test_prepare_does_not_wrap_declaration() {
-    let code = "import { foo } from \"bar\";\nconst x = foo();";
-    let result = prepare_module_result(code);
-    assert!(
-        !result.contains("globalThis.__result__"),
-        "Should not wrap const declaration: {}",
-        result
-    );
-}
-
-#[test]
-fn test_prepare_does_not_wrap_import() {
-    let code = r#"import { foo } from "bar";"#;
-    let result = prepare_module_result(code);
-    assert!(
-        !result.contains("globalThis.__result__"),
-        "Should not wrap import: {}",
-        result
-    );
-}
-
-#[test]
-fn test_prepare_strips_trailing_semicolon() {
-    let code = "import { x } from \"m\";\nx + 1;";
-    let result = prepare_module_result(code);
-    assert!(
-        result.contains("globalThis.__result__ = (x + 1)"),
-        "Should strip semicolon: {}",
-        result
-    );
 }
 
 // ── Module specifier resolution unit tests ──────────────────────────────
@@ -268,7 +217,7 @@ async fn test_npm_import_lodash_es() {
 
     let code = r#"
 import camelCase from "npm:lodash-es@4.17.21/camelCase";
-globalThis.__result__ = camelCase("hello_world");
+console.log(camelCase("hello_world"));
 "#;
 
     let result = run_and_wait(&engine, code).await;
@@ -277,7 +226,7 @@ globalThis.__result__ = camelCase("hello_world");
         "npm lodash-es import should succeed, got: {:?}",
         result
     );
-    assert_eq!(result.unwrap(), "helloWorld");
+    assert_eq!(result.unwrap(), "undefined");
 }
 
 // ── jsr imports (network required) ──────────────────────────────────────
@@ -290,7 +239,7 @@ async fn test_jsr_import_cases() {
 
     let code = r#"
 import { camelCase } from "jsr:@luca/cases@1.0.0";
-camelCase("hello_world");
+console.log(camelCase("hello_world"));
 "#;
 
     let result = run_and_wait(&engine, code).await;
@@ -299,7 +248,7 @@ camelCase("hello_world");
         "jsr @luca/cases import should succeed, got: {:?}",
         result
     );
-    assert_eq!(result.unwrap(), "helloWorld");
+    assert_eq!(result.unwrap(), "undefined");
 }
 
 // ── URL imports (network required) ──────────────────────────────────────
@@ -312,7 +261,7 @@ async fn test_url_import() {
 
     let code = r#"
 import { camelCase } from "https://esm.sh/jsr/@luca/cases@1.0.0";
-camelCase("foo_bar");
+console.log(camelCase("foo_bar"));
 "#;
 
     let result = run_and_wait(&engine, code).await;
@@ -321,7 +270,7 @@ camelCase("foo_bar");
         "URL import should succeed, got: {:?}",
         result
     );
-    assert_eq!(result.unwrap(), "fooBar");
+    assert_eq!(result.unwrap(), "undefined");
 }
 
 // ── Module with console output (network required) ───────────────────────
@@ -336,7 +285,6 @@ async fn test_module_console_log() {
 import camelCase from "npm:lodash-es@4.17.21/camelCase";
 const result = camelCase("foo_bar_baz");
 console.log("Result:", result);
-result;
 "#;
 
     let exec_id = engine
@@ -348,7 +296,7 @@ result;
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         if let Ok(info) = engine.get_execution(&exec_id) {
             if info.status == "completed" {
-                assert_eq!(info.result.as_deref(), Some("fooBarBaz"));
+                assert_eq!(info.result.as_deref(), Some("undefined"));
                 let output = engine
                     .get_execution_output(&exec_id, None, None, None, None)
                     .expect("should get output");
@@ -381,7 +329,6 @@ async fn test_npm_cowsay() {
 import { say } from "npm:cowsay@1.6.0";
 const result = say({ text: "Hello from mcp-js!" });
 console.log(result);
-typeof result;
 "#;
 
     let result = run_and_wait(&engine, code).await;
@@ -390,7 +337,7 @@ typeof result;
         "npm cowsay import should succeed, got: {:?}",
         result
     );
-    assert_eq!(result.unwrap(), "string");
+    assert_eq!(result.unwrap(), "undefined");
 }
 
 // ── Deno-style URL import of TypeScript (network required) ──────────────
