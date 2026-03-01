@@ -720,6 +720,7 @@ pub fn execute_stateless(
     wasm_default_max_bytes: usize,
     fetch_config: Option<&fetch::FetchConfig>,
     console_tree: Option<sled::Tree>,
+    module_loader_config: Option<&module_loader::ModuleLoaderConfig>,
 ) -> (Result<String, String>, bool) {
     let oom_flag = Arc::new(AtomicBool::new(false));
 
@@ -738,7 +739,10 @@ pub fn execute_stateless(
         // When the code contains ES module syntax (import/export) we need a
         // module loader that can resolve npm:/jsr:/URL specifiers.
         let module_loader: Option<Rc<dyn deno_core::ModuleLoader>> = if use_modules {
-            Some(Rc::new(module_loader::NetworkModuleLoader::new()))
+            match module_loader_config {
+                Some(config) => Some(Rc::new(module_loader::NetworkModuleLoader::with_config(config.clone()))),
+                None => Some(Rc::new(module_loader::NetworkModuleLoader::new())),
+            }
         } else {
             None
         };
@@ -825,6 +829,7 @@ pub fn execute_stateful(
     wasm_default_max_bytes: usize,
     fetch_config: Option<&fetch::FetchConfig>,
     console_tree: Option<sled::Tree>,
+    module_loader_config: Option<&module_loader::ModuleLoaderConfig>,
 ) -> (Result<(String, Vec<u8>, String), String>, bool) {
     let oom_flag = Arc::new(AtomicBool::new(false));
 
@@ -859,7 +864,10 @@ pub fn execute_stateful(
         }
 
         let module_loader: Option<Rc<dyn deno_core::ModuleLoader>> = if use_modules {
-            Some(Rc::new(module_loader::NetworkModuleLoader::new()))
+            match module_loader_config {
+                Some(config) => Some(Rc::new(module_loader::NetworkModuleLoader::with_config(config.clone()))),
+                None => Some(Rc::new(module_loader::NetworkModuleLoader::new())),
+            }
         } else {
             None
         };
@@ -989,6 +997,8 @@ pub struct Engine {
     fetch_config: Option<Arc<fetch::FetchConfig>>,
     /// Execution registry for async execution tracking and console output.
     execution_registry: Option<Arc<ExecutionRegistry>>,
+    /// Module loader configuration controlling external module access and OPA auditing.
+    module_loader_config: Arc<module_loader::ModuleLoaderConfig>,
 }
 
 impl Engine {
@@ -1009,6 +1019,11 @@ impl Engine {
             wasm_modules: Arc::new(Vec::new()),
             fetch_config: None,
             execution_registry: None,
+            module_loader_config: Arc::new(module_loader::ModuleLoaderConfig {
+                allow_external: false,
+                opa_client: None,
+                opa_module_policy: None,
+            }),
         }
     }
 
@@ -1032,6 +1047,11 @@ impl Engine {
             wasm_modules: Arc::new(Vec::new()),
             fetch_config: None,
             execution_registry: None,
+            module_loader_config: Arc::new(module_loader::ModuleLoaderConfig {
+                allow_external: false,
+                opa_client: None,
+                opa_module_policy: None,
+            }),
         }
     }
 
@@ -1056,6 +1076,12 @@ impl Engine {
     /// Set the execution registry for async execution tracking.
     pub fn with_execution_registry(mut self, registry: Arc<ExecutionRegistry>) -> Self {
         self.execution_registry = Some(registry);
+        self
+    }
+
+    /// Configure module loader settings (external module access and OPA auditing).
+    pub fn with_module_loader_config(mut self, config: module_loader::ModuleLoaderConfig) -> Self {
+        self.module_loader_config = Arc::new(config);
         self
     }
 
@@ -1150,8 +1176,9 @@ impl Engine {
                 let wasm_default = self.wasm_default_max_bytes;
                 let fc = self.fetch_config.clone();
                 let ct = console_tree;
+                let mlc = self.module_loader_config.clone();
                 let mut join_handle = tokio::task::spawn_blocking(move || {
-                    execute_stateless(&code, max_bytes, ih, &wasm, wasm_default, fc.as_deref(), Some(ct))
+                    execute_stateless(&code, max_bytes, ih, &wasm, wasm_default, fc.as_deref(), Some(ct), Some(&mlc))
                 });
 
                 // Publish isolate handle for cancellation once it's available.
@@ -1201,11 +1228,12 @@ impl Engine {
                 let wasm_default = self.wasm_default_max_bytes;
                 let fc = self.fetch_config.clone();
                 let ct = console_tree;
+                let mlc = self.module_loader_config.clone();
 
                 let snap_mutex = self.snapshot_mutex.clone();
                 let mut join_handle = tokio::task::spawn_blocking(move || {
                     let _guard = snap_mutex.blocking_lock();
-                    execute_stateful(&code, raw_snapshot, max_bytes, ih, &wasm, wasm_default, fc.as_deref(), Some(ct))
+                    execute_stateful(&code, raw_snapshot, max_bytes, ih, &wasm, wasm_default, fc.as_deref(), Some(ct), Some(&mlc))
                 });
 
                 // Publish isolate handle for cancellation.

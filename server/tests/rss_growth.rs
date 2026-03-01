@@ -80,7 +80,7 @@ fn test_rss_growth_stateless_no_wasm() {
         iterations,
         || {
             let handle = no_handle();
-            let _ = execute_stateless("1 + 1", heap_bytes, handle, &[], heap_bytes, None, None);
+            let _ = execute_stateless("1 + 1", heap_bytes, handle, &[], heap_bytes, None, None, None);
         },
     );
 
@@ -104,7 +104,7 @@ fn test_rss_growth_stateless_with_invalid_wasm() {
                 bytes: vec![0xde, 0xad, 0xbe, 0xef],
                 max_memory_bytes: None,
             }];
-            let _ = execute_stateless("1", heap_bytes, handle, &modules, heap_bytes, None, None);
+            let _ = execute_stateless("1", heap_bytes, handle, &modules, heap_bytes, None, None, None);
         },
     );
 
@@ -123,7 +123,7 @@ fn test_rss_growth_stateful_no_wasm() {
         iterations,
         || {
             let handle = no_handle();
-            let _ = execute_stateful("1 + 1", None, heap_bytes, handle, &[], heap_bytes, None, None);
+            let _ = execute_stateful("1 + 1", None, heap_bytes, handle, &[], heap_bytes, None, None, None);
         },
     );
 
@@ -142,7 +142,7 @@ fn test_rss_growth_stateless_syntax_error() {
         iterations,
         || {
             let handle = no_handle();
-            let _ = execute_stateless("= mon:= m {", heap_bytes, handle, &[], heap_bytes, None, None);
+            let _ = execute_stateless("= mon:= m {", heap_bytes, handle, &[], heap_bytes, None, None, None);
         },
     );
 

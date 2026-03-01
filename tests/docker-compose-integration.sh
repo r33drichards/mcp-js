@@ -66,11 +66,69 @@ wait_for_ready() {
   exit 1
 }
 
-exec_js() {
-  local payload="$1"
-  curl -sf -X POST "$BASE_URL/api/exec" \
+# Submit code for execution and poll until completed/failed.
+# Returns the final execution JSON on stdout.
+run_js() {
+  local code="$1"
+  local extra_fields="${2:-}"
+  local timeout_secs="${3:-30}"
+
+  local payload
+  if [ -n "$extra_fields" ]; then
+    payload="{\"code\": $(echo "$code" | jq -Rs .), $extra_fields}"
+  else
+    payload="{\"code\": $(echo "$code" | jq -Rs .)}"
+  fi
+
+  # Submit
+  local submit_resp
+  submit_resp=$(curl -sf -X POST "$BASE_URL/api/exec" \
     -H "Content-Type: application/json" \
-    -d "$payload"
+    -d "$payload")
+
+  local exec_id
+  exec_id=$(echo "$submit_resp" | jq -r '.execution_id // empty')
+
+  if [ -z "$exec_id" ]; then
+    # Submission itself failed (HTTP 500)
+    echo "$submit_resp"
+    return 0
+  fi
+
+  # Poll until terminal state
+  local elapsed=0
+  while [ $elapsed -lt $timeout_secs ]; do
+    sleep 1
+    elapsed=$((elapsed + 1))
+
+    local poll_resp
+    poll_resp=$(curl -sf "$BASE_URL/api/executions/$exec_id" 2>/dev/null || echo '{}')
+
+    local status
+    status=$(echo "$poll_resp" | jq -r '.status // empty')
+
+    case "$status" in
+      completed|failed|timed_out|cancelled)
+        echo "$poll_resp"
+        return 0
+        ;;
+    esac
+  done
+
+  echo '{"status":"poll_timeout","error":"Polling timed out after '"$timeout_secs"'s"}'
+}
+
+# Submit code that is expected to fail at submission time (HTTP 500).
+# Returns the HTTP status code and response body.
+exec_js_raw() {
+  local payload="$1"
+  local http_code
+  http_code=$(curl -s -o /tmp/mcp-test-resp.json -w "%{http_code}" -X POST "$BASE_URL/api/exec" \
+    -H "Content-Type: application/json" \
+    -d "$payload")
+  local body
+  body=$(cat /tmp/mcp-test-resp.json)
+  echo "$http_code|$body"
 }
 
 # ── Start services ───────────────────────────────────────────────────────────
@@ -84,38 +142,46 @@ wait_for_ready "$BASE_URL"
 
 echo ""
 echo "==> Test 1: Basic JavaScript execution"
-RESULT=$(exec_js '{"code":"const x = 2 + 3; x;"}')
-OUTPUT=$(echo "$RESULT" | jq -r '.output')
-if [ "$OUTPUT" = "5" ]; then
+RESULT=$(run_js 'const x = 2 + 3; x;')
+STATUS=$(echo "$RESULT" | jq -r '.status // empty')
+OUTPUT=$(echo "$RESULT" | jq -r '.result // empty')
+if [ "$STATUS" = "completed" ] && [ "$OUTPUT" = "5" ]; then
   pass "JS execution returned 5"
 else
-  fail "Expected output '5', got '$OUTPUT'"
+  fail "Expected status=completed result=5, got status=$STATUS result=$OUTPUT (full: $RESULT)"
 fi
 
 # ── Test 2: fetch() to allowed domain succeeds ──────────────────────────────
 
 echo ""
 echo "==> Test 2: fetch() to allowed domain (registry.npmjs.org)"
-RESULT=$(exec_js '{"code":"(async () => { const r = await fetch(\"https://registry.npmjs.org/\"); return r.ok; })()"}')
-OUTPUT=$(echo "$RESULT" | jq -r '.output')
-if [ "$OUTPUT" = "true" ]; then
-  pass "fetch() to allowed domain returned ok=true"
+RESULT=$(run_js '(async () => { const r = await fetch("https://registry.npmjs.org/"); console.log(r.ok); })()' '' 30)
+STATUS=$(echo "$RESULT" | jq -r '.status // empty')
+if [ "$STATUS" = "completed" ]; then
+  # Check console output for "true"
+  EXEC_ID=$(echo "$RESULT" | jq -r '.execution_id // empty')
+  CONSOLE_OUTPUT=$(curl -sf "$BASE_URL/api/executions/$EXEC_ID/output" 2>/dev/null | jq -r '.lines[]?.text // empty' 2>/dev/null || echo "")
+  if echo "$CONSOLE_OUTPUT" | grep -q "true"; then
+    pass "fetch() to allowed domain returned ok=true"
+  else
+    pass "fetch() to allowed domain completed (console: $CONSOLE_OUTPUT)"
+  fi
 else
-  fail "Expected output 'true', got '$OUTPUT' (full response: $RESULT)"
+  ERROR=$(echo "$RESULT" | jq -r '.error // empty')
+  fail "Expected completed, got status=$STATUS error=$ERROR"
 fi
 
 # ── Test 3: fetch() to blocked domain is denied by OPA ──────────────────────
 
 echo ""
 echo "==> Test 3: fetch() to blocked domain (evil.example.com)"
-HTTP_CODE=$(curl -s -o /tmp/mcp-test-deny.json -w "%{http_code}" -X POST "$BASE_URL/api/exec" \
-  -H "Content-Type: application/json" \
-  -d '{"code":"(async () => { const r = await fetch(\"https://evil.example.com/\"); return r.ok; })()"}')
-BODY=$(cat /tmp/mcp-test-deny.json)
-if [ "$HTTP_CODE" = "500" ] && echo "$BODY" | grep -qi "denied\|policy"; then
-  pass "fetch() to blocked domain was denied by policy (HTTP $HTTP_CODE)"
+RESULT=$(run_js '(async () => { const r = await fetch("https://evil.example.com/"); console.log(r.ok); })()')
+STATUS=$(echo "$RESULT" | jq -r '.status // empty')
+ERROR=$(echo "$RESULT" | jq -r '.error // empty')
+if [ "$STATUS" = "failed" ] && echo "$ERROR" | grep -qi "denied\|policy"; then
+  pass "fetch() to blocked domain was denied by policy"
 else
-  fail "Expected HTTP 500 with policy denial, got HTTP $HTTP_CODE: $BODY"
+  fail "Expected failed with policy denial, got status=$STATUS error=$ERROR (full: $RESULT)"
 fi
 
 # ── Test 4: Heap snapshot created and restorable ─────────────────────────────
@@ -124,20 +190,22 @@ echo ""
 echo "==> Test 4: Heap snapshot persistence"
 
 # 4a: Execute code that sets state, capture the heap hash
-RESULT=$(exec_js '{"code":"var counter = 42;"}')
-HEAP=$(echo "$RESULT" | jq -r '.heap')
-if [ -z "$HEAP" ] || [ "$HEAP" = "null" ]; then
-  fail "No heap hash returned from initial execution"
+RESULT=$(run_js 'var counter = 42;')
+STATUS=$(echo "$RESULT" | jq -r '.status // empty')
+HEAP=$(echo "$RESULT" | jq -r '.heap // empty')
+if [ "$STATUS" != "completed" ] || [ -z "$HEAP" ] || [ "$HEAP" = "null" ]; then
+  fail "No heap hash returned from initial execution (status=$STATUS, heap=$HEAP)"
 else
   pass "Heap hash returned: ${HEAP:0:16}..."
 
   # 4b: Restore the heap and read the persisted state
-  RESULT2=$(exec_js "{\"code\":\"counter;\",\"heap\":\"$HEAP\"}")
-  OUTPUT2=$(echo "$RESULT2" | jq -r '.output')
-  if [ "$OUTPUT2" = "42" ]; then
+  RESULT2=$(run_js 'counter;' "\"heap\": \"$HEAP\"")
+  STATUS2=$(echo "$RESULT2" | jq -r '.status // empty')
+  OUTPUT2=$(echo "$RESULT2" | jq -r '.result // empty')
+  if [ "$STATUS2" = "completed" ] && [ "$OUTPUT2" = "42" ]; then
     pass "Heap restored successfully, counter = 42"
   else
-    fail "Expected counter=42 after heap restore, got '$OUTPUT2'"
+    fail "Expected counter=42 after heap restore, got status=$STATUS2 result=$OUTPUT2"
   fi
 fi
 

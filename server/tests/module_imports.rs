@@ -8,6 +8,8 @@
 use std::sync::{Arc, Once};
 use server::engine::{initialize_v8, has_module_syntax, Engine};
 use server::engine::execution::ExecutionRegistry;
+use server::engine::module_loader::ModuleLoaderConfig;
+use server::engine::opa::OpaClient;
 
 // ── has_module_syntax unit tests ────────────────────────────────────────
 
@@ -154,6 +156,42 @@ fn create_test_engine() -> Engine {
         .with_execution_registry(Arc::new(registry))
 }
 
+/// Create an engine with external modules explicitly allowed (for network-dependent tests).
+fn create_test_engine_with_external_modules() -> Engine {
+    let tmp = std::env::temp_dir().join(format!(
+        "mcp-module-test-ext-{}-{}",
+        std::process::id(),
+        rand_id()
+    ));
+    let registry =
+        ExecutionRegistry::new(tmp.to_str().unwrap()).expect("Failed to create test registry");
+    Engine::new_stateless(16 * 1024 * 1024, 60, 4)
+        .with_module_loader_config(ModuleLoaderConfig {
+            allow_external: true,
+            opa_client: None,
+            opa_module_policy: None,
+        })
+        .with_execution_registry(Arc::new(registry))
+}
+
+/// Create an engine with external modules explicitly blocked.
+fn create_test_engine_modules_blocked() -> Engine {
+    let tmp = std::env::temp_dir().join(format!(
+        "mcp-module-test-blocked-{}-{}",
+        std::process::id(),
+        rand_id()
+    ));
+    let registry =
+        ExecutionRegistry::new(tmp.to_str().unwrap()).expect("Failed to create test registry");
+    Engine::new_stateless(16 * 1024 * 1024, 60, 4)
+        .with_module_loader_config(ModuleLoaderConfig {
+            allow_external: false,
+            opa_client: None,
+            opa_module_policy: None,
+        })
+        .with_execution_registry(Arc::new(registry))
+}
+
 fn rand_id() -> u64 {
     use std::time::SystemTime;
     SystemTime::now()
@@ -213,7 +251,7 @@ async fn test_plain_js_with_dynamic_import_keyword() {
 #[ignore]
 async fn test_npm_import_lodash_es() {
     ensure_v8();
-    let engine = create_test_engine();
+    let engine = create_test_engine_with_external_modules();
 
     let code = r#"
 import camelCase from "npm:lodash-es@4.17.21/camelCase";
@@ -235,7 +273,7 @@ console.log(camelCase("hello_world"));
 #[ignore]
 async fn test_jsr_import_cases() {
     ensure_v8();
-    let engine = create_test_engine();
+    let engine = create_test_engine_with_external_modules();
 
     let code = r#"
 import { camelCase } from "jsr:@luca/cases@1.0.0";
@@ -257,7 +295,7 @@ console.log(camelCase("hello_world"));
 #[ignore]
 async fn test_url_import() {
     ensure_v8();
-    let engine = create_test_engine();
+    let engine = create_test_engine_with_external_modules();
 
     let code = r#"
 import { camelCase } from "https://esm.sh/jsr/@luca/cases@1.0.0";
@@ -279,7 +317,7 @@ console.log(camelCase("foo_bar"));
 #[ignore]
 async fn test_module_console_log() {
     ensure_v8();
-    let engine = create_test_engine();
+    let engine = create_test_engine_with_external_modules();
 
     let code = r#"
 import camelCase from "npm:lodash-es@4.17.21/camelCase";
@@ -323,7 +361,7 @@ console.log("Result:", result);
 #[ignore]
 async fn test_npm_cowsay() {
     ensure_v8();
-    let engine = create_test_engine();
+    let engine = create_test_engine_with_external_modules();
 
     let code = r#"
 import { say } from "npm:cowsay@1.6.0";
@@ -371,7 +409,7 @@ console.log(result);
 #[ignore]
 async fn test_url_import_typescript() {
     ensure_v8();
-    let engine = create_test_engine();
+    let engine = create_test_engine_with_external_modules();
 
     let code = r#"
 import { pascalCase } from "https://deno.land/x/case/mod.ts";
@@ -405,4 +443,176 @@ console.log(pascalCase("hello_world"));
         }
     }
     panic!("Execution did not complete within timeout");
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// External module blocking tests (no network required)
+// ══════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_resolve_npm_blocked_when_external_disabled() {
+    use deno_core::ResolutionKind;
+    use server::engine::module_loader::NetworkModuleLoader;
+    use deno_core::ModuleLoader;
+
+    let loader = NetworkModuleLoader::with_config(ModuleLoaderConfig {
+        allow_external: false,
+        opa_client: None,
+        opa_module_policy: None,
+    });
+    let result = loader.resolve("npm:lodash-es@4.17.21", "file:///main.js", ResolutionKind::Import);
+    assert!(result.is_err(), "npm specifier should be rejected when external modules disabled");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("External module imports are disabled"),
+        "Error should mention disabled imports, got: {}",
+        err
+    );
+}
+
+#[test]
+fn test_resolve_jsr_blocked_when_external_disabled() {
+    use deno_core::ResolutionKind;
+    use server::engine::module_loader::NetworkModuleLoader;
+    use deno_core::ModuleLoader;
+
+    let loader = NetworkModuleLoader::with_config(ModuleLoaderConfig {
+        allow_external: false,
+        opa_client: None,
+        opa_module_policy: None,
+    });
+    let result = loader.resolve("jsr:@luca/cases@1.0.0", "file:///main.js", ResolutionKind::Import);
+    assert!(result.is_err(), "jsr specifier should be rejected when external modules disabled");
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("External module imports are disabled"), "got: {}", err);
+}
+
+#[test]
+fn test_resolve_url_blocked_when_external_disabled() {
+    use deno_core::ResolutionKind;
+    use server::engine::module_loader::NetworkModuleLoader;
+    use deno_core::ModuleLoader;
+
+    let loader = NetworkModuleLoader::with_config(ModuleLoaderConfig {
+        allow_external: false,
+        opa_client: None,
+        opa_module_policy: None,
+    });
+    let result = loader.resolve(
+        "https://esm.sh/jsr/@luca/cases@1.0.0",
+        "file:///main.js",
+        ResolutionKind::Import,
+    );
+    assert!(result.is_err(), "URL specifier should be rejected when external modules disabled");
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("External module imports are disabled"), "got: {}", err);
+}
+
+#[test]
+fn test_resolve_relative_allowed_when_external_disabled() {
+    use deno_core::ResolutionKind;
+    use server::engine::module_loader::NetworkModuleLoader;
+    use deno_core::ModuleLoader;
+
+    let loader = NetworkModuleLoader::with_config(ModuleLoaderConfig {
+        allow_external: false,
+        opa_client: None,
+        opa_module_policy: None,
+    });
+    let result = loader.resolve(
+        "./utils.js",
+        "https://esm.sh/cowsay@1.6.0/index.js",
+        ResolutionKind::Import,
+    );
+    assert!(result.is_ok(), "Relative specifier should resolve even when external disabled: {:?}", result);
+}
+
+#[test]
+fn test_resolve_npm_allowed_when_external_enabled() {
+    use deno_core::ResolutionKind;
+    use server::engine::module_loader::NetworkModuleLoader;
+    use deno_core::ModuleLoader;
+
+    let loader = NetworkModuleLoader::with_config(ModuleLoaderConfig {
+        allow_external: true,
+        opa_client: None,
+        opa_module_policy: None,
+    });
+    let result = loader.resolve("npm:lodash-es@4.17.21", "file:///main.js", ResolutionKind::Import);
+    assert!(result.is_ok(), "npm specifier should resolve when external enabled: {:?}", result);
+    assert_eq!(result.unwrap().as_str(), "https://esm.sh/lodash-es@4.17.21");
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// Engine-level blocking tests (no network required)
+// ══════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn test_engine_blocks_npm_import_by_default() {
+    ensure_v8();
+    let engine = create_test_engine_modules_blocked();
+
+    let code = r#"import { camelCase } from "npm:lodash-es@4.17.21";
+camelCase("hello_world");"#;
+
+    let result = run_and_wait(&engine, code).await;
+    assert!(result.is_err(), "npm import should fail when external modules blocked");
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("External module imports are disabled"),
+        "Error should mention disabled imports, got: {}",
+        err
+    );
+}
+
+#[tokio::test]
+async fn test_engine_blocks_jsr_import_by_default() {
+    ensure_v8();
+    let engine = create_test_engine_modules_blocked();
+
+    let code = r#"import { camelCase } from "jsr:@luca/cases@1.0.0";
+camelCase("hello_world");"#;
+
+    let result = run_and_wait(&engine, code).await;
+    assert!(result.is_err(), "jsr import should fail when external modules blocked");
+    let err = result.unwrap_err();
+    assert!(err.contains("External module imports are disabled"), "got: {}", err);
+}
+
+#[tokio::test]
+async fn test_engine_blocks_url_import_by_default() {
+    ensure_v8();
+    let engine = create_test_engine_modules_blocked();
+
+    let code = r#"import { camelCase } from "https://esm.sh/jsr/@luca/cases@1.0.0";
+camelCase("hello_world");"#;
+
+    let result = run_and_wait(&engine, code).await;
+    assert!(result.is_err(), "URL import should fail when external modules blocked");
+    let err = result.unwrap_err();
+    assert!(err.contains("External module imports are disabled"), "got: {}", err);
+}
+
+#[tokio::test]
+async fn test_engine_plain_js_works_when_modules_blocked() {
+    ensure_v8();
+    let engine = create_test_engine_modules_blocked();
+
+    let result = run_and_wait(&engine, "1 + 2;").await;
+    assert!(result.is_ok(), "Plain JS should work when external modules blocked: {:?}", result);
+    assert_eq!(result.unwrap(), "3");
+}
+
+#[tokio::test]
+async fn test_default_engine_blocks_external_modules() {
+    ensure_v8();
+    let engine = create_test_engine(); // uses default (blocked)
+
+    let code = r#"import { camelCase } from "npm:lodash-es@4.17.21";
+camelCase("hello_world");"#;
+
+    let result = run_and_wait(&engine, code).await;
+    assert!(result.is_err(), "Default engine should block external modules");
+    let err = result.unwrap_err();
+    assert!(err.contains("External module imports are disabled"), "got: {}", err);
 }

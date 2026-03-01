@@ -1,0 +1,23 @@
+name: Module Policy Integration Test
+
+on:
+  pull_request:
+    paths:
+      - Dockerfile
+      - docker-compose.module-policy.yml
+      - policies/**
+      - tests/module-policy-integration.sh
+      - server/src/**
+
+jobs:
+  integration-test:
+    name: Module Policy Integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run module policy integration tests
+        run: ./tests/module-policy-integration.sh
