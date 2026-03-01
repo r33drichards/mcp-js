@@ -1,5 +1,6 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
+use server::engine::ExecutionConfig;
 use std::sync::{Arc, Mutex, Once};
 
 static INIT: Once = Once::new();
@@ -39,5 +40,7 @@ fuzz_target!(|data: &[u8]| {
     let max_bytes = 64 * 1024 * 1024;
     let handle = Arc::new(Mutex::new(None));
     let wasm_default = 16 * 1024 * 1024;
-    let _ = server::engine::execute_stateful("1", raw_snapshot, max_bytes, handle, &[], wasm_default, None, None, None);
+    let _ = server::engine::execute_stateful("1", raw_snapshot, ExecutionConfig::new(max_bytes)
+        .isolate_handle(handle)
+        .wasm_default_max_bytes(wasm_default));
 });

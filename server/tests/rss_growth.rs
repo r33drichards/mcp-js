@@ -9,8 +9,8 @@
 ///   H2: V8 internal caches/pools — RSS grows with and without ASAN
 ///   H3: Code-level resource leak — RSS grows proportional to leak size
 
-use std::sync::{Arc, Mutex, Once};
-use server::engine::{WasmModule, initialize_v8, execute_stateless, execute_stateful};
+use std::sync::Once;
+use server::engine::{ExecutionConfig, WasmModule, initialize_v8, execute_stateless, execute_stateful};
 
 static INIT: Once = Once::new();
 
@@ -18,10 +18,6 @@ fn ensure_v8() {
     INIT.call_once(|| {
         initialize_v8();
     });
-}
-
-fn no_handle() -> Arc<Mutex<Option<deno_core::v8::IsolateHandle>>> {
-    Arc::new(Mutex::new(None))
 }
 
 /// Get current RSS in KB using ps (works on macOS and Linux).
@@ -79,8 +75,7 @@ fn test_rss_growth_stateless_no_wasm() {
         "stateless-no-wasm",
         iterations,
         || {
-            let handle = no_handle();
-            let _ = execute_stateless("1 + 1", heap_bytes, handle, &[], heap_bytes, None, None, None);
+            let _ = execute_stateless("1 + 1", ExecutionConfig::new(heap_bytes));
         },
     );
 
@@ -98,13 +93,12 @@ fn test_rss_growth_stateless_with_invalid_wasm() {
         "stateless-invalid-wasm",
         iterations,
         || {
-            let handle = no_handle();
             let modules = vec![WasmModule {
                 name: "m".to_string(),
                 bytes: vec![0xde, 0xad, 0xbe, 0xef],
                 max_memory_bytes: None,
             }];
-            let _ = execute_stateless("1", heap_bytes, handle, &modules, heap_bytes, None, None, None);
+            let _ = execute_stateless("1", ExecutionConfig::new(heap_bytes).wasm_modules(&modules));
         },
     );
 
@@ -122,8 +116,7 @@ fn test_rss_growth_stateful_no_wasm() {
         "stateful-no-wasm",
         iterations,
         || {
-            let handle = no_handle();
-            let _ = execute_stateful("1 + 1", None, heap_bytes, handle, &[], heap_bytes, None, None, None);
+            let _ = execute_stateful("1 + 1", None, ExecutionConfig::new(heap_bytes));
         },
     );
 
@@ -141,8 +134,7 @@ fn test_rss_growth_stateless_syntax_error() {
         "stateless-syntax-error",
         iterations,
         || {
-            let handle = no_handle();
-            let _ = execute_stateless("= mon:= m {", heap_bytes, handle, &[], heap_bytes, None, None, None);
+            let _ = execute_stateless("= mon:= m {", ExecutionConfig::new(heap_bytes));
         },
     );
 

@@ -1,7 +1,7 @@
 #![no_main]
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use server::engine::WasmModule;
+use server::engine::{ExecutionConfig, WasmModule};
 use std::sync::{Arc, Mutex, Once};
 
 static INIT: Once = Once::new();
@@ -72,5 +72,8 @@ fuzz_target!(|input: StatefulInput| {
     let max_bytes = 8 * 1024 * 1024;
     let wasm_default = 8 * 1024 * 1024;
     let handle = Arc::new(Mutex::new(None));
-    let _ = server::engine::execute_stateful(&input.code, raw_snapshot, max_bytes, handle, &modules, wasm_default, None, None, None);
+    let _ = server::engine::execute_stateful(&input.code, raw_snapshot, ExecutionConfig::new(max_bytes)
+        .isolate_handle(handle)
+        .wasm_modules(&modules)
+        .wasm_default_max_bytes(wasm_default));
 });
