@@ -688,66 +688,15 @@ pub fn has_module_syntax(code: &str) -> bool {
     false
 }
 
-/// Transform module code so that the last expression statement is captured
-/// in `globalThis.__result__`, allowing us to return it after evaluation.
-pub fn prepare_module_result(code: &str) -> String {
-    let lines: Vec<&str> = code.lines().collect();
-
-    // Find the last non-empty, non-comment line.
-    let last_idx = lines.iter().rposition(|l| {
-        let t = l.trim();
-        !t.is_empty() && !t.starts_with("//") && !t.starts_with("/*")
-    });
-
-    if let Some(idx) = last_idx {
-        let last = lines[idx].trim();
-
-        // Only wrap bare expression statements — skip declarations, imports,
-        // exports, control flow, and blocks.
-        let dominated = last.starts_with("import ")
-            || last.starts_with("export ")
-            || last.starts_with("const ")
-            || last.starts_with("let ")
-            || last.starts_with("var ")
-            || last.starts_with("function ")
-            || last.starts_with("class ")
-            || last.starts_with("if ")
-            || last.starts_with("if(")
-            || last.starts_with("for ")
-            || last.starts_with("for(")
-            || last.starts_with("while ")
-            || last.starts_with("while(")
-            || last.starts_with("switch ")
-            || last.starts_with("try ")
-            || last.starts_with("return ")
-            || last.starts_with("throw ")
-            || last.starts_with('{')
-            || last.starts_with('}');
-
-        if !dominated {
-            let expr = last.trim_end_matches(';');
-            let mut result = lines[..idx].join("\n");
-            result.push('\n');
-            result.push_str(&format!("globalThis.__result__ = ({});\n", expr));
-            return result;
-        }
-    }
-
-    code.to_string()
-}
-
 /// Execute code as an ES module, supporting `import` declarations for
-/// `npm:`, `jsr:`, and URL specifiers. Returns the stringified value of
-/// `globalThis.__result__` (set by `prepare_module_result`).
+/// `npm:`, `jsr:`, and URL specifiers.
 fn execute_module(runtime: &mut JsRuntime, code: &str) -> Result<String, String> {
-    let code = prepare_module_result(code);
-
     let handle = tokio::runtime::Handle::current();
     let main_url = ModuleSpecifier::parse("file:///main.js")
         .map_err(|e| format!("internal specifier error: {}", e))?;
 
     let mod_id = handle
-        .block_on(runtime.load_main_es_module_from_code(&main_url, code))
+        .block_on(runtime.load_main_es_module_from_code(&main_url, code.to_string()))
         .map_err(|e| format!("{}", e))?;
 
     let eval_future = runtime.mod_evaluate(mod_id);
@@ -758,21 +707,7 @@ fn execute_module(runtime: &mut JsRuntime, code: &str) -> Result<String, String>
 
     handle.block_on(eval_future).map_err(|e| format!("{}", e))?;
 
-    // Read the captured result.
-    let result = runtime
-        .execute_script(
-            "<get_result>",
-            "typeof globalThis.__result__ !== 'undefined' ? String(globalThis.__result__) : 'undefined'"
-                .to_string(),
-        )
-        .map_err(|e| format!("{}", e))?;
-
-    deno_core::scope!(scope, runtime);
-    let local = v8::Local::new(scope, result);
-    local
-        .to_string(scope)
-        .map(|s| s.to_rust_string_lossy(scope))
-        .ok_or_else(|| "Failed to convert module result to string".to_string())
+    Ok("undefined".to_string())
 }
 
 /// Stateless execution — creates a fresh JsRuntime (no snapshot).
