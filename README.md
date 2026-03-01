@@ -748,17 +748,10 @@ You can configure heap storage using the following command line arguments:
 
 ## Limitations
 
-While `mcp-v8` provides a powerful and persistent JavaScript execution environment, there are limitations to its runtime.
-
-- **Async execution model**: `run_js` returns immediately with an execution ID. Use `get_execution` to poll for completion and `get_execution_output` to read console output. Each execution runs in a fresh V8 isolate — no state is shared between calls (unless using stateful mode with heap snapshots).
-- **`async`/`await` and Promises**: Fully supported. If your code returns a Promise, the runtime resolves it automatically.
-- **`console.log` supported**: `console.log`, `console.info`, `console.warn`, and `console.error` are captured and available via `get_execution_output` with paginated access.
 - **No `fetch` or network access by default**: When the server is started with `--opa-url`, a `fetch(url, opts?)` function becomes available following the web standard Fetch API. Each request is checked against an OPA policy before execution. Without `--opa-url`, there is no network access. See [OPA-Gated Fetch](#opa-gated-fetch) for details.
 - **No file system access**: The runtime does not provide access to the local file system or environment variables.
-- **ES module imports**: You can import npm packages, JSR packages, and URL modules using Deno-style import syntax. Packages are fetched from [esm.sh](https://esm.sh) at runtime — no `npm install` needed. See [Importing Packages](#importing-packages) for details and examples.
 - **No timers**: Functions like `setTimeout` and `setInterval` are not available.
 - **No DOM or browser APIs**: This is not a browser environment; there is no access to `window`, `document`, or other browser-specific objects.
-- **WebAssembly**: Both synchronous (`WebAssembly.Module`, `WebAssembly.Instance`, `WebAssembly.validate`) and async (`WebAssembly.compile`, `WebAssembly.instantiate`) APIs are supported.
 - **TypeScript: type removal only**: TypeScript type annotations are stripped before execution. No type checking is performed — invalid types are silently removed, not reported as errors.
 
 ---
