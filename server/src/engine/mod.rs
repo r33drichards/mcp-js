@@ -664,8 +664,8 @@ fn execute_and_stringify(runtime: &mut JsRuntime, code: &str) -> Result<String, 
 }
 
 /// Check whether the (already TypeScript-stripped) code uses ES module syntax
-/// (`import` / `export` declarations). When it does, the code must be
-/// evaluated as an ES module rather than a classic script.
+/// (`import` / `export` declarations) or top-level `await`. When it does, the
+/// code must be evaluated as an ES module rather than a classic script.
 pub fn has_module_syntax(code: &str) -> bool {
     for line in code.lines() {
         let t = line.trim();
@@ -685,7 +685,88 @@ pub fn has_module_syntax(code: &str) -> bool {
             return true;
         }
     }
+    has_top_level_await(code)
+}
+
+/// Check whether the code contains a top-level `await` expression.
+///
+/// Tracks brace depth to distinguish `await` at the module scope from `await`
+/// inside `async function` / `async () =>` bodies. Also skips string literals
+/// and comments so that `await` inside those is not misdetected.
+fn has_top_level_await(code: &str) -> bool {
+    let bytes = code.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    let mut brace_depth: i32 = 0;
+
+    while i < len {
+        let ch = bytes[i];
+
+        // Skip single-line comments
+        if ch == b'/' && i + 1 < len && bytes[i + 1] == b'/' {
+            while i < len && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+
+        // Skip multi-line comments
+        if ch == b'/' && i + 1 < len && bytes[i + 1] == b'*' {
+            i += 2;
+            while i + 1 < len && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                i += 1;
+            }
+            i += 2; // skip */
+            continue;
+        }
+
+        // Skip string literals (single, double, backtick)
+        if ch == b'\'' || ch == b'"' || ch == b'`' {
+            let quote = ch;
+            i += 1;
+            while i < len {
+                if bytes[i] == b'\\' {
+                    i += 2; // skip escaped char
+                    continue;
+                }
+                if bytes[i] == quote {
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+
+        if ch == b'{' {
+            brace_depth += 1;
+            i += 1;
+            continue;
+        }
+        if ch == b'}' {
+            brace_depth -= 1;
+            i += 1;
+            continue;
+        }
+
+        // Look for `await` keyword at top-level (brace_depth == 0)
+        if brace_depth == 0 && ch == b'a' && i + 4 < len && &bytes[i..i + 5] == b"await" {
+            // Make sure it's a whole word: not preceded/followed by [a-zA-Z0-9_$]
+            let preceded_ok = i == 0 || !is_ident_char(bytes[i - 1]);
+            let followed_ok = i + 5 >= len || !is_ident_char(bytes[i + 5]);
+            if preceded_ok && followed_ok {
+                return true;
+            }
+        }
+
+        i += 1;
+    }
+
     false
+}
+
+fn is_ident_char(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'$'
 }
 
 /// Execute code as an ES module, supporting `import` declarations for
