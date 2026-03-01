@@ -29,7 +29,7 @@ in
   name = "mcp-js-fs-opa";
 
   nodes = {
-    machine = { ... }: {
+    machine = { lib, ... }: {
       imports = [ ../../nix/module.nix ];
 
       # ── mcp-js server (stateless, with filesystem policy) ────────────
@@ -47,6 +47,10 @@ in
           };
         };
       };
+
+      # DynamicUser implies PrivateTmp; disable it so the service sees
+      # the /tmp/allowed directory the test script creates.
+      systemd.services.mcp-js.serviceConfig.PrivateTmp = lib.mkForce false;
 
       networking.firewall.allowedTCPPorts = [ 3000 ];
     };
