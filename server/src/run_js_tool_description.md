@@ -61,12 +61,20 @@ After execution completes, `get_execution` will return `result: '{"a":1,"b":2}'`
 
 async/await is supported. The runtime resolves top-level Promises automatically.
 
+## Importing Packages
+
+You can import npm packages, JSR packages, and URL modules using ES module `import` syntax. Packages are fetched from esm.sh at runtime — no installation needed.
+
+- **npm**: `import { camelCase } from "npm:lodash-es@4.17.21";`
+- **jsr**: `import { camelCase } from "jsr:@luca/cases@1.0.0";`
+- **URL**: `import { pascalCase } from "https://deno.land/x/case/mod.ts";`
+
+Always pin versions for reproducible results. Dynamic `import()` is also supported with top-level `await`.
+
 ## Limitations
 
-- **`async`/`await` and Promises**: Fully supported. If your code returns a Promise, the runtime resolves it automatically.
 - **No `fetch` or network access by default**: When the server is started with `--opa-url`, a `fetch(url, opts?)` function becomes available. `fetch()` follows the web standard Fetch API — it returns a Promise that resolves to a Response object. Use `await` to get the response: `const resp = await fetch(url)`. The response object has `.ok`, `.status`, `.statusText`, `.url`, `.headers.get(name)`, `.text()`, and `.json()` methods (`.text()` and `.json()` also return Promises). Each request is checked against an OPA policy before execution. Without `--opa-url`, there is no network access.
 - **No file system access**: The runtime does not provide access to the local file system or environment variables.
-- **No `npm install` or external packages**: You cannot install or import npm packages. Only standard JavaScript (ECMAScript) built-ins are available.
 - **No timers**: Functions like `setTimeout` and `setInterval` are not available.
 - **No DOM or browser APIs**: This is not a browser environment; there is no access to `window`, `document`, or other browser-specific objects.
 

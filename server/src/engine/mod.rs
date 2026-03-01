@@ -3,10 +3,12 @@ pub mod execution;
 pub mod fetch;
 pub mod heap_storage;
 pub mod heap_tags;
+pub mod module_loader;
 pub mod opa;
 pub mod session_log;
 
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -15,7 +17,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ffi::c_void;
 use std::alloc::{Layout, alloc_zeroed, alloc, dealloc};
 use deno_core::v8;
-use deno_core::{JsRuntime, JsRuntimeForSnapshot, RuntimeOptions};
+use deno_core::{JsRuntime, JsRuntimeForSnapshot, ModuleSpecifier, RuntimeOptions};
 use sha2::{Sha256, Digest};
 
 use swc_core::common::{
@@ -661,6 +663,53 @@ fn execute_and_stringify(runtime: &mut JsRuntime, code: &str) -> Result<String, 
     }
 }
 
+/// Check whether the (already TypeScript-stripped) code uses ES module syntax
+/// (`import` / `export` declarations). When it does, the code must be
+/// evaluated as an ES module rather than a classic script.
+pub fn has_module_syntax(code: &str) -> bool {
+    for line in code.lines() {
+        let t = line.trim();
+        // Static import declaration: import ... from "..."
+        // Side-effect import: import "..."
+        // Named/default import: import { ... } from "..."
+        if t.starts_with("import ") || t.starts_with("import{") || t.starts_with("import\"") || t.starts_with("import'") {
+            // Exclude dynamic import() which is an expression, not a declaration.
+            // After SWC emitting, a static import always looks like
+            //   import ... from "...";
+            // while dynamic import is a call expression: import("...")
+            if !t.starts_with("import(") {
+                return true;
+            }
+        }
+        if t.starts_with("export ") || t.starts_with("export{") || t.starts_with("export*") || t.starts_with("export default") {
+            return true;
+        }
+    }
+    false
+}
+
+/// Execute code as an ES module, supporting `import` declarations for
+/// `npm:`, `jsr:`, and URL specifiers.
+fn execute_module(runtime: &mut JsRuntime, code: &str) -> Result<String, String> {
+    let handle = tokio::runtime::Handle::current();
+    let main_url = ModuleSpecifier::parse("file:///main.js")
+        .map_err(|e| format!("internal specifier error: {}", e))?;
+
+    let mod_id = handle
+        .block_on(runtime.load_main_es_module_from_code(&main_url, code.to_string()))
+        .map_err(|e| format!("{}", e))?;
+
+    let eval_future = runtime.mod_evaluate(mod_id);
+
+    handle
+        .block_on(runtime.run_event_loop(Default::default()))
+        .map_err(|e| format!("{}", e))?;
+
+    handle.block_on(eval_future).map_err(|e| format!("{}", e))?;
+
+    Ok("undefined".to_string())
+}
+
 /// Stateless execution — creates a fresh JsRuntime (no snapshot).
 /// Publishes an IsolateHandle for external cancellation.
 /// Returns (result, oom_flag).
@@ -675,6 +724,8 @@ pub fn execute_stateless(
 ) -> (Result<String, String>, bool) {
     let oom_flag = Arc::new(AtomicBool::new(false));
 
+    let use_modules = has_module_syntax(code);
+
     let result = catch_unwind(AssertUnwindSafe(|| {
         let params = create_params_with_heap_limit(heap_memory_max_bytes);
         let mut extensions = Vec::new();
@@ -684,9 +735,19 @@ pub fn execute_stateless(
         if fetch_config.is_some() {
             extensions.push(fetch::create_extension());
         }
+
+        // When the code contains ES module syntax (import/export) we need a
+        // module loader that can resolve npm:/jsr:/URL specifiers.
+        let module_loader: Option<Rc<dyn deno_core::ModuleLoader>> = if use_modules {
+            Some(Rc::new(module_loader::NetworkModuleLoader::new()))
+        } else {
+            None
+        };
+
         let mut runtime = JsRuntime::new(RuntimeOptions {
             create_params: Some(params),
             extensions,
+            module_loader,
             ..Default::default()
         });
 
@@ -724,7 +785,11 @@ pub fn execute_stateless(
                         return Err(e);
                     }
                 }
-                execute_and_stringify(&mut runtime, code)
+                if use_modules {
+                    execute_module(&mut runtime, code)
+                } else {
+                    execute_and_stringify(&mut runtime, code)
+                }
             }
         };
 
@@ -764,6 +829,8 @@ pub fn execute_stateful(
 ) -> (Result<(String, Vec<u8>, String), String>, bool) {
     let oom_flag = Arc::new(AtomicBool::new(false));
 
+    let use_modules = has_module_syntax(code);
+
     let result = catch_unwind(AssertUnwindSafe(|| {
         let params = create_params_with_heap_limit(heap_memory_max_bytes);
 
@@ -791,10 +858,18 @@ pub fn execute_stateful(
         if fetch_config.is_some() {
             extensions.push(fetch::create_extension());
         }
+
+        let module_loader: Option<Rc<dyn deno_core::ModuleLoader>> = if use_modules {
+            Some(Rc::new(module_loader::NetworkModuleLoader::new()))
+        } else {
+            None
+        };
+
         let mut runtime = JsRuntimeForSnapshot::new(RuntimeOptions {
             create_params: Some(params),
             startup_snapshot,
             extensions,
+            module_loader,
             ..Default::default()
         });
 
@@ -833,7 +908,11 @@ pub fn execute_stateful(
                         return Err(e);
                     }
                 }
-                execute_and_stringify(&mut runtime, code)
+                if use_modules {
+                    execute_module(&mut runtime, code)
+                } else {
+                    execute_and_stringify(&mut runtime, code)
+                }
             }
         };
 
