@@ -99,6 +99,7 @@
 
           nativeBuildInputs = with pkgs; [
             clang
+            git
             llvmPackages.bintools
             pkg-config
           ];
