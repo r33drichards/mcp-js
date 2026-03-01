@@ -18,12 +18,13 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use deno_core::{JsRuntime, OpState, op2};
 use deno_error::JsErrorBox;
 use serde::{Deserialize, Serialize};
 
-use super::opa::OpaClient;
+use super::opa::{OpaClient, PolicyChain};
 
 // ── Configuration ────────────────────────────────────────────────────────
 
@@ -31,21 +32,39 @@ use super::opa::OpaClient;
 /// Stored in deno_core's `OpState` for access from async ops.
 #[derive(Clone, Debug)]
 pub struct FetchConfig {
-    pub opa_client: OpaClient,
-    pub opa_policy_path: String,
+    pub opa_client: Option<OpaClient>,
+    pub opa_policy_path: Option<String>,
+    pub policy_chain: Option<Arc<PolicyChain>>,
     pub http_client: reqwest::Client,
     pub header_rules: Vec<HeaderRule>,
 }
 
 impl FetchConfig {
+    /// Create from a legacy `--opa-url` + `--opa-fetch-policy` pair.
     pub fn new(opa_url: String, opa_policy_path: String) -> Self {
         let http_client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .expect("Failed to create fetch HTTP client");
         Self {
-            opa_client: OpaClient::new(opa_url),
-            opa_policy_path,
+            opa_client: Some(OpaClient::new(opa_url)),
+            opa_policy_path: Some(opa_policy_path),
+            policy_chain: None,
+            http_client,
+            header_rules: Vec::new(),
+        }
+    }
+
+    /// Create from a [`PolicyChain`] (used with `--policies-json`).
+    pub fn new_with_chain(chain: Arc<PolicyChain>) -> Self {
+        let http_client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .expect("Failed to create fetch HTTP client");
+        Self {
+            opa_client: None,
+            opa_policy_path: None,
+            policy_chain: Some(chain),
             http_client,
             header_rules: Vec::new(),
         }
@@ -53,6 +72,11 @@ impl FetchConfig {
 
     pub fn with_header_rules(mut self, rules: Vec<HeaderRule>) -> Self {
         self.header_rules = rules;
+        self
+    }
+
+    pub fn with_policy_chain(mut self, chain: Arc<PolicyChain>) -> Self {
+        self.policy_chain = Some(chain);
         self
     }
 }
@@ -142,13 +166,14 @@ async fn op_fetch(
     #[string] body: String,
 ) -> Result<String, JsErrorBox> {
     // Clone config from OpState before any .await (Rc is !Send).
-    let (opa_client, opa_policy_path, http_client, header_rules) = {
+    let (opa_client, opa_policy_path, policy_chain, http_client, header_rules) = {
         let state = state.borrow();
         let config = state.try_borrow::<FetchConfig>()
             .ok_or_else(|| JsErrorBox::generic("fetch: internal error — no fetch config available"))?;
         (
             config.opa_client.clone(),
             config.opa_policy_path.clone(),
+            config.policy_chain.clone(),
             config.http_client.clone(),
             config.header_rules.clone(),
         )
@@ -157,7 +182,7 @@ async fn op_fetch(
     // Convert empty string (from JS null body) to None.
     let body = if body.is_empty() { None } else { Some(body) };
 
-    do_fetch(url, method, headers_json, body, opa_client, opa_policy_path, http_client, header_rules)
+    do_fetch(url, method, headers_json, body, opa_client, opa_policy_path, policy_chain, http_client, header_rules)
         .await
         .map_err(|e| JsErrorBox::generic(e))
 }
@@ -279,14 +304,15 @@ const FETCH_JS_WRAPPER: &str = r#"
 
 // ── Pure-Rust fetch implementation (no V8 types) ─────────────────────────
 
-/// Execute an OPA-gated HTTP fetch. All V8 interaction happens in the caller.
+/// Execute a policy-gated HTTP fetch. All V8 interaction happens in the caller.
 async fn do_fetch(
     url_str: String,
     method: String,
     headers_json: String,
     body: Option<String>,
-    opa_client: OpaClient,
-    opa_policy_path: String,
+    opa_client: Option<OpaClient>,
+    opa_policy_path: Option<String>,
+    policy_chain: Option<Arc<PolicyChain>>,
     http_client: reqwest::Client,
     header_rules: Vec<HeaderRule>,
 ) -> Result<String, String> {
@@ -318,16 +344,33 @@ async fn do_fetch(
         url_parsed,
     };
 
-    // Evaluate OPA policy
-    let allowed = opa_client
-        .evaluate(&opa_policy_path, &policy_input)
-        .await?;
+    // Evaluate legacy remote OPA policy if configured.
+    if let (Some(client), Some(path)) = (&opa_client, &opa_policy_path) {
+        let allowed = client.evaluate(path, &policy_input).await?;
+        if !allowed {
+            return Err(format!(
+                "fetch denied by policy: {} {} is not allowed",
+                method, url_str
+            ));
+        }
+    }
 
-    if !allowed {
-        return Err(format!(
-            "fetch denied by policy: {} {} is not allowed",
-            method, url_str
-        ));
+    // Evaluate policy chain if configured.
+    if let Some(ref chain) = policy_chain {
+        let input_value = serde_json::to_value(&policy_input)
+            .map_err(|e| format!("fetch: failed to serialize policy input: {}", e))?;
+        let allowed = chain.evaluate(&input_value).await?;
+        if !allowed {
+            return Err(format!(
+                "fetch denied by policy: {} {} is not allowed",
+                method, url_str
+            ));
+        }
+    }
+
+    // If neither is configured, deny by default.
+    if opa_client.is_none() && policy_chain.is_none() {
+        return Err("fetch denied: no policy evaluator configured".to_string());
     }
 
     // Execute the HTTP request

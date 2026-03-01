@@ -170,6 +170,7 @@ fn create_test_engine_with_external_modules() -> Engine {
             allow_external: true,
             opa_client: None,
             opa_module_policy: None,
+            policy_chain: None,
         })
         .with_execution_registry(Arc::new(registry))
 }
@@ -188,6 +189,7 @@ fn create_test_engine_modules_blocked() -> Engine {
             allow_external: false,
             opa_client: None,
             opa_module_policy: None,
+            policy_chain: None,
         })
         .with_execution_registry(Arc::new(registry))
 }
@@ -459,6 +461,7 @@ fn test_resolve_npm_blocked_when_external_disabled() {
         allow_external: false,
         opa_client: None,
         opa_module_policy: None,
+        policy_chain: None,
     });
     let result = loader.resolve("npm:lodash-es@4.17.21", "file:///main.js", ResolutionKind::Import);
     assert!(result.is_err(), "npm specifier should be rejected when external modules disabled");
@@ -480,6 +483,7 @@ fn test_resolve_jsr_blocked_when_external_disabled() {
         allow_external: false,
         opa_client: None,
         opa_module_policy: None,
+        policy_chain: None,
     });
     let result = loader.resolve("jsr:@luca/cases@1.0.0", "file:///main.js", ResolutionKind::Import);
     assert!(result.is_err(), "jsr specifier should be rejected when external modules disabled");
@@ -497,6 +501,7 @@ fn test_resolve_url_blocked_when_external_disabled() {
         allow_external: false,
         opa_client: None,
         opa_module_policy: None,
+        policy_chain: None,
     });
     let result = loader.resolve(
         "https://esm.sh/jsr/@luca/cases@1.0.0",
@@ -518,6 +523,7 @@ fn test_resolve_relative_allowed_when_external_disabled() {
         allow_external: false,
         opa_client: None,
         opa_module_policy: None,
+        policy_chain: None,
     });
     let result = loader.resolve(
         "./utils.js",
@@ -537,6 +543,7 @@ fn test_resolve_npm_allowed_when_external_enabled() {
         allow_external: true,
         opa_client: None,
         opa_module_policy: None,
+        policy_chain: None,
     });
     let result = loader.resolve("npm:lodash-es@4.17.21", "file:///main.js", ResolutionKind::Import);
     assert!(result.is_ok(), "npm specifier should resolve when external enabled: {:?}", result);

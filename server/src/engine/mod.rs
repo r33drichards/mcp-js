@@ -1023,6 +1023,7 @@ impl Engine {
                 allow_external: false,
                 opa_client: None,
                 opa_module_policy: None,
+                policy_chain: None,
             }),
         }
     }
@@ -1051,6 +1052,7 @@ impl Engine {
                 allow_external: false,
                 opa_client: None,
                 opa_module_policy: None,
+                policy_chain: None,
             }),
         }
     }

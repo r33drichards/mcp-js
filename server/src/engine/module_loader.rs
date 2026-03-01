@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use deno_core::ModuleLoadOptions;
 use deno_core::ModuleLoadReferrer;
 use deno_core::ModuleLoadResponse;
@@ -13,7 +15,7 @@ use deno_error::JsErrorBox;
 use futures::FutureExt;
 use serde::Serialize;
 
-use super::opa::OpaClient;
+use super::opa::{OpaClient, PolicyChain};
 
 /// Configuration for the module loader controlling external module access.
 #[derive(Clone, Debug)]
@@ -24,6 +26,8 @@ pub struct ModuleLoaderConfig {
     pub opa_client: Option<OpaClient>,
     /// OPA policy path for module auditing (e.g. "mcp/modules").
     pub opa_module_policy: Option<String>,
+    /// Optional policy chain for module auditing (from `--policies-json`).
+    pub policy_chain: Option<Arc<PolicyChain>>,
 }
 
 /// Input sent to OPA for module import auditing.
@@ -66,6 +70,7 @@ impl NetworkModuleLoader {
                 allow_external: true,
                 opa_client: None,
                 opa_module_policy: None,
+                policy_chain: None,
             },
         }
     }
@@ -150,6 +155,7 @@ impl ModuleLoader for NetworkModuleLoader {
         let specifier = module_specifier.clone();
         let opa_client = self.config.opa_client.clone();
         let opa_policy = self.config.opa_module_policy.clone();
+        let policy_chain = self.config.policy_chain.clone();
         let specifier_url_str = specifier.to_string();
 
         let fut = async move {
@@ -187,6 +193,55 @@ impl ModuleLoader for NetworkModuleLoader {
                     .await
                     .map_err(|e| JsErrorBox::generic(format!(
                         "OPA module policy check failed for '{}': {}",
+                        specifier, e
+                    )))?;
+
+                if !allowed {
+                    return Err(JsErrorBox::generic(format!(
+                        "Module import denied by policy: '{}' is not allowed by the module policy",
+                        specifier
+                    )));
+                }
+            }
+
+            // Evaluate policy chain if configured.
+            if let Some(ref chain) = policy_chain {
+                let parsed = url::Url::parse(specifier_url_str.as_str()).ok();
+                let url_parsed = parsed.as_ref().map(|p| ModuleUrlParsed {
+                    scheme: p.scheme().to_string(),
+                    host: p.host_str().unwrap_or("").to_string(),
+                    path: p.path().to_string(),
+                }).unwrap_or(ModuleUrlParsed {
+                    scheme: String::new(),
+                    host: String::new(),
+                    path: String::new(),
+                });
+
+                let spec_type = if specifier_url_str.contains("esm.sh/jsr/") {
+                    "jsr"
+                } else if specifier_url_str.contains("esm.sh/") {
+                    "npm"
+                } else {
+                    "url"
+                };
+
+                let chain_input = ModulePolicyInput {
+                    specifier: specifier_url_str.clone(),
+                    specifier_type: spec_type.to_string(),
+                    resolved_url: specifier_url_str.clone(),
+                    url_parsed,
+                };
+
+                let input_value = serde_json::to_value(&chain_input)
+                    .map_err(|e| JsErrorBox::generic(format!(
+                        "Failed to serialize module policy input: {}", e
+                    )))?;
+
+                let allowed = chain
+                    .evaluate(&input_value)
+                    .await
+                    .map_err(|e| JsErrorBox::generic(format!(
+                        "Module policy chain check failed for '{}': {}",
                         specifier, e
                     )))?;
 
