@@ -1,0 +1,35 @@
+name: Module Policy Integration Test
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - Dockerfile
+      - docker-compose.module-policy.yml
+      - policies/**
+      - tests/module-policy-integration.sh
+      - server/src/**
+  pull_request:
+    branches: [main]
+    paths:
+      - Dockerfile
+      - docker-compose.module-policy.yml
+      - policies/**
+      - tests/module-policy-integration.sh
+      - server/src/**
+  schedule:
+    - cron: "0 6 * * *" # daily at 06:00 UTC
+  workflow_dispatch:
+
+jobs:
+  integration-test:
+    name: Module Policy Integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run module policy integration tests
+        run: ./tests/module-policy-integration.sh
