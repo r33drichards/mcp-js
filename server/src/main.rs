@@ -11,6 +11,7 @@ mod engine;
 mod mcp;
 mod api;
 mod cluster;
+mod oauth;
 use engine::{initialize_v8, Engine, WasmModule, DEFAULT_EXECUTION_TIMEOUT_SECS};
 use engine::fetch::FetchConfig;
 use engine::execution::ExecutionRegistry;
@@ -19,6 +20,7 @@ use engine::heap_tags::HeapTagStore;
 use engine::session_log::SessionLog;
 use mcp::{McpService, StatelessMcpService};
 use cluster::{ClusterConfig, ClusterNode};
+use oauth::{OAuthConfig, OAuthStore};
 
 fn default_max_concurrent() -> usize {
     std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4)
@@ -153,6 +155,20 @@ struct Cli {
     /// Format: [{"host": "api.github.com", "methods": ["GET","POST"], "headers": {"Authorization": "Bearer ..."}}]
     #[arg(long = "fetch-header-config", value_name = "PATH", requires = "opa_url")]
     fetch_header_config: Option<String>,
+
+    // ── OAuth options ───────────────────────────────────────────────────
+
+    /// Enable OAuth 2.1 authentication for HTTP/SSE transports.
+    /// When enabled, MCP and API endpoints require a valid Bearer token.
+    /// OAuth endpoints (/.well-known/oauth-authorization-server, /oauth/*)
+    /// are served publicly for client registration and token exchange.
+    #[arg(long)]
+    oauth: bool,
+
+    /// OAuth issuer URL used in discovery metadata. Defaults to http://0.0.0.0:<port>.
+    /// Set this to the server's public base URL when behind a reverse proxy.
+    #[arg(long, requires = "oauth")]
+    oauth_issuer: Option<String>,
 }
 
 #[tokio::main]
@@ -339,20 +355,30 @@ async fn main() -> Result<()> {
         }
     };
 
+    // ── OAuth configuration ──────────────────────────────────────────────
+    let oauth_store: Option<Arc<OAuthStore>> = if cli.oauth {
+        let port = cli.http_port.or(cli.sse_port).unwrap_or(0);
+        let issuer = cli.oauth_issuer.unwrap_or_else(|| format!("http://0.0.0.0:{}", port));
+        tracing::info!("OAuth enabled (issuer: {})", issuer);
+        Some(Arc::new(OAuthStore::new(OAuthConfig { issuer })))
+    } else {
+        None
+    };
+
     // ── Start transport ─────────────────────────────────────────────────
     if let Some(port) = cli.http_port {
         tracing::info!("Starting Streamable HTTP transport on port {}", port);
         if engine.is_stateful() {
-            start_streamable_http(engine, port, |e| McpService::new(e)).await?;
+            start_streamable_http(engine, port, oauth_store, |e| McpService::new(e)).await?;
         } else {
-            start_streamable_http(engine, port, |e| StatelessMcpService::new(e)).await?;
+            start_streamable_http(engine, port, oauth_store, |e| StatelessMcpService::new(e)).await?;
         }
     } else if let Some(port) = cli.sse_port {
         tracing::info!("Starting SSE transport on port {}", port);
         if engine.is_stateful() {
-            start_sse_server(engine, port, |e| McpService::new(e)).await?;
+            start_sse_server(engine, port, oauth_store, |e| McpService::new(e)).await?;
         } else {
-            start_sse_server(engine, port, |e| StatelessMcpService::new(e)).await?;
+            start_sse_server(engine, port, oauth_store, |e| StatelessMcpService::new(e)).await?;
         }
     } else {
         tracing::info!("Starting stdio transport");
@@ -380,7 +406,12 @@ async fn main() -> Result<()> {
 
 // ── Streamable HTTP transport (--http-port) ─────────────────────────────
 
-async fn start_streamable_http<S, F>(engine: Engine, port: u16, make_service: F) -> Result<()>
+async fn start_streamable_http<S, F>(
+    engine: Engine,
+    port: u16,
+    oauth_store: Option<Arc<OAuthStore>>,
+    make_service: F,
+) -> Result<()>
 where
     S: ServerHandler + Send + Sync + 'static,
     F: Fn(Engine) -> S + Send + Sync + Clone + 'static,
@@ -397,8 +428,18 @@ where
 
     let (server, mcp_router) = StreamableHttpServer::new(config);
 
-    // Merge MCP router with plain HTTP API router
-    let app = mcp_router.merge(api::api_router(engine.clone()));
+    // Build the app: if OAuth is enabled, protect MCP + API routes and add OAuth endpoints
+    let app = if let Some(store) = oauth_store {
+        let protected = mcp_router
+            .merge(api::api_router(engine.clone()))
+            .layer(axum::middleware::from_fn_with_state(
+                store.clone(),
+                oauth::token_validation_middleware,
+            ));
+        protected.merge(oauth::oauth_router(store))
+    } else {
+        mcp_router.merge(api::api_router(engine.clone()))
+    };
 
     let listener = tokio::net::TcpListener::bind(bind).await?;
     tracing::info!("Streamable HTTP server listening on {}", bind);
@@ -425,7 +466,12 @@ where
 
 // ── SSE transport (--sse-port) ──────────────────────────────────────────
 
-async fn start_sse_server<S, F>(engine: Engine, port: u16, make_service: F) -> Result<()>
+async fn start_sse_server<S, F>(
+    engine: Engine,
+    port: u16,
+    oauth_store: Option<Arc<OAuthStore>>,
+    make_service: F,
+) -> Result<()>
 where
     S: ServerHandler + Send + Sync + 'static,
     F: Fn(Engine) -> S + Send + Sync + Clone + 'static,
@@ -442,8 +488,18 @@ where
 
     let (sse_server, sse_router) = SseServer::new(config);
 
-    // Merge SSE router with plain HTTP API router
-    let app = sse_router.merge(api::api_router(engine.clone()));
+    // Build the app: if OAuth is enabled, protect SSE + API routes and add OAuth endpoints
+    let app = if let Some(store) = oauth_store {
+        let protected = sse_router
+            .merge(api::api_router(engine.clone()))
+            .layer(axum::middleware::from_fn_with_state(
+                store.clone(),
+                oauth::token_validation_middleware,
+            ));
+        protected.merge(oauth::oauth_router(store))
+    } else {
+        sse_router.merge(api::api_router(engine.clone()))
+    };
 
     let listener = tokio::net::TcpListener::bind(sse_server.config.bind).await?;
     tracing::info!("SSE server listening on {}", sse_server.config.bind);
