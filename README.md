@@ -18,6 +18,7 @@ A Rust-based Model Context Protocol (MCP) server that exposes a V8 JavaScript ru
 - **Multiple Transports**: Supports stdio, Streamable HTTP (MCP 2025-03-26+), and SSE (Server-Sent Events) transport protocols.
 - **Clustering**: Optional Raft-based clustering for distributed coordination, replicated session logging, and horizontal scaling.
 - **Concurrency Control**: Configurable concurrent V8 execution limits with semaphore-based throttling.
+- **Policy-Gated Filesystem Access**: Optional `fs` module for Node.js-compatible file operations (read, write, delete, etc.), with every operation checked against a [Rego policy](https://www.openpolicyagent.org/docs/latest/policy-language/) before execution.
 - **OPA-Gated Fetch**: Optional `fetch()` function for JavaScript following the web standard Fetch API, with every HTTP request checked against an [Open Policy Agent](https://www.openpolicyagent.org/) policy before execution.
 - **Fetch Header Injection**: Automatically inject headers (e.g., auth tokens, API keys) into outgoing fetch requests based on host and method matching rules, configured via CLI flags or a JSON config file.
 
@@ -659,6 +660,129 @@ await fetch("https://api.example.com/data", {
 // → request includes Authorization: Bearer my-own-token (rule skipped)
 ```
 
+### Policy-Gated Filesystem Access
+
+When the server is started with a Rego policy configuration, JavaScript code can use an `fs` module providing Node.js-compatible file operations. Every operation is evaluated against a Rego policy before execution.
+
+The `fs` module supports the following operations:
+
+```javascript
+const data = await fs.readFile("/tmp/data.txt");          // string (utf-8)
+const data = await fs.readFile("/tmp/data.bin", "buffer"); // Uint8Array
+await fs.writeFile("/tmp/out.txt", "hello");              // string data
+await fs.writeFile("/tmp/out.bin", uint8array);           // binary data
+await fs.appendFile("/tmp/out.txt", " world");
+const entries = await fs.readdir("/tmp");                  // string[]
+const info = await fs.stat("/tmp/data.txt");               // {size,isFile,isDirectory,...}
+await fs.mkdir("/tmp/newdir", { recursive: true });
+await fs.rm("/tmp/data.txt");
+await fs.rm("/tmp/newdir", { recursive: true });
+await fs.rename("/tmp/old.txt", "/tmp/new.txt");
+await fs.copyFile("/tmp/a.txt", "/tmp/b.txt");
+const bool = await fs.exists("/tmp/data.txt");
+```
+
+**1. Write a Rego policy**
+
+Create a Rego policy that controls which filesystem operations are allowed:
+
+```rego
+package mcp.fs
+
+default allow = false
+
+# Allow reading from /tmp
+allow if {
+    input.operation == "readFile"
+    startswith(input.path, "/tmp/")
+}
+
+# Allow writing to /tmp
+allow if {
+    input.operation == "writeFile"
+    startswith(input.path, "/tmp/")
+}
+
+# Allow other common operations
+allow if {
+    input.operation in ["readdir", "stat", "exists"]
+    startswith(input.path, "/tmp/")
+}
+```
+
+The policy input includes:
+- `operation`: the filesystem operation being performed (e.g., `"readFile"`, `"writeFile"`, `"mkdir"`, `"rm"`, `"rename"`, `"copyFile"`, `"appendFile"`, `"readdir"`, `"stat"`, `"exists"`)
+- `path`: the file or directory path being accessed
+- `destination`: (optional) the destination path for operations like `rename` and `copyFile`
+- `recursive`: (optional, boolean) whether a recursive operation was requested (for `mkdir` and `rm`)
+- `encoding`: (optional) the encoding parameter for `readFile` (either `"utf8"` or `"buffer"`)
+
+**2. Start the server with policy configuration**
+
+Use `--policies-json` to enable filesystem access with local Rego policies:
+
+```bash
+mcp-v8 --stateless --http-port 3000 \
+  --policies-json /path/to/policies.json
+```
+
+The `policies.json` file should contain policy configuration objects. See the [POLICIES section](https://github.com/r33drichards/mcp-js) for detailed configuration examples.
+
+**3. Use `fs` in JavaScript**
+
+All `fs` operations return Promises and can be used with `await`:
+
+```javascript
+// Read a file
+const content = await fs.readFile("/tmp/data.txt");
+console.log(content);
+
+// Write a file
+await fs.writeFile("/tmp/output.txt", "Hello, World!");
+
+// Check if a file exists
+const exists = await fs.exists("/tmp/output.txt");
+console.log(exists); // true
+
+// Get file metadata
+const stats = await fs.stat("/tmp/output.txt");
+console.log(stats.size); // file size in bytes
+
+// List directory contents
+const files = await fs.readdir("/tmp");
+console.log(files); // array of filenames
+
+// Create a directory
+await fs.mkdir("/tmp/mydir", { recursive: true });
+
+// Copy a file
+await fs.copyFile("/tmp/output.txt", "/tmp/backup.txt");
+
+// Rename a file
+await fs.rename("/tmp/backup.txt", "/tmp/backup_old.txt");
+
+// Delete a file
+await fs.rm("/tmp/backup_old.txt");
+
+// Delete a directory recursively
+await fs.rm("/tmp/mydir", { recursive: true });
+```
+
+If a policy denies an operation, the Promise returned by the `fs` operation is rejected with an error message indicating that the operation was denied by policy.
+
+**Binary Data**
+
+When reading binary files, specify `"buffer"` as the encoding parameter:
+
+```javascript
+const buffer = await fs.readFile("/tmp/image.png", "buffer");
+// buffer is a Uint8Array
+
+// Write binary data
+const newBuffer = new Uint8Array([72, 101, 108, 108, 111]); // "Hello"
+await fs.writeFile("/tmp/binary.bin", newBuffer);
+```
+
 ### Loading `.wasm` Files
 
 Instead of embedding raw bytes in JavaScript, you can compile a `.wasm` file once and load it at server startup. The module's exports are then available as a global variable in every execution.
@@ -749,7 +873,7 @@ You can configure heap storage using the following command line arguments:
 ## Limitations
 
 - **No `fetch` or network access by default**: When the server is started with `--opa-url`, a `fetch(url, opts?)` function becomes available following the web standard Fetch API. Each request is checked against an OPA policy before execution. Without `--opa-url`, there is no network access. See [OPA-Gated Fetch](#opa-gated-fetch) for details.
-- **No file system access**: The runtime does not provide access to the local file system or environment variables.
+- **No filesystem access by default**: When the server is configured with policies (see [Policy-Gated Filesystem Access](#policy-gated-filesystem-access)), an `fs` module becomes available for Node.js-compatible file operations. Each operation is checked against a Rego policy before execution.
 - **No timers**: Functions like `setTimeout` and `setInterval` are not available.
 - **No DOM or browser APIs**: This is not a browser environment; there is no access to `window`, `document`, or other browser-specific objects.
 - **TypeScript: type removal only**: TypeScript type annotations are stripped before execution. No type checking is performed — invalid types are silently removed, not reported as errors.

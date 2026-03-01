@@ -71,10 +71,30 @@ You can import npm packages, JSR packages, and URL modules using ES module `impo
 
 Always pin versions for reproducible results. Dynamic `import()` is also supported with top-level `await`.
 
+## Filesystem Access
+
+When the server is configured with policies, JavaScript code can use an `fs` module providing Node.js-compatible file operations. Every operation is evaluated against a Rego policy before execution.
+
+**Available operations:**
+- `await fs.readFile(path, [encoding])` — Read file as UTF-8 string (default) or `Uint8Array` (if `encoding="buffer"`)
+- `await fs.writeFile(path, data)` — Write string or `Uint8Array` to file
+- `await fs.appendFile(path, data)` — Append data to file
+- `await fs.readdir(path)` — List directory contents
+- `await fs.stat(path)` — Get file metadata
+- `await fs.mkdir(path, [options])` — Create directory (supports `{recursive: true}`)
+- `await fs.rm(path, [options])` — Delete file or directory (supports `{recursive: true}`)
+- `await fs.rename(oldPath, newPath)` — Rename or move file
+- `await fs.copyFile(src, dest)` — Copy file
+- `await fs.exists(path)` — Check if path exists
+- `await fs.unlink(path)` — Delete a file
+
+All operations return Promises and are subject to Rego policy evaluation. Policy input includes `operation`, `path`, `destination` (for rename/copy), `recursive` (for mkdir/rm), and `encoding` (for readFile).
+
 ## Limitations
 
 - **No `fetch` or network access by default**: When the server is started with `--opa-url`, a `fetch(url, opts?)` function becomes available. `fetch()` follows the web standard Fetch API — it returns a Promise that resolves to a Response object. Use `await` to get the response: `const resp = await fetch(url)`. The response object has `.ok`, `.status`, `.statusText`, `.url`, `.headers.get(name)`, `.text()`, and `.json()` methods (`.text()` and `.json()` also return Promises). Each request is checked against an OPA policy before execution. Without `--opa-url`, there is no network access.
-- **No file system access**: The runtime does not provide access to the local file system or environment variables.
+- **No file system access by default**: Filesystem access requires server configuration with policies. See "Filesystem Access" above.
+- **No environment variables**: The runtime does not provide access to environment variables.
 - **No timers**: Functions like `setTimeout` and `setInterval` are not available.
 - **No DOM or browser APIs**: This is not a browser environment; there is no access to `window`, `document`, or other browser-specific objects.
 
