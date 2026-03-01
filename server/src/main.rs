@@ -13,6 +13,7 @@ mod api;
 mod cluster;
 use engine::{initialize_v8, Engine, WasmModule, DEFAULT_EXECUTION_TIMEOUT_SECS};
 use engine::fetch::FetchConfig;
+use engine::fs::FsConfig;
 use engine::execution::ExecutionRegistry;
 use engine::module_loader::ModuleLoaderConfig;
 use engine::opa::{PoliciesConfig, build_policy_chain};
@@ -144,6 +145,13 @@ struct Cli {
     /// Format: [{"host": "api.github.com", "methods": ["GET","POST"], "headers": {"Authorization": "Bearer ..."}}]
     #[arg(long = "fetch-header-config", value_name = "PATH")]
     fetch_header_config: Option<String>,
+
+    /// OPA policy path for filesystem operations (appended to /v1/data/).
+    /// Default: "mcp/fs". The policy must return {"allow": true} to permit an operation.
+    /// When --opa-url is set, the `fs` global becomes available in the JS runtime
+    /// with Node.js-compatible async methods (readFile, writeFile, readdir, stat, etc.).
+    #[arg(long = "opa-fs-policy", default_value = "mcp/fs", requires = "opa_url")]
+    opa_fs_policy: String,
 
     // ── Module import options ──────────────────────────────────────────
 
@@ -371,6 +379,15 @@ async fn main() -> Result<()> {
         let fetch_config = FetchConfig::new_with_chain(chain)
             .with_header_rules(header_rules);
         engine.with_fetch_config(fetch_config)
+    } else {
+        engine
+    };
+
+    // ── OPA / filesystem ──────────────────────────────────────────────────
+    let engine = if let Some(ref opa_url) = cli.opa_url {
+        tracing::info!("OPA fs policy: {}", cli.opa_fs_policy);
+        let fs_config = FsConfig::new(opa_url.clone(), cli.opa_fs_policy.clone());
+        engine.with_fs_config(fs_config)
     } else {
         engine
     };
