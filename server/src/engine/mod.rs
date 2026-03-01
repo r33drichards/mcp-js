@@ -1,3 +1,5 @@
+pub mod console;
+pub mod execution;
 pub mod fetch;
 pub mod heap_storage;
 pub mod heap_tags;
@@ -28,6 +30,9 @@ use swc_core::ecma::transforms::base::{fixer::fixer, hygiene::hygiene, resolver}
 use swc_core::ecma::transforms::typescript::strip;
 
 use tokio::sync::Semaphore;
+
+use self::console::ConsoleLogState;
+use self::execution::{ExecutionId, ExecutionRegistry, ExecutionInfo, ExecutionSummary, ConsoleOutputPage};
 
 use crate::engine::heap_storage::{HeapStorage, AnyHeapStorage};
 use crate::engine::heap_tags::{HeapTagStore, HeapTagEntry};
@@ -666,21 +671,26 @@ pub fn execute_stateless(
     wasm_modules: &[WasmModule],
     wasm_default_max_bytes: usize,
     fetch_config: Option<&fetch::FetchConfig>,
+    console_tree: Option<sled::Tree>,
 ) -> (Result<String, String>, bool) {
     let oom_flag = Arc::new(AtomicBool::new(false));
 
     let result = catch_unwind(AssertUnwindSafe(|| {
         let params = create_params_with_heap_limit(heap_memory_max_bytes);
-        let extensions = if fetch_config.is_some() {
-            vec![fetch::create_extension()]
-        } else {
-            vec![]
-        };
+        let mut extensions = vec![console::create_extension()];
+        if fetch_config.is_some() {
+            extensions.push(fetch::create_extension());
+        }
         let mut runtime = JsRuntime::new(RuntimeOptions {
             create_params: Some(params),
             extensions,
             ..Default::default()
         });
+
+        // Put console log state in OpState.
+        if let Some(tree) = console_tree {
+            runtime.op_state().borrow_mut().put(ConsoleLogState::new(tree));
+        }
 
         // Put fetch config in OpState if OPA is configured.
         if let Some(fc) = fetch_config {
@@ -701,6 +711,10 @@ pub fn execute_stateless(
         let eval_result = match inject_wasm_modules(&mut runtime, wasm_modules, wasm_default_max_bytes) {
             Err(e) => Err(e),
             Ok(()) => {
+                // Inject console JS wrapper.
+                if let Err(e) = console::inject_console(&mut runtime) {
+                    return Err(e);
+                }
                 // Inject fetch() JS wrapper if OPA is configured.
                 if fetch_config.is_some() {
                     if let Err(e) = fetch::inject_fetch(&mut runtime) {
@@ -710,6 +724,9 @@ pub fn execute_stateless(
                 execute_and_stringify(&mut runtime, code)
             }
         };
+
+        // Flush any remaining console output before runtime is dropped.
+        console::flush_console(&mut runtime);
 
         *isolate_handle.lock().unwrap() = None;
 
@@ -740,6 +757,7 @@ pub fn execute_stateful(
     wasm_modules: &[WasmModule],
     wasm_default_max_bytes: usize,
     fetch_config: Option<&fetch::FetchConfig>,
+    console_tree: Option<sled::Tree>,
 ) -> (Result<(String, Vec<u8>, String), String>, bool) {
     let oom_flag = Arc::new(AtomicBool::new(false));
 
@@ -763,17 +781,21 @@ pub fn execute_stateful(
 
         let startup_snapshot = leaked_snapshot.as_ref().map(|(_, s)| *s);
 
-        let extensions = if fetch_config.is_some() {
-            vec![fetch::create_extension()]
-        } else {
-            vec![]
-        };
+        let mut extensions = vec![console::create_extension()];
+        if fetch_config.is_some() {
+            extensions.push(fetch::create_extension());
+        }
         let mut runtime = JsRuntimeForSnapshot::new(RuntimeOptions {
             create_params: Some(params),
             startup_snapshot,
             extensions,
             ..Default::default()
         });
+
+        // Put console log state in OpState.
+        if let Some(tree) = console_tree {
+            runtime.op_state().borrow_mut().put(ConsoleLogState::new(tree));
+        }
 
         // Put fetch config in OpState if OPA is configured.
         if let Some(fc) = fetch_config {
@@ -795,6 +817,10 @@ pub fn execute_stateful(
         let output_result = match inject_wasm_modules(&mut runtime, wasm_modules, wasm_default_max_bytes) {
             Err(e) => Err(e),
             Ok(()) => {
+                // Inject console JS wrapper.
+                if let Err(e) = console::inject_console_snapshot(&mut runtime) {
+                    return Err(e);
+                }
                 // Inject fetch() JS wrapper if OPA is configured.
                 if fetch_config.is_some() {
                     if let Err(e) = fetch::inject_fetch(&mut runtime) {
@@ -804,6 +830,9 @@ pub fn execute_stateful(
                 execute_and_stringify(&mut runtime, code)
             }
         };
+
+        // Flush any remaining console output before snapshot.
+        console::flush_console_snapshot(&mut runtime);
 
         *isolate_handle.lock().unwrap() = None;
 
@@ -874,6 +903,8 @@ pub struct Engine {
     wasm_modules: Arc<Vec<WasmModule>>,
     /// OPA-gated fetch configuration. When Some, `fetch()` is injected into the JS runtime.
     fetch_config: Option<Arc<fetch::FetchConfig>>,
+    /// Execution registry for async execution tracking and console output.
+    execution_registry: Option<Arc<ExecutionRegistry>>,
 }
 
 impl Engine {
@@ -893,6 +924,7 @@ impl Engine {
             wasm_default_max_bytes: DEFAULT_WASM_MAX_BYTES,
             wasm_modules: Arc::new(Vec::new()),
             fetch_config: None,
+            execution_registry: None,
         }
     }
 
@@ -915,6 +947,7 @@ impl Engine {
             wasm_default_max_bytes: DEFAULT_WASM_MAX_BYTES,
             wasm_modules: Arc::new(Vec::new()),
             fetch_config: None,
+            execution_registry: None,
         }
     }
 
@@ -936,11 +969,15 @@ impl Engine {
         self
     }
 
-    /// Core execution — used by both MCP and API.
-    ///
-    /// Acquires a semaphore permit to bound concurrent V8 executions,
-    /// runs V8 on tokio's blocking pool (single thread per request),
-    /// and enforces wall-clock timeout at the async layer via `tokio::select!`.
+    /// Set the execution registry for async execution tracking.
+    pub fn with_execution_registry(mut self, registry: Arc<ExecutionRegistry>) -> Self {
+        self.execution_registry = Some(registry);
+        self
+    }
+
+    /// Submit code for async execution. Returns an execution ID immediately.
+    /// V8 runs in a background task. Use `get_execution()` to poll status and
+    /// `get_execution_output()` to read console output.
     pub async fn run_js(
         &self,
         code: String,
@@ -949,9 +986,60 @@ impl Engine {
         heap_memory_max_mb: Option<usize>,
         execution_timeout_secs: Option<u64>,
         tags: Option<HashMap<String, String>>,
-    ) -> Result<JsResult, String> {
+    ) -> Result<ExecutionId, String> {
+        let registry = self.execution_registry.as_ref()
+            .ok_or_else(|| "Execution registry not configured".to_string())?;
+
         // Strip TypeScript types before V8 execution (no-op for plain JS)
         let code = strip_typescript_types(&code)?;
+
+        let id = uuid::Uuid::new_v4().to_string();
+        let console_tree = registry.register(&id)?;
+
+        // For stateful mode, unwrap snapshot before spawning background task.
+        let raw_snapshot = if let Some(storage) = &self.heap_storage {
+            let snapshot = match &heap {
+                Some(h) if !h.is_empty() => storage.get(h).await.ok(),
+                _ => None,
+            };
+            match snapshot {
+                Some(data) if !data.is_empty() => Some(unwrap_snapshot(&data)?),
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        let engine = self.clone();
+        let id_bg = id.clone();
+
+        tokio::spawn(async move {
+            engine.execute_in_background(
+                id_bg, code, heap, session, heap_memory_max_mb,
+                execution_timeout_secs, tags, raw_snapshot, console_tree,
+            ).await;
+        });
+
+        Ok(id)
+    }
+
+    /// Background execution task — runs V8 on the blocking pool with timeout.
+    async fn execute_in_background(
+        &self,
+        id: ExecutionId,
+        code: String,
+        heap: Option<String>,
+        session: Option<String>,
+        heap_memory_max_mb: Option<usize>,
+        execution_timeout_secs: Option<u64>,
+        tags: Option<HashMap<String, String>>,
+        raw_snapshot: Option<Vec<u8>>,
+        console_tree: sled::Tree,
+    ) {
+        let registry = match &self.execution_registry {
+            Some(r) => r.clone(),
+            None => return,
+        };
 
         let max_bytes = heap_memory_max_mb
             .map(|mb| mb.max(MIN_HEAP_MEMORY_MB) * 1024 * 1024)
@@ -960,8 +1048,13 @@ impl Engine {
         let timeout_dur = Duration::from_secs(timeout);
 
         // Bound concurrent V8 executions to avoid OS thread exhaustion.
-        let _permit = self.v8_semaphore.acquire().await
-            .map_err(|_| "V8 semaphore closed".to_string())?;
+        let permit = match self.v8_semaphore.acquire().await {
+            Ok(p) => p,
+            Err(_) => {
+                registry.fail(&id, "V8 semaphore closed".to_string());
+                return;
+            }
+        };
 
         let isolate_handle: Arc<Mutex<Option<v8::IsolateHandle>>> = Arc::new(Mutex::new(None));
 
@@ -972,11 +1065,27 @@ impl Engine {
                 let wasm = self.wasm_modules.clone();
                 let wasm_default = self.wasm_default_max_bytes;
                 let fc = self.fetch_config.clone();
+                let ct = console_tree;
                 let mut join_handle = tokio::task::spawn_blocking(move || {
-                    execute_stateless(&code, max_bytes, ih, &wasm, wasm_default, fc.as_deref())
+                    execute_stateless(&code, max_bytes, ih, &wasm, wasm_default, fc.as_deref(), Some(ct))
                 });
 
-                tokio::select! {
+                // Publish isolate handle for cancellation once it's available.
+                let ih_clone = isolate_handle.clone();
+                let reg_clone = registry.clone();
+                let id_clone = id.clone();
+                tokio::spawn(async move {
+                    // Poll briefly for handle to become available.
+                    for _ in 0..100 {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                        if let Some(h) = ih_clone.lock().unwrap().as_ref() {
+                            reg_clone.set_isolate_handle(&id_clone, h.clone());
+                            break;
+                        }
+                    }
+                });
+
+                let result = tokio::select! {
                     biased;
                     res = &mut join_handle => {
                         match res {
@@ -989,35 +1098,44 @@ impl Engine {
                         if let Some(h) = isolate_handle.lock().unwrap().as_ref() {
                             h.terminate_execution();
                         }
-                        // Wait for the blocking task to finish cleanup (holds permit until done).
                         let _ = join_handle.await;
-                        Err("Execution timed out: script exceeded the time limit. Try increasing execution_timeout_secs.".to_string())
+                        Err("Execution timed out: script exceeded the time limit.".to_string())
                     }
+                };
+
+                match result {
+                    Ok(js_result) => registry.complete(&id, js_result.output, None),
+                    Err(e) if e.contains("timed out") => registry.timed_out(&id),
+                    Err(e) => registry.fail(&id, e),
                 }
             }
             Some(storage) => {
-                // Stateful mode — unwrap snapshot before entering blocking task.
-                let snapshot = match &heap {
-                    Some(h) if !h.is_empty() => storage.get(h).await.ok(),
-                    _ => None,
-                };
-                let raw_snapshot = match snapshot {
-                    Some(data) if !data.is_empty() => Some(unwrap_snapshot(&data)?),
-                    _ => None,
-                };
-
+                // Stateful mode
                 let code_for_log = code.clone();
                 let ih = isolate_handle.clone();
                 let wasm = self.wasm_modules.clone();
                 let wasm_default = self.wasm_default_max_bytes;
                 let fc = self.fetch_config.clone();
+                let ct = console_tree;
 
-                // V8 SnapshotCreator segfaults under concurrent use — serialize
-                // stateful V8 work while keeping the async timeout wrapper.
                 let snap_mutex = self.snapshot_mutex.clone();
                 let mut join_handle = tokio::task::spawn_blocking(move || {
                     let _guard = snap_mutex.blocking_lock();
-                    execute_stateful(&code, raw_snapshot, max_bytes, ih, &wasm, wasm_default, fc.as_deref())
+                    execute_stateful(&code, raw_snapshot, max_bytes, ih, &wasm, wasm_default, fc.as_deref(), Some(ct))
+                });
+
+                // Publish isolate handle for cancellation.
+                let ih_clone = isolate_handle.clone();
+                let reg_clone = registry.clone();
+                let id_clone = id.clone();
+                tokio::spawn(async move {
+                    for _ in 0..100 {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                        if let Some(h) = ih_clone.lock().unwrap().as_ref() {
+                            reg_clone.set_isolate_handle(&id_clone, h.clone());
+                            break;
+                        }
+                    }
                 });
 
                 let v8_result = tokio::select! {
@@ -1033,14 +1151,15 @@ impl Engine {
                             h.terminate_execution();
                         }
                         let _ = join_handle.await;
-                        Err("Execution timed out: script exceeded the time limit. Try increasing execution_timeout_secs.".to_string())
+                        Err("Execution timed out: script exceeded the time limit.".to_string())
                     }
                 };
 
                 match v8_result {
                     Ok((output, startup_data, content_hash)) => {
                         if let Err(e) = storage.put(&content_hash, &startup_data).await {
-                            return Err(format!("Error saving heap: {}", e));
+                            registry.fail(&id, format!("Error saving heap: {}", e));
+                            return;
                         }
 
                         if let (Some(session_name), Some(log)) = (&session, &self.session_log) {
@@ -1061,12 +1180,52 @@ impl Engine {
                             }
                         }
 
-                        Ok(JsResult { output, heap: Some(content_hash) })
+                        registry.complete(&id, output, Some(content_hash));
                     }
-                    Err(e) => Err(e),
+                    Err(e) if e.contains("timed out") => registry.timed_out(&id),
+                    Err(e) => registry.fail(&id, e),
                 }
             }
         }
+
+        drop(permit);
+    }
+
+    // ── Query / cancel methods ───────────────────────────────────────────
+
+    /// Get execution status and result.
+    pub fn get_execution(&self, id: &str) -> Result<ExecutionInfo, String> {
+        let registry = self.execution_registry.as_ref()
+            .ok_or_else(|| "Execution registry not configured".to_string())?;
+        registry.get(id).ok_or_else(|| format!("Execution '{}' not found", id))
+    }
+
+    /// Get paginated console output for an execution.
+    pub fn get_execution_output(
+        &self,
+        id: &str,
+        line_offset: Option<u64>,
+        line_limit: Option<u64>,
+        byte_offset: Option<u64>,
+        byte_limit: Option<u64>,
+    ) -> Result<ConsoleOutputPage, String> {
+        let registry = self.execution_registry.as_ref()
+            .ok_or_else(|| "Execution registry not configured".to_string())?;
+        registry.get_console_output(id, line_offset, line_limit, byte_offset, byte_limit)
+    }
+
+    /// Cancel a running execution.
+    pub fn cancel_execution(&self, id: &str) -> Result<(), String> {
+        let registry = self.execution_registry.as_ref()
+            .ok_or_else(|| "Execution registry not configured".to_string())?;
+        registry.cancel(id)
+    }
+
+    /// List all executions.
+    pub fn list_executions(&self) -> Result<Vec<ExecutionSummary>, String> {
+        let registry = self.execution_registry.as_ref()
+            .ok_or_else(|| "Execution registry not configured".to_string())?;
+        Ok(registry.list())
     }
 
     pub async fn list_sessions(&self) -> Result<Vec<String>, String> {

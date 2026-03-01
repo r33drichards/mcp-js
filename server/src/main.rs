@@ -13,6 +13,7 @@ mod api;
 mod cluster;
 use engine::{initialize_v8, Engine, WasmModule, DEFAULT_EXECUTION_TIMEOUT_SECS};
 use engine::fetch::FetchConfig;
+use engine::execution::ExecutionRegistry;
 use engine::heap_storage::{AnyHeapStorage, S3HeapStorage, WriteThroughCacheHeapStorage, FileHeapStorage};
 use engine::heap_tags::HeapTagStore;
 use engine::session_log::SessionLog;
@@ -317,6 +318,23 @@ async fn main() -> Result<()> {
         engine.with_fetch_config(fetch_config)
     } else {
         engine
+    };
+
+    // ── Execution registry ──────────────────────────────────────────────
+    let exec_db_path = if cli.stateless {
+        "/tmp/mcp-v8-executions".to_string()
+    } else {
+        format!("{}/executions", cli.session_db_path)
+    };
+    let engine = match ExecutionRegistry::new(&exec_db_path) {
+        Ok(registry) => {
+            tracing::info!("Execution registry opened at {}", exec_db_path);
+            engine.with_execution_registry(Arc::new(registry))
+        }
+        Err(e) => {
+            tracing::warn!("Failed to open execution registry at {}: {}. Async execution disabled.", exec_db_path, e);
+            engine
+        }
     };
 
     // ── Start transport ─────────────────────────────────────────────────
