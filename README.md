@@ -10,6 +10,7 @@ A Rust-based Model Context Protocol (MCP) server that exposes a V8 JavaScript ru
 - **V8 JavaScript Execution**: Run arbitrary JavaScript code in a secure, isolated V8 engine.
 - **TypeScript Support**: Run TypeScript code directly — types are stripped before execution using [SWC](https://swc.rs/). This is type removal only, not type checking.
 - **WebAssembly Support**: Compile and run WASM modules using the standard `WebAssembly` JavaScript API (`WebAssembly.Module`, `WebAssembly.Instance`, `WebAssembly.validate`).
+- **ES Module Imports**: Import npm packages, JSR packages, and URL modules using Deno-style `import` syntax. Packages are fetched from [esm.sh](https://esm.sh) at runtime — no `npm install` needed. (e.g., `import { camelCase } from "npm:lodash-es@4.17.21"`)
 - **Content-Addressed Heap Snapshots**: Persist and restore V8 heap state between runs using content-addressed storage, supporting both S3 and local file storage.
 - **Stateless Mode**: Optional mode for fresh executions without heap persistence, ideal for serverless environments.
 - **MCP Protocol**: Implements the Model Context Protocol for seamless tool integration with Claude, Cursor, and other MCP clients.
@@ -410,6 +411,61 @@ The agent will:
 
 In stateful mode, `get_execution` also returns a `heap` content hash — pass it back in the next `run_js` call to resume from that state.
 
+### Importing Packages
+
+You can import npm packages, JSR packages, and URL modules directly in your JavaScript code using ES module `import` syntax. Packages are fetched from [esm.sh](https://esm.sh) at runtime — no `npm install` or pre-installation step is needed.
+
+#### npm Packages
+
+Use the `npm:` prefix followed by the package name and version:
+
+```javascript
+import { camelCase } from "npm:lodash-es@4.17.21";
+camelCase("hello world"); // → "helloWorld"
+```
+
+```javascript
+import dayjs from "npm:dayjs@1.11.13";
+dayjs("2025-01-15").format("MMMM D, YYYY"); // → "January 15, 2025"
+```
+
+#### JSR Packages
+
+Use the `jsr:` prefix for packages from the [JSR registry](https://jsr.io):
+
+```javascript
+import { camelCase } from "jsr:@luca/cases@1.0.0";
+camelCase("hello world"); // → "helloWorld"
+```
+
+#### URL Imports
+
+Import directly from any URL that serves ES modules:
+
+```javascript
+import { pascalCase } from "https://deno.land/x/case/mod.ts";
+pascalCase("hello world"); // → "HelloWorld"
+```
+
+#### How It Works
+
+- **`npm:` specifiers** are rewritten to `https://esm.sh/<package>` URLs
+- **`jsr:` specifiers** are rewritten to `https://esm.sh/jsr/<package>` URLs
+- **`https://` and `http://` URLs** are fetched directly
+- **Relative imports** (e.g., `./utils.js`) resolve against the parent module's URL
+- **TypeScript modules** (`.ts`, `.tsx`) fetched from URLs are automatically type-stripped before execution
+
+#### Tips
+
+- **Always pin versions** (e.g., `npm:lodash-es@4.17.21`) for reproducible results
+- Only packages that ship as **ES modules** are supported — CommonJS-only packages won't work directly, but esm.sh converts many of them automatically
+- Imports are **fetched over the network** at runtime, so the first execution may be slower while modules are downloaded
+- Top-level `await` is supported, so you can use `import()` dynamically as well:
+  ```javascript
+  const { default: _ } = await import("npm:lodash-es@4.17.21");
+  _.chunk([1, 2, 3, 4, 5], 2); // → [[1, 2], [3, 4], [5]]
+  ```
+
 ### WebAssembly
 
 You can compile and run WebAssembly modules using the standard `WebAssembly` JavaScript API:
@@ -692,17 +748,10 @@ You can configure heap storage using the following command line arguments:
 
 ## Limitations
 
-While `mcp-v8` provides a powerful and persistent JavaScript execution environment, there are limitations to its runtime.
-
-- **Async execution model**: `run_js` returns immediately with an execution ID. Use `get_execution` to poll for completion and `get_execution_output` to read console output. Each execution runs in a fresh V8 isolate — no state is shared between calls (unless using stateful mode with heap snapshots).
-- **`async`/`await` and Promises**: Fully supported. If your code returns a Promise, the runtime resolves it automatically.
-- **`console.log` supported**: `console.log`, `console.info`, `console.warn`, and `console.error` are captured and available via `get_execution_output` with paginated access.
 - **No `fetch` or network access by default**: When the server is started with `--opa-url`, a `fetch(url, opts?)` function becomes available following the web standard Fetch API. Each request is checked against an OPA policy before execution. Without `--opa-url`, there is no network access. See [OPA-Gated Fetch](#opa-gated-fetch) for details.
 - **No file system access**: The runtime does not provide access to the local file system or environment variables.
-- **No `npm install` or external packages**: You cannot install or import npm packages. Only standard JavaScript (ECMAScript) built-ins are available.
 - **No timers**: Functions like `setTimeout` and `setInterval` are not available.
 - **No DOM or browser APIs**: This is not a browser environment; there is no access to `window`, `document`, or other browser-specific objects.
-- **WebAssembly**: Both synchronous (`WebAssembly.Module`, `WebAssembly.Instance`, `WebAssembly.validate`) and async (`WebAssembly.compile`, `WebAssembly.instantiate`) APIs are supported.
 - **TypeScript: type removal only**: TypeScript type annotations are stripped before execution. No type checking is performed — invalid types are silently removed, not reported as errors.
 
 ---
