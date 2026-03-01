@@ -677,7 +677,10 @@ pub fn execute_stateless(
 
     let result = catch_unwind(AssertUnwindSafe(|| {
         let params = create_params_with_heap_limit(heap_memory_max_bytes);
-        let mut extensions = vec![console::create_extension()];
+        let mut extensions = Vec::new();
+        if console_tree.is_some() {
+            extensions.push(console::create_extension());
+        }
         if fetch_config.is_some() {
             extensions.push(fetch::create_extension());
         }
@@ -781,7 +784,10 @@ pub fn execute_stateful(
 
         let startup_snapshot = leaked_snapshot.as_ref().map(|(_, s)| *s);
 
-        let mut extensions = vec![console::create_extension()];
+        let mut extensions = Vec::new();
+        if console_tree.is_some() {
+            extensions.push(console::create_extension());
+        }
         if fetch_config.is_some() {
             extensions.push(fetch::create_extension());
         }
