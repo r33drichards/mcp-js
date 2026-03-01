@@ -14,14 +14,15 @@ use std::{collections::HashMap, sync::Arc};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
-// ── OAuth types (defined locally to avoid pulling in the oauth2 crate) ───
+// ── OAuth types ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthorizationMetadata {
     pub issuer: String,
     pub authorization_endpoint: String,
     pub token_endpoint: String,
-    pub registration_endpoint: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub registration_endpoint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scopes_supported: Option<Vec<String>>,
     pub response_types_supported: Vec<String>,
@@ -51,6 +52,8 @@ pub struct ClientRegistrationResponse {
     pub redirect_uris: Vec<String>,
 }
 
+// ── Internal types (built-in mode) ───────────────────────────────────────
+
 #[derive(Debug, Clone)]
 struct OAuthClient {
     _client_secret: Option<String>,
@@ -78,12 +81,24 @@ struct TokenResponse {
     scope: Option<String>,
 }
 
-// ── OAuth configuration ──────────────────────────────────────────────────
+// ── Configuration ────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub struct OAuthConfig {
-    /// The issuer URL (used in metadata). Typically the server's public base URL.
+    /// The issuer URL advertised in metadata (the MCP server's own URL).
     pub issuer: String,
+    /// External OIDC provider. When set, the server delegates auth to this provider.
+    pub provider: Option<ExternalProviderConfig>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExternalProviderConfig {
+    /// Base URL of the OIDC provider (e.g. http://keycloak:8080/realms/mcp).
+    pub url: String,
+    /// Client ID used by the MCP server to call the introspection endpoint.
+    pub client_id: String,
+    /// Client secret used by the MCP server to call the introspection endpoint.
+    pub client_secret: String,
 }
 
 // ── OAuth store ──────────────────────────────────────────────────────────
@@ -91,10 +106,10 @@ pub struct OAuthConfig {
 #[derive(Clone)]
 pub struct OAuthStore {
     config: OAuthConfig,
+    http_client: reqwest::Client,
+    // Built-in mode state (unused in external provider mode)
     clients: Arc<RwLock<HashMap<String, OAuthClient>>>,
-    /// Maps auth_code -> AuthSession.
     codes: Arc<RwLock<HashMap<String, AuthSession>>>,
-    /// Maps access_token -> client_id.
     tokens: Arc<RwLock<HashMap<String, String>>>,
 }
 
@@ -102,14 +117,60 @@ impl OAuthStore {
     pub fn new(config: OAuthConfig) -> Self {
         Self {
             config,
+            http_client: reqwest::Client::new(),
             clients: Arc::new(RwLock::new(HashMap::new())),
             codes: Arc::new(RwLock::new(HashMap::new())),
             tokens: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
+    /// Validate a bearer token. In external mode, calls the provider's introspection endpoint.
+    /// In built-in mode, checks the local token store.
     async fn validate_token(&self, token: &str) -> bool {
-        self.tokens.read().await.contains_key(token)
+        if let Some(ref provider) = self.config.provider {
+            self.introspect_token(provider, token).await
+        } else {
+            self.tokens.read().await.contains_key(token)
+        }
+    }
+
+    /// Call the external provider's token introspection endpoint (RFC 7662).
+    async fn introspect_token(&self, provider: &ExternalProviderConfig, token: &str) -> bool {
+        let introspection_url = format!(
+            "{}/protocol/openid-connect/token/introspect",
+            provider.url
+        );
+        let resp = self
+            .http_client
+            .post(&introspection_url)
+            .basic_auth(&provider.client_id, Some(&provider.client_secret))
+            .form(&[("token", token)])
+            .send()
+            .await;
+
+        match resp {
+            Ok(r) if r.status().is_success() => {
+                #[derive(Deserialize)]
+                struct IntrospectionResponse {
+                    active: bool,
+                }
+                match r.json::<IntrospectionResponse>().await {
+                    Ok(body) => body.active,
+                    Err(e) => {
+                        tracing::warn!("OAuth introspection parse error: {}", e);
+                        false
+                    }
+                }
+            }
+            Ok(r) => {
+                tracing::warn!("OAuth introspection HTTP error: {}", r.status());
+                false
+            }
+            Err(e) => {
+                tracing::warn!("OAuth introspection request failed: {}", e);
+                false
+            }
+        }
     }
 }
 
@@ -124,23 +185,57 @@ fn generate_random_string(length: usize) -> String {
 // ── Handlers ─────────────────────────────────────────────────────────────
 
 /// GET /.well-known/oauth-authorization-server
+///
+/// In external provider mode, returns the provider's OIDC endpoints.
+/// In built-in mode, returns this server's own OAuth endpoints.
 async fn metadata_handler(State(store): State<Arc<OAuthStore>>) -> impl IntoResponse {
-    let issuer = &store.config.issuer;
-    let metadata = AuthorizationMetadata {
-        issuer: issuer.clone(),
-        authorization_endpoint: format!("{}/oauth/authorize", issuer),
-        token_endpoint: format!("{}/oauth/token", issuer),
-        registration_endpoint: format!("{}/oauth/register", issuer),
-        scopes_supported: Some(vec!["mcp".to_string()]),
-        response_types_supported: vec!["code".to_string()],
-        grant_types_supported: vec!["authorization_code".to_string()],
-        token_endpoint_auth_methods_supported: vec![
-            "client_secret_post".to_string(),
-            "none".to_string(),
-        ],
-        code_challenge_methods_supported: vec!["S256".to_string(), "plain".to_string()],
-    };
-    (StatusCode::OK, Json(metadata))
+    if let Some(ref provider) = store.config.provider {
+        // External provider mode: point clients to the provider's endpoints
+        let base = &provider.url;
+        let metadata = AuthorizationMetadata {
+            issuer: base.clone(),
+            authorization_endpoint: format!(
+                "{}/protocol/openid-connect/auth",
+                base
+            ),
+            token_endpoint: format!(
+                "{}/protocol/openid-connect/token",
+                base
+            ),
+            registration_endpoint: Some(format!(
+                "{}/clients-registrations/openid-connect",
+                base
+            )),
+            scopes_supported: Some(vec!["openid".to_string(), "profile".to_string()]),
+            response_types_supported: vec!["code".to_string()],
+            grant_types_supported: vec!["authorization_code".to_string()],
+            token_endpoint_auth_methods_supported: vec![
+                "client_secret_post".to_string(),
+                "client_secret_basic".to_string(),
+                "none".to_string(),
+            ],
+            code_challenge_methods_supported: vec!["S256".to_string(), "plain".to_string()],
+        };
+        (StatusCode::OK, Json(metadata))
+    } else {
+        // Built-in mode
+        let issuer = &store.config.issuer;
+        let metadata = AuthorizationMetadata {
+            issuer: issuer.clone(),
+            authorization_endpoint: format!("{}/oauth/authorize", issuer),
+            token_endpoint: format!("{}/oauth/token", issuer),
+            registration_endpoint: Some(format!("{}/oauth/register", issuer)),
+            scopes_supported: Some(vec!["mcp".to_string()]),
+            response_types_supported: vec!["code".to_string()],
+            grant_types_supported: vec!["authorization_code".to_string()],
+            token_endpoint_auth_methods_supported: vec![
+                "client_secret_post".to_string(),
+                "none".to_string(),
+            ],
+            code_challenge_methods_supported: vec!["S256".to_string(), "plain".to_string()],
+        };
+        (StatusCode::OK, Json(metadata))
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -158,10 +253,7 @@ struct AuthorizeQuery {
     code_challenge_method: Option<String>,
 }
 
-/// GET /oauth/authorize
-///
-/// Auto-approves and redirects back with an authorization code.
-/// Clients must first register via /oauth/register.
+/// GET /oauth/authorize  (built-in mode only)
 async fn authorize_handler(
     Query(params): Query<AuthorizeQuery>,
     State(store): State<Arc<OAuthStore>>,
@@ -177,7 +269,6 @@ async fn authorize_handler(
             .into_response();
     }
 
-    // Validate client
     let clients = store.clients.read().await;
     let client = match clients.get(&params.client_id) {
         Some(c) => c.clone(),
@@ -195,7 +286,6 @@ async fn authorize_handler(
     };
     drop(clients);
 
-    // Validate redirect_uri
     if !client.redirect_uris.contains(&params.redirect_uri) {
         return (
             StatusCode::BAD_REQUEST,
@@ -207,7 +297,6 @@ async fn authorize_handler(
             .into_response();
     }
 
-    // Generate authorization code and store session
     let auth_code = format!("mcp-code-{}", generate_random_string(32));
 
     let session = AuthSession {
@@ -224,7 +313,6 @@ async fn authorize_handler(
         .await
         .insert(auth_code.clone(), session);
 
-    // Redirect back to the client with the authorization code
     let mut redirect_url = format!("{}?code={}", params.redirect_uri, auth_code);
     if let Some(state) = params.state {
         redirect_url.push_str(&format!("&state={}", state));
@@ -250,7 +338,7 @@ struct TokenRequest {
     code_verifier: Option<String>,
 }
 
-/// POST /oauth/token
+/// POST /oauth/token  (built-in mode only)
 async fn token_handler(
     State(store): State<Arc<OAuthStore>>,
     request: Request<Body>,
@@ -294,7 +382,6 @@ async fn token_handler(
             .into_response();
     }
 
-    // Consume the authorization code (single use) and get the session
     let session = match store.codes.write().await.remove(&token_req.code) {
         Some(s) => s,
         None => {
@@ -309,7 +396,6 @@ async fn token_handler(
         }
     };
 
-    // Validate redirect_uri matches
     if !token_req.redirect_uri.is_empty() && token_req.redirect_uri != session.redirect_uri {
         return (
             StatusCode::BAD_REQUEST,
@@ -321,7 +407,7 @@ async fn token_handler(
             .into_response();
     }
 
-    // Validate PKCE code_verifier if code_challenge was provided
+    // PKCE verification
     if let Some(ref challenge) = session.code_challenge {
         let verifier = match &token_req.code_verifier {
             Some(v) => v,
@@ -363,7 +449,6 @@ async fn token_handler(
         }
     }
 
-    // Issue an access token
     let access_token = format!("mcp-at-{}", generate_random_string(48));
     store
         .tokens
@@ -383,7 +468,7 @@ async fn token_handler(
     (StatusCode::OK, Json(response)).into_response()
 }
 
-/// POST /oauth/register  (RFC 7591 Dynamic Client Registration)
+/// POST /oauth/register  (RFC 7591 Dynamic Client Registration, built-in mode only)
 async fn register_handler(
     State(store): State<Arc<OAuthStore>>,
     Json(req): Json<ClientRegistrationRequest>,
@@ -459,23 +544,32 @@ pub async fn token_validation_middleware(
 
 // ── Router builder ───────────────────────────────────────────────────────
 
-/// Build an Axum router with OAuth endpoints (metadata, authorize, token, register).
-/// These endpoints are public (no auth required). Merge this into the main app router.
+/// Build an Axum router with OAuth endpoints.
+///
+/// In **external provider mode**, only the metadata discovery endpoint is served;
+/// authorize/token/register are handled by the external provider directly.
+///
+/// In **built-in mode**, all OAuth endpoints are served locally.
 pub fn oauth_router(store: Arc<OAuthStore>) -> Router {
-    Router::new()
-        .route(
-            "/.well-known/oauth-authorization-server",
-            get(metadata_handler),
-        )
-        .route("/oauth/authorize", get(authorize_handler))
-        .route("/oauth/token", post(token_handler))
-        .route("/oauth/register", post(register_handler))
-        .with_state(store)
+    let mut router = Router::new().route(
+        "/.well-known/oauth-authorization-server",
+        get(metadata_handler),
+    );
+
+    // Only add built-in OAuth endpoints when not using an external provider
+    if store.config.provider.is_none() {
+        router = router
+            .route("/oauth/authorize", get(authorize_handler))
+            .route("/oauth/token", post(token_handler))
+            .route("/oauth/register", post(register_handler));
+    }
+
+    router.with_state(store)
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
-/// Base64-URL-encode without padding (RFC 4648 §5), used for PKCE S256.
+/// Base64-URL-encode without padding (RFC 4648 section 5), used for PKCE S256.
 fn base64url_encode(data: &[u8]) -> String {
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut encoded = String::with_capacity((data.len() + 2) / 3 * 4);

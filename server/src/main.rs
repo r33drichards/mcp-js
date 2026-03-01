@@ -20,7 +20,7 @@ use engine::heap_tags::HeapTagStore;
 use engine::session_log::SessionLog;
 use mcp::{McpService, StatelessMcpService};
 use cluster::{ClusterConfig, ClusterNode};
-use oauth::{OAuthConfig, OAuthStore};
+use oauth::{OAuthConfig, OAuthStore, ExternalProviderConfig};
 
 fn default_max_concurrent() -> usize {
     std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4)
@@ -169,6 +169,23 @@ struct Cli {
     /// Set this to the server's public base URL when behind a reverse proxy.
     #[arg(long, requires = "oauth")]
     oauth_issuer: Option<String>,
+
+    /// External OIDC provider URL (e.g. http://keycloak:8080/realms/mcp).
+    /// When set, the server delegates authentication to this provider and
+    /// validates tokens via its introspection endpoint. The metadata discovery
+    /// endpoint will point MCP clients to the provider's authorize/token URLs.
+    #[arg(long, requires = "oauth")]
+    oauth_provider_url: Option<String>,
+
+    /// Client ID for the MCP server to authenticate with the external
+    /// OIDC provider's introspection endpoint.
+    #[arg(long, requires = "oauth_provider_url")]
+    oauth_client_id: Option<String>,
+
+    /// Client secret for the MCP server to authenticate with the external
+    /// OIDC provider's introspection endpoint.
+    #[arg(long, requires = "oauth_provider_url")]
+    oauth_client_secret: Option<String>,
 }
 
 #[tokio::main]
@@ -359,8 +376,24 @@ async fn main() -> Result<()> {
     let oauth_store: Option<Arc<OAuthStore>> = if cli.oauth {
         let port = cli.http_port.or(cli.sse_port).unwrap_or(0);
         let issuer = cli.oauth_issuer.unwrap_or_else(|| format!("http://0.0.0.0:{}", port));
-        tracing::info!("OAuth enabled (issuer: {})", issuer);
-        Some(Arc::new(OAuthStore::new(OAuthConfig { issuer })))
+
+        let provider = if let Some(provider_url) = cli.oauth_provider_url {
+            let client_id = cli.oauth_client_id
+                .expect("--oauth-client-id is required when --oauth-provider-url is set");
+            let client_secret = cli.oauth_client_secret
+                .expect("--oauth-client-secret is required when --oauth-provider-url is set");
+            tracing::info!("OAuth enabled with external provider: {} (client_id: {})", provider_url, client_id);
+            Some(ExternalProviderConfig {
+                url: provider_url,
+                client_id,
+                client_secret,
+            })
+        } else {
+            tracing::info!("OAuth enabled with built-in provider (issuer: {})", issuer);
+            None
+        };
+
+        Some(Arc::new(OAuthStore::new(OAuthConfig { issuer, provider })))
     } else {
         None
     };
