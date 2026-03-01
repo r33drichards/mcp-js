@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use deno_core::ModuleLoadOptions;
 use deno_core::ModuleLoadReferrer;
 use deno_core::ModuleLoadResponse;
@@ -13,17 +15,15 @@ use deno_error::JsErrorBox;
 use futures::FutureExt;
 use serde::Serialize;
 
-use super::opa::OpaClient;
+use super::opa::PolicyChain;
 
 /// Configuration for the module loader controlling external module access.
 #[derive(Clone, Debug)]
 pub struct ModuleLoaderConfig {
     /// When false, all external module imports (npm:, jsr:, URL) are rejected.
     pub allow_external: bool,
-    /// Optional OPA client for auditing module imports before fetching.
-    pub opa_client: Option<OpaClient>,
-    /// OPA policy path for module auditing (e.g. "mcp/modules").
-    pub opa_module_policy: Option<String>,
+    /// Optional policy chain for module auditing (from `--policies-json`).
+    pub policy_chain: Option<Arc<PolicyChain>>,
 }
 
 /// Input sent to OPA for module import auditing.
@@ -51,7 +51,7 @@ struct ModuleUrlParsed {
 /// URLs so that packages are served as standard ES modules.
 ///
 /// When `allow_external` is false, all external module imports are rejected
-/// at resolution time. When an OPA module policy is configured, each module
+/// at resolution time. When a policy chain is configured, each module
 /// is audited against the policy before being fetched from the network.
 pub struct NetworkModuleLoader {
     client: reqwest::Client,
@@ -64,8 +64,7 @@ impl NetworkModuleLoader {
             client: reqwest::Client::new(),
             config: ModuleLoaderConfig {
                 allow_external: true,
-                opa_client: None,
-                opa_module_policy: None,
+                policy_chain: None,
             },
         }
     }
@@ -148,13 +147,12 @@ impl ModuleLoader for NetworkModuleLoader {
 
         let client = self.client.clone();
         let specifier = module_specifier.clone();
-        let opa_client = self.config.opa_client.clone();
-        let opa_policy = self.config.opa_module_policy.clone();
+        let policy_chain = self.config.policy_chain.clone();
         let specifier_url_str = specifier.to_string();
 
         let fut = async move {
-            // OPA module audit: check with policy before fetching
-            if let (Some(opa), Some(policy_path)) = (&opa_client, &opa_policy) {
+            // Evaluate policy chain if configured.
+            if let Some(ref chain) = policy_chain {
                 let parsed = url::Url::parse(specifier_url_str.as_str()).ok();
                 let url_parsed = parsed.as_ref().map(|p| ModuleUrlParsed {
                     scheme: p.scheme().to_string(),
@@ -166,7 +164,6 @@ impl ModuleLoader for NetworkModuleLoader {
                     path: String::new(),
                 });
 
-                // Determine specifier type from the resolved URL
                 let spec_type = if specifier_url_str.contains("esm.sh/jsr/") {
                     "jsr"
                 } else if specifier_url_str.contains("esm.sh/") {
@@ -175,18 +172,23 @@ impl ModuleLoader for NetworkModuleLoader {
                     "url"
                 };
 
-                let policy_input = ModulePolicyInput {
+                let chain_input = ModulePolicyInput {
                     specifier: specifier_url_str.clone(),
                     specifier_type: spec_type.to_string(),
                     resolved_url: specifier_url_str.clone(),
                     url_parsed,
                 };
 
-                let allowed = opa
-                    .evaluate(policy_path, &policy_input)
+                let input_value = serde_json::to_value(&chain_input)
+                    .map_err(|e| JsErrorBox::generic(format!(
+                        "Failed to serialize module policy input: {}", e
+                    )))?;
+
+                let allowed = chain
+                    .evaluate(&input_value)
                     .await
                     .map_err(|e| JsErrorBox::generic(format!(
-                        "OPA module policy check failed for '{}': {}",
+                        "Module policy chain check failed for '{}': {}",
                         specifier, e
                     )))?;
 

@@ -32,8 +32,7 @@ services:
       - --directory-path=/data/heaps
       - --session-db-path=/data/sessions
       - --allow-external-modules
-      - --opa-url=http://opa:8181
-      - --opa-module-policy=mcp/modules
+      - --policies-json={"modules":{"policies":[{"url":"http://opa:8181","policy_path":"mcp/modules"}]}}
     tmpfs:
       - /data:uid=1000,gid=1000
     ports:

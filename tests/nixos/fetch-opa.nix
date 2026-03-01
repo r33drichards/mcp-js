@@ -42,8 +42,14 @@ in
         nodeId = "test";
         stateless = true;
         httpPort = 3000;
-        opaUrl = "http://localhost:8181";
-        opaFetchPolicy = "mcp/fetch";
+        policiesJson = builtins.toJSON {
+          fetch = {
+            policies = [{
+              url = "http://localhost:8181";
+              policy_path = "mcp/fetch";
+            }];
+          };
+        };
       };
 
       # ── OPA server ───────────────────────────────────────────────────
