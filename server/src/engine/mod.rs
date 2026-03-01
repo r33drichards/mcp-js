@@ -1,6 +1,7 @@
 pub mod console;
 pub mod execution;
 pub mod fetch;
+pub mod fs;
 pub mod heap_storage;
 pub mod heap_tags;
 pub mod module_loader;
@@ -719,6 +720,7 @@ pub fn execute_stateless(
     wasm_modules: &[WasmModule],
     wasm_default_max_bytes: usize,
     fetch_config: Option<&fetch::FetchConfig>,
+    fs_config: Option<&fs::FsConfig>,
     console_tree: Option<sled::Tree>,
     module_loader_config: Option<&module_loader::ModuleLoaderConfig>,
 ) -> (Result<String, String>, bool) {
@@ -734,6 +736,9 @@ pub fn execute_stateless(
         }
         if fetch_config.is_some() {
             extensions.push(fetch::create_extension());
+        }
+        if fs_config.is_some() {
+            extensions.push(fs::create_extension());
         }
 
         // When the code contains ES module syntax (import/export) we need a
@@ -764,6 +769,11 @@ pub fn execute_stateless(
             runtime.op_state().borrow_mut().put(fc.clone());
         }
 
+        // Put fs config in OpState if OPA is configured.
+        if let Some(fsc) = fs_config {
+            runtime.op_state().borrow_mut().put(fsc.clone());
+        }
+
         // Publish handle immediately so caller can terminate us.
         *isolate_handle.lock().unwrap() = Some(
             runtime.v8_isolate().thread_safe_handle()
@@ -785,6 +795,12 @@ pub fn execute_stateless(
                 // Inject fetch() JS wrapper if OPA is configured.
                 if fetch_config.is_some() {
                     if let Err(e) = fetch::inject_fetch(&mut runtime) {
+                        return Err(e);
+                    }
+                }
+                // Inject fs JS wrapper if OPA is configured.
+                if fs_config.is_some() {
+                    if let Err(e) = fs::inject_fs(&mut runtime) {
                         return Err(e);
                     }
                 }
@@ -828,6 +844,7 @@ pub fn execute_stateful(
     wasm_modules: &[WasmModule],
     wasm_default_max_bytes: usize,
     fetch_config: Option<&fetch::FetchConfig>,
+    fs_config: Option<&fs::FsConfig>,
     console_tree: Option<sled::Tree>,
     module_loader_config: Option<&module_loader::ModuleLoaderConfig>,
 ) -> (Result<(String, Vec<u8>, String), String>, bool) {
@@ -862,6 +879,9 @@ pub fn execute_stateful(
         if fetch_config.is_some() {
             extensions.push(fetch::create_extension());
         }
+        if fs_config.is_some() {
+            extensions.push(fs::create_extension());
+        }
 
         let module_loader: Option<Rc<dyn deno_core::ModuleLoader>> = if use_modules {
             match module_loader_config {
@@ -890,6 +910,11 @@ pub fn execute_stateful(
             runtime.op_state().borrow_mut().put(fc.clone());
         }
 
+        // Put fs config in OpState if OPA is configured.
+        if let Some(fsc) = fs_config {
+            runtime.op_state().borrow_mut().put(fsc.clone());
+        }
+
         // Publish handle immediately so caller can terminate us.
         *isolate_handle.lock().unwrap() = Some(
             runtime.v8_isolate().thread_safe_handle()
@@ -912,6 +937,12 @@ pub fn execute_stateful(
                 // Inject fetch() JS wrapper if OPA is configured.
                 if fetch_config.is_some() {
                     if let Err(e) = fetch::inject_fetch(&mut runtime) {
+                        return Err(e);
+                    }
+                }
+                // Inject fs JS wrapper if OPA is configured.
+                if fs_config.is_some() {
+                    if let Err(e) = fs::inject_fs(&mut runtime) {
                         return Err(e);
                     }
                 }
@@ -995,6 +1026,8 @@ pub struct Engine {
     wasm_modules: Arc<Vec<WasmModule>>,
     /// OPA-gated fetch configuration. When Some, `fetch()` is injected into the JS runtime.
     fetch_config: Option<Arc<fetch::FetchConfig>>,
+    /// OPA-gated filesystem configuration. When Some, `fs.*` methods are injected into the JS runtime.
+    fs_config: Option<Arc<fs::FsConfig>>,
     /// Execution registry for async execution tracking and console output.
     execution_registry: Option<Arc<ExecutionRegistry>>,
     /// Module loader configuration controlling external module access and OPA auditing.
@@ -1018,6 +1051,7 @@ impl Engine {
             wasm_default_max_bytes: DEFAULT_WASM_MAX_BYTES,
             wasm_modules: Arc::new(Vec::new()),
             fetch_config: None,
+            fs_config: None,
             execution_registry: None,
             module_loader_config: Arc::new(module_loader::ModuleLoaderConfig {
                 allow_external: false,
@@ -1046,6 +1080,7 @@ impl Engine {
             wasm_default_max_bytes: DEFAULT_WASM_MAX_BYTES,
             wasm_modules: Arc::new(Vec::new()),
             fetch_config: None,
+            fs_config: None,
             execution_registry: None,
             module_loader_config: Arc::new(module_loader::ModuleLoaderConfig {
                 allow_external: false,
@@ -1070,6 +1105,12 @@ impl Engine {
     /// Enable OPA-gated fetch() in the JS runtime.
     pub fn with_fetch_config(mut self, config: fetch::FetchConfig) -> Self {
         self.fetch_config = Some(Arc::new(config));
+        self
+    }
+
+    /// Enable OPA-gated filesystem access in the JS runtime.
+    pub fn with_fs_config(mut self, config: fs::FsConfig) -> Self {
+        self.fs_config = Some(Arc::new(config));
         self
     }
 
@@ -1175,10 +1216,11 @@ impl Engine {
                 let wasm = self.wasm_modules.clone();
                 let wasm_default = self.wasm_default_max_bytes;
                 let fc = self.fetch_config.clone();
+                let fsc = self.fs_config.clone();
                 let ct = console_tree;
                 let mlc = self.module_loader_config.clone();
                 let mut join_handle = tokio::task::spawn_blocking(move || {
-                    execute_stateless(&code, max_bytes, ih, &wasm, wasm_default, fc.as_deref(), Some(ct), Some(&mlc))
+                    execute_stateless(&code, max_bytes, ih, &wasm, wasm_default, fc.as_deref(), fsc.as_deref(), Some(ct), Some(&mlc))
                 });
 
                 // Publish isolate handle for cancellation once it's available.
@@ -1227,13 +1269,14 @@ impl Engine {
                 let wasm = self.wasm_modules.clone();
                 let wasm_default = self.wasm_default_max_bytes;
                 let fc = self.fetch_config.clone();
+                let fsc = self.fs_config.clone();
                 let ct = console_tree;
                 let mlc = self.module_loader_config.clone();
 
                 let snap_mutex = self.snapshot_mutex.clone();
                 let mut join_handle = tokio::task::spawn_blocking(move || {
                     let _guard = snap_mutex.blocking_lock();
-                    execute_stateful(&code, raw_snapshot, max_bytes, ih, &wasm, wasm_default, fc.as_deref(), Some(ct), Some(&mlc))
+                    execute_stateful(&code, raw_snapshot, max_bytes, ih, &wasm, wasm_default, fc.as_deref(), fsc.as_deref(), Some(ct), Some(&mlc))
                 });
 
                 // Publish isolate handle for cancellation.
