@@ -29,7 +29,7 @@ in
   name = "mcp-js-fs-opa";
 
   nodes = {
-    machine = { lib, ... }: {
+    machine = { ... }: {
       imports = [ ../../nix/module.nix ];
 
       # ── mcp-js server (stateless, with filesystem policy) ────────────
@@ -48,10 +48,6 @@ in
         };
       };
 
-      # DynamicUser implies PrivateTmp; disable it so the service sees
-      # the /tmp/allowed directory the test script creates.
-      systemd.services.mcp-js.serviceConfig.PrivateTmp = lib.mkForce false;
-
       networking.firewall.allowedTCPPorts = [ 3000 ];
     };
   };
@@ -64,9 +60,6 @@ in
     machine.start()
     machine.wait_for_unit("mcp-js.service")
     machine.wait_for_open_port(3000)
-
-    # Create the allowed directory
-    machine.succeed("mkdir -p /tmp/allowed")
 
     def exec_js(code):
         """Execute JS code via mcp-js async /api/exec endpoint and return parsed response."""
@@ -92,6 +85,11 @@ in
             time.sleep(0.5)
 
         raise Exception("Execution " + exec_id + " did not complete within 30s")
+
+    # Create the allowed directory inside the service's private /tmp
+    # (DynamicUser=true implies PrivateTmp, so shell mkdir is invisible to the service)
+    setup = exec_js('(async () => { await fs.mkdir("/tmp/allowed/", {recursive: true}); return "ok"; })()')
+    assert setup["output"] == "ok", "Failed to create /tmp/allowed: " + str(setup)
 
     # ── Test 1: Write and read a file in allowed directory ────────────
 
