@@ -24,6 +24,10 @@ jobs:
           - fuzz_execute_stateless
           - fuzz_execute_stateful
           - fuzz_wasm_compile
+          - fuzz_fs_operations
+          - fuzz_fetch_operations
+          - fuzz_parameter_validation
+          - fuzz_module_resolution
 
     steps:
       - name: Checkout code
