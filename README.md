@@ -872,8 +872,6 @@ You can configure heap storage using the following command line arguments:
 
 ## Limitations
 
-- **No `fetch` or network access by default**: When the server is started with `--opa-url`, a `fetch(url, opts?)` function becomes available following the web standard Fetch API. Each request is checked against an OPA policy before execution. Without `--opa-url`, there is no network access. See [OPA-Gated Fetch](#opa-gated-fetch) for details.
-- **No filesystem access by default**: When the server is configured with policies (see [Policy-Gated Filesystem Access](#policy-gated-filesystem-access)), an `fs` module becomes available for Node.js-compatible file operations. Each operation is checked against a Rego policy before execution.
 - **No timers**: Functions like `setTimeout` and `setInterval` are not available.
 - **No DOM or browser APIs**: This is not a browser environment; there is no access to `window`, `document`, or other browser-specific objects.
 - **TypeScript: type removal only**: TypeScript type annotations are stripped before execution. No type checking is performed — invalid types are silently removed, not reported as errors.
