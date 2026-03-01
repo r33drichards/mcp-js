@@ -41,7 +41,6 @@ use crate::engine::heap_tags::{HeapTagStore, HeapTagEntry};
 use crate::engine::session_log::{SessionLog, SessionLogEntry};
 use wasmparser::Validator;
 
-pub const DEFAULT_HEAP_MEMORY_MAX_MB: usize = 8;
 pub const DEFAULT_EXECUTION_TIMEOUT_SECS: u64 = 30;
 /// Default maximum native memory (bytes) a WASM module may declare when no
 /// per-module limit is set. 16 MiB.
