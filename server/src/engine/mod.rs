@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -56,6 +57,16 @@ pub const MIN_HEAP_MEMORY_MB: usize = 8;
 pub fn initialize_v8() {
     // deno_core initializes V8 automatically on first JsRuntime creation.
     // Kept for backward compatibility with callers (main.rs, tests, fuzz).
+}
+
+// ── V8 platform singleton (needed for CppHeap in snapshot runtimes) ─────
+
+static V8_PLATFORM: OnceLock<v8::SharedRef<v8::Platform>> = OnceLock::new();
+
+fn get_or_create_platform() -> v8::SharedRef<v8::Platform> {
+    V8_PLATFORM
+        .get_or_init(|| v8::new_default_platform(0, false).make_shared())
+        .clone()
 }
 
 // ── Snapshot envelope ───────────────────────────────────────────────────
@@ -931,6 +942,22 @@ pub fn execute_stateful(
 
     let result = catch_unwind(AssertUnwindSafe(|| {
         let params = create_params_with_heap_limit(heap_memory_max_bytes);
+
+        // Only create a CppHeap when cppgc-managed ops (console, fetch) are
+        // registered.  V8's SnapshotCreator does not cleanly destroy CppHeaps
+        // across many rapid create/destroy cycles, so we avoid creating one
+        // when it is not needed.
+        let needs_cpp_heap = console_tree.is_some() || fetch_config.is_some();
+        let params = if needs_cpp_heap {
+            let platform = get_or_create_platform();
+            let cpp_heap = v8::cppgc::Heap::create(
+                platform,
+                v8::cppgc::HeapCreateParams::default(),
+            );
+            params.cpp_heap(cpp_heap)
+        } else {
+            params
+        };
 
         // Box::leak to get &'static [u8] required by RuntimeOptions::startup_snapshot.
         // We reclaim the memory after the runtime is consumed by snapshot().
