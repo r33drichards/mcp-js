@@ -100,6 +100,24 @@ in
       default = null;
       description = "JSON policy configuration (inline JSON or path to a JSON file). Enables fetch() and/or module policy gating via local Rego files and/or remote OPA servers.";
     };
+
+    opaFsPolicy = lib.mkOption {
+      type = lib.types.str;
+      default = "mcp/fs";
+      description = "OPA policy path for filesystem operations (appended to /v1/data/).";
+    };
+
+    allowExternalModules = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = "Allow external module imports (npm:, jsr:, URL).";
+    };
+
+    opaModulePolicy = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = "OPA policy path for module import auditing (appended to /v1/data/).";
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -155,8 +173,23 @@ in
               "--policies-json"
               "'${cfg.policiesJson}'"
             ];
+
+            opaArgs = lib.optionals (cfg.opaUrl != null) [
+              "--opa-url"
+              cfg.opaUrl
+              "--opa-fetch-policy"
+              cfg.opaFetchPolicy
+              "--opa-fs-policy"
+              cfg.opaFsPolicy
+            ];
+
+            moduleArgs = lib.optionals cfg.allowExternalModules [ "--allow-external-modules" ]
+              ++ lib.optionals (cfg.opaModulePolicy != null) [
+                "--opa-module-policy"
+                cfg.opaModulePolicy
+              ];
           in
-          lib.concatStringsSep " " (baseArgs ++ storageArgs ++ peerArgs ++ statelessArgs ++ advertiseArgs ++ joinArgs ++ policiesArgs);
+          lib.concatStringsSep " " (baseArgs ++ storageArgs ++ peerArgs ++ statelessArgs ++ advertiseArgs ++ joinArgs ++ policiesArgs ++ opaArgs ++ moduleArgs);
 
         Restart = "on-failure";
         RestartSec = "2s";
