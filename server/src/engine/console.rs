@@ -4,11 +4,16 @@
 //! calls and streams the output as a byte stream into a sled tree. Writes are
 //! buffered in-memory and flushed to sled in fixed-size pages (WAL-style) for
 //! efficient batching.
+//!
+//! Uses V8's cppgc (Oilpan garbage collector) to manage the `ConsoleWriter`
+//! lifetime — the JS wrapper holds the native writer object, and V8's GC
+//! reclaims it when it goes out of scope.
 
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use deno_core::{JsRuntime, OpState, op2};
+use deno_core::GarbageCollected;
 
 // ── Configuration ────────────────────────────────────────────────────────
 
@@ -17,21 +22,35 @@ use deno_core::{JsRuntime, OpState, op2};
 /// execution end.
 const PAGE_SIZE: usize = 4096;
 
-/// Per-execution console output state, stored in deno_core's `OpState`.
-/// Buffers console output bytes and flushes them to sled in fixed-size pages.
-pub struct ConsoleLogState {
+// ── cppgc-managed ConsoleWriter ─────────────────────────────────────────
+
+/// Per-execution console output writer, tracked by V8's Oilpan garbage
+/// collector. Buffers console output bytes and flushes them to sled in
+/// fixed-size pages. Interior mutability via RefCell since cppgc hands
+/// out `&self` references.
+pub struct ConsoleWriter {
     tree: sled::Tree,
     seq: AtomicU64,
     buffer: RefCell<Vec<u8>>,
 }
 
-// Safety: ConsoleLogState is only accessed from a single V8 thread.
-// The RefCell ensures runtime borrow checking. AtomicU64 is inherently
-// thread-safe. sled::Tree is Send+Sync.
-unsafe impl Send for ConsoleLogState {}
-unsafe impl Sync for ConsoleLogState {}
+// Safety: ConsoleWriter is only accessed from the single V8 thread that
+// owns the isolate. RefCell provides runtime borrow checking within that
+// thread. AtomicU64 is inherently thread-safe. sled::Tree is Send+Sync.
+unsafe impl Send for ConsoleWriter {}
+unsafe impl Sync for ConsoleWriter {}
 
-impl ConsoleLogState {
+unsafe impl GarbageCollected for ConsoleWriter {
+    fn trace(&self, _visitor: &mut deno_core::v8::cppgc::Visitor) {
+        // No pointers to other GC objects — nothing to trace.
+    }
+
+    fn get_name(&self) -> &'static std::ffi::CStr {
+        c"ConsoleWriter"
+    }
+}
+
+impl ConsoleWriter {
     pub fn new(tree: sled::Tree) -> Self {
         Self {
             tree,
@@ -62,15 +81,22 @@ impl ConsoleLogState {
     }
 }
 
-// ── Op definition ────────────────────────────────────────────────────────
+// ── Op definitions ──────────────────────────────────────────────────────
+
+/// Create a cppgc-managed ConsoleWriter from the sled tree stored in OpState.
+/// Called once during JS wrapper initialization.
+#[op2]
+#[cppgc]
+fn op_console_init(state: &mut OpState) -> ConsoleWriter {
+    let tree = state.take::<sled::Tree>();
+    ConsoleWriter::new(tree)
+}
 
 /// Sync op: writes formatted console output bytes into the buffered WAL.
-/// Called from JS via `Deno.core.ops.op_console_write(msg, level)`.
+/// Called from JS via the console wrapper, passing the cppgc writer handle.
 /// level: 0=log, 1=info, 2=warn, 3=error
 #[op2(fast)]
-fn op_console_write(state: &mut OpState, #[string] msg: &str, #[smi] level: i32) {
-    let console_state = state.borrow::<ConsoleLogState>();
-
+fn op_console_write(#[cppgc] writer: &ConsoleWriter, #[string] msg: &str, #[smi] level: i32) {
     let formatted = match level {
         2 => format!("[WARN] {}\n", msg),
         3 => format!("[ERROR] {}\n", msg),
@@ -78,14 +104,14 @@ fn op_console_write(state: &mut OpState, #[string] msg: &str, #[smi] level: i32)
         _ => format!("{}\n", msg),
     };
 
-    console_state.write(formatted.as_bytes());
+    writer.write(formatted.as_bytes());
 }
 
 // ── Extension registration ───────────────────────────────────────────────
 
 deno_core::extension!(
     console_ext,
-    ops = [op_console_write],
+    ops = [op_console_init, op_console_write],
 );
 
 /// Create the console extension for use in `RuntimeOptions::extensions`.
@@ -113,9 +139,17 @@ pub fn inject_console_snapshot(runtime: &mut deno_core::JsRuntimeForSnapshot) ->
 }
 
 /// JavaScript wrapper that overrides `globalThis.console` to route output
-/// through `op_console_write`.
+/// through the cppgc-managed `ConsoleWriter` via `op_console_write`.
+///
+/// The writer is created once via `op_console_init` and stored in a closure.
+/// It's also set as `globalThis.__console_writer` so Rust can access it
+/// for flushing via the V8 global object.
 const CONSOLE_JS_WRAPPER: &str = r#"
 (function() {
+    var writer;
+    if (Deno.core.ops.op_console_init) {
+        writer = Deno.core.ops.op_console_init();
+    }
     function formatArgs(args) {
         return args.map(function(a) {
             if (typeof a === 'string') return a;
@@ -123,33 +157,46 @@ const CONSOLE_JS_WRAPPER: &str = r#"
         }).join(' ');
     }
     globalThis.console = {
-        log: function() { Deno.core.ops.op_console_write(formatArgs(Array.from(arguments)), 0); },
-        info: function() { Deno.core.ops.op_console_write(formatArgs(Array.from(arguments)), 1); },
-        warn: function() { Deno.core.ops.op_console_write(formatArgs(Array.from(arguments)), 2); },
-        error: function() { Deno.core.ops.op_console_write(formatArgs(Array.from(arguments)), 3); },
-        debug: function() { Deno.core.ops.op_console_write(formatArgs(Array.from(arguments)), 0); },
-        trace: function() { Deno.core.ops.op_console_write(formatArgs(Array.from(arguments)), 0); },
+        log: function() { if (writer) Deno.core.ops.op_console_write(writer, formatArgs(Array.from(arguments)), 0); },
+        info: function() { if (writer) Deno.core.ops.op_console_write(writer, formatArgs(Array.from(arguments)), 1); },
+        warn: function() { if (writer) Deno.core.ops.op_console_write(writer, formatArgs(Array.from(arguments)), 2); },
+        error: function() { if (writer) Deno.core.ops.op_console_write(writer, formatArgs(Array.from(arguments)), 3); },
+        debug: function() { if (writer) Deno.core.ops.op_console_write(writer, formatArgs(Array.from(arguments)), 0); },
+        trace: function() { if (writer) Deno.core.ops.op_console_write(writer, formatArgs(Array.from(arguments)), 0); },
     };
+    globalThis.__console_writer = writer;
 })();
 "#;
 
 // ── Flush helper ─────────────────────────────────────────────────────────
 
-/// Flush any remaining console output from the runtime's OpState.
-/// Call this after V8 execution completes but before the runtime is dropped.
+/// Flush any remaining console output from the cppgc-managed ConsoleWriter.
+/// Retrieves the writer from `globalThis.__console_writer` via V8's global
+/// object and calls flush(). Call after V8 execution completes but before
+/// the runtime is dropped.
 pub fn flush_console(runtime: &mut JsRuntime) {
-    let state = runtime.op_state();
-    let state = state.borrow();
-    if let Some(console_state) = state.try_borrow::<ConsoleLogState>() {
-        console_state.flush();
+    use deno_core::v8;
+
+    deno_core::scope!(scope, runtime);
+    let global = scope.get_current_context().global(scope);
+    let key = v8::String::new(scope, "__console_writer").unwrap();
+    if let Some(val) = global.get(scope, key.into()) {
+        if let Some(writer) = deno_core::cppgc::try_unwrap_cppgc_object::<ConsoleWriter>(scope, val) {
+            writer.flush();
+        }
     }
 }
 
 /// Flush helper for JsRuntimeForSnapshot (stateful mode).
 pub fn flush_console_snapshot(runtime: &mut deno_core::JsRuntimeForSnapshot) {
-    let state = runtime.op_state();
-    let state = state.borrow();
-    if let Some(console_state) = state.try_borrow::<ConsoleLogState>() {
-        console_state.flush();
+    use deno_core::v8;
+
+    deno_core::scope!(scope, runtime);
+    let global = scope.get_current_context().global(scope);
+    let key = v8::String::new(scope, "__console_writer").unwrap();
+    if let Some(val) = global.get(scope, key.into()) {
+        if let Some(writer) = deno_core::cppgc::try_unwrap_cppgc_object::<ConsoleWriter>(scope, val) {
+            writer.flush();
+        }
     }
 }

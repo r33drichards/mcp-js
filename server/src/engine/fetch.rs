@@ -1,7 +1,8 @@
 //! OPA-gated `fetch()` implementation for the JavaScript runtime.
 //!
-//! Uses a deno_core async op (`op_fetch`) to perform truly non-blocking HTTP
-//! requests. Each request is evaluated against an OPA policy before execution.
+//! Uses V8's cppgc (Oilpan garbage collector) to manage the `FetchResponse`
+//! lifetime — the JS wrapper holds the native response object, and accessor
+//! ops extract fields on demand (no JSON serialization round-trip).
 //!
 //! The `fetch()` function follows the web standard Fetch API:
 //! ```js
@@ -21,6 +22,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use deno_core::{JsRuntime, OpState, op2};
+use deno_core::GarbageCollected;
 use deno_error::JsErrorBox;
 use serde::{Deserialize, Serialize};
 
@@ -127,20 +129,49 @@ struct UrlParsed {
     query: String,
 }
 
+// ── cppgc-managed FetchResponse ─────────────────────────────────────────
+
+/// HTTP response tracked by V8's Oilpan garbage collector.
+/// Fields are accessed via dedicated ops (no JSON serialization).
+pub struct FetchResponse {
+    status: u16,
+    status_text: String,
+    url: String,
+    headers: HashMap<String, String>,
+    body: String,
+    redirected: bool,
+}
+
+unsafe impl GarbageCollected for FetchResponse {
+    fn trace(&self, _visitor: &mut deno_core::v8::cppgc::Visitor) {
+        // No pointers to other GC objects — nothing to trace.
+    }
+
+    fn get_name(&self) -> &'static std::ffi::CStr {
+        c"FetchResponse"
+    }
+}
+
+// Safety: FetchResponse is only accessed from the single V8 thread.
+// The async op creates it on a background task, but it's moved to V8's
+// GC heap (single-threaded) before any JS code can access it.
+unsafe impl Send for FetchResponse {}
+unsafe impl Sync for FetchResponse {}
+
 // ── Async deno_core op ──────────────────────────────────────────────────
 
 /// Async op: performs an OPA-gated HTTP fetch. Called from JS via
 /// `Deno.core.ops.op_fetch(url, method, headersJson, body)`.
-/// Returns a JSON string with {status, statusText, url, headers, body}.
+/// Returns a cppgc-managed FetchResponse object.
 #[op2(async)]
-#[string]
+#[cppgc]
 async fn op_fetch(
     state: Rc<RefCell<OpState>>,
     #[string] url: String,
     #[string] method: String,
     #[string] headers_json: String,
     #[string] body: String,
-) -> Result<String, JsErrorBox> {
+) -> Result<FetchResponse, JsErrorBox> {
     // Clone config from OpState before any .await (Rc is !Send).
     let (policy_chain, http_client, header_rules) = {
         let state = state.borrow();
@@ -169,11 +200,61 @@ async fn op_fetch(
     .map_err(|e| JsErrorBox::generic(e))
 }
 
+// ── Response accessor ops ───────────────────────────────────────────────
+
+#[op2(fast)]
+fn op_fetch_status(#[cppgc] resp: &FetchResponse) -> u32 {
+    resp.status as u32
+}
+
+#[op2(fast)]
+fn op_fetch_ok(#[cppgc] resp: &FetchResponse) -> bool {
+    resp.status >= 200 && resp.status < 300
+}
+
+#[op2(fast)]
+fn op_fetch_redirected(#[cppgc] resp: &FetchResponse) -> bool {
+    resp.redirected
+}
+
+#[op2]
+#[string]
+fn op_fetch_status_text(#[cppgc] resp: &FetchResponse) -> String {
+    resp.status_text.clone()
+}
+
+#[op2]
+#[string]
+fn op_fetch_url(#[cppgc] resp: &FetchResponse) -> String {
+    resp.url.clone()
+}
+
+#[op2]
+#[string]
+fn op_fetch_headers(#[cppgc] resp: &FetchResponse) -> String {
+    serde_json::to_string(&resp.headers).unwrap_or_else(|_| "{}".to_string())
+}
+
+#[op2]
+#[string]
+fn op_fetch_body(#[cppgc] resp: &FetchResponse) -> String {
+    resp.body.clone()
+}
+
 // ── Extension registration ──────────────────────────────────────────────
 
 deno_core::extension!(
     fetch_ext,
-    ops = [op_fetch],
+    ops = [
+        op_fetch,
+        op_fetch_status,
+        op_fetch_ok,
+        op_fetch_redirected,
+        op_fetch_status_text,
+        op_fetch_url,
+        op_fetch_headers,
+        op_fetch_body,
+    ],
 );
 
 /// Create the fetch extension for use in `RuntimeOptions::extensions`.
@@ -192,10 +273,18 @@ pub fn inject_fetch(runtime: &mut JsRuntime) -> Result<(), String> {
     Ok(())
 }
 
+/// Overload for JsRuntimeForSnapshot (stateful mode).
+pub fn inject_fetch_snapshot(runtime: &mut deno_core::JsRuntimeForSnapshot) -> Result<(), String> {
+    runtime
+        .execute_script("<fetch-setup>", FETCH_JS_WRAPPER.to_string())
+        .map_err(|e| format!("Failed to install fetch wrapper: {}", e))?;
+    Ok(())
+}
+
 /// JavaScript wrapper that provides the web-standard Fetch API.
 /// The async op `Deno.core.ops.op_fetch(url, method, headersJson, body)`
-/// returns a Promise<string> with JSON {status, statusText, url, headers, body}.
-/// This wrapper parses it into a proper Response-like object.
+/// returns a cppgc-managed FetchResponse. Accessor ops extract fields
+/// on demand — no JSON serialization round-trip.
 const FETCH_JS_WRAPPER: &str = r#"
 (function() {
     function Headers(init) {
@@ -247,36 +336,37 @@ const FETCH_JS_WRAPPER: &str = r#"
 
         const headersJson = JSON.stringify(normalizedHeaders);
 
-        // Async op — truly non-blocking, returns a Promise
-        const rawResult = await Deno.core.ops.op_fetch(resource, method, headersJson, body);
-        const result = JSON.parse(rawResult);
+        // Async op — returns a cppgc-managed FetchResponse
+        const resp = await Deno.core.ops.op_fetch(resource, method, headersJson, body);
 
-        const responseBody = result.body;
-        const responseHeaders = new Headers(result.headers);
+        // Parse response headers from the cppgc object
+        const respHeadersJson = Deno.core.ops.op_fetch_headers(resp);
+        const responseHeaders = new Headers(JSON.parse(respHeadersJson));
 
         return {
-            ok: result.status >= 200 && result.status < 300,
-            status: result.status,
-            statusText: result.statusText,
-            url: result.url,
+            get ok() { return Deno.core.ops.op_fetch_ok(resp); },
+            get status() { return Deno.core.ops.op_fetch_status(resp); },
+            get statusText() { return Deno.core.ops.op_fetch_status_text(resp); },
+            get url() { return Deno.core.ops.op_fetch_url(resp); },
             headers: responseHeaders,
-            redirected: result.redirected || false,
+            get redirected() { return Deno.core.ops.op_fetch_redirected(resp); },
             type: 'basic',
             bodyUsed: false,
-            text: function() { return Promise.resolve(responseBody); },
-            json: function() { return Promise.resolve(JSON.parse(responseBody)); },
+            text: function() { return Promise.resolve(Deno.core.ops.op_fetch_body(resp)); },
+            json: function() { return Promise.resolve(JSON.parse(Deno.core.ops.op_fetch_body(resp))); },
             clone: function() {
+                const bodyText = Deno.core.ops.op_fetch_body(resp);
                 return {
-                    ok: this.ok,
-                    status: this.status,
-                    statusText: this.statusText,
-                    url: this.url,
-                    headers: this.headers,
-                    redirected: this.redirected,
-                    type: this.type,
+                    ok: Deno.core.ops.op_fetch_ok(resp),
+                    status: Deno.core.ops.op_fetch_status(resp),
+                    statusText: Deno.core.ops.op_fetch_status_text(resp),
+                    url: Deno.core.ops.op_fetch_url(resp),
+                    headers: responseHeaders,
+                    redirected: Deno.core.ops.op_fetch_redirected(resp),
+                    type: 'basic',
                     bodyUsed: false,
-                    text: function() { return Promise.resolve(responseBody); },
-                    json: function() { return Promise.resolve(JSON.parse(responseBody)); },
+                    text: function() { return Promise.resolve(bodyText); },
+                    json: function() { return Promise.resolve(JSON.parse(bodyText)); },
                 };
             }
         };
@@ -286,7 +376,7 @@ const FETCH_JS_WRAPPER: &str = r#"
 
 // ── Pure-Rust fetch implementation (no V8 types) ─────────────────────────
 
-/// Execute a policy-gated HTTP fetch. All V8 interaction happens in the caller.
+/// Execute a policy-gated HTTP fetch. Returns a FetchResponse struct.
 async fn do_fetch(
     url_str: String,
     method: String,
@@ -295,7 +385,7 @@ async fn do_fetch(
     policy_chain: Arc<PolicyChain>,
     http_client: reqwest::Client,
     header_rules: Vec<HeaderRule>,
-) -> Result<String, String> {
+) -> Result<FetchResponse, String> {
     let mut headers: HashMap<String, String> = serde_json::from_str(&headers_json)
         .map_err(|e| format!("fetch: invalid headers JSON: {}", e))?;
 
@@ -380,16 +470,16 @@ async fn do_fetch(
         .await
         .map_err(|e| format!("fetch: failed to read response body: {}", e))?;
 
-    let result = serde_json::json!({
-        "status": status,
-        "statusText": status_text,
-        "url": final_url,
-        "headers": resp_headers,
-        "body": resp_body,
-        "redirected": final_url != url_str,
-    });
+    let redirected = final_url != url_str;
 
-    Ok(result.to_string())
+    Ok(FetchResponse {
+        status,
+        status_text,
+        url: final_url,
+        headers: resp_headers,
+        body: resp_body,
+        redirected,
+    })
 }
 
 #[cfg(test)]
