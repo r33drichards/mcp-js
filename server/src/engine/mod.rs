@@ -3,10 +3,12 @@ pub mod execution;
 pub mod fetch;
 pub mod heap_storage;
 pub mod heap_tags;
+pub mod module_loader;
 pub mod opa;
 pub mod session_log;
 
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -15,7 +17,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ffi::c_void;
 use std::alloc::{Layout, alloc_zeroed, alloc, dealloc};
 use deno_core::v8;
-use deno_core::{JsRuntime, JsRuntimeForSnapshot, RuntimeOptions};
+use deno_core::{JsRuntime, JsRuntimeForSnapshot, ModuleSpecifier, RuntimeOptions};
 use sha2::{Sha256, Digest};
 
 use swc_core::common::{
@@ -661,6 +663,118 @@ fn execute_and_stringify(runtime: &mut JsRuntime, code: &str) -> Result<String, 
     }
 }
 
+/// Check whether the (already TypeScript-stripped) code uses ES module syntax
+/// (`import` / `export` declarations). When it does, the code must be
+/// evaluated as an ES module rather than a classic script.
+pub fn has_module_syntax(code: &str) -> bool {
+    for line in code.lines() {
+        let t = line.trim();
+        // Static import declaration: import ... from "..."
+        // Side-effect import: import "..."
+        // Named/default import: import { ... } from "..."
+        if t.starts_with("import ") || t.starts_with("import{") || t.starts_with("import\"") || t.starts_with("import'") {
+            // Exclude dynamic import() which is an expression, not a declaration.
+            // After SWC emitting, a static import always looks like
+            //   import ... from "...";
+            // while dynamic import is a call expression: import("...")
+            if !t.starts_with("import(") {
+                return true;
+            }
+        }
+        if t.starts_with("export ") || t.starts_with("export{") || t.starts_with("export*") || t.starts_with("export default") {
+            return true;
+        }
+    }
+    false
+}
+
+/// Transform module code so that the last expression statement is captured
+/// in `globalThis.__result__`, allowing us to return it after evaluation.
+pub fn prepare_module_result(code: &str) -> String {
+    let lines: Vec<&str> = code.lines().collect();
+
+    // Find the last non-empty, non-comment line.
+    let last_idx = lines.iter().rposition(|l| {
+        let t = l.trim();
+        !t.is_empty() && !t.starts_with("//") && !t.starts_with("/*")
+    });
+
+    if let Some(idx) = last_idx {
+        let last = lines[idx].trim();
+
+        // Only wrap bare expression statements — skip declarations, imports,
+        // exports, control flow, and blocks.
+        let dominated = last.starts_with("import ")
+            || last.starts_with("export ")
+            || last.starts_with("const ")
+            || last.starts_with("let ")
+            || last.starts_with("var ")
+            || last.starts_with("function ")
+            || last.starts_with("class ")
+            || last.starts_with("if ")
+            || last.starts_with("if(")
+            || last.starts_with("for ")
+            || last.starts_with("for(")
+            || last.starts_with("while ")
+            || last.starts_with("while(")
+            || last.starts_with("switch ")
+            || last.starts_with("try ")
+            || last.starts_with("return ")
+            || last.starts_with("throw ")
+            || last.starts_with('{')
+            || last.starts_with('}');
+
+        if !dominated {
+            let expr = last.trim_end_matches(';');
+            let mut result = lines[..idx].join("\n");
+            result.push('\n');
+            result.push_str(&format!("globalThis.__result__ = ({});\n", expr));
+            return result;
+        }
+    }
+
+    code.to_string()
+}
+
+/// Execute code as an ES module, supporting `import` declarations for
+/// `npm:`, `jsr:`, and URL specifiers. Returns the stringified value of
+/// `globalThis.__result__` (set by `prepare_module_result`).
+fn execute_module(runtime: &mut JsRuntime, code: &str) -> Result<String, String> {
+    let code = prepare_module_result(code);
+
+    let handle = tokio::runtime::Handle::current();
+    let main_url = ModuleSpecifier::parse("file:///main.js")
+        .map_err(|e| format!("internal specifier error: {}", e))?;
+
+    let mod_id = handle
+        .block_on(runtime.load_main_es_module_from_code(&main_url, code))
+        .map_err(|e| format!("{}", e))?;
+
+    let eval_future = runtime.mod_evaluate(mod_id);
+
+    handle
+        .block_on(runtime.run_event_loop(Default::default()))
+        .map_err(|e| format!("{}", e))?;
+
+    handle.block_on(eval_future).map_err(|e| format!("{}", e))?;
+
+    // Read the captured result.
+    let result = runtime
+        .execute_script(
+            "<get_result>",
+            "typeof globalThis.__result__ !== 'undefined' ? String(globalThis.__result__) : 'undefined'"
+                .to_string(),
+        )
+        .map_err(|e| format!("{}", e))?;
+
+    deno_core::scope!(scope, runtime);
+    let local = v8::Local::new(scope, result);
+    local
+        .to_string(scope)
+        .map(|s| s.to_rust_string_lossy(scope))
+        .ok_or_else(|| "Failed to convert module result to string".to_string())
+}
+
 /// Stateless execution — creates a fresh JsRuntime (no snapshot).
 /// Publishes an IsolateHandle for external cancellation.
 /// Returns (result, oom_flag).
@@ -675,6 +789,8 @@ pub fn execute_stateless(
 ) -> (Result<String, String>, bool) {
     let oom_flag = Arc::new(AtomicBool::new(false));
 
+    let use_modules = has_module_syntax(code);
+
     let result = catch_unwind(AssertUnwindSafe(|| {
         let params = create_params_with_heap_limit(heap_memory_max_bytes);
         let mut extensions = Vec::new();
@@ -684,9 +800,19 @@ pub fn execute_stateless(
         if fetch_config.is_some() {
             extensions.push(fetch::create_extension());
         }
+
+        // When the code contains ES module syntax (import/export) we need a
+        // module loader that can resolve npm:/jsr:/URL specifiers.
+        let module_loader: Option<Rc<dyn deno_core::ModuleLoader>> = if use_modules {
+            Some(Rc::new(module_loader::NetworkModuleLoader::new()))
+        } else {
+            None
+        };
+
         let mut runtime = JsRuntime::new(RuntimeOptions {
             create_params: Some(params),
             extensions,
+            module_loader,
             ..Default::default()
         });
 
@@ -724,7 +850,11 @@ pub fn execute_stateless(
                         return Err(e);
                     }
                 }
-                execute_and_stringify(&mut runtime, code)
+                if use_modules {
+                    execute_module(&mut runtime, code)
+                } else {
+                    execute_and_stringify(&mut runtime, code)
+                }
             }
         };
 
@@ -764,6 +894,8 @@ pub fn execute_stateful(
 ) -> (Result<(String, Vec<u8>, String), String>, bool) {
     let oom_flag = Arc::new(AtomicBool::new(false));
 
+    let use_modules = has_module_syntax(code);
+
     let result = catch_unwind(AssertUnwindSafe(|| {
         let params = create_params_with_heap_limit(heap_memory_max_bytes);
 
@@ -791,10 +923,18 @@ pub fn execute_stateful(
         if fetch_config.is_some() {
             extensions.push(fetch::create_extension());
         }
+
+        let module_loader: Option<Rc<dyn deno_core::ModuleLoader>> = if use_modules {
+            Some(Rc::new(module_loader::NetworkModuleLoader::new()))
+        } else {
+            None
+        };
+
         let mut runtime = JsRuntimeForSnapshot::new(RuntimeOptions {
             create_params: Some(params),
             startup_snapshot,
             extensions,
+            module_loader,
             ..Default::default()
         });
 
@@ -833,7 +973,11 @@ pub fn execute_stateful(
                         return Err(e);
                     }
                 }
-                execute_and_stringify(&mut runtime, code)
+                if use_modules {
+                    execute_module(&mut runtime, code)
+                } else {
+                    execute_and_stringify(&mut runtime, code)
+                }
             }
         };
 
