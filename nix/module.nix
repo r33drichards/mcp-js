@@ -106,6 +106,24 @@ in
       default = "mcp/fetch";
       description = "OPA policy path for fetch requests (appended to /v1/data/).";
     };
+
+    opaFsPolicy = lib.mkOption {
+      type = lib.types.str;
+      default = "mcp/fs";
+      description = "OPA policy path for filesystem operations (appended to /v1/data/).";
+    };
+
+    allowExternalModules = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = "Allow external module imports (npm:, jsr:, URL).";
+    };
+
+    opaModulePolicy = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = "OPA policy path for module import auditing (appended to /v1/data/).";
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -162,9 +180,17 @@ in
               cfg.opaUrl
               "--opa-fetch-policy"
               cfg.opaFetchPolicy
+              "--opa-fs-policy"
+              cfg.opaFsPolicy
             ];
+
+            moduleArgs = lib.optionals cfg.allowExternalModules [ "--allow-external-modules" ]
+              ++ lib.optionals (cfg.opaModulePolicy != null) [
+                "--opa-module-policy"
+                cfg.opaModulePolicy
+              ];
           in
-          lib.concatStringsSep " " (baseArgs ++ storageArgs ++ peerArgs ++ statelessArgs ++ advertiseArgs ++ joinArgs ++ opaArgs);
+          lib.concatStringsSep " " (baseArgs ++ storageArgs ++ peerArgs ++ statelessArgs ++ advertiseArgs ++ joinArgs ++ opaArgs ++ moduleArgs);
 
         Restart = "on-failure";
         RestartSec = "2s";
