@@ -10,18 +10,7 @@
 use std::path::Path;
 use std::sync::Mutex;
 
-use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-
-// ── PolicyEvaluator trait ────────────────────────────────────────────────
-
-/// A single policy evaluator. Implementations include remote OPA servers
-/// and local Rego file evaluation.
-#[async_trait]
-pub trait PolicyEvaluator: Send + Sync + std::fmt::Debug {
-    /// Evaluate the policy with the given input. Returns `Ok(true)` if allowed.
-    async fn evaluate_policy(&self, input: &serde_json::Value) -> Result<bool, String>;
-}
 
 // ── Remote (OPA REST API) evaluator ──────────────────────────────────────
 
@@ -89,7 +78,7 @@ impl OpaClient {
     }
 }
 
-/// Wraps an [`OpaClient`] + policy path as a [`PolicyEvaluator`].
+/// Wraps an [`OpaClient`] + policy path for remote policy evaluation.
 #[derive(Debug)]
 pub struct RemotePolicyEvaluator {
     client: OpaClient,
@@ -103,10 +92,7 @@ impl RemotePolicyEvaluator {
             policy_path,
         }
     }
-}
 
-#[async_trait]
-impl PolicyEvaluator for RemotePolicyEvaluator {
     async fn evaluate_policy(&self, input: &serde_json::Value) -> Result<bool, String> {
         self.client.evaluate(&self.policy_path, input).await
     }
@@ -169,11 +155,8 @@ impl LocalPolicyEvaluator {
             eval_rule,
         })
     }
-}
 
-#[async_trait]
-impl PolicyEvaluator for LocalPolicyEvaluator {
-    async fn evaluate_policy(&self, input: &serde_json::Value) -> Result<bool, String> {
+    fn evaluate_policy(&self, input: &serde_json::Value) -> Result<bool, String> {
         let input_clone = input.clone();
         let eval_rule = self.eval_rule.clone();
 
@@ -191,6 +174,25 @@ impl PolicyEvaluator for LocalPolicyEvaluator {
         engine.set_input(regorus::Value::new_object());
 
         Ok(result == regorus::Value::from(true))
+    }
+}
+
+// ── PolicyEvaluatorKind ──────────────────────────────────────────────────
+
+/// Enum dispatch for policy evaluators, avoiding `async_trait` boxing which
+/// can conflict with deno_core's op driver `RefCell` polling internals.
+#[derive(Debug)]
+pub enum PolicyEvaluatorKind {
+    Remote(RemotePolicyEvaluator),
+    Local(LocalPolicyEvaluator),
+}
+
+impl PolicyEvaluatorKind {
+    async fn evaluate_policy(&self, input: &serde_json::Value) -> Result<bool, String> {
+        match self {
+            Self::Remote(e) => e.evaluate_policy(input).await,
+            Self::Local(e) => e.evaluate_policy(input),
+        }
     }
 }
 
@@ -212,15 +214,15 @@ impl Default for EvalMode {
     }
 }
 
-/// An ordered list of [`PolicyEvaluator`]s with a configurable [`EvalMode`].
+/// An ordered list of policy evaluators with a configurable [`EvalMode`].
 #[derive(Debug)]
 pub struct PolicyChain {
-    evaluators: Vec<Box<dyn PolicyEvaluator>>,
+    evaluators: Vec<PolicyEvaluatorKind>,
     mode: EvalMode,
 }
 
 impl PolicyChain {
-    pub fn new(evaluators: Vec<Box<dyn PolicyEvaluator>>, mode: EvalMode) -> Self {
+    pub fn new(evaluators: Vec<PolicyEvaluatorKind>, mode: EvalMode) -> Self {
         Self { evaluators, mode }
     }
 
@@ -297,7 +299,7 @@ pub fn build_policy_chain(
     default_remote_path: &str,
     default_local_rule: &str,
 ) -> Result<PolicyChain, String> {
-    let mut evaluators: Vec<Box<dyn PolicyEvaluator>> = Vec::new();
+    let mut evaluators: Vec<PolicyEvaluatorKind> = Vec::new();
 
     for source in &op_policies.policies {
         if source.url.starts_with("http://") || source.url.starts_with("https://") {
@@ -305,7 +307,7 @@ pub fn build_policy_chain(
                 .policy_path
                 .clone()
                 .unwrap_or_else(|| default_remote_path.to_string());
-            evaluators.push(Box::new(RemotePolicyEvaluator::new(
+            evaluators.push(PolicyEvaluatorKind::Remote(RemotePolicyEvaluator::new(
                 source.url.clone(),
                 policy_path,
             )));
@@ -317,11 +319,11 @@ pub fn build_policy_chain(
 
             let path = Path::new(file_path);
             if path.is_dir() {
-                evaluators.push(Box::new(
+                evaluators.push(PolicyEvaluatorKind::Local(
                     LocalPolicyEvaluator::from_directory(path, rule)?,
                 ));
             } else {
-                evaluators.push(Box::new(
+                evaluators.push(PolicyEvaluatorKind::Local(
                     LocalPolicyEvaluator::from_file(path, rule)?,
                 ));
             }
@@ -385,7 +387,7 @@ allow if {
 
         let eval = LocalPolicyEvaluator::from_file(&path, "data.mcp.test.allow".to_string()).unwrap();
         let input = serde_json::json!({"method": "GET"});
-        assert!(eval.evaluate_policy(&input).await.unwrap());
+        assert!(eval.evaluate_policy(&input).unwrap());
     }
 
     #[tokio::test]
@@ -395,7 +397,7 @@ allow if {
 
         let eval = LocalPolicyEvaluator::from_file(&path, "data.mcp.test.allow".to_string()).unwrap();
         let input = serde_json::json!({"method": "GET"});
-        assert!(!eval.evaluate_policy(&input).await.unwrap());
+        assert!(!eval.evaluate_policy(&input).unwrap());
     }
 
     #[tokio::test]
@@ -406,10 +408,10 @@ allow if {
         let eval = LocalPolicyEvaluator::from_file(&path, "data.mcp.fetch.allow".to_string()).unwrap();
 
         let get_input = serde_json::json!({"method": "GET"});
-        assert!(eval.evaluate_policy(&get_input).await.unwrap());
+        assert!(eval.evaluate_policy(&get_input).unwrap());
 
         let post_input = serde_json::json!({"method": "POST"});
-        assert!(!eval.evaluate_policy(&post_input).await.unwrap());
+        assert!(!eval.evaluate_policy(&post_input).unwrap());
     }
 
     #[tokio::test]
@@ -431,13 +433,13 @@ allow if { input.admin == true }
         let eval = LocalPolicyEvaluator::from_directory(dir.path(), "data.mcp.test.allow".to_string()).unwrap();
 
         let ok_input = serde_json::json!({"ok": true});
-        assert!(eval.evaluate_policy(&ok_input).await.unwrap());
+        assert!(eval.evaluate_policy(&ok_input).unwrap());
 
         let admin_input = serde_json::json!({"admin": true});
-        assert!(eval.evaluate_policy(&admin_input).await.unwrap());
+        assert!(eval.evaluate_policy(&admin_input).unwrap());
 
         let denied_input = serde_json::json!({"ok": false});
-        assert!(!eval.evaluate_policy(&denied_input).await.unwrap());
+        assert!(!eval.evaluate_policy(&denied_input).unwrap());
     }
 
     #[tokio::test]
@@ -450,21 +452,14 @@ allow if { input.admin == true }
 
     // ── PolicyChain tests ────────────────────────────────────────────────
 
-    /// Helper evaluator that always returns a fixed value.
-    #[derive(Debug)]
-    struct FixedEvaluator(bool);
-
-    #[async_trait]
-    impl PolicyEvaluator for FixedEvaluator {
-        async fn evaluate_policy(&self, _input: &serde_json::Value) -> Result<bool, String> {
-            Ok(self.0)
-        }
-    }
-
     #[tokio::test]
     async fn test_chain_all_mode_all_allow() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_rego_file(dir.path(), "allow.rego", allow_rego());
         let chain = PolicyChain::new(
-            vec![Box::new(FixedEvaluator(true)), Box::new(FixedEvaluator(true))],
+            vec![
+                PolicyEvaluatorKind::Local(LocalPolicyEvaluator::from_file(&path, "data.mcp.test.allow".to_string()).unwrap()),
+            ],
             EvalMode::All,
         );
         assert!(chain.evaluate(&serde_json::json!({})).await.unwrap());
@@ -472,17 +467,27 @@ allow if { input.admin == true }
 
     #[tokio::test]
     async fn test_chain_all_mode_one_denies() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_rego_file(dir.path(), "deny.rego", deny_rego());
         let chain = PolicyChain::new(
-            vec![Box::new(FixedEvaluator(true)), Box::new(FixedEvaluator(false))],
+            vec![
+                PolicyEvaluatorKind::Local(LocalPolicyEvaluator::from_file(&path, "data.mcp.test.allow".to_string()).unwrap()),
+            ],
             EvalMode::All,
         );
         assert!(!chain.evaluate(&serde_json::json!({})).await.unwrap());
     }
 
     #[tokio::test]
-    async fn test_chain_any_mode_one_allows() {
+    async fn test_chain_any_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let allow_path = write_rego_file(dir.path(), "allow.rego", allow_rego());
+        let deny_path = write_rego_file(dir.path(), "deny.rego", deny_rego());
         let chain = PolicyChain::new(
-            vec![Box::new(FixedEvaluator(false)), Box::new(FixedEvaluator(true))],
+            vec![
+                PolicyEvaluatorKind::Local(LocalPolicyEvaluator::from_file(&deny_path, "data.mcp.test.allow".to_string()).unwrap()),
+                PolicyEvaluatorKind::Local(LocalPolicyEvaluator::from_file(&allow_path, "data.mcp.test.allow".to_string()).unwrap()),
+            ],
             EvalMode::Any,
         );
         assert!(chain.evaluate(&serde_json::json!({})).await.unwrap());
@@ -490,8 +495,14 @@ allow if { input.admin == true }
 
     #[tokio::test]
     async fn test_chain_any_mode_all_deny() {
+        let dir = tempfile::tempdir().unwrap();
+        let path1 = write_rego_file(dir.path(), "deny1.rego", deny_rego());
+        let path2 = write_rego_file(dir.path(), "deny2.rego", deny_rego());
         let chain = PolicyChain::new(
-            vec![Box::new(FixedEvaluator(false)), Box::new(FixedEvaluator(false))],
+            vec![
+                PolicyEvaluatorKind::Local(LocalPolicyEvaluator::from_file(&path1, "data.mcp.test.allow".to_string()).unwrap()),
+                PolicyEvaluatorKind::Local(LocalPolicyEvaluator::from_file(&path2, "data.mcp.test.allow".to_string()).unwrap()),
+            ],
             EvalMode::Any,
         );
         assert!(!chain.evaluate(&serde_json::json!({})).await.unwrap());

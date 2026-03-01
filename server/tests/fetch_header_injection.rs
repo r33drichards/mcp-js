@@ -17,7 +17,7 @@ use serde_json::Value;
 use server::engine::{initialize_v8, Engine};
 use server::engine::fetch::{FetchConfig, HeaderRule};
 use server::engine::execution::ExecutionRegistry;
-use server::engine::opa::{EvalMode, PolicyChain, LocalPolicyEvaluator};
+use server::engine::opa::{EvalMode, PolicyChain, PolicyEvaluatorKind, LocalPolicyEvaluator};
 
 static INIT: Once = Once::new();
 
@@ -69,7 +69,7 @@ fn allow_all_chain() -> Arc<PolicyChain> {
     // Leak the tempdir so it persists for the test lifetime.
     std::mem::forget(dir);
     let evaluator = LocalPolicyEvaluator::from_file(&path, "data.mcp.fetch.allow".to_string()).unwrap();
-    Arc::new(PolicyChain::new(vec![Box::new(evaluator)], EvalMode::All))
+    Arc::new(PolicyChain::new(vec![PolicyEvaluatorKind::Local(evaluator)], EvalMode::All))
 }
 
 fn build_engine(header_rules: Vec<HeaderRule>) -> Engine {
