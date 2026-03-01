@@ -331,13 +331,38 @@ const result = say({ text: "Hello from mcp-js!" });
 console.log(result);
 "#;
 
-    let result = run_and_wait(&engine, code).await;
-    assert!(
-        result.is_ok(),
-        "npm cowsay import should succeed, got: {:?}",
-        result
-    );
-    assert_eq!(result.unwrap(), "undefined");
+    let exec_id = engine
+        .run_js(code.to_string(), None, None, None, Some(60), None)
+        .await
+        .expect("run_js should succeed");
+
+    for _ in 0..1200 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        if let Ok(info) = engine.get_execution(&exec_id) {
+            if info.status == "completed" {
+                let output = engine
+                    .get_execution_output(&exec_id, None, None, None, None)
+                    .expect("should get output");
+                assert!(
+                    output.data.contains("Hello from mcp-js!"),
+                    "Console output should contain 'Hello from mcp-js!', got: {}",
+                    output.data
+                );
+                assert!(
+                    output.data.contains("<") || output.data.contains("("),
+                    "Cowsay output should contain cow art, got: {}",
+                    output.data
+                );
+                return;
+            } else if info.status == "failed" || info.status == "timed_out" {
+                panic!(
+                    "Execution failed: {:?}",
+                    info.error.unwrap_or_else(|| info.status.clone())
+                );
+            }
+        }
+    }
+    panic!("Execution did not complete within timeout");
 }
 
 // ── Deno-style URL import of TypeScript (network required) ──────────────
