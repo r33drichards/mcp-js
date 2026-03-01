@@ -322,7 +322,12 @@ async fn main() -> Result<()> {
 
     // ── Execution registry ──────────────────────────────────────────────
     let exec_db_path = if cli.stateless {
-        "/tmp/mcp-v8-executions".to_string()
+        // Use http_port to avoid sled lock contention when multiple
+        // stateless nodes run on the same machine (e.g. cluster mode).
+        match cli.http_port {
+            Some(port) => format!("/tmp/mcp-v8-executions-{}", port),
+            None => "/tmp/mcp-v8-executions".to_string(),
+        }
     } else {
         format!("{}/executions", cli.session_db_path)
     };

@@ -88,15 +88,37 @@ in
     machine.wait_for_open_port(8080)
     machine.wait_for_open_port(8181)
 
+    import time
+
     def exec_js(code):
-        """Execute JS code via mcp-js /api/exec endpoint and return parsed response."""
+        """Execute JS code via mcp-js async /api/exec endpoint and return parsed response.
+
+        Submits the code (returns 202 + execution_id), then polls for completion.
+        Returns a dict with 'output' key for backward-compat with assertions.
+        """
         body = json.dumps({"code": code})
         raw = machine.succeed(
-            "curl -sf -X POST http://localhost:3000/api/exec "
+            "curl -s -X POST http://localhost:3000/api/exec "
             "-H 'Content-Type: application/json' "
             "-d " + shlex.quote(body)
         )
-        return json.loads(raw)
+        submit_resp = json.loads(raw)
+        exec_id = submit_resp["execution_id"]
+
+        # Poll until execution completes (up to 30s)
+        for _ in range(60):
+            status_raw = machine.succeed(
+                "curl -s http://localhost:3000/api/executions/" + exec_id
+            )
+            status_resp = json.loads(status_raw)
+            status = status_resp.get("status", "")
+            if status in ("Completed", "completed"):
+                return {"output": status_resp.get("result", "")}
+            if status in ("Failed", "failed", "TimedOut", "Cancelled"):
+                return {"output": "Error: " + status_resp.get("error", status)}
+            time.sleep(0.5)
+
+        raise Exception("Execution " + exec_id + " did not complete within 30s")
 
     # ── Test 1: Allowed fetch (GET to /allowed/) ────────────────────────
 

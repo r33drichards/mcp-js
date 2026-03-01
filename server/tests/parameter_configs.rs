@@ -6,6 +6,7 @@
 
 use std::sync::{Arc, Mutex, Once};
 use server::engine::{Engine, initialize_v8};
+use server::engine::execution::ExecutionRegistry;
 
 static INIT: Once = Once::new();
 
@@ -19,6 +20,34 @@ fn no_handle() -> Arc<Mutex<Option<deno_core::v8::IsolateHandle>>> {
     Arc::new(Mutex::new(None))
 }
 
+fn rand_id() -> u64 {
+    use std::time::SystemTime;
+    SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_nanos() as u64
+}
+
+fn make_registry() -> Arc<ExecutionRegistry> {
+    let tmp = std::env::temp_dir().join(format!("mcp-param-test-{}-{}", std::process::id(), rand_id()));
+    Arc::new(ExecutionRegistry::new(tmp.to_str().unwrap()).expect("Failed to create test registry"))
+}
+
+/// Submit code and wait for the result (blocking poll).
+async fn run_and_wait(engine: &Engine, code: &str) -> Result<String, String> {
+    let exec_id = engine.run_js(code.to_string(), None, None, None, None, None).await?;
+    for _ in 0..600 {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        if let Ok(info) = engine.get_execution(&exec_id) {
+            match info.status.as_str() {
+                "completed" => return info.result.ok_or_else(|| "No result".to_string()),
+                "failed" => return Err(info.error.unwrap_or_else(|| "Unknown error".to_string())),
+                "timed_out" => return Err("Timed out".to_string()),
+                "cancelled" => return Err("Cancelled".to_string()),
+                _ => continue,
+            }
+        }
+    }
+    Err("Execution did not complete within timeout".to_string())
+}
+
 // ── Timeout tests (async, using Engine::run_js) ─────────────────────────
 
 /// An infinite loop with a short timeout should return a descriptive timeout error.
@@ -26,11 +55,9 @@ fn no_handle() -> Arc<Mutex<Option<deno_core::v8::IsolateHandle>>> {
 async fn test_timeout_produces_descriptive_error() {
     ensure_v8();
 
-    let engine = Engine::new_stateless(64 * 1024 * 1024, 2, 4);
-    let result = engine.run_js(
-        "while (true) {}".to_string(),
-        None, None, None, None, None,
-    ).await;
+    let engine = Engine::new_stateless(64 * 1024 * 1024, 2, 4)
+        .with_execution_registry(make_registry());
+    let result = run_and_wait(&engine, "while (true) {}").await;
 
     assert!(result.is_err(), "Infinite loop should fail, got: {:?}", result);
     let err = result.unwrap_err();
@@ -48,11 +75,9 @@ async fn test_timeout_stateful_produces_descriptive_error() {
     let heap_storage = server::engine::heap_storage::AnyHeapStorage::File(
         server::engine::heap_storage::FileHeapStorage::new("/tmp/mcp-v8-test-timeout-stateful"),
     );
-    let engine = Engine::new_stateful(heap_storage, None, None, 64 * 1024 * 1024, 2, 4);
-    let result = engine.run_js(
-        "while (true) {}".to_string(),
-        None, None, None, None, None,
-    ).await;
+    let engine = Engine::new_stateful(heap_storage, None, None, 64 * 1024 * 1024, 2, 4)
+        .with_execution_registry(make_registry());
+    let result = run_and_wait(&engine, "while (true) {}").await;
 
     assert!(result.is_err(), "Infinite loop should fail, got: {:?}", result);
     let err = result.unwrap_err();
@@ -78,7 +103,7 @@ fn test_oom_produces_descriptive_error_not_crash() {
     "#;
     let heap_bytes = 16 * 1024 * 1024; // 16MB
 
-    let (result, _oom) = server::engine::execute_stateless(code, heap_bytes, no_handle(), &[], heap_bytes, None);
+    let (result, _oom) = server::engine::execute_stateless(code, heap_bytes, no_handle(), &[], heap_bytes, None, None);
 
     assert!(result.is_err(), "Huge allocation with small heap should fail, got: {:?}", result);
     let err = result.unwrap_err();
@@ -102,7 +127,7 @@ fn test_oom_stateful_produces_descriptive_error_not_crash() {
     "#;
     let heap_bytes = 16 * 1024 * 1024; // 16MB
 
-    let (result, _oom) = server::engine::execute_stateful(code, None, heap_bytes, no_handle(), &[], heap_bytes, None);
+    let (result, _oom) = server::engine::execute_stateful(code, None, heap_bytes, no_handle(), &[], heap_bytes, None, None);
 
     assert!(result.is_err(), "Huge allocation with small heap should fail, got: {:?}", result);
     let err = result.unwrap_err();
@@ -126,7 +151,7 @@ fn test_fast_computation_succeeds() {
     "#;
     let heap_bytes = 64 * 1024 * 1024;
 
-    let (result, _oom) = server::engine::execute_stateless(code, heap_bytes, no_handle(), &[], heap_bytes, None);
+    let (result, _oom) = server::engine::execute_stateless(code, heap_bytes, no_handle(), &[], heap_bytes, None, None);
 
     assert!(result.is_ok(), "Fast computation should succeed, got: {:?}", result);
     assert_eq!(result.unwrap(), "499999500000");
@@ -139,7 +164,7 @@ fn test_bare_call_default_params() {
 
     let heap_bytes = server::engine::DEFAULT_HEAP_MEMORY_MAX_MB * 1024 * 1024;
 
-    let (result, _oom) = server::engine::execute_stateless("1 + 1", heap_bytes, no_handle(), &[], heap_bytes, None);
+    let (result, _oom) = server::engine::execute_stateless("1 + 1", heap_bytes, no_handle(), &[], heap_bytes, None, None);
 
     assert!(result.is_ok(), "Simple expression should succeed, got: {:?}", result);
     assert_eq!(result.unwrap(), "2");

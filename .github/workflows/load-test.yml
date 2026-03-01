@@ -142,10 +142,14 @@ jobs:
           for URL in "${URLS[@]}"; do
             echo "Checking ${URL}..."
             for i in $(seq 1 60); do
-              if curl -sf --max-time 10 -o /dev/null -X POST "${URL}/api/exec" \
+              # The exec endpoint now returns 202 Accepted (async).
+              # Use -w to check the HTTP status code.
+              HTTP_CODE=$(curl -s --max-time 10 -o /dev/null -w '%{http_code}' \
+                -X POST "${URL}/api/exec" \
                 -H 'Content-Type: application/json' \
-                -d '{"code":"1"}' 2>/dev/null; then
-                echo "${URL} is ready (attempt ${i})"
+                -d '{"code":"1"}' 2>/dev/null || echo "000")
+              if [ "$HTTP_CODE" = "202" ] || [ "$HTTP_CODE" = "200" ]; then
+                echo "${URL} is ready (attempt ${i}, HTTP ${HTTP_CODE})"
                 break
               fi
               if [ "$i" -eq 60 ]; then
@@ -180,7 +184,7 @@ jobs:
           URL="${URLS[0]}"
 
           echo "=== Smoke test: POST /api/exec on ${URL} ==="
-          RESP=$(curl -sf --max-time 10 -X POST "${URL}/api/exec" \
+          RESP=$(curl -s --max-time 10 -X POST "${URL}/api/exec" \
             -H 'Content-Type: application/json' \
             -d '{"code":"1 + 1"}')
           echo "Response: $RESP"
@@ -191,14 +195,42 @@ jobs:
             exit 1
           fi
 
-          # Verify the output field contains "2"
-          OUTPUT=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('output',''))" 2>/dev/null || true)
-          if [ "$OUTPUT" != "2" ]; then
-            echo "ERROR: Expected output '2', got '${OUTPUT}'"
+          # The exec endpoint now returns 202 with an execution_id.
+          # Poll the execution status until it completes.
+          EXEC_ID=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('execution_id',''))" 2>/dev/null || true)
+          if [ -z "$EXEC_ID" ]; then
+            echo "ERROR: No execution_id in response"
             cat /tmp/loadtest/*.log || true
             exit 1
           fi
-          echo "Smoke test passed"
+          echo "Execution ID: $EXEC_ID"
+
+          # Poll for completion (up to 30 seconds)
+          for i in $(seq 1 30); do
+            STATUS_RESP=$(curl -s --max-time 10 "${URL}/api/executions/${EXEC_ID}" 2>/dev/null)
+            STATUS=$(echo "$STATUS_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null || true)
+            if [ "$STATUS" = "Completed" ] || [ "$STATUS" = "completed" ]; then
+              echo "Execution completed"
+              RESULT=$(echo "$STATUS_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('result',''))" 2>/dev/null || true)
+              echo "Result: $RESULT"
+              if [ "$RESULT" != "2" ]; then
+                echo "ERROR: Expected result '2', got '${RESULT}'"
+                cat /tmp/loadtest/*.log || true
+                exit 1
+              fi
+              echo "Smoke test passed"
+              exit 0
+            elif [ "$STATUS" = "Failed" ] || [ "$STATUS" = "failed" ]; then
+              echo "ERROR: Execution failed"
+              echo "$STATUS_RESP"
+              cat /tmp/loadtest/*.log || true
+              exit 1
+            fi
+            sleep 1
+          done
+          echo "ERROR: Execution did not complete within 30s"
+          cat /tmp/loadtest/*.log || true
+          exit 1
 
       # ── Load tests at each rate ─────────────────────────────────────
       - name: Run load tests
