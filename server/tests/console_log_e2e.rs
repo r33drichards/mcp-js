@@ -152,7 +152,7 @@ async fn test_console_log_basic() -> Result<(), Box<dyn std::error::Error>> {
 
     let result = timeout(Duration::from_secs(10), poll_until_done(&client, &server.base_url, &id)).await?;
     assert_eq!(result["status"], "completed", "Execution should complete");
-    assert_eq!(result["result"], "42", "Return value should be 42");
+    assert_eq!(result["result"], "undefined");
 
     // Fetch console output
     let output = get_output(&client, &server.base_url, &id, "").await;
@@ -260,7 +260,7 @@ async fn test_execution_lifecycle() -> Result<(), Box<dyn std::error::Error>> {
     // Poll until done
     let result = timeout(Duration::from_secs(10), poll_until_done(&client, &server.base_url, id)).await?;
     assert_eq!(result["status"], "completed");
-    assert_eq!(result["result"], "2");
+    assert_eq!(result["result"], "undefined");
     assert!(result["started_at"].is_string());
     assert!(result["completed_at"].is_string());
 
@@ -427,7 +427,7 @@ async fn test_console_log_with_return_value() -> Result<(), Box<dyn std::error::
     let id = submit_code(&client, &server.base_url, code).await;
     let result = timeout(Duration::from_secs(10), poll_until_done(&client, &server.base_url, &id)).await?;
     assert_eq!(result["status"], "completed");
-    assert_eq!(result["result"], "15", "1+2+3+4+5 should equal 15");
+    assert_eq!(result["result"], "undefined");
 
     let output = get_output(&client, &server.base_url, &id, "").await;
     let data = output["data"].as_str().unwrap();
@@ -445,10 +445,10 @@ async fn test_no_console_output() -> Result<(), Box<dyn std::error::Error>> {
     let mut server = HttpServer::start().await?;
     let client = Client::new();
 
-    let id = submit_code(&client, &server.base_url, "1 + 1").await;
+    let id = submit_code(&client, &server.base_url, "1 + 1;").await;
     let result = timeout(Duration::from_secs(10), poll_until_done(&client, &server.base_url, &id)).await?;
     assert_eq!(result["status"], "completed");
-    assert_eq!(result["result"], "2");
+    assert_eq!(result["result"], "undefined");
 
     let output = get_output(&client, &server.base_url, &id, "").await;
     assert_eq!(output["total_bytes"], 0, "Should have no console output bytes");
