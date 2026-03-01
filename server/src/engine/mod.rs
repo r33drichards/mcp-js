@@ -33,7 +33,6 @@ use swc_core::ecma::transforms::typescript::strip;
 
 use tokio::sync::Semaphore;
 
-use self::console::ConsoleLogState;
 use self::execution::{ExecutionId, ExecutionRegistry, ExecutionInfo, ExecutionSummary, ConsoleOutputPage};
 
 use crate::engine::heap_storage::{HeapStorage, AnyHeapStorage};
@@ -824,7 +823,7 @@ pub fn execute_stateless(
 
         // Put console log state in OpState.
         if let Some(tree) = console_tree {
-            runtime.op_state().borrow_mut().put(ConsoleLogState::new(tree));
+            runtime.op_state().borrow_mut().put(tree);
         }
 
         // Put fetch config in OpState if OPA is configured.
@@ -953,7 +952,7 @@ pub fn execute_stateful(
 
         // Put console log state in OpState.
         if let Some(tree) = console_tree {
-            runtime.op_state().borrow_mut().put(ConsoleLogState::new(tree));
+            runtime.op_state().borrow_mut().put(tree);
         }
 
         // Put fetch config in OpState if OPA is configured.
@@ -999,20 +998,28 @@ pub fn execute_stateful(
 
         *isolate_handle.lock().unwrap() = None;
 
-        // Consume runtime to create snapshot (replaces snapshot_creator.create_blob).
-        let snapshot_data = runtime.snapshot();
-
-        // Reclaim leaked snapshot input memory (safe: runtime is consumed).
-        if let Some((ptr, _)) = leaked_snapshot {
-            unsafe { let _ = Box::from_raw(ptr); }
-        }
-
+        // Only take a snapshot when execution succeeded — snapshotting a
+        // terminated / OOM isolate can leave cppgc-managed objects in an
+        // inconsistent state.
         match output_result {
             Ok(output) => {
+                let snapshot_data = runtime.snapshot();
+                // Reclaim leaked snapshot input memory (safe: runtime is consumed).
+                if let Some((ptr, _)) = leaked_snapshot {
+                    unsafe { let _ = Box::from_raw(ptr); }
+                }
                 let wrapped = wrap_snapshot(&snapshot_data);
                 Ok((output, wrapped.data, wrapped.content_hash))
             }
-            Err(e) => Err(e),
+            Err(e) => {
+                // Drop the runtime without snapshotting.
+                drop(runtime);
+                // Reclaim leaked snapshot input memory.
+                if let Some((ptr, _)) = leaked_snapshot {
+                    unsafe { let _ = Box::from_raw(ptr); }
+                }
+                Err(e)
+            }
         }
     }));
 
