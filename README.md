@@ -4,6 +4,8 @@ A Rust-based Model Context Protocol (MCP) server that exposes a V8 JavaScript ru
 
 ## Features
 
+- **Async Execution Model**: `run_js` returns immediately with an execution ID. Poll status with `get_execution`, read console output with `get_execution_output`, and cancel running executions with `cancel_execution`.
+- **Console Output**: Full support for `console.log`, `console.info`, `console.warn`, and `console.error`. Output is streamed to persistent storage during execution and can be read in real-time with paginated access (line-based or byte-based).
 - **Async/Await Support**: Full support for `async`/`await` and Promises via the deno_core event loop.
 - **V8 JavaScript Execution**: Run arbitrary JavaScript code in a secure, isolated V8 engine.
 - **TypeScript Support**: Run TypeScript code directly — types are stripped before execution using [SWC](https://swc.rs/). This is type removal only, not type checking.
@@ -185,6 +187,83 @@ mcp-v8 --directory-path /tmp/mcp-v8-heaps --sse-port 8081
 mcp-v8 --stateless --sse-port 8081
 ```
 
+## MCP Tools
+
+### Execution Workflow
+
+`run_js` uses an **async execution model** — it submits code for background execution and returns an execution ID immediately. Use `get_execution` to poll for completion and retrieve the result, and `get_execution_output` to read console output.
+
+```
+1. run_js(code)           → { execution_id }
+2. get_execution(id)      → { status: "running" | "completed" | "failed" | "cancelled" | "timed_out", result, error }
+3. get_execution_output(id, line_offset, line_limit)  → paginated console output
+```
+
+**Example:**
+
+```
+Call run_js with code: "console.log('hello'); 1 + 1;"
+  → { execution_id: "abc-123" }
+
+Call get_execution with execution_id: "abc-123"
+  → { status: "completed", result: "2" }
+
+Call get_execution_output with execution_id: "abc-123"
+  → { data: "hello\n", total_lines: 1 }
+```
+
+### Return Values
+
+The **last expression** in your code is the return value, available via `get_execution` once the execution completes:
+
+```javascript
+const result = 1 + 1;
+result;
+// → result: "2"
+```
+
+Objects must be serialized to see their contents:
+
+```javascript
+const obj = { a: 1, b: 2 };
+JSON.stringify(obj);
+// → result: '{"a":1,"b":2}'
+```
+
+### Console Output
+
+`console.log`, `console.info`, `console.warn`, and `console.error` are fully supported. Output is streamed to persistent storage during execution and can be read in real-time using `get_execution_output`.
+
+`get_execution_output` supports two pagination modes:
+
+- **Line mode**: `line_offset` + `line_limit` — fetch N lines starting from line M
+- **Byte mode**: `byte_offset` + `byte_limit` — fetch N bytes starting from byte M
+
+Both modes return position info in both coordinate systems for cross-referencing. Use `next_line_offset` or `next_byte_offset` from a response to resume reading.
+
+### Tools (All Modes)
+
+| Tool | Description |
+|------|-------------|
+| `run_js` | Submit JavaScript/TypeScript code for async execution. Returns an `execution_id` immediately. Parameters: `code` (required), `heap_memory_max_mb` (optional, 4–64, default: 8), `execution_timeout_secs` (optional, 1–300, default: 30). |
+| `get_execution` | Poll execution status and result. Returns `execution_id`, `status`, `result` (if completed), `error` (if failed), `started_at`, `completed_at`. |
+| `get_execution_output` | Read paginated console output. Supports line-based (`line_offset` + `line_limit`) or byte-based (`byte_offset` + `byte_limit`) pagination. |
+| `cancel_execution` | Terminate a running V8 execution. |
+| `list_executions` | List all executions with their status. |
+
+### Additional Tools (Stateful Mode Only)
+
+In stateful mode, `run_js` accepts additional parameters: `heap` (SHA-256 hash to resume from) and `session` (human-readable session name for logging).
+
+| Tool | Description |
+|------|-------------|
+| `list_sessions` | List all named sessions. |
+| `list_session_snapshots` | Browse execution history for a session. Accepts `session` (required) and `fields` (optional, comma-separated: `index`, `input_heap`, `output_heap`, `code`, `timestamp`). |
+| `get_heap_tags` | Get tags for a heap snapshot. |
+| `set_heap_tags` | Set or replace tags on a heap snapshot. |
+| `delete_heap_tags` | Delete specific tag keys from a heap snapshot. |
+| `query_heaps_by_tags` | Find heap snapshots matching tag criteria. |
+
 ## Stateless vs Stateful Mode
 
 ### Stateless Mode (`--stateless`)
@@ -226,10 +305,11 @@ The session database path defaults to `/tmp/mcp-v8-sessions` and can be overridd
 
 **Example workflow:**
 
-1. Call `run_js` with `code: "var x = 1; x;"` and `session: "my-project"` — the execution is logged.
-2. Pass the returned `heap` hash and `session: "my-project"` in subsequent calls to continue and log the session.
-3. Call `list_sessions` to see `["my-project"]`.
-4. Call `list_session_snapshots` with `session: "my-project"` to see the full execution history.
+1. Call `run_js` with `code: "var x = 1; x;"` and `session: "my-project"` → receives `execution_id`.
+2. Call `get_execution` with the `execution_id` → receives `{ status: "completed", result: "1", heap: "ab12..." }`.
+3. Pass the returned `heap` hash and `session: "my-project"` in subsequent `run_js` calls to continue and log the session.
+4. Call `list_sessions` to see `["my-project"]`.
+5. Call `list_session_snapshots` with `session: "my-project"` to see the full execution history.
 
 ## Integration
 
@@ -339,8 +419,13 @@ You can also use the hosted version on Railway without installing anything local
 
 ## Example Usage
 
-- Ask Claude or Cursor: "Run this JavaScript: `1 + 2`"
-- Use content-addressed heap snapshots to persist state between runs. The `run_js` tool returns a `heap` content hash after each execution — pass it back in the next call to resume that session.
+Ask Claude or Cursor: "Run this JavaScript: `1 + 2`"
+
+The agent will:
+1. Call `run_js` with `code: "1 + 2"` → receives `execution_id`
+2. Call `get_execution` with the `execution_id` → receives `{ status: "completed", result: "3" }`
+
+In stateful mode, `get_execution` also returns a `heap` content hash — pass it back in the next `run_js` call to resume from that state.
 
 ### WebAssembly
 
@@ -624,11 +709,12 @@ You can configure heap storage using the following command line arguments:
 
 ## Limitations
 
-While `mcp-v8` provides a powerful and persistent JavaScript execution environment, there are limitations to its runtime. 
+While `mcp-v8` provides a powerful and persistent JavaScript execution environment, there are limitations to its runtime.
 
+- **Async execution model**: `run_js` returns immediately with an execution ID. Use `get_execution` to poll for the result and `get_execution_output` to read console output. Each execution runs in a fresh V8 isolate — no state is shared between calls (unless using stateful mode with heap snapshots).
 - **`async`/`await` and Promises**: Fully supported. If your code returns a Promise, the runtime resolves it automatically.
+- **`console.log` supported**: `console.log`, `console.info`, `console.warn`, and `console.error` are captured and available via `get_execution_output` with paginated access.
 - **No `fetch` or network access by default**: When the server is started with `--opa-url`, a `fetch(url, opts?)` function becomes available following the web standard Fetch API. Each request is checked against an OPA policy before execution. Without `--opa-url`, there is no network access. See [OPA-Gated Fetch](#opa-gated-fetch) for details.
-- **No `console.log` or standard output**: Output from `console.log` or similar functions will not appear. To return results, ensure the value you want is the last line of your code.
 - **No file system access**: The runtime does not provide access to the local file system or environment variables.
 - **No `npm install` or external packages**: You cannot install or import npm packages. Only standard JavaScript (ECMAScript) built-ins are available.
 - **No timers**: Functions like `setTimeout` and `setInterval` are not available.
