@@ -321,15 +321,12 @@ async fn main() -> Result<()> {
     };
 
     // ── Execution registry ──────────────────────────────────────────────
-    let exec_db_path = if cli.stateless {
-        // Use http_port to avoid sled lock contention when multiple
-        // stateless nodes run on the same machine (e.g. cluster mode).
-        match cli.http_port {
-            Some(port) => format!("/tmp/mcp-v8-executions-{}", port),
-            None => "/tmp/mcp-v8-executions".to_string(),
-        }
-    } else {
-        format!("{}/executions", cli.session_db_path)
+    // Use session_db_path for both stateless and stateful modes.
+    // For stateless with http_port, add port suffix to avoid sled lock
+    // contention when multiple nodes run on the same machine.
+    let exec_db_path = match cli.http_port {
+        Some(port) => format!("{}/executions-{}", cli.session_db_path, port),
+        None => format!("{}/executions", cli.session_db_path),
     };
     let engine = match ExecutionRegistry::new(&exec_db_path) {
         Ok(registry) => {

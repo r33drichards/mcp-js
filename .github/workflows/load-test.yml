@@ -68,7 +68,7 @@ jobs:
       # ── Prepare data directories ────────────────────────────────────
       - name: Create data directories
         run: |
-          rm -rf /tmp/loadtest
+          rm -rf /tmp/loadtest /tmp/mcp-v8-sessions /tmp/mcp-v8-executions*
           mkdir -p /tmp/loadtest/node1/heaps /tmp/loadtest/node1/sessions
           mkdir -p /tmp/loadtest/node2/heaps /tmp/loadtest/node2/sessions
           mkdir -p /tmp/loadtest/node3/heaps /tmp/loadtest/node3/sessions
@@ -83,7 +83,7 @@ jobs:
             if [ "${{ matrix.mode }}" = "stateful" ]; then
               ARGS="--http-port=3001 --directory-path=/tmp/loadtest/node1/heaps --session-db-path=/tmp/loadtest/node1/sessions"
             else
-              ARGS="--http-port=3001 --stateless"
+              ARGS="--http-port=3001 --stateless --session-db-path=/tmp/loadtest/node1/sessions"
             fi
 
             echo "Starting single node on port 3001..."
@@ -112,7 +112,7 @@ jobs:
               if [ "${{ matrix.mode }}" = "stateful" ]; then
                 MODE_ARGS="--directory-path=/tmp/loadtest/${NODE_ID}/heaps --session-db-path=/tmp/loadtest/${NODE_ID}/sessions"
               else
-                MODE_ARGS="--stateless"
+                MODE_ARGS="--stateless --session-db-path=/tmp/loadtest/${NODE_ID}/sessions"
               fi
 
               echo "Starting ${NODE_ID} on HTTP ${HTTP_PORT}, cluster ${CLUSTER_PORT}..."
