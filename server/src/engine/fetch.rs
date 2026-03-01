@@ -156,9 +156,17 @@ async fn op_fetch(
     // Convert empty string (from JS null body) to None.
     let body = if body.is_empty() { None } else { Some(body) };
 
-    do_fetch(url, method, headers_json, body, policy_chain, http_client, header_rules)
-        .await
-        .map_err(|e| JsErrorBox::generic(e))
+    // Spawn on a separate tokio task so deno_core's op driver only sees a
+    // simple JoinHandle future. Without this, the deeply nested async state
+    // machine from PolicyChain → PolicyEvaluatorKind → reqwest triggers a
+    // RefCell re-entrancy panic in deno_core's FuturesUnorderedDriver on
+    // some Rust toolchains (observed with stable, not nightly).
+    tokio::spawn(async move {
+        do_fetch(url, method, headers_json, body, policy_chain, http_client, header_rules).await
+    })
+    .await
+    .map_err(|e| JsErrorBox::generic(format!("fetch task join error: {}", e)))?
+    .map_err(|e| JsErrorBox::generic(e))
 }
 
 // ── Extension registration ──────────────────────────────────────────────
