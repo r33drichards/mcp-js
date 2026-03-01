@@ -1,0 +1,42 @@
+# Docker Compose for module policy integration tests.
+#
+# Services:
+#   opa            – OPA server loaded with policies/
+#   mcp-default    – mcp-js with external modules DISABLED (default)
+#   mcp-opa-policy – mcp-js with --allow-external-modules + --opa-module-policy
+
+services:
+  opa:
+    image: openpolicyagent/opa:latest
+    command: ["run", "--server", "--addr", "0.0.0.0:8181", "/policies"]
+    ports:
+      - "8181:8181"
+    volumes:
+      - ./policies:/policies:ro
+
+  mcp-default:
+    build: .
+    command:
+      - --http-port=3000
+      - --directory-path=/data/heaps
+      - --session-db-path=/data/sessions
+    tmpfs:
+      - /data:uid=1000,gid=1000
+    ports:
+      - "3001:3000"
+
+  mcp-opa-policy:
+    build: .
+    command:
+      - --http-port=3000
+      - --directory-path=/data/heaps
+      - --session-db-path=/data/sessions
+      - --allow-external-modules
+      - --opa-url=http://opa:8181
+      - --opa-module-policy=mcp/modules
+    tmpfs:
+      - /data:uid=1000,gid=1000
+    ports:
+      - "3002:3000"
+    depends_on:
+      - opa
