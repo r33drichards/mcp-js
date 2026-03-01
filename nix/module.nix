@@ -153,7 +153,7 @@ in
 
             policiesArgs = lib.optionals (cfg.policiesJson != null) [
               "--policies-json"
-              cfg.policiesJson
+              "'${cfg.policiesJson}'"
             ];
           in
           lib.concatStringsSep " " (baseArgs ++ storageArgs ++ peerArgs ++ statelessArgs ++ advertiseArgs ++ joinArgs ++ policiesArgs);
