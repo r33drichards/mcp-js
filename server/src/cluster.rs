@@ -1130,6 +1130,15 @@ async fn route(
     node: Arc<ClusterNode>,
     req: Request<Incoming>,
 ) -> Result<Response<String>, Infallible> {
+    // Reject all requests on a shut-down node.  The TCP listener stops
+    // accepting new connections on shutdown, but already-established HTTP/1.1
+    // keep-alive connections (held by reqwest's connection pool) can still
+    // deliver requests.  Without this guard a "dead" node can grant votes or
+    // acknowledge replication, breaking quorum guarantees.
+    if node.shutdown.is_cancelled() {
+        return Ok(error_response(503, "node is shut down"));
+    }
+
     let method = req.method().clone();
     let path = req.uri().path().to_string();
 
