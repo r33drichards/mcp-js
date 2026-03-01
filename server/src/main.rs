@@ -66,7 +66,7 @@ struct Cli {
     max_concurrent_executions: usize,
 
     /// Path to the sled database for session logging (default: /tmp/mcp-v8-sessions)
-    #[arg(long, default_value = "/tmp/mcp-v8-sessions", conflicts_with = "stateless")]
+    #[arg(long, default_value = "/tmp/mcp-v8-sessions")]
     session_db_path: String,
 
     // ── Cluster options ────────────────────────────────────────────────
