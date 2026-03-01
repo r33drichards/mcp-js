@@ -1,5 +1,5 @@
 import http from "k6/http";
-import { check } from "k6";
+import { check, sleep } from "k6";
 import { Counter, Rate, Trend } from "k6/metrics";
 
 // ── Custom metrics ──────────────────────────────────────────────────────
@@ -65,34 +65,72 @@ function pickUrl() {
 }
 
 // ── Main test function ──────────────────────────────────────────────────
-// Each iteration: single POST /api/exec with JSON body
+// Each iteration: POST /api/exec (returns 202 + execution_id), then poll
+// GET /api/executions/{id} until completion.
 export default function () {
   const baseUrl = pickUrl();
   const snippet = JS_SNIPPETS[Math.floor(Math.random() * JS_SNIPPETS.length)];
 
   const payload = JSON.stringify({ code: snippet });
 
-  const res = http.post(`${baseUrl}/api/exec`, payload, {
+  const submitRes = http.post(`${baseUrl}/api/exec`, payload, {
     headers: HEADERS,
     timeout: "10s",
   });
 
-  jsExecDuration.add(res.timings.duration);
+  if (submitRes.status !== 202) {
+    jsExecCount.add(1);
+    jsExecDuration.add(submitRes.timings.duration);
+    jsExecSuccess.add(false);
+    return;
+  }
+
+  let execId;
+  try {
+    execId = JSON.parse(submitRes.body).execution_id;
+  } catch (_) {
+    jsExecCount.add(1);
+    jsExecDuration.add(submitRes.timings.duration);
+    jsExecSuccess.add(false);
+    return;
+  }
+
+  // Poll for completion (up to 10 seconds)
+  const startTime = Date.now();
+  let ok = false;
+  for (let i = 0; i < 100; i++) {
+    const statusRes = http.get(`${baseUrl}/api/executions/${execId}`, {
+      headers: HEADERS,
+      timeout: "5s",
+    });
+
+    if (statusRes.status === 200) {
+      try {
+        const body = JSON.parse(statusRes.body);
+        if (body.status === "Completed" || body.status === "completed") {
+          ok = body.result !== undefined && !String(body.result).startsWith("Error:");
+          break;
+        } else if (body.status === "Failed" || body.status === "failed" ||
+                   body.status === "TimedOut" || body.status === "Cancelled") {
+          break;
+        }
+      } catch (_) {
+        break;
+      }
+    }
+    sleep(0.05); // 50ms between polls
+    if (Date.now() - startTime > 10000) break;
+  }
+
+  const totalDuration = Date.now() - startTime + submitRes.timings.duration;
+  jsExecDuration.add(totalDuration);
   jsExecCount.add(1);
 
-  const ok = check(res, {
-    "status 200": (r) => r.status === 200,
-    "has output": (r) => {
-      try {
-        const body = JSON.parse(r.body);
-        return body.output !== undefined && !String(body.output).startsWith("Error:");
-      } catch (_) {
-        return false;
-      }
-    },
+  const passed = check(null, {
+    "execution completed": () => ok,
   });
 
-  jsExecSuccess.add(ok);
+  jsExecSuccess.add(passed);
 }
 
 // ── Summary ─────────────────────────────────────────────────────────────

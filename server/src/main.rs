@@ -13,6 +13,7 @@ mod api;
 mod cluster;
 use engine::{initialize_v8, Engine, WasmModule, DEFAULT_EXECUTION_TIMEOUT_SECS};
 use engine::fetch::FetchConfig;
+use engine::execution::ExecutionRegistry;
 use engine::heap_storage::{AnyHeapStorage, S3HeapStorage, WriteThroughCacheHeapStorage, FileHeapStorage};
 use engine::heap_tags::HeapTagStore;
 use engine::session_log::SessionLog;
@@ -65,7 +66,7 @@ struct Cli {
     max_concurrent_executions: usize,
 
     /// Path to the sled database for session logging (default: /tmp/mcp-v8-sessions)
-    #[arg(long, default_value = "/tmp/mcp-v8-sessions", conflicts_with = "stateless")]
+    #[arg(long, default_value = "/tmp/mcp-v8-sessions")]
     session_db_path: String,
 
     // ── Cluster options ────────────────────────────────────────────────
@@ -317,6 +318,25 @@ async fn main() -> Result<()> {
         engine.with_fetch_config(fetch_config)
     } else {
         engine
+    };
+
+    // ── Execution registry ──────────────────────────────────────────────
+    // Use session_db_path for both stateless and stateful modes.
+    // For stateless with http_port, add port suffix to avoid sled lock
+    // contention when multiple nodes run on the same machine.
+    let exec_db_path = match cli.http_port {
+        Some(port) => format!("{}/executions-{}", cli.session_db_path, port),
+        None => format!("{}/executions", cli.session_db_path),
+    };
+    let engine = match ExecutionRegistry::new(&exec_db_path) {
+        Ok(registry) => {
+            tracing::info!("Execution registry opened at {}", exec_db_path);
+            engine.with_execution_registry(Arc::new(registry))
+        }
+        Err(e) => {
+            tracing::warn!("Failed to open execution registry at {}: {}. Async execution disabled.", exec_db_path, e);
+            engine
+        }
     };
 
     // ── Start transport ─────────────────────────────────────────────────

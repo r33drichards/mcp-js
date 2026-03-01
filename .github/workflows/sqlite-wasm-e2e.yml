@@ -50,33 +50,56 @@ jobs:
 
           # Wait for server to be ready (up to 30s)
           for i in $(seq 1 30); do
-            if curl -sf http://localhost:8080/api/exec \
+            HTTP_CODE=$(curl -s --max-time 10 -o /dev/null -w '%{http_code}' \
+              http://localhost:8080/api/exec \
               -H 'Content-Type: application/json' \
-              -d '{"code": "1+1"}' > /dev/null 2>&1; then
-              echo "Server is ready"
+              -d '{"code": "1+1"}' 2>/dev/null || echo "000")
+            if [ "$HTTP_CODE" = "202" ] || [ "$HTTP_CODE" = "200" ]; then
+              echo "Server is ready (HTTP $HTTP_CODE)"
               break
             fi
             sleep 1
           done
 
-          # Run the SQLite WASM example — capture response even on HTTP errors
-          HTTP_CODE=$(curl -s -o /tmp/response.json -w '%{http_code}' \
+          # Run the SQLite WASM example — submit for async execution
+          HTTP_CODE=$(curl -s -o /tmp/submit.json -w '%{http_code}' \
             http://localhost:8080/api/exec \
             -H 'Content-Type: application/json' \
             -d "$(jq -Rs '{code: .}' < examples/sqlite-wasm/example.js)")
 
-          RESULT=$(cat /tmp/response.json)
-          echo "HTTP status: $HTTP_CODE"
-          echo "Result: $RESULT"
+          echo "Submit HTTP status: $HTTP_CODE"
+          cat /tmp/submit.json
 
-          if [ "$HTTP_CODE" != "200" ]; then
-            echo "ERROR: Server returned HTTP $HTTP_CODE"
-            echo "Response body: $RESULT"
+          if [ "$HTTP_CODE" != "202" ]; then
+            echo "ERROR: Server returned HTTP $HTTP_CODE (expected 202)"
+            cat /tmp/submit.json
             exit 1
           fi
 
+          EXEC_ID=$(cat /tmp/submit.json | jq -r '.execution_id')
+          echo "Execution ID: $EXEC_ID"
+
+          # Poll for completion (up to 60s for WASM compilation)
+          for i in $(seq 1 60); do
+            STATUS_RESP=$(curl -s http://localhost:8080/api/executions/${EXEC_ID})
+            STATUS=$(echo "$STATUS_RESP" | jq -r '.status')
+            if [ "$STATUS" = "Completed" ] || [ "$STATUS" = "completed" ]; then
+              echo "Execution completed"
+              break
+            elif [ "$STATUS" = "Failed" ] || [ "$STATUS" = "failed" ] || [ "$STATUS" = "TimedOut" ]; then
+              echo "ERROR: Execution $STATUS"
+              echo "$STATUS_RESP"
+              exit 1
+            fi
+            sleep 1
+          done
+
+          # Get the result
+          RESULT=$(echo "$STATUS_RESP" | jq -r '.result')
+          echo "Result: $RESULT"
+
           # Parse and verify the output
-          OUTPUT=$(echo "$RESULT" | jq -r '.output')
+          OUTPUT="$RESULT"
           echo "Output: $OUTPUT"
 
           # Verify we got 3 users back

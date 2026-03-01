@@ -5,7 +5,7 @@
 /// arrive (or don't) on the outbound request.
 
 use std::collections::HashMap;
-use std::sync::Once;
+use std::sync::{Arc, Once};
 
 use axum::{
     Router,
@@ -16,6 +16,7 @@ use axum::{
 use serde_json::Value;
 use server::engine::{initialize_v8, Engine};
 use server::engine::fetch::{FetchConfig, HeaderRule};
+use server::engine::execution::ExecutionRegistry;
 
 static INIT: Once = Once::new();
 
@@ -83,7 +84,12 @@ fn build_engine(opa_url: &str, header_rules: Vec<HeaderRule>) -> Engine {
     let fetch_config = FetchConfig::new(opa_url.to_string(), "mcp/fetch".to_string())
         .with_header_rules(header_rules);
 
-    Engine::new_stateless(64 * 1024 * 1024, 30, 4).with_fetch_config(fetch_config)
+    let tmp = std::env::temp_dir().join(format!("mcp-fetch-test-{}-{}", std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::SystemTime::UNIX_EPOCH).unwrap().as_nanos()));
+    let registry = ExecutionRegistry::new(tmp.to_str().unwrap()).expect("Failed to create test registry");
+    Engine::new_stateless(64 * 1024 * 1024, 30, 4)
+        .with_fetch_config(fetch_config)
+        .with_execution_registry(Arc::new(registry))
 }
 
 /// Run JS code that fetches the echo endpoint and parse the echoed headers.
@@ -107,12 +113,26 @@ async fn fetch_and_get_echoed_headers(
         js_extra = js_extra,
     );
 
-    let result = engine
+    let exec_id = engine
         .run_js(code, None, None, None, None, None)
         .await
-        .expect("fetch should succeed");
+        .expect("submit should succeed");
 
-    let parsed: Value = serde_json::from_str(&result.output)
+    // Poll for completion
+    let mut output = String::new();
+    for _ in 0..600 {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        if let Ok(info) = engine.get_execution(&exec_id) {
+            match info.status.as_str() {
+                "completed" => { output = info.result.expect("should have result"); break; }
+                "failed" => panic!("Execution failed: {}", info.error.unwrap_or_default()),
+                "timed_out" => panic!("Execution timed out"),
+                _ => continue,
+            }
+        }
+    }
+
+    let parsed: Value = serde_json::from_str(&output)
         .expect("output should be valid JSON");
 
     parsed
