@@ -162,7 +162,7 @@ fn test_fast_computation_succeeds() {
 fn test_bare_call_default_params() {
     ensure_v8();
 
-    let heap_bytes = server::engine::DEFAULT_HEAP_MEMORY_MAX_MB * 1024 * 1024;
+    let heap_bytes = 8 * 1024 * 1024;
 
     let (result, _oom) = server::engine::execute_stateless("1 + 1", heap_bytes, no_handle(), &[], heap_bytes, None, None);
 

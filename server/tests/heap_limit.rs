@@ -49,7 +49,7 @@ fn test_stateless_small_heap_limit_rejects_large_allocation() {
 fn test_stateless_default_limit_allows_small_code() {
     ensure_v8();
 
-    let max_bytes = server::engine::DEFAULT_HEAP_MEMORY_MAX_MB * 1024 * 1024;
+    let max_bytes = 8 * 1024 * 1024;
     let (result, _oom) = server::engine::execute_stateless(SMALL_JS, max_bytes, no_handle(), &[], max_bytes, None, None);
 
     assert!(
@@ -95,7 +95,7 @@ fn test_stateful_small_heap_limit_rejects_large_allocation() {
 fn test_stateful_default_limit_allows_small_code() {
     ensure_v8();
 
-    let max_bytes = server::engine::DEFAULT_HEAP_MEMORY_MAX_MB * 1024 * 1024;
+    let max_bytes = 8 * 1024 * 1024;
     let (result, _oom) = server::engine::execute_stateful(SMALL_JS, None, max_bytes, no_handle(), &[], max_bytes, None, None);
 
     assert!(
