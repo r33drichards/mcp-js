@@ -403,14 +403,34 @@ async fn test_url_import_typescript() {
 
     let code = r#"
 import { pascalCase } from "https://deno.land/x/case/mod.ts";
-pascalCase("hello_world");
+console.log(pascalCase("hello_world"));
 "#;
 
-    let result = run_and_wait(&engine, code).await;
-    assert!(
-        result.is_ok(),
-        "URL import of TypeScript should succeed, got: {:?}",
-        result
-    );
-    assert_eq!(result.unwrap(), "HelloWorld");
+    let exec_id = engine
+        .run_js(code.to_string(), None, None, None, Some(60), None)
+        .await
+        .expect("run_js should succeed");
+
+    for _ in 0..1200 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        if let Ok(info) = engine.get_execution(&exec_id) {
+            if info.status == "completed" {
+                let output = engine
+                    .get_execution_output(&exec_id, None, None, None, None)
+                    .expect("should get output");
+                assert!(
+                    output.data.contains("HelloWorld"),
+                    "Console output should contain 'HelloWorld', got: {}",
+                    output.data
+                );
+                return;
+            } else if info.status == "failed" || info.status == "timed_out" {
+                panic!(
+                    "Execution failed: {:?}",
+                    info.error.unwrap_or_else(|| info.status.clone())
+                );
+            }
+        }
+    }
+    panic!("Execution did not complete within timeout");
 }

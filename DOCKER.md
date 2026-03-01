@@ -124,7 +124,7 @@ curl http://localhost:8080/mcp
 # Test the plain HTTP API directly
 curl -X POST http://localhost:8080/api/exec \
   -H "Content-Type: application/json" \
-  -d '{"code": "1 + 2"}'
+  -d '{"code": "console.log(1 + 2)"}'
 
 # Use MCP Inspector
 npx @modelcontextprotocol/inspector http://localhost:8080/mcp

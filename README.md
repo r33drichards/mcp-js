@@ -202,32 +202,14 @@ mcp-v8 --stateless --sse-port 8081
 **Example:**
 
 ```
-Call run_js with code: "console.log('hello'); 1 + 1;"
+Call run_js with code: "console.log('hello');"
   → { execution_id: "abc-123" }
 
 Call get_execution with execution_id: "abc-123"
-  → { status: "completed", result: "2" }
+  → { status: "completed" }
 
 Call get_execution_output with execution_id: "abc-123"
   → { data: "hello\n", total_lines: 1 }
-```
-
-### Return Values
-
-The **last expression** in your code is the return value, available via `get_execution` once the execution completes:
-
-```javascript
-const result = 1 + 1;
-result;
-// → result: "2"
-```
-
-Objects must be serialized to see their contents:
-
-```javascript
-const obj = { a: 1, b: 2 };
-JSON.stringify(obj);
-// → result: '{"a":1,"b":2}'
 ```
 
 ### Console Output
@@ -375,7 +357,7 @@ claude mcp add mcp-v8 -- mcp-v8 --stateless
 claude mcp add mcp-v8 -t sse https://mcp-js-production.up.railway.app/sse
 ```
 
-Then test by running `claude` and asking: "Run this JavaScript: `[1,2,3].map(x => x * 2)`"
+Then test by running `claude` and asking: "Run this JavaScript: `console.log([1,2,3].map(x => x * 2))`"
 
 ### Cursor
 
@@ -419,11 +401,12 @@ You can also use the hosted version on Railway without installing anything local
 
 ## Example Usage
 
-Ask Claude or Cursor: "Run this JavaScript: `1 + 2`"
+Ask Claude or Cursor: "Run this JavaScript: `console.log(1 + 2)`"
 
 The agent will:
-1. Call `run_js` with `code: "1 + 2"` → receives `execution_id`
-2. Call `get_execution` with the `execution_id` → receives `{ status: "completed", result: "3" }`
+1. Call `run_js` with `code: "console.log(1 + 2)"` → receives `execution_id`
+2. Call `get_execution` with the `execution_id` → receives `{ status: "completed" }`
+3. Call `get_execution_output` with the `execution_id` → receives `{ data: "3\n", total_lines: 1 }`
 
 In stateful mode, `get_execution` also returns a `heap` content hash — pass it back in the next `run_js` call to resume from that state.
 
@@ -711,7 +694,7 @@ You can configure heap storage using the following command line arguments:
 
 While `mcp-v8` provides a powerful and persistent JavaScript execution environment, there are limitations to its runtime.
 
-- **Async execution model**: `run_js` returns immediately with an execution ID. Use `get_execution` to poll for the result and `get_execution_output` to read console output. Each execution runs in a fresh V8 isolate — no state is shared between calls (unless using stateful mode with heap snapshots).
+- **Async execution model**: `run_js` returns immediately with an execution ID. Use `get_execution` to poll for completion and `get_execution_output` to read console output. Each execution runs in a fresh V8 isolate — no state is shared between calls (unless using stateful mode with heap snapshots).
 - **`async`/`await` and Promises**: Fully supported. If your code returns a Promise, the runtime resolves it automatically.
 - **`console.log` supported**: `console.log`, `console.info`, `console.warn`, and `console.error` are captured and available via `get_execution_output` with paginated access.
 - **No `fetch` or network access by default**: When the server is started with `--opa-url`, a `fetch(url, opts?)` function becomes available following the web standard Fetch API. Each request is checked against an OPA policy before execution. Without `--opa-url`, there is no network access. See [OPA-Gated Fetch](#opa-gated-fetch) for details.
