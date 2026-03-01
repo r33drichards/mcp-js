@@ -186,7 +186,7 @@ jobs:
           echo "=== Smoke test: POST /api/exec on ${URL} ==="
           RESP=$(curl -s --max-time 10 -X POST "${URL}/api/exec" \
             -H 'Content-Type: application/json' \
-            -d '{"code":"1 + 1"}')
+            -d '{"code":"console.log(\"smoke test passed\")"}')
           echo "Response: $RESP"
 
           if [ -z "$RESP" ]; then
@@ -211,10 +211,13 @@ jobs:
             STATUS=$(echo "$STATUS_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null || true)
             if [ "$STATUS" = "Completed" ] || [ "$STATUS" = "completed" ]; then
               echo "Execution completed"
-              RESULT=$(echo "$STATUS_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('result',''))" 2>/dev/null || true)
-              echo "Result: $RESULT"
-              if [ "$RESULT" != "2" ]; then
-                echo "ERROR: Expected result '2', got '${RESULT}'"
+
+              # Check console output to verify code executed
+              OUTPUT_RESP=$(curl -s --max-time 10 "${URL}/api/executions/${EXEC_ID}/output" 2>/dev/null)
+              OUTPUT=$(echo "$OUTPUT_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('data',''))" 2>/dev/null || true)
+              echo "Console output: $OUTPUT"
+              if [[ "$OUTPUT" != *"smoke test passed"* ]]; then
+                echo "ERROR: Expected console output containing 'smoke test passed', got '${OUTPUT}'"
                 cat /tmp/loadtest/*.log || true
                 exit 1
               fi
