@@ -61,3 +61,26 @@ pub fn extract_heap_hash(response: &serde_json::Value) -> Option<String> {
     let parsed: serde_json::Value = serde_json::from_str(text).ok()?;
     parsed["heap"].as_str().map(|s| s.to_string())
 }
+
+/// Extract the execution_id from a run_js response.
+/// The response format is: result.content[0].text = '{"execution_id":"<id>"}'
+pub fn extract_execution_id(response: &serde_json::Value) -> Option<String> {
+    let text = response["result"]["content"]
+        .as_array()?
+        .first()?
+        .get("text")?
+        .as_str()?;
+    let parsed: serde_json::Value = serde_json::from_str(text).ok()?;
+    parsed["execution_id"].as_str().map(|s| s.to_string())
+}
+
+/// Extract fields from a get_execution response.
+/// The response format is: result.content[0].text = '{"execution_id":"...","status":"...","result":"...","heap":"...",...}'
+pub fn extract_execution_info(response: &serde_json::Value) -> Option<serde_json::Value> {
+    let text = response["result"]["content"]
+        .as_array()?
+        .first()?
+        .get("text")?
+        .as_str()?;
+    serde_json::from_str(text).ok()
+}
