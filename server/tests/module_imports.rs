@@ -9,7 +9,6 @@ use std::sync::{Arc, Once};
 use server::engine::{initialize_v8, has_module_syntax, Engine};
 use server::engine::execution::ExecutionRegistry;
 use server::engine::module_loader::ModuleLoaderConfig;
-use server::engine::opa::OpaClient;
 
 // ── has_module_syntax unit tests ────────────────────────────────────────
 
@@ -168,8 +167,6 @@ fn create_test_engine_with_external_modules() -> Engine {
     Engine::new_stateless(16 * 1024 * 1024, 60, 4)
         .with_module_loader_config(ModuleLoaderConfig {
             allow_external: true,
-            opa_client: None,
-            opa_module_policy: None,
             policy_chain: None,
         })
         .with_execution_registry(Arc::new(registry))
@@ -187,8 +184,6 @@ fn create_test_engine_modules_blocked() -> Engine {
     Engine::new_stateless(16 * 1024 * 1024, 60, 4)
         .with_module_loader_config(ModuleLoaderConfig {
             allow_external: false,
-            opa_client: None,
-            opa_module_policy: None,
             policy_chain: None,
         })
         .with_execution_registry(Arc::new(registry))
@@ -459,8 +454,6 @@ fn test_resolve_npm_blocked_when_external_disabled() {
 
     let loader = NetworkModuleLoader::with_config(ModuleLoaderConfig {
         allow_external: false,
-        opa_client: None,
-        opa_module_policy: None,
         policy_chain: None,
     });
     let result = loader.resolve("npm:lodash-es@4.17.21", "file:///main.js", ResolutionKind::Import);
@@ -481,8 +474,6 @@ fn test_resolve_jsr_blocked_when_external_disabled() {
 
     let loader = NetworkModuleLoader::with_config(ModuleLoaderConfig {
         allow_external: false,
-        opa_client: None,
-        opa_module_policy: None,
         policy_chain: None,
     });
     let result = loader.resolve("jsr:@luca/cases@1.0.0", "file:///main.js", ResolutionKind::Import);
@@ -499,8 +490,6 @@ fn test_resolve_url_blocked_when_external_disabled() {
 
     let loader = NetworkModuleLoader::with_config(ModuleLoaderConfig {
         allow_external: false,
-        opa_client: None,
-        opa_module_policy: None,
         policy_chain: None,
     });
     let result = loader.resolve(
@@ -521,8 +510,6 @@ fn test_resolve_relative_allowed_when_external_disabled() {
 
     let loader = NetworkModuleLoader::with_config(ModuleLoaderConfig {
         allow_external: false,
-        opa_client: None,
-        opa_module_policy: None,
         policy_chain: None,
     });
     let result = loader.resolve(
@@ -541,8 +528,6 @@ fn test_resolve_npm_allowed_when_external_enabled() {
 
     let loader = NetworkModuleLoader::with_config(ModuleLoaderConfig {
         allow_external: true,
-        opa_client: None,
-        opa_module_policy: None,
         policy_chain: None,
     });
     let result = loader.resolve("npm:lodash-es@4.17.21", "file:///main.js", ResolutionKind::Import);

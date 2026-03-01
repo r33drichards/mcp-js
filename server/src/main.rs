@@ -15,7 +15,7 @@ use engine::{initialize_v8, Engine, WasmModule, DEFAULT_EXECUTION_TIMEOUT_SECS};
 use engine::fetch::FetchConfig;
 use engine::execution::ExecutionRegistry;
 use engine::module_loader::ModuleLoaderConfig;
-use engine::opa::{OpaClient, PoliciesConfig, build_policy_chain};
+use engine::opa::{PoliciesConfig, build_policy_chain};
 use engine::heap_storage::{AnyHeapStorage, S3HeapStorage, WriteThroughCacheHeapStorage, FileHeapStorage};
 use engine::heap_tags::HeapTagStore;
 use engine::session_log::SessionLog;
@@ -132,19 +132,7 @@ struct Cli {
     #[arg(long = "wasm-default-max-memory", default_value = "16m")]
     wasm_default_max_memory: String,
 
-    // ── OPA / fetch options ──────────────────────────────────────────────
-
-    /// OPA server URL for policy-gated operations. When set, fetch() becomes
-    /// available in the JS runtime, with each request checked against OPA.
-    /// Example: http://localhost:8181
-    /// Deprecated: prefer --policies-json for new deployments.
-    #[arg(long = "opa-url", value_name = "URL", conflicts_with = "policies_json")]
-    opa_url: Option<String>,
-
-    /// OPA policy path for fetch requests (appended to /v1/data/).
-    /// Default: "mcp/fetch". The policy must return {"allow": true} to permit a request.
-    #[arg(long = "opa-fetch-policy", default_value = "mcp/fetch", requires = "opa_url")]
-    opa_fetch_policy: String,
+    // ── Fetch options ──────────────────────────────────────────────────
 
     /// Inject headers into fetch requests matching host/method rules.
     /// Format: host=<host>,header=<name>,value=<val>[,methods=GET;POST]
@@ -165,24 +153,16 @@ struct Cli {
     #[arg(long = "allow-external-modules", default_value = "false")]
     allow_external_modules: bool,
 
-    /// OPA policy path for auditing module imports (appended to /v1/data/).
-    /// When set (requires --opa-url and --allow-external-modules), each module
-    /// specifier is checked against this policy before being fetched.
-    /// The policy receives {specifier, specifier_type, resolved_url} as input
-    /// and must return {"allow": true} to permit the import.
-    #[arg(long = "opa-module-policy", value_name = "PATH", requires_all = ["opa_url", "allow_external_modules"])]
-    opa_module_policy: Option<String>,
-
     // ── Policy configuration ─────────────────────────────────────────────
 
     /// JSON policy configuration (inline JSON or path to a JSON file).
     /// Enables fetch() and/or module policy gating via local Rego files
-    /// and/or remote OPA servers. Replaces --opa-url and related flags.
+    /// and/or remote OPA servers.
     ///
     /// Example: --policies-json '{"fetch":{"policies":[{"url":"file:///path/to/fetch.rego"}]}}'
     ///
     /// Schema: { "fetch": { "mode": "all"|"any", "policies": [{"url": "...", "policy_path": "...", "rule": "..."}] }, "modules": { ... } }
-    #[arg(long = "policies-json", value_name = "JSON_OR_PATH", conflicts_with = "opa_url")]
+    #[arg(long = "policies-json", value_name = "JSON_OR_PATH")]
     policies_json: Option<String>,
 }
 
@@ -381,21 +361,13 @@ async fn main() -> Result<()> {
         None
     };
 
-    // ── OPA / fetch ─────────────────────────────────────────────────────
+    // ── Fetch policy ───────────────────────────────────────────────────
     let header_rules = load_fetch_header_rules(&cli.fetch_headers, &cli.fetch_header_config)?;
     if !header_rules.is_empty() {
         tracing::info!("Loaded {} fetch header injection rule(s)", header_rules.len());
     }
 
-    let engine = if let Some(ref opa_url) = cli.opa_url {
-        // Legacy --opa-url path (deprecated).
-        tracing::warn!("--opa-url is deprecated. Use --policies-json instead. See --help for the new format.");
-        tracing::info!("OPA enabled (legacy): {} (fetch policy: {})", opa_url, cli.opa_fetch_policy);
-        let fetch_config = FetchConfig::new(opa_url.clone(), cli.opa_fetch_policy.clone())
-            .with_header_rules(header_rules);
-        engine.with_fetch_config(fetch_config)
-    } else if let Some(chain) = fetch_policy_chain {
-        // --policies-json fetch chain.
+    let engine = if let Some(chain) = fetch_policy_chain {
         let fetch_config = FetchConfig::new_with_chain(chain)
             .with_header_rules(header_rules);
         engine.with_fetch_config(fetch_config)
@@ -406,17 +378,10 @@ async fn main() -> Result<()> {
     // ── Module loader config ─────────────────────────────────────────────
     let module_loader_config = ModuleLoaderConfig {
         allow_external: cli.allow_external_modules,
-        opa_client: cli.opa_module_policy.as_ref().map(|_| {
-            OpaClient::new(cli.opa_url.clone().expect("--opa-module-policy requires --opa-url"))
-        }),
-        opa_module_policy: cli.opa_module_policy.clone(),
         policy_chain: modules_policy_chain,
     };
     if cli.allow_external_modules {
         tracing::info!("External module imports: ENABLED");
-        if let Some(ref policy) = cli.opa_module_policy {
-            tracing::info!("OPA module audit policy: {}", policy);
-        }
         if module_loader_config.policy_chain.is_some() {
             tracing::info!("Module policy chain: ENABLED");
         }

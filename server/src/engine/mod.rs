@@ -1021,8 +1021,6 @@ impl Engine {
             execution_registry: None,
             module_loader_config: Arc::new(module_loader::ModuleLoaderConfig {
                 allow_external: false,
-                opa_client: None,
-                opa_module_policy: None,
                 policy_chain: None,
             }),
         }
@@ -1050,8 +1048,6 @@ impl Engine {
             execution_registry: None,
             module_loader_config: Arc::new(module_loader::ModuleLoaderConfig {
                 allow_external: false,
-                opa_client: None,
-                opa_module_policy: None,
                 policy_chain: None,
             }),
         }
