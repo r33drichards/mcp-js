@@ -22,6 +22,8 @@ jobs:
             check: load-balancing-test
           - name: Fetch OPA Integration Test
             check: fetch-opa-test
+          - name: Filesystem OPA Integration Test
+            check: fs-opa-test
 
     steps:
       - name: Checkout code

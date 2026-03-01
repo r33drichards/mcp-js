@@ -263,6 +263,8 @@ pub struct PoliciesConfig {
     pub fetch: Option<OperationPolicies>,
     /// Policy chain for module import auditing.
     pub modules: Option<OperationPolicies>,
+    /// Policy chain for filesystem operations.
+    pub filesystem: Option<OperationPolicies>,
 }
 
 /// Per-operation policy configuration.
