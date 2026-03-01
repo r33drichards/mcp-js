@@ -400,8 +400,23 @@ impl ServerHandler for McpService {
 
 // ── StatelessMcpService ─────────────────────────────────────────────────
 //
-// Stateless mode: exposes `run_js` plus execution query/cancel tools,
-// but no heap/session/tag parameters.
+// Stateless shell mode: single `run_js` tool that executes code and returns
+// console output directly. No execution IDs are exposed to callers — session
+// isolation is automatic.
+
+#[derive(Debug, Clone)]
+pub struct StatelessRunJsResponse {
+    pub value: serde_json::Value,
+}
+
+impl IntoContents for StatelessRunJsResponse {
+    fn into_contents(self) -> Vec<Content> {
+        match Content::json(self.value) {
+            Ok(content) => vec![content],
+            Err(e) => vec![Content::text(format!("Failed to convert response: {}", e))],
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct StatelessMcpService {
@@ -426,100 +441,56 @@ impl StatelessMcpService {
         #[tool(param)]
         #[serde(default)]
         execution_timeout_secs: Option<u64>,
-    ) -> RunJsResponse {
-        match self.engine.run_js(code, None, None, heap_memory_max_mb, execution_timeout_secs, None).await {
-            Ok(execution_id) => RunJsResponse { execution_id },
-            Err(e) => RunJsResponse {
-                execution_id: format!("error: {}", e),
-            },
-        }
-    }
-
-    #[tool(description = "Get the status and result of an execution. Returns execution_id, status (running/completed/failed/cancelled/timed_out), result (if completed), error (if failed), started_at, and completed_at.")]
-    pub async fn get_execution(
-        &self,
-        #[tool(param)] execution_id: String,
-    ) -> ExecutionStatusResponse {
-        match self.engine.get_execution(&execution_id) {
-            Ok(info) => ExecutionStatusResponse {
-                value: json!({
-                    "execution_id": info.id,
-                    "status": info.status,
-                    "result": info.result,
-                    "error": info.error,
-                    "started_at": info.started_at,
-                    "completed_at": info.completed_at,
-                }),
-            },
-            Err(e) => ExecutionStatusResponse {
+    ) -> StatelessRunJsResponse {
+        // 1. Submit to engine (fire-and-forget internally)
+        let exec_id = match self.engine.run_js(code, None, None, heap_memory_max_mb, execution_timeout_secs, None).await {
+            Ok(id) => id,
+            Err(e) => return StatelessRunJsResponse {
                 value: json!({ "error": e }),
             },
+        };
+
+        // 2. Poll until terminal state
+        let poll_interval = tokio::time::Duration::from_millis(50);
+        let max_polls = 6000; // 5 minutes at 50ms intervals
+        let mut status = String::new();
+        let mut error_msg: Option<String> = None;
+
+        for _ in 0..max_polls {
+            tokio::time::sleep(poll_interval).await;
+            match self.engine.get_execution(&exec_id) {
+                Ok(info) => {
+                    match info.status.as_str() {
+                        "completed" => { status = info.status; break; }
+                        "failed" => { status = info.status; error_msg = info.error; break; }
+                        "timed_out" => { status = info.status; error_msg = info.error; break; }
+                        "cancelled" => { status = info.status; error_msg = info.error; break; }
+                        _ => continue,
+                    }
+                }
+                Err(_) => continue,
+            }
         }
-    }
 
-    #[tool(description = "Get paginated console output for an execution. Supports two modes: line-based (line_offset + line_limit) or byte-based (byte_offset + byte_limit). If byte_offset is provided, byte mode takes precedence. Response includes both line and byte coordinates for cross-referencing.")]
-    pub async fn get_execution_output(
-        &self,
-        #[tool(param)] execution_id: String,
-        #[tool(param)]
-        #[serde(default)]
-        line_offset: Option<u64>,
-        #[tool(param)]
-        #[serde(default)]
-        line_limit: Option<u64>,
-        #[tool(param)]
-        #[serde(default)]
-        byte_offset: Option<u64>,
-        #[tool(param)]
-        #[serde(default)]
-        byte_limit: Option<u64>,
-    ) -> ConsoleOutputResponse {
-        let status = self.engine.get_execution(&execution_id)
-            .map(|info| info.status)
-            .unwrap_or_else(|_| "unknown".to_string());
-
-        match self.engine.get_execution_output(&execution_id, line_offset, line_limit, byte_offset, byte_limit) {
-            Ok(page) => ConsoleOutputResponse {
-                value: json!({
-                    "execution_id": execution_id,
-                    "data": page.data,
-                    "start_line": page.start_line,
-                    "end_line": page.end_line,
-                    "next_line_offset": page.next_line_offset,
-                    "total_lines": page.total_lines,
-                    "start_byte": page.start_byte,
-                    "end_byte": page.end_byte,
-                    "next_byte_offset": page.next_byte_offset,
-                    "total_bytes": page.total_bytes,
-                    "has_more": page.has_more,
-                    "status": status,
-                }),
-            },
-            Err(e) => ConsoleOutputResponse {
-                value: json!({ "error": e }),
-            },
+        if status.is_empty() {
+            return StatelessRunJsResponse {
+                value: json!({ "error": "Execution did not complete within polling timeout" }),
+            };
         }
-    }
 
-    #[tool(description = "Cancel a running execution. Terminates the V8 isolate.")]
-    pub async fn cancel_execution(
-        &self,
-        #[tool(param)] execution_id: String,
-    ) -> OkResponse {
-        match self.engine.cancel_execution(&execution_id) {
-            Ok(()) => OkResponse { ok: true, error: None },
-            Err(e) => OkResponse { ok: false, error: Some(e) },
-        }
-    }
+        // 3. Collect all console output
+        let output = match self.engine.get_execution_output(&exec_id, None, Some(u64::MAX), None, None) {
+            Ok(page) => page.data,
+            Err(_) => String::new(),
+        };
 
-    #[tool(description = "List all executions with their status.")]
-    pub async fn list_executions(&self) -> ListExecutionsResponse {
-        match self.engine.list_executions() {
-            Ok(executions) => ListExecutionsResponse {
-                value: json!({ "executions": executions }),
+        // 4. Return console output (and error if execution failed)
+        match status.as_str() {
+            "completed" => StatelessRunJsResponse {
+                value: json!({ "output": output }),
             },
-            Err(e) => ListExecutionsResponse {
-                value: json!({ "error": e }),
+            _ => StatelessRunJsResponse {
+                value: json!({ "output": output, "error": error_msg }),
             },
         }
     }
@@ -529,7 +500,7 @@ impl StatelessMcpService {
 impl ServerHandler for StatelessMcpService {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
-            instructions: Some("JavaScript execution service (stateless mode)".to_string()),
+            instructions: Some("JavaScript execution service (stateless shell mode)".to_string()),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             ..Default::default()
         }
