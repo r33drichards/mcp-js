@@ -5,11 +5,15 @@
 //! and any relevant metadata to the configured OPA endpoint, which must return
 //! `{"allow": true}` for the operation to proceed.
 //!
+//! Binary data is transferred directly as `Uint8Array` through deno_core's native
+//! `#[buffer]` support — no base64 encoding is needed.
+//!
 //! Available operations (all return Promises):
 //! ```js
 //! const data = await fs.readFile("/tmp/data.txt");          // string (utf-8)
 //! const data = await fs.readFile("/tmp/data.bin", "buffer"); // Uint8Array
-//! await fs.writeFile("/tmp/out.txt", "hello");
+//! await fs.writeFile("/tmp/out.txt", "hello");              // string data
+//! await fs.writeFile("/tmp/out.bin", uint8array);           // binary data
 //! await fs.appendFile("/tmp/out.txt", " world");
 //! const entries = await fs.readdir("/tmp");                  // string[]
 //! const info = await fs.stat("/tmp/data.txt");               // {size,isFile,isDirectory,...}
@@ -65,57 +69,70 @@ struct FsPolicyInput {
 
 // ── Async deno_core ops ──────────────────────────────────────────────────
 
-/// Read a file. encoding: "utf8" (default, returns string) or "buffer" (returns base64).
+/// Read a file as UTF-8 text.
 #[op2(async)]
 #[string]
-async fn op_fs_read_file(
+async fn op_fs_read_file_text(
     state: Rc<RefCell<OpState>>,
     #[string] path: String,
-    #[string] encoding: String,
 ) -> Result<String, JsErrorBox> {
     let (opa_client, opa_policy_path) = extract_config(&state)?;
-    let encoding = if encoding.is_empty() { "utf8".to_string() } else { encoding };
 
-    check_policy(&opa_client, &opa_policy_path, "readFile", &path, None, None, Some(&encoding)).await?;
+    check_policy(&opa_client, &opa_policy_path, "readFile", &path, None, None, Some("utf8")).await?;
 
     let content = tokio::fs::read(&path).await
         .map_err(|e| JsErrorBox::generic(format!("fs.readFile: {}: {}", path, e)))?;
 
-    if encoding == "buffer" {
-        // Return base64-encoded bytes for binary reading
-        use deno_core::serde_json;
-        let b64 = base64_encode(&content);
-        let result = serde_json::json!({ "type": "buffer", "data": b64 });
-        Ok(result.to_string())
-    } else {
-        let text = String::from_utf8(content)
-            .map_err(|e| JsErrorBox::generic(format!("fs.readFile: invalid UTF-8 in {}: {}", path, e)))?;
-        let result = deno_core::serde_json::json!({ "type": "utf8", "data": text });
-        Ok(result.to_string())
-    }
+    String::from_utf8(content)
+        .map_err(|e| JsErrorBox::generic(format!("fs.readFile: invalid UTF-8 in {}: {}", path, e)))
 }
 
-/// Write a file (creates or truncates). data_b64 is base64 if is_binary is true.
+/// Read a file as raw bytes, returned as a Uint8Array to JavaScript.
+#[op2(async)]
+#[buffer]
+async fn op_fs_read_file_buffer(
+    state: Rc<RefCell<OpState>>,
+    #[string] path: String,
+) -> Result<Vec<u8>, JsErrorBox> {
+    let (opa_client, opa_policy_path) = extract_config(&state)?;
+
+    check_policy(&opa_client, &opa_policy_path, "readFile", &path, None, None, Some("buffer")).await?;
+
+    tokio::fs::read(&path).await
+        .map_err(|e| JsErrorBox::generic(format!("fs.readFile: {}: {}", path, e)))
+}
+
+/// Write a file from a UTF-8 string (creates or truncates).
 #[op2(async)]
 #[string]
-async fn op_fs_write_file(
+async fn op_fs_write_file_text(
     state: Rc<RefCell<OpState>>,
     #[string] path: String,
     #[string] data: String,
-    #[smi] is_binary: i32,
 ) -> Result<String, JsErrorBox> {
     let (opa_client, opa_policy_path) = extract_config(&state)?;
 
     check_policy(&opa_client, &opa_policy_path, "writeFile", &path, None, None, None).await?;
 
-    let bytes = if is_binary != 0 {
-        base64_decode(&data)
-            .map_err(|e| JsErrorBox::generic(format!("fs.writeFile: invalid base64: {}", e)))?
-    } else {
-        data.into_bytes()
-    };
+    tokio::fs::write(&path, data.as_bytes()).await
+        .map_err(|e| JsErrorBox::generic(format!("fs.writeFile: {}: {}", path, e)))?;
 
-    tokio::fs::write(&path, &bytes).await
+    Ok("{}".to_string())
+}
+
+/// Write a file from raw bytes (Uint8Array from JavaScript).
+#[op2(async)]
+#[string]
+async fn op_fs_write_file_buffer(
+    state: Rc<RefCell<OpState>>,
+    #[string] path: String,
+    #[buffer(copy)] data: Vec<u8>,
+) -> Result<String, JsErrorBox> {
+    let (opa_client, opa_policy_path) = extract_config(&state)?;
+
+    check_policy(&opa_client, &opa_policy_path, "writeFile", &path, None, None, None).await?;
+
+    tokio::fs::write(&path, &data).await
         .map_err(|e| JsErrorBox::generic(format!("fs.writeFile: {}: {}", path, e)))?;
 
     Ok("{}".to_string())
@@ -318,8 +335,10 @@ async fn op_fs_exists(
 deno_core::extension!(
     fs_ext,
     ops = [
-        op_fs_read_file,
-        op_fs_write_file,
+        op_fs_read_file_text,
+        op_fs_read_file_buffer,
+        op_fs_write_file_text,
+        op_fs_write_file_buffer,
         op_fs_append_file,
         op_fs_readdir,
         op_fs_stat,
@@ -348,69 +367,26 @@ pub fn inject_fs(runtime: &mut JsRuntime) -> Result<(), String> {
 }
 
 /// JavaScript wrapper that provides a Node.js-compatible `fs` API via async ops.
+/// Binary data is passed directly as Uint8Array through deno_core's native buffer
+/// support — no base64 encoding needed.
 const FS_JS_WRAPPER: &str = r#"
 (function() {
-    // Base64 encoder/decoder for binary data
-    const _b64chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
-
-    function _uint8ToBase64(bytes) {
-        let result = '';
-        const len = bytes.length;
-        for (let i = 0; i < len; i += 3) {
-            const a = bytes[i];
-            const b = i + 1 < len ? bytes[i + 1] : 0;
-            const c = i + 2 < len ? bytes[i + 2] : 0;
-            result += _b64chars[a >> 2];
-            result += _b64chars[((a & 3) << 4) | (b >> 4)];
-            result += i + 1 < len ? _b64chars[((b & 15) << 2) | (c >> 6)] : '=';
-            result += i + 2 < len ? _b64chars[c & 63] : '=';
-        }
-        return result;
-    }
-
-    function _base64ToUint8(b64) {
-        const lookup = new Uint8Array(256);
-        for (let i = 0; i < _b64chars.length; i++) lookup[_b64chars.charCodeAt(i)] = i;
-        let bufLen = b64.length * 3 / 4;
-        if (b64[b64.length - 1] === '=') bufLen--;
-        if (b64[b64.length - 2] === '=') bufLen--;
-        const bytes = new Uint8Array(bufLen);
-        let p = 0;
-        for (let i = 0; i < b64.length; i += 4) {
-            const a = lookup[b64.charCodeAt(i)];
-            const b = lookup[b64.charCodeAt(i + 1)];
-            const c = lookup[b64.charCodeAt(i + 2)];
-            const d = lookup[b64.charCodeAt(i + 3)];
-            bytes[p++] = (a << 2) | (b >> 4);
-            if (p < bufLen) bytes[p++] = ((b & 15) << 4) | (c >> 2);
-            if (p < bufLen) bytes[p++] = ((c & 3) << 6) | d;
-        }
-        return bytes;
-    }
-
     globalThis.fs = {
         readFile: async function(path, encoding) {
             if (typeof path !== 'string') throw new TypeError('fs.readFile: path must be a string');
-            const enc = encoding || 'utf8';
-            const raw = await Deno.core.ops.op_fs_read_file(path, enc);
-            const result = JSON.parse(raw);
-            if (result.type === 'buffer') {
-                return _base64ToUint8(result.data);
+            if (encoding === 'buffer') {
+                return await Deno.core.ops.op_fs_read_file_buffer(path);
             }
-            return result.data;
+            return await Deno.core.ops.op_fs_read_file_text(path);
         },
 
         writeFile: async function(path, data) {
             if (typeof path !== 'string') throw new TypeError('fs.writeFile: path must be a string');
-            let isBinary = 0;
-            let payload = '';
             if (data instanceof Uint8Array) {
-                isBinary = 1;
-                payload = _uint8ToBase64(data);
+                await Deno.core.ops.op_fs_write_file_buffer(path, data);
             } else {
-                payload = String(data);
+                await Deno.core.ops.op_fs_write_file_text(path, String(data));
             }
-            await Deno.core.ops.op_fs_write_file(path, payload, isBinary);
         },
 
         appendFile: async function(path, data) {
@@ -509,93 +485,9 @@ async fn check_policy(
     Ok(())
 }
 
-fn base64_encode(data: &[u8]) -> String {
-    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut result = String::with_capacity((data.len() + 2) / 3 * 4);
-    for chunk in data.chunks(3) {
-        let a = chunk[0] as usize;
-        let b = if chunk.len() > 1 { chunk[1] as usize } else { 0 };
-        let c = if chunk.len() > 2 { chunk[2] as usize } else { 0 };
-        result.push(CHARS[a >> 2] as char);
-        result.push(CHARS[((a & 3) << 4) | (b >> 4)] as char);
-        if chunk.len() > 1 {
-            result.push(CHARS[((b & 15) << 2) | (c >> 6)] as char);
-        } else {
-            result.push('=');
-        }
-        if chunk.len() > 2 {
-            result.push(CHARS[c & 63] as char);
-        } else {
-            result.push('=');
-        }
-    }
-    result
-}
-
-fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
-    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut lookup = [255u8; 256];
-    for (i, &c) in CHARS.iter().enumerate() {
-        lookup[c as usize] = i as u8;
-    }
-
-    let bytes = input.as_bytes();
-    let mut result = Vec::with_capacity(bytes.len() * 3 / 4);
-
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'=' || bytes[i] == b'\n' || bytes[i] == b'\r' {
-            i += 1;
-            continue;
-        }
-
-        let a = lookup[bytes[i] as usize];
-        let b = if i + 1 < bytes.len() { lookup[bytes[i + 1] as usize] } else { 0 };
-        let c = if i + 2 < bytes.len() && bytes[i + 2] != b'=' { lookup[bytes[i + 2] as usize] } else { 0 };
-        let d = if i + 3 < bytes.len() && bytes[i + 3] != b'=' { lookup[bytes[i + 3] as usize] } else { 0 };
-
-        if a == 255 || b == 255 {
-            return Err("Invalid base64 character".to_string());
-        }
-
-        result.push((a << 2) | (b >> 4));
-        if i + 2 < bytes.len() && bytes[i + 2] != b'=' {
-            result.push(((b & 15) << 4) | (c >> 2));
-        }
-        if i + 3 < bytes.len() && bytes[i + 3] != b'=' {
-            result.push(((c & 3) << 6) | d);
-        }
-
-        i += 4;
-    }
-
-    Ok(result)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_base64_roundtrip() {
-        let original = b"Hello, World! \x00\x01\x02\xff";
-        let encoded = base64_encode(original);
-        let decoded = base64_decode(&encoded).unwrap();
-        assert_eq!(original.as_slice(), decoded.as_slice());
-    }
-
-    #[test]
-    fn test_base64_empty() {
-        assert_eq!(base64_encode(b""), "");
-        assert_eq!(base64_decode("").unwrap(), Vec::<u8>::new());
-    }
-
-    #[test]
-    fn test_base64_padding() {
-        assert_eq!(base64_encode(b"a"), "YQ==");
-        assert_eq!(base64_encode(b"ab"), "YWI=");
-        assert_eq!(base64_encode(b"abc"), "YWJj");
-    }
 
     #[test]
     fn test_fs_policy_input_serialization() {
