@@ -14,6 +14,8 @@ mod cluster;
 use engine::{initialize_v8, Engine, WasmModule, DEFAULT_EXECUTION_TIMEOUT_SECS};
 use engine::fetch::FetchConfig;
 use engine::execution::ExecutionRegistry;
+use engine::module_loader::ModuleLoaderConfig;
+use engine::opa::OpaClient;
 use engine::heap_storage::{AnyHeapStorage, S3HeapStorage, WriteThroughCacheHeapStorage, FileHeapStorage};
 use engine::heap_tags::HeapTagStore;
 use engine::session_log::SessionLog;
@@ -153,6 +155,22 @@ struct Cli {
     /// Format: [{"host": "api.github.com", "methods": ["GET","POST"], "headers": {"Authorization": "Bearer ..."}}]
     #[arg(long = "fetch-header-config", value_name = "PATH", requires = "opa_url")]
     fetch_header_config: Option<String>,
+
+    // ── Module import options ──────────────────────────────────────────
+
+    /// Allow external module imports (npm:, jsr:, and URL imports).
+    /// When disabled (the default), code using import declarations for external
+    /// packages will be rejected. Enable with --allow-external-modules.
+    #[arg(long = "allow-external-modules", default_value = "false")]
+    allow_external_modules: bool,
+
+    /// OPA policy path for auditing module imports (appended to /v1/data/).
+    /// When set (requires --opa-url and --allow-external-modules), each module
+    /// specifier is checked against this policy before being fetched.
+    /// The policy receives {specifier, specifier_type, resolved_url} as input
+    /// and must return {"allow": true} to permit the import.
+    #[arg(long = "opa-module-policy", value_name = "PATH", requires_all = ["opa_url", "allow_external_modules"])]
+    opa_module_policy: Option<String>,
 }
 
 #[tokio::main]
@@ -307,18 +325,36 @@ async fn main() -> Result<()> {
     let engine = if wasm_modules.is_empty() { engine } else { engine.with_wasm_modules(wasm_modules) };
 
     // ── OPA / fetch ─────────────────────────────────────────────────────
-    let engine = if let Some(opa_url) = cli.opa_url {
+    let engine = if let Some(ref opa_url) = cli.opa_url {
         tracing::info!("OPA enabled: {} (fetch policy: {})", opa_url, cli.opa_fetch_policy);
         let header_rules = load_fetch_header_rules(&cli.fetch_headers, &cli.fetch_header_config)?;
         if !header_rules.is_empty() {
             tracing::info!("Loaded {} fetch header injection rule(s)", header_rules.len());
         }
-        let fetch_config = FetchConfig::new(opa_url, cli.opa_fetch_policy)
+        let fetch_config = FetchConfig::new(opa_url.clone(), cli.opa_fetch_policy.clone())
             .with_header_rules(header_rules);
         engine.with_fetch_config(fetch_config)
     } else {
         engine
     };
+
+    // ── Module loader config ─────────────────────────────────────────────
+    let module_loader_config = ModuleLoaderConfig {
+        allow_external: cli.allow_external_modules,
+        opa_client: cli.opa_module_policy.as_ref().map(|_| {
+            OpaClient::new(cli.opa_url.clone().expect("--opa-module-policy requires --opa-url"))
+        }),
+        opa_module_policy: cli.opa_module_policy.clone(),
+    };
+    if cli.allow_external_modules {
+        tracing::info!("External module imports: ENABLED");
+        if let Some(ref policy) = cli.opa_module_policy {
+            tracing::info!("OPA module audit policy: {}", policy);
+        }
+    } else {
+        tracing::info!("External module imports: DISABLED (use --allow-external-modules to enable)");
+    }
+    let engine = engine.with_module_loader_config(module_loader_config);
 
     // ── Execution registry ──────────────────────────────────────────────
     // Use session_db_path for both stateless and stateful modes.
