@@ -1,0 +1,80 @@
+{
+  "realm": "mcp",
+  "enabled": true,
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": false,
+  "editUsernameAllowed": false,
+  "bruteForceProtected": false,
+  "sslRequired": "none",
+  "accessTokenLifespan": 3600,
+  "roles": {
+    "realm": [
+      {
+        "name": "user",
+        "description": "Default user role"
+      }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "mcp-server",
+      "name": "MCP Server (Resource Server)",
+      "description": "Confidential client used by the MCP server for token introspection",
+      "enabled": true,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "mcp-server-secret",
+      "publicClient": false,
+      "serviceAccountsEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "standardFlowEnabled": false,
+      "protocol": "openid-connect"
+    },
+    {
+      "clientId": "mcp-client",
+      "name": "MCP Client",
+      "description": "Public client for MCP client applications (e.g. Claude Code)",
+      "enabled": true,
+      "publicClient": true,
+      "directAccessGrantsEnabled": true,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "serviceAccountsEnabled": false,
+      "protocol": "openid-connect",
+      "redirectUris": [
+        "http://localhost:*",
+        "http://127.0.0.1:*",
+        "urn:ietf:wg:oauth:2.0:oob"
+      ],
+      "webOrigins": [
+        "http://localhost",
+        "http://127.0.0.1"
+      ],
+      "defaultClientScopes": [
+        "openid",
+        "profile"
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "testuser",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "testuser@example.com",
+      "firstName": "Test",
+      "lastName": "User",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "testpassword",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "user"
+      ]
+    }
+  ]
+}
