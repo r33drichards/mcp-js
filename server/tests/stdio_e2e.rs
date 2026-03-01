@@ -195,33 +195,11 @@ async fn test_stdio_run_js_execution() -> Result<(), Box<dyn std::error::Error>>
         "method": "notifications/initialized"
     })).await?;
 
-    // Call run_js tool (no heap needed for fresh session)
-    let tool_call_msg = json!({
-        "jsonrpc": "2.0",
-        "id": 2,
-        "method": "tools/call",
-        "params": {
-            "name": "run_js",
-            "arguments": {
-                "code": "1 + 1"
-            }
-        }
-    });
-
-    let response = server.send_message(tool_call_msg).await?;
-
-    // Verify response
-    assert_eq!(response["jsonrpc"], "2.0");
-    assert_eq!(response["id"], 2);
-    assert!(response["result"].is_object(), "Should have result object");
-
-    // Check for output in result
-    if let Some(content) = response["result"]["content"].as_array() {
-        assert!(!content.is_empty(), "Should have content in response");
-        // Verify the result contains "2" (result of 1 + 1)
-        let content_str = serde_json::to_string(&content)?;
-        assert!(content_str.contains("2"), "Response should contain result '2'");
-    }
+    // Call run_js tool and poll until completed
+    let info = server.run_js_and_wait(2, "1 + 1", None).await?;
+    assert_eq!(info["status"], "completed", "Execution should complete successfully");
+    let result = info["result"].as_str().unwrap_or("");
+    assert!(result.contains("2"), "Response should contain result '2', got: {}", result);
 
     server.stop().await;
     common::cleanup_heap_dir(&heap_dir);
