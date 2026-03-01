@@ -20,6 +20,7 @@ A Rust-based Model Context Protocol (MCP) server that exposes a V8 JavaScript ru
 - **Concurrency Control**: Configurable concurrent V8 execution limits with semaphore-based throttling.
 - **OPA-Gated Fetch**: Optional `fetch()` function for JavaScript following the web standard Fetch API, with every HTTP request checked against an [Open Policy Agent](https://www.openpolicyagent.org/) policy before execution.
 - **Fetch Header Injection**: Automatically inject headers (e.g., auth tokens, API keys) into outgoing fetch requests based on host and method matching rules, configured via CLI flags or a JSON config file.
+- **Policy-Gated Filesystem Access**: Optional `fs` API for JavaScript with Node.js-compatible operations (`readFile`, `writeFile`, `stat`, `mkdir`, etc.), where every operation is checked against a Rego/OPA policy before execution. Binary data is transferred directly as `Uint8Array` — no base64 encoding needed.
 
 ## Installation
 
@@ -76,20 +77,55 @@ These options enable Raft-based clustering for distributed coordination and repl
 - `--election-timeout-min <ms>`: Minimum election timeout in milliseconds (default: 300).
 - `--election-timeout-max <ms>`: Maximum election timeout in milliseconds (default: 500).
 
-### OPA / Fetch Options
+### Policy Configuration
 
-These options enable an OPA-gated `fetch()` function in the JavaScript runtime. When `--opa-url` is set, a `fetch(url, opts?)` global becomes available. `fetch()` follows the web standard Fetch API — it returns a Promise that resolves to a Response object. Every outbound HTTP request is first checked against an OPA policy — the request is only made if the policy returns `{"allow": true}`.
+Policy-gated features (fetch, filesystem, module imports) are configured via `--policies-json`. This flag accepts either inline JSON or a path to a JSON file. Policies can use local Rego files (via `regorus`) and/or remote OPA servers.
 
-- `--opa-url <URL>`: OPA server URL (e.g. `http://localhost:8181`). Enables `fetch()` in the JS runtime.
-- `--opa-fetch-policy <path>`: OPA policy path appended to `/v1/data/` (default: `mcp/fetch`). Requires `--opa-url`.
-- `--fetch-header <RULE>`: Inject headers into fetch requests matching host/method rules. Format: `host=<host>,header=<name>,value=<val>[,methods=GET;POST]`. Can be specified multiple times. Requires `--opa-url`. See [Fetch Header Injection](#fetch-header-injection) for details.
-- `--fetch-header-config <PATH>`: Path to a JSON file with header injection rules. Format: `[{"host": "...", "methods": [...], "headers": {...}}]`. Requires `--opa-url`. See [Fetch Header Injection](#fetch-header-injection) for details.
+- `--policies-json <JSON_OR_PATH>`: JSON policy configuration. Supports three operation keys: `fetch`, `filesystem`, and `modules`. Each key maps to a policy chain with an evaluation mode and a list of policy sources.
+
+**Schema:**
+```json
+{
+  "fetch": {
+    "mode": "all",
+    "policies": [
+      {"url": "file:///path/to/fetch.rego"},
+      {"url": "http://localhost:8181", "policy_path": "mcp/fetch"}
+    ]
+  },
+  "filesystem": {
+    "mode": "all",
+    "policies": [
+      {"url": "file:///path/to/fs-policy.rego"}
+    ]
+  },
+  "modules": {
+    "mode": "any",
+    "policies": [
+      {"url": "file:///path/to/modules.rego", "rule": "data.mcp.modules.allow"}
+    ]
+  }
+}
+```
+
+Each policy source supports:
+- `url` — `file://` for local Rego files/directories, or `http://`/`https://` for remote OPA servers
+- `policy_path` — (remote only) OPA REST API data path (defaults vary per operation)
+- `rule` — (local only) regorus eval rule (defaults vary per operation)
+
+Evaluation modes:
+- `"all"` (default) — all policies must allow (AND logic)
+- `"any"` — any policy allowing is sufficient (OR logic)
+
+### Fetch Options
+
+- `--fetch-header <RULE>`: Inject headers into fetch requests matching host/method rules. Format: `host=<host>,header=<name>,value=<val>[,methods=GET;POST]`. Can be specified multiple times. Requires a `fetch` policy in `--policies-json`. See [Fetch Header Injection](#fetch-header-injection) for details.
+- `--fetch-header-config <PATH>`: Path to a JSON file with header injection rules. Format: `[{"host": "...", "methods": [...], "headers": {...}}]`. Requires a `fetch` policy in `--policies-json`. See [Fetch Header Injection](#fetch-header-injection) for details.
 
 **Example:**
 ```bash
 mcp-v8 --stateless --http-port 3000 \
-  --opa-url http://localhost:8181 \
-  --opa-fetch-policy mcp/fetch
+  --policies-json '{"fetch":{"policies":[{"url":"file:///path/to/fetch.rego"}]}}'
 ```
 
 ### WASM Module Options
@@ -515,7 +551,7 @@ See [`examples/sqlite-wasm/`](examples/sqlite-wasm/) for the full example includ
 
 ### OPA-Gated Fetch
 
-When the server is started with `--opa-url`, JavaScript code can use a `fetch(url, opts?)` function following the web standard Fetch API. Every request is checked against an OPA policy before the HTTP call is made.
+When the server is configured with a `fetch` policy via `--policies-json`, JavaScript code can use a `fetch(url, opts?)` function following the web standard Fetch API. Every request is checked against a policy before the HTTP call is made.
 
 **1. Write an OPA policy**
 
@@ -541,12 +577,16 @@ The policy input includes:
 - `headers`: request headers (keys normalized to lowercase)
 - `url_parsed`: parsed URL components — `scheme`, `host`, `port`, `path`, `query`
 
-**2. Start the server with OPA enabled**
+**2. Start the server with a fetch policy**
 
 ```bash
+# Using a local Rego file
 mcp-v8 --stateless --http-port 3000 \
-  --opa-url http://localhost:8181 \
-  --opa-fetch-policy mcp/fetch
+  --policies-json '{"fetch":{"policies":[{"url":"file:///path/to/fetch.rego"}]}}'
+
+# Using a remote OPA server
+mcp-v8 --stateless --http-port 3000 \
+  --policies-json '{"fetch":{"policies":[{"url":"http://localhost:8181","policy_path":"mcp/fetch"}]}}'
 ```
 
 **3. Use `fetch()` in JavaScript**
@@ -580,7 +620,7 @@ If the OPA policy denies a request, the Promise returned by `fetch()` is rejecte
 
 ### Fetch Header Injection
 
-When using OPA-gated fetch, you can configure automatic header injection rules that add headers to outgoing `fetch()` requests based on the target host and HTTP method. This is useful for injecting authentication tokens, API keys, or other credentials without embedding them in JavaScript code.
+When using policy-gated fetch, you can configure automatic header injection rules that add headers to outgoing `fetch()` requests based on the target host and HTTP method. This is useful for injecting authentication tokens, API keys, or other credentials without embedding them in JavaScript code.
 
 Header injection rules are evaluated per-request. If a rule's host pattern and method filter match, its headers are injected into the request. **User-provided headers always take precedence** — a rule will not overwrite a header that JavaScript code already set.
 
@@ -600,7 +640,8 @@ host=<host>,header=<name>,value=<val>[,methods=GET;POST]
 Can be specified multiple times for multiple rules:
 
 ```bash
-mcp-v8 --stateless --opa-url http://localhost:8181 \
+mcp-v8 --stateless \
+  --policies-json '{"fetch":{"policies":[{"url":"file:///path/to/fetch.rego"}]}}' \
   --fetch-header "host=api.github.com,header=Authorization,value=Bearer ghp_xxxx" \
   --fetch-header "host=api.example.com,header=X-API-Key,value=secret123"
 ```
@@ -629,7 +670,8 @@ For managing many rules, use a JSON config file. Each rule can inject multiple h
 ```
 
 ```bash
-mcp-v8 --stateless --opa-url http://localhost:8181 \
+mcp-v8 --stateless \
+  --policies-json '{"fetch":{"policies":[{"url":"file:///path/to/fetch.rego"}]}}' \
   --fetch-header-config headers.json
 ```
 
@@ -658,6 +700,91 @@ await fetch("https://api.example.com/data", {
 });
 // → request includes Authorization: Bearer my-own-token (rule skipped)
 ```
+
+### Policy-Gated Filesystem Access
+
+When the server is configured with a `filesystem` policy via `--policies-json`, JavaScript code can use a global `fs` object with Node.js-compatible file operations. Every operation is checked against the policy before execution.
+
+**1. Write a Rego policy**
+
+Create a Rego policy that controls which filesystem operations are allowed:
+
+```rego
+package mcp.filesystem
+
+default allow = false
+
+# Allow all operations under /tmp/workspace/
+allow if {
+    startswith(input.path, "/tmp/workspace/")
+}
+
+# Also allow operations with a destination (rename, copyFile) under /tmp/workspace/
+allow if {
+    startswith(input.path, "/tmp/workspace/")
+    startswith(input.destination, "/tmp/workspace/")
+}
+```
+
+The policy input includes:
+- `operation`: one of `readFile`, `writeFile`, `appendFile`, `readdir`, `stat`, `mkdir`, `rm`, `rename`, `copyFile`, `exists`
+- `path`: the file or directory path
+- `destination`: (optional) destination path for `rename` and `copyFile`
+- `recursive`: (optional) boolean for `mkdir` and `rm`
+- `encoding`: (optional) `"utf8"` or `"buffer"` for `readFile`
+
+**2. Start the server with the filesystem policy**
+
+```bash
+mcp-v8 --stateless --http-port 3000 \
+  --policies-json '{"filesystem":{"policies":[{"url":"file:///path/to/fs-policy.rego"}]}}'
+```
+
+Or with a remote OPA server:
+
+```bash
+mcp-v8 --stateless --http-port 3000 \
+  --policies-json '{"filesystem":{"policies":[{"url":"http://localhost:8181"}]}}'
+```
+
+**3. Use `fs` in JavaScript**
+
+All operations are async and return Promises:
+
+```javascript
+// Write and read text files
+await fs.writeFile("/tmp/workspace/hello.txt", "Hello, world!");
+const text = await fs.readFile("/tmp/workspace/hello.txt");
+
+// Write and read binary files (Uint8Array — no base64 overhead)
+const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
+await fs.writeFile("/tmp/workspace/image.bin", bytes);
+const data = await fs.readFile("/tmp/workspace/image.bin", "buffer"); // Uint8Array
+
+// Append to a file
+await fs.appendFile("/tmp/workspace/log.txt", "new line\n");
+
+// Directory operations
+await fs.mkdir("/tmp/workspace/subdir", { recursive: true });
+const entries = await fs.readdir("/tmp/workspace/subdir"); // string[]
+
+// File metadata
+const info = await fs.stat("/tmp/workspace/hello.txt");
+// { size, isFile, isDirectory, isSymlink, readonly, mtimeMs, atimeMs, birthtimeMs }
+
+// File management
+await fs.rename("/tmp/workspace/old.txt", "/tmp/workspace/new.txt");
+await fs.copyFile("/tmp/workspace/src.txt", "/tmp/workspace/dst.txt");
+await fs.rm("/tmp/workspace/file.txt");
+await fs.rm("/tmp/workspace/subdir", { recursive: true });
+
+// Check existence
+const exists = await fs.exists("/tmp/workspace/hello.txt"); // boolean
+```
+
+If the policy denies an operation, the Promise is rejected with an error containing `"denied by policy"`.
+
+**Note:** The `fs` object is only available when a `filesystem` policy is configured via `--policies-json`. Without it, there is no filesystem access.
 
 ### Loading `.wasm` Files
 
@@ -748,8 +875,8 @@ You can configure heap storage using the following command line arguments:
 
 ## Limitations
 
-- **No `fetch` or network access by default**: When the server is started with `--opa-url`, a `fetch(url, opts?)` function becomes available following the web standard Fetch API. Each request is checked against an OPA policy before execution. Without `--opa-url`, there is no network access. See [OPA-Gated Fetch](#opa-gated-fetch) for details.
-- **No file system access**: The runtime does not provide access to the local file system or environment variables.
+- **No `fetch` or network access by default**: When the server is configured with a `fetch` policy via `--policies-json`, a `fetch(url, opts?)` function becomes available following the web standard Fetch API. Each request is checked against the policy before execution. Without a `fetch` policy, there is no network access. See [OPA-Gated Fetch](#opa-gated-fetch) for details.
+- **No file system access by default**: When the server is configured with a `filesystem` policy via `--policies-json`, a global `fs` object becomes available with Node.js-compatible file operations. Each operation is checked against the policy before execution. Without a `filesystem` policy, there is no file system access. See [Policy-Gated Filesystem Access](#policy-gated-filesystem-access) for details. Environment variables are never accessible.
 - **No timers**: Functions like `setTimeout` and `setInterval` are not available.
 - **No DOM or browser APIs**: This is not a browser environment; there is no access to `window`, `document`, or other browser-specific objects.
 - **TypeScript: type removal only**: TypeScript type annotations are stripped before execution. No type checking is performed — invalid types are silently removed, not reported as errors.
