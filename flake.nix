@@ -144,6 +144,10 @@
             inherit pkgs;
             mcp-js = self.packages.x86_64-linux.default;
           });
+          fs-opa-test = pkgs.nixosTest (import ./tests/nixos/fs-opa.nix {
+            inherit pkgs;
+            mcp-js = self.packages.x86_64-linux.default;
+          });
         };
     };
 }
