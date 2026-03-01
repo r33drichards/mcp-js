@@ -4,8 +4,8 @@
 /// tokio::select! timeout). OOM tests call execute_stateless/execute_stateful
 /// directly since they don't need timeout management.
 
-use std::sync::{Arc, Mutex, Once};
-use server::engine::{Engine, initialize_v8};
+use std::sync::{Arc, Once};
+use server::engine::{Engine, ExecutionConfig, initialize_v8};
 use server::engine::execution::ExecutionRegistry;
 
 static INIT: Once = Once::new();
@@ -14,10 +14,6 @@ fn ensure_v8() {
     INIT.call_once(|| {
         initialize_v8();
     });
-}
-
-fn no_handle() -> Arc<Mutex<Option<deno_core::v8::IsolateHandle>>> {
-    Arc::new(Mutex::new(None))
 }
 
 fn rand_id() -> u64 {
@@ -103,7 +99,7 @@ fn test_oom_produces_descriptive_error_not_crash() {
     "#;
     let heap_bytes = 16 * 1024 * 1024; // 16MB
 
-    let (result, _oom) = server::engine::execute_stateless(code, heap_bytes, no_handle(), &[], heap_bytes, None, None, None);
+    let (result, _oom) = server::engine::execute_stateless(code, ExecutionConfig::new(heap_bytes));
 
     assert!(result.is_err(), "Huge allocation with small heap should fail, got: {:?}", result);
     let err = result.unwrap_err();
@@ -127,7 +123,7 @@ fn test_oom_stateful_produces_descriptive_error_not_crash() {
     "#;
     let heap_bytes = 16 * 1024 * 1024; // 16MB
 
-    let (result, _oom) = server::engine::execute_stateful(code, None, heap_bytes, no_handle(), &[], heap_bytes, None, None, None);
+    let (result, _oom) = server::engine::execute_stateful(code, None, ExecutionConfig::new(heap_bytes));
 
     assert!(result.is_err(), "Huge allocation with small heap should fail, got: {:?}", result);
     let err = result.unwrap_err();
@@ -151,7 +147,7 @@ fn test_fast_computation_succeeds() {
     "#;
     let heap_bytes = 64 * 1024 * 1024;
 
-    let (result, _oom) = server::engine::execute_stateless(code, heap_bytes, no_handle(), &[], heap_bytes, None, None, None);
+    let (result, _oom) = server::engine::execute_stateless(code, ExecutionConfig::new(heap_bytes));
 
     assert!(result.is_ok(), "Fast computation should succeed, got: {:?}", result);
     assert_eq!(result.unwrap(), "499999500000");
@@ -164,7 +160,7 @@ fn test_bare_call_default_params() {
 
     let heap_bytes = 8 * 1024 * 1024;
 
-    let (result, _oom) = server::engine::execute_stateless("1 + 1", heap_bytes, no_handle(), &[], heap_bytes, None, None, None);
+    let (result, _oom) = server::engine::execute_stateless("1 + 1", ExecutionConfig::new(heap_bytes));
 
     assert!(result.is_ok(), "Simple expression should succeed, got: {:?}", result);
     assert_eq!(result.unwrap(), "2");

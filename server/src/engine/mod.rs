@@ -709,19 +709,87 @@ fn execute_module(runtime: &mut JsRuntime, code: &str) -> Result<String, String>
     Ok("undefined".to_string())
 }
 
+/// Configuration bundle for `execute_stateless` / `execute_stateful`.
+///
+/// Only `heap_memory_max_bytes` is required; everything else defaults to
+/// sensible values (`None`, `&[]`, fresh `Arc<Mutex<None>>`).
+pub struct ExecutionConfig<'a> {
+    pub heap_memory_max_bytes: usize,
+    pub isolate_handle: Arc<Mutex<Option<v8::IsolateHandle>>>,
+    pub wasm_modules: &'a [WasmModule],
+    pub wasm_default_max_bytes: usize,
+    pub fetch_config: Option<&'a fetch::FetchConfig>,
+    pub console_tree: Option<sled::Tree>,
+    pub module_loader_config: Option<&'a module_loader::ModuleLoaderConfig>,
+}
+
+impl<'a> ExecutionConfig<'a> {
+    pub fn new(heap_memory_max_bytes: usize) -> Self {
+        Self {
+            heap_memory_max_bytes,
+            isolate_handle: Arc::new(Mutex::new(None)),
+            wasm_modules: &[],
+            wasm_default_max_bytes: heap_memory_max_bytes,
+            fetch_config: None,
+            console_tree: None,
+            module_loader_config: None,
+        }
+    }
+
+    pub fn isolate_handle(mut self, handle: Arc<Mutex<Option<v8::IsolateHandle>>>) -> Self {
+        self.isolate_handle = handle;
+        self
+    }
+
+    pub fn wasm_modules(mut self, modules: &'a [WasmModule]) -> Self {
+        self.wasm_modules = modules;
+        self
+    }
+
+    pub fn wasm_default_max_bytes(mut self, bytes: usize) -> Self {
+        self.wasm_default_max_bytes = bytes;
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn fetch_config(mut self, config: &'a fetch::FetchConfig) -> Self {
+        self.fetch_config = Some(config);
+        self
+    }
+
+    pub fn console_tree(mut self, tree: sled::Tree) -> Self {
+        self.console_tree = Some(tree);
+        self
+    }
+
+    pub fn module_loader_config(mut self, config: &'a module_loader::ModuleLoaderConfig) -> Self {
+        self.module_loader_config = Some(config);
+        self
+    }
+
+    pub fn maybe_fetch_config(mut self, config: Option<&'a fetch::FetchConfig>) -> Self {
+        self.fetch_config = config;
+        self
+    }
+
+}
+
 /// Stateless execution — creates a fresh JsRuntime (no snapshot).
 /// Publishes an IsolateHandle for external cancellation.
 /// Returns (result, oom_flag).
 pub fn execute_stateless(
     code: &str,
-    heap_memory_max_bytes: usize,
-    isolate_handle: Arc<Mutex<Option<v8::IsolateHandle>>>,
-    wasm_modules: &[WasmModule],
-    wasm_default_max_bytes: usize,
-    fetch_config: Option<&fetch::FetchConfig>,
-    console_tree: Option<sled::Tree>,
-    module_loader_config: Option<&module_loader::ModuleLoaderConfig>,
+    config: ExecutionConfig<'_>,
 ) -> (Result<String, String>, bool) {
+    let ExecutionConfig {
+        heap_memory_max_bytes,
+        isolate_handle,
+        wasm_modules,
+        wasm_default_max_bytes,
+        fetch_config,
+        console_tree,
+        module_loader_config,
+    } = config;
     let oom_flag = Arc::new(AtomicBool::new(false));
 
     let use_modules = has_module_syntax(code);
@@ -823,14 +891,17 @@ pub fn execute_stateless(
 pub fn execute_stateful(
     code: &str,
     raw_snapshot: Option<Vec<u8>>,
-    heap_memory_max_bytes: usize,
-    isolate_handle: Arc<Mutex<Option<v8::IsolateHandle>>>,
-    wasm_modules: &[WasmModule],
-    wasm_default_max_bytes: usize,
-    fetch_config: Option<&fetch::FetchConfig>,
-    console_tree: Option<sled::Tree>,
-    module_loader_config: Option<&module_loader::ModuleLoaderConfig>,
+    config: ExecutionConfig<'_>,
 ) -> (Result<(String, Vec<u8>, String), String>, bool) {
+    let ExecutionConfig {
+        heap_memory_max_bytes,
+        isolate_handle,
+        wasm_modules,
+        wasm_default_max_bytes,
+        fetch_config,
+        console_tree,
+        module_loader_config,
+    } = config;
     let oom_flag = Arc::new(AtomicBool::new(false));
 
     let use_modules = has_module_syntax(code);
@@ -1176,7 +1247,13 @@ impl Engine {
                 let ct = console_tree;
                 let mlc = self.module_loader_config.clone();
                 let mut join_handle = tokio::task::spawn_blocking(move || {
-                    execute_stateless(&code, max_bytes, ih, &wasm, wasm_default, fc.as_deref(), Some(ct), Some(&mlc))
+                    execute_stateless(&code, ExecutionConfig::new(max_bytes)
+                        .isolate_handle(ih)
+                        .wasm_modules(&wasm)
+                        .wasm_default_max_bytes(wasm_default)
+                        .maybe_fetch_config(fc.as_deref())
+                        .console_tree(ct)
+                        .module_loader_config(&mlc))
                 });
 
                 // Publish isolate handle for cancellation once it's available.
@@ -1231,7 +1308,13 @@ impl Engine {
                 let snap_mutex = self.snapshot_mutex.clone();
                 let mut join_handle = tokio::task::spawn_blocking(move || {
                     let _guard = snap_mutex.blocking_lock();
-                    execute_stateful(&code, raw_snapshot, max_bytes, ih, &wasm, wasm_default, fc.as_deref(), Some(ct), Some(&mlc))
+                    execute_stateful(&code, raw_snapshot, ExecutionConfig::new(max_bytes)
+                        .isolate_handle(ih)
+                        .wasm_modules(&wasm)
+                        .wasm_default_max_bytes(wasm_default)
+                        .maybe_fetch_config(fc.as_deref())
+                        .console_tree(ct)
+                        .module_loader_config(&mlc))
                 });
 
                 // Publish isolate handle for cancellation.

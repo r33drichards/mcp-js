@@ -3,7 +3,8 @@
 /// These tests verify that the heap_limits parameter correctly constrains
 /// V8 isolate memory usage, preventing unbounded heap growth.
 
-use std::sync::{Arc, Mutex, Once};
+use std::sync::Once;
+use server::engine::ExecutionConfig;
 
 static INIT: Once = Once::new();
 
@@ -11,10 +12,6 @@ fn ensure_v8() {
     INIT.call_once(|| {
         server::engine::initialize_v8();
     });
-}
-
-fn no_handle() -> Arc<Mutex<Option<deno_core::v8::IsolateHandle>>> {
-    Arc::new(Mutex::new(None))
 }
 
 /// JS code that allocates a large amount of memory by building a huge array of strings.
@@ -36,7 +33,7 @@ fn test_stateless_small_heap_limit_rejects_large_allocation() {
 
     // 5 MB heap limit — too small for a 2M-element string array
     let max_bytes = 5 * 1024 * 1024;
-    let (result, _oom) = server::engine::execute_stateless(MEMORY_HOG_JS, max_bytes, no_handle(), &[], max_bytes, None, None, None);
+    let (result, _oom) = server::engine::execute_stateless(MEMORY_HOG_JS, ExecutionConfig::new(max_bytes));
 
     assert!(
         result.is_err(),
@@ -50,7 +47,7 @@ fn test_stateless_default_limit_allows_small_code() {
     ensure_v8();
 
     let max_bytes = 8 * 1024 * 1024;
-    let (result, _oom) = server::engine::execute_stateless(SMALL_JS, max_bytes, no_handle(), &[], max_bytes, None, None, None);
+    let (result, _oom) = server::engine::execute_stateless(SMALL_JS, ExecutionConfig::new(max_bytes));
 
     assert!(
         result.is_ok(),
@@ -66,7 +63,7 @@ fn test_stateless_generous_limit_allows_large_allocation() {
 
     // 256 MB — should be plenty for 2M strings
     let max_bytes = 256 * 1024 * 1024;
-    let (result, _oom) = server::engine::execute_stateless(MEMORY_HOG_JS, max_bytes, no_handle(), &[], max_bytes, None, None, None);
+    let (result, _oom) = server::engine::execute_stateless(MEMORY_HOG_JS, ExecutionConfig::new(max_bytes));
 
     assert!(
         result.is_ok(),
@@ -82,7 +79,7 @@ fn test_stateful_small_heap_limit_rejects_large_allocation() {
 
     // 5 MB heap limit — too small for a 2M-element string array
     let max_bytes = 5 * 1024 * 1024;
-    let (result, _oom) = server::engine::execute_stateful(MEMORY_HOG_JS, None, max_bytes, no_handle(), &[], max_bytes, None, None, None);
+    let (result, _oom) = server::engine::execute_stateful(MEMORY_HOG_JS, None, ExecutionConfig::new(max_bytes));
 
     assert!(
         result.is_err(),
@@ -96,7 +93,7 @@ fn test_stateful_default_limit_allows_small_code() {
     ensure_v8();
 
     let max_bytes = 8 * 1024 * 1024;
-    let (result, _oom) = server::engine::execute_stateful(SMALL_JS, None, max_bytes, no_handle(), &[], max_bytes, None, None, None);
+    let (result, _oom) = server::engine::execute_stateful(SMALL_JS, None, ExecutionConfig::new(max_bytes));
 
     assert!(
         result.is_ok(),
@@ -114,7 +111,7 @@ fn test_stateful_generous_limit_allows_large_allocation() {
 
     // 256 MB — should be plenty for 2M strings
     let max_bytes = 256 * 1024 * 1024;
-    let (result, _oom) = server::engine::execute_stateful(MEMORY_HOG_JS, None, max_bytes, no_handle(), &[], max_bytes, None, None, None);
+    let (result, _oom) = server::engine::execute_stateful(MEMORY_HOG_JS, None, ExecutionConfig::new(max_bytes));
 
     assert!(
         result.is_ok(),
@@ -133,8 +130,8 @@ fn test_different_limits_produce_different_outcomes() {
     let small_limit = 5 * 1024 * 1024;
     let large_limit = 256 * 1024 * 1024;
 
-    let (small_result, _) = server::engine::execute_stateless(MEMORY_HOG_JS, small_limit, no_handle(), &[], small_limit, None, None, None);
-    let (large_result, _) = server::engine::execute_stateless(MEMORY_HOG_JS, large_limit, no_handle(), &[], large_limit, None, None, None);
+    let (small_result, _) = server::engine::execute_stateless(MEMORY_HOG_JS, ExecutionConfig::new(small_limit));
+    let (large_result, _) = server::engine::execute_stateless(MEMORY_HOG_JS, ExecutionConfig::new(large_limit));
 
     assert!(
         small_result.is_err(),
@@ -177,7 +174,7 @@ fn test_typed_array_oom_does_not_crash_stateless() {
 
     // 8 MB heap — typed array backing stores will exceed this quickly
     let heap_bytes = 8 * 1024 * 1024;
-    let (result, _oom) = server::engine::execute_stateless(TYPED_ARRAY_OOM_JS, heap_bytes, no_handle(), &[], heap_bytes, None, None, None);
+    let (result, _oom) = server::engine::execute_stateless(TYPED_ARRAY_OOM_JS, ExecutionConfig::new(heap_bytes));
 
     // We don't care whether it's Ok (the JS catch fired) or Err (V8 killed it) —
     // the critical thing is that we *get here* instead of a process crash.
@@ -196,7 +193,7 @@ fn test_typed_array_oom_does_not_crash_stateful() {
     ensure_v8();
 
     let heap_bytes = 8 * 1024 * 1024;
-    let (result, _oom) = server::engine::execute_stateful(TYPED_ARRAY_OOM_JS, None, heap_bytes, no_handle(), &[], heap_bytes, None, None, None);
+    let (result, _oom) = server::engine::execute_stateful(TYPED_ARRAY_OOM_JS, None, ExecutionConfig::new(heap_bytes));
 
     if let Err(ref e) = result {
         assert!(
@@ -236,7 +233,7 @@ fn extreme_oom_subprocess_worker() {
 
     match mode.as_str() {
         "stateless" => {
-            let (result, _) = server::engine::execute_stateless(code, heap_bytes, no_handle(), &[], heap_bytes, None, None, None);
+            let (result, _) = server::engine::execute_stateless(code, ExecutionConfig::new(heap_bytes));
             // If we reach here (V8 didn't abort), exit cleanly.
             if result.is_err() {
                 std::process::exit(0);
@@ -244,7 +241,7 @@ fn extreme_oom_subprocess_worker() {
             std::process::exit(0);
         }
         "stateful" => {
-            let (result, _) = server::engine::execute_stateful(code, None, heap_bytes, no_handle(), &[], heap_bytes, None, None, None);
+            let (result, _) = server::engine::execute_stateful(code, None, ExecutionConfig::new(heap_bytes));
             if result.is_err() {
                 std::process::exit(0);
             }
@@ -276,7 +273,8 @@ fn run_extreme_oom_subprocess(mode: &str) {
     // The parent process is still running — V8 global state is intact.
     // Verify by running a simple V8 execution.
     ensure_v8();
-    let (result, _) = server::engine::execute_stateless("1 + 1", 8 * 1024 * 1024, no_handle(), &[], 16 * 1024 * 1024, None, None, None);
+    let (result, _) = server::engine::execute_stateless("1 + 1", ExecutionConfig::new(8 * 1024 * 1024)
+        .wasm_default_max_bytes(16 * 1024 * 1024));
     assert!(
         result.is_ok(),
         "Parent process V8 should be unaffected after subprocess OOM, but got: {:?}",
