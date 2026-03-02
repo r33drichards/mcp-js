@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use deno_core::ModuleLoadOptions;
 use deno_core::ModuleLoadReferrer;
@@ -16,6 +17,14 @@ use futures::FutureExt;
 use serde::Serialize;
 
 use super::opa::PolicyChain;
+
+/// Per-request timeout for module fetches. Limits how long a single HTTP
+/// request (DNS + connect + transfer) can take. Prevents hanging on
+/// unreachable hosts or slow networks.
+const MODULE_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
+/// Connect-phase timeout. Fails fast when the remote host is unreachable
+/// (e.g. non-existent domain) without waiting for the full request timeout.
+const MODULE_FETCH_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Configuration for the module loader controlling external module access.
 #[derive(Clone, Debug)]
@@ -59,9 +68,17 @@ pub struct NetworkModuleLoader {
 }
 
 impl NetworkModuleLoader {
+    fn build_client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .connect_timeout(MODULE_FETCH_CONNECT_TIMEOUT)
+            .timeout(MODULE_FETCH_TIMEOUT)
+            .build()
+            .expect("failed to build reqwest client")
+    }
+
     pub fn new() -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: Self::build_client(),
             config: ModuleLoaderConfig {
                 allow_external: true,
                 policy_chain: None,
@@ -71,7 +88,7 @@ impl NetworkModuleLoader {
 
     pub fn with_config(config: ModuleLoaderConfig) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: Self::build_client(),
             config,
         }
     }
