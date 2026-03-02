@@ -107,7 +107,11 @@ pub fn create_extension() -> deno_core::Extension {
 /// 1. Replaces `Deno.core.ops.op_panic` with a JS function that throws
 /// 2. Replaces `Deno.core.ops.op_print` with a JS function that routes
 ///    through `op_console_write` (if available) or silently discards
-/// 3. Replaces `Deno.core.print` via prototype chain override
+/// 3. Replaces `Deno.core` with a flat copy (null prototype) that overrides
+///    `print` — severing the prototype chain to the original frozen core
+///    whose `print` held a closure reference to the native `op_print`
+/// 4. Makes `Deno.core` non-configurable to prevent user code from
+///    reversing the replacement
 pub fn neutralize_dangerous_ops(runtime: &mut JsRuntime) -> Result<(), String> {
     runtime
         .execute_script("<sandbox-setup>", SANDBOX_SETUP_JS.to_string())
@@ -133,22 +137,58 @@ const SANDBOX_SETUP_JS: &str = r#"
     };
     Deno.core.ops.op_print = safePrint;
 
-    // Deno.core is frozen by deno_core bootstrap, so we cannot modify
-    // Deno.core.print in-place. Instead, create a new core object that
-    // inherits all original properties but overrides print.
+    // CRITICAL FIX: Deno.core is frozen by deno_core bootstrap, so we cannot
+    // modify Deno.core.print in-place. The old approach used Object.create()
+    // to inherit from origCore and shadow `print`, but this left the original
+    // native print accessible via Object.getPrototypeOf(Deno.core).print,
+    // which captures the native op_print in a bootstrap closure — bypassing
+    // neutralization and writing directly to stdout (corrupting JSON-RPC).
+    //
+    // Fix: copy all own properties from origCore to a plain object (no
+    // prototype chain), overriding `print` with the safe version.
     var origCore = Deno.core;
-    var newCore = Object.create(origCore);
+    var newCore = Object.create(null);
+
+    // Copy all own properties (including symbols) from the original core.
+    var names = Object.getOwnPropertyNames(origCore);
+    for (var i = 0; i < names.length; i++) {
+        if (names[i] === 'print') continue; // override below
+        try {
+            var desc = Object.getOwnPropertyDescriptor(origCore, names[i]);
+            if (desc) {
+                Object.defineProperty(newCore, names[i], desc);
+            }
+        } catch (e) {
+            try { newCore[names[i]] = origCore[names[i]]; } catch (_) {}
+        }
+    }
+    var syms = Object.getOwnPropertySymbols(origCore);
+    for (var i = 0; i < syms.length; i++) {
+        try {
+            var desc = Object.getOwnPropertyDescriptor(origCore, syms[i]);
+            if (desc) {
+                Object.defineProperty(newCore, syms[i], desc);
+            }
+        } catch (e) {
+            try { newCore[syms[i]] = origCore[syms[i]]; } catch (_) {}
+        }
+    }
+
+    // Override print with the safe version (non-configurable, non-writable).
     Object.defineProperty(newCore, 'print', {
         value: safePrint,
         writable: false,
         configurable: false,
         enumerable: true,
     });
-    // The Deno object is NOT frozen, so we can replace the core property.
+
+    // Replace Deno.core with the new object that has NO prototype chain
+    // back to the original frozen core. Use configurable: false so user
+    // code cannot reverse this replacement.
     Object.defineProperty(globalThis.Deno, 'core', {
         value: newCore,
         writable: false,
-        configurable: true,
+        configurable: false,
         enumerable: true,
     });
 })();

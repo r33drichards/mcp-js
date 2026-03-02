@@ -166,6 +166,90 @@ fn test_stateful_op_panic_returns_error() {
 }
 
 #[test]
+fn test_print_prototype_bypass_is_neutralized() {
+    ensure_v8();
+    let heap_bytes = 8 * 1024 * 1024;
+    let (tree, tmp) = console_tree();
+    let config = ExecutionConfig::new(heap_bytes).console_tree(tree.clone());
+    let (result, _oom) = server::engine::execute_stateless(
+        r#"
+        // Attempt prototype-chain bypass: accessing the original core via prototype
+        var origCore = Object.getPrototypeOf(Deno.core);
+        if (origCore === null) {
+            // Prototype is null — bypass is not possible, print via safe path
+            Deno.core.print("proto_bypass_test\n", false);
+        } else {
+            origCore.print("proto_bypass_test\n", false);
+        }
+        console.log("done");
+        "#,
+        config,
+    );
+    assert!(result.is_ok(), "Should succeed, got: {:?}", result);
+
+    // The print output should appear in captured console (not raw stdout).
+    let output = read_console(&tree);
+    assert!(
+        output.contains("proto_bypass_test"),
+        "Prototype print should route through console capture, got: '{}'",
+        output,
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn test_core_not_reconfigurable() {
+    ensure_v8();
+    let heap_bytes = 8 * 1024 * 1024;
+    let (tree, tmp) = console_tree();
+    let config = ExecutionConfig::new(heap_bytes).console_tree(tree.clone());
+    let (result, _oom) = server::engine::execute_stateless(
+        r#"
+        try {
+            Object.defineProperty(globalThis.Deno, 'core', {
+                value: {}
+            });
+            console.log("reconfigured");
+        } catch (e) {
+            console.log("blocked: " + e.message);
+        }
+        "#,
+        config,
+    );
+    assert!(result.is_ok(), "Should succeed, got: {:?}", result);
+    let output = read_console(&tree);
+    assert!(
+        output.contains("blocked:"),
+        "Deno.core reconfiguration should be blocked, got: {}",
+        output,
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn test_prototype_chain_severed() {
+    ensure_v8();
+    let heap_bytes = 8 * 1024 * 1024;
+    let (tree, tmp) = console_tree();
+    let config = ExecutionConfig::new(heap_bytes).console_tree(tree.clone());
+    let (result, _oom) = server::engine::execute_stateless(
+        r#"
+        var proto = Object.getPrototypeOf(Deno.core);
+        console.log("proto=" + (proto === null ? "null" : typeof proto));
+        "#,
+        config,
+    );
+    assert!(result.is_ok(), "Should succeed, got: {:?}", result);
+    let output = read_console(&tree);
+    assert!(
+        output.contains("proto=null"),
+        "Deno.core prototype should be null, got: {}",
+        output,
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
 fn test_process_survives_after_panic_interception() {
     ensure_v8();
     let heap_bytes = 8 * 1024 * 1024;
