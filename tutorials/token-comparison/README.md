@@ -26,6 +26,12 @@ direct MCP. Approach B (mcp-js) shows high variance (38K–197K per run) dependi
 how much data Claude's JS code pulls back via `console.log()` — the server-side
 filtering advantage is real but inconsistent.
 
+![Average token usage by approach](graph_avg_tokens.png)
+
+![Token usage distribution across runs](graph_distribution.png)
+
+![Token usage per run](graph_per_run.png)
+
 ## The Three Approaches
 
 ### Approach A: GitHub MCP Server Direct

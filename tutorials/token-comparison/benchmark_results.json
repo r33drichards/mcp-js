@@ -1,0 +1,212 @@
+{
+  "A": {
+    "label": "GitHub MCP (26 tools)",
+    "runs": [
+      {
+        "input": 194635,
+        "output": 728,
+        "total": 195363,
+        "requests": 5
+      },
+      {
+        "input": 147131,
+        "output": 593,
+        "total": 147724,
+        "requests": 4
+      },
+      {
+        "input": 57916,
+        "output": 493,
+        "total": 58409,
+        "requests": 3
+      },
+      {
+        "input": 57921,
+        "output": 568,
+        "total": 58489,
+        "requests": 3
+      },
+      {
+        "input": 325010,
+        "output": 878,
+        "total": 325888,
+        "requests": 6
+      },
+      {
+        "input": 57925,
+        "output": 521,
+        "total": 58446,
+        "requests": 3
+      },
+      {
+        "input": 105356,
+        "output": 545,
+        "total": 105901,
+        "requests": 4
+      },
+      {
+        "input": 105331,
+        "output": 655,
+        "total": 105986,
+        "requests": 4
+      },
+      {
+        "input": 105357,
+        "output": 575,
+        "total": 105932,
+        "requests": 4
+      },
+      {
+        "input": 57918,
+        "output": 501,
+        "total": 58419,
+        "requests": 3
+      }
+    ],
+    "avg": {
+      "input": 121450.0,
+      "output": 605.7,
+      "total": 122055.7,
+      "requests": 3.9,
+      "n": 10
+    }
+  },
+  "B": {
+    "label": "mcp-js proxy (1 tool)",
+    "runs": [
+      {
+        "input": 60552,
+        "output": 2708,
+        "total": 63260,
+        "requests": 5
+      },
+      {
+        "input": 193780,
+        "output": 3298,
+        "total": 197078,
+        "requests": 6
+      },
+      {
+        "input": 35276,
+        "output": 2906,
+        "total": 38182,
+        "requests": 6
+      },
+      {
+        "input": 128191,
+        "output": 3470,
+        "total": 131661,
+        "requests": 6
+      },
+      {
+        "input": 132485,
+        "output": 2727,
+        "total": 135212,
+        "requests": 5
+      },
+      {
+        "input": 171147,
+        "output": 2800,
+        "total": 173947,
+        "requests": 8
+      },
+      {
+        "input": 76144,
+        "output": 4305,
+        "total": 80449,
+        "requests": 6
+      },
+      {
+        "input": 114935,
+        "output": 2513,
+        "total": 117448,
+        "requests": 5
+      },
+      {
+        "input": 120358,
+        "output": 2843,
+        "total": 123201,
+        "requests": 6
+      }
+    ],
+    "avg": {
+      "input": 114763.1,
+      "output": 3063.3,
+      "total": 117826.4,
+      "requests": 5.9,
+      "n": 9
+    }
+  },
+  "C": {
+    "label": "gh CLI (1 tool)",
+    "runs": [
+      {
+        "input": 14290,
+        "output": 789,
+        "total": 15079,
+        "requests": 7
+      },
+      {
+        "input": 17548,
+        "output": 1004,
+        "total": 18552,
+        "requests": 8
+      },
+      {
+        "input": 19574,
+        "output": 873,
+        "total": 20447,
+        "requests": 8
+      },
+      {
+        "input": 17363,
+        "output": 1045,
+        "total": 18408,
+        "requests": 8
+      },
+      {
+        "input": 35272,
+        "output": 1502,
+        "total": 36774,
+        "requests": 14
+      },
+      {
+        "input": 13902,
+        "output": 1062,
+        "total": 14964,
+        "requests": 9
+      },
+      {
+        "input": 14375,
+        "output": 845,
+        "total": 15220,
+        "requests": 7
+      },
+      {
+        "input": 10540,
+        "output": 525,
+        "total": 11065,
+        "requests": 5
+      },
+      {
+        "input": 45529,
+        "output": 1465,
+        "total": 46994,
+        "requests": 14
+      },
+      {
+        "input": 41418,
+        "output": 1272,
+        "total": 42690,
+        "requests": 12
+      }
+    ],
+    "avg": {
+      "input": 22981.1,
+      "output": 1038.2,
+      "total": 24019.3,
+      "requests": 9.2,
+      "n": 10
+    }
+  }
+}
