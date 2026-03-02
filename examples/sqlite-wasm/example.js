@@ -298,4 +298,4 @@ var stats = db.query("SELECT COUNT(*) as count, AVG(age) as avg_age FROM users")
 
 db.close();
 
-JSON.stringify({ users: result.rows, stats: stats.rows[0] });
+console.log(JSON.stringify({ users: result.rows, stats: stats.rows[0] }));
