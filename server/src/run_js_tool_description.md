@@ -20,7 +20,7 @@ returns:
 1. Call `run_js(code)` → get `execution_id`
 2. Call `get_execution(execution_id)` → check `status` (running/completed/failed/cancelled/timed_out)
 3. Call `get_execution_output(execution_id)` → read console output (paginated)
-4. When status is "completed", `get_execution` returns the `result` (final expression value) and `heap` (content hash)
+4. When status is "completed", `get_execution` returns the `result` and `heap` (content hash). Use `get_execution_output` to read console output.
 
 ## Console Output
 
@@ -34,32 +34,31 @@ Both modes return position info in both coordinate systems for cross-referencing
 
 ## Return Values
 
-The final expression value (the last evaluated expression in your code) is available via `get_execution` once the execution completes. To return results, ensure the value you want is the last line of your code.
+All code runs as ES modules, which support `import`/`export` declarations and **top-level `await`**. Use `console.log()` to output results, then read them via `get_execution_output`.
 
 eg:
 
 ```js
 const result = 1 + 1;
-result;
+console.log(result);
 ```
 
-After execution completes, `get_execution` will return `result: "2"`.
+After execution completes, `get_execution_output` will return `data: "2\n"`.
 
-You must also jsonify an object, and return it as a string to see its content.
-
-eg:
+To return structured data, JSON-stringify it:
 
 ```js
-const obj = {
-  a: 1,
-  b: 2,
-};
-JSON.stringify(obj);
+const obj = { a: 1, b: 2 };
+console.log(JSON.stringify(obj));
 ```
 
-After execution completes, `get_execution` will return `result: '{"a":1,"b":2}'`.
+Top-level `await` is fully supported:
 
-async/await is supported. The runtime resolves top-level Promises automatically.
+```js
+const resp = await fetch("https://example.com/api");
+const data = await resp.json();
+console.log(JSON.stringify(data));
+```
 
 ## Importing Packages
 

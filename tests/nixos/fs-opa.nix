@@ -62,7 +62,11 @@ in
     machine.wait_for_open_port(3000)
 
     def exec_js(code):
-        """Execute JS code via mcp-js async /api/exec endpoint and return parsed response."""
+        """Execute JS code via mcp-js async /api/exec endpoint and return parsed response.
+
+        All code runs as ES modules, so results must be captured via console.log().
+        Returns a dict with 'output' key containing console output.
+        """
         body = json.dumps({"code": code})
         raw = machine.succeed(
             "curl -s -X POST http://localhost:3000/api/exec "
@@ -79,7 +83,13 @@ in
             status_resp = json.loads(status_raw)
             status = status_resp.get("status", "")
             if status in ("Completed", "completed"):
-                return {"output": status_resp.get("result", "")}
+                # Read console output (module results are always "undefined")
+                output_raw = machine.succeed(
+                    "curl -s http://localhost:3000/api/executions/" + exec_id + "/output"
+                )
+                output_resp = json.loads(output_raw)
+                console_data = output_resp.get("data", "").strip()
+                return {"output": console_data}
             if status in ("Failed", "failed", "TimedOut", "Cancelled"):
                 return {"output": "Error: " + status_resp.get("error", status)}
             time.sleep(0.5)
@@ -88,18 +98,16 @@ in
 
     # Create the allowed directory inside the service's private /tmp
     # (DynamicUser=true implies PrivateTmp, so shell mkdir is invisible to the service)
-    setup = exec_js('(async () => { await fs.mkdir("/tmp/allowed/", {recursive: true}); return "ok"; })()')
+    setup = exec_js('await fs.mkdir("/tmp/allowed/", {recursive: true}); console.log("ok");')
     assert setup["output"] == "ok", "Failed to create /tmp/allowed: " + str(setup)
 
     # ── Test 1: Write and read a file in allowed directory ────────────
 
     with subtest("should allow writeFile and readFile in /tmp/allowed/"):
         result = exec_js("""
-            (async () => {
-                await fs.writeFile("/tmp/allowed/test.txt", "hello world");
-                const data = await fs.readFile("/tmp/allowed/test.txt");
-                return data;
-            })()
+            await fs.writeFile("/tmp/allowed/test.txt", "hello world");
+            const data = await fs.readFile("/tmp/allowed/test.txt");
+            console.log(data);
         """)
         print("Write+Read result: " + str(result))
         assert result["output"] == "hello world", "Expected 'hello world', got: " + str(result)
@@ -108,12 +116,10 @@ in
 
     with subtest("should deny writeFile outside /tmp/allowed/"):
         result = exec_js("""
-            (async () => {
-                try {
-                    await fs.writeFile("/tmp/secret.txt", "bad data");
-                    return "no error";
-                } catch(e) { return e.message; }
-            })()
+            try {
+                await fs.writeFile("/tmp/secret.txt", "bad data");
+                console.log("no error");
+            } catch(e) { console.log(e.message); }
         """)
         print("Denied write result: " + str(result))
         assert "denied by policy" in result["output"], \
@@ -123,12 +129,10 @@ in
 
     with subtest("should deny readFile outside /tmp/allowed/"):
         result = exec_js("""
-            (async () => {
-                try {
-                    const data = await fs.readFile("/etc/hostname");
-                    return "no error: " + data;
-                } catch(e) { return e.message; }
-            })()
+            try {
+                const data = await fs.readFile("/etc/hostname");
+                console.log("no error: " + data);
+            } catch(e) { console.log(e.message); }
         """)
         print("Denied read result: " + str(result))
         assert "denied by policy" in result["output"], \
@@ -138,10 +142,8 @@ in
 
     with subtest("should allow stat in /tmp/allowed/"):
         result = exec_js("""
-            (async () => {
-                const info = await fs.stat("/tmp/allowed/test.txt");
-                return JSON.stringify({isFile: info.isFile, size: info.size});
-            })()
+            const info = await fs.stat("/tmp/allowed/test.txt");
+            console.log(JSON.stringify({isFile: info.isFile, size: info.size}));
         """)
         print("Stat result: " + str(result))
         body = json.loads(result["output"])
@@ -152,11 +154,9 @@ in
 
     with subtest("should allow exists in /tmp/allowed/"):
         result = exec_js("""
-            (async () => {
-                const e1 = await fs.exists("/tmp/allowed/test.txt");
-                const e2 = await fs.exists("/tmp/allowed/nonexistent.txt");
-                return JSON.stringify({exists: e1, notExists: e2});
-            })()
+            const e1 = await fs.exists("/tmp/allowed/test.txt");
+            const e2 = await fs.exists("/tmp/allowed/nonexistent.txt");
+            console.log(JSON.stringify({exists: e1, notExists: e2}));
         """)
         print("Exists result: " + str(result))
         body = json.loads(result["output"])
@@ -167,14 +167,12 @@ in
 
     with subtest("should allow mkdir and readdir in /tmp/allowed/"):
         result = exec_js("""
-            (async () => {
-                await fs.mkdir("/tmp/allowed/subdir", {recursive: true});
-                await fs.writeFile("/tmp/allowed/subdir/a.txt", "a");
-                await fs.writeFile("/tmp/allowed/subdir/b.txt", "b");
-                const entries = await fs.readdir("/tmp/allowed/subdir");
-                entries.sort();
-                return JSON.stringify(entries);
-            })()
+            await fs.mkdir("/tmp/allowed/subdir", {recursive: true});
+            await fs.writeFile("/tmp/allowed/subdir/a.txt", "a");
+            await fs.writeFile("/tmp/allowed/subdir/b.txt", "b");
+            const entries = await fs.readdir("/tmp/allowed/subdir");
+            entries.sort();
+            console.log(JSON.stringify(entries));
         """)
         print("mkdir+readdir result: " + str(result))
         entries = json.loads(result["output"])
@@ -184,11 +182,9 @@ in
 
     with subtest("should allow appendFile in /tmp/allowed/"):
         result = exec_js("""
-            (async () => {
-                await fs.writeFile("/tmp/allowed/append.txt", "hello");
-                await fs.appendFile("/tmp/allowed/append.txt", " world");
-                return await fs.readFile("/tmp/allowed/append.txt");
-            })()
+            await fs.writeFile("/tmp/allowed/append.txt", "hello");
+            await fs.appendFile("/tmp/allowed/append.txt", " world");
+            console.log(await fs.readFile("/tmp/allowed/append.txt"));
         """)
         print("appendFile result: " + str(result))
         assert result["output"] == "hello world", "Expected 'hello world', got: " + str(result)
@@ -197,11 +193,9 @@ in
 
     with subtest("should allow rename within /tmp/allowed/"):
         result = exec_js("""
-            (async () => {
-                await fs.writeFile("/tmp/allowed/old.txt", "renamed");
-                await fs.rename("/tmp/allowed/old.txt", "/tmp/allowed/new.txt");
-                return await fs.readFile("/tmp/allowed/new.txt");
-            })()
+            await fs.writeFile("/tmp/allowed/old.txt", "renamed");
+            await fs.rename("/tmp/allowed/old.txt", "/tmp/allowed/new.txt");
+            console.log(await fs.readFile("/tmp/allowed/new.txt"));
         """)
         print("Rename result: " + str(result))
         assert result["output"] == "renamed", "Expected 'renamed', got: " + str(result)
@@ -210,11 +204,9 @@ in
 
     with subtest("should allow copyFile within /tmp/allowed/"):
         result = exec_js("""
-            (async () => {
-                await fs.writeFile("/tmp/allowed/src.txt", "copied");
-                await fs.copyFile("/tmp/allowed/src.txt", "/tmp/allowed/dst.txt");
-                return await fs.readFile("/tmp/allowed/dst.txt");
-            })()
+            await fs.writeFile("/tmp/allowed/src.txt", "copied");
+            await fs.copyFile("/tmp/allowed/src.txt", "/tmp/allowed/dst.txt");
+            console.log(await fs.readFile("/tmp/allowed/dst.txt"));
         """)
         print("CopyFile result: " + str(result))
         assert result["output"] == "copied", "Expected 'copied', got: " + str(result)
@@ -223,12 +215,10 @@ in
 
     with subtest("should allow rm in /tmp/allowed/"):
         result = exec_js("""
-            (async () => {
-                await fs.writeFile("/tmp/allowed/del.txt", "delete me");
-                await fs.rm("/tmp/allowed/del.txt");
-                const exists = await fs.exists("/tmp/allowed/del.txt");
-                return JSON.stringify({deleted: !exists});
-            })()
+            await fs.writeFile("/tmp/allowed/del.txt", "delete me");
+            await fs.rm("/tmp/allowed/del.txt");
+            const exists = await fs.exists("/tmp/allowed/del.txt");
+            console.log(JSON.stringify({deleted: !exists}));
         """)
         print("rm result: " + str(result))
         body = json.loads(result["output"])
@@ -237,7 +227,7 @@ in
     # ── Test 11: fs object is available ───────────────────────────────
 
     with subtest("should have fs available when filesystem policy is configured"):
-        result = exec_js("typeof fs")
+        result = exec_js("console.log(typeof fs)")
         print("typeof fs: " + str(result))
         assert result["output"] == "object", "Expected object, got: " + str(result)
 
@@ -245,12 +235,10 @@ in
 
     with subtest("should support binary write/read with Uint8Array"):
         result = exec_js("""
-            (async () => {
-                const data = new Uint8Array([72, 101, 108, 108, 111]);
-                await fs.writeFile("/tmp/allowed/binary.bin", data);
-                const read = await fs.readFile("/tmp/allowed/binary.bin", "buffer");
-                return JSON.stringify(Array.from(read));
-            })()
+            const data = new Uint8Array([72, 101, 108, 108, 111]);
+            await fs.writeFile("/tmp/allowed/binary.bin", data);
+            const read = await fs.readFile("/tmp/allowed/binary.bin", "buffer");
+            console.log(JSON.stringify(Array.from(read)));
         """)
         print("Binary write/read result: " + str(result))
         arr = json.loads(result["output"])

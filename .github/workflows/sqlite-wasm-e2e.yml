@@ -94,12 +94,8 @@ jobs:
             sleep 1
           done
 
-          # Get the result
-          RESULT=$(echo "$STATUS_RESP" | jq -r '.result')
-          echo "Result: $RESULT"
-
-          # Parse and verify the output
-          OUTPUT="$RESULT"
+          # Get the console output (result is in console.log, not .result)
+          OUTPUT=$(curl -s "http://localhost:8080/api/executions/${EXEC_ID}/output" | jq -r '.data')
           echo "Output: $OUTPUT"
 
           # Verify we got 3 users back

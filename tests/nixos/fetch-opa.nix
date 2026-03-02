@@ -100,7 +100,8 @@ in
         """Execute JS code via mcp-js async /api/exec endpoint and return parsed response.
 
         Submits the code (returns 202 + execution_id), then polls for completion.
-        Returns a dict with 'output' key for backward-compat with assertions.
+        Returns a dict with 'output' key containing console output.
+        All code runs as ES modules, so results must be captured via console.log().
         """
         body = json.dumps({"code": code})
         raw = machine.succeed(
@@ -119,7 +120,13 @@ in
             status_resp = json.loads(status_raw)
             status = status_resp.get("status", "")
             if status in ("Completed", "completed"):
-                return {"output": status_resp.get("result", "")}
+                # Read console output (module results are always "undefined")
+                output_raw = machine.succeed(
+                    "curl -s http://localhost:3000/api/executions/" + exec_id + "/output"
+                )
+                output_resp = json.loads(output_raw)
+                console_data = output_resp.get("data", "").strip()
+                return {"output": console_data}
             if status in ("Failed", "failed", "TimedOut", "Cancelled"):
                 return {"output": "Error: " + status_resp.get("error", status)}
             time.sleep(0.5)
@@ -130,10 +137,8 @@ in
 
     with subtest("should allow GET fetch to permitted path"):
         result = exec_js("""
-            (async () => {
-                const resp = await fetch("http://localhost:8080/allowed/data");
-                return JSON.stringify(await resp.json());
-            })()
+            const resp = await fetch("http://localhost:8080/allowed/data");
+            console.log(JSON.stringify(await resp.json()));
         """)
         print("Allowed fetch result: " + str(result))
         assert "Error" not in result["output"], "Expected success, got: " + str(result)
@@ -144,10 +149,8 @@ in
 
     with subtest("should deny fetch to non-allowed path"):
         result = exec_js("""
-            (async () => {
-                try { await fetch("http://localhost:8080/denied/secret"); return "no error"; }
-                catch(e) { return e.message; }
-            })()
+            try { await fetch("http://localhost:8080/denied/secret"); console.log("no error"); }
+            catch(e) { console.log(e.message); }
         """)
         print("Denied-by-path result: " + str(result))
         assert "denied by policy" in result["output"], \
@@ -157,10 +160,8 @@ in
 
     with subtest("should deny POST fetch even to allowed path"):
         result = exec_js("""
-            (async () => {
-                try { await fetch("http://localhost:8080/allowed/data", {method: "POST"}); return "no error"; }
-                catch(e) { return e.message; }
-            })()
+            try { await fetch("http://localhost:8080/allowed/data", {method: "POST"}); console.log("no error"); }
+            catch(e) { console.log(e.message); }
         """)
         print("Denied-by-method result: " + str(result))
         assert "denied by policy" in result["output"], \
@@ -170,10 +171,8 @@ in
 
     with subtest("should deny fetch to non-allowed host"):
         result = exec_js("""
-            (async () => {
-                try { await fetch("http://example.com/allowed/data"); return "no error"; }
-                catch(e) { return e.message; }
-            })()
+            try { await fetch("http://example.com/allowed/data"); console.log("no error"); }
+            catch(e) { console.log(e.message); }
         """)
         print("Denied-by-host result: " + str(result))
         # Could be "denied by policy" or a connection error — either is acceptable.
@@ -183,7 +182,7 @@ in
     # ── Test 5: Verify fetch is available (typeof check) ────────────────
 
     with subtest("should have fetch available when OPA is configured"):
-        result = exec_js("typeof fetch")
+        result = exec_js("console.log(typeof fetch)")
         print("typeof fetch: " + str(result))
         assert result["output"] == "function", "Expected function, got: " + str(result)
 
@@ -191,10 +190,8 @@ in
 
     with subtest("should work with async/await syntax"):
         result = exec_js("""
-            (async () => {
-                const resp = await fetch("http://localhost:8080/allowed/data");
-                return JSON.stringify(await resp.json());
-            })()
+            const resp = await fetch("http://localhost:8080/allowed/data");
+            console.log(JSON.stringify(await resp.json()));
         """)
         print("Async/await fetch result: " + str(result))
         body = json.loads(result["output"])
@@ -205,9 +202,9 @@ in
 
     with subtest("should work with Promise.then callback syntax"):
         result = exec_js("""
-            fetch("http://localhost:8080/allowed/data")
-                .then(function(resp) { return resp.json(); })
-                .then(function(data) { return JSON.stringify(data); })
+            const data = await fetch("http://localhost:8080/allowed/data")
+                .then(function(resp) { return resp.json(); });
+            console.log(JSON.stringify(data));
         """)
         print("Promise.then fetch result: " + str(result))
         body = json.loads(result["output"])
@@ -218,17 +215,15 @@ in
 
     with subtest("should work with nested async fetch calls"):
         result = exec_js("""
-            (async () => {
-                const first = await fetch("http://localhost:8080/allowed/data");
-                const body = await first.json();
-                const second = await fetch("http://localhost:8080/allowed/data");
-                const body2 = await second.json();
-                return JSON.stringify({
-                    first: body.message,
-                    second: body2.message,
-                    combined: body.message + " + " + body2.message
-                });
-            })()
+            const first = await fetch("http://localhost:8080/allowed/data");
+            const body = await first.json();
+            const second = await fetch("http://localhost:8080/allowed/data");
+            const body2 = await second.json();
+            console.log(JSON.stringify({
+                first: body.message,
+                second: body2.message,
+                combined: body.message + " + " + body2.message
+            }));
         """)
         print("Nested async fetch result: " + str(result))
         body = json.loads(result["output"])
