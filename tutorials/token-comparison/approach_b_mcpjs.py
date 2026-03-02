@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "pydantic-ai[mcp]",
+# ]
+# ///
 """
 Approach B: PydanticAI agent connected to mcp-js via Streamable HTTP.
 
 Only the tools exposed by mcp-js (run_js) are sent to the model.
 Claude writes JavaScript that calls mcp.callTool() inside the V8 sandbox.
 
-Requirements:
-    pip install "pydantic-ai[bedrock,mcp]"
-    export AWS_REGION=us-east-1
-
+Usage:
     # Start mcp-js with the GitHub MCP server connected:
     mcp-v8 --stateless --http-port 3000 \
         --mcp-server 'github=stdio:npx:-y:@modelcontextprotocol/server-github'
+
+    export AWS_REGION=us-east-1
+    uv run tutorials/token-comparison/approach_b_mcpjs.py
 """
 
 import asyncio
