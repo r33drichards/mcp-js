@@ -2,6 +2,7 @@
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use server::engine::ExecutionConfig;
+use server::engine::module_loader::ModuleLoaderConfig;
 use std::sync::{Arc, Mutex, Once};
 
 static INIT: Once = Once::new();
@@ -90,11 +91,18 @@ try {{
         )
     };
 
-    // Execute stateless — we don't care about the result, only that it doesn't crash
+    // Execute stateless — we don't care about the result, only that it doesn't crash.
+    // Disable external modules so dynamic imports fail fast at resolution time
+    // instead of attempting real HTTP requests that would timeout.
     let max_bytes = 8 * 1024 * 1024;
     let handle = Arc::new(Mutex::new(None));
+    let loader_config = ModuleLoaderConfig {
+        allow_external: false,
+        policy_chain: None,
+    };
     let _ = server::engine::execute_stateless(&code, ExecutionConfig::new(max_bytes)
-        .isolate_handle(handle));
+        .isolate_handle(handle)
+        .module_loader_config(&loader_config));
 });
 
 /// Escape a string for safe inclusion in JavaScript code
