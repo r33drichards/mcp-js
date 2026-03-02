@@ -1077,6 +1077,8 @@ pub struct Engine {
     module_loader_config: Arc<module_loader::ModuleLoaderConfig>,
     /// MCP client manager for programmatic tool calling from JS.
     mcp_client_manager: Option<Arc<mcp_client::McpClientManager>>,
+    /// OPA policy chain for MCP tool calls (`mcp.callTool()`).
+    mcp_tools_policy_chain: Option<Arc<opa::PolicyChain>>,
 }
 
 impl Engine {
@@ -1103,6 +1105,7 @@ impl Engine {
                 policy_chain: None,
             }),
             mcp_client_manager: None,
+            mcp_tools_policy_chain: None,
         }
     }
 
@@ -1132,6 +1135,7 @@ impl Engine {
                 policy_chain: None,
             }),
             mcp_client_manager: None,
+            mcp_tools_policy_chain: None,
         }
     }
 
@@ -1174,6 +1178,12 @@ impl Engine {
     /// Enable MCP client tool calling from the JS runtime.
     pub fn with_mcp_client_manager(mut self, manager: mcp_client::McpClientManager) -> Self {
         self.mcp_client_manager = Some(Arc::new(manager));
+        self
+    }
+
+    /// Set OPA policy chain for MCP tool calls (`mcp.callTool()`).
+    pub fn with_mcp_tools_policy_chain(mut self, chain: Arc<opa::PolicyChain>) -> Self {
+        self.mcp_tools_policy_chain = Some(chain);
         self
     }
 
@@ -1270,7 +1280,7 @@ impl Engine {
                 let fsc = self.fs_config.clone();
                 let ct = console_tree;
                 let mlc = self.module_loader_config.clone();
-                let mc = self.mcp_client_manager.as_ref().map(|m| mcp_client::McpConfig { client_manager: (**m).clone() });
+                let mc = self.mcp_client_manager.as_ref().map(|m| mcp_client::McpConfig { client_manager: (**m).clone(), policy_chain: self.mcp_tools_policy_chain.clone() });
                 let mut join_handle = tokio::task::spawn_blocking(move || {
                     execute_stateless(&code, ExecutionConfig::new(max_bytes)
                         .isolate_handle(ih)
@@ -1332,7 +1342,7 @@ impl Engine {
                 let fsc = self.fs_config.clone();
                 let ct = console_tree;
                 let mlc = self.module_loader_config.clone();
-                let mc = self.mcp_client_manager.as_ref().map(|m| mcp_client::McpConfig { client_manager: (**m).clone() });
+                let mc = self.mcp_client_manager.as_ref().map(|m| mcp_client::McpConfig { client_manager: (**m).clone(), policy_chain: self.mcp_tools_policy_chain.clone() });
 
                 let snap_mutex = self.snapshot_mutex.clone();
                 let mut join_handle = tokio::task::spawn_blocking(move || {

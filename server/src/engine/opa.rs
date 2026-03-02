@@ -265,6 +265,8 @@ pub struct PoliciesConfig {
     pub modules: Option<OperationPolicies>,
     /// Policy chain for filesystem operations.
     pub filesystem: Option<OperationPolicies>,
+    /// Policy chain for MCP tool calls (`mcp.callTool()`).
+    pub mcp_tools: Option<OperationPolicies>,
 }
 
 /// Per-operation policy configuration.
@@ -628,6 +630,27 @@ allow if { input.admin == true }
         let fetch = config.fetch.unwrap();
         assert_eq!(fetch.mode, EvalMode::All); // default
         assert!(config.modules.is_none());
+        assert!(config.mcp_tools.is_none());
+    }
+
+    #[test]
+    fn test_policies_config_mcp_tools() {
+        let json = r#"{
+            "mcp_tools": {
+                "mode": "all",
+                "policies": [
+                    {"url": "file:///etc/policies/mcp_tools.rego", "rule": "data.mcp.tools.allow"}
+                ]
+            }
+        }"#;
+        let config: PoliciesConfig = serde_json::from_str(json).unwrap();
+        assert!(config.fetch.is_none());
+        assert!(config.modules.is_none());
+        assert!(config.filesystem.is_none());
+        let mcp_tools = config.mcp_tools.unwrap();
+        assert_eq!(mcp_tools.mode, EvalMode::All);
+        assert_eq!(mcp_tools.policies.len(), 1);
+        assert_eq!(mcp_tools.policies[0].rule.as_deref(), Some("data.mcp.tools.allow"));
     }
 
     // ── Integration: local rego through build_policy_chain + evaluate ────
@@ -652,5 +675,105 @@ allow if { input.admin == true }
 
         let post_input = serde_json::json!({"method": "POST", "url": "https://example.com"});
         assert!(!chain.evaluate(&post_input).await.unwrap());
+    }
+
+    // ── MCP tools policy tests ────────────────────────────────────────────
+
+    fn mcp_tools_rego() -> &'static str {
+        r#"
+package mcp.tools
+
+default allow = false
+
+allow if {
+    input.server == "math"
+    input.tool == "add"
+}
+
+allow if {
+    input.server == "utils"
+}
+"#
+    }
+
+    #[tokio::test]
+    async fn test_mcp_tools_policy_allow() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_rego_file(dir.path(), "mcp_tools.rego", mcp_tools_rego());
+
+        let op = OperationPolicies {
+            mode: EvalMode::All,
+            policies: vec![PolicySource {
+                url: format!("file://{}", path.display()),
+                policy_path: None,
+                rule: None,
+            }],
+        };
+        let chain = build_policy_chain(&op, "mcp/tools", "data.mcp.tools.allow").unwrap();
+
+        // Allowed: math.add
+        let input = serde_json::json!({
+            "operation": "mcp_call_tool",
+            "server": "math",
+            "tool": "add",
+            "arguments": {"a": 1, "b": 2}
+        });
+        assert!(chain.evaluate(&input).await.unwrap());
+
+        // Allowed: any tool on "utils" server
+        let input = serde_json::json!({
+            "operation": "mcp_call_tool",
+            "server": "utils",
+            "tool": "anything",
+            "arguments": null
+        });
+        assert!(chain.evaluate(&input).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_mcp_tools_policy_deny() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_rego_file(dir.path(), "mcp_tools.rego", mcp_tools_rego());
+
+        let op = OperationPolicies {
+            mode: EvalMode::All,
+            policies: vec![PolicySource {
+                url: format!("file://{}", path.display()),
+                policy_path: None,
+                rule: None,
+            }],
+        };
+        let chain = build_policy_chain(&op, "mcp/tools", "data.mcp.tools.allow").unwrap();
+
+        // Denied: math.subtract (only math.add is allowed)
+        let input = serde_json::json!({
+            "operation": "mcp_call_tool",
+            "server": "math",
+            "tool": "subtract",
+            "arguments": {"a": 5, "b": 3}
+        });
+        assert!(!chain.evaluate(&input).await.unwrap());
+
+        // Denied: unknown server
+        let input = serde_json::json!({
+            "operation": "mcp_call_tool",
+            "server": "secret",
+            "tool": "get_password",
+            "arguments": null
+        });
+        assert!(!chain.evaluate(&input).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_mcp_tools_policy_no_chain_allows_all() {
+        // Empty chain should allow all calls (permissive default).
+        let chain = PolicyChain::new(vec![], EvalMode::All);
+        let input = serde_json::json!({
+            "operation": "mcp_call_tool",
+            "server": "anything",
+            "tool": "whatever",
+            "arguments": null
+        });
+        assert!(chain.evaluate(&input).await.unwrap());
     }
 }
