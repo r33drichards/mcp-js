@@ -1,0 +1,8 @@
+# LeakSanitizer suppression file for fuzz targets.
+#
+# deno_core's JsRuntimeForSnapshot leaks a small Vec of extension names
+# (32 bytes / 2 allocations) when the runtime is consumed by snapshot().
+# This is an internal deno_core issue — the allocation happens in
+# JsRuntime::new_inner and is not freed when snapshot() consumes the runtime.
+# Not a real leak since the forked fuzz process exits immediately after.
+leak:JsRuntime
