@@ -612,7 +612,7 @@ static MODULE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 /// Execute code as an ES module. All code is always executed as a module,
 /// which supports `import` declarations, `export`, and top-level `await`.
-fn execute_module(runtime: &mut JsRuntime, code: &str) -> Result<String, String> {
+fn execute_module(runtime: &mut JsRuntime, code: &str) -> Result<(), String> {
     let id = MODULE_COUNTER.fetch_add(1, Ordering::Relaxed);
     let main_url = ModuleSpecifier::parse(&format!("file:///main_{}.js", id))
         .map_err(|e| format!("internal specifier error: {}", e))?;
@@ -646,7 +646,7 @@ fn execute_module(runtime: &mut JsRuntime, code: &str) -> Result<String, String>
 
     handle.block_on(eval_future).map_err(|e| format!("{}", e))?;
 
-    Ok("undefined".to_string())
+    Ok(())
 }
 
 /// Configuration bundle for `execute_stateless` / `execute_stateful`.
@@ -829,7 +829,7 @@ pub fn execute_stateless(
 
     let oom = oom_flag.load(Ordering::SeqCst);
     match result {
-        Ok(Ok(output)) => (Ok(output), oom),
+        Ok(Ok(())) => (Ok(String::new()), oom),
         Ok(Err(e)) => (Err(classify_termination_error(&oom_flag, false, e)), oom),
         Err(_panic) => {
             *isolate_handle.lock().unwrap() = None;
@@ -973,9 +973,9 @@ pub fn execute_stateful(
         }
 
         match output_result {
-            Ok(output) => {
+            Ok(()) => {
                 let wrapped = wrap_snapshot(&snapshot_data);
-                Ok((output, wrapped.data, wrapped.content_hash))
+                Ok((String::new(), wrapped.data, wrapped.content_hash))
             }
             Err(e) => Err(e),
         }
