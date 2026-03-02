@@ -48,3 +48,23 @@ name = "fuzz_wasm_compile"
 path = "fuzz_targets/fuzz_wasm_compile.rs"
 doc = false
 
+[[bin]]
+name = "fuzz_fs_operations"
+path = "fuzz_targets/fuzz_fs_operations.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_fetch_operations"
+path = "fuzz_targets/fuzz_fetch_operations.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_parameter_validation"
+path = "fuzz_targets/fuzz_parameter_validation.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_module_resolution"
+path = "fuzz_targets/fuzz_module_resolution.rs"
+doc = false
+

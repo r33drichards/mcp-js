@@ -1,0 +1,1 @@
+writefile /tmp/output.txt hello world
