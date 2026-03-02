@@ -244,7 +244,7 @@ console.log(camelCase("hello_world"));
         "npm lodash-es import should succeed, got: {:?}",
         result
     );
-    assert_eq!(result.unwrap(), "undefined");
+    assert_eq!(result.unwrap(), "");
 }
 
 // ── jsr imports (network required) ──────────────────────────────────────
@@ -266,7 +266,7 @@ console.log(camelCase("hello_world"));
         "jsr @luca/cases import should succeed, got: {:?}",
         result
     );
-    assert_eq!(result.unwrap(), "undefined");
+    assert_eq!(result.unwrap(), "");
 }
 
 // ── URL imports (network required) ──────────────────────────────────────
@@ -288,7 +288,7 @@ console.log(camelCase("foo_bar"));
         "URL import should succeed, got: {:?}",
         result
     );
-    assert_eq!(result.unwrap(), "undefined");
+    assert_eq!(result.unwrap(), "");
 }
 
 // ── Module with console output (network required) ───────────────────────
@@ -314,7 +314,7 @@ console.log("Result:", result);
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         if let Ok(info) = engine.get_execution(&exec_id) {
             if info.status == "completed" {
-                assert_eq!(info.result.as_deref(), Some("undefined"));
+                assert_eq!(info.result.as_deref(), Some(""));
                 let output = engine
                     .get_execution_output(&exec_id, None, None, None, None)
                     .expect("should get output");
