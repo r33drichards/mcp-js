@@ -25,6 +25,7 @@ services:
   node1:
     build: .
     command:
+      - mcp-v8
       - --http-port=3000
       - --stateless
       - --cluster-port=4000
@@ -40,6 +41,7 @@ services:
   node2:
     build: .
     command:
+      - mcp-v8
       - --http-port=3000
       - --stateless
       - --cluster-port=4000
@@ -55,6 +57,7 @@ services:
   node3:
     build: .
     command:
+      - mcp-v8
       - --http-port=3000
       - --stateless
       - --cluster-port=4000
