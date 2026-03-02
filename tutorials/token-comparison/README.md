@@ -88,7 +88,8 @@ Approach C:
 ### Prerequisites
 
 ```bash
-pip install "pydantic-ai[bedrock,mcp]"
+# uv handles Python dependencies automatically via inline script metadata
+# https://docs.astral.sh/uv/guides/scripts/
 export AWS_REGION=us-east-1
 export GITHUB_PERSONAL_ACCESS_TOKEN=$(gh auth token)
 ```
@@ -96,7 +97,7 @@ export GITHUB_PERSONAL_ACCESS_TOKEN=$(gh auth token)
 ### Approach A
 
 ```bash
-python tutorials/token-comparison/approach_a_github_mcp.py
+uv run tutorials/token-comparison/approach_a_github_mcp.py
 ```
 
 ### Approach B
@@ -107,14 +108,14 @@ mcp-v8 --stateless --http-port 3000 \
     --mcp-server 'github=stdio:npx:-y:@modelcontextprotocol/server-github'
 
 # In another terminal
-python tutorials/token-comparison/approach_b_mcpjs.py
+uv run tutorials/token-comparison/approach_b_mcpjs.py
 ```
 
 ### Approach C
 
 ```bash
 gh auth login  # must be authenticated
-python tutorials/token-comparison/approach_c_gh_cli.py
+uv run tutorials/token-comparison/approach_c_gh_cli.py
 ```
 
 ## When to Use Each Approach

@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "pydantic-ai[mcp]",
+# ]
+# ///
 """
 Approach A: PydanticAI agent connected directly to GitHub MCP server.
 
 All 26 GitHub MCP tools are exposed to the model on every turn.
 
-Requirements:
-    pip install "pydantic-ai[bedrock,mcp]"
-    export GITHUB_PERSONAL_ACCESS_TOKEN=...
+Usage:
+    export GITHUB_PERSONAL_ACCESS_TOKEN=$(gh auth token)
     export AWS_REGION=us-east-1
+    uv run tutorials/token-comparison/approach_a_github_mcp.py
 """
 
 import asyncio

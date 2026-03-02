@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "pydantic-ai",
+# ]
+# ///
 """
 Approach C: PydanticAI agent with a single gh CLI tool.
 
 One tool that runs `gh` commands. No MCP overhead at all.
 
-Requirements:
-    pip install "pydantic-ai[bedrock]"
+Usage:
     export AWS_REGION=us-east-1
     gh auth login  # must be authenticated
+    uv run tutorials/token-comparison/approach_c_gh_cli.py
 """
 
 import asyncio
