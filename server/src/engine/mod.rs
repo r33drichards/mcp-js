@@ -806,6 +806,8 @@ pub fn execute_stateless(
     let result = catch_unwind(AssertUnwindSafe(|| {
         let params = create_params_with_heap_limit(heap_memory_max_bytes);
         let mut extensions = Vec::new();
+        // Always load sandbox extension for op_panic/print neutralization.
+        extensions.push(console::create_sandbox_extension());
         if console_tree.is_some() {
             extensions.push(console::create_extension());
         }
@@ -865,6 +867,10 @@ pub fn execute_stateless(
             Ok(()) => {
                 // Inject console JS wrapper.
                 if let Err(e) = console::inject_console(&mut runtime) {
+                    return Err(e);
+                }
+                // Neutralize dangerous built-in ops (op_panic, print).
+                if let Err(e) = console::neutralize_dangerous_ops(&mut runtime) {
                     return Err(e);
                 }
                 // Inject fetch() JS wrapper if OPA is configured.
@@ -951,6 +957,8 @@ pub fn execute_stateful(
         let startup_snapshot = leaked_snapshot.as_ref().map(|(_, s)| *s);
 
         let mut extensions = Vec::new();
+        // Always load sandbox extension for op_panic/print neutralization.
+        extensions.push(console::create_sandbox_extension());
         if console_tree.is_some() {
             extensions.push(console::create_extension());
         }
@@ -1010,6 +1018,10 @@ pub fn execute_stateful(
             Ok(()) => {
                 // Inject console JS wrapper.
                 if let Err(e) = console::inject_console_snapshot(&mut runtime) {
+                    return Err(e);
+                }
+                // Neutralize dangerous built-in ops (op_panic, print).
+                if let Err(e) = console::neutralize_dangerous_ops(&mut runtime) {
                     return Err(e);
                 }
                 // Inject fetch() JS wrapper if OPA is configured.
