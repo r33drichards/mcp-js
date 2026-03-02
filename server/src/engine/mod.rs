@@ -972,43 +972,53 @@ pub fn execute_stateful(
         );
         let _heap_guard = HeapLimitGuard { ptr: cb_data_ptr };
 
-        // Inject WASM modules as globals via V8 native API.
-        // Do NOT early-return here — snapshot() must be called below.
-        let output_result = match inject_wasm_modules(&mut runtime, wasm_modules, wasm_default_max_bytes) {
-            Err(e) => Err(e),
-            Ok(()) => {
-                // Inject console JS wrapper.
-                if let Err(e) = console::inject_console_snapshot(&mut runtime) {
-                    return Err(e);
-                }
-                // Neutralize dangerous built-in ops (op_panic, print).
-                if let Err(e) = console::neutralize_dangerous_ops(&mut runtime) {
-                    return Err(e);
-                }
-                // Inject fetch() JS wrapper if OPA is configured.
-                if fetch_config.is_some() {
-                    if let Err(e) = fetch::inject_fetch(&mut runtime) {
+        // When restoring from a snapshot, the JS-level setup (console wrappers,
+        // sandbox hardening, WASM globals) is already baked in. Re-running these
+        // scripts would fail because the sandbox is locked down (Deno.core is
+        // non-configurable, Deno.core.ops is frozen). Only inject on fresh runtimes.
+        let has_snapshot = leaked_snapshot.is_some();
+
+        let output_result = if has_snapshot {
+            execute_module(&mut runtime, code)
+        } else {
+            // Inject WASM modules as globals via V8 native API.
+            // Do NOT early-return here — snapshot() must be called below.
+            match inject_wasm_modules(&mut runtime, wasm_modules, wasm_default_max_bytes) {
+                Err(e) => Err(e),
+                Ok(()) => {
+                    // Inject console JS wrapper.
+                    if let Err(e) = console::inject_console_snapshot(&mut runtime) {
                         return Err(e);
                     }
-                }
-                // Inject fs JS wrapper if filesystem policies are configured.
-                if fs_config.is_some() {
-                    if let Err(e) = fs::inject_fs(&mut runtime) {
+                    // Neutralize dangerous built-in ops (op_panic, print).
+                    if let Err(e) = console::neutralize_dangerous_ops(&mut runtime) {
                         return Err(e);
                     }
-                }
-                // Inject mcp JS wrapper if MCP servers are configured.
-                if mcp_config.is_some() {
-                    if let Err(e) = mcp_client::inject_mcp(&mut runtime) {
+                    // Inject fetch() JS wrapper if OPA is configured.
+                    if fetch_config.is_some() {
+                        if let Err(e) = fetch::inject_fetch(&mut runtime) {
+                            return Err(e);
+                        }
+                    }
+                    // Inject fs JS wrapper if filesystem policies are configured.
+                    if fs_config.is_some() {
+                        if let Err(e) = fs::inject_fs(&mut runtime) {
+                            return Err(e);
+                        }
+                    }
+                    // Inject mcp JS wrapper if MCP servers are configured.
+                    if mcp_config.is_some() {
+                        if let Err(e) = mcp_client::inject_mcp(&mut runtime) {
+                            return Err(e);
+                        }
+                    }
+                    // Harden sandbox: freeze ops, neutralize introspection, remove __bootstrap.
+                    // Must run after all inject_* calls and before user code.
+                    if let Err(e) = console::harden_runtime(&mut runtime) {
                         return Err(e);
                     }
+                    execute_module(&mut runtime, code)
                 }
-                // Harden sandbox: freeze ops, neutralize introspection, remove __bootstrap.
-                // Must run after all inject_* calls and before user code.
-                if let Err(e) = console::harden_runtime(&mut runtime) {
-                    return Err(e);
-                }
-                execute_module(&mut runtime, code)
             }
         };
 
