@@ -130,12 +130,7 @@ jobs:
           echo ""
           echo "=== Test 3: mcp.callTool() ==="
           # Call run_js on the MCP server: it should execute "2+3" and return output
-          read -r -d '' CODE << 'JSEOF'
-          const result = await mcp.callTool("tools", "run_js", {
-            code: "console.log(JSON.stringify({sum: 2+3, greeting: 'hello from mcp'}))"
-          });
-          console.log(JSON.stringify(result));
-          JSEOF
+          CODE='const result = await mcp.callTool("tools", "run_js", { code: "console.log(JSON.stringify({sum: 2+3, greeting: \"hello from mcp\"}))" }); console.log(JSON.stringify(result));'
 
           SUBMIT=$(curl -s -o /tmp/t3_submit.json -w '%{http_code}' \
             http://localhost:8080/api/exec \
