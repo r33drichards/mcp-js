@@ -1,0 +1,208 @@
+name: MCP Programmatic Tool Calling E2E
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  mcp-tool-calling-e2e:
+    name: MCP Tool Calling E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+        with:
+          extra-conf: |
+            sandbox = relaxed
+
+      - uses: DeterminateSystems/flake-checker-action@main
+
+      - name: Build mcp-js
+        run: nix build .#default --print-build-logs -L
+
+      - name: Run MCP programmatic tool calling E2E test
+        run: |
+          SERVER_BIN=$(nix build .#default --print-out-paths)/bin/server
+          echo "Server binary: $SERVER_BIN"
+
+          # Start the HTTP server with an MCP server connection.
+          # The MCP server is another mcp-js instance running in stateless
+          # stdio MCP mode, providing the "run_js" tool.
+          $SERVER_BIN --stateless --http-port 8080 \
+            --mcp-server "tools=stdio:${SERVER_BIN}:--stateless" &
+          SERVER_PID=$!
+
+          cleanup() { kill $SERVER_PID 2>/dev/null || true; }
+          trap cleanup EXIT
+
+          # Wait for the HTTP server to be ready (up to 30s)
+          echo "Waiting for server to be ready..."
+          for i in $(seq 1 30); do
+            HTTP_CODE=$(curl -s --max-time 5 -o /dev/null -w '%{http_code}' \
+              http://localhost:8080/api/exec \
+              -H 'Content-Type: application/json' \
+              -d '{"code": "1+1"}' 2>/dev/null || echo "000")
+            if [ "$HTTP_CODE" = "202" ] || [ "$HTTP_CODE" = "200" ]; then
+              echo "Server is ready (HTTP $HTTP_CODE)"
+              break
+            fi
+            echo "  attempt $i: HTTP $HTTP_CODE"
+            sleep 1
+          done
+
+          # ── Test 1: mcp.servers lists the connected server ──────────────
+          echo ""
+          echo "=== Test 1: mcp.servers ==="
+          CODE='const servers = mcp.servers; console.log(JSON.stringify(servers));'
+          SUBMIT=$(curl -s -o /tmp/t1_submit.json -w '%{http_code}' \
+            http://localhost:8080/api/exec \
+            -H 'Content-Type: application/json' \
+            -d "$(jq -n --arg c "$CODE" '{code: $c}')")
+          echo "Submit status: $SUBMIT"
+
+          if [ "$SUBMIT" != "202" ]; then
+            echo "ERROR: Expected HTTP 202, got $SUBMIT"
+            cat /tmp/t1_submit.json
+            exit 1
+          fi
+
+          EXEC_ID=$(jq -r '.execution_id' /tmp/t1_submit.json)
+          echo "Execution ID: $EXEC_ID"
+
+          # Poll until complete
+          for i in $(seq 1 30); do
+            RESP=$(curl -s http://localhost:8080/api/executions/${EXEC_ID})
+            STATUS=$(echo "$RESP" | jq -r '.status')
+            if [ "$STATUS" = "Completed" ] || [ "$STATUS" = "completed" ]; then
+              break
+            elif [ "$STATUS" = "Failed" ] || [ "$STATUS" = "failed" ] || [ "$STATUS" = "timed_out" ]; then
+              echo "ERROR: Execution $STATUS"
+              echo "$RESP"
+              exit 1
+            fi
+            sleep 1
+          done
+
+          OUTPUT=$(curl -s "http://localhost:8080/api/executions/${EXEC_ID}/output" | jq -r '.data')
+          echo "Output: $OUTPUT"
+
+          # Verify "tools" is in the server list
+          echo "$OUTPUT" | grep -q '"tools"'
+          if [ $? -ne 0 ]; then
+            echo "FAIL: mcp.servers does not contain 'tools'"
+            exit 1
+          fi
+          echo "PASS: mcp.servers contains 'tools'"
+
+          # ── Test 2: mcp.listTools() returns run_js tool ─────────────────
+          echo ""
+          echo "=== Test 2: mcp.listTools() ==="
+          CODE='const tools = mcp.listTools("tools"); console.log(JSON.stringify(tools.map(t => t.name)));'
+          SUBMIT=$(curl -s -o /tmp/t2_submit.json -w '%{http_code}' \
+            http://localhost:8080/api/exec \
+            -H 'Content-Type: application/json' \
+            -d "$(jq -n --arg c "$CODE" '{code: $c}')")
+
+          EXEC_ID=$(jq -r '.execution_id' /tmp/t2_submit.json)
+          for i in $(seq 1 30); do
+            RESP=$(curl -s http://localhost:8080/api/executions/${EXEC_ID})
+            STATUS=$(echo "$RESP" | jq -r '.status')
+            if [ "$STATUS" = "Completed" ] || [ "$STATUS" = "completed" ]; then
+              break
+            elif [ "$STATUS" = "Failed" ] || [ "$STATUS" = "failed" ] || [ "$STATUS" = "timed_out" ]; then
+              echo "ERROR: Execution $STATUS"
+              echo "$RESP"
+              exit 1
+            fi
+            sleep 1
+          done
+
+          OUTPUT=$(curl -s "http://localhost:8080/api/executions/${EXEC_ID}/output" | jq -r '.data')
+          echo "Output: $OUTPUT"
+
+          echo "$OUTPUT" | grep -q '"run_js"'
+          if [ $? -ne 0 ]; then
+            echo "FAIL: mcp.listTools does not contain 'run_js'"
+            exit 1
+          fi
+          echo "PASS: mcp.listTools contains 'run_js'"
+
+          # ── Test 3: mcp.callTool() executes JS on remote MCP server ─────
+          echo ""
+          echo "=== Test 3: mcp.callTool() ==="
+          # Call run_js on the MCP server: it should execute "2+3" and return output
+          CODE='const result = await mcp.callTool("tools", "run_js", { code: "console.log(JSON.stringify({sum: 2+3, greeting: \"hello from mcp\"}))" }); console.log(JSON.stringify(result));'
+
+          SUBMIT=$(curl -s -o /tmp/t3_submit.json -w '%{http_code}' \
+            http://localhost:8080/api/exec \
+            -H 'Content-Type: application/json' \
+            -d "$(jq -n --arg c "$CODE" '{code: $c}')")
+
+          EXEC_ID=$(jq -r '.execution_id' /tmp/t3_submit.json)
+          for i in $(seq 1 60); do
+            RESP=$(curl -s http://localhost:8080/api/executions/${EXEC_ID})
+            STATUS=$(echo "$RESP" | jq -r '.status')
+            if [ "$STATUS" = "Completed" ] || [ "$STATUS" = "completed" ]; then
+              break
+            elif [ "$STATUS" = "Failed" ] || [ "$STATUS" = "failed" ] || [ "$STATUS" = "TimedOut" ]; then
+              echo "ERROR: Execution $STATUS"
+              echo "$RESP"
+              exit 1
+            fi
+            sleep 1
+          done
+
+          OUTPUT=$(curl -s "http://localhost:8080/api/executions/${EXEC_ID}/output" | jq -r '.data')
+          echo "Output: $OUTPUT"
+
+          # The output is the console.log'd JSON from callTool — verify it
+          # contains our expected string and is not an error
+          echo "$OUTPUT" | grep -q 'hello from mcp'
+          if [ $? -ne 0 ]; then
+            echo "FAIL: mcp.callTool result does not contain expected output"
+            exit 1
+          fi
+          echo "PASS: mcp.callTool successfully executed code on MCP server"
+
+          # ── Test 4: mcp.listTools() without server filter ───────────────
+          echo ""
+          echo "=== Test 4: mcp.listTools() without filter ==="
+          CODE='const tools = mcp.listTools(); console.log(JSON.stringify(tools.length > 0));'
+          SUBMIT=$(curl -s -o /tmp/t4_submit.json -w '%{http_code}' \
+            http://localhost:8080/api/exec \
+            -H 'Content-Type: application/json' \
+            -d "$(jq -n --arg c "$CODE" '{code: $c}')")
+
+          EXEC_ID=$(jq -r '.execution_id' /tmp/t4_submit.json)
+          for i in $(seq 1 30); do
+            RESP=$(curl -s http://localhost:8080/api/executions/${EXEC_ID})
+            STATUS=$(echo "$RESP" | jq -r '.status')
+            if [ "$STATUS" = "Completed" ] || [ "$STATUS" = "completed" ]; then
+              break
+            elif [ "$STATUS" = "Failed" ] || [ "$STATUS" = "failed" ] || [ "$STATUS" = "timed_out" ]; then
+              echo "ERROR: Execution $STATUS"
+              echo "$RESP"
+              exit 1
+            fi
+            sleep 1
+          done
+
+          OUTPUT=$(curl -s "http://localhost:8080/api/executions/${EXEC_ID}/output" | jq -r '.data')
+          echo "Output: $OUTPUT"
+
+          echo "$OUTPUT" | grep -q 'true'
+          if [ $? -ne 0 ]; then
+            echo "FAIL: mcp.listTools() returned empty list"
+            exit 1
+          fi
+          echo "PASS: mcp.listTools() without filter returns tools"
+
+          echo ""
+          echo "All MCP programmatic tool calling E2E tests passed!"

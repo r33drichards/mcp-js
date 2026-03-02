@@ -165,6 +165,22 @@ struct Cli {
     /// Schema: { "fetch": { "mode": "all"|"any", "policies": [{"url": "...", "policy_path": "...", "rule": "..."}] }, "modules": { ... } }
     #[arg(long = "policies-json", value_name = "JSON_OR_PATH")]
     policies_json: Option<String>,
+
+    // ── MCP server module options ────────────────────────────────────
+
+    /// Connect to an external MCP server as a module. JS code can call its tools
+    /// via the `mcp` global object (mcp.callTool, mcp.listTools, mcp.servers).
+    /// Format for stdio: name=stdio:command:arg1:arg2
+    /// Format for SSE:   name=sse:url
+    /// Can be specified multiple times for multiple servers.
+    #[arg(long = "mcp-server", value_name = "NAME=TRANSPORT:...")]
+    mcp_servers: Vec<String>,
+
+    /// Path to a JSON config file for MCP server modules.
+    /// Format: [{"name": "srv", "transport": "stdio", "command": "cmd", "args": ["a"]},
+    ///          {"name": "srv2", "transport": "sse", "url": "http://..."}]
+    #[arg(long = "mcp-config", value_name = "PATH")]
+    mcp_config: Option<String>,
 }
 
 #[tokio::main]
@@ -428,6 +444,18 @@ async fn main() -> Result<()> {
             tracing::warn!("Failed to open execution registry at {}: {}. Async execution disabled.", exec_db_path, e);
             engine
         }
+    };
+
+    // ── MCP server modules ────────────────────────────────────────────────
+    let mcp_server_configs = load_mcp_server_configs(&cli.mcp_servers, &cli.mcp_config)?;
+    let engine = if !mcp_server_configs.is_empty() {
+        tracing::info!("Connecting to {} MCP server(s)...", mcp_server_configs.len());
+        let manager = engine::mcp_client::McpClientManager::connect(mcp_server_configs).await
+            .map_err(|e| anyhow::anyhow!("MCP server connection failed: {}", e))?;
+        tracing::info!("All MCP servers connected. JS code can use mcp.callTool(), mcp.listTools(), mcp.servers");
+        engine.with_mcp_client_manager(manager)
+    } else {
+        engine
     };
 
     // ── Start transport ─────────────────────────────────────────────────
@@ -759,4 +787,72 @@ fn parse_fetch_header_cli(s: &str) -> Result<engine::fetch::HeaderRule> {
         methods,
         headers,
     })
+}
+
+// ── MCP server module loading ────────────────────────────────────────────
+
+/// Parse `--mcp-server` flags and optional `--mcp-config` JSON file into
+/// `McpServerConfig` entries.
+fn load_mcp_server_configs(
+    cli_servers: &[String],
+    config_path: &Option<String>,
+) -> Result<Vec<engine::mcp_client::McpServerConfig>> {
+    use engine::mcp_client::{McpServerConfig, McpServerTransport};
+    let mut configs = Vec::new();
+
+    // Parse CLI --mcp-server flags
+    for entry in cli_servers {
+        let (name, rest) = entry.split_once('=')
+            .ok_or_else(|| anyhow::anyhow!(
+                "Invalid --mcp-server format: '{}'. Expected name=transport:...", entry
+            ))?;
+        let name = name.trim().to_string();
+
+        if let Some(cmd_args) = rest.strip_prefix("stdio:") {
+            // stdio:command:arg1:arg2
+            let parts: Vec<&str> = cmd_args.split(':').collect();
+            if parts.is_empty() || parts[0].is_empty() {
+                anyhow::bail!("--mcp-server stdio transport requires a command");
+            }
+            configs.push(McpServerConfig {
+                name,
+                transport: McpServerTransport::Stdio {
+                    command: parts[0].to_string(),
+                    args: parts[1..].iter().map(|s| s.to_string()).collect(),
+                    env: std::collections::HashMap::new(),
+                },
+            });
+        } else if let Some(url) = rest.strip_prefix("sse:") {
+            configs.push(McpServerConfig {
+                name,
+                transport: McpServerTransport::Sse {
+                    url: url.to_string(),
+                },
+            });
+        } else {
+            anyhow::bail!(
+                "Invalid --mcp-server transport for '{}': must start with 'stdio:' or 'sse:'. Got: '{}'",
+                name, rest
+            );
+        }
+    }
+
+    // Parse --mcp-config JSON file
+    if let Some(config_path) = config_path {
+        let content = std::fs::read_to_string(config_path)
+            .map_err(|e| anyhow::anyhow!("Failed to read MCP config '{}': {}", config_path, e))?;
+        let file_configs: Vec<McpServerConfig> = serde_json::from_str(&content)
+            .map_err(|e| anyhow::anyhow!("Invalid JSON in MCP config '{}': {}", config_path, e))?;
+        configs.extend(file_configs);
+    }
+
+    // Check for duplicate names
+    let mut seen = std::collections::HashSet::new();
+    for c in &configs {
+        if !seen.insert(&c.name) {
+            anyhow::bail!("Duplicate MCP server name: '{}'", c.name);
+        }
+    }
+
+    Ok(configs)
 }
