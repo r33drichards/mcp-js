@@ -9,7 +9,6 @@ use std::cell::RefCell;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use deno_core::{JsRuntime, OpState, op2};
-use deno_error::JsErrorBox;
 
 // ── Configuration ────────────────────────────────────────────────────────
 
@@ -82,29 +81,6 @@ fn op_console_write(state: &mut OpState, #[string] msg: &str, #[smi] level: i32)
     console_state.write(formatted.as_bytes());
 }
 
-/// Replacement for deno_core's built-in `op_panic`. Instead of calling
-/// `panic!()`, returns the message as a JS exception (Error).
-#[op2(fast)]
-fn op_safe_panic(#[string] msg: &str) -> Result<(), JsErrorBox> {
-    Err(JsErrorBox::generic(format!("panic: {}", msg)))
-}
-
-/// Replacement for deno_core's built-in `Deno.core.print`. Routes output
-/// through ConsoleLogState (if available) instead of writing to process
-/// stdout/stderr which would corrupt the JSON-RPC protocol stream.
-#[op2(fast)]
-fn op_safe_print(state: &mut OpState, #[string] msg: &str, is_err: bool) {
-    if let Some(console_state) = state.try_borrow::<ConsoleLogState>() {
-        let formatted = if is_err {
-            format!("[WARN] {}", msg)
-        } else {
-            msg.to_string()
-        };
-        console_state.write(formatted.as_bytes());
-    }
-    // If no ConsoleLogState, silently discard (safer than writing to stdout)
-}
-
 // ── Extension registration ───────────────────────────────────────────────
 
 deno_core::extension!(
@@ -117,26 +93,21 @@ pub fn create_extension() -> deno_core::Extension {
     console_ext::init()
 }
 
-deno_core::extension!(
-    sandbox_ext,
-    ops = [op_safe_panic, op_safe_print],
-);
-
-/// Create the sandbox-hardening extension. Always loaded (regardless of
-/// console_tree) so that safe replacement ops exist for `neutralize_dangerous_ops()`.
-pub fn create_sandbox_extension() -> deno_core::Extension {
-    sandbox_ext::init()
-}
-
 // ── Neutralize dangerous built-in ops ────────────────────────────────────
 
-/// Replace dangerous built-in deno_core ops with safe alternatives.
+/// Replace dangerous built-in deno_core ops with safe pure-JS alternatives.
 ///
-/// Must be called after the runtime is created (with sandbox_ext loaded)
-/// but before any user code runs.
-/// 1. Replaces `Deno.core.ops.op_panic` with `Deno.core.ops.op_safe_panic`
-/// 2. Replaces `Deno.core.print` with a wrapper around `Deno.core.ops.op_safe_print`
-/// 3. Replaces `Deno.core.ops.op_print` with `Deno.core.ops.op_safe_print`
+/// Implemented entirely in JavaScript to avoid registering an additional
+/// deno_core extension. This matters because `JsRuntimeForSnapshot`'s
+/// `prepare_for_snapshot()` calls `std::mem::forget(self)`, which leaks the
+/// internal `extensions: Vec<&'static str>` — each extra extension adds to
+/// that leak. Pure-JS neutralization avoids the problem entirely.
+///
+/// Must be called after the runtime is created but before any user code runs.
+/// 1. Replaces `Deno.core.ops.op_panic` with a JS function that throws
+/// 2. Replaces `Deno.core.ops.op_print` with a JS function that routes
+///    through `op_console_write` (if available) or silently discards
+/// 3. Replaces `Deno.core.print` via prototype chain override
 pub fn neutralize_dangerous_ops(runtime: &mut JsRuntime) -> Result<(), String> {
     runtime
         .execute_script("<sandbox-setup>", SANDBOX_SETUP_JS.to_string())
@@ -146,17 +117,26 @@ pub fn neutralize_dangerous_ops(runtime: &mut JsRuntime) -> Result<(), String> {
 
 const SANDBOX_SETUP_JS: &str = r#"
 (function() {
-    // Replace dangerous ops on the (non-frozen) ops object.
-    Deno.core.ops.op_panic = Deno.core.ops.op_safe_panic;
-    Deno.core.ops.op_print = Deno.core.ops.op_safe_print;
+    // Replace op_panic: throw a JS Error instead of calling Rust panic!().
+    Deno.core.ops.op_panic = function(msg) {
+        throw new Error("panic: " + msg);
+    };
+
+    // Replace op_print: route through console capture if available, else discard.
+    // This prevents direct writes to stdout/stderr which would corrupt the
+    // JSON-RPC protocol stream.
+    var safePrint = function(msg, isErr) {
+        if (typeof Deno.core.ops.op_console_write === 'function') {
+            Deno.core.ops.op_console_write(isErr ? "[WARN] " + msg : msg, isErr ? 2 : 0);
+        }
+        // If no console capture, silently discard (safer than writing to stdout)
+    };
+    Deno.core.ops.op_print = safePrint;
 
     // Deno.core is frozen by deno_core bootstrap, so we cannot modify
     // Deno.core.print in-place. Instead, create a new core object that
     // inherits all original properties but overrides print.
     var origCore = Deno.core;
-    var safePrint = function(msg, isErr) {
-        Deno.core.ops.op_safe_print(msg, isErr || false);
-    };
     var newCore = Object.create(origCore);
     Object.defineProperty(newCore, 'print', {
         value: safePrint,
