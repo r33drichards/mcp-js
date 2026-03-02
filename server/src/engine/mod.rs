@@ -806,8 +806,6 @@ pub fn execute_stateless(
     let result = catch_unwind(AssertUnwindSafe(|| {
         let params = create_params_with_heap_limit(heap_memory_max_bytes);
         let mut extensions = Vec::new();
-        // Always load sandbox extension for op_panic/print neutralization.
-        extensions.push(console::create_sandbox_extension());
         if console_tree.is_some() {
             extensions.push(console::create_extension());
         }
@@ -957,8 +955,6 @@ pub fn execute_stateful(
         let startup_snapshot = leaked_snapshot.as_ref().map(|(_, s)| *s);
 
         let mut extensions = Vec::new();
-        // Always load sandbox extension for op_panic/print neutralization.
-        extensions.push(console::create_sandbox_extension());
         if console_tree.is_some() {
             extensions.push(console::create_extension());
         }
