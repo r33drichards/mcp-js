@@ -6,55 +6,9 @@
 ///   cargo test --test module_imports -- --ignored
 
 use std::sync::{Arc, Once};
-use server::engine::{initialize_v8, has_module_syntax, Engine};
+use server::engine::{initialize_v8, Engine};
 use server::engine::execution::ExecutionRegistry;
 use server::engine::module_loader::ModuleLoaderConfig;
-
-// ── has_module_syntax unit tests ────────────────────────────────────────
-
-#[test]
-fn test_detect_import_declaration() {
-    assert!(has_module_syntax(r#"import { foo } from "bar";"#));
-    assert!(has_module_syntax(r#"import foo from "bar";"#));
-    assert!(has_module_syntax(r#"import "side-effect";"#));
-    assert!(has_module_syntax(r#"import{foo}from"bar";"#));
-}
-
-#[test]
-fn test_detect_export_declaration() {
-    assert!(has_module_syntax("export const foo = 1;"));
-    assert!(has_module_syntax("export default function() {}"));
-    assert!(has_module_syntax(r#"export { foo } from "bar";"#));
-    assert!(has_module_syntax(r#"export* from "bar";"#));
-}
-
-#[test]
-fn test_no_module_syntax_in_plain_js() {
-    assert!(!has_module_syntax("const x = 1 + 2;"));
-    assert!(!has_module_syntax("function foo() { return 42; }"));
-    assert!(!has_module_syntax(r#"const s = "import is a keyword";"#));
-}
-
-#[test]
-fn test_dynamic_import_not_detected() {
-    // dynamic import() is an expression, not a declaration
-    assert!(!has_module_syntax(r#"import("./foo.js");"#));
-    assert!(!has_module_syntax(r#"const m = import("./foo.js");"#));
-}
-
-#[test]
-fn test_npm_specifier_detected() {
-    assert!(has_module_syntax(
-        r#"import { camelCase } from "npm:lodash-es@4.17.21";"#
-    ));
-}
-
-#[test]
-fn test_jsr_specifier_detected() {
-    assert!(has_module_syntax(
-        r#"import { camelCase } from "jsr:@luca/cases@1.0.0";"#
-    ));
-}
 
 // ── Module specifier resolution unit tests ──────────────────────────────
 
@@ -218,6 +172,39 @@ async fn run_and_wait(engine: &Engine, code: &str) -> Result<String, String> {
     Err("Execution did not complete within timeout".to_string())
 }
 
+// ── Top-level await execution ────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_top_level_await_resolves() {
+    ensure_v8();
+    let engine = create_test_engine();
+
+    let code = r#"
+const result = await Promise.resolve(42);
+console.log("got", result);
+"#;
+
+    let result = run_and_wait(&engine, code).await;
+    assert!(result.is_ok(), "Top-level await should succeed: {:?}", result);
+}
+
+#[tokio::test]
+async fn test_top_level_await_with_async_iife_also_works() {
+    ensure_v8();
+    let engine = create_test_engine();
+
+    // The old workaround should still work
+    let code = r#"
+const result = await (async () => {
+    return await Promise.resolve(99);
+})();
+console.log("got", result);
+"#;
+
+    let result = run_and_wait(&engine, code).await;
+    assert!(result.is_ok(), "Top-level await with IIFE should succeed: {:?}", result);
+}
+
 // ── Plain JS unaffected ─────────────────────────────────────────────────
 
 #[tokio::test]
@@ -225,21 +212,17 @@ async fn test_plain_js_unaffected_by_module_support() {
     ensure_v8();
     let engine = create_test_engine();
 
-    let result = run_and_wait(&engine, "1 + 2;").await;
+    let result = run_and_wait(&engine, "console.log(1 + 2);").await;
     assert!(result.is_ok(), "Plain JS should still work: {:?}", result);
-    assert_eq!(result.unwrap(), "3");
 }
 
 #[tokio::test]
 async fn test_plain_js_with_dynamic_import_keyword() {
-    // dynamic import() is an expression, not module syntax
     ensure_v8();
     let engine = create_test_engine();
 
-    // The word "import" in a string should not trigger module mode.
-    let result = run_and_wait(&engine, r#"const x = "import foo"; x;"#).await;
+    let result = run_and_wait(&engine, r#"const x = "import foo"; console.log(x);"#).await;
     assert!(result.is_ok(), "String with 'import' should work: {:?}", result);
-    assert_eq!(result.unwrap(), "import foo");
 }
 
 // ── npm imports (network required) ──────────────────────────────────────
@@ -590,9 +573,8 @@ async fn test_engine_plain_js_works_when_modules_blocked() {
     ensure_v8();
     let engine = create_test_engine_modules_blocked();
 
-    let result = run_and_wait(&engine, "1 + 2;").await;
+    let result = run_and_wait(&engine, "console.log(1 + 2);").await;
     assert!(result.is_ok(), "Plain JS should work when external modules blocked: {:?}", result);
-    assert_eq!(result.unwrap(), "3");
 }
 
 #[tokio::test]

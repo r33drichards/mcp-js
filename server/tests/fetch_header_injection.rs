@@ -90,16 +90,14 @@ async fn fetch_and_get_echoed_headers(
     echo_url: &str,
     js_extra: &str,
 ) -> HashMap<String, String> {
-    // JS code: call fetch, parse the echoed JSON, re-stringify so V8
-    // returns a proper JSON string (not "[object Object]").
-    // Wrapped in an async IIFE because fetch() is async and top-level
-    // await is not available in script (non-module) context.
+    // JS code: use top-level await to call fetch, then console.log the
+    // echoed headers as JSON. All code runs as ES modules, so top-level
+    // await is supported and the result is captured via console output
+    // (modules always evaluate to "undefined").
     let code = format!(
         r#"
-        (async () => {{
-            const resp = await fetch("{echo_url}", {js_extra});
-            return JSON.stringify(await resp.json());
-        }})()
+        const resp = await fetch("{echo_url}", {js_extra});
+        console.log(JSON.stringify(await resp.json()));
         "#,
         echo_url = echo_url,
         js_extra = js_extra,
@@ -111,18 +109,23 @@ async fn fetch_and_get_echoed_headers(
         .expect("submit should succeed");
 
     // Poll for completion
-    let mut output = String::new();
     for _ in 0..600 {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         if let Ok(info) = engine.get_execution(&exec_id) {
             match info.status.as_str() {
-                "completed" => { output = info.result.expect("should have result"); break; }
+                "completed" => break,
                 "failed" => panic!("Execution failed: {}", info.error.unwrap_or_default()),
                 "timed_out" => panic!("Execution timed out"),
                 _ => continue,
             }
         }
     }
+
+    // Read the console output (contains the JSON-stringified headers)
+    let console_page = engine
+        .get_execution_output(&exec_id, None, Some(u64::MAX), None, None)
+        .expect("should be able to read console output");
+    let output = console_page.data.trim().to_string();
 
     let parsed: Value = serde_json::from_str(&output)
         .expect("output should be valid JSON");

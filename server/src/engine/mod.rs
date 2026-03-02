@@ -607,97 +607,36 @@ pub fn inject_wasm_modules(
 // `run_js` for async timeout via `tokio::select!`).
 // Tests and fuzz targets pass a no-op handle.
 
-/// Helper: execute code on a JsRuntime and return the string result.
-/// Expects WASM modules to have already been injected.
-/// If the result is a Promise, runs the event loop to resolve it.
-fn execute_and_stringify(runtime: &mut JsRuntime, code: &str) -> Result<String, String> {
-    let global_value = runtime
-        .execute_script("<eval>", code.to_string())
-        .map_err(|e| format!("{}", e))?;
+/// Global counter for unique module URLs, avoiding conflicts when restoring
+/// from a V8 heap snapshot that already has a registered module.
+static MODULE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
-    // Check if the result is a Promise; if so, run the event loop to resolve it.
-    let is_promise = {
-        deno_core::scope!(scope, runtime);
-        let local = v8::Local::new(scope, &global_value);
-        local.is_promise()
-    };
-
-    if is_promise {
-        // Run the event loop to process microtasks and resolve the Promise.
-        let handle = tokio::runtime::Handle::current();
-        handle
-            .block_on(runtime.run_event_loop(Default::default()))
-            .map_err(|e| format!("{}", e))?;
-
-        deno_core::scope!(scope, runtime);
-        let local = v8::Local::new(scope, &global_value);
-        let promise: v8::Local<v8::Promise> = local
-            .try_into()
-            .map_err(|_| "Failed to cast to Promise".to_string())?;
-        match promise.state() {
-            v8::PromiseState::Fulfilled => {
-                let result = promise.result(scope);
-                result
-                    .to_string(scope)
-                    .map(|s| s.to_rust_string_lossy(scope))
-                    .ok_or_else(|| "Failed to convert Promise result to string".to_string())
-            }
-            v8::PromiseState::Rejected => {
-                let result = promise.result(scope);
-                let err_str = result
-                    .to_string(scope)
-                    .map(|s| s.to_rust_string_lossy(scope))
-                    .unwrap_or_else(|| "Unknown Promise rejection".to_string());
-                Err(err_str)
-            }
-            v8::PromiseState::Pending => {
-                Err("Promise did not resolve after running event loop".to_string())
-            }
-        }
-    } else {
-        deno_core::scope!(scope, runtime);
-        let local = v8::Local::new(scope, global_value);
-        local
-            .to_string(scope)
-            .map(|s| s.to_rust_string_lossy(scope))
-            .ok_or_else(|| "Failed to convert result to string".to_string())
-    }
-}
-
-/// Check whether the (already TypeScript-stripped) code uses ES module syntax
-/// (`import` / `export` declarations). When it does, the code must be
-/// evaluated as an ES module rather than a classic script.
-pub fn has_module_syntax(code: &str) -> bool {
-    for line in code.lines() {
-        let t = line.trim();
-        // Static import declaration: import ... from "..."
-        // Side-effect import: import "..."
-        // Named/default import: import { ... } from "..."
-        if t.starts_with("import ") || t.starts_with("import{") || t.starts_with("import\"") || t.starts_with("import'") {
-            // Exclude dynamic import() which is an expression, not a declaration.
-            // After SWC emitting, a static import always looks like
-            //   import ... from "...";
-            // while dynamic import is a call expression: import("...")
-            if !t.starts_with("import(") {
-                return true;
-            }
-        }
-        if t.starts_with("export ") || t.starts_with("export{") || t.starts_with("export*") || t.starts_with("export default") {
-            return true;
-        }
-    }
-    false
-}
-
-/// Execute code as an ES module, supporting `import` declarations for
-/// `npm:`, `jsr:`, and URL specifiers.
+/// Execute code as an ES module. All code is always executed as a module,
+/// which supports `import` declarations, `export`, and top-level `await`.
 fn execute_module(runtime: &mut JsRuntime, code: &str) -> Result<String, String> {
-    let handle = tokio::runtime::Handle::current();
-    let main_url = ModuleSpecifier::parse("file:///main.js")
+    let id = MODULE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let main_url = ModuleSpecifier::parse(&format!("file:///main_{}.js", id))
         .map_err(|e| format!("internal specifier error: {}", e))?;
 
+    // Use the current tokio runtime handle if available, otherwise create a
+    // temporary one. Direct callers (tests, fuzz targets) may not have a
+    // tokio runtime on the current thread.
+    let owned_rt;
+    let handle = match tokio::runtime::Handle::try_current() {
+        Ok(h) => h,
+        Err(_) => {
+            owned_rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| format!("Failed to create tokio runtime: {}", e))?;
+            owned_rt.handle().clone()
+        }
+    };
+
+    let _guard = handle.enter();
+
     let mod_id = handle
-        .block_on(runtime.load_main_es_module_from_code(&main_url, code.to_string()))
+        .block_on(runtime.load_side_es_module_from_code(&main_url, code.to_string()))
         .map_err(|e| format!("{}", e))?;
 
     let eval_future = runtime.mod_evaluate(mod_id);
@@ -810,8 +749,6 @@ pub fn execute_stateless(
     } = config;
     let oom_flag = Arc::new(AtomicBool::new(false));
 
-    let use_modules = has_module_syntax(code);
-
     let result = catch_unwind(AssertUnwindSafe(|| {
         let params = create_params_with_heap_limit(heap_memory_max_bytes);
         let mut extensions = Vec::new();
@@ -828,21 +765,16 @@ pub fn execute_stateless(
             extensions.push(mcp_client::create_extension());
         }
 
-        // When the code contains ES module syntax (import/export) we need a
-        // module loader that can resolve npm:/jsr:/URL specifiers.
-        let module_loader: Option<Rc<dyn deno_core::ModuleLoader>> = if use_modules {
-            match module_loader_config {
-                Some(config) => Some(Rc::new(module_loader::NetworkModuleLoader::with_config(config.clone()))),
-                None => Some(Rc::new(module_loader::NetworkModuleLoader::new())),
-            }
-        } else {
-            None
+        // Always create a module loader — all code runs as ES modules.
+        let module_loader: Rc<dyn deno_core::ModuleLoader> = match module_loader_config {
+            Some(config) => Rc::new(module_loader::NetworkModuleLoader::with_config(config.clone())),
+            None => Rc::new(module_loader::NetworkModuleLoader::new()),
         };
 
         let mut runtime = JsRuntime::new(RuntimeOptions {
             create_params: Some(params),
             extensions,
-            module_loader,
+            module_loader: Some(module_loader),
             ..Default::default()
         });
 
@@ -896,17 +828,7 @@ pub fn execute_stateless(
                         return Err(e);
                     }
                 }
-                // Inject mcp JS wrapper if MCP servers are configured.
-                if mcp_config.is_some() {
-                    if let Err(e) = mcp_client::inject_mcp(&mut runtime) {
-                        return Err(e);
-                    }
-                }
-                if use_modules {
-                    execute_module(&mut runtime, code)
-                } else {
-                    execute_and_stringify(&mut runtime, code)
-                }
+                execute_module(&mut runtime, code)
             }
         };
 
@@ -952,8 +874,6 @@ pub fn execute_stateful(
     } = config;
     let oom_flag = Arc::new(AtomicBool::new(false));
 
-    let use_modules = has_module_syntax(code);
-
     let result = catch_unwind(AssertUnwindSafe(|| {
         let params = create_params_with_heap_limit(heap_memory_max_bytes);
 
@@ -988,20 +908,17 @@ pub fn execute_stateful(
             extensions.push(mcp_client::create_extension());
         }
 
-        let module_loader: Option<Rc<dyn deno_core::ModuleLoader>> = if use_modules {
-            match module_loader_config {
-                Some(config) => Some(Rc::new(module_loader::NetworkModuleLoader::with_config(config.clone()))),
-                None => Some(Rc::new(module_loader::NetworkModuleLoader::new())),
-            }
-        } else {
-            None
+        // Always create a module loader — all code runs as ES modules.
+        let module_loader: Rc<dyn deno_core::ModuleLoader> = match module_loader_config {
+            Some(config) => Rc::new(module_loader::NetworkModuleLoader::with_config(config.clone())),
+            None => Rc::new(module_loader::NetworkModuleLoader::new()),
         };
 
         let mut runtime = JsRuntimeForSnapshot::new(RuntimeOptions {
             create_params: Some(params),
             startup_snapshot,
             extensions,
-            module_loader,
+            module_loader: Some(module_loader),
             ..Default::default()
         });
 
@@ -1056,17 +973,7 @@ pub fn execute_stateful(
                         return Err(e);
                     }
                 }
-                // Inject mcp JS wrapper if MCP servers are configured.
-                if mcp_config.is_some() {
-                    if let Err(e) = mcp_client::inject_mcp(&mut runtime) {
-                        return Err(e);
-                    }
-                }
-                if use_modules {
-                    execute_module(&mut runtime, code)
-                } else {
-                    execute_and_stringify(&mut runtime, code)
-                }
+                execute_module(&mut runtime, code)
             }
         };
 
