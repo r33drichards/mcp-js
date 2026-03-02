@@ -142,25 +142,30 @@ wait_for_ready "$BASE_URL"
 
 echo ""
 echo "==> Test 1: Basic JavaScript execution"
-RESULT=$(run_js 'const x = 2 + 3; x;')
+RESULT=$(run_js 'const x = 2 + 3; console.log(x);')
 STATUS=$(echo "$RESULT" | jq -r '.status // empty')
-OUTPUT=$(echo "$RESULT" | jq -r '.result // empty')
-if [ "$STATUS" = "completed" ] && [ "$OUTPUT" = "5" ]; then
-  pass "JS execution returned 5"
+EXEC_ID=$(echo "$RESULT" | jq -r '.execution_id // empty')
+if [ "$STATUS" = "completed" ]; then
+  CONSOLE_OUTPUT=$(curl -sf "$BASE_URL/api/executions/$EXEC_ID/output" 2>/dev/null | jq -r '.data // empty' 2>/dev/null || echo "")
+  if echo "$CONSOLE_OUTPUT" | grep -q "5"; then
+    pass "JS execution returned 5"
+  else
+    fail "Expected console output containing 5, got: $CONSOLE_OUTPUT (full: $RESULT)"
+  fi
 else
-  fail "Expected status=completed result=5, got status=$STATUS result=$OUTPUT (full: $RESULT)"
+  fail "Expected status=completed, got status=$STATUS (full: $RESULT)"
 fi
 
 # ── Test 2: fetch() to allowed domain succeeds ──────────────────────────────
 
 echo ""
 echo "==> Test 2: fetch() to allowed domain (registry.npmjs.org)"
-RESULT=$(run_js '(async () => { const r = await fetch("https://registry.npmjs.org/"); console.log(r.ok); })()' '' 30)
+RESULT=$(run_js 'const r = await fetch("https://registry.npmjs.org/"); console.log(r.ok);' '' 30)
 STATUS=$(echo "$RESULT" | jq -r '.status // empty')
 if [ "$STATUS" = "completed" ]; then
   # Check console output for "true"
   EXEC_ID=$(echo "$RESULT" | jq -r '.execution_id // empty')
-  CONSOLE_OUTPUT=$(curl -sf "$BASE_URL/api/executions/$EXEC_ID/output" 2>/dev/null | jq -r '.lines[]?.text // empty' 2>/dev/null || echo "")
+  CONSOLE_OUTPUT=$(curl -sf "$BASE_URL/api/executions/$EXEC_ID/output" 2>/dev/null | jq -r '.data // empty' 2>/dev/null || echo "")
   if echo "$CONSOLE_OUTPUT" | grep -q "true"; then
     pass "fetch() to allowed domain returned ok=true"
   else
@@ -175,7 +180,7 @@ fi
 
 echo ""
 echo "==> Test 3: fetch() to blocked domain (evil.example.com)"
-RESULT=$(run_js '(async () => { const r = await fetch("https://evil.example.com/"); console.log(r.ok); })()')
+RESULT=$(run_js 'const r = await fetch("https://evil.example.com/"); console.log(r.ok);')
 STATUS=$(echo "$RESULT" | jq -r '.status // empty')
 ERROR=$(echo "$RESULT" | jq -r '.error // empty')
 if [ "$STATUS" = "failed" ] && echo "$ERROR" | grep -qi "denied\|policy"; then
@@ -189,8 +194,8 @@ fi
 echo ""
 echo "==> Test 4: Heap snapshot persistence"
 
-# 4a: Execute code that sets state, capture the heap hash
-RESULT=$(run_js 'var counter = 42;')
+# 4a: Execute code that sets state on globalThis, capture the heap hash
+RESULT=$(run_js 'globalThis.counter = 42;')
 STATUS=$(echo "$RESULT" | jq -r '.status // empty')
 HEAP=$(echo "$RESULT" | jq -r '.heap // empty')
 if [ "$STATUS" != "completed" ] || [ -z "$HEAP" ] || [ "$HEAP" = "null" ]; then
@@ -198,14 +203,19 @@ if [ "$STATUS" != "completed" ] || [ -z "$HEAP" ] || [ "$HEAP" = "null" ]; then
 else
   pass "Heap hash returned: ${HEAP:0:16}..."
 
-  # 4b: Restore the heap and read the persisted state
-  RESULT2=$(run_js 'counter;' "\"heap\": \"$HEAP\"")
+  # 4b: Restore the heap and read the persisted state via console output
+  RESULT2=$(run_js 'console.log(globalThis.counter);' "\"heap\": \"$HEAP\"")
   STATUS2=$(echo "$RESULT2" | jq -r '.status // empty')
-  OUTPUT2=$(echo "$RESULT2" | jq -r '.result // empty')
-  if [ "$STATUS2" = "completed" ] && [ "$OUTPUT2" = "42" ]; then
-    pass "Heap restored successfully, counter = 42"
+  EXEC_ID2=$(echo "$RESULT2" | jq -r '.execution_id // empty')
+  if [ "$STATUS2" = "completed" ]; then
+    CONSOLE_OUTPUT2=$(curl -sf "$BASE_URL/api/executions/$EXEC_ID2/output" 2>/dev/null | jq -r '.data // empty' 2>/dev/null || echo "")
+    if echo "$CONSOLE_OUTPUT2" | grep -q "42"; then
+      pass "Heap restored successfully, counter = 42"
+    else
+      fail "Expected console output containing 42, got: $CONSOLE_OUTPUT2"
+    fi
   else
-    fail "Expected counter=42 after heap restore, got status=$STATUS2 result=$OUTPUT2"
+    fail "Expected status=completed after heap restore, got status=$STATUS2 (full: $RESULT2)"
   fi
 fi
 

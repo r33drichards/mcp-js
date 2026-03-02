@@ -828,6 +828,12 @@ pub fn execute_stateless(
                         return Err(e);
                     }
                 }
+                // Inject mcp JS wrapper if MCP servers are configured.
+                if mcp_config.is_some() {
+                    if let Err(e) = mcp_client::inject_mcp(&mut runtime) {
+                        return Err(e);
+                    }
+                }
                 execute_module(&mut runtime, code)
             }
         };
@@ -970,6 +976,12 @@ pub fn execute_stateful(
                 // Inject fs JS wrapper if filesystem policies are configured.
                 if fs_config.is_some() {
                     if let Err(e) = fs::inject_fs(&mut runtime) {
+                        return Err(e);
+                    }
+                }
+                // Inject mcp JS wrapper if MCP servers are configured.
+                if mcp_config.is_some() {
+                    if let Err(e) = mcp_client::inject_mcp(&mut runtime) {
                         return Err(e);
                     }
                 }

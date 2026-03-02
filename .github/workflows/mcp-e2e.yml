@@ -82,6 +82,10 @@ jobs:
             STATUS=$(echo "$RESP" | jq -r '.status')
             if [ "$STATUS" = "Completed" ] || [ "$STATUS" = "completed" ]; then
               break
+            elif [ "$STATUS" = "Failed" ] || [ "$STATUS" = "failed" ] || [ "$STATUS" = "timed_out" ]; then
+              echo "ERROR: Execution $STATUS"
+              echo "$RESP"
+              exit 1
             fi
             sleep 1
           done
@@ -112,6 +116,10 @@ jobs:
             STATUS=$(echo "$RESP" | jq -r '.status')
             if [ "$STATUS" = "Completed" ] || [ "$STATUS" = "completed" ]; then
               break
+            elif [ "$STATUS" = "Failed" ] || [ "$STATUS" = "failed" ] || [ "$STATUS" = "timed_out" ]; then
+              echo "ERROR: Execution $STATUS"
+              echo "$RESP"
+              exit 1
             fi
             sleep 1
           done
@@ -178,6 +186,10 @@ jobs:
             STATUS=$(echo "$RESP" | jq -r '.status')
             if [ "$STATUS" = "Completed" ] || [ "$STATUS" = "completed" ]; then
               break
+            elif [ "$STATUS" = "Failed" ] || [ "$STATUS" = "failed" ] || [ "$STATUS" = "timed_out" ]; then
+              echo "ERROR: Execution $STATUS"
+              echo "$RESP"
+              exit 1
             fi
             sleep 1
           done
