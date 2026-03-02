@@ -606,10 +606,15 @@ pub fn inject_wasm_modules(
 // `run_js` for async timeout via `tokio::select!`).
 // Tests and fuzz targets pass a no-op handle.
 
+/// Global counter for unique module URLs, avoiding conflicts when restoring
+/// from a V8 heap snapshot that already has a registered module.
+static MODULE_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
 /// Execute code as an ES module. All code is always executed as a module,
 /// which supports `import` declarations, `export`, and top-level `await`.
 fn execute_module(runtime: &mut JsRuntime, code: &str) -> Result<String, String> {
-    let main_url = ModuleSpecifier::parse("file:///main.js")
+    let id = MODULE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let main_url = ModuleSpecifier::parse(&format!("file:///main_{}.js", id))
         .map_err(|e| format!("internal specifier error: {}", e))?;
 
     // Use the current tokio runtime handle if available, otherwise create a
@@ -630,7 +635,7 @@ fn execute_module(runtime: &mut JsRuntime, code: &str) -> Result<String, String>
     let _guard = handle.enter();
 
     let mod_id = handle
-        .block_on(runtime.load_main_es_module_from_code(&main_url, code.to_string()))
+        .block_on(runtime.load_side_es_module_from_code(&main_url, code.to_string()))
         .map_err(|e| format!("{}", e))?;
 
     let eval_future = runtime.mod_evaluate(mod_id);

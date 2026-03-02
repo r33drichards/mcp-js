@@ -59,9 +59,11 @@ impl StdioServer {
             });
 
             let poll_resp = self.send_message(poll_msg).await?;
-            if let Some(info) = common::extract_execution_info(&poll_resp) {
+            if let Some(mut info) = common::extract_execution_info(&poll_resp) {
                 match info["status"].as_str() {
                     Some("completed") | Some("failed") | Some("timed_out") | Some("cancelled") => {
+                        // Include the execution_id so callers can fetch console output
+                        info["execution_id"] = json!(exec_id);
                         return Ok(info);
                     }
                     _ => continue,
@@ -69,6 +71,34 @@ impl StdioServer {
             }
         }
         Err("Execution did not complete within polling timeout".into())
+    }
+
+    /// Get console output for a completed execution.
+    /// Returns the console output text.
+    async fn get_console_output(
+        &mut self,
+        id: u64,
+        execution_id: &str,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/call",
+            "params": {
+                "name": "get_execution_output",
+                "arguments": {
+                    "execution_id": execution_id,
+                    "line_limit": 10000
+                }
+            }
+        });
+
+        let response = self.send_message(msg).await?;
+        if let Some(info) = common::extract_execution_info(&response) {
+            Ok(info["data"].as_str().unwrap_or("").to_string())
+        } else {
+            Ok(String::new())
+        }
     }
 
     /// Start a new stdio MCP server for testing
@@ -196,10 +226,11 @@ async fn test_stdio_run_js_execution() -> Result<(), Box<dyn std::error::Error>>
     })).await?;
 
     // Call run_js tool and poll until completed
-    let info = server.run_js_and_wait(2, "1 + 1", None).await?;
+    let info = server.run_js_and_wait(2, "console.log(1 + 1)", None).await?;
     assert_eq!(info["status"], "completed", "Execution should complete successfully");
-    let result = info["result"].as_str().unwrap_or("");
-    assert!(result.contains("2"), "Response should contain result '2', got: {}", result);
+    let exec_id = info["execution_id"].as_str().unwrap();
+    let output = server.get_console_output(100, exec_id).await?;
+    assert!(output.contains("2"), "Console output should contain '2', got: {}", output);
 
     server.stop().await;
     common::cleanup_heap_dir(&heap_dir);
@@ -235,8 +266,8 @@ async fn test_stdio_heap_persistence() -> Result<(), Box<dyn std::error::Error>>
         "method": "notifications/initialized"
     })).await?;
 
-    // Set a variable in a fresh heap
-    let info1 = server.run_js_and_wait(2, "var persistentValue = 42; persistentValue", None).await?;
+    // Set a variable on globalThis so it persists in the heap snapshot
+    let info1 = server.run_js_and_wait(2, "globalThis.persistentValue = 42; console.log(globalThis.persistentValue)", None).await?;
     assert_eq!(info1["status"], "completed", "First call should succeed");
 
     // Extract the content hash from the completed execution
@@ -244,12 +275,13 @@ async fn test_stdio_heap_persistence() -> Result<(), Box<dyn std::error::Error>>
         .expect("First response should contain a heap content hash");
 
     // Read the variable from the heap using the content hash
-    let info2 = server.run_js_and_wait(3, "persistentValue", Some(heap_hash)).await?;
+    let info2 = server.run_js_and_wait(3, "console.log(globalThis.persistentValue)", Some(heap_hash)).await?;
     assert_eq!(info2["status"], "completed", "Second call should succeed");
 
-    // Verify the value persisted
-    let result = info2["result"].as_str().unwrap_or("");
-    assert!(result.contains("42"), "Persisted value should be 42, got: {}", result);
+    // Verify the value persisted via console output
+    let exec_id = info2["execution_id"].as_str().unwrap();
+    let output = server.get_console_output(200, exec_id).await?;
+    assert!(output.contains("42"), "Persisted value should be 42, got: {}", output);
 
     server.stop().await;
     common::cleanup_heap_dir(&heap_dir);
@@ -350,12 +382,13 @@ async fn test_stdio_sequential_operations() -> Result<(), Box<dyn std::error::Er
         "method": "notifications/initialized"
     })).await?;
 
-    // Perform multiple sequential operations, threading the content hash
+    // Perform multiple sequential operations, threading the content hash.
+    // Use globalThis for persistence across module executions and console.log for output.
     let operations = vec![
-        ("var counter = 0; counter", "0"),
-        ("counter = counter + 1; counter", "1"),
-        ("counter = counter + 1; counter", "2"),
-        ("counter = counter + 1; counter", "3"),
+        ("globalThis.counter = 0; console.log(globalThis.counter)", "0"),
+        ("globalThis.counter = globalThis.counter + 1; console.log(globalThis.counter)", "1"),
+        ("globalThis.counter = globalThis.counter + 1; console.log(globalThis.counter)", "2"),
+        ("globalThis.counter = globalThis.counter + 1; console.log(globalThis.counter)", "3"),
     ];
 
     let mut current_heap: Option<String> = None;
@@ -368,9 +401,10 @@ async fn test_stdio_sequential_operations() -> Result<(), Box<dyn std::error::Er
         ).await?;
         assert_eq!(info["status"], "completed", "Operation {} should succeed", idx);
 
-        let result = info["result"].as_str().unwrap_or("");
-        assert!(result.contains(expected),
-                "Operation {} should return {}, got: {}", idx, expected, result);
+        let exec_id = info["execution_id"].as_str().unwrap();
+        let output = server.get_console_output((300 + idx) as u64, exec_id).await?;
+        assert!(output.trim() == *expected,
+                "Operation {} should return {}, got: {}", idx, expected, output.trim());
 
         // Thread the content hash to the next call
         current_heap = info["heap"].as_str().map(|s| s.to_string());
@@ -410,29 +444,31 @@ async fn test_stdio_multiple_heaps() -> Result<(), Box<dyn std::error::Error>> {
         "method": "notifications/initialized"
     })).await?;
 
-    // Set variable in heap A (fresh session)
-    let info_a = server.run_js_and_wait(2, "var heapValue = 'A'; heapValue", None).await?;
+    // Set variable in heap A (fresh session) using globalThis for persistence
+    let info_a = server.run_js_and_wait(2, "globalThis.heapValue = 'A'; console.log(globalThis.heapValue)", None).await?;
     assert_eq!(info_a["status"], "completed");
     let hash_a = info_a["heap"].as_str()
         .expect("Should get content hash for heap A");
 
-    // Set variable in heap B (fresh session)
-    let info_b = server.run_js_and_wait(3, "var heapValue = 'B'; heapValue", None).await?;
+    // Set variable in heap B (fresh session) using globalThis for persistence
+    let info_b = server.run_js_and_wait(3, "globalThis.heapValue = 'B'; console.log(globalThis.heapValue)", None).await?;
     assert_eq!(info_b["status"], "completed");
     let hash_b = info_b["heap"].as_str()
         .expect("Should get content hash for heap B");
 
     // Read from heap A using its content hash - should still be 'A'
-    let verify_a = server.run_js_and_wait(4, "heapValue", Some(hash_a)).await?;
+    let verify_a = server.run_js_and_wait(4, "console.log(globalThis.heapValue)", Some(hash_a)).await?;
     assert_eq!(verify_a["status"], "completed");
-    let result_a = verify_a["result"].as_str().unwrap_or("");
-    assert!(result_a.contains("A"), "Heap A should contain 'A', got: {}", result_a);
+    let exec_id_a = verify_a["execution_id"].as_str().unwrap();
+    let output_a = server.get_console_output(400, exec_id_a).await?;
+    assert!(output_a.contains("A"), "Heap A should contain 'A', got: {}", output_a);
 
     // Read from heap B using its content hash - should still be 'B'
-    let verify_b = server.run_js_and_wait(5, "heapValue", Some(hash_b)).await?;
+    let verify_b = server.run_js_and_wait(5, "console.log(globalThis.heapValue)", Some(hash_b)).await?;
     assert_eq!(verify_b["status"], "completed");
-    let result_b = verify_b["result"].as_str().unwrap_or("");
-    assert!(result_b.contains("B"), "Heap B should contain 'B', got: {}", result_b);
+    let exec_id_b = verify_b["execution_id"].as_str().unwrap();
+    let output_b = server.get_console_output(401, exec_id_b).await?;
+    assert!(output_b.contains("B"), "Heap B should contain 'B', got: {}", output_b);
 
     server.stop().await;
     common::cleanup_heap_dir(&heap_dir);
@@ -468,17 +504,19 @@ async fn test_stdio_complex_javascript() -> Result<(), Box<dyn std::error::Error
         "method": "notifications/initialized"
     })).await?;
 
-    // Test array operations (fresh session)
-    let info = server.run_js_and_wait(2, "[1, 2, 3, 4, 5].reduce((a, b) => a + b, 0)", None).await?;
+    // Test array operations (fresh session) - use console.log for output
+    let info = server.run_js_and_wait(2, "console.log([1, 2, 3, 4, 5].reduce((a, b) => a + b, 0))", None).await?;
     assert_eq!(info["status"], "completed");
-    let result = info["result"].as_str().unwrap_or("");
-    assert!(result.contains("15"), "Array sum should be 15, got: {}", result);
+    let exec_id = info["execution_id"].as_str().unwrap();
+    let output = server.get_console_output(500, exec_id).await?;
+    assert!(output.contains("15"), "Array sum should be 15, got: {}", output);
 
-    // Test object operations (fresh session)
-    let info2 = server.run_js_and_wait(3, "var obj = {a: 1, b: 2, c: 3}; Object.keys(obj).length", None).await?;
+    // Test object operations (fresh session) - use console.log for output
+    let info2 = server.run_js_and_wait(3, "const obj = {a: 1, b: 2, c: 3}; console.log(Object.keys(obj).length)", None).await?;
     assert_eq!(info2["status"], "completed");
-    let result2 = info2["result"].as_str().unwrap_or("");
-    assert!(result2.contains("3"), "Object should have 3 keys, got: {}", result2);
+    let exec_id2 = info2["execution_id"].as_str().unwrap();
+    let output2 = server.get_console_output(501, exec_id2).await?;
+    assert!(output2.contains("3"), "Object should have 3 keys, got: {}", output2);
 
     server.stop().await;
     common::cleanup_heap_dir(&heap_dir);
