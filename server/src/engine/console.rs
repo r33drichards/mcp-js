@@ -234,6 +234,52 @@ const CONSOLE_JS_WRAPPER: &str = r#"
 })();
 "#;
 
+// ── Post-setup sandbox hardening ─────────────────────────────────────────
+
+/// Final hardening pass that locks down the sandbox after all extensions and
+/// JS wrappers have been injected, but before user code runs.
+///
+/// Must be called AFTER inject_console, neutralize_dangerous_ops, inject_fetch,
+/// inject_fs, and inject_mcp — otherwise it will freeze ops before they are
+/// set up, breaking the runtime.
+///
+/// 1. Neutralizes dangerous introspection ops (op_get_proxy_details, etc.)
+/// 2. Freezes Deno.core.ops to prevent interception/replacement
+/// 3. Removes __bootstrap (event loop hooks, primordials, internals)
+/// 4. Removes SharedArrayBuffer (Spectre timer prerequisite)
+pub fn harden_runtime(runtime: &mut JsRuntime) -> Result<(), String> {
+    runtime
+        .execute_script("<sandbox-hardening>", HARDENING_JS.to_string())
+        .map_err(|e| format!("Failed to harden sandbox: {}", e))?;
+    Ok(())
+}
+
+const HARDENING_JS: &str = r#"
+(function() {
+    // 1. Neutralize dangerous introspection/info-leak ops before freezing.
+    //    These must be replaced on the ops object before Object.freeze.
+    Deno.core.ops.op_get_proxy_details = function() { return undefined; };
+    Deno.core.ops.op_memory_usage = function() { return {}; };
+    Deno.core.ops.op_is_terminal = function() { return false; };
+
+    // 2. Freeze ops to prevent interception/replacement of any op.
+    //    All setup (console, fetch, fs, mcp) has completed by this point.
+    Object.freeze(Deno.core.ops);
+
+    // 3. Remove __bootstrap: exposes event-loop hooks (setMacrotaskCallback,
+    //    setPromiseHooks, addMainModuleHandler, etc.), primordials (pristine
+    //    Function constructor), and internal registration objects.
+    //    deno_core's own bootstrap has already completed, so this is safe.
+    delete globalThis.__bootstrap;
+
+    // 4. Remove SharedArrayBuffer: prerequisite for Spectre-style timing
+    //    attacks. Workers are not available, but defense-in-depth applies.
+    //    V8 flags cannot disable it (stable spec feature), so remove from JS.
+    delete globalThis.SharedArrayBuffer;
+    delete globalThis.Atomics;
+})();
+"#;
+
 // ── Flush helper ─────────────────────────────────────────────────────────
 
 /// Flush any remaining console output from the runtime's OpState.

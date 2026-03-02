@@ -277,3 +277,128 @@ fn test_process_survives_after_panic_interception() {
     );
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+// ── Sandbox hardening tests ─────────────────────────────────────────────
+
+#[test]
+fn test_ops_are_frozen() {
+    ensure_v8();
+    let heap_bytes = 8 * 1024 * 1024;
+    let (tree, tmp) = console_tree();
+    let config = ExecutionConfig::new(heap_bytes).console_tree(tree.clone());
+    let (result, _oom) = server::engine::execute_stateless(
+        r#"console.log("frozen=" + Object.isFrozen(Deno.core.ops));"#,
+        config,
+    );
+    assert!(result.is_ok(), "Should succeed, got: {:?}", result);
+    let output = read_console(&tree);
+    assert!(
+        output.contains("frozen=true"),
+        "Deno.core.ops should be frozen, got: {}",
+        output,
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn test_bootstrap_not_accessible() {
+    ensure_v8();
+    let heap_bytes = 8 * 1024 * 1024;
+    let (tree, tmp) = console_tree();
+    let config = ExecutionConfig::new(heap_bytes).console_tree(tree.clone());
+    let (result, _oom) = server::engine::execute_stateless(
+        r#"console.log("bootstrap=" + typeof globalThis.__bootstrap);"#,
+        config,
+    );
+    assert!(result.is_ok(), "Should succeed, got: {:?}", result);
+    let output = read_console(&tree);
+    assert!(
+        output.contains("bootstrap=undefined"),
+        "__bootstrap should be removed, got: {}",
+        output,
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn test_proxy_details_neutralized() {
+    ensure_v8();
+    let heap_bytes = 8 * 1024 * 1024;
+    let (tree, tmp) = console_tree();
+    let config = ExecutionConfig::new(heap_bytes).console_tree(tree.clone());
+    let (result, _oom) = server::engine::execute_stateless(
+        r#"
+        const secret = { password: "hunter2" };
+        const proxy = new Proxy(secret, {});
+        const details = Deno.core.ops.op_get_proxy_details(proxy);
+        console.log("details=" + (details === undefined ? "undefined" : "leaked"));
+        "#,
+        config,
+    );
+    assert!(result.is_ok(), "Should succeed, got: {:?}", result);
+    let output = read_console(&tree);
+    assert!(
+        output.contains("details=undefined"),
+        "op_get_proxy_details should return undefined, got: {}",
+        output,
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn test_ops_not_replaceable() {
+    ensure_v8();
+    let heap_bytes = 8 * 1024 * 1024;
+    let (tree, tmp) = console_tree();
+    let config = ExecutionConfig::new(heap_bytes).console_tree(tree.clone());
+    let (result, _oom) = server::engine::execute_stateless(
+        // ES modules run in strict mode — assigning to a frozen property throws
+        r#"
+        try {
+            Deno.core.ops.op_console_write = function() {};
+            console.log("replaced");
+        } catch (e) {
+            console.log("blocked: " + e.message);
+        }
+        "#,
+        config,
+    );
+    assert!(result.is_ok(), "Should succeed, got: {:?}", result);
+    let output = read_console(&tree);
+    assert!(
+        output.contains("blocked:"),
+        "Replacing frozen op should throw, got: {}",
+        output,
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn test_shared_array_buffer_disabled() {
+    ensure_v8();
+    let heap_bytes = 8 * 1024 * 1024;
+    let (tree, tmp) = console_tree();
+    let config = ExecutionConfig::new(heap_bytes).console_tree(tree.clone());
+    let (result, _oom) = server::engine::execute_stateless(
+        r#"
+        try {
+            const sab = new SharedArrayBuffer(8);
+            console.log("sab=available");
+        } catch (e) {
+            console.log("sab=disabled");
+        }
+        "#,
+        config,
+    );
+    assert!(result.is_ok(), "Should succeed, got: {:?}", result);
+    let output = read_console(&tree);
+    assert!(
+        output.contains("sab=disabled"),
+        "SharedArrayBuffer should be disabled, got: {}",
+        output,
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+// Note: ReDoS (catastrophic regex backtracking) is mitigated by the
+// per-execution timeout. V8 145 does not support --regexp-backtrace-limit.
