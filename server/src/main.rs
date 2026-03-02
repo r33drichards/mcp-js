@@ -391,6 +391,19 @@ async fn main() -> Result<()> {
         None
     };
 
+    let mcp_tools_policy_chain = if let Some(ref config) = policies_config {
+        if let Some(ref mcp_tools_policies) = config.mcp_tools {
+            let chain = build_policy_chain(mcp_tools_policies, "mcp/tools", "data.mcp.tools.allow")
+                .map_err(|e| anyhow::anyhow!("Failed to build MCP tools policy chain: {}", e))?;
+            tracing::info!("MCP tools policy chain: {} evaluator(s), mode={:?}", mcp_tools_policies.policies.len(), mcp_tools_policies.mode);
+            Some(Arc::new(chain))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     // ── Fetch policy ───────────────────────────────────────────────────
     let header_rules = load_fetch_header_rules(&cli.fetch_headers, &cli.fetch_header_config)?;
     if !header_rules.is_empty() {
@@ -453,7 +466,13 @@ async fn main() -> Result<()> {
         let manager = engine::mcp_client::McpClientManager::connect(mcp_server_configs).await
             .map_err(|e| anyhow::anyhow!("MCP server connection failed: {}", e))?;
         tracing::info!("All MCP servers connected. JS code can use mcp.callTool(), mcp.listTools(), mcp.servers");
-        engine.with_mcp_client_manager(manager)
+        let engine = engine.with_mcp_client_manager(manager);
+        if let Some(chain) = mcp_tools_policy_chain {
+            tracing::info!("MCP tools policy: ENABLED");
+            engine.with_mcp_tools_policy_chain(chain)
+        } else {
+            engine
+        }
     } else {
         engine
     };

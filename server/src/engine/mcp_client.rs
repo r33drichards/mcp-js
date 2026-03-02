@@ -273,9 +273,20 @@ async fn connect_one(config: &McpServerConfig) -> Result<ConnectedMcpServer, Str
 #[derive(Clone)]
 pub struct McpConfig {
     pub client_manager: McpClientManager,
+    /// Optional OPA policy chain for gating `mcp.callTool()` calls.
+    pub policy_chain: Option<std::sync::Arc<super::opa::PolicyChain>>,
 }
 
 // ── Deno ops ─────────────────────────────────────────────────────────────
+
+/// OPA policy input for MCP tool calls.
+#[derive(Serialize)]
+struct McpToolPolicyInput {
+    operation: &'static str,
+    server: String,
+    tool: String,
+    arguments: serde_json::Value,
+}
 
 /// Async op: call an MCP tool. Spawned on a separate tokio task to avoid
 /// RefCell re-entrancy issues (same pattern as op_fetch).
@@ -287,12 +298,12 @@ async fn op_mcp_call_tool(
     #[string] tool_name: String,
     #[string] arguments_json: String,
 ) -> Result<String, JsErrorBox> {
-    let manager = {
+    let (manager, policy_chain) = {
         let state = state.borrow();
         let config = state
             .try_borrow::<McpConfig>()
             .ok_or_else(|| JsErrorBox::generic("mcp: internal error — no MCP config available"))?;
-        config.client_manager.clone()
+        (config.client_manager.clone(), config.policy_chain.clone())
     };
 
     let arguments: Option<serde_json::Map<String, serde_json::Value>> =
@@ -309,6 +320,29 @@ async fn op_mcp_call_tool(
     // Spawn on separate tokio task (same pattern as fetch) to avoid
     // RefCell re-entrancy panic in deno_core's FuturesUnorderedDriver.
     tokio::spawn(async move {
+        // Evaluate OPA policy if configured.
+        if let Some(ref chain) = policy_chain {
+            let policy_input = McpToolPolicyInput {
+                operation: "mcp_call_tool",
+                server: server_name.clone(),
+                tool: tool_name.clone(),
+                arguments: arguments
+                    .as_ref()
+                    .map(|a| serde_json::Value::Object(a.clone()))
+                    .unwrap_or(serde_json::Value::Null),
+            };
+            let input_value = serde_json::to_value(&policy_input)
+                .map_err(|e| JsErrorBox::generic(format!("mcp.callTool: failed to serialize policy input: {}", e)))?;
+            let allowed = chain.evaluate(&input_value).await
+                .map_err(|e| JsErrorBox::generic(format!("mcp.callTool: policy evaluation error: {}", e)))?;
+            if !allowed {
+                return Err(JsErrorBox::generic(format!(
+                    "mcp.callTool denied by policy: {}.{} is not allowed",
+                    server_name, tool_name
+                )));
+            }
+        }
+
         let result = manager
             .call_tool(&server_name, &tool_name, arguments)
             .await
