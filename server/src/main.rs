@@ -14,6 +14,7 @@ mod cluster;
 use engine::{initialize_v8, Engine, WasmModule, DEFAULT_EXECUTION_TIMEOUT_SECS};
 use engine::fetch::FetchConfig;
 use engine::fs::FsConfig;
+use engine::subprocess::SubprocessConfig;
 use engine::execution::ExecutionRegistry;
 use engine::module_loader::ModuleLoaderConfig;
 use engine::opa::{PoliciesConfig, build_policy_chain};
@@ -404,6 +405,19 @@ async fn main() -> Result<()> {
         None
     };
 
+    let subprocess_policy_chain = if let Some(ref config) = policies_config {
+        if let Some(ref subprocess_policies) = config.subprocess {
+            let chain = build_policy_chain(subprocess_policies, "mcp/subprocess", "data.mcp.subprocess.allow")
+                .map_err(|e| anyhow::anyhow!("Failed to build subprocess policy chain: {}", e))?;
+            tracing::info!("Subprocess policy chain: {} evaluator(s), mode={:?}", subprocess_policies.policies.len(), subprocess_policies.mode);
+            Some(Arc::new(chain))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     // ── Fetch policy ───────────────────────────────────────────────────
     let header_rules = load_fetch_header_rules(&cli.fetch_headers, &cli.fetch_header_config)?;
     if !header_rules.is_empty() {
@@ -421,6 +435,13 @@ async fn main() -> Result<()> {
     // ── Filesystem policy ────────────────────────────────────────────────
     let engine = if let Some(chain) = fs_policy_chain {
         engine.with_fs_config(FsConfig::new(chain))
+    } else {
+        engine
+    };
+
+    // ── Subprocess policy ──────────────────────────────────────────────
+    let engine = if let Some(chain) = subprocess_policy_chain {
+        engine.with_subprocess_config(SubprocessConfig::new(chain))
     } else {
         engine
     };

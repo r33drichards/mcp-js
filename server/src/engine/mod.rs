@@ -8,6 +8,7 @@ pub mod mcp_client;
 pub mod module_loader;
 pub mod opa;
 pub mod session_log;
+pub mod subprocess;
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -666,6 +667,7 @@ pub struct ExecutionConfig<'a> {
     pub wasm_default_max_bytes: usize,
     pub fetch_config: Option<&'a fetch::FetchConfig>,
     pub fs_config: Option<&'a fs::FsConfig>,
+    pub subprocess_config: Option<&'a subprocess::SubprocessConfig>,
     pub console_tree: Option<sled::Tree>,
     pub module_loader_config: Option<&'a module_loader::ModuleLoaderConfig>,
     pub mcp_config: Option<&'a mcp_client::McpConfig>,
@@ -680,6 +682,7 @@ impl<'a> ExecutionConfig<'a> {
             wasm_default_max_bytes: heap_memory_max_bytes,
             fetch_config: None,
             fs_config: None,
+            subprocess_config: None,
             console_tree: None,
             module_loader_config: None,
             mcp_config: None,
@@ -727,6 +730,11 @@ impl<'a> ExecutionConfig<'a> {
         self
     }
 
+    pub fn maybe_subprocess_config(mut self, config: Option<&'a subprocess::SubprocessConfig>) -> Self {
+        self.subprocess_config = config;
+        self
+    }
+
     pub fn maybe_mcp_config(mut self, config: Option<&'a mcp_client::McpConfig>) -> Self {
         self.mcp_config = config;
         self
@@ -748,6 +756,7 @@ pub fn execute_stateless(
         wasm_default_max_bytes,
         fetch_config,
         fs_config,
+        subprocess_config,
         console_tree,
         module_loader_config,
         mcp_config,
@@ -765,6 +774,9 @@ pub fn execute_stateless(
         }
         if fs_config.is_some() {
             extensions.push(fs::create_extension());
+        }
+        if subprocess_config.is_some() {
+            extensions.push(subprocess::create_extension());
         }
         if mcp_config.is_some() {
             extensions.push(mcp_client::create_extension());
@@ -796,6 +808,11 @@ pub fn execute_stateless(
         // Put fs config in OpState if filesystem policies are configured.
         if let Some(fsc) = fs_config {
             runtime.op_state().borrow_mut().put(fsc.clone());
+        }
+
+        // Put subprocess config in OpState if subprocess policies are configured.
+        if let Some(sc) = subprocess_config {
+            runtime.op_state().borrow_mut().put(sc.clone());
         }
 
         // Put MCP config in OpState if MCP servers are configured.
@@ -834,6 +851,12 @@ pub fn execute_stateless(
                 // Inject fs JS wrapper if filesystem policies are configured.
                 if fs_config.is_some() {
                     if let Err(e) = fs::inject_fs(&mut runtime) {
+                        return Err(e);
+                    }
+                }
+                // Inject subprocess JS wrapper if subprocess policies are configured.
+                if subprocess_config.is_some() {
+                    if let Err(e) = subprocess::inject_subprocess(&mut runtime) {
                         return Err(e);
                     }
                 }
@@ -888,6 +911,7 @@ pub fn execute_stateful(
         wasm_default_max_bytes,
         fetch_config,
         fs_config,
+        subprocess_config,
         console_tree,
         module_loader_config,
         mcp_config,
@@ -924,6 +948,9 @@ pub fn execute_stateful(
         if fs_config.is_some() {
             extensions.push(fs::create_extension());
         }
+        if subprocess_config.is_some() {
+            extensions.push(subprocess::create_extension());
+        }
         if mcp_config.is_some() {
             extensions.push(mcp_client::create_extension());
         }
@@ -955,6 +982,11 @@ pub fn execute_stateful(
         // Put fs config in OpState if filesystem policies are configured.
         if let Some(fsc) = fs_config {
             runtime.op_state().borrow_mut().put(fsc.clone());
+        }
+
+        // Put subprocess config in OpState if subprocess policies are configured.
+        if let Some(sc) = subprocess_config {
+            runtime.op_state().borrow_mut().put(sc.clone());
         }
 
         // Put MCP config in OpState if MCP servers are configured.
@@ -1003,6 +1035,12 @@ pub fn execute_stateful(
                     // Inject fs JS wrapper if filesystem policies are configured.
                     if fs_config.is_some() {
                         if let Err(e) = fs::inject_fs(&mut runtime) {
+                            return Err(e);
+                        }
+                    }
+                    // Inject subprocess JS wrapper if subprocess policies are configured.
+                    if subprocess_config.is_some() {
+                        if let Err(e) = subprocess::inject_subprocess(&mut runtime) {
                             return Err(e);
                         }
                     }
@@ -1096,6 +1134,8 @@ pub struct Engine {
     fetch_config: Option<Arc<fetch::FetchConfig>>,
     /// Policy-gated filesystem configuration. When Some, `fs` is injected into the JS runtime.
     fs_config: Option<Arc<fs::FsConfig>>,
+    /// Policy-gated subprocess configuration. When Some, `Deno.Command` and `child_process` are injected.
+    subprocess_config: Option<Arc<subprocess::SubprocessConfig>>,
     /// Execution registry for async execution tracking and console output.
     execution_registry: Option<Arc<ExecutionRegistry>>,
     /// Module loader configuration controlling external module access and OPA auditing.
@@ -1124,6 +1164,7 @@ impl Engine {
             wasm_modules: Arc::new(Vec::new()),
             fetch_config: None,
             fs_config: None,
+            subprocess_config: None,
             execution_registry: None,
             module_loader_config: Arc::new(module_loader::ModuleLoaderConfig {
                 allow_external: false,
@@ -1154,6 +1195,7 @@ impl Engine {
             wasm_modules: Arc::new(Vec::new()),
             fetch_config: None,
             fs_config: None,
+            subprocess_config: None,
             execution_registry: None,
             module_loader_config: Arc::new(module_loader::ModuleLoaderConfig {
                 allow_external: false,
@@ -1185,6 +1227,12 @@ impl Engine {
     /// Enable policy-gated filesystem access in the JS runtime.
     pub fn with_fs_config(mut self, config: fs::FsConfig) -> Self {
         self.fs_config = Some(Arc::new(config));
+        self
+    }
+
+    /// Enable policy-gated subprocess execution in the JS runtime.
+    pub fn with_subprocess_config(mut self, config: subprocess::SubprocessConfig) -> Self {
+        self.subprocess_config = Some(Arc::new(config));
         self
     }
 
@@ -1303,6 +1351,7 @@ impl Engine {
                 let wasm_default = self.wasm_default_max_bytes;
                 let fc = self.fetch_config.clone();
                 let fsc = self.fs_config.clone();
+                let sc = self.subprocess_config.clone();
                 let ct = console_tree;
                 let mlc = self.module_loader_config.clone();
                 let mc = self.mcp_client_manager.as_ref().map(|m| mcp_client::McpConfig { client_manager: (**m).clone(), policy_chain: self.mcp_tools_policy_chain.clone() });
@@ -1313,6 +1362,7 @@ impl Engine {
                         .wasm_default_max_bytes(wasm_default)
                         .maybe_fetch_config(fc.as_deref())
                         .maybe_fs_config(fsc.as_deref())
+                        .maybe_subprocess_config(sc.as_deref())
                         .console_tree(ct)
                         .module_loader_config(&mlc)
                         .maybe_mcp_config(mc.as_ref()))
@@ -1365,6 +1415,7 @@ impl Engine {
                 let wasm_default = self.wasm_default_max_bytes;
                 let fc = self.fetch_config.clone();
                 let fsc = self.fs_config.clone();
+                let sc = self.subprocess_config.clone();
                 let ct = console_tree;
                 let mlc = self.module_loader_config.clone();
                 let mc = self.mcp_client_manager.as_ref().map(|m| mcp_client::McpConfig { client_manager: (**m).clone(), policy_chain: self.mcp_tools_policy_chain.clone() });
@@ -1378,6 +1429,7 @@ impl Engine {
                         .wasm_default_max_bytes(wasm_default)
                         .maybe_fetch_config(fc.as_deref())
                         .maybe_fs_config(fsc.as_deref())
+                        .maybe_subprocess_config(sc.as_deref())
                         .console_tree(ct)
                         .module_loader_config(&mlc)
                         .maybe_mcp_config(mc.as_ref()))
