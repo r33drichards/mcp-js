@@ -921,20 +921,13 @@ ran on railway gha runners on [pr](https://github.com/r33drichards/mcp-js/pull/3
 
 ## P95 Latency
 
-| Topology | Rate | P95 (ms) | |
-|----------|------|----------|-|
-| cluster-stateful | 100/s | 196.88 | `█████████████████████` |
-| cluster-stateful | 200/s | 79.32 | `█████████████████` |
-| cluster-stateless | 100/s | 5.65 | `███████` |
-| cluster-stateless | 200/s | 5.9 | `███████` |
-| cluster-stateless | 500/s | 5.85 | `███████` |
-| cluster-stateless | 1000/s | 7.72 | `████████` |
-| single-stateful | 100/s | 362.5 | `███████████████████████` |
-| single-stateful | 200/s | 2212.55 | `██████████████████████████████` |
-| single-stateless | 100/s | 5.73 | `███████` |
-| single-stateless | 200/s | 5.43 | `██████` |
-| single-stateless | 500/s | 8.49 | `████████` |
-| single-stateless | 1000/s | 482.98 | `████████████████████████` |
+```mermaid
+xychart-beta horizontal
+    title "P95 Latency by Topology and Rate (ms)"
+    x-axis ["cluster-stateful 100/s", "cluster-stateful 200/s", "cluster-stateless 100/s", "cluster-stateless 200/s", "cluster-stateless 500/s", "cluster-stateless 1000/s", "single-stateful 100/s", "single-stateful 200/s", "single-stateless 100/s", "single-stateless 200/s", "single-stateless 500/s", "single-stateless 1000/s"]
+    y-axis "P95 Latency (ms)" 0 --> 2300
+    bar [196.88, 79.32, 5.65, 5.9, 5.85, 7.72, 362.5, 2212.55, 5.73, 5.43, 8.49, 482.98]
+```
 
 ## Notes
 

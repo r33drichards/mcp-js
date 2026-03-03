@@ -8,18 +8,13 @@ All approaches use **PydanticAI** with **Claude Sonnet 4 on AWS Bedrock**.
 
 Average token usage over 10 runs (March 2, 2026):
 
-```
-                          Approach A        Approach B        Approach C
-                         GitHub MCP      mcp-js proxy         gh CLI
-                         (26 tools)        (1 tool)          (1 tool)
- ──────────────────────────────────────────────────────────────────────
-  Avg input tokens         121,450         114,763            22,981
-  Avg output tokens            606           3,063             1,038
-  Avg total tokens         122,056         117,826            24,019
-  Avg API requests             3.9             5.9               9.2
- ──────────────────────────────────────────────────────────────────────
-  vs. Approach A                —              -3%              -80%
-```
+| Metric | Approach A: GitHub MCP (26 tools) | Approach B: mcp-js proxy (1 tool) | Approach C: gh CLI (1 tool) |
+|--------|----------------------------------|----------------------------------|----------------------------|
+| Avg input tokens | 121,450 | 114,763 | 22,981 |
+| Avg output tokens | 606 | 3,063 | 1,038 |
+| Avg total tokens | 122,056 | 117,826 | 24,019 |
+| Avg API requests | 3.9 | 5.9 | 9.2 |
+| vs. Approach A | — | -3% | -80% |
 
 ![Average token usage by approach](graph_avg_tokens.png)
 
@@ -66,18 +61,18 @@ result = await agent.run(prompt)
 
 ## How It Works
 
-```
-Approach A:
-  Claude ←→ [26 tool schemas] ←→ PydanticAI ←→ GitHub MCP Server
-
-Approach B:
-  Claude ←→ [1 tool: run_js] ←→ PydanticAI ←→ mcp-js ←→ GitHub MCP Server
-                                                  ↑
-                                          V8 sandbox with
-                                         mcp.callTool() API
-
-Approach C:
-  Claude ←→ [1 tool: run_gh] ←→ PydanticAI ←→ subprocess ←→ gh CLI
+```mermaid
+flowchart LR
+    subgraph A["Approach A: GitHub MCP Direct"]
+        A1[Claude] <--> A2["26 tool schemas"] <--> A3[PydanticAI] <--> A4[GitHub MCP Server]
+    end
+    subgraph B["Approach B: mcp-js Proxy"]
+        B1[Claude] <--> B2["1 tool: run_js"] <--> B3[PydanticAI] <--> B4[mcp-js] <--> B5[GitHub MCP Server]
+        B6["V8 sandbox\nmcp.callTool() API"] --> B4
+    end
+    subgraph C["Approach C: gh CLI"]
+        C1[Claude] <--> C2["1 tool: run_gh"] <--> C3[PydanticAI] <--> C4[subprocess] <--> C5[gh CLI]
+    end
 ```
 
 ## Running the Scripts
