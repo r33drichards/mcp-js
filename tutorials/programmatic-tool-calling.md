@@ -4,11 +4,12 @@ mcp-v8 can connect to external MCP servers at startup and expose their tools to 
 
 ## How It Works
 
-```
-AI Agent ←→ [1 tool: run_js] ←→ mcp-v8 ←→ External MCP Servers
-                                    ↑
-                            V8 sandbox with
-                           mcp.callTool() API
+```mermaid
+flowchart LR
+    A[AI Agent] <--> B["1 tool: run_js"]
+    B <--> C[mcp-v8]
+    C <--> D[External MCP Servers]
+    E["V8 sandbox\nmcp.callTool() API"] --> C
 ```
 
 The `--mcp-server` flag tells mcp-v8 to connect to an external MCP server and make its tools available inside the JavaScript runtime via a `globalThis.mcp` object:
@@ -177,14 +178,11 @@ Result:
 
 When an AI agent connects directly to an MCP server with many tools, every tool schema is sent to the model on every turn. The [token comparison case study](token-comparison/README.md) measured this effect using the GitHub MCP server (26 tools):
 
-```
-                      Direct MCP       mcp-v8 proxy
-                      (26 tools)        (1 tool)
- ─────────────────────────────────────────────────
-  Avg input tokens     121,450         114,763
-  Avg total tokens     122,056         117,826
-  vs. Direct              —              -3%
-```
+| Metric | Direct MCP (26 tools) | mcp-v8 proxy (1 tool) |
+|--------|----------------------|----------------------|
+| Avg input tokens | 121,450 | 114,763 |
+| Avg total tokens | 122,056 | 117,826 |
+| vs. Direct | — | -3% |
 
 The savings increase with the number of tools exposed. With a single `run_js` tool, the model context stays small regardless of how many external tools are connected behind mcp-v8.
 
