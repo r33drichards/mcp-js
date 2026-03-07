@@ -27,7 +27,7 @@ deno_error = "0.7"
 aws-config = "0.0.26-alpha"
 aws-sdk-s3 = "0.0.26-alpha"
 async-trait = "0.1"
-clap = { version = "4.5", features = ["derive"] }
+clap = { version = "4.5", features = ["derive", "env"] }
 sha2 = "0.10"
 swc_core = { version = "17", features = [
     "common",
@@ -51,6 +51,7 @@ futures = "0.3"
 wasmparser = "0.225"
 uuid = { version = "1.0", features = ["v4"] }
 dashmap = "6"
+jsonwebtoken = "9"
 
 [dev-dependencies]
 tokio-test = "0.4"

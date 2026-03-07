@@ -11,6 +11,7 @@ mod engine;
 mod mcp;
 mod api;
 mod cluster;
+mod session;
 use engine::{initialize_v8, Engine, WasmModule, DEFAULT_EXECUTION_TIMEOUT_SECS};
 use engine::fetch::FetchConfig;
 use engine::fs::FsConfig;
@@ -20,7 +21,7 @@ use engine::opa::{PoliciesConfig, build_policy_chain};
 use engine::heap_storage::{AnyHeapStorage, S3HeapStorage, WriteThroughCacheHeapStorage, FileHeapStorage};
 use engine::heap_tags::HeapTagStore;
 use engine::session_log::SessionLog;
-use mcp::{McpService, StatelessMcpService};
+use mcp::{McpService, SecureSessionMcpService, StatelessMcpService};
 use cluster::{ClusterConfig, ClusterNode};
 
 fn default_max_concurrent() -> usize {
@@ -45,8 +46,20 @@ struct Cli {
     directory_path: Option<String>,
 
     /// Run in stateless mode - no heap snapshots are saved or loaded
-    #[arg(long, conflicts_with_all = ["s3_bucket", "directory_path"])]
+    #[arg(long, conflicts_with_all = ["s3_bucket", "directory_path", "secure_sessions"])]
     stateless: bool,
+
+    /// Enable secure session mode: the agent's `session` tool parameter is removed from the
+    /// tool schema and is instead derived from the `session_id` claim in a programmer-signed
+    /// `AgentSession` JWT header. Requires --jwt-secret. Only effective with HTTP transports
+    /// (--sse-port or --http-port); ignored for stdio. Conflicts with --stateless.
+    #[arg(long, conflicts_with = "stateless")]
+    secure_sessions: bool,
+
+    /// HS256 signing secret for verifying AgentSession JWTs (used with --secure-sessions).
+    /// Can also be provided via the JWT_SECRET environment variable.
+    #[arg(long, env = "JWT_SECRET", requires = "secure_sessions")]
+    jwt_secret: Option<String>,
 
     /// HTTP port using Streamable HTTP transport (MCP 2025-03-26+, load-balanceable)
     #[arg(long, conflicts_with = "sse_port")]
@@ -480,19 +493,30 @@ async fn main() -> Result<()> {
     // ── Start transport ─────────────────────────────────────────────────
     if let Some(port) = cli.http_port {
         tracing::info!("Starting Streamable HTTP transport on port {}", port);
-        if engine.is_stateful() {
+        if cli.secure_sessions {
+            let jwt_secret = cli.jwt_secret.clone();
+            tracing::info!("Secure session mode enabled");
+            start_streamable_http(engine, port, move |e| SecureSessionMcpService::new(e, jwt_secret.clone())).await?;
+        } else if engine.is_stateful() {
             start_streamable_http(engine, port, |e| McpService::new(e)).await?;
         } else {
             start_streamable_http(engine, port, |e| StatelessMcpService::new(e)).await?;
         }
     } else if let Some(port) = cli.sse_port {
         tracing::info!("Starting SSE transport on port {}", port);
-        if engine.is_stateful() {
+        if cli.secure_sessions {
+            let jwt_secret = cli.jwt_secret.clone();
+            tracing::info!("Secure session mode enabled");
+            start_sse_server(engine, port, move |e| SecureSessionMcpService::new(e, jwt_secret.clone())).await?;
+        } else if engine.is_stateful() {
             start_sse_server(engine, port, |e| McpService::new(e)).await?;
         } else {
             start_sse_server(engine, port, |e| StatelessMcpService::new(e)).await?;
         }
     } else {
+        if cli.secure_sessions {
+            tracing::warn!("--secure-sessions has no effect with stdio transport (no HTTP headers available); using standard stateful mode");
+        }
         tracing::info!("Starting stdio transport");
         if engine.is_stateful() {
             let service = McpService::new(engine)
