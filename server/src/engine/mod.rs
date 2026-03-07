@@ -666,6 +666,7 @@ pub struct ExecutionConfig<'a> {
     pub wasm_default_max_bytes: usize,
     pub fetch_config: Option<&'a fetch::FetchConfig>,
     pub fs_config: Option<&'a fs::FsConfig>,
+    pub session_id: Option<String>,
     pub console_tree: Option<sled::Tree>,
     pub module_loader_config: Option<&'a module_loader::ModuleLoaderConfig>,
     pub mcp_config: Option<&'a mcp_client::McpConfig>,
@@ -680,10 +681,16 @@ impl<'a> ExecutionConfig<'a> {
             wasm_default_max_bytes: heap_memory_max_bytes,
             fetch_config: None,
             fs_config: None,
+            session_id: None,
             console_tree: None,
             module_loader_config: None,
             mcp_config: None,
         }
+    }
+
+    pub fn session_id(mut self, session_id: Option<String>) -> Self {
+        self.session_id = session_id;
+        self
     }
 
     pub fn isolate_handle(mut self, handle: Arc<Mutex<Option<v8::IsolateHandle>>>) -> Self {
@@ -748,6 +755,7 @@ pub fn execute_stateless(
         wasm_default_max_bytes,
         fetch_config,
         fs_config,
+        session_id,
         console_tree,
         module_loader_config,
         mcp_config,
@@ -795,7 +803,8 @@ pub fn execute_stateless(
 
         // Put fs config in OpState if filesystem policies are configured.
         if let Some(fsc) = fs_config {
-            runtime.op_state().borrow_mut().put(fsc.clone());
+            let fsc = fsc.clone().with_session_id(session_id.clone());
+            runtime.op_state().borrow_mut().put(fsc);
         }
 
         // Put MCP config in OpState if MCP servers are configured.
@@ -888,6 +897,7 @@ pub fn execute_stateful(
         wasm_default_max_bytes,
         fetch_config,
         fs_config,
+        session_id,
         console_tree,
         module_loader_config,
         mcp_config,
@@ -954,7 +964,8 @@ pub fn execute_stateful(
 
         // Put fs config in OpState if filesystem policies are configured.
         if let Some(fsc) = fs_config {
-            runtime.op_state().borrow_mut().put(fsc.clone());
+            let fsc = fsc.clone().with_session_id(session_id.clone());
+            runtime.op_state().borrow_mut().put(fsc);
         }
 
         // Put MCP config in OpState if MCP servers are configured.
@@ -1303,6 +1314,7 @@ impl Engine {
                 let wasm_default = self.wasm_default_max_bytes;
                 let fc = self.fetch_config.clone();
                 let fsc = self.fs_config.clone();
+                let sid = session.clone();
                 let ct = console_tree;
                 let mlc = self.module_loader_config.clone();
                 let mc = self.mcp_client_manager.as_ref().map(|m| mcp_client::McpConfig { client_manager: (**m).clone(), policy_chain: self.mcp_tools_policy_chain.clone() });
@@ -1313,6 +1325,7 @@ impl Engine {
                         .wasm_default_max_bytes(wasm_default)
                         .maybe_fetch_config(fc.as_deref())
                         .maybe_fs_config(fsc.as_deref())
+                        .session_id(sid)
                         .console_tree(ct)
                         .module_loader_config(&mlc)
                         .maybe_mcp_config(mc.as_ref()))
@@ -1365,6 +1378,7 @@ impl Engine {
                 let wasm_default = self.wasm_default_max_bytes;
                 let fc = self.fetch_config.clone();
                 let fsc = self.fs_config.clone();
+                let sid = session.clone();
                 let ct = console_tree;
                 let mlc = self.module_loader_config.clone();
                 let mc = self.mcp_client_manager.as_ref().map(|m| mcp_client::McpConfig { client_manager: (**m).clone(), policy_chain: self.mcp_tools_policy_chain.clone() });
@@ -1378,6 +1392,7 @@ impl Engine {
                         .wasm_default_max_bytes(wasm_default)
                         .maybe_fetch_config(fc.as_deref())
                         .maybe_fs_config(fsc.as_deref())
+                        .session_id(sid)
                         .console_tree(ct)
                         .module_loader_config(&mlc)
                         .maybe_mcp_config(mc.as_ref()))

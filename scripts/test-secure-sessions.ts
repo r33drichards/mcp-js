@@ -8,7 +8,7 @@
 //    try every creative trick they can think of to escape the sandbox.
 //
 // Prerequisites:
-//   - docker compose up -d
+//   - docker compose -f docker-compose.secure-sessions.yml up -d
 //   - AWS credentials configured (for Bedrock)
 //   - JWT_SECRET env var matching docker-compose (default: "test-secret-change-me")
 //

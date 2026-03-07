@@ -2,36 +2,22 @@ package mcp.filesystem
 
 default allow = false
 
-# All filesystem operations are restricted to /data/workspace/ subtree.
-# Path traversal (../) is explicitly blocked.
+# Filesystem operations are restricted to /data/workspace/<session_id>/.
 
 allow if {
-    not path_traversal
-    path_allowed
-}
-
-# Block any path containing ".." components
-path_traversal if {
-    contains(input.path, "..")
-}
-
-path_traversal if {
-    input.destination
-    contains(input.destination, "..")
-}
-
-# Primary path must start with /data/workspace/
-path_allowed if {
-    startswith(input.path, "/data/workspace/")
+    input.session_id
+    session_prefix := concat("", ["/data/workspace/", input.session_id, "/"])
+    startswith(input.path, session_prefix)
     check_destination
 }
 
-# For rename/copyFile, destination must also be under /data/workspace/
 check_destination if {
     not input.destination
 }
 
 check_destination if {
     input.destination
-    startswith(input.destination, "/data/workspace/")
+    input.session_id
+    session_prefix := concat("", ["/data/workspace/", input.session_id, "/"])
+    startswith(input.destination, session_prefix)
 }
