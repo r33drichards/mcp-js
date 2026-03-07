@@ -19,22 +19,13 @@ jobs:
         include:
           - name: Linux x86_64
             os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            bin_name: mcp-v8-linux
-            build_cmd: cargo build --release --target x86_64-unknown-linux-gnu
-            out_path: server/target/x86_64-unknown-linux-gnu/release/server
+            bin_name: mcp-js-linux-x86_64
           - name: macOS x86_64
             os: macos-13
-            target: x86_64-apple-darwin
-            bin_name: mcp-v8-macos
-            build_cmd: cargo build --release --target x86_64-apple-darwin
-            out_path: server/target/x86_64-apple-darwin/release/server
+            bin_name: mcp-js-macos-x86_64
           - name: macOS ARM64
             os: macos-14
-            target: aarch64-apple-darwin
-            bin_name: mcp-v8-macos-arm64
-            build_cmd: cargo build --release --target aarch64-apple-darwin
-            out_path: server/target/aarch64-apple-darwin/release/server
+            bin_name: mcp-js-macos-arm64
 
     steps:
       - name: Checkout code
@@ -42,21 +33,15 @@ jobs:
 
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/flake-checker-action@main
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-directories: "server"
-
-      - name: Install target
-        run: nix develop --command rustup target add ${{ matrix.target }}
 
       - name: Build
-        run: nix develop --command bash -c "cd server && ${{ matrix.build_cmd }}"
+        run: nix build .#
 
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.bin_name }}
-          path: ${{ matrix.out_path }}
+          path: result/bin/server
 
   release:
     needs: build
@@ -67,32 +52,14 @@ jobs:
         with:
           path: dist
 
-      - name: Rename and organize binaries
+      - name: Compress binaries
         run: |
-          echo "Listing dist directory:"
-          ls -l dist
-          echo "Listing all subdirectories in dist:"
-          for dir in dist/*; do
-            if [ -d "$dir" ]; then
-              echo "Contents of $dir:"
-              ls -l "$dir"
-            fi
-          done
           mkdir -p dist/final
           for dir in dist/*; do
-            if [ -d "$dir" ] && [ "$dir" != "dist/final" ]; then
-              echo "Processing directory: $dir"
-              bin=$(ls "$dir")
-              echo "Found binary: $bin in $dir"
-              dir_trimmed=$(echo "$dir" | sed 's/^dist\///')
-              echo "Copying $dir/$bin to dist/final/$bin-$dir_trimmed"
-              cp "$dir/$bin" "dist/final/$bin-$dir_trimmed"
-            fi
-          done
-          # Gzip each binary in dist/final
-          for file in dist/final/*; do
-            if [ -f "$file" ]; then
-              gzip -c "$file" > "$file.gz"
+            if [ -d "$dir" ]; then
+              name=$(basename "$dir")
+              cp "$dir/server" "dist/final/$name"
+              gzip -c "dist/final/$name" > "dist/final/$name.gz"
             fi
           done
 
