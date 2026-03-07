@@ -224,7 +224,7 @@ async fn test_heap_persistence() -> Result<(), Box<dyn std::error::Error>> {
         send_mcp_message(&mut stream, initialize_msg)
     ).await??;
 
-    // Set a variable in a fresh heap
+    // Set a variable on globalThis in a fresh heap (var is module-scoped in ES modules)
     let set_var_msg = json!({
         "jsonrpc": "2.0",
         "id": 2,
@@ -232,7 +232,7 @@ async fn test_heap_persistence() -> Result<(), Box<dyn std::error::Error>> {
         "params": {
             "name": "run_js",
             "arguments": {
-                "code": "var myValue = 42; myValue"
+                "code": "globalThis.myValue = 42;"
             }
         }
     });
@@ -257,7 +257,7 @@ async fn test_heap_persistence() -> Result<(), Box<dyn std::error::Error>> {
         "params": {
             "name": "run_js",
             "arguments": {
-                "code": "myValue",
+                "code": "globalThis.myValue",
                 "heap": heap_hash
             }
         }
