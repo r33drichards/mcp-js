@@ -40,11 +40,17 @@ use super::opa::PolicyChain;
 #[derive(Clone, Debug)]
 pub struct FsConfig {
     pub policy_chain: Arc<PolicyChain>,
+    pub session_id: Option<String>,
 }
 
 impl FsConfig {
     pub fn new(chain: Arc<PolicyChain>) -> Self {
-        Self { policy_chain: chain }
+        Self { policy_chain: chain, session_id: None }
+    }
+
+    pub fn with_session_id(mut self, session_id: Option<String>) -> Self {
+        self.session_id = session_id;
+        self
     }
 }
 
@@ -60,6 +66,8 @@ struct FsPolicyInput {
     recursive: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     encoding: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_id: Option<String>,
 }
 
 // ── Async deno_core ops ──────────────────────────────────────────────────
@@ -71,10 +79,10 @@ async fn op_fs_read_file_text(
     state: Rc<RefCell<OpState>>,
     #[string] path: String,
 ) -> Result<String, JsErrorBox> {
-    let policy_chain = extract_chain(&state)?;
+    let config = extract_config(&state)?;
 
     tokio::spawn(async move {
-        check_policy(&policy_chain, "readFile", &path, None, None, Some("utf8")).await?;
+        check_policy(&config.policy_chain, "readFile", &path, None, None, Some("utf8"), config.session_id.as_deref()).await?;
 
         let content = tokio::fs::read(&path).await
             .map_err(|e| format!("fs.readFile: {}: {}", path, e))?;
@@ -94,10 +102,10 @@ async fn op_fs_read_file_buffer(
     state: Rc<RefCell<OpState>>,
     #[string] path: String,
 ) -> Result<Vec<u8>, JsErrorBox> {
-    let policy_chain = extract_chain(&state)?;
+    let config = extract_config(&state)?;
 
     tokio::spawn(async move {
-        check_policy(&policy_chain, "readFile", &path, None, None, Some("buffer")).await?;
+        check_policy(&config.policy_chain, "readFile", &path, None, None, Some("buffer"), config.session_id.as_deref()).await?;
 
         tokio::fs::read(&path).await
             .map_err(|e| format!("fs.readFile: {}: {}", path, e))
@@ -115,10 +123,10 @@ async fn op_fs_write_file_text(
     #[string] path: String,
     #[string] data: String,
 ) -> Result<String, JsErrorBox> {
-    let policy_chain = extract_chain(&state)?;
+    let config = extract_config(&state)?;
 
     tokio::spawn(async move {
-        check_policy(&policy_chain, "writeFile", &path, None, None, None).await?;
+        check_policy(&config.policy_chain, "writeFile", &path, None, None, None, config.session_id.as_deref()).await?;
 
         tokio::fs::write(&path, data.as_bytes()).await
             .map_err(|e| format!("fs.writeFile: {}: {}", path, e))?;
@@ -138,10 +146,10 @@ async fn op_fs_write_file_buffer(
     #[string] path: String,
     #[buffer(copy)] data: Vec<u8>,
 ) -> Result<String, JsErrorBox> {
-    let policy_chain = extract_chain(&state)?;
+    let config = extract_config(&state)?;
 
     tokio::spawn(async move {
-        check_policy(&policy_chain, "writeFile", &path, None, None, None).await?;
+        check_policy(&config.policy_chain, "writeFile", &path, None, None, None, config.session_id.as_deref()).await?;
 
         tokio::fs::write(&path, &data).await
             .map_err(|e| format!("fs.writeFile: {}: {}", path, e))?;
@@ -161,10 +169,10 @@ async fn op_fs_append_file(
     #[string] path: String,
     #[string] data: String,
 ) -> Result<String, JsErrorBox> {
-    let policy_chain = extract_chain(&state)?;
+    let config = extract_config(&state)?;
 
     tokio::spawn(async move {
-        check_policy(&policy_chain, "appendFile", &path, None, None, None).await?;
+        check_policy(&config.policy_chain, "appendFile", &path, None, None, None, config.session_id.as_deref()).await?;
 
         use tokio::io::AsyncWriteExt;
         let mut file = tokio::fs::OpenOptions::new()
@@ -191,10 +199,10 @@ async fn op_fs_readdir(
     state: Rc<RefCell<OpState>>,
     #[string] path: String,
 ) -> Result<String, JsErrorBox> {
-    let policy_chain = extract_chain(&state)?;
+    let config = extract_config(&state)?;
 
     tokio::spawn(async move {
-        check_policy(&policy_chain, "readdir", &path, None, None, None).await?;
+        check_policy(&config.policy_chain, "readdir", &path, None, None, None, config.session_id.as_deref()).await?;
 
         let mut entries = Vec::new();
         let mut dir = tokio::fs::read_dir(&path).await
@@ -222,10 +230,10 @@ async fn op_fs_stat(
     state: Rc<RefCell<OpState>>,
     #[string] path: String,
 ) -> Result<String, JsErrorBox> {
-    let policy_chain = extract_chain(&state)?;
+    let config = extract_config(&state)?;
 
     tokio::spawn(async move {
-        check_policy(&policy_chain, "stat", &path, None, None, None).await?;
+        check_policy(&config.policy_chain, "stat", &path, None, None, None, config.session_id.as_deref()).await?;
 
         let metadata = tokio::fs::metadata(&path).await
             .map_err(|e| format!("fs.stat: {}: {}", path, e))?;
@@ -266,11 +274,11 @@ async fn op_fs_mkdir(
     #[string] path: String,
     #[smi] recursive: i32,
 ) -> Result<String, JsErrorBox> {
-    let policy_chain = extract_chain(&state)?;
+    let config = extract_config(&state)?;
     let recursive = recursive != 0;
 
     tokio::spawn(async move {
-        check_policy(&policy_chain, "mkdir", &path, None, Some(recursive), None).await?;
+        check_policy(&config.policy_chain, "mkdir", &path, None, Some(recursive), None, config.session_id.as_deref()).await?;
 
         if recursive {
             tokio::fs::create_dir_all(&path).await
@@ -293,11 +301,11 @@ async fn op_fs_rm(
     #[string] path: String,
     #[smi] recursive: i32,
 ) -> Result<String, JsErrorBox> {
-    let policy_chain = extract_chain(&state)?;
+    let config = extract_config(&state)?;
     let recursive = recursive != 0;
 
     tokio::spawn(async move {
-        check_policy(&policy_chain, "rm", &path, None, Some(recursive), None).await?;
+        check_policy(&config.policy_chain, "rm", &path, None, Some(recursive), None, config.session_id.as_deref()).await?;
 
         let metadata = tokio::fs::metadata(&path).await
             .map_err(|e| format!("fs.rm: {}: {}", path, e))?;
@@ -327,10 +335,10 @@ async fn op_fs_rename(
     #[string] from: String,
     #[string] to: String,
 ) -> Result<String, JsErrorBox> {
-    let policy_chain = extract_chain(&state)?;
+    let config = extract_config(&state)?;
 
     tokio::spawn(async move {
-        check_policy(&policy_chain, "rename", &from, Some(&to), None, None).await?;
+        check_policy(&config.policy_chain, "rename", &from, Some(&to), None, None, config.session_id.as_deref()).await?;
 
         tokio::fs::rename(&from, &to).await
             .map_err(|e| format!("fs.rename: {} -> {}: {}", from, to, e))?;
@@ -350,10 +358,10 @@ async fn op_fs_copy_file(
     #[string] from: String,
     #[string] to: String,
 ) -> Result<String, JsErrorBox> {
-    let policy_chain = extract_chain(&state)?;
+    let config = extract_config(&state)?;
 
     tokio::spawn(async move {
-        check_policy(&policy_chain, "copyFile", &from, Some(&to), None, None).await?;
+        check_policy(&config.policy_chain, "copyFile", &from, Some(&to), None, None, config.session_id.as_deref()).await?;
 
         tokio::fs::copy(&from, &to).await
             .map_err(|e| format!("fs.copyFile: {} -> {}: {}", from, to, e))?;
@@ -372,10 +380,10 @@ async fn op_fs_exists(
     state: Rc<RefCell<OpState>>,
     #[string] path: String,
 ) -> Result<String, JsErrorBox> {
-    let policy_chain = extract_chain(&state)?;
+    let config = extract_config(&state)?;
 
     tokio::spawn(async move {
-        check_policy(&policy_chain, "exists", &path, None, None, None).await?;
+        check_policy(&config.policy_chain, "exists", &path, None, None, None, config.session_id.as_deref()).await?;
 
         let exists = tokio::fs::try_exists(&path).await.unwrap_or(false);
         Ok(if exists { "true" } else { "false" }.to_string())
@@ -495,11 +503,11 @@ const FS_JS_WRAPPER: &str = r#"
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
-fn extract_chain(state: &Rc<RefCell<OpState>>) -> Result<Arc<PolicyChain>, JsErrorBox> {
+fn extract_config(state: &Rc<RefCell<OpState>>) -> Result<FsConfig, JsErrorBox> {
     let state = state.borrow();
     let config = state.try_borrow::<FsConfig>()
         .ok_or_else(|| JsErrorBox::generic("fs: internal error — no fs config available"))?;
-    Ok(config.policy_chain.clone())
+    Ok(config.clone())
 }
 
 async fn check_policy(
@@ -509,6 +517,7 @@ async fn check_policy(
     destination: Option<&str>,
     recursive: Option<bool>,
     encoding: Option<&str>,
+    session_id: Option<&str>,
 ) -> Result<(), String> {
     let input = FsPolicyInput {
         operation: operation.to_string(),
@@ -516,6 +525,7 @@ async fn check_policy(
         destination: destination.map(|s| s.to_string()),
         recursive,
         encoding: encoding.map(|s| s.to_string()),
+        session_id: session_id.map(|s| s.to_string()),
     };
 
     let input_value = serde_json::to_value(&input)
@@ -548,6 +558,7 @@ mod tests {
             destination: None,
             recursive: None,
             encoding: Some("utf8".to_string()),
+            session_id: None,
         };
         let json = serde_json::to_string(&input).unwrap();
         assert!(json.contains("\"operation\":\"readFile\""));
@@ -555,6 +566,21 @@ mod tests {
         assert!(json.contains("\"encoding\":\"utf8\""));
         assert!(!json.contains("destination"));
         assert!(!json.contains("recursive"));
+        assert!(!json.contains("session_id"));
+    }
+
+    #[test]
+    fn test_fs_policy_input_with_session_id() {
+        let input = FsPolicyInput {
+            operation: "readFile".to_string(),
+            path: "/data/workspace/abc-123/file.txt".to_string(),
+            destination: None,
+            recursive: None,
+            encoding: None,
+            session_id: Some("abc-123".to_string()),
+        };
+        let json = serde_json::to_string(&input).unwrap();
+        assert!(json.contains("\"session_id\":\"abc-123\""));
     }
 
     #[test]
@@ -565,6 +591,7 @@ mod tests {
             destination: Some("/tmp/new.txt".to_string()),
             recursive: None,
             encoding: None,
+            session_id: None,
         };
         let json = serde_json::to_string(&input).unwrap();
         assert!(json.contains("\"destination\":\"/tmp/new.txt\""));
