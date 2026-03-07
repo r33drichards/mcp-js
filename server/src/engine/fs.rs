@@ -46,7 +46,7 @@ pub struct FsConfig {
 
 impl FsConfig {
     pub fn new(chain: Arc<PolicyChain>) -> Self {
-        Self { policy_chain: chain, session_id: None, claims: None, mcp_headers: None }
+        Self { policy_chain: chain, mcp_headers: None }
     }
 
     pub fn with_mcp_headers(mut self, mcp_headers: Option<serde_json::Value>) -> Self {
