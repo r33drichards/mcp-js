@@ -9,7 +9,7 @@ use std::sync::{Arc, OnceLock};
 
 use crate::engine::Engine;
 use crate::engine::heap_tags::HeapTagEntry;
-use crate::session;
+use crate::session::SessionVerifier;
 
 // ── MCP response types ──────────────────────────────────────────────────
 
@@ -182,7 +182,7 @@ impl McpService {
         #[serde(default)]
         tags: Option<HashMap<String, String>>,
     ) -> RunJsResponse {
-        match self.engine.run_js(code, heap, session, heap_memory_max_mb, execution_timeout_secs, tags).await {
+        match self.engine.run_js(code, heap, session, heap_memory_max_mb, execution_timeout_secs, tags, None).await {
             Ok(execution_id) => RunJsResponse { execution_id },
             Err(e) => RunJsResponse {
                 execution_id: format!("error: {}", e),
@@ -412,18 +412,21 @@ impl ServerHandler for McpService {
 #[derive(Clone)]
 pub struct SecureSessionMcpService {
     engine: Engine,
-    jwt_secret: Option<Arc<String>>,
+    verifier: Option<Arc<SessionVerifier>>,
     /// Set once during `initialize` from the verified JWT. Reads return
     /// `None` if the client never provided a valid token.
     session_id: Arc<OnceLock<String>>,
+    /// All JWT claims from the verified token, available for policy evaluation.
+    jwt_claims: Arc<OnceLock<serde_json::Value>>,
 }
 
 impl SecureSessionMcpService {
-    pub fn new(engine: Engine, jwt_secret: Option<String>) -> Self {
+    pub fn new(engine: Engine, verifier: Option<Arc<SessionVerifier>>) -> Self {
         Self {
             engine,
-            jwt_secret: jwt_secret.map(Arc::new),
+            verifier,
             session_id: Arc::new(OnceLock::new()),
+            jwt_claims: Arc::new(OnceLock::new()),
         }
     }
 }
@@ -453,7 +456,8 @@ impl SecureSessionMcpService {
                 execution_id: "error: no valid AgentSession JWT was provided at connection time".to_string(),
             },
         };
-        match self.engine.run_js(code, heap, Some(session), heap_memory_max_mb, execution_timeout_secs, tags).await {
+        let claims = self.jwt_claims.get().cloned();
+        match self.engine.run_js(code, heap, Some(session), heap_memory_max_mb, execution_timeout_secs, tags, claims).await {
             Ok(execution_id) => RunJsResponse { execution_id },
             Err(e) => RunJsResponse {
                 execution_id: format!("error: {}", e),
@@ -662,22 +666,30 @@ impl ServerHandler for SecureSessionMcpService {
             let initialize_uri = &http_request_part.uri;
             tracing::info!(?initialize_headers, %initialize_uri, "initialize from http server (secure session mode)");
 
-            if let Some(ref secret) = self.jwt_secret {
+            if let Some(ref verifier) = self.verifier {
+                // Try Authorization: Bearer first, fall back to agent-session header
                 let token = http_request_part.headers
-                    .get("agent-session")
-                    .and_then(|v| v.to_str().ok());
+                    .get("authorization")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.strip_prefix("Bearer "))
+                    .or_else(|| {
+                        http_request_part.headers
+                            .get("agent-session")
+                            .and_then(|v| v.to_str().ok())
+                    });
                 match token {
-                    Some(token) => match session::verify_session_jwt(token, secret) {
-                        Some(session_id) => {
-                            tracing::info!(session_id, "AgentSession JWT verified");
-                            let _ = self.session_id.set(session_id);
+                    Some(token) => match verifier.verify(token).await {
+                        Some(verified) => {
+                            tracing::info!(session_id = verified.session_id, "Session JWT verified");
+                            let _ = self.jwt_claims.set(verified.claims);
+                            let _ = self.session_id.set(verified.session_id);
                         }
                         None => {
-                            tracing::warn!("AgentSession JWT present but failed verification");
+                            tracing::warn!("Session JWT present but failed verification");
                         }
                     },
                     None => {
-                        tracing::warn!("--secure-sessions enabled but no AgentSession header in initialize request");
+                        tracing::warn!("--secure-sessions enabled but no Authorization/AgentSession header in initialize request");
                     }
                 }
             }
@@ -731,7 +743,7 @@ impl StatelessMcpService {
         execution_timeout_secs: Option<u64>,
     ) -> StatelessRunJsResponse {
         // 1. Submit to engine (fire-and-forget internally)
-        let exec_id = match self.engine.run_js(code, None, None, heap_memory_max_mb, execution_timeout_secs, None).await {
+        let exec_id = match self.engine.run_js(code, None, None, heap_memory_max_mb, execution_timeout_secs, None, None).await {
             Ok(id) => id,
             Err(e) => return StatelessRunJsResponse {
                 value: json!({ "error": e }),

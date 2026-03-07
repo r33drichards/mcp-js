@@ -37,6 +37,7 @@ async fn exec_handler(
             req.heap_memory_max_mb,
             req.execution_timeout_secs,
             req.tags,
+            None,
         )
         .await
     {

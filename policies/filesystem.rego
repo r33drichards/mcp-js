@@ -2,12 +2,15 @@ package mcp.filesystem
 
 default allow = false
 
-# Filesystem operations are restricted to /data/workspace/<session_id>/.
+# Filesystem operations are restricted to /data/workspace/<sub>/<session_id>/.
+# JWT claims are passed as input.claims; any claim can be used for policy decisions.
 
 allow if {
-    input.session_id
-    session_prefix := concat("", ["/data/workspace/", input.session_id, "/"])
-    startswith(input.path, session_prefix)
+    input.claims
+    input.claims.sub
+    input.claims.session_id
+    workspace_prefix := concat("", ["/data/workspace/", input.claims.sub, "/", input.claims.session_id, "/"])
+    startswith(input.path, workspace_prefix)
     check_destination
 }
 
@@ -17,7 +20,9 @@ check_destination if {
 
 check_destination if {
     input.destination
-    input.session_id
-    session_prefix := concat("", ["/data/workspace/", input.session_id, "/"])
-    startswith(input.destination, session_prefix)
+    input.claims
+    input.claims.sub
+    input.claims.session_id
+    workspace_prefix := concat("", ["/data/workspace/", input.claims.sub, "/", input.claims.session_id, "/"])
+    startswith(input.destination, workspace_prefix)
 }

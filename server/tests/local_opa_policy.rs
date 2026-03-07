@@ -102,7 +102,7 @@ async fn run_fetch(engine: &Engine, url: &str, method: &str) -> Result<String, S
     );
 
     let exec_id = engine
-        .run_js(code, None, None, None, None, None)
+        .run_js(code, None, None, None, None, None, None)
         .await
         .expect("submit should succeed");
 
