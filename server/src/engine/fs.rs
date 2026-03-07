@@ -42,11 +42,12 @@ pub struct FsConfig {
     pub policy_chain: Arc<PolicyChain>,
     pub session_id: Option<String>,
     pub claims: Option<serde_json::Value>,
+    pub mcp_headers: Option<serde_json::Value>,
 }
 
 impl FsConfig {
     pub fn new(chain: Arc<PolicyChain>) -> Self {
-        Self { policy_chain: chain, session_id: None, claims: None }
+        Self { policy_chain: chain, session_id: None, claims: None, mcp_headers: None }
     }
 
     pub fn with_session_id(mut self, session_id: Option<String>) -> Self {
@@ -56,6 +57,11 @@ impl FsConfig {
 
     pub fn with_claims(mut self, claims: Option<serde_json::Value>) -> Self {
         self.claims = claims;
+        self
+    }
+
+    pub fn with_mcp_headers(mut self, mcp_headers: Option<serde_json::Value>) -> Self {
+        self.mcp_headers = mcp_headers;
         self
     }
 }
@@ -76,6 +82,8 @@ struct FsPolicyInput {
     session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     claims: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mcp_headers: Option<serde_json::Value>,
 }
 
 // ── Async deno_core ops ──────────────────────────────────────────────────
@@ -90,7 +98,7 @@ async fn op_fs_read_file_text(
     let config = extract_config(&state)?;
 
     tokio::spawn(async move {
-        check_policy(&config.policy_chain, "readFile", &path, None, None, Some("utf8"), config.session_id.as_deref(), config.claims.as_ref()).await?;
+        check_policy(&config.policy_chain, "readFile", &path, None, None, Some("utf8"), config.session_id.as_deref(), config.claims.as_ref(), config.mcp_headers.as_ref()).await?;
 
         let content = tokio::fs::read(&path).await
             .map_err(|e| format!("fs.readFile: {}: {}", path, e))?;
@@ -113,7 +121,7 @@ async fn op_fs_read_file_buffer(
     let config = extract_config(&state)?;
 
     tokio::spawn(async move {
-        check_policy(&config.policy_chain, "readFile", &path, None, None, Some("buffer"), config.session_id.as_deref(), config.claims.as_ref()).await?;
+        check_policy(&config.policy_chain, "readFile", &path, None, None, Some("buffer"), config.session_id.as_deref(), config.claims.as_ref(), config.mcp_headers.as_ref()).await?;
 
         tokio::fs::read(&path).await
             .map_err(|e| format!("fs.readFile: {}: {}", path, e))
@@ -134,7 +142,7 @@ async fn op_fs_write_file_text(
     let config = extract_config(&state)?;
 
     tokio::spawn(async move {
-        check_policy(&config.policy_chain, "writeFile", &path, None, None, None, config.session_id.as_deref(), config.claims.as_ref()).await?;
+        check_policy(&config.policy_chain, "writeFile", &path, None, None, None, config.session_id.as_deref(), config.claims.as_ref(), config.mcp_headers.as_ref()).await?;
 
         tokio::fs::write(&path, data.as_bytes()).await
             .map_err(|e| format!("fs.writeFile: {}: {}", path, e))?;
@@ -157,7 +165,7 @@ async fn op_fs_write_file_buffer(
     let config = extract_config(&state)?;
 
     tokio::spawn(async move {
-        check_policy(&config.policy_chain, "writeFile", &path, None, None, None, config.session_id.as_deref(), config.claims.as_ref()).await?;
+        check_policy(&config.policy_chain, "writeFile", &path, None, None, None, config.session_id.as_deref(), config.claims.as_ref(), config.mcp_headers.as_ref()).await?;
 
         tokio::fs::write(&path, &data).await
             .map_err(|e| format!("fs.writeFile: {}: {}", path, e))?;
@@ -180,7 +188,7 @@ async fn op_fs_append_file(
     let config = extract_config(&state)?;
 
     tokio::spawn(async move {
-        check_policy(&config.policy_chain, "appendFile", &path, None, None, None, config.session_id.as_deref(), config.claims.as_ref()).await?;
+        check_policy(&config.policy_chain, "appendFile", &path, None, None, None, config.session_id.as_deref(), config.claims.as_ref(), config.mcp_headers.as_ref()).await?;
 
         use tokio::io::AsyncWriteExt;
         let mut file = tokio::fs::OpenOptions::new()
@@ -210,7 +218,7 @@ async fn op_fs_readdir(
     let config = extract_config(&state)?;
 
     tokio::spawn(async move {
-        check_policy(&config.policy_chain, "readdir", &path, None, None, None, config.session_id.as_deref(), config.claims.as_ref()).await?;
+        check_policy(&config.policy_chain, "readdir", &path, None, None, None, config.session_id.as_deref(), config.claims.as_ref(), config.mcp_headers.as_ref()).await?;
 
         let mut entries = Vec::new();
         let mut dir = tokio::fs::read_dir(&path).await
@@ -241,7 +249,7 @@ async fn op_fs_stat(
     let config = extract_config(&state)?;
 
     tokio::spawn(async move {
-        check_policy(&config.policy_chain, "stat", &path, None, None, None, config.session_id.as_deref(), config.claims.as_ref()).await?;
+        check_policy(&config.policy_chain, "stat", &path, None, None, None, config.session_id.as_deref(), config.claims.as_ref(), config.mcp_headers.as_ref()).await?;
 
         let metadata = tokio::fs::metadata(&path).await
             .map_err(|e| format!("fs.stat: {}: {}", path, e))?;
@@ -286,7 +294,7 @@ async fn op_fs_mkdir(
     let recursive = recursive != 0;
 
     tokio::spawn(async move {
-        check_policy(&config.policy_chain, "mkdir", &path, None, Some(recursive), None, config.session_id.as_deref(), config.claims.as_ref()).await?;
+        check_policy(&config.policy_chain, "mkdir", &path, None, Some(recursive), None, config.session_id.as_deref(), config.claims.as_ref(), config.mcp_headers.as_ref()).await?;
 
         if recursive {
             tokio::fs::create_dir_all(&path).await
@@ -313,7 +321,7 @@ async fn op_fs_rm(
     let recursive = recursive != 0;
 
     tokio::spawn(async move {
-        check_policy(&config.policy_chain, "rm", &path, None, Some(recursive), None, config.session_id.as_deref(), config.claims.as_ref()).await?;
+        check_policy(&config.policy_chain, "rm", &path, None, Some(recursive), None, config.session_id.as_deref(), config.claims.as_ref(), config.mcp_headers.as_ref()).await?;
 
         let metadata = tokio::fs::metadata(&path).await
             .map_err(|e| format!("fs.rm: {}: {}", path, e))?;
@@ -346,7 +354,7 @@ async fn op_fs_rename(
     let config = extract_config(&state)?;
 
     tokio::spawn(async move {
-        check_policy(&config.policy_chain, "rename", &from, Some(&to), None, None, config.session_id.as_deref(), config.claims.as_ref()).await?;
+        check_policy(&config.policy_chain, "rename", &from, Some(&to), None, None, config.session_id.as_deref(), config.claims.as_ref(), config.mcp_headers.as_ref()).await?;
 
         tokio::fs::rename(&from, &to).await
             .map_err(|e| format!("fs.rename: {} -> {}: {}", from, to, e))?;
@@ -369,7 +377,7 @@ async fn op_fs_copy_file(
     let config = extract_config(&state)?;
 
     tokio::spawn(async move {
-        check_policy(&config.policy_chain, "copyFile", &from, Some(&to), None, None, config.session_id.as_deref(), config.claims.as_ref()).await?;
+        check_policy(&config.policy_chain, "copyFile", &from, Some(&to), None, None, config.session_id.as_deref(), config.claims.as_ref(), config.mcp_headers.as_ref()).await?;
 
         tokio::fs::copy(&from, &to).await
             .map_err(|e| format!("fs.copyFile: {} -> {}: {}", from, to, e))?;
@@ -391,7 +399,7 @@ async fn op_fs_exists(
     let config = extract_config(&state)?;
 
     tokio::spawn(async move {
-        check_policy(&config.policy_chain, "exists", &path, None, None, None, config.session_id.as_deref(), config.claims.as_ref()).await?;
+        check_policy(&config.policy_chain, "exists", &path, None, None, None, config.session_id.as_deref(), config.claims.as_ref(), config.mcp_headers.as_ref()).await?;
 
         let exists = tokio::fs::try_exists(&path).await.unwrap_or(false);
         Ok(if exists { "true" } else { "false" }.to_string())
@@ -527,6 +535,7 @@ async fn check_policy(
     encoding: Option<&str>,
     session_id: Option<&str>,
     claims: Option<&serde_json::Value>,
+    mcp_headers: Option<&serde_json::Value>,
 ) -> Result<(), String> {
     let input = FsPolicyInput {
         operation: operation.to_string(),
@@ -536,6 +545,7 @@ async fn check_policy(
         encoding: encoding.map(|s| s.to_string()),
         session_id: session_id.map(|s| s.to_string()),
         claims: claims.cloned(),
+        mcp_headers: mcp_headers.cloned(),
     };
 
     let input_value = serde_json::to_value(&input)
@@ -570,6 +580,7 @@ mod tests {
             encoding: Some("utf8".to_string()),
             session_id: None,
             claims: None,
+            mcp_headers: None,
         };
         let json = serde_json::to_string(&input).unwrap();
         assert!(json.contains("\"operation\":\"readFile\""));
@@ -578,6 +589,7 @@ mod tests {
         assert!(!json.contains("destination"));
         assert!(!json.contains("recursive"));
         assert!(!json.contains("session_id"));
+        assert!(!json.contains("mcp_headers"));
     }
 
     #[test]
@@ -590,6 +602,7 @@ mod tests {
             encoding: None,
             session_id: Some("abc-123".to_string()),
             claims: None,
+            mcp_headers: None,
         };
         let json = serde_json::to_string(&input).unwrap();
         assert!(json.contains("\"session_id\":\"abc-123\""));
@@ -605,6 +618,7 @@ mod tests {
             encoding: None,
             session_id: None,
             claims: None,
+            mcp_headers: None,
         };
         let json = serde_json::to_string(&input).unwrap();
         assert!(json.contains("\"destination\":\"/tmp/new.txt\""));

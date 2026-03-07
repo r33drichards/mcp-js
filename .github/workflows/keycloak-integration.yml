@@ -1,0 +1,91 @@
+name: Keycloak Session Integration Test
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - Dockerfile
+      - docker-compose.secure-sessions.yml
+      - keycloak/**
+      - scripts/test-keycloak-sessions.ts
+      - scripts/oauth-client-credentials-provider.ts
+      - server/src/session.rs
+      - server/src/mcp.rs
+      - server/src/main.rs
+      - policies/**
+  pull_request:
+    branches: [main]
+    paths:
+      - Dockerfile
+      - docker-compose.secure-sessions.yml
+      - keycloak/**
+      - scripts/test-keycloak-sessions.ts
+      - scripts/oauth-client-credentials-provider.ts
+      - server/src/session.rs
+      - server/src/mcp.rs
+      - server/src/main.rs
+      - policies/**
+  schedule:
+    - cron: "0 6 * * *" # daily at 06:00 UTC
+  workflow_dispatch:
+
+jobs:
+  keycloak-integration:
+    name: Keycloak Session Integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Start services
+        run: docker compose -f docker-compose.secure-sessions.yml up --build -d
+
+      - name: Wait for Keycloak to be healthy
+        run: |
+          echo "Waiting for Keycloak..."
+          for i in $(seq 1 60); do
+            if docker compose -f docker-compose.secure-sessions.yml ps keycloak | grep -q healthy; then
+              echo "Keycloak is healthy."
+              break
+            fi
+            sleep 5
+          done
+
+      - name: Wait for mcp-js to be ready
+        run: |
+          echo "Waiting for mcp-js..."
+          for i in $(seq 1 30); do
+            if curl -sf -o /dev/null -X POST http://localhost:3000/api/exec \
+                 -H "Content-Type: application/json" \
+                 -d '{"code":"1"}' 2>/dev/null; then
+              echo "mcp-js is ready."
+              break
+            fi
+            sleep 2
+          done
+
+      - name: Run keycloak session tests
+        run: deno run -A scripts/test-keycloak-sessions.ts
+
+      - name: Show logs on failure
+        if: failure()
+        run: |
+          echo "=== mcp-js logs ==="
+          docker compose -f docker-compose.secure-sessions.yml logs mcp-js
+          echo ""
+          echo "=== keycloak logs ==="
+          docker compose -f docker-compose.secure-sessions.yml logs keycloak
+          echo ""
+          echo "=== opa logs ==="
+          docker compose -f docker-compose.secure-sessions.yml logs opa
+
+      - name: Tear down
+        if: always()
+        run: docker compose -f docker-compose.secure-sessions.yml down -v --remove-orphans

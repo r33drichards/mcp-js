@@ -3,10 +3,9 @@
 // Test script for JWKS/OAuth secure sessions with Keycloak.
 //
 // Verifies:
-// 1. Token acquisition from Keycloak with custom session_id claim
-// 2. Session isolation between two MCP connections with different tokens
-// 3. JWT claims are available to OPA filesystem policy
-// 4. Invalid/forged tokens are rejected
+// 1. Token acquisition from Keycloak (JWT for auth only)
+// 2. Session isolation via X-MCP-Session-Id headers
+// 3. Invalid/forged tokens are rejected
 //
 // Prerequisites:
 //   docker compose -f docker-compose.secure-sessions.yml up --build -d
@@ -18,6 +17,7 @@
 
 import { Client } from "npm:@modelcontextprotocol/sdk@1.12.1/client/index.js";
 import { StreamableHTTPClientTransport } from "npm:@modelcontextprotocol/sdk@1.12.1/client/streamableHttp.js";
+import { ClientCredentialsProvider } from "./oauth-client-credentials-provider.ts";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -28,6 +28,7 @@ const MCP_URL = Deno.env.get("MCP_SERVER_URL") ?? "http://localhost:3000";
 const CLIENT_ID = "mcp-client";
 const CLIENT_SECRET = "mcp-client-secret";
 const REALM = "mcp";
+const TOKEN_URL = `${KEYCLOAK_URL}/realms/${REALM}/protocol/openid-connect/token`;
 
 console.log(`Keycloak:   ${KEYCLOAK_URL}`);
 console.log(`MCP server: ${MCP_URL}`);
@@ -37,53 +38,37 @@ console.log();
 // Helpers
 // ---------------------------------------------------------------------------
 
-async function getToken(sessionId: string): Promise<string> {
-  const tokenUrl = `${KEYCLOAK_URL}/realms/${REALM}/protocol/openid-connect/token`;
-  const body = new URLSearchParams({
-    grant_type: "client_credentials",
-    client_id: CLIENT_ID,
-    client_secret: CLIENT_SECRET,
-    session_id: sessionId,
-  });
-
-  const resp = await fetch(tokenUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: body.toString(),
-  });
-
-  if (!resp.ok) {
-    const text = await resp.text();
-    throw new Error(`Token request failed (${resp.status}): ${text}`);
-  }
-
-  const data = await resp.json();
-  return data.access_token;
-}
-
 function decodeJwtPayload(token: string): Record<string, unknown> {
   const parts = token.split(".");
   const payload = JSON.parse(atob(parts[1]));
   return payload;
 }
 
-async function createMcpClient(token: string, label: string): Promise<Client> {
+function createProvider(): ClientCredentialsProvider {
+  return new ClientCredentialsProvider({
+    tokenUrl: TOKEN_URL,
+    clientId: CLIENT_ID,
+    clientSecret: CLIENT_SECRET,
+  });
+}
+
+async function createMcpClient(sessionId: string): Promise<{ client: Client; provider: ClientCredentialsProvider }> {
+  const provider = createProvider();
   const transport = new StreamableHTTPClientTransport(
     new URL(`${MCP_URL}/mcp`),
     {
+      authProvider: provider,
       requestInit: {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
+        headers: { "X-MCP-Session-Id": sessionId },
       },
     },
   );
   const client = new Client({
-    name: `test-${label}`,
+    name: `test-${sessionId}`,
     version: "1.0.0",
   });
   await client.connect(transport);
-  return client;
+  return { client, provider };
 }
 
 async function runCode(client: Client, code: string): Promise<string> {
@@ -148,28 +133,26 @@ console.log("PHASE 1: Keycloak token acquisition");
 console.log("=".repeat(70));
 console.log();
 
-const tokenA = await getToken("session-alpha");
-const tokenB = await getToken("session-beta");
+const provider = createProvider();
 
-const claimsA = decodeJwtPayload(tokenA);
-const claimsB = decodeJwtPayload(tokenB);
+const tokens = await provider.tokens();
 
-console.log("Token A claims (subset):", {
-  sub: claimsA.sub,
-  session_id: claimsA.session_id,
-  azp: claimsA.azp,
-});
-console.log("Token B claims (subset):", {
-  sub: claimsB.sub,
-  session_id: claimsB.session_id,
-  azp: claimsB.azp,
+if (!tokens) {
+  console.error("Failed to acquire token from Keycloak");
+  Deno.exit(1);
+}
+
+const claims = decodeJwtPayload(tokens.access_token);
+
+console.log("Token claims (subset):", {
+  sub: claims.sub,
+  azp: claims.azp,
 });
 console.log();
 
-report("token A has session_id claim", claimsA.session_id === "session-alpha");
-report("token B has session_id claim", claimsB.session_id === "session-beta");
-report("token A has sub claim", typeof claimsA.sub === "string" && (claimsA.sub as string).length > 0);
-report("tokens have same sub (same client)", claimsA.sub === claimsB.sub);
+report("token has sub claim", typeof claims.sub === "string" && (claims.sub as string).length > 0);
+report("token has azp claim", claims.azp === CLIENT_ID);
+report("session_id NOT in JWT (comes from X-MCP-Session-Id header instead)", claims.session_id === undefined);
 console.log();
 
 // ===========================================================================
@@ -181,8 +164,8 @@ console.log("PHASE 2: Session isolation");
 console.log("=".repeat(70));
 console.log();
 
-const clientA = await createMcpClient(tokenA, "session-alpha");
-const clientB = await createMcpClient(tokenB, "session-beta");
+const { client: clientA } = await createMcpClient("session-alpha");
+const { client: clientB } = await createMcpClient("session-beta");
 
 // Session A: store a value
 console.log("--- Session A: store globalThis.secret = 42 ---");
@@ -229,11 +212,16 @@ console.log("PHASE 3: Invalid token rejection");
 console.log("=".repeat(70));
 console.log();
 
-// Try connecting with a forged token
+// Try connecting with a forged token (use static headers, no provider)
 console.log("--- Forged token ---");
 try {
-  const forgedToken = tokenA.slice(0, -5) + "XXXXX";
-  const clientForged = await createMcpClient(forgedToken, "forged");
+  const forgedToken = tokens.access_token.slice(0, -5) + "XXXXX";
+  const forgedTransport = new StreamableHTTPClientTransport(
+    new URL(`${MCP_URL}/mcp`),
+    { requestInit: { headers: { Authorization: `Bearer ${forgedToken}` } } },
+  );
+  const clientForged = new Client({ name: "test-forged", version: "1.0.0" });
+  await clientForged.connect(forgedTransport);
   const forgedResult = await runCode(clientForged, "console.log('should not run');");
   // If we get here, the connection succeeded but run_js should fail (no valid session)
   report("forged token rejected", forgedResult.includes("error") || forgedResult.includes("no valid"));

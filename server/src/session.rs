@@ -4,9 +4,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-/// Result of a successful JWT verification: the session ID and all token claims.
+/// Result of a successful JWT verification: all token claims.
 pub struct VerifiedSession {
-    pub session_id: String,
     pub claims: serde_json::Value,
 }
 
@@ -84,21 +83,20 @@ impl JwksKeyStore {
     }
 }
 
-/// Verifies JWTs against a JWKS endpoint and extracts the session ID from a
-/// configurable claim. All token claims are returned so downstream policies
-/// (e.g. OPA filesystem policy) can enforce arbitrary claim-based rules.
+/// Verifies JWTs against a JWKS endpoint. All token claims are returned so
+/// downstream policies (e.g. OPA filesystem policy) can enforce arbitrary
+/// claim-based rules. Session identity is determined by the X-MCP-Session-Id
+/// header, not by JWT claims.
 pub struct SessionVerifier {
     key_store: Arc<JwksKeyStore>,
-    claim_name: String,
 }
 
 impl SessionVerifier {
-    pub fn new(key_store: Arc<JwksKeyStore>, claim_name: String) -> Self {
-        Self { key_store, claim_name }
+    pub fn new(key_store: Arc<JwksKeyStore>) -> Self {
+        Self { key_store }
     }
 
-    /// Verify a JWT signature via JWKS, extract the session ID from the
-    /// configured claim, and return all claims for policy evaluation.
+    /// Verify a JWT signature via JWKS and return all claims for policy evaluation.
     pub async fn verify(&self, token: &str) -> Option<VerifiedSession> {
         let header = decode_header(token).ok()?;
         let kid = header.kid.as_deref()?;
@@ -112,14 +110,8 @@ impl SessionVerifier {
         validation.validate_aud = false;
 
         let token_data = decode::<serde_json::Value>(token, &dk, &validation).ok()?;
-        let session_id = token_data
-            .claims
-            .get(&self.claim_name)
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())?;
 
         Some(VerifiedSession {
-            session_id,
             claims: token_data.claims,
         })
     }

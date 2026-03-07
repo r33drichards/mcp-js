@@ -668,6 +668,7 @@ pub struct ExecutionConfig<'a> {
     pub fs_config: Option<&'a fs::FsConfig>,
     pub session_id: Option<String>,
     pub claims: Option<serde_json::Value>,
+    pub mcp_headers: Option<serde_json::Value>,
     pub console_tree: Option<sled::Tree>,
     pub module_loader_config: Option<&'a module_loader::ModuleLoaderConfig>,
     pub mcp_config: Option<&'a mcp_client::McpConfig>,
@@ -684,6 +685,7 @@ impl<'a> ExecutionConfig<'a> {
             fs_config: None,
             session_id: None,
             claims: None,
+            mcp_headers: None,
             console_tree: None,
             module_loader_config: None,
             mcp_config: None,
@@ -697,6 +699,11 @@ impl<'a> ExecutionConfig<'a> {
 
     pub fn claims(mut self, claims: Option<serde_json::Value>) -> Self {
         self.claims = claims;
+        self
+    }
+
+    pub fn mcp_headers(mut self, mcp_headers: Option<serde_json::Value>) -> Self {
+        self.mcp_headers = mcp_headers;
         self
     }
 
@@ -764,6 +771,7 @@ pub fn execute_stateless(
         fs_config,
         session_id,
         claims,
+        mcp_headers,
         console_tree,
         module_loader_config,
         mcp_config,
@@ -811,7 +819,7 @@ pub fn execute_stateless(
 
         // Put fs config in OpState if filesystem policies are configured.
         if let Some(fsc) = fs_config {
-            let fsc = fsc.clone().with_session_id(session_id.clone()).with_claims(claims.clone());
+            let fsc = fsc.clone().with_session_id(session_id.clone()).with_claims(claims.clone()).with_mcp_headers(mcp_headers.clone());
             runtime.op_state().borrow_mut().put(fsc);
         }
 
@@ -907,6 +915,7 @@ pub fn execute_stateful(
         fs_config,
         session_id,
         claims,
+        mcp_headers,
         console_tree,
         module_loader_config,
         mcp_config,
@@ -973,7 +982,7 @@ pub fn execute_stateful(
 
         // Put fs config in OpState if filesystem policies are configured.
         if let Some(fsc) = fs_config {
-            let fsc = fsc.clone().with_session_id(session_id.clone()).with_claims(claims.clone());
+            let fsc = fsc.clone().with_session_id(session_id.clone()).with_claims(claims.clone()).with_mcp_headers(mcp_headers.clone());
             runtime.op_state().borrow_mut().put(fsc);
         }
 
@@ -1244,6 +1253,7 @@ impl Engine {
         execution_timeout_secs: Option<u64>,
         tags: Option<HashMap<String, String>>,
         jwt_claims: Option<serde_json::Value>,
+        mcp_headers: Option<serde_json::Value>,
     ) -> Result<ExecutionId, String> {
         let registry = self.execution_registry.as_ref()
             .ok_or_else(|| "Execution registry not configured".to_string())?;
@@ -1275,7 +1285,7 @@ impl Engine {
             engine.execute_in_background(
                 id_bg, code, heap, session, heap_memory_max_mb,
                 execution_timeout_secs, tags, raw_snapshot, console_tree,
-                jwt_claims,
+                jwt_claims, mcp_headers,
             ).await;
         });
 
@@ -1295,6 +1305,7 @@ impl Engine {
         raw_snapshot: Option<Vec<u8>>,
         console_tree: sled::Tree,
         jwt_claims: Option<serde_json::Value>,
+        mcp_headers: Option<serde_json::Value>,
     ) {
         let registry = match &self.execution_registry {
             Some(r) => r.clone(),
@@ -1328,6 +1339,7 @@ impl Engine {
                 let fsc = self.fs_config.clone();
                 let sid = session.clone();
                 let jc = jwt_claims.clone();
+                let mh = mcp_headers.clone();
                 let ct = console_tree;
                 let mlc = self.module_loader_config.clone();
                 let mc = self.mcp_client_manager.as_ref().map(|m| mcp_client::McpConfig { client_manager: (**m).clone(), policy_chain: self.mcp_tools_policy_chain.clone() });
@@ -1340,6 +1352,7 @@ impl Engine {
                         .maybe_fs_config(fsc.as_deref())
                         .session_id(sid)
                         .claims(jc)
+                        .mcp_headers(mh)
                         .console_tree(ct)
                         .module_loader_config(&mlc)
                         .maybe_mcp_config(mc.as_ref()))
@@ -1394,6 +1407,7 @@ impl Engine {
                 let fsc = self.fs_config.clone();
                 let sid = session.clone();
                 let jc = jwt_claims.clone();
+                let mh = mcp_headers.clone();
                 let ct = console_tree;
                 let mlc = self.module_loader_config.clone();
                 let mc = self.mcp_client_manager.as_ref().map(|m| mcp_client::McpConfig { client_manager: (**m).clone(), policy_chain: self.mcp_tools_policy_chain.clone() });
@@ -1409,6 +1423,7 @@ impl Engine {
                         .maybe_fs_config(fsc.as_deref())
                         .session_id(sid)
                         .claims(jc)
+                        .mcp_headers(mh)
                         .console_tree(ct)
                         .module_loader_config(&mlc)
                         .maybe_mcp_config(mc.as_ref()))

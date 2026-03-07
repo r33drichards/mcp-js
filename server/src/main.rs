@@ -21,7 +21,7 @@ use engine::opa::{PoliciesConfig, build_policy_chain};
 use engine::heap_storage::{AnyHeapStorage, S3HeapStorage, WriteThroughCacheHeapStorage, FileHeapStorage};
 use engine::heap_tags::HeapTagStore;
 use engine::session_log::SessionLog;
-use mcp::{McpService, SecureSessionMcpService, StatelessMcpService};
+use mcp::{McpService, StatelessMcpService};
 use session::{SessionVerifier, JwksKeyStore};
 use cluster::{ClusterConfig, ClusterNode};
 
@@ -47,25 +47,13 @@ struct Cli {
     directory_path: Option<String>,
 
     /// Run in stateless mode - no heap snapshots are saved or loaded
-    #[arg(long, conflicts_with_all = ["s3_bucket", "directory_path", "secure_sessions"])]
+    #[arg(long, conflicts_with_all = ["s3_bucket", "directory_path"])]
     stateless: bool,
 
-    /// Enable secure session mode: the agent's `session` tool parameter is removed from the
-    /// tool schema and is instead derived from a JWT claim (see --session-claim). Requires
-    /// --jwks-url for OAuth/OIDC token verification. Only effective with HTTP transports
-    /// (--sse-port or --http-port); ignored for stdio. Conflicts with --stateless.
-    #[arg(long, conflicts_with = "stateless")]
-    secure_sessions: bool,
-
     /// JWKS endpoint URL for fetching public keys (e.g., Keycloak OIDC certs URL).
-    /// Required with --secure-sessions.
-    #[arg(long, env = "JWKS_URL", requires = "secure_sessions")]
+    /// Enables JWT verification of Authorization: Bearer tokens during initialize.
+    #[arg(long, env = "JWKS_URL")]
     jwks_url: Option<String>,
-
-    /// JWT claim name that contains the session ID (default: "session_id").
-    /// Used with --secure-sessions.
-    #[arg(long, default_value = "session_id", requires = "secure_sessions")]
-    session_claim: String,
 
     /// HTTP port using Streamable HTTP transport (MCP 2025-03-26+, load-balanceable)
     #[arg(long, conflicts_with = "sse_port")]
@@ -496,14 +484,12 @@ async fn main() -> Result<()> {
         engine
     };
 
-    // ── Build session verifier (if --secure-sessions) ─────────────────
-    let session_verifier: Option<Arc<SessionVerifier>> = if cli.secure_sessions {
-        let jwks_url = cli.jwks_url.clone()
-            .ok_or_else(|| anyhow::anyhow!("--secure-sessions requires --jwks-url"))?;
+    // ── Build session verifier (if --jwks-url) ─────────────────────────
+    let session_verifier: Option<Arc<SessionVerifier>> = if let Some(ref jwks_url) = cli.jwks_url {
         tracing::info!("Fetching JWKS keys from {}", jwks_url);
-        let key_store = JwksKeyStore::new(jwks_url).await
+        let key_store = JwksKeyStore::new(jwks_url.clone()).await
             .map_err(|e| anyhow::anyhow!("Failed to initialize JWKS key store: {}", e))?;
-        Some(Arc::new(SessionVerifier::new(Arc::new(key_store), cli.session_claim.clone())))
+        Some(Arc::new(SessionVerifier::new(Arc::new(key_store))))
     } else {
         None
     };
@@ -511,33 +497,26 @@ async fn main() -> Result<()> {
     // ── Start transport ─────────────────────────────────────────────────
     if let Some(port) = cli.http_port {
         tracing::info!("Starting Streamable HTTP transport on port {}", port);
-        if cli.secure_sessions {
+        if engine.is_stateful() {
             let verifier = session_verifier.clone();
-            tracing::info!("Secure session mode enabled");
-            start_streamable_http(engine, port, move |e| SecureSessionMcpService::new(e, verifier.clone())).await?;
-        } else if engine.is_stateful() {
-            start_streamable_http(engine, port, |e| McpService::new(e)).await?;
+            start_streamable_http(engine, port, move |e| McpService::new(e, verifier.clone())).await?;
         } else {
-            start_streamable_http(engine, port, |e| StatelessMcpService::new(e)).await?;
+            let verifier = session_verifier.clone();
+            start_streamable_http(engine, port, move |e| StatelessMcpService::new(e, verifier.clone())).await?;
         }
     } else if let Some(port) = cli.sse_port {
         tracing::info!("Starting SSE transport on port {}", port);
-        if cli.secure_sessions {
+        if engine.is_stateful() {
             let verifier = session_verifier.clone();
-            tracing::info!("Secure session mode enabled");
-            start_sse_server(engine, port, move |e| SecureSessionMcpService::new(e, verifier.clone())).await?;
-        } else if engine.is_stateful() {
-            start_sse_server(engine, port, |e| McpService::new(e)).await?;
+            start_sse_server(engine, port, move |e| McpService::new(e, verifier.clone())).await?;
         } else {
-            start_sse_server(engine, port, |e| StatelessMcpService::new(e)).await?;
+            let verifier = session_verifier.clone();
+            start_sse_server(engine, port, move |e| StatelessMcpService::new(e, verifier.clone())).await?;
         }
     } else {
-        if cli.secure_sessions {
-            tracing::warn!("--secure-sessions has no effect with stdio transport (no HTTP headers available); using standard stateful mode");
-        }
         tracing::info!("Starting stdio transport");
         if engine.is_stateful() {
-            let service = McpService::new(engine)
+            let service = McpService::new(engine, None)
                 .serve(stdio())
                 .await
                 .inspect_err(|e| {
@@ -545,7 +524,7 @@ async fn main() -> Result<()> {
                 })?;
             service.waiting().await?;
         } else {
-            let service = StatelessMcpService::new(engine)
+            let service = StatelessMcpService::new(engine, None)
                 .serve(stdio())
                 .await
                 .inspect_err(|e| {

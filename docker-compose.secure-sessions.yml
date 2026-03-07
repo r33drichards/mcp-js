@@ -32,8 +32,6 @@ services:
       - --session-db-path=/data/sessions
       - --policies-json={"fetch":{"policies":[{"url":"http://opa:8181"}]},"filesystem":{"policies":[{"url":"http://opa:8181"}]}}
       - --fetch-header=host=api.github.com,header=Authorization,value=Bearer ${GITHUB_TOKEN}
-      - --secure-sessions
-      - --session-claim=session_id
     tmpfs:
       - /data:uid=1000,gid=1000
     ports:
