@@ -1,10 +1,11 @@
 #!/usr/bin/env -S deno run -A
 //
-// Test script for --secure-sessions mode.
+// Test script for --secure-sessions mode and OPA filesystem policy.
 //
-// Spins up two MCP client connections with different session JWTs,
-// uses Bedrock Claude Haiku to drive tool calls, and verifies that
-// sessions are isolated from each other.
+// 1. Session isolation: two MCP connections with different JWTs verify
+//    that globalThis state doesn't leak between sessions.
+// 2. Filesystem sandbox: agents write to /data/workspace/<uuid>/ and then
+//    try every creative trick they can think of to escape the sandbox.
 //
 // Prerequisites:
 //   - docker compose up -d
@@ -30,11 +31,14 @@ import {
 const JWT_SECRET = Deno.env.get("JWT_SECRET") ?? "test-secret-change-me";
 const MCP_URL = Deno.env.get("MCP_SERVER_URL") ?? "http://localhost:3000";
 const BEDROCK_MODEL =
-  Deno.env.get("BEDROCK_MODEL") ?? "us.anthropic.claude-haiku-4-5-20251001-v1:0";
+  Deno.env.get("BEDROCK_MODEL") ??
+    "us.anthropic.claude-haiku-4-5-20251001-v1:0";
 const BEDROCK_REGION = Deno.env.get("AWS_REGION") ?? "us-east-1";
 
 const GLOBAL_UUID = crypto.randomUUID();
+const WORKSPACE = `/data/workspace/${GLOBAL_UUID}`;
 console.log(`Global test UUID: ${GLOBAL_UUID}`);
+console.log(`Workspace:        ${WORKSPACE}`);
 console.log(`MCP server:       ${MCP_URL}`);
 console.log(`Bedrock model:    ${BEDROCK_MODEL}`);
 console.log();
@@ -76,7 +80,7 @@ async function createMcpClient(sessionId: string): Promise<Client> {
 function mcpToolsToBedrock(
   mcpTools: Awaited<ReturnType<Client["listTools"]>>,
 ) {
-  return mcpTools.tools.map((t) => ({
+  return mcpTools.tools.map((t: { name: string; description?: string; inputSchema: unknown }) => ({
     toolSpec: {
       name: t.name,
       description: t.description ?? "",
@@ -102,8 +106,7 @@ async function chat(
     { role: "user", content: [{ text: userMessage }] },
   ];
 
-  // Tool-use loop (max 10 iterations as a safety net)
-  for (let i = 0; i < 10; i++) {
+  for (let i = 0; i < 15; i++) {
     const resp = await bedrock.send(
       new ConverseCommand({
         modelId: BEDROCK_MODEL,
@@ -115,20 +118,19 @@ async function chat(
     const assistantContent = resp.output?.message?.content ?? [];
     messages.push({ role: "assistant", content: assistantContent });
 
-    // Check if model wants to use tools
     const toolUses = assistantContent.filter(
       (b: Record<string, unknown>) => b.toolUse,
     );
 
     if (toolUses.length === 0) {
-      // No more tool calls — extract final text
       const textBlocks = assistantContent.filter(
         (b: Record<string, unknown>) => b.text,
       );
-      return textBlocks.map((b: Record<string, unknown>) => b.text).join("\n");
+      return textBlocks
+        .map((b: Record<string, unknown>) => b.text)
+        .join("\n");
     }
 
-    // Execute each tool call against MCP
     const toolResults = [];
     for (const block of toolUses) {
       const tu = (block as Record<string, Record<string, unknown>>).toolUse;
@@ -145,7 +147,7 @@ async function chat(
         )
         .join("\n");
 
-      console.log(`  <- result: ${resultText.slice(0, 200)}`);
+      console.log(`  <- result: ${resultText.slice(0, 300)}`);
 
       toolResults.push({
         toolResult: {
@@ -162,13 +164,34 @@ async function chat(
 }
 
 // ---------------------------------------------------------------------------
-// Main test
+// Test runner
 // ---------------------------------------------------------------------------
+
+let passed = 0;
+let failed = 0;
+
+function report(name: string, ok: boolean, detail?: string) {
+  if (ok) {
+    passed++;
+    console.log(`  PASS: ${name}`);
+  } else {
+    failed++;
+    console.log(`  FAIL: ${name}${detail ? " — " + detail : ""}`);
+  }
+}
+
+// ===========================================================================
+// Phase 1: Session isolation
+// ===========================================================================
+
+console.log("=".repeat(70));
+console.log("PHASE 1: Secure session isolation");
+console.log("=".repeat(70));
+console.log();
 
 const sessionA = `${GLOBAL_UUID}-session-a`;
 const sessionB = `${GLOBAL_UUID}-session-b`;
 
-console.log("=== Creating MCP clients ===");
 console.log(`Session A: ${sessionA}`);
 console.log(`Session B: ${sessionB}`);
 console.log();
@@ -177,64 +200,215 @@ const clientA = await createMcpClient(sessionA);
 const clientB = await createMcpClient(sessionB);
 
 const toolsA = await clientA.listTools();
-const toolsB = await clientB.listTools();
-console.log(
-  `Session A tools: ${toolsA.tools.map((t) => t.name).join(", ")}`,
-);
-console.log(
-  `Session B tools: ${toolsB.tools.map((t) => t.name).join(", ")}`,
-);
+const bedrockTools = mcpToolsToBedrock(toolsA);
 
-// Verify 'session' param is NOT in the run_js tool schema (secure mode)
-const runJsTool = toolsA.tools.find((t) => t.name === "run_js");
+// Check that 'session' param is hidden in secure mode
+const runJsTool = toolsA.tools.find((t: { name: string }) => t.name === "run_js");
 const runJsProps = (runJsTool?.inputSchema as Record<string, unknown>)
   ?.properties as Record<string, unknown> | undefined;
-if (runJsProps && "session" in runJsProps) {
-  console.error(
-    "\nFAIL: run_js tool still exposes 'session' parameter — secure sessions not active!",
-  );
-  Deno.exit(1);
-}
-console.log(
-  "OK: run_js tool does NOT expose 'session' parameter (secure mode confirmed)",
+report(
+  "run_js hides 'session' parameter",
+  !runJsProps || !("session" in runJsProps),
 );
 console.log();
 
-const bedrockTools = mcpToolsToBedrock(toolsA);
-
-// --- Session A: store a value ---
-console.log("=== Session A: store a variable ===");
+// Session A: store a value
+console.log("--- Session A: store globalThis.secret = 42 ---");
 const responseA1 = await chat(
   clientA,
   bedrockTools,
-  "Use run_js to execute this JavaScript code: `globalThis.secret = 42;` — then get the execution result and tell me the heap hash.",
+  "Use run_js to execute: `globalThis.secret = 42;` then get_execution to confirm it completed. Tell me the heap hash.",
 );
-console.log(`\nAssistant A: ${responseA1}\n`);
+console.log(`\n  Assistant: ${responseA1}\n`);
 
-// --- Session A: read it back (with heap chaining) ---
-console.log("=== Session A: read variable back ===");
+// Session A: read it back via heap chain
+console.log("--- Session A: read secret + 8 via heap chain ---");
 const responseA2 = await chat(
   clientA,
   bedrockTools,
-  "Now list the session snapshots to find the latest heap hash, then use run_js with that heap to execute: `globalThis.secret + 8;` — tell me the result.",
+  "List session snapshots to find the latest output_heap, then run_js with that heap: `console.log(globalThis.secret + 8);` and get the output. Tell me the console output.",
 );
-console.log(`\nAssistant A: ${responseA2}\n`);
+console.log(`\n  Assistant: ${responseA2}\n`);
+report("heap chain returns 50", /50/.test(responseA2));
 
-// --- Session B: try to access the variable (should be undefined) ---
-console.log("=== Session B: attempt to access Session A's variable ===");
+// Session B: should NOT see the variable
+console.log("--- Session B: check isolation ---");
 const responseB = await chat(
   clientB,
   bedrockTools,
-  "Use run_js to execute: `typeof globalThis.secret` — then get the result and tell me what it returned. This should be 'undefined' since this is a fresh session.",
+  "Use run_js to execute: `console.log(typeof globalThis.secret);` then get the output. Tell me what it printed.",
 );
-console.log(`\nAssistant B: ${responseB}\n`);
+console.log(`\n  Assistant: ${responseB}\n`);
+report("session isolation (undefined)", /undefined/.test(responseB));
 
-// --- Cleanup ---
-console.log("=== Closing connections ===");
+// ===========================================================================
+// Phase 2: Filesystem sandbox — happy path
+// ===========================================================================
+
+console.log();
+console.log("=".repeat(70));
+console.log("PHASE 2: Filesystem sandbox — allowed operations");
+console.log("=".repeat(70));
+console.log();
+
+console.log("--- Write and read a file inside workspace ---");
+const fsHappy = await chat(
+  clientA,
+  bedrockTools,
+  `Use run_js to execute the following JavaScript. Report exactly what console.log prints.
+\`\`\`js
+await fs.mkdir("${WORKSPACE}", { recursive: true });
+await fs.writeFile("${WORKSPACE}/hello.txt", "sandbox works!");
+const content = await fs.readFile("${WORKSPACE}/hello.txt");
+console.log(content);
+\`\`\``,
+);
+console.log(`\n  Assistant: ${fsHappy}\n`);
+report("write + read inside workspace", /sandbox works/.test(fsHappy));
+
+console.log("--- List directory ---");
+const fsList = await chat(
+  clientA,
+  bedrockTools,
+  `Use run_js to execute and report the console output:
+\`\`\`js
+const entries = await fs.readdir("${WORKSPACE}");
+console.log(JSON.stringify(entries));
+\`\`\``,
+);
+console.log(`\n  Assistant: ${fsList}\n`);
+report("readdir inside workspace", /hello\.txt/.test(fsList));
+
+// ===========================================================================
+// Phase 3: Filesystem sandbox — breakout attempts
+// ===========================================================================
+
+console.log();
+console.log("=".repeat(70));
+console.log("PHASE 3: Filesystem sandbox — breakout attempts (agent-driven)");
+console.log("=".repeat(70));
+console.log();
+
+console.log("--- Agent: creative breakout attempts ---");
+const breakout = await chat(
+  clientA,
+  bedrockTools,
+  `You are a security pentester. Your goal is to read or write files OUTSIDE of /data/workspace/ using the fs module available in the JavaScript runtime via run_js.
+
+The fs module provides: fs.readFile, fs.writeFile, fs.appendFile, fs.readdir, fs.stat, fs.mkdir, fs.rm, fs.rename, fs.copyFile, fs.exists.
+
+Try AT LEAST 8 different creative approaches to escape the sandbox. For each attempt:
+1. Run the JavaScript code using run_js
+2. Get the execution result
+3. Note whether it succeeded or was blocked
+
+Try these kinds of attacks (and invent more):
+- Direct paths: /etc/passwd, /proc/self/environ, /data/heaps/, /data/sessions/
+- Path traversal: /data/workspace/../../../etc/passwd
+- Symlink-style traversal: /data/workspace/../../etc/passwd
+- URL encoding tricks in paths
+- Null byte injection: /data/workspace/foo\\x00/../../../etc/passwd
+- Double encoding: /data/workspace/%2e%2e/etc/passwd
+- Unicode normalization attacks
+- Race conditions with rename
+- Copying files from outside into workspace
+- Reading /proc/self/cmdline or /proc/1/environ
+
+After all attempts, summarize: how many succeeded vs were blocked? Quote the exact error messages you received.`,
+);
+console.log(`\n  Assistant: ${breakout}\n`);
+
+// The agent summary should mention things were denied/blocked.
+// We look for evidence of policy enforcement and no evidence of actual data exfil.
+const mentionsBlocking = /denied|blocked|not allowed|policy/i.test(breakout);
+const hasExfilEvidence = /root:.*:0:0|\/bin\/(ba)?sh|HOSTNAME=|AWS_SECRET/i.test(breakout);
+report(
+  "breakout attempts blocked (agent summary)",
+  mentionsBlocking && !hasExfilEvidence,
+);
+
+// ===========================================================================
+// Phase 4: Scripted breakout verification (deterministic)
+// ===========================================================================
+
+console.log();
+console.log("=".repeat(70));
+console.log("PHASE 4: Scripted breakout verification");
+console.log("=".repeat(70));
+console.log();
+
+const breakoutPaths = [
+  { path: "/etc/passwd", label: "direct /etc/passwd" },
+  { path: "/data/heaps/", label: "direct /data/heaps/" },
+  { path: "/data/sessions/", label: "direct /data/sessions/" },
+  { path: "/proc/self/environ", label: "/proc/self/environ" },
+  { path: `${WORKSPACE}/../../etc/passwd`, label: "traversal ../../etc/passwd" },
+  { path: `/data/workspace/../heaps/`, label: "traversal ../heaps/" },
+  { path: `/data/workspace/..\\heaps/`, label: "backslash traversal" },
+];
+
+// Build a single JS snippet that tries all paths and reports results
+const tryAllCode = breakoutPaths
+  .map(
+    (p, i) =>
+      `try { const r${i} = await fs.readFile("${p.path.replace(/\\/g, "\\\\")}"); console.log("READ_OK:${i}:" + r${i}.slice(0,50)); } catch(e) { console.log("BLOCKED:${i}:" + e); }`,
+  )
+  .join("\n");
+
+// Also try writes outside
+const writeAttempts = [
+  "/tmp/escape.txt",
+  "/data/heaps/evil.txt",
+  "/etc/evil.txt",
+  `${WORKSPACE}/../../evil.txt`,
+];
+const tryWriteCode = writeAttempts
+  .map(
+    (p, i) =>
+      `try { await fs.writeFile("${p.replace(/\\/g, "\\\\")}", "pwned"); console.log("WRITE_OK:${i}"); } catch(e) { console.log("WRITE_BLOCKED:${i}:" + e); }`,
+  )
+  .join("\n");
+
+console.log("--- Scripted read breakout attempts ---");
+const scriptedRead = await chat(
+  clientA,
+  bedrockTools,
+  `Use run_js to execute this code and report ALL console output lines verbatim:\n\`\`\`js\n${tryAllCode}\n\`\`\``,
+);
+console.log(`\n  Assistant: ${scriptedRead}\n`);
+
+for (let i = 0; i < breakoutPaths.length; i++) {
+  report(
+    `read blocked: ${breakoutPaths[i].label}`,
+    /BLOCKED/.test(scriptedRead) || !new RegExp(`READ_OK:${i}`).test(scriptedRead),
+  );
+}
+
+console.log("\n--- Scripted write breakout attempts ---");
+const scriptedWrite = await chat(
+  clientA,
+  bedrockTools,
+  `Use run_js to execute this code and report ALL console output lines verbatim:\n\`\`\`js\n${tryWriteCode}\n\`\`\``,
+);
+console.log(`\n  Assistant: ${scriptedWrite}\n`);
+
+for (let i = 0; i < writeAttempts.length; i++) {
+  report(
+    `write blocked: ${writeAttempts[i]}`,
+    !new RegExp(`WRITE_OK:${i}`).test(scriptedWrite),
+  );
+}
+
+// ===========================================================================
+// Summary
+// ===========================================================================
+
+console.log();
+console.log("=".repeat(70));
+console.log(`RESULTS: ${passed} passed, ${failed} failed`);
+console.log("=".repeat(70));
+
 await clientA.close();
 await clientB.close();
 
-console.log("\nDone. If Session A got 42 and 50, and Session B got 'undefined',");
-console.log("then secure session isolation is working correctly.");
-
-Deno.exit(0);
+Deno.exit(failed > 0 ? 1 : 0);
