@@ -5,9 +5,11 @@ use rmcp::{
 };
 use serde_json::json;
 use std::collections::HashMap;
+use std::sync::{Arc, OnceLock};
 
 use crate::engine::Engine;
 use crate::engine::heap_tags::HeapTagEntry;
+use crate::session;
 
 // ── MCP response types ──────────────────────────────────────────────────
 
@@ -393,6 +395,292 @@ impl ServerHandler for McpService {
             let initialize_headers = &http_request_part.headers;
             let initialize_uri = &http_request_part.uri;
             tracing::info!(?initialize_headers, %initialize_uri, "initialize from http server");
+        }
+        Ok(self.get_info())
+    }
+}
+
+// ── SecureSessionMcpService ──────────────────────────────────────────────
+//
+// Like McpService but the `session` parameter is not exposed to the agent.
+// Session identity is derived from the `session_id` claim in the signed
+// `AgentSession` JWT header, extracted during `initialize`. The agent
+// cannot choose or override the session name.
+//
+// Conflicts with --stateless (enforced at CLI level).
+
+#[derive(Clone)]
+pub struct SecureSessionMcpService {
+    engine: Engine,
+    jwt_secret: Option<Arc<String>>,
+    /// Set once during `initialize` from the verified JWT. Reads return
+    /// `None` if the client never provided a valid token.
+    session_id: Arc<OnceLock<String>>,
+}
+
+impl SecureSessionMcpService {
+    pub fn new(engine: Engine, jwt_secret: Option<String>) -> Self {
+        Self {
+            engine,
+            jwt_secret: jwt_secret.map(Arc::new),
+            session_id: Arc::new(OnceLock::new()),
+        }
+    }
+}
+
+#[tool(tool_box)]
+impl SecureSessionMcpService {
+    #[tool(description = include_str!("run_js_tool_secure.md"))]
+    pub async fn run_js(
+        &self,
+        #[tool(param)] code: String,
+        #[tool(param)]
+        #[serde(default)]
+        heap: Option<String>,
+        #[tool(param)]
+        #[serde(default)]
+        heap_memory_max_mb: Option<usize>,
+        #[tool(param)]
+        #[serde(default)]
+        execution_timeout_secs: Option<u64>,
+        #[tool(param)]
+        #[serde(default)]
+        tags: Option<HashMap<String, String>>,
+    ) -> RunJsResponse {
+        let session = match self.session_id.get() {
+            Some(id) => id.clone(),
+            None => return RunJsResponse {
+                execution_id: "error: no valid AgentSession JWT was provided at connection time".to_string(),
+            },
+        };
+        match self.engine.run_js(code, heap, Some(session), heap_memory_max_mb, execution_timeout_secs, tags).await {
+            Ok(execution_id) => RunJsResponse { execution_id },
+            Err(e) => RunJsResponse {
+                execution_id: format!("error: {}", e),
+            },
+        }
+    }
+
+    #[tool(description = "Get the status and result of an execution. Returns execution_id, status (running/completed/failed/cancelled/timed_out), result (if completed), heap (if stateful), error (if failed), started_at, and completed_at.")]
+    pub async fn get_execution(
+        &self,
+        #[tool(param)] execution_id: String,
+    ) -> ExecutionStatusResponse {
+        match self.engine.get_execution(&execution_id) {
+            Ok(info) => ExecutionStatusResponse {
+                value: json!({
+                    "execution_id": info.id,
+                    "status": info.status,
+                    "result": info.result,
+                    "heap": info.heap,
+                    "error": info.error,
+                    "started_at": info.started_at,
+                    "completed_at": info.completed_at,
+                }),
+            },
+            Err(e) => ExecutionStatusResponse {
+                value: json!({ "error": e }),
+            },
+        }
+    }
+
+    #[tool(description = "Get paginated console output for an execution. Supports two modes: line-based (line_offset + line_limit) or byte-based (byte_offset + byte_limit). If byte_offset is provided, byte mode takes precedence. Response includes both line and byte coordinates for cross-referencing. Use next_line_offset or next_byte_offset from a previous response to resume reading.")]
+    pub async fn get_execution_output(
+        &self,
+        #[tool(param)] execution_id: String,
+        #[tool(param)]
+        #[serde(default)]
+        line_offset: Option<u64>,
+        #[tool(param)]
+        #[serde(default)]
+        line_limit: Option<u64>,
+        #[tool(param)]
+        #[serde(default)]
+        byte_offset: Option<u64>,
+        #[tool(param)]
+        #[serde(default)]
+        byte_limit: Option<u64>,
+    ) -> ConsoleOutputResponse {
+        let status = self.engine.get_execution(&execution_id)
+            .map(|info| info.status)
+            .unwrap_or_else(|_| "unknown".to_string());
+
+        match self.engine.get_execution_output(&execution_id, line_offset, line_limit, byte_offset, byte_limit) {
+            Ok(page) => ConsoleOutputResponse {
+                value: json!({
+                    "execution_id": execution_id,
+                    "data": page.data,
+                    "start_line": page.start_line,
+                    "end_line": page.end_line,
+                    "next_line_offset": page.next_line_offset,
+                    "total_lines": page.total_lines,
+                    "start_byte": page.start_byte,
+                    "end_byte": page.end_byte,
+                    "next_byte_offset": page.next_byte_offset,
+                    "total_bytes": page.total_bytes,
+                    "has_more": page.has_more,
+                    "status": status,
+                }),
+            },
+            Err(e) => ConsoleOutputResponse {
+                value: json!({ "error": e }),
+            },
+        }
+    }
+
+    #[tool(description = "Cancel a running execution. Terminates the V8 isolate.")]
+    pub async fn cancel_execution(
+        &self,
+        #[tool(param)] execution_id: String,
+    ) -> OkResponse {
+        match self.engine.cancel_execution(&execution_id) {
+            Ok(()) => OkResponse { ok: true, error: None },
+            Err(e) => OkResponse { ok: false, error: Some(e) },
+        }
+    }
+
+    #[tool(description = "List all executions with their status.")]
+    pub async fn list_executions(&self) -> ListExecutionsResponse {
+        match self.engine.list_executions() {
+            Ok(executions) => ListExecutionsResponse {
+                value: json!({ "executions": executions }),
+            },
+            Err(e) => ListExecutionsResponse {
+                value: json!({ "error": e }),
+            },
+        }
+    }
+
+    #[tool(description = "List all log entries for the current session (stateful mode only). Each entry contains the input heap hash, output heap hash, code executed, and timestamp. Use the fields parameter to select specific fields (comma-separated: index,input_heap,output_heap,code,timestamp).")]
+    pub async fn list_session_snapshots(
+        &self,
+        #[tool(param)]
+        #[serde(default)]
+        fields: Option<String>,
+    ) -> ListSessionSnapshotsResponse {
+        let session = match self.session_id.get() {
+            Some(id) => id.clone(),
+            None => return ListSessionSnapshotsResponse {
+                entries: vec![serde_json::json!({"error": "no valid AgentSession JWT was provided at connection time"})],
+            },
+        };
+        let parsed_fields = fields.map(|f| {
+            f.split(',').map(|s| s.trim().to_string()).collect::<Vec<_>>()
+        });
+        match self.engine.list_session_snapshots(session, parsed_fields).await {
+            Ok(entries) => ListSessionSnapshotsResponse { entries },
+            Err(e) => ListSessionSnapshotsResponse {
+                entries: vec![serde_json::json!({"error": e})],
+            },
+        }
+    }
+
+    #[tool(description = "Get tags for a heap snapshot (stateful mode only). Returns a map of key-value tags associated with the given heap content hash.")]
+    pub async fn get_heap_tags(
+        &self,
+        #[tool(param)] heap: String,
+    ) -> GetHeapTagsResponse {
+        match self.engine.get_heap_tags(heap).await {
+            Ok(tags) => GetHeapTagsResponse { tags },
+            Err(e) => GetHeapTagsResponse {
+                tags: {
+                    let mut m = HashMap::new();
+                    m.insert("error".to_string(), e);
+                    m
+                },
+            },
+        }
+    }
+
+    #[tool(description = "Set or replace tags on a heap snapshot (stateful mode only). Provide a map of key-value string pairs. This replaces all existing tags for the heap.")]
+    pub async fn set_heap_tags(
+        &self,
+        #[tool(param)] heap: String,
+        #[tool(param)] tags: HashMap<String, String>,
+    ) -> OkResponse {
+        match self.engine.set_heap_tags(heap, tags).await {
+            Ok(()) => OkResponse { ok: true, error: None },
+            Err(e) => OkResponse { ok: false, error: Some(e) },
+        }
+    }
+
+    #[tool(description = "Delete tags from a heap snapshot (stateful mode only). If keys is provided (comma-separated), only those tag keys are removed. If keys is omitted, all tags are deleted.")]
+    pub async fn delete_heap_tags(
+        &self,
+        #[tool(param)] heap: String,
+        #[tool(param)]
+        #[serde(default)]
+        keys: Option<String>,
+    ) -> OkResponse {
+        let parsed_keys = keys.map(|k| {
+            k.split(',').map(|s| s.trim().to_string()).collect::<Vec<_>>()
+        });
+        match self.engine.delete_heap_tags(heap, parsed_keys).await {
+            Ok(()) => OkResponse { ok: true, error: None },
+            Err(e) => OkResponse { ok: false, error: Some(e) },
+        }
+    }
+
+    #[tool(description = "Query heap snapshots by tags (stateful mode only). Provide a map of key-value pairs to match. Returns all heaps whose tags contain all the specified key-value pairs.")]
+    pub async fn query_heaps_by_tags(
+        &self,
+        #[tool(param)] tags: HashMap<String, String>,
+    ) -> QueryHeapTagsResponse {
+        match self.engine.query_heaps_by_tags(tags).await {
+            Ok(results) => QueryHeapTagsResponse { results },
+            Err(e) => QueryHeapTagsResponse {
+                results: vec![HeapTagEntry {
+                    heap: "error".to_string(),
+                    tags: {
+                        let mut m = HashMap::new();
+                        m.insert("error".to_string(), e);
+                        m
+                    },
+                }],
+            },
+        }
+    }
+}
+
+#[tool(tool_box)]
+impl ServerHandler for SecureSessionMcpService {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo {
+            instructions: Some("JavaScript execution service (secure session mode - session identity is derived from the AgentSession JWT header)".to_string()),
+            capabilities: ServerCapabilities::builder().enable_tools().build(),
+            ..Default::default()
+        }
+    }
+
+    async fn initialize(
+        &self,
+        _request: InitializeRequestParam,
+        context: RequestContext<RoleServer>,
+    ) -> Result<InitializeResult, McpError> {
+        if let Some(http_request_part) = context.extensions.get::<axum::http::request::Parts>() {
+            let initialize_headers = &http_request_part.headers;
+            let initialize_uri = &http_request_part.uri;
+            tracing::info!(?initialize_headers, %initialize_uri, "initialize from http server (secure session mode)");
+
+            if let Some(ref secret) = self.jwt_secret {
+                let token = http_request_part.headers
+                    .get("agent-session")
+                    .and_then(|v| v.to_str().ok());
+                match token {
+                    Some(token) => match session::verify_session_jwt(token, secret) {
+                        Some(session_id) => {
+                            tracing::info!(session_id, "AgentSession JWT verified");
+                            let _ = self.session_id.set(session_id);
+                        }
+                        None => {
+                            tracing::warn!("AgentSession JWT present but failed verification");
+                        }
+                    },
+                    None => {
+                        tracing::warn!("--secure-sessions enabled but no AgentSession header in initialize request");
+                    }
+                }
+            }
         }
         Ok(self.get_info())
     }
