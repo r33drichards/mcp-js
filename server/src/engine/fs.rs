@@ -40,24 +40,13 @@ use super::opa::PolicyChain;
 #[derive(Clone, Debug)]
 pub struct FsConfig {
     pub policy_chain: Arc<PolicyChain>,
-    pub session_id: Option<String>,
-    pub claims: Option<serde_json::Value>,
+
     pub mcp_headers: Option<serde_json::Value>,
 }
 
 impl FsConfig {
     pub fn new(chain: Arc<PolicyChain>) -> Self {
         Self { policy_chain: chain, session_id: None, claims: None, mcp_headers: None }
-    }
-
-    pub fn with_session_id(mut self, session_id: Option<String>) -> Self {
-        self.session_id = session_id;
-        self
-    }
-
-    pub fn with_claims(mut self, claims: Option<serde_json::Value>) -> Self {
-        self.claims = claims;
-        self
     }
 
     pub fn with_mcp_headers(mut self, mcp_headers: Option<serde_json::Value>) -> Self {
