@@ -38,7 +38,7 @@ fn parse_response(resp: StatelessRunJsResponse) -> serde_json::Value {
 async fn test_stateless_shell_console_log() {
     ensure_v8();
     let engine = create_test_engine();
-    let service = StatelessMcpService::new(engine);
+    let service = StatelessMcpService::new(engine, None);
 
     let resp = service.run_js("console.log('hello world')".to_string(), None, None).await;
     let value = parse_response(resp);
@@ -52,7 +52,7 @@ async fn test_stateless_shell_console_log() {
 async fn test_stateless_shell_multiple_console_logs() {
     ensure_v8();
     let engine = create_test_engine();
-    let service = StatelessMcpService::new(engine);
+    let service = StatelessMcpService::new(engine, None);
 
     let code = r#"
         console.log("line 1");
@@ -73,7 +73,7 @@ async fn test_stateless_shell_multiple_console_logs() {
 async fn test_stateless_shell_error_handling() {
     ensure_v8();
     let engine = create_test_engine();
-    let service = StatelessMcpService::new(engine);
+    let service = StatelessMcpService::new(engine, None);
 
     let resp = service.run_js("throw new Error('boom')".to_string(), None, None).await;
     let value = parse_response(resp);
@@ -87,7 +87,7 @@ async fn test_stateless_shell_error_handling() {
 async fn test_stateless_shell_no_execution_id_exposed() {
     ensure_v8();
     let engine = create_test_engine();
-    let service = StatelessMcpService::new(engine);
+    let service = StatelessMcpService::new(engine, None);
 
     let resp = service.run_js("console.log('test')".to_string(), None, None).await;
     let value = parse_response(resp);
@@ -99,7 +99,7 @@ async fn test_stateless_shell_no_execution_id_exposed() {
 async fn test_stateless_shell_computation_with_output() {
     ensure_v8();
     let engine = create_test_engine();
-    let service = StatelessMcpService::new(engine);
+    let service = StatelessMcpService::new(engine, None);
 
     let code = r#"
         const sum = [1, 2, 3, 4, 5].reduce((a, b) => a + b, 0);
@@ -117,7 +117,7 @@ async fn test_stateless_shell_computation_with_output() {
 async fn test_stateless_shell_top_level_await() {
     ensure_v8();
     let engine = create_test_engine();
-    let service = StatelessMcpService::new(engine);
+    let service = StatelessMcpService::new(engine, None);
 
     let code = r#"
         const result = await Promise.resolve(42);
@@ -136,7 +136,7 @@ async fn test_stateless_shell_top_level_await() {
 async fn test_stateless_shell_top_level_await_async_chain() {
     ensure_v8();
     let engine = create_test_engine();
-    let service = StatelessMcpService::new(engine);
+    let service = StatelessMcpService::new(engine, None);
 
     let code = r#"
         const a = await Promise.resolve(10);

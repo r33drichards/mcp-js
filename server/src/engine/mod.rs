@@ -666,8 +666,6 @@ pub struct ExecutionConfig<'a> {
     pub wasm_default_max_bytes: usize,
     pub fetch_config: Option<&'a fetch::FetchConfig>,
     pub fs_config: Option<&'a fs::FsConfig>,
-    pub session_id: Option<String>,
-    pub claims: Option<serde_json::Value>,
     pub mcp_headers: Option<serde_json::Value>,
     pub console_tree: Option<sled::Tree>,
     pub module_loader_config: Option<&'a module_loader::ModuleLoaderConfig>,
@@ -683,23 +681,11 @@ impl<'a> ExecutionConfig<'a> {
             wasm_default_max_bytes: heap_memory_max_bytes,
             fetch_config: None,
             fs_config: None,
-            session_id: None,
-            claims: None,
             mcp_headers: None,
             console_tree: None,
             module_loader_config: None,
             mcp_config: None,
         }
-    }
-
-    pub fn session_id(mut self, session_id: Option<String>) -> Self {
-        self.session_id = session_id;
-        self
-    }
-
-    pub fn claims(mut self, claims: Option<serde_json::Value>) -> Self {
-        self.claims = claims;
-        self
     }
 
     pub fn mcp_headers(mut self, mcp_headers: Option<serde_json::Value>) -> Self {
@@ -769,8 +755,6 @@ pub fn execute_stateless(
         wasm_default_max_bytes,
         fetch_config,
         fs_config,
-        session_id,
-        claims,
         mcp_headers,
         console_tree,
         module_loader_config,
@@ -819,7 +803,7 @@ pub fn execute_stateless(
 
         // Put fs config in OpState if filesystem policies are configured.
         if let Some(fsc) = fs_config {
-            let fsc = fsc.clone().with_session_id(session_id.clone()).with_claims(claims.clone()).with_mcp_headers(mcp_headers.clone());
+            let fsc = fsc.clone().with_mcp_headers(mcp_headers.clone());
             runtime.op_state().borrow_mut().put(fsc);
         }
 
@@ -913,8 +897,6 @@ pub fn execute_stateful(
         wasm_default_max_bytes,
         fetch_config,
         fs_config,
-        session_id,
-        claims,
         mcp_headers,
         console_tree,
         module_loader_config,
@@ -982,7 +964,7 @@ pub fn execute_stateful(
 
         // Put fs config in OpState if filesystem policies are configured.
         if let Some(fsc) = fs_config {
-            let fsc = fsc.clone().with_session_id(session_id.clone()).with_claims(claims.clone()).with_mcp_headers(mcp_headers.clone());
+            let fsc = fsc.clone().with_mcp_headers(mcp_headers.clone());
             runtime.op_state().borrow_mut().put(fsc);
         }
 
@@ -1135,6 +1117,73 @@ pub struct Engine {
     mcp_tools_policy_chain: Option<Arc<opa::PolicyChain>>,
 }
 
+/// Builder for `Engine::run_js()`. Only `code` is required; everything else
+/// defaults to `None`.
+pub struct RunJsRequest<'a> {
+    engine: &'a Engine,
+    code: String,
+    heap: Option<String>,
+    session: Option<String>,
+    heap_memory_max_mb: Option<usize>,
+    execution_timeout_secs: Option<u64>,
+    tags: Option<HashMap<String, String>>,
+    mcp_headers: Option<serde_json::Value>,
+}
+
+impl<'a> RunJsRequest<'a> {
+    pub fn heap(mut self, heap: impl Into<String>) -> Self {
+        self.heap = Some(heap.into());
+        self
+    }
+
+    pub fn session(mut self, session: impl Into<String>) -> Self {
+        self.session = Some(session.into());
+        self
+    }
+
+    pub fn maybe_session(mut self, session: Option<String>) -> Self {
+        self.session = session;
+        self
+    }
+
+    pub fn heap_memory_max_mb(mut self, mb: usize) -> Self {
+        self.heap_memory_max_mb = Some(mb);
+        self
+    }
+
+    pub fn execution_timeout_secs(mut self, secs: u64) -> Self {
+        self.execution_timeout_secs = Some(secs);
+        self
+    }
+
+    pub fn tags(mut self, tags: HashMap<String, String>) -> Self {
+        self.tags = Some(tags);
+        self
+    }
+
+    pub fn mcp_headers(mut self, headers: serde_json::Value) -> Self {
+        self.mcp_headers = Some(headers);
+        self
+    }
+
+    pub fn maybe_mcp_headers(mut self, headers: Option<serde_json::Value>) -> Self {
+        self.mcp_headers = headers;
+        self
+    }
+
+    pub async fn execute(self) -> Result<ExecutionId, String> {
+        self.engine.run_js_inner(
+            self.code,
+            self.heap,
+            self.session,
+            self.heap_memory_max_mb,
+            self.execution_timeout_secs,
+            self.tags,
+            self.mcp_headers,
+        ).await
+    }
+}
+
 impl Engine {
     pub fn is_stateful(&self) -> bool {
         self.heap_storage.is_some()
@@ -1242,9 +1291,22 @@ impl Engine {
     }
 
     /// Submit code for async execution. Returns an execution ID immediately.
-    /// V8 runs in a background task. Use `get_execution()` to poll status and
-    /// `get_execution_output()` to read console output.
-    pub async fn run_js(
+    /// Create a builder for submitting JavaScript code for execution.
+    pub fn run_js(&self, code: impl Into<String>) -> RunJsRequest<'_> {
+        RunJsRequest {
+            engine: self,
+            code: code.into(),
+            heap: None,
+            session: None,
+            heap_memory_max_mb: None,
+            execution_timeout_secs: None,
+            tags: None,
+            mcp_headers: None,
+        }
+    }
+
+    /// Internal: actually submit the run_js request.
+    async fn run_js_inner(
         &self,
         code: String,
         heap: Option<String>,
@@ -1252,7 +1314,6 @@ impl Engine {
         heap_memory_max_mb: Option<usize>,
         execution_timeout_secs: Option<u64>,
         tags: Option<HashMap<String, String>>,
-        jwt_claims: Option<serde_json::Value>,
         mcp_headers: Option<serde_json::Value>,
     ) -> Result<ExecutionId, String> {
         let registry = self.execution_registry.as_ref()
@@ -1285,7 +1346,7 @@ impl Engine {
             engine.execute_in_background(
                 id_bg, code, heap, session, heap_memory_max_mb,
                 execution_timeout_secs, tags, raw_snapshot, console_tree,
-                jwt_claims, mcp_headers,
+                mcp_headers,
             ).await;
         });
 
@@ -1304,7 +1365,6 @@ impl Engine {
         tags: Option<HashMap<String, String>>,
         raw_snapshot: Option<Vec<u8>>,
         console_tree: sled::Tree,
-        jwt_claims: Option<serde_json::Value>,
         mcp_headers: Option<serde_json::Value>,
     ) {
         let registry = match &self.execution_registry {
@@ -1337,8 +1397,6 @@ impl Engine {
                 let wasm_default = self.wasm_default_max_bytes;
                 let fc = self.fetch_config.clone();
                 let fsc = self.fs_config.clone();
-                let sid = session.clone();
-                let jc = jwt_claims.clone();
                 let mh = mcp_headers.clone();
                 let ct = console_tree;
                 let mlc = self.module_loader_config.clone();
@@ -1350,8 +1408,6 @@ impl Engine {
                         .wasm_default_max_bytes(wasm_default)
                         .maybe_fetch_config(fc.as_deref())
                         .maybe_fs_config(fsc.as_deref())
-                        .session_id(sid)
-                        .claims(jc)
                         .mcp_headers(mh)
                         .console_tree(ct)
                         .module_loader_config(&mlc)
@@ -1405,8 +1461,6 @@ impl Engine {
                 let wasm_default = self.wasm_default_max_bytes;
                 let fc = self.fetch_config.clone();
                 let fsc = self.fs_config.clone();
-                let sid = session.clone();
-                let jc = jwt_claims.clone();
                 let mh = mcp_headers.clone();
                 let ct = console_tree;
                 let mlc = self.module_loader_config.clone();
@@ -1421,8 +1475,6 @@ impl Engine {
                         .wasm_default_max_bytes(wasm_default)
                         .maybe_fetch_config(fc.as_deref())
                         .maybe_fs_config(fsc.as_deref())
-                        .session_id(sid)
-                        .claims(jc)
                         .mcp_headers(mh)
                         .console_tree(ct)
                         .module_loader_config(&mlc)

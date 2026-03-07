@@ -29,19 +29,13 @@ async fn exec_handler(
     State(engine): State<Engine>,
     Json(req): Json<ExecRequest>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    match engine
-        .run_js(
-            req.code,
-            req.heap,
-            req.session,
-            req.heap_memory_max_mb,
-            req.execution_timeout_secs,
-            req.tags,
-            None,
-            None,
-        )
-        .await
-    {
+    let mut r = engine.run_js(req.code);
+    if let Some(h) = req.heap { r = r.heap(h); }
+    if let Some(s) = req.session { r = r.session(s); }
+    if let Some(mb) = req.heap_memory_max_mb { r = r.heap_memory_max_mb(mb); }
+    if let Some(secs) = req.execution_timeout_secs { r = r.execution_timeout_secs(secs); }
+    if let Some(t) = req.tags { r = r.tags(t); }
+    match r.execute().await {
         Ok(execution_id) => (
             StatusCode::ACCEPTED,
             Json(serde_json::json!({ "execution_id": execution_id })),
