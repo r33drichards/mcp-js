@@ -386,7 +386,7 @@ async fn test_sse_heap_persistence() -> Result<(), Box<dyn std::error::Error>> {
         "params": {
             "name": "run_js",
             "arguments": {
-                "code": "var sseValue = 100; sseValue"
+                "code": "globalThis.sseValue = 100;"
             }
         }
     });
@@ -487,7 +487,7 @@ async fn test_sse_sequential_operations() -> Result<(), Box<dyn std::error::Erro
         "params": {
             "name": "run_js",
             "arguments": {
-                "code": "var counter = 0; counter = counter + 5; counter"
+                "code": "globalThis.counter = 0; globalThis.counter = globalThis.counter + 5;"
             }
         }
     });

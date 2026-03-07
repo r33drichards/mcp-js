@@ -91,8 +91,8 @@ async fn test_stdio_run_js_message_format() {
 async fn test_stdio_javascript_scenarios() {
     let scenarios = vec![
         ("1 + 1", "simple arithmetic"),
-        ("var x = 5; x", "variable assignment"),
-        ("x * 2", "accessing stored variable"),
+        ("globalThis.x = 5;", "variable assignment"),
+        ("globalThis.x * 2", "accessing stored variable"),
         ("[1, 2, 3].map(n => n * 2)", "array operations"),
         ("({ a: 1, b: 2 })", "object literals"),
     ];

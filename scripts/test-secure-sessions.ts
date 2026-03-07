@@ -30,7 +30,7 @@ import {
 const JWT_SECRET = Deno.env.get("JWT_SECRET") ?? "test-secret-change-me";
 const MCP_URL = Deno.env.get("MCP_SERVER_URL") ?? "http://localhost:3000";
 const BEDROCK_MODEL =
-  Deno.env.get("BEDROCK_MODEL") ?? "us.anthropic.claude-haiku-4-5-20251001";
+  Deno.env.get("BEDROCK_MODEL") ?? "us.anthropic.claude-haiku-4-5-20251001-v1:0";
 const BEDROCK_REGION = Deno.env.get("AWS_REGION") ?? "us-east-1";
 
 const GLOBAL_UUID = crypto.randomUUID();
@@ -207,7 +207,7 @@ console.log("=== Session A: store a variable ===");
 const responseA1 = await chat(
   clientA,
   bedrockTools,
-  "Use run_js to execute this JavaScript code: `var secret = 42; secret;` — then get the execution result and tell me the value and the heap hash.",
+  "Use run_js to execute this JavaScript code: `globalThis.secret = 42;` — then get the execution result and tell me the heap hash.",
 );
 console.log(`\nAssistant A: ${responseA1}\n`);
 
@@ -216,7 +216,7 @@ console.log("=== Session A: read variable back ===");
 const responseA2 = await chat(
   clientA,
   bedrockTools,
-  "Now list the session snapshots to find the latest heap hash, then use run_js with that heap to execute: `secret + 8;` — tell me the result.",
+  "Now list the session snapshots to find the latest heap hash, then use run_js with that heap to execute: `globalThis.secret + 8;` — tell me the result.",
 );
 console.log(`\nAssistant A: ${responseA2}\n`);
 
@@ -225,7 +225,7 @@ console.log("=== Session B: attempt to access Session A's variable ===");
 const responseB = await chat(
   clientB,
   bedrockTools,
-  "Use run_js to execute: `typeof secret` — then get the result and tell me what it returned. This should be 'undefined' since this is a fresh session.",
+  "Use run_js to execute: `typeof globalThis.secret` — then get the result and tell me what it returned. This should be 'undefined' since this is a fresh session.",
 );
 console.log(`\nAssistant B: ${responseB}\n`);
 
@@ -236,3 +236,5 @@ await clientB.close();
 
 console.log("\nDone. If Session A got 42 and 50, and Session B got 'undefined',");
 console.log("then secure session isolation is working correctly.");
+
+Deno.exit(0);
