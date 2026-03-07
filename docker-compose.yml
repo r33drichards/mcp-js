@@ -15,7 +15,7 @@ services:
       - --http-port=3000
       - --directory-path=/data/heaps
       - --session-db-path=/data/sessions
-      - --policies-json={"fetch":{"policies":[{"url":"http://opa:8181"}]}}
+      - --policies-json={"fetch":{"policies":[{"url":"http://opa:8181"}]},"filesystem":{"policies":[{"url":"http://opa:8181"}]}}
       - --fetch-header=host=api.github.com,header=Authorization,value=Bearer ${GITHUB_TOKEN}
       - --secure-sessions
     tmpfs:
