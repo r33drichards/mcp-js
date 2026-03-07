@@ -153,10 +153,8 @@ impl IntoContents for QueryHeapTagsResponse {
 pub struct McpService {
     engine: Engine,
     verifier: Option<Arc<SessionVerifier>>,
-    /// Set once during `initialize` from the verified JWT or X-MCP-Session-Id header.
+    /// Set once during `initialize` from X-MCP-Session-Id header.
     session_id: Arc<OnceLock<String>>,
-    /// All JWT claims from the verified token, available for policy evaluation.
-    jwt_claims: Arc<OnceLock<serde_json::Value>>,
     /// X-MCP-* headers from the initialize request, available for policy evaluation.
     mcp_headers: Arc<OnceLock<serde_json::Value>>,
 }
@@ -167,7 +165,6 @@ impl McpService {
             engine,
             verifier,
             session_id: Arc::new(OnceLock::new()),
-            jwt_claims: Arc::new(OnceLock::new()),
             mcp_headers: Arc::new(OnceLock::new()),
         }
     }
@@ -192,10 +189,14 @@ impl McpService {
         #[serde(default)]
         tags: Option<HashMap<String, String>>,
     ) -> RunJsResponse {
-        let session = self.session_id.get().cloned();
-        let claims = self.jwt_claims.get().cloned();
-        let mcp_hdrs = self.mcp_headers.get().cloned();
-        match self.engine.run_js(code, heap, session, heap_memory_max_mb, execution_timeout_secs, tags, claims, mcp_hdrs).await {
+        let mut req = self.engine.run_js(code);
+        if let Some(h) = heap { req = req.heap(h); }
+        if let Some(s) = self.session_id.get() { req = req.session(s.clone()); }
+        if let Some(mb) = heap_memory_max_mb { req = req.heap_memory_max_mb(mb); }
+        if let Some(secs) = execution_timeout_secs { req = req.execution_timeout_secs(secs); }
+        if let Some(t) = tags { req = req.tags(t); }
+        req = req.maybe_mcp_headers(self.mcp_headers.get().cloned());
+        match req.execute().await {
             Ok(execution_id) => RunJsResponse { execution_id },
             Err(e) => RunJsResponse {
                 execution_id: format!("error: {}", e),
@@ -426,14 +427,10 @@ impl ServerHandler for McpService {
                             .and_then(|v| v.to_str().ok())
                     });
                 match token {
-                    Some(token) => match verifier.verify(token).await {
-                        Some(verified) => {
-                            tracing::info!("Session JWT verified");
-                            let _ = self.jwt_claims.set(verified.claims);
-                        }
-                        None => {
-                            tracing::warn!("Session JWT present but failed verification");
-                        }
+                    Some(token) => if verifier.verify(token).await {
+                        tracing::info!("JWT verified");
+                    } else {
+                        tracing::warn!("JWT present but failed verification");
                     },
                     None => {
                         tracing::debug!("No Authorization/AgentSession header in initialize request");
@@ -490,8 +487,6 @@ impl IntoContents for StatelessRunJsResponse {
 pub struct StatelessMcpService {
     engine: Engine,
     verifier: Option<Arc<SessionVerifier>>,
-    /// All JWT claims from the verified token, available for policy evaluation.
-    jwt_claims: Arc<OnceLock<serde_json::Value>>,
     /// X-MCP-* headers from the initialize request, available for policy evaluation.
     mcp_headers: Arc<OnceLock<serde_json::Value>>,
 }
@@ -501,7 +496,6 @@ impl StatelessMcpService {
         Self {
             engine,
             verifier,
-            jwt_claims: Arc::new(OnceLock::new()),
             mcp_headers: Arc::new(OnceLock::new()),
         }
     }
@@ -521,9 +515,11 @@ impl StatelessMcpService {
         execution_timeout_secs: Option<u64>,
     ) -> StatelessRunJsResponse {
         // 1. Submit to engine (fire-and-forget internally)
-        let claims = self.jwt_claims.get().cloned();
-        let mcp_hdrs = self.mcp_headers.get().cloned();
-        let exec_id = match self.engine.run_js(code, None, None, heap_memory_max_mb, execution_timeout_secs, None, claims, mcp_hdrs).await {
+        let mut req = self.engine.run_js(code);
+        if let Some(mb) = heap_memory_max_mb { req = req.heap_memory_max_mb(mb); }
+        if let Some(secs) = execution_timeout_secs { req = req.execution_timeout_secs(secs); }
+        req = req.maybe_mcp_headers(self.mcp_headers.get().cloned());
+        let exec_id = match req.execute().await {
             Ok(id) => id,
             Err(e) => return StatelessRunJsResponse {
                 value: json!({ "error": e }),
@@ -608,14 +604,10 @@ impl ServerHandler for StatelessMcpService {
                             .and_then(|v| v.to_str().ok())
                     });
                 match token {
-                    Some(token) => match verifier.verify(token).await {
-                        Some(verified) => {
-                            tracing::info!("JWT verified in stateless mode");
-                            let _ = self.jwt_claims.set(verified.claims);
-                        }
-                        None => {
-                            tracing::warn!("Session JWT present but failed verification");
-                        }
+                    Some(token) => if verifier.verify(token).await {
+                        tracing::info!("JWT verified in stateless mode");
+                    } else {
+                        tracing::warn!("JWT present but failed verification");
                     },
                     None => {
                         tracing::debug!("No Authorization/AgentSession header in initialize request");

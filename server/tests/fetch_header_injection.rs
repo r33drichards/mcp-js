@@ -104,7 +104,8 @@ async fn fetch_and_get_echoed_headers(
     );
 
     let exec_id = engine
-        .run_js(code, None, None, None, None, None, None)
+        .run_js(code)
+        .execute()
         .await
         .expect("submit should succeed");
 

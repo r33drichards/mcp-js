@@ -4,10 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-/// Result of a successful JWT verification: all token claims.
-pub struct VerifiedSession {
-    pub claims: serde_json::Value,
-}
+/// Marker for a successful JWT verification.
 
 /// Cached JWKS key store that fetches public keys from a JWKS endpoint.
 pub struct JwksKeyStore {
@@ -96,11 +93,11 @@ impl SessionVerifier {
         Self { key_store }
     }
 
-    /// Verify a JWT signature via JWKS and return all claims for policy evaluation.
-    pub async fn verify(&self, token: &str) -> Option<VerifiedSession> {
-        let header = decode_header(token).ok()?;
-        let kid = header.kid.as_deref()?;
-        let dk = self.key_store.get_key(kid).await?;
+    /// Verify a JWT signature via JWKS. Returns true if the token is valid.
+    pub async fn verify(&self, token: &str) -> bool {
+        let Some(header) = decode_header(token).ok() else { return false };
+        let Some(kid) = header.kid.as_deref() else { return false };
+        let Some(dk) = self.key_store.get_key(kid).await else { return false };
 
         let alg = header.alg;
         let mut validation = Validation::new(alg);
@@ -109,10 +106,6 @@ impl SessionVerifier {
         // Don't validate audience — Keycloak may not set aud for service accounts.
         validation.validate_aud = false;
 
-        let token_data = decode::<serde_json::Value>(token, &dk, &validation).ok()?;
-
-        Some(VerifiedSession {
-            claims: token_data.claims,
-        })
+        decode::<serde_json::Value>(token, &dk, &validation).is_ok()
     }
 }
