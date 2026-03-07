@@ -25,8 +25,7 @@ on:
       - server/src/mcp.rs
       - server/src/main.rs
       - policies/**
-  schedule:
-    - cron: "0 6 * * *" # daily at 06:00 UTC
+
   workflow_dispatch:
 
 jobs:
