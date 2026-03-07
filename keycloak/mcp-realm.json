@@ -22,51 +22,7 @@
       "protocol": "openid-connect",
       "standardFlowEnabled": false,
       "implicitFlowEnabled": false,
-      "protocolMappers": [
-        {
-          "name": "session_id-mapper",
-          "protocol": "openid-connect",
-          "protocolMapper": "oidc-hardcoded-claim-mapper",
-          "config": {
-            "claim.name": "session_id",
-            "claim.value": "default-session",
-            "jsonType.label": "String",
-            "id.token.claim": "false",
-            "access.token.claim": "true",
-            "userinfo.token.claim": "false",
-            "access.tokenResponse.claim": "false"
-          }
-        }
-      ]
+      "protocolMappers": []
     }
-  ],
-  "clientScopes": [
-    {
-      "name": "session_id",
-      "description": "Adds session_id claim from token request parameters",
-      "protocol": "openid-connect",
-      "attributes": {
-        "include.in.token.scope": "true"
-      },
-      "protocolMappers": [
-        {
-          "name": "session_id-from-request",
-          "protocol": "openid-connect",
-          "protocolMapper": "oidc-script-based-protocol-mapper",
-          "config": {
-            "id.token.claim": "false",
-            "access.token.claim": "true",
-            "userinfo.token.claim": "false",
-            "multivalued": "false",
-            "claim.name": "session_id",
-            "jsonType.label": "String",
-            "script": "// Read session_id from token request parameters\nvar session_id = keycloakSession.getContext().getHttpRequest().getDecodedFormParameters().getFirst('session_id');\nif (session_id) { exports = session_id; } else { exports = 'default-session'; }"
-          }
-        }
-      ]
-    }
-  ],
-  "defaultDefaultClientScopes": [
-    "session_id"
   ]
 }
