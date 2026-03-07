@@ -153,7 +153,7 @@ fn rand_id() -> u64 {
 
 async fn run_and_wait(engine: &Engine, code: &str) -> Result<String, String> {
     let exec_id = engine
-        .run_js(code.to_string(), None, None, None, Some(60), None)
+        .run_js(code.to_string(), None, None, None, Some(60), None, None)
         .await?;
     for _ in 0..1200 {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -306,7 +306,7 @@ console.log("Result:", result);
 "#;
 
     let exec_id = engine
-        .run_js(code.to_string(), None, None, None, Some(60), None)
+        .run_js(code.to_string(), None, None, None, Some(60), None, None)
         .await
         .expect("run_js should succeed");
 
@@ -350,7 +350,7 @@ console.log(result);
 "#;
 
     let exec_id = engine
-        .run_js(code.to_string(), None, None, None, Some(60), None)
+        .run_js(code.to_string(), None, None, None, Some(60), None, None)
         .await
         .expect("run_js should succeed");
 
@@ -397,7 +397,7 @@ console.log(pascalCase("hello_world"));
 "#;
 
     let exec_id = engine
-        .run_js(code.to_string(), None, None, None, Some(60), None)
+        .run_js(code.to_string(), None, None, None, Some(60), None, None)
         .await
         .expect("run_js should succeed");
 

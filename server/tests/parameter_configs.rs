@@ -28,7 +28,7 @@ fn make_registry() -> Arc<ExecutionRegistry> {
 
 /// Submit code and wait for the result (blocking poll).
 async fn run_and_wait(engine: &Engine, code: &str) -> Result<String, String> {
-    let exec_id = engine.run_js(code.to_string(), None, None, None, None, None).await?;
+    let exec_id = engine.run_js(code.to_string(), None, None, None, None, None, None).await?;
     for _ in 0..600 {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         if let Ok(info) = engine.get_execution(&exec_id) {

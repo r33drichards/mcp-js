@@ -22,6 +22,7 @@ use engine::heap_storage::{AnyHeapStorage, S3HeapStorage, WriteThroughCacheHeapS
 use engine::heap_tags::HeapTagStore;
 use engine::session_log::SessionLog;
 use mcp::{McpService, SecureSessionMcpService, StatelessMcpService};
+use session::{SessionVerifier, JwksKeyStore};
 use cluster::{ClusterConfig, ClusterNode};
 
 fn default_max_concurrent() -> usize {
@@ -50,16 +51,21 @@ struct Cli {
     stateless: bool,
 
     /// Enable secure session mode: the agent's `session` tool parameter is removed from the
-    /// tool schema and is instead derived from the `session_id` claim in a programmer-signed
-    /// `AgentSession` JWT header. Requires --jwt-secret. Only effective with HTTP transports
+    /// tool schema and is instead derived from a JWT claim (see --session-claim). Requires
+    /// --jwks-url for OAuth/OIDC token verification. Only effective with HTTP transports
     /// (--sse-port or --http-port); ignored for stdio. Conflicts with --stateless.
     #[arg(long, conflicts_with = "stateless")]
     secure_sessions: bool,
 
-    /// HS256 signing secret for verifying AgentSession JWTs (used with --secure-sessions).
-    /// Can also be provided via the JWT_SECRET environment variable.
-    #[arg(long, env = "JWT_SECRET", requires = "secure_sessions")]
-    jwt_secret: Option<String>,
+    /// JWKS endpoint URL for fetching public keys (e.g., Keycloak OIDC certs URL).
+    /// Required with --secure-sessions.
+    #[arg(long, env = "JWKS_URL", requires = "secure_sessions")]
+    jwks_url: Option<String>,
+
+    /// JWT claim name that contains the session ID (default: "session_id").
+    /// Used with --secure-sessions.
+    #[arg(long, default_value = "session_id", requires = "secure_sessions")]
+    session_claim: String,
 
     /// HTTP port using Streamable HTTP transport (MCP 2025-03-26+, load-balanceable)
     #[arg(long, conflicts_with = "sse_port")]
@@ -490,13 +496,25 @@ async fn main() -> Result<()> {
         engine
     };
 
+    // ── Build session verifier (if --secure-sessions) ─────────────────
+    let session_verifier: Option<Arc<SessionVerifier>> = if cli.secure_sessions {
+        let jwks_url = cli.jwks_url.clone()
+            .ok_or_else(|| anyhow::anyhow!("--secure-sessions requires --jwks-url"))?;
+        tracing::info!("Fetching JWKS keys from {}", jwks_url);
+        let key_store = JwksKeyStore::new(jwks_url).await
+            .map_err(|e| anyhow::anyhow!("Failed to initialize JWKS key store: {}", e))?;
+        Some(Arc::new(SessionVerifier::new(Arc::new(key_store), cli.session_claim.clone())))
+    } else {
+        None
+    };
+
     // ── Start transport ─────────────────────────────────────────────────
     if let Some(port) = cli.http_port {
         tracing::info!("Starting Streamable HTTP transport on port {}", port);
         if cli.secure_sessions {
-            let jwt_secret = cli.jwt_secret.clone();
+            let verifier = session_verifier.clone();
             tracing::info!("Secure session mode enabled");
-            start_streamable_http(engine, port, move |e| SecureSessionMcpService::new(e, jwt_secret.clone())).await?;
+            start_streamable_http(engine, port, move |e| SecureSessionMcpService::new(e, verifier.clone())).await?;
         } else if engine.is_stateful() {
             start_streamable_http(engine, port, |e| McpService::new(e)).await?;
         } else {
@@ -505,9 +523,9 @@ async fn main() -> Result<()> {
     } else if let Some(port) = cli.sse_port {
         tracing::info!("Starting SSE transport on port {}", port);
         if cli.secure_sessions {
-            let jwt_secret = cli.jwt_secret.clone();
+            let verifier = session_verifier.clone();
             tracing::info!("Secure session mode enabled");
-            start_sse_server(engine, port, move |e| SecureSessionMcpService::new(e, jwt_secret.clone())).await?;
+            start_sse_server(engine, port, move |e| SecureSessionMcpService::new(e, verifier.clone())).await?;
         } else if engine.is_stateful() {
             start_sse_server(engine, port, |e| McpService::new(e)).await?;
         } else {
