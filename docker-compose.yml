@@ -9,12 +9,15 @@ services:
 
   mcp-js:
     build: .
+    environment:
+      - JWT_SECRET=${JWT_SECRET:-test-secret-change-me}
     command:
       - --http-port=3000
       - --directory-path=/data/heaps
       - --session-db-path=/data/sessions
       - --policies-json={"fetch":{"policies":[{"url":"http://opa:8181"}]}}
       - --fetch-header=host=api.github.com,header=Authorization,value=Bearer ${GITHUB_TOKEN}
+      - --secure-sessions
     tmpfs:
       - /data:uid=1000,gid=1000
     ports:
