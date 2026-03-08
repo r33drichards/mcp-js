@@ -22,7 +22,7 @@ use engine::heap_storage::{AnyHeapStorage, S3HeapStorage, WriteThroughCacheHeapS
 use engine::heap_tags::HeapTagStore;
 use engine::session_log::SessionLog;
 use mcp::{McpService, StatelessMcpService};
-use session::{SessionVerifier, JwksKeyStore};
+use session::{SessionVerifier, JwksKeyStore, OAuthTokenVerifier};
 use cluster::{ClusterConfig, ClusterNode};
 
 fn default_max_concurrent() -> usize {
@@ -54,6 +54,18 @@ struct Cli {
     /// Enables JWT verification of Authorization: Bearer tokens during initialize.
     #[arg(long, env = "JWKS_URL")]
     jwks_url: Option<String>,
+
+    /// OAuth userinfo endpoint URL for validating opaque bearer tokens.
+    /// When set, Authorization: Bearer tokens are validated by calling this URL
+    /// with the token. The response claims are merged into mcp_headers for OPA
+    /// policy evaluation. Example: https://api.github.com/user
+    #[arg(long, env = "OAUTH_USERINFO_URL")]
+    oauth_userinfo_url: Option<String>,
+
+    /// JSON key in the userinfo response to use as the `sub` claim.
+    /// Defaults to "id" (appropriate for GitHub). Use "sub" for OIDC-compliant providers.
+    #[arg(long, default_value = "id")]
+    oauth_sub_key: String,
 
     /// HTTP port using Streamable HTTP transport (MCP 2025-03-26+, load-balanceable)
     #[arg(long, conflicts_with = "sse_port")]
@@ -494,29 +506,41 @@ async fn main() -> Result<()> {
         None
     };
 
+    // ── Build OAuth token verifier (if --oauth-userinfo-url) ─────────
+    let oauth_verifier: Option<Arc<OAuthTokenVerifier>> = if let Some(ref url) = cli.oauth_userinfo_url {
+        tracing::info!("OAuth token verification enabled via {}", url);
+        Some(Arc::new(OAuthTokenVerifier::new(url.clone(), Some(cli.oauth_sub_key.clone()))))
+    } else {
+        None
+    };
+
     // ── Start transport ─────────────────────────────────────────────────
     if let Some(port) = cli.http_port {
         tracing::info!("Starting Streamable HTTP transport on port {}", port);
         if engine.is_stateful() {
             let verifier = session_verifier.clone();
-            start_streamable_http(engine, port, move |e| McpService::new(e, verifier.clone())).await?;
+            let oauth = oauth_verifier.clone();
+            start_streamable_http(engine, port, move |e| McpService::new(e, verifier.clone(), oauth.clone())).await?;
         } else {
             let verifier = session_verifier.clone();
-            start_streamable_http(engine, port, move |e| StatelessMcpService::new(e, verifier.clone())).await?;
+            let oauth = oauth_verifier.clone();
+            start_streamable_http(engine, port, move |e| StatelessMcpService::new(e, verifier.clone(), oauth.clone())).await?;
         }
     } else if let Some(port) = cli.sse_port {
         tracing::info!("Starting SSE transport on port {}", port);
         if engine.is_stateful() {
             let verifier = session_verifier.clone();
-            start_sse_server(engine, port, move |e| McpService::new(e, verifier.clone())).await?;
+            let oauth = oauth_verifier.clone();
+            start_sse_server(engine, port, move |e| McpService::new(e, verifier.clone(), oauth.clone())).await?;
         } else {
             let verifier = session_verifier.clone();
-            start_sse_server(engine, port, move |e| StatelessMcpService::new(e, verifier.clone())).await?;
+            let oauth = oauth_verifier.clone();
+            start_sse_server(engine, port, move |e| StatelessMcpService::new(e, verifier.clone(), oauth.clone())).await?;
         }
     } else {
         tracing::info!("Starting stdio transport");
         if engine.is_stateful() {
-            let service = McpService::new(engine, None)
+            let service = McpService::new(engine, None, None)
                 .serve(stdio())
                 .await
                 .inspect_err(|e| {
@@ -524,7 +548,7 @@ async fn main() -> Result<()> {
                 })?;
             service.waiting().await?;
         } else {
-            let service = StatelessMcpService::new(engine, None)
+            let service = StatelessMcpService::new(engine, None, None)
                 .serve(stdio())
                 .await
                 .inspect_err(|e| {

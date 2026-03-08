@@ -9,7 +9,7 @@ use std::sync::{Arc, OnceLock};
 
 use crate::engine::Engine;
 use crate::engine::heap_tags::HeapTagEntry;
-use crate::session::SessionVerifier;
+use crate::session::{SessionVerifier, OAuthTokenVerifier};
 
 // ── MCP response types ──────────────────────────────────────────────────
 
@@ -153,6 +153,7 @@ impl IntoContents for QueryHeapTagsResponse {
 pub struct McpService {
     engine: Engine,
     verifier: Option<Arc<SessionVerifier>>,
+    oauth_verifier: Option<Arc<OAuthTokenVerifier>>,
     /// Set once during `initialize` from X-MCP-Session-Id header.
     session_id: Arc<OnceLock<String>>,
     /// X-MCP-* headers from the initialize request, available for policy evaluation.
@@ -160,10 +161,11 @@ pub struct McpService {
 }
 
 impl McpService {
-    pub fn new(engine: Engine, verifier: Option<Arc<SessionVerifier>>) -> Self {
+    pub fn new(engine: Engine, verifier: Option<Arc<SessionVerifier>>, oauth_verifier: Option<Arc<OAuthTokenVerifier>>) -> Self {
         Self {
             engine,
             verifier,
+            oauth_verifier,
             session_id: Arc::new(OnceLock::new()),
             mcp_headers: Arc::new(OnceLock::new()),
         }
@@ -415,18 +417,21 @@ impl ServerHandler for McpService {
             let initialize_uri = &http_request_part.uri;
             tracing::info!(?initialize_headers, %initialize_uri, "initialize from http server");
 
+            let bearer_token = http_request_part.headers
+                .get("authorization")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.strip_prefix("Bearer "))
+                .map(|s| s.to_string())
+                .or_else(|| {
+                    http_request_part.headers
+                        .get("agent-session")
+                        .and_then(|v| v.to_str().ok())
+                        .map(|s| s.to_string())
+                });
+
             // JWT verification (if --jwks-url was provided)
             if let Some(ref verifier) = self.verifier {
-                let token = http_request_part.headers
-                    .get("authorization")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|v| v.strip_prefix("Bearer "))
-                    .or_else(|| {
-                        http_request_part.headers
-                            .get("agent-session")
-                            .and_then(|v| v.to_str().ok())
-                    });
-                match token {
+                match bearer_token.as_deref() {
                     Some(token) => if verifier.verify(token).await {
                         tracing::info!("JWT verified");
                     } else {
@@ -444,6 +449,24 @@ impl ServerHandler for McpService {
                 if let Some(key) = name.as_str().strip_prefix("x-mcp-") {
                     if let Ok(v) = value.to_str() {
                         mcp_header_map.insert(key.to_string(), serde_json::Value::String(v.to_string()));
+                    }
+                }
+            }
+
+            // OAuth token verification (if --oauth-userinfo-url was provided)
+            // Merges verified claims (sub, login, etc.) into mcp_headers
+            if let Some(ref oauth) = self.oauth_verifier {
+                if let Some(ref token) = bearer_token {
+                    match oauth.verify(token).await {
+                        Some(claims) => {
+                            tracing::info!(?claims, "OAuth token verified, merging claims into mcp_headers");
+                            for (k, v) in claims {
+                                mcp_header_map.insert(k, v);
+                            }
+                        }
+                        None => {
+                            tracing::warn!("OAuth token present but verification failed");
+                        }
                     }
                 }
             }
@@ -487,15 +510,17 @@ impl IntoContents for StatelessRunJsResponse {
 pub struct StatelessMcpService {
     engine: Engine,
     verifier: Option<Arc<SessionVerifier>>,
+    oauth_verifier: Option<Arc<OAuthTokenVerifier>>,
     /// X-MCP-* headers from the initialize request, available for policy evaluation.
     mcp_headers: Arc<OnceLock<serde_json::Value>>,
 }
 
 impl StatelessMcpService {
-    pub fn new(engine: Engine, verifier: Option<Arc<SessionVerifier>>) -> Self {
+    pub fn new(engine: Engine, verifier: Option<Arc<SessionVerifier>>, oauth_verifier: Option<Arc<OAuthTokenVerifier>>) -> Self {
         Self {
             engine,
             verifier,
+            oauth_verifier,
             mcp_headers: Arc::new(OnceLock::new()),
         }
     }
@@ -592,18 +617,21 @@ impl ServerHandler for StatelessMcpService {
             let initialize_uri = &http_request_part.uri;
             tracing::info!(?initialize_headers, %initialize_uri, "initialize from http server");
 
+            let bearer_token = http_request_part.headers
+                .get("authorization")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.strip_prefix("Bearer "))
+                .map(|s| s.to_string())
+                .or_else(|| {
+                    http_request_part.headers
+                        .get("agent-session")
+                        .and_then(|v| v.to_str().ok())
+                        .map(|s| s.to_string())
+                });
+
             // JWT verification (if --jwks-url was provided)
             if let Some(ref verifier) = self.verifier {
-                let token = http_request_part.headers
-                    .get("authorization")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|v| v.strip_prefix("Bearer "))
-                    .or_else(|| {
-                        http_request_part.headers
-                            .get("agent-session")
-                            .and_then(|v| v.to_str().ok())
-                    });
-                match token {
+                match bearer_token.as_deref() {
                     Some(token) => if verifier.verify(token).await {
                         tracing::info!("JWT verified in stateless mode");
                     } else {
@@ -621,6 +649,23 @@ impl ServerHandler for StatelessMcpService {
                 if let Some(key) = name.as_str().strip_prefix("x-mcp-") {
                     if let Ok(v) = value.to_str() {
                         mcp_header_map.insert(key.to_string(), serde_json::Value::String(v.to_string()));
+                    }
+                }
+            }
+
+            // OAuth token verification (if --oauth-userinfo-url was provided)
+            if let Some(ref oauth) = self.oauth_verifier {
+                if let Some(ref token) = bearer_token {
+                    match oauth.verify(token).await {
+                        Some(claims) => {
+                            tracing::info!(?claims, "OAuth token verified in stateless mode");
+                            for (k, v) in claims {
+                                mcp_header_map.insert(k, v);
+                            }
+                        }
+                        None => {
+                            tracing::warn!("OAuth token present but verification failed");
+                        }
                     }
                 }
             }
