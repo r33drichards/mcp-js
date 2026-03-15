@@ -23,6 +23,12 @@ jobs:
             bin_name: mcp-v8-linux
             build_cmd: cargo build --release --target x86_64-unknown-linux-gnu
             out_path: server/target/x86_64-unknown-linux-gnu/release/server
+          - name: Linux ARM64
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            bin_name: mcp-v8-linux-arm64
+            build_cmd: cargo build --release --target aarch64-unknown-linux-gnu
+            out_path: server/target/aarch64-unknown-linux-gnu/release/server
           - name: macOS ARM64
             os: macos-14
             target: aarch64-apple-darwin
