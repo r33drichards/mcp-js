@@ -9,7 +9,7 @@
 //! mcp.servers                              // string[] — connected server names
 //! mcp.listTools("server")                  // [{server, name, description, inputSchema}, ...]
 //! mcp.listTools()                          // all tools from all servers
-//! await mcp.callTool("server", "tool", {}) // {content: [...], isError: false} — throws McpToolError on error
+//! await mcp.callTool("server", "tool", {}) // {content: [...], isError: bool}
 //! ```
 
 use std::cell::RefCell;
@@ -418,44 +418,20 @@ pub fn inject_mcp(runtime: &mut JsRuntime) -> Result<(), String> {
 /// JavaScript wrapper that provides the `globalThis.mcp` API.
 const MCP_JS_WRAPPER: &str = r#"
 (function() {
-    /**
-     * Error thrown when an MCP tool returns an error result.
-     * The original result (with content and isError) is available on the `result` property.
-     */
-    class McpToolError extends Error {
-        constructor(serverName, toolName, result) {
-            var text = (result.content && result.content.length > 0 && result.content[0].text)
-                ? result.content[0].text
-                : 'Tool returned an error';
-            super('mcp.callTool ' + serverName + '.' + toolName + ' failed: ' + text);
-            this.name = 'McpToolError';
-            this.result = result;
-            this.serverName = serverName;
-            this.toolName = toolName;
-        }
-    }
-    globalThis.McpToolError = McpToolError;
-
     globalThis.mcp = {
         /**
          * Call a tool on a connected MCP server.
-         * Throws McpToolError if the tool returns an error result (isError: true).
          * @param {string} serverName - Name of the MCP server
          * @param {string} toolName - Name of the tool to call
          * @param {object} [args] - Arguments to pass to the tool
          * @returns {Promise<{content: Array, isError: boolean}>}
-         * @throws {McpToolError} When the tool returns isError: true
          */
         callTool: async function(serverName, toolName, args) {
             if (typeof serverName !== 'string') throw new TypeError('mcp.callTool: serverName must be a string');
             if (typeof toolName !== 'string') throw new TypeError('mcp.callTool: toolName must be a string');
             var argsJson = args ? JSON.stringify(args) : '';
             var raw = await Deno.core.ops.op_mcp_call_tool(serverName, toolName, argsJson);
-            var result = JSON.parse(raw);
-            if (result.isError) {
-                throw new McpToolError(serverName, toolName, result);
-            }
-            return result;
+            return JSON.parse(raw);
         },
 
         /**
