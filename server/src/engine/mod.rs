@@ -1152,6 +1152,8 @@ pub struct Engine {
     mcp_client_manager: Option<Arc<mcp_client::McpClientManager>>,
     /// OPA policy chain for MCP tool calls (`mcp.callTool()`).
     mcp_tools_policy_chain: Option<Arc<opa::PolicyChain>>,
+    /// Policy-gated subprocess configuration. When Some, `Deno.Command` and `child_process` are injected.
+    subprocess_config: Option<Arc<subprocess::SubprocessConfig>>,
 }
 
 /// Builder for `Engine::run_js()`. Only `code` is required; everything else
@@ -1253,6 +1255,7 @@ impl Engine {
             }),
             mcp_client_manager: None,
             mcp_tools_policy_chain: None,
+            subprocess_config: None,
         }
     }
 
@@ -1283,6 +1286,7 @@ impl Engine {
             }),
             mcp_client_manager: None,
             mcp_tools_policy_chain: None,
+            subprocess_config: None,
         }
     }
 
