@@ -883,5 +883,3 @@ allow if {
         assert!(!chain.evaluate(&input).await.unwrap());
     }
 }
-
-}

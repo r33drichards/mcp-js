@@ -1179,7 +1179,6 @@ pub struct RunJsRequest<'a> {
     execution_timeout_secs: Option<u64>,
     tags: Option<HashMap<String, String>>,
     mcp_headers: Option<serde_json::Value>,
-    subprocess_config: Option<&'a subprocess::SubprocessConfig>,
 }
 
 impl<'a> RunJsRequest<'a> {
@@ -1223,10 +1222,6 @@ impl<'a> RunJsRequest<'a> {
         self
     }
 
-    pub fn maybe_subprocess_config(mut self, config: Option<&'a subprocess::SubprocessConfig>) -> Self {
-        self.subprocess_config = config;
-        self
-    }
 
     pub async fn execute(self) -> Result<ExecutionId, String> {
         self.engine.run_js_inner(
@@ -1237,7 +1232,6 @@ impl<'a> RunJsRequest<'a> {
             self.execution_timeout_secs,
             self.tags,
             self.mcp_headers,
-            self.subprocess_config.cloned(),
         ).await
     }
 }
@@ -1368,7 +1362,6 @@ impl Engine {
             execution_timeout_secs: None,
             tags: None,
             mcp_headers: None,
-            subprocess_config: None,
         }
     }
 
@@ -1382,7 +1375,6 @@ impl Engine {
         execution_timeout_secs: Option<u64>,
         tags: Option<HashMap<String, String>>,
         mcp_headers: Option<serde_json::Value>,
-        subprocess_config: Option<subprocess::SubprocessConfig>,
     ) -> Result<ExecutionId, String> {
         let registry = self.execution_registry.as_ref()
             .ok_or_else(|| "Execution registry not configured".to_string())?;
@@ -1415,7 +1407,6 @@ impl Engine {
                 id_bg, code, heap, session, heap_memory_max_mb,
                 execution_timeout_secs, tags, raw_snapshot, console_tree,
                 mcp_headers,
-            subprocess_config,
             ).await;
         });
 
@@ -1435,7 +1426,6 @@ impl Engine {
         raw_snapshot: Option<Vec<u8>>,
         console_tree: sled::Tree,
         mcp_headers: Option<serde_json::Value>,
-        subprocess_config: Option<subprocess::SubprocessConfig>,
     ) {
         let registry = match &self.execution_registry {
             Some(r) => r.clone(),
@@ -1468,7 +1458,7 @@ impl Engine {
                 let fc = self.fetch_config.clone();
                 let fsc = self.fs_config.clone();
                 let mh = mcp_headers.clone();
-                let sc = subprocess_config.clone();
+                let sc = self.subprocess_config.clone();
                 let ct = console_tree;
                 let mlc = self.module_loader_config.clone();
                 let mc = self.mcp_client_manager.as_ref().map(|m| mcp_client::McpConfig { client_manager: (**m).clone(), policy_chain: self.mcp_tools_policy_chain.clone() });
@@ -1480,7 +1470,7 @@ impl Engine {
                         .maybe_fetch_config(fc.as_deref())
                         .maybe_fs_config(fsc.as_deref())
                         .mcp_headers(mh)
-                        .maybe_subprocess_config(sc.as_ref())
+                        .maybe_subprocess_config(sc.as_deref())
                         .console_tree(ct)
                         .module_loader_config(&mlc)
                         .maybe_mcp_config(mc.as_ref()))
@@ -1534,7 +1524,7 @@ impl Engine {
                 let fc = self.fetch_config.clone();
                 let fsc = self.fs_config.clone();
                 let mh = mcp_headers.clone();
-                let sc = subprocess_config;
+                let sc = self.subprocess_config.clone();
                 let ct = console_tree;
                 let mlc = self.module_loader_config.clone();
                 let mc = self.mcp_client_manager.as_ref().map(|m| mcp_client::McpConfig { client_manager: (**m).clone(), policy_chain: self.mcp_tools_policy_chain.clone() });
@@ -1549,7 +1539,7 @@ impl Engine {
                         .maybe_fetch_config(fc.as_deref())
                         .maybe_fs_config(fsc.as_deref())
                         .mcp_headers(mh)
-                        .maybe_subprocess_config(sc.as_ref())
+                        .maybe_subprocess_config(sc.as_deref())
                         .console_tree(ct)
                         .module_loader_config(&mlc)
                         .maybe_mcp_config(mc.as_ref()))
