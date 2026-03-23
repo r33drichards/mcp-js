@@ -267,6 +267,8 @@ pub struct PoliciesConfig {
     pub filesystem: Option<OperationPolicies>,
     /// Policy chain for MCP tool calls (`mcp.callTool()`).
     pub mcp_tools: Option<OperationPolicies>,
+    /// Policy chain for subprocess execution (`Deno.Command`, `child_process.exec`).
+    pub subprocess: Option<OperationPolicies>,
 }
 
 /// Per-operation policy configuration.
@@ -776,4 +778,110 @@ allow if {
         });
         assert!(chain.evaluate(&input).await.unwrap());
     }
+    #[test]
+    fn test_policies_config_subprocess() {
+        let json = r#"{
+            "subprocess": {
+                "mode": "all",
+                "policies": [
+                    {"url": "file:///etc/policies/subprocess.rego", "rule": "data.mcp.subprocess.allow"}
+                ]
+            }
+        }"#;
+        let config: PoliciesConfig = serde_json::from_str(json).unwrap();
+        assert!(config.fetch.is_none());
+        assert!(config.modules.is_none());
+        assert!(config.filesystem.is_none());
+        assert!(config.mcp_tools.is_none());
+        let subprocess = config.subprocess.unwrap();
+        assert_eq!(subprocess.mode, EvalMode::All);
+        assert_eq!(subprocess.policies.len(), 1);
+        assert_eq!(subprocess.policies[0].rule.as_deref(), Some("data.mcp.subprocess.allow"));
+    }
+
+    // ── Subprocess policy tests ──────────────────────────────────────────
+
+    fn subprocess_rego() -> &'static str {
+        r#"
+package mcp.subprocess
+
+default allow = false
+
+allow if {
+    input.operation == "command_output"
+    input.command == "echo"
+}
+
+allow if {
+    input.operation == "exec"
+    startswith(input.args[1], "echo")
+}
+"#
+    }
+
+    #[tokio::test]
+    async fn test_subprocess_policy_allow() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_rego_file(dir.path(), "subprocess.rego", subprocess_rego());
+
+        let op = OperationPolicies {
+            mode: EvalMode::All,
+            policies: vec![PolicySource {
+                url: format!("file://{}", path.display()),
+                policy_path: None,
+                rule: None,
+            }],
+        };
+        let chain = build_policy_chain(&op, "mcp/subprocess", "data.mcp.subprocess.allow").unwrap();
+
+        // Allowed: command_output for "echo"
+        let input = serde_json::json!({
+            "operation": "command_output",
+            "command": "echo",
+            "args": ["hello"]
+        });
+        assert!(chain.evaluate(&input).await.unwrap());
+
+        // Allowed: exec with "echo hello"
+        let input = serde_json::json!({
+            "operation": "exec",
+            "command": "/bin/sh",
+            "args": ["-c", "echo hello"]
+        });
+        assert!(chain.evaluate(&input).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_subprocess_policy_deny() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_rego_file(dir.path(), "subprocess.rego", subprocess_rego());
+
+        let op = OperationPolicies {
+            mode: EvalMode::All,
+            policies: vec![PolicySource {
+                url: format!("file://{}", path.display()),
+                policy_path: None,
+                rule: None,
+            }],
+        };
+        let chain = build_policy_chain(&op, "mcp/subprocess", "data.mcp.subprocess.allow").unwrap();
+
+        // Denied: command_output for "rm"
+        let input = serde_json::json!({
+            "operation": "command_output",
+            "command": "rm",
+            "args": ["-rf", "/"]
+        });
+        assert!(!chain.evaluate(&input).await.unwrap());
+
+        // Denied: exec with "rm -rf /"
+        let input = serde_json::json!({
+            "operation": "exec",
+            "command": "/bin/sh",
+            "args": ["-c", "rm -rf /"]
+        });
+        assert!(!chain.evaluate(&input).await.unwrap());
+    }
+}
+
 }
