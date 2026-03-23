@@ -17,7 +17,8 @@ use engine::fetch::FetchConfig;
 use engine::fs::FsConfig;
 use engine::execution::ExecutionRegistry;
 use engine::module_loader::ModuleLoaderConfig;
-use engine::opa::{PoliciesConfig, build_policy_chain};
+use engine::opa;
+use engine::subprocess::SubprocessConfig::{PoliciesConfig, build_policy_chain};
 use engine::heap_storage::{AnyHeapStorage, S3HeapStorage, WriteThroughCacheHeapStorage, FileHeapStorage};
 use engine::heap_tags::HeapTagStore;
 use engine::session_log::SessionLog;
@@ -411,6 +412,19 @@ async fn main() -> Result<()> {
         None
     };
 
+    let subprocess_policy_chain = if let Some(ref config) = policies_config {
+        if let Some(ref subprocess_policies) = config.subprocess {
+            let chain = build_policy_chain(subprocess_policies, "mcp/subprocess", "data.mcp.subprocess.allow")
+                .map_err(|e| anyhow::anyhow!("Failed to build subprocess policy chain: {}", e))?;
+            tracing::info!("Subprocess policy chain: {} evaluator(s), mode={:?}", subprocess_policies.policies.len(), subprocess_policies.mode);
+            Some(Arc::new(chain))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     // ── Fetch policy ───────────────────────────────────────────────────
     let header_rules = load_fetch_header_rules(&cli.fetch_headers, &cli.fetch_header_config)?;
     if !header_rules.is_empty() {
@@ -446,6 +460,14 @@ async fn main() -> Result<()> {
         tracing::info!("External module imports: DISABLED (use --allow-external-modules to enable)");
     }
     let engine = engine.with_module_loader_config(module_loader_config);
+
+    // ── Subprocess policy ──────────────────────────────────────────────
+    let engine = if let Some(chain) = subprocess_policy_chain {
+        engine.with_subprocess_config(SubprocessConfig::new(chain))
+    } else {
+        engine
+    };
+
 
     // ── Execution registry ──────────────────────────────────────────────
     // Use session_db_path for both stateless and stateful modes.

@@ -148,6 +148,10 @@
             inherit pkgs;
             mcp-js = self.packages.x86_64-linux.default;
           });
+          exec-opa-test = pkgs.nixosTest (import ./tests/nixos/exec-opa.nix {
+            inherit pkgs;
+            mcp-js = self.packages.x86_64-linux.default;
+          });
         };
     };
 }
