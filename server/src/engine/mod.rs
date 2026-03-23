@@ -8,6 +8,7 @@ pub mod mcp_client;
 pub mod module_loader;
 pub mod opa;
 pub mod session_log;
+pub mod subprocess;
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -667,6 +668,7 @@ pub struct ExecutionConfig<'a> {
     pub fetch_config: Option<&'a fetch::FetchConfig>,
     pub fs_config: Option<&'a fs::FsConfig>,
     pub mcp_headers: Option<serde_json::Value>,
+    pub subprocess_config: Option<&'a subprocess::SubprocessConfig>,
     pub console_tree: Option<sled::Tree>,
     pub module_loader_config: Option<&'a module_loader::ModuleLoaderConfig>,
     pub mcp_config: Option<&'a mcp_client::McpConfig>,
@@ -690,6 +692,11 @@ impl<'a> ExecutionConfig<'a> {
 
     pub fn mcp_headers(mut self, mcp_headers: Option<serde_json::Value>) -> Self {
         self.mcp_headers = mcp_headers;
+        self
+    }
+
+    pub fn maybe_subprocess_config(mut self, config: Option<&'a subprocess::SubprocessConfig>) -> Self {
+        self.subprocess_config = config;
         self
     }
 
@@ -756,6 +763,7 @@ pub fn execute_stateless(
         fetch_config,
         fs_config,
         mcp_headers,
+            subprocess_config,
         console_tree,
         module_loader_config,
         mcp_config,
@@ -770,6 +778,9 @@ pub fn execute_stateless(
         }
         if fetch_config.is_some() {
             extensions.push(fetch::create_extension());
+        if subprocess_config.is_some() {
+            extensions.push(subprocess::create_extension());
+        }
         }
         if fs_config.is_some() {
             extensions.push(fs::create_extension());
@@ -805,6 +816,11 @@ pub fn execute_stateless(
         if let Some(fsc) = fs_config {
             let fsc = fsc.clone().with_mcp_headers(mcp_headers.clone());
             runtime.op_state().borrow_mut().put(fsc);
+
+            // Put subprocess config in OpState if subprocess policies are configured.
+            if let Some(sc) = subprocess_config {
+                runtime.op_state().borrow_mut().put(sc.clone());
+            }
         }
 
         // Put MCP config in OpState if MCP servers are configured.
@@ -839,6 +855,12 @@ pub fn execute_stateless(
                     if let Err(e) = fetch::inject_fetch(&mut runtime) {
                         return Err(e);
                     }
+                // Inject subprocess JS wrapper if subprocess policies are configured.
+                if subprocess_config.is_some() {
+                    if let Err(e) = subprocess::inject_subprocess(&mut runtime) {
+                        return Err(e);
+                    }
+                }
                 }
                 // Inject fs JS wrapper if filesystem policies are configured.
                 if fs_config.is_some() {
@@ -898,6 +920,7 @@ pub fn execute_stateful(
         fetch_config,
         fs_config,
         mcp_headers,
+            subprocess_config,
         console_tree,
         module_loader_config,
         mcp_config,
@@ -930,6 +953,9 @@ pub fn execute_stateful(
         }
         if fetch_config.is_some() {
             extensions.push(fetch::create_extension());
+        if subprocess_config.is_some() {
+            extensions.push(subprocess::create_extension());
+        }
         }
         if fs_config.is_some() {
             extensions.push(fs::create_extension());
@@ -966,6 +992,11 @@ pub fn execute_stateful(
         if let Some(fsc) = fs_config {
             let fsc = fsc.clone().with_mcp_headers(mcp_headers.clone());
             runtime.op_state().borrow_mut().put(fsc);
+
+            // Put subprocess config in OpState if subprocess policies are configured.
+            if let Some(sc) = subprocess_config {
+                runtime.op_state().borrow_mut().put(sc.clone());
+            }
         }
 
         // Put MCP config in OpState if MCP servers are configured.
@@ -1010,6 +1041,12 @@ pub fn execute_stateful(
                         if let Err(e) = fetch::inject_fetch(&mut runtime) {
                             return Err(e);
                         }
+                // Inject subprocess JS wrapper if subprocess policies are configured.
+                if subprocess_config.is_some() {
+                    if let Err(e) = subprocess::inject_subprocess(&mut runtime) {
+                        return Err(e);
+                    }
+                }
                     }
                     // Inject fs JS wrapper if filesystem policies are configured.
                     if fs_config.is_some() {
@@ -1115,6 +1152,8 @@ pub struct Engine {
     mcp_client_manager: Option<Arc<mcp_client::McpClientManager>>,
     /// OPA policy chain for MCP tool calls (`mcp.callTool()`).
     mcp_tools_policy_chain: Option<Arc<opa::PolicyChain>>,
+    /// Policy-gated subprocess configuration. When Some, `Deno.Command` and `child_process` are injected.
+    subprocess_config: Option<Arc<subprocess::SubprocessConfig>>,
 }
 
 /// Builder for `Engine::run_js()`. Only `code` is required; everything else
@@ -1171,6 +1210,7 @@ impl<'a> RunJsRequest<'a> {
         self
     }
 
+
     pub async fn execute(self) -> Result<ExecutionId, String> {
         self.engine.run_js_inner(
             self.code,
@@ -1209,6 +1249,7 @@ impl Engine {
             }),
             mcp_client_manager: None,
             mcp_tools_policy_chain: None,
+            subprocess_config: None,
         }
     }
 
@@ -1239,6 +1280,7 @@ impl Engine {
             }),
             mcp_client_manager: None,
             mcp_tools_policy_chain: None,
+            subprocess_config: None,
         }
     }
 
@@ -1291,6 +1333,12 @@ impl Engine {
     }
 
     /// Submit code for async execution. Returns an execution ID immediately.
+    /// Enable policy-gated subprocess execution in the JS runtime.
+    pub fn with_subprocess_config(mut self, config: subprocess::SubprocessConfig) -> Self {
+        self.subprocess_config = Some(Arc::new(config));
+        self
+    }
+
     /// Create a builder for submitting JavaScript code for execution.
     pub fn run_js(&self, code: impl Into<String>) -> RunJsRequest<'_> {
         RunJsRequest {
@@ -1398,6 +1446,7 @@ impl Engine {
                 let fc = self.fetch_config.clone();
                 let fsc = self.fs_config.clone();
                 let mh = mcp_headers.clone();
+                let sc = self.subprocess_config.clone();
                 let ct = console_tree;
                 let mlc = self.module_loader_config.clone();
                 let mc = self.mcp_client_manager.as_ref().map(|m| mcp_client::McpConfig { client_manager: (**m).clone(), policy_chain: self.mcp_tools_policy_chain.clone() });
@@ -1409,6 +1458,7 @@ impl Engine {
                         .maybe_fetch_config(fc.as_deref())
                         .maybe_fs_config(fsc.as_deref())
                         .mcp_headers(mh)
+                        .maybe_subprocess_config(sc.as_deref())
                         .console_tree(ct)
                         .module_loader_config(&mlc)
                         .maybe_mcp_config(mc.as_ref()))
@@ -1462,6 +1512,7 @@ impl Engine {
                 let fc = self.fetch_config.clone();
                 let fsc = self.fs_config.clone();
                 let mh = mcp_headers.clone();
+                let sc = self.subprocess_config.clone();
                 let ct = console_tree;
                 let mlc = self.module_loader_config.clone();
                 let mc = self.mcp_client_manager.as_ref().map(|m| mcp_client::McpConfig { client_manager: (**m).clone(), policy_chain: self.mcp_tools_policy_chain.clone() });
@@ -1476,6 +1527,7 @@ impl Engine {
                         .maybe_fetch_config(fc.as_deref())
                         .maybe_fs_config(fsc.as_deref())
                         .mcp_headers(mh)
+                        .maybe_subprocess_config(sc.as_deref())
                         .console_tree(ct)
                         .module_loader_config(&mlc)
                         .maybe_mcp_config(mc.as_ref()))
