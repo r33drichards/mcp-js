@@ -2,6 +2,10 @@
 
 A Rust-based Model Context Protocol (MCP) server that exposes a V8 JavaScript runtime as a tool for AI agents like Claude and Cursor. Supports persistent heap snapshots via S3 or local filesystem, and is ready for integration with modern AI development environments.
 
+## Hosted deployment
+
+A hosted deployment is available on [Fronteir AI](https://fronteir.ai/mcp/r33drichards-mcp-js).
+
 ## Features
 
 - **Async Execution Model**: `run_js` returns immediately with an execution ID. Poll status with `get_execution`, read console output with `get_execution_output`, and cancel running executions with `cancel_execution`.
