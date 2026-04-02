@@ -1,0 +1,49 @@
+# MCP-JS with Keycloak OAuth authentication.
+#
+# Usage:
+#   docker compose -f docker-compose.oauth.yml up --build
+#
+# Services:
+#   - keycloak:  http://localhost:8080  (admin: admin / admin)
+#   - mcp-js:    http://localhost:3000  (MCP endpoint: /mcp, protected by OAuth)
+#
+# Pre-configured Keycloak realm "mcp":
+#   - Client "mcp-client" (public)  — for MCP client apps
+#   - Client "mcp-server" (confidential, secret: mcp-server-secret) — for token introspection
+#   - Test user: testuser / testpassword
+
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    command:
+      - start-dev
+      - --import-realm
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./keycloak/realm.json:/opt/keycloak/data/import/realm.json:ro
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/8080 && echo -e 'GET /health/ready HTTP/1.1\r\nHost: localhost\r\n\r\n' >&3 && cat <&3 | grep -q '200'"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  mcp-js:
+    build: .
+    command:
+      - --http-port=3000
+      - --stateless
+      - --oauth
+      - --oauth-issuer=http://localhost:3000
+      - --oauth-provider-url=http://keycloak:8080/realms/mcp
+      - --oauth-client-id=mcp-server
+      - --oauth-client-secret=mcp-server-secret
+    ports:
+      - "3000:3000"
+    depends_on:
+      keycloak:
+        condition: service_healthy

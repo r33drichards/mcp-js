@@ -47,6 +47,7 @@ http-body-util = "0.1"
 regorus = "0.5"
 reqwest = { version = "0.12", features = ["json"] }
 url = "2"
+serde_urlencoded = "0.7"
 futures = "0.3"
 wasmparser = "0.225"
 uuid = { version = "1.0", features = ["v4"] }
