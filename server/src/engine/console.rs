@@ -240,8 +240,8 @@ const CONSOLE_JS_WRAPPER: &str = r#"
 /// JS wrappers have been injected, but before user code runs.
 ///
 /// Must be called AFTER inject_console, neutralize_dangerous_ops, inject_fetch,
-/// inject_fs, and inject_mcp — otherwise it will freeze ops before they are
-/// set up, breaking the runtime.
+/// inject_fs, inject_mcp, and inject_timers — otherwise it will freeze ops
+/// before they are set up, breaking the runtime.
 ///
 /// 1. Neutralizes dangerous introspection ops (op_get_proxy_details, etc.)
 /// 2. Freezes Deno.core.ops to prevent interception/replacement

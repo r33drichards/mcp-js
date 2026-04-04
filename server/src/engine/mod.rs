@@ -8,6 +8,7 @@ pub mod mcp_client;
 pub mod module_loader;
 pub mod opa;
 pub mod session_log;
+pub mod timers;
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -777,6 +778,7 @@ pub fn execute_stateless(
         if mcp_config.is_some() {
             extensions.push(mcp_client::create_extension());
         }
+        extensions.push(timers::create_extension());
 
         // Always create a module loader — all code runs as ES modules.
         let module_loader: Rc<dyn deno_core::ModuleLoader> = match module_loader_config {
@@ -851,6 +853,10 @@ pub fn execute_stateless(
                     if let Err(e) = mcp_client::inject_mcp(&mut runtime) {
                         return Err(e);
                     }
+                }
+                // Inject setTimeout/clearTimeout (always available).
+                if let Err(e) = timers::inject_timers(&mut runtime) {
+                    return Err(e);
                 }
                 // Harden sandbox: freeze ops, neutralize introspection, remove __bootstrap.
                 // Must run after all inject_* calls and before user code.
@@ -937,6 +943,7 @@ pub fn execute_stateful(
         if mcp_config.is_some() {
             extensions.push(mcp_client::create_extension());
         }
+        extensions.push(timers::create_extension());
 
         // Always create a module loader — all code runs as ES modules.
         let module_loader: Rc<dyn deno_core::ModuleLoader> = match module_loader_config {
@@ -1022,6 +1029,10 @@ pub fn execute_stateful(
                         if let Err(e) = mcp_client::inject_mcp(&mut runtime) {
                             return Err(e);
                         }
+                    }
+                    // Inject setTimeout/clearTimeout (always available).
+                    if let Err(e) = timers::inject_timers(&mut runtime) {
+                        return Err(e);
                     }
                     // Harden sandbox: freeze ops, neutralize introspection, remove __bootstrap.
                     // Must run after all inject_* calls and before user code.
