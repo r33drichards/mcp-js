@@ -53,6 +53,12 @@ uuid = { version = "1.0", features = ["v4"] }
 dashmap = "6"
 jsonwebtoken = "9"
 
+[patch.crates-io]
+# Fixes Vec<&str> heap leak in prepare_for_snapshot: the `extensions` field
+# was not ManuallyDrop so mem::forget(self) leaked its backing buffer.
+# Upstream PR pending; using our fork until merged.
+deno_core = { git = "https://github.com/r33drichards/deno_core", rev = "1c97a0ad596fed8c258803c020194243ef4441cc" }
+
 [dev-dependencies]
 tokio-test = "0.4"
 reqwest = { version = "0.12", features = ["json", "cookies", "stream"] }

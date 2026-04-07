@@ -130,7 +130,10 @@ impl ModuleLoader for NetworkModuleLoader {
         }
 
         // Absolute URLs pass through directly.
-        if specifier.starts_with("https://") || specifier.starts_with("http://") {
+        // Check for "https:" / "http:" (not just "https://" / "http://") so that
+        // malformed specifiers like "https:1/es" are caught here rather than
+        // falling through to resolve_import which would parse them as valid URLs.
+        if specifier.starts_with("https:") || specifier.starts_with("http:") {
             if !self.config.allow_external {
                 return Err(JsErrorBox::generic(format!(
                     "External module imports are disabled. Cannot import URL module '{}'. \
@@ -160,6 +163,15 @@ impl ModuleLoader for NetworkModuleLoader {
                     module_specifier
                 ),
             )));
+        }
+
+        // Defense-in-depth: block network requests even if resolve() let something through.
+        if !self.config.allow_external {
+            return ModuleLoadResponse::Sync(Err(JsErrorBox::generic(format!(
+                "External module imports are disabled. Cannot import URL module '{}'. \
+                 Start the server with --allow-external-modules to enable.",
+                module_specifier
+            ))));
         }
 
         let client = self.client.clone();
