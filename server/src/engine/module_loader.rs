@@ -146,19 +146,7 @@ impl ModuleLoader for NetworkModuleLoader {
         }
 
         // Relative specifiers (./foo, ../bar) resolve against the referrer.
-        // After resolution the URL may have an http/https scheme; block those
-        // too when external imports are disabled.
-        let resolved = resolve_import(specifier, referrer).map_err(JsErrorBox::from_err)?;
-        if !self.config.allow_external
-            && (resolved.scheme() == "https" || resolved.scheme() == "http")
-        {
-            return Err(JsErrorBox::generic(format!(
-                "External module imports are disabled. Cannot import URL module '{}'. \
-                 Start the server with --allow-external-modules to enable.",
-                specifier
-            )));
-        }
-        Ok(resolved)
+        resolve_import(specifier, referrer).map_err(JsErrorBox::from_err)
     }
 
     fn load(
