@@ -47,6 +47,7 @@ jobs:
       - name: Run fuzzer (${{ matrix.target }})
         env:
           ASAN_OPTIONS: quarantine_size_mb=64:malloc_context_size=5:allocator_may_return_null=1
+          LSAN_OPTIONS: suppressions=${{ github.workspace }}/server/fuzz/lsan_suppressions.txt
         run: |
           # Use fork mode (-fork=1) so each worker gets a clean address space,
           # preventing cumulative ASAN shadow memory growth from killing the

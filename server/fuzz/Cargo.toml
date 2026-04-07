@@ -23,6 +23,8 @@ version = "0.381"
 # Override rmcp to use the same git source as the server crate
 [patch.crates-io]
 rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", rev = "787cc015b719773f66d4ac32e695b9a0079e12ef" }
+# Fixes Vec<&str> heap leak in prepare_for_snapshot; upstream PR pending.
+deno_core = { git = "https://github.com/r33drichards/deno_core", rev = "1c97a0ad596fed8c258803c020194243ef4441cc" }
 
 # Prevent this from interfering with workspaces
 [workspace]
