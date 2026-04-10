@@ -59,6 +59,10 @@ struct Cli {
     #[arg(long, conflicts_with = "sse_port")]
     http_port: Option<u16>,
 
+    /// HTTP host/bind address (default: 0.0.0.0, listens on all interfaces)
+    #[arg(long, short = 'h', alias = "host", default_value = "0.0.0.0", requires = "http_port")]
+    http_host: String,
+
     /// SSE port using the older HTTP+SSE transport
     #[arg(long, conflicts_with = "http_port")]
     sse_port: Option<u16>,
@@ -496,13 +500,14 @@ async fn main() -> Result<()> {
 
     // ── Start transport ─────────────────────────────────────────────────
     if let Some(port) = cli.http_port {
-        tracing::info!("Starting Streamable HTTP transport on port {}", port);
+        let host = cli.http_host.as_str();
+        tracing::info!("Starting Streamable HTTP transport on {}:{}", host, port);
         if engine.is_stateful() {
             let verifier = session_verifier.clone();
-            start_streamable_http(engine, port, move |e| McpService::new(e, verifier.clone())).await?;
+            start_streamable_http(engine, host, port, move |e| McpService::new(e, verifier.clone())).await?;
         } else {
             let verifier = session_verifier.clone();
-            start_streamable_http(engine, port, move |e| StatelessMcpService::new(e, verifier.clone())).await?;
+            start_streamable_http(engine, host, port, move |e| StatelessMcpService::new(e, verifier.clone())).await?;
         }
     } else if let Some(port) = cli.sse_port {
         tracing::info!("Starting SSE transport on port {}", port);
@@ -539,12 +544,12 @@ async fn main() -> Result<()> {
 
 // ── Streamable HTTP transport (--http-port) ─────────────────────────────
 
-async fn start_streamable_http<S, F>(engine: Engine, port: u16, make_service: F) -> Result<()>
+async fn start_streamable_http<S, F>(engine: Engine, host: &str, port: u16, make_service: F) -> Result<()>
 where
     S: ServerHandler + Send + Sync + 'static,
     F: Fn(Engine) -> S + Send + Sync + Clone + 'static,
 {
-    let bind: std::net::SocketAddr = format!("0.0.0.0:{}", port).parse()?;
+    let bind: std::net::SocketAddr = format!("{}:{}", host, port).parse()?;
     let ct = CancellationToken::new();
 
     let config = StreamableHttpServerConfig {
