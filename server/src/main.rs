@@ -12,6 +12,7 @@ mod mcp;
 mod api;
 mod cluster;
 mod session;
+mod temporal_tasks;
 use engine::{initialize_v8, Engine, WasmModule, DEFAULT_EXECUTION_TIMEOUT_SECS};
 use engine::fetch::FetchConfig;
 use engine::fs::FsConfig;
@@ -188,6 +189,16 @@ struct Cli {
     ///          {"name": "srv2", "transport": "sse", "url": "http://..."}]
     #[arg(long = "mcp-config", value_name = "PATH")]
     mcp_config: Option<String>,
+
+    // ── Temporal task sidecar ─────────────────────────────────────────────
+    /// Base URL of the Temporal-tasks sidecar (see ./temporal_worker).
+    /// When set, run_js submits workflows through Temporal for durability,
+    /// and the schedule_js / list_schedules / delete_schedule /
+    /// pause_schedule / unpause_schedule / trigger_schedule MCP tools become
+    /// available. When unset, run_js calls the engine directly and the
+    /// scheduling tools are not registered.
+    #[arg(long = "temporal-tasks-url", env = "TEMPORAL_TASKS_URL", value_name = "URL")]
+    temporal_tasks_url: Option<String>,
 }
 
 #[tokio::main]
@@ -494,29 +505,54 @@ async fn main() -> Result<()> {
         None
     };
 
+    // ── Connect to Temporal-tasks sidecar (if --temporal-tasks-url) ────
+    let temporal_tasks: Option<Arc<temporal_tasks::TemporalTasksClient>> =
+        if let Some(ref url) = cli.temporal_tasks_url {
+            tracing::info!("Connecting to Temporal tasks sidecar at {}", url);
+            let client = temporal_tasks::TemporalTasksClient::new(url.clone())?;
+            // Best-effort health check: warn but don't bail, so the MCP
+            // server still comes up if the sidecar is starting.
+            if let Err(e) = client.health().await {
+                tracing::warn!(
+                    "Temporal tasks sidecar health check failed (will retry on demand): {}",
+                    e
+                );
+            } else {
+                tracing::info!("Temporal tasks sidecar is healthy");
+            }
+            Some(Arc::new(client))
+        } else {
+            None
+        };
+
     // ── Start transport ─────────────────────────────────────────────────
     if let Some(port) = cli.http_port {
         tracing::info!("Starting Streamable HTTP transport on port {}", port);
         if engine.is_stateful() {
             let verifier = session_verifier.clone();
-            start_streamable_http(engine, port, move |e| McpService::new(e, verifier.clone())).await?;
+            let temporal = temporal_tasks.clone();
+            start_streamable_http(engine, port, move |e| McpService::new(e, verifier.clone()).with_temporal_tasks(temporal.clone())).await?;
         } else {
             let verifier = session_verifier.clone();
-            start_streamable_http(engine, port, move |e| StatelessMcpService::new(e, verifier.clone())).await?;
+            let temporal = temporal_tasks.clone();
+            start_streamable_http(engine, port, move |e| StatelessMcpService::new(e, verifier.clone()).with_temporal_tasks(temporal.clone())).await?;
         }
     } else if let Some(port) = cli.sse_port {
         tracing::info!("Starting SSE transport on port {}", port);
         if engine.is_stateful() {
             let verifier = session_verifier.clone();
-            start_sse_server(engine, port, move |e| McpService::new(e, verifier.clone())).await?;
+            let temporal = temporal_tasks.clone();
+            start_sse_server(engine, port, move |e| McpService::new(e, verifier.clone()).with_temporal_tasks(temporal.clone())).await?;
         } else {
             let verifier = session_verifier.clone();
-            start_sse_server(engine, port, move |e| StatelessMcpService::new(e, verifier.clone())).await?;
+            let temporal = temporal_tasks.clone();
+            start_sse_server(engine, port, move |e| StatelessMcpService::new(e, verifier.clone()).with_temporal_tasks(temporal.clone())).await?;
         }
     } else {
         tracing::info!("Starting stdio transport");
         if engine.is_stateful() {
             let service = McpService::new(engine, None)
+                .with_temporal_tasks(temporal_tasks.clone())
                 .serve(stdio())
                 .await
                 .inspect_err(|e| {
@@ -525,6 +561,7 @@ async fn main() -> Result<()> {
             service.waiting().await?;
         } else {
             let service = StatelessMcpService::new(engine, None)
+                .with_temporal_tasks(temporal_tasks.clone())
                 .serve(stdio())
                 .await
                 .inspect_err(|e| {

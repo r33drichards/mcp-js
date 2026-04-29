@@ -1,0 +1,91 @@
+version: "3.8"
+
+# Temporal-backed background and scheduled JavaScript task execution.
+#
+# Usage:
+#   docker compose -f docker-compose.temporal.yml up --build
+#
+# Endpoints:
+#   * MCP server (Streamable HTTP): http://localhost:3000/mcp
+#   * Temporal frontend (gRPC):     localhost:7233
+#   * Temporal Web UI:              http://localhost:8233
+#   * Sidecar control plane:        http://localhost:8000
+#
+# Architecture:
+#   The Rust MCP server cannot embed the Temporal Rust SDK without a serde
+#   version conflict (swc_common 8.1.1 needs serde::__private, removed in
+#   serde 1.0.220+). Instead we run a Python sidecar (./temporal_worker)
+#   that hosts the Temporal worker and exposes a small REST control plane
+#   the MCP server talks to via --temporal-tasks-url.
+#
+#   Per-session schedule keys are namespaced server-side as
+#   `mcpjs-{session}-{schedule_id}`.
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: temporal
+      POSTGRES_USER: temporal
+      POSTGRES_DB: temporal
+    volumes:
+      - temporal_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U temporal"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  temporal:
+    image: temporalio/auto-setup:1.25.2
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - DB=postgres12
+      - DB_PORT=5432
+      - POSTGRES_USER=temporal
+      - POSTGRES_PWD=temporal
+      - POSTGRES_SEEDS=postgres
+      - DYNAMIC_CONFIG_FILE_PATH=config/dynamicconfig/development-sql.yaml
+    ports:
+      - "7233:7233"
+
+  temporal-ui:
+    image: temporalio/ui:2.31.2
+    depends_on:
+      - temporal
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+      - TEMPORAL_CORS_ORIGINS=http://localhost:8233
+    ports:
+      - "8233:8080"
+
+  node1:
+    build: .
+    command:
+      - --http-port=3000
+      - --stateless
+      - --temporal-tasks-url=http://temporal-tasks:8000
+    expose:
+      - "3000"
+    ports:
+      - "3000:3000"
+    depends_on:
+      - temporal-tasks
+
+  temporal-tasks:
+    build: ./temporal_worker
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+      - TEMPORAL_NAMESPACE=default
+      - TEMPORAL_TASK_QUEUE=mcp-js
+      - MCP_SERVER_URL=http://node1:3000
+      - HTTP_PORT=8000
+    ports:
+      - "8000:8000"
+    depends_on:
+      - temporal
+
+volumes:
+  temporal_pg:

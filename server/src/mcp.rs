@@ -10,6 +10,7 @@ use std::sync::{Arc, OnceLock};
 use crate::engine::Engine;
 use crate::engine::heap_tags::HeapTagEntry;
 use crate::session::SessionVerifier;
+use crate::temporal_tasks::{RunJsInput as TemporalRunJsInput, TemporalTasksClient};
 
 // ── MCP response types ──────────────────────────────────────────────────
 
@@ -157,6 +158,9 @@ pub struct McpService {
     session_id: Arc<OnceLock<String>>,
     /// X-MCP-* headers from the initialize request, available for policy evaluation.
     mcp_headers: Arc<OnceLock<serde_json::Value>>,
+    /// When set, run_js is wrapped in a durable Temporal workflow (via the
+    /// sidecar) and the schedule_* tools become operational.
+    temporal_tasks: Option<Arc<TemporalTasksClient>>,
 }
 
 impl McpService {
@@ -166,7 +170,13 @@ impl McpService {
             verifier,
             session_id: Arc::new(OnceLock::new()),
             mcp_headers: Arc::new(OnceLock::new()),
+            temporal_tasks: None,
         }
+    }
+
+    pub fn with_temporal_tasks(mut self, client: Option<Arc<TemporalTasksClient>>) -> Self {
+        self.temporal_tasks = client;
+        self
     }
 }
 
@@ -189,6 +199,29 @@ impl McpService {
         #[serde(default)]
         tags: Option<HashMap<String, String>>,
     ) -> RunJsResponse {
+        // Temporal-backed path: submit a durable workflow via the sidecar.
+        // The sidecar's RunJsWorkflow eventually calls back into the server
+        // /api/exec, so the engine is still the executor — Temporal just
+        // owns the durability/retry envelope, and the workflow_id surfaces
+        // as the execution_id to MCP callers.
+        if let Some(ref tasks) = self.temporal_tasks {
+            let input = TemporalRunJsInput {
+                code,
+                heap,
+                session: self.session_id.get().cloned(),
+                heap_memory_max_mb,
+                execution_timeout_secs,
+                tags,
+                mcp_headers: self.mcp_headers.get().cloned(),
+            };
+            return match tasks.submit_run_js(&input).await {
+                Ok(workflow_id) => RunJsResponse { execution_id: workflow_id },
+                Err(e) => RunJsResponse {
+                    execution_id: format!("error: {}", e),
+                },
+            };
+        }
+
         let mut req = self.engine.run_js(code);
         if let Some(h) = heap { req = req.heap(h); }
         if let Some(s) = self.session_id.get() { req = req.session(s.clone()); }
@@ -201,6 +234,168 @@ impl McpService {
             Err(e) => RunJsResponse {
                 execution_id: format!("error: {}", e),
             },
+        }
+    }
+
+    #[tool(description = "Create a per-session scheduled run_js task. Provide either `cron` (a 5/6-field cron expression) or `every_secs` (interval in seconds). The schedule_id is unique within the current session. Requires --temporal-tasks-url.")]
+    pub async fn schedule_js(
+        &self,
+        #[tool(param)] schedule_id: String,
+        #[tool(param)] code: String,
+        #[tool(param)]
+        #[serde(default)]
+        cron: Option<String>,
+        #[tool(param)]
+        #[serde(default)]
+        every_secs: Option<u64>,
+        #[tool(param)]
+        #[serde(default)]
+        heap: Option<String>,
+        #[tool(param)]
+        #[serde(default)]
+        heap_memory_max_mb: Option<usize>,
+        #[tool(param)]
+        #[serde(default)]
+        execution_timeout_secs: Option<u64>,
+        #[tool(param)]
+        #[serde(default)]
+        tags: Option<HashMap<String, String>>,
+        #[tool(param)]
+        #[serde(default)]
+        note: Option<String>,
+        #[tool(param)]
+        #[serde(default)]
+        paused: Option<bool>,
+    ) -> ListExecutionsResponse {
+        let Some(ref tasks) = self.temporal_tasks else {
+            return ListExecutionsResponse {
+                value: json!({ "error": "scheduling requires --temporal-tasks-url" }),
+            };
+        };
+        let Some(session) = self.session_id.get().cloned() else {
+            return ListExecutionsResponse {
+                value: json!({ "error": "no session ID available (send X-MCP-Session-Id header)" }),
+            };
+        };
+        let input = TemporalRunJsInput {
+            code,
+            heap,
+            session: Some(session.clone()),
+            heap_memory_max_mb,
+            execution_timeout_secs,
+            tags,
+            mcp_headers: self.mcp_headers.get().cloned(),
+        };
+        match tasks
+            .create_schedule(
+                &session,
+                &schedule_id,
+                cron.as_deref(),
+                every_secs,
+                &input,
+                note.as_deref(),
+                paused.unwrap_or(false),
+            )
+            .await
+        {
+            Ok(v) => ListExecutionsResponse { value: v },
+            Err(e) => ListExecutionsResponse {
+                value: json!({ "error": e.to_string() }),
+            },
+        }
+    }
+
+    #[tool(description = "List scheduled run_js tasks for the current session. Requires --temporal-tasks-url.")]
+    pub async fn list_schedules(&self) -> ListExecutionsResponse {
+        let Some(ref tasks) = self.temporal_tasks else {
+            return ListExecutionsResponse {
+                value: json!({ "error": "scheduling requires --temporal-tasks-url" }),
+            };
+        };
+        let Some(session) = self.session_id.get().cloned() else {
+            return ListExecutionsResponse {
+                value: json!({ "error": "no session ID available (send X-MCP-Session-Id header)" }),
+            };
+        };
+        match tasks.list_schedules(&session).await {
+            Ok(v) => ListExecutionsResponse { value: v },
+            Err(e) => ListExecutionsResponse {
+                value: json!({ "error": e.to_string() }),
+            },
+        }
+    }
+
+    #[tool(description = "Delete a scheduled run_js task by schedule_id (within the current session). Requires --temporal-tasks-url.")]
+    pub async fn delete_schedule(
+        &self,
+        #[tool(param)] schedule_id: String,
+    ) -> OkResponse {
+        let Some(ref tasks) = self.temporal_tasks else {
+            return OkResponse { ok: false, error: Some("scheduling requires --temporal-tasks-url".to_string()) };
+        };
+        let Some(session) = self.session_id.get().cloned() else {
+            return OkResponse { ok: false, error: Some("no session ID available (send X-MCP-Session-Id header)".to_string()) };
+        };
+        match tasks.delete_schedule(&session, &schedule_id).await {
+            Ok(()) => OkResponse { ok: true, error: None },
+            Err(e) => OkResponse { ok: false, error: Some(e.to_string()) },
+        }
+    }
+
+    #[tool(description = "Pause a scheduled run_js task. Requires --temporal-tasks-url.")]
+    pub async fn pause_schedule(
+        &self,
+        #[tool(param)] schedule_id: String,
+        #[tool(param)]
+        #[serde(default)]
+        note: Option<String>,
+    ) -> OkResponse {
+        let Some(ref tasks) = self.temporal_tasks else {
+            return OkResponse { ok: false, error: Some("scheduling requires --temporal-tasks-url".to_string()) };
+        };
+        let Some(session) = self.session_id.get().cloned() else {
+            return OkResponse { ok: false, error: Some("no session ID available (send X-MCP-Session-Id header)".to_string()) };
+        };
+        match tasks.pause_schedule(&session, &schedule_id, note.as_deref()).await {
+            Ok(()) => OkResponse { ok: true, error: None },
+            Err(e) => OkResponse { ok: false, error: Some(e.to_string()) },
+        }
+    }
+
+    #[tool(description = "Unpause a scheduled run_js task. Requires --temporal-tasks-url.")]
+    pub async fn unpause_schedule(
+        &self,
+        #[tool(param)] schedule_id: String,
+        #[tool(param)]
+        #[serde(default)]
+        note: Option<String>,
+    ) -> OkResponse {
+        let Some(ref tasks) = self.temporal_tasks else {
+            return OkResponse { ok: false, error: Some("scheduling requires --temporal-tasks-url".to_string()) };
+        };
+        let Some(session) = self.session_id.get().cloned() else {
+            return OkResponse { ok: false, error: Some("no session ID available (send X-MCP-Session-Id header)".to_string()) };
+        };
+        match tasks.unpause_schedule(&session, &schedule_id, note.as_deref()).await {
+            Ok(()) => OkResponse { ok: true, error: None },
+            Err(e) => OkResponse { ok: false, error: Some(e.to_string()) },
+        }
+    }
+
+    #[tool(description = "Trigger an immediate run of a scheduled task (in addition to its normal schedule). Requires --temporal-tasks-url.")]
+    pub async fn trigger_schedule(
+        &self,
+        #[tool(param)] schedule_id: String,
+    ) -> OkResponse {
+        let Some(ref tasks) = self.temporal_tasks else {
+            return OkResponse { ok: false, error: Some("scheduling requires --temporal-tasks-url".to_string()) };
+        };
+        let Some(session) = self.session_id.get().cloned() else {
+            return OkResponse { ok: false, error: Some("no session ID available (send X-MCP-Session-Id header)".to_string()) };
+        };
+        match tasks.trigger_schedule(&session, &schedule_id).await {
+            Ok(()) => OkResponse { ok: true, error: None },
+            Err(e) => OkResponse { ok: false, error: Some(e.to_string()) },
         }
     }
 
@@ -489,6 +684,8 @@ pub struct StatelessMcpService {
     verifier: Option<Arc<SessionVerifier>>,
     /// X-MCP-* headers from the initialize request, available for policy evaluation.
     mcp_headers: Arc<OnceLock<serde_json::Value>>,
+    /// Optional Temporal sidecar for durable run_js execution.
+    temporal_tasks: Option<Arc<TemporalTasksClient>>,
 }
 
 impl StatelessMcpService {
@@ -497,7 +694,13 @@ impl StatelessMcpService {
             engine,
             verifier,
             mcp_headers: Arc::new(OnceLock::new()),
+            temporal_tasks: None,
         }
+    }
+
+    pub fn with_temporal_tasks(mut self, client: Option<Arc<TemporalTasksClient>>) -> Self {
+        self.temporal_tasks = client;
+        self
     }
 }
 
