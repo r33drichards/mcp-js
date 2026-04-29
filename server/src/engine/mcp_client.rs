@@ -86,6 +86,28 @@ struct ConnectedMcpServer {
 
 // ── McpClientManager ─────────────────────────────────────────────────────
 
+/// Configuration for the auto-generated MCP tool stubs that MCPJS exposes
+/// to its own clients on behalf of upstream servers. The default prefix
+/// `runjs__` makes it obvious to a calling agent that these tools execute
+/// indirectly through the JavaScript runtime (`run_js` + `mcp.callTool(...)`),
+/// rather than through MCPJS's normal tool dispatcher.
+#[derive(Debug, Clone)]
+pub struct StubConfig {
+    pub prefix: String,
+    pub enabled: bool,
+}
+
+pub const DEFAULT_STUB_PREFIX: &str = "runjs__";
+
+impl Default for StubConfig {
+    fn default() -> Self {
+        Self {
+            prefix: DEFAULT_STUB_PREFIX.to_string(),
+            enabled: true,
+        }
+    }
+}
+
 /// Manages connections to multiple MCP servers. Thread-safe and cloneable
 /// for sharing across V8 executions (stored in deno_core OpState).
 ///
@@ -97,6 +119,7 @@ struct ConnectedMcpServer {
 pub struct McpClientManager {
     tools_by_server: Arc<HashMap<String, Vec<Tool>>>,
     servers: Arc<HashMap<String, ConnectedMcpServer>>,
+    stub_config: StubConfig,
 }
 
 impl McpClientManager {
@@ -128,7 +151,19 @@ impl McpClientManager {
         Ok(Self {
             tools_by_server: Arc::new(tools_by_server),
             servers: Arc::new(servers),
+            stub_config: StubConfig::default(),
         })
+    }
+
+    /// Override the stub-tool exposure config. Builder-style; intended to be
+    /// chained right after `connect()`.
+    pub fn with_stub_config(mut self, config: StubConfig) -> Self {
+        self.stub_config = config;
+        self
+    }
+
+    pub fn stub_config(&self) -> &StubConfig {
+        &self.stub_config
     }
 
     /// Test-only constructor: build a catalog-only manager (no live peers).
@@ -140,6 +175,7 @@ impl McpClientManager {
         Self {
             tools_by_server: Arc::new(tools_by_server),
             servers: Arc::new(HashMap::new()),
+            stub_config: StubConfig::default(),
         }
     }
 
@@ -177,11 +213,15 @@ impl McpClientManager {
     /// intended to be served by MCPJS's own MCP server so that an external
     /// agent can discover the tool via MCP tool-list/search but invoke it
     /// through the JavaScript runtime (`run_js` → `mcp.callTool(...)`).
+    /// Returns an empty vec when stub exposure is disabled in the config.
     pub fn stub_tools(&self) -> Vec<Tool> {
+        if !self.stub_config.enabled {
+            return Vec::new();
+        }
         let mut out = Vec::new();
         for (server, tools) in self.tools_by_server.as_ref() {
             for tool in tools {
-                out.push(make_stub_tool(server, tool));
+                out.push(make_stub_tool(&self.stub_config.prefix, server, tool));
             }
         }
         out
@@ -189,14 +229,18 @@ impl McpClientManager {
 
     /// If `name` is a stub for a known upstream tool, build the instructional
     /// `CallToolResult` (telling the caller to invoke the tool via `run_js`).
-    /// Returns `None` if `name` does not match any known stub — callers
-    /// should fall through to their normal tool dispatcher in that case.
+    /// Returns `None` if stubs are disabled or if `name` does not match any
+    /// known stub — callers should fall through to their normal tool
+    /// dispatcher in that case.
     pub fn stub_call_response(
         &self,
         name: &str,
         arguments: Option<&serde_json::Map<String, serde_json::Value>>,
     ) -> Option<CallToolResult> {
-        let (server, tool) = parse_stub_tool_name(name)?;
+        if !self.stub_config.enabled {
+            return None;
+        }
+        let (server, tool) = parse_stub_tool_name(&self.stub_config.prefix, name)?;
         let tools = self.tools_by_server.get(&server)?;
         if !tools.iter().any(|t| t.name.as_ref() == tool) {
             return None;
@@ -249,24 +293,31 @@ impl McpClientManager {
 
 // ── Tool stubs ──────────────────────────────────────────────────────────
 //
-// Stub names follow Claude Code's `mcp__<server>__<tool>` namespacing. The
-// stub Tool's input schema is identical to the upstream tool's schema, so
-// the agent can plan a `run_js` call with correct arguments.
+// Stub names follow `<prefix><server>__<tool>`. The default prefix is
+// `runjs__`, signalling that the tool is dispatched through the JS runtime
+// rather than through MCPJS's normal tool dispatcher. The stub Tool's
+// input schema is identical to the upstream tool's schema, so the agent
+// can plan a `run_js` call with correct arguments.
 
-const STUB_PREFIX: &str = "mcp__";
 const STUB_SEPARATOR: &str = "__";
 
-/// Build the stub tool name for `server.tool`.
-pub fn stub_tool_name(server: &str, tool: &str) -> String {
-    format!("{}{}{}{}", STUB_PREFIX, server, STUB_SEPARATOR, tool)
+/// Build the stub tool name for `server.tool` under the given `prefix`.
+pub fn stub_tool_name(prefix: &str, server: &str, tool: &str) -> String {
+    format!("{}{}{}{}", prefix, server, STUB_SEPARATOR, tool)
 }
 
 /// Inverse of `stub_tool_name`. Returns `(server, tool)` or `None` if `name`
-/// does not look like a stub. Splits on the **first** `__` after the prefix
-/// so server names without `__` round-trip exactly; tool names containing
-/// `__` are preserved.
-pub fn parse_stub_tool_name(name: &str) -> Option<(String, String)> {
-    let rest = name.strip_prefix(STUB_PREFIX)?;
+/// does not start with `prefix` or does not contain a `__` separator after
+/// the prefix. Splits on the **first** `__` after the prefix so server
+/// names without `__` round-trip exactly; tool names containing `__` are
+/// preserved. An empty `prefix` is treated as "no stub recognition" and
+/// always returns `None` — pass a non-empty prefix or disable stubs via
+/// `StubConfig::enabled = false`.
+pub fn parse_stub_tool_name(prefix: &str, name: &str) -> Option<(String, String)> {
+    if prefix.is_empty() {
+        return None;
+    }
+    let rest = name.strip_prefix(prefix)?;
     let idx = rest.find(STUB_SEPARATOR)?;
     let server = &rest[..idx];
     let tool = &rest[idx + STUB_SEPARATOR.len()..];
@@ -278,10 +329,10 @@ pub fn parse_stub_tool_name(name: &str) -> Option<(String, String)> {
 
 /// Build a stub `Tool` mirroring an upstream tool's schema. The description
 /// is rewritten to make it clear the tool is invoked via `run_js`.
-pub fn make_stub_tool(server: &str, tool: &Tool) -> Tool {
-    let stub_name = stub_tool_name(server, &tool.name);
+pub fn make_stub_tool(prefix: &str, server: &str, tool: &Tool) -> Tool {
+    let stub_name = stub_tool_name(prefix, server, &tool.name);
     let original_desc = tool.description.as_deref().unwrap_or("");
-    let prefix = format!(
+    let header = format!(
         "[stub for upstream MCP tool {server}.{tool} — invoke via run_js then \
          `await mcp.callTool({server:?}, {tool:?}, args)`. Calling this tool \
          directly only returns instructions; it does not execute.]",
@@ -289,9 +340,9 @@ pub fn make_stub_tool(server: &str, tool: &Tool) -> Tool {
         tool = tool.name,
     );
     let new_desc = if original_desc.is_empty() {
-        prefix
+        header
     } else {
-        format!("{}\n\n{}", prefix, original_desc)
+        format!("{}\n\n{}", header, original_desc)
     };
     Tool {
         name: stub_name.into(),
@@ -634,22 +685,43 @@ mod tests {
     }
 
     #[test]
+    fn default_stub_prefix_is_runjs() {
+        // The default prefix advertises that the tool runs via the JS
+        // runtime rather than dispatching through MCPJS directly.
+        assert_eq!(StubConfig::default().prefix, "runjs__");
+        assert_eq!(DEFAULT_STUB_PREFIX, "runjs__");
+        assert!(StubConfig::default().enabled);
+    }
+
+    #[test]
     fn stub_name_round_trips() {
-        let n = stub_tool_name("github", "create_issue");
-        assert_eq!(n, "mcp__github__create_issue");
+        let n = stub_tool_name("runjs__", "github", "create_issue");
+        assert_eq!(n, "runjs__github__create_issue");
         assert_eq!(
-            parse_stub_tool_name(&n),
+            parse_stub_tool_name("runjs__", &n),
             Some(("github".to_string(), "create_issue".to_string()))
         );
     }
 
     #[test]
+    fn stub_name_round_trips_with_custom_prefix() {
+        let n = stub_tool_name("rj_", "srv", "do_thing");
+        assert_eq!(n, "rj_srv__do_thing");
+        assert_eq!(
+            parse_stub_tool_name("rj_", &n),
+            Some(("srv".to_string(), "do_thing".to_string()))
+        );
+        // Default prefix should not match a name minted with a custom prefix.
+        assert_eq!(parse_stub_tool_name("runjs__", &n), None);
+    }
+
+    #[test]
     fn parse_stub_preserves_underscores_in_tool_name() {
         // Tool names with `__` should round-trip via the rest of the string.
-        let n = stub_tool_name("srv", "do__a_thing");
-        assert_eq!(n, "mcp__srv__do__a_thing");
+        let n = stub_tool_name("runjs__", "srv", "do__a_thing");
+        assert_eq!(n, "runjs__srv__do__a_thing");
         assert_eq!(
-            parse_stub_tool_name(&n),
+            parse_stub_tool_name("runjs__", &n),
             Some(("srv".to_string(), "do__a_thing".to_string()))
         );
     }
@@ -657,22 +729,24 @@ mod tests {
     #[test]
     fn parse_stub_rejects_non_stub_names() {
         // Built-in MCPJS tools should not be misclassified as stubs.
-        assert_eq!(parse_stub_tool_name("run_js"), None);
-        assert_eq!(parse_stub_tool_name("get_execution"), None);
+        assert_eq!(parse_stub_tool_name("runjs__", "run_js"), None);
+        assert_eq!(parse_stub_tool_name("runjs__", "get_execution"), None);
         // Missing separator after server name.
-        assert_eq!(parse_stub_tool_name("mcp__github"), None);
+        assert_eq!(parse_stub_tool_name("runjs__", "runjs__github"), None);
         // Empty server or tool segment.
-        assert_eq!(parse_stub_tool_name("mcp____tool"), None);
-        assert_eq!(parse_stub_tool_name("mcp__server__"), None);
+        assert_eq!(parse_stub_tool_name("runjs__", "runjs____tool"), None);
+        assert_eq!(parse_stub_tool_name("runjs__", "runjs__server__"), None);
         // Wrong prefix.
-        assert_eq!(parse_stub_tool_name("rpc__server__tool"), None);
+        assert_eq!(parse_stub_tool_name("runjs__", "mcp__server__tool"), None);
+        // Empty prefix is treated as "no stub recognition".
+        assert_eq!(parse_stub_tool_name("", "server__tool"), None);
     }
 
     #[test]
     fn make_stub_tool_preserves_schema_and_rewrites_description() {
         let upstream = tool("create_issue", "Create a GitHub issue.");
-        let stub = make_stub_tool("github", &upstream);
-        assert_eq!(stub.name, "mcp__github__create_issue");
+        let stub = make_stub_tool("runjs__", "github", &upstream);
+        assert_eq!(stub.name, "runjs__github__create_issue");
         // Schema is the *same Arc* — stubs share the upstream schema.
         assert!(StdArc::ptr_eq(&stub.input_schema, &upstream.input_schema));
         // Description hints at run_js usage and includes original docs.
@@ -690,7 +764,7 @@ mod tests {
             input_schema: schema(json!({})),
             annotations: None,
         };
-        let stub = make_stub_tool("infra", &upstream);
+        let stub = make_stub_tool("runjs__", "infra", &upstream);
         let desc = stub.description.unwrap();
         assert!(desc.contains("run_js"));
         // No trailing duplicated newlines from empty original docs.
@@ -736,11 +810,48 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "mcp__github__close_issue".to_string(),
-                "mcp__github__create_issue".to_string(),
-                "mcp__infra__ping".to_string(),
+                "runjs__github__close_issue".to_string(),
+                "runjs__github__create_issue".to_string(),
+                "runjs__infra__ping".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn manager_stub_tools_honours_custom_prefix() {
+        let mut by_server = HashMap::new();
+        by_server.insert("github".to_string(), vec![tool("create_issue", "doc")]);
+        let mgr = McpClientManager::from_tools_for_test(by_server)
+            .with_stub_config(StubConfig {
+                prefix: "rj_".to_string(),
+                enabled: true,
+            });
+
+        let names: Vec<String> = mgr.stub_tools().into_iter().map(|t| t.name.to_string()).collect();
+        assert_eq!(names, vec!["rj_github__create_issue".to_string()]);
+
+        // And the dispatcher recognises the custom-prefixed name.
+        let resp = mgr.stub_call_response("rj_github__create_issue", None);
+        assert!(resp.is_some());
+        // The default-prefix name is no longer recognised.
+        assert!(mgr.stub_call_response("runjs__github__create_issue", None).is_none());
+    }
+
+    #[test]
+    fn manager_stub_tools_empty_when_disabled() {
+        let mut by_server = HashMap::new();
+        by_server.insert("github".to_string(), vec![tool("create_issue", "doc")]);
+        let mgr = McpClientManager::from_tools_for_test(by_server)
+            .with_stub_config(StubConfig {
+                prefix: "runjs__".to_string(),
+                enabled: false,
+            });
+
+        // No stub tools advertised at all.
+        assert!(mgr.stub_tools().is_empty());
+        // And calls to stub-shaped names fall through (return None, so the
+        // caller can dispatch as a normal tool / report not-found).
+        assert!(mgr.stub_call_response("runjs__github__create_issue", None).is_none());
     }
 
     #[test]
@@ -752,7 +863,7 @@ mod tests {
         let mut args = serde_json::Map::new();
         args.insert("title".into(), json!("hi"));
         let resp = mgr
-            .stub_call_response("mcp__github__create_issue", Some(&args))
+            .stub_call_response("runjs__github__create_issue", Some(&args))
             .expect("stub should match");
         // Expect a single text content block with usage instructions.
         assert_eq!(resp.is_error, Some(false));
@@ -773,8 +884,10 @@ mod tests {
         // Built-in tool names: not stubs.
         assert!(mgr.stub_call_response("run_js", None).is_none());
         // Stub-shaped name but unknown server.
-        assert!(mgr.stub_call_response("mcp__other__tool", None).is_none());
+        assert!(mgr.stub_call_response("runjs__other__tool", None).is_none());
         // Stub-shaped name with known server but unknown tool.
-        assert!(mgr.stub_call_response("mcp__github__delete_issue", None).is_none());
+        assert!(mgr.stub_call_response("runjs__github__delete_issue", None).is_none());
+        // Default-prefix dispatcher should reject the old `mcp__` prefix.
+        assert!(mgr.stub_call_response("mcp__github__create_issue", None).is_none());
     }
 }

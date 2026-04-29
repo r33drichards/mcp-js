@@ -6,7 +6,7 @@
 //!   * **outer**: another MCPJS server configured to connect to `upstream`
 //!     via `--mcp-server upstream=stdio:<server-bin>:--directory-path:...`.
 //!
-//! The outer server should advertise `mcp__upstream__run_js` (and the other
+//! The outer server should advertise `runjs__upstream__run_js` (and the other
 //! upstream tools) as stubs in `tools/list`. Calling one of those stubs
 //! should return an instructional text result telling the caller to invoke
 //! the tool from JavaScript via `run_js` + `mcp.callTool(...)`.
@@ -28,8 +28,14 @@ struct OuterServer {
 
 impl OuterServer {
     /// Start an MCPJS server on stdio whose `--mcp-server upstream=stdio:...`
-    /// points at a second MCPJS subprocess.
-    async fn start(outer_heap: &str, upstream_heap: &str) -> Result<Self, Box<dyn std::error::Error>> {
+    /// points at a second MCPJS subprocess. `extra_args` lets a test pass
+    /// additional flags (e.g. `--mcp-stubs false` or
+    /// `--mcp-stub-prefix rj_`).
+    async fn start_with_args(
+        outer_heap: &str,
+        upstream_heap: &str,
+        extra_args: &[&str],
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let server_bin = env!("CARGO_BIN_EXE_server");
 
         // The argument format is `name=stdio:command:arg1:arg2...`. We want
@@ -39,13 +45,16 @@ impl OuterServer {
             server_bin, upstream_heap
         );
 
+        let mut args: Vec<String> = vec![
+            "--directory-path".to_string(),
+            outer_heap.to_string(),
+            "--mcp-server".to_string(),
+            upstream_arg,
+        ];
+        args.extend(extra_args.iter().map(|s| s.to_string()));
+
         let mut child = Command::new(server_bin)
-            .args([
-                "--directory-path",
-                outer_heap,
-                "--mcp-server",
-                &upstream_arg,
-            ])
+            .args(&args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -58,6 +67,10 @@ impl OuterServer {
         tokio::time::sleep(Duration::from_millis(1500)).await;
 
         Ok(Self { child, stdin, stdout })
+    }
+
+    async fn start(outer_heap: &str, upstream_heap: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::start_with_args(outer_heap, upstream_heap, &[]).await
     }
 
     async fn send(&mut self, msg: Value) -> Result<Value, Box<dyn std::error::Error>> {
@@ -137,12 +150,12 @@ async fn outer_server_advertises_upstream_tools_as_stubs() -> Result<(), Box<dyn
     assert!(names.contains(&"run_js".to_string()), "native run_js missing: {:?}", names);
     // Upstream tools stubbed: at minimum, run_js from upstream.
     assert!(
-        names.contains(&"mcp__upstream__run_js".to_string()),
-        "expected mcp__upstream__run_js in tool list, got: {:?}",
+        names.contains(&"runjs__upstream__run_js".to_string()),
+        "expected runjs__upstream__run_js in tool list, got: {:?}",
         names,
     );
     // Several upstream tools should be stubbed (run_js, get_execution, list_executions, ...).
-    let stub_count = names.iter().filter(|n| n.starts_with("mcp__upstream__")).count();
+    let stub_count = names.iter().filter(|n| n.starts_with("runjs__upstream__")).count();
     assert!(stub_count >= 2, "expected multiple upstream stubs, got: {:?}", names);
 
     // Stub schemas should mirror the upstream tool's schema. For run_js
@@ -151,7 +164,7 @@ async fn outer_server_advertises_upstream_tools_as_stubs() -> Result<(), Box<dyn
         .as_array()
         .unwrap()
         .iter()
-        .find(|t| t.get("name").and_then(|n| n.as_str()) == Some("mcp__upstream__run_js"))
+        .find(|t| t.get("name").and_then(|n| n.as_str()) == Some("runjs__upstream__run_js"))
         .expect("stub present");
     let schema = &stub["inputSchema"];
     assert!(
@@ -185,7 +198,7 @@ async fn calling_a_stub_returns_run_js_instructions() -> Result<(), Box<dyn std:
             "id": 2,
             "method": "tools/call",
             "params": {
-                "name": "mcp__upstream__run_js",
+                "name": "runjs__upstream__run_js",
                 "arguments": {"code": "return 1 + 1;"}
             }
         }))
@@ -222,6 +235,113 @@ async fn calling_a_stub_returns_run_js_instructions() -> Result<(), Box<dyn std:
         .unwrap_or_default()
         .to_string();
     assert!(!text.contains("mcp.callTool"), "native list_executions should not return stub text: {}", text);
+
+    server.stop().await;
+    common::cleanup_heap_dir(&outer_heap);
+    common::cleanup_heap_dir(&upstream_heap);
+    Ok(())
+}
+
+#[tokio::test]
+async fn mcp_stub_prefix_flag_overrides_default() -> Result<(), Box<dyn std::error::Error>> {
+    let outer_heap = common::create_temp_heap_dir() + "-outer3";
+    let upstream_heap = common::create_temp_heap_dir() + "-upstream3";
+    std::fs::create_dir_all(&outer_heap).ok();
+    std::fs::create_dir_all(&upstream_heap).ok();
+
+    let mut server = OuterServer::start_with_args(
+        &outer_heap,
+        &upstream_heap,
+        &["--mcp-stub-prefix", "rj_"],
+    )
+    .await?;
+    server.initialize().await?;
+
+    let list = server
+        .send(json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list",
+            "params": {}
+        }))
+        .await?;
+    let names = tool_names(&list);
+    // Stubs use the new prefix.
+    assert!(
+        names.contains(&"rj_upstream__run_js".to_string()),
+        "expected rj_upstream__run_js in tool list, got: {:?}",
+        names,
+    );
+    // The default prefix is no longer present.
+    assert!(
+        !names.iter().any(|n| n.starts_with("runjs__")),
+        "default-prefixed stubs should not appear: {:?}",
+        names,
+    );
+
+    server.stop().await;
+    common::cleanup_heap_dir(&outer_heap);
+    common::cleanup_heap_dir(&upstream_heap);
+    Ok(())
+}
+
+#[tokio::test]
+async fn mcp_stubs_disabled_flag_hides_stubs() -> Result<(), Box<dyn std::error::Error>> {
+    let outer_heap = common::create_temp_heap_dir() + "-outer4";
+    let upstream_heap = common::create_temp_heap_dir() + "-upstream4";
+    std::fs::create_dir_all(&outer_heap).ok();
+    std::fs::create_dir_all(&upstream_heap).ok();
+
+    let mut server = OuterServer::start_with_args(
+        &outer_heap,
+        &upstream_heap,
+        &["--mcp-stubs", "false"],
+    )
+    .await?;
+    server.initialize().await?;
+
+    let list = server
+        .send(json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list",
+            "params": {}
+        }))
+        .await?;
+    let names = tool_names(&list);
+    // Native tools still present.
+    assert!(names.contains(&"run_js".to_string()), "native run_js missing: {:?}", names);
+    // No stubs at all.
+    assert!(
+        !names.iter().any(|n| n.starts_with("runjs__")),
+        "stubs should be hidden when --mcp-stubs false: {:?}",
+        names,
+    );
+
+    // Calling a stub-shaped name now falls through to the normal dispatcher,
+    // which returns "tool not found" rather than a stub instruction.
+    let resp = server
+        .send(json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "runjs__upstream__run_js",
+                "arguments": {"code": "return 1;"}
+            }
+        }))
+        .await?;
+    let text = resp["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let err = resp["error"]["message"].as_str().unwrap_or_default().to_string();
+    assert!(
+        !text.contains("mcp.callTool"),
+        "should not return stub instructions when stubs disabled: text={} err={}",
+        text,
+        err,
+    );
 
     server.stop().await;
     common::cleanup_heap_dir(&outer_heap);
