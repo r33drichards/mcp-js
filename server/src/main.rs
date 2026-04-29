@@ -188,6 +188,23 @@ struct Cli {
     ///          {"name": "srv2", "transport": "sse", "url": "http://..."}]
     #[arg(long = "mcp-config", value_name = "PATH")]
     mcp_config: Option<String>,
+
+    /// Expose upstream MCP server tools on the MCPJS server itself as
+    /// `<prefix><server>__<tool>` stubs. When `true` (the default whenever
+    /// at least one --mcp-server is configured), an external client of
+    /// MCPJS can discover those tools via tools/list and tool search;
+    /// calling a stub returns instructional text telling the caller to
+    /// invoke the tool from JavaScript via run_js + mcp.callTool(...).
+    /// Pass `--mcp-stubs false` to disable.
+    #[arg(long = "mcp-stubs", default_value = "true", num_args = 1)]
+    mcp_stubs: bool,
+
+    /// Prefix applied to stub tool names. Defaults to `runjs__` so it is
+    /// obvious to a calling agent that these tools execute through the JS
+    /// runtime rather than dispatching directly. Has no effect when
+    /// --mcp-stubs is false.
+    #[arg(long = "mcp-stub-prefix", default_value = engine::mcp_client::DEFAULT_STUB_PREFIX)]
+    mcp_stub_prefix: String,
 }
 
 #[tokio::main]
@@ -470,8 +487,18 @@ async fn main() -> Result<()> {
     let mcp_server_configs = load_mcp_server_configs(&cli.mcp_servers, &cli.mcp_config)?;
     let engine = if !mcp_server_configs.is_empty() {
         tracing::info!("Connecting to {} MCP server(s)...", mcp_server_configs.len());
+        let stub_config = engine::mcp_client::StubConfig {
+            prefix: cli.mcp_stub_prefix.clone(),
+            enabled: cli.mcp_stubs,
+        };
+        tracing::info!(
+            stubs = stub_config.enabled,
+            prefix = %stub_config.prefix,
+            "Upstream MCP tool stubbing"
+        );
         let manager = engine::mcp_client::McpClientManager::connect(mcp_server_configs).await
-            .map_err(|e| anyhow::anyhow!("MCP server connection failed: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("MCP server connection failed: {}", e))?
+            .with_stub_config(stub_config);
         tracing::info!("All MCP servers connected. JS code can use mcp.callTool(), mcp.listTools(), mcp.servers");
         let engine = engine.with_mcp_client_manager(manager);
         if let Some(chain) = mcp_tools_policy_chain {
