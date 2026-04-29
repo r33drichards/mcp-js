@@ -9,6 +9,7 @@ use std::sync::{Arc, OnceLock};
 
 use crate::engine::Engine;
 use crate::engine::heap_tags::HeapTagEntry;
+use crate::engine::mcp_client::McpClientManager;
 use crate::session::SessionVerifier;
 
 // ── MCP response types ──────────────────────────────────────────────────
@@ -153,6 +154,10 @@ impl IntoContents for QueryHeapTagsResponse {
 pub struct McpService {
     engine: Engine,
     verifier: Option<Arc<SessionVerifier>>,
+    /// Optional manager for upstream MCP servers. When set, those servers'
+    /// tools are exposed as stubs in this service's tool list, and calls to
+    /// those stubs return run_js instructions instead of dispatching.
+    mcp_client: Option<Arc<McpClientManager>>,
     /// Set once during `initialize` from X-MCP-Session-Id header.
     session_id: Arc<OnceLock<String>>,
     /// X-MCP-* headers from the initialize request, available for policy evaluation.
@@ -161,9 +166,11 @@ pub struct McpService {
 
 impl McpService {
     pub fn new(engine: Engine, verifier: Option<Arc<SessionVerifier>>) -> Self {
+        let mcp_client = engine.mcp_client_manager();
         Self {
             engine,
             verifier,
+            mcp_client,
             session_id: Arc::new(OnceLock::new()),
             mcp_headers: Arc::new(OnceLock::new()),
         }
@@ -395,7 +402,6 @@ impl McpService {
     }
 }
 
-#[tool(tool_box)]
 impl ServerHandler for McpService {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
@@ -403,6 +409,32 @@ impl ServerHandler for McpService {
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             ..Default::default()
         }
+    }
+
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParam>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, McpError> {
+        let mut tools = Self::tool_box().list();
+        if let Some(client) = &self.mcp_client {
+            tools.extend(client.stub_tools());
+        }
+        Ok(ListToolsResult { next_cursor: None, tools })
+    }
+
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParam,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        if let Some(client) = &self.mcp_client {
+            if let Some(result) = client.stub_call_response(&request.name, request.arguments.as_ref()) {
+                return Ok(result);
+            }
+        }
+        let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+        Self::tool_box().call(tcc).await
     }
 
     async fn initialize(
@@ -487,15 +519,18 @@ impl IntoContents for StatelessRunJsResponse {
 pub struct StatelessMcpService {
     engine: Engine,
     verifier: Option<Arc<SessionVerifier>>,
+    mcp_client: Option<Arc<McpClientManager>>,
     /// X-MCP-* headers from the initialize request, available for policy evaluation.
     mcp_headers: Arc<OnceLock<serde_json::Value>>,
 }
 
 impl StatelessMcpService {
     pub fn new(engine: Engine, verifier: Option<Arc<SessionVerifier>>) -> Self {
+        let mcp_client = engine.mcp_client_manager();
         Self {
             engine,
             verifier,
+            mcp_client,
             mcp_headers: Arc::new(OnceLock::new()),
         }
     }
@@ -572,7 +607,6 @@ impl StatelessMcpService {
     }
 }
 
-#[tool(tool_box)]
 impl ServerHandler for StatelessMcpService {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
@@ -580,6 +614,32 @@ impl ServerHandler for StatelessMcpService {
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             ..Default::default()
         }
+    }
+
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParam>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, McpError> {
+        let mut tools = Self::tool_box().list();
+        if let Some(client) = &self.mcp_client {
+            tools.extend(client.stub_tools());
+        }
+        Ok(ListToolsResult { next_cursor: None, tools })
+    }
+
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParam,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        if let Some(client) = &self.mcp_client {
+            if let Some(result) = client.stub_call_response(&request.name, request.arguments.as_ref()) {
+                return Ok(result);
+            }
+        }
+        let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+        Self::tool_box().call(tcc).await
     }
 
     async fn initialize(

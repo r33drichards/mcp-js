@@ -1295,6 +1295,12 @@ impl Engine {
         self
     }
 
+    /// Get the MCP client manager (if any). Used by the MCP server side to
+    /// expose upstream tools as stubs.
+    pub fn mcp_client_manager(&self) -> Option<Arc<mcp_client::McpClientManager>> {
+        self.mcp_client_manager.clone()
+    }
+
     /// Set OPA policy chain for MCP tool calls (`mcp.callTool()`).
     pub fn with_mcp_tools_policy_chain(mut self, chain: Arc<opa::PolicyChain>) -> Self {
         self.mcp_tools_policy_chain = Some(chain);
