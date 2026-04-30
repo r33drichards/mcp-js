@@ -5,6 +5,7 @@
 /// then decompresses some payload, prints the round-tripped result, and we
 /// inspect the captured console output.
 
+use std::io::Read;
 use std::sync::Once;
 use server::engine::ExecutionConfig;
 
@@ -319,4 +320,103 @@ fn streaming_produces_output_before_close() {
     "#, preamble = PREAMBLE));
     assert!(out.contains("pre-close-done=false"), "expected chunk before close: {}", out);
     assert!(!out.contains("bytes=0"), "expected non-zero bytes: {}", out);
+}
+
+/// Extract a hex-encoded byte string printed via console.log.
+fn extract_hex(out: &str, marker: &str) -> Vec<u8> {
+    let line = out
+        .lines()
+        .find(|l| l.contains(marker))
+        .unwrap_or_else(|| panic!("marker {} not found in:\n{}", marker, out));
+    let hex = line
+        .split_once('=')
+        .map(|(_, h)| h.trim())
+        .unwrap_or_else(|| panic!("no = in line: {}", line));
+    let mut bytes = Vec::with_capacity(hex.len() / 2);
+    let chars: Vec<char> = hex.chars().collect();
+    for pair in chars.chunks(2) {
+        let s: String = pair.iter().collect();
+        bytes.push(u8::from_str_radix(&s, 16).expect("invalid hex"));
+    }
+    bytes
+}
+
+/// JS-encoded gzip output must decode through an independent path
+/// (`flate2::read::GzDecoder`, which uses miniz_oxide). This proves the
+/// produced bytes are real RFC 1952 gzip and not just self-consistent
+/// with our own encoder.
+#[test]
+fn gzip_output_is_rfc1952_compliant_with_external_decoder() {
+    let payload = "Litematica schematic payload - make me real gzip! ".repeat(40);
+    let out = run(&format!(r#"
+        {preamble}
+        (async () => {{
+            const enc = {{ encode: encodeAscii }};
+            const bytes = enc.encode({payload});
+            // Two uneven chunks to exercise streaming inside a single member.
+            const mid = Math.floor(bytes.length / 3);
+            const compressed = await pump(new CompressionStream('gzip'),
+                [bytes.slice(0, mid), bytes.slice(mid)]);
+            console.log("hex=" + toHex(compressed));
+        }})().catch(e => console.log("ERR:" + e.message));
+    "#, preamble = PREAMBLE, payload = serde_json::to_string(&payload).unwrap()));
+
+    let bytes = extract_hex(&out, "hex=");
+
+    // RFC 1952: gzip stream starts with 0x1f 0x8b.
+    assert_eq!(bytes[0], 0x1f, "missing gzip magic byte 0");
+    assert_eq!(bytes[1], 0x8b, "missing gzip magic byte 1");
+    // Compression method 8 = deflate.
+    assert_eq!(bytes[2], 8, "expected deflate compression method");
+
+    let mut decoder = flate2::read::GzDecoder::new(&bytes[..]);
+    let mut decoded = String::new();
+    decoder
+        .read_to_string(&mut decoded)
+        .expect("flate2 GzDecoder should decode JS-encoded gzip");
+    assert_eq!(decoded, payload, "decoded payload mismatch");
+}
+
+/// Reverse direction: a gzip stream produced by Rust's flate2 must decompress
+/// through `DecompressionStream('gzip')` in JS. This proves we accept
+/// standard RFC 1952 input from any source.
+#[test]
+fn gzip_input_from_external_encoder_decompresses() {
+    use flate2::Compression;
+    use flate2::write::GzEncoder;
+    use std::io::Write;
+
+    let payload = "external gzip payload ".repeat(50);
+    let mut enc = GzEncoder::new(Vec::new(), Compression::default());
+    enc.write_all(payload.as_bytes()).unwrap();
+    let compressed = enc.finish().unwrap();
+    let hex: String = compressed.iter().map(|b| format!("{:02x}", b)).collect();
+
+    let out = run(&format!(r#"
+        {preamble}
+        function fromHex(s) {{
+            const out = new Uint8Array(s.length / 2);
+            for (let i = 0; i < out.length; i++) {{
+                out[i] = parseInt(s.substr(i*2, 2), 16);
+            }}
+            return out;
+        }}
+        (async () => {{
+            const dec = {{ decode: decodeAscii }};
+            const compressed = fromHex({hex});
+            // Feed the externally-encoded bytes in tiny chunks to make the
+            // decoder do real streaming work.
+            const chunks = [];
+            for (let i = 0; i < compressed.length; i += 13) {{
+                chunks.push(compressed.slice(i, Math.min(i + 13, compressed.length)));
+            }}
+            const decompressed = await pump(new DecompressionStream('gzip'), chunks);
+            console.log("decoded=" + dec.decode(decompressed));
+        }})().catch(e => console.log("ERR:" + e.message));
+    "#,
+    preamble = PREAMBLE,
+    hex = serde_json::to_string(&hex).unwrap()));
+
+    let expected = format!("decoded={}", payload);
+    assert!(out.contains(&expected), "decoded mismatch.\ngot:\n{}", out);
 }
