@@ -344,11 +344,22 @@ pub fn make_stub_tool(prefix: &str, server: &str, tool: &Tool) -> Tool {
     } else {
         format!("{}\n\n{}", header, original_desc)
     };
+    // Drop annotations from stubs: upstream servers (e.g. GitHub MCP,
+    // Linear) may return `null` for optional boolean hint fields
+    // (readOnlyHint, destructiveHint, etc.). The rmcp ToolAnnotations
+    // struct serializes Option::None as JSON `null` (its fields lack
+    // skip_serializing_if), which violates the MCP spec and causes
+    // Claude Code SDK's Zod validator to reject the entire tools/list
+    // response.
+    //
+    // Since stubs are discovery mechanisms (they return instructions, not
+    // results), upstream annotations about behavior are misleading anyway.
+    // Setting annotations to None omits the field entirely from the JSON.
     Tool {
         name: stub_name.into(),
         description: Some(new_desc.into()),
         input_schema: tool.input_schema.clone(),
-        annotations: tool.annotations.clone(),
+        annotations: None,
     }
 }
 
@@ -889,5 +900,56 @@ mod tests {
         assert!(mgr.stub_call_response("runjs__github__delete_issue", None).is_none());
         // Default-prefix dispatcher should reject the old `mcp__` prefix.
         assert!(mgr.stub_call_response("mcp__github__create_issue", None).is_none());
+    }
+
+    #[test]
+    fn make_stub_drops_annotations_with_nulls() {
+        use rmcp::model::ToolAnnotations;
+
+        // Simulate GitHub MCP server: hints with None values that would
+        // serialize as JSON null and break Claude Code SDK's Zod validator.
+        let upstream = Tool {
+            name: "create_issue".into(),
+            description: Some("Create issue".into()),
+            input_schema: schema(json!({"title": {"type": "string"}})),
+            annotations: Some(ToolAnnotations {
+                title: Some("Create a GitHub issue".into()),
+                read_only_hint: None,
+                destructive_hint: None,
+                idempotent_hint: None,
+                open_world_hint: None,
+            }),
+        };
+        let stub = make_stub_tool("runjs__", "github", &upstream);
+
+        // Stubs should never carry upstream annotations — they are discovery
+        // mechanisms, not executable tools, so behavioral hints are misleading.
+        let json = serde_json::to_value(&stub).unwrap();
+        assert!(json.get("annotations").is_none(),
+            "stub annotations should be absent to avoid null serialization issues");
+    }
+
+    #[test]
+    fn make_stub_drops_annotations_even_when_valid() {
+        use rmcp::model::ToolAnnotations;
+
+        // Even fully valid annotations are dropped — stubs don't execute.
+        let upstream = Tool {
+            name: "get_file".into(),
+            description: Some("Get file contents".into()),
+            input_schema: schema(json!({"path": {"type": "string"}})),
+            annotations: Some(ToolAnnotations {
+                title: Some("Get file".into()),
+                read_only_hint: Some(true),
+                destructive_hint: Some(false),
+                idempotent_hint: Some(true),
+                open_world_hint: Some(false),
+            }),
+        };
+        let stub = make_stub_tool("runjs__", "github", &upstream);
+
+        let json = serde_json::to_value(&stub).unwrap();
+        assert!(json.get("annotations").is_none(),
+            "stub annotations should be absent");
     }
 }
