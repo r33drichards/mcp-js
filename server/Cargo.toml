@@ -22,7 +22,7 @@ serde_json = "1.0.140"
 tokio = { version = "1.45.0", features = ["rt-multi-thread", "process", "signal", "time", "sync", "macros"] }
 tracing = "0.1.41"
 tracing-subscriber = "0.3.19"
-deno_core = "0.381"
+deno_core = "0.386"
 deno_error = "0.7"
 aws-config = "0.0.26-alpha"
 aws-sdk-s3 = "0.0.26-alpha"
@@ -53,12 +53,8 @@ uuid = { version = "1.0", features = ["v4"] }
 dashmap = "6"
 jsonwebtoken = "9"
 flate2 = "1"
-
-[patch.crates-io]
-# Fixes Vec<&str> heap leak in prepare_for_snapshot: the `extensions` field
-# was not ManuallyDrop so mem::forget(self) leaked its backing buffer.
-# Upstream PR pending; using our fork until merged.
-deno_core = { git = "https://github.com/r33drichards/deno_core", rev = "1c97a0ad596fed8c258803c020194243ef4441cc" }
+deno_web = "=0.264.0"
+deno_webidl = "=0.233.0"
 
 [dev-dependencies]
 tokio-test = "0.4"

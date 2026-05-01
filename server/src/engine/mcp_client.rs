@@ -478,7 +478,7 @@ struct McpToolPolicyInput {
 
 /// Async op: call an MCP tool. Spawned on a separate tokio task to avoid
 /// RefCell re-entrancy issues (same pattern as op_fetch).
-#[op2(async)]
+#[op2(async(lazy), fast)]
 #[string]
 async fn op_mcp_call_tool(
     state: Rc<RefCell<OpState>>,

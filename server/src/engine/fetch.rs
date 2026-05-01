@@ -132,7 +132,7 @@ struct UrlParsed {
 /// Async op: performs an OPA-gated HTTP fetch. Called from JS via
 /// `Deno.core.ops.op_fetch(url, method, headersJson, body)`.
 /// Returns a JSON string with {status, statusText, url, headers, body}.
-#[op2(async)]
+#[op2(async(lazy), fast)]
 #[string]
 async fn op_fetch(
     state: Rc<RefCell<OpState>>,

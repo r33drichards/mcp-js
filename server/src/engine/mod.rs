@@ -1,4 +1,3 @@
-pub mod compression;
 pub mod console;
 pub mod execution;
 pub mod fetch;
@@ -780,7 +779,18 @@ pub fn execute_stateless(
             extensions.push(mcp_client::create_extension());
         }
         extensions.push(timers::create_extension());
-        extensions.push(compression::create_extension());
+        // deno_web ships TextEncoder/TextDecoder, Blob, ReadableStream/
+        // WritableStream/TransformStream, AbortController, URL, atob/btoa,
+        // CompressionStream/DecompressionStream (gzip + deflate + deflate-raw
+        // + brotli), structured cloning, EventTarget, etc. deno_webidl is its
+        // only Rust-side dep. We supply a default in-process BlobStore and
+        // BroadcastChannel — neither has any cross-isolate scope.
+        extensions.push(deno_webidl::deno_webidl::init());
+        extensions.push(deno_web::deno_web::init(
+            std::sync::Arc::new(deno_web::BlobStore::default()),
+            None,
+            deno_web::InMemoryBroadcastChannel::default(),
+        ));
 
         // Always create a module loader — all code runs as ES modules.
         let module_loader: Rc<dyn deno_core::ModuleLoader> = match module_loader_config {
@@ -858,10 +868,6 @@ pub fn execute_stateless(
                 }
                 // Inject setTimeout/clearTimeout (always available).
                 if let Err(e) = timers::inject_timers(&mut runtime) {
-                    return Err(e);
-                }
-                // Inject CompressionStream / DecompressionStream (always available).
-                if let Err(e) = compression::inject_compression(&mut runtime) {
                     return Err(e);
                 }
                 // Harden sandbox: freeze ops, neutralize introspection, remove __bootstrap.
@@ -950,7 +956,18 @@ pub fn execute_stateful(
             extensions.push(mcp_client::create_extension());
         }
         extensions.push(timers::create_extension());
-        extensions.push(compression::create_extension());
+        // deno_web ships TextEncoder/TextDecoder, Blob, ReadableStream/
+        // WritableStream/TransformStream, AbortController, URL, atob/btoa,
+        // CompressionStream/DecompressionStream (gzip + deflate + deflate-raw
+        // + brotli), structured cloning, EventTarget, etc. deno_webidl is its
+        // only Rust-side dep. We supply a default in-process BlobStore and
+        // BroadcastChannel — neither has any cross-isolate scope.
+        extensions.push(deno_webidl::deno_webidl::init());
+        extensions.push(deno_web::deno_web::init(
+            std::sync::Arc::new(deno_web::BlobStore::default()),
+            None,
+            deno_web::InMemoryBroadcastChannel::default(),
+        ));
 
         // Always create a module loader — all code runs as ES modules.
         let module_loader: Rc<dyn deno_core::ModuleLoader> = match module_loader_config {
@@ -1039,10 +1056,6 @@ pub fn execute_stateful(
                     }
                     // Inject setTimeout/clearTimeout (always available).
                     if let Err(e) = timers::inject_timers(&mut runtime) {
-                        return Err(e);
-                    }
-                    // Inject CompressionStream / DecompressionStream (always available).
-                    if let Err(e) = compression::inject_compression(&mut runtime) {
                         return Err(e);
                     }
                     // Harden sandbox: freeze ops, neutralize introspection, remove __bootstrap.

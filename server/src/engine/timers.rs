@@ -12,7 +12,7 @@ use deno_error::JsErrorBox;
 /// Async op: sleeps for `delay_ms` milliseconds. Called from JS via
 /// `Deno.core.ops.op_timer_sleep(delay_ms)`.
 /// Returns a Promise that resolves after the delay.
-#[op2(async)]
+#[op2(async(lazy), fast)]
 async fn op_timer_sleep(#[number] delay_ms: u64) -> Result<(), JsErrorBox> {
     tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
     Ok(())

@@ -73,7 +73,7 @@ struct FsPolicyInput {
 // ── Async deno_core ops ──────────────────────────────────────────────────
 
 /// Read a file as UTF-8 text.
-#[op2(async)]
+#[op2(async(lazy), fast)]
 #[string]
 async fn op_fs_read_file_text(
     state: Rc<RefCell<OpState>>,
@@ -96,7 +96,7 @@ async fn op_fs_read_file_text(
 }
 
 /// Read a file as raw bytes, returned as a Uint8Array to JavaScript.
-#[op2(async)]
+#[op2(async(lazy), fast)]
 #[buffer]
 async fn op_fs_read_file_buffer(
     state: Rc<RefCell<OpState>>,
@@ -116,7 +116,7 @@ async fn op_fs_read_file_buffer(
 }
 
 /// Write a file from a UTF-8 string.
-#[op2(async)]
+#[op2(async(lazy), fast)]
 #[string]
 async fn op_fs_write_file_text(
     state: Rc<RefCell<OpState>>,
@@ -139,7 +139,7 @@ async fn op_fs_write_file_text(
 }
 
 /// Write a file from raw bytes (Uint8Array from JavaScript).
-#[op2(async)]
+#[op2(async(lazy), fast)]
 #[string]
 async fn op_fs_write_file_buffer(
     state: Rc<RefCell<OpState>>,
@@ -162,7 +162,7 @@ async fn op_fs_write_file_buffer(
 }
 
 /// Append to a file.
-#[op2(async)]
+#[op2(async(lazy), fast)]
 #[string]
 async fn op_fs_append_file(
     state: Rc<RefCell<OpState>>,
@@ -193,7 +193,7 @@ async fn op_fs_append_file(
 }
 
 /// Read a directory. Returns JSON array of entry names.
-#[op2(async)]
+#[op2(async(lazy), fast)]
 #[string]
 async fn op_fs_readdir(
     state: Rc<RefCell<OpState>>,
@@ -224,7 +224,7 @@ async fn op_fs_readdir(
 }
 
 /// Stat a path. Returns JSON with size, isFile, isDirectory, etc.
-#[op2(async)]
+#[op2(async(lazy), fast)]
 #[string]
 async fn op_fs_stat(
     state: Rc<RefCell<OpState>>,
@@ -267,7 +267,7 @@ async fn op_fs_stat(
 }
 
 /// Create a directory.
-#[op2(async)]
+#[op2(async(lazy), fast)]
 #[string]
 async fn op_fs_mkdir(
     state: Rc<RefCell<OpState>>,
@@ -294,7 +294,7 @@ async fn op_fs_mkdir(
 }
 
 /// Remove a file or directory.
-#[op2(async)]
+#[op2(async(lazy), fast)]
 #[string]
 async fn op_fs_rm(
     state: Rc<RefCell<OpState>>,
@@ -328,7 +328,7 @@ async fn op_fs_rm(
 }
 
 /// Rename (move) a file or directory.
-#[op2(async)]
+#[op2(async(lazy), fast)]
 #[string]
 async fn op_fs_rename(
     state: Rc<RefCell<OpState>>,
@@ -351,7 +351,7 @@ async fn op_fs_rename(
 }
 
 /// Copy a file.
-#[op2(async)]
+#[op2(async(lazy), fast)]
 #[string]
 async fn op_fs_copy_file(
     state: Rc<RefCell<OpState>>,
@@ -374,7 +374,7 @@ async fn op_fs_copy_file(
 }
 
 /// Check if a path exists.
-#[op2(async)]
+#[op2(async(lazy), fast)]
 #[string]
 async fn op_fs_exists(
     state: Rc<RefCell<OpState>>,
