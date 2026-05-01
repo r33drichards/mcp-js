@@ -46,7 +46,13 @@ jobs:
 
       - name: Run fuzzer (${{ matrix.target }})
         env:
-          ASAN_OPTIONS: quarantine_size_mb=64:malloc_context_size=5:allocator_may_return_null=1
+          # detect_leaks=0: deno_core 0.386 leaks 32 bytes per JsRuntime
+          # creation (a Vec<&'static str> of extension names dropped via
+          # std::mem::forget in InnerIsolateState::prepare_for_snapshot).
+          # This is a tiny upstream leak that's unrelated to the safety
+          # bugs the fuzzer is looking for, and on every iteration LSAN
+          # would otherwise terminate the worker.
+          ASAN_OPTIONS: quarantine_size_mb=64:malloc_context_size=5:allocator_may_return_null=1:detect_leaks=0
         run: |
           # Use fork mode (-fork=1) so each worker gets a clean address space,
           # preventing cumulative ASAN shadow memory growth from killing the

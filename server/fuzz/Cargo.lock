@@ -1062,8 +1062,9 @@ dependencies = [
 
 [[package]]
 name = "deno_core"
-version = "0.381.1"
-source = "git+https://github.com/r33drichards/deno_core?rev=1c97a0ad596fed8c258803c020194243ef4441cc#1c97a0ad596fed8c258803c020194243ef4441cc"
+version = "0.386.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f5cdb60d25f7e87f7f3bb5b1fcbd8d059ab908d614c0ad67dafce7f6c1514f08"
 dependencies = [
  "anyhow",
  "az",
@@ -1081,6 +1082,7 @@ dependencies = [
  "deno_unsync",
  "futures",
  "indexmap",
+ "inventory",
  "libc",
  "parking_lot 0.12.5",
  "percent-encoding",
@@ -1131,8 +1133,9 @@ dependencies = [
 
 [[package]]
 name = "deno_ops"
-version = "0.257.0"
-source = "git+https://github.com/r33drichards/deno_core?rev=1c97a0ad596fed8c258803c020194243ef4441cc#1c97a0ad596fed8c258803c020194243ef4441cc"
+version = "0.262.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "34b785cc3c336f7414d49a05119fa001ced8dff3150fdda671fc11eb4ccd15f4"
 dependencies = [
  "indexmap",
  "proc-macro2",
@@ -1316,7 +1319,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1350,6 +1353,16 @@ name = "find-msvc-tools"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
+
+[[package]]
+name = "flate2"
+version = "1.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "843fba2746e448b37e26a819579957415c8cef339bf08564fe8b7ddbd959573c"
+dependencies = [
+ "crc32fast",
+ "miniz_oxide",
+]
 
 [[package]]
 name = "fluent-uri"
@@ -1884,7 +1897,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.2",
+ "socket2 0.5.10",
  "system-configuration",
  "tokio",
  "tower-service",
@@ -2093,6 +2106,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e0242819d153cba4b4b05a5a8f2a7e9bbf97b6055b2a002b395c96b5ff3c0222"
 dependencies = [
  "cfg-if",
+]
+
+[[package]]
+name = "inventory"
+version = "0.3.24"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4f0c30c76f2f4ccee3fe55a2435f691ca00c0e4bd87abe4f4a851b1d4dac39b"
+dependencies = [
+ "rustversion",
 ]
 
 [[package]]
@@ -2331,6 +2353,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fa76a2c86f704bdb222d66965fb3d63269ce38518b83cb0575fca855ebb6316"
 dependencies = [
  "adler2",
+ "simd-adler32",
 ]
 
 [[package]]
@@ -2823,7 +2846,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls 0.23.36",
- "socket2 0.6.2",
+ "socket2 0.5.10",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -2860,9 +2883,9 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.2",
+ "socket2 0.5.10",
  "tracing",
- "windows-sys 0.60.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3200,7 +3223,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3213,7 +3236,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3482,8 +3505,9 @@ dependencies = [
 
 [[package]]
 name = "serde_v8"
-version = "0.290.0"
-source = "git+https://github.com/r33drichards/deno_core?rev=1c97a0ad596fed8c258803c020194243ef4441cc#1c97a0ad596fed8c258803c020194243ef4441cc"
+version = "0.295.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cb620fe7d5bf70c50297bdd48621b1c365c0f6535e607a1b0aaab961939fe3e8"
 dependencies = [
  "deno_error",
  "num-bigint",
@@ -3520,6 +3544,7 @@ dependencies = [
  "dashmap 6.1.0",
  "deno_core",
  "deno_error",
+ "flate2",
  "futures",
  "http-body-util",
  "hyper 1.8.1",
@@ -3600,6 +3625,12 @@ dependencies = [
  "errno",
  "libc",
 ]
+
+[[package]]
+name = "simd-adler32"
+version = "0.3.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "703d5c7ef118737c72f1af64ad2f6f8c5e1921f818cdcb97b8fe6fc69bf66214"
 
 [[package]]
 name = "simple_asn1"
@@ -3737,6 +3768,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "psm",
+ "windows-sys 0.52.0",
  "windows-sys 0.59.0",
 ]
 
@@ -4266,7 +4298,7 @@ dependencies = [
  "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
