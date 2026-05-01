@@ -53,8 +53,6 @@ uuid = { version = "1.0", features = ["v4"] }
 dashmap = "6"
 jsonwebtoken = "9"
 flate2 = "1"
-deno_web = "=0.264.0"
-deno_webidl = "=0.233.0"
 
 [dev-dependencies]
 tokio-test = "0.4"

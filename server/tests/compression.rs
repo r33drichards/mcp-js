@@ -298,7 +298,7 @@ fn unknown_format_throws() {
 
 #[test]
 fn streaming_produces_output_before_close() {
-    // Verifies that the encoder sync-flushes on each write — i.e. some bytes
+    // Verifies that the encoder sync-flushes on each write; some bytes
     // become available on the readable side before the writable is closed.
     // We do NOT call writer.close() here: if we can drain a chunk while the
     // writable is still open, streaming is working.
