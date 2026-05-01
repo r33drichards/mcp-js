@@ -88,7 +88,9 @@
           # so we can inject our fixed replace-workspace-values script.
           cargoDeps = (rustPlatform.fetchCargoVendor {
             src = ./server;
-            hash = "sha256-ubgki0Sm0dYYFGWIu5SVnODR0SNSMAEZNRgn9t+Dorg=";
+            # Cargo.lock changed substantially in this branch (deno_core
+            # upgrade + new compression deps); needs a fresh hash.
+            hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
           }).overrideAttrs (old: {
             nativeBuildInputs = map (dep:
               if (dep.name or "") == "replace-workspace-values"
