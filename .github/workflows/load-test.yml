@@ -59,11 +59,11 @@ jobs:
 
       # ── Build ───────────────────────────────────────────────────────
       - name: Build MCP-V8 binary
-        run: nix develop --command bash -c "cd server && cargo build --release"
+        run: nix develop --command bash -c "cargo build --release -p server"
 
       - name: Verify binary
         run: |
-          ls -lh server/target/release/server
+          ls -lh target/release/server
 
       # ── Prepare data directories ────────────────────────────────────
       - name: Create data directories
@@ -76,7 +76,7 @@ jobs:
       # ── Start server(s) ─────────────────────────────────────────────
       - name: Start ${{ env.LABEL }} server(s)
         run: |
-          BINARY="$(pwd)/server/target/release/server"
+          BINARY="$(pwd)/target/release/server"
 
           if [ "${{ matrix.topology }}" = "single" ]; then
             # ── Single node ─────────────────────────────────

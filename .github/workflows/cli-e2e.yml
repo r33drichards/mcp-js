@@ -25,10 +25,10 @@ jobs:
       - uses: DeterminateSystems/flake-checker-action@main
 
       - name: Build server binary
-        run: nix develop --command bash -c "cd server && cargo build --release && cp target/release/server ../server-bin"
+        run: nix develop --command bash -c "cargo build --release -p server && cp target/release/server server-bin"
 
       - name: Build CLI binary
-        run: nix develop --command bash -c "cd mcp-v8-client && cargo build --release --bin mcp-v8-cli && cp target/release/mcp-v8-cli ../cli-bin"
+        run: nix develop --command bash -c "cargo build --release -p mcp-v8-client --bin mcp-v8-cli && cp target/release/mcp-v8-cli cli-bin"
 
       - name: Run bash CLI E2E tests
         run: |

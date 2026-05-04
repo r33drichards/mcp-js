@@ -50,8 +50,7 @@ fn cli_bin() -> String {
 ///
 /// Resolved in priority order:
 ///   1. `SERVER_BIN` environment variable (explicit override)
-///   2. `../server/target/release/server` relative to the workspace root
-///   3. `../../server/target/release/server` as a fallback
+///   2. `target/release/server` relative to the workspace root
 fn server_bin() -> String {
     if let Ok(bin) = env::var("SERVER_BIN") {
         return bin;
@@ -62,7 +61,6 @@ fn server_bin() -> String {
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."));
     let candidate = workspace_root
-        .join("server")
         .join("target")
         .join("release")
         .join("server");
@@ -70,7 +68,7 @@ fn server_bin() -> String {
         return candidate.to_string_lossy().to_string();
     }
     // Fallback: assume tests run from workspace root
-    "server/target/release/server".to_string()
+    "target/release/server".to_string()
 }
 
 // ── Server lifecycle ──────────────────────────────────────────────────────────
