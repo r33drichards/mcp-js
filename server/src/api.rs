@@ -7,7 +7,6 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use utoipa::{OpenApi, ToSchema};
-use utoipa_axum::router::OpenApiRouter;
 
 use crate::engine::Engine;
 
@@ -360,19 +359,5 @@ pub fn api_router(engine: Engine) -> Router {
         .route("/api/executions/{id}", get(get_execution_handler))
         .route("/api/executions/{id}/output", get(get_execution_output_handler))
         .route("/api/executions/{id}/cancel", post(cancel_execution_handler))
-        .with_state(engine)
-}
-
-/// Build an `OpenApiRouter` (utoipa-axum) that carries the full OpenAPI
-/// schema alongside the routes.  Merge this into your Axum app and call
-/// `.split_for_parts()` to obtain both the router and the `OpenApi` spec.
-pub fn openapi_router(engine: Engine) -> OpenApiRouter {
-    use utoipa_axum::routes;
-    OpenApiRouter::with_openapi(ApiDoc::openapi())
-        .routes(routes!(exec_handler))
-        .routes(routes!(list_executions_handler))
-        .routes(routes!(get_execution_handler))
-        .routes(routes!(get_execution_output_handler))
-        .routes(routes!(cancel_execution_handler))
         .with_state(engine)
 }

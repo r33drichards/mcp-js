@@ -51,6 +51,7 @@ pub struct ExecutionRecord {
 /// Summary returned by `list()`.
 #[derive(Debug, Clone, Serialize)]
 pub struct ExecutionSummary {
+    #[serde(rename = "execution_id")]
     pub id: ExecutionId,
     pub status: String,
     pub started_at: String,

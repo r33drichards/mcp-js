@@ -45,7 +45,7 @@ enum Commands {
 
         /// Per-execution V8 heap memory cap in megabytes.
         #[arg(long)]
-        heap_memory_max_mb: Option<i64>,
+        heap_memory_max_mb: Option<u64>,
 
         /// Per-execution timeout in seconds.
         #[arg(long)]
