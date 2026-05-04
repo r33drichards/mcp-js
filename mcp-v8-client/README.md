@@ -6,17 +6,10 @@ The client is generated at build time from `openapi.json` using [progenitor](htt
 
 ## Installation (CLI binary)
 
-Download the pre-built binary from the [GitHub Releases](https://github.com/r33drichards/mcp-js/releases) page, or use the install script:
+Download the pre-built binary from the [GitHub Releases](https://github.com/r33drichards/mcp-js/releases) page, or use the dedicated CLI install script:
 
 ```bash
-# Install both mcp-v8 server and mcp-v8-cli in one go
-curl -fsSL https://raw.githubusercontent.com/r33drichards/mcp-js/main/install.sh | bash
-```
-
-Or install just the CLI:
-
-```bash
-MCP_V8_INSTALL=cli curl -fsSL https://raw.githubusercontent.com/r33drichards/mcp-js/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/r33drichards/mcp-js/main/install-cli.sh | sudo bash
 ```
 
 Or install via cargo (once published):

@@ -24,19 +24,23 @@ A Rust-based Model Context Protocol (MCP) server that exposes a V8 JavaScript ru
 
 ## Installation
 
-Install `mcp-v8` **and** `mcp-v8-cli` using the provided install script:
+Install `mcp-v8` using the provided install script:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/r33drichards/mcp-js/main/install.sh | sudo bash
 ```
 
-This will automatically download and install the latest release for your platform to `/usr/local/bin/` (you may be prompted for your password). Both `mcp-v8` (server) and `mcp-v8-cli` (HTTP API client) are installed.
+This will automatically download and install the latest release for your platform to `/usr/local/bin/mcp-v8` (you may be prompted for your password).
 
-To install **only the CLI**:
+### Installing mcp-v8-cli
+
+Install the CLI client separately using `install-cli.sh`:
 
 ```bash
-MCP_V8_INSTALL=cli curl -fsSL https://raw.githubusercontent.com/r33drichards/mcp-js/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/r33drichards/mcp-js/main/install-cli.sh | sudo bash
 ```
+
+This installs `mcp-v8-cli` to `/usr/local/bin/mcp-v8-cli`.
 
 You can also install the CLI via `cargo` (once the crate is published to crates.io):
 
