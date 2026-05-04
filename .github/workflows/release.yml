@@ -11,8 +11,9 @@ permissions:
   contents: write
 
 jobs:
-  build:
-    name: Build ${{ matrix.name }}
+  # ── Server binary builds ─────────────────────────────────────────────
+  build-server:
+    name: Server – ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -49,17 +50,152 @@ jobs:
       - name: Install target
         run: nix develop --command rustup target add ${{ matrix.target }}
 
-      - name: Build
+      - name: Build server
         run: nix develop --command bash -c "cd server && ${{ matrix.build_cmd }}"
 
-      - name: Upload binary
+      - name: Upload server binary
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.bin_name }}
           path: ${{ matrix.out_path }}
 
+  # ── Regenerate openapi.json from the built server binary ────────────
+  # Uses the Linux x86_64 server binary (lightest runner, no cross-compile).
+  generate-openapi:
+    name: Regenerate openapi.json
+    needs: build-server
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download Linux x86_64 server binary
+        uses: actions/download-artifact@v4
+        with:
+          name: mcp-v8-linux
+          path: dist-server
+
+      - name: Regenerate openapi.json
+        run: |
+          chmod +x dist-server/server
+          dist-server/server --print-openapi > openapi.json
+          echo "Generated openapi.json:"
+          head -5 openapi.json
+
+      - name: Upload openapi.json
+        uses: actions/upload-artifact@v4
+        with:
+          name: openapi-json
+          path: openapi.json
+
+  # ── CLI binary builds (mcp-v8-cli) ─────────────────────────────────
+  build-cli:
+    name: CLI – ${{ matrix.name }}
+    needs: generate-openapi
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - name: Linux x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            bin_name: mcp-v8-cli-linux
+            cargo_target_flag: --target x86_64-unknown-linux-gnu
+            out_path: mcp-v8-client/target/x86_64-unknown-linux-gnu/release/mcp-v8-cli
+          - name: Linux ARM64
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            bin_name: mcp-v8-cli-linux-arm64
+            cargo_target_flag: --target aarch64-unknown-linux-gnu
+            out_path: mcp-v8-client/target/aarch64-unknown-linux-gnu/release/mcp-v8-cli
+          - name: macOS x86_64
+            os: macos-13
+            target: x86_64-apple-darwin
+            bin_name: mcp-v8-cli-macos
+            cargo_target_flag: --target x86_64-apple-darwin
+            out_path: mcp-v8-client/target/x86_64-apple-darwin/release/mcp-v8-cli
+          - name: macOS ARM64
+            os: macos-14
+            target: aarch64-apple-darwin
+            bin_name: mcp-v8-cli-macos-arm64
+            cargo_target_flag: --target aarch64-apple-darwin
+            out_path: mcp-v8-client/target/aarch64-apple-darwin/release/mcp-v8-cli
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download regenerated openapi.json
+        uses: actions/download-artifact@v4
+        with:
+          name: openapi-json
+          path: .
+
+      # Copy fresh spec into client crate so build.rs picks it up
+      - name: Sync openapi.json into client crate
+        run: cp openapi.json mcp-v8-client/openapi.json
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "mcp-v8-client -> target"
+
+      - name: Build CLI
+        run: |
+          cd mcp-v8-client
+          cargo build --release ${{ matrix.cargo_target_flag }}
+
+      - name: Upload CLI binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.bin_name }}
+          path: ${{ matrix.out_path }}
+
+  # ── Publish mcp-v8-client to crates.io ──────────────────────────────
+  publish-crate:
+    name: Publish mcp-v8-client to crates.io
+    needs: generate-openapi
+    runs-on: ubuntu-latest
+    # Only publish on real version tag pushes, not workflow_dispatch
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download regenerated openapi.json
+        uses: actions/download-artifact@v4
+        with:
+          name: openapi-json
+          path: .
+
+      - name: Sync openapi.json into client crate
+        run: cp openapi.json mcp-v8-client/openapi.json
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "mcp-v8-client -> target"
+
+      - name: Verify package
+        run: |
+          cd mcp-v8-client
+          cargo package --list
+
+      - name: Publish to crates.io
+        run: |
+          cd mcp-v8-client
+          cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        continue-on-error: true  # Don't fail the release if already published at this version
+
+  # ── Assemble GitHub Release ──────────────────────────────────────────
   release:
-    needs: build
+    needs: [build-server, build-cli]
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
@@ -79,19 +215,27 @@ jobs:
             fi
           done
           mkdir -p dist/final
+
+          # Skip non-binary artifact directories
           for dir in dist/*; do
-            if [ -d "$dir" ] && [ "$dir" != "dist/final" ]; then
+            if [ -d "$dir" ] && [ "$dir" != "dist/final" ] && [ "$dir" != "dist/openapi-json" ]; then
               echo "Processing directory: $dir"
-              bin=$(ls "$dir")
+              bin=$(ls "$dir" | head -1)
               echo "Found binary: $bin in $dir"
               dir_trimmed=$(echo "$dir" | sed 's/^dist\///')
               echo "Copying $dir/$bin to dist/final/$bin-$dir_trimmed"
               cp "$dir/$bin" "dist/final/$bin-$dir_trimmed"
             fi
           done
-          # Gzip each binary in dist/final
+
+          # Also include openapi.json in the release
+          if [ -f "dist/openapi-json/openapi.json" ]; then
+            cp dist/openapi-json/openapi.json dist/final/openapi.json
+          fi
+
+          # Gzip each binary in dist/final (not .json files)
           for file in dist/final/*; do
-            if [ -f "$file" ]; then
+            if [ -f "$file" ] && [[ "$file" != *.json ]] && [[ "$file" != *.gz ]]; then
               gzip -c "$file" > "$file.gz"
             fi
           done

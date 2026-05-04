@@ -1,0 +1,130 @@
+name: Publish mcp-v8-client
+
+# Mirrors the pattern from ip-allocator-webserver/publish-rust-sdk.yml.
+#
+# On every push to main that touches the server API or client crate:
+#   - Verifies the client builds cleanly against the committed openapi.json
+#   - Publishes to crates.io (continues on error — handles "already published")
+#
+# On pull_requests: builds and comments with install instructions.
+# On workflow_dispatch: optionally publish with a custom version.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'server/src/api.rs'
+      - 'mcp-v8-client/**'
+      - 'openapi.json'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'server/src/api.rs'
+      - 'mcp-v8-client/**'
+      - 'openapi.json'
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Publish to crates.io (yes/no)'
+        required: false
+        default: 'no'
+
+env:
+  PACKAGE_NAME: "mcp-v8-client"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "mcp-v8-client -> target"
+
+      - name: Determine version
+        id: version
+        run: |
+          BASE_VERSION=$(grep -E '^version = ' mcp-v8-client/Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          if [ "${{ github.event_name }}" == "pull_request" ]; then
+            PR_NUMBER="${{ github.event.pull_request.number }}"
+            SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+            VERSION="${BASE_VERSION}-beta.${PR_NUMBER}.${SHORT_SHA}"
+          else
+            VERSION="$BASE_VERSION"
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "📦 Package version: $VERSION"
+
+      - name: Build client
+        run: |
+          cd mcp-v8-client
+          cargo build --release --verbose
+
+      - name: Verify package
+        run: |
+          cd mcp-v8-client
+          cargo package --list
+
+      - name: Publish to crates.io (main branch)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          cd mcp-v8-client
+          cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        continue-on-error: true
+
+      - name: Publish to crates.io (manual)
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.publish == 'yes'
+        run: |
+          cd mcp-v8-client
+          cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Comment on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const version = '${{ steps.version.outputs.version }}';
+            const packageName = '${{ env.PACKAGE_NAME }}';
+            const comment = `## 🦀 mcp-v8-client Built Successfully
+
+            **Package:** \`${packageName}\`
+            **Version:** \`${version}\`
+
+            ### Add as dependency
+
+            \`\`\`toml
+            [dependencies]
+            ${packageName} = { git = "https://github.com/${{ github.repository }}", branch = "${{ github.head_ref }}" }
+            \`\`\`
+
+            ### CLI (from this branch)
+
+            \`\`\`bash
+            cargo install --git https://github.com/${{ github.repository }} --branch ${{ github.head_ref }} mcp-v8-client
+            \`\`\`
+            `;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mcp-v8-client-${{ steps.version.outputs.version }}
+          path: mcp-v8-client/
+          retention-days: 30
