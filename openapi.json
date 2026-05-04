@@ -1,0 +1,490 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "mcp-v8",
+    "description": "HTTP API for the mcp-v8 JavaScript execution server",
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/api/exec": {
+      "post": {
+        "tags": [
+          "executions"
+        ],
+        "summary": "Submit JavaScript code for asynchronous execution.",
+        "description": "Submit JavaScript code for asynchronous execution.\n\nReturns immediately with an `execution_id`. Use `GET /api/executions/{id}`\nto poll status and `GET /api/executions/{id}/output` to read console output.",
+        "operationId": "exec_handler",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExecRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Execution queued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecAccepted"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/executions": {
+      "get": {
+        "tags": [
+          "executions"
+        ],
+        "summary": "List all known executions (running and recently completed).",
+        "operationId": "list_executions_handler",
+        "responses": {
+          "200": {
+            "description": "Execution list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecutionList"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/executions/{id}": {
+      "get": {
+        "tags": [
+          "executions"
+        ],
+        "summary": "Get the status and result of an execution.",
+        "operationId": "get_execution_handler",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Execution ID returned by POST /api/exec",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Execution found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecutionInfo"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Execution not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/executions/{id}/output": {
+      "get": {
+        "tags": [
+          "executions"
+        ],
+        "summary": "Read paginated console output from an execution.",
+        "description": "Read paginated console output from an execution.\n\nSupports both line-based (`line_offset` / `line_limit`) and byte-based\n(`byte_offset` / `byte_limit`) pagination. Use `has_more` and\n`next_line_offset` / `next_byte_offset` to iterate.",
+        "operationId": "get_execution_output_handler",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Execution ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "line_offset",
+            "in": "query",
+            "description": "Return output starting at this line number (0-indexed).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "nullable": true
+            }
+          },
+          {
+            "name": "line_limit",
+            "in": "query",
+            "description": "Maximum number of lines to return.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "nullable": true
+            }
+          },
+          {
+            "name": "byte_offset",
+            "in": "query",
+            "description": "Return output starting at this byte offset.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "nullable": true
+            }
+          },
+          {
+            "name": "byte_limit",
+            "in": "query",
+            "description": "Maximum number of bytes to return.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "nullable": true
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Output page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecutionOutput"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Execution not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/executions/{id}/cancel": {
+      "post": {
+        "tags": [
+          "executions"
+        ],
+        "summary": "Cancel a running execution.",
+        "operationId": "cancel_execution_handler",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Execution ID to cancel",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cancel accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CancelResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Cannot cancel (e.g. already finished)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CancelResult"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ExecRequest": {
+        "type": "object",
+        "required": [
+          "code"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "JavaScript (or TypeScript) source code to execute."
+          },
+          "heap": {
+            "type": "string",
+            "description": "Serialised heap snapshot key to restore before execution.",
+            "nullable": true
+          },
+          "session": {
+            "type": "string",
+            "description": "Session identifier used for tagging / logging.",
+            "nullable": true
+          },
+          "heap_memory_max_mb": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Per-execution V8 heap memory cap in megabytes.",
+            "nullable": true
+          },
+          "execution_timeout_secs": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Per-execution timeout in seconds (overrides server default).",
+            "nullable": true
+          },
+          "tags": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "Arbitrary key/value tags attached to the resulting heap snapshot.",
+            "nullable": true
+          }
+        }
+      },
+      "ExecAccepted": {
+        "type": "object",
+        "required": [
+          "execution_id"
+        ],
+        "properties": {
+          "execution_id": {
+            "type": "string",
+            "description": "Unique identifier for the queued execution."
+          }
+        }
+      },
+      "ExecutionInfo": {
+        "type": "object",
+        "required": [
+          "execution_id",
+          "status",
+          "started_at"
+        ],
+        "properties": {
+          "execution_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "description": "Current status: running, completed, failed, cancelled, timed_out."
+          },
+          "result": {
+            "type": "string",
+            "description": "Final return value serialised to JSON (present when status is completed).",
+            "nullable": true
+          },
+          "heap": {
+            "type": "string",
+            "description": "Heap snapshot key produced after execution.",
+            "nullable": true
+          },
+          "error": {
+            "type": "string",
+            "description": "Error message (present when status is failed).",
+            "nullable": true
+          },
+          "started_at": {
+            "type": "string",
+            "description": "ISO-8601 timestamp when execution started."
+          },
+          "completed_at": {
+            "type": "string",
+            "description": "ISO-8601 timestamp when execution finished (absent while running).",
+            "nullable": true
+          }
+        }
+      },
+      "ExecutionOutput": {
+        "type": "object",
+        "required": [
+          "execution_id",
+          "data",
+          "start_line",
+          "end_line",
+          "next_line_offset",
+          "total_lines",
+          "start_byte",
+          "end_byte",
+          "next_byte_offset",
+          "total_bytes",
+          "has_more",
+          "status"
+        ],
+        "properties": {
+          "execution_id": {
+            "type": "string"
+          },
+          "data": {
+            "type": "string",
+            "description": "Text content for the requested window."
+          },
+          "start_line": {
+            "type": "integer",
+            "format": "int64",
+            "description": "First line number in this page (0-indexed)."
+          },
+          "end_line": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Last line number in this page (exclusive)."
+          },
+          "next_line_offset": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Line offset to use for the next page."
+          },
+          "total_lines": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Total lines written so far."
+          },
+          "start_byte": {
+            "type": "integer",
+            "format": "int64",
+            "description": "First byte offset in this page."
+          },
+          "end_byte": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Last byte offset in this page (exclusive)."
+          },
+          "next_byte_offset": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Byte offset to use for the next page."
+          },
+          "total_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Total bytes written so far."
+          },
+          "has_more": {
+            "type": "boolean",
+            "description": "Whether more output is available beyond this page."
+          },
+          "status": {
+            "type": "string",
+            "description": "Execution status at the time of this query."
+          }
+        }
+      },
+      "ExecutionList": {
+        "type": "object",
+        "required": [
+          "executions"
+        ],
+        "properties": {
+          "executions": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
+        }
+      },
+      "ExecutionSummary": {
+        "type": "object",
+        "required": [
+          "execution_id",
+          "status",
+          "started_at"
+        ],
+        "properties": {
+          "execution_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "started_at": {
+            "type": "string"
+          },
+          "completed_at": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "CancelResult": {
+        "type": "object",
+        "required": [
+          "ok"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "error": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "ApiError": {
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

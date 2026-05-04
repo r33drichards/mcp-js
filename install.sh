@@ -4,6 +4,10 @@ set -e
 REPO="r33drichards/mcp-js"
 INSTALL_DIR="/usr/local/bin"
 
+# What to install: "server", "cli", or "all" (default: "all")
+# Override with: MCP_V8_INSTALL=cli ./install.sh
+INSTALL="${MCP_V8_INSTALL:-all}"
+
 # Detect latest version if not specified
 if [ -z "$MCP_V8_VERSION" ]; then
   MCP_V8_VERSION=$(curl -s "https://api.github.com/repos/$REPO/releases/latest" | grep '"tag_name":' | sed -E 's/.*"tag_name": "([^"]+)".*/\1/')
@@ -22,7 +26,18 @@ ARCH=$(uname -m)
 
 case "$OS" in
   Linux)
-    PLATFORM="linux"
+    case "$ARCH" in
+      x86_64)
+        PLATFORM="linux"
+        ;;
+      aarch64 | arm64)
+        PLATFORM="linux-arm64"
+        ;;
+      *)
+        echo "Unsupported Linux architecture: $ARCH"
+        exit 1
+        ;;
+    esac
     ;;
   Darwin)
     if [ "$ARCH" = "arm64" ]; then
@@ -37,26 +52,42 @@ case "$OS" in
     ;;
 esac
 
-BINARY_NAME="server-mcp-v8-$PLATFORM"
-BINARY_GZ="$BINARY_NAME.gz"
-DOWNLOAD_URL="https://github.com/$REPO/releases/download/$MCP_V8_VERSION/$BINARY_GZ"
+# ── Helper: download, extract, and install a single binary ──────────────
 
-echo "Downloading $DOWNLOAD_URL"
-curl -L -o "$BINARY_GZ" "$DOWNLOAD_URL"
+install_binary() {
+  local ASSET_NAME="$1"     # e.g.  server-mcp-v8-linux
+  local INSTALL_AS="$2"     # e.g.  mcp-v8
+  local BINARY_GZ="${ASSET_NAME}.gz"
+  local DOWNLOAD_URL="https://github.com/$REPO/releases/download/$MCP_V8_VERSION/$BINARY_GZ"
 
-echo "Extracting binary..."
-gunzip -f "$BINARY_GZ"
+  echo ""
+  echo "Downloading $DOWNLOAD_URL"
+  curl -L -o "$BINARY_GZ" "$DOWNLOAD_URL"
 
-# Find install dir
-if [ -w "$INSTALL_DIR" ]; then
-  TARGET="$INSTALL_DIR/mcp-v8"
-  mv "$BINARY_NAME" "$TARGET"
-  chmod +x "$TARGET"
-else
-  TARGET="$INSTALL_DIR/mcp-v8"
-  sudo mv "$BINARY_NAME" "$TARGET"
-  sudo chmod +x "$TARGET"
+  echo "Extracting $BINARY_GZ ..."
+  gunzip -f "$BINARY_GZ"
+
+  if [ -w "$INSTALL_DIR" ]; then
+    mv "$ASSET_NAME" "$INSTALL_DIR/$INSTALL_AS"
+    chmod +x "$INSTALL_DIR/$INSTALL_AS"
+  else
+    sudo mv "$ASSET_NAME" "$INSTALL_DIR/$INSTALL_AS"
+    sudo chmod +x "$INSTALL_DIR/$INSTALL_AS"
+  fi
+
+  echo "Installed $INSTALL_AS to $INSTALL_DIR/$INSTALL_AS"
+}
+
+# ── Install server ───────────────────────────────────────────────────────
+
+if [ "$INSTALL" = "server" ] || [ "$INSTALL" = "all" ]; then
+  install_binary "server-mcp-v8-$PLATFORM" "mcp-v8"
+  echo "You can now run: mcp-v8"
 fi
 
-echo "Installed mcp-v8 to $TARGET"
-echo "You can now run: mcp-v8"
+# ── Install CLI ──────────────────────────────────────────────────────────
+
+if [ "$INSTALL" = "cli" ] || [ "$INSTALL" = "all" ]; then
+  install_binary "mcp-v8-cli-$PLATFORM" "mcp-v8-cli"
+  echo "You can now run: mcp-v8-cli --help"
+fi
