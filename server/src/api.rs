@@ -120,7 +120,7 @@ pub struct ApiError {
 // ── Query params ─────────────────────────────────────────────────────────
 
 /// Optional pagination query parameters for console output.
-#[derive(Deserialize, ToSchema)]
+#[derive(Deserialize, ToSchema, utoipa::IntoParams)]
 pub struct OutputQuery {
     /// Return output starting at this line number (0-indexed).
     #[serde(default)]
