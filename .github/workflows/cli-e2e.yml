@@ -25,15 +25,15 @@ jobs:
       - uses: DeterminateSystems/flake-checker-action@main
 
       - name: Build server binary
-        run: nix develop --command bash -c "cd server && cargo build --release"
+        run: nix develop --command bash -c "cd server && cargo build --release && cp target/release/server ../server-bin"
 
       - name: Build CLI binary
-        run: nix develop --command bash -c "cd mcp-v8-client && cargo build --release --bin mcp-v8-cli"
+        run: nix develop --command bash -c "cd mcp-v8-client && cargo build --release --bin mcp-v8-cli && cp target/release/mcp-v8-cli ../cli-bin"
 
       - name: Run bash CLI E2E tests
         run: |
           # Start the server in HTTP stateless mode
-          ./server/target/release/server --stateless --http-port 3000 &
+          ./server-bin --stateless --http-port 3000 &
           SERVER_PID=$!
 
           cleanup() { kill $SERVER_PID 2>/dev/null || true; }
@@ -60,7 +60,7 @@ jobs:
           fi
 
           # Run the CLI e2e test script
-          CLI_BIN=./mcp-v8-client/target/release/mcp-v8-cli \
+          CLI_BIN=./cli-bin \
           SERVER_URL=http://localhost:3000 \
           bash tests/cli-e2e.sh
 
@@ -69,6 +69,6 @@ jobs:
         # SERVER_BIN points to the pre-built release binary built above.
         run: |
           nix develop --command bash -c "
-            SERVER_BIN=\$(pwd)/server/target/release/server \
+            SERVER_BIN=\$(pwd)/server-bin \
             cargo test --test cli_e2e -p mcp-v8-client -- --test-threads=4 --nocapture
           "
