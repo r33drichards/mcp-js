@@ -8,7 +8,6 @@ use rmcp::transport::streamable_http_server::axum::StreamableHttpServerConfig;
 use tokio_util::sync::CancellationToken;
 use std::sync::Arc;
 use utoipa::OpenApi as _;
-use utoipa_swagger_ui::SwaggerUi;
 mod engine;
 mod mcp;
 mod api;
@@ -619,14 +618,24 @@ where
 
     let (server, mcp_router) = StreamableHttpServer::new(config);
 
-    // Build swagger UI and openapi.json route
-    let swagger = SwaggerUi::new("/swagger-ui")
-        .url("/api-doc/openapi.json", api::ApiDoc::openapi());
+    // Serve OpenAPI JSON spec at /api-doc/openapi.json
+    let openapi_spec = api::ApiDoc::openapi();
+    let openapi_json = serde_json::to_string(&openapi_spec).unwrap_or_default();
+    let openapi_route = axum::Router::new()
+        .route("/api-doc/openapi.json", axum::routing::get(move || {
+            let json = openapi_json.clone();
+            async move {
+                axum::response::Response::builder()
+                    .header("Content-Type", "application/json")
+                    .body(axum::body::Body::from(json))
+                    .unwrap()
+            }
+        }));
 
-    // Merge MCP router with plain HTTP API router and swagger UI
+    // Merge MCP router with plain HTTP API router and openapi route
     let app = mcp_router
         .merge(api::api_router(engine.clone()))
-        .merge(swagger);
+        .merge(openapi_route);
 
     let listener = tokio::net::TcpListener::bind(bind).await?;
     tracing::info!("Streamable HTTP server listening on {}", bind);
@@ -670,14 +679,24 @@ where
 
     let (sse_server, sse_router) = SseServer::new(config);
 
-    // Build swagger UI and openapi.json route
-    let swagger = SwaggerUi::new("/swagger-ui")
-        .url("/api-doc/openapi.json", api::ApiDoc::openapi());
+    // Serve OpenAPI JSON spec at /api-doc/openapi.json
+    let openapi_spec2 = api::ApiDoc::openapi();
+    let openapi_json2 = serde_json::to_string(&openapi_spec2).unwrap_or_default();
+    let openapi_route2 = axum::Router::new()
+        .route("/api-doc/openapi.json", axum::routing::get(move || {
+            let json = openapi_json2.clone();
+            async move {
+                axum::response::Response::builder()
+                    .header("Content-Type", "application/json")
+                    .body(axum::body::Body::from(json))
+                    .unwrap()
+            }
+        }));
 
-    // Merge SSE router with plain HTTP API router and swagger UI
+    // Merge SSE router with plain HTTP API router and openapi route
     let app = sse_router
         .merge(api::api_router(engine.clone()))
-        .merge(swagger);
+        .merge(openapi_route2);
 
     let listener = tokio::net::TcpListener::bind(sse_server.config.bind).await?;
     tracing::info!("SSE server listening on {}", sse_server.config.bind);

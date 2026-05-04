@@ -54,7 +54,6 @@ dashmap = "6"
 jsonwebtoken = "9"
 utoipa = { version = "5", features = ["axum_extras"] }
 utoipa-axum = "0.2"
-utoipa-swagger-ui = { version = "8", features = ["axum"] }
 
 [patch.crates-io]
 # Fixes Vec<&str> heap leak in prepare_for_snapshot: the `extensions` field
