@@ -128,7 +128,7 @@ fi
 echo ""
 echo "--- Test 5: exec + poll until Completed, assert output contains '4' ---"
 
-T5_OUT=$("$CLI_BIN" --url "$SERVER_URL" exec '2+2' 2>&1)
+T5_OUT=$("$CLI_BIN" --url "$SERVER_URL" exec 'console.log(2+2)' 2>&1)
 echo "$T5_OUT"
 T5_ID=$(echo "$T5_OUT" | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | head -1 || true)
 
