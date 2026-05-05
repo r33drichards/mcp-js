@@ -85,6 +85,56 @@ jobs:
           name: ${{ matrix.bin_name }}
           path: target/${{ matrix.target }}/release/mcp-v8-cli
 
+  # ── Server musl static builds (exploratory) ──────────────────────────────
+  # Uses gnu-target rusty_v8 prebuilts with musl linker — fully static binaries.
+  # continue-on-error: true so failures don't block the release.
+  build-server-musl:
+    name: Server (musl) – ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true   # exploratory — don't block release
+    strategy:
+      matrix:
+        include:
+          - name: Linux x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            rusty_v8_target: x86_64-unknown-linux-gnu
+            bin_name: mcp-v8-linux-musl
+          - name: Linux ARM64
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            rusty_v8_target: aarch64-unknown-linux-gnu
+            bin_name: mcp-v8-linux-arm64-musl
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Install musl + build tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            musl-tools clang llvm pkg-config perl
+          echo "LIBCLANG_PATH=$(llvm-config --libdir)" >> $GITHUB_ENV
+          echo "OPENSSL_STATIC=1" >> $GITHUB_ENV
+          echo "OPENSSL_VENDORED=1" >> $GITHUB_ENV
+          echo "CC_aarch64_unknown_linux_musl=clang" >> $GITHUB_ENV
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=clang" >> $GITHUB_ENV
+      - name: Fetch rusty_v8 static library (gnu target)
+        run: |
+          URL="https://github.com/denoland/rusty_v8/releases/download/v${RUSTY_V8_VERSION}/librusty_v8_release_${{ matrix.rusty_v8_target }}.a.gz"
+          curl -fL "$URL" -o librusty_v8.a.gz
+          gunzip librusty_v8.a.gz
+          echo "RUSTY_V8_ARCHIVE=$(pwd)/librusty_v8.a" >> $GITHUB_ENV
+      - name: Build server (musl)
+        run: cargo build --release -p server --target ${{ matrix.target }}
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.bin_name }}
+          path: target/${{ matrix.target }}/release/server
+
   # ── Publish mcp-v8-client to crates.io ────────────────────────────────────
   publish-crate:
     name: Publish mcp-v8-client to crates.io
@@ -109,7 +159,8 @@ jobs:
 
   # ── Assemble GitHub Release ────────────────────────────────────────────────
   release:
-    needs: build-cli
+    needs: [build-cli, build-server-musl]
+    if: always() && needs.build-cli.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -129,6 +180,13 @@ jobs:
             [ -d "$dir" ] || continue
             name=$(basename "$dir")
             cp "$dir/mcp-v8-cli" "dist/final/$name"
+          done
+
+          # Server musl binaries (exploratory — include if present, skip if missing)
+          for entry in mcp-v8-linux-musl mcp-v8-linux-arm64-musl; do
+            dir="dist/$entry"
+            [ -d "$dir" ] || continue
+            cp "$dir/server" "dist/final/$entry" || continue
           done
 
           # Include openapi.json from the repo
