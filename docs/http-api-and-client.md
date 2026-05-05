@@ -3,10 +3,11 @@
 The mcp-v8 server exposes a plain REST API alongside its MCP transport. This
 document covers:
 
-1. [Using the CLI (`mcp-v8-cli`)](#1-cli-mcp-v8-cli)
-2. [Using the Rust SDK (`mcp-v8-client`)](#2-rust-sdk-mcp-v8-client)
-3. [Generating a client for another language](#3-generating-a-client-for-another-language)
-4. [Keeping `openapi.json` up to date](#4-keeping-openapijson-up-to-date)
+1. [API reference](#1-api-reference)
+2. [Installing and using the CLI (`mcp-v8-cli`)](#2-cli-mcp-v8-cli)
+3. [Using the Rust SDK (`mcp-v8-client`)](#3-rust-sdk-mcp-v8-client)
+4. [Generating a client for another language](#4-generating-a-client-for-another-language)
+5. [Keeping `openapi.json` up to date](#5-keeping-openapijson-up-to-date)
 
 ---
 
@@ -28,21 +29,97 @@ export MCP_V8_URL=http://localhost:3000
 
 ---
 
-## 1. CLI (`mcp-v8-cli`)
+## 1. API reference
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/api/version` | GET | Server version |
+| `/api/exec` | POST | Submit JS code for async execution |
+| `/api/executions` | GET | List all executions |
+| `/api/executions/{id}` | GET | Get status + result of an execution |
+| `/api/executions/{id}/output` | GET | Read paginated console output |
+| `/api/executions/{id}/cancel` | POST | Cancel a running execution |
+| `/api/cli` | GET | CLI download index (version + per-platform URLs) |
+| `/api/cli/{platform}` | GET | Download the CLI binary for a platform |
+| `/api-doc/openapi.json` | GET | OpenAPI 3.0 specification |
+
+### GET /api/version
+
+```bash
+$ curl http://localhost:3000/api/version
+{"version":"0.1.0"}
+```
+
+### GET /api/cli
+
+Returns the server version and direct download URLs for each platform. URLs
+point to this server — the binary served is the exact CLI that shipped with
+this server version.
+
+```bash
+$ curl http://localhost:3000/api/cli
+{
+  "version": "0.1.0",
+  "assets": [
+    { "platform": "linux-x86_64",  "url": "http://localhost:3000/api/cli/linux-x86_64",  "available": true  },
+    { "platform": "linux-aarch64", "url": "http://localhost:3000/api/cli/linux-aarch64", "available": true  },
+    { "platform": "macos-x86_64",  "url": "http://localhost:3000/api/cli/macos-x86_64",  "available": true  },
+    { "platform": "macos-aarch64", "url": "http://localhost:3000/api/cli/macos-aarch64", "available": true  }
+  ]
+}
+```
+
+`available: false` means the server was built without embedded CLI binaries
+(local/dev builds). Release builds always have `available: true`.
+
+### GET /api/cli/{platform}
+
+Streams the CLI binary directly (no redirect, no GitHub dependency).
+
+Supported platforms: `linux-x86_64`, `linux-aarch64`, `macos-x86_64`, `macos-aarch64`.
+
+```bash
+# Download and run immediately
+curl -fL http://my-server:3000/api/cli/linux-x86_64 -o mcp-v8-cli
+chmod +x mcp-v8-cli
+./mcp-v8-cli --url http://my-server:3000 exec 'console.log("hello")'
+```
+
+Returns `404` with a JSON error for unknown platforms or dev builds without
+embedded binaries.
+
+---
+
+## 2. CLI (`mcp-v8-cli`)
 
 ### Installation
 
-**From a GitHub Release (recommended):**
+**Directly from your server (recommended — always matches the server version):**
 
 ```bash
 # Linux x86_64
+curl -fL http://my-server:3000/api/cli/linux-x86_64 -o mcp-v8-cli && chmod +x mcp-v8-cli
+
+# Linux ARM64
+curl -fL http://my-server:3000/api/cli/linux-aarch64 -o mcp-v8-cli && chmod +x mcp-v8-cli
+
+# macOS ARM64 (Apple Silicon)
+curl -fL http://my-server:3000/api/cli/macos-aarch64 -o mcp-v8-cli && chmod +x mcp-v8-cli
+
+# macOS x86_64 (Intel)
+curl -fL http://my-server:3000/api/cli/macos-x86_64 -o mcp-v8-cli && chmod +x mcp-v8-cli
+```
+
+**From a GitHub Release:**
+
+```bash
 curl -fsSL https://raw.githubusercontent.com/r33drichards/mcp-js/main/install-cli.sh | sudo bash
 ```
 
 **From source:**
 
 ```bash
-cargo install mcp-v8-client   # once published to crates.io
+cargo install mcp-v8-client   # crates.io
 # or from the repo root:
 cargo build --release -p mcp-v8-client
 # binary is at ./target/release/mcp-v8-cli
@@ -147,6 +224,21 @@ mcp-v8-cli executions output "$ID"
 # 4
 ```
 
+#### One-liner: download CLI, run it, get output
+
+```bash
+SERVER=http://my-server:3000
+
+# Download CLI matching this server's version
+curl -fL $SERVER/api/cli/linux-x86_64 -o mcp-v8-cli && chmod +x mcp-v8-cli
+
+# Submit, poll, print output
+ID=$(./mcp-v8-cli --url $SERVER --json exec 'console.log(1+1)' | jq -r .execution_id)
+until [ "$(./mcp-v8-cli --url $SERVER --json executions get $ID | jq -r .status)" = "completed" ]; do sleep 0.2; done
+./mcp-v8-cli --url $SERVER executions output $ID
+# 2
+```
+
 ### Optional flags for `exec`
 
 ```bash
@@ -162,7 +254,7 @@ mcp-v8-cli exec --tag env=prod --tag user=alice 'doSomething()'
 
 ---
 
-## 2. Rust SDK (`mcp-v8-client`)
+## 3. Rust SDK (`mcp-v8-client`)
 
 The crate wraps the auto-generated [progenitor](https://github.com/oxidecomputer/progenitor)
 client with a thin async `Client` struct.
@@ -275,7 +367,7 @@ loop {
 
 ---
 
-## 3. Generating a client for another language
+## 4. Generating a client for another language
 
 The server emits an OpenAPI 3.0.3 spec. Any standard OpenAPI generator works.
 
@@ -341,7 +433,7 @@ CI enforces this — see the next section.
 
 ---
 
-## 4. Keeping `openapi.json` up to date
+## 5. Keeping `openapi.json` up to date
 
 A dedicated workflow (`.github/workflows/openapi-drift.yml`) runs on every
 push and PR. It:
@@ -359,4 +451,53 @@ cargo build --release -p server
 cp openapi.json mcp-v8-client/openapi.json
 git add openapi.json mcp-v8-client/openapi.json
 git commit -m "chore: regenerate openapi.json"
+```
+
+---
+
+## How the CLI binary embedding works
+
+The CLI binary is embedded directly into the server binary at compile time
+using `include_bytes!`. This means:
+
+- No GitHub API calls at download time — the binary is served from memory
+- The CLI always matches the server version exactly
+- `GET /api/cli/{platform}` is a plain HTTP download, no redirects
+
+### For release builds (CI)
+
+The release workflow uses a two-pass build:
+
+1. **Pass 1:** Build server → generate `openapi.json` → build CLI
+2. **Pass 2:** Rebuild server with `MCP_V8_CLI_<PLATFORM>=/path/to/cli` env
+   vars set → `server/build.rs` copies them into `OUT_DIR` → `include_bytes!`
+   embeds them
+
+### For local/dev builds
+
+No env vars are set, so `build.rs` writes empty placeholder files. The
+`/api/cli/{platform}` endpoint returns 404 with a message explaining how to
+embed:
+
+```
+{"error": "CLI binary for 'linux-x86_64' is not embedded in this build.
+           Set MCP_V8_CLI_LINUX_X86_64 at build time to embed it."}
+```
+
+To test the full flow locally:
+
+```bash
+# Build the CLI first
+cargo build --release -p mcp-v8-client
+
+# Rebuild the server with it embedded
+MCP_V8_CLI_LINUX_X86_64=$(pwd)/target/release/mcp-v8-cli \
+  cargo build --release -p server
+
+# Now the server serves the CLI directly
+./target/release/server --stateless --http-port 3000 &
+curl -fL http://localhost:3000/api/cli/linux-x86_64 -o mcp-v8-cli
+chmod +x mcp-v8-cli
+./mcp-v8-cli --url http://localhost:3000 exec 'console.log(1+1)'
+# → output: 2
 ```
