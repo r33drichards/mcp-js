@@ -70,7 +70,7 @@ jobs:
 
       - name: Also test pre-built CLI binary directly
         run: |
-          RESULT=$(./cli --url http://127.0.0.1:9090 --json exec '"hello from cli"')
+          RESULT=$(./cli --url http://127.0.0.1:9090 --json exec 'console.log("hello from cli")')
           EXEC_ID=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin)['execution_id'])")
           for i in $(seq 1 30); do
             sleep 0.5
