@@ -24,18 +24,21 @@ jobs:
             bin_name: mcp-v8-linux
             build_cmd: cargo build --release --target x86_64-unknown-linux-gnu -p server
             out_path: target/x86_64-unknown-linux-gnu/release/server
+            gen_openapi: true
           - name: Linux ARM64
             os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             bin_name: mcp-v8-linux-arm64
             build_cmd: cargo build --release --target aarch64-unknown-linux-gnu -p server
             out_path: target/aarch64-unknown-linux-gnu/release/server
+            gen_openapi: false
           - name: macOS ARM64
             os: macos-14
             target: aarch64-apple-darwin
             bin_name: mcp-v8-macos-arm64
             build_cmd: cargo build --release --target aarch64-apple-darwin -p server
             out_path: target/aarch64-apple-darwin/release/server
+            gen_openapi: false
 
     steps:
       - name: Checkout code
@@ -57,30 +60,19 @@ jobs:
           name: ${{ matrix.bin_name }}-pass1
           path: ${{ matrix.out_path }}
 
-  # ── Regenerate openapi.json from the built server binary ────────────
-  # Uses the Linux x86_64 server binary (lightest runner, no cross-compile).
-  generate-openapi:
-    name: Regenerate openapi.json
-    needs: build-server
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Download Linux x86_64 server binary
-        uses: actions/download-artifact@v4
-        with:
-          name: mcp-v8-linux-pass1
-          path: dist-server
-
+      # Generate openapi.json while Nix is still active (Linux x86_64 only).
+      # The binary is a Nix-linked ELF; it can only run inside a Nix environment.
       - name: Regenerate openapi.json
+        if: ${{ matrix.gen_openapi }}
         run: |
-          chmod +x dist-server/server
-          dist-server/server --print-openapi > openapi.json
+          nix develop --command bash -c "
+            ${{ matrix.out_path }} --print-openapi > openapi.json
+          "
           echo "Generated openapi.json:"
           head -5 openapi.json
 
       - name: Upload openapi.json
+        if: ${{ matrix.gen_openapi }}
         uses: actions/upload-artifact@v4
         with:
           name: openapi-json
@@ -89,7 +81,7 @@ jobs:
   # ── CLI binary builds (mcp-v8-cli) ─────────────────────────────────
   build-cli:
     name: CLI – ${{ matrix.name }}
-    needs: generate-openapi
+    needs: build-server
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -221,7 +213,7 @@ jobs:
   # ── Publish mcp-v8-client to crates.io ──────────────────────────────
   publish-crate:
     name: Publish mcp-v8-client to crates.io
-    needs: generate-openapi
+    needs: build-server
     runs-on: ubuntu-latest
     # Only publish on real version tag pushes, not workflow_dispatch
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
