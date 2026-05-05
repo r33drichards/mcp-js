@@ -1,0 +1,74 @@
+name: CLI E2E Tests
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  cli-e2e:
+    name: CLI E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+        with:
+          extra-conf: |
+            sandbox = relaxed
+
+      - uses: DeterminateSystems/flake-checker-action@main
+
+      - name: Build server binary
+        run: nix develop --command bash -c "cargo build --release -p server && cp target/release/server server-bin"
+
+      - name: Build CLI binary
+        run: nix develop --command bash -c "cargo build --release -p mcp-v8-client --bin mcp-v8-cli && cp target/release/mcp-v8-cli cli-bin"
+
+      - name: Run bash CLI E2E tests
+        run: |
+          # Start the server in HTTP stateless mode
+          ./server-bin --stateless --http-port 3000 &
+          SERVER_PID=$!
+
+          cleanup() { kill $SERVER_PID 2>/dev/null || true; }
+          trap cleanup EXIT
+
+          # Wait for server to be ready (up to 30s)
+          echo "Waiting for server to be ready..."
+          for i in $(seq 1 30); do
+            HTTP_CODE=$(curl -s --max-time 5 -o /dev/null -w '%{http_code}' \
+              http://localhost:3000/api/exec \
+              -H 'Content-Type: application/json' \
+              -d '{"code": "1+1"}' 2>/dev/null || echo "000")
+            if [ "$HTTP_CODE" = "202" ] || [ "$HTTP_CODE" = "200" ]; then
+              echo "Server is ready (HTTP $HTTP_CODE)"
+              break
+            fi
+            echo "  attempt $i: HTTP $HTTP_CODE"
+            sleep 1
+          done
+
+          if [ "$HTTP_CODE" != "202" ] && [ "$HTTP_CODE" != "200" ]; then
+            echo "ERROR: Server did not become ready after 30 attempts"
+            exit 1
+          fi
+
+          # Run the CLI e2e test script
+          CLI_BIN=./cli-bin \
+          SERVER_URL=http://localhost:3000 \
+          bash tests/cli-e2e.sh
+
+      - name: Run Rust CLI integration tests
+        # Each test starts its own server, so no external server is needed here.
+        # SERVER_BIN points to the pre-built release binary built above.
+        run: |
+          nix develop --command bash -c "
+            SERVER_BIN=\$(pwd)/server-bin \
+            cargo test --test cli_e2e -p mcp-v8-client -- --test-threads=4 --nocapture
+          "

@@ -18,7 +18,7 @@ COPY . .
 RUN rustup default nightly
 
 # Build the release binary
-RUN cd server && cargo build --release
+RUN cargo build --release -p server
 
 # Runtime stage
 FROM debian:trixie-slim
@@ -33,7 +33,7 @@ RUN apt-get update && apt-get install -y \
 RUN useradd -m -u 1000 mcpuser
 
 # Copy the binary from builder
-COPY --from=builder /app/server/target/release/server /usr/local/bin/mcp-v8
+COPY --from=builder /app/target/release/server /usr/local/bin/mcp-v8
 
 # Set ownership
 RUN chown mcpuser:mcpuser /usr/local/bin/mcp-v8

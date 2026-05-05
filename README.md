@@ -32,13 +32,137 @@ curl -fsSL https://raw.githubusercontent.com/r33drichards/mcp-js/main/install.sh
 
 This will automatically download and install the latest release for your platform to `/usr/local/bin/mcp-v8` (you may be prompted for your password).
 
+### Installing mcp-v8-cli
+
+Install the CLI client separately using `install-cli.sh`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/r33drichards/mcp-js/main/install-cli.sh | sudo bash
+```
+
+This installs `mcp-v8-cli` to `/usr/local/bin/mcp-v8-cli`.
+
+You can also install the CLI via `cargo` (once the crate is published to crates.io):
+
+```bash
+cargo install mcp-v8-client
+```
+
+Or download a pre-built binary directly from the [GitHub Releases](https://github.com/r33drichards/mcp-js/releases) page.
+
 ---
 
 *Advanced users: If you prefer to build from source, see the [Build from Source](#build-from-source) section at the end of this document.*
 
+## HTTP API & OpenAPI
+
+When running with `--http-port` or `--sse-port`, the server exposes a plain REST API alongside the MCP transport:
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/api/exec` | POST | Submit JS code for async execution |
+| `/api/executions` | GET | List all executions |
+| `/api/executions/{id}` | GET | Get status + result of an execution |
+| `/api/executions/{id}/output` | GET | Read paginated console output |
+| `/api/executions/{id}/cancel` | POST | Cancel a running execution |
+| `/swagger-ui` | GET | Interactive Swagger UI |
+| `/api-doc/openapi.json` | GET | OpenAPI 3.0 specification |
+
+The OpenAPI specification is also committed to the repo root as [`openapi.json`](./openapi.json).
+
+### Regenerating openapi.json
+
+```bash
+cd server
+cargo build --release
+./target/release/server --print-openapi > ../openapi.json
+cp ../openapi.json ../mcp-v8-client/openapi.json
+```
+
+## mcp-v8-cli
+
+The `mcp-v8-cli` binary is a fully-typed command-line client for the HTTP API, auto-generated from the OpenAPI spec via [progenitor](https://github.com/oxidecomputer/progenitor).
+
+```
+Usage: mcp-v8-cli [OPTIONS] <COMMAND>
+
+Options:
+  --url <URL>    Base URL of the mcp-v8 server [env: MCP_V8_URL] [default: http://localhost:3000]
+  -j, --json     Output raw JSON
+
+Commands:
+  exec                      Submit JavaScript code for asynchronous execution
+  executions list           List all known executions
+  executions get <ID>       Get status and result of an execution
+  executions output <ID>    Read paginated console output
+  executions cancel <ID>    Cancel a running execution
+```
+
+### CLI Examples
+
+```bash
+# Start the server in HTTP mode
+mcp-v8 --stateless --http-port 3000 &
+
+# Submit code and get an execution ID
+mcp-v8-cli exec "console.log('hello'); 1 + 1"
+# ✅ Execution queued
+#    execution_id: 550e8400-e29b-41d4-a716-446655440000
+
+# Poll until complete
+mcp-v8-cli executions get 550e8400-e29b-41d4-a716-446655440000
+# status : completed
+# result : 2
+
+# Read console output
+mcp-v8-cli executions output 550e8400-e29b-41d4-a716-446655440000
+# hello
+
+# Pipe-friendly JSON output
+mcp-v8-cli --json exec "42" | jq .execution_id
+
+# Cancel a long-running execution
+mcp-v8-cli executions cancel 550e8400-e29b-41d4-a716-446655440000
+
+# Point at a remote server via env var
+export MCP_V8_URL=https://my-server.example.com
+mcp-v8-cli executions list
+```
+
+## mcp-v8-client (Rust crate)
+
+The [`mcp-v8-client`](./mcp-v8-client/) crate provides a typed Rust client generated at build time from `openapi.json`:
+
+```toml
+[dependencies]
+mcp-v8-client = "0.1.0"   # crates.io
+# or from git:
+# mcp-v8-client = { git = "https://github.com/r33drichards/mcp-js" }
+```
+
+```rust
+use mcp_v8_client::Client;
+
+let client = Client::new("http://localhost:3000");
+let body = mcp_v8_client::types::ExecRequest {
+    code: "1 + 1".to_string(),
+    heap: None, session: None,
+    heap_memory_max_mb: None, execution_timeout_secs: None, tags: None,
+};
+let resp = client.exec_handler(&body).await?;
+println!("execution_id: {}", resp.into_inner().execution_id);
+```
+
 ## Command Line Arguments
 
 `mcp-v8` supports the following command line arguments:
+
+### Utility Options
+
+- `--print-openapi`: Print the OpenAPI JSON specification to stdout and exit. Use this to regenerate `openapi.json`:
+  ```bash
+  mcp-v8 --print-openapi > openapi.json
+  ```
 
 ### Storage Options
 
@@ -893,7 +1017,7 @@ cd server
 cargo build --release
 ```
 
-The built binary will be located at `server/target/release/server`. You can use this path in the integration steps above instead of `/usr/local/bin/mcp-v8` if desired.
+The built binary will be located at `target/release/server`. You can use this path in the integration steps above instead of `/usr/local/bin/mcp-v8` if desired.
 
 <!-- load-test-report -->
 # MCP-V8 Load Test Benchmark Report v0.1.0

@@ -7,6 +7,7 @@ use rmcp::transport::StreamableHttpServer;
 use rmcp::transport::streamable_http_server::axum::StreamableHttpServerConfig;
 use tokio_util::sync::CancellationToken;
 use std::sync::Arc;
+use utoipa::OpenApi as _;
 mod engine;
 mod mcp;
 mod api;
@@ -34,6 +35,11 @@ fn default_max_concurrent() -> usize {
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
+
+    /// Print the OpenAPI JSON specification to stdout and exit.
+    /// Use this to regenerate openapi.json: `./server --print-openapi > openapi.json`
+    #[arg(long)]
+    print_openapi: bool,
 
     /// S3 bucket name (required if --use-s3)
     #[arg(long, conflicts_with_all = ["directory_path", "stateless"])]
@@ -217,6 +223,13 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
+
+    // ── --print-openapi: dump spec and exit ─────────────────────────────
+    if cli.print_openapi {
+        let spec = api::ApiDoc::openapi();
+        println!("{}", serde_json::to_string_pretty(&spec).expect("serialize OpenAPI spec"));
+        return Ok(());
+    }
 
     tracing::info!(?cli, "Starting MCP server with CLI arguments");
 
@@ -605,8 +618,24 @@ where
 
     let (server, mcp_router) = StreamableHttpServer::new(config);
 
-    // Merge MCP router with plain HTTP API router
-    let app = mcp_router.merge(api::api_router(engine.clone()));
+    // Serve OpenAPI JSON spec at /api-doc/openapi.json
+    let openapi_spec = api::ApiDoc::openapi();
+    let openapi_json = serde_json::to_string(&openapi_spec).unwrap_or_default();
+    let openapi_route = axum::Router::new()
+        .route("/api-doc/openapi.json", axum::routing::get(move || {
+            let json = openapi_json.clone();
+            async move {
+                axum::response::Response::builder()
+                    .header("Content-Type", "application/json")
+                    .body(axum::body::Body::from(json))
+                    .unwrap()
+            }
+        }));
+
+    // Merge MCP router with plain HTTP API router and openapi route
+    let app = mcp_router
+        .merge(api::api_router(engine.clone()))
+        .merge(openapi_route);
 
     let listener = tokio::net::TcpListener::bind(bind).await?;
     tracing::info!("Streamable HTTP server listening on {}", bind);
@@ -650,8 +679,24 @@ where
 
     let (sse_server, sse_router) = SseServer::new(config);
 
-    // Merge SSE router with plain HTTP API router
-    let app = sse_router.merge(api::api_router(engine.clone()));
+    // Serve OpenAPI JSON spec at /api-doc/openapi.json
+    let openapi_spec2 = api::ApiDoc::openapi();
+    let openapi_json2 = serde_json::to_string(&openapi_spec2).unwrap_or_default();
+    let openapi_route2 = axum::Router::new()
+        .route("/api-doc/openapi.json", axum::routing::get(move || {
+            let json = openapi_json2.clone();
+            async move {
+                axum::response::Response::builder()
+                    .header("Content-Type", "application/json")
+                    .body(axum::body::Body::from(json))
+                    .unwrap()
+            }
+        }));
+
+    // Merge SSE router with plain HTTP API router and openapi route
+    let app = sse_router
+        .merge(api::api_router(engine.clone()))
+        .merge(openapi_route2);
 
     let listener = tokio::net::TcpListener::bind(sse_server.config.bind).await?;
     tracing::info!("SSE server listening on {}", sse_server.config.bind);
