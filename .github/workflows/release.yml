@@ -17,127 +17,13 @@ env:
   GLIBC_FLOOR: "2.17"
 
 jobs:
-  # ── Server binary builds ─────────────────────────────────────────────
-  # Uses cargo-zigbuild for portable glibc-floored Linux binaries.
-  # macOS builds use plain cargo (system frameworks, no glibc concern).
-  build-server:
-    name: Server – ${{ matrix.name }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        include:
-          - name: Linux x86_64
-            os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            bin_name: mcp-v8-linux
-            rusty_v8_target: x86_64-unknown-linux-gnu
-            gen_openapi: true
-            use_zigbuild: true
-          - name: Linux ARM64
-            os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-            bin_name: mcp-v8-linux-arm64
-            rusty_v8_target: aarch64-unknown-linux-gnu
-            gen_openapi: false
-            use_zigbuild: true
-          - name: macOS ARM64
-            os: macos-14
-            target: aarch64-apple-darwin
-            bin_name: mcp-v8-macos-arm64
-            rusty_v8_target: aarch64-apple-darwin
-            gen_openapi: false
-            use_zigbuild: false
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Install build dependencies (Linux only)
-        if: ${{ matrix.use_zigbuild }}
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
-            clang llvm pkg-config perl
-          echo "LIBCLANG_PATH=$(llvm-config --libdir)" >> $GITHUB_ENV
-          # zigbuild's wrapped CC strips /usr/include; openssl headers are split
-          # between /usr/include/openssl/ and /usr/include/<arch>-linux-gnu/openssl/.
-          # Merge both into a single dir that openssl-sys can use.
-          ARCH_TRIPLE=$(dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || echo "x86_64-linux-gnu")
-          # zigbuild replaces CC with its own wrapper that uses Zig's libc headers,
-          # which don't include system openssl. Create a symlink so Zig's default
-          # include search path (/usr/include) actually contains the arch headers.
-          for f in /usr/include/${ARCH_TRIPLE}/openssl/*.h; do sudo ln -sf "$f" "/usr/include/openssl/$(basename $f)" 2>/dev/null || true; done
-          echo "OPENSSL_INCLUDE_DIR=/usr/include" >> $GITHUB_ENV
-          # Use vendored openssl — the system libcrypto requires glibc 2.34+ which
-          # is incompatible with our 2.17 glibc floor target. Vendored compiles
-          # openssl from source as a static lib with no external glibc deps.
-          echo "OPENSSL_VENDORED=1" >> $GITHUB_ENV
-          # Also tell the linker where system libs live for any crate that emits
-          # cargo:rustc-link-lib=ssl outside of openssl-sys (e.g. ring)
-          echo "RUSTFLAGS=-L/usr/lib/${ARCH_TRIPLE}" >> $GITHUB_ENV
-
-
-      # ── Linux: install Zig + cargo-zigbuild for portable glibc floor ──
-      - name: Install Zig + cargo-zigbuild (Linux only)
-        if: ${{ matrix.use_zigbuild }}
-        run: |
-          pip install ziglang --quiet
-          cargo install cargo-zigbuild --locked --quiet
-
-      # ── Download pre-built rusty_v8 static library ────────────────────
-      # Avoids network access during build and works in any environment.
-      - name: Fetch rusty_v8 static library
-        run: |
-          URL="https://github.com/denoland/rusty_v8/releases/download/v${RUSTY_V8_VERSION}/librusty_v8_release_${{ matrix.rusty_v8_target }}.a.gz"
-          echo "Fetching $URL"
-          curl -fL "$URL" -o librusty_v8.a.gz
-          gunzip librusty_v8.a.gz
-          echo "RUSTY_V8_ARCHIVE=$(pwd)/librusty_v8.a" >> $GITHUB_ENV
-
-      # ── Build server (first pass — no embedded CLI) ───────────────────
-      - name: Build server – Linux (cargo-zigbuild)
-        if: ${{ matrix.use_zigbuild }}
-        run: |
-          cargo zigbuild --release -p server \
-            --target ${{ matrix.target }}.${{ env.GLIBC_FLOOR }}
-
-      - name: Build server – macOS (cargo)
-        if: ${{ !matrix.use_zigbuild }}
-        run: cargo build --release -p server --target ${{ matrix.target }}
-
-      - name: Upload server binary (first pass)
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.bin_name }}-pass1
-          path: target/${{ matrix.target }}/release/server
-
-      # ── Generate openapi.json while binary is available (Linux x86_64) ─
-      - name: Regenerate openapi.json
-        if: ${{ matrix.gen_openapi }}
-        run: |
-          chmod +x target/${{ matrix.target }}/release/server
-          target/${{ matrix.target }}/release/server --print-openapi > openapi.json
-          echo "Generated openapi.json:"
-          head -5 openapi.json
-
-      - name: Upload openapi.json
-        if: ${{ matrix.gen_openapi }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: openapi-json
-          path: openapi.json
-
-  # ── CLI binary builds (mcp-v8-cli) ─────────────────────────────────
+  # ── CLI binary builds (mcp-v8-cli) ────────────────────────────────────────
+  # Pure HTTP client generated from openapi.json via progenitor.
+  # Uses reqwest + rustls-tls — no V8, no OpenSSL dependency.
+  # Server portable binaries are dropped; the server is delivered via the Nix flake:
+  #   nix run github:r33drichards/mcp-js
   build-cli:
     name: CLI – ${{ matrix.name }}
-    needs: build-server
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -162,15 +48,6 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Download regenerated openapi.json
-        uses: actions/download-artifact@v4
-        with:
-          name: openapi-json
-          path: .
-
-      - name: Sync openapi.json into client crate
-        run: cp openapi.json mcp-v8-client/openapi.json
-
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -185,23 +62,6 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             clang llvm pkg-config perl
           echo "LIBCLANG_PATH=$(llvm-config --libdir)" >> $GITHUB_ENV
-          # zigbuild's wrapped CC strips /usr/include; openssl headers are split
-          # between /usr/include/openssl/ and /usr/include/<arch>-linux-gnu/openssl/.
-          # Merge both into a single dir that openssl-sys can use.
-          ARCH_TRIPLE=$(dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || echo "x86_64-linux-gnu")
-          # zigbuild replaces CC with its own wrapper that uses Zig's libc headers,
-          # which don't include system openssl. Create a symlink so Zig's default
-          # include search path (/usr/include) actually contains the arch headers.
-          for f in /usr/include/${ARCH_TRIPLE}/openssl/*.h; do sudo ln -sf "$f" "/usr/include/openssl/$(basename $f)" 2>/dev/null || true; done
-          echo "OPENSSL_INCLUDE_DIR=/usr/include" >> $GITHUB_ENV
-          # Use vendored openssl — the system libcrypto requires glibc 2.34+ which
-          # is incompatible with our 2.17 glibc floor target. Vendored compiles
-          # openssl from source as a static lib with no external glibc deps.
-          echo "OPENSSL_VENDORED=1" >> $GITHUB_ENV
-          # Also tell the linker where system libs live for any crate that emits
-          # cargo:rustc-link-lib=ssl outside of openssl-sys (e.g. ring)
-          echo "RUSTFLAGS=-L/usr/lib/${ARCH_TRIPLE}" >> $GITHUB_ENV
-
 
       - name: Install Zig + cargo-zigbuild (Linux only)
         if: ${{ matrix.use_zigbuild }}
@@ -225,133 +85,15 @@ jobs:
           name: ${{ matrix.bin_name }}
           path: target/${{ matrix.target }}/release/mcp-v8-cli
 
-  # ── Rebuild server with embedded CLI binaries (second pass) ─────────
-  rebuild-server:
-    name: Server+CLI – ${{ matrix.name }}
-    needs: build-cli
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        include:
-          - name: Linux x86_64
-            os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            bin_name: mcp-v8-linux
-            rusty_v8_target: x86_64-unknown-linux-gnu
-            cli_artifact: mcp-v8-cli-linux-x86_64
-            cli_env: MCP_V8_CLI_LINUX_X86_64
-            use_zigbuild: true
-          - name: Linux ARM64
-            os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-            bin_name: mcp-v8-linux-arm64
-            rusty_v8_target: aarch64-unknown-linux-gnu
-            cli_artifact: mcp-v8-cli-linux-arm64
-            cli_env: MCP_V8_CLI_LINUX_AARCH64
-            use_zigbuild: true
-          - name: macOS ARM64
-            os: macos-14
-            target: aarch64-apple-darwin
-            bin_name: mcp-v8-macos-arm64
-            rusty_v8_target: aarch64-apple-darwin
-            cli_artifact: mcp-v8-cli-macos-arm64
-            cli_env: MCP_V8_CLI_MACOS_AARCH64
-            use_zigbuild: false
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Install build dependencies (Linux only)
-        if: ${{ matrix.use_zigbuild }}
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
-            clang llvm pkg-config perl
-          echo "LIBCLANG_PATH=$(llvm-config --libdir)" >> $GITHUB_ENV
-          # zigbuild's wrapped CC strips /usr/include; openssl headers are split
-          # between /usr/include/openssl/ and /usr/include/<arch>-linux-gnu/openssl/.
-          # Merge both into a single dir that openssl-sys can use.
-          ARCH_TRIPLE=$(dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || echo "x86_64-linux-gnu")
-          # zigbuild replaces CC with its own wrapper that uses Zig's libc headers,
-          # which don't include system openssl. Create a symlink so Zig's default
-          # include search path (/usr/include) actually contains the arch headers.
-          for f in /usr/include/${ARCH_TRIPLE}/openssl/*.h; do sudo ln -sf "$f" "/usr/include/openssl/$(basename $f)" 2>/dev/null || true; done
-          echo "OPENSSL_INCLUDE_DIR=/usr/include" >> $GITHUB_ENV
-          # Use vendored openssl — the system libcrypto requires glibc 2.34+ which
-          # is incompatible with our 2.17 glibc floor target. Vendored compiles
-          # openssl from source as a static lib with no external glibc deps.
-          echo "OPENSSL_VENDORED=1" >> $GITHUB_ENV
-          # Also tell the linker where system libs live for any crate that emits
-          # cargo:rustc-link-lib=ssl outside of openssl-sys (e.g. ring)
-          echo "RUSTFLAGS=-L/usr/lib/${ARCH_TRIPLE}" >> $GITHUB_ENV
-
-
-      - name: Install Zig + cargo-zigbuild (Linux only)
-        if: ${{ matrix.use_zigbuild }}
-        run: |
-          pip install ziglang --quiet
-          cargo install cargo-zigbuild --locked --quiet
-
-      - name: Fetch rusty_v8 static library
-        run: |
-          URL="https://github.com/denoland/rusty_v8/releases/download/v${RUSTY_V8_VERSION}/librusty_v8_release_${{ matrix.rusty_v8_target }}.a.gz"
-          curl -fL "$URL" -o librusty_v8.a.gz
-          gunzip librusty_v8.a.gz
-          echo "RUSTY_V8_ARCHIVE=$(pwd)/librusty_v8.a" >> $GITHUB_ENV
-
-      - name: Download matching CLI binary
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ matrix.cli_artifact }}
-          path: dist-cli
-
-      - name: Rebuild server with embedded CLI – Linux (cargo-zigbuild)
-        if: ${{ matrix.use_zigbuild }}
-        run: |
-          chmod +x dist-cli/mcp-v8-cli
-          ${{ matrix.cli_env }}=$(pwd)/dist-cli/mcp-v8-cli \
-          cargo zigbuild --release -p server \
-            --target ${{ matrix.target }}.${{ env.GLIBC_FLOOR }}
-
-      - name: Rebuild server with embedded CLI – macOS (cargo)
-        if: ${{ !matrix.use_zigbuild }}
-        run: |
-          chmod +x dist-cli/mcp-v8-cli
-          ${{ matrix.cli_env }}=$(pwd)/dist-cli/mcp-v8-cli \
-          cargo build --release -p server --target ${{ matrix.target }}
-
-      - name: Upload final server binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.bin_name }}
-          path: target/${{ matrix.target }}/release/server
-
-  # ── Publish mcp-v8-client to crates.io ──────────────────────────────
+  # ── Publish mcp-v8-client to crates.io ────────────────────────────────────
   publish-crate:
     name: Publish mcp-v8-client to crates.io
-    needs: build-server
+    needs: build-cli
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
-      - name: Download regenerated openapi.json
-        uses: actions/download-artifact@v4
-        with:
-          name: openapi-json
-          path: .
-
-      - name: Sync openapi.json into client crate
-        run: cp openapi.json mcp-v8-client/openapi.json
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -365,11 +107,14 @@ jobs:
         run: cd mcp-v8-client && cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
         continue-on-error: true
 
-  # ── Assemble GitHub Release ──────────────────────────────────────────
+  # ── Assemble GitHub Release ────────────────────────────────────────────────
   release:
-    needs: [rebuild-server, build-cli]
+    needs: build-cli
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -379,13 +124,6 @@ jobs:
         run: |
           mkdir -p dist/final
 
-          # Server binaries (artifact dir name = bin_name, file inside = "server")
-          for dir in dist/mcp-v8-linux dist/mcp-v8-linux-arm64 dist/mcp-v8-macos-arm64; do
-            [ -d "$dir" ] || continue
-            name=$(basename "$dir")
-            cp "$dir/server" "dist/final/$name"
-          done
-
           # CLI binaries (artifact dir name = bin_name, file inside = "mcp-v8-cli")
           for dir in dist/mcp-v8-cli-linux-x86_64 dist/mcp-v8-cli-linux-arm64 dist/mcp-v8-cli-macos-arm64; do
             [ -d "$dir" ] || continue
@@ -393,9 +131,8 @@ jobs:
             cp "$dir/mcp-v8-cli" "dist/final/$name"
           done
 
-          # Include openapi.json
-          [ -f "dist/openapi-json/openapi.json" ] && \
-            cp dist/openapi-json/openapi.json dist/final/openapi.json
+          # Include openapi.json from the repo
+          cp mcp-v8-client/openapi.json dist/final/openapi.json
 
           # Gzip each binary
           for file in dist/final/*; do
