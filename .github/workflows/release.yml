@@ -13,8 +13,11 @@ permissions:
 env:
   # rusty_v8 version must match the deno_core rev in Cargo.toml
   RUSTY_V8_VERSION: "145.0.0"
-  # Glibc floor: 2.17 = RHEL7 / CentOS7 era — runs on essentially all modern Linux
+  # CLI glibc floor: 2.17 = RHEL7 / CentOS7 era (no V8, reqwest only)
   GLIBC_FLOOR: "2.17"
+  # Server glibc floor: 2.27 = Ubuntu 18.04 era
+  # V8's WasmMemoryMapDescriptor calls memfd_create which landed in glibc 2.27
+  GLIBC_FLOOR_SERVER: "2.27"
 
 jobs:
   # ── Pass 1: CLI binary builds (mcp-v8-cli) ────────────────────────────────
@@ -84,12 +87,11 @@ jobs:
           path: target/${{ matrix.target }}/release/mcp-v8-cli
 
   # ── Pass 2: Server binary builds with embedded CLI ────────────────────────
-  # Downloads all three CLI binaries produced in pass 1, then rebuilds the
-  # server with MCP_V8_CLI_* env vars pointing at them so build.rs embeds
-  # them into the binary. The /api/cli/{platform} endpoint then serves them.
-  #
-  # Native runners — plain cargo build, no cross-compilation.
-  # Binaries link against the runner's system glibc (~2.35 on ubuntu-latest).
+  # Uses cargo-zigbuild for glibc-floored Linux binaries (floor = 2.17).
+  # rustls replaces native-tls so there is no OpenSSL to wrangle with zigbuild.
+  # macOS uses plain cargo (no glibc concern).
+  # Downloads all three CLI artifacts from pass 1 and sets MCP_V8_CLI_* env
+  # vars so build.rs embeds them — /api/cli/{platform} serves them directly.
   build-server:
     name: Server – ${{ matrix.name }}
     needs: build-cli
@@ -102,16 +104,19 @@ jobs:
             target: x86_64-unknown-linux-gnu
             rusty_v8_target: x86_64-unknown-linux-gnu
             bin_name: mcp-v8-linux
+            use_zigbuild: true
           - name: Linux ARM64
             os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             rusty_v8_target: aarch64-unknown-linux-gnu
             bin_name: mcp-v8-linux-arm64
+            use_zigbuild: true
           - name: macOS ARM64
             os: macos-14
             target: aarch64-apple-darwin
             rusty_v8_target: aarch64-apple-darwin
             bin_name: mcp-v8-macos-arm64
+            use_zigbuild: false
 
     steps:
       - uses: actions/checkout@v4
@@ -123,15 +128,21 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Install build dependencies (Linux)
-        if: runner.os == 'Linux'
+        if: ${{ matrix.use_zigbuild }}
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
             clang llvm pkg-config perl
           echo "LIBCLANG_PATH=$(llvm-config --libdir)" >> $GITHUB_ENV
 
+      - name: Install Zig + cargo-zigbuild (Linux)
+        if: ${{ matrix.use_zigbuild }}
+        run: |
+          pip install ziglang --quiet
+          cargo install cargo-zigbuild --locked --quiet
+
       - name: Install build dependencies (macOS)
-        if: runner.os == 'macOS'
+        if: ${{ !matrix.use_zigbuild }}
         run: |
           brew install llvm
           echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> $GITHUB_ENV
@@ -170,7 +181,14 @@ jobs:
           echo "MCP_V8_CLI_LINUX_AARCH64=$(pwd)/cli-bins/linux-arm64/mcp-v8-cli"   >> $GITHUB_ENV
           echo "MCP_V8_CLI_MACOS_AARCH64=$(pwd)/cli-bins/macos-arm64/mcp-v8-cli"   >> $GITHUB_ENV
 
-      - name: Build server (with embedded CLI)
+      - name: Build server – Linux (cargo-zigbuild, glibc ${{ env.GLIBC_FLOOR_SERVER }})
+        if: ${{ matrix.use_zigbuild }}
+        run: |
+          cargo zigbuild --release -p server \
+            --target ${{ matrix.target }}.${{ env.GLIBC_FLOOR_SERVER }}
+
+      - name: Build server – macOS (cargo)
+        if: ${{ !matrix.use_zigbuild }}
         run: cargo build --release -p server --target ${{ matrix.target }}
 
       - name: Upload server binary
