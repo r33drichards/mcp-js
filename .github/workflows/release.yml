@@ -67,6 +67,9 @@ jobs:
             clang llvm pkg-config libssl-dev
           echo "LIBCLANG_PATH=$(llvm-config --libdir)" >> $GITHUB_ENV
           echo "OPENSSL_DIR=/usr" >> $GITHUB_ENV
+          # Also set the target-triple-prefixed variant that openssl-sys checks first
+          TARGET_UPPER=$(echo "${{ matrix.target }}" | tr '[:lower:]-' '[:upper:]_')
+          echo "${TARGET_UPPER}_OPENSSL_DIR=/usr" >> $GITHUB_ENV
 
       # ── Linux: install Zig + cargo-zigbuild for portable glibc floor ──
       - name: Install Zig + cargo-zigbuild (Linux only)
@@ -170,6 +173,9 @@ jobs:
             clang llvm pkg-config libssl-dev
           echo "LIBCLANG_PATH=$(llvm-config --libdir)" >> $GITHUB_ENV
           echo "OPENSSL_DIR=/usr" >> $GITHUB_ENV
+          # Also set the target-triple-prefixed variant that openssl-sys checks first
+          TARGET_UPPER=$(echo "${{ matrix.target }}" | tr '[:lower:]-' '[:upper:]_')
+          echo "${TARGET_UPPER}_OPENSSL_DIR=/usr" >> $GITHUB_ENV
 
       - name: Install Zig + cargo-zigbuild (Linux only)
         if: ${{ matrix.use_zigbuild }}
@@ -245,6 +251,9 @@ jobs:
             clang llvm pkg-config libssl-dev
           echo "LIBCLANG_PATH=$(llvm-config --libdir)" >> $GITHUB_ENV
           echo "OPENSSL_DIR=/usr" >> $GITHUB_ENV
+          # Also set the target-triple-prefixed variant that openssl-sys checks first
+          TARGET_UPPER=$(echo "${{ matrix.target }}" | tr '[:lower:]-' '[:upper:]_')
+          echo "${TARGET_UPPER}_OPENSSL_DIR=/usr" >> $GITHUB_ENV
 
       - name: Install Zig + cargo-zigbuild (Linux only)
         if: ${{ matrix.use_zigbuild }}
