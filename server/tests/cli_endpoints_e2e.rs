@@ -14,7 +14,7 @@
 use reqwest::Client;
 use std::process::Stdio;
 use tokio::process::Command;
-use tokio::time::{sleep, Duration};
+use tokio::time::{sleep, timeout, Duration};
 
 // ── Server helper ────────────────────────────────────────────────────────
 
@@ -372,5 +372,140 @@ async fn test_cli_available_flag_consistent_with_download() {
         }
     }
 
+    server.stop().await;
+}
+
+// ── Full E2E: download CLI from API, run it, check output ─────────────────
+
+/// Download the CLI binary from /api/cli/linux-x86_64, write it to a temp
+/// file, make it executable, then run:
+///
+///   mcp-v8-cli --url <server> --json exec 'console.log(1+1)'
+///
+/// Poll until the execution is complete, read the output, and assert it
+/// contains "2".
+///
+/// This test is skipped (with a clear message) when the CLI binary is not
+/// embedded in the server build (dev/local builds). It is the definitive
+/// end-to-end test for the feature: the same binary that ships in the server
+/// is the one used to drive it.
+#[tokio::test]
+async fn test_downloaded_cli_exec_console_log_outputs_2() {
+    let mut server = HttpServer::start().await.expect("server start");
+    let client = Client::new();
+
+    // ── Step 1: download the CLI from the server ──────────────────────
+    let resp = client
+        .get(format!("{}/api/cli/linux-x86_64", server.base_url))
+        .send()
+        .await
+        .expect("GET /api/cli/linux-x86_64");
+
+    if resp.status() == 404 {
+        // Dev build — binary not embedded; skip gracefully.
+        eprintln!(
+            "[SKIP] test_downloaded_cli_exec_console_log_outputs_2: \
+             CLI not embedded in this build (set MCP_V8_CLI_LINUX_X86_64 at build time)"
+        );
+        server.stop().await;
+        return;
+    }
+
+    assert_eq!(resp.status(), 200, "expected 200 downloading CLI");
+
+    let cli_bytes = resp.bytes().await.expect("read CLI binary");
+    assert!(!cli_bytes.is_empty(), "downloaded CLI is empty");
+
+    // ── Step 2: write to a temp file and make executable ─────────────
+    let cli_path = std::env::temp_dir().join(format!(
+        "mcp-v8-cli-e2e-{}",
+        std::process::id()
+    ));
+    std::fs::write(&cli_path, &cli_bytes).expect("write CLI binary");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&cli_path, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod +x");
+    }
+
+    // ── Step 3: submit 'console.log(1+1)' via the downloaded CLI ─────
+    let output = timeout(
+        Duration::from_secs(30),
+        Command::new(&cli_path)
+            .args([
+                "--url", &server.base_url,
+                "--json",
+                "exec",
+                "console.log(1+1)",
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output(),
+    )
+    .await
+    .expect("exec timed out")
+    .expect("spawn CLI");
+
+    assert!(
+        output.status.success(),
+        "CLI exec failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let exec_json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("CLI --json output is not valid JSON");
+    let exec_id = exec_json["execution_id"]
+        .as_str()
+        .expect("execution_id missing from CLI output");
+
+    // ── Step 4: poll via the downloaded CLI until completed ───────────
+    let mut status = String::new();
+    for _ in 0..60 {
+        let poll = Command::new(&cli_path)
+            .args([
+                "--url", &server.base_url,
+                "--json",
+                "executions", "get", exec_id,
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await
+            .expect("CLI executions get");
+
+        let info: serde_json::Value =
+            serde_json::from_slice(&poll.stdout).expect("poll output not JSON");
+        status = info["status"].as_str().unwrap_or("").to_string();
+
+        if matches!(status.as_str(), "completed" | "failed" | "timed_out" | "cancelled") {
+            break;
+        }
+        sleep(Duration::from_millis(200)).await;
+    }
+
+    assert_eq!(status, "completed", "execution did not complete: status={status}");
+
+    // ── Step 5: read console output via the downloaded CLI ────────────
+    let output_cmd = Command::new(&cli_path)
+        .args([
+            "--url", &server.base_url,
+            "executions", "output", exec_id,
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .expect("CLI executions output");
+
+    let stdout = String::from_utf8_lossy(&output_cmd.stdout);
+    assert!(
+        stdout.trim().contains("2"),
+        "expected output to contain '2', got: {stdout:?}"
+    );
+
+    // ── Cleanup ───────────────────────────────────────────────────────
+    let _ = std::fs::remove_file(&cli_path);
     server.stop().await;
 }
