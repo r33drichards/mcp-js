@@ -10,8 +10,16 @@ on:
 permissions:
   contents: write
 
+env:
+  # rusty_v8 version must match the deno_core rev in Cargo.toml
+  RUSTY_V8_VERSION: "145.0.0"
+  # Glibc floor: 2.17 = RHEL7 / CentOS7 era — runs on essentially all modern Linux
+  GLIBC_FLOOR: "2.17"
+
 jobs:
   # ── Server binary builds ─────────────────────────────────────────────
+  # Uses cargo-zigbuild for portable glibc-floored Linux binaries.
+  # macOS builds use plain cargo (system frameworks, no glibc concern).
   build-server:
     name: Server – ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
@@ -22,52 +30,84 @@ jobs:
             os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             bin_name: mcp-v8-linux
-            build_cmd: cargo build --release --target x86_64-unknown-linux-gnu -p server
-            out_path: target/x86_64-unknown-linux-gnu/release/server
+            rusty_v8_target: x86_64-unknown-linux-gnu
             gen_openapi: true
+            use_zigbuild: true
           - name: Linux ARM64
             os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             bin_name: mcp-v8-linux-arm64
-            build_cmd: cargo build --release --target aarch64-unknown-linux-gnu -p server
-            out_path: target/aarch64-unknown-linux-gnu/release/server
+            rusty_v8_target: aarch64-unknown-linux-gnu
             gen_openapi: false
+            use_zigbuild: true
           - name: macOS ARM64
             os: macos-14
             target: aarch64-apple-darwin
             bin_name: mcp-v8-macos-arm64
-            build_cmd: cargo build --release --target aarch64-apple-darwin -p server
-            out_path: target/aarch64-apple-darwin/release/server
+            rusty_v8_target: aarch64-apple-darwin
             gen_openapi: false
+            use_zigbuild: false
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - uses: DeterminateSystems/nix-installer-action@main
-      - uses: DeterminateSystems/flake-checker-action@main
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
       - uses: Swatinem/rust-cache@v2
 
-      - name: Install target
-        run: nix develop --command rustup target add ${{ matrix.target }}
+      - name: Install build dependencies (Linux only)
+        if: ${{ matrix.use_zigbuild }}
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            clang llvm libssl-dev pkg-config
+          echo "LIBCLANG_PATH=$(llvm-config --libdir)" >> $GITHUB_ENV
+          echo "OPENSSL_STATIC=1" >> $GITHUB_ENV
 
-      - name: Build server (first pass — no embedded CLI)
-        run: nix develop --command bash -c "${{ matrix.build_cmd }}"
+      # ── Linux: install Zig + cargo-zigbuild for portable glibc floor ──
+      - name: Install Zig + cargo-zigbuild (Linux only)
+        if: ${{ matrix.use_zigbuild }}
+        run: |
+          pip install ziglang --quiet
+          cargo install cargo-zigbuild --locked --quiet
+
+      # ── Download pre-built rusty_v8 static library ────────────────────
+      # Avoids network access during build and works in any environment.
+      - name: Fetch rusty_v8 static library
+        run: |
+          URL="https://github.com/denoland/rusty_v8/releases/download/v${RUSTY_V8_VERSION}/librusty_v8_release_${{ matrix.rusty_v8_target }}.a.gz"
+          echo "Fetching $URL"
+          curl -fL "$URL" -o librusty_v8.a.gz
+          gunzip librusty_v8.a.gz
+          echo "RUSTY_V8_ARCHIVE=$(pwd)/librusty_v8.a" >> $GITHUB_ENV
+
+      # ── Build server (first pass — no embedded CLI) ───────────────────
+      - name: Build server – Linux (cargo-zigbuild)
+        if: ${{ matrix.use_zigbuild }}
+        run: |
+          cargo zigbuild --release -p server \
+            --target ${{ matrix.target }}.${{ env.GLIBC_FLOOR }}
+
+      - name: Build server – macOS (cargo)
+        if: ${{ !matrix.use_zigbuild }}
+        run: cargo build --release -p server --target ${{ matrix.target }}
 
       - name: Upload server binary (first pass)
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.bin_name }}-pass1
-          path: ${{ matrix.out_path }}
+          path: target/${{ matrix.target }}/release/server
 
-      # Generate openapi.json while Nix is still active (Linux x86_64 only).
-      # The binary is a Nix-linked ELF; it can only run inside a Nix environment.
+      # ── Generate openapi.json while binary is available (Linux x86_64) ─
       - name: Regenerate openapi.json
         if: ${{ matrix.gen_openapi }}
         run: |
-          nix develop --command bash -c "
-            ${{ matrix.out_path }} --print-openapi > openapi.json
-          "
+          chmod +x target/${{ matrix.target }}/release/server
+          target/${{ matrix.target }}/release/server --print-openapi > openapi.json
           echo "Generated openapi.json:"
           head -5 openapi.json
 
@@ -90,20 +130,17 @@ jobs:
             os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             bin_name: mcp-v8-cli-linux-x86_64
-            cargo_target_flag: --target x86_64-unknown-linux-gnu
-            out_path: target/x86_64-unknown-linux-gnu/release/mcp-v8-cli
+            use_zigbuild: true
           - name: Linux ARM64
             os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             bin_name: mcp-v8-cli-linux-arm64
-            cargo_target_flag: --target aarch64-unknown-linux-gnu
-            out_path: target/aarch64-unknown-linux-gnu/release/mcp-v8-cli
+            use_zigbuild: true
           - name: macOS ARM64
             os: macos-14
             target: aarch64-apple-darwin
             bin_name: mcp-v8-cli-macos-arm64
-            cargo_target_flag: --target aarch64-apple-darwin
-            out_path: target/aarch64-apple-darwin/release/mcp-v8-cli
+            use_zigbuild: false
 
     steps:
       - name: Checkout code
@@ -115,7 +152,6 @@ jobs:
           name: openapi-json
           path: .
 
-      # Copy fresh spec into client crate so build.rs picks it up
       - name: Sync openapi.json into client crate
         run: cp openapi.json mcp-v8-client/openapi.json
 
@@ -126,18 +162,38 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Build CLI
-        run: cargo build --release -p mcp-v8-client ${{ matrix.cargo_target_flag }}
+      - name: Install build dependencies (Linux only)
+        if: ${{ matrix.use_zigbuild }}
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            clang llvm libssl-dev pkg-config
+          echo "LIBCLANG_PATH=$(llvm-config --libdir)" >> $GITHUB_ENV
+          echo "OPENSSL_STATIC=1" >> $GITHUB_ENV
+
+      - name: Install Zig + cargo-zigbuild (Linux only)
+        if: ${{ matrix.use_zigbuild }}
+        run: |
+          pip install ziglang --quiet
+          cargo install cargo-zigbuild --locked --quiet
+
+      - name: Build CLI – Linux (cargo-zigbuild)
+        if: ${{ matrix.use_zigbuild }}
+        run: |
+          cargo zigbuild --release -p mcp-v8-client \
+            --target ${{ matrix.target }}.${{ env.GLIBC_FLOOR }}
+
+      - name: Build CLI – macOS (cargo)
+        if: ${{ !matrix.use_zigbuild }}
+        run: cargo build --release -p mcp-v8-client --target ${{ matrix.target }}
 
       - name: Upload CLI binary
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.bin_name }}
-          path: ${{ matrix.out_path }}
+          path: target/${{ matrix.target }}/release/mcp-v8-cli
 
   # ── Rebuild server with embedded CLI binaries (second pass) ─────────
-  # Downloads the CLI artifacts built above and rebuilds each server binary
-  # with MCP_V8_CLI_* env vars set so build.rs embeds them via include_bytes!.
   rebuild-server:
     name: Server+CLI – ${{ matrix.name }}
     needs: build-cli
@@ -149,40 +205,59 @@ jobs:
             os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             bin_name: mcp-v8-linux
-            build_cmd: cargo build --release --target x86_64-unknown-linux-gnu -p server
-            out_path: target/x86_64-unknown-linux-gnu/release/server
+            rusty_v8_target: x86_64-unknown-linux-gnu
             cli_artifact: mcp-v8-cli-linux-x86_64
             cli_env: MCP_V8_CLI_LINUX_X86_64
+            use_zigbuild: true
           - name: Linux ARM64
             os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             bin_name: mcp-v8-linux-arm64
-            build_cmd: cargo build --release --target aarch64-unknown-linux-gnu -p server
-            out_path: target/aarch64-unknown-linux-gnu/release/server
+            rusty_v8_target: aarch64-unknown-linux-gnu
             cli_artifact: mcp-v8-cli-linux-arm64
             cli_env: MCP_V8_CLI_LINUX_AARCH64
+            use_zigbuild: true
           - name: macOS ARM64
             os: macos-14
             target: aarch64-apple-darwin
             bin_name: mcp-v8-macos-arm64
-            build_cmd: cargo build --release --target aarch64-apple-darwin -p server
-            out_path: target/aarch64-apple-darwin/release/server
+            rusty_v8_target: aarch64-apple-darwin
             cli_artifact: mcp-v8-cli-macos-arm64
             cli_env: MCP_V8_CLI_MACOS_AARCH64
+            use_zigbuild: false
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - uses: DeterminateSystems/nix-installer-action@main
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
         with:
-          extra-conf: |
-            sandbox = relaxed
-      - uses: DeterminateSystems/flake-checker-action@main
+          targets: ${{ matrix.target }}
+
       - uses: Swatinem/rust-cache@v2
 
-      - name: Install target
-        run: nix develop --command rustup target add ${{ matrix.target }}
+      - name: Install build dependencies (Linux only)
+        if: ${{ matrix.use_zigbuild }}
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            clang llvm libssl-dev pkg-config
+          echo "LIBCLANG_PATH=$(llvm-config --libdir)" >> $GITHUB_ENV
+          echo "OPENSSL_STATIC=1" >> $GITHUB_ENV
+
+      - name: Install Zig + cargo-zigbuild (Linux only)
+        if: ${{ matrix.use_zigbuild }}
+        run: |
+          pip install ziglang --quiet
+          cargo install cargo-zigbuild --locked --quiet
+
+      - name: Fetch rusty_v8 static library
+        run: |
+          URL="https://github.com/denoland/rusty_v8/releases/download/v${RUSTY_V8_VERSION}/librusty_v8_release_${{ matrix.rusty_v8_target }}.a.gz"
+          curl -fL "$URL" -o librusty_v8.a.gz
+          gunzip librusty_v8.a.gz
+          echo "RUSTY_V8_ARCHIVE=$(pwd)/librusty_v8.a" >> $GITHUB_ENV
 
       - name: Download matching CLI binary
         uses: actions/download-artifact@v4
@@ -190,26 +265,32 @@ jobs:
           name: ${{ matrix.cli_artifact }}
           path: dist-cli
 
-      - name: Rebuild server with embedded CLI
+      - name: Rebuild server with embedded CLI – Linux (cargo-zigbuild)
+        if: ${{ matrix.use_zigbuild }}
         run: |
           chmod +x dist-cli/mcp-v8-cli
-          nix develop --command bash -c "
-            ${{ matrix.cli_env }}=$(pwd)/dist-cli/mcp-v8-cli \
-            ${{ matrix.build_cmd }}
-          "
+          ${{ matrix.cli_env }}=$(pwd)/dist-cli/mcp-v8-cli \
+          cargo zigbuild --release -p server \
+            --target ${{ matrix.target }}.${{ env.GLIBC_FLOOR }}
+
+      - name: Rebuild server with embedded CLI – macOS (cargo)
+        if: ${{ !matrix.use_zigbuild }}
+        run: |
+          chmod +x dist-cli/mcp-v8-cli
+          ${{ matrix.cli_env }}=$(pwd)/dist-cli/mcp-v8-cli \
+          cargo build --release -p server --target ${{ matrix.target }}
 
       - name: Upload final server binary
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.bin_name }}
-          path: ${{ matrix.out_path }}
+          path: target/${{ matrix.target }}/release/server
 
   # ── Publish mcp-v8-client to crates.io ──────────────────────────────
   publish-crate:
     name: Publish mcp-v8-client to crates.io
     needs: build-server
     runs-on: ubuntu-latest
-    # Only publish on real version tag pushes, not workflow_dispatch
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     steps:
       - name: Checkout code
@@ -230,15 +311,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Verify package
-        run: |
-          cd mcp-v8-client
-          cargo package --list
+        run: cd mcp-v8-client && cargo package --list
 
       - name: Publish to crates.io
-        run: |
-          cd mcp-v8-client
-          cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        continue-on-error: true  # Don't fail the release if already published at this version
+        run: cd mcp-v8-client && cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        continue-on-error: true
 
   # ── Assemble GitHub Release ──────────────────────────────────────────
   release:
@@ -254,16 +331,14 @@ jobs:
         run: |
           mkdir -p dist/final
 
-          # Server binaries: artifact dir = matrix.bin_name (e.g. mcp-v8-linux)
-          # binary inside is named "server" — rename to the dir name for clarity
+          # Server binaries (artifact dir name = bin_name, file inside = "server")
           for dir in dist/mcp-v8-linux dist/mcp-v8-linux-arm64 dist/mcp-v8-macos-arm64; do
             [ -d "$dir" ] || continue
             name=$(basename "$dir")
             cp "$dir/server" "dist/final/$name"
           done
 
-          # CLI binaries: artifact dir = matrix.bin_name (e.g. mcp-v8-cli-linux-x86_64)
-          # binary inside is named "mcp-v8-cli" — rename to the dir name
+          # CLI binaries (artifact dir name = bin_name, file inside = "mcp-v8-cli")
           for dir in dist/mcp-v8-cli-linux-x86_64 dist/mcp-v8-cli-linux-arm64 dist/mcp-v8-cli-macos-arm64; do
             [ -d "$dir" ] || continue
             name=$(basename "$dir")
@@ -271,11 +346,10 @@ jobs:
           done
 
           # Include openapi.json
-          if [ -f "dist/openapi-json/openapi.json" ]; then
+          [ -f "dist/openapi-json/openapi.json" ] && \
             cp dist/openapi-json/openapi.json dist/final/openapi.json
-          fi
 
-          # Gzip each binary (not .json/.gz files)
+          # Gzip each binary
           for file in dist/final/*; do
             if [ -f "$file" ] && [[ "$file" != *.json ]] && [[ "$file" != *.gz ]]; then
               gzip -c "$file" > "$file.gz"
