@@ -73,7 +73,7 @@ jobs:
           # zigbuild replaces CC with its own wrapper that uses Zig's libc headers,
           # which don't include system openssl. Create a symlink so Zig's default
           # include search path (/usr/include) actually contains the arch headers.
-          sudo ln -sf /usr/include/${ARCH_TRIPLE}/openssl/opensslconf.h             /usr/include/openssl/opensslconf.h 2>/dev/null || true
+          for f in /usr/include/${ARCH_TRIPLE}/openssl/*.h; do sudo ln -sf "$f" "/usr/include/openssl/$(basename $f)" 2>/dev/null || true; done
           echo "OPENSSL_INCLUDE_DIR=/usr/include" >> $GITHUB_ENV
           echo "OPENSSL_LIB_DIR=/usr/lib/${ARCH_TRIPLE}" >> $GITHUB_ENV
 
@@ -185,7 +185,7 @@ jobs:
           # zigbuild replaces CC with its own wrapper that uses Zig's libc headers,
           # which don't include system openssl. Create a symlink so Zig's default
           # include search path (/usr/include) actually contains the arch headers.
-          sudo ln -sf /usr/include/${ARCH_TRIPLE}/openssl/opensslconf.h             /usr/include/openssl/opensslconf.h 2>/dev/null || true
+          for f in /usr/include/${ARCH_TRIPLE}/openssl/*.h; do sudo ln -sf "$f" "/usr/include/openssl/$(basename $f)" 2>/dev/null || true; done
           echo "OPENSSL_INCLUDE_DIR=/usr/include" >> $GITHUB_ENV
           echo "OPENSSL_LIB_DIR=/usr/lib/${ARCH_TRIPLE}" >> $GITHUB_ENV
 
@@ -269,7 +269,7 @@ jobs:
           # zigbuild replaces CC with its own wrapper that uses Zig's libc headers,
           # which don't include system openssl. Create a symlink so Zig's default
           # include search path (/usr/include) actually contains the arch headers.
-          sudo ln -sf /usr/include/${ARCH_TRIPLE}/openssl/opensslconf.h             /usr/include/openssl/opensslconf.h 2>/dev/null || true
+          for f in /usr/include/${ARCH_TRIPLE}/openssl/*.h; do sudo ln -sf "$f" "/usr/include/openssl/$(basename $f)" 2>/dev/null || true; done
           echo "OPENSSL_INCLUDE_DIR=/usr/include" >> $GITHUB_ENV
           echo "OPENSSL_LIB_DIR=/usr/lib/${ARCH_TRIPLE}" >> $GITHUB_ENV
 
