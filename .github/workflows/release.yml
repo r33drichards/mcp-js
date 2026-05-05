@@ -17,11 +17,9 @@ env:
   GLIBC_FLOOR: "2.17"
 
 jobs:
-  # ── CLI binary builds (mcp-v8-cli) ────────────────────────────────────────
+  # ── Pass 1: CLI binary builds (mcp-v8-cli) ────────────────────────────────
   # Pure HTTP client generated from openapi.json via progenitor.
   # Uses reqwest + rustls-tls — no V8, no OpenSSL dependency.
-  # Server portable binaries are dropped; the server is delivered via the Nix flake:
-  #   nix run github:r33drichards/mcp-js
   build-cli:
     name: CLI – ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
@@ -85,12 +83,16 @@ jobs:
           name: ${{ matrix.bin_name }}
           path: target/${{ matrix.target }}/release/mcp-v8-cli
 
-  # ── Server binary builds (mcp-v8) ─────────────────────────────────────────
-  # Native runners — plain cargo build, no cross-compilation, no zigbuild.
+  # ── Pass 2: Server binary builds with embedded CLI ────────────────────────
+  # Downloads all three CLI binaries produced in pass 1, then rebuilds the
+  # server with MCP_V8_CLI_* env vars pointing at them so build.rs embeds
+  # them into the binary. The /api/cli/{platform} endpoint then serves them.
+  #
+  # Native runners — plain cargo build, no cross-compilation.
   # Binaries link against the runner's system glibc (~2.35 on ubuntu-latest).
-  # Tradeoff: won't run on RHEL7-era systems — fine for an alpha.
   build-server:
     name: Server – ${{ matrix.name }}
+    needs: build-cli
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -110,31 +112,67 @@ jobs:
             target: aarch64-apple-darwin
             rusty_v8_target: aarch64-apple-darwin
             bin_name: mcp-v8-macos-arm64
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+
       - uses: Swatinem/rust-cache@v2
+
       - name: Install build dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            clang llvm pkg-config perl libssl-dev
+            clang llvm pkg-config perl
           echo "LIBCLANG_PATH=$(llvm-config --libdir)" >> $GITHUB_ENV
+
       - name: Install build dependencies (macOS)
         if: runner.os == 'macOS'
         run: |
           brew install llvm
           echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> $GITHUB_ENV
+
       - name: Fetch rusty_v8 static library
         run: |
           URL="https://github.com/denoland/rusty_v8/releases/download/v${RUSTY_V8_VERSION}/librusty_v8_release_${{ matrix.rusty_v8_target }}.a.gz"
           curl -fL "$URL" -o librusty_v8.a.gz && gunzip librusty_v8.a.gz
           echo "RUSTY_V8_ARCHIVE=$(pwd)/librusty_v8.a" >> $GITHUB_ENV
-      - name: Build server
+
+      # Download all three CLI binaries so build.rs can embed them
+      - name: Download CLI – Linux x86_64
+        uses: actions/download-artifact@v4
+        with:
+          name: mcp-v8-cli-linux-x86_64
+          path: cli-bins/linux-x86_64
+
+      - name: Download CLI – Linux ARM64
+        uses: actions/download-artifact@v4
+        with:
+          name: mcp-v8-cli-linux-arm64
+          path: cli-bins/linux-arm64
+
+      - name: Download CLI – macOS ARM64
+        uses: actions/download-artifact@v4
+        with:
+          name: mcp-v8-cli-macos-arm64
+          path: cli-bins/macos-arm64
+
+      - name: Set CLI embed paths
+        run: |
+          chmod +x cli-bins/linux-x86_64/mcp-v8-cli \
+                   cli-bins/linux-arm64/mcp-v8-cli \
+                   cli-bins/macos-arm64/mcp-v8-cli
+          echo "MCP_V8_CLI_LINUX_X86_64=$(pwd)/cli-bins/linux-x86_64/mcp-v8-cli"   >> $GITHUB_ENV
+          echo "MCP_V8_CLI_LINUX_AARCH64=$(pwd)/cli-bins/linux-arm64/mcp-v8-cli"   >> $GITHUB_ENV
+          echo "MCP_V8_CLI_MACOS_AARCH64=$(pwd)/cli-bins/macos-arm64/mcp-v8-cli"   >> $GITHUB_ENV
+
+      - name: Build server (with embedded CLI)
         run: cargo build --release -p server --target ${{ matrix.target }}
+
       - name: Upload server binary
         uses: actions/upload-artifact@v4
         with:
@@ -180,21 +218,21 @@ jobs:
         run: |
           mkdir -p dist/final
 
-          # CLI binaries (artifact dir name = bin_name, file inside = "mcp-v8-cli")
+          # CLI binaries
           for dir in dist/mcp-v8-cli-linux-x86_64 dist/mcp-v8-cli-linux-arm64 dist/mcp-v8-cli-macos-arm64; do
             [ -d "$dir" ] || continue
             name=$(basename "$dir")
             cp "$dir/mcp-v8-cli" "dist/final/$name"
           done
 
-          # Server binaries (artifact dir name = bin_name, file inside = "server")
+          # Server binaries (with embedded CLI)
           for dir in dist/mcp-v8-linux dist/mcp-v8-linux-arm64 dist/mcp-v8-macos-arm64; do
             [ -d "$dir" ] || continue
             name=$(basename "$dir")
             cp "$dir/server" "dist/final/$name"
           done
 
-          # Include openapi.json from the repo
+          # Include openapi.json
           cp mcp-v8-client/openapi.json dist/final/openapi.json
 
           # Gzip each binary
