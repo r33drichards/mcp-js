@@ -66,15 +66,18 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             clang llvm pkg-config libssl-dev
           echo "LIBCLANG_PATH=$(llvm-config --libdir)" >> $GITHUB_ENV
-          # On Ubuntu, openssl headers and libs are in arch-specific dirs.
-          # Tell openssl-sys exactly where they are so zigbuild's wrapped
-          # compiler/linker can find them.
+          # zigbuild's wrapped CC strips /usr/include; openssl headers are split
+          # between /usr/include/openssl/ and /usr/include/<arch>-linux-gnu/openssl/.
+          # Merge both into a single dir that openssl-sys can use.
           ARCH_TRIPLE=$(dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || echo "x86_64-linux-gnu")
-          echo "CFLAGS=-I/usr/include/${ARCH_TRIPLE}" >> $GITHUB_ENV
-          echo "CXXFLAGS=-I/usr/include/${ARCH_TRIPLE}" >> $GITHUB_ENV
-          echo "OPENSSL_INCLUDE_DIR=/usr/include/${ARCH_TRIPLE}" >> $GITHUB_ENV
+          MERGED_INC="$HOME/openssl-merged"
+          mkdir -p "${MERGED_INC}/openssl"
+          cp /usr/include/openssl/*.h "${MERGED_INC}/openssl/" 2>/dev/null || true
+          cp /usr/include/${ARCH_TRIPLE}/openssl/*.h "${MERGED_INC}/openssl/" 2>/dev/null || true
+          echo "OPENSSL_INCLUDE_DIR=${MERGED_INC}" >> $GITHUB_ENV
           echo "OPENSSL_LIB_DIR=/usr/lib/${ARCH_TRIPLE}" >> $GITHUB_ENV
-          echo "PKG_CONFIG_PATH=/usr/lib/${ARCH_TRIPLE}/pkgconfig" >> $GITHUB_ENV
+          echo "CFLAGS=-I${MERGED_INC}" >> $GITHUB_ENV
+          echo "CXXFLAGS=-I${MERGED_INC}" >> $GITHUB_ENV
 
       # ── Linux: install Zig + cargo-zigbuild for portable glibc floor ──
       - name: Install Zig + cargo-zigbuild (Linux only)
@@ -177,15 +180,18 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             clang llvm pkg-config libssl-dev
           echo "LIBCLANG_PATH=$(llvm-config --libdir)" >> $GITHUB_ENV
-          # On Ubuntu, openssl headers and libs are in arch-specific dirs.
-          # Tell openssl-sys exactly where they are so zigbuild's wrapped
-          # compiler/linker can find them.
+          # zigbuild's wrapped CC strips /usr/include; openssl headers are split
+          # between /usr/include/openssl/ and /usr/include/<arch>-linux-gnu/openssl/.
+          # Merge both into a single dir that openssl-sys can use.
           ARCH_TRIPLE=$(dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || echo "x86_64-linux-gnu")
-          echo "CFLAGS=-I/usr/include/${ARCH_TRIPLE}" >> $GITHUB_ENV
-          echo "CXXFLAGS=-I/usr/include/${ARCH_TRIPLE}" >> $GITHUB_ENV
-          echo "OPENSSL_INCLUDE_DIR=/usr/include/${ARCH_TRIPLE}" >> $GITHUB_ENV
+          MERGED_INC="$HOME/openssl-merged"
+          mkdir -p "${MERGED_INC}/openssl"
+          cp /usr/include/openssl/*.h "${MERGED_INC}/openssl/" 2>/dev/null || true
+          cp /usr/include/${ARCH_TRIPLE}/openssl/*.h "${MERGED_INC}/openssl/" 2>/dev/null || true
+          echo "OPENSSL_INCLUDE_DIR=${MERGED_INC}" >> $GITHUB_ENV
           echo "OPENSSL_LIB_DIR=/usr/lib/${ARCH_TRIPLE}" >> $GITHUB_ENV
-          echo "PKG_CONFIG_PATH=/usr/lib/${ARCH_TRIPLE}/pkgconfig" >> $GITHUB_ENV
+          echo "CFLAGS=-I${MERGED_INC}" >> $GITHUB_ENV
+          echo "CXXFLAGS=-I${MERGED_INC}" >> $GITHUB_ENV
 
       - name: Install Zig + cargo-zigbuild (Linux only)
         if: ${{ matrix.use_zigbuild }}
@@ -260,15 +266,18 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             clang llvm pkg-config libssl-dev
           echo "LIBCLANG_PATH=$(llvm-config --libdir)" >> $GITHUB_ENV
-          # On Ubuntu, openssl headers and libs are in arch-specific dirs.
-          # Tell openssl-sys exactly where they are so zigbuild's wrapped
-          # compiler/linker can find them.
+          # zigbuild's wrapped CC strips /usr/include; openssl headers are split
+          # between /usr/include/openssl/ and /usr/include/<arch>-linux-gnu/openssl/.
+          # Merge both into a single dir that openssl-sys can use.
           ARCH_TRIPLE=$(dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || echo "x86_64-linux-gnu")
-          echo "CFLAGS=-I/usr/include/${ARCH_TRIPLE}" >> $GITHUB_ENV
-          echo "CXXFLAGS=-I/usr/include/${ARCH_TRIPLE}" >> $GITHUB_ENV
-          echo "OPENSSL_INCLUDE_DIR=/usr/include/${ARCH_TRIPLE}" >> $GITHUB_ENV
+          MERGED_INC="$HOME/openssl-merged"
+          mkdir -p "${MERGED_INC}/openssl"
+          cp /usr/include/openssl/*.h "${MERGED_INC}/openssl/" 2>/dev/null || true
+          cp /usr/include/${ARCH_TRIPLE}/openssl/*.h "${MERGED_INC}/openssl/" 2>/dev/null || true
+          echo "OPENSSL_INCLUDE_DIR=${MERGED_INC}" >> $GITHUB_ENV
           echo "OPENSSL_LIB_DIR=/usr/lib/${ARCH_TRIPLE}" >> $GITHUB_ENV
-          echo "PKG_CONFIG_PATH=/usr/lib/${ARCH_TRIPLE}/pkgconfig" >> $GITHUB_ENV
+          echo "CFLAGS=-I${MERGED_INC}" >> $GITHUB_ENV
+          echo "CXXFLAGS=-I${MERGED_INC}" >> $GITHUB_ENV
 
       - name: Install Zig + cargo-zigbuild (Linux only)
         if: ${{ matrix.use_zigbuild }}
