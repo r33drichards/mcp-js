@@ -9,6 +9,74 @@
     "version": "0.1.0"
   },
   "paths": {
+    "/api/cli": {
+      "get": {
+        "tags": [
+          "cli"
+        ],
+        "summary": "List available CLI binary downloads for the running server version.",
+        "description": "Returns download URLs for all supported platforms. The CLI binary will\nalways match the server version it was downloaded from.",
+        "operationId": "cli_index_handler",
+        "responses": {
+          "200": {
+            "description": "CLI download index",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CliIndex"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/cli/{platform}": {
+      "get": {
+        "tags": [
+          "cli"
+        ],
+        "summary": "Download the CLI binary for a specific platform.",
+        "description": "Redirects (302) to the matching GitHub Release asset for the running server\nversion. Use `?gz=1` to download the gzip-compressed variant.\n\nSupported platforms: `linux-x86_64`, `linux-aarch64`, `macos-x86_64`, `macos-aarch64`.",
+        "operationId": "cli_download_handler",
+        "parameters": [
+          {
+            "name": "platform",
+            "in": "path",
+            "description": "Target platform (linux-x86_64 | linux-aarch64 | macos-x86_64 | macos-aarch64)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "gz",
+            "in": "query",
+            "description": "Set to '1' to download the .gz compressed binary",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true
+            }
+          }
+        ],
+        "responses": {
+          "302": {
+            "description": "Redirect to the CLI binary on GitHub Releases"
+          },
+          "404": {
+            "description": "Unknown platform",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/exec": {
       "post": {
         "tags": [
@@ -285,6 +353,50 @@
           },
           "ok": {
             "type": "boolean"
+          }
+        }
+      },
+      "CliAsset": {
+        "type": "object",
+        "description": "A single entry in the CLI download index.",
+        "required": [
+          "platform",
+          "url",
+          "url_gz"
+        ],
+        "properties": {
+          "platform": {
+            "type": "string",
+            "description": "Platform identifier (e.g. `linux-x86_64`)."
+          },
+          "url": {
+            "type": "string",
+            "description": "Direct download URL for the CLI binary."
+          },
+          "url_gz": {
+            "type": "string",
+            "description": "Gzip-compressed download URL."
+          }
+        }
+      },
+      "CliIndex": {
+        "type": "object",
+        "description": "Index of available CLI binary downloads for the running server version.",
+        "required": [
+          "version",
+          "assets"
+        ],
+        "properties": {
+          "assets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CliAsset"
+            },
+            "description": "Available platform binaries."
+          },
+          "version": {
+            "type": "string",
+            "description": "Server (and CLI) version string, e.g. `\"0.1.0\"`."
           }
         }
       },

@@ -99,7 +99,7 @@ jobs:
           - name: Linux x86_64
             os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            bin_name: mcp-v8-cli-linux
+            bin_name: mcp-v8-cli-linux-x86_64
             cargo_target_flag: --target x86_64-unknown-linux-gnu
             out_path: mcp-v8-client/target/x86_64-unknown-linux-gnu/release/mcp-v8-cli
           - name: Linux ARM64
@@ -111,7 +111,7 @@ jobs:
           - name: macOS x86_64
             os: macos-13
             target: x86_64-apple-darwin
-            bin_name: mcp-v8-cli-macos
+            bin_name: mcp-v8-cli-macos-x86_64
             cargo_target_flag: --target x86_64-apple-darwin
             out_path: mcp-v8-client/target/x86_64-apple-darwin/release/mcp-v8-cli
           - name: macOS ARM64
@@ -205,40 +205,38 @@ jobs:
 
       - name: Rename and organize binaries
         run: |
-          echo "Listing dist directory:"
-          ls -l dist
-          echo "Listing all subdirectories in dist:"
-          for dir in dist/*; do
-            if [ -d "$dir" ]; then
-              echo "Contents of $dir:"
-              ls -l "$dir"
-            fi
-          done
           mkdir -p dist/final
 
-          # Skip non-binary artifact directories
-          for dir in dist/*; do
-            if [ -d "$dir" ] && [ "$dir" != "dist/final" ] && [ "$dir" != "dist/openapi-json" ]; then
-              echo "Processing directory: $dir"
-              bin=$(ls "$dir" | head -1)
-              echo "Found binary: $bin in $dir"
-              dir_trimmed=$(echo "$dir" | sed 's/^dist\///')
-              echo "Copying $dir/$bin to dist/final/$bin-$dir_trimmed"
-              cp "$dir/$bin" "dist/final/$bin-$dir_trimmed"
-            fi
+          # Server binaries: artifact dir = matrix.bin_name (e.g. mcp-v8-linux)
+          # binary inside is named "server" — rename to the dir name for clarity
+          for dir in dist/mcp-v8-linux dist/mcp-v8-linux-arm64 dist/mcp-v8-macos-arm64; do
+            [ -d "$dir" ] || continue
+            name=$(basename "$dir")
+            cp "$dir/server" "dist/final/$name"
           done
 
-          # Also include openapi.json in the release
+          # CLI binaries: artifact dir = matrix.bin_name (e.g. mcp-v8-cli-linux-x86_64)
+          # binary inside is named "mcp-v8-cli" — rename to the dir name
+          for dir in dist/mcp-v8-cli-linux-x86_64 dist/mcp-v8-cli-linux-arm64 dist/mcp-v8-cli-macos-x86_64 dist/mcp-v8-cli-macos-arm64; do
+            [ -d "$dir" ] || continue
+            name=$(basename "$dir")
+            cp "$dir/mcp-v8-cli" "dist/final/$name"
+          done
+
+          # Include openapi.json
           if [ -f "dist/openapi-json/openapi.json" ]; then
             cp dist/openapi-json/openapi.json dist/final/openapi.json
           fi
 
-          # Gzip each binary in dist/final (not .json files)
+          # Gzip each binary (not .json/.gz files)
           for file in dist/final/*; do
             if [ -f "$file" ] && [[ "$file" != *.json ]] && [[ "$file" != *.gz ]]; then
               gzip -c "$file" > "$file.gz"
             fi
           done
+
+          echo "Release assets:"
+          ls -lh dist/final/
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

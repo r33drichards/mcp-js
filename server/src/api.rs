@@ -1,6 +1,7 @@
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
+    response::Redirect,
     routing::{get, post},
     Json, Router,
 };
@@ -10,6 +11,31 @@ use utoipa::{OpenApi, ToSchema};
 
 use crate::engine::Engine;
 
+// ── CLI download helpers ──────────────────────────────────────────────
+
+/// The version of this server binary, from Cargo.toml at compile time.
+const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// GitHub repo where releases are published.
+const GITHUB_REPO: &str = "r33drichards/mcp-js";
+
+/// Map a `{os}-{arch}` platform string to the release asset name.
+fn cli_asset_name(platform: &str) -> Option<&'static str> {
+    match platform {
+        "linux-x86_64"  => Some("mcp-v8-cli-linux-x86_64"),
+        "linux-aarch64" => Some("mcp-v8-cli-linux-arm64"),
+        "macos-x86_64"  => Some("mcp-v8-cli-macos-x86_64"),
+        "macos-aarch64" => Some("mcp-v8-cli-macos-arm64"),
+        _ => None,
+    }
+}
+
+fn cli_download_url(asset: &str) -> String {
+    format!(
+        "https://github.com/{}/releases/download/v{}/{}",
+        GITHUB_REPO, SERVER_VERSION, asset
+    )
+}
 // ── Request / Response types ─────────────────────────────────────────────
 
 /// Request body for executing JavaScript code.
@@ -110,6 +136,26 @@ pub struct CancelResult {
     pub error: Option<String>,
 }
 
+/// A single entry in the CLI download index.
+#[derive(Serialize, ToSchema)]
+pub struct CliAsset {
+    /// Platform identifier (e.g. `linux-x86_64`).
+    pub platform: String,
+    /// Direct download URL for the CLI binary.
+    pub url: String,
+    /// Gzip-compressed download URL.
+    pub url_gz: String,
+}
+
+/// Index of available CLI binary downloads for the running server version.
+#[derive(Serialize, ToSchema)]
+pub struct CliIndex {
+    /// Server (and CLI) version string, e.g. `"0.1.0"`.
+    pub version: String,
+    /// Available platform binaries.
+    pub assets: Vec<CliAsset>,
+}
+
 /// Generic error body.
 #[derive(Serialize, ToSchema)]
 pub struct ApiError {
@@ -150,6 +196,8 @@ pub struct OutputQuery {
         get_execution_handler,
         get_execution_output_handler,
         cancel_execution_handler,
+        cli_index_handler,
+        cli_download_handler,
     ),
     components(schemas(
         ExecRequest,
@@ -161,6 +209,8 @@ pub struct OutputQuery {
         CancelResult,
         ApiError,
         OutputQuery,
+        CliAsset,
+        CliIndex,
     ))
 )]
 pub struct ApiDoc;
@@ -346,6 +396,97 @@ async fn list_executions_handler(
     }
 }
 
+// ── CLI download endpoints ────────────────────────────────────────────────
+
+const PLATFORMS: &[&str] = &[
+    "linux-x86_64",
+    "linux-aarch64",
+    "macos-x86_64",
+    "macos-aarch64",
+];
+
+/// List available CLI binary downloads for the running server version.
+///
+/// Returns download URLs for all supported platforms. The CLI binary will
+/// always match the server version it was downloaded from.
+#[utoipa::path(
+    get,
+    path = "/api/cli",
+    responses(
+        (status = 200, description = "CLI download index", body = CliIndex),
+    ),
+    tag = "cli"
+)]
+async fn cli_index_handler() -> Json<serde_json::Value> {
+    let assets: Vec<_> = PLATFORMS
+        .iter()
+        .filter_map(|p| {
+            let asset = cli_asset_name(p)?;
+            Some(serde_json::json!({
+                "platform": p,
+                "url":    cli_download_url(asset),
+                "url_gz": cli_download_url(&format!("{}.gz", asset)),
+            }))
+        })
+        .collect();
+
+    Json(serde_json::json!({
+        "version": SERVER_VERSION,
+        "assets": assets,
+    }))
+}
+
+/// Download the CLI binary for a specific platform.
+///
+/// Redirects (302) to the matching GitHub Release asset for the running server
+/// version. Use `?gz=1` to download the gzip-compressed variant.
+///
+/// Supported platforms: `linux-x86_64`, `linux-aarch64`, `macos-x86_64`, `macos-aarch64`.
+#[utoipa::path(
+    get,
+    path = "/api/cli/{platform}",
+    params(
+        ("platform" = String, Path, description = "Target platform (linux-x86_64 | linux-aarch64 | macos-x86_64 | macos-aarch64)"),
+        ("gz" = Option<String>, Query, description = "Set to '1' to download the .gz compressed binary"),
+    ),
+    responses(
+        (status = 302, description = "Redirect to the CLI binary on GitHub Releases"),
+        (status = 404, description = "Unknown platform", body = ApiError),
+    ),
+    tag = "cli"
+)]
+async fn cli_download_handler(
+    Path(platform): Path<String>,
+    axum::extract::RawQuery(query): axum::extract::RawQuery,
+) -> Result<Redirect, (StatusCode, Json<serde_json::Value>)> {
+    let want_gz = query
+        .as_deref()
+        .unwrap_or("")
+        .split('&')
+        .any(|kv| kv == "gz=1" || kv == "gz=true");
+
+    match cli_asset_name(&platform) {
+        Some(asset) => {
+            let url = if want_gz {
+                cli_download_url(&format!("{}.gz", asset))
+            } else {
+                cli_download_url(asset)
+            };
+            Ok(Redirect::temporary(&url))
+        }
+        None => Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": format!(
+                    "Unknown platform '{}'. Valid platforms: {}",
+                    platform,
+                    PLATFORMS.join(", ")
+                )
+            })),
+        )),
+    }
+}
+
 // ── Router builders ──────────────────────────────────────────────────────
 
 /// Build the plain Axum router (no OpenAPI metadata attached).
@@ -359,5 +500,7 @@ pub fn api_router(engine: Engine) -> Router {
         .route("/api/executions/{id}", get(get_execution_handler))
         .route("/api/executions/{id}/output", get(get_execution_output_handler))
         .route("/api/executions/{id}/cancel", post(cancel_execution_handler))
+        .route("/api/cli", get(cli_index_handler))
+        .route("/api/cli/{platform}", get(cli_download_handler))
         .with_state(engine)
 }
