@@ -1,0 +1,85 @@
+name: Smoke Test v0.10.18-alpha
+on:
+  workflow_dispatch:
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download release binaries
+        run: |
+          curl -fL https://github.com/r33drichards/mcp-js/releases/download/v0.10.18-alpha/mcp-v8-linux.gz | gunzip > server
+          curl -fL https://github.com/r33drichards/mcp-js/releases/download/v0.10.18-alpha/mcp-v8-cli-linux-x86_64.gz | gunzip > cli
+          chmod +x server cli
+          echo "server: $(du -sh server | cut -f1)"
+          echo "cli:    $(du -sh cli | cut -f1)"
+
+      - name: Start server
+        run: |
+          ./server --stateless --http-port 9090 &
+          echo "SERVER_PID=$!" >> $GITHUB_ENV
+          for i in $(seq 1 30); do
+            sleep 1
+            CODE=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:9090/api/executions 2>/dev/null)
+            [ "$CODE" = "200" ] && echo "Server ready after ${i}s" && break
+            [ "$i" = "30" ] && echo "Server did not start" && exit 1
+          done
+
+      - name: Check /api/version
+        run: |
+          curl -s http://127.0.0.1:9090/api/version | python3 -m json.tool
+
+      - name: Check /api/cli index (3 platforms, no macos-x86_64)
+        run: |
+          RESP=$(curl -s http://127.0.0.1:9090/api/cli)
+          echo "$RESP" | python3 -m json.tool
+          echo "$RESP" | python3 -c "
+          import sys,json
+          d=json.load(sys.stdin)
+          platforms=[a['platform'] for a in d['assets']]
+          print('platforms:', platforms)
+          assert 'linux-x86_64'  in platforms, 'missing linux-x86_64'
+          assert 'linux-aarch64' in platforms, 'missing linux-aarch64'
+          assert 'macos-aarch64' in platforms, 'missing macos-aarch64'
+          assert 'macos-x86_64'  not in platforms, 'macos-x86_64 should not be present'
+          avail=[a['platform'] for a in d['assets'] if a['available']]
+          print('available:', avail)
+          assert 'linux-x86_64' in avail, 'linux-x86_64 should be available (embedded)'
+          print('PASS: CLI index looks correct')
+          "
+
+      - name: Download embedded CLI from server and run it
+        run: |
+          curl -fLo cli-from-server http://127.0.0.1:9090/api/cli/linux-x86_64
+          chmod +x cli-from-server
+          file cli-from-server
+          # Run a JS exec via the CLI downloaded from the server
+          RESULT=$(./cli-from-server --url http://127.0.0.1:9090 --json exec 'console.log(42)')
+          echo "exec result: $RESULT"
+          EXEC_ID=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin)['execution_id'])")
+          echo "execution_id: $EXEC_ID"
+          # Poll until complete
+          for i in $(seq 1 30); do
+            sleep 0.5
+            STATUS=$(./cli-from-server --url http://127.0.0.1:9090 --json executions get $EXEC_ID | python3 -c "import sys,json; print(json.load(sys.stdin)['status'])")
+            [ "$STATUS" = "completed" ] && echo "COMPLETED" && break
+          done
+          # Get output
+          OUTPUT=$(./cli-from-server --url http://127.0.0.1:9090 executions output $EXEC_ID)
+          echo "output: $OUTPUT"
+          echo "$OUTPUT" | grep -q "42" && echo "PASS: output contains 42" || (echo "FAIL: expected 42" && exit 1)
+
+      - name: Also test pre-built CLI binary directly
+        run: |
+          RESULT=$(./cli --url http://127.0.0.1:9090 --json exec '"hello from cli"')
+          EXEC_ID=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin)['execution_id'])")
+          for i in $(seq 1 30); do
+            sleep 0.5
+            STATUS=$(./cli --url http://127.0.0.1:9090 --json executions get $EXEC_ID | python3 -c "import sys,json; print(json.load(sys.stdin)['status'])")
+            [ "$STATUS" = "completed" ] && break
+          done
+          OUTPUT=$(./cli --url http://127.0.0.1:9090 executions output $EXEC_ID)
+          echo "output: $OUTPUT"
+          echo "$OUTPUT" | grep -qi "hello" && echo "PASS: output contains hello" || (echo "FAIL" && exit 1)
+
+      - name: Summary
+        run: echo "All smoke tests passed for v0.10.18-alpha"
