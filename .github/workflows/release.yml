@@ -180,6 +180,8 @@ jobs:
           echo "MCP_V8_CLI_LINUX_X86_64=$(pwd)/cli-bins/linux-x86_64/mcp-v8-cli"   >> $GITHUB_ENV
           echo "MCP_V8_CLI_LINUX_AARCH64=$(pwd)/cli-bins/linux-arm64/mcp-v8-cli"   >> $GITHUB_ENV
           echo "MCP_V8_CLI_MACOS_AARCH64=$(pwd)/cli-bins/macos-arm64/mcp-v8-cli"   >> $GITHUB_ENV
+          # Strip leading 'v' from tag for CARGO_PKG_VERSION (e.g. v0.10.21 → 0.10.21)
+          echo "RELEASE_VERSION=${GITHUB_REF_NAME#v}"                               >> $GITHUB_ENV
 
       - name: Build server – Linux (cargo-zigbuild, glibc ${{ env.GLIBC_FLOOR_SERVER }})
         if: ${{ matrix.use_zigbuild }}
