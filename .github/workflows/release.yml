@@ -64,7 +64,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            clang llvm pkg-config libssl-dev
+            clang llvm pkg-config perl
           echo "LIBCLANG_PATH=$(llvm-config --libdir)" >> $GITHUB_ENV
           # zigbuild's wrapped CC strips /usr/include; openssl headers are split
           # between /usr/include/openssl/ and /usr/include/<arch>-linux-gnu/openssl/.
@@ -75,7 +75,10 @@ jobs:
           # include search path (/usr/include) actually contains the arch headers.
           for f in /usr/include/${ARCH_TRIPLE}/openssl/*.h; do sudo ln -sf "$f" "/usr/include/openssl/$(basename $f)" 2>/dev/null || true; done
           echo "OPENSSL_INCLUDE_DIR=/usr/include" >> $GITHUB_ENV
-          echo "OPENSSL_LIB_DIR=/usr/lib/${ARCH_TRIPLE}" >> $GITHUB_ENV
+          # Use vendored openssl — the system libcrypto requires glibc 2.34+ which
+          # is incompatible with our 2.17 glibc floor target. Vendored compiles
+          # openssl from source as a static lib with no external glibc deps.
+          echo "OPENSSL_VENDORED=1" >> $GITHUB_ENV
 
       # ── Linux: install Zig + cargo-zigbuild for portable glibc floor ──
       - name: Install Zig + cargo-zigbuild (Linux only)
@@ -176,7 +179,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            clang llvm pkg-config libssl-dev
+            clang llvm pkg-config perl
           echo "LIBCLANG_PATH=$(llvm-config --libdir)" >> $GITHUB_ENV
           # zigbuild's wrapped CC strips /usr/include; openssl headers are split
           # between /usr/include/openssl/ and /usr/include/<arch>-linux-gnu/openssl/.
@@ -187,7 +190,10 @@ jobs:
           # include search path (/usr/include) actually contains the arch headers.
           for f in /usr/include/${ARCH_TRIPLE}/openssl/*.h; do sudo ln -sf "$f" "/usr/include/openssl/$(basename $f)" 2>/dev/null || true; done
           echo "OPENSSL_INCLUDE_DIR=/usr/include" >> $GITHUB_ENV
-          echo "OPENSSL_LIB_DIR=/usr/lib/${ARCH_TRIPLE}" >> $GITHUB_ENV
+          # Use vendored openssl — the system libcrypto requires glibc 2.34+ which
+          # is incompatible with our 2.17 glibc floor target. Vendored compiles
+          # openssl from source as a static lib with no external glibc deps.
+          echo "OPENSSL_VENDORED=1" >> $GITHUB_ENV
 
       - name: Install Zig + cargo-zigbuild (Linux only)
         if: ${{ matrix.use_zigbuild }}
@@ -260,7 +266,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            clang llvm pkg-config libssl-dev
+            clang llvm pkg-config perl
           echo "LIBCLANG_PATH=$(llvm-config --libdir)" >> $GITHUB_ENV
           # zigbuild's wrapped CC strips /usr/include; openssl headers are split
           # between /usr/include/openssl/ and /usr/include/<arch>-linux-gnu/openssl/.
@@ -271,7 +277,10 @@ jobs:
           # include search path (/usr/include) actually contains the arch headers.
           for f in /usr/include/${ARCH_TRIPLE}/openssl/*.h; do sudo ln -sf "$f" "/usr/include/openssl/$(basename $f)" 2>/dev/null || true; done
           echo "OPENSSL_INCLUDE_DIR=/usr/include" >> $GITHUB_ENV
-          echo "OPENSSL_LIB_DIR=/usr/lib/${ARCH_TRIPLE}" >> $GITHUB_ENV
+          # Use vendored openssl — the system libcrypto requires glibc 2.34+ which
+          # is incompatible with our 2.17 glibc floor target. Vendored compiles
+          # openssl from source as a static lib with no external glibc deps.
+          echo "OPENSSL_VENDORED=1" >> $GITHUB_ENV
 
       - name: Install Zig + cargo-zigbuild (Linux only)
         if: ${{ matrix.use_zigbuild }}
