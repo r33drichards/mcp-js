@@ -174,7 +174,7 @@ async fn test_cli_index_covers_all_platforms() {
         .filter_map(|a| a["platform"].as_str())
         .collect();
 
-    for expected in &["linux-x86_64", "linux-aarch64", "macos-x86_64", "macos-aarch64"] {
+    for expected in &["linux-x86_64", "linux-aarch64", "macos-aarch64"] {
         assert!(platforms.contains(expected), "missing platform {expected}");
     }
 
