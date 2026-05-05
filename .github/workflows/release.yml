@@ -66,12 +66,14 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             clang llvm pkg-config libssl-dev
           echo "LIBCLANG_PATH=$(llvm-config --libdir)" >> $GITHUB_ENV
-          # opensslconf.h lives at /usr/include/<arch>-linux-gnu/ on Ubuntu.
-          # Pass it via CFLAGS so zigbuild's wrapped compiler sees it.
+          # On Ubuntu, openssl headers and libs are in arch-specific dirs.
+          # Tell openssl-sys exactly where they are so zigbuild's wrapped
+          # compiler/linker can find them.
           ARCH_TRIPLE=$(dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || echo "x86_64-linux-gnu")
           echo "CFLAGS=-I/usr/include/${ARCH_TRIPLE}" >> $GITHUB_ENV
           echo "CXXFLAGS=-I/usr/include/${ARCH_TRIPLE}" >> $GITHUB_ENV
-          # Let pkg-config find the multiarch openssl .pc file
+          echo "OPENSSL_INCLUDE_DIR=/usr/include/${ARCH_TRIPLE}" >> $GITHUB_ENV
+          echo "OPENSSL_LIB_DIR=/usr/lib/${ARCH_TRIPLE}" >> $GITHUB_ENV
           echo "PKG_CONFIG_PATH=/usr/lib/${ARCH_TRIPLE}/pkgconfig" >> $GITHUB_ENV
 
       # ── Linux: install Zig + cargo-zigbuild for portable glibc floor ──
@@ -175,12 +177,14 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             clang llvm pkg-config libssl-dev
           echo "LIBCLANG_PATH=$(llvm-config --libdir)" >> $GITHUB_ENV
-          # opensslconf.h lives at /usr/include/<arch>-linux-gnu/ on Ubuntu.
-          # Pass it via CFLAGS so zigbuild's wrapped compiler sees it.
+          # On Ubuntu, openssl headers and libs are in arch-specific dirs.
+          # Tell openssl-sys exactly where they are so zigbuild's wrapped
+          # compiler/linker can find them.
           ARCH_TRIPLE=$(dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || echo "x86_64-linux-gnu")
           echo "CFLAGS=-I/usr/include/${ARCH_TRIPLE}" >> $GITHUB_ENV
           echo "CXXFLAGS=-I/usr/include/${ARCH_TRIPLE}" >> $GITHUB_ENV
-          # Let pkg-config find the multiarch openssl .pc file
+          echo "OPENSSL_INCLUDE_DIR=/usr/include/${ARCH_TRIPLE}" >> $GITHUB_ENV
+          echo "OPENSSL_LIB_DIR=/usr/lib/${ARCH_TRIPLE}" >> $GITHUB_ENV
           echo "PKG_CONFIG_PATH=/usr/lib/${ARCH_TRIPLE}/pkgconfig" >> $GITHUB_ENV
 
       - name: Install Zig + cargo-zigbuild (Linux only)
@@ -256,12 +260,14 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             clang llvm pkg-config libssl-dev
           echo "LIBCLANG_PATH=$(llvm-config --libdir)" >> $GITHUB_ENV
-          # opensslconf.h lives at /usr/include/<arch>-linux-gnu/ on Ubuntu.
-          # Pass it via CFLAGS so zigbuild's wrapped compiler sees it.
+          # On Ubuntu, openssl headers and libs are in arch-specific dirs.
+          # Tell openssl-sys exactly where they are so zigbuild's wrapped
+          # compiler/linker can find them.
           ARCH_TRIPLE=$(dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || echo "x86_64-linux-gnu")
           echo "CFLAGS=-I/usr/include/${ARCH_TRIPLE}" >> $GITHUB_ENV
           echo "CXXFLAGS=-I/usr/include/${ARCH_TRIPLE}" >> $GITHUB_ENV
-          # Let pkg-config find the multiarch openssl .pc file
+          echo "OPENSSL_INCLUDE_DIR=/usr/include/${ARCH_TRIPLE}" >> $GITHUB_ENV
+          echo "OPENSSL_LIB_DIR=/usr/lib/${ARCH_TRIPLE}" >> $GITHUB_ENV
           echo "PKG_CONFIG_PATH=/usr/lib/${ARCH_TRIPLE}/pkgconfig" >> $GITHUB_ENV
 
       - name: Install Zig + cargo-zigbuild (Linux only)
