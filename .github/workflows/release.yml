@@ -79,6 +79,9 @@ jobs:
           # is incompatible with our 2.17 glibc floor target. Vendored compiles
           # openssl from source as a static lib with no external glibc deps.
           echo "OPENSSL_VENDORED=1" >> $GITHUB_ENV
+          # Also tell the linker where system libs live for any crate that emits
+          # cargo:rustc-link-lib=ssl outside of openssl-sys (e.g. ring)
+          echo "RUSTFLAGS=-L/usr/lib/${ARCH_TRIPLE}" >> $GITHUB_ENV
 
       # ── Linux: install Zig + cargo-zigbuild for portable glibc floor ──
       - name: Install Zig + cargo-zigbuild (Linux only)
@@ -194,6 +197,9 @@ jobs:
           # is incompatible with our 2.17 glibc floor target. Vendored compiles
           # openssl from source as a static lib with no external glibc deps.
           echo "OPENSSL_VENDORED=1" >> $GITHUB_ENV
+          # Also tell the linker where system libs live for any crate that emits
+          # cargo:rustc-link-lib=ssl outside of openssl-sys (e.g. ring)
+          echo "RUSTFLAGS=-L/usr/lib/${ARCH_TRIPLE}" >> $GITHUB_ENV
 
       - name: Install Zig + cargo-zigbuild (Linux only)
         if: ${{ matrix.use_zigbuild }}
@@ -281,6 +287,9 @@ jobs:
           # is incompatible with our 2.17 glibc floor target. Vendored compiles
           # openssl from source as a static lib with no external glibc deps.
           echo "OPENSSL_VENDORED=1" >> $GITHUB_ENV
+          # Also tell the linker where system libs live for any crate that emits
+          # cargo:rustc-link-lib=ssl outside of openssl-sys (e.g. ring)
+          echo "RUSTFLAGS=-L/usr/lib/${ARCH_TRIPLE}" >> $GITHUB_ENV
 
       - name: Install Zig + cargo-zigbuild (Linux only)
         if: ${{ matrix.use_zigbuild }}
