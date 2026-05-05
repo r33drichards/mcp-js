@@ -70,14 +70,12 @@ jobs:
           # between /usr/include/openssl/ and /usr/include/<arch>-linux-gnu/openssl/.
           # Merge both into a single dir that openssl-sys can use.
           ARCH_TRIPLE=$(dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || echo "x86_64-linux-gnu")
-          MERGED_INC="$HOME/openssl-merged"
-          mkdir -p "${MERGED_INC}/openssl"
-          cp /usr/include/openssl/*.h "${MERGED_INC}/openssl/" 2>/dev/null || true
-          cp /usr/include/${ARCH_TRIPLE}/openssl/*.h "${MERGED_INC}/openssl/" 2>/dev/null || true
-          echo "OPENSSL_INCLUDE_DIR=${MERGED_INC}" >> $GITHUB_ENV
+          # zigbuild replaces CC with its own wrapper that uses Zig's libc headers,
+          # which don't include system openssl. Create a symlink so Zig's default
+          # include search path (/usr/include) actually contains the arch headers.
+          sudo ln -sf /usr/include/${ARCH_TRIPLE}/openssl/opensslconf.h             /usr/include/openssl/opensslconf.h 2>/dev/null || true
+          echo "OPENSSL_INCLUDE_DIR=/usr/include" >> $GITHUB_ENV
           echo "OPENSSL_LIB_DIR=/usr/lib/${ARCH_TRIPLE}" >> $GITHUB_ENV
-          echo "CFLAGS=-I${MERGED_INC}" >> $GITHUB_ENV
-          echo "CXXFLAGS=-I${MERGED_INC}" >> $GITHUB_ENV
 
       # ── Linux: install Zig + cargo-zigbuild for portable glibc floor ──
       - name: Install Zig + cargo-zigbuild (Linux only)
@@ -184,14 +182,12 @@ jobs:
           # between /usr/include/openssl/ and /usr/include/<arch>-linux-gnu/openssl/.
           # Merge both into a single dir that openssl-sys can use.
           ARCH_TRIPLE=$(dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || echo "x86_64-linux-gnu")
-          MERGED_INC="$HOME/openssl-merged"
-          mkdir -p "${MERGED_INC}/openssl"
-          cp /usr/include/openssl/*.h "${MERGED_INC}/openssl/" 2>/dev/null || true
-          cp /usr/include/${ARCH_TRIPLE}/openssl/*.h "${MERGED_INC}/openssl/" 2>/dev/null || true
-          echo "OPENSSL_INCLUDE_DIR=${MERGED_INC}" >> $GITHUB_ENV
+          # zigbuild replaces CC with its own wrapper that uses Zig's libc headers,
+          # which don't include system openssl. Create a symlink so Zig's default
+          # include search path (/usr/include) actually contains the arch headers.
+          sudo ln -sf /usr/include/${ARCH_TRIPLE}/openssl/opensslconf.h             /usr/include/openssl/opensslconf.h 2>/dev/null || true
+          echo "OPENSSL_INCLUDE_DIR=/usr/include" >> $GITHUB_ENV
           echo "OPENSSL_LIB_DIR=/usr/lib/${ARCH_TRIPLE}" >> $GITHUB_ENV
-          echo "CFLAGS=-I${MERGED_INC}" >> $GITHUB_ENV
-          echo "CXXFLAGS=-I${MERGED_INC}" >> $GITHUB_ENV
 
       - name: Install Zig + cargo-zigbuild (Linux only)
         if: ${{ matrix.use_zigbuild }}
@@ -270,14 +266,12 @@ jobs:
           # between /usr/include/openssl/ and /usr/include/<arch>-linux-gnu/openssl/.
           # Merge both into a single dir that openssl-sys can use.
           ARCH_TRIPLE=$(dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || echo "x86_64-linux-gnu")
-          MERGED_INC="$HOME/openssl-merged"
-          mkdir -p "${MERGED_INC}/openssl"
-          cp /usr/include/openssl/*.h "${MERGED_INC}/openssl/" 2>/dev/null || true
-          cp /usr/include/${ARCH_TRIPLE}/openssl/*.h "${MERGED_INC}/openssl/" 2>/dev/null || true
-          echo "OPENSSL_INCLUDE_DIR=${MERGED_INC}" >> $GITHUB_ENV
+          # zigbuild replaces CC with its own wrapper that uses Zig's libc headers,
+          # which don't include system openssl. Create a symlink so Zig's default
+          # include search path (/usr/include) actually contains the arch headers.
+          sudo ln -sf /usr/include/${ARCH_TRIPLE}/openssl/opensslconf.h             /usr/include/openssl/opensslconf.h 2>/dev/null || true
+          echo "OPENSSL_INCLUDE_DIR=/usr/include" >> $GITHUB_ENV
           echo "OPENSSL_LIB_DIR=/usr/lib/${ARCH_TRIPLE}" >> $GITHUB_ENV
-          echo "CFLAGS=-I${MERGED_INC}" >> $GITHUB_ENV
-          echo "CXXFLAGS=-I${MERGED_INC}" >> $GITHUB_ENV
 
       - name: Install Zig + cargo-zigbuild (Linux only)
         if: ${{ matrix.use_zigbuild }}
