@@ -20,7 +20,6 @@ const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 // Each is an empty slice in dev builds (no MCP_V8_CLI_* env vars set).
 static CLI_LINUX_X86_64:  &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cli-linux-x86_64.bin"));
 static CLI_LINUX_AARCH64: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cli-linux-aarch64.bin"));
-static CLI_MACOS_X86_64:  &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cli-macos-x86_64.bin"));
 static CLI_MACOS_AARCH64: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cli-macos-aarch64.bin"));
 
 struct PlatformCli {
@@ -32,7 +31,6 @@ struct PlatformCli {
 const PLATFORMS: &[PlatformCli] = &[
     PlatformCli { platform: "linux-x86_64",  filename: "mcp-v8-cli-linux-x86_64",  bytes: CLI_LINUX_X86_64  },
     PlatformCli { platform: "linux-aarch64", filename: "mcp-v8-cli-linux-arm64",   bytes: CLI_LINUX_AARCH64 },
-    PlatformCli { platform: "macos-x86_64",  filename: "mcp-v8-cli-macos-x86_64",  bytes: CLI_MACOS_X86_64  },
     PlatformCli { platform: "macos-aarch64", filename: "mcp-v8-cli-macos-arm64",   bytes: CLI_MACOS_AARCH64 },
 ];
 
@@ -443,12 +441,12 @@ async fn cli_index_handler(
 /// version. Returns 404 if the server was built without embedded binaries
 /// (dev/local builds).
 ///
-/// Supported platforms: `linux-x86_64`, `linux-aarch64`, `macos-x86_64`, `macos-aarch64`.
+/// Supported platforms: `linux-x86_64`, `linux-aarch64`, `macos-aarch64`.
 #[utoipa::path(
     get,
     path = "/api/cli/{platform}",
     params(
-        ("platform" = String, Path, description = "Target platform (linux-x86_64 | linux-aarch64 | macos-x86_64 | macos-aarch64)"),
+        ("platform" = String, Path, description = "Target platform (linux-x86_64 | linux-aarch64 | macos-aarch64)"),
     ),
     responses(
         (status = 200, description = "CLI binary (application/octet-stream)"),

@@ -11,7 +11,6 @@ fn main() {
     for platform in &[
         "linux-x86_64",
         "linux-aarch64",
-        "macos-x86_64",
         "macos-aarch64",
     ] {
         let env_key = format!(
