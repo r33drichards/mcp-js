@@ -1,7 +1,7 @@
 use axum::{
     extract::{Path, Query, State},
-    http::StatusCode,
-    response::Redirect,
+    http::{header, StatusCode},
+    response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
@@ -16,25 +16,28 @@ use crate::engine::Engine;
 /// The version of this server binary, from Cargo.toml at compile time.
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// GitHub repo where releases are published.
-const GITHUB_REPO: &str = "r33drichards/mcp-js";
+// Embedded CLI binaries — populated at compile time by build.rs.
+// Each is an empty slice in dev builds (no MCP_V8_CLI_* env vars set).
+static CLI_LINUX_X86_64:  &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cli-linux-x86_64.bin"));
+static CLI_LINUX_AARCH64: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cli-linux-aarch64.bin"));
+static CLI_MACOS_X86_64:  &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cli-macos-x86_64.bin"));
+static CLI_MACOS_AARCH64: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cli-macos-aarch64.bin"));
 
-/// Map a `{os}-{arch}` platform string to the release asset name.
-fn cli_asset_name(platform: &str) -> Option<&'static str> {
-    match platform {
-        "linux-x86_64"  => Some("mcp-v8-cli-linux-x86_64"),
-        "linux-aarch64" => Some("mcp-v8-cli-linux-arm64"),
-        "macos-x86_64"  => Some("mcp-v8-cli-macos-x86_64"),
-        "macos-aarch64" => Some("mcp-v8-cli-macos-arm64"),
-        _ => None,
-    }
+struct PlatformCli {
+    platform: &'static str,
+    filename: &'static str,
+    bytes:    &'static [u8],
 }
 
-fn cli_download_url(asset: &str) -> String {
-    format!(
-        "https://github.com/{}/releases/download/v{}/{}",
-        GITHUB_REPO, SERVER_VERSION, asset
-    )
+const PLATFORMS: &[PlatformCli] = &[
+    PlatformCli { platform: "linux-x86_64",  filename: "mcp-v8-cli-linux-x86_64",  bytes: CLI_LINUX_X86_64  },
+    PlatformCli { platform: "linux-aarch64", filename: "mcp-v8-cli-linux-arm64",   bytes: CLI_LINUX_AARCH64 },
+    PlatformCli { platform: "macos-x86_64",  filename: "mcp-v8-cli-macos-x86_64",  bytes: CLI_MACOS_X86_64  },
+    PlatformCli { platform: "macos-aarch64", filename: "mcp-v8-cli-macos-arm64",   bytes: CLI_MACOS_AARCH64 },
+];
+
+fn find_platform(platform: &str) -> Option<&'static PlatformCli> {
+    PLATFORMS.iter().find(|p| p.platform == platform)
 }
 // ── Request / Response types ─────────────────────────────────────────────
 
@@ -141,10 +144,10 @@ pub struct CancelResult {
 pub struct CliAsset {
     /// Platform identifier (e.g. `linux-x86_64`).
     pub platform: String,
-    /// Direct download URL for the CLI binary.
+    /// Download URL for this binary via the server itself.
     pub url: String,
-    /// Gzip-compressed download URL.
-    pub url_gz: String,
+    /// Whether the binary is embedded in this server build.
+    pub available: bool,
 }
 
 /// Index of available CLI binary downloads for the running server version.
@@ -191,6 +194,7 @@ pub struct OutputQuery {
         description = "HTTP API for the mcp-v8 JavaScript execution server"
     ),
     paths(
+        version_handler,
         exec_handler,
         list_executions_handler,
         get_execution_handler,
@@ -398,17 +402,10 @@ async fn list_executions_handler(
 
 // ── CLI download endpoints ────────────────────────────────────────────────
 
-const PLATFORMS: &[&str] = &[
-    "linux-x86_64",
-    "linux-aarch64",
-    "macos-x86_64",
-    "macos-aarch64",
-];
-
 /// List available CLI binary downloads for the running server version.
 ///
-/// Returns download URLs for all supported platforms. The CLI binary will
-/// always match the server version it was downloaded from.
+/// Each `url` is a direct download from this server. `available: false` means
+/// the binary was not embedded at build time (dev/local builds).
 #[utoipa::path(
     get,
     path = "/api/cli",
@@ -417,29 +414,34 @@ const PLATFORMS: &[&str] = &[
     ),
     tag = "cli"
 )]
-async fn cli_index_handler() -> Json<serde_json::Value> {
+async fn cli_index_handler(
+    headers: axum::http::HeaderMap,
+) -> Json<serde_json::Value> {
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("localhost");
+
     let assets: Vec<_> = PLATFORMS
         .iter()
-        .filter_map(|p| {
-            let asset = cli_asset_name(p)?;
-            Some(serde_json::json!({
-                "platform": p,
-                "url":    cli_download_url(asset),
-                "url_gz": cli_download_url(&format!("{}.gz", asset)),
-            }))
-        })
+        .map(|p| serde_json::json!({
+            "platform":  p.platform,
+            "url":       format!("http://{}/api/cli/{}", host, p.platform),
+            "available": !p.bytes.is_empty(),
+        }))
         .collect();
 
     Json(serde_json::json!({
         "version": SERVER_VERSION,
-        "assets": assets,
+        "assets":  assets,
     }))
 }
 
-/// Download the CLI binary for a specific platform.
+/// Download the CLI binary for a specific platform directly from this server.
 ///
-/// Redirects (302) to the matching GitHub Release asset for the running server
-/// version. Use `?gz=1` to download the gzip-compressed variant.
+/// The binary is embedded at build time and always matches the running server
+/// version. Returns 404 if the server was built without embedded binaries
+/// (dev/local builds).
 ///
 /// Supported platforms: `linux-x86_64`, `linux-aarch64`, `macos-x86_64`, `macos-aarch64`.
 #[utoipa::path(
@@ -447,44 +449,65 @@ async fn cli_index_handler() -> Json<serde_json::Value> {
     path = "/api/cli/{platform}",
     params(
         ("platform" = String, Path, description = "Target platform (linux-x86_64 | linux-aarch64 | macos-x86_64 | macos-aarch64)"),
-        ("gz" = Option<String>, Query, description = "Set to '1' to download the .gz compressed binary"),
     ),
     responses(
-        (status = 302, description = "Redirect to the CLI binary on GitHub Releases"),
-        (status = 404, description = "Unknown platform", body = ApiError),
+        (status = 200, description = "CLI binary (application/octet-stream)"),
+        (status = 404, description = "Unknown platform or binary not embedded", body = ApiError),
     ),
     tag = "cli"
 )]
 async fn cli_download_handler(
     Path(platform): Path<String>,
-    axum::extract::RawQuery(query): axum::extract::RawQuery,
-) -> Result<Redirect, (StatusCode, Json<serde_json::Value>)> {
-    let want_gz = query
-        .as_deref()
-        .unwrap_or("")
-        .split('&')
-        .any(|kv| kv == "gz=1" || kv == "gz=true");
-
-    match cli_asset_name(&platform) {
-        Some(asset) => {
-            let url = if want_gz {
-                cli_download_url(&format!("{}.gz", asset))
-            } else {
-                cli_download_url(asset)
-            };
-            Ok(Redirect::temporary(&url))
-        }
-        None => Err((
+) -> Response {
+    match find_platform(&platform) {
+        None => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({
                 "error": format!(
                     "Unknown platform '{}'. Valid platforms: {}",
                     platform,
-                    PLATFORMS.join(", ")
+                    PLATFORMS.iter().map(|p| p.platform).collect::<Vec<_>>().join(", ")
                 )
             })),
-        )),
+        ).into_response(),
+
+        Some(p) if p.bytes.is_empty() => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": format!(
+                    "CLI binary for '{}' is not embedded in this build. \
+                     Set MCP_V8_CLI_{} at build time to embed it.",
+                    platform,
+                    platform.to_uppercase().replace('-', "_")
+                )
+            })),
+        ).into_response(),
+
+        Some(p) => (
+            StatusCode::OK,
+            [
+                (header::CONTENT_TYPE,        "application/octet-stream"),
+                (header::CONTENT_DISPOSITION, &format!("attachment; filename=\"{}\"", p.filename)),
+                (header::CONTENT_LENGTH,      &p.bytes.len().to_string()),
+            ],
+            p.bytes,
+        ).into_response(),
     }
+}
+
+// ── Version endpoint ──────────────────────────────────────────────────────
+
+/// Return the running server version.
+#[utoipa::path(
+    get,
+    path = "/api/version",
+    responses(
+        (status = 200, description = "Server version"),
+    ),
+    tag = "meta"
+)]
+async fn version_handler() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "version": SERVER_VERSION }))
 }
 
 // ── Router builders ──────────────────────────────────────────────────────
@@ -495,6 +518,7 @@ async fn cli_download_handler(
 /// for merging into SSE / Streamable-HTTP transport servers.
 pub fn api_router(engine: Engine) -> Router {
     Router::new()
+        .route("/api/version", get(version_handler))
         .route("/api/exec", post(exec_handler))
         .route("/api/executions", get(list_executions_handler))
         .route("/api/executions/{id}", get(get_execution_handler))

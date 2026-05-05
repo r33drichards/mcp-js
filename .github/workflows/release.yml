@@ -50,13 +50,13 @@ jobs:
       - name: Install target
         run: nix develop --command rustup target add ${{ matrix.target }}
 
-      - name: Build server
+      - name: Build server (first pass — no embedded CLI)
         run: nix develop --command bash -c "cd server && ${{ matrix.build_cmd }}"
 
-      - name: Upload server binary
+      - name: Upload server binary (first pass)
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.bin_name }}
+          name: ${{ matrix.bin_name }}-pass1
           path: ${{ matrix.out_path }}
 
   # ── Regenerate openapi.json from the built server binary ────────────
@@ -72,7 +72,7 @@ jobs:
       - name: Download Linux x86_64 server binary
         uses: actions/download-artifact@v4
         with:
-          name: mcp-v8-linux
+          name: mcp-v8-linux-pass1
           path: dist-server
 
       - name: Regenerate openapi.json
@@ -155,6 +155,78 @@ jobs:
           name: ${{ matrix.bin_name }}
           path: ${{ matrix.out_path }}
 
+  # ── Rebuild server with embedded CLI binaries (second pass) ─────────
+  # Downloads the CLI artifacts built above and rebuilds each server binary
+  # with MCP_V8_CLI_* env vars set so build.rs embeds them via include_bytes!.
+  rebuild-server:
+    name: Server+CLI – ${{ matrix.name }}
+    needs: build-cli
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - name: Linux x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            bin_name: mcp-v8-linux
+            build_cmd: cargo build --release --target x86_64-unknown-linux-gnu
+            out_path: server/target/x86_64-unknown-linux-gnu/release/server
+            cli_artifact: mcp-v8-cli-linux-x86_64
+            cli_env: MCP_V8_CLI_LINUX_X86_64
+          - name: Linux ARM64
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            bin_name: mcp-v8-linux-arm64
+            build_cmd: cargo build --release --target aarch64-unknown-linux-gnu
+            out_path: server/target/aarch64-unknown-linux-gnu/release/server
+            cli_artifact: mcp-v8-cli-linux-arm64
+            cli_env: MCP_V8_CLI_LINUX_AARCH64
+          - name: macOS ARM64
+            os: macos-14
+            target: aarch64-apple-darwin
+            bin_name: mcp-v8-macos-arm64
+            build_cmd: cargo build --release --target aarch64-apple-darwin
+            out_path: server/target/aarch64-apple-darwin/release/server
+            cli_artifact: mcp-v8-cli-macos-arm64
+            cli_env: MCP_V8_CLI_MACOS_AARCH64
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - uses: DeterminateSystems/nix-installer-action@main
+        with:
+          extra-conf: |
+            sandbox = relaxed
+      - uses: DeterminateSystems/flake-checker-action@main
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-directories: "server"
+
+      - name: Install target
+        run: nix develop --command rustup target add ${{ matrix.target }}
+
+      - name: Download matching CLI binary
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.cli_artifact }}
+          path: dist-cli
+
+      - name: Rebuild server with embedded CLI
+        run: |
+          chmod +x dist-cli/mcp-v8-cli
+          nix develop --command bash -c "
+            cd server
+            ${{ matrix.cli_env }}=$(pwd)/../dist-cli/mcp-v8-cli \
+            ${{ matrix.build_cmd }}
+          "
+
+      - name: Upload final server binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.bin_name }}
+          path: ${{ matrix.out_path }}
+
   # ── Publish mcp-v8-client to crates.io ──────────────────────────────
   publish-crate:
     name: Publish mcp-v8-client to crates.io
@@ -195,7 +267,7 @@ jobs:
 
   # ── Assemble GitHub Release ──────────────────────────────────────────
   release:
-    needs: [build-server, build-cli]
+    needs: [rebuild-server, build-cli]
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
