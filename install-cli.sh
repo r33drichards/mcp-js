@@ -39,7 +39,8 @@ case "$OS" in
     if [ "$ARCH" = "arm64" ]; then
       PLATFORM="macos-arm64"
     else
-      PLATFORM="macos"
+      echo "Unsupported macOS architecture: $ARCH (only Apple Silicon / arm64 is supported)"
+      exit 1
     fi
     ;;
   *)

@@ -98,12 +98,6 @@ jobs:
             bin_name: mcp-v8-cli-linux-arm64
             cargo_target_flag: --target aarch64-unknown-linux-gnu
             out_path: target/aarch64-unknown-linux-gnu/release/mcp-v8-cli
-          - name: macOS x86_64
-            os: macos-13
-            target: x86_64-apple-darwin
-            bin_name: mcp-v8-cli-macos-x86_64
-            cargo_target_flag: --target x86_64-apple-darwin
-            out_path: target/x86_64-apple-darwin/release/mcp-v8-cli
           - name: macOS ARM64
             os: macos-14
             target: aarch64-apple-darwin
@@ -270,7 +264,7 @@ jobs:
 
           # CLI binaries: artifact dir = matrix.bin_name (e.g. mcp-v8-cli-linux-x86_64)
           # binary inside is named "mcp-v8-cli" — rename to the dir name
-          for dir in dist/mcp-v8-cli-linux-x86_64 dist/mcp-v8-cli-linux-arm64 dist/mcp-v8-cli-macos-x86_64 dist/mcp-v8-cli-macos-arm64; do
+          for dir in dist/mcp-v8-cli-linux-x86_64 dist/mcp-v8-cli-linux-arm64 dist/mcp-v8-cli-macos-arm64; do
             [ -d "$dir" ] || continue
             name=$(basename "$dir")
             cp "$dir/mcp-v8-cli" "dist/final/$name"

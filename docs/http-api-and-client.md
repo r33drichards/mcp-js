@@ -63,7 +63,6 @@ $ curl http://localhost:3000/api/cli
   "assets": [
     { "platform": "linux-x86_64",  "url": "http://localhost:3000/api/cli/linux-x86_64",  "available": true  },
     { "platform": "linux-aarch64", "url": "http://localhost:3000/api/cli/linux-aarch64", "available": true  },
-    { "platform": "macos-x86_64",  "url": "http://localhost:3000/api/cli/macos-x86_64",  "available": true  },
     { "platform": "macos-aarch64", "url": "http://localhost:3000/api/cli/macos-aarch64", "available": true  }
   ]
 }
@@ -76,7 +75,7 @@ $ curl http://localhost:3000/api/cli
 
 Streams the CLI binary directly (no redirect, no GitHub dependency).
 
-Supported platforms: `linux-x86_64`, `linux-aarch64`, `macos-x86_64`, `macos-aarch64`.
+Supported platforms: `linux-x86_64`, `linux-aarch64`, `macos-aarch64`.
 
 ```bash
 # Download and run immediately
@@ -105,9 +104,6 @@ curl -fL http://my-server:3000/api/cli/linux-aarch64 -o mcp-v8-cli && chmod +x m
 
 # macOS ARM64 (Apple Silicon)
 curl -fL http://my-server:3000/api/cli/macos-aarch64 -o mcp-v8-cli && chmod +x mcp-v8-cli
-
-# macOS x86_64 (Intel)
-curl -fL http://my-server:3000/api/cli/macos-x86_64 -o mcp-v8-cli && chmod +x mcp-v8-cli
 ```
 
 **From a GitHub Release:**
