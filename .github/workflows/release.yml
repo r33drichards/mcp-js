@@ -22,20 +22,20 @@ jobs:
             os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             bin_name: mcp-v8-linux
-            build_cmd: cargo build --release --target x86_64-unknown-linux-gnu
-            out_path: server/target/x86_64-unknown-linux-gnu/release/server
+            build_cmd: cargo build --release --target x86_64-unknown-linux-gnu -p server
+            out_path: target/x86_64-unknown-linux-gnu/release/server
           - name: Linux ARM64
             os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             bin_name: mcp-v8-linux-arm64
-            build_cmd: cargo build --release --target aarch64-unknown-linux-gnu
-            out_path: server/target/aarch64-unknown-linux-gnu/release/server
+            build_cmd: cargo build --release --target aarch64-unknown-linux-gnu -p server
+            out_path: target/aarch64-unknown-linux-gnu/release/server
           - name: macOS ARM64
             os: macos-14
             target: aarch64-apple-darwin
             bin_name: mcp-v8-macos-arm64
-            build_cmd: cargo build --release --target aarch64-apple-darwin
-            out_path: server/target/aarch64-apple-darwin/release/server
+            build_cmd: cargo build --release --target aarch64-apple-darwin -p server
+            out_path: target/aarch64-apple-darwin/release/server
 
     steps:
       - name: Checkout code
@@ -44,14 +44,12 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/flake-checker-action@main
       - uses: Swatinem/rust-cache@v2
-        with:
-          cache-directories: "server"
 
       - name: Install target
         run: nix develop --command rustup target add ${{ matrix.target }}
 
       - name: Build server (first pass — no embedded CLI)
-        run: nix develop --command bash -c "cd server && ${{ matrix.build_cmd }}"
+        run: nix develop --command bash -c "${{ matrix.build_cmd }}"
 
       - name: Upload server binary (first pass)
         uses: actions/upload-artifact@v4
@@ -101,25 +99,25 @@ jobs:
             target: x86_64-unknown-linux-gnu
             bin_name: mcp-v8-cli-linux-x86_64
             cargo_target_flag: --target x86_64-unknown-linux-gnu
-            out_path: mcp-v8-client/target/x86_64-unknown-linux-gnu/release/mcp-v8-cli
+            out_path: target/x86_64-unknown-linux-gnu/release/mcp-v8-cli
           - name: Linux ARM64
             os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             bin_name: mcp-v8-cli-linux-arm64
             cargo_target_flag: --target aarch64-unknown-linux-gnu
-            out_path: mcp-v8-client/target/aarch64-unknown-linux-gnu/release/mcp-v8-cli
+            out_path: target/aarch64-unknown-linux-gnu/release/mcp-v8-cli
           - name: macOS x86_64
             os: macos-13
             target: x86_64-apple-darwin
             bin_name: mcp-v8-cli-macos-x86_64
             cargo_target_flag: --target x86_64-apple-darwin
-            out_path: mcp-v8-client/target/x86_64-apple-darwin/release/mcp-v8-cli
+            out_path: target/x86_64-apple-darwin/release/mcp-v8-cli
           - name: macOS ARM64
             os: macos-14
             target: aarch64-apple-darwin
             bin_name: mcp-v8-cli-macos-arm64
             cargo_target_flag: --target aarch64-apple-darwin
-            out_path: mcp-v8-client/target/aarch64-apple-darwin/release/mcp-v8-cli
+            out_path: target/aarch64-apple-darwin/release/mcp-v8-cli
 
     steps:
       - name: Checkout code
@@ -141,13 +139,9 @@ jobs:
           targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: "mcp-v8-client -> target"
 
       - name: Build CLI
-        run: |
-          cd mcp-v8-client
-          cargo build --release ${{ matrix.cargo_target_flag }}
+        run: cargo build --release -p mcp-v8-client ${{ matrix.cargo_target_flag }}
 
       - name: Upload CLI binary
         uses: actions/upload-artifact@v4
@@ -169,24 +163,24 @@ jobs:
             os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             bin_name: mcp-v8-linux
-            build_cmd: cargo build --release --target x86_64-unknown-linux-gnu
-            out_path: server/target/x86_64-unknown-linux-gnu/release/server
+            build_cmd: cargo build --release --target x86_64-unknown-linux-gnu -p server
+            out_path: target/x86_64-unknown-linux-gnu/release/server
             cli_artifact: mcp-v8-cli-linux-x86_64
             cli_env: MCP_V8_CLI_LINUX_X86_64
           - name: Linux ARM64
             os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             bin_name: mcp-v8-linux-arm64
-            build_cmd: cargo build --release --target aarch64-unknown-linux-gnu
-            out_path: server/target/aarch64-unknown-linux-gnu/release/server
+            build_cmd: cargo build --release --target aarch64-unknown-linux-gnu -p server
+            out_path: target/aarch64-unknown-linux-gnu/release/server
             cli_artifact: mcp-v8-cli-linux-arm64
             cli_env: MCP_V8_CLI_LINUX_AARCH64
           - name: macOS ARM64
             os: macos-14
             target: aarch64-apple-darwin
             bin_name: mcp-v8-macos-arm64
-            build_cmd: cargo build --release --target aarch64-apple-darwin
-            out_path: server/target/aarch64-apple-darwin/release/server
+            build_cmd: cargo build --release --target aarch64-apple-darwin -p server
+            out_path: target/aarch64-apple-darwin/release/server
             cli_artifact: mcp-v8-cli-macos-arm64
             cli_env: MCP_V8_CLI_MACOS_AARCH64
 
@@ -200,8 +194,6 @@ jobs:
             sandbox = relaxed
       - uses: DeterminateSystems/flake-checker-action@main
       - uses: Swatinem/rust-cache@v2
-        with:
-          cache-directories: "server"
 
       - name: Install target
         run: nix develop --command rustup target add ${{ matrix.target }}
@@ -216,8 +208,7 @@ jobs:
         run: |
           chmod +x dist-cli/mcp-v8-cli
           nix develop --command bash -c "
-            cd server
-            ${{ matrix.cli_env }}=$(pwd)/../dist-cli/mcp-v8-cli \
+            ${{ matrix.cli_env }}=$(pwd)/dist-cli/mcp-v8-cli \
             ${{ matrix.build_cmd }}
           "
 
@@ -251,8 +242,6 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: "mcp-v8-client -> target"
 
       - name: Verify package
         run: |
