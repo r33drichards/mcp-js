@@ -85,6 +85,72 @@ jobs:
           name: ${{ matrix.bin_name }}
           path: target/${{ matrix.target }}/release/mcp-v8-cli
 
+  # ── Server binary builds (mcp-v8-server) via cross (Docker-based) ─────────
+  # cross uses pre-built Docker images with the correct sysroot per target,
+  # avoiding manual OpenSSL header wrangling.  RUSTY_V8_ARCHIVE pre-fetches
+  # the static lib so the cross container doesn't need clang/llvm at all.
+  build-server:
+    name: Server – ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - name: Linux x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            rusty_v8_target: x86_64-unknown-linux-gnu
+            bin_name: mcp-v8-linux
+          - name: Linux ARM64
+            os: ubuntu-latest      # x86 runner + cross/QEMU for ARM (~15-20 min)
+            target: aarch64-unknown-linux-gnu
+            rusty_v8_target: aarch64-unknown-linux-gnu
+            bin_name: mcp-v8-linux-arm64
+          - name: macOS ARM64
+            os: macos-14
+            target: aarch64-apple-darwin
+            rusty_v8_target: aarch64-apple-darwin
+            bin_name: mcp-v8-macos-arm64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cross (Linux)
+        if: runner.os == 'Linux'
+        run: cargo install cross --git https://github.com/cross-rs/cross --locked --quiet
+
+      - name: Install build tools (macOS — plain cargo)
+        if: runner.os == 'macOS'
+        run: echo "macOS uses plain cargo"
+
+      - name: Fetch rusty_v8 static library
+        run: |
+          URL="https://github.com/denoland/rusty_v8/releases/download/v${RUSTY_V8_VERSION}/librusty_v8_release_${{ matrix.rusty_v8_target }}.a.gz"
+          curl -fL "$URL" -o librusty_v8.a.gz && gunzip librusty_v8.a.gz
+          echo "RUSTY_V8_ARCHIVE=$(pwd)/librusty_v8.a" >> $GITHUB_ENV
+
+      - name: Build server – Linux (cross)
+        if: runner.os == 'Linux'
+        run: cross build --release -p server --target ${{ matrix.target }}
+
+      - name: Build server – macOS (cargo)
+        if: runner.os == 'macOS'
+        run: |
+          brew install llvm
+          echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> $GITHUB_ENV
+          cargo build --release -p server --target ${{ matrix.target }}
+
+      - name: Upload server binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.bin_name }}
+          path: target/${{ matrix.target }}/release/server
+
   # ── Publish mcp-v8-client to crates.io ────────────────────────────────────
   publish-crate:
     name: Publish mcp-v8-client to crates.io
@@ -109,7 +175,7 @@ jobs:
 
   # ── Assemble GitHub Release ────────────────────────────────────────────────
   release:
-    needs: build-cli
+    needs: [build-cli, build-server]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -129,6 +195,13 @@ jobs:
             [ -d "$dir" ] || continue
             name=$(basename "$dir")
             cp "$dir/mcp-v8-cli" "dist/final/$name"
+          done
+
+          # Server binaries (artifact dir name = bin_name, file inside = "server")
+          for dir in dist/mcp-v8-linux dist/mcp-v8-linux-arm64 dist/mcp-v8-macos-arm64; do
+            [ -d "$dir" ] || continue
+            name=$(basename "$dir")
+            cp "$dir/server" "dist/final/$name"
           done
 
           # Include openapi.json from the repo
