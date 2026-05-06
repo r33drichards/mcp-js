@@ -18,7 +18,7 @@ use crate::session::SessionVerifier;
 const LLMS_TXT: &str = include_str!("llms_txt.md");
 
 /// Full README
-const README_MD: &str = include_str!("../../README.md");
+const README_MD: &str = include_str!("../README.md");
 
 /// Build the list of static documentation resources exposed via MCP.
 fn doc_resources(stateful: bool) -> Vec<Resource> {
