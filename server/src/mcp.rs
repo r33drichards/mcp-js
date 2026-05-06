@@ -12,6 +12,152 @@ use crate::engine::heap_tags::HeapTagEntry;
 use crate::engine::mcp_client::McpClientManager;
 use crate::session::SessionVerifier;
 
+// ── Embedded documentation resources ───────────────────────────────────
+
+/// llms.txt content — machine-readable agent guide (https://llmstxt.org/)
+const LLMS_TXT: &str = include_str!("llms_txt.md");
+
+/// Full README
+const README_MD: &str = include_str!("../README.md");
+
+/// Build the list of static documentation resources exposed via MCP.
+fn doc_resources(stateful: bool) -> Vec<Resource> {
+    use crate::api::ApiDoc;
+    use utoipa::OpenApi as _;
+
+    let openapi_json = serde_json::to_string(&ApiDoc::openapi()).unwrap_or_default();
+
+    // Build a compact tool summary as JSON
+    let mut tools: Vec<serde_json::Value> = vec![
+        json!({ "name": "run_js",               "description": if stateful { "Submit JS/TS for async execution (stateful). Returns execution_id." } else { "Submit JS/TS for async execution (stateless). Returns execution_id." } }),
+        json!({ "name": "get_execution",         "description": "Poll execution status and result." }),
+        json!({ "name": "get_execution_output",  "description": "Read paginated console output (line or byte mode)." }),
+        json!({ "name": "cancel_execution",      "description": "Terminate a running execution." }),
+        json!({ "name": "list_executions",       "description": "List all executions with their status." }),
+    ];
+    if stateful {
+        tools.extend([
+            json!({ "name": "list_sessions",           "description": "List all named sessions (stateful only)." }),
+            json!({ "name": "list_session_snapshots",  "description": "Browse execution history for a session." }),
+            json!({ "name": "get_heap_tags",           "description": "Get tags for a heap snapshot." }),
+            json!({ "name": "set_heap_tags",           "description": "Set tags on a heap snapshot." }),
+            json!({ "name": "delete_heap_tags",        "description": "Delete tag keys from a heap snapshot." }),
+            json!({ "name": "query_heaps_by_tags",     "description": "Find heap snapshots matching tag criteria." }),
+        ]);
+    }
+    let tools_json = serde_json::to_string(&json!({
+        "mode": if stateful { "stateful" } else { "stateless" },
+        "tools": tools,
+    })).unwrap_or_default();
+
+    // Store the generated JSON in thread-local statics to extend the lifetime
+    // to 'static so we can use them in ResourceContents::text().
+    // We use once_cell-style initialisation via OnceLock boxes on the heap.
+    // Actually, we use owned Strings, not &'static str, so we return the
+    // ResourceContents by value — that's fine.
+    let _ = (openapi_json, tools_json); // suppress unused warning before use below
+
+    vec![
+        Annotated::new(
+            RawResource {
+                uri: "docs://readme".into(),
+                name: "README".into(),
+                description: Some("Full mcp-v8 README with usage, CLI flags, and examples (Markdown)".into()),
+                mime_type: Some("text/markdown".into()),
+                size: Some(README_MD.len() as u32),
+            },
+            None,
+        ),
+        Annotated::new(
+            RawResource {
+                uri: "docs://llms-txt".into(),
+                name: "llms.txt".into(),
+                description: Some("Machine-readable agent guide: connection options, tools, REST API (Markdown)".into()),
+                mime_type: Some("text/markdown".into()),
+                size: Some(LLMS_TXT.len() as u32),
+            },
+            None,
+        ),
+        Annotated::new(
+            RawResource {
+                uri: "docs://openapi".into(),
+                name: "OpenAPI spec".into(),
+                description: Some("OpenAPI 3.0 JSON spec for the REST API (/api/exec, /api/executions/*, etc.)".into()),
+                mime_type: Some("application/json".into()),
+                size: None,
+            },
+            None,
+        ),
+        Annotated::new(
+            RawResource {
+                uri: "docs://tools".into(),
+                name: "MCP tool list".into(),
+                description: Some("JSON list of available MCP tools with descriptions, mode-aware".into()),
+                mime_type: Some("application/json".into()),
+                size: None,
+            },
+            None,
+        ),
+    ]
+}
+
+/// Read a single documentation resource by URI.
+/// Returns `None` when the URI is not recognised.
+fn read_doc_resource(uri: &str, stateful: bool) -> Option<ReadResourceResult> {
+    use crate::api::ApiDoc;
+    use utoipa::OpenApi as _;
+
+    let openapi_json = serde_json::to_string_pretty(&ApiDoc::openapi()).unwrap_or_default();
+
+    let mut tools: Vec<serde_json::Value> = vec![
+        json!({ "name": "run_js",               "description": if stateful { "Submit JS/TS for async execution (stateful). Returns execution_id." } else { "Submit JS/TS for async execution (stateless). Returns execution_id." } }),
+        json!({ "name": "get_execution",         "description": "Poll execution status and result." }),
+        json!({ "name": "get_execution_output",  "description": "Read paginated console output (line or byte mode)." }),
+        json!({ "name": "cancel_execution",      "description": "Terminate a running execution." }),
+        json!({ "name": "list_executions",       "description": "List all executions with their status." }),
+    ];
+    if stateful {
+        tools.extend([
+            json!({ "name": "list_sessions",           "description": "List all named sessions (stateful only)." }),
+            json!({ "name": "list_session_snapshots",  "description": "Browse execution history for a session." }),
+            json!({ "name": "get_heap_tags",           "description": "Get tags for a heap snapshot." }),
+            json!({ "name": "set_heap_tags",           "description": "Set tags on a heap snapshot." }),
+            json!({ "name": "delete_heap_tags",        "description": "Delete tag keys from a heap snapshot." }),
+            json!({ "name": "query_heaps_by_tags",     "description": "Find heap snapshots matching tag criteria." }),
+        ]);
+    }
+    let tools_json = serde_json::to_string_pretty(&json!({
+        "mode": if stateful { "stateful" } else { "stateless" },
+        "tools": tools,
+    })).unwrap_or_default();
+
+    let contents = match uri {
+        "docs://readme" => vec![ResourceContents::TextResourceContents {
+            uri: uri.to_string(),
+            mime_type: Some("text/markdown".into()),
+            text: README_MD.to_string(),
+        }],
+        "docs://llms-txt" => vec![ResourceContents::TextResourceContents {
+            uri: uri.to_string(),
+            mime_type: Some("text/markdown".into()),
+            text: LLMS_TXT.to_string(),
+        }],
+        "docs://openapi" => vec![ResourceContents::TextResourceContents {
+            uri: uri.to_string(),
+            mime_type: Some("application/json".into()),
+            text: openapi_json,
+        }],
+        "docs://tools" => vec![ResourceContents::TextResourceContents {
+            uri: uri.to_string(),
+            mime_type: Some("application/json".into()),
+            text: tools_json,
+        }],
+        _ => return None,
+    };
+
+    Some(ReadResourceResult { contents })
+}
+
 // ── MCP response types ──────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -405,10 +551,41 @@ impl McpService {
 impl ServerHandler for McpService {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
-            instructions: Some("JavaScript execution service (stateful mode - with heap persistence)".to_string()),
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
+            instructions: Some(
+                "JavaScript execution service (stateful mode - with heap persistence). \
+                 Use resources/list and resources/read to explore docs://readme, \
+                 docs://llms-txt, docs://openapi, and docs://tools before calling tools."
+                .to_string()
+            ),
+            capabilities: ServerCapabilities::builder()
+                .enable_tools()
+                .enable_resources()
+                .build(),
             ..Default::default()
         }
+    }
+
+    async fn list_resources(
+        &self,
+        _request: Option<PaginatedRequestParam>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListResourcesResult, McpError> {
+        Ok(ListResourcesResult {
+            next_cursor: None,
+            resources: doc_resources(true),
+        })
+    }
+
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParam,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResult, McpError> {
+        read_doc_resource(&request.uri, true)
+            .ok_or_else(|| McpError::resource_not_found(
+                format!("Unknown resource URI: {}", request.uri),
+                None,
+            ))
     }
 
     async fn list_tools(
@@ -610,10 +787,41 @@ impl StatelessMcpService {
 impl ServerHandler for StatelessMcpService {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
-            instructions: Some("JavaScript execution service (stateless shell mode)".to_string()),
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
+            instructions: Some(
+                "JavaScript execution service (stateless mode — no heap persistence). \
+                 Use resources/list and resources/read to explore docs://readme, \
+                 docs://llms-txt, docs://openapi, and docs://tools before calling tools."
+                .to_string()
+            ),
+            capabilities: ServerCapabilities::builder()
+                .enable_tools()
+                .enable_resources()
+                .build(),
             ..Default::default()
         }
+    }
+
+    async fn list_resources(
+        &self,
+        _request: Option<PaginatedRequestParam>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListResourcesResult, McpError> {
+        Ok(ListResourcesResult {
+            next_cursor: None,
+            resources: doc_resources(false),
+        })
+    }
+
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParam,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResult, McpError> {
+        read_doc_resource(&request.uri, false)
+            .ok_or_else(|| McpError::resource_not_found(
+                format!("Unknown resource URI: {}", request.uri),
+                None,
+            ))
     }
 
     async fn list_tools(
