@@ -17,7 +17,7 @@ use crate::engine::Engine;
 const LLMS_TXT: &str = include_str!("llms_txt.md");
 
 /// Full README for the /docs endpoint
-const README_MD: &str = include_str!("../../README.md");
+const README_MD: &str = include_str!("../README.md");
 
 // ── CLI download helpers ──────────────────────────────────────────────
 
