@@ -11,6 +11,14 @@ use utoipa::{OpenApi, ToSchema};
 
 use crate::engine::Engine;
 
+// ── Embedded agent-discovery content ─────────────────────────────────
+
+/// llms.txt — machine-readable guide for AI agents (https://llmstxt.org/)
+const LLMS_TXT: &str = include_str!("llms_txt.md");
+
+/// Full README for the /docs endpoint
+const README_MD: &str = include_str!("../../README.md");
+
 // ── CLI download helpers ──────────────────────────────────────────────
 
 /// The version of this server binary, from Cargo.toml at compile time.
@@ -508,6 +516,115 @@ async fn version_handler() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "version": SERVER_VERSION }))
 }
 
+// ── Agent-discovery endpoints ─────────────────────────────────────────────
+
+/// Redirect / → /llms.txt so agents that follow RFC 7231 redirects land on
+/// the machine-readable guide immediately.
+async fn root_redirect_handler() -> Response {
+    axum::response::Redirect::permanent("/llms.txt").into_response()
+}
+
+/// Serve the embedded llms.txt (https://llmstxt.org/) as plain Markdown.
+/// Agents can fetch this to understand the API, available MCP tools, and
+/// how to connect before making any other requests.
+async fn llms_txt_handler() -> Response {
+    axum::response::Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/markdown; charset=utf-8")
+        .header("X-Content-Type-Options", "nosniff")
+        .body(axum::body::Body::from(LLMS_TXT))
+        .unwrap()
+}
+
+/// Serve the full README as Markdown at /docs.
+/// Useful for agents that want deep context before exploring the API.
+async fn docs_handler() -> Response {
+    axum::response::Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/markdown; charset=utf-8")
+        .header("X-Content-Type-Options", "nosniff")
+        .body(axum::body::Body::from(README_MD))
+        .unwrap()
+}
+
+/// Serve the MCP tool list as JSON at /api/tools.
+/// Agents can query this endpoint to discover available tools and their
+/// descriptions without going through the MCP protocol handshake.
+async fn list_tools_handler(State(engine): State<Engine>) -> Json<serde_json::Value> {
+    // Build the tool list from the static tool descriptions embedded in the binary.
+    // This mirrors what `tools/list` returns over MCP, without requiring a full
+    // protocol session.  Stateful mode exposes heap/session tools; stateless does not.
+    let stateful = engine.is_stateful();
+
+    let mut tools = vec![
+        serde_json::json!({
+            "name": "run_js",
+            "description": if stateful {
+                "Submit JavaScript/TypeScript code for async execution. Returns execution_id. \
+                 In stateful mode accepts heap (SHA-256 to resume), session (logging label), \
+                 heap_memory_max_mb, execution_timeout_secs, and tags."
+            } else {
+                "Submit JavaScript/TypeScript code for async execution. Returns execution_id. \
+                 Accepts heap_memory_max_mb and execution_timeout_secs."
+            },
+        }),
+        serde_json::json!({
+            "name": "get_execution",
+            "description": "Poll execution status and result. Returns execution_id, status \
+                             (running/completed/failed/cancelled/timed_out), result (if completed), \
+                             heap (stateful only), error (if failed), started_at, completed_at.",
+        }),
+        serde_json::json!({
+            "name": "get_execution_output",
+            "description": "Read paginated console output. Supports line-based (line_offset + line_limit) \
+                             or byte-based (byte_offset + byte_limit) pagination.",
+        }),
+        serde_json::json!({
+            "name": "cancel_execution",
+            "description": "Terminate a running execution by its execution_id.",
+        }),
+        serde_json::json!({
+            "name": "list_executions",
+            "description": "List all executions with their status.",
+        }),
+    ];
+
+    if stateful {
+        tools.extend([
+            serde_json::json!({
+                "name": "list_sessions",
+                "description": "List all named sessions (stateful mode only).",
+            }),
+            serde_json::json!({
+                "name": "list_session_snapshots",
+                "description": "Browse execution history for a session. \
+                                 Params: session (required), fields (optional, comma-separated).",
+            }),
+            serde_json::json!({
+                "name": "get_heap_tags",
+                "description": "Get tags for a heap snapshot by its SHA-256 hash.",
+            }),
+            serde_json::json!({
+                "name": "set_heap_tags",
+                "description": "Set or replace tags on a heap snapshot.",
+            }),
+            serde_json::json!({
+                "name": "delete_heap_tags",
+                "description": "Delete specific tag keys from a heap snapshot.",
+            }),
+            serde_json::json!({
+                "name": "query_heaps_by_tags",
+                "description": "Find heap snapshots matching tag criteria.",
+            }),
+        ]);
+    }
+
+    Json(serde_json::json!({
+        "mode": if stateful { "stateful" } else { "stateless" },
+        "tools": tools,
+    }))
+}
+
 // ── Router builders ──────────────────────────────────────────────────────
 
 /// Build the plain Axum router (no OpenAPI metadata attached).
@@ -516,7 +633,11 @@ async fn version_handler() -> Json<serde_json::Value> {
 /// for merging into SSE / Streamable-HTTP transport servers.
 pub fn api_router(engine: Engine) -> Router {
     Router::new()
+        .route("/", get(root_redirect_handler))
+        .route("/llms.txt", get(llms_txt_handler))
+        .route("/docs", get(docs_handler))
         .route("/api/version", get(version_handler))
+        .route("/api/tools", get(list_tools_handler))
         .route("/api/exec", post(exec_handler))
         .route("/api/executions", get(list_executions_handler))
         .route("/api/executions/{id}", get(get_execution_handler))
