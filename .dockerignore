@@ -19,8 +19,7 @@ flake.lock
 shell.nix
 
 # Documentation
-# NOTE: README.md is intentionally NOT excluded — it is embedded at compile
-# time via include_str!() in server/src/api.rs and server/src/mcp.rs.
+README.md
 LICENSE
 
 # IDE files
