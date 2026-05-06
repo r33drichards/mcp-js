@@ -43,7 +43,11 @@ fuzz_target!(|input: ModuleResolutionInput| {
 
     // Cap specifier length to avoid excessive code generation
     let mut specifier = input.specifier;
-    specifier.truncate(10000);
+    if specifier.len() > 10000 {
+        let mut end = 10000;
+        while !specifier.is_char_boundary(end) { end -= 1; }
+        specifier.truncate(end);
+    }
 
     // Build JavaScript code that attempts various imports
     // Wrap in try-catch since most will fail (no network, policy denial, etc.)
