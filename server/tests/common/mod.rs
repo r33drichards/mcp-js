@@ -18,10 +18,12 @@ pub async fn start_server(port: u16, heap_dir: &str) -> Result<tokio::process::C
     Ok(child)
 }
 
-/// Start the MCP server with SSE transport for testing
+/// Start the MCP server with Streamable HTTP transport. The standalone SSE
+/// transport was removed when rmcp folded SSE into Streamable HTTP per the
+/// 2025-11-25 MCP spec, so this helper now dials `--http-port`.
 pub async fn start_sse_server(port: u16, heap_dir: &str) -> Result<tokio::process::Child, std::io::Error> {
     let child = Command::new(env!("CARGO"))
-        .args(&["run", "--", "--directory-path", heap_dir, "--sse-port", &port.to_string()])
+        .args(&["run", "--", "--directory-path", heap_dir, "--http-port", &port.to_string()])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()?;

@@ -46,6 +46,8 @@ pub struct ExecutionRecord {
     pub error: Option<String>,
     pub started_at: String,
     pub completed_at: Option<String>,
+    /// MCP session ID for ownership scoping in `tasks/list`. Optional.
+    pub session_id: Option<String>,
 }
 
 /// Summary returned by `list()`.
@@ -98,6 +100,16 @@ impl ExecutionRegistry {
 
     /// Register a new execution. Returns the sled tree for console output.
     pub fn register(&self, id: &str) -> Result<sled::Tree, String> {
+        self.register_with_session(id, None)
+    }
+
+    /// Register a new execution scoped to an MCP session ID. The session ID is
+    /// retained on the record so `list_for_session` can filter by ownership.
+    pub fn register_with_session(
+        &self,
+        id: &str,
+        session_id: Option<String>,
+    ) -> Result<sled::Tree, String> {
         let tree_name = format!("ex:{}", id);
         let tree = self.db.open_tree(&tree_name)
             .map_err(|e| format!("Failed to open console tree '{}': {}", tree_name, e))?;
@@ -111,6 +123,7 @@ impl ExecutionRegistry {
             error: None,
             started_at: chrono::Utc::now().to_rfc3339(),
             completed_at: None,
+            session_id,
         };
         self.executions.insert(id.to_string(), record);
 
@@ -209,6 +222,53 @@ impl ExecutionRegistry {
                 completed_at: r.completed_at.clone(),
             }
         }).collect()
+    }
+
+    /// List executions belonging to `session_id`, sorted by `started_at`
+    /// descending, with simple offset-based pagination via an opaque cursor.
+    /// `cursor` is interpreted as a base-10 offset; pages of `page_size`
+    /// items are returned. When `session_id` is `None`, returns an empty list
+    /// (per spec: unidentified requestors see no tasks).
+    pub fn list_for_session(
+        &self,
+        session_id: Option<&str>,
+        cursor: Option<&str>,
+        page_size: usize,
+    ) -> (Vec<ExecutionInfoDetailed>, Option<String>) {
+        let Some(sid) = session_id else {
+            return (Vec::new(), None);
+        };
+
+        let mut matches: Vec<ExecutionInfoDetailed> = self
+            .executions
+            .iter()
+            .filter_map(|entry| {
+                let r = entry.value();
+                if r.session_id.as_deref() == Some(sid) {
+                    Some(ExecutionInfoDetailed {
+                        id: r.id.clone(),
+                        status: r.status.to_string(),
+                        started_at: r.started_at.clone(),
+                        completed_at: r.completed_at.clone(),
+                        error: r.error.clone(),
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        matches.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+
+        let offset = cursor.and_then(|c| c.parse::<usize>().ok()).unwrap_or(0);
+        let end = (offset + page_size).min(matches.len());
+        let page = matches[offset.min(matches.len())..end].to_vec();
+        let next = if end < matches.len() {
+            Some(end.to_string())
+        } else {
+            None
+        };
+        (page, next)
     }
 
     /// Get the execution status string for a given ID.
@@ -323,4 +383,14 @@ pub struct ExecutionInfo {
     pub error: Option<String>,
     pub started_at: String,
     pub completed_at: Option<String>,
+}
+
+/// Lightweight detail row for paginated task listings.
+#[derive(Debug, Clone, Serialize)]
+pub struct ExecutionInfoDetailed {
+    pub id: ExecutionId,
+    pub status: String,
+    pub started_at: String,
+    pub completed_at: Option<String>,
+    pub error: Option<String>,
 }

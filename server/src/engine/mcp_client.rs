@@ -21,13 +21,18 @@ use deno_core::{JsRuntime, OpState, op2};
 use deno_error::JsErrorBox;
 use serde::{Deserialize, Serialize};
 
-use rmcp::model::{CallToolRequestParam, CallToolResult, Content, Tool};
+use rmcp::model::{CallToolRequestParams, CallToolResult, Content, Tool};
 use rmcp::service::Peer;
 use rmcp::RoleClient;
 
 // ── Configuration ────────────────────────────────────────────────────────
 
 /// Transport configuration for a single MCP server.
+///
+/// Note: the historical `sse` transport variant is kept as a deserialization
+/// alias for `http`; rmcp removed the standalone SSE client when the spec
+/// folded SSE into Streamable HTTP. Configs that still say `"transport":
+/// "sse"` continue to work and are dialled via Streamable HTTP.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "transport", rename_all = "lowercase")]
 pub enum McpServerTransport {
@@ -38,7 +43,8 @@ pub enum McpServerTransport {
         #[serde(default)]
         env: HashMap<String, String>,
     },
-    Sse {
+    #[serde(alias = "sse")]
+    Http {
         url: String,
     },
 }
@@ -265,12 +271,11 @@ impl McpClientManager {
             )
         })?;
 
+        let mut params = CallToolRequestParams::new(tool_name.to_string());
+        params.arguments = arguments;
         let result = server
             .peer
-            .call_tool(CallToolRequestParam {
-                name: tool_name.to_string().into(),
-                arguments,
-            })
+            .call_tool(params)
             .await
             .map_err(|e| format!("mcp.callTool({}.{}): {}", server_name, tool_name, e))?;
 
@@ -355,12 +360,11 @@ pub fn make_stub_tool(prefix: &str, server: &str, tool: &Tool) -> Tool {
     // Since stubs are discovery mechanisms (they return instructions, not
     // results), upstream annotations about behavior are misleading anyway.
     // Setting annotations to None omits the field entirely from the JSON.
-    Tool {
-        name: stub_name.into(),
-        description: Some(new_desc.into()),
-        input_schema: tool.input_schema.clone(),
-        annotations: None,
-    }
+    let mut t = Tool::default();
+    t.name = stub_name.into();
+    t.description = Some(new_desc.into());
+    t.input_schema = tool.input_schema.clone();
+    t
 }
 
 /// Render the instructional text returned when an external client calls a
@@ -397,7 +401,7 @@ async fn connect_one(config: &McpServerConfig) -> Result<ConnectedMcpServer, Str
             for (k, v) in env {
                 cmd.env(k, v);
             }
-            let transport = rmcp::transport::TokioChildProcess::new(&mut cmd)
+            let transport = rmcp::transport::TokioChildProcess::new(cmd)
                 .map_err(|e| format!("Failed to spawn '{}': {}", command, e))?;
 
             let service: rmcp::service::RunningService<RoleClient, ()> =
@@ -421,15 +425,8 @@ async fn connect_one(config: &McpServerConfig) -> Result<ConnectedMcpServer, Str
                 _keep_alive: keep_alive.abort_handle(),
             })
         }
-        McpServerTransport::Sse { url } => {
-            let transport = rmcp::transport::SseTransport::start(url)
-                .await
-                .map_err(|e| {
-                    format!(
-                        "Failed to connect to SSE endpoint '{}' for '{}': {}",
-                        url, config.name, e
-                    )
-                })?;
+        McpServerTransport::Http { url } => {
+            let transport = rmcp::transport::StreamableHttpClientTransport::from_uri(url.as_str());
 
             let service: rmcp::service::RunningService<RoleClient, ()> =
                 ().serve(transport)
@@ -687,12 +684,11 @@ mod tests {
     }
 
     fn tool(name: &'static str, desc: &'static str) -> Tool {
-        Tool {
-            name: name.into(),
-            description: Some(desc.into()),
-            input_schema: schema(json!({"x": {"type": "number"}})),
-            annotations: None,
-        }
+        let mut t = Tool::default();
+        t.name = name.into();
+        t.description = Some(desc.into());
+        t.input_schema = schema(json!({"x": {"type": "number"}}));
+        t
     }
 
     #[test]
@@ -769,11 +765,11 @@ mod tests {
 
     #[test]
     fn make_stub_handles_missing_description() {
-        let upstream = Tool {
-            name: "ping".into(),
-            description: None,
-            input_schema: schema(json!({})),
-            annotations: None,
+        let upstream = {
+            let mut t = Tool::default();
+            t.name = "ping".into();
+            t.input_schema = schema(json!({}));
+            t
         };
         let stub = make_stub_tool("runjs__", "infra", &upstream);
         let desc = stub.description.unwrap();
@@ -908,17 +904,17 @@ mod tests {
 
         // Simulate GitHub MCP server: hints with None values that would
         // serialize as JSON null and break Claude Code SDK's Zod validator.
-        let upstream = Tool {
-            name: "create_issue".into(),
-            description: Some("Create issue".into()),
-            input_schema: schema(json!({"title": {"type": "string"}})),
-            annotations: Some(ToolAnnotations {
-                title: Some("Create a GitHub issue".into()),
-                read_only_hint: None,
-                destructive_hint: None,
-                idempotent_hint: None,
-                open_world_hint: None,
-            }),
+        let upstream = {
+            let mut t = Tool::default();
+            t.name = "create_issue".into();
+            t.description = Some("Create issue".into());
+            t.input_schema = schema(json!({"title": {"type": "string"}}));
+            t.annotations = Some({
+                let mut a = ToolAnnotations::default();
+                a.title = Some("Create a GitHub issue".into());
+                a
+            });
+            t
         };
         let stub = make_stub_tool("runjs__", "github", &upstream);
 
@@ -934,17 +930,21 @@ mod tests {
         use rmcp::model::ToolAnnotations;
 
         // Even fully valid annotations are dropped — stubs don't execute.
-        let upstream = Tool {
-            name: "get_file".into(),
-            description: Some("Get file contents".into()),
-            input_schema: schema(json!({"path": {"type": "string"}})),
-            annotations: Some(ToolAnnotations {
-                title: Some("Get file".into()),
-                read_only_hint: Some(true),
-                destructive_hint: Some(false),
-                idempotent_hint: Some(true),
-                open_world_hint: Some(false),
-            }),
+        let upstream = {
+            let mut t = Tool::default();
+            t.name = "get_file".into();
+            t.description = Some("Get file contents".into());
+            t.input_schema = schema(json!({"path": {"type": "string"}}));
+            t.annotations = Some({
+                let mut a = ToolAnnotations::default();
+                a.title = Some("Get file".into());
+                a.read_only_hint = Some(true);
+                a.destructive_hint = Some(false);
+                a.idempotent_hint = Some(true);
+                a.open_world_hint = Some(false);
+                a
+            });
+            t
         };
         let stub = make_stub_tool("runjs__", "github", &upstream);
 

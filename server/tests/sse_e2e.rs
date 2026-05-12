@@ -1,5 +1,13 @@
-/// End-to-end integration tests for SSE MCP server
-/// These tests start the actual server with SSE transport and test real MCP protocol communication
+//! End-to-end integration tests for the SSE MCP server.
+//!
+//! **Disabled**: rmcp removed the standalone SSE transport (folded into
+//! Streamable HTTP per the MCP 2025-11-25 spec). These tests still exercise
+//! the legacy `GET /sse` + `POST /message?sessionId=…` two-endpoint protocol,
+//! which the new server no longer speaks. The Streamable HTTP equivalents
+//! live in `http_e2e.rs` / `http_integration.rs`. Kept here for reference;
+//! will be deleted once we're confident http_e2e covers equivalent ground.
+
+#![cfg(any())]
 
 use tokio::time::{timeout, Duration, sleep};
 use serde_json::{json, Value};

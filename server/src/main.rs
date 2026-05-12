@@ -2,9 +2,9 @@ use anyhow::Result;
 use rmcp::{ServerHandler, ServiceExt, transport::stdio};
 use tracing_subscriber::{self};
 use clap::Parser;
-use rmcp::transport::sse_server::{SseServer, SseServerConfig};
-use rmcp::transport::StreamableHttpServer;
-use rmcp::transport::streamable_http_server::axum::StreamableHttpServerConfig;
+use rmcp::transport::streamable_http_server::{
+    StreamableHttpService, StreamableHttpServerConfig, session::local::LocalSessionManager,
+};
 use tokio_util::sync::CancellationToken;
 use std::sync::Arc;
 use utoipa::OpenApi as _;
@@ -23,7 +23,7 @@ use engine::opa::{PoliciesConfig, build_policy_chain};
 use engine::heap_storage::{AnyHeapStorage, S3HeapStorage, WriteThroughCacheHeapStorage, FileHeapStorage};
 use engine::heap_tags::HeapTagStore;
 use engine::session_log::SessionLog;
-use mcp::{McpService, StatelessMcpService};
+use mcp::{McpService, StatelessMcpService, StatelessTasksApiMcpService, TasksApiMcpService};
 use session::{SessionVerifier, JwksKeyStore};
 use cluster::{ClusterConfig, ClusterNode};
 
@@ -63,12 +63,19 @@ struct Cli {
     jwks_url: Option<String>,
 
     /// HTTP port using Streamable HTTP transport (MCP 2025-03-26+, load-balanceable)
-    #[arg(long, conflicts_with = "sse_port")]
+    #[arg(long)]
     http_port: Option<u16>,
 
-    /// SSE port using the older HTTP+SSE transport
-    #[arg(long, conflicts_with = "http_port")]
-    sse_port: Option<u16>,
+    /// Expose `run_js` via the MCP Tasks API (2025-11-25 spec) instead of the
+    /// `execution_id` polling model. When set:
+    ///   - protocolVersion becomes 2025-11-25 and `capabilities.tasks` is advertised,
+    ///   - `run_js` is marked `execution.taskSupport = "required"`,
+    ///   - `tools/call` for `run_js` without `_meta.task` is rejected,
+    ///   - clients drive lifecycle via tasks/get, tasks/result, tasks/list, tasks/cancel,
+    ///   - `get_execution`, `get_execution_output`, `cancel_execution`, `list_executions` are hidden.
+    /// Task ownership is scoped by the `X-MCP-Session-Id` header (weaker than JWT).
+    #[arg(long = "use-tasks-api", default_value_t = false)]
+    use_tasks_api: bool,
 
     /// Maximum V8 heap memory per isolate in megabytes (default: 8, max: 64)
     #[arg(long, default_value = "8", value_parser = clap::value_parser!(u64).range(1..=64))]
@@ -184,15 +191,16 @@ struct Cli {
 
     /// Connect to an external MCP server as a module. JS code can call its tools
     /// via the `mcp` global object (mcp.callTool, mcp.listTools, mcp.servers).
-    /// Format for stdio: name=stdio:command:arg1:arg2
-    /// Format for SSE:   name=sse:url
+    /// Format for stdio:           name=stdio:command:arg1:arg2
+    /// Format for Streamable HTTP: name=http:http://host:port/mcp  (or use sse: as a legacy alias)
     /// Can be specified multiple times for multiple servers.
     #[arg(long = "mcp-server", value_name = "NAME=TRANSPORT:...")]
     mcp_servers: Vec<String>,
 
     /// Path to a JSON config file for MCP server modules.
-    /// Format: [{"name": "srv", "transport": "stdio", "command": "cmd", "args": ["a"]},
-    ///          {"name": "srv2", "transport": "sse", "url": "http://..."}]
+    /// Format: [{"name": "srv",  "transport": "stdio", "command": "cmd", "args": ["a"]},
+    ///          {"name": "srv2", "transport": "http",  "url": "http://..."}]
+    /// `"transport": "sse"` is accepted as a legacy alias for `http` (rmcp folded SSE into Streamable HTTP).
     #[arg(long = "mcp-config", value_name = "PATH")]
     mcp_config: Option<String>,
 
@@ -239,10 +247,11 @@ async fn main() -> Result<()> {
     tracing::info!("V8 execution timeout: {} seconds", execution_timeout_secs);
     tracing::info!("Max concurrent V8 executions: {}", cli.max_concurrent_executions);
 
-    // Cluster mode requires --http-port or --sse-port.
-    if cli.cluster_port.is_some() && cli.http_port.is_none() && cli.sse_port.is_none() {
+    // Cluster mode requires --http-port (rmcp dropped the SSE transport in
+    // favour of Streamable HTTP; stdio is not supported in cluster mode).
+    if cli.cluster_port.is_some() && cli.http_port.is_none() {
         anyhow::bail!(
-            "Cluster mode requires --http-port or --sse-port (stdio transport is not supported in cluster mode)"
+            "Cluster mode requires --http-port (stdio transport is not supported in cluster mode)"
         );
     }
 
@@ -557,42 +566,63 @@ async fn main() -> Result<()> {
     };
 
     // ── Start transport ─────────────────────────────────────────────────
+    let stateful = engine.is_stateful();
+    let tasks_api = cli.use_tasks_api;
+
     if let Some(port) = cli.http_port {
-        tracing::info!("Starting Streamable HTTP transport on port {}", port);
-        if engine.is_stateful() {
-            let verifier = session_verifier.clone();
-            start_streamable_http(engine, port, move |e| McpService::new(e, verifier.clone())).await?;
-        } else {
-            let verifier = session_verifier.clone();
-            start_streamable_http(engine, port, move |e| StatelessMcpService::new(e, verifier.clone())).await?;
-        }
-    } else if let Some(port) = cli.sse_port {
-        tracing::info!("Starting SSE transport on port {}", port);
-        if engine.is_stateful() {
-            let verifier = session_verifier.clone();
-            start_sse_server(engine, port, move |e| McpService::new(e, verifier.clone())).await?;
-        } else {
-            let verifier = session_verifier.clone();
-            start_sse_server(engine, port, move |e| StatelessMcpService::new(e, verifier.clone())).await?;
+        tracing::info!(
+            "Starting Streamable HTTP transport on port {} (stateful={}, tasks_api={})",
+            port, stateful, tasks_api,
+        );
+        match (stateful, tasks_api) {
+            (true, false) => {
+                let verifier = session_verifier.clone();
+                start_streamable_http(engine, port, move |e| McpService::new(e, verifier.clone())).await?;
+            }
+            (false, false) => {
+                let verifier = session_verifier.clone();
+                start_streamable_http(engine, port, move |e| StatelessMcpService::new(e, verifier.clone())).await?;
+            }
+            (true, true) => {
+                let verifier = session_verifier.clone();
+                start_streamable_http(engine, port, move |e| TasksApiMcpService::new(e, verifier.clone())).await?;
+            }
+            (false, true) => {
+                let verifier = session_verifier.clone();
+                start_streamable_http(engine, port, move |e| StatelessTasksApiMcpService::new(e, verifier.clone())).await?;
+            }
         }
     } else {
-        tracing::info!("Starting stdio transport");
-        if engine.is_stateful() {
-            let service = McpService::new(engine, None)
-                .serve(stdio())
-                .await
-                .inspect_err(|e| {
-                    tracing::error!("serving error: {:?}", e);
-                })?;
-            service.waiting().await?;
-        } else {
-            let service = StatelessMcpService::new(engine, None)
-                .serve(stdio())
-                .await
-                .inspect_err(|e| {
-                    tracing::error!("serving error: {:?}", e);
-                })?;
-            service.waiting().await?;
+        tracing::info!("Starting stdio transport (stateful={}, tasks_api={})", stateful, tasks_api);
+        match (stateful, tasks_api) {
+            (true, false) => {
+                let service = McpService::new(engine, None)
+                    .serve(stdio())
+                    .await
+                    .inspect_err(|e| tracing::error!("serving error: {:?}", e))?;
+                service.waiting().await?;
+            }
+            (false, false) => {
+                let service = StatelessMcpService::new(engine, None)
+                    .serve(stdio())
+                    .await
+                    .inspect_err(|e| tracing::error!("serving error: {:?}", e))?;
+                service.waiting().await?;
+            }
+            (true, true) => {
+                let service = TasksApiMcpService::new(engine, None)
+                    .serve(stdio())
+                    .await
+                    .inspect_err(|e| tracing::error!("serving error: {:?}", e))?;
+                service.waiting().await?;
+            }
+            (false, true) => {
+                let service = StatelessTasksApiMcpService::new(engine, None)
+                    .serve(stdio())
+                    .await
+                    .inspect_err(|e| tracing::error!("serving error: {:?}", e))?;
+                service.waiting().await?;
+            }
         }
     }
 
@@ -609,14 +639,27 @@ where
     let bind: std::net::SocketAddr = format!("0.0.0.0:{}", port).parse()?;
     let ct = CancellationToken::new();
 
-    let config = StreamableHttpServerConfig {
-        bind,
-        path: "/mcp".to_string(),
-        ct: ct.clone(),
-        sse_keep_alive: Some(std::time::Duration::from_secs(15)),
-    };
+    let mut config = StreamableHttpServerConfig::default();
+    config.sse_keep_alive = Some(std::time::Duration::from_secs(15));
+    config.cancellation_token = ct.clone();
+    // Permit Host headers used by typical deployments (loopback + 0.0.0.0).
+    // Public deployments should override via reverse proxy / extra config.
+    config.allowed_hosts = vec![
+        "localhost".to_string(),
+        "127.0.0.1".to_string(),
+        "0.0.0.0".to_string(),
+        format!("localhost:{}", port),
+        format!("127.0.0.1:{}", port),
+        format!("0.0.0.0:{}", port),
+    ];
 
-    let (server, mcp_router) = StreamableHttpServer::new(config);
+    let factory_engine = engine.clone();
+    let make_service = make_service.clone();
+    let mcp_service = StreamableHttpService::new(
+        move || Ok(make_service(factory_engine.clone())),
+        std::sync::Arc::new(LocalSessionManager::default()),
+        config,
+    );
 
     // Serve OpenAPI JSON spec at /api-doc/openapi.json
     let openapi_spec = api::ApiDoc::openapi();
@@ -632,8 +675,8 @@ where
             }
         }));
 
-    // Merge MCP router with plain HTTP API router and openapi route
-    let app = mcp_router
+    let app = axum::Router::new()
+        .nest_service("/mcp", mcp_service)
         .merge(api::api_router(engine.clone()))
         .merge(openapi_route);
 
@@ -651,74 +694,8 @@ where
         }
     });
 
-    server.with_service(move || make_service(engine.clone()));
-
     tokio::signal::ctrl_c().await?;
     tracing::info!("Received Ctrl+C, shutting down");
-    ct.cancel();
-
-    Ok(())
-}
-
-// ── SSE transport (--sse-port) ──────────────────────────────────────────
-
-async fn start_sse_server<S, F>(engine: Engine, port: u16, make_service: F) -> Result<()>
-where
-    S: ServerHandler + Send + Sync + 'static,
-    F: Fn(Engine) -> S + Send + Sync + Clone + 'static,
-{
-    let addr = format!("0.0.0.0:{}", port).parse()?;
-
-    let config = SseServerConfig {
-        bind: addr,
-        sse_path: "/sse".to_string(),
-        post_path: "/message".to_string(),
-        ct: CancellationToken::new(),
-        sse_keep_alive: Some(std::time::Duration::from_secs(15)),
-    };
-
-    let (sse_server, sse_router) = SseServer::new(config);
-
-    // Serve OpenAPI JSON spec at /api-doc/openapi.json
-    let openapi_spec2 = api::ApiDoc::openapi();
-    let openapi_json2 = serde_json::to_string(&openapi_spec2).unwrap_or_default();
-    let openapi_route2 = axum::Router::new()
-        .route("/api-doc/openapi.json", axum::routing::get(move || {
-            let json = openapi_json2.clone();
-            async move {
-                axum::response::Response::builder()
-                    .header("Content-Type", "application/json")
-                    .body(axum::body::Body::from(json))
-                    .unwrap()
-            }
-        }));
-
-    // Merge SSE router with plain HTTP API router and openapi route
-    let app = sse_router
-        .merge(api::api_router(engine.clone()))
-        .merge(openapi_route2);
-
-    let listener = tokio::net::TcpListener::bind(sse_server.config.bind).await?;
-    tracing::info!("SSE server listening on {}", sse_server.config.bind);
-
-    let ct = sse_server.config.ct.clone();
-    let ct_shutdown = ct.child_token();
-
-    let server = axum::serve(listener, app).with_graceful_shutdown(async move {
-        ct_shutdown.cancelled().await;
-        tracing::info!("SSE server shutting down");
-    });
-
-    sse_server.with_service(move || make_service(engine.clone()));
-
-    tokio::spawn(async move {
-        if let Err(e) = server.await {
-            tracing::error!("SSE server error: {:?}", e);
-        }
-    });
-
-    tokio::signal::ctrl_c().await?;
-    tracing::info!("Received Ctrl+C, shutting down SSE server");
     ct.cancel();
 
     Ok(())
@@ -956,16 +933,23 @@ fn load_mcp_server_configs(
                     env: std::collections::HashMap::new(),
                 },
             });
-        } else if let Some(url) = rest.strip_prefix("sse:") {
+        } else if let Some(url) = rest.strip_prefix("sse:").or_else(|| rest.strip_prefix("http:")) {
+            // `sse:` is accepted as a legacy alias; rmcp folded SSE into
+            // Streamable HTTP, so both prefixes dial via the same transport.
+            // Note: `http:` here is a *scheme tag* for our CLI; the URL after
+            // it should be `http://...` or `https://...`.
+            let url_str = if url.starts_with("//") {
+                format!("http:{}", url)
+            } else {
+                url.to_string()
+            };
             configs.push(McpServerConfig {
                 name,
-                transport: McpServerTransport::Sse {
-                    url: url.to_string(),
-                },
+                transport: McpServerTransport::Http { url: url_str },
             });
         } else {
             anyhow::bail!(
-                "Invalid --mcp-server transport for '{}': must start with 'stdio:' or 'sse:'. Got: '{}'",
+                "Invalid --mcp-server transport for '{}': must start with 'stdio:', 'http:', or 'sse:'. Got: '{}'",
                 name, rest
             );
         }

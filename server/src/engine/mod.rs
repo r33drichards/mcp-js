@@ -1389,7 +1389,7 @@ impl Engine {
         let code = strip_typescript_types(&code)?;
 
         let id = uuid::Uuid::new_v4().to_string();
-        let console_tree = registry.register(&id)?;
+        let console_tree = registry.register_with_session(&id, session.clone())?;
 
         // For stateful mode, unwrap snapshot before spawning background task.
         let raw_snapshot = if let Some(storage) = &self.heap_storage {
@@ -1653,6 +1653,21 @@ impl Engine {
         let registry = self.execution_registry.as_ref()
             .ok_or_else(|| "Execution registry not configured".to_string())?;
         Ok(registry.list())
+    }
+
+    /// List executions belonging to a given MCP session ID. Used by the
+    /// Tasks API (`tasks/list`) to scope returned tasks to the requesting
+    /// client. When `session_id` is `None`, returns an empty page.
+    pub fn list_executions_for_session(
+        &self,
+        session_id: Option<&str>,
+        cursor: Option<&str>,
+        page_size: usize,
+    ) -> Result<(Vec<crate::engine::execution::ExecutionInfoDetailed>, Option<String>), String>
+    {
+        let registry = self.execution_registry.as_ref()
+            .ok_or_else(|| "Execution registry not configured".to_string())?;
+        Ok(registry.list_for_session(session_id, cursor, page_size))
     }
 
     pub async fn list_sessions(&self) -> Result<Vec<String>, String> {

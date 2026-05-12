@@ -2,9 +2,11 @@
 /// executes code and returns console output directly (no execution IDs exposed).
 
 use std::sync::{Arc, Once};
+use rmcp::handler::server::wrapper::Parameters;
+use rmcp::model::CallToolResult;
 use server::engine::{initialize_v8, Engine};
 use server::engine::execution::ExecutionRegistry;
-use server::mcp::StatelessMcpService;
+use server::mcp::{StatelessMcpService, StatelessRunJsArgs};
 
 static INIT: Once = Once::new();
 
@@ -27,11 +29,28 @@ fn create_test_engine() -> Engine {
         .with_execution_registry(Arc::new(registry))
 }
 
-use server::mcp::StatelessRunJsResponse;
-
-/// Extract the JSON value from a StatelessRunJsResponse.
-fn parse_response(resp: StatelessRunJsResponse) -> serde_json::Value {
-    resp.value
+/// Helper: invoke `run_js` with code only, parse the JSON text content of the
+/// returned `CallToolResult`.
+async fn run(service: &StatelessMcpService, code: &str) -> serde_json::Value {
+    let args = StatelessRunJsArgs {
+        code: code.to_string(),
+        heap_memory_max_mb: None,
+        execution_timeout_secs: None,
+    };
+    let result: CallToolResult = service
+        .run_js(Parameters(args))
+        .await
+        .expect("run_js returned McpError");
+    let raw_content = result
+        .content
+        .first()
+        .expect("CallToolResult has no content");
+    let json = serde_json::to_value(raw_content).expect("content not serializable");
+    let text = json
+        .get("text")
+        .and_then(|v| v.as_str())
+        .expect("first content block is not text");
+    serde_json::from_str(text).unwrap_or_else(|e| panic!("response text is not JSON: {}: {}", e, text))
 }
 
 #[tokio::test]
@@ -40,8 +59,7 @@ async fn test_stateless_shell_console_log() {
     let engine = create_test_engine();
     let service = StatelessMcpService::new(engine, None);
 
-    let resp = service.run_js("console.log('hello world')".to_string(), None, None).await;
-    let value = parse_response(resp);
+    let value = run(&service, "console.log('hello world')").await;
 
     assert!(value["error"].is_null(), "Should not have error: {:?}", value);
     let output = value["output"].as_str().expect("Should have output field");
@@ -60,8 +78,7 @@ async fn test_stateless_shell_multiple_console_logs() {
         console.log("line 3");
     "#;
 
-    let resp = service.run_js(code.to_string(), None, None).await;
-    let value = parse_response(resp);
+    let value = run(&service, code).await;
 
     let output = value["output"].as_str().expect("Should have output");
     assert!(output.contains("line 1"), "Should contain line 1");
@@ -75,8 +92,7 @@ async fn test_stateless_shell_error_handling() {
     let engine = create_test_engine();
     let service = StatelessMcpService::new(engine, None);
 
-    let resp = service.run_js("throw new Error('boom')".to_string(), None, None).await;
-    let value = parse_response(resp);
+    let value = run(&service, "throw new Error('boom')").await;
 
     assert!(!value["error"].is_null(), "Should have error field: {:?}", value);
     let error = value["error"].as_str().unwrap_or("");
@@ -89,8 +105,7 @@ async fn test_stateless_shell_no_execution_id_exposed() {
     let engine = create_test_engine();
     let service = StatelessMcpService::new(engine, None);
 
-    let resp = service.run_js("console.log('test')".to_string(), None, None).await;
-    let value = parse_response(resp);
+    let value = run(&service, "console.log('test')").await;
 
     assert!(value["execution_id"].is_null(), "Should not expose execution_id: {:?}", value);
 }
@@ -106,8 +121,7 @@ async fn test_stateless_shell_computation_with_output() {
         console.log("sum is", sum);
     "#;
 
-    let resp = service.run_js(code.to_string(), None, None).await;
-    let value = parse_response(resp);
+    let value = run(&service, code).await;
 
     let output = value["output"].as_str().expect("Should have output");
     assert!(output.contains("sum is 15"), "Output should contain 'sum is 15', got: {}", output);
@@ -124,8 +138,7 @@ async fn test_stateless_shell_top_level_await() {
         console.log("result is", result);
     "#;
 
-    let resp = service.run_js(code.to_string(), None, None).await;
-    let value = parse_response(resp);
+    let value = run(&service, code).await;
 
     assert!(value["error"].is_null(), "Top-level await should not error: {:?}", value);
     let output = value["output"].as_str().expect("Should have output");
@@ -144,8 +157,7 @@ async fn test_stateless_shell_top_level_await_async_chain() {
         console.log(a + b);
     "#;
 
-    let resp = service.run_js(code.to_string(), None, None).await;
-    let value = parse_response(resp);
+    let value = run(&service, code).await;
 
     assert!(value["error"].is_null(), "Chained top-level await should not error: {:?}", value);
     let output = value["output"].as_str().expect("Should have output");
