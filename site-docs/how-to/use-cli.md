@@ -33,6 +33,3 @@ Read output:
 ```bash
 mcp-v8-cli executions output <execution-id>
 ```
-
-The CLI is not the primary integration surface. It is a practical wrapper for
-the HTTP API when shell access is more useful than MCP integration.

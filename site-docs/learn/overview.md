@@ -13,7 +13,7 @@ At a high level, the system has four layers:
 4. optional policy-gated capabilities such as `fetch()`, `fs`, and external
    module loading
 
-If you are new to the project, continue with [First Run](first-run.md). If you
+If you are new to the project, continue with [Quick Start](first-run.md). If you
 already know what transport or client you need, move to
 [Transport Walkthrough](transport-walkthrough.md) or
 [Client Walkthrough](client-walkthrough.md).

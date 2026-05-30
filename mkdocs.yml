@@ -12,7 +12,7 @@ nav:
   - Home: index.md
   - Learn:
       - Overview: learn/overview.md
-      - First Run: learn/first-run.md
+      - Quick Start: learn/first-run.md
       - Transport Walkthrough: learn/transport-walkthrough.md
       - Client Walkthrough: learn/client-walkthrough.md
   - How-to:
