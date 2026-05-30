@@ -94,11 +94,7 @@ pub struct HeaderRule {
 impl HeaderRule {
     pub fn new(host: String, methods: Vec<String>, injection: HeaderInjection) -> Result<Self> {
         let host = require_non_empty("host", host)?;
-
-        match &injection {
-            HeaderInjection::Static { headers } => validate_static_headers(headers)?,
-            HeaderInjection::OAuthClientCredentials(config) => validate_oauth_config(config)?,
-        }
+        let injection = normalize_injection(injection)?;
 
         Ok(Self {
             host,
@@ -179,26 +175,53 @@ fn require_non_empty(field: &str, value: String) -> Result<String> {
     Ok(trimmed.to_string())
 }
 
-fn validate_static_headers(headers: &HashMap<String, String>) -> Result<()> {
+fn normalize_injection(injection: HeaderInjection) -> Result<HeaderInjection> {
+    match injection {
+        HeaderInjection::Static { headers } => Ok(HeaderInjection::Static {
+            headers: normalize_static_headers(headers)?,
+        }),
+        HeaderInjection::OAuthClientCredentials(config) => Ok(
+            HeaderInjection::OAuthClientCredentials(normalize_oauth_config(config)?),
+        ),
+    }
+}
+
+fn normalize_static_headers(headers: HashMap<String, String>) -> Result<HashMap<String, String>> {
     if headers.is_empty() {
         anyhow::bail!("fetch rule static headers cannot be empty");
     }
 
-    for header_name in headers.keys() {
-        if header_name.trim().is_empty() {
-            anyhow::bail!("fetch rule 'header' cannot be empty");
+    let mut normalized = HashMap::with_capacity(headers.len());
+    let mut seen_names = HashMap::with_capacity(headers.len());
+
+    for (header_name, header_value) in headers {
+        let normalized_name = require_non_empty("header", header_name)?;
+        let normalized_value = require_non_empty("value", header_value)?;
+        let normalized_name_key = normalized_name.to_ascii_lowercase();
+
+        if let Some(existing_name) = seen_names.insert(normalized_name_key, normalized_name.clone()) {
+            anyhow::bail!(
+                "fetch rule duplicate static header name '{}' conflicts with '{}'",
+                normalized_name,
+                existing_name
+            );
         }
+
+        normalized.insert(normalized_name, normalized_value);
     }
 
-    Ok(())
+    Ok(normalized)
 }
 
-fn validate_oauth_config(config: &OAuthClientCredentialsConfig) -> Result<()> {
-    require_non_empty("header", config.header_name.clone())?;
-    require_non_empty("token_url", config.token_url.clone())?;
-    require_non_empty("client_id", config.client_id.clone())?;
-    require_non_empty("client_secret", config.client_secret.clone())?;
-    Ok(())
+fn normalize_oauth_config(config: OAuthClientCredentialsConfig) -> Result<OAuthClientCredentialsConfig> {
+    Ok(OAuthClientCredentialsConfig {
+        header_name: require_non_empty("header", config.header_name)?,
+        token_url: require_non_empty("token_url", config.token_url)?,
+        client_id: require_non_empty("client_id", config.client_id)?,
+        client_secret: require_non_empty("client_secret", config.client_secret)?,
+        scope: config.scope.map(|scope| scope.trim().to_string()).filter(|scope| !scope.is_empty()),
+        refresh_buffer_secs: config.refresh_buffer_secs,
+    })
 }
 
 fn normalize_methods(methods: Vec<String>) -> Vec<String> {
@@ -575,6 +598,62 @@ mod tests {
         .expect_err("empty static headers map should fail");
 
         assert!(err.to_string().contains("static headers cannot be empty"));
+    }
+
+    #[test]
+    fn test_header_rule_new_rejects_blank_static_header_value() {
+        let err = HeaderRule::new(
+            "example.com".to_string(),
+            vec![],
+            HeaderInjection::Static {
+                headers: HashMap::from([("authorization".into(), "   ".into())]),
+            },
+        )
+        .expect_err("blank static header value should fail");
+
+        assert!(err.to_string().contains("'value' cannot be empty"));
+    }
+
+    #[test]
+    fn test_header_rule_new_rejects_case_variant_duplicate_static_headers() {
+        let err = HeaderRule::new(
+            "example.com".to_string(),
+            vec![],
+            HeaderInjection::Static {
+                headers: HashMap::from([
+                    ("Authorization".into(), "Bearer one".into()),
+                    ("authorization".into(), "Bearer two".into()),
+                ]),
+            },
+        )
+        .expect_err("case-variant duplicate headers should fail");
+
+        assert!(err.to_string().contains("duplicate static header name"));
+    }
+
+    #[test]
+    fn test_header_rule_oauth_client_credentials_trims_required_fields() {
+        let rule = HeaderRule::oauth_client_credentials(
+            " example.com ".to_string(),
+            vec![" get ".to_string()],
+            OAuthClientCredentialsConfig {
+                header_name: " Authorization ".to_string(),
+                token_url: " https://issuer/token ".to_string(),
+                client_id: " abc ".to_string(),
+                client_secret: " xyz ".to_string(),
+                scope: Some("read:all".to_string()),
+                refresh_buffer_secs: 30,
+            },
+        )
+        .expect("required auth fields should be trimmed");
+
+        let auth = rule.dynamic_auth().expect("dynamic auth expected");
+        assert_eq!(rule.host, "example.com");
+        assert_eq!(rule.methods(), &["GET".to_string()]);
+        assert_eq!(auth.header_name, "Authorization");
+        assert_eq!(auth.token_url, "https://issuer/token");
+        assert_eq!(auth.client_id, "abc");
+        assert_eq!(auth.client_secret, "xyz");
     }
 
     #[test]

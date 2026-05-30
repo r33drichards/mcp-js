@@ -1318,6 +1318,47 @@ mod tests {
     }
 
     #[test]
+    fn load_fetch_header_rules_rejects_blank_static_header_values() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let path = dir.path().join("blank-static-value.json");
+        std::fs::write(
+            &path,
+            r#"[{
+                "host": "api.example.com",
+                "headers": {"Authorization": "   "}
+            }]"#,
+        )
+        .expect("config should be written");
+
+        let err = load_fetch_header_rules(&[], &Some(path.display().to_string()))
+            .expect_err("blank static header value should fail");
+
+        assert!(err.to_string().contains("'value' cannot be empty"));
+    }
+
+    #[test]
+    fn load_fetch_header_rules_rejects_case_variant_duplicate_static_header_names() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let path = dir.path().join("duplicate-static-headers.json");
+        std::fs::write(
+            &path,
+            r#"[{
+                "host": "api.example.com",
+                "headers": {
+                    "Authorization": "Bearer one",
+                    "authorization": "Bearer two"
+                }
+            }]"#,
+        )
+        .expect("config should be written");
+
+        let err = load_fetch_header_rules(&[], &Some(path.display().to_string()))
+            .expect_err("case-variant duplicate headers should fail");
+
+        assert!(err.to_string().contains("duplicate static header name"));
+    }
+
+    #[test]
     fn load_fetch_header_rules_rejects_blank_json_required_values() {
         let dir = tempfile::tempdir().expect("tempdir should be created");
 
@@ -1352,5 +1393,36 @@ mod tests {
         let token_url_err = load_fetch_header_rules(&[], &Some(empty_token_url.display().to_string()))
             .expect_err("blank token_url should fail");
         assert!(token_url_err.to_string().contains("'token_url' cannot be empty"));
+    }
+
+    #[test]
+    fn load_fetch_header_rules_trims_dynamic_json_required_values() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let path = dir.path().join("trimmed-auth.json");
+        std::fs::write(
+            &path,
+            r#"[{
+                "host": " api.example.com ",
+                "methods": [" get "],
+                "auth": {
+                    "type": "oauth_client_credentials",
+                    "header": " Authorization ",
+                    "token_url": " https://issuer/token ",
+                    "client_id": " abc ",
+                    "client_secret": " xyz "
+                }
+            }]"#,
+        )
+        .expect("config should be written");
+
+        let rules = load_fetch_header_rules(&[], &Some(path.display().to_string()))
+            .expect("trimmed auth values should parse");
+
+        let auth = rules[0].dynamic_auth().expect("dynamic auth expected");
+        assert_eq!(rules[0].methods(), &["GET".to_string()]);
+        assert_eq!(auth.header_name, "Authorization");
+        assert_eq!(auth.token_url, "https://issuer/token");
+        assert_eq!(auth.client_id, "abc");
+        assert_eq!(auth.client_secret, "xyz");
     }
 }
