@@ -7,7 +7,7 @@ TypeScript support is type removal only — types are stripped before execution,
 params:
 - code: the javascript or typescript code to run
 - heap (optional): content hash (SHA-256 hex string) from a previous execution to resume that session, or omit for a fresh session
-- heap_memory_max_mb (optional): maximum V8 heap memory in megabytes (4–64, default: 8). Override the server default for this execution.
+- heap_memory_max_mb (optional): maximum V8 heap memory in megabytes (minimum: 4, default: 8). Override the server default for this execution.
 - execution_timeout_secs (optional): maximum execution time in seconds (1–300, default: 30). Override the server default for this execution.
 - tags (optional): a JSON object of key-value string pairs to associate with the resulting heap snapshot. Tags can be used to label, categorize, or annotate heaps for later retrieval. Use get_heap_tags, set_heap_tags, delete_heap_tags, and query_heaps_by_tags to manage tags independently.
 

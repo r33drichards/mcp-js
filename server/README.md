@@ -180,7 +180,7 @@ println!("execution_id: {}", resp.into_inner().execution_id);
 
 ### Execution Limits
 
-- `--heap-memory-max <megabytes>`: Maximum V8 heap memory per isolate in megabytes (1–64, default: 8).
+- `--heap-memory-max <megabytes>`: Maximum V8 heap memory per isolate in megabytes (default: 8, minimum: 1).
 - `--execution-timeout <seconds>`: Maximum execution timeout in seconds (1–300, default: 30).
 - `--max-concurrent-executions <n>`: Maximum number of concurrent V8 executions (default: CPU core count). Controls how many JavaScript executions can run in parallel.
 
@@ -353,7 +353,7 @@ Both modes return position info in both coordinate systems for cross-referencing
 
 | Tool | Description |
 |------|-------------|
-| `run_js` | Submit JavaScript/TypeScript code for async execution. Returns an `execution_id` immediately. Parameters: `code` (required), `heap_memory_max_mb` (optional, 4–64, default: 8), `execution_timeout_secs` (optional, 1–300, default: 30). |
+| `run_js` | Submit JavaScript/TypeScript code for async execution. Returns an `execution_id` immediately. Parameters: `code` (required), `heap_memory_max_mb` (optional, minimum: 4, default: 8), `execution_timeout_secs` (optional, 1–300, default: 30). |
 | `get_execution` | Poll execution status and result. Returns `execution_id`, `status`, `result` (if completed), `error` (if failed), `started_at`, `completed_at`. |
 | `get_execution_output` | Read paginated console output. Supports line-based (`line_offset` + `line_limit`) or byte-based (`byte_offset` + `byte_limit`) pagination. |
 | `cancel_execution` | Terminate a running V8 execution. |
