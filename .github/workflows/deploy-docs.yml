@@ -23,7 +23,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: python -m pip install --upgrade pip
-      - run: python -m pip install mkdocs
+      - run: python -m pip install mkdocs mkdocs-mermaid2-plugin
       - run: python -m mkdocs build --strict
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3

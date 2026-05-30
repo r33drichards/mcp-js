@@ -5,6 +5,9 @@ docs_dir: site-docs
 site_dir: site
 theme:
   name: mkdocs
+plugins:
+  - search
+  - mermaid2
 nav:
   - Home: index.md
   - Learn:
@@ -21,13 +24,19 @@ nav:
       - Use S3 Storage: how-to/use-s3-storage.md
       - Enable OPA Policies: how-to/enable-opa-policies.md
       - Configure Fetch Header Injection: how-to/configure-fetch-header-injection.md
+      - Connect as an MCP Server: how-to/connect-as-an-mcp-server.md
+      - Use CLI: how-to/use-cli.md
       - Use Rust Client: how-to/use-rust-client.md
   - Concepts:
       - Execution Model: concepts/execution-model.md
       - Sessions and Heaps: concepts/sessions-and-heaps.md
       - Transports: concepts/transports.md
-      - Policy System: concepts/policy-system.md
+      - Integration Surfaces: concepts/integration-surfaces.md
       - Module Loading: concepts/module-loading.md
+      - WASM and Native Modules: concepts/wasm-and-native-modules.md
+      - Policy System: concepts/policy-system.md
+      - Network Access: concepts/network-access.md
+      - Filesystem Access: concepts/filesystem-access.md
       - Clustering: concepts/clustering.md
   - Reference:
       - CLI Flags: reference/cli-flags.md
