@@ -276,6 +276,13 @@ fn build_dynamic_auth_source(
     }
 }
 
+fn sanitized_dynamic_auth_error(header_name: &str, stage: &str) -> String {
+    format!(
+        "dynamic credential injection failed for header '{}' during {}",
+        header_name, stage
+    )
+}
+
 fn normalize_methods(methods: Vec<String>) -> Vec<String> {
     methods
         .into_iter()
@@ -310,17 +317,12 @@ pub async fn apply_header_rules(
                 }
 
                 let source = rule.dynamic_auth_source.as_ref().ok_or_else(|| {
-                    format!(
-                        "dynamic credential source unavailable for header '{}'",
-                        config.header_name
-                    )
+                    sanitized_dynamic_auth_error(&config.header_name, "source initialization")
                 })?;
-                let value = source.authorization_header_value().await.map_err(|error| {
-                    format!(
-                        "dynamic credential injection failed for header '{}': {}",
-                        config.header_name, error
-                    )
-                })?;
+                let value = source
+                    .authorization_header_value()
+                    .await
+                    .map_err(|_| sanitized_dynamic_auth_error(&config.header_name, "token acquisition"))?;
                 headers.insert(key, value);
             }
         }
@@ -1195,7 +1197,12 @@ allow if {{
     async fn test_do_fetch_reports_host_when_dynamic_auth_fails() {
         let token_server = start_token_server(vec![TestTokenResponse::failure(
             StatusCode::BAD_REQUEST,
-            json!({"error":"invalid_client"}),
+            json!({
+                "error":"invalid_client",
+                "access_token":"server-access-token",
+                "refresh_token":"server-refresh-token",
+                "detail":"client-secret should never surface"
+            }),
         )])
         .await;
 
@@ -1213,6 +1220,17 @@ allow if {{
 
         assert!(err.contains("host 'example.com'"), "unexpected error: {err}");
         assert!(err.contains("credential injection failed"), "unexpected error: {err}");
+        assert!(err.contains("header 'Authorization'"), "unexpected error: {err}");
+        assert!(err.contains("token acquisition"), "unexpected error: {err}");
         assert!(!err.contains("client-secret"), "secret leaked in error: {err}");
+        assert!(!err.contains("invalid_client"), "endpoint body leaked in error: {err}");
+        assert!(
+            !err.contains("server-access-token"),
+            "access token leaked in error: {err}"
+        );
+        assert!(
+            !err.contains("server-refresh-token"),
+            "refresh token leaked in error: {err}"
+        );
     }
 }
