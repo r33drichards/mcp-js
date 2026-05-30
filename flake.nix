@@ -51,6 +51,17 @@
           }
           (builtins.readFile ./nix/replace-workspace-values.py);
 
+        # Patched fetch-cargo-vendor-util that downloads crates.io tarballs
+        # from the registry CDN instead of the API redirect endpoint. crates.io
+        # now returns 403 for the API download path in some CI environments.
+        patchedFetchCargoVendorUtil = pkgs.writers.writePython3Bin
+          "fetch-cargo-vendor-util"
+          {
+            libraries = with pkgs.python3Packages; [ requests tomli-w ];
+            flakeIgnore = [ "E501" "W503" ];
+          }
+          (builtins.readFile ./nix/fetch-cargo-vendor-util.py);
+
         # Pre-fetched rusty_v8 static library.
         # The v8 crate's build.rs tries to download this at build time,
         # which fails inside the Nix sandbox and on network-restricted
@@ -93,6 +104,8 @@
             nativeBuildInputs = map (dep:
               if (dep.name or "") == "replace-workspace-values"
               then patchedReplaceWorkspaceValues
+              else if (dep.name or "") == "fetch-cargo-vendor-util"
+              then patchedFetchCargoVendorUtil
               else dep
             ) (old.nativeBuildInputs or []);
           });
