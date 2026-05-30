@@ -13,7 +13,7 @@ Codex, Cursor, generic MCP clients, `curl`, and the bundled CLI.
 
 Use this documentation by intent:
 
-- Start with [Learn](learn/overview.md) if you need orientation.
+- Start with [Quick Start](learn/first-run.md) if you need orientation.
 - Use [How-to](how-to/install-server.md) when you need to complete a task.
 - Read [Concepts](concepts/execution-model.md) to understand system behavior.
 - Use [Reference](reference/cli-flags.md) for flags, APIs, and interface details.

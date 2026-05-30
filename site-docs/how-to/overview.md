@@ -29,4 +29,4 @@ Use the how-to section when you already know the task you need to complete.
 - [Use Rust Client](use-rust-client.md)
 
 If you are still deciding which path to take, start with
-[Quick Start](../learn/first-run.md) or [Learn](../learn/overview.md).
+[Quick Start](../learn/first-run.md).
