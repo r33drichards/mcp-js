@@ -24,7 +24,8 @@ help documents the first-pass shape as:
 
 Useful keys:
 
-- top-level operation keys: `fetch` and `modules`
+- top-level operation keys: `fetch`, `modules`, `filesystem`,
+  `mcp_tools`, and `subprocess`
 - per-operation keys: `mode` and `policies`
 - `mode`: `"all"` or `"any"`; omitted means `"all"`
 - `policies`: ordered list of policy sources
