@@ -51,17 +51,6 @@
           }
           (builtins.readFile ./nix/replace-workspace-values.py);
 
-        # Patched fetch-cargo-vendor-util-v2 used by fetchCargoVendor's
-        # network-facing staging step. crates.io now returns 403 for the API
-        # redirect endpoint in some CI environments, so fetch from the CDN.
-        patchedFetchCargoVendorUtilV2 = pkgs.writers.writePython3Bin
-          "fetch-cargo-vendor-util-v2"
-          {
-            libraries = with pkgs.python3Packages; [ requests tomli-w ];
-            flakeIgnore = [ "E501" "W503" ];
-          }
-          (builtins.readFile ./nix/fetch-cargo-vendor-util-v2.py);
-
         # Pre-fetched rusty_v8 static library.
         # The v8 crate's build.rs tries to download this at build time,
         # which fails inside the Nix sandbox and on network-restricted
@@ -95,19 +84,13 @@
           version = "0.1.0";
           src = ./server;
 
-          # Use cargoDeps with a patched vendor step instead of cargoHash
-          # so we can inject our fixed replace-workspace-values script.
-          cargoDeps = (rustPlatform.fetchCargoVendor {
+          # Use a local copy of fetchCargoVendor so the staging helper fetches
+          # crates from the registry CDN instead of the crates.io API endpoint.
+          cargoDeps = (pkgs.callPackage ./nix/fetch-cargo-vendor.nix {
+            cargo = rustToolchain;
+          } {
             src = ./server;
             hash = "sha256-L1IGe3cHLFT35OQ/aJ4xq0RJqRZ4Yu6YbTSMf6ziMr0=";
-          }).overrideAttrs (old: {
-            nativeBuildInputs = map (dep:
-              if (dep.name or "") == "replace-workspace-values"
-              then patchedReplaceWorkspaceValues
-              else if (dep.name or "") == "fetch-cargo-vendor-util-v2"
-              then patchedFetchCargoVendorUtilV2
-              else dep
-            ) (old.nativeBuildInputs or []);
           });
 
           nativeBuildInputs = with pkgs; [
