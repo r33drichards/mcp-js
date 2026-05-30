@@ -238,6 +238,7 @@ def copy_and_patch_git_crate_subtree(git_tree: Path, crate_name: str, crate_out_
         cmd = ["replace-workspace-values", str(manifest_path), str(root_manifest_path)]
         subprocess.check_output(cmd)
 
+
 def extract_crate_tarball_contents(tarball_path: Path, crate_out_dir: Path) -> None:
     eprint(f"Unpacking to {crate_out_dir}")
     crate_out_dir.mkdir()
