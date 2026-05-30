@@ -8,7 +8,7 @@ use reqwest::Client;
 use serde::Deserialize;
 use tokio::sync::Mutex;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct OAuthTokenSourceConfig {
     pub header: String,
     pub token_url: String,
@@ -16,6 +16,19 @@ pub struct OAuthTokenSourceConfig {
     pub client_secret: String,
     pub scope: Option<String>,
     pub refresh_buffer_secs: u64,
+}
+
+impl std::fmt::Debug for OAuthTokenSourceConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuthTokenSourceConfig")
+            .field("header", &self.header)
+            .field("token_url", &self.token_url)
+            .field("client_id", &self.client_id)
+            .field("client_secret", &"<redacted>")
+            .field("scope", &self.scope)
+            .field("refresh_buffer_secs", &self.refresh_buffer_secs)
+            .finish()
+    }
 }
 
 #[derive(Clone)]
@@ -890,22 +903,23 @@ mod tests {
 
     #[test]
     fn oauth_token_source_debug_redacts_client_secret() {
-        let source = OAuthClientCredentialsTokenSource::new(
-            Client::new(),
-            OAuthTokenSourceConfig {
-                header: "Authorization".to_string(),
-                token_url: "https://issuer.example/token".to_string(),
-                client_id: "client-id".to_string(),
-                client_secret: "super-secret".to_string(),
-                scope: Some("read:all".to_string()),
-                refresh_buffer_secs: 30,
-            },
-        );
+        let config = OAuthTokenSourceConfig {
+            header: "Authorization".to_string(),
+            token_url: "https://issuer.example/token".to_string(),
+            client_id: "client-id".to_string(),
+            client_secret: "super-secret".to_string(),
+            scope: Some("read:all".to_string()),
+            refresh_buffer_secs: 30,
+        };
+        let source = OAuthClientCredentialsTokenSource::new(Client::new(), config.clone());
 
-        let debug_output = format!("{source:?}");
+        let config_debug_output = format!("{config:?}");
+        let source_debug_output = format!("{source:?}");
 
-        assert!(debug_output.contains("<redacted>"));
-        assert!(!debug_output.contains("super-secret"));
+        assert!(config_debug_output.contains("<redacted>"));
+        assert!(!config_debug_output.contains("super-secret"));
+        assert!(source_debug_output.contains("<redacted>"));
+        assert!(!source_debug_output.contains("super-secret"));
     }
 
     fn state_set_cached_token_for_test(state: &mut TokenSourceState, token: CachedToken) {
