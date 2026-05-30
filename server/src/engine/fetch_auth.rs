@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -27,7 +28,12 @@ pub struct OAuthClientCredentialsTokenSource {
 impl std::fmt::Debug for OAuthClientCredentialsTokenSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OAuthClientCredentialsTokenSource")
-            .field("config", &self.config)
+            .field("header", &self.config.header)
+            .field("token_url", &self.config.token_url)
+            .field("client_id", &self.config.client_id)
+            .field("client_secret", &"<redacted>")
+            .field("scope", &self.config.scope)
+            .field("refresh_buffer_secs", &self.config.refresh_buffer_secs)
             .finish_non_exhaustive()
     }
 }
@@ -61,6 +67,7 @@ struct TokenSourceState {
     cached_token: Option<CachedToken>,
     in_flight: Option<InFlightRequest>,
     next_generation: u64,
+    recent_failures: VecDeque<CompletedFailure>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -85,6 +92,12 @@ type SharedTokenFuture = Shared<BoxFuture<'static, Result<CachedToken, String>>>
 struct InFlightRequest {
     generation: u64,
     future: SharedTokenFuture,
+}
+
+#[derive(Clone)]
+struct CompletedFailure {
+    generation: u64,
+    error: String,
 }
 
 impl OAuthClientCredentialsTokenSource {
@@ -133,6 +146,9 @@ impl OAuthClientCredentialsTokenSource {
             match apply_in_flight_result(&mut state, in_flight.generation, result.clone()) {
                 InFlightResolution::Applied => {
                     return result.map(|token| token.authorization_header_value());
+                }
+                InFlightResolution::AlreadyFailed(error) => {
+                    return Err(error);
                 }
                 InFlightResolution::Stale => continue,
             }
@@ -230,6 +246,7 @@ impl OAuthClientCredentialsTokenSource {
 
 enum InFlightResolution {
     Applied,
+    AlreadyFailed(String),
     Stale,
 }
 
@@ -238,6 +255,15 @@ fn apply_in_flight_result(
     generation: u64,
     result: Result<CachedToken, String>,
 ) -> InFlightResolution {
+    if let Some(error) = state
+        .recent_failures
+        .iter()
+        .find(|failure| failure.generation == generation)
+        .map(|failure| failure.error.clone())
+    {
+        return InFlightResolution::AlreadyFailed(error);
+    }
+
     let Some(in_flight) = state.in_flight.as_ref() else {
         return InFlightResolution::Stale;
     };
@@ -249,9 +275,32 @@ fn apply_in_flight_result(
     state.in_flight = None;
     match result {
         Ok(token) => state.cached_token = Some(token),
-        Err(_) => state.cached_token = None,
+        Err(error) => {
+            state.cached_token = None;
+            remember_failure(state, generation, error);
+        }
     }
     InFlightResolution::Applied
+}
+
+fn remember_failure(state: &mut TokenSourceState, generation: u64, error: String) {
+    const MAX_RECORDED_FAILURES: usize = 8;
+
+    if let Some(existing) = state
+        .recent_failures
+        .iter_mut()
+        .find(|failure| failure.generation == generation)
+    {
+        existing.error = error;
+        return;
+    }
+
+    if state.recent_failures.len() >= MAX_RECORDED_FAILURES {
+        state.recent_failures.pop_front();
+    }
+
+    state.recent_failures
+        .push_back(CompletedFailure { generation, error });
 }
 
 #[derive(Clone, Debug)]
@@ -602,6 +651,54 @@ mod tests {
         assert_eq!(requests[2].refresh_token.as_deref(), Some("refresh-1"));
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn authorization_header_value_replays_shared_failure_without_retry_fan_out() {
+        let server = start_token_server(vec![
+            TokenResponseSpec::success(json!({
+                "access_token": "short-lived",
+                "token_type": "Bearer",
+                "expires_in": 1
+            })),
+            TokenResponseSpec::failure(
+                StatusCode::BAD_REQUEST,
+                json!({
+                    "error": "invalid_grant"
+                }),
+            )
+            .with_delay(Duration::from_millis(150)),
+        ])
+        .await;
+
+        let source = Arc::new(OAuthClientCredentialsTokenSource::new(
+            Client::new(),
+            test_config(server.token_url()),
+        ));
+
+        assert_eq!(
+            source.authorization_header_value().await.unwrap(),
+            "Bearer short-lived"
+        );
+
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+
+        let mut tasks = Vec::new();
+        for _ in 0..4 {
+            let source = source.clone();
+            tasks.push(tokio::spawn(async move {
+                source.authorization_header_value().await.unwrap_err()
+            }));
+        }
+
+        let results = futures::future::join_all(tasks).await;
+        for result in results {
+            let error = result.unwrap();
+            assert!(error.contains("invalid_grant"), "unexpected error: {error}");
+        }
+
+        let requests = server.requests().await;
+        assert_eq!(requests.len(), 2);
+    }
+
     #[tokio::test]
     async fn authorization_header_value_reacquires_after_refresh_failure() {
         let server = start_token_server(vec![
@@ -789,6 +886,26 @@ mod tests {
         let cached = state.cached_token.as_ref().expect("newer cached token should remain");
         assert_eq!(cached.access_token, "newer-token");
         assert!(state.in_flight.is_some(), "newer in-flight future should remain");
+    }
+
+    #[test]
+    fn oauth_token_source_debug_redacts_client_secret() {
+        let source = OAuthClientCredentialsTokenSource::new(
+            Client::new(),
+            OAuthTokenSourceConfig {
+                header: "Authorization".to_string(),
+                token_url: "https://issuer.example/token".to_string(),
+                client_id: "client-id".to_string(),
+                client_secret: "super-secret".to_string(),
+                scope: Some("read:all".to_string()),
+                refresh_buffer_secs: 30,
+            },
+        );
+
+        let debug_output = format!("{source:?}");
+
+        assert!(debug_output.contains("<redacted>"));
+        assert!(!debug_output.contains("super-secret"));
     }
 
     fn state_set_cached_token_for_test(state: &mut TokenSourceState, token: CachedToken) {
