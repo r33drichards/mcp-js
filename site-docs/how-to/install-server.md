@@ -8,6 +8,9 @@ curl -fsSL https://raw.githubusercontent.com/r33drichards/mcp-js/main/install.sh
 
 This installs `mcp-v8` into `/usr/local/bin/`.
 
+The rest of the how-to pages assume that `mcp-v8` is available on your `PATH`
+after this install.
+
 ## Build from source
 
 ```bash
@@ -17,4 +20,5 @@ cargo build --release -p server
 
 Building from source is the better option when you are testing changes, using a
 development branch, or working in an environment where you already have Rust
-tooling available.
+tooling available. In that case, use `./target/release/server` in the examples
+below anywhere this documentation says `mcp-v8`.

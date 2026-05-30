@@ -3,7 +3,7 @@
 Start the server with Streamable HTTP enabled:
 
 ```bash
-./target/release/server --stateless --http-port 3000
+mcp-v8 --stateless --http-port 3000
 ```
 
 This exposes:

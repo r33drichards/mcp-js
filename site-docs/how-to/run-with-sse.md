@@ -3,7 +3,7 @@
 Start the server with SSE transport enabled:
 
 ```bash
-./target/release/server --stateless --sse-port 3000
+mcp-v8 --stateless --sse-port 3000
 ```
 
 This exposes:
