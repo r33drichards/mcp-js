@@ -898,11 +898,11 @@ impl FetchHeaderConfigRule {
                 "Fetch header config rule for host '{}' must define either 'headers' or 'auth'",
                 host
             ),
-            (Some(headers), None) => Ok(engine::fetch::HeaderRule::new(
+            (Some(headers), None) => engine::fetch::HeaderRule::new(
                 host,
                 methods,
                 engine::fetch::HeaderInjection::Static { headers },
-            )),
+            ),
             (None, Some(auth)) => {
                 if auth.auth_type != "oauth_client_credentials" {
                     anyhow::bail!(
@@ -912,7 +912,7 @@ impl FetchHeaderConfigRule {
                     );
                 }
 
-                Ok(engine::fetch::HeaderRule::oauth_client_credentials(
+                engine::fetch::HeaderRule::oauth_client_credentials(
                     host,
                     methods,
                     engine::fetch::OAuthClientCredentialsConfig {
@@ -923,7 +923,7 @@ impl FetchHeaderConfigRule {
                         scope: auth.scope,
                         refresh_buffer_secs: auth.refresh_buffer_secs,
                     },
-                ))
+                )
             }
         }
     }
@@ -1007,13 +1007,13 @@ fn parse_fetch_header_cli(s: &str) -> Result<engine::fetch::HeaderRule> {
         (Some(_), true) => anyhow::bail!(
             "--fetch-header cannot mix static 'value' with dynamic oauth keys"
         ),
-        (Some(value), false) => Ok(engine::fetch::HeaderRule::static_header(
+        (Some(value), false) => engine::fetch::HeaderRule::static_header(
             host,
             methods,
             header_name,
             value,
-        )),
-        (None, true) => Ok(engine::fetch::HeaderRule::oauth_client_credentials(
+        ),
+        (None, true) => engine::fetch::HeaderRule::oauth_client_credentials(
             host,
             methods,
             engine::fetch::OAuthClientCredentialsConfig {
@@ -1031,7 +1031,7 @@ fn parse_fetch_header_cli(s: &str) -> Result<engine::fetch::HeaderRule> {
                 refresh_buffer_secs: refresh_buffer_secs
                     .unwrap_or_else(engine::fetch::default_refresh_buffer_secs),
             },
-        )),
+        ),
         (None, false) => anyhow::bail!(
             "--fetch-header must provide either 'value' for a static rule or the full dynamic oauth key set: token_url, client_id, client_secret"
         ),
@@ -1154,6 +1154,47 @@ mod tests {
     }
 
     #[test]
+    fn parse_fetch_header_cli_rejects_empty_host() {
+        let err = parse_fetch_header_cli(
+            "host=   ,header=Authorization,value=Bearer fixed",
+        )
+        .expect_err("blank host should fail");
+
+        assert!(err.to_string().contains("'host' cannot be empty"));
+    }
+
+    #[test]
+    fn parse_fetch_header_cli_rejects_empty_header_name() {
+        let err = parse_fetch_header_cli(
+            "host=api.example.com,header=   ,value=Bearer fixed",
+        )
+        .expect_err("blank header name should fail");
+
+        assert!(err.to_string().contains("'header' cannot be empty"));
+    }
+
+    #[test]
+    fn parse_fetch_header_cli_rejects_empty_dynamic_required_values() {
+        let token_url_err = parse_fetch_header_cli(
+            "host=api.example.com,header=Authorization,token_url=   ,client_id=abc,client_secret=xyz",
+        )
+        .expect_err("blank token_url should fail");
+        assert!(token_url_err.to_string().contains("'token_url' cannot be empty"));
+
+        let client_id_err = parse_fetch_header_cli(
+            "host=api.example.com,header=Authorization,token_url=https://issuer/token,client_id=   ,client_secret=xyz",
+        )
+        .expect_err("blank client_id should fail");
+        assert!(client_id_err.to_string().contains("'client_id' cannot be empty"));
+
+        let client_secret_err = parse_fetch_header_cli(
+            "host=api.example.com,header=Authorization,token_url=https://issuer/token,client_id=abc,client_secret=   ",
+        )
+        .expect_err("blank client_secret should fail");
+        assert!(client_secret_err.to_string().contains("'client_secret' cannot be empty"));
+    }
+
+    #[test]
     fn load_fetch_header_rules_supports_dynamic_json_rules_and_normalizes_methods() {
         let dir = tempfile::tempdir().expect("tempdir should be created");
         let path = dir.path().join("fetch-rules.json");
@@ -1255,5 +1296,61 @@ mod tests {
             .expect_err("unknown json fields should fail");
 
         assert!(err.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn load_fetch_header_rules_rejects_empty_static_headers_map() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let path = dir.path().join("fetch-rules.json");
+        std::fs::write(
+            &path,
+            r#"[{
+                "host": "api.example.com",
+                "headers": {}
+            }]"#,
+        )
+        .expect("config should be written");
+
+        let err = load_fetch_header_rules(&[], &Some(path.display().to_string()))
+            .expect_err("empty static headers map should fail");
+
+        assert!(err.to_string().contains("static headers cannot be empty"));
+    }
+
+    #[test]
+    fn load_fetch_header_rules_rejects_blank_json_required_values() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+
+        let empty_host = dir.path().join("empty-host.json");
+        std::fs::write(
+            &empty_host,
+            r#"[{
+                "host": "   ",
+                "headers": {"Authorization": "Bearer fixed"}
+            }]"#,
+        )
+        .expect("config should be written");
+        let host_err = load_fetch_header_rules(&[], &Some(empty_host.display().to_string()))
+            .expect_err("blank host should fail");
+        assert!(host_err.to_string().contains("'host' cannot be empty"));
+
+        let empty_token_url = dir.path().join("empty-token-url.json");
+        std::fs::write(
+            &empty_token_url,
+            r#"[{
+                "host": "api.example.com",
+                "auth": {
+                    "type": "oauth_client_credentials",
+                    "header": "Authorization",
+                    "token_url": "   ",
+                    "client_id": "abc",
+                    "client_secret": "xyz"
+                }
+            }]"#,
+        )
+        .expect("config should be written");
+        let token_url_err = load_fetch_header_rules(&[], &Some(empty_token_url.display().to_string()))
+            .expect_err("blank token_url should fail");
+        assert!(token_url_err.to_string().contains("'token_url' cannot be empty"));
     }
 }
