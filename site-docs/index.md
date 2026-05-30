@@ -1,5 +1,12 @@
 # mcp-v8
 
+`mcp-v8` is designed for cases where agents need real compute and controlled
+access to host resources, but the cost of a full Linux VM is too high. It adds
+a policy layer between the JavaScript runtime and the underlying machine so you
+can expose network, filesystem, and other capabilities with tighter control and
+lower overhead than VM-based sandbox products such as Daytona, E2B, or
+Cloudflare sandboxes.
+
 `mcp-v8` is a Rust-based MCP server that exposes a V8 JavaScript runtime to AI
 agents and other clients. It supports stateful and stateless execution,
 multiple transports, optional policy-gated network and filesystem access, and

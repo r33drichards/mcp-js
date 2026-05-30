@@ -26,6 +26,26 @@ Use Streamable HTTP when the MCP client can connect to a remote endpoint:
 http://your-host:3000/mcp
 ```
 
+For clients that accept URL-based MCP configuration directly, the config can
+look like this:
+
+```json
+{
+  "mcpServers": {
+    "mcp-v8": {
+      "url": "http://localhost:3000/mcp"
+    }
+  }
+}
+```
+
+For Codex, MCP servers are configured in `config.toml`:
+
+```toml
+[mcp_servers.mcp-v8]
+url = "http://localhost:3000/mcp"
+```
+
 This mode is better for load-balanced, containerized, or remotely hosted
 deployments.
 

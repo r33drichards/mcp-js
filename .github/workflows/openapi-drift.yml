@@ -33,12 +33,13 @@ jobs:
           cp openapi.json mcp-v8-client/openapi.json
           python3 scripts/generate_http_api_reference.py
           ./target/release/generate-cli-markdown > site-docs/reference/cli-flags.md
+          ./target/release/generate-mcp-tools-markdown > site-docs/reference/mcp-tools.md
 
       - name: Check for drift
         run: |
-          if ! git diff --exit-code openapi.json mcp-v8-client/openapi.json site-docs/reference/http-api.md site-docs/reference/cli-flags.md; then
+          if ! git diff --exit-code openapi.json mcp-v8-client/openapi.json site-docs/reference/http-api.md site-docs/reference/cli-flags.md site-docs/reference/mcp-tools.md; then
             echo ""
-            echo "❌ OpenAPI-derived artifacts are out of date."
+            echo "❌ Generated API/docs artifacts are out of date."
             echo ""
             echo "The committed generated API docs do not match the current source."
             echo "Regenerate them with:"
@@ -48,7 +49,8 @@ jobs:
             echo "  cp openapi.json mcp-v8-client/openapi.json"
             echo "  python3 scripts/generate_http_api_reference.py"
             echo "  ./target/release/generate-cli-markdown > site-docs/reference/cli-flags.md"
+            echo "  ./target/release/generate-mcp-tools-markdown > site-docs/reference/mcp-tools.md"
             echo ""
             exit 1
           fi
-          echo "✅ OpenAPI-derived artifacts are up to date."
+          echo "✅ Generated API/docs artifacts are up to date."

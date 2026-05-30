@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use clap::CommandFactory;
+use clap::{ArgAction, CommandFactory};
 use server::cli::Cli;
 
 fn slug(text: &str) -> String {
@@ -69,35 +69,24 @@ fn main() {
             ));
         }
 
-        if let Some(value_names) = arg.get_value_names() {
-            let rendered = value_names
-                .iter()
-                .flatten()
-                .map(|value| value.to_string())
-                .collect::<Vec<_>>();
-            if !rendered.is_empty() {
-                block.push(format!("- Value: `{}`", rendered.join(" ")));
+        if arg.get_action().takes_values() {
+            if let Some(value_names) = arg.get_value_names() {
+                let rendered = value_names
+                    .iter()
+                    .map(|value| value.to_string())
+                    .collect::<Vec<_>>();
+                if !rendered.is_empty() {
+                    block.push(format!("- Value: `{}`", rendered.join(" ")));
+                }
+            }
+
+            if let Some(delimiter) = arg.get_value_delimiter() {
+                block.push(format!("- Delimiter: `{delimiter}`"));
             }
         }
 
-        if let Some(delimiter) = arg.get_value_delimiter() {
-            block.push(format!("- Delimiter: `{delimiter}`"));
-        }
-
-        let requires = arg
-            .get_requires()
-            .map(|(id, _)| format!("`--{}`", id.as_str().replace('_', "-")))
-            .collect::<Vec<_>>();
-        if !requires.is_empty() {
-            block.push(format!("- Requires: {}", requires.join(", ")));
-        }
-
-        let conflicts = arg
-            .get_conflicts()
-            .map(|id| format!("`--{}`", id.as_str().replace('_', "-")))
-            .collect::<Vec<_>>();
-        if !conflicts.is_empty() {
-            block.push(format!("- Conflicts: {}", conflicts.join(", ")));
+        if matches!(arg.get_action(), ArgAction::Append) {
+            block.push("- Repeatable: yes".to_string());
         }
 
         if block.last().is_some_and(|line| !line.is_empty()) {

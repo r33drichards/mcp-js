@@ -4,7 +4,7 @@ Use the how-to section when you already know the task you need to complete.
 
 ## Install and startup
 
-- [Install the Server](install-server.md)
+- [Install](../install/overview.md)
 - [Run with stdio](run-with-stdio.md)
 - [Run with HTTP](run-with-http.md)
 - [Run with SSE](run-with-sse.md)

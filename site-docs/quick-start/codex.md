@@ -29,4 +29,12 @@ If you want a fresh isolate for every run:
 Once connected, ask Codex to run a short JavaScript snippet and confirm the
 output.
 
+If you want Codex to connect to a running Streamable HTTP MCP endpoint instead
+of launching `mcp-v8` locally, configure it in `config.toml`:
+
+```toml
+[mcp_servers.mcp-v8]
+url = "http://localhost:3000/mcp"
+```
+
 For the server-side model, see [Connect as an MCP Server](../how-to/connect-as-an-mcp-server.md).

@@ -17,7 +17,7 @@ mod cluster;
 mod cli;
 mod session;
 use cli::Cli;
-use engine::{initialize_v8, Engine, WasmModule, DEFAULT_EXECUTION_TIMEOUT_SECS};
+use engine::{initialize_v8, Engine, WasmModule};
 use engine::fetch::FetchConfig;
 use engine::fs::FsConfig;
 use engine::execution::ExecutionRegistry;

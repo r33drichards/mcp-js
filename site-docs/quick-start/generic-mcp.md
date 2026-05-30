@@ -27,6 +27,18 @@ Then point the client at:
 http://localhost:3000/mcp
 ```
 
+For clients with JSON-based MCP configuration, that usually means a config like:
+
+```json
+{
+  "mcpServers": {
+    "mcp-v8": {
+      "url": "http://localhost:3000/mcp"
+    }
+  }
+}
+```
+
 See [Run with stdio](../how-to/run-with-stdio.md),
 [Run with HTTP](../how-to/run-with-http.md), and
 [Connect as an MCP Server](../how-to/connect-as-an-mcp-server.md).

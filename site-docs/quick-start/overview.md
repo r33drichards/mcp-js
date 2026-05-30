@@ -16,4 +16,4 @@ curl -fsSL https://raw.githubusercontent.com/r33drichards/mcp-js/main/install.sh
 ```
 
 That is the same GitHub install script used in
-[Install the Server](../how-to/install-server.md).
+[Install](../install/overview.md).
