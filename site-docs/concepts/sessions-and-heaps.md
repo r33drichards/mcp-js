@@ -16,14 +16,14 @@ this:
 
 ```mermaid
 flowchart LR
+  G[Named session log] --> A
+  G --> D
   A[Execution A] --> B[input heap: none]
   A --> C[output heap: hash-1]
   D[Execution B] --> E[input heap: hash-1]
   D --> F[output heap: hash-2]
-  G[Named session log] --> A
-  G --> D
-  H[Heap tags] --> C
-  H --> F
+  C --> H[Heap tags]
+  F --> H
 ```
 
 Named sessions are related, but separate. Session logging records a history of
