@@ -15,7 +15,6 @@ mcp-v8 exposes a V8 JavaScript runtime as MCP tools. Agents can run JS/TS code, 
 - MCP (SSE): `GET /sse` + `POST /message`
 - REST API: `POST /api/exec`, `GET /api/executions/{id}`, etc.
 - OpenAPI spec: `GET /api-doc/openapi.json`
-- Tool list (JSON): `GET /api/tools`
 - Full docs: `GET /docs`
 
 ## MCP Tools
@@ -82,7 +81,6 @@ In stateful mode, pass the returned `heap` hash back to `run_js` to resume that 
 | GET | /api/executions/{id} | Get execution status + result |
 | GET | /api/executions/{id}/output | Read paginated console output |
 | POST | /api/executions/{id}/cancel | Cancel a running execution |
-| GET | /api/tools | List available MCP tools (JSON) |
 | GET | /api-doc/openapi.json | OpenAPI 3.0 spec |
 | GET | /docs | Full documentation |
 | GET | /llms.txt | This file |
