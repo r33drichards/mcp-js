@@ -29,14 +29,14 @@ fn doc_resources(stateful: bool) -> Vec<Resource> {
 
     // Build a compact tool summary as JSON
     let mut tools: Vec<serde_json::Value> = vec![
-        json!({ "name": "run_js",               "description": if stateful { "Submit JS/TS for async execution (stateful). Returns execution_id." } else { "Submit JS/TS for async execution (stateless). Returns execution_id." } }),
-        json!({ "name": "get_execution",         "description": "Poll execution status and result." }),
-        json!({ "name": "get_execution_output",  "description": "Read paginated console output (line or byte mode)." }),
-        json!({ "name": "cancel_execution",      "description": "Terminate a running execution." }),
-        json!({ "name": "list_executions",       "description": "List all executions with their status." }),
+        json!({ "name": "run_js", "description": if stateful { "Submit JS/TS for async execution (stateful). Returns execution_id." } else { "Run JS/TS and return collected output directly (stateless)." } }),
     ];
     if stateful {
         tools.extend([
+            json!({ "name": "get_execution",         "description": "Poll execution status and result." }),
+            json!({ "name": "get_execution_output",  "description": "Read paginated console output (line or byte mode)." }),
+            json!({ "name": "cancel_execution",      "description": "Terminate a running execution." }),
+            json!({ "name": "list_executions",       "description": "List all executions with their status." }),
             json!({ "name": "list_sessions",           "description": "List all named sessions (stateful only)." }),
             json!({ "name": "list_session_snapshots",  "description": "Browse execution history for a session." }),
             json!({ "name": "get_heap_tags",           "description": "Get tags for a heap snapshot." }),
@@ -110,14 +110,14 @@ fn read_doc_resource(uri: &str, stateful: bool) -> Option<ReadResourceResult> {
     let openapi_json = serde_json::to_string_pretty(&ApiDoc::openapi()).unwrap_or_default();
 
     let mut tools: Vec<serde_json::Value> = vec![
-        json!({ "name": "run_js",               "description": if stateful { "Submit JS/TS for async execution (stateful). Returns execution_id." } else { "Submit JS/TS for async execution (stateless). Returns execution_id." } }),
-        json!({ "name": "get_execution",         "description": "Poll execution status and result." }),
-        json!({ "name": "get_execution_output",  "description": "Read paginated console output (line or byte mode)." }),
-        json!({ "name": "cancel_execution",      "description": "Terminate a running execution." }),
-        json!({ "name": "list_executions",       "description": "List all executions with their status." }),
+        json!({ "name": "run_js", "description": if stateful { "Submit JS/TS for async execution (stateful). Returns execution_id." } else { "Run JS/TS and return collected output directly (stateless)." } }),
     ];
     if stateful {
         tools.extend([
+            json!({ "name": "get_execution",         "description": "Poll execution status and result." }),
+            json!({ "name": "get_execution_output",  "description": "Read paginated console output (line or byte mode)." }),
+            json!({ "name": "cancel_execution",      "description": "Terminate a running execution." }),
+            json!({ "name": "list_executions",       "description": "List all executions with their status." }),
             json!({ "name": "list_sessions",           "description": "List all named sessions (stateful only)." }),
             json!({ "name": "list_session_snapshots",  "description": "Browse execution history for a session." }),
             json!({ "name": "get_heap_tags",           "description": "Get tags for a heap snapshot." }),
@@ -447,7 +447,7 @@ impl McpService {
         }
     }
 
-    #[tool(description = "List all named sessions (stateful mode only). Returns an array of session names that have been used with the session parameter in run_js.")]
+    #[tool(description = "List all named sessions (stateful mode only). Returns an array of session names that have been used via REST session fields or the X-MCP-Session-Id header.")]
     pub async fn list_sessions(&self) -> ListSessionsResponse {
         match self.engine.list_sessions().await {
             Ok(sessions) => ListSessionsResponse { sessions },

@@ -84,17 +84,13 @@
           version = "0.1.0";
           src = ./server;
 
-          # Use cargoDeps with a patched vendor step instead of cargoHash
-          # so we can inject our fixed replace-workspace-values script.
-          cargoDeps = (rustPlatform.fetchCargoVendor {
+          # Use a local copy of fetchCargoVendor so the staging helper fetches
+          # crates from the registry CDN instead of the crates.io API endpoint.
+          cargoDeps = (pkgs.callPackage ./nix/fetch-cargo-vendor.nix {
+            cargo = rustToolchain;
+          } {
             src = ./server;
             hash = "sha256-L1IGe3cHLFT35OQ/aJ4xq0RJqRZ4Yu6YbTSMf6ziMr0=";
-          }).overrideAttrs (old: {
-            nativeBuildInputs = map (dep:
-              if (dep.name or "") == "replace-workspace-values"
-              then patchedReplaceWorkspaceValues
-              else dep
-            ) (old.nativeBuildInputs or []);
           });
 
           nativeBuildInputs = with pkgs; [

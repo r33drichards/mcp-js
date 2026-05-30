@@ -5,9 +5,11 @@ use clap::Parser;
 use rmcp::transport::sse_server::{SseServer, SseServerConfig};
 use rmcp::transport::StreamableHttpServer;
 use rmcp::transport::streamable_http_server::axum::StreamableHttpServerConfig;
+use serde::{Deserialize, de::{self, MapAccess, Visitor}};
 use tokio_util::sync::CancellationToken;
 use std::sync::Arc;
 use utoipa::OpenApi as _;
+use std::fmt;
 mod engine;
 mod mcp;
 mod api;
@@ -856,6 +858,115 @@ fn validate_wasm_name(name: &str) -> Result<()> {
 
 // ── Fetch header injection rule loading ──────────────────────────────────
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FetchHeaderConfigRule {
+    host: String,
+    #[serde(default)]
+    methods: Vec<String>,
+    #[serde(default)]
+    headers: Option<StaticHeadersConfig>,
+    #[serde(default)]
+    auth: Option<FetchHeaderAuthConfig>,
+}
+
+#[derive(Debug)]
+struct StaticHeadersConfig(std::collections::HashMap<String, String>);
+
+impl<'de> Deserialize<'de> for StaticHeadersConfig {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct StaticHeadersVisitor;
+
+        impl<'de> Visitor<'de> for StaticHeadersVisitor {
+            type Value = StaticHeadersConfig;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a JSON object mapping header names to header values")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> std::result::Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut headers = std::collections::HashMap::new();
+
+                while let Some((key, value)) = map.next_entry::<String, String>()? {
+                    if headers.insert(key.clone(), value).is_some() {
+                        return Err(de::Error::custom(format!("duplicate field `{}`", key)));
+                    }
+                }
+
+                Ok(StaticHeadersConfig(headers))
+            }
+        }
+
+        deserializer.deserialize_map(StaticHeadersVisitor)
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FetchHeaderAuthConfig {
+    #[serde(rename = "type")]
+    auth_type: String,
+    header: String,
+    token_url: String,
+    client_id: String,
+    client_secret: String,
+    #[serde(default)]
+    scope: Option<String>,
+    #[serde(default = "engine::fetch::default_refresh_buffer_secs")]
+    refresh_buffer_secs: u64,
+}
+
+impl FetchHeaderConfigRule {
+    fn into_runtime_rule(self) -> Result<engine::fetch::HeaderRule> {
+        let host = self.host;
+        let methods = self.methods;
+
+        match (self.headers, self.auth) {
+            (Some(_), Some(_)) => anyhow::bail!(
+                "Fetch header config rule for host '{}' cannot define both 'headers' and 'auth'",
+                host
+            ),
+            (None, None) => anyhow::bail!(
+                "Fetch header config rule for host '{}' must define either 'headers' or 'auth'",
+                host
+            ),
+            (Some(headers), None) => engine::fetch::HeaderRule::new(
+                host,
+                methods,
+                engine::fetch::HeaderInjection::Static { headers: headers.0 },
+            ),
+            (None, Some(auth)) => {
+                if auth.auth_type != "oauth_client_credentials" {
+                    anyhow::bail!(
+                        "Unsupported fetch auth type '{}' for host '{}'",
+                        auth.auth_type,
+                        host
+                    );
+                }
+
+                engine::fetch::HeaderRule::oauth_client_credentials(
+                    host,
+                    methods,
+                    engine::fetch::OAuthClientCredentialsConfig {
+                        header_name: auth.header,
+                        token_url: auth.token_url,
+                        client_id: auth.client_id,
+                        client_secret: auth.client_secret,
+                        scope: auth.scope,
+                        refresh_buffer_secs: auth.refresh_buffer_secs,
+                    },
+                )
+            }
+        }
+    }
+}
+
 /// Load fetch header injection rules from CLI flags and/or a JSON config file.
 fn load_fetch_header_rules(
     cli_rules: &[String],
@@ -870,13 +981,11 @@ fn load_fetch_header_rules(
     if let Some(path) = config_path {
         let content = std::fs::read_to_string(path)
             .map_err(|e| anyhow::anyhow!("Failed to read fetch header config '{}': {}", path, e))?;
-        let mut file_rules: Vec<engine::fetch::HeaderRule> = serde_json::from_str(&content)
+        let file_rules: Vec<FetchHeaderConfigRule> = serde_json::from_str(&content)
             .map_err(|e| anyhow::anyhow!("Invalid JSON in fetch header config '{}': {}", path, e))?;
-        // Normalize methods to uppercase
-        for rule in &mut file_rules {
-            rule.methods = rule.methods.iter().map(|m| m.to_uppercase()).collect();
+        for rule in file_rules {
+            rules.push(rule.into_runtime_rule()?);
         }
-        rules.extend(file_rules);
     }
 
     Ok(rules)
@@ -884,11 +993,17 @@ fn load_fetch_header_rules(
 
 /// Parse a `--fetch-header` CLI string into a `HeaderRule`.
 /// Format: host=<host>,header=<name>,value=<val>[,methods=GET;POST]
+/// Or:     host=<host>,header=<name>,token_url=<url>,client_id=<id>,client_secret=<secret>[,scope=<scope>][,methods=GET;POST][,refresh_buffer_secs=30]
 fn parse_fetch_header_cli(s: &str) -> Result<engine::fetch::HeaderRule> {
     let mut host = None;
     let mut methods = Vec::new();
     let mut header_name = None;
     let mut header_value = None;
+    let mut token_url = None;
+    let mut client_id = None;
+    let mut client_secret = None;
+    let mut scope = None;
+    let mut refresh_buffer_secs = None;
 
     for part in s.split(',') {
         let (key, val) = part.split_once('=')
@@ -897,30 +1012,68 @@ fn parse_fetch_header_cli(s: &str) -> Result<engine::fetch::HeaderRule> {
             ))?;
         match key.trim() {
             "host" => host = Some(val.trim().to_string()),
-            "methods" => {
-                methods = val.split(';')
-                    .map(|m| m.trim().to_uppercase())
-                    .filter(|m| !m.is_empty())
-                    .collect();
-            }
+            "methods" => methods = val.split(';').map(|m| m.to_string()).collect(),
             "header" => header_name = Some(val.trim().to_string()),
             "value" => header_value = Some(val.to_string()),
+            "token_url" => token_url = Some(val.trim().to_string()),
+            "client_id" => client_id = Some(val.trim().to_string()),
+            "client_secret" => client_secret = Some(val.to_string()),
+            "scope" => scope = Some(val.trim().to_string()),
+            "refresh_buffer_secs" => {
+                refresh_buffer_secs = Some(val.trim().parse::<u64>().map_err(|e| anyhow::anyhow!(
+                    "Invalid 'refresh_buffer_secs' value '{}': {}",
+                    val.trim(),
+                    e
+                ))?)
+            }
             other => anyhow::bail!(
-                "Unknown key '{}' in --fetch-header. Expected: host, methods, header, value", other
+                "Unknown key '{}' in --fetch-header. Expected: host, methods, header, value, token_url, client_id, client_secret, scope, refresh_buffer_secs",
+                other
             ),
         }
     }
 
-    let name = header_name.ok_or_else(|| anyhow::anyhow!("--fetch-header missing 'header'"))?;
-    let value = header_value.ok_or_else(|| anyhow::anyhow!("--fetch-header missing 'value'"))?;
-    let mut headers = std::collections::HashMap::new();
-    headers.insert(name, value);
+    let host = host.ok_or_else(|| anyhow::anyhow!("--fetch-header missing 'host'"))?;
+    let header_name = header_name.ok_or_else(|| anyhow::anyhow!("--fetch-header missing 'header'"))?;
+    let has_dynamic_keys = token_url.is_some()
+        || client_id.is_some()
+        || client_secret.is_some()
+        || scope.is_some()
+        || refresh_buffer_secs.is_some();
 
-    Ok(engine::fetch::HeaderRule {
-        host: host.ok_or_else(|| anyhow::anyhow!("--fetch-header missing 'host'"))?,
-        methods,
-        headers,
-    })
+    match (header_value, has_dynamic_keys) {
+        (Some(_), true) => anyhow::bail!(
+            "--fetch-header cannot mix static 'value' with dynamic oauth keys"
+        ),
+        (Some(value), false) => engine::fetch::HeaderRule::static_header(
+            host,
+            methods,
+            header_name,
+            value,
+        ),
+        (None, true) => engine::fetch::HeaderRule::oauth_client_credentials(
+            host,
+            methods,
+            engine::fetch::OAuthClientCredentialsConfig {
+                header_name,
+                token_url: token_url.ok_or_else(|| anyhow::anyhow!(
+                    "--fetch-header missing 'token_url' for dynamic oauth rule"
+                ))?,
+                client_id: client_id.ok_or_else(|| anyhow::anyhow!(
+                    "--fetch-header missing 'client_id' for dynamic oauth rule"
+                ))?,
+                client_secret: client_secret.ok_or_else(|| anyhow::anyhow!(
+                    "--fetch-header missing 'client_secret' for dynamic oauth rule"
+                ))?,
+                scope,
+                refresh_buffer_secs: refresh_buffer_secs
+                    .unwrap_or_else(engine::fetch::default_refresh_buffer_secs),
+            },
+        ),
+        (None, false) => anyhow::bail!(
+            "--fetch-header must provide either 'value' for a static rule or the full dynamic oauth key set: token_url, client_id, client_secret"
+        ),
+    }
 }
 
 // ── MCP server module loading ────────────────────────────────────────────
@@ -989,4 +1142,348 @@ fn load_mcp_server_configs(
     }
 
     Ok(configs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{load_fetch_header_rules, parse_fetch_header_cli};
+
+    #[test]
+    fn parse_fetch_header_cli_supports_static_rules() {
+        let rule = parse_fetch_header_cli(
+            "host=api.example.com,header=Authorization,value=Bearer fixed,methods=get;post",
+        )
+        .expect("static rule should parse");
+
+        let headers = rule.static_headers().expect("static headers expected");
+        assert_eq!(
+            headers.get("Authorization").map(|value| value.as_str()),
+            Some("Bearer fixed"),
+        );
+        assert!(rule.dynamic_auth().is_none());
+        assert_eq!(rule.methods(), &["GET".to_string(), "POST".to_string()]);
+    }
+
+    #[test]
+    fn parse_fetch_header_cli_supports_dynamic_rules() {
+        let rule = parse_fetch_header_cli(
+            "host=api.example.com,header=Authorization,token_url=https://issuer/token,client_id=abc,client_secret=xyz,scope=read:all,methods=GET;POST,refresh_buffer_secs=45",
+        )
+        .expect("dynamic rule should parse");
+
+        let auth = rule.dynamic_auth().expect("dynamic auth expected");
+        assert_eq!(auth.header_name, "Authorization");
+        assert_eq!(auth.token_url, "https://issuer/token");
+        assert_eq!(auth.client_id, "abc");
+        assert_eq!(auth.client_secret, "xyz");
+        assert_eq!(auth.scope.as_deref(), Some("read:all"));
+        assert_eq!(auth.refresh_buffer_secs, 45);
+        assert_eq!(rule.methods(), &["GET".to_string(), "POST".to_string()]);
+    }
+
+    #[test]
+    fn parse_fetch_header_cli_rejects_mixed_static_and_dynamic_keys() {
+        let err = parse_fetch_header_cli(
+            "host=api.example.com,header=Authorization,value=Bearer nope,token_url=https://issuer/token,client_id=abc,client_secret=xyz",
+        )
+        .expect_err("mixed rule should fail");
+
+        assert!(err.to_string().contains("cannot mix"));
+    }
+
+    #[test]
+    fn parse_fetch_header_cli_rejects_empty_host() {
+        let err = parse_fetch_header_cli(
+            "host=   ,header=Authorization,value=Bearer fixed",
+        )
+        .expect_err("blank host should fail");
+
+        assert!(err.to_string().contains("'host' cannot be empty"));
+    }
+
+    #[test]
+    fn parse_fetch_header_cli_rejects_empty_header_name() {
+        let err = parse_fetch_header_cli(
+            "host=api.example.com,header=   ,value=Bearer fixed",
+        )
+        .expect_err("blank header name should fail");
+
+        assert!(err.to_string().contains("'header' cannot be empty"));
+    }
+
+    #[test]
+    fn parse_fetch_header_cli_rejects_empty_dynamic_required_values() {
+        let token_url_err = parse_fetch_header_cli(
+            "host=api.example.com,header=Authorization,token_url=   ,client_id=abc,client_secret=xyz",
+        )
+        .expect_err("blank token_url should fail");
+        assert!(token_url_err.to_string().contains("'token_url' cannot be empty"));
+
+        let client_id_err = parse_fetch_header_cli(
+            "host=api.example.com,header=Authorization,token_url=https://issuer/token,client_id=   ,client_secret=xyz",
+        )
+        .expect_err("blank client_id should fail");
+        assert!(client_id_err.to_string().contains("'client_id' cannot be empty"));
+
+        let client_secret_err = parse_fetch_header_cli(
+            "host=api.example.com,header=Authorization,token_url=https://issuer/token,client_id=abc,client_secret=   ",
+        )
+        .expect_err("blank client_secret should fail");
+        assert!(client_secret_err.to_string().contains("'client_secret' cannot be empty"));
+    }
+
+    #[test]
+    fn load_fetch_header_rules_supports_dynamic_json_rules_and_normalizes_methods() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let path = dir.path().join("fetch-rules.json");
+        std::fs::write(
+            &path,
+            r#"[{
+                "host": "api.example.com",
+                "methods": ["get", "post"],
+                "auth": {
+                    "type": "oauth_client_credentials",
+                    "header": "Authorization",
+                    "token_url": "https://issuer/token",
+                    "client_id": "abc",
+                    "client_secret": "xyz",
+                    "scope": "read:all"
+                }
+            }]"#,
+        )
+        .expect("config should be written");
+
+        let rules = load_fetch_header_rules(&[], &Some(path.display().to_string()))
+            .expect("json rules should parse");
+
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].methods(), &["GET".to_string(), "POST".to_string()]);
+
+        let auth = rules[0].dynamic_auth().expect("dynamic auth expected");
+        assert_eq!(auth.header_name, "Authorization");
+        assert_eq!(auth.scope.as_deref(), Some("read:all"));
+        assert_eq!(auth.refresh_buffer_secs, 30);
+    }
+
+    #[test]
+    fn load_fetch_header_rules_rejects_mixed_headers_and_auth_json_rules() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let path = dir.path().join("fetch-rules.json");
+        std::fs::write(
+            &path,
+            r#"[{
+                "host": "api.example.com",
+                "headers": {"Authorization": "Bearer fixed"},
+                "auth": {
+                    "type": "oauth_client_credentials",
+                    "header": "Authorization",
+                    "token_url": "https://issuer/token",
+                    "client_id": "abc",
+                    "client_secret": "xyz"
+                }
+            }]"#,
+        )
+        .expect("config should be written");
+
+        let err = load_fetch_header_rules(&[], &Some(path.display().to_string()))
+            .expect_err("mixed headers/auth json rule should fail");
+
+        assert!(err.to_string().contains("cannot define both 'headers' and 'auth'"));
+    }
+
+    #[test]
+    fn load_fetch_header_rules_rejects_unsupported_auth_type() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let path = dir.path().join("fetch-rules.json");
+        std::fs::write(
+            &path,
+            r#"[{
+                "host": "api.example.com",
+                "auth": {
+                    "type": "basic",
+                    "header": "Authorization",
+                    "token_url": "https://issuer/token",
+                    "client_id": "abc",
+                    "client_secret": "xyz"
+                }
+            }]"#,
+        )
+        .expect("config should be written");
+
+        let err = load_fetch_header_rules(&[], &Some(path.display().to_string()))
+            .expect_err("unsupported auth type should fail");
+
+        assert!(err.to_string().contains("Unsupported fetch auth type"));
+    }
+
+    #[test]
+    fn load_fetch_header_rules_rejects_unknown_json_fields() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let path = dir.path().join("fetch-rules.json");
+        std::fs::write(
+            &path,
+            r#"[{
+                "host": "api.example.com",
+                "headers": {"Authorization": "Bearer fixed"},
+                "unexpected": true
+            }]"#,
+        )
+        .expect("config should be written");
+
+        let err = load_fetch_header_rules(&[], &Some(path.display().to_string()))
+            .expect_err("unknown json fields should fail");
+
+        assert!(err.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn load_fetch_header_rules_rejects_empty_static_headers_map() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let path = dir.path().join("fetch-rules.json");
+        std::fs::write(
+            &path,
+            r#"[{
+                "host": "api.example.com",
+                "headers": {}
+            }]"#,
+        )
+        .expect("config should be written");
+
+        let err = load_fetch_header_rules(&[], &Some(path.display().to_string()))
+            .expect_err("empty static headers map should fail");
+
+        assert!(err.to_string().contains("static headers cannot be empty"));
+    }
+
+    #[test]
+    fn load_fetch_header_rules_rejects_blank_static_header_values() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let path = dir.path().join("blank-static-value.json");
+        std::fs::write(
+            &path,
+            r#"[{
+                "host": "api.example.com",
+                "headers": {"Authorization": "   "}
+            }]"#,
+        )
+        .expect("config should be written");
+
+        let err = load_fetch_header_rules(&[], &Some(path.display().to_string()))
+            .expect_err("blank static header value should fail");
+
+        assert!(err.to_string().contains("'value' cannot be empty"));
+    }
+
+    #[test]
+    fn load_fetch_header_rules_rejects_case_variant_duplicate_static_header_names() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let path = dir.path().join("duplicate-static-headers.json");
+        std::fs::write(
+            &path,
+            r#"[{
+                "host": "api.example.com",
+                "headers": {
+                    "Authorization": "Bearer one",
+                    "authorization": "Bearer two"
+                }
+            }]"#,
+        )
+        .expect("config should be written");
+
+        let err = load_fetch_header_rules(&[], &Some(path.display().to_string()))
+            .expect_err("case-variant duplicate headers should fail");
+
+        assert!(err.to_string().contains("duplicate static header name"));
+    }
+
+    #[test]
+    fn load_fetch_header_rules_rejects_exact_duplicate_static_header_names() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let path = dir.path().join("exact-duplicate-static-headers.json");
+        std::fs::write(
+            &path,
+            r#"[{
+                "host": "api.example.com",
+                "headers": {
+                    "Authorization": "Bearer one",
+                    "Authorization": "Bearer two"
+                }
+            }]"#,
+        )
+        .expect("config should be written");
+
+        let err = load_fetch_header_rules(&[], &Some(path.display().to_string()))
+            .expect_err("exact duplicate headers should fail");
+
+        assert!(err.to_string().contains("duplicate field"));
+        assert!(err.to_string().contains("Authorization"));
+    }
+
+    #[test]
+    fn load_fetch_header_rules_rejects_blank_json_required_values() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+
+        let empty_host = dir.path().join("empty-host.json");
+        std::fs::write(
+            &empty_host,
+            r#"[{
+                "host": "   ",
+                "headers": {"Authorization": "Bearer fixed"}
+            }]"#,
+        )
+        .expect("config should be written");
+        let host_err = load_fetch_header_rules(&[], &Some(empty_host.display().to_string()))
+            .expect_err("blank host should fail");
+        assert!(host_err.to_string().contains("'host' cannot be empty"));
+
+        let empty_token_url = dir.path().join("empty-token-url.json");
+        std::fs::write(
+            &empty_token_url,
+            r#"[{
+                "host": "api.example.com",
+                "auth": {
+                    "type": "oauth_client_credentials",
+                    "header": "Authorization",
+                    "token_url": "   ",
+                    "client_id": "abc",
+                    "client_secret": "xyz"
+                }
+            }]"#,
+        )
+        .expect("config should be written");
+        let token_url_err = load_fetch_header_rules(&[], &Some(empty_token_url.display().to_string()))
+            .expect_err("blank token_url should fail");
+        assert!(token_url_err.to_string().contains("'token_url' cannot be empty"));
+    }
+
+    #[test]
+    fn load_fetch_header_rules_trims_dynamic_json_required_values() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let path = dir.path().join("trimmed-auth.json");
+        std::fs::write(
+            &path,
+            r#"[{
+                "host": " api.example.com ",
+                "methods": [" get "],
+                "auth": {
+                    "type": "oauth_client_credentials",
+                    "header": " Authorization ",
+                    "token_url": " https://issuer/token ",
+                    "client_id": " abc ",
+                    "client_secret": " xyz "
+                }
+            }]"#,
+        )
+        .expect("config should be written");
+
+        let rules = load_fetch_header_rules(&[], &Some(path.display().to_string()))
+            .expect("trimmed auth values should parse");
+
+        let auth = rules[0].dynamic_auth().expect("dynamic auth expected");
+        assert_eq!(rules[0].methods(), &["GET".to_string()]);
+        assert_eq!(auth.header_name, "Authorization");
+        assert_eq!(auth.token_url, "https://issuer/token");
+        assert_eq!(auth.client_id, "abc");
+        assert_eq!(auth.client_secret, "xyz");
+    }
 }

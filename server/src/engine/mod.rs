@@ -1,6 +1,7 @@
 pub mod console;
 pub mod execution;
 pub mod fetch;
+pub mod fetch_auth;
 pub mod fs;
 pub mod heap_storage;
 pub mod heap_tags;

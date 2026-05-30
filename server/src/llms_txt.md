@@ -19,13 +19,11 @@ mcp-v8 exposes a V8 JavaScript runtime as MCP tools. Agents can run JS/TS code, 
 
 ## MCP Tools
 
-### Core tools (all modes)
+### Core tools
 
-- `run_js(code, [heap_memory_max_mb], [execution_timeout_secs])` — Submit JS/TS for async execution. Returns `execution_id`.
-- `get_execution(execution_id)` — Poll status and result. Returns `status`, `result`, `heap` (stateful only), `error`.
-- `get_execution_output(execution_id, [line_offset], [line_limit], [byte_offset], [byte_limit])` — Read paginated console output.
-- `cancel_execution(execution_id)` — Terminate a running execution.
-- `list_executions()` — List all executions with their status.
+- Stateful MCP: `run_js(code, [heap], [heap_memory_max_mb], [execution_timeout_secs], [tags])` submits async execution and returns `execution_id`; use `get_execution(execution_id)` and `get_execution_output(execution_id, ...)` to poll/read output.
+- Stateless MCP: `run_js(code, [heap_memory_max_mb], [execution_timeout_secs])` waits internally and returns `{output, error}` directly.
+- Stateful MCP only: `cancel_execution(execution_id)` and `list_executions()`.
 
 ### Additional tools (stateful mode only)
 
@@ -40,6 +38,8 @@ mcp-v8 exposes a V8 JavaScript runtime as MCP tools. Agents can run JS/TS code, 
 ## Typical agent workflow
 
 ```
+Stateful mode:
+
 1. run_js({ code: "console.log(1 + 1);" })
    → { execution_id: "abc-123" }
 
@@ -48,9 +48,14 @@ mcp-v8 exposes a V8 JavaScript runtime as MCP tools. Agents can run JS/TS code, 
 
 3. get_execution_output({ execution_id: "abc-123" })
    → { data: "2\n", total_lines: 1 }
+
+Stateless mode:
+
+1. run_js({ code: "console.log(1 + 1);" })
+   → { output: "2\n" }
 ```
 
-In stateful mode, pass the returned `heap` hash back to `run_js` to resume that V8 state.
+In stateful mode, pass the returned `heap` hash back to `run_js` to resume that V8 state. For MCP session history, send `X-MCP-Session-Id` instead of a `session` tool parameter.
 
 ## JavaScript features
 
@@ -60,6 +65,7 @@ In stateful mode, pass the returned `heap` hash back to `run_js` to resume that 
 - npm/JSR/URL imports via esm.sh (requires `--allow-external-modules`)
 - WebAssembly (`WebAssembly.Module`, `WebAssembly.Instance`)
 - Optional `fetch()` (OPA-gated, web-standard Fetch API)
+- Optional fetch header injection via `--fetch-header` / `--fetch-header-config` (static headers or OAuth client-credentials bearer tokens)
 - Optional `fs` module (OPA-gated, Node.js-compatible)
 - Optional pre-loaded WASM globals
 
@@ -69,7 +75,7 @@ In stateful mode, pass the returned `heap` hash back to `run_js` to resume that 
 - No DOM / browser APIs
 - No environment variable access
 - External imports disabled by default (enable with `--allow-external-modules`)
-- `fetch()` requires `--opa-url` (or `--policies-json`)
+- `fetch()` requires `--policies-json`
 - `fs` requires `--policies-json`
 
 ## REST API quick reference
