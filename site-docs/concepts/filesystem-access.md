@@ -26,5 +26,8 @@ different input fields, such as:
 This design lets the runtime expose useful file operations while still making
 access decisions explicit and configurable.
 
+For a task-focused setup with a real policy file and runnable `fs` example, see
+[Provide Sandboxed Filesystem Access](../how-to/provide-sandboxed-filesystem-access.md).
+
 See [Policy System](policy-system.md) for the general evaluation model and
 [Policy Files](../reference/policy-files.md) for configuration shape.

@@ -41,4 +41,6 @@ The SQLite WASM example in the README is a good illustration of the imported
 module path: WASM can be preloaded as a reusable runtime capability, then
 instantiated from ordinary JavaScript with the imports it needs.
 
+For a complete walkthrough, see [Use SQLite WASM](../how-to/use-sqlite-wasm.md).
+
 See [Reference](../reference/cli-flags.md) for the exact WASM flags.
