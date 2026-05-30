@@ -238,11 +238,26 @@ def copy_and_patch_git_crate_subtree(git_tree: Path, crate_name: str, crate_out_
         cmd = ["replace-workspace-values", str(manifest_path), str(root_manifest_path)]
         subprocess.check_output(cmd)
 
-    cargo_toml = load_toml(crate_out_dir / "Cargo.toml")
-    if "package" in cargo_toml and "version" in cargo_toml["package"]:
-        cargo_toml["package"]["version"] = "0.0.1"
-    with open(crate_out_dir / "Cargo.toml", "wb") as f:
-        tomli_w.dump(cargo_toml, f)
+def extract_crate_tarball_contents(tarball_path: Path, crate_out_dir: Path) -> None:
+    eprint(f"Unpacking to {crate_out_dir}")
+    crate_out_dir.mkdir()
+    cmd = ["tar", "xf", str(tarball_path), "-C", str(crate_out_dir), "--strip-components=1"]
+    subprocess.check_output(cmd)
+
+
+def make_git_source_selector(source_info: GitSourceInfo) -> dict[str, str]:
+    selector = {}
+    selector["git"] = source_info["url"]
+    if source_info["type"] is not None:
+        selector[source_info["type"]] = source_info["value"]
+    return selector
+
+
+def make_registry_source_selector(source: str) -> dict[str, str]:
+    registry = source[9:] if source.startswith("registry+") else source
+    selector = {}
+    selector["registry"] = registry
+    return selector
 
 
 def create_vendor(vendor_staging_dir: Path, out_dir: Path) -> None:
@@ -253,26 +268,91 @@ def create_vendor(vendor_staging_dir: Path, out_dir: Path) -> None:
     cargo_lock_toml = load_toml(lockfile_path)
     lockfile_version = get_lockfile_version(cargo_lock_toml)
 
-    out_dir_vendor = out_dir / "vendor"
-    out_dir_vendor.mkdir(exist_ok=True)
+    source_to_ind: dict[str, str] = {}
+    source_config = {}
+    next_registry_ind = 0
+    next_git_ind = 0
+
+    def add_source_replacement(
+        orig_key: str,
+        orig_selector: dict[str, str],
+        vendored_key: str,
+        vendored_dir: str,
+    ) -> None:
+        source_config[vendored_key] = {}
+        source_config[vendored_key]["directory"] = vendored_dir
+        source_config[orig_key] = orig_selector
+        source_config[orig_key]["replace-with"] = vendored_key
+
+    source_to_ind["registry+https://github.com/rust-lang/crates.io-index"] = "registry-0"
+    source_to_ind["sparse+https://index.crates.io/"] = "registry-0"
+    add_source_replacement(
+        orig_key="crates-io",
+        orig_selector={},
+        vendored_key="vendored-source-registry-0",
+        vendored_dir="@vendor@/source-registry-0",
+    )
+    next_registry_ind += 1
 
     for pkg in cargo_lock_toml["package"]:
         if "source" not in pkg.keys():
-            eprint(f'Skipping local dependency: {pkg["name"]}')
+            continue
+        source: str = pkg["source"]
+        if source in source_to_ind:
             continue
 
-        crate_out_dir = out_dir_vendor / f'{pkg["name"]}-{pkg["version"]}'
-        source = pkg["source"]
-
-        if source.startswith("registry+"):
-            filename = f'{pkg["name"]}-{pkg["version"]}.tar.gz'
-            tarball = vendor_staging_dir / "tarballs" / filename
-            eprint(f"Unpacking tarball {tarball}")
-            shutil.unpack_archive(tarball, out_dir_vendor, "gztar")
-        elif source.startswith("git+"):
+        if source.startswith("git+"):
+            ind = f"git-{next_git_ind}"
+            next_git_ind += 1
             source_info = parse_git_source(source, lockfile_version)
-            git_tree = vendor_staging_dir / "git" / source_info["git_sha_rev"]
+            selector = make_git_source_selector(source_info)
+        elif source.startswith("registry+") or source.startswith("sparse+"):
+            ind = f"registry-{next_registry_ind}"
+            next_registry_ind += 1
+            selector = make_registry_source_selector(source)
+        else:
+            raise Exception(f"Can't process source: {source}.")
+
+        source_to_ind[source] = ind
+        add_source_replacement(
+            orig_key=f"original-source-{ind}",
+            orig_selector=selector,
+            vendored_key=f"vendored-source-{ind}",
+            vendored_dir=f"@vendor@/source-{ind}",
+        )
+
+    config_path = out_dir / ".cargo" / "config.toml"
+    config_path.parent.mkdir()
+
+    with open(config_path, "wb") as config_file:
+        tomli_w.dump({"source": source_config}, config_file)
+
+    for pkg in cargo_lock_toml["package"]:
+        if "source" not in pkg.keys():
+            continue
+
+        source: str = pkg["source"]
+        source_ind = source_to_ind[source]
+        crate_dir_name = f'{pkg["name"]}-{pkg["version"]}'
+        source_dir_name = f"source-{source_ind}"
+        crate_out_dir = out_dir / source_dir_name / crate_dir_name
+        crate_out_dir.parent.mkdir(exist_ok=True)
+
+        if source.startswith("git+"):
+            source_info = parse_git_source(source, lockfile_version)
+            git_sha_rev = source_info["git_sha_rev"]
+            git_tree = vendor_staging_dir / "git" / git_sha_rev
             copy_and_patch_git_crate_subtree(git_tree, pkg["name"], crate_out_dir)
+
+            with open(crate_out_dir / ".cargo-checksum.json", "w") as f:
+                json.dump({"files": {}}, f)
+        elif source.startswith("registry+") or source.startswith("sparse+"):
+            filename = f'{pkg["name"]}-{pkg["version"]}.tar.gz'
+            tarball_path = vendor_staging_dir / "tarballs" / filename
+            extract_crate_tarball_contents(tarball_path, crate_out_dir)
+
+            with open(crate_out_dir / ".cargo-checksum.json", "w") as f:
+                json.dump({"files": {}, "package": pkg["checksum"]}, f)
         else:
             raise Exception(f"Can't process source: {source}.")
 
