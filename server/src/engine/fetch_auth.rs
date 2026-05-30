@@ -24,6 +24,14 @@ pub struct OAuthClientCredentialsTokenSource {
     state: Arc<Mutex<TokenSourceState>>,
 }
 
+impl std::fmt::Debug for OAuthClientCredentialsTokenSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuthClientCredentialsTokenSource")
+            .field("config", &self.config)
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Clone, Debug)]
 struct CachedToken {
     access_token: String,
@@ -89,41 +97,46 @@ impl OAuthClientCredentialsTokenSource {
     }
 
     pub async fn authorization_header_value(&self) -> Result<String, String> {
-        let in_flight = {
-            let mut state = self.state.lock().await;
-            if let Some(token) = state.cached_token.as_ref() {
-                if token.is_valid(self.config.refresh_buffer_secs) {
-                    return Ok(token.authorization_header_value());
+        loop {
+            let in_flight = {
+                let mut state = self.state.lock().await;
+                if let Some(token) = state.cached_token.as_ref() {
+                    if token.is_valid(self.config.refresh_buffer_secs) {
+                        return Ok(token.authorization_header_value());
+                    }
                 }
+
+                if let Some(in_flight) = state.in_flight.clone() {
+                    in_flight
+                } else {
+                    let refresh_token = state
+                        .cached_token
+                        .as_ref()
+                        .and_then(|token| token.refresh_token.clone());
+                    let this = self.clone();
+                    let future = async move { this.refresh_or_reacquire(refresh_token).await }
+                        .boxed()
+                        .shared();
+                    let in_flight = InFlightRequest {
+                        generation: state.next_generation,
+                        future,
+                    };
+                    state.next_generation += 1;
+                    state.in_flight = Some(in_flight.clone());
+                    in_flight
+                }
+            };
+
+            let result = in_flight.future.await;
+
+            let mut state = self.state.lock().await;
+            match apply_in_flight_result(&mut state, in_flight.generation, result.clone()) {
+                InFlightResolution::Applied => {
+                    return result.map(|token| token.authorization_header_value());
+                }
+                InFlightResolution::Stale => continue,
             }
-
-            if let Some(in_flight) = state.in_flight.clone() {
-                in_flight
-            } else {
-                let refresh_token = state
-                    .cached_token
-                    .as_ref()
-                    .and_then(|token| token.refresh_token.clone());
-                let this = self.clone();
-                let future = async move { this.refresh_or_reacquire(refresh_token).await }
-                    .boxed()
-                    .shared();
-                let in_flight = InFlightRequest {
-                    generation: state.next_generation,
-                    future,
-                };
-                state.next_generation += 1;
-                state.in_flight = Some(in_flight.clone());
-                in_flight
-            }
-        };
-
-        let result = in_flight.future.await;
-
-        let mut state = self.state.lock().await;
-        apply_in_flight_result(&mut state, in_flight.generation, result.clone());
-
-        result.map(|token| token.authorization_header_value())
+        }
     }
 
     async fn refresh_or_reacquire(
@@ -215,17 +228,22 @@ impl OAuthClientCredentialsTokenSource {
     }
 }
 
+enum InFlightResolution {
+    Applied,
+    Stale,
+}
+
 fn apply_in_flight_result(
     state: &mut TokenSourceState,
     generation: u64,
     result: Result<CachedToken, String>,
-) {
+) -> InFlightResolution {
     let Some(in_flight) = state.in_flight.as_ref() else {
-        return;
+        return InFlightResolution::Stale;
     };
 
     if in_flight.generation != generation {
-        return;
+        return InFlightResolution::Stale;
     }
 
     state.in_flight = None;
@@ -233,6 +251,7 @@ fn apply_in_flight_result(
         Ok(token) => state.cached_token = Some(token),
         Err(_) => state.cached_token = None,
     }
+    InFlightResolution::Applied
 }
 
 #[derive(Clone, Debug)]
@@ -707,7 +726,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stale_waiter_from_old_future_does_not_clear_newer_in_flight_state() {
+    async fn stale_waiter_from_old_future_observes_newer_state_before_returning() {
         let source = OAuthClientCredentialsTokenSource::new(
             Client::new(),
             OAuthTokenSourceConfig {
@@ -764,7 +783,7 @@ mod tests {
         state_set_in_flight_for_test(&mut guard, 1, newer_future.clone());
         drop(guard);
 
-        assert_eq!(waiter.await.unwrap(), "Bearer older-token");
+        assert_eq!(waiter.await.unwrap(), "Bearer newer-token");
 
         let state = source.state.lock().await;
         let cached = state.cached_token.as_ref().expect("newer cached token should remain");
