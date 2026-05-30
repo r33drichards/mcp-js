@@ -18,3 +18,7 @@ Stateful mode exposes:
 
 Stateless mode exposes a simplified `run_js` that waits internally and returns
 output directly.
+
+This MCP tool surface is the primary integration surface for `mcp-v8`. The
+HTTP API and generated clients expose a fallback path for environments that are
+not speaking MCP directly.

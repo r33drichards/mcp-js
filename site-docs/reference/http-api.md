@@ -17,3 +17,7 @@ Core endpoints:
 
 Use the OpenAPI document as the source of truth for request and response
 shapes.
+
+The HTTP API is a fallback and tooling surface, not the primary product
+integration model. The main integration story for `mcp-v8` is still the MCP
+server and tool surface.
