@@ -236,8 +236,7 @@ def copy_and_patch_git_crate_subtree(git_tree: Path, crate_name: str, crate_out_
         eprint(f"Patching {manifest_path}")
 
         cmd = ["replace-workspace-values", str(manifest_path), str(root_manifest_path)]
-        output = subprocess.check_output(cmd)
-        manifest_path.write_bytes(output)
+        subprocess.check_output(cmd)
 
     cargo_toml = load_toml(crate_out_dir / "Cargo.toml")
     if "package" in cargo_toml and "version" in cargo_toml["package"]:
