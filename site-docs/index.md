@@ -19,3 +19,15 @@ Use this documentation by intent:
 - how sessions, heaps, and clustering work
 - how policy-gated fetch, filesystem access, and module loading behave
 - how to use the HTTP API and Rust client
+
+## Core concepts
+
+- [Execution Model](concepts/execution-model.md)
+- [Sessions and Heaps](concepts/sessions-and-heaps.md)
+- [Integration Surfaces](concepts/integration-surfaces.md)
+- [Module Loading](concepts/module-loading.md)
+- [WASM and Native Modules](concepts/wasm-and-native-modules.md)
+- [Policy System](concepts/policy-system.md)
+- [Network Access](concepts/network-access.md)
+- [Filesystem Access](concepts/filesystem-access.md)
+- [Clustering](concepts/clustering.md)

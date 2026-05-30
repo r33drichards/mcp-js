@@ -52,3 +52,8 @@ allow if {
 That test is wired with a policy entry like
 `{"url":"file:///.../fetch.rego","policy_path":null,"rule":null}`, which is
 enough for fetch gating because the default fetch rule path is applied.
+
+For the behavior model behind these configuration keys, see
+[Policy System](../concepts/policy-system.md),
+[Network Access](../concepts/network-access.md), and
+[Filesystem Access](../concepts/filesystem-access.md).

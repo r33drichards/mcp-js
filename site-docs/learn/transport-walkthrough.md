@@ -29,3 +29,6 @@ instead of the newer Streamable HTTP model.
 - use stdio for local tool integrations
 - use Streamable HTTP for most server deployments
 - use SSE only when the client requires it
+
+For the transport model behind these setup choices, see
+[Transports](../concepts/transports.md).

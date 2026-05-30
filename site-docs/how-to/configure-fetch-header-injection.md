@@ -65,3 +65,6 @@ mcp-v8 \
   --policies-json ./policies.json \
   --fetch-header-config ./fetch-headers.json
 ```
+
+For the runtime behavior behind these rules, see
+[Network Access](../concepts/network-access.md).

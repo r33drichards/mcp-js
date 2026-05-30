@@ -17,3 +17,16 @@ If you are new to the project, continue with [First Run](first-run.md). If you
 already know what transport or client you need, move to
 [Transport Walkthrough](transport-walkthrough.md) or
 [Client Walkthrough](client-walkthrough.md).
+
+## Read next by topic
+
+- Read [Integration Surfaces](../concepts/integration-surfaces.md) to
+  understand the MCP-first model and the fallback HTTP and CLI paths.
+- Read [Execution Model](../concepts/execution-model.md) to understand the
+  async lifecycle and output model.
+- Read [Sessions and Heaps](../concepts/sessions-and-heaps.md) to understand
+  stateful versus stateless behavior.
+- Read [Module Loading](../concepts/module-loading.md) if your code imports
+  npm, JSR, or URL modules.
+- Read [Policy System](../concepts/policy-system.md) if you plan to enable
+  network or filesystem capabilities.

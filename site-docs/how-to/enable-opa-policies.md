@@ -45,3 +45,7 @@ mcp-v8 \
 auditing, and filesystem access depending on the configuration you provide. For
 local fetch policies, the default rule path is `data.mcp.fetch.allow`; this
 example sets it explicitly.
+
+For the underlying evaluation model, see
+[Policy System](../concepts/policy-system.md) and
+[Policy Files](../reference/policy-files.md).
