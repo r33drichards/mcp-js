@@ -714,6 +714,8 @@ When using OPA-gated fetch, you can configure automatic header injection rules t
 
 Header injection rules are evaluated per-request. If a rule's host pattern and method filter match, its headers are injected into the request. **User-provided headers always take precedence** — a rule will not overwrite a header that JavaScript code already set.
 
+There are no new top-level CLI flags for dynamic auth. The feature is configured through additional key-value pairs on `--fetch-header` or through the `auth` object inside `--fetch-header-config`.
+
 #### CLI Flags (`--fetch-header`)
 
 Use `--fetch-header` to define rules inline.

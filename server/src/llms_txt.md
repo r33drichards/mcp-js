@@ -66,6 +66,7 @@ In stateful mode, pass the returned `heap` hash back to `run_js` to resume that 
 - npm/JSR/URL imports via esm.sh (requires `--allow-external-modules`)
 - WebAssembly (`WebAssembly.Module`, `WebAssembly.Instance`)
 - Optional `fetch()` (OPA-gated, web-standard Fetch API)
+- Optional fetch header injection via `--fetch-header` / `--fetch-header-config` (static headers or OAuth client-credentials bearer tokens)
 - Optional `fs` module (OPA-gated, Node.js-compatible)
 - Optional pre-loaded WASM globals
 

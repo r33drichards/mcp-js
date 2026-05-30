@@ -2,6 +2,8 @@
 
 This tutorial shows how to configure mcp-js to inject a GitHub personal access token into outgoing `fetch()` requests, so that JavaScript code executed in the sandbox can call the GitHub API without receiving the token directly.
 
+If you need dynamic bearer acquisition instead of a fixed token, see [OAuth Client Credentials Fetch Injection](./oauth-client-credentials-fetch-injection.md).
+
 ## How It Works
 
 mcp-js supports **header injection rules** via the `--fetch-header` CLI flag. When a fetch request matches a rule's host (and optionally HTTP method), the server automatically injects the configured headers into the outgoing request. The injected headers are not exposed to user-supplied JavaScript automatically, but the upstream service still receives them and can reflect them back, so only target services you trust.
