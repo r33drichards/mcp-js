@@ -70,8 +70,8 @@ struct Cli {
     #[arg(long, conflicts_with = "http_port")]
     sse_port: Option<u16>,
 
-    /// Maximum V8 heap memory per isolate in megabytes (default: 8, max: 64)
-    #[arg(long, default_value = "8", value_parser = clap::value_parser!(u64).range(1..=64))]
+    /// Maximum V8 heap memory per isolate in megabytes (default: 8)
+    #[arg(long, default_value = "8", value_parser = clap::value_parser!(u64).range(1..))]
     heap_memory_max: u64,
 
     /// Maximum execution timeout in seconds (default: 30, max: 300)
