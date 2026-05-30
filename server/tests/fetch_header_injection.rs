@@ -536,6 +536,65 @@ async fn post_expiry_request_uses_refresh_token_grant_when_available() {
 }
 
 #[tokio::test]
+async fn post_expiry_request_reacquires_with_client_credentials_without_refresh_token() {
+    ensure_v8();
+
+    let token_server = start_token_server(vec![
+        TestTokenResponse::success(json!({
+            "access_token": "expired-token",
+            "token_type": "Bearer",
+            "expires_in": 0
+        })),
+        TestTokenResponse::success(json!({
+            "access_token": "reacquired-token",
+            "token_type": "Bearer",
+            "expires_in": 3600
+        })),
+    ])
+    .await;
+    let echo_server = start_echo_server().await;
+    let engine = build_engine(vec![oauth_rule_for_host(
+        "127.0.0.1",
+        &[],
+        token_server.token_url(),
+    )]);
+
+    run_fetch(&engine, &echo_server.url, "GET", None)
+        .await
+        .expect("first fetch should succeed");
+    run_fetch(&engine, &echo_server.url, "GET", None)
+        .await
+        .expect("second fetch should reacquire after expiry");
+
+    assert_eq!(
+        echo_server.requests().await,
+        vec![
+            EchoRequestRecord {
+                method: "GET".to_string(),
+                authorization: Some("Bearer expired-token".to_string()),
+            },
+            EchoRequestRecord {
+                method: "GET".to_string(),
+                authorization: Some("Bearer reacquired-token".to_string()),
+            },
+        ]
+    );
+    assert_eq!(
+        token_server.requests().await,
+        vec![
+            TestTokenRequest {
+                grant_type: "client_credentials".to_string(),
+                refresh_token: None,
+            },
+            TestTokenRequest {
+                grant_type: "client_credentials".to_string(),
+                refresh_token: None,
+            },
+        ]
+    );
+}
+
+#[tokio::test]
 async fn user_provided_authorization_overrides_dynamic_injection() {
     ensure_v8();
 
