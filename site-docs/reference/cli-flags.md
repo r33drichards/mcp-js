@@ -5,6 +5,7 @@ are:
 
 - storage: `--s3-bucket`, `--cache-dir`, `--directory-path`, `--stateless`
 - transport: `--http-port`, `--sse-port`
+- auth: `--jwks-url` (falls back to `JWKS_URL`)
 - execution limits: `--heap-memory-max`, `--execution-timeout`,
   `--max-concurrent-executions`
 - session logging: `--session-db-path`

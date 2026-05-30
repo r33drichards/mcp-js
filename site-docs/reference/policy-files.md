@@ -1,9 +1,53 @@
 # Policy Files
 
-Policy configuration is passed through `--policies-json` as inline JSON or a
-path to a JSON file. That configuration defines one or more policy chains for
-fetch and module evaluation, and it also controls optional filesystem
-operations when those capabilities are enabled.
+`--policies-json` accepts either inline JSON or a path to a JSON file. The CLI
+help documents the first-pass shape as:
 
-The reference should document the configuration shape, supported keys, and the
-kinds of input each policy receives, not just example workflows.
+```json
+{
+  "fetch": {
+    "mode": "all",
+    "policies": [
+      {
+        "url": "file:///abs/path/fetch.rego",
+        "policy_path": "mcp/fetch",
+        "rule": "data.mcp.fetch.allow"
+      }
+    ]
+  },
+  "modules": {
+    "mode": "all",
+    "policies": []
+  }
+}
+```
+
+Useful keys:
+
+- top-level operation keys: `fetch` and `modules`
+- per-operation keys: `mode` and `policies`
+- `mode`: `"all"` or `"any"`; omitted means `"all"`
+- `policies`: ordered list of policy sources
+- per-policy keys:
+  - `url`: required; `http://` and `https://` point at remote OPA, `file://`
+    points at a local `.rego` file or directory
+  - `policy_path`: optional remote OPA data path
+  - `rule`: optional local Regorus rule path
+
+For local fetch policies, omitting `rule` uses the default
+`data.mcp.fetch.allow`.
+
+Minimal local Rego from `server/tests/local_opa_policy.rs`:
+
+```rego
+package mcp.fetch
+default allow = false
+
+allow if {
+    input.method == "GET"
+}
+```
+
+That test is wired with a policy entry like
+`{"url":"file:///.../fetch.rego","policy_path":null,"rule":null}`, which is
+enough for fetch gating because the default fetch rule path is applied.
