@@ -1,0 +1,42 @@
+site_name: mcp-v8
+site_description: JavaScript MCP server, transports, policies, and operational guidance
+site_url: https://r33drichards.github.io/mcp-js/
+docs_dir: site-docs
+site_dir: site
+theme:
+  name: mkdocs
+nav:
+  - Home: index.md
+  - Learn:
+      - Overview: learn/overview.md
+      - First Run: learn/first-run.md
+      - Transport Walkthrough: learn/transport-walkthrough.md
+      - Client Walkthrough: learn/client-walkthrough.md
+  - How-to:
+      - Install the Server: how-to/install-server.md
+      - Run with stdio: how-to/run-with-stdio.md
+      - Run with HTTP: how-to/run-with-http.md
+      - Run with SSE: how-to/run-with-sse.md
+      - Use Local Storage: how-to/use-local-storage.md
+      - Use S3 Storage: how-to/use-s3-storage.md
+      - Enable OPA Policies: how-to/enable-opa-policies.md
+      - Configure Fetch Header Injection: how-to/configure-fetch-header-injection.md
+      - Use Rust Client: how-to/use-rust-client.md
+  - Concepts:
+      - Execution Model: concepts/execution-model.md
+      - Sessions and Heaps: concepts/sessions-and-heaps.md
+      - Transports: concepts/transports.md
+      - Policy System: concepts/policy-system.md
+      - Module Loading: concepts/module-loading.md
+      - Clustering: concepts/clustering.md
+  - Reference:
+      - CLI Flags: reference/cli-flags.md
+      - HTTP API: reference/http-api.md
+      - MCP Tools: reference/mcp-tools.md
+      - Configuration and Environment: reference/configuration-and-environment.md
+      - Rust Client API: reference/rust-client-api.md
+      - Policy Files: reference/policy-files.md
+markdown_extensions:
+  - tables
+  - toc:
+      permalink: true
