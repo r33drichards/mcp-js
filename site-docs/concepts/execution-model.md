@@ -12,27 +12,30 @@ The main split is between:
 - **stateless execution**, where the server waits internally and returns
   output and result directly
 
-In stateful mode, the normal flow is:
+In stateful mode, the generic lifecycle looks like this:
 
 ```mermaid
 sequenceDiagram
   participant Client
-  participant MCP as MCP or HTTP API
+  participant Interface as MCP or HTTP API
   participant Registry as Execution Registry
   participant V8 as V8 Isolate
   participant Output as Output Store
 
-  Client->>MCP: submit code
-  MCP->>Registry: create execution
+  Client->>Interface: submit code
+  Interface->>Registry: create execution
   Registry->>V8: start run
-  MCP-->>Client: execution_id
+  Interface-->>Client: execution_id
   V8->>Output: stream console lines
-  Client->>MCP: get_execution(execution_id)
-  MCP-->>Client: running or completed
-  Client->>MCP: get_execution_output(execution_id)
-  MCP-->>Client: paginated output
-  Client->>MCP: cancel_execution(execution_id)
-  Registry->>V8: stop if still running
+  Client->>Interface: check execution status
+  Interface-->>Client: running or completed
+  Client->>Interface: read execution output
+  Interface-->>Client: paginated output
+  opt Optional cancellation
+    Client->>Interface: request cancellation
+    Interface->>Registry: cancel execution
+    Registry->>V8: stop if still running
+  end
 ```
 
 This design separates submission, status polling, and output retrieval. That
@@ -41,7 +44,8 @@ consume memory, or be cancelled before it completes.
 
 The primary client model is still MCP. The execution lifecycle is exposed most
 naturally through MCP tools such as `run_js`, `get_execution`, and
-`get_execution_output`. The HTTP API exposes the same lifecycle for fallback
+`get_execution_output`, with `cancel_execution` available when a client needs
+to stop work early. The HTTP API exposes the same lifecycle for fallback
 clients, automation, and typed client generation, but it should be documented
 as a secondary surface rather than the main integration story.
 
