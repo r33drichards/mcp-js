@@ -22,6 +22,7 @@ nav:
       - Run with SSE: how-to/run-with-sse.md
       - Use Local Storage: how-to/use-local-storage.md
       - Use S3 Storage: how-to/use-s3-storage.md
+      - Run a Cluster: how-to/run-a-cluster.md
       - Enable OPA Policies: how-to/enable-opa-policies.md
       - Provide Sandboxed Filesystem Access: how-to/provide-sandboxed-filesystem-access.md
       - Configure Fetch Header Injection: how-to/configure-fetch-header-injection.md

@@ -31,3 +31,6 @@ stdio, and it introduces configuration concerns such as `--cluster-port`,
 Cluster mode is an operational scaling feature. It helps preserve a coherent
 view of state across nodes, but it also makes deployment and failure handling
 more complex than single-node operation.
+
+For a concrete three-node setup on localhost, see
+[Run a Cluster](../how-to/run-a-cluster.md).
