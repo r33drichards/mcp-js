@@ -3,6 +3,7 @@ use rmcp::{
     Error as McpError, RoleServer, ServerHandler, model::*,
     service::RequestContext, tool,
 };
+use serde::Serialize;
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
@@ -20,35 +21,54 @@ const LLMS_TXT: &str = include_str!("llms_txt.md");
 /// Full README
 const README_MD: &str = include_str!("../README.md");
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ToolDoc {
+    pub name: String,
+    pub description: Option<String>,
+    pub input_schema: serde_json::Value,
+}
+
+impl ToolDoc {
+    fn from_tool(tool: Tool) -> Self {
+        Self {
+            name: tool.name.to_string(),
+            description: tool.description.as_ref().map(|value| value.to_string()),
+            input_schema: serde_json::Value::Object(tool.input_schema.as_ref().clone()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ToolCatalog {
+    pub mode: &'static str,
+    pub tools: Vec<ToolDoc>,
+}
+
+fn built_in_tools(stateful: bool) -> Vec<Tool> {
+    if stateful {
+        McpService::tool_box().list()
+    } else {
+        StatelessMcpService::tool_box().list()
+    }
+}
+
+pub fn built_in_tool_catalog(stateful: bool) -> ToolCatalog {
+    ToolCatalog {
+        mode: if stateful { "stateful" } else { "stateless" },
+        tools: built_in_tools(stateful)
+            .into_iter()
+            .map(ToolDoc::from_tool)
+            .collect(),
+    }
+}
+
 /// Build the list of static documentation resources exposed via MCP.
 fn doc_resources(stateful: bool) -> Vec<Resource> {
     use crate::api::ApiDoc;
     use utoipa::OpenApi as _;
 
     let openapi_json = serde_json::to_string(&ApiDoc::openapi()).unwrap_or_default();
-
-    // Build a compact tool summary as JSON
-    let mut tools: Vec<serde_json::Value> = vec![
-        json!({ "name": "run_js", "description": if stateful { "Submit JS/TS for async execution (stateful). Returns execution_id." } else { "Run JS/TS and return collected output directly (stateless)." } }),
-    ];
-    if stateful {
-        tools.extend([
-            json!({ "name": "get_execution",         "description": "Poll execution status and result." }),
-            json!({ "name": "get_execution_output",  "description": "Read paginated console output (line or byte mode)." }),
-            json!({ "name": "cancel_execution",      "description": "Terminate a running execution." }),
-            json!({ "name": "list_executions",       "description": "List all executions with their status." }),
-            json!({ "name": "list_sessions",           "description": "List all named sessions (stateful only)." }),
-            json!({ "name": "list_session_snapshots",  "description": "Browse execution history for a session." }),
-            json!({ "name": "get_heap_tags",           "description": "Get tags for a heap snapshot." }),
-            json!({ "name": "set_heap_tags",           "description": "Set tags on a heap snapshot." }),
-            json!({ "name": "delete_heap_tags",        "description": "Delete tag keys from a heap snapshot." }),
-            json!({ "name": "query_heaps_by_tags",     "description": "Find heap snapshots matching tag criteria." }),
-        ]);
-    }
-    let tools_json = serde_json::to_string(&json!({
-        "mode": if stateful { "stateful" } else { "stateless" },
-        "tools": tools,
-    })).unwrap_or_default();
+    let tools_json = serde_json::to_string(&built_in_tool_catalog(stateful)).unwrap_or_default();
 
     // Store the generated JSON in thread-local statics to extend the lifetime
     // to 'static so we can use them in ResourceContents::text().
@@ -108,28 +128,7 @@ fn read_doc_resource(uri: &str, stateful: bool) -> Option<ReadResourceResult> {
     use utoipa::OpenApi as _;
 
     let openapi_json = serde_json::to_string_pretty(&ApiDoc::openapi()).unwrap_or_default();
-
-    let mut tools: Vec<serde_json::Value> = vec![
-        json!({ "name": "run_js", "description": if stateful { "Submit JS/TS for async execution (stateful). Returns execution_id." } else { "Run JS/TS and return collected output directly (stateless)." } }),
-    ];
-    if stateful {
-        tools.extend([
-            json!({ "name": "get_execution",         "description": "Poll execution status and result." }),
-            json!({ "name": "get_execution_output",  "description": "Read paginated console output (line or byte mode)." }),
-            json!({ "name": "cancel_execution",      "description": "Terminate a running execution." }),
-            json!({ "name": "list_executions",       "description": "List all executions with their status." }),
-            json!({ "name": "list_sessions",           "description": "List all named sessions (stateful only)." }),
-            json!({ "name": "list_session_snapshots",  "description": "Browse execution history for a session." }),
-            json!({ "name": "get_heap_tags",           "description": "Get tags for a heap snapshot." }),
-            json!({ "name": "set_heap_tags",           "description": "Set tags on a heap snapshot." }),
-            json!({ "name": "delete_heap_tags",        "description": "Delete tag keys from a heap snapshot." }),
-            json!({ "name": "query_heaps_by_tags",     "description": "Find heap snapshots matching tag criteria." }),
-        ]);
-    }
-    let tools_json = serde_json::to_string_pretty(&json!({
-        "mode": if stateful { "stateful" } else { "stateless" },
-        "tools": tools,
-    })).unwrap_or_default();
+    let tools_json = serde_json::to_string_pretty(&built_in_tool_catalog(stateful)).unwrap_or_default();
 
     let contents = match uri {
         "docs://readme" => vec![ResourceContents::TextResourceContents {

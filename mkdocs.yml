@@ -1,0 +1,65 @@
+site_name: mcp-v8
+site_description: JavaScript MCP server, transports, policies, and operational guidance
+site_url: https://r33drichards.github.io/mcp-js/
+docs_dir: site-docs
+site_dir: site
+theme:
+  name: mkdocs
+plugins:
+  - search
+  - mermaid2
+nav:
+  - Home: index.md
+  - Quick Start:
+      - Overview: quick-start/overview.md
+      - Claude Code: quick-start/claude-code.md
+      - Codex: quick-start/codex.md
+      - Cursor: quick-start/cursor.md
+      - Generic MCP: quick-start/generic-mcp.md
+      - curl: quick-start/curl.md
+      - Bundled CLI: quick-start/bundled-cli.md
+  - Install:
+      - Overview: install/overview.md
+      - Release Script: install/release-script.md
+      - GitHub Releases: install/github-releases.md
+      - Build from Source: install/build-from-source.md
+      - Nix: install/nix.md
+  - How-to:
+      - Overview: how-to/overview.md
+      - Run with stdio: how-to/run-with-stdio.md
+      - Run with HTTP: how-to/run-with-http.md
+      - Run with SSE: how-to/run-with-sse.md
+      - Use Local Storage: how-to/use-local-storage.md
+      - Use S3 Storage: how-to/use-s3-storage.md
+      - Run a Cluster: how-to/run-a-cluster.md
+      - Enable OPA Policies: how-to/enable-opa-policies.md
+      - Provide Sandboxed Filesystem Access: how-to/provide-sandboxed-filesystem-access.md
+      - Configure Fetch Header Injection: how-to/configure-fetch-header-injection.md
+      - Use SQLite WASM: how-to/use-sqlite-wasm.md
+      - Connect as an MCP Server: how-to/connect-as-an-mcp-server.md
+      - Use CLI: how-to/use-cli.md
+      - Use Rust Client: how-to/use-rust-client.md
+  - Concepts:
+      - Overview: concepts/overview.md
+      - Execution Model: concepts/execution-model.md
+      - Sessions and Heaps: concepts/sessions-and-heaps.md
+      - Transports: concepts/transports.md
+      - Integration Surfaces: concepts/integration-surfaces.md
+      - Module Loading: concepts/module-loading.md
+      - WASM and Native Modules: concepts/wasm-and-native-modules.md
+      - Policy System: concepts/policy-system.md
+      - Network Access: concepts/network-access.md
+      - Filesystem Access: concepts/filesystem-access.md
+      - Clustering: concepts/clustering.md
+  - Reference:
+      - Overview: reference/overview.md
+      - CLI Flags: reference/cli-flags.md
+      - HTTP API: reference/http-api.md
+      - MCP Tools: reference/mcp-tools.md
+      - Configuration and Environment: reference/configuration-and-environment.md
+      - Rust Client API: reference/rust-client-api.md
+      - Policy Files: reference/policy-files.md
+markdown_extensions:
+  - tables
+  - toc:
+      permalink: true
