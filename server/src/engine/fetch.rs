@@ -57,19 +57,60 @@ impl FetchConfig {
     }
 }
 
+pub fn default_refresh_buffer_secs() -> u64 {
+    30
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct OAuthClientCredentialsConfig {
+    pub header_name: String,
+    pub token_url: String,
+    pub client_id: String,
+    pub client_secret: String,
+    #[serde(default)]
+    pub scope: Option<String>,
+    #[serde(default = "default_refresh_buffer_secs")]
+    pub refresh_buffer_secs: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HeaderInjection {
+    Static {
+        headers: HashMap<String, String>,
+    },
+    OAuthClientCredentials(OAuthClientCredentialsConfig),
+}
+
 /// A rule for injecting headers into outgoing fetch requests.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HeaderRule {
     /// Host to match (exact match or leading-wildcard like "*.github.com"). Case-insensitive.
     pub host: String,
     /// HTTP methods to match (e.g., ["GET", "POST"]). Empty means all methods.
-    #[serde(default)]
     pub methods: Vec<String>,
-    /// Headers to inject. Keys are header names, values are header values.
-    pub headers: HashMap<String, String>,
+    /// Injection strategy for matching requests.
+    pub injection: HeaderInjection,
 }
 
 impl HeaderRule {
+    pub fn methods(&self) -> &[String] {
+        &self.methods
+    }
+
+    pub fn static_headers(&self) -> Option<&HashMap<String, String>> {
+        match &self.injection {
+            HeaderInjection::Static { headers } => Some(headers),
+            HeaderInjection::OAuthClientCredentials(_) => None,
+        }
+    }
+
+    pub fn dynamic_auth(&self) -> Option<&OAuthClientCredentialsConfig> {
+        match &self.injection {
+            HeaderInjection::Static { .. } => None,
+            HeaderInjection::OAuthClientCredentials(config) => Some(config),
+        }
+    }
+
     fn matches(&self, request_host: &str, request_method: &str) -> bool {
         if !self.methods.is_empty() {
             let method_upper = request_method.to_uppercase();
@@ -99,9 +140,11 @@ pub fn apply_header_rules(
 ) {
     for rule in rules {
         if rule.matches(host, method) {
-            for (k, v) in &rule.headers {
-                let key = k.to_lowercase();
-                headers.entry(key).or_insert_with(|| v.clone());
+            if let Some(rule_headers) = rule.static_headers() {
+                for (k, v) in rule_headers {
+                    let key = k.to_lowercase();
+                    headers.entry(key).or_insert_with(|| v.clone());
+                }
             }
         }
     }
@@ -401,7 +444,9 @@ mod tests {
         let rule = HeaderRule {
             host: "api.github.com".to_string(),
             methods: vec![],
-            headers: HashMap::from([("authorization".into(), "Bearer tok".into())]),
+            injection: HeaderInjection::Static {
+                headers: HashMap::from([("authorization".into(), "Bearer tok".into())]),
+            },
         };
         assert!(rule.matches("api.github.com", "GET"));
         assert!(rule.matches("api.github.com", "POST"));
@@ -414,7 +459,9 @@ mod tests {
         let rule = HeaderRule {
             host: "*.github.com".to_string(),
             methods: vec![],
-            headers: HashMap::new(),
+            injection: HeaderInjection::Static {
+                headers: HashMap::new(),
+            },
         };
         assert!(rule.matches("api.github.com", "GET"));
         assert!(rule.matches("github.com", "GET"));
@@ -427,7 +474,9 @@ mod tests {
         let rule = HeaderRule {
             host: "API.GitHub.COM".to_string(),
             methods: vec![],
-            headers: HashMap::new(),
+            injection: HeaderInjection::Static {
+                headers: HashMap::new(),
+            },
         };
         assert!(rule.matches("api.github.com", "GET"));
         assert!(rule.matches("API.GITHUB.COM", "GET"));
@@ -438,7 +487,9 @@ mod tests {
         let rule = HeaderRule {
             host: "example.com".to_string(),
             methods: vec!["GET".to_string(), "POST".to_string()],
-            headers: HashMap::new(),
+            injection: HeaderInjection::Static {
+                headers: HashMap::new(),
+            },
         };
         assert!(rule.matches("example.com", "GET"));
         assert!(rule.matches("example.com", "post"));
@@ -450,7 +501,9 @@ mod tests {
         let rule = HeaderRule {
             host: "example.com".to_string(),
             methods: vec![],
-            headers: HashMap::new(),
+            injection: HeaderInjection::Static {
+                headers: HashMap::new(),
+            },
         };
         assert!(rule.matches("example.com", "GET"));
         assert!(rule.matches("example.com", "POST"));
@@ -463,7 +516,9 @@ mod tests {
         let rules = vec![HeaderRule {
             host: "example.com".to_string(),
             methods: vec![],
-            headers: HashMap::from([("authorization".into(), "Bearer injected".into())]),
+            injection: HeaderInjection::Static {
+                headers: HashMap::from([("authorization".into(), "Bearer injected".into())]),
+            },
         }];
         let mut headers = HashMap::new();
         apply_header_rules(&rules, "example.com", "GET", &mut headers);
@@ -475,7 +530,9 @@ mod tests {
         let rules = vec![HeaderRule {
             host: "example.com".to_string(),
             methods: vec![],
-            headers: HashMap::from([("authorization".into(), "Bearer injected".into())]),
+            injection: HeaderInjection::Static {
+                headers: HashMap::from([("authorization".into(), "Bearer injected".into())]),
+            },
         }];
         let mut headers = HashMap::new();
         headers.insert("authorization".to_string(), "Bearer user-provided".to_string());
@@ -488,7 +545,9 @@ mod tests {
         let rules = vec![HeaderRule {
             host: "example.com".to_string(),
             methods: vec!["POST".to_string()],
-            headers: HashMap::from([("authorization".into(), "Bearer tok".into())]),
+            injection: HeaderInjection::Static {
+                headers: HashMap::from([("authorization".into(), "Bearer tok".into())]),
+            },
         }];
         let mut headers = HashMap::new();
 
@@ -506,14 +565,37 @@ mod tests {
         let rules = vec![HeaderRule {
             host: "example.com".to_string(),
             methods: vec![],
-            headers: HashMap::from([
-                ("authorization".into(), "Bearer tok".into()),
-                ("x-custom".into(), "custom-value".into()),
-            ]),
+            injection: HeaderInjection::Static {
+                headers: HashMap::from([
+                    ("authorization".into(), "Bearer tok".into()),
+                    ("x-custom".into(), "custom-value".into()),
+                ]),
+            },
         }];
         let mut headers = HashMap::new();
         apply_header_rules(&rules, "example.com", "GET", &mut headers);
         assert_eq!(headers["authorization"], "Bearer tok");
         assert_eq!(headers["x-custom"], "custom-value");
+    }
+
+    #[test]
+    fn test_apply_header_rules_ignores_dynamic_auth_for_now() {
+        let rules = vec![HeaderRule {
+            host: "example.com".to_string(),
+            methods: vec![],
+            injection: HeaderInjection::OAuthClientCredentials(OAuthClientCredentialsConfig {
+                header_name: "Authorization".to_string(),
+                token_url: "https://issuer/token".to_string(),
+                client_id: "abc".to_string(),
+                client_secret: "xyz".to_string(),
+                scope: Some("read:all".to_string()),
+                refresh_buffer_secs: 30,
+            }),
+        }];
+        let mut headers = HashMap::new();
+
+        apply_header_rules(&rules, "example.com", "GET", &mut headers);
+
+        assert!(headers.is_empty());
     }
 }
