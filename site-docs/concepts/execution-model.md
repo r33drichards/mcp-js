@@ -98,9 +98,9 @@ executions can run at once with `--max-concurrent-executions`. When demand is
 higher than the configured limit, executions wait in the registry instead of
 starting immediately.
 
-The primary client model is still MCP. The HTTP API exposes a fallback version
-of the same execution engine for automation, CLI use, and generated clients,
-but it is a secondary surface rather than the main product integration story.
+The same execution engine is exposed through MCP, the plain HTTP API, the CLI,
+and generated clients. The lifecycle is shared even when the calling surface
+changes.
 
 See [MCP Tools](../reference/mcp-tools.md) for the exact tool names and
 [HTTP API](../reference/http-api.md) for the REST endpoints that expose the

@@ -29,9 +29,8 @@ and debugging workflows.
 
 That distinction matters in the docs:
 
-- the main integration story is still "connect an MCP client to `mcp-v8`"
-- the REST API is a fallback and tooling surface layered on top of the HTTP
-  transport
+- Streamable HTTP carries both MCP traffic and plain HTTP API traffic
+- stdio keeps the integration local to one process boundary
 
 SSE remains useful for clients that still expect the older event-stream shape,
 but it is conceptually older and operationally less central than Streamable
