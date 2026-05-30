@@ -203,18 +203,15 @@ These options enable Raft-based clustering for distributed coordination and repl
 
 ### OPA / Fetch Options
 
-These options enable an OPA-gated `fetch()` function in the JavaScript runtime. When `--opa-url` is set, a `fetch(url, opts?)` global becomes available. `fetch()` follows the web standard Fetch API — it returns a Promise that resolves to a Response object. Every outbound HTTP request is first checked against an OPA policy — the request is only made if the policy returns `{"allow": true}`.
+These options enable a policy-gated `fetch()` function in the JavaScript runtime. When fetch policies are configured via `--policies-json`, a `fetch(url, opts?)` global becomes available. `fetch()` follows the web standard Fetch API — it returns a Promise that resolves to a Response object. If fetch-header rules are configured, matching headers are applied first, then the resulting request is evaluated by policy.
 
-- `--opa-url <URL>`: OPA server URL (e.g. `http://localhost:8181`). Enables `fetch()` in the JS runtime.
-- `--opa-fetch-policy <path>`: OPA policy path appended to `/v1/data/` (default: `mcp/fetch`). Requires `--opa-url`.
-- `--fetch-header <RULE>`: Inject headers into fetch requests matching host/method rules. Format: `host=<host>,header=<name>,value=<val>[,methods=GET;POST]`. Can be specified multiple times. Requires `--opa-url`. See [Fetch Header Injection](#fetch-header-injection) for details.
-- `--fetch-header-config <PATH>`: Path to a JSON file with header injection rules. Format: `[{"host": "...", "methods": [...], "headers": {...}}]`. Requires `--opa-url`. See [Fetch Header Injection](#fetch-header-injection) for details.
+- `--fetch-header <RULE>`: Inject static headers or dynamic OAuth client-credentials tokens into matching fetch requests. Static format: `host=<host>,header=<name>,value=<val>[,methods=GET;POST]`. Dynamic format: `host=<host>,header=<name>,token_url=<url>,client_id=<id>,client_secret=<secret>[,scope=<scope>][,refresh_buffer_secs=30][,methods=GET;POST]`. Can be specified multiple times. Requires fetch to be enabled via `--policies-json`. See [Fetch Header Injection](#fetch-header-injection) for details.
+- `--fetch-header-config <PATH>`: Path to a JSON file with fetch header injection rules. Each rule uses either a static `headers` object or a dynamic `auth` block. Requires fetch to be enabled via `--policies-json`. See [Fetch Header Injection](#fetch-header-injection) for details.
 
 **Example:**
 ```bash
 mcp-v8 --stateless --http-port 3000 \
-  --opa-url http://localhost:8181 \
-  --opa-fetch-policy mcp/fetch
+  --policies-json '{"fetch":{"policies":[{"url":"http://localhost:8181"}]}}'
 ```
 
 ### WASM Module Options
@@ -317,17 +314,22 @@ mcp-v8 --stateless --sse-port 8081
 
 ### Execution Workflow
 
-`run_js` uses an **async execution model** — it submits code for background execution and returns an execution ID immediately. Use `get_execution` to poll for completion and retrieve the result, and `get_execution_output` to read console output.
+Execution differs by transport mode:
 
 ```
+Stateful MCP:
 1. run_js(code)           → { execution_id }
 2. get_execution(id)      → { status: "running" | "completed" | "failed" | "cancelled" | "timed_out", result, error }
 3. get_execution_output(id, line_offset, line_limit)  → paginated console output
+
+Stateless MCP:
+1. run_js(code)           → { output, error? }
 ```
 
 **Example:**
 
 ```
+Stateful MCP:
 Call run_js with code: "console.log('hello');"
   → { execution_id: "abc-123" }
 
@@ -336,11 +338,15 @@ Call get_execution with execution_id: "abc-123"
 
 Call get_execution_output with execution_id: "abc-123"
   → { data: "hello\n", total_lines: 1 }
+
+Stateless MCP:
+Call run_js with code: "console.log('hello');"
+  → { output: "hello\n" }
 ```
 
 ### Console Output
 
-`console.log`, `console.info`, `console.warn`, and `console.error` are fully supported. Output is streamed to persistent storage during execution and can be read in real-time using `get_execution_output`.
+`console.log`, `console.info`, `console.warn`, and `console.error` are fully supported. In stateful MCP and the REST API, output is streamed to persistent storage during execution and can be read using `get_execution_output` or `GET /api/executions/{id}/output`. In stateless MCP, `run_js` returns the collected console output directly.
 
 `get_execution_output` supports two pagination modes:
 
@@ -349,19 +355,19 @@ Call get_execution_output with execution_id: "abc-123"
 
 Both modes return position info in both coordinate systems for cross-referencing. Use `next_line_offset` or `next_byte_offset` from a response to resume reading.
 
-### Tools (All Modes)
+### Tools
 
 | Tool | Description |
 |------|-------------|
-| `run_js` | Submit JavaScript/TypeScript code for async execution. Returns an `execution_id` immediately. Parameters: `code` (required), `heap_memory_max_mb` (optional, minimum: 4, default: 8), `execution_timeout_secs` (optional, 1–300, default: 30). |
-| `get_execution` | Poll execution status and result. Returns `execution_id`, `status`, `result` (if completed), `error` (if failed), `started_at`, `completed_at`. |
-| `get_execution_output` | Read paginated console output. Supports line-based (`line_offset` + `line_limit`) or byte-based (`byte_offset` + `byte_limit`) pagination. |
-| `cancel_execution` | Terminate a running V8 execution. |
-| `list_executions` | List all executions with their status. |
+| `run_js` | Stateful MCP: submit async execution and get `execution_id`. Stateless MCP: wait internally and return `{output, error}`. Parameters common to both: `code`, `heap_memory_max_mb`, `execution_timeout_secs`. |
+| `get_execution` | Stateful MCP only. Poll execution status and result. |
+| `get_execution_output` | Stateful MCP only. Read paginated console output. |
+| `cancel_execution` | Stateful MCP only. Terminate a running V8 execution. |
+| `list_executions` | Stateful MCP only. List all executions with their status. |
 
 ### Additional Tools (Stateful Mode Only)
 
-In stateful mode, `run_js` accepts additional parameters: `heap` (SHA-256 hash to resume from) and `session` (human-readable session name for logging).
+In stateful MCP, `run_js` accepts an additional `heap` parameter (SHA-256 hash to resume a previous heap snapshot). Session identity for MCP calls comes from the `X-MCP-Session-Id` header rather than a `session` tool parameter.
 
 | Tool | Description |
 |------|-------------|
@@ -402,7 +408,7 @@ Each execution returns a `heap` content hash (a 64-character SHA-256 hex string)
 
 #### Named Sessions
 
-You can tag executions with a human-readable **session name** by passing the `session` parameter to `run_js`. When a session name is provided, the server logs each execution (input heap, output heap, code, and timestamp) to an embedded sled database.
+You can tag executions with a human-readable **session name** for history tracking. On the REST API, pass the `session` field in the request body. On MCP, send the `X-MCP-Session-Id` header during initialization. The server logs each execution (input heap, output heap, code, and timestamp) to an embedded sled database.
 
 Two additional tools are available in stateful mode for browsing session history:
 
@@ -413,11 +419,11 @@ The session database path defaults to `/tmp/mcp-v8-sessions` and can be overridd
 
 **Example workflow:**
 
-1. Call `run_js` with `code: "var x = 1; x;"` and `session: "my-project"` → receives `execution_id`.
+1. Call `run_js` with `code: "var x = 1; x;"` while using session `my-project` → receives `execution_id`.
 2. Call `get_execution` with the `execution_id` → receives `{ status: "completed", result: "1", heap: "ab12..." }`.
-3. Pass the returned `heap` hash and `session: "my-project"` in subsequent `run_js` calls to continue and log the session.
+3. Pass the returned `heap` hash in subsequent `run_js` calls to continue that heap, while keeping the same session identity for history tracking.
 4. Call `list_sessions` to see `["my-project"]`.
-5. Call `list_session_snapshots` with `session: "my-project"` to see the full execution history.
+5. Call `list_session_snapshots` while using session `my-project` to see the full execution history.
 
 ## Integration
 
@@ -640,7 +646,7 @@ See [`examples/sqlite-wasm/`](examples/sqlite-wasm/) for the full example includ
 
 ### OPA-Gated Fetch
 
-When the server is started with `--opa-url`, JavaScript code can use a `fetch(url, opts?)` function following the web standard Fetch API. Every request is checked against an OPA policy before the HTTP call is made.
+When the server is started with fetch policies configured via `--policies-json`, JavaScript code can use a `fetch(url, opts?)` function following the web standard Fetch API. If fetch-header rules are configured, they are applied before policy evaluation, and the policy sees the final request headers before the HTTP call is made.
 
 **1. Write an OPA policy**
 
@@ -666,12 +672,11 @@ The policy input includes:
 - `headers`: request headers (keys normalized to lowercase)
 - `url_parsed`: parsed URL components — `scheme`, `host`, `port`, `path`, `query`
 
-**2. Start the server with OPA enabled**
+**2. Start the server with fetch policy enabled**
 
 ```bash
 mcp-v8 --stateless --http-port 3000 \
-  --opa-url http://localhost:8181 \
-  --opa-fetch-policy mcp/fetch
+  --policies-json '{"fetch":{"policies":[{"url":"http://localhost:8181"}]}}'
 ```
 
 **3. Use `fetch()` in JavaScript**
@@ -705,34 +710,53 @@ If the OPA policy denies a request, the Promise returned by `fetch()` is rejecte
 
 ### Fetch Header Injection
 
-When using OPA-gated fetch, you can configure automatic header injection rules that add headers to outgoing `fetch()` requests based on the target host and HTTP method. This is useful for injecting authentication tokens, API keys, or other credentials without embedding them in JavaScript code.
+When using OPA-gated fetch, you can configure automatic header injection rules that add headers to outgoing `fetch()` requests based on the target host and HTTP method. Rules can be static (`headers`) or dynamic (`auth` via OAuth2 client credentials), which lets the server acquire and cache bearer tokens without embedding secrets in JavaScript code.
 
 Header injection rules are evaluated per-request. If a rule's host pattern and method filter match, its headers are injected into the request. **User-provided headers always take precedence** — a rule will not overwrite a header that JavaScript code already set.
 
 #### CLI Flags (`--fetch-header`)
 
-Use `--fetch-header` to define rules inline. The format is:
+Use `--fetch-header` to define rules inline.
+
+Static header syntax:
 
 ```
 host=<host>,header=<name>,value=<val>[,methods=GET;POST]
 ```
 
+Dynamic OAuth client-credentials syntax:
+
+```
+host=<host>,header=<name>,token_url=<url>,client_id=<id>,client_secret=<secret>[,scope=<scope>][,refresh_buffer_secs=30][,methods=GET;POST]
+```
+
 - `host` — Host to match (exact or wildcard, see below). **Required.**
 - `header` — Header name to inject. **Required.**
-- `value` — Header value to inject. **Required.**
+- `value` — Static header value to inject. Required for static rules.
+- `token_url` — OAuth2 token endpoint for client credentials. Required for dynamic rules.
+- `client_id` — OAuth2 client ID. Required for dynamic rules.
+- `client_secret` — OAuth2 client secret. Required for dynamic rules.
+- `scope` — Optional OAuth2 scope sent on client-credentials acquisition.
+- `refresh_buffer_secs` — Optional early-refresh window in seconds. Defaults to `30`.
 - `methods` — Semicolon-separated HTTP methods to match. **Optional.** If omitted, the rule applies to all methods.
 
 Can be specified multiple times for multiple rules:
 
 ```bash
-mcp-v8 --stateless --opa-url http://localhost:8181 \
+mcp-v8 --stateless --policies-json '{"fetch":{"policies":[{"url":"http://localhost:8181"}]}}' \
   --fetch-header "host=api.github.com,header=Authorization,value=Bearer ghp_xxxx" \
   --fetch-header "host=api.example.com,header=X-API-Key,value=secret123"
 ```
 
+```bash
+mcp-v8 --stateless \
+  --policies-json '{"fetch":{"policies":[{"url":"http://localhost:8181"}]}}' \
+  --fetch-header "host=api.example.com,header=Authorization,token_url=https://issuer.example.com/oauth2/token,client_id=my-client,client_secret=${CLIENT_SECRET},scope=read:all,refresh_buffer_secs=45"
+```
+
 #### JSON Config File (`--fetch-header-config`)
 
-For managing many rules, use a JSON config file. Each rule can inject multiple headers at once:
+For managing many rules, use a JSON config file. Each rule uses either a static `headers` object or a dynamic `auth` block:
 
 ```json
 [
@@ -745,26 +769,42 @@ For managing many rules, use a JSON config file. Each rule can inject multiple h
     }
   },
   {
-    "host": "*.example.com",
-    "headers": {
-      "X-API-Key": "secret123"
+    "host": "api.example.com",
+    "methods": ["GET", "POST"],
+    "auth": {
+      "type": "oauth_client_credentials",
+      "header": "Authorization",
+      "token_url": "https://issuer.example.com/oauth2/token",
+      "client_id": "my-client",
+      "client_secret": "my-secret",
+      "scope": "read:all",
+      "refresh_buffer_secs": 45
     }
   }
 ]
 ```
 
 ```bash
-mcp-v8 --stateless --opa-url http://localhost:8181 \
+mcp-v8 --stateless --policies-json '{"fetch":{"policies":[{"url":"http://localhost:8181"}]}}' \
   --fetch-header-config headers.json
 ```
 
 Both `--fetch-header` and `--fetch-header-config` can be used together — their rules are merged.
+Each JSON rule must choose exactly one style: static `headers` or dynamic `auth`.
+
+JSON config files are read literally; they do not expand shell-style placeholders such as `${CLIENT_SECRET}`.
 
 #### Host Matching
 
 - **Exact match**: `api.github.com` matches only `api.github.com`.
 - **Wildcard**: `*.github.com` matches `api.github.com`, `github.com`, and `sub.api.github.com`.
 - Host matching is **case-insensitive**.
+
+#### Token Reuse, Refresh, And Reacquire
+
+Dynamic OAuth rules cache tokens per rule and reuse them across matching fetches until the token is close to expiry. When the token endpoint returns a `refresh_token`, mcp-v8 attempts a refresh first once the cached token expires. If refresh is unavailable or fails, the server falls back to a fresh client-credentials token acquisition automatically.
+
+`refresh_buffer_secs` controls how early the server treats a token as stale. This keeps fetches from racing the exact expiry boundary while still reusing the same bearer token across normal back-to-back requests.
 
 #### Header Precedence
 
@@ -783,6 +823,25 @@ await fetch("https://api.example.com/data", {
 });
 // → request includes Authorization: Bearer my-own-token (rule skipped)
 ```
+
+The same precedence rule applies to dynamic OAuth injection: if user code sets `Authorization`, the token source is skipped and no token lookup happens for that request.
+
+#### Security Notes
+
+- Prefer environment variables, mounted config files, or container/orchestrator secrets over hard-coded client secrets.
+- Be aware that inline CLI secrets can be visible in shell history, process listings, and container metadata.
+- JavaScript running inside `run_js` does not receive injected header values automatically, but your upstream service will still receive them and can reflect them back, so treat the target host as trusted.
+- Never commit real client secrets or token-bearing config files.
+
+For a quick local smoke test, `docker-compose.secure-sessions.yml` starts mcp-js with a dynamic `--fetch-header` rule pointed at this repo's local Keycloak realm, and the helper verifies bearer injection and token reuse:
+
+```bash
+docker compose -f docker-compose.secure-sessions.yml up --build -d
+deno run -A scripts/test-keycloak-fetch-injection.ts
+docker compose -f docker-compose.secure-sessions.yml down -v
+```
+
+For a full local development walkthrough with Keycloak, see [tutorials/oauth-client-credentials-fetch-injection.md](./tutorials/oauth-client-credentials-fetch-injection.md).
 
 ### Policy-Gated Filesystem Access
 
@@ -1067,4 +1126,3 @@ ran on railway gha runners on [pr](https://github.com/r33drichards/mcp-js/pull/3
 - **HTTP Req/s**: Total HTTP requests per second (1 per iteration)
 - **Dropped**: Iterations k6 couldn't schedule because VUs were exhausted (indicates server saturation)
 - **Topology**: `single` = 1 MCP-V8 node; `cluster` = 3 MCP-V8 nodes with Raft
-
