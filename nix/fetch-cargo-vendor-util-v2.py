@@ -32,6 +32,7 @@ def get_lockfile_version(cargo_lock_toml: dict[str, Any]) -> int:
 def create_http_session() -> requests.Session:
     retries = Retry(total=5, backoff_factor=0.5, status_forcelist=[500, 502, 503, 504])
     session = requests.Session()
+    session.headers["User-Agent"] = "nixpkgs-fetchCargoVendor/2 (https://github.com/NixOS/nixpkgs)"
     session.mount("http://", HTTPAdapter(max_retries=retries))
     session.mount("https://", HTTPAdapter(max_retries=retries))
     return session
@@ -55,9 +56,9 @@ def get_download_url_for_tarball(pkg: dict[str, Any]) -> str:
     if pkg["source"] != "registry+https://github.com/rust-lang/crates.io-index":
         raise Exception("Only the default crates.io registry is supported.")
 
-    name = pkg["name"]
-    version = pkg["version"]
-    return f"https://static.crates.io/crates/{name}/{name}-{version}.crate"
+    # Use the registry CDN advertised in index.crates.io/config.json instead of
+    # the crates.io API redirect endpoint, which now returns policy 403s in CI.
+    return f'https://static.crates.io/crates/{pkg["name"]}/{pkg["version"]}/download'
 
 
 def download_tarball(session: requests.Session, pkg: dict[str, Any], out_dir: Path) -> None:
@@ -193,7 +194,6 @@ def find_crate_manifest_in_tree(tree: Path, crate_name: str) -> Path:
 def copy_and_patch_git_crate_subtree(git_tree: Path, crate_name: str, crate_out_dir: Path) -> None:
     def ignore_func(dir_str: str, path_strs: list[str]) -> list[str]:
         ignorelist: list[str] = []
-
         dir = Path(realpath(dir_str, strict=True))
 
         for path_str in path_strs:
@@ -219,53 +219,72 @@ def copy_and_patch_git_crate_subtree(git_tree: Path, crate_name: str, crate_out_
     crate_tree = crate_manifest_path.parent
 
     eprint(f"Copying to {crate_out_dir}")
-    shutil.copytree(crate_tree, crate_out_dir, ignore=ignore_func, dirs_exist_ok=False)
+    shutil.copytree(crate_tree, crate_out_dir, ignore=ignore_func)
+    crate_out_dir.chmod(0o755)
+
+    with open(crate_manifest_path, "r") as f:
+        manifest_data = f.read()
+
+    if "workspace" in manifest_data:
+        crate_manifest_metadata = get_manifest_metadata(crate_manifest_path)
+        workspace_root = Path(crate_manifest_metadata["workspace_root"])
+
+        root_manifest_path = workspace_root / "Cargo.toml"
+        manifest_path = crate_out_dir / "Cargo.toml"
+
+        manifest_path.chmod(0o644)
+        eprint(f"Patching {manifest_path}")
+
+        cmd = ["replace-workspace-values", str(manifest_path), str(root_manifest_path)]
+        output = subprocess.check_output(cmd)
+        manifest_path.write_bytes(output)
 
     cargo_toml = load_toml(crate_out_dir / "Cargo.toml")
-
     if "package" in cargo_toml and "version" in cargo_toml["package"]:
         cargo_toml["package"]["version"] = "0.0.1"
-
     with open(crate_out_dir / "Cargo.toml", "wb") as f:
         tomli_w.dump(cargo_toml, f)
 
 
-def unpack(out_dir: Path) -> None:
-    lockfile_path = out_dir / "Cargo.lock"
+def create_vendor(vendor_staging_dir: Path, out_dir: Path) -> None:
+    lockfile_path = vendor_staging_dir / "Cargo.lock"
+    out_dir.mkdir(exist_ok=True)
+    shutil.copy(lockfile_path, out_dir / "Cargo.lock")
+
     cargo_lock_toml = load_toml(lockfile_path)
     lockfile_version = get_lockfile_version(cargo_lock_toml)
 
-    vendor_dir = out_dir / "vendor"
-    vendor_dir.mkdir(exist_ok=True)
+    out_dir_vendor = out_dir / "vendor"
+    out_dir_vendor.mkdir(exist_ok=True)
 
     for pkg in cargo_lock_toml["package"]:
         if "source" not in pkg.keys():
             eprint(f'Skipping local dependency: {pkg["name"]}')
             continue
 
-        crate_out_dir = vendor_dir / f'{pkg["name"]}-{pkg["version"]}'
+        crate_out_dir = out_dir_vendor / f'{pkg["name"]}-{pkg["version"]}'
         source = pkg["source"]
 
         if source.startswith("registry+"):
             filename = f'{pkg["name"]}-{pkg["version"]}.tar.gz'
-            tarball = out_dir / "tarballs" / filename
+            tarball = vendor_staging_dir / "tarballs" / filename
             eprint(f"Unpacking tarball {tarball}")
-            shutil.unpack_archive(tarball, vendor_dir, "gztar")
+            shutil.unpack_archive(tarball, out_dir_vendor, "gztar")
         elif source.startswith("git+"):
             source_info = parse_git_source(source, lockfile_version)
-            git_tree = out_dir / "git" / source_info["git_sha_rev"]
+            git_tree = vendor_staging_dir / "git" / source_info["git_sha_rev"]
             copy_and_patch_git_crate_subtree(git_tree, pkg["name"], crate_out_dir)
         else:
             raise Exception(f"Can't process source: {source}.")
 
 
 def main() -> None:
-    subcommand_to_func = {
-        "create-vendor-staging": lambda: create_vendor_staging(lockfile_path=Path(sys.argv[2]), out_dir=Path(sys.argv[3])),
-        "unpack": lambda: unpack(out_dir=Path(sys.argv[2])),
-    }
     subcommand = sys.argv[1]
-    subcommand_func = subcommand_to_func.get(subcommand)
+    subcommand_func_dict = {
+        "create-vendor-staging": lambda: create_vendor_staging(lockfile_path=Path(sys.argv[2]), out_dir=Path(sys.argv[3])),
+        "create-vendor": lambda: create_vendor(vendor_staging_dir=Path(sys.argv[2]), out_dir=Path(sys.argv[3])),
+    }
+    subcommand_func = subcommand_func_dict.get(subcommand)
     if subcommand_func is None:
         raise Exception(f"Unknown subcommand: {subcommand}")
     subcommand_func()
