@@ -10,12 +10,13 @@ plugins:
   - mermaid2
 nav:
   - Home: index.md
+  - Quick Start: learn/first-run.md
   - Learn:
       - Overview: learn/overview.md
-      - Quick Start: learn/first-run.md
       - Transport Walkthrough: learn/transport-walkthrough.md
       - Client Walkthrough: learn/client-walkthrough.md
   - How-to:
+      - Overview: how-to/overview.md
       - Install the Server: how-to/install-server.md
       - Run with stdio: how-to/run-with-stdio.md
       - Run with HTTP: how-to/run-with-http.md
@@ -31,6 +32,7 @@ nav:
       - Use CLI: how-to/use-cli.md
       - Use Rust Client: how-to/use-rust-client.md
   - Concepts:
+      - Overview: concepts/overview.md
       - Execution Model: concepts/execution-model.md
       - Sessions and Heaps: concepts/sessions-and-heaps.md
       - Transports: concepts/transports.md
@@ -42,6 +44,7 @@ nav:
       - Filesystem Access: concepts/filesystem-access.md
       - Clustering: concepts/clustering.md
   - Reference:
+      - Overview: reference/overview.md
       - CLI Flags: reference/cli-flags.md
       - HTTP API: reference/http-api.md
       - MCP Tools: reference/mcp-tools.md
