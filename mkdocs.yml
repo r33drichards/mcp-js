@@ -10,7 +10,14 @@ plugins:
   - mermaid2
 nav:
   - Home: index.md
-  - Quick Start: learn/first-run.md
+  - Quick Start:
+      - Overview: quick-start/overview.md
+      - Claude Code: quick-start/claude-code.md
+      - Codex: quick-start/codex.md
+      - Cursor: quick-start/cursor.md
+      - Generic MCP: quick-start/generic-mcp.md
+      - curl: quick-start/curl.md
+      - Bundled CLI: quick-start/bundled-cli.md
   - How-to:
       - Overview: how-to/overview.md
       - Install the Server: how-to/install-server.md

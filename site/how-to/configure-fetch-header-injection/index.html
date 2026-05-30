@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+
+<html data-bs-theme="light" lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta content="IE=edge" http-equiv="X-UA-Compatible"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<link href="https://r33drichards.github.io/mcp-js/how-to/configure-fetch-header-injection/" rel="canonical"/>
+<link href="../../img/favicon.ico" rel="shortcut icon"/>
+<title>Configure Fetch Header Injection - mcp-v8</title>
+<link href="../../css/bootstrap.min.css" rel="stylesheet"/>
+<link href="../../css/fontawesome.min.css" rel="stylesheet"/>
+<link href="../../css/brands.min.css" rel="stylesheet"/>
+<link href="../../css/solid.min.css" rel="stylesheet"/>
+<link href="../../css/v4-font-face.min.css" rel="stylesheet"/>
+<link href="../../css/base.css" rel="stylesheet"/>
+<link href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" id="hljs-light" rel="stylesheet"/>
+<link disabled="" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github-dark.min.css" id="hljs-dark" rel="stylesheet"/>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+<script>hljs.highlightAll();</script>
+</head>
+<body>
+<div class="navbar fixed-top navbar-expand-lg navbar-dark bg-primary">
+<div class="container">
+<a class="navbar-brand" href="../..">mcp-v8</a>
+<!-- Expander button -->
+<button aria-controls="navbar-collapse" aria-expanded="false" aria-label="Toggle navigation" class="navbar-toggler" data-bs-target="#navbar-collapse" data-bs-toggle="collapse" type="button">
+<span class="navbar-toggler-icon"></span>
+</button>
+<!-- Expanded navigation -->
+<div class="navbar-collapse collapse" id="navbar-collapse">
+<!-- Main navigation -->
+<ul class="nav navbar-nav">
+<li class="nav-item">
+<a class="nav-link" href="../..">Home</a>
+</li>
+<li class="nav-item">
+<a class="nav-link" href="../../learn/first-run/">Quick Start</a>
+</li>
+<li class="nav-item dropdown">
+<a aria-current="page" aria-expanded="false" class="nav-link dropdown-toggle active" data-bs-toggle="dropdown" href="#" role="button">How-to</a>
+<ul class="dropdown-menu">
+<li>
+<a class="dropdown-item" href="../overview/">Overview</a>
+</li>
+<li>
+<a class="dropdown-item" href="../install-server/">Install the Server</a>
+</li>
+<li>
+<a class="dropdown-item" href="../run-with-stdio/">Run with stdio</a>
+</li>
+<li>
+<a class="dropdown-item" href="../run-with-http/">Run with HTTP</a>
+</li>
+<li>
+<a class="dropdown-item" href="../run-with-sse/">Run with SSE</a>
+</li>
+<li>
+<a class="dropdown-item" href="../use-local-storage/">Use Local Storage</a>
+</li>
+<li>
+<a class="dropdown-item" href="../use-s3-storage/">Use S3 Storage</a>
+</li>
+<li>
+<a class="dropdown-item" href="../run-a-cluster/">Run a Cluster</a>
+</li>
+<li>
+<a class="dropdown-item" href="../enable-opa-policies/">Enable OPA Policies</a>
+</li>
+<li>
+<a class="dropdown-item" href="../provide-sandboxed-filesystem-access/">Provide Sandboxed Filesystem Access</a>
+</li>
+<li>
+<a aria-current="page" class="dropdown-item active" href="./">Configure Fetch Header Injection</a>
+</li>
+<li>
+<a class="dropdown-item" href="../use-sqlite-wasm/">Use SQLite WASM</a>
+</li>
+<li>
+<a class="dropdown-item" href="../connect-as-an-mcp-server/">Connect as an MCP Server</a>
+</li>
+<li>
+<a class="dropdown-item" href="../use-cli/">Use CLI</a>
+</li>
+<li>
+<a class="dropdown-item" href="../use-rust-client/">Use Rust Client</a>
+</li>
+</ul>
+</li>
+<li class="nav-item dropdown">
+<a aria-expanded="false" class="nav-link dropdown-toggle" data-bs-toggle="dropdown" href="#" role="button">Concepts</a>
+<ul class="dropdown-menu">
+<li>
+<a class="dropdown-item" href="../../concepts/overview/">Overview</a>
+</li>
+<li>
+<a class="dropdown-item" href="../../concepts/execution-model/">Execution Model</a>
+</li>
+<li>
+<a class="dropdown-item" href="../../concepts/sessions-and-heaps/">Sessions and Heaps</a>
+</li>
+<li>
+<a class="dropdown-item" href="../../concepts/transports/">Transports</a>
+</li>
+<li>
+<a class="dropdown-item" href="../../concepts/integration-surfaces/">Integration Surfaces</a>
+</li>
+<li>
+<a class="dropdown-item" href="../../concepts/module-loading/">Module Loading</a>
+</li>
+<li>
+<a class="dropdown-item" href="../../concepts/wasm-and-native-modules/">WASM and Native Modules</a>
+</li>
+<li>
+<a class="dropdown-item" href="../../concepts/policy-system/">Policy System</a>
+</li>
+<li>
+<a class="dropdown-item" href="../../concepts/network-access/">Network Access</a>
+</li>
+<li>
+<a class="dropdown-item" href="../../concepts/filesystem-access/">Filesystem Access</a>
+</li>
+<li>
+<a class="dropdown-item" href="../../concepts/clustering/">Clustering</a>
+</li>
+</ul>
+</li>
+<li class="nav-item dropdown">
+<a aria-expanded="false" class="nav-link dropdown-toggle" data-bs-toggle="dropdown" href="#" role="button">Reference</a>
+<ul class="dropdown-menu">
+<li>
+<a class="dropdown-item" href="../../reference/overview/">Overview</a>
+</li>
+<li>
+<a class="dropdown-item" href="../../reference/cli-flags/">CLI Flags</a>
+</li>
+<li>
+<a class="dropdown-item" href="../../reference/http-api/">HTTP API</a>
+</li>
+<li>
+<a class="dropdown-item" href="../../reference/mcp-tools/">MCP Tools</a>
+</li>
+<li>
+<a class="dropdown-item" href="../../reference/configuration-and-environment/">Configuration and Environment</a>
+</li>
+<li>
+<a class="dropdown-item" href="../../reference/rust-client-api/">Rust Client API</a>
+</li>
+<li>
+<a class="dropdown-item" href="../../reference/policy-files/">Policy Files</a>
+</li>
+</ul>
+</li>
+</ul>
+<ul class="nav navbar-nav ms-md-auto">
+<li class="nav-item">
+<a class="nav-link" data-bs-target="#mkdocs_search_modal" data-bs-toggle="modal" href="#">
+<i class="fa fa-search"></i> Search
+                            </a>
+</li>
+<li class="nav-item">
+<a class="nav-link" href="../provide-sandboxed-filesystem-access/" rel="prev">
+<i class="fa fa-arrow-left"></i> Previous
+                                </a>
+</li>
+<li class="nav-item">
+<a class="nav-link" href="../use-sqlite-wasm/" rel="next">
+                                    Next <i class="fa fa-arrow-right"></i>
+</a>
+</li>
+</ul>
+</div>
+</div>
+</div>
+<div class="container">
+<div class="row">
+<div class="col-md-3"><div class="navbar-expand-md bs-sidebar hidden-print affix" role="complementary">
+<div class="navbar-header">
+<button class="navbar-toggler collapsed" data-bs-target="#toc-collapse" data-bs-toggle="collapse" title="Table of Contents" type="button">
+<span class="fa fa-angle-down"></span>
+</button>
+</div>
+<div class="navbar-collapse collapse card bg-body-tertiary" id="toc-collapse">
+<ul class="nav flex-column">
+<li class="nav-item" data-bs-level="1"><a class="nav-link" href="#configure-fetch-header-injection">Configure Fetch Header Injection</a>
+<ul class="nav flex-column">
+<li class="nav-item" data-bs-level="2"><a class="nav-link" href="#what-agent-code-looks-like">What agent code looks like</a>
+<ul class="nav flex-column">
+</ul>
+</li>
+<li class="nav-item" data-bs-level="2"><a class="nav-link" href="#dynamic-client-credentials-injection">Dynamic client-credentials injection</a>
+<ul class="nav flex-column">
+</ul>
+</li>
+<li class="nav-item" data-bs-level="2"><a class="nav-link" href="#when-injection-is-skipped">When injection is skipped</a>
+<ul class="nav flex-column">
+</ul>
+</li>
+</ul>
+</li>
+</ul>
+</div>
+</div></div>
+<div class="col-md-9" role="main">
+<h1 id="configure-fetch-header-injection">Configure Fetch Header Injection<a class="headerlink" href="#configure-fetch-header-injection" title="Permanent link">¶</a></h1>
+<p>Create a minimal fetch policy first, because header injection requires
+<code>fetch()</code> to be enabled:</p>
+<pre><code class="language-bash">cat &gt; fetch.rego &lt;&lt;'EOF'
+package mcp.fetch
+
+default allow = false
+
+allow if {
+  input.method == "GET"
+}
+EOF
+</code></pre>
+<pre><code class="language-bash">POLICY_PATH="$(pwd)/fetch.rego"
+cat &gt; policies.json &lt;&lt;EOF
+{
+  "fetch": {
+    "policies": [
+      {
+        "url": "file://${POLICY_PATH}",
+        "rule": "data.mcp.fetch.allow"
+      }
+    ]
+  }
+}
+EOF
+</code></pre>
+<p>Add a static header rule on the command line:</p>
+<pre><code class="language-bash">mcp-v8 \
+  --stateless \
+  --http-port 3000 \
+  --policies-json ./policies.json \
+  --fetch-header 'host=api.github.com,header=Authorization,value=Bearer TOKEN,methods=GET'
+</code></pre>
+<p>Or load rules from a JSON file:</p>
+<pre><code class="language-bash">cat &gt; fetch-headers.json &lt;&lt;'EOF'
+[
+  {
+    "host": "api.github.com",
+    "methods": ["GET"],
+    "headers": {
+      "Authorization": "Bearer TOKEN",
+      "X-GitHub-Api-Version": "2022-11-28"
+    }
+  }
+]
+EOF
+</code></pre>
+<pre><code class="language-bash">mcp-v8 \
+  --stateless \
+  --http-port 3000 \
+  --policies-json ./policies.json \
+  --fetch-header-config ./fetch-headers.json
+</code></pre>
+<h2 id="what-agent-code-looks-like">What agent code looks like<a class="headerlink" href="#what-agent-code-looks-like" title="Permanent link">¶</a></h2>
+<p>The agent does not need to hold the credential itself. It can write an ordinary
+<code>fetch()</code> call:</p>
+<pre><code class="language-javascript">const resp = await fetch("https://api.github.com/user", {
+  method: "GET",
+  headers: {
+    "Accept": "application/vnd.github+json"
+  }
+});
+
+const body = await resp.json();
+console.log(body);
+</code></pre>
+<p>With the static rule shown above, <code>mcp-v8</code> sends the request as if the agent
+had written:</p>
+<pre><code class="language-http">GET /user HTTP/1.1
+Host: api.github.com
+Accept: application/vnd.github+json
+Authorization: Bearer TOKEN
+X-GitHub-Api-Version: 2022-11-28
+</code></pre>
+<p>The <code>Authorization</code> and <code>X-GitHub-Api-Version</code> headers come from the server's
+injection rules, not from the JavaScript source.</p>
+<h2 id="dynamic-client-credentials-injection">Dynamic client-credentials injection<a class="headerlink" href="#dynamic-client-credentials-injection" title="Permanent link">¶</a></h2>
+<p>Dynamic rules let the agent keep writing the same simple <code>fetch()</code> call while
+the server acquires and caches the bearer token:</p>
+<pre><code class="language-bash">mcp-v8 \
+  --stateless \
+  --http-port 3000 \
+  --policies-json ./policies.json \
+  --fetch-header 'host=api.example.com,header=Authorization,token_url=https://issuer.example.com/oauth2/token,client_id=my-client,client_secret=${CLIENT_SECRET},scope=read:all,methods=GET'
+</code></pre>
+<p>The agent request can stay minimal:</p>
+<pre><code class="language-javascript">const resp = await fetch("https://api.example.com/data", {
+  method: "GET"
+});
+
+console.log(await resp.text());
+</code></pre>
+<p>At request time, <code>mcp-v8</code> performs this flow:</p>
+<div class="mermaid">sequenceDiagram
+  participant Agent as Agent JS
+  participant Server as mcp-v8
+  participant Issuer as OAuth token endpoint
+  participant API as Upstream API
+
+  Agent-&gt;&gt;Server: fetch("https://api.example.com/data")
+  Server-&gt;&gt;Server: match host and method rule
+  alt no cached token or token stale
+    Server-&gt;&gt;Issuer: client_credentials token request
+    Issuer--&gt;&gt;Server: access_token
+  end
+  Server-&gt;&gt;API: GET /data + Authorization: Bearer &lt;token&gt;
+  API--&gt;&gt;Server: response
+  Server--&gt;&gt;Agent: fetch Response
+</div>
+<p>From the agent's point of view, it wrote a plain unauthenticated <code>fetch()</code>
+call. The upstream API receives an authenticated request because <code>mcp-v8</code>
+injected the bearer token before the HTTP call was made.</p>
+<h2 id="when-injection-is-skipped">When injection is skipped<a class="headerlink" href="#when-injection-is-skipped" title="Permanent link">¶</a></h2>
+<p>Headers set directly in JavaScript still win. If the agent provides its own
+<code>Authorization</code> header, the rule is skipped for that request:</p>
+<pre><code class="language-javascript">await fetch("https://api.example.com/data", {
+  headers: {
+    "Authorization": "Bearer my-own-token"
+  }
+});
+</code></pre>
+<p>In that case, <code>mcp-v8</code> does not overwrite the header, and dynamic token lookup
+does not happen.</p>
+<p>For the runtime behavior behind these rules, see
+<a href="../../concepts/network-access/">Network Access</a>.</p></div>
+</div>
+</div>
+<footer class="col-md-12">
+<hr/>
+<p>Documentation built with <a href="https://www.mkdocs.org/">MkDocs</a>.</p>
+</footer>
+<script src="../../js/bootstrap.bundle.min.js"></script>
+<script>
+            var base_url = "../..",
+                shortcuts = {"help": 191, "next": 78, "previous": 80, "search": 83};
+        </script>
+<script src="../../js/base.js"></script>
+<script src="../../search/main.js"></script>
+<div aria-hidden="true" aria-labelledby="searchModalLabel" class="modal" id="mkdocs_search_modal" role="dialog" tabindex="-1">
+<div class="modal-dialog modal-lg">
+<div class="modal-content">
+<div class="modal-header">
+<h4 class="modal-title" id="searchModalLabel">Search</h4>
+<button aria-label="Close" class="btn-close" data-bs-dismiss="modal" type="button"></button>
+</div>
+<div class="modal-body">
+<p>From here you can search these documents. Enter your search terms below.</p>
+<form>
+<div class="form-group">
+<input class="form-control" id="mkdocs-search-query" placeholder="Search..." title="Type search term here" type="search"/>
+</div>
+</form>
+<div data-no-results-text="No results found" id="mkdocs-search-results"></div>
+</div>
+<div class="modal-footer">
+</div>
+</div>
+</div>
+</div><div aria-hidden="true" aria-labelledby="keyboardModalLabel" class="modal" id="mkdocs_keyboard_modal" role="dialog" tabindex="-1">
+<div class="modal-dialog">
+<div class="modal-content">
+<div class="modal-header">
+<h4 class="modal-title" id="keyboardModalLabel">Keyboard Shortcuts</h4>
+<button aria-label="Close" class="btn-close" data-bs-dismiss="modal" type="button"></button>
+</div>
+<div class="modal-body">
+<table class="table">
+<thead>
+<tr>
+<th style="width: 20%;">Keys</th>
+<th>Action</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td class="help shortcut"><kbd>?</kbd></td>
+<td>Open this help</td>
+</tr>
+<tr>
+<td class="next shortcut"><kbd>n</kbd></td>
+<td>Next page</td>
+</tr>
+<tr>
+<td class="prev shortcut"><kbd>p</kbd></td>
+<td>Previous page</td>
+</tr>
+<tr>
+<td class="search shortcut"><kbd>s</kbd></td>
+<td>Search</td>
+</tr>
+</tbody>
+</table>
+</div>
+<div class="modal-footer">
+</div>
+</div>
+</div>
+</div>
+<script type="module">import mermaid from "https://unpkg.com/mermaid@10.4.0/dist/mermaid.esm.min.mjs";
+mermaid.initialize({});</script></body>
+</html>

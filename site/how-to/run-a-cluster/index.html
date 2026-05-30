@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="light">
+    <head>
+        <meta charset="utf-8">
+        <meta http-equiv="X-UA-Compatible" content="IE=edge">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        
+        
+        <link rel="canonical" href="https://r33drichards.github.io/mcp-js/how-to/run-a-cluster/">
+        <link rel="shortcut icon" href="../../img/favicon.ico">
+        <title>Run a Cluster - mcp-v8</title>
+        <link href="../../css/bootstrap.min.css" rel="stylesheet">
+        <link href="../../css/fontawesome.min.css" rel="stylesheet">
+        <link href="../../css/brands.min.css" rel="stylesheet">
+        <link href="../../css/solid.min.css" rel="stylesheet">
+        <link href="../../css/v4-font-face.min.css" rel="stylesheet">
+        <link href="../../css/base.css" rel="stylesheet">
+        <link id="hljs-light" rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css" >
+        <link id="hljs-dark" rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github-dark.min.css" disabled>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+        <script>hljs.highlightAll();</script> 
+    </head>
+
+    <body>
+        <div class="navbar fixed-top navbar-expand-lg navbar-dark bg-primary">
+            <div class="container">
+                <a class="navbar-brand" href="../..">mcp-v8</a>
+                <!-- Expander button -->
+                <button type="button" class="navbar-toggler" data-bs-toggle="collapse" data-bs-target="#navbar-collapse" aria-controls="navbar-collapse" aria-expanded="false" aria-label="Toggle navigation">
+                    <span class="navbar-toggler-icon"></span>
+                </button>
+
+                <!-- Expanded navigation -->
+                <div id="navbar-collapse" class="navbar-collapse collapse">
+                        <!-- Main navigation -->
+                        <ul class="nav navbar-nav">
+                            <li class="nav-item">
+                                <a href="../.." class="nav-link">Home</a>
+                            </li>
+                            <li class="nav-item">
+                                <a href="../../learn/first-run/" class="nav-link">Quick Start</a>
+                            </li>
+                            <li class="nav-item dropdown">
+                                <a href="#" class="nav-link dropdown-toggle active" aria-current="page" role="button" data-bs-toggle="dropdown"  aria-expanded="false">How-to</a>
+                                <ul class="dropdown-menu">
+                                    
+<li>
+    <a href="../overview/" class="dropdown-item">Overview</a>
+</li>
+                                    
+<li>
+    <a href="../install-server/" class="dropdown-item">Install the Server</a>
+</li>
+                                    
+<li>
+    <a href="../run-with-stdio/" class="dropdown-item">Run with stdio</a>
+</li>
+                                    
+<li>
+    <a href="../run-with-http/" class="dropdown-item">Run with HTTP</a>
+</li>
+                                    
+<li>
+    <a href="../run-with-sse/" class="dropdown-item">Run with SSE</a>
+</li>
+                                    
+<li>
+    <a href="../use-local-storage/" class="dropdown-item">Use Local Storage</a>
+</li>
+                                    
+<li>
+    <a href="../use-s3-storage/" class="dropdown-item">Use S3 Storage</a>
+</li>
+                                    
+<li>
+    <a href="./" class="dropdown-item active" aria-current="page">Run a Cluster</a>
+</li>
+                                    
+<li>
+    <a href="../enable-opa-policies/" class="dropdown-item">Enable OPA Policies</a>
+</li>
+                                    
+<li>
+    <a href="../provide-sandboxed-filesystem-access/" class="dropdown-item">Provide Sandboxed Filesystem Access</a>
+</li>
+                                    
+<li>
+    <a href="../configure-fetch-header-injection/" class="dropdown-item">Configure Fetch Header Injection</a>
+</li>
+                                    
+<li>
+    <a href="../use-sqlite-wasm/" class="dropdown-item">Use SQLite WASM</a>
+</li>
+                                    
+<li>
+    <a href="../connect-as-an-mcp-server/" class="dropdown-item">Connect as an MCP Server</a>
+</li>
+                                    
+<li>
+    <a href="../use-cli/" class="dropdown-item">Use CLI</a>
+</li>
+                                    
+<li>
+    <a href="../use-rust-client/" class="dropdown-item">Use Rust Client</a>
+</li>
+                                </ul>
+                            </li>
+                            <li class="nav-item dropdown">
+                                <a href="#" class="nav-link dropdown-toggle" role="button" data-bs-toggle="dropdown"  aria-expanded="false">Concepts</a>
+                                <ul class="dropdown-menu">
+                                    
+<li>
+    <a href="../../concepts/overview/" class="dropdown-item">Overview</a>
+</li>
+                                    
+<li>
+    <a href="../../concepts/execution-model/" class="dropdown-item">Execution Model</a>
+</li>
+                                    
+<li>
+    <a href="../../concepts/sessions-and-heaps/" class="dropdown-item">Sessions and Heaps</a>
+</li>
+                                    
+<li>
+    <a href="../../concepts/transports/" class="dropdown-item">Transports</a>
+</li>
+                                    
+<li>
+    <a href="../../concepts/integration-surfaces/" class="dropdown-item">Integration Surfaces</a>
+</li>
+                                    
+<li>
+    <a href="../../concepts/module-loading/" class="dropdown-item">Module Loading</a>
+</li>
+                                    
+<li>
+    <a href="../../concepts/wasm-and-native-modules/" class="dropdown-item">WASM and Native Modules</a>
+</li>
+                                    
+<li>
+    <a href="../../concepts/policy-system/" class="dropdown-item">Policy System</a>
+</li>
+                                    
+<li>
+    <a href="../../concepts/network-access/" class="dropdown-item">Network Access</a>
+</li>
+                                    
+<li>
+    <a href="../../concepts/filesystem-access/" class="dropdown-item">Filesystem Access</a>
+</li>
+                                    
+<li>
+    <a href="../../concepts/clustering/" class="dropdown-item">Clustering</a>
+</li>
+                                </ul>
+                            </li>
+                            <li class="nav-item dropdown">
+                                <a href="#" class="nav-link dropdown-toggle" role="button" data-bs-toggle="dropdown"  aria-expanded="false">Reference</a>
+                                <ul class="dropdown-menu">
+                                    
+<li>
+    <a href="../../reference/overview/" class="dropdown-item">Overview</a>
+</li>
+                                    
+<li>
+    <a href="../../reference/cli-flags/" class="dropdown-item">CLI Flags</a>
+</li>
+                                    
+<li>
+    <a href="../../reference/http-api/" class="dropdown-item">HTTP API</a>
+</li>
+                                    
+<li>
+    <a href="../../reference/mcp-tools/" class="dropdown-item">MCP Tools</a>
+</li>
+                                    
+<li>
+    <a href="../../reference/configuration-and-environment/" class="dropdown-item">Configuration and Environment</a>
+</li>
+                                    
+<li>
+    <a href="../../reference/rust-client-api/" class="dropdown-item">Rust Client API</a>
+</li>
+                                    
+<li>
+    <a href="../../reference/policy-files/" class="dropdown-item">Policy Files</a>
+</li>
+                                </ul>
+                            </li>
+                        </ul>
+
+                    <ul class="nav navbar-nav ms-md-auto">
+                        <li class="nav-item">
+                            <a href="#" class="nav-link" data-bs-toggle="modal" data-bs-target="#mkdocs_search_modal">
+                                <i class="fa fa-search"></i> Search
+                            </a>
+                        </li>
+                            <li class="nav-item">
+                                <a rel="prev" href="../use-s3-storage/" class="nav-link">
+                                    <i class="fa fa-arrow-left"></i> Previous
+                                </a>
+                            </li>
+                            <li class="nav-item">
+                                <a rel="next" href="../enable-opa-policies/" class="nav-link">
+                                    Next <i class="fa fa-arrow-right"></i>
+                                </a>
+                            </li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+
+        <div class="container">
+            <div class="row">
+                    <div class="col-md-3"><div class="navbar-expand-md bs-sidebar hidden-print affix" role="complementary">
+    <div class="navbar-header">
+        <button type="button" class="navbar-toggler collapsed" data-bs-toggle="collapse" data-bs-target="#toc-collapse" title="Table of Contents">
+            <span class="fa fa-angle-down"></span>
+        </button>
+    </div>
+
+    
+    <div id="toc-collapse" class="navbar-collapse collapse card bg-body-tertiary">
+        <ul class="nav flex-column">
+            
+            <li class="nav-item" data-bs-level="1"><a href="#run-a-cluster" class="nav-link">Run a Cluster</a>
+              <ul class="nav flex-column">
+            <li class="nav-item" data-bs-level="2"><a href="#1-create-per-node-storage-directories" class="nav-link">1. Create per-node storage directories</a>
+              <ul class="nav flex-column">
+              </ul>
+            </li>
+            <li class="nav-item" data-bs-level="2"><a href="#2-start-the-seed-node" class="nav-link">2. Start the seed node</a>
+              <ul class="nav flex-column">
+              </ul>
+            </li>
+            <li class="nav-item" data-bs-level="2"><a href="#3-start-the-two-joining-nodes" class="nav-link">3. Start the two joining nodes</a>
+              <ul class="nav flex-column">
+              </ul>
+            </li>
+            <li class="nav-item" data-bs-level="2"><a href="#4-check-cluster-status" class="nav-link">4. Check cluster status</a>
+              <ul class="nav flex-column">
+              </ul>
+            </li>
+            <li class="nav-item" data-bs-level="2"><a href="#5-send-traffic-to-any-http-node" class="nav-link">5. Send traffic to any HTTP node</a>
+              <ul class="nav flex-column">
+              </ul>
+            </li>
+            <li class="nav-item" data-bs-level="2"><a href="#6-understand-the-routing-model" class="nav-link">6. Understand the routing model</a>
+              <ul class="nav flex-column">
+              </ul>
+            </li>
+            <li class="nav-item" data-bs-level="2"><a href="#7-add-a-node-manually" class="nav-link">7. Add a node manually</a>
+              <ul class="nav flex-column">
+              </ul>
+            </li>
+            <li class="nav-item" data-bs-level="2"><a href="#what-to-watch-in-production" class="nav-link">What to watch in production</a>
+              <ul class="nav flex-column">
+              </ul>
+            </li>
+              </ul>
+            </li>
+        </ul>
+    </div>
+</div></div>
+                    <div class="col-md-9" role="main">
+
+<h1 id="run-a-cluster">Run a Cluster<a class="headerlink" href="#run-a-cluster" title="Permanent link">&para;</a></h1>
+<p>Start a small three-node <code>mcp-v8</code> cluster on one machine.</p>
+<p>This setup uses:</p>
+<ul>
+<li>Streamable HTTP for the MCP and REST surfaces</li>
+<li>local filesystem storage for heaps</li>
+<li>separate session databases per node</li>
+<li>a dedicated Raft port per node</li>
+</ul>
+<h2 id="1-create-per-node-storage-directories">1. Create per-node storage directories<a class="headerlink" href="#1-create-per-node-storage-directories" title="Permanent link">&para;</a></h2>
+<pre><code class="language-bash">mkdir -p /tmp/mcp-v8-cluster/node1/heaps /tmp/mcp-v8-cluster/node2/heaps /tmp/mcp-v8-cluster/node3/heaps
+mkdir -p /tmp/mcp-v8-cluster/node1/db /tmp/mcp-v8-cluster/node2/db /tmp/mcp-v8-cluster/node3/db
+</code></pre>
+<p>Each node needs its own local heap directory and session database path.</p>
+<h2 id="2-start-the-seed-node">2. Start the seed node<a class="headerlink" href="#2-start-the-seed-node" title="Permanent link">&para;</a></h2>
+<p>Start the first node with both peer addresses listed up front:</p>
+<pre><code class="language-bash">mcp-v8 \
+  --directory-path /tmp/mcp-v8-cluster/node1/heaps \
+  --session-db-path /tmp/mcp-v8-cluster/node1/db/sessions \
+  --http-port 3001 \
+  --cluster-port 4001 \
+  --node-id node1 \
+  --advertise-addr 127.0.0.1:4001 \
+  --peers node2@127.0.0.1:4002,node3@127.0.0.1:4003
+</code></pre>
+<p><code>--cluster-port</code> enables the Raft server. Because cluster mode forwards writes
+between nodes, <code>--advertise-addr</code> should be a routable address that other nodes
+can use.</p>
+<h2 id="3-start-the-two-joining-nodes">3. Start the two joining nodes<a class="headerlink" href="#3-start-the-two-joining-nodes" title="Permanent link">&para;</a></h2>
+<p>Node 2:</p>
+<pre><code class="language-bash">mcp-v8 \
+  --directory-path /tmp/mcp-v8-cluster/node2/heaps \
+  --session-db-path /tmp/mcp-v8-cluster/node2/db/sessions \
+  --http-port 3002 \
+  --cluster-port 4002 \
+  --node-id node2 \
+  --advertise-addr 127.0.0.1:4002 \
+  --join 127.0.0.1:4001
+</code></pre>
+<p>Node 3:</p>
+<pre><code class="language-bash">mcp-v8 \
+  --directory-path /tmp/mcp-v8-cluster/node3/heaps \
+  --session-db-path /tmp/mcp-v8-cluster/node3/db/sessions \
+  --http-port 3003 \
+  --cluster-port 4003 \
+  --node-id node3 \
+  --advertise-addr 127.0.0.1:4003 \
+  --join 127.0.0.1:4001
+</code></pre>
+<p><code>--join</code> contacts an existing cluster node, which forwards the join request to
+the current leader if needed.</p>
+<h2 id="4-check-cluster-status">4. Check cluster status<a class="headerlink" href="#4-check-cluster-status" title="Permanent link">&para;</a></h2>
+<p>Each node exposes Raft status on its cluster port:</p>
+<pre><code class="language-bash">curl -s http://127.0.0.1:4001/raft/status | jq
+curl -s http://127.0.0.1:4002/raft/status | jq
+curl -s http://127.0.0.1:4003/raft/status | jq
+</code></pre>
+<p>Look for:</p>
+<ul>
+<li>one node with a leader role</li>
+<li>all three peer addresses in the peer list</li>
+<li>the same leader ID across nodes</li>
+</ul>
+<h2 id="5-send-traffic-to-any-http-node">5. Send traffic to any HTTP node<a class="headerlink" href="#5-send-traffic-to-any-http-node" title="Permanent link">&para;</a></h2>
+<p>Once the cluster is up, clients can talk to any node's HTTP port:</p>
+<pre><code class="language-bash">curl -s http://127.0.0.1:3002/api/exec \
+  -H 'content-type: application/json' \
+  -d '{&quot;code&quot;:&quot;console.log(\&quot;cluster ok\&quot;)&quot;}'
+</code></pre>
+<p>If the request lands on a follower and needs a coordinated write, the follower
+forwards it to the leader.</p>
+<h2 id="6-understand-the-routing-model">6. Understand the routing model<a class="headerlink" href="#6-understand-the-routing-model" title="Permanent link">&para;</a></h2>
+<ul>
+<li>use <code>3001</code>, <code>3002</code>, and <code>3003</code> for MCP or REST traffic</li>
+<li>use <code>4001</code>, <code>4002</code>, and <code>4003</code> for cluster coordination only</li>
+<li>reads and status checks can hit any node</li>
+<li>leader-owned writes may be forwarded under the hood</li>
+</ul>
+<h2 id="7-add-a-node-manually">7. Add a node manually<a class="headerlink" href="#7-add-a-node-manually" title="Permanent link">&para;</a></h2>
+<p><code>--join</code> is the simplest path, but the cluster API also exposes a direct join
+endpoint:</p>
+<pre><code class="language-bash">curl -s http://127.0.0.1:4001/raft/join \
+  -H 'content-type: application/json' \
+  -d '{&quot;node_id&quot;:&quot;node4&quot;,&quot;addr&quot;:&quot;127.0.0.1:4004&quot;}'
+</code></pre>
+<p>That request can be sent to any cluster node. Followers forward it to the
+leader.</p>
+<h2 id="what-to-watch-in-production">What to watch in production<a class="headerlink" href="#what-to-watch-in-production" title="Permanent link">&para;</a></h2>
+<ul>
+<li>every node needs a unique <code>--node-id</code></li>
+<li>every node needs a unique <code>--cluster-port</code></li>
+<li><code>--advertise-addr</code> must be reachable by peers, not just valid locally</li>
+<li>keep separate heap and session storage per node</li>
+<li>cluster mode adds leader election and quorum concerns to normal server
+  operations</li>
+</ul>
+<p>For the underlying coordination model, see
+<a href="../../concepts/clustering/">Clustering</a>. For the flag reference, see
+<a href="../../reference/cli-flags/">CLI Flags</a>.</p></div>
+            </div>
+        </div>
+
+        <footer class="col-md-12">
+            <hr>
+            <p>Documentation built with <a href="https://www.mkdocs.org/">MkDocs</a>.</p>
+        </footer>
+        <script src="../../js/bootstrap.bundle.min.js"></script>
+        <script>
+            var base_url = "../..",
+                shortcuts = {"help": 191, "next": 78, "previous": 80, "search": 83};
+        </script>
+        <script src="../../js/base.js"></script>
+        <script src="../../search/main.js"></script>
+
+        <div class="modal" id="mkdocs_search_modal" tabindex="-1" role="dialog" aria-labelledby="searchModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h4 class="modal-title" id="searchModalLabel">Search</h4>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <p>From here you can search these documents. Enter your search terms below.</p>
+                <form>
+                    <div class="form-group">
+                        <input type="search" class="form-control" placeholder="Search..." id="mkdocs-search-query" title="Type search term here">
+                    </div>
+                </form>
+                <div id="mkdocs-search-results" data-no-results-text="No results found"></div>
+            </div>
+            <div class="modal-footer">
+            </div>
+        </div>
+    </div>
+</div><div class="modal" id="mkdocs_keyboard_modal" tabindex="-1" role="dialog" aria-labelledby="keyboardModalLabel" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h4 class="modal-title" id="keyboardModalLabel">Keyboard Shortcuts</h4>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+              <table class="table">
+                <thead>
+                  <tr>
+                    <th style="width: 20%;">Keys</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td class="help shortcut"><kbd>?</kbd></td>
+                    <td>Open this help</td>
+                  </tr>
+                  <tr>
+                    <td class="next shortcut"><kbd>n</kbd></td>
+                    <td>Next page</td>
+                  </tr>
+                  <tr>
+                    <td class="prev shortcut"><kbd>p</kbd></td>
+                    <td>Previous page</td>
+                  </tr>
+                  <tr>
+                    <td class="search shortcut"><kbd>s</kbd></td>
+                    <td>Search</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="modal-footer">
+            </div>
+        </div>
+    </div>
+</div>
+
+    </body>
+</html>

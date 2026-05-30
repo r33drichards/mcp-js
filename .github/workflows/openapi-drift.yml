@@ -32,20 +32,22 @@ jobs:
           ./target/release/server --print-openapi > openapi.json
           cp openapi.json mcp-v8-client/openapi.json
           python3 scripts/generate_http_api_reference.py
+          ./target/release/generate-cli-markdown > site-docs/reference/cli-flags.md
 
       - name: Check for drift
         run: |
-          if ! git diff --exit-code openapi.json mcp-v8-client/openapi.json site-docs/reference/http-api.md; then
+          if ! git diff --exit-code openapi.json mcp-v8-client/openapi.json site-docs/reference/http-api.md site-docs/reference/cli-flags.md; then
             echo ""
             echo "❌ OpenAPI-derived artifacts are out of date."
             echo ""
-            echo "The committed OpenAPI files do not match what the server binary generates."
+            echo "The committed generated API docs do not match the current source."
             echo "Regenerate them with:"
             echo ""
             echo "  cargo build --release -p server"
             echo "  ./target/release/server --print-openapi > openapi.json"
             echo "  cp openapi.json mcp-v8-client/openapi.json"
             echo "  python3 scripts/generate_http_api_reference.py"
+            echo "  ./target/release/generate-cli-markdown > site-docs/reference/cli-flags.md"
             echo ""
             exit 1
           fi

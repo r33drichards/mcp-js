@@ -8,15 +8,15 @@ content-addressed heap persistence.
 ## Quick Start
 
 If you want the fastest path to a working setup, start with
-[Quick Start](learn/first-run.md). It includes entry points for Claude Code,
+[Quick Start](quick-start/overview.md). It includes entry points for Claude Code,
 Codex, Cursor, generic MCP clients, `curl`, and the bundled CLI.
 
 Use this documentation by intent:
 
-- Start with [Quick Start](learn/first-run.md) if you need orientation.
-- Use [How-to](how-to/install-server.md) when you need to complete a task.
-- Read [Concepts](concepts/execution-model.md) to understand system behavior.
-- Use [Reference](reference/cli-flags.md) for flags, APIs, and interface details.
+- Start with [Quick Start](quick-start/overview.md) if you need orientation.
+- Use [How-to](how-to/overview.md) when you need to complete a task.
+- Read [Concepts](concepts/overview.md) to understand system behavior.
+- Use [Reference](reference/overview.md) for flags, APIs, and interface details.
 
 ## What this site covers
 

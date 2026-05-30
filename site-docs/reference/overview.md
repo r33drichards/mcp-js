@@ -19,4 +19,4 @@ names, or configuration keys.
 - [Rust Client API](rust-client-api.md)
 
 If you are still learning the system, start with
-[Quick Start](../learn/first-run.md) or [Concepts](../concepts/overview.md).
+[Quick Start](../quick-start/overview.md) or [Concepts](../concepts/overview.md).
