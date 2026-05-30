@@ -21,10 +21,6 @@ services:
       - "8181:8181"
     volumes:
       - ./policies:/policies:ro
-    healthcheck:
-      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/8181"]
-      interval: 5s
-      retries: 12
 
   mcp-js:
     build: .
@@ -46,4 +42,4 @@ services:
       keycloak:
         condition: service_healthy
       opa:
-        condition: service_healthy
+        condition: service_started
