@@ -72,6 +72,7 @@ impl TestTokenResponse {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct TestTokenRequest {
     grant_type: String,
+    refresh_token: Option<String>,
 }
 
 async fn start_token_server(responses: Vec<TestTokenResponse>) -> TestTokenServer {
@@ -81,6 +82,7 @@ async fn start_token_server(responses: Vec<TestTokenResponse>) -> TestTokenServe
     ) -> Response {
         state.requests.lock().await.push(TestTokenRequest {
             grant_type: form.get("grant_type").cloned().unwrap_or_default(),
+            refresh_token: form.get("refresh_token").cloned(),
         });
 
         let response = state.responses.lock().await.pop_front().unwrap_or_else(|| {
@@ -223,6 +225,21 @@ fn oauth_rule_for_host(host: &str, methods: &[&str], token_url: String) -> Heade
     .expect("rule should be valid")
 }
 
+fn static_rule_for_host(
+    host: &str,
+    methods: &[&str],
+    header_name: &str,
+    header_value: &str,
+) -> HeaderRule {
+    HeaderRule::static_header(
+        host.to_string(),
+        methods.iter().map(|method| method.to_string()).collect(),
+        header_name.to_string(),
+        header_value.to_string(),
+    )
+    .expect("static rule should be valid")
+}
+
 async fn run_js(engine: &Engine, code: String) -> Result<String, String> {
     let exec_id = engine
         .run_js(code)
@@ -311,7 +328,103 @@ async fn matching_request_receives_injected_bearer_token_from_mock_token_server(
         token_server.requests().await,
         vec![TestTokenRequest {
             grant_type: "client_credentials".to_string(),
+            refresh_token: None,
         }]
+    );
+}
+
+#[tokio::test]
+async fn matching_request_receives_static_authorization_header() {
+    ensure_v8();
+
+    let echo_server = start_echo_server().await;
+    let engine = build_engine(vec![static_rule_for_host(
+        "127.0.0.1",
+        &[],
+        "Authorization",
+        "Bearer static-token",
+    )]);
+
+    run_fetch(&engine, &echo_server.url, "GET", None)
+        .await
+        .expect("fetch should succeed");
+
+    assert_eq!(
+        echo_server.requests().await,
+        vec![EchoRequestRecord {
+            method: "GET".to_string(),
+            authorization: Some("Bearer static-token".to_string()),
+        }]
+    );
+}
+
+#[tokio::test]
+async fn user_provided_authorization_overrides_static_injection() {
+    ensure_v8();
+
+    let echo_server = start_echo_server().await;
+    let engine = build_engine(vec![static_rule_for_host(
+        "127.0.0.1",
+        &[],
+        "Authorization",
+        "Bearer static-token",
+    )]);
+
+    run_fetch(
+        &engine,
+        &echo_server.url,
+        "GET",
+        Some("Bearer user-provided"),
+    )
+    .await
+    .expect("user-provided authorization should win");
+
+    assert_eq!(
+        echo_server.requests().await,
+        vec![EchoRequestRecord {
+            method: "GET".to_string(),
+            authorization: Some("Bearer user-provided".to_string()),
+        }]
+    );
+}
+
+#[tokio::test]
+async fn static_injection_skips_non_matching_host_and_method() {
+    ensure_v8();
+
+    let echo_server = start_echo_server().await;
+    let host_engine = build_engine(vec![static_rule_for_host(
+        "other.example.com",
+        &[],
+        "Authorization",
+        "Bearer static-token",
+    )]);
+    let method_engine = build_engine(vec![static_rule_for_host(
+        "127.0.0.1",
+        &["POST"],
+        "Authorization",
+        "Bearer static-token",
+    )]);
+
+    run_fetch(&host_engine, &echo_server.url, "GET", None)
+        .await
+        .expect("host-mismatch fetch should succeed");
+    run_fetch(&method_engine, &echo_server.url, "GET", None)
+        .await
+        .expect("method-mismatch fetch should succeed");
+
+    assert_eq!(
+        echo_server.requests().await,
+        vec![
+            EchoRequestRecord {
+                method: "GET".to_string(),
+                authorization: None,
+            },
+            EchoRequestRecord {
+                method: "GET".to_string(),
+                authorization: None,
+            },
+        ]
     );
 }
 
@@ -356,24 +469,27 @@ async fn repeated_requests_reuse_cached_token() {
         token_server.requests().await,
         vec![TestTokenRequest {
             grant_type: "client_credentials".to_string(),
+            refresh_token: None,
         }]
     );
 }
 
 #[tokio::test]
-async fn post_expiry_request_reacquires_token() {
+async fn post_expiry_request_uses_refresh_token_grant_when_available() {
     ensure_v8();
 
     let token_server = start_token_server(vec![
         TestTokenResponse::success(json!({
             "access_token": "expired-token",
             "token_type": "Bearer",
-            "expires_in": 0
+            "expires_in": 0,
+            "refresh_token": "refresh-1"
         })),
         TestTokenResponse::success(json!({
             "access_token": "refreshed-token",
             "token_type": "Bearer",
-            "expires_in": 3600
+            "expires_in": 3600,
+            "refresh_token": "refresh-2"
         })),
     ])
     .await;
@@ -389,7 +505,7 @@ async fn post_expiry_request_reacquires_token() {
         .expect("first fetch should succeed");
     run_fetch(&engine, &echo_server.url, "GET", None)
         .await
-        .expect("second fetch should reacquire after expiry");
+        .expect("second fetch should refresh after expiry");
 
     assert_eq!(
         echo_server.requests().await,
@@ -409,9 +525,11 @@ async fn post_expiry_request_reacquires_token() {
         vec![
             TestTokenRequest {
                 grant_type: "client_credentials".to_string(),
+                refresh_token: None,
             },
             TestTokenRequest {
-                grant_type: "client_credentials".to_string(),
+                grant_type: "refresh_token".to_string(),
+                refresh_token: Some("refresh-1".to_string()),
             },
         ]
     );
