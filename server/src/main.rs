@@ -858,6 +858,7 @@ fn validate_wasm_name(name: &str) -> Result<()> {
 // ── Fetch header injection rule loading ──────────────────────────────────
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct FetchHeaderConfigRule {
     host: String,
     #[serde(default)]
@@ -869,6 +870,7 @@ struct FetchHeaderConfigRule {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct FetchHeaderAuthConfig {
     #[serde(rename = "type")]
     auth_type: String,
@@ -883,29 +885,36 @@ struct FetchHeaderAuthConfig {
 }
 
 impl FetchHeaderConfigRule {
-    fn into_runtime_rule(mut self) -> Result<engine::fetch::HeaderRule> {
-        self.methods = self.methods.into_iter().map(|method| method.to_uppercase()).collect();
+    fn into_runtime_rule(self) -> Result<engine::fetch::HeaderRule> {
+        let host = self.host;
+        let methods = self.methods;
 
-        let injection = match (self.headers, self.auth) {
+        match (self.headers, self.auth) {
             (Some(_), Some(_)) => anyhow::bail!(
                 "Fetch header config rule for host '{}' cannot define both 'headers' and 'auth'",
-                self.host
+                host
             ),
             (None, None) => anyhow::bail!(
                 "Fetch header config rule for host '{}' must define either 'headers' or 'auth'",
-                self.host
+                host
             ),
-            (Some(headers), None) => engine::fetch::HeaderInjection::Static { headers },
+            (Some(headers), None) => Ok(engine::fetch::HeaderRule::new(
+                host,
+                methods,
+                engine::fetch::HeaderInjection::Static { headers },
+            )),
             (None, Some(auth)) => {
                 if auth.auth_type != "oauth_client_credentials" {
                     anyhow::bail!(
                         "Unsupported fetch auth type '{}' for host '{}'",
                         auth.auth_type,
-                        self.host
+                        host
                     );
                 }
 
-                engine::fetch::HeaderInjection::OAuthClientCredentials(
+                Ok(engine::fetch::HeaderRule::oauth_client_credentials(
+                    host,
+                    methods,
                     engine::fetch::OAuthClientCredentialsConfig {
                         header_name: auth.header,
                         token_url: auth.token_url,
@@ -914,15 +923,9 @@ impl FetchHeaderConfigRule {
                         scope: auth.scope,
                         refresh_buffer_secs: auth.refresh_buffer_secs,
                     },
-                )
+                ))
             }
-        };
-
-        Ok(engine::fetch::HeaderRule {
-            host: self.host,
-            methods: self.methods,
-            injection,
-        })
+        }
     }
 }
 
@@ -971,12 +974,7 @@ fn parse_fetch_header_cli(s: &str) -> Result<engine::fetch::HeaderRule> {
             ))?;
         match key.trim() {
             "host" => host = Some(val.trim().to_string()),
-            "methods" => {
-                methods = val.split(';')
-                    .map(|m| m.trim().to_uppercase())
-                    .filter(|m| !m.is_empty())
-                    .collect();
-            }
+            "methods" => methods = val.split(';').map(|m| m.to_string()).collect(),
             "header" => header_name = Some(val.trim().to_string()),
             "value" => header_value = Some(val.to_string()),
             "token_url" => token_url = Some(val.trim().to_string()),
@@ -1005,16 +1003,19 @@ fn parse_fetch_header_cli(s: &str) -> Result<engine::fetch::HeaderRule> {
         || scope.is_some()
         || refresh_buffer_secs.is_some();
 
-    let injection = match (header_value, has_dynamic_keys) {
+    match (header_value, has_dynamic_keys) {
         (Some(_), true) => anyhow::bail!(
             "--fetch-header cannot mix static 'value' with dynamic oauth keys"
         ),
-        (Some(value), false) => {
-            let mut headers = std::collections::HashMap::new();
-            headers.insert(header_name, value);
-            engine::fetch::HeaderInjection::Static { headers }
-        }
-        (None, true) => engine::fetch::HeaderInjection::OAuthClientCredentials(
+        (Some(value), false) => Ok(engine::fetch::HeaderRule::static_header(
+            host,
+            methods,
+            header_name,
+            value,
+        )),
+        (None, true) => Ok(engine::fetch::HeaderRule::oauth_client_credentials(
+            host,
+            methods,
             engine::fetch::OAuthClientCredentialsConfig {
                 header_name,
                 token_url: token_url.ok_or_else(|| anyhow::anyhow!(
@@ -1030,17 +1031,11 @@ fn parse_fetch_header_cli(s: &str) -> Result<engine::fetch::HeaderRule> {
                 refresh_buffer_secs: refresh_buffer_secs
                     .unwrap_or_else(engine::fetch::default_refresh_buffer_secs),
             },
-        ),
+        )),
         (None, false) => anyhow::bail!(
             "--fetch-header must provide either 'value' for a static rule or the full dynamic oauth key set: token_url, client_id, client_secret"
         ),
-    };
-
-    Ok(engine::fetch::HeaderRule {
-        host,
-        methods,
-        injection,
-    })
+    }
 }
 
 // ── MCP server module loading ────────────────────────────────────────────
@@ -1189,5 +1184,76 @@ mod tests {
         assert_eq!(auth.header_name, "Authorization");
         assert_eq!(auth.scope.as_deref(), Some("read:all"));
         assert_eq!(auth.refresh_buffer_secs, 30);
+    }
+
+    #[test]
+    fn load_fetch_header_rules_rejects_mixed_headers_and_auth_json_rules() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let path = dir.path().join("fetch-rules.json");
+        std::fs::write(
+            &path,
+            r#"[{
+                "host": "api.example.com",
+                "headers": {"Authorization": "Bearer fixed"},
+                "auth": {
+                    "type": "oauth_client_credentials",
+                    "header": "Authorization",
+                    "token_url": "https://issuer/token",
+                    "client_id": "abc",
+                    "client_secret": "xyz"
+                }
+            }]"#,
+        )
+        .expect("config should be written");
+
+        let err = load_fetch_header_rules(&[], &Some(path.display().to_string()))
+            .expect_err("mixed headers/auth json rule should fail");
+
+        assert!(err.to_string().contains("cannot define both 'headers' and 'auth'"));
+    }
+
+    #[test]
+    fn load_fetch_header_rules_rejects_unsupported_auth_type() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let path = dir.path().join("fetch-rules.json");
+        std::fs::write(
+            &path,
+            r#"[{
+                "host": "api.example.com",
+                "auth": {
+                    "type": "basic",
+                    "header": "Authorization",
+                    "token_url": "https://issuer/token",
+                    "client_id": "abc",
+                    "client_secret": "xyz"
+                }
+            }]"#,
+        )
+        .expect("config should be written");
+
+        let err = load_fetch_header_rules(&[], &Some(path.display().to_string()))
+            .expect_err("unsupported auth type should fail");
+
+        assert!(err.to_string().contains("Unsupported fetch auth type"));
+    }
+
+    #[test]
+    fn load_fetch_header_rules_rejects_unknown_json_fields() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let path = dir.path().join("fetch-rules.json");
+        std::fs::write(
+            &path,
+            r#"[{
+                "host": "api.example.com",
+                "headers": {"Authorization": "Bearer fixed"},
+                "unexpected": true
+            }]"#,
+        )
+        .expect("config should be written");
+
+        let err = load_fetch_header_rules(&[], &Some(path.display().to_string()))
+            .expect_err("unknown json fields should fail");
+
+        assert!(err.to_string().contains("unknown field"));
     }
 }

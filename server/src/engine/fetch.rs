@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use deno_core::{JsRuntime, OpState, op2};
 use deno_error::JsErrorBox;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use super::opa::PolicyChain;
 
@@ -61,15 +61,13 @@ pub fn default_refresh_buffer_secs() -> u64 {
     30
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OAuthClientCredentialsConfig {
     pub header_name: String,
     pub token_url: String,
     pub client_id: String,
     pub client_secret: String,
-    #[serde(default)]
     pub scope: Option<String>,
-    #[serde(default = "default_refresh_buffer_secs")]
     pub refresh_buffer_secs: u64,
 }
 
@@ -93,6 +91,37 @@ pub struct HeaderRule {
 }
 
 impl HeaderRule {
+    pub fn new(host: String, methods: Vec<String>, injection: HeaderInjection) -> Self {
+        Self {
+            host,
+            methods: normalize_methods(methods),
+            injection,
+        }
+    }
+
+    pub fn static_header(
+        host: String,
+        methods: Vec<String>,
+        header_name: String,
+        header_value: String,
+    ) -> Self {
+        let mut headers = HashMap::new();
+        headers.insert(header_name, header_value);
+        Self::new(host, methods, HeaderInjection::Static { headers })
+    }
+
+    pub fn oauth_client_credentials(
+        host: String,
+        methods: Vec<String>,
+        config: OAuthClientCredentialsConfig,
+    ) -> Self {
+        Self::new(
+            host,
+            methods,
+            HeaderInjection::OAuthClientCredentials(config),
+        )
+    }
+
     pub fn methods(&self) -> &[String] {
         &self.methods
     }
@@ -129,6 +158,14 @@ impl HeaderRule {
             host == pattern
         }
     }
+}
+
+fn normalize_methods(methods: Vec<String>) -> Vec<String> {
+    methods
+        .into_iter()
+        .map(|method| method.trim().to_uppercase())
+        .filter(|method| !method.is_empty())
+        .collect()
 }
 
 /// Apply header injection rules. User-provided headers take precedence.
