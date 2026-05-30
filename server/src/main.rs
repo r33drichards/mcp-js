@@ -5,10 +5,11 @@ use clap::Parser;
 use rmcp::transport::sse_server::{SseServer, SseServerConfig};
 use rmcp::transport::StreamableHttpServer;
 use rmcp::transport::streamable_http_server::axum::StreamableHttpServerConfig;
-use serde::Deserialize;
+use serde::{Deserialize, de::{self, MapAccess, Visitor}};
 use tokio_util::sync::CancellationToken;
 use std::sync::Arc;
 use utoipa::OpenApi as _;
+use std::fmt;
 mod engine;
 mod mcp;
 mod api;
@@ -864,9 +865,46 @@ struct FetchHeaderConfigRule {
     #[serde(default)]
     methods: Vec<String>,
     #[serde(default)]
-    headers: Option<std::collections::HashMap<String, String>>,
+    headers: Option<StaticHeadersConfig>,
     #[serde(default)]
     auth: Option<FetchHeaderAuthConfig>,
+}
+
+#[derive(Debug)]
+struct StaticHeadersConfig(std::collections::HashMap<String, String>);
+
+impl<'de> Deserialize<'de> for StaticHeadersConfig {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct StaticHeadersVisitor;
+
+        impl<'de> Visitor<'de> for StaticHeadersVisitor {
+            type Value = StaticHeadersConfig;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a JSON object mapping header names to header values")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> std::result::Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut headers = std::collections::HashMap::new();
+
+                while let Some((key, value)) = map.next_entry::<String, String>()? {
+                    if headers.insert(key.clone(), value).is_some() {
+                        return Err(de::Error::custom(format!("duplicate field `{}`", key)));
+                    }
+                }
+
+                Ok(StaticHeadersConfig(headers))
+            }
+        }
+
+        deserializer.deserialize_map(StaticHeadersVisitor)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -901,7 +939,7 @@ impl FetchHeaderConfigRule {
             (Some(headers), None) => engine::fetch::HeaderRule::new(
                 host,
                 methods,
-                engine::fetch::HeaderInjection::Static { headers },
+                engine::fetch::HeaderInjection::Static { headers: headers.0 },
             ),
             (None, Some(auth)) => {
                 if auth.auth_type != "oauth_client_credentials" {
@@ -1356,6 +1394,29 @@ mod tests {
             .expect_err("case-variant duplicate headers should fail");
 
         assert!(err.to_string().contains("duplicate static header name"));
+    }
+
+    #[test]
+    fn load_fetch_header_rules_rejects_exact_duplicate_static_header_names() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let path = dir.path().join("exact-duplicate-static-headers.json");
+        std::fs::write(
+            &path,
+            r#"[{
+                "host": "api.example.com",
+                "headers": {
+                    "Authorization": "Bearer one",
+                    "Authorization": "Bearer two"
+                }
+            }]"#,
+        )
+        .expect("config should be written");
+
+        let err = load_fetch_header_rules(&[], &Some(path.display().to_string()))
+            .expect_err("exact duplicate headers should fail");
+
+        assert!(err.to_string().contains("duplicate field"));
+        assert!(err.to_string().contains("Authorization"));
     }
 
     #[test]
