@@ -7,7 +7,7 @@ on:
     branches: [ main ]
 
 jobs:
-  openapi-drift:
+  generated-docs-drift:
     name: Check openapi.json is up to date
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -24,27 +24,5 @@ jobs:
 
       - uses: DeterminateSystems/flake-checker-action@main
 
-      - name: Build server binary
-        run: nix develop --command bash -c "cargo build --release -p server"
-
-      - name: Regenerate openapi.json
-        run: |
-          ./target/release/server --print-openapi > openapi.json
-          cp openapi.json mcp-v8-client/openapi.json
-
-      - name: Check for drift
-        run: |
-          if ! git diff --exit-code openapi.json mcp-v8-client/openapi.json; then
-            echo ""
-            echo "❌ openapi.json is out of date."
-            echo ""
-            echo "The committed openapi.json does not match what the server binary generates."
-            echo "Regenerate it with:"
-            echo ""
-            echo "  cargo build --release -p server"
-            echo "  ./target/release/server --print-openapi > openapi.json"
-            echo "  cp openapi.json mcp-v8-client/openapi.json"
-            echo ""
-            exit 1
-          fi
-          echo "✅ openapi.json is up to date."
+      - name: Run generated docs drift check
+        run: nix build .#checks.x86_64-linux.docs-generated-check --print-build-logs --no-link -L

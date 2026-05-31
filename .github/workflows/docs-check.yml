@@ -1,0 +1,34 @@
+name: Docs Check
+
+on:
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - name: Build docs package
+        run: nix build .#packages.x86_64-linux.docs --print-build-logs -L
+      - name: Check generated docs drift
+        run: nix build .#checks.x86_64-linux.docs-generated-check --print-build-logs --no-link -L
+      - name: Check docs links
+        uses: lycheeverse/lychee-action@v2
+        with:
+          args: --config .lychee.toml site-docs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - id: setup-chrome
+        uses: browser-actions/setup-chrome@v1
+        with:
+          chrome-version: stable
+      - name: Run docs browser test
+        env:
+          CHROME_BIN: ${{ steps.setup-chrome.outputs.chrome-path }}
+        run: python3 scripts/check_docs_browser.py result
