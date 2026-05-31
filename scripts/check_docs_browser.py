@@ -59,7 +59,13 @@ def dump_dom(chrome: str, url: str, profile_dir: Path) -> str:
         "--dump-dom",
         url,
     ]
-    result = subprocess.run(command, check=True, capture_output=True, text=True)
+    result = subprocess.run(
+        command,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
     return result.stdout
 
 
@@ -88,11 +94,11 @@ def main() -> int:
         thread.start()
         wait_for_server(8000)
 
-        profile_dir = Path(tmpdir) / "chromium-profile"
-        profile_dir.mkdir()
-
         failures: list[str] = []
-        for path, expected_strings in checks:
+        for index, (path, expected_strings) in enumerate(checks):
+            print(f"Checking {path}", flush=True)
+            profile_dir = Path(tmpdir) / f"chromium-profile-{index}"
+            profile_dir.mkdir()
             dom = dump_dom(chrome, f"http://127.0.0.1:8000{path}", profile_dir)
             for expected in expected_strings:
                 if expected not in dom:
