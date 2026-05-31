@@ -22,6 +22,22 @@ fn normalize(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+fn render_default(arg: &clap::Arg, long: &str) -> Option<String> {
+    // Some Clap defaults are computed at runtime from the host environment.
+    // Omitting those values keeps the generated reference deterministic.
+    if long == "max-concurrent-executions" {
+        return None;
+    }
+
+    let defaults: Vec<String> = arg
+        .get_default_values()
+        .iter()
+        .map(|value| value.to_string_lossy().to_string())
+        .collect();
+
+    (!defaults.is_empty()).then(|| format!("- Default: `{}`", defaults.join("`, `")))
+}
+
 fn main() {
     let command = Cli::command();
     let mut sections: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -57,16 +73,8 @@ fn main() {
             block.push(format!("- Environment: `{}`", env.to_string_lossy()));
         }
 
-        let defaults: Vec<String> = arg
-            .get_default_values()
-            .iter()
-            .map(|value| value.to_string_lossy().to_string())
-            .collect();
-        if !defaults.is_empty() {
-            block.push(format!(
-                "- Default: `{}`",
-                defaults.join("`, `")
-            ));
+        if let Some(default_line) = render_default(arg, long) {
+            block.push(default_line);
         }
 
         if arg.get_action().takes_values() {

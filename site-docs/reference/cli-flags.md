@@ -136,7 +136,6 @@ Maximum execution timeout in seconds (default: 30, max: 300)
 
 Maximum concurrent V8 executions (default: CPU core count)
 
-- Default: `16`
 - Value: `MAX_CONCURRENT_EXECUTIONS`
 
 ### `--session-db-path`
