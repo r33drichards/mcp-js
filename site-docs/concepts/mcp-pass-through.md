@@ -1,12 +1,6 @@
 # MCP Pass-Through
 
-`mcp-v8` can register upstream MCP servers as sub-servers. That lets the
-runtime use external MCP tools from JavaScript, while still keeping execution
-inside `mcp-v8`'s JavaScript runtime, state model, and policy boundary.
-
-This is why "pass-through" is the right term. `mcp-v8` is not only an MCP
-server for downstream clients. It can also act as an MCP client to upstream
-servers, then expose those capabilities inside `run_js`.
+`mcp-v8` can register MCP servers as function calls in the v8 runtime. When combined with stubs, this provides a robust surface for progressive tool disclosure, and composability of toolc calls.
 
 ## Register sub-servers
 
@@ -16,13 +10,6 @@ startup.
 
 At the conceptual level, each configured sub-server becomes another capability
 source for the JavaScript runtime.
-
-```mermaid
-flowchart LR
-  A[Upstream MCP server] --> B[mcp-v8 MCP client manager]
-  B --> C[JavaScript runtime]
-  C --> D[run_js execution]
-```
 
 See [Connect as an MCP Server](../how-to/connect-as-an-mcp-server.md) and
 [CLI Flags](../reference/cli-flags.md) for configuration details.
