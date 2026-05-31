@@ -10,8 +10,16 @@ theme:
     name: mkdocs
 plugins:
   - search
-  - mermaid2:
-      javascript: js/mermaid.min.js
+  # The vendored mermaid library is loaded via extra_javascript (below), not
+  # the plugin's `javascript:` option. The pinned mkdocs-mermaid2-plugin
+  # (v1.1.0) emits the library <script src> using the configured path
+  # verbatim, so a relative path like `js/mermaid.min.js` resolves against the
+  # current page and 404s on every sub-page (e.g. /concepts/...), leaving
+  # diagrams unrendered. Listing the library under extra_javascript lets mkdocs
+  # compute the correct per-page URL; the plugin then skips its own injection
+  # because the filename contains "mermaid". This is version-independent and
+  # also works under newer plugin releases.
+  - mermaid2
 nav:
   - Home: index.md
 
@@ -71,3 +79,4 @@ extra_css:
     - stylesheets/footer-nav.css
 extra_javascript:
     - js/footer-nav.js
+    - js/mermaid.min.js
