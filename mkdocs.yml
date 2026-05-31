@@ -67,7 +67,3 @@ markdown_extensions:
   - tables
   - toc:
       permalink: true
-extra_css:
-    - stylesheets/footer-nav.css
-extra_javascript:
-    - js/footer-nav.js
