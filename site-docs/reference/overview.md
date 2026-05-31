@@ -11,12 +11,8 @@ names, or configuration keys.
 
 ## Configuration
 
-- [Configuration and Environment](configuration-and-environment.md)
 - [Policy Files](policy-files.md)
 
-## Client API
-
-- [Rust Client API](rust-client-api.md)
 
 If you are still learning the system, start with
 [Quick Start](../quick-start/overview.md) or [Concepts](../concepts/overview.md).
