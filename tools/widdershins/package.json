@@ -1,0 +1,7 @@
+{
+  "dependencies": {
+    "widdershins": "4.0.1"
+  },
+  "private": true,
+  "name": "@mcp-js/widdershins-tooling"
+}

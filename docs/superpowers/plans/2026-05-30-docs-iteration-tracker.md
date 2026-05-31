@@ -77,6 +77,11 @@ so follow-up tasks can be handled incrementally.
   - docs still build deterministically with `nix build`
   - GitHub Actions now serves the Nix-built `result/` artifact directly
   - headless Chrome verifies key pages outside the Nix sandbox
+- tried Widdershins for the generated HTTP API reference:
+  - vendored a pinned local Widdershins toolchain under `tools/widdershins/`
+  - switched `scripts/generate_http_api_reference.py` to call Widdershins
+  - regenerated `site-docs/reference/http-api.md` from Widdershins output with
+    light MkDocs-oriented post-processing
 
 ## In progress
 

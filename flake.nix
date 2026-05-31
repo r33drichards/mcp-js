@@ -180,6 +180,7 @@
           nativeBuildInputs = [
             docsTools
             docsPython
+            pkgs.nodejs
           ];
 
           dontConfigure = true;
@@ -247,6 +248,7 @@
             nativeBuildInputs = [
               self.packages.x86_64-linux.docs-tools
               docsPython
+              pkgs.nodejs
             ];
 
             dontConfigure = true;
