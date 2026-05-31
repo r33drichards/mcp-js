@@ -1,22 +1,20 @@
-# Quick Start: Claude Code
+# Quick Start: Claude Code CLI
+Add the MCP server to Claude Code using the claude mcp add command:
 
-Add the server to Claude Code:
+Stdio transport (local):
 
-```bash
+# Stateful mode with local filesystem
+```
 claude mcp add mcp-v8 -- mcp-v8 --directory-path /tmp/mcp-v8-heaps
 ```
-
-For a stateless setup instead:
-
-```bash
+# Stateless mode
+```
 claude mcp add mcp-v8 -- mcp-v8 --stateless
 ```
+SSE transport (remote):
 
-Then ask Claude Code:
-
-```text
-Run this JavaScript: console.log(1 + 2)
+```
+claude mcp add mcp-v8 -t sse https://mcp-js-production.up.railway.app/sse
 ```
 
-For more detail, see [Connect as an MCP Server](../how-to/connect-as-an-mcp-server.md)
-and [Run with stdio](../how-to/run-with-stdio.md).
+Then test by running claude and asking: Run this JavaScript: `console.log([1,2,3].map(x => x * 2))`

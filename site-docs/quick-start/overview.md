@@ -3,6 +3,7 @@
 Pick the entry point you want:
 
 - [Claude Code](claude-code.md)
+- [Claude Desktop](claude-code-desktop.md)
 - [Codex](codex.md)
 - [Cursor](cursor.md)
 - [Generic MCP](generic-mcp.md)

@@ -26,7 +26,6 @@ Use the how-to section when you already know the task you need to complete.
 
 - [Connect as an MCP Server](connect-as-an-mcp-server.md)
 - [Use CLI](use-cli.md)
-- [Use Rust Client](use-rust-client.md)
 
 If you are still deciding which path to take, start with
 [Quick Start](../quick-start/overview.md).

@@ -4,7 +4,7 @@ Start a small three-node `mcp-v8` cluster on one machine.
 
 This setup uses:
 
-- Streamable HTTP for the MCP and REST surfaces
+- [Streamable HTTP](../concepts/transports.md) for the MCP and REST surfaces
 - local filesystem storage for heaps
 - separate session databases per node
 - a dedicated Raft port per node
@@ -99,7 +99,7 @@ forwards it to the leader.
 
 ## 6. Understand the routing model
 
-- use `3001`, `3002`, and `3003` for MCP or REST traffic
+- use `3001`, `3002`, and `3003` for MCP or [HTTP API](../reference/http-api.md) traffic
 - use `4001`, `4002`, and `4003` for cluster coordination only
 - reads and status checks can hit any node
 - leader-owned writes may be forwarded under the hood
