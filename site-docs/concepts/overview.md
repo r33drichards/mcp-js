@@ -4,6 +4,7 @@ Use the concepts section when you want to understand how `mcp-v8` works.
 
 ## Execution and state
 
+- [JavaScript Runtime](javascript-runtime.md)
 - [Execution Model](execution-model.md)
 - [Sessions and Heaps](sessions-and-heaps.md)
 

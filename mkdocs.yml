@@ -42,6 +42,7 @@ nav:
       - Use Rust Client: how-to/use-rust-client.md
   - Concepts:
       - Overview: concepts/overview.md
+      - JavaScript Runtime: concepts/javascript-runtime.md
       - Execution Model: concepts/execution-model.md
       - Sessions and Heaps: concepts/sessions-and-heaps.md
       - Transports: concepts/transports.md
