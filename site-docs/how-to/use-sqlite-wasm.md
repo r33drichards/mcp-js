@@ -14,6 +14,14 @@ the `WebAssembly.Instance` with the imports it needs.
 - Emscripten SDK with `emcc` on `PATH`
 - `mcp-v8` built from this repo or installed on the machine
 
+
+## Clone the example repository
+
+```bash
+git clone --depth 1 github.com/r33drichard/mcp-js
+cd mcp-js
+```
+
 ## Build the module
 
 ```bash
