@@ -51,7 +51,11 @@ This derivation should:
 
 - take the repo root as input
 - install the exact tools needed to build the site
-- run the docs generation steps that produce committed reference pages
+- run the docs generation steps that produce committed reference pages:
+  - `python3 scripts/generate_http_api_reference.py`
+  - `./target/release/generate-cli-markdown > site-docs/reference/cli-flags.md`
+  - `./target/release/generate-mcp-tools-markdown > site-docs/reference/mcp-tools.md`
+- generate or stage any required build helper binaries before those steps run
 - run `mkdocs build --strict`
 - publish the built site as the derivation output
 
@@ -59,6 +63,14 @@ This becomes the canonical docs artifact.
 
 The key point is that the Pages workflow and the PR gate both consume this same
 artifact. No separate Python installer path remains.
+
+This package must own both classes of docs work:
+
+- generated reference docs
+- final MkDocs site rendering
+
+That prevents a split pipeline where generated pages are checked in one
+workflow, but the rendered site is built somewhere else.
 
 ### 2. Add a NixOS browser test for docs
 
@@ -145,6 +157,7 @@ After the change, the flow is:
 - build docs with Nix
 - run the NixOS browser test
 - fail if the site does not build or if key content is not visible
+- fail if generated reference pages are stale relative to source
 
 ### Pushes to `main`
 
@@ -158,10 +171,13 @@ After the change, the flow is:
 
 `openapi-drift.yml`
 
-- remains responsible for generated reference drift
-- should stay separate from the Pages deploy
-- may optionally be updated to reuse the same docs package inputs, but it does
-  not need to own deployment
+- should either:
+  - call the same Nix docs build and diff the generated reference files, or
+  - be folded into the new docs gate if that yields a cleaner single-source
+    pipeline
+- must not become a second independent generation path with different tooling
+- should stay separate from the Pages deploy if kept, but it must reuse the
+  same generation logic as the docs package
 
 ## File-Level Design
 
@@ -170,6 +186,12 @@ Expected changes:
 - `flake.nix`
   - add a docs package
   - add a docs browser test check
+- `scripts/generate_http_api_reference.py`
+  - consumed by the Nix docs package as part of the build
+- `server/src/bin/generate-cli-markdown.rs`
+  - consumed by the Nix docs package as part of the build
+- `server/src/bin/generate-mcp-tools-markdown.rs`
+  - consumed by the Nix docs package as part of the build
 - `tests/nixos/docs-browser.nix`
   - new NixOS integration test for browser-visible docs assertions
 - `.github/workflows/docs-check.yml`
@@ -185,10 +207,13 @@ Expected changes:
 Implementation is complete only if all of these are true:
 
 1. `nix build .#packages.x86_64-linux.docs` succeeds locally.
-2. `nix build .#checks.x86_64-linux.docs-browser-test` succeeds locally.
-3. The docs browser test proves rendered content is visible on key pages.
-4. `docs-check.yml` uses the Nix path and no longer uses `pip install mkdocs`.
-5. `deploy-docs.yml` uses the same Nix docs build output.
+2. That build regenerates `site-docs/reference/http-api.md`,
+   `site-docs/reference/cli-flags.md`, and
+   `site-docs/reference/mcp-tools.md` from source-of-truth inputs.
+3. `nix build .#checks.x86_64-linux.docs-browser-test` succeeds locally.
+4. The docs browser test proves rendered content is visible on key pages.
+5. `docs-check.yml` uses the Nix path and no longer uses `pip install mkdocs`.
+6. `deploy-docs.yml` uses the same Nix docs build output.
 
 ## Tradeoffs
 
