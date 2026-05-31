@@ -36,6 +36,11 @@
   pointer-events: none;
 }
 
+.navbar-nav.ms-md-auto a[rel="prev"],
+.navbar-nav.ms-md-auto a[rel="next"] {
+  display: none !important;
+}
+
 @media (max-width: 576px) {
   .docs-footer-nav-list {
     flex-direction: column;
