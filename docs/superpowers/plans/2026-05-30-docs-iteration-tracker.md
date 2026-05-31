@@ -64,6 +64,16 @@ so follow-up tasks can be handled incrementally.
   - transports and MCP integration
   - HTTP API, MCP tools, and CLI flags
   - WASM, fetch, filesystem access, storage, and clustering
+- added a hermetic Nix docs pipeline design and implementation plan for:
+  - a shared Nix docs build that regenerates committed reference pages
+  - PR-gated browser checks in a NixOS VM with headless Chromium
+  - GitHub Pages deploys on every push to `main` from the same Nix build
+  - generated-doc drift checks for OpenAPI, CLI flags, and MCP tools
+- implemented the hermetic Nix docs pipeline in the repo:
+  - `packages.docs` builds the public site from regenerated reference pages
+  - `checks.x86_64-linux.docs-generated-check` verifies generated artifacts stay committed
+  - `checks.x86_64-linux.docs-browser-test` serves the built site and verifies key pages in headless Chromium
+  - docs CI and Pages deploy now use the Nix docs build path
 
 ## In progress
 
@@ -71,7 +81,7 @@ None.
 
 ## Next tasks
 
-None right now.
+- verify the new Nix docs build and checks in GitHub Actions after branch CI runs
 
 ## Notes
 

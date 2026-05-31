@@ -7,8 +7,8 @@ on:
     branches: [ main ]
 
 jobs:
-  openapi-drift:
-    name: Check openapi.json is up to date
+  generated-docs-drift:
+    name: Check generated docs are up to date
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -24,33 +24,5 @@ jobs:
 
       - uses: DeterminateSystems/flake-checker-action@main
 
-      - name: Build server binary
-        run: nix develop --command bash -c "cargo build --release -p server"
-
-      - name: Regenerate openapi.json
-        run: |
-          ./target/release/server --print-openapi > openapi.json
-          cp openapi.json mcp-v8-client/openapi.json
-          python3 scripts/generate_http_api_reference.py
-          ./target/release/generate-cli-markdown > site-docs/reference/cli-flags.md
-          ./target/release/generate-mcp-tools-markdown > site-docs/reference/mcp-tools.md
-
-      - name: Check for drift
-        run: |
-          if ! git diff --exit-code openapi.json mcp-v8-client/openapi.json site-docs/reference/http-api.md site-docs/reference/cli-flags.md site-docs/reference/mcp-tools.md; then
-            echo ""
-            echo "❌ Generated API/docs artifacts are out of date."
-            echo ""
-            echo "The committed generated API docs do not match the current source."
-            echo "Regenerate them with:"
-            echo ""
-            echo "  cargo build --release -p server"
-            echo "  ./target/release/server --print-openapi > openapi.json"
-            echo "  cp openapi.json mcp-v8-client/openapi.json"
-            echo "  python3 scripts/generate_http_api_reference.py"
-            echo "  ./target/release/generate-cli-markdown > site-docs/reference/cli-flags.md"
-            echo "  ./target/release/generate-mcp-tools-markdown > site-docs/reference/mcp-tools.md"
-            echo ""
-            exit 1
-          fi
-          echo "✅ Generated API/docs artifacts are up to date."
+      - name: Run generated docs drift check
+        run: nix build .#checks.x86_64-linux.docs-generated-check --print-build-logs --no-link -L
