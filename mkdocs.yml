@@ -47,6 +47,7 @@ nav:
       - Sessions and Heaps: concepts/sessions-and-heaps.md
       - Transports: concepts/transports.md
       - Integration Surfaces: concepts/integration-surfaces.md
+      - MCP Pass-Through: concepts/mcp-pass-through.md
       - Module Loading: concepts/module-loading.md
       - WASM and Native Modules: concepts/wasm-and-native-modules.md
       - Policy System: concepts/policy-system.md

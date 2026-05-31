@@ -89,6 +89,14 @@ so follow-up tasks can be handled incrementally.
   - reordered the page so runtime internals come before the agent-facing model
   - expanded the teaching flow to cover heaps, sessions, storage, tags, and
     clustered execution
+- added an `MCP Pass-Through` concept page:
+  - explained upstream MCP sub-server registration and the `globalThis.mcp`
+    runtime surface
+  - documented optional stub tools for native discovery that steer agents back
+    to `run_js`
+  - added a composition example showing how pass-through can move large data
+    through fetch, filesystem, transformation, and upstream storage tools
+    without pushing payloads into the context window
 
 ## In progress
 
