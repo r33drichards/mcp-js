@@ -1,5 +1,6 @@
 .docs-footer-nav {
   margin: 0.75rem 0 0;
+  padding: 0 1rem;
 }
 
 .docs-footer-nav-list {
@@ -43,5 +44,9 @@
 
   .docs-footer-nav-item-next {
     margin-left: 0;
+  }
+
+  .docs-footer-nav {
+    padding: 0 0.5rem;
   }
 }
