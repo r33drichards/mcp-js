@@ -26,20 +26,8 @@ Use this documentation by intent:
 
 ## What this site covers
 
-- how to [install]/install/release-script/) and run the server
-- how transports and execution modes differ
-- how sessions, heaps, and clustering work
-- how policy-gated fetch, filesystem access, and module loading behave
-- how to use the HTTP API and Rust client
-
-## Core concepts
-
-- [Execution Model](concepts/execution-model.md)
-- [Sessions and Heaps](concepts/sessions-and-heaps.md)
-- [Integration Surfaces](concepts/integration-surfaces.md)
-- [Module Loading](concepts/module-loading.md)
-- [WASM and Native Modules](concepts/wasm-and-native-modules.md)
-- [Policy System](concepts/policy-system.md)
-- [Network Access](concepts/network-access.md)
-- [Filesystem Access](concepts/filesystem-access.md)
-- [Clustering](concepts/clustering.md)
+- how to [install](install/release-script.md) and [run the server](how-to/run-with-stdio.md)
+- how [transports](concepts/transports.md) and [execution modes](concepts/execution-model.md) differ
+- how [sessions](concepts/sessions-and-heaps.md), [heaps](concepts/sessions-and-heaps.md), and [clustering](concepts/clustering.md) work
+- how policy-gated [fetch](concepts/network-access.md), [filesystem access](concepts/filesystem-access.md), and [module loading](concepts/module-loading.md) behave
+- how to use the [HTTP API](reference/http-api.md)
