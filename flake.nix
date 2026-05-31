@@ -39,6 +39,26 @@
           rustc = rustToolchain;
         };
 
+        serverCargoDeps = (pkgs.callPackage ./nix/fetch-cargo-vendor.nix {
+          cargo = rustToolchain;
+        } {
+          src = ./server;
+          hash = "sha256-L1IGe3cHLFT35OQ/aJ4xq0RJqRZ4Yu6YbTSMf6ziMr0=";
+        });
+
+        docsPython = pkgs.python3.withPackages (
+          ps: with ps; [
+            mkdocs
+            mkdocs-mermaid2-plugin
+          ]
+        );
+
+        docsToolCargoFlags = [
+          "--bin" "server"
+          "--bin" "generate-cli-markdown"
+          "--bin" "generate-mcp-tools-markdown"
+        ];
+
         # Patched replace-workspace-values that handles the 'version' key
         # in workspace-inherited dependencies.  Upstream nixpkgs script
         # does not handle this, causing builds to fail for crates (like
@@ -72,12 +92,50 @@
             "aarch64-darwin" = "sha256-yHa1eydVCrfYGgrZANbzgmmf25p7ui1VMas2A7BhG6k=";
           }.${system};
         };
+
+        docsTools = rustPlatform.buildRustPackage {
+          pname = "mcp-js-docs-tools";
+          version = "0.1.0";
+          src = ./server;
+
+          cargoDeps = serverCargoDeps;
+
+          cargoBuildFlags = docsToolCargoFlags;
+          cargoInstallFlags = docsToolCargoFlags;
+
+          nativeBuildInputs = with pkgs; [
+            clang
+            git
+            llvmPackages.bintools
+            pkg-config
+          ];
+
+          buildInputs = with pkgs; [
+            openssl
+          ];
+
+          LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
+          RUSTY_V8_ARCHIVE = "${rustyV8Archive}";
+          doCheck = false;
+        };
+
+        docsGenerationCommands = ''
+          export HOME="$TMPDIR/home"
+          mkdir -p "$HOME"
+
+          server --print-openapi > openapi.json
+          cp openapi.json mcp-v8-client/openapi.json
+          python3 scripts/generate_http_api_reference.py
+          generate-cli-markdown > site-docs/reference/cli-flags.md
+          generate-mcp-tools-markdown > site-docs/reference/mcp-tools.md
+        '';
       in {
         devShells.default = import ./shell.nix { inherit pkgs rustToolchain rustyV8Archive; };
         devShells.fuzz = import ./shell.nix { inherit pkgs rustyV8Archive; rustToolchain = rustNightly; };
 
         # SQLite compiled to WASM via Emscripten — used by the sqlite-wasm example.
         packages.sqlite-wasm = import ./nix/sqlite-wasm.nix { inherit pkgs; };
+        packages.docs-tools = docsTools;
 
         packages.default = rustPlatform.buildRustPackage {
           pname = "mcp-js-server";
@@ -86,12 +144,7 @@
 
           # Use a local copy of fetchCargoVendor so the staging helper fetches
           # crates from the registry CDN instead of the crates.io API endpoint.
-          cargoDeps = (pkgs.callPackage ./nix/fetch-cargo-vendor.nix {
-            cargo = rustToolchain;
-          } {
-            src = ./server;
-            hash = "sha256-L1IGe3cHLFT35OQ/aJ4xq0RJqRZ4Yu6YbTSMf6ziMr0=";
-          });
+          cargoDeps = serverCargoDeps;
 
           nativeBuildInputs = with pkgs; [
             clang
@@ -117,6 +170,35 @@
           doCheck = false;
 
           meta.mainProgram = "server";
+        };
+
+        packages.docs = pkgs.stdenvNoCC.mkDerivation {
+          pname = "mcp-js-docs";
+          version = "0.1.0";
+          src = self;
+
+          nativeBuildInputs = [
+            docsTools
+            docsPython
+          ];
+
+          dontConfigure = true;
+          strictDeps = true;
+
+          buildPhase = ''
+            runHook preBuild
+
+            ${docsGenerationCommands}
+            python3 -m mkdocs build --strict
+
+            runHook postBuild
+          '';
+
+          installPhase = ''
+            runHook preInstall
+            cp -R site "$out"
+            runHook postInstall
+          '';
         };
       }
     )) // {

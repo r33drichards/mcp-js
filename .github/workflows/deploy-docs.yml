@@ -19,16 +19,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - run: python -m pip install --upgrade pip
-      - run: python -m pip install mkdocs mkdocs-mermaid2-plugin
-      - run: python -m mkdocs build --strict
+      - uses: DeterminateSystems/nix-installer-action@main
+      - name: Build docs artifact
+        run: nix build .#packages.x86_64-linux.docs --print-build-logs -L
+      - name: Stage Pages artifact
+        run: |
+          mkdir public-docs
+          cp -R result/. public-docs/
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: site
+          path: public-docs
 
   deploy:
     if: github.ref == 'refs/heads/main'
