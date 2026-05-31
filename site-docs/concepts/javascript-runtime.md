@@ -1,57 +1,67 @@
 # JavaScript Runtime
 
 `mcp-v8` runs agent code inside an isolated V8 runtime built on
-[`deno_core`](https://github.com/denoland/deno_core), the core engine used by
-the [Deno project](https://deno.com/). It is not a full Deno runtime, and it
-is not a full Node.js runtime. It is a controlled JavaScript runtime with a
-subset of Node.js-compatible host surfaces added where the server chooses to
-expose them.
+[`deno_core`](https://github.com/denoland/deno_core), the core runtime crate
+used by the [Deno project](https://deno.com/). It is not a full Deno runtime,
+and it is not a full Node.js runtime. It exposes a controlled JavaScript
+environment with a subset of Node.js-compatible surfaces when the server
+chooses to provide them.
 
-This page introduces the runtime in the order most users meet it:
+The simplest way to learn the runtime is in layers:
 
-1. run JavaScript once
-2. preserve state across runs
-3. store that state somewhere durable
-4. organize it with sessions and tags
-5. coordinate it across a cluster
+1. run one piece of JavaScript
+2. keep the resulting state as a heap
+3. group related executions into sessions
+4. store heaps durably
+5. organize heaps with tags
+6. coordinate state across a cluster
 
-## What this runtime is
+## Runtime internals
 
-The simplest way to think about `mcp-v8` is:
+At the implementation level, the runtime is:
 
-- JavaScript runs inside V8
-- `deno_core` provides the runtime foundation and event loop behavior
-- the server decides which host capabilities exist
-- some APIs are Node.js-compatible, but only as a subset and only when enabled
+- a V8 isolate for JavaScript execution
+- a `deno_core` event loop and op system underneath that isolate
+- a server-controlled set of host capabilities attached to the runtime
+- a bounded environment with time, memory, and policy limits
 
-That means the runtime is closer to a sandboxed JavaScript compute surface than
-to a normal shell session or a general Node.js process.
+That combination matters because it gives `mcp-v8` a smaller and more
+controlled execution surface than a Linux VM or a full developer shell.
 
-At a high level, code can rely on:
+Conceptually:
 
-- ES modules
-- top-level `await`
-- captured console output
-- execution limits such as timeouts and heap caps
+```mermaid
+flowchart LR
+  A[Agent JavaScript] --> B[V8 isolate]
+  B --> C[deno_core runtime]
+  C --> D{requested capability}
+  D -->|module import| E[module loader]
+  D -->|network access| F[fetch surface]
+  D -->|filesystem access| G[filesystem surface]
+  D -->|WASM use| H[WASM loader]
+  E --> I[config and policy checks]
+  F --> I
+  G --> I
+  H --> I
+  I --> J[allow or deny]
+```
 
-Code should not assume:
+Some interfaces will feel familiar if you know Node.js, but the right mental
+model is "selected compatibility," not "full Node." The runtime may expose
+Node-style modules such as `fs`, but only as a subset and only when enabled.
 
-- a full Node.js standard library
-- a full Deno runtime surface
-- arbitrary filesystem access
-- arbitrary subprocess access
-- unrestricted network access
+See:
+
+- [Module Loading](module-loading.md)
+- [Network Access](network-access.md)
+- [Filesystem Access](filesystem-access.md)
+- [WASM and Native Modules](wasm-and-native-modules.md)
+- [Policy System](policy-system.md)
 
 ## Start with one execution
 
-At its most basic, the runtime executes one piece of JavaScript in an isolated
-environment.
-
-This is the starting point for understanding everything else. An agent sends
-JavaScript, the runtime executes it, and the server captures the result and
-output.
-
-Conceptually:
+At its simplest, `mcp-v8` runs one piece of JavaScript in an isolated runtime
+and returns the result and captured output.
 
 ```mermaid
 flowchart LR
@@ -60,31 +70,15 @@ flowchart LR
   B --> D[console output]
 ```
 
-If you use the runtime this way, each execution can be treated as independent.
-This is the stateless model.
+This is the stateless model. Each execution starts fresh unless you explicitly
+resume from a prior heap.
 
-See [Execution Model](execution-model.md) for the exact lifecycle and the
-difference between stateful and stateless execution.
+See [Execution Model](execution-model.md) for the exact lifecycle.
 
 ## Persist state with heaps
 
-The runtime becomes much more useful when it can resume from prior JavaScript
-state.
-
-In stateful mode, a completed execution can produce a heap snapshot. A later
-execution can start from that heap instead of from a blank runtime.
-
-That changes the model from:
-
-- run one isolated program
-
-to:
-
-- run a step
-- capture the resulting state
-- resume from that state in the next step
-
-Conceptually:
+Stateful execution begins when one run produces a heap snapshot and a later
+run resumes from it.
 
 ```mermaid
 flowchart LR
@@ -93,62 +87,36 @@ flowchart LR
   C --> D[new output heap]
 ```
 
-This is the foundation for iterative agent workflows. The runtime is no longer
-only an evaluator. It becomes a resumable environment.
+This is the first big shift in how to think about the runtime. It is no longer
+only a JavaScript evaluator. It becomes a resumable environment that can carry
+state forward across steps.
 
-See [Sessions and Heaps](sessions-and-heaps.md) for the full state model.
+See [Sessions and Heaps](sessions-and-heaps.md).
 
 ## Track work with sessions
 
-Heap snapshots preserve runtime state. Sessions preserve runtime history.
+Heaps preserve runtime state. Sessions preserve runtime history.
 
-A session gives a human-meaningful way to group related executions. Instead of
-thinking only in heap hashes, you can think in terms of:
+A heap answers: "what state should I resume from?" A session answers: "which
+executions belong to the same piece of work?"
 
-- this task
-- this conversation
-- this workflow
-- this user operation
-
-The useful distinction is:
-
-- heaps capture **state**
-- sessions capture **history**
-
-In practice, this helps agents and operators answer different questions:
-
-- which state should I resume from?
-- which executions were part of the same workflow?
-- what happened before this runtime reached its current state?
-
-Sessions do not replace heaps. They make long-running stateful work easier to
-understand.
+That distinction makes long-running agent workflows easier to inspect and
+operate. You can follow a session as a task timeline while still resuming from
+specific heap snapshots.
 
 See [Sessions and Heaps](sessions-and-heaps.md) and
-[MCP Tools](../reference/mcp-tools.md) for the stateful surfaces.
+[MCP Tools](../reference/mcp-tools.md).
 
 ## Store heaps locally or in S3
 
-Once the runtime can preserve heaps, those heaps have to live somewhere.
-
-The server supports:
+Once state matters, storage matters too. The server can persist heaps in:
 
 - local filesystem storage
 - S3-backed storage
 - S3 with a local write-through cache
 
-This is not only an operational detail. Storage changes what the runtime can
-do across calls.
-
-Without storage, stateful execution has nowhere durable to keep its output.
-With storage, the runtime can preserve and resume work across multiple steps,
-process restarts, or deployments.
-
-The tradeoff is simple:
-
-- local storage is the easiest way to start
-- S3 is better when you need durable or shared storage
-- cached S3 helps balance durability with performance
+Local storage is the easiest way to start. S3 is better when state needs to
+survive node replacement or be shared across a wider deployment.
 
 See:
 
@@ -157,45 +125,24 @@ See:
 
 ## Organize heaps with tags
 
-As soon as the runtime starts producing many heaps, raw hashes stop being
-enough.
+Heap hashes are precise, but they are not a good way to navigate a large body
+of saved state. Tags make heaps easier to search and reason about without
+changing the content-addressed storage model.
 
-Heap tags solve that problem. They add searchable metadata around snapshots
-without changing the snapshot contents.
+That lets you move from "resume this exact hash" to more usable workflows such
+as:
 
-That makes the runtime easier to use for iterative work:
+- find the latest checkpoint for a task
+- label a heap as a milestone or recovery point
+- attach human-meaningful metadata to saved state
 
-- mark a heap as a checkpoint
-- associate heaps with a task or environment
-- find the latest useful state without remembering only hashes
-
-So the progression becomes:
-
-- execute code
-- persist state
-- organize that state
-
-This is how the runtime grows from a sandboxed evaluator into a practical
-stateful system for agents.
-
-See [Sessions and Heaps](sessions-and-heaps.md) for the storage model and
-[MCP Tools](../reference/mcp-tools.md) for tagging and query operations.
+See [Sessions and Heaps](sessions-and-heaps.md) and
+[MCP Tools](../reference/mcp-tools.md).
 
 ## Scale stateful execution across a cluster
 
-On one node, the runtime preserves and resumes state locally.
-
-In a cluster, the runtime still executes JavaScript the same way, but the
-state layer becomes coordinated across nodes.
-
-That matters most for:
-
-- session history
-- replicated writes
-- leader-owned coordination
-- a consistent view of state across the cluster
-
-Conceptually:
+On one node, stateful execution is a local concern. In a cluster, the runtime
+is still the same JavaScript runtime, but the state layer becomes distributed.
 
 ```mermaid
 flowchart LR
@@ -207,70 +154,37 @@ flowchart LR
   F --> G[cluster converges]
 ```
 
-The teaching point is: clustered execution is not a different JavaScript
-language model. It is the same runtime with a distributed state layer.
+The important teaching point is that clustering changes how state is
+coordinated, not how JavaScript itself runs. You are scaling the stateful
+execution model, not switching to a different runtime.
 
-See [Clustering](clustering.md) and [Run a Cluster](../how-to/run-a-cluster.md)
-for the operational model.
+See [Clustering](clustering.md) and
+[Run a Cluster](../how-to/run-a-cluster.md).
 
-## Host capabilities are attached selectively
+## Agent-facing model
 
-The runtime does not inherit all host features automatically. The server
-attaches specific capabilities into the JavaScript environment.
+From an agent's point of view, the runtime should be treated as:
 
-That is why the runtime can stay lightweight while still being controlled.
+- JavaScript-first compute
+- isolated by default
+- resumable when you opt into heaps
+- organized through sessions and tags
+- durable when you configure storage
+- scalable when you coordinate state across a cluster
 
-Conceptually:
+Agents should assume:
 
-```mermaid
-flowchart LR
-  A[Agent JavaScript] --> B[V8 runtime]
-  B --> C{requested action}
-  C -->|module import| D[module loader]
-  C -->|network request| E[fetch surface]
-  C -->|file access| F[filesystem surface]
-  C -->|WASM use| G[WASM loader]
-  D --> H[config and policy checks]
-  E --> H
-  F --> H
-  G --> H
-  H --> I[allow or deny]
-```
-
-Some of these surfaces are intentionally familiar. For example, filesystem
-operations can be exposed through a Node.js-compatible `fs` surface. But the
-important qualifier stays the same: it is a subset, and it exists only when
-enabled.
-
-See:
-
-- [Module Loading](module-loading.md)
-- [Network Access](network-access.md)
-- [Filesystem Access](filesystem-access.md)
-- [WASM and Native Modules](wasm-and-native-modules.md)
-- [Policy System](policy-system.md)
-
-## What agents should assume
-
-When using this runtime, agents should assume:
-
-- JavaScript is the primary compute surface
-- persistence is explicit, not automatic
-- host access is capability-based
 - some familiar Node.js-style APIs may exist, but only as a bounded subset
-- scaling to multiple nodes changes state coordination, not the language model
+- host access is capability-based, not implicit
+- persistence is explicit, not automatic
+- cluster mode changes state coordination, not the language model
 
 Agents should not assume:
 
 - "this is just Node"
 - "this is just Deno"
 - "I can use the host like a full shell"
-- "my state always carries forward unless I ask for it to"
-
-The best way to use `mcp-v8` is to start with one execution, add persistence
-when you need it, add storage when you want durable state, add tags and
-sessions when you need organization, and add clustering when you need
-coordinated distributed state.
+- "state always carries forward unless I ask for it to"
 
 ## Related concepts
 

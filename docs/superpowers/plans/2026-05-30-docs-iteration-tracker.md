@@ -82,6 +82,13 @@ so follow-up tasks can be handled incrementally.
   - switched `scripts/generate_http_api_reference.py` to call Widdershins
   - regenerated `site-docs/reference/http-api.md` from Widdershins output with
     light MkDocs-oriented post-processing
+- rewrote the `JavaScript Runtime` concept page to teach the runtime
+  progressively:
+  - clarified that the runtime is built on `deno_core` and linked to the Deno project
+  - made the Node.js story explicit as selected subset compatibility
+  - reordered the page so runtime internals come before the agent-facing model
+  - expanded the teaching flow to cover heaps, sessions, storage, tags, and
+    clustered execution
 
 ## In progress
 
