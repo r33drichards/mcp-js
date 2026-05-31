@@ -97,6 +97,10 @@ so follow-up tasks can be handled incrementally.
   - added a composition example showing how pass-through can move large data
     through fetch, filesystem, transformation, and upstream storage tools
     without pushing payloads into the context window
+- stopped vendoring `tools/widdershins/node_modules`:
+  - changed the HTTP API generator to resolve `widdershins` from `PATH`
+  - added a flake-packaged `widdershins` tool for docs generation
+  - kept only the Widdershins manifest and lockfile in the repo
 
 ## In progress
 

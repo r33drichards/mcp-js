@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import shutil
 import subprocess
@@ -28,21 +29,18 @@ THIRD_LEVEL_HEADING = re.compile(r'^<h3 id="([^"]+)">([^<]+)</h3>$')
 
 
 def run_widdershins(input_path: Path) -> str:
-    repo_root = Path(__file__).resolve().parent.parent
-    widdershins_cli = repo_root / "tools" / "widdershins" / "node_modules" / "widdershins" / "widdershins.js"
-    if not widdershins_cli.exists():
-        raise SystemExit(f"Missing vendored Widdershins CLI at {widdershins_cli}")
-
-    node = shutil.which("node")
-    if not node:
-        raise SystemExit("Could not find `node` in PATH.")
+    widdershins = os.environ.get("WIDDERSHINS") or shutil.which("widdershins")
+    if not widdershins:
+        raise SystemExit(
+            "Could not find `widdershins` in PATH. "
+            "Install it through the flake docs build inputs or set WIDDERSHINS."
+        )
 
     with tempfile.NamedTemporaryFile("r+", encoding="utf-8", suffix=".md", delete=False) as handle:
         tmp_output = Path(handle.name)
 
     command = [
-        node,
-        str(widdershins_cli),
+        widdershins,
         "--omitHeader",
         "--summary",
         "-c",

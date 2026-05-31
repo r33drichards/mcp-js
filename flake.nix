@@ -119,6 +119,33 @@
           doCheck = false;
         };
 
+        widdershins = pkgs.buildNpmPackage {
+          pname = "widdershins";
+          version = "4.0.1";
+          src = ./tools/widdershins;
+
+          npmDeps = pkgs.importNpmLock {
+            npmRoot = ./tools/widdershins;
+          };
+          npmConfigHook = pkgs.importNpmLock.npmConfigHook;
+
+          dontNpmBuild = true;
+          nativeBuildInputs = [ pkgs.makeWrapper ];
+
+          installPhase = ''
+            runHook preInstall
+
+            mkdir -p "$out/libexec/widdershins" "$out/bin"
+            cp package.json package-lock.json "$out/libexec/widdershins/"
+            cp -R node_modules "$out/libexec/widdershins/"
+
+            makeWrapper ${pkgs.nodejs}/bin/node "$out/bin/widdershins" \
+              --add-flags "$out/libexec/widdershins/node_modules/widdershins/widdershins.js"
+
+            runHook postInstall
+          '';
+        };
+
         docsGenerationCommands = ''
           export HOME="$TMPDIR/home"
           mkdir -p "$HOME"
@@ -136,6 +163,7 @@
         # SQLite compiled to WASM via Emscripten — used by the sqlite-wasm example.
         packages.sqlite-wasm = import ./nix/sqlite-wasm.nix { inherit pkgs; };
         packages.docs-tools = docsTools;
+        packages.widdershins = widdershins;
 
         packages.default = rustPlatform.buildRustPackage {
           pname = "mcp-js-server";
@@ -180,7 +208,7 @@
           nativeBuildInputs = [
             docsTools
             docsPython
-            pkgs.nodejs
+            widdershins
           ];
 
           dontConfigure = true;
@@ -248,7 +276,7 @@
             nativeBuildInputs = [
               self.packages.x86_64-linux.docs-tools
               docsPython
-              pkgs.nodejs
+              self.packages.x86_64-linux.widdershins
             ];
 
             dontConfigure = true;
