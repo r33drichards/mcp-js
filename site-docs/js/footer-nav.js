@@ -23,6 +23,26 @@ document.addEventListener("DOMContentLoaded", function () {
   var list = document.createElement("ul");
   list.className = "docs-footer-nav-list";
 
+  function navTitleFor(link) {
+    var href = link.getAttribute("href");
+    if (!href) {
+      return "";
+    }
+
+    var candidates = document.querySelectorAll(
+      '.dropdown-item[href="' + href + '"], .nav-link[href="' + href + '"]'
+    );
+
+    for (var i = 0; i < candidates.length; i++) {
+      var text = candidates[i].textContent.trim();
+      if (text) {
+        return text;
+      }
+    }
+
+    return "";
+  }
+
   function appendItem(link, kind) {
     if (!link) {
       return;
@@ -32,6 +52,28 @@ document.addEventListener("DOMContentLoaded", function () {
 
     var clone = link.cloneNode(true);
     clone.classList.add("docs-footer-nav-link");
+    clone.innerHTML = "";
+
+    var label = navTitleFor(link);
+    if (kind === "prev") {
+      var prevIcon = document.createElement("i");
+      prevIcon.className = "fa fa-arrow-left";
+      prevIcon.setAttribute("aria-hidden", "true");
+      clone.appendChild(prevIcon);
+    }
+
+    clone.appendChild(document.createTextNode(label || link.textContent.trim()));
+
+    if (kind === "next") {
+      var nextIcon = document.createElement("i");
+      nextIcon.className = "fa fa-arrow-right";
+      nextIcon.setAttribute("aria-hidden", "true");
+      clone.appendChild(document.createTextNode(" "));
+      clone.appendChild(nextIcon);
+    } else {
+      clone.insertBefore(document.createTextNode(" "), clone.childNodes[1] || null);
+    }
+
     item.appendChild(clone);
     list.appendChild(item);
   }
