@@ -17,7 +17,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@main
       - name: Build docs artifact
-        run: nix build .#packages.x86_64-linux.docs --print-build-logs --no-link -L
+        run: nix build .#packages.x86_64-linux.docs --print-build-logs -L
       - name: Stage built docs
         run: |
           rm -rf public-docs

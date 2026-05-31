@@ -7,7 +7,8 @@ theme:
   name: mkdocs
 plugins:
   - search
-  - mermaid2
+  - mermaid2:
+      javascript: js/mermaid.min.js
 nav:
   - Home: index.md
   - Quick Start:

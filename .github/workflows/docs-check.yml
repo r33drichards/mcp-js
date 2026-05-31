@@ -24,7 +24,7 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
       - name: Build docs package
-        run: nix build .#packages.x86_64-linux.docs --print-build-logs --no-link -L
+        run: nix build .#packages.x86_64-linux.docs --print-build-logs -L
       - name: Stage built docs
         run: |
           rm -rf public-docs
