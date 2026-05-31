@@ -26,6 +26,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - id: setup-chrome
         uses: browser-actions/setup-chrome@v1
+        with:
+          chrome-version: stable
       - name: Run docs browser test
         env:
           CHROME_BIN: ${{ steps.setup-chrome.outputs.chrome-path }}
