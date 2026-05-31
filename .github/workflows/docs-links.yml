@@ -18,15 +18,9 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@main
       - name: Build docs artifact
         run: nix build .#packages.x86_64-linux.docs --print-build-logs -L
-      - name: Stage built docs
-        run: |
-          rm -rf public-docs
-          mkdir public-docs
-          cp -R result/. public-docs/
-          chmod -R u+w public-docs
       - name: Check docs links
         uses: lycheeverse/lychee-action@v2
         with:
-          args: --config .lychee.toml public-docs
+          args: --config .lychee.toml site-docs
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
