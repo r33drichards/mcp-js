@@ -290,10 +290,6 @@
               runHook postInstall
             '';
           };
-          docs-browser-test = pkgs.nixosTest (import ./tests/nixos/docs-browser.nix {
-            inherit pkgs;
-            docsSite = self.packages.x86_64-linux.docs;
-          });
         };
     };
 }

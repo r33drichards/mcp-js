@@ -72,8 +72,11 @@ so follow-up tasks can be handled incrementally.
 - implemented the hermetic Nix docs pipeline in the repo:
   - `packages.docs` builds the public site from regenerated reference pages
   - `checks.x86_64-linux.docs-generated-check` verifies generated artifacts stay committed
-  - `checks.x86_64-linux.docs-browser-test` serves the built site and verifies key pages in headless Chromium
   - docs CI and Pages deploy now use the Nix docs build path
+- moved the docs browser-visible content check out of the NixOS test sandbox:
+  - docs still build deterministically with `nix build`
+  - GitHub Actions now serves the Nix-built `result/` artifact directly
+  - headless Chrome verifies key pages outside the Nix sandbox
 
 ## In progress
 

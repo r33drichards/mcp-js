@@ -14,15 +14,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@main
-        with:
-          extra-conf: |
-            system-features = nixos-test benchmark big-parallel kvm
-            sandbox = false
-      - name: Enable KVM
-        run: |
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm
       - name: Build docs package
         run: nix build .#packages.x86_64-linux.docs --print-build-logs -L
       - name: Check generated docs drift
@@ -33,5 +24,9 @@ jobs:
           args: --config .lychee.toml site-docs
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - id: setup-chrome
+        uses: browser-actions/setup-chrome@v1
       - name: Run docs browser test
-        run: nix build .#checks.x86_64-linux.docs-browser-test --print-build-logs --no-link -L
+        env:
+          CHROME_BIN: ${{ steps.setup-chrome.outputs.chrome-path }}
+        run: python3 scripts/check_docs_browser.py result
