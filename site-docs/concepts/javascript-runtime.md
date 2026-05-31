@@ -6,7 +6,8 @@ used by the [Deno project](https://deno.com/). It is not a full Deno runtime,
 and it is not a full Node.js runtime. It exposes a controlled JavaScript
 environment with a subset of Node.js-compatible surfaces when the server
 chooses to provide them. It can execute both JavaScript and TypeScript, but
-TypeScript support is type stripping only, not type checking.
+TypeScript support is type stripping only, not type checking. It also supports
+`async`/`await` and Promises through the `deno_core` event loop.
 
 The simplest way to learn the runtime is in layers:
 
@@ -78,6 +79,10 @@ The same entry point also accepts TypeScript. Before execution, the runtime
 strips type syntax with SWC and then runs the resulting JavaScript. That means
 TypeScript is useful for authoring convenience, but the runtime does not act
 as a type checker.
+
+Async JavaScript is fully supported. Code can `await` Promises, schedule
+asynchronous work, and rely on the runtime's `deno_core` event loop to drive
+those tasks to completion within the configured execution limits.
 
 See [Execution Model](execution-model.md) for the exact lifecycle.
 
@@ -182,6 +187,7 @@ Agents should assume:
 
 - some familiar Node.js-style APIs may exist, but only as a bounded subset
 - TypeScript works, but only through type removal before execution
+- `async`/`await` and Promises work as normal JavaScript control flow
 - host access is capability-based, not implicit
 - persistence is explicit, not automatic
 - cluster mode changes state coordination, not the language model
