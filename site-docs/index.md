@@ -26,7 +26,7 @@ Use this documentation by intent:
 
 ## What this site covers
 
-- how to install and run the server
+- how to [install]/install/release-script/) and run the server
 - how transports and execution modes differ
 - how sessions, heaps, and clustering work
 - how policy-gated fetch, filesystem access, and module loading behave
