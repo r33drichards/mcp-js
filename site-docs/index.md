@@ -9,8 +9,7 @@ content-addressed heap persistence.
 access to host resources, but the cost of a full Linux VM is too high. It adds
 a policy layer between the JavaScript runtime and the underlying machine so you
 can expose network, filesystem, and other capabilities with tighter control and
-lower overhead than VM-based sandbox products such as Daytona, E2B, or
-Cloudflare sandboxes.
+lower overhead than VM or container-based approaches.
 
 ## Quick Start
 

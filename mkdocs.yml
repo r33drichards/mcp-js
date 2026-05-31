@@ -1,10 +1,13 @@
 site_name: mcp-v8
 site_description: JavaScript MCP server, transports, policies, and operational guidance
 site_url: https://r33drichards.github.io/mcp-js/
+repo_url: https://github.com/r33drichards/mcp-js
+repo_name: r33drichards/mcp-js
+edit_uri_template: edit/main/site-docs/{path}
 docs_dir: site-docs
 site_dir: site
 theme:
-  name: mkdocs
+    name: mkdocs
 plugins:
   - search
   - mermaid2:
@@ -14,6 +17,7 @@ nav:
   - Quick Start:
       - Overview: quick-start/overview.md
       - Claude Code: quick-start/claude-code.md
+      - Claude Desktop: quick-start/claude-code-desktop.md
       - Codex: quick-start/codex.md
       - Cursor: quick-start/cursor.md
       - Generic MCP: quick-start/generic-mcp.md
@@ -64,3 +68,7 @@ markdown_extensions:
   - tables
   - toc:
       permalink: true
+extra_css:
+    - stylesheets/footer-nav.css
+extra_javascript:
+    - js/footer-nav.js
