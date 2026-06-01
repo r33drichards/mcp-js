@@ -68,23 +68,6 @@ flowchart LR
   F --> G[Upstream MCP server]
 ```
 
-## Why stubs point back to `run_js`
-
-This design is deliberate.
-
-If a discovered upstream tool executed directly as a plain proxy call, the
-agent would bypass the main reason to use `mcp-v8` in the first place:
-
-- JavaScript orchestration
-- resumable heaps and sessions
-- captured output
-- runtime-level control and policy checks
-
-By steering the agent back to `run_js`, `mcp-v8` keeps the tool call inside
-the same execution model as the rest of the task.
-
-The result is guided delegation, not transparent proxying.
-
 ## Compose tools without pushing data through the context window
 
 One of the main benefits of pass-through is that JavaScript can compose local
