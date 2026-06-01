@@ -121,18 +121,6 @@ So the control chain becomes:
 
 See [Policy System](policy-system.md) for the broader policy model.
 
-## When to use pass-through
-
-Use MCP pass-through when:
-
-- JavaScript should orchestrate several steps around an upstream tool call
-- the agent benefits from heaps, sessions, or captured output
-- you want discovery to stay visible through MCP stubs
-- you want one runtime to coordinate both local code and remote MCP tools
-
-Call an upstream server directly from the outer client instead when the
-runtime adds no value and you do not need `run_js` as the execution layer.
-
 ## Related concepts
 
 - [Integration Surfaces](integration-surfaces.md)
