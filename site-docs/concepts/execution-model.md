@@ -1,107 +1,83 @@
 # Execution Model
 
-`mcp-v8` runs JavaScript in an isolated V8 runtime, but it does not behave
-like a browser or a general Node.js process. Code executes as ES modules,
-supports top-level `await`, and uses an execution registry to track work after
-submission.
+mcp-v8 supports two fundamentally different execution modes -- stateful and stateless -- and uses an asynchronous submit-poll-read pattern for all executions. Understanding these modes and the execution lifecycle is essential for designing effective agent workflows.
 
-The main split is between:
+## Stateful Mode
 
-- **stateful execution**, where `run_js` queues work and returns an execution
-  ID immediately
-- **stateless execution**, where the server waits internally and returns
-  output and result directly
+In stateful mode, every execution produces a V8 heap snapshot. This snapshot captures the entire state of the JavaScript environment: all variables, closures, prototypes, and module registrations. The snapshot is serialized, hashed with SHA-256 to produce a content-addressed key, and stored in the configured storage backend.
 
-## Stateful execution
+Subsequent executions can provide a `heap` parameter pointing to a previous snapshot. The V8 isolate is restored from that snapshot, and the new code runs in the context of the prior state. This creates a chain of execution states, where each step builds on the last.
 
-In stateful mode, the lifecycle looks like this:
+Stateful mode exists because multi-turn agent conversations benefit enormously from persistent state. An agent can define functions in one turn, populate data structures in the next, and query them in a third -- without re-running all prior code. The content-addressed storage means that identical states are automatically deduplicated, and any prior state can be revisited by referencing its hash.
 
-```mermaid
-sequenceDiagram
-  participant Client
-  participant MCP as MCP surface
-  participant Registry as Execution Registry
-  participant V8 as V8 Isolate
-  participant Output as Output Store
+The trade-off is that V8's `SnapshotCreator` is not safe to run concurrently. mcp-v8 uses a Tokio mutex to serialize snapshot creation, meaning stateful executions run one at a time (though the I/O-bound work of loading/storing snapshots happens outside this lock). Stateless executions are unaffected and run in full parallelism.
 
-  Client->>MCP: run_js(...)
-  MCP->>Registry: create execution
-  Registry->>V8: start run
-  MCP-->>Client: execution_id
-  V8->>Output: stream console lines
-  Client->>MCP: get_execution(execution_id)
-  MCP-->>Client: running or completed
-  Client->>MCP: get_execution_output(execution_id)
-  MCP-->>Client: paginated output
-  opt Optional cancellation
-    Client->>MCP: cancel_execution(execution_id)
-    MCP->>Registry: cancel execution
-    Registry->>V8: stop if still running
-  end
-```
+## Stateless Mode
 
-This design separates submission, status polling, and output retrieval. That
-matters because JavaScript may run for long enough to produce streaming output,
-consume memory, or be cancelled before it completes.
+In stateless mode, each execution starts from a fresh V8 isolate. No snapshots are created or loaded. This mode is simpler, faster for one-shot evaluations, and fully parallelizable.
 
-An agent session in this mode usually looks like:
+Stateless mode is appropriate when executions are independent -- for example, evaluating mathematical expressions, transforming data, or running self-contained scripts. Without the overhead of snapshot serialization and storage, stateless mode can handle higher throughput.
 
-- the agent asks `run_js` to start a longer job
-- the server returns an execution ID immediately
-- the agent checks status, reads output as it streams, and decides whether to
-  wait, continue polling, or cancel
-- if the run completes with a new heap snapshot, the next step can resume from
-  that state
+## Why Two Modes Exist
 
-This is the primary MCP-facing execution model. It fits interactive agent
-work, where a caller may want to observe progress, inspect logs before the run
-finishes, or build up state across multiple steps.
+The two modes reflect a fundamental trade-off between state persistence and concurrency. Stateful mode is powerful for iterative workflows but serializes V8 execution. Stateless mode sacrifices state persistence for throughput. The choice is made at server startup and applies to all executions on that server instance.
 
-## Stateless execution
+In practice, many deployments run both: a stateful instance for multi-turn agent sessions and a stateless instance (or pool) for one-shot evaluations.
 
-In stateless mode, the interface collapses into one request-response step:
+## Async Execution: Submit, Poll, Read
 
-```mermaid
-sequenceDiagram
-  participant Client
-  participant Interface as MCP or HTTP API
-  participant V8 as Fresh V8 Isolate
+All executions -- stateful and stateless -- follow an asynchronous pattern:
 
-  Client->>Interface: submit code
-  Interface->>V8: run once in fresh isolate
-  V8-->>Interface: result and output
-  Interface-->>Client: completed response
-```
+### 1. Submit
 
-There is no heap restoration or follow-up polling step. Each execution starts
-clean, runs to completion inside the request, and returns its output directly.
+The caller sends code (via MCP tool call or HTTP POST). The server immediately returns an execution ID without waiting for the code to finish. This non-blocking submission means the caller (typically an AI agent) is never stuck waiting for a long-running script.
 
-An agent session in this mode usually looks like:
+### 2. Poll
 
-- the agent sends one self-contained computation
-- the server runs it in a fresh isolate
-- the agent gets the result and output in the same interaction
-- the next call starts over without carrying forward in-memory state
+The caller checks execution status by ID. The possible statuses are:
 
-This mode is a better fit for one-off calculations, stateless automations, and
-environments where persistence is unnecessary or undesirable.
+- **running** -- The code is still executing. Console output may already be available for streaming.
+- **completed** -- Execution finished successfully. The result and (in stateful mode) the output heap snapshot hash are available.
+- **failed** -- Execution encountered an error. The error message describes what went wrong.
+- **cancelled** -- The execution was explicitly cancelled by the caller.
+- **timed_out** -- The execution exceeded its time limit and was forcibly terminated.
 
-## Shared behavior
+### 3. Read
 
-Console output is captured while the program runs. The server supports
-`console.log`, `console.info`, `console.warn`, and `console.error`, and stores
-output so clients can read it incrementally later through MCP tools or the
-HTTP API when the chosen execution mode exposes that lifecycle.
+Once complete, the caller retrieves the result and any console output. Console output can also be read while execution is still running, enabling streaming use cases.
 
-Concurrency is also part of the execution model. The server limits how many V8
-executions can run at once with `--max-concurrent-executions`. When demand is
-higher than the configured limit, executions wait in the registry instead of
-starting immediately.
+This pattern was chosen over synchronous execution for several reasons:
 
-The same execution engine is exposed through MCP, the plain HTTP API, the CLI,
-and generated clients. The lifecycle is shared even when the calling surface
-changes.
+- Long-running scripts do not block the MCP transport.
+- Console output can be streamed incrementally.
+- Executions can be cancelled mid-flight.
+- Multiple executions can be in flight simultaneously.
+- The timeout mechanism works cleanly with the async model.
 
-See [MCP Tools](../reference/mcp-tools.md) for the exact tool names and
-[HTTP API](../reference/http-api.md) for the REST endpoints that expose the
-same lifecycle.
+## Concurrency Control
+
+V8 isolates are heavyweight: each one allocates a managed heap, runs on a blocking thread, and consumes significant memory. Unbounded concurrency would exhaust OS threads and memory.
+
+mcp-v8 uses a Tokio semaphore to limit concurrent V8 executions. The default concurrency limit equals the number of CPU cores, but it can be configured via `--max-concurrent-executions`. When all permits are taken, new executions wait in a queue until a permit becomes available.
+
+This semaphore applies to both stateful and stateless executions. In stateful mode, the snapshot mutex provides an additional serialization point, but the semaphore is still the primary mechanism for bounding resource usage.
+
+## Timeout Enforcement
+
+Every execution races against a configurable timeout (default: 30 seconds, maximum: 300 seconds). The timeout mechanism uses `tokio::select!` to race the V8 task against a sleep timer:
+
+- If the V8 task completes first, the timeout is cancelled.
+- If the timer fires first, `IsolateHandle::terminate_execution()` is called. This sets a V8-internal flag that causes the engine to throw an uncatchable exception at the next safe point. The V8 task then completes with a "timed out" error.
+
+The V8 isolate handle is published to a shared `Arc<Mutex<Option<IsolateHandle>>>` as soon as the isolate is created, making it available for both timeout termination and explicit cancellation.
+
+## Execution Registry
+
+All active and recently completed executions are tracked in an `ExecutionRegistry`. This is an in-memory `DashMap` (a concurrent hash map) backed by per-execution sled trees for console output. The registry provides:
+
+- Status tracking across the execution lifecycle
+- Isolate handle storage for cancellation
+- Console output storage and paginated retrieval
+- Listing of all known executions
+
+The registry is ephemeral -- it does not survive server restarts. For durable execution history, the session log (in stateful mode) provides a persistent record.

@@ -1,36 +1,41 @@
 # mcp-v8
 
-`mcp-v8` is a Rust-based MCP server that exposes a V8 JavaScript runtime to AI
-agents and other clients. It supports stateful and stateless execution,
-multiple transports, JavaScript and TypeScript execution, full async/await and
-Promise support via the `deno_core` event loop, optional policy-gated network
-and filesystem access, and content-addressed heap persistence.
+A Rust-based MCP (Model Context Protocol) server that runs JavaScript and TypeScript inside a V8 engine. Designed for AI agents that need a sandboxed, stateful JS runtime as a tool.
 
-`mcp-v8` is designed for cases where agents need real compute and controlled
-access to host resources, but the cost of a full Linux VM is too high. It adds
-a policy layer between the JavaScript runtime and the underlying machine so you
-can expose network, filesystem, and other capabilities with tighter control and
-lower overhead than VM or container-based approaches.
+mcp-v8 exposes a V8 JavaScript runtime as MCP tools. Agents can run JS/TS code, persist V8 heap state between calls (stateful mode), import npm/JSR packages at runtime, and optionally use OPA-gated fetch and filesystem access.
 
-## Quick Start
+## Documentation Structure
 
-If you want the fastest path to a working setup, start with
-[Quick Start](quick-start/overview.md). It includes entry points for Claude Code,
-Codex, Cursor, generic MCP clients, `curl`, and the bundled CLI.
+This documentation follows the [Diataxis](https://diataxis.fr/) framework, organized into four pillars:
 
-Use this documentation by intent:
+### [Tutorials](tutorials/overview.md)
 
-- Start with [Quick Start](quick-start/overview.md) if you need orientation.
-- Use [How-to](how-to/overview.md) when you need to complete a task.
-- Read [Concepts](concepts/overview.md) to understand system behavior.
-- Use [Reference](reference/overview.md) for flags, APIs, and interface details.
+**Learning-oriented** step-by-step lessons. Start here if you're new to mcp-v8. Each tutorial walks you through a complete working example from start to finish.
 
-## What this site covers
+### [How-to Guides](how-to/overview.md)
 
-- how to [install](install/release-script.md) and [run the server](how-to/run-with-stdio.md)
-- how [transports](concepts/transports.md) and [execution modes](concepts/execution-model.md) differ
-- how JavaScript and [TypeScript](concepts/javascript-runtime.md) run in the runtime
-- how async JavaScript behaves in the runtime event loop
-- how [sessions](concepts/sessions-and-heaps.md), [heaps](concepts/sessions-and-heaps.md), and [clustering](concepts/clustering.md) work
-- how policy-gated [fetch](concepts/network-access.md), [filesystem access](concepts/filesystem-access.md), and [module loading](concepts/module-loading.md) behave
-- how to use the [HTTP API](reference/http-api.md)
+**Task-oriented** practical guides. Use these when you know what you want to do and need the steps to get it done. Each guide focuses on a single task.
+
+### [Concepts](concepts/overview.md)
+
+**Understanding-oriented** explanations. Read these to build a deeper mental model of how mcp-v8 works and why it's designed the way it is.
+
+### [Reference](reference/overview.md)
+
+**Information-oriented** technical specifications. Look up CLI flags, API endpoints, tool schemas, and configuration formats.
+
+## Quick Links
+
+| What you want to do | Where to go |
+|---|---|
+| Install mcp-v8 | [Installation tutorial](tutorials/installation.md) |
+| Run your first code | [JavaScript runtime tutorial](tutorials/javascript-runtime.md) |
+| Connect to Claude or Cursor | [MCP protocol tutorial](tutorials/mcp-protocol.md) |
+| Look up a CLI flag | [CLI flags reference](reference/cli-flags.md) |
+| Understand stateful vs stateless | [Execution model concepts](concepts/execution-model.md) |
+| Deploy with Docker | [Docker deployment how-to](how-to/docker-deployment.md) |
+
+## Source
+
+- GitHub: [r33drichards/mcp-js](https://github.com/r33drichards/mcp-js)
+- Install: `curl -fsSL https://raw.githubusercontent.com/r33drichards/mcp-js/main/install.sh | sudo bash`

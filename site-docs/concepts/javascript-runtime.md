@@ -1,211 +1,73 @@
-# JavaScript Runtime
+# The V8 JavaScript Runtime
 
-`mcp-v8` runs agent code inside an isolated V8 runtime built on
-[`deno_core`](https://github.com/denoland/deno_core), the core runtime crate
-used by the [Deno project](https://deno.com/). It is not a full Deno runtime,
-and it is not a full Node.js runtime. It exposes a controlled JavaScript
-environment with a subset of Node.js-compatible surfaces when the server
-chooses to provide them. It can execute both JavaScript and TypeScript, but
-TypeScript support is type stripping only, not type checking. It also supports
-`async`/`await` and Promises through the `deno_core` event loop.
+mcp-v8 executes JavaScript and TypeScript inside Google's V8 engine, the same engine that powers Chrome and Node.js. Rather than embedding V8 directly, it uses `deno_core`, the runtime foundation of the Deno project. This gives mcp-v8 a mature event loop, ES module support, and a clean Rust-to-JavaScript bridge -- without bringing in Deno's full standard library or permission system.
 
-The simplest way to learn the runtime is in layers:
+## How Code Enters V8
 
-1. run one piece of JavaScript
-2. keep the resulting state as a heap
-3. group related executions into sessions
-4. store heaps durably
-5. organize heaps with tags
-6. coordinate state across a cluster
+When mcp-v8 receives code (via an MCP tool call or HTTP request), the code passes through several stages before V8 sees it:
 
-## Runtime internals
+1. **TypeScript type stripping** -- The code is parsed by SWC (a Rust-based JavaScript/TypeScript compiler). SWC strips all TypeScript type annotations -- interfaces, type aliases, generics, enums, and type-only imports -- producing plain JavaScript. This is type _removal_, not type _checking_. If the code is already plain JavaScript, SWC parses it and emits it unchanged. This step runs synchronously on the Rust side before V8 is involved.
 
-At the implementation level, the runtime is:
+2. **ES module loading** -- All code is executed as an ES module, not as a classic script. This means `import` and `export` declarations work at the top level, and top-level `await` is supported. deno_core's module loader is responsible for resolving and fetching any imported modules.
 
-- a V8 isolate for JavaScript execution
-- a `deno_core` event loop and op system underneath that isolate
-- a server-controlled set of host capabilities attached to the runtime
-- a bounded environment with time, memory, and policy limits
+3. **V8 execution** -- The prepared JavaScript is loaded into a `JsRuntime` (stateless mode) or `JsRuntimeForSnapshot` (stateful mode) via `load_side_es_module_from_code`. The module is evaluated, and the deno_core event loop is driven to completion using `run_event_loop`.
 
-That combination matters because it gives `mcp-v8` a smaller and more
-controlled execution surface than a Linux VM or a full developer shell.
+## The deno_core Event Loop
 
-Conceptually:
+deno_core provides a Tokio-integrated event loop that drives asynchronous operations inside V8. When JavaScript code calls an async function -- like `fetch()`, `fs.readFile()`, or `mcp.callTool()` -- the call is dispatched to a Rust "op" (operation) that returns a future. The event loop polls these futures alongside V8's microtask queue, resolving Promises on the JavaScript side as the Rust futures complete.
 
-```mermaid
-flowchart LR
-  A[Agent JavaScript] --> B[V8 isolate]
-  B --> C[deno_core runtime]
-  C --> D{requested capability}
-  D -->|module import| E[module loader]
-  D -->|network access| F[fetch surface]
-  D -->|filesystem access| G[filesystem surface]
-  D -->|WASM use| H[WASM loader]
-  E --> I[config and policy checks]
-  F --> I
-  G --> I
-  H --> I
-  I --> J[allow or deny]
+The event loop runs until all pending operations are finished: all Promises are settled, all timers have fired, and no pending module loads remain. This means that top-level `await` works naturally:
+
+```js
+const resp = await fetch("https://api.example.com/data");
+const data = await resp.json();
+console.log(data.length);
 ```
 
-Some interfaces will feel familiar if you know Node.js, but the right mental
-model is "selected compatibility," not "full Node." The runtime may expose
-Node-style modules such as `fs`, but only as a subset and only when enabled.
+Each line awaits its result before proceeding, and the event loop keeps running until `console.log` has executed and no further work remains.
 
-See:
+## Async/Await Resolution
 
-- [Module Loading](module-loading.md)
-- [Network Access](network-access.md)
-- [Filesystem Access](filesystem-access.md)
-- [WASM and Native Modules](wasm-and-native-modules.md)
-- [Policy System](policy-system.md)
+Async operations in mcp-v8 follow the standard JavaScript Promise model, but the actual I/O happens in Rust. The flow is:
 
-## Start with one execution
+1. JavaScript calls an async op (e.g., `Deno.core.ops.op_fetch(...)`).
+2. deno_core converts the arguments and dispatches the call to a Rust async function.
+3. The Rust function returns a future. deno_core registers this future in its internal `FuturesUnorderedDriver`.
+4. The event loop polls Rust futures and V8's microtask queue in interleaved fashion.
+5. When a Rust future completes, its result is delivered back to JavaScript as a resolved (or rejected) Promise.
 
-At its simplest, `mcp-v8` runs one piece of JavaScript in an isolated runtime
-and returns the result and captured output.
+This architecture means that `await` in mcp-v8 is truly non-blocking. While one `fetch()` is waiting for a network response, timers can fire, other Promises can resolve, and the V8 microtask queue can process `.then()` callbacks.
 
-```mermaid
-flowchart LR
-  A[Agent code] --> B[V8 runtime]
-  B --> C[result]
-  B --> D[console output]
-```
+## TypeScript Type Stripping via SWC
 
-This is the stateless model. Each execution starts fresh unless you explicitly
-resume from a prior heap.
+SWC is used purely for type erasure. The transformation pipeline is:
 
-The same entry point also accepts TypeScript. Before execution, the runtime
-strips type syntax with SWC and then runs the resulting JavaScript. That means
-TypeScript is useful for authoring convenience, but the runtime does not act
-as a type checker.
+1. **Parse** -- SWC's TypeScript parser (with TSX support enabled) produces an AST.
+2. **Resolve** -- Identifier scope analysis determines which names are local vs. imported.
+3. **Strip** -- The TypeScript strip transform removes all type-level constructs: type annotations, interfaces, type aliases, enums (converted to plain objects), abstract classes (converted to regular classes), and type-only imports/exports.
+4. **Hygiene** -- Identifiers that share names but belong to different scopes are disambiguated.
+5. **Fixer** -- Missing parentheses are inserted to preserve correct precedence after AST transforms.
+6. **Emit** -- The cleaned AST is serialized back to JavaScript source text.
 
-Async JavaScript is fully supported. Code can `await` Promises, schedule
-asynchronous work, and rely on the runtime's `deno_core` event loop to drive
-those tasks to completion within the configured execution limits.
+Because this is type removal rather than full compilation, TypeScript-specific runtime features like `const enum` with complex initializers or `namespace` merging may not work as they would in `tsc`. The focus is on supporting the common case: TypeScript code with type annotations that can be mechanically stripped to produce valid JavaScript.
 
-See [Execution Model](execution-model.md) for the exact lifecycle.
+## ES Module Execution
 
-## Persist state with heaps
+All user code runs as ES modules. This design choice has several implications:
 
-Stateful execution begins when one run produces a heap snapshot and a later
-run resumes from it.
+- `import` declarations are supported at the top level. External modules (npm, JSR, URL) are fetched at load time by the module loader.
+- `export` declarations are permitted (though the exported values are not captured by mcp-v8).
+- Top-level `await` is supported. The event loop drives async operations to completion.
+- Code runs in strict mode by default (as required by the ES module specification).
+- Each execution gets a unique synthetic module URL (`file:///main_0.js`, `file:///main_1.js`, ...) generated from a global atomic counter. This prevents collisions when restoring from a snapshot that already has registered modules.
 
-```mermaid
-flowchart LR
-  A[Execution 1] --> B[output heap]
-  B --> C[Execution 2]
-  C --> D[new output heap]
-```
+## Sandbox Setup
 
-This is the first big shift in how to think about the runtime. It is no longer
-only a JavaScript evaluator. It becomes a resumable environment that can carry
-state forward across steps.
+Before user code runs, several setup steps harden the V8 environment:
 
-See [Sessions and Heaps](sessions-and-heaps.md).
+1. **Console wrapper** -- `globalThis.console` is replaced with a custom implementation that routes `console.log`, `console.info`, `console.warn`, and `console.error` through a Rust op that writes to the console output WAL.
+2. **Dangerous op neutralization** -- Built-in deno_core ops like `op_panic` (which would call Rust `panic!()`) and `op_print` (which would write directly to stdout, corrupting the JSON-RPC stream) are replaced with safe JavaScript alternatives.
+3. **Optional capabilities** -- `fetch()`, `fs`, `mcp`, `setTimeout`/`clearTimeout`, and subprocess APIs are injected based on server configuration.
+4. **Runtime hardening** -- `Deno.core.ops` is frozen to prevent interception. `__bootstrap` (which exposes event loop hooks and primordials) is deleted. `SharedArrayBuffer` and `Atomics` are removed as a defense-in-depth measure against Spectre-style timing attacks.
 
-## Track work with sessions
-
-Heaps preserve runtime state. Sessions preserve runtime history.
-
-A heap answers: "what state should I resume from?" A session answers: "which
-executions belong to the same piece of work?"
-
-That distinction makes long-running agent workflows easier to inspect and
-operate. You can follow a session as a task timeline while still resuming from
-specific heap snapshots.
-
-See [Sessions and Heaps](sessions-and-heaps.md) and
-[MCP Tools](../reference/mcp-tools.md).
-
-## Store heaps locally or in S3
-
-Once state matters, storage matters too. The server can persist heaps in:
-
-- local filesystem storage
-- S3-backed storage
-- S3 with a local write-through cache
-
-Local storage is the easiest way to start. S3 is better when state needs to
-survive node replacement or be shared across a wider deployment.
-
-See:
-
-- [Use Local Storage](../how-to/use-local-storage.md)
-- [Use S3 Storage](../how-to/use-s3-storage.md)
-
-## Organize heaps with tags
-
-Heap hashes are precise, but they are not a good way to navigate a large body
-of saved state. Tags make heaps easier to search and reason about without
-changing the content-addressed storage model.
-
-That lets you move from "resume this exact hash" to more usable workflows such
-as:
-
-- find the latest checkpoint for a task
-- label a heap as a milestone or recovery point
-- attach human-meaningful metadata to saved state
-
-See [Sessions and Heaps](sessions-and-heaps.md) and
-[MCP Tools](../reference/mcp-tools.md).
-
-## Scale stateful execution across a cluster
-
-On one node, stateful execution is a local concern. In a cluster, the runtime
-is still the same JavaScript runtime, but the state layer becomes distributed.
-
-```mermaid
-flowchart LR
-  A[Agent request] --> B[node receiving request]
-  B --> C{stateful write?}
-  C -->|no| D[serve locally]
-  C -->|yes| E[route or forward to leader]
-  E --> F[replicate state change]
-  F --> G[cluster converges]
-```
-
-The important teaching point is that clustering changes how state is
-coordinated, not how JavaScript itself runs. You are scaling the stateful
-execution model, not switching to a different runtime.
-
-See [Clustering](clustering.md) and
-[Run a Cluster](../how-to/run-a-cluster.md).
-
-## Agent-facing model
-
-From an agent's point of view, the runtime should be treated as:
-
-- JavaScript-first compute
-- isolated by default
-- resumable when you opt into heaps
-- organized through sessions and tags
-- durable when you configure storage
-- scalable when you coordinate state across a cluster
-
-Agents should assume:
-
-- some familiar Node.js-style APIs may exist, but only as a bounded subset
-- TypeScript works, but only through type removal before execution
-- `async`/`await` and Promises work as normal JavaScript control flow
-- host access is capability-based, not implicit
-- persistence is explicit, not automatic
-- cluster mode changes state coordination, not the language model
-
-Agents should not assume:
-
-- "this is just Node"
-- "this is just Deno"
-- "I can use the host like a full shell"
-- "state always carries forward unless I ask for it to"
-
-## Related concepts
-
-- [Execution Model](execution-model.md)
-- [Sessions and Heaps](sessions-and-heaps.md)
-- [Module Loading](module-loading.md)
-- [Network Access](network-access.md)
-- [Filesystem Access](filesystem-access.md)
-- [WASM and Native Modules](wasm-and-native-modules.md)
-- [Policy System](policy-system.md)
-- [Clustering](clustering.md)
+After hardening, user code cannot access internal deno_core machinery, cannot write directly to stdout/stderr, and cannot reverse the sandbox lockdown.

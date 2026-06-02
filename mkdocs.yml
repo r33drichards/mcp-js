@@ -10,67 +10,101 @@ theme:
     name: mkdocs
 plugins:
   - search
-  # The vendored mermaid library is loaded via extra_javascript (below), not
-  # the plugin's `javascript:` option. The pinned mkdocs-mermaid2-plugin
-  # (v1.1.0) emits the library <script src> using the configured path
-  # verbatim, so a relative path like `js/mermaid.min.js` resolves against the
-  # current page and 404s on every sub-page (e.g. /concepts/...), leaving
-  # diagrams unrendered. Listing the library under extra_javascript lets mkdocs
-  # compute the correct per-page URL; the plugin then skips its own injection
-  # because the filename contains "mermaid". This is version-independent and
-  # also works under newer plugin releases.
   - mermaid2
 nav:
   - Home: index.md
 
-  - Install:
-      - Overview: install/overview.md
-      - Release Script: install/release-script.md
-      - Build from Source: install/build-from-source.md
-      - Nix: install/nix.md
-  - Quick Start:
-      - Overview: quick-start/overview.md
-      - Claude Code: quick-start/claude-code.md
-      - Claude Desktop: quick-start/claude-code-desktop.md
-      - Codex: quick-start/codex.md
-      - Cursor: quick-start/cursor.md
-      - Generic MCP: quick-start/generic-mcp.md
-      - curl: quick-start/curl.md
-      - Bundled CLI: quick-start/bundled-cli.md
-  - How-to:
+  - Tutorials:
+      - Overview: tutorials/overview.md
+      - Installation: tutorials/installation.md
+      - JavaScript Runtime: tutorials/javascript-runtime.md
+      - Execution Model: tutorials/execution-model.md
+      - Sessions and Heaps: tutorials/sessions-and-heaps.md
+      - Console Output: tutorials/console-output.md
+      - Heap Tags: tutorials/heap-tags.md
+      - Transports: tutorials/transports.md
+      - MCP Protocol: tutorials/mcp-protocol.md
+      - Module Loading: tutorials/module-loading.md
+      - WebAssembly: tutorials/webassembly.md
+      - Policy System: tutorials/policy-system.md
+      - Network Access: tutorials/network-access.md
+      - Fetch Header Injection: tutorials/fetch-header-injection.md
+      - Filesystem Access: tutorials/filesystem-access.md
+      - Clustering: tutorials/clustering.md
+      - Storage Backends: tutorials/storage-backends.md
+      - HTTP API: tutorials/http-api.md
+      - mcp-v8-cli: tutorials/mcp-v8-cli.md
+      - MCP Pass-Through: tutorials/mcp-pass-through.md
+      - Docker Deployment: tutorials/docker-deployment.md
+
+  - How-to Guides:
       - Overview: how-to/overview.md
-      - Run with stdio: how-to/run-with-stdio.md
-      - Run with HTTP: how-to/run-with-http.md
-      - Run with SSE: how-to/run-with-sse.md
-      - Use Local Storage: how-to/use-local-storage.md
-      - Use S3 Storage: how-to/use-s3-storage.md
-      - Run a Cluster: how-to/run-a-cluster.md
-      - Enable OPA Policies: how-to/enable-opa-policies.md
-      - Provide Sandboxed Filesystem Access: how-to/provide-sandboxed-filesystem-access.md
-      - Configure Fetch Header Injection: how-to/configure-fetch-header-injection.md
-      - Use SQLite WASM: how-to/use-sqlite-wasm.md
-      - Connect as an MCP Server: how-to/connect-as-an-mcp-server.md
-      - Use CLI: how-to/use-cli.md
+      - Installation: how-to/installation.md
+      - JavaScript Runtime: how-to/javascript-runtime.md
+      - Execution Model: how-to/execution-model.md
+      - Sessions and Heaps: how-to/sessions-and-heaps.md
+      - Console Output: how-to/console-output.md
+      - Heap Tags: how-to/heap-tags.md
+      - Transports: how-to/transports.md
+      - MCP Protocol: how-to/mcp-protocol.md
+      - Module Loading: how-to/module-loading.md
+      - WebAssembly: how-to/webassembly.md
+      - Policy System: how-to/policy-system.md
+      - Network Access: how-to/network-access.md
+      - Fetch Header Injection: how-to/fetch-header-injection.md
+      - Filesystem Access: how-to/filesystem-access.md
+      - Clustering: how-to/clustering.md
+      - Storage Backends: how-to/storage-backends.md
+      - HTTP API: how-to/http-api.md
+      - mcp-v8-cli: how-to/mcp-v8-cli.md
+      - MCP Pass-Through: how-to/mcp-pass-through.md
+      - Docker Deployment: how-to/docker-deployment.md
+
   - Concepts:
       - Overview: concepts/overview.md
       - JavaScript Runtime: concepts/javascript-runtime.md
       - Execution Model: concepts/execution-model.md
       - Sessions and Heaps: concepts/sessions-and-heaps.md
+      - Console Output: concepts/console-output.md
+      - Heap Tags: concepts/heap-tags.md
       - Transports: concepts/transports.md
-      - Integration Surfaces: concepts/integration-surfaces.md
-      - MCP Pass-Through: concepts/mcp-pass-through.md
+      - MCP Protocol: concepts/mcp-protocol.md
       - Module Loading: concepts/module-loading.md
-      - WASM and Native Modules: concepts/wasm-and-native-modules.md
+      - WebAssembly: concepts/webassembly.md
       - Policy System: concepts/policy-system.md
       - Network Access: concepts/network-access.md
+      - Fetch Header Injection: concepts/fetch-header-injection.md
       - Filesystem Access: concepts/filesystem-access.md
       - Clustering: concepts/clustering.md
+      - Storage Backends: concepts/storage-backends.md
+      - HTTP API: concepts/http-api.md
+      - mcp-v8-cli: concepts/mcp-v8-cli.md
+      - MCP Pass-Through: concepts/mcp-pass-through.md
+      - Security Model: concepts/security-model.md
+
   - Reference:
       - Overview: reference/overview.md
       - CLI Flags: reference/cli-flags.md
       - HTTP API: reference/http-api.md
       - MCP Tools: reference/mcp-tools.md
-      - Policy Files: reference/policy-files.md
+      - JavaScript Runtime: reference/javascript-runtime.md
+      - Execution Model: reference/execution-model.md
+      - Sessions and Heaps: reference/sessions-and-heaps.md
+      - Console Output: reference/console-output.md
+      - Heap Tags: reference/heap-tags.md
+      - Transports: reference/transports.md
+      - Module Loading: reference/module-loading.md
+      - WebAssembly: reference/webassembly.md
+      - Policy System: reference/policy-system.md
+      - Network Access: reference/network-access.md
+      - Fetch Header Injection: reference/fetch-header-injection.md
+      - Filesystem Access: reference/filesystem-access.md
+      - Clustering: reference/clustering.md
+      - Storage Backends: reference/storage-backends.md
+      - mcp-v8-cli: reference/mcp-v8-cli.md
+      - MCP Pass-Through: reference/mcp-pass-through.md
+      - Docker: reference/docker.md
+      - Environment Variables: reference/environment-variables.md
 markdown_extensions:
   - tables
   - toc:

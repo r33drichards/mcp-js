@@ -1,129 +1,130 @@
 # MCP Pass-Through
 
-`mcp-v8` can register MCP servers as function calls in the v8 runtime. When combined with stubs, this provides a robust surface for progressive tool disclosure, and composability of toolc calls.
+mcp-v8 can connect to upstream MCP servers and expose their tools to JavaScript code running inside the sandbox. This feature turns mcp-v8 into an MCP client and server simultaneously: it consumes tools from upstream servers and makes them available both to JavaScript code (via the `mcp` global) and optionally to its own MCP clients (via auto-generated tool stubs).
 
-## Register sub-servers
+## Why Pass-Through Exists
 
-You register upstream MCP servers with `--mcp-server` or `--mcp-config`.
-Those definitions tell `mcp-v8` which external servers to connect to at
-startup.
+AI agents often need to call multiple tools across different services. Without pass-through, the agent would need direct connections to each MCP server. Pass-through consolidates these connections: the agent connects only to mcp-v8, and mcp-v8 handles the fan-out to upstream servers.
 
-At the conceptual level, each configured sub-server becomes another capability
-source for the JavaScript runtime.
+This is particularly valuable when the agent needs to combine tool results with computation. For example, an agent might call a database MCP tool to fetch data, then process the data with JavaScript, then call an email MCP tool to send a summary. With pass-through, all of this happens through a single mcp-v8 connection.
 
-See [Connect as an MCP Server](../how-to/connect-as-an-mcp-server.md) and
-[CLI Flags](../reference/cli-flags.md) for configuration details.
+## JavaScript API
 
-## Call upstream tools from JavaScript
+When upstream MCP servers are configured, a `globalThis.mcp` object is injected into the JavaScript runtime:
 
-Inside the runtime, upstream tools are exposed through `globalThis.mcp`.
+### mcp.servers
 
-The important pieces are:
-
-- `mcp.servers` for connected server names
-- `mcp.listTools()` for discovery
-- `mcp.callTool(server, tool, args)` for execution
-
-Conceptually, that means an agent can use JavaScript as the orchestration
-layer while still reaching out to other MCP systems when needed.
+A string array of connected server names:
 
 ```js
-const tools = mcp.listTools("github");
-const result = await mcp.callTool("github", "create_issue", {
-  owner: "acme",
-  repo: "roadmap",
-  title: "Document MCP pass-through",
+console.log(mcp.servers);  // ["database", "email", "slack"]
+```
+
+### mcp.listTools(server?)
+
+Lists available tools, optionally filtered by server:
+
+```js
+// All tools from all servers
+const allTools = mcp.listTools();
+
+// Tools from a specific server
+const dbTools = mcp.listTools("database");
+// [{server: "database", name: "query", description: "...", inputSchema: {...}}, ...]
+```
+
+Each tool entry includes:
+- `server` -- The server name
+- `name` -- The tool name
+- `description` -- Human-readable description
+- `inputSchema` -- JSON Schema for the tool's input parameters
+
+### mcp.callTool(server, tool, arguments)
+
+Calls a tool on a specific server:
+
+```js
+const result = await mcp.callTool("database", "query", {
+  sql: "SELECT * FROM users LIMIT 10"
 });
-
-console.log(JSON.stringify(result, null, 2));
+// { content: [...], isError: false }
 ```
 
-The tool call still happens through `run_js`, not as a separate direct tool
-dispatch from the outer MCP client.
+The result follows the MCP `CallToolResult` format:
+- `content` -- Array of content items (text, images, etc.)
+- `isError` -- Boolean indicating whether the tool reported an error
 
-## Expose stub tools for discovery
+If the tool call fails, `mcp.callTool` throws an error rather than returning an error result. This makes error handling natural with try/catch.
 
-`mcp-v8` can also publish optional stub tools on its own MCP surface. These
-stubs mirror the upstream tools with names like
-`runjs__github__create_issue`.
+## Supported Transports
 
-This is useful because it preserves native MCP tool discovery for downstream
-agents:
+mcp-v8 connects to upstream servers using two transport types:
 
-- the agent can see the tool in `tools/list`
-- the tool carries the upstream input schema
-- the agent can reason about the tool as if it were locally available
+### stdio
 
-But the stub is intentionally not a direct proxy. Calling it returns
-instructions telling the agent to invoke the tool through `run_js` and
-`mcp.callTool(...)`.
-
-```mermaid
-flowchart LR
-  A[Downstream MCP client] --> B[stub tool discovery]
-  B --> C[runjs__github__create_issue]
-  C --> D[instructional response]
-  D --> E[run_js plus mcp.callTool]
-  E --> F[JavaScript runtime]
-  F --> G[Upstream MCP server]
+```
+--mcp-server database=stdio:sqlite-mcp-server:--db:mydb.sqlite
 ```
 
-## Compose tools without pushing data through the context window
+The format is `name=stdio:command:arg1:arg2:...`. mcp-v8 spawns the upstream server as a child process and communicates over its stdin/stdout. Environment variables can be passed in the JSON config format.
 
-One of the main benefits of pass-through is that JavaScript can compose local
-runtime capabilities and upstream MCP tools in one workflow.
+### SSE
 
-For example, an agent might:
-
-1. fetch structured data from an external API
-2. write the raw response to the sandboxed filesystem
-3. transform it into a smaller report
-4. call an upstream storage MCP server to upload the result to S3
-5. call another upstream tool to create a signed URL
-6. return only the signed URL and a short summary to the user
-
-Conceptually:
-
-```mermaid
-flowchart LR
-  A[fetch remote data] --> B[write raw file with fs]
-  B --> C[transform in JavaScript]
-  C --> D[call upstream storage MCP tool]
-  D --> E[upload artifact to S3]
-  E --> F[create signed URL]
-  F --> G[return URL to user]
+```
+--mcp-server remote=sse:http://mcp-server:8080/sse
 ```
 
-The key advantage is that the large payload never has to be copied into the
-agent's context window. The runtime can fetch, store, transform, and hand off
-artifacts in place, then return only the useful result.
+The format is `name=sse:url`. mcp-v8 connects to the upstream server's SSE endpoint.
 
-That is a good fit for:
+For complex configurations with environment variables or multiple servers, use `--mcp-config` with a JSON file:
 
-- large API responses
-- multi-step document generation
-- binary or structured artifacts
-- workflows where the user only needs a link, summary, or final status
+```json
+[
+  {
+    "name": "database",
+    "transport": "stdio",
+    "command": "sqlite-mcp-server",
+    "args": ["--db", "mydb.sqlite"],
+    "env": { "LOG_LEVEL": "warn" }
+  },
+  {
+    "name": "remote",
+    "transport": "sse",
+    "url": "http://mcp-server:8080/sse"
+  }
+]
+```
 
-## Policy and control boundaries
+## Tool Discovery and Caching
 
-Pass-through does not mean "anything connected is automatically trusted."
+When mcp-v8 starts, it connects to all configured upstream servers and calls `tools/list` on each to discover available tools. The tool lists are cached in the `McpClientManager` and used for:
 
-`mcp.callTool()` can still be gated by policy. That lets operators control
-which upstream servers and tools the runtime may use, and with what arguments.
+1. **JavaScript `mcp.listTools()`** -- Returns the cached tool metadata. No network call is needed at query time.
+2. **MCP tool stubs** -- The cached tools are used to generate stub tool definitions on mcp-v8's own MCP interface.
 
-So the control chain becomes:
+Tool lists are fetched once at startup and not refreshed during the server's lifetime. If an upstream server adds or removes tools, mcp-v8 must be restarted to pick up the changes.
 
-- discover or select an upstream tool
-- invoke it from JavaScript
-- evaluate policy
-- call the upstream MCP server only if allowed
+## Tool Stubs with Configurable Prefix
 
-See [Policy System](policy-system.md) for the broader policy model.
+When `--mcp-stubs` is enabled (the default), mcp-v8 re-exports upstream tools on its own MCP interface. Each upstream tool is wrapped as a stub with a configurable prefix (default: `runjs__`):
 
-## Related concepts
+An upstream tool `database.query` becomes `runjs__database__query` on mcp-v8's MCP interface.
 
-- [Integration Surfaces](integration-surfaces.md)
-- [JavaScript Runtime](javascript-runtime.md)
-- [Policy System](policy-system.md)
-- [MCP Tools](../reference/mcp-tools.md)
+When a client calls a stub tool, mcp-v8 generates JavaScript code that invokes `mcp.callTool()` with the appropriate parameters and executes it through the normal `run_js` path. This makes upstream tools accessible to MCP clients that connect only to mcp-v8.
+
+The prefix can be customized via `--mcp-stub-prefix`, and stubbing can be disabled entirely with `--no-mcp-stubs` (or `--mcp-stubs=false`).
+
+## Policy Gating
+
+When an `mcp_tools` policy chain is configured (via `--policies-json`), every `mcp.callTool()` invocation is evaluated against the policy before the call reaches the upstream server. The policy input includes:
+
+```json
+{
+  "operation": "mcp_call_tool",
+  "server": "database",
+  "tool": "query",
+  "arguments": { "sql": "SELECT * FROM users" }
+}
+```
+
+This allows operators to restrict which upstream tools can be called, or to limit calls based on the arguments (e.g., allowing only SELECT queries on the database tool).
