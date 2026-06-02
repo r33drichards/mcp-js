@@ -1,0 +1,18 @@
+# Reference Overview
+
+Use the reference section when you need exact flags, endpoint shapes, tool
+names, or configuration keys.
+
+## Server interfaces
+
+- [CLI Flags](cli-flags.md)
+- [HTTP API](http-api.md)
+- [MCP Tools](mcp-tools.md)
+
+## Configuration
+
+- [Policy Files](policy-files.md)
+
+
+If you are still learning the system, start with
+[Quick Start](../quick-start/overview.md) or [Concepts](../concepts/overview.md).
