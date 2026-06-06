@@ -101,6 +101,27 @@ restart) pick up the changed modules.
 In stateless mode (`--stateless`) there is no snapshot. The module bytes are
 re-validated and re-compiled from disk on every execution.
 
+## Discovery: WASM stub tools
+
+A pre-loaded module is injected as a JavaScript global, but a downstream MCP
+client has no way to know it exists from the protocol alone. To close that gap,
+mcp-v8 advertises each loaded module on its own MCP surface as a **stub tool**
+named `runjs__wasm__<name>` (the prefix is configurable). This mirrors the
+[upstream MCP tool stubs](../concepts/mcp-client.md): the module shows up in
+`tools/list` and tool search, and its description explains the `__wasm_<name>`
+global, the module's exports, and whether an imports object is required.
+
+The stub is deliberately **not** an executable proxy. WebAssembly exports carry no
+MCP-level schema, so the agent cannot call them directly over the protocol;
+instead, calling the stub returns instructional text telling the agent to drive
+the module from JavaScript through `run_js`. Discovery happens at the MCP layer;
+execution stays in the V8 isolate.
+
+Stubbing is on by default whenever at least one module is loaded. `--wasm-stubs
+false` hides the stubs, `--wasm-stub-prefix` changes the `runjs__` prefix, and a
+per-module human description can be set with `--wasm-stub-description name=text`
+or the `description` field in `--wasm-config`.
+
 ## Name validation
 
 Module names must satisfy a restricted identifier grammar:

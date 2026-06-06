@@ -123,6 +123,32 @@ encoder/decoder, and a thin `SQLite` wrapper class — lives in
 `examples/sqlite-wasm/example.js`. Send its contents as the `code` parameter of
 `run_js` to run it end-to-end.
 
+## Let downstream clients discover a module
+
+By default every loaded module is advertised on the server's MCP surface as a
+stub tool named `runjs__wasm__<name>`, so an MCP client finds it via `tools/list`
+or tool search. Calling the stub returns instructions to use the module from
+JavaScript via `run_js` (it is not an executable proxy — see
+[concepts](../concepts/wasm-modules.md)).
+
+Give the stub a human description so agents know when to use it — either inline in
+`--wasm-config`:
+
+```json
+{ "sqlite": { "path": "/opt/wasm/sqlite3.wasm", "description": "In-memory SQLite database (exec/query SQL)." } }
+```
+
+or on the command line (overrides the config value):
+
+```bash
+mcp-v8 --http-port 8080 \
+  --wasm-module sqlite=/opt/wasm/sqlite3.wasm \
+  --wasm-stub-description sqlite="In-memory SQLite database (exec/query SQL)."
+```
+
+Disable the stubs with `--wasm-stubs false`, or change the `runjs__` prefix with
+`--wasm-stub-prefix <prefix>`.
+
 ## See also
 
 - [WebAssembly modules — concepts](../concepts/wasm-modules.md)

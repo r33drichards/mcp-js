@@ -150,10 +150,18 @@ TypeScript parse error: <SWC diagnostic>
 | `TypeScript parse error: ...` | SWC failed to parse the input as TypeScript (this includes JSX/TSX, which is not supported). |
 | `Cancelled by user` | The `cancel_execution` tool or REST cancel endpoint was called. |
 
+## Customizing the run_js description
+
+The description advertised for `run_js` in `tools/list` can be overridden at
+startup with `--run-js-description "<text>"` (or `--run-js-description @file`),
+and the server's `initialize` instructions with `--instructions`. See
+[Customize the prompt and tool descriptions](../how-to/customize-mcp-surface.md).
+
 ## See also
 
 - [How-to — execution recipes](../how-to/js-execution.md)
 - [Concepts — execution model](../concepts/js-execution.md)
+- [Customize the prompt and tool descriptions](../how-to/customize-mcp-surface.md)
 - [Asynchronous execution & output](../reference/async-execution.md)
 - [Stateful sessions & heap snapshots](../reference/sessions-and-heaps.md)
 - [MCP tools reference](../reference/mcp-tools.md)

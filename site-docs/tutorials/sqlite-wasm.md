@@ -74,6 +74,24 @@ You'll see the query results the example prints, e.g.:
  "stats":{"count":3,"avg_age":30}}
 ```
 
+## Discover the module from an MCP client
+
+You loaded `sqlite` with `--wasm-module`, and the server automatically advertises
+it on its MCP surface as a stub tool named `runjs__wasm__sqlite`. A downstream MCP
+client finds it via `tools/list` or tool search — no need to read server config.
+The stub isn't an executable proxy: calling it returns instructions to drive the
+module from JavaScript via `run_js` (it's the `__wasm_sqlite` global, exactly as
+below). Add a human description so agents know what it's for:
+
+```bash
+mcp-v8 --stateless --http-port 8080 \
+  --wasm-module sqlite=examples/sqlite-wasm/sqlite3.wasm \
+  --wasm-stub-description sqlite="In-memory SQLite database (exec/query SQL)."
+```
+
+Use `--wasm-stubs false` to hide stubs or `--wasm-stub-prefix` to change the
+`runjs__` prefix. See [WebAssembly modules — how-to](../how-to/wasm-modules.md).
+
 ## What the wrapper does
 
 The example performs three steps.

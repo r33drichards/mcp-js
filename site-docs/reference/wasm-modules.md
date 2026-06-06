@@ -46,6 +46,7 @@ is one of:
 |-------|------|----------|-------------|
 | `path` | string | yes | Path to the `.wasm` file |
 | `max_memory_bytes` | integer | no | Per-module memory cap in bytes; overrides `--wasm-default-max-memory` |
+| `description` | string | no | Human description shown on the module's MCP [stub tool](#mcp-stub-tools) (overridden by `--wasm-stub-description`) |
 
 **Example:**
 
@@ -54,7 +55,8 @@ is one of:
   "math": "/opt/wasm/math.wasm",
   "sqlite": {
     "path": "/opt/wasm/sqlite3.wasm",
-    "max_memory_bytes": 33554432
+    "max_memory_bytes": 33554432,
+    "description": "In-memory SQLite database (exec/query SQL)."
   }
 }
 ```
@@ -146,6 +148,25 @@ var exports = instance.exports;      // exports.sqlite3_open, .malloc, etc.
 
 A server-side warning is printed to stderr when a module with imports is loaded,
 noting the `__wasm_<name>` global name and that manual instantiation is required.
+
+## MCP stub tools
+
+Each loaded module is also advertised on the server's own MCP surface as a
+**stub tool** so a downstream MCP client can discover it via `tools/list` or tool
+search without reading server configuration. This mirrors the
+[upstream MCP tool stubs](mcp-client.md).
+
+| Aspect | Detail |
+|--------|--------|
+| Stub tool name | `<prefix>wasm__<name>` (default prefix `runjs__`, e.g. `runjs__wasm__sqlite`) |
+| Description | Auto-generated usage hint (the `__wasm_<name>` global, export names, whether an imports object is needed), plus any configured description |
+| Calling the stub | Returns instructional text only — it is **not** an executable proxy. WASM exports have no MCP-level schema, so the agent must drive the module from JavaScript via `run_js`. |
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--wasm-stubs <bool>` | `true` whenever ≥1 module is loaded | Advertise loaded modules as stub tools. Pass `--wasm-stubs false` to disable. |
+| `--wasm-stub-prefix <prefix>` | `runjs__` | Prefix for stub tool names. No effect when `--wasm-stubs false`. |
+| `--wasm-stub-description <name>=<text>` | — | Set the stub description for a loaded module (repeatable). Overrides a `description` set inline in `--wasm-config`. The named module must be loaded. |
 
 ## See also
 

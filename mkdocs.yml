@@ -46,6 +46,7 @@ nav:
       - Security policies (OPA/Rego): how-to/policies.md
       - Authentication (JWT/JWKS): how-to/authentication.md
       - Clustering & replication (Raft): how-to/clustering.md
+      - Customize prompt & tool descriptions: how-to/customize-mcp-surface.md
 
   - Concepts:
       - Overview: concepts/overview.md
