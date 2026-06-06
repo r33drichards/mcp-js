@@ -215,7 +215,7 @@ Pre-load a WASM module as a global. Format: name=/path/to/module.wasm[:max_memor
 
 ### `--wasm-config`
 
-Path to a JSON config file mapping global names to .wasm file paths or objects. String value: {"name": "/path/to/module.wasm"} Object value: {"name": {"path": "/path/to/module.wasm", "max_memory_bytes": 16777216}}
+Path to a JSON config file mapping global names to .wasm file paths or objects. String value: {"name": "/path/to/module.wasm"} Object value: {"name": {"path": "/path/to/module.wasm", "max_memory_bytes": 16777216, "description": "what the module does"}} The optional "description" sets the MCP stub tool's description
 
 - Value: `PATH`
 
@@ -238,3 +238,10 @@ Prefix applied to WASM stub tool names. Defaults to `runjs__` so it is obvious t
 
 - Default: `runjs__`
 - Value: `WASM_STUB_PREFIX`
+
+### `--wasm-stub-description`
+
+Set the MCP stub tool description for a loaded WASM module. Format: name=description text. The text is shown to downstream agents alongside the auto-generated usage hint (globals, exports, instantiation), helping them decide when to use the module. Can be specified multiple times. Overrides a "description" set inline via --wasm-config. The named module must be loaded with --wasm-module or --wasm-config
+
+- Value: `NAME=TEXT`
+- Repeatable: yes

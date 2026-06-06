@@ -1135,6 +1135,10 @@ pub struct WasmModule {
     /// Max native memory (bytes) this module may declare (linear memory + tables).
     /// Defaults to wasm_default_max_bytes when None.
     pub max_memory_bytes: Option<usize>,
+    /// Optional operator-supplied description used for the module's MCP stub
+    /// tool. When set, it is shown to downstream agents alongside the
+    /// auto-generated usage hint. Defaults to None (auto-generated text only).
+    pub description: Option<String>,
 }
 
 #[derive(Clone)]

@@ -122,7 +122,7 @@ fn module_surface(bytes: &[u8]) -> ModuleSurface {
 pub fn make_wasm_stub_tool(prefix: &str, module: &WasmModule) -> Tool {
     let stub_name = wasm_stub_tool_name(prefix, &module.name);
     let surface = module_surface(&module.bytes);
-    let description = stub_description(&module.name, &surface);
+    let description = stub_description(&module.name, &surface, module.description.as_deref());
 
     // WASM exports have no MCP-level argument schema, so the stub advertises an
     // empty object schema. Arguments passed to the stub are echoed back into
@@ -149,18 +149,30 @@ pub fn make_wasm_stub_tool(prefix: &str, module: &WasmModule) -> Tool {
 }
 
 /// Human-readable description placed on the stub tool, explaining how to use
-/// the module from JavaScript.
-fn stub_description(name: &str, surface: &ModuleSurface) -> String {
+/// the module from JavaScript. An operator-supplied `custom` description (from
+/// `--wasm-stub-description` / `--wasm-config`) is shown prominently right
+/// after the stub header, before the auto-generated usage hint.
+fn stub_description(name: &str, surface: &ModuleSurface, custom: Option<&str>) -> String {
     let module_global = format!("__wasm_{}", name);
     let mut desc = format!(
         "[stub for pre-loaded WASM module {name} — use it from JavaScript via \
          the run_js tool. Calling this tool directly only returns instructions; \
-         it does not execute the module.]\n\n\
-         The compiled WebAssembly.Module is available as the global \
-         `{module_global}`.",
+         it does not execute the module.]",
         name = name,
-        module_global = module_global,
     );
+
+    if let Some(custom) = custom {
+        let custom = custom.trim();
+        if !custom.is_empty() {
+            desc.push_str(&format!("\n\n{}", custom));
+        }
+    }
+
+    desc.push_str(&format!(
+        "\n\nThe compiled WebAssembly.Module is available as the global \
+         `{module_global}`.",
+        module_global = module_global,
+    ));
 
     if surface.has_imports {
         desc.push_str(&format!(
@@ -316,6 +328,7 @@ mod tests {
             name: name.to_string(),
             bytes,
             max_memory_bytes: None,
+            description: None,
         }
     }
 
@@ -388,6 +401,24 @@ mod tests {
         // Empty object schema.
         let schema = serde_json::to_value(stub.input_schema.as_ref()).unwrap();
         assert_eq!(schema["type"], json!("object"));
+    }
+
+    #[test]
+    fn make_stub_tool_includes_custom_description() {
+        let mut m = module("math", module_with_export());
+        m.description = Some("Fast fixed-point arithmetic helpers.".to_string());
+        let stub = make_wasm_stub_tool("runjs__", &m);
+        let desc = stub.description.unwrap();
+        // Operator description appears prominently...
+        assert!(
+            desc.contains("Fast fixed-point arithmetic helpers."),
+            "desc: {}",
+            desc
+        );
+        // ...but the auto-generated usage hint is still present.
+        assert!(desc.contains("__wasm_math"), "desc: {}", desc);
+        assert!(desc.contains("run_js"), "desc: {}", desc);
+        assert!(desc.contains("add"), "desc: {}", desc);
     }
 
     #[test]

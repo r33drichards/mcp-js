@@ -114,6 +114,19 @@ Control this behaviour with:
 
 - `--wasm-stubs false` to hide the stubs
 - `--wasm-stub-prefix <prefix>` to change the `runjs__` prefix
+- `--wasm-stub-description <name>=<text>` to add a human description to a
+  module's stub (shown to agents alongside the auto-generated usage hint)
+
+The description can also be set inline in `--wasm-config`:
+
+```json
+{
+  "sqlite": {
+    "path": "examples/sqlite-wasm/sqlite3.wasm",
+    "description": "In-memory SQLite database (exec/query SQL)."
+  }
+}
+```
 
 This mirrors the [MCP server tool stubs](../concepts/mcp-pass-through.md).
 

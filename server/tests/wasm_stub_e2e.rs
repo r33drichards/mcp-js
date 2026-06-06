@@ -191,6 +191,47 @@ async fn calling_wasm_stub_returns_run_js_instructions() -> Result<(), Box<dyn s
 }
 
 #[tokio::test]
+async fn wasm_stub_description_flag_sets_tool_description() -> Result<(), Box<dyn std::error::Error>> {
+    let heap = common::create_temp_heap_dir() + "-wasm-stub-desc";
+    std::fs::create_dir_all(&heap).ok();
+
+    let mut server = WasmServer::start_with_args(
+        &heap,
+        &["--wasm-stub-description", "math=Adds two integers together."],
+    )
+    .await?;
+    server.initialize().await?;
+
+    let list = server
+        .send(json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list",
+            "params": {}
+        }))
+        .await?;
+
+    let stub = list["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t.get("name").and_then(|n| n.as_str()) == Some("runjs__wasm__math"))
+        .expect("stub present");
+    let desc = stub["description"].as_str().unwrap_or_default();
+    assert!(
+        desc.contains("Adds two integers together."),
+        "custom description should appear: {}",
+        desc,
+    );
+    // Auto-generated usage hint still present.
+    assert!(desc.contains("__wasm_math"), "description: {}", desc);
+
+    server.stop().await;
+    common::cleanup_heap_dir(&heap);
+    Ok(())
+}
+
+#[tokio::test]
 async fn wasm_stub_prefix_flag_overrides_default() -> Result<(), Box<dyn std::error::Error>> {
     let heap = common::create_temp_heap_dir() + "-wasm-stub3";
     std::fs::create_dir_all(&heap).ok();
