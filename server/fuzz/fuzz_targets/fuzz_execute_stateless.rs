@@ -49,6 +49,7 @@ fuzz_target!(|input: StatelessInput| {
             name: format!("m{}", i),
             bytes: m.bytes,
             max_memory_bytes: None,
+            description: None,
         })
         .collect();
 

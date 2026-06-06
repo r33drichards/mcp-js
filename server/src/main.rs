@@ -121,7 +121,7 @@ async fn main() -> Result<()> {
         .map_err(|e| anyhow::anyhow!("Invalid --wasm-default-max-memory: {}", e))?;
     tracing::info!("WASM default max memory: {} bytes ({} MiB)", wasm_default_max_bytes, wasm_default_max_bytes / 1024 / 1024);
 
-    let wasm_modules = load_wasm_modules(&cli.wasm_modules, &cli.wasm_config)?;
+    let wasm_modules = load_wasm_modules(&cli.wasm_modules, &cli.wasm_config, &cli.wasm_stub_descriptions)?;
     if !wasm_modules.is_empty() {
         tracing::info!("Loaded {} WASM module(s): {}", wasm_modules.len(),
             wasm_modules.iter().map(|m| m.name.as_str()).collect::<Vec<_>>().join(", "));
@@ -187,7 +187,22 @@ async fn main() -> Result<()> {
     };
 
     let engine = engine.with_wasm_default_max_bytes(wasm_default_max_bytes);
-    let engine = if wasm_modules.is_empty() { engine } else { engine.with_wasm_modules(wasm_modules) };
+    let has_wasm_modules = !wasm_modules.is_empty();
+    let engine = if has_wasm_modules { engine.with_wasm_modules(wasm_modules) } else { engine };
+    let engine = if has_wasm_modules {
+        let wasm_stub_config = engine::wasm_stub::WasmStubConfig {
+            prefix: cli.wasm_stub_prefix.clone(),
+            enabled: cli.wasm_stubs,
+        };
+        tracing::info!(
+            stubs = wasm_stub_config.enabled,
+            prefix = %wasm_stub_config.prefix,
+            "WASM module stubbing"
+        );
+        engine.with_wasm_stub_config(wasm_stub_config)
+    } else {
+        engine
+    };
 
     // ── Policy configuration ─────────────────────────────────────────────
     // Parse --policies-json if provided (inline JSON or file path).
@@ -565,6 +580,7 @@ where
 fn load_wasm_modules(
     cli_modules: &[String],
     config_path: &Option<String>,
+    stub_descriptions: &[String],
 ) -> Result<Vec<WasmModule>> {
     let mut modules = Vec::new();
 
@@ -600,7 +616,7 @@ fn load_wasm_modules(
 
         let bytes = std::fs::read(path)
             .map_err(|e| anyhow::anyhow!("Failed to read WASM file '{}': {}", path, e))?;
-        modules.push(WasmModule { name, bytes, max_memory_bytes });
+        modules.push(WasmModule { name, bytes, max_memory_bytes, description: None });
     }
 
     // Parse --wasm-config JSON file.
@@ -612,8 +628,8 @@ fn load_wasm_modules(
         let config: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&config_str)
             .map_err(|e| anyhow::anyhow!("Invalid JSON in WASM config '{}': {}", config_path, e))?;
         for (name, value) in config {
-            let (path, max_memory_bytes) = if let Some(s) = value.as_str() {
-                (s.to_string(), None)
+            let (path, max_memory_bytes, description) = if let Some(s) = value.as_str() {
+                (s.to_string(), None, None)
             } else if let Some(obj) = value.as_object() {
                 let path = obj.get("path")
                     .and_then(|v| v.as_str())
@@ -627,7 +643,13 @@ fn load_wasm_modules(
                     )))
                     .transpose()?
                     .map(|v| v as usize);
-                (path, max_mem)
+                let description = obj.get("description")
+                    .map(|v| v.as_str().ok_or_else(|| anyhow::anyhow!(
+                        "WASM config \"description\" for '{}' must be a string", name
+                    )))
+                    .transpose()?
+                    .map(|s| s.to_string());
+                (path, max_mem, description)
             } else {
                 anyhow::bail!(
                     "WASM config value for '{}' must be a string path or object, got: {}", name, value
@@ -636,8 +658,24 @@ fn load_wasm_modules(
             validate_wasm_name(&name)?;
             let bytes = std::fs::read(&path)
                 .map_err(|e| anyhow::anyhow!("Failed to read WASM file '{}': {}", path, e))?;
-            modules.push(WasmModule { name, bytes, max_memory_bytes });
+            modules.push(WasmModule { name, bytes, max_memory_bytes, description });
         }
+    }
+
+    // Apply --wasm-stub-description overrides (format: name=description text).
+    // These take precedence over a description set inline in --wasm-config.
+    for entry in stub_descriptions {
+        let (name, desc) = entry.split_once('=')
+            .ok_or_else(|| anyhow::anyhow!(
+                "Invalid --wasm-stub-description format: '{}'. Expected name=description", entry
+            ))?;
+        let name = name.trim();
+        let module = modules.iter_mut().find(|m| m.name == name)
+            .ok_or_else(|| anyhow::anyhow!(
+                "--wasm-stub-description refers to unknown WASM module '{}'. \
+                 Load it first with --wasm-module or --wasm-config.", name
+            ))?;
+        module.description = Some(desc.to_string());
     }
 
     // Check for duplicate names

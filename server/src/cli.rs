@@ -133,7 +133,8 @@ pub struct Cli {
 
     /// Path to a JSON config file mapping global names to .wasm file paths or objects.
     /// String value: {"name": "/path/to/module.wasm"}
-    /// Object value: {"name": {"path": "/path/to/module.wasm", "max_memory_bytes": 16777216}}
+    /// Object value: {"name": {"path": "/path/to/module.wasm", "max_memory_bytes": 16777216, "description": "what the module does"}}
+    /// The optional "description" sets the MCP stub tool's description.
     #[arg(long = "wasm-config", value_name = "PATH", help_heading = "WASM")]
     pub wasm_config: Option<String>,
 
@@ -143,6 +144,36 @@ pub struct Cli {
     /// is allocated as native memory outside the V8 heap.
     #[arg(long = "wasm-default-max-memory", default_value = "16m", help_heading = "WASM")]
     pub wasm_default_max_memory: String,
+
+    /// Expose pre-loaded WASM modules on the MCPJS server itself as
+    /// `<prefix>wasm__<name>` stubs. When `true` (the default whenever at
+    /// least one WASM module is loaded), an external client of MCPJS can
+    /// discover the module via tools/list and tool search; calling a stub
+    /// returns instructional text telling the caller to use the module from
+    /// JavaScript via run_js (the module is available as the `__wasm_<name>`
+    /// global). Pass `--wasm-stubs false` to disable.
+    #[arg(long = "wasm-stubs", default_value = "true", num_args = 1, help_heading = "WASM")]
+    pub wasm_stubs: bool,
+
+    /// Prefix applied to WASM stub tool names. Defaults to `runjs__` so it is
+    /// obvious to a calling agent that these modules execute through the JS
+    /// runtime rather than dispatching directly. Has no effect when
+    /// --wasm-stubs is false.
+    #[arg(
+        long = "wasm-stub-prefix",
+        default_value = crate::engine::wasm_stub::DEFAULT_WASM_STUB_PREFIX,
+        help_heading = "WASM"
+    )]
+    pub wasm_stub_prefix: String,
+
+    /// Set the MCP stub tool description for a loaded WASM module. Format:
+    /// name=description text. The text is shown to downstream agents alongside
+    /// the auto-generated usage hint (globals, exports, instantiation), helping
+    /// them decide when to use the module. Can be specified multiple times.
+    /// Overrides a "description" set inline via --wasm-config. The named module
+    /// must be loaded with --wasm-module or --wasm-config.
+    #[arg(long = "wasm-stub-description", value_name = "NAME=TEXT", help_heading = "WASM")]
+    pub wasm_stub_descriptions: Vec<String>,
 
     /// Inject headers into fetch requests matching host/method rules.
     /// Format: host=<host>,header=<name>,value=<val>[,methods=GET;POST]

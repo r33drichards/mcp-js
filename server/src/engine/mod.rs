@@ -11,6 +11,7 @@ pub mod opa;
 pub mod session_log;
 pub mod subprocess;
 pub mod timers;
+pub mod wasm_stub;
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -1138,6 +1139,10 @@ pub struct WasmModule {
     /// Max native memory (bytes) this module may declare (linear memory + tables).
     /// Defaults to wasm_default_max_bytes when None.
     pub max_memory_bytes: Option<usize>,
+    /// Optional operator-supplied description used for the module's MCP stub
+    /// tool. When set, it is shown to downstream agents alongside the
+    /// auto-generated usage hint. Defaults to None (auto-generated text only).
+    pub description: Option<String>,
 }
 
 #[derive(Clone)]
@@ -1157,6 +1162,9 @@ pub struct Engine {
     wasm_default_max_bytes: usize,
     /// WASM modules to inject as globals before every execution.
     wasm_modules: Arc<Vec<WasmModule>>,
+    /// Controls whether loaded WASM modules are advertised as stub tools on
+    /// the MCP surface, and under what name prefix.
+    wasm_stub_config: wasm_stub::WasmStubConfig,
     /// OPA-gated fetch configuration. When Some, `fetch()` is injected into the JS runtime.
     fetch_config: Option<Arc<fetch::FetchConfig>>,
     /// Policy-gated filesystem configuration. When Some, `fs` is injected into the JS runtime.
@@ -1264,6 +1272,7 @@ impl Engine {
             snapshot_mutex: Arc::new(tokio::sync::Mutex::new(())),
             wasm_default_max_bytes: DEFAULT_WASM_MAX_BYTES,
             wasm_modules: Arc::new(Vec::new()),
+            wasm_stub_config: wasm_stub::WasmStubConfig::default(),
             fetch_config: None,
             fs_config: None,
             execution_registry: None,
@@ -1297,6 +1306,7 @@ impl Engine {
             snapshot_mutex: Arc::new(tokio::sync::Mutex::new(())),
             wasm_default_max_bytes: DEFAULT_WASM_MAX_BYTES,
             wasm_modules: Arc::new(Vec::new()),
+            wasm_stub_config: wasm_stub::WasmStubConfig::default(),
             fetch_config: None,
             fs_config: None,
             execution_registry: None,
@@ -1322,6 +1332,31 @@ impl Engine {
     pub fn with_wasm_modules(mut self, modules: Vec<WasmModule>) -> Self {
         self.wasm_modules = Arc::new(modules);
         self
+    }
+
+    /// Configure how loaded WASM modules are advertised as stub tools on the
+    /// MCP surface.
+    pub fn with_wasm_stub_config(mut self, config: wasm_stub::WasmStubConfig) -> Self {
+        self.wasm_stub_config = config;
+        self
+    }
+
+    /// Generate stub `Tool` definitions for every loaded WASM module. Used by
+    /// the MCP server side to expose modules for discovery. Returns an empty
+    /// vec when WASM stubbing is disabled or no modules are loaded.
+    pub fn wasm_stub_tools(&self) -> Vec<rmcp::model::Tool> {
+        wasm_stub::stub_tools(&self.wasm_modules, &self.wasm_stub_config)
+    }
+
+    /// If `name` is a stub for a loaded WASM module, build the instructional
+    /// `CallToolResult` telling the caller to use the module via `run_js`.
+    /// Returns `None` if stubs are disabled or `name` matches no module.
+    pub fn wasm_stub_call_response(
+        &self,
+        name: &str,
+        arguments: Option<&serde_json::Map<String, serde_json::Value>>,
+    ) -> Option<rmcp::model::CallToolResult> {
+        wasm_stub::stub_call_response(&self.wasm_modules, &self.wasm_stub_config, name, arguments)
     }
 
     /// Enable OPA-gated fetch() in the JS runtime.

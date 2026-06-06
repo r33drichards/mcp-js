@@ -613,6 +613,8 @@ impl ServerHandler for McpService {
         if let Some(client) = &self.mcp_client {
             tools.extend(client.stub_tools());
         }
+        // Advertise pre-loaded WASM modules as stubs for discovery.
+        tools.extend(self.engine.wasm_stub_tools());
         Ok(ListToolsResult { next_cursor: None, tools })
     }
 
@@ -625,6 +627,10 @@ impl ServerHandler for McpService {
             if let Some(result) = client.stub_call_response(&request.name, request.arguments.as_ref()) {
                 return Ok(result);
             }
+        }
+        // WASM module stubs return run_js usage instructions instead of dispatching.
+        if let Some(result) = self.engine.wasm_stub_call_response(&request.name, request.arguments.as_ref()) {
+            return Ok(result);
         }
         let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
         Self::tool_box().call(tcc).await
@@ -853,6 +859,8 @@ impl ServerHandler for StatelessMcpService {
         if let Some(client) = &self.mcp_client {
             tools.extend(client.stub_tools());
         }
+        // Advertise pre-loaded WASM modules as stubs for discovery.
+        tools.extend(self.engine.wasm_stub_tools());
         Ok(ListToolsResult { next_cursor: None, tools })
     }
 
@@ -865,6 +873,10 @@ impl ServerHandler for StatelessMcpService {
             if let Some(result) = client.stub_call_response(&request.name, request.arguments.as_ref()) {
                 return Ok(result);
             }
+        }
+        // WASM module stubs return run_js usage instructions instead of dispatching.
+        if let Some(result) = self.engine.wasm_stub_call_response(&request.name, request.arguments.as_ref()) {
+            return Ok(result);
         }
         let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
         Self::tool_box().call(tcc).await
