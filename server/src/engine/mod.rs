@@ -369,8 +369,12 @@ pub fn strip_typescript_types(code: &str) -> Result<String, String> {
     let comments = SingleThreadedComments::default();
 
     let lexer = Lexer::new(
+        // JSX/TSX is intentionally disabled: the pipeline only strips TypeScript
+        // types and does not transform JSX, so accepting JSX would emit code that
+        // V8 rejects at runtime. Disabling tsx also re-enables `<T>value` type
+        // assertions, which are ambiguous with JSX when tsx is on.
         Syntax::Typescript(TsSyntax {
-            tsx: true,
+            tsx: false,
             ..Default::default()
         }),
         Default::default(),
