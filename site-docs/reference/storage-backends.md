@@ -73,7 +73,6 @@ A `put` failure on either the cache or S3 returns an error to the caller. A cach
 
 ## See also
 
-- [Quick-start: Heap storage backends](../tutorials/storage-backends.md)
 - [How-to: Heap storage backends](../how-to/storage-backends.md)
 - [Concepts: Heap storage backends](../concepts/storage-backends.md)
 - [Concepts: Stateful sessions & heap snapshots](../concepts/sessions-and-heaps.md)

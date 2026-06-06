@@ -140,7 +140,6 @@ request from proceeding with no credential.
 
 ## See also
 
-- [Quick-start: Network access with fetch](../tutorials/fetch.md)
 - [How-to: Network access with fetch](../how-to/fetch.md)
 - [Reference: Network access with fetch](../reference/fetch.md)
 - [Concepts: Security policies](../concepts/policies.md)

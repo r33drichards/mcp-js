@@ -130,7 +130,6 @@ curl -s -X POST http://localhost:8080/api/exec \
 
 ## See also
 
-- [Quick-start: Asynchronous execution & output](../tutorials/async-execution.md)
 - [Concepts: Asynchronous execution & output](../concepts/async-execution.md)
 - [Reference: Asynchronous execution & output](../reference/async-execution.md)
 - [How-to: Running JavaScript & TypeScript](js-execution.md)

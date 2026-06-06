@@ -176,7 +176,6 @@ The `headers` map reflects all headers sent to the upstream server, including th
 
 ## See also
 
-- [Quick-start: Security policies](../tutorials/policies.md)
 - [How-to: Security policies](../how-to/policies.md)
 - [Reference: Security policies](../reference/policies.md)
 - [Concepts: Network access with fetch](../concepts/fetch.md)

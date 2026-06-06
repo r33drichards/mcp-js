@@ -125,7 +125,6 @@ encoder/decoder, and a thin `SQLite` wrapper class — lives in
 
 ## See also
 
-- [Tutorial: load your first WASM module](../tutorials/wasm-modules.md)
 - [WebAssembly modules — concepts](../concepts/wasm-modules.md)
 - [WebAssembly modules reference](../reference/wasm-modules.md)
 - [CLI flags reference](../reference/cli-flags.md)

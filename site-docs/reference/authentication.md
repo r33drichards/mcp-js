@@ -109,7 +109,6 @@ The bundled `keycloak/mcp-realm.json` configures:
 
 ## See also
 
-- [Quick-start: Authentication](../tutorials/authentication.md)
 - [How-to: Authentication](../how-to/authentication.md)
 - [Concepts: Authentication](../concepts/authentication.md)
 - [Reference: CLI flags](../reference/cli-flags.md)

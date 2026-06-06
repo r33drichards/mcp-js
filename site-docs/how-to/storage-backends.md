@@ -72,7 +72,6 @@ This flag is independent of the heap storage backend selection and applies in bo
 
 ## See also
 
-- [Quick-start: Heap storage backends](../tutorials/storage-backends.md)
 - [Concepts: Heap storage backends](../concepts/storage-backends.md)
 - [Reference: Heap storage backends](../reference/storage-backends.md)
 - [Concepts: Stateful sessions & heap snapshots](../concepts/sessions-and-heaps.md)

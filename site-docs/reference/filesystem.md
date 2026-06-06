@@ -304,7 +304,6 @@ Each `PolicySource`:
 
 ## See also
 
-- [Quick-start: Filesystem access](../tutorials/filesystem.md)
 - [How-to: Filesystem access](../how-to/filesystem.md)
 - [Concepts: Filesystem access](../concepts/filesystem.md)
 - [Reference: CLI flags](../reference/cli-flags.md)

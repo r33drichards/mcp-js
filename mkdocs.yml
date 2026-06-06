@@ -28,20 +28,7 @@ nav:
 
   - Tutorials:
       - Overview: tutorials/overview.md
-      - Running JavaScript & TypeScript: tutorials/js-execution.md
-      - Stateful sessions & heap snapshots: tutorials/sessions-and-heaps.md
-      - Heap storage backends: tutorials/storage-backends.md
-      - Asynchronous execution & output: tutorials/async-execution.md
-      - Transports (stdio, HTTP, SSE): tutorials/transports.md
-      - Network access with fetch: tutorials/fetch.md
-      - Filesystem access: tutorials/filesystem.md
-      - Subprocess execution: tutorials/subprocess.md
-      - WebAssembly modules: tutorials/wasm-modules.md
-      - ES module imports: tutorials/module-imports.md
-      - Calling upstream MCP servers: tutorials/mcp-client.md
-      - Security policies (OPA/Rego): tutorials/policies.md
-      - Authentication (JWT/JWKS): tutorials/authentication.md
-      - Clustering & replication (Raft): tutorials/clustering.md
+      - Run SQLite in WebAssembly: tutorials/sqlite-wasm.md
 
   - How-to:
       - Overview: how-to/overview.md

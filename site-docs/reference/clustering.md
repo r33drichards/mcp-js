@@ -146,7 +146,6 @@ Cluster mode requires --http-port or --sse-port (stdio transport is not supporte
 
 ## See also
 
-- [Tutorial: Clustering & replication (Raft)](../tutorials/clustering.md)
 - [How-to: Clustering & replication (Raft)](../how-to/clustering.md)
 - [Concepts: Clustering & replication (Raft)](../concepts/clustering.md)
 - [Concepts: Heap storage backends](../concepts/storage-backends.md)

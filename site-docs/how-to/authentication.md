@@ -147,7 +147,6 @@ curl -s -X POST http://localhost:3000/mcp \
 
 ## See also
 
-- [Quick-start: Authentication](../tutorials/authentication.md)
 - [Concepts: Authentication](../concepts/authentication.md)
 - [Reference: Authentication](../reference/authentication.md)
 - [Stateful sessions & heap snapshots](../how-to/sessions-and-heaps.md)

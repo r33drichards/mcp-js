@@ -77,7 +77,6 @@ graph LR
 
 ## See also
 
-- [Tutorial](../tutorials/transports.md)
 - [How-to guide](../how-to/transports.md)
 - [Reference](../reference/transports.md)
 - [Concepts: async execution](../concepts/async-execution.md)

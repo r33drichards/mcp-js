@@ -80,7 +80,6 @@ Subprocess, filesystem, and fetch all follow the same pattern: disabled unless a
 
 ## See also
 
-- [Quick-start: Subprocess execution](../tutorials/subprocess.md)
 - [How-to: Subprocess execution](../how-to/subprocess.md)
 - [Reference: Subprocess execution](../reference/subprocess.md)
 - [Security policies (OPA/Rego)](../concepts/policies.md)

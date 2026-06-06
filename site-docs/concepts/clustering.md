@@ -88,7 +88,6 @@ Peer information is persisted to the local sled database under the key `raft_pee
 
 ## See also
 
-- [Tutorial: Clustering & replication (Raft)](../tutorials/clustering.md)
 - [How-to: Clustering & replication (Raft)](../how-to/clustering.md)
 - [Reference: Clustering & replication (Raft)](../reference/clustering.md)
 - [Concepts: Heap storage backends](storage-backends.md)

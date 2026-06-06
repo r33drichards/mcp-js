@@ -100,7 +100,6 @@ Even with a policy, consider the following:
 
 ## See also
 
-- [Quick-start: ES module imports](../tutorials/module-imports.md)
 - [How-to: ES module imports](../how-to/module-imports.md)
 - [Reference: ES module imports](../reference/module-imports.md)
 - [Concepts: Security policies](../concepts/policies.md)

@@ -115,7 +115,6 @@ After all capability extensions are injected (console, fetch, filesystem, timers
 
 ## See also
 
-- [Tutorial — run your first script](../tutorials/js-execution.md)
 - [How-to — execution recipes](../how-to/js-execution.md)
 - [Reference — parameters and return shapes](../reference/js-execution.md)
 - [Asynchronous execution & output](../concepts/async-execution.md)

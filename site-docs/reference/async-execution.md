@@ -197,7 +197,6 @@ The REST `POST /api/exec` body (`ExecRequest`) also accepts a `session` string f
 
 ## See also
 
-- [Quick-start: Asynchronous execution & output](../tutorials/async-execution.md)
 - [How-to: Asynchronous execution & output](../how-to/async-execution.md)
 - [Concepts: Asynchronous execution & output](../concepts/async-execution.md)
 - [Reference: Running JavaScript & TypeScript](js-execution.md)

@@ -142,7 +142,6 @@ mcp-v8 --http-port=3000 --cluster-port=4000 --node-id=node1 \
 
 ## See also
 
-- [Tutorial: Clustering & replication (Raft)](../tutorials/clustering.md)
 - [Concepts: Clustering & replication (Raft)](../concepts/clustering.md)
 - [Reference: Clustering & replication (Raft)](../reference/clustering.md)
 - [Concepts: Heap storage backends](../concepts/storage-backends.md)

@@ -97,7 +97,6 @@ When `--jwks-url` is configured:
 
 ## See also
 
-- [Quick-start: Authentication](../tutorials/authentication.md)
 - [How-to: Authentication](../how-to/authentication.md)
 - [Reference: Authentication](../reference/authentication.md)
 - [Stateful sessions & heap snapshots](../concepts/sessions-and-heaps.md)

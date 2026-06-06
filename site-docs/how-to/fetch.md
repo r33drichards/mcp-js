@@ -195,7 +195,6 @@ itself. Matching is case-insensitive.
 
 ## See also
 
-- [Quick-start: Network access with fetch](../tutorials/fetch.md)
 - [Concepts: Network access with fetch](../concepts/fetch.md)
 - [Reference: Network access with fetch](../reference/fetch.md)
 - [Concepts: Security policies](../concepts/policies.md)

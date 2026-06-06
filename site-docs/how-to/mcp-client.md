@@ -164,9 +164,7 @@ See the [policies concepts page](../concepts/policies.md) for the full policy co
 
 ## See also
 
-- [Tutorial](../tutorials/mcp-client.md)
 - [Concepts](../concepts/mcp-client.md)
 - [Reference](../reference/mcp-client.md)
-- [Running JavaScript & TypeScript](../tutorials/js-execution.md)
 - [Security policies](../concepts/policies.md)
 - [MCP tools reference](../reference/mcp-tools.md)

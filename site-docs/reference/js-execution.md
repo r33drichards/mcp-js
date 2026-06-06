@@ -152,7 +152,6 @@ TypeScript parse error: <SWC diagnostic>
 
 ## See also
 
-- [Tutorial — run your first script](../tutorials/js-execution.md)
 - [How-to — execution recipes](../how-to/js-execution.md)
 - [Concepts — execution model](../concepts/js-execution.md)
 - [Asynchronous execution & output](../reference/async-execution.md)

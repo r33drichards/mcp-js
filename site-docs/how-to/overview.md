@@ -1,8 +1,9 @@
 # How-to guides
 
-These are **task-oriented** recipes for getting specific things done. They assume you
-already have the server installed and running. For a guided introduction, start with
-the [Tutorials](../tutorials/overview.md) tutorials instead.
+These are **task-oriented** recipes for getting specific things done, organized by
+feature. They assume you already have the server installed and running. For
+end-to-end, build-something-real walkthroughs, see the
+[Tutorials](../tutorials/overview.md) instead.
 
 ## Guides by feature
 

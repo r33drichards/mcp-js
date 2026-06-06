@@ -146,7 +146,6 @@ The `allow_external` flag and the modules policy are independent controls:
 
 ## See also
 
-- [Quick-start: ES module imports](../tutorials/module-imports.md)
 - [How-to: ES module imports](../how-to/module-imports.md)
 - [Concepts: ES module imports](../concepts/module-imports.md)
 - [Reference: CLI flags](../reference/cli-flags.md)

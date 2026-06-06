@@ -297,7 +297,6 @@ Mix local and remote evaluators in the same chain. For example, use a fast local
 ## See also
 
 - [Concepts: Security policies](../concepts/policies.md)
-- [Quick-start: Security policies](../tutorials/policies.md)
 - [Reference: Security policies](../reference/policies.md)
 - [How-to: Network access with fetch](../how-to/fetch.md)
 - [How-to: Filesystem access](../how-to/filesystem.md)

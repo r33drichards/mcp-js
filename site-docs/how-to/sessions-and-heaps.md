@@ -176,7 +176,6 @@ Omit the `fields` parameter to return all fields: `index`, `input_heap`, `output
 
 ## See also
 
-- [Tutorial: sessions & heap snapshots](../tutorials/sessions-and-heaps.md)
 - [Concepts: sessions & heap snapshots](../concepts/sessions-and-heaps.md)
 - [Reference: sessions & heap snapshots](../reference/sessions-and-heaps.md)
 - [Storage backends](../how-to/storage-backends.md)

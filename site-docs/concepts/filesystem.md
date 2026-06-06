@@ -63,7 +63,6 @@ sequenceDiagram
 
 ## See also
 
-- [Quick-start: Filesystem access](../tutorials/filesystem.md)
 - [How-to: Filesystem access](../how-to/filesystem.md)
 - [Reference: Filesystem access](../reference/filesystem.md)
 - [Concepts: Security policies](../concepts/policies.md)

@@ -81,7 +81,6 @@ For a Raft cluster to work correctly every node must be able to resolve any cont
 
 ## See also
 
-- [Quick-start: Heap storage backends](../tutorials/storage-backends.md)
 - [How-to: Heap storage backends](../how-to/storage-backends.md)
 - [Reference: Heap storage backends](../reference/storage-backends.md)
 - [Concepts: Stateful sessions & heap snapshots](sessions-and-heaps.md)

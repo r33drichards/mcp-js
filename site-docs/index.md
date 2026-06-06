@@ -28,8 +28,8 @@ cluster** that replicates session metadata.
 ## Start here
 
 - [Install](install/overview.md) — get the server running.
-- [Tutorials](tutorials/overview.md) — guided, copy-paste tutorials.
-- [How-to guides](how-to/overview.md) — task-focused recipes.
+- [Tutorials](tutorials/overview.md) — end-to-end use-case walkthroughs (e.g. SQLite WASM).
+- [How-to guides](how-to/overview.md) — task-focused recipes by feature.
 - [Concepts](concepts/overview.md) — how and why it works.
 - [Reference](reference/overview.md) — flags, tools, APIs.
 

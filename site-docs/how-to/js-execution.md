@@ -1,6 +1,6 @@
 # Running JavaScript & TypeScript
 
-Focused recipes for common execution tasks. These assume the server is running with an HTTP or SSE transport. For an introduction, see the [tutorial](../tutorials/js-execution.md).
+Focused recipes for common execution tasks. These assume the server is running with an HTTP or SSE transport. For the execution model, see [Concepts](../concepts/js-execution.md).
 
 ## How to run TypeScript
 
@@ -162,7 +162,6 @@ Pass `tags` to attach arbitrary key-value metadata to the output snapshot, which
 
 ## See also
 
-- [Tutorial — run your first script](../tutorials/js-execution.md)
 - [Concepts — execution model](../concepts/js-execution.md)
 - [Reference — all parameters and return shapes](../reference/js-execution.md)
 - [Asynchronous execution & output](../how-to/async-execution.md)

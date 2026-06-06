@@ -149,7 +149,6 @@ noting the `__wasm_<name>` global name and that manual instantiation is required
 
 ## See also
 
-- [Tutorial: load your first WASM module](../tutorials/wasm-modules.md)
 - [How to use WebAssembly modules](../how-to/wasm-modules.md)
 - [WebAssembly modules — concepts](../concepts/wasm-modules.md)
 - [CLI flags reference](../reference/cli-flags.md)

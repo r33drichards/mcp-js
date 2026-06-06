@@ -200,7 +200,6 @@ Session log entries and heap tag metadata are stored in the sled embedded databa
 
 ## See also
 
-- [Tutorial: sessions & heap snapshots](../tutorials/sessions-and-heaps.md)
 - [How-to: sessions & heap snapshots](../how-to/sessions-and-heaps.md)
 - [Concepts: sessions & heap snapshots](../concepts/sessions-and-heaps.md)
 - [Storage backends](../reference/storage-backends.md)

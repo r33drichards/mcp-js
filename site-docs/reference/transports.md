@@ -68,7 +68,6 @@ REST sidecar. See the [HTTP API reference](../reference/http-api.md) for the ful
 
 ## See also
 
-- [Tutorial](../tutorials/transports.md)
 - [How-to guide](../how-to/transports.md)
 - [Concepts](../concepts/transports.md)
 - [Reference: async execution](../reference/async-execution.md)

@@ -323,7 +323,6 @@ allow if {
 
 ## See also
 
-- [Quick-start: Security policies](../tutorials/policies.md)
 - [How-to: Security policies](../how-to/policies.md)
 - [Concepts: Security policies](../concepts/policies.md)
 - [Reference: Network access with fetch](../reference/fetch.md)

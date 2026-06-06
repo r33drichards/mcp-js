@@ -169,7 +169,6 @@ The following JSON object is passed to the Rego policy as `input` on every subpr
 
 ## See also
 
-- [Quick-start: Subprocess execution](../tutorials/subprocess.md)
 - [How-to: Subprocess execution](../how-to/subprocess.md)
 - [Concepts: Subprocess execution](../concepts/subprocess.md)
 - [Security policies (OPA/Rego)](../reference/policies.md)

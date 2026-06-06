@@ -237,7 +237,6 @@ The entrypoint is `data.mcp.fetch.allow`.
 
 ## See also
 
-- [Quick-start: Network access with fetch](../tutorials/fetch.md)
 - [How-to: Network access with fetch](../how-to/fetch.md)
 - [Concepts: Network access with fetch](../concepts/fetch.md)
 - [Concepts: Security policies](../concepts/policies.md)

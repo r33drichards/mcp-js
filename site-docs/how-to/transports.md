@@ -97,7 +97,6 @@ The process prints the spec to stdout and exits immediately — no port is opene
 
 ## See also
 
-- [Tutorial](../tutorials/transports.md)
 - [Concepts](../concepts/transports.md)
 - [Reference](../reference/transports.md)
 - [How-to: async execution](../how-to/async-execution.md)
