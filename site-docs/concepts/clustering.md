@@ -1,51 +1,96 @@
-# Clustering
+# Clustering & replication (Raft)
 
-Cluster mode adds distributed coordination to `mcp-v8` for deployments that
-need replicated session metadata and coordinated writes across multiple nodes.
+mcp-v8 can run as a Raft cluster of two or more nodes to provide high availability and fault tolerance for session metadata.
 
-It is not just a transport flag. Cluster mode changes how the server handles
-leadership, write ownership, and operational topology.
+## Why Raft
+
+Raft is a distributed consensus algorithm that guarantees that a replicated log is consistent across a cluster as long as a majority of nodes are healthy. For mcp-v8, this means that session history and heap tag metadata remain correct and available even when individual nodes crash or restart — without requiring a shared external database.
+
+Raft was chosen over simpler replication schemes because it provides strong consistency (every committed write is linearizable), well-understood leader-election semantics, and automatic recovery when nodes rejoin.
+
+## Architecture: three-node cluster with load balancer
+
+The diagram below shows how the pieces fit together. Each node exposes two ports: an MCP HTTP port for clients and a separate Raft cluster port for inter-node communication.
 
 ```mermaid
-flowchart LR
-  A[Client request] --> B[Follower or leader node]
-  B --> C[execute JS locally]
-  C --> D[write heap snapshot to configured storage]
-  C --> E{metadata write?}
-  E -->|yes on leader| F[append coordinated write]
-  E -->|yes on follower| G[forward metadata write to leader]
-  G --> F
-  F --> H[replicate session log and heap tags]
-  H --> I[cluster metadata converges]
+graph TB
+    client["MCP Client"] --> lb["nginx LB<br/>port 8080"]
+    lb -->|POST /mcp| n1["node1<br/>MCP :3000 / Raft :4000"]
+    lb -->|POST /mcp| n2["node2<br/>MCP :3000 / Raft :4000"]
+    lb -->|POST /mcp| n3["node3<br/>MCP :3000 / Raft :4000"]
+    n1 <-->|AppendEntries / RequestVote| n2
+    n2 <-->|AppendEntries / RequestVote| n3
+    n1 <-->|AppendEntries / RequestVote| n3
+    style n1 fill:#4caf50,color:#fff
 ```
 
-The cluster layer is Raft-inspired. It handles:
+`node1` is shown as the current leader (green). The load balancer routes client traffic to all three MCP ports; Raft traffic stays on port 4000 and never reaches external clients.
 
-- leader election
-- replicated session logging
-- replicated heap tag updates
-- metadata write forwarding when a request lands on a follower
-- peer discovery and node identity concerns
+## Leader election
 
-The important implementation detail is that JavaScript execution still happens
-on the node that received the request. In stateful mode, that node also writes
-the resulting heap snapshot through its configured heap storage directly.
+Every node starts as a **Follower**. If a follower does not receive a heartbeat from a leader within a randomised election timeout, it transitions to **Candidate**, increments its term, and sends `RequestVote` RPCs to all peers.
 
-What goes through Raft is the metadata layer around that execution:
+- A node votes for a candidate only if the candidate's log is at least as up to date as its own, and it has not already voted in this term.
+- A candidate that collects votes from a strict majority (⌊N/2⌋ + 1) becomes the new **Leader**.
+- The randomised timeout window (`--election-timeout-min` to `--election-timeout-max`) reduces the probability of split votes.
 
-- session log entries
-- heap tag writes
+The leader then sends periodic `AppendEntries` heartbeats at `--heartbeat-interval` intervals. Followers reset their election timers on every received heartbeat, preventing unnecessary elections while the leader is alive.
 
-So the cluster is coordinating state metadata, not shipping V8 execution itself
-to the leader.
+## Log replication
 
-This matters most for stateful, networked deployments. It does not apply to
-stdio, and it introduces configuration concerns such as `--cluster-port`,
-`--node-id`, peer lists, advertise addresses, and timing parameters.
+When a write is committed (a session-log entry or a heap tag change), the leader:
 
-Cluster mode is an operational scaling feature. It helps preserve a coherent
-view of session history and heap metadata across nodes, but it also makes
-deployment and failure handling more complex than single-node operation.
+1. Appends the entry to its own log.
+2. Sends `AppendEntries` RPCs to all followers in parallel.
+3. Waits until a majority acknowledge the entry.
+4. Advances `commit_index` and applies the entry to the local key-value store.
+5. Notifies followers of the new `commit_index` in the next heartbeat so they apply the entry too.
 
-For a concrete three-node setup on localhost, see
-[Run a Cluster](../how-to/run-a-cluster.md).
+A follower that falls behind — due to a restart or network partition — is caught up automatically: the leader re-sends all log entries starting from `next_index` for that peer.
+
+## What state is replicated
+
+The Raft cluster replicates two stores:
+
+| Store | Description |
+|-------|-------------|
+| **Session log** | Records of MCP session initializations and their associated metadata (session ID, heap reference, tags, execution history). |
+| **Heap tags** | The key-value tag store used by `set_heap_tags`, `get_heap_tags`, and `query_heaps_by_tags`. |
+
+Both stores call `.with_cluster(node)` at startup, which routes their writes through the Raft leader and waits for majority acknowledgment before returning.
+
+## What state is NOT replicated
+
+**V8 heap snapshots** are not replicated. Each heap is a content-addressed binary blob stored in whichever heap storage backend the node is configured to use (`--directory-path`, `--s3-bucket`, or the default local filesystem). Because heaps are content-addressed by their SHA-256 hash, the same heap content will have the same address on every node — but physically each node stores only the heaps it has created locally.
+
+In practice, heaps are replicated at the storage layer by using a shared backend (S3 is the natural choice for multi-node deployments) rather than at the Raft layer. See [Heap storage backends](storage-backends.md) for details.
+
+## Consistency model
+
+Reads served by a follower may see slightly stale data (up to one heartbeat interval behind the leader's `commit_index`). Writes, however, always go through the leader: if a non-leader node receives a write request it forwards the request to the leader before returning. This means:
+
+- **Writes are linearizable** — they complete only after a majority acknowledges the log entry.
+- **Reads have eventual consistency** — followers apply committed entries asynchronously and may lag by a few milliseconds.
+
+For most MCP use cases (session metadata and tag lookups) this trade-off is acceptable.
+
+## Why HTTP or SSE transport is required
+
+The Raft cluster port runs its own lightweight HTTP server (using `hyper`) to handle `AppendEntries`, `RequestVote`, `join`, and `leave` RPCs. This server is independent of the MCP transport, but the node's MCP transport must also be HTTP-based so it can run concurrently and share the same process.
+
+stdio transport is a blocking single-connection protocol — it does not allow the node to concurrently serve cluster traffic. If `--cluster-port` is set without `--http-port` or `--sse-port`, the server exits with an error at startup.
+
+## Cluster membership and peer discovery
+
+Initial peer addresses are supplied via `--peers` using the format `id@host:port`. The leader propagates its current peer table to all followers in every `AppendEntries` RPC (in the `peer_addrs` field). Followers merge any new peers they learn from the leader, so a node added via `--join` is discovered by the whole cluster without restarting existing members.
+
+Peer information is persisted to the local sled database under the key `raft_peers`, so a restarting node recovers its peer list without reconfiguration.
+
+## See also
+
+- [How-to: Clustering & replication (Raft)](../how-to/clustering.md)
+- [Reference: Clustering & replication (Raft)](../reference/clustering.md)
+- [Concepts: Heap storage backends](storage-backends.md)
+- [Concepts: Transports](transports.md)
+- [Concepts: Stateful sessions & heap snapshots](sessions-and-heaps.md)
+- [Reference: CLI flags](../reference/cli-flags.md)

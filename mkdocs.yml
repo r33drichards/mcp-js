@@ -25,52 +25,65 @@ nav:
 
   - Install:
       - Overview: install/overview.md
-      - Release Script: install/release-script.md
-      - Build from Source: install/build-from-source.md
-      - Nix: install/nix.md
-  - Quick Start:
-      - Overview: quick-start/overview.md
-      - Claude Code: quick-start/claude-code.md
-      - Claude Desktop: quick-start/claude-code-desktop.md
-      - Codex: quick-start/codex.md
-      - Cursor: quick-start/cursor.md
-      - Generic MCP: quick-start/generic-mcp.md
-      - curl: quick-start/curl.md
-      - Bundled CLI: quick-start/bundled-cli.md
+
+  - Tutorials:
+      - Overview: tutorials/overview.md
+      - Run SQLite in WebAssembly: tutorials/sqlite-wasm.md
+
   - How-to:
       - Overview: how-to/overview.md
-      - Run with stdio: how-to/run-with-stdio.md
-      - Run with HTTP: how-to/run-with-http.md
-      - Run with SSE: how-to/run-with-sse.md
-      - Use Local Storage: how-to/use-local-storage.md
-      - Use S3 Storage: how-to/use-s3-storage.md
-      - Run a Cluster: how-to/run-a-cluster.md
-      - Enable OPA Policies: how-to/enable-opa-policies.md
-      - Provide Sandboxed Filesystem Access: how-to/provide-sandboxed-filesystem-access.md
-      - Configure Fetch Header Injection: how-to/configure-fetch-header-injection.md
-      - Use SQLite WASM: how-to/use-sqlite-wasm.md
-      - Connect as an MCP Server: how-to/connect-as-an-mcp-server.md
-      - Use CLI: how-to/use-cli.md
+      - Running JavaScript & TypeScript: how-to/js-execution.md
+      - Stateful sessions & heap snapshots: how-to/sessions-and-heaps.md
+      - Heap storage backends: how-to/storage-backends.md
+      - Asynchronous execution & output: how-to/async-execution.md
+      - Transports (stdio, HTTP, SSE): how-to/transports.md
+      - Network access with fetch: how-to/fetch.md
+      - Filesystem access: how-to/filesystem.md
+      - Subprocess execution: how-to/subprocess.md
+      - WebAssembly modules: how-to/wasm-modules.md
+      - ES module imports: how-to/module-imports.md
+      - Calling upstream MCP servers: how-to/mcp-client.md
+      - Security policies (OPA/Rego): how-to/policies.md
+      - Authentication (JWT/JWKS): how-to/authentication.md
+      - Clustering & replication (Raft): how-to/clustering.md
+      - Customize prompt & tool descriptions: how-to/customize-mcp-surface.md
+
   - Concepts:
       - Overview: concepts/overview.md
-      - JavaScript Runtime: concepts/javascript-runtime.md
-      - Execution Model: concepts/execution-model.md
-      - Sessions and Heaps: concepts/sessions-and-heaps.md
-      - Transports: concepts/transports.md
-      - Integration Surfaces: concepts/integration-surfaces.md
-      - MCP Pass-Through: concepts/mcp-pass-through.md
-      - Module Loading: concepts/module-loading.md
-      - WASM and Native Modules: concepts/wasm-and-native-modules.md
-      - Policy System: concepts/policy-system.md
-      - Network Access: concepts/network-access.md
-      - Filesystem Access: concepts/filesystem-access.md
-      - Clustering: concepts/clustering.md
+      - Running JavaScript & TypeScript: concepts/js-execution.md
+      - Stateful sessions & heap snapshots: concepts/sessions-and-heaps.md
+      - Heap storage backends: concepts/storage-backends.md
+      - Asynchronous execution & output: concepts/async-execution.md
+      - Transports (stdio, HTTP, SSE): concepts/transports.md
+      - Network access with fetch: concepts/fetch.md
+      - Filesystem access: concepts/filesystem.md
+      - Subprocess execution: concepts/subprocess.md
+      - WebAssembly modules: concepts/wasm-modules.md
+      - ES module imports: concepts/module-imports.md
+      - Calling upstream MCP servers: concepts/mcp-client.md
+      - Security policies (OPA/Rego): concepts/policies.md
+      - Authentication (JWT/JWKS): concepts/authentication.md
+      - Clustering & replication (Raft): concepts/clustering.md
+
   - Reference:
       - Overview: reference/overview.md
       - CLI Flags: reference/cli-flags.md
       - HTTP API: reference/http-api.md
       - MCP Tools: reference/mcp-tools.md
-      - Policy Files: reference/policy-files.md
+      - Running JavaScript & TypeScript: reference/js-execution.md
+      - Stateful sessions & heap snapshots: reference/sessions-and-heaps.md
+      - Heap storage backends: reference/storage-backends.md
+      - Asynchronous execution & output: reference/async-execution.md
+      - Transports (stdio, HTTP, SSE): reference/transports.md
+      - Network access with fetch: reference/fetch.md
+      - Filesystem access: reference/filesystem.md
+      - Subprocess execution: reference/subprocess.md
+      - WebAssembly modules: reference/wasm-modules.md
+      - ES module imports: reference/module-imports.md
+      - Calling upstream MCP servers: reference/mcp-client.md
+      - Security policies (OPA/Rego): reference/policies.md
+      - Authentication (JWT/JWKS): reference/authentication.md
+      - Clustering & replication (Raft): reference/clustering.md
 markdown_extensions:
   - tables
   - toc:
