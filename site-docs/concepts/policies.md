@@ -48,7 +48,7 @@ flowchart TD
     A[JS capability call] --> B{Policy chain present?}
     B -- No --> C[Capability unavailable / JS error]
     B -- Yes --> D[Build input document]
-    D --> E{Evaluate chain\nmode = all?}
+    D --> E{Evaluate chain<br/>mode = all?}
     E -- all --> F{Next evaluator}
     F --> G{allow = true?}
     G -- Yes, more remain --> F

@@ -19,16 +19,16 @@ path from flag to JavaScript global.
 
 ```mermaid
 flowchart TD
-    A["--wasm-module name=path\n--wasm-config file.json"] --> B[Read .wasm bytes from disk at startup]
-    B --> C[validate_wasm_name\nfirst char: letter / _ / $\nrest: alphanumeric / _ / $]
+    A["--wasm-module name=path<br/>--wasm-config file.json"] --> B[Read .wasm bytes from disk at startup]
+    B --> C[validate_wasm_name<br/>first char: letter / _ / $<br/>rest: alphanumeric / _ / $]
     C --> D["Per execution: inject_wasm_modules()"]
     D --> E[wasmparser: validate binary structure]
-    E --> F["Check declared initial memory ≤ cap ÷ 65 536 pages\nCheck declared initial table ≤ cap ÷ 8 elements"]
+    E --> F["Check declared initial memory ≤ cap ÷ 65 536 pages<br/>Check declared initial table ≤ cap ÷ 8 elements"]
     F --> G{Module has imports?}
-    G -- "No" --> H["Compile + auto-instantiate\nnew WebAssembly.Instance(module, {})"]
-    G -- "Yes" --> I["Compile only\nWebAssembly.Module object"]
-    H --> J["globalThis[name] = instance.exports\nCall exports directly in JS"]
-    I --> K["globalThis['__wasm_' + name] = compiled module\nUser code must provide imports and instantiate"]
+    G -- "No" --> H["Compile + auto-instantiate<br/>new WebAssembly.Instance(module, {})"]
+    G -- "Yes" --> I["Compile only<br/>WebAssembly.Module object"]
+    H --> J["globalThis[name] = instance.exports<br/>Call exports directly in JS"]
+    I --> K["globalThis['__wasm_' + name] = compiled module<br/>User code must provide imports and instantiate"]
 ```
 
 ## Auto-instantiation vs. manual instantiation

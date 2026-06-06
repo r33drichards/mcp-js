@@ -16,14 +16,14 @@ creates the `WebAssembly.Instance` with the imports SQLite needs. See
 - `mcp-v8` built or installed (see [Install](../install/overview.md)).
 - `curl` and `jq` for sending the example over HTTP.
 
-## 1. Get the repo
+## Step 1 — Get the repo
 
 ```bash
 git clone --depth 1 https://github.com/r33drichards/mcp-js
 cd mcp-js
 ```
 
-## 2. Build the module
+## Step 2 — Build the module
 
 ```bash
 ./examples/sqlite-wasm/build.sh
@@ -35,7 +35,7 @@ This downloads the SQLite amalgamation, compiles it with `emcc`, and writes:
 examples/sqlite-wasm/sqlite3.wasm
 ```
 
-## 3. Start the server with the module loaded
+## Step 3 — Start the server with the module loaded
 
 Pre-load the `.wasm` file under the global name `sqlite` with `--wasm-module`.
 Run over HTTP so we can submit the example with `curl`:
@@ -49,7 +49,7 @@ The `--wasm-module` value is `name=/path/to/module.wasm` — see
 [CLI flags](../reference/cli-flags.md) for the full syntax (including per-module
 memory caps).
 
-## 4. Run the example
+## Step 4 — Run the example
 
 The repo ships a complete JavaScript example at
 `examples/sqlite-wasm/example.js`. Submit it to the async execution API:
@@ -76,29 +76,30 @@ You'll see the query results the example prints, e.g.:
 
 ## What the wrapper does
 
-The example performs three steps:
+The example performs three steps.
 
-1. Provide WASI-style import stubs (`wasi_snapshot_preview1`) plus an `env`
-   import for Emscripten's memory-growth notification.
-2. Instantiate the exposed module:
+**1. Provide WASI-style import stubs** (`wasi_snapshot_preview1`) plus an `env`
+import for Emscripten's memory-growth notification.
 
-   ```javascript
-   var instance = new WebAssembly.Instance(__wasm_sqlite, {
-       wasi_snapshot_preview1: wasiStubs,
-       env: { emscripten_notify_memory_growth: function () {} },
-   });
-   ```
+**2. Instantiate the exposed module:**
 
-3. Drive SQLite through the wrapper's class:
+```javascript
+var instance = new WebAssembly.Instance(__wasm_sqlite, {
+    wasi_snapshot_preview1: wasiStubs,
+    env: { emscripten_notify_memory_growth: function () {} },
+});
+```
 
-   ```javascript
-   var db = new SQLite();
-   db.exec("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, email TEXT, age INTEGER)");
-   db.exec("INSERT INTO users (name, email, age) VALUES ('Alice', 'alice@example.com', 30)");
-   var result = db.query("SELECT * FROM users ORDER BY age");
-   db.close();
-   JSON.stringify(result.rows);
-   ```
+**3. Drive SQLite through the wrapper's class:**
+
+```javascript
+var db = new SQLite();
+db.exec("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, email TEXT, age INTEGER)");
+db.exec("INSERT INTO users (name, email, age) VALUES ('Alice', 'alice@example.com', 30)");
+var result = db.query("SELECT * FROM users ORDER BY age");
+db.close();
+JSON.stringify(result.rows);
+```
 
 ## Persisting the database (stateful mode)
 

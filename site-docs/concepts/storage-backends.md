@@ -13,16 +13,16 @@ At runtime one of three concrete backends is wired in as `AnyHeapStorage`. In st
 
 ```mermaid
 flowchart TD
-    call["run_js call"] --> mode{Mode}
-    mode -->|"--stateless"| sl["Stateless Engine\nNo heap saved"]
-    mode -->|"Stateful (default)"| sel{Storage backend selected}
-    sel -->|"--directory-path DIR\nor default /tmp/mcp-v8-heaps"| fs["FileHeapStorage\n(local directory)"]
-    sel -->|"--s3-bucket NAME"| s3["S3HeapStorage\n(S3 bucket)"]
-    sel -->|"--s3-bucket NAME\n--cache-dir DIR"| wt["WriteThroughCacheHeapStorage\n(FS cache + S3)"]
-    fs --> snap["Heap snapshot\n(content-addressed file)"]
+    entry["run_js call"] --> mode{Mode}
+    mode -->|"--stateless"| sl["Stateless Engine<br/>No heap saved"]
+    mode -->|"Stateful default"| sel{Storage backend selected}
+    sel -->|"--directory-path DIR<br/>or default /tmp/mcp-v8-heaps"| fs["FileHeapStorage<br/>(local directory)"]
+    sel -->|"--s3-bucket NAME"| s3["S3HeapStorage<br/>(S3 bucket)"]
+    sel -->|"--s3-bucket NAME<br/>--cache-dir DIR"| wt["WriteThroughCacheHeapStorage<br/>(FS cache + S3)"]
+    fs --> snap["Heap snapshot<br/>(content-addressed file)"]
     s3 --> snap
     wt --> snap
-    snap -.->|"heap= on next call"| call
+    snap -.->|"heap key on next call"| entry
 ```
 
 ## The four backends

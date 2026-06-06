@@ -28,7 +28,7 @@ sequenceDiagram
     S->>K: GET /realms/mcp/protocol/openid-connect/certs
     K-->>S: JWK Set (keys by kid)
 
-    C->>S: POST /mcp initialize\n(Authorization: Bearer <jwt>)
+    C->>S: POST /mcp initialize<br/>(Authorization: Bearer <jwt>)
     S->>S: decode JWT header → alg, kid
     alt kid in cache
         S->>S: verify signature with cached key

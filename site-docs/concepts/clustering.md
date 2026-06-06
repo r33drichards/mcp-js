@@ -14,10 +14,10 @@ The diagram below shows how the pieces fit together. Each node exposes two ports
 
 ```mermaid
 graph TB
-    client["MCP Client"] --> lb["nginx LB\nport 8080"]
-    lb -->|POST /mcp| n1["node1\nMCP :3000 / Raft :4000"]
-    lb -->|POST /mcp| n2["node2\nMCP :3000 / Raft :4000"]
-    lb -->|POST /mcp| n3["node3\nMCP :3000 / Raft :4000"]
+    client["MCP Client"] --> lb["nginx LB<br/>port 8080"]
+    lb -->|POST /mcp| n1["node1<br/>MCP :3000 / Raft :4000"]
+    lb -->|POST /mcp| n2["node2<br/>MCP :3000 / Raft :4000"]
+    lb -->|POST /mcp| n3["node3<br/>MCP :3000 / Raft :4000"]
     n1 <-->|AppendEntries / RequestVote| n2
     n2 <-->|AppendEntries / RequestVote| n3
     n1 <-->|AppendEntries / RequestVote| n3
