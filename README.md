@@ -194,6 +194,24 @@ println!("execution_id: {}", resp.into_inner().execution_id);
 
 - `--session-db-path <path>`: Path to the sled database used for session logging (default: `/tmp/mcp-v8-sessions`). Only applies in stateful mode. (Conflicts with `--stateless`)
 
+### Prompt / Tool Description Options
+
+These options let you override the text the server presents to MCP clients. Each flag accepts either **inline text** or, when the value begins with `@`, a **path to a file** whose contents are used. Use `@@` to pass a literal value that starts with `@`.
+
+- `--instructions <TEXT_OR_@FILE>`: Override the MCP server `instructions` (the "system prompt" reported during `initialize`). Applies to both stateful and stateless modes.
+- `--run-js-description <TEXT_OR_@FILE>`: Override the description advertised for the `run_js` tool in `tools/list`. Other tools are unaffected.
+
+**Examples:**
+```bash
+# Inline text
+mcp-v8 --stateless --instructions "Execute JavaScript on the user's behalf."
+
+# Read from files
+mcp-v8 --stateless \
+  --instructions @./prompts/system.md \
+  --run-js-description @./prompts/run_js.md
+```
+
 ### Cluster Options
 
 These options enable Raft-based clustering for distributed coordination and replicated session logging.
