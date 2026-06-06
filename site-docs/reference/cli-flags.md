@@ -13,6 +13,7 @@ using the same help headings exposed by the CLI itself.
 - [MCP Server Module](#mcp-server-module)
 - [Module Import](#module-import)
 - [Policy](#policy)
+- [Prompt](#prompt)
 - [WASM](#wasm)
 
 ## Cluster
@@ -203,6 +204,20 @@ Allow external module imports (npm:, jsr:, and URL imports). When disabled (the 
 JSON policy configuration (inline JSON or path to a JSON file). Enables fetch() and/or module policy gating via local Rego files and/or remote OPA servers. Example: --policies-json '{"fetch":{"policies":[{"url":"file:///path/to/fetch.rego"}]}}' Schema: { "fetch": { "mode": "all"|"any", "policies": [{"url": "...", "policy_path": "...", "rule": "..."}] }, "modules": { ... } }
 
 - Value: `JSON_OR_PATH`
+
+## Prompt
+
+### `--instructions`
+
+Override the MCP server `instructions` (the "system prompt" the server reports to clients during `initialize`). The value is used verbatim as inline text, unless it begins with `@`, in which case the remainder is treated as a path to a file whose contents are used (`@-` is not special; use `@@` for a literal leading `@`). Examples: --instructions "Run JS for me" --instructions @./prompt.txt
+
+- Value: `TEXT_OR_@FILE`
+
+### `--run-js-description`
+
+Override the description advertised for the `run_js` tool in `tools/list`. The value is used verbatim as inline text, unless it begins with `@`, in which case the remainder is treated as a path to a file whose contents are used (use `@@` for a literal leading `@`). Examples: --run-js-description "Execute JS" --run-js-description @./run_js.md
+
+- Value: `TEXT_OR_@FILE`
 
 ## WASM
 
