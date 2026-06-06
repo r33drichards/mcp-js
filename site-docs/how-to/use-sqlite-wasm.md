@@ -98,6 +98,25 @@ db.close();
 JSON.stringify(result.rows);
 ```
 
+## Discover loaded modules via stub tools
+
+By default, every module loaded with `--wasm-module` / `--wasm-config` is
+also advertised on the MCPJS MCP surface as a stub tool named
+`runjs__wasm__<name>` (so the SQLite module above appears as
+`runjs__wasm__sqlite`). A downstream MCP client can discover the module via
+`tools/list` or tool search without reading server configuration.
+
+The stub is not an executable proxy: calling it returns instructions telling
+the agent to use the module from JavaScript via `run_js` (the compiled module
+is available as the `__wasm_<name>` global, exactly as described above).
+
+Control this behaviour with:
+
+- `--wasm-stubs false` to hide the stubs
+- `--wasm-stub-prefix <prefix>` to change the `runjs__` prefix
+
+This mirrors the [MCP server tool stubs](../concepts/mcp-pass-through.md).
+
 ## Limits to keep in mind
 
 - the example is built for in-memory databases only

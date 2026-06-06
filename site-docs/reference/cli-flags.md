@@ -225,3 +225,16 @@ Default max native memory for WASM modules without a per-module limit. Supports 
 
 - Default: `16m`
 - Value: `WASM_DEFAULT_MAX_MEMORY`
+
+### `--wasm-stubs`
+
+Expose pre-loaded WASM modules on the MCPJS server itself as `<prefix>wasm__<name>` stubs. When `true` (the default whenever at least one WASM module is loaded), an external client of MCPJS can discover the module via tools/list and tool search; calling a stub returns instructional text telling the caller to use the module from JavaScript via run_js (the module is available as the `__wasm_<name>` global). Pass `--wasm-stubs false` to disable
+
+- Default: `true`
+
+### `--wasm-stub-prefix`
+
+Prefix applied to WASM stub tool names. Defaults to `runjs__` so it is obvious to a calling agent that these modules execute through the JS runtime rather than dispatching directly. Has no effect when --wasm-stubs is false
+
+- Default: `runjs__`
+- Value: `WASM_STUB_PREFIX`

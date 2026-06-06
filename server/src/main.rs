@@ -187,7 +187,22 @@ async fn main() -> Result<()> {
     };
 
     let engine = engine.with_wasm_default_max_bytes(wasm_default_max_bytes);
-    let engine = if wasm_modules.is_empty() { engine } else { engine.with_wasm_modules(wasm_modules) };
+    let has_wasm_modules = !wasm_modules.is_empty();
+    let engine = if has_wasm_modules { engine.with_wasm_modules(wasm_modules) } else { engine };
+    let engine = if has_wasm_modules {
+        let wasm_stub_config = engine::wasm_stub::WasmStubConfig {
+            prefix: cli.wasm_stub_prefix.clone(),
+            enabled: cli.wasm_stubs,
+        };
+        tracing::info!(
+            stubs = wasm_stub_config.enabled,
+            prefix = %wasm_stub_config.prefix,
+            "WASM module stubbing"
+        );
+        engine.with_wasm_stub_config(wasm_stub_config)
+    } else {
+        engine
+    };
 
     // ── Policy configuration ─────────────────────────────────────────────
     // Parse --policies-json if provided (inline JSON or file path).

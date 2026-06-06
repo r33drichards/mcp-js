@@ -127,6 +127,27 @@ pub struct Cli {
     #[arg(long = "wasm-default-max-memory", default_value = "16m", help_heading = "WASM")]
     pub wasm_default_max_memory: String,
 
+    /// Expose pre-loaded WASM modules on the MCPJS server itself as
+    /// `<prefix>wasm__<name>` stubs. When `true` (the default whenever at
+    /// least one WASM module is loaded), an external client of MCPJS can
+    /// discover the module via tools/list and tool search; calling a stub
+    /// returns instructional text telling the caller to use the module from
+    /// JavaScript via run_js (the module is available as the `__wasm_<name>`
+    /// global). Pass `--wasm-stubs false` to disable.
+    #[arg(long = "wasm-stubs", default_value = "true", num_args = 1, help_heading = "WASM")]
+    pub wasm_stubs: bool,
+
+    /// Prefix applied to WASM stub tool names. Defaults to `runjs__` so it is
+    /// obvious to a calling agent that these modules execute through the JS
+    /// runtime rather than dispatching directly. Has no effect when
+    /// --wasm-stubs is false.
+    #[arg(
+        long = "wasm-stub-prefix",
+        default_value = crate::engine::wasm_stub::DEFAULT_WASM_STUB_PREFIX,
+        help_heading = "WASM"
+    )]
+    pub wasm_stub_prefix: String,
+
     /// Inject headers into fetch requests matching host/method rules.
     /// Format: host=<host>,header=<name>,value=<val>[,methods=GET;POST]
     /// Can be specified multiple times.
