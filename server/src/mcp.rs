@@ -293,6 +293,19 @@ impl IntoContents for QueryHeapTagsResponse {
     }
 }
 
+/// Replace the `run_js` tool's description with an operator-provided override,
+/// if one was configured via `--run-js-description`. Other tools are left
+/// untouched.
+fn apply_run_js_description_override(tools: &mut [Tool], override_desc: Option<Arc<str>>) {
+    if let Some(desc) = override_desc {
+        for tool in tools.iter_mut() {
+            if tool.name.as_ref() == "run_js" {
+                tool.description = Some(desc.to_string().into());
+            }
+        }
+    }
+}
+
 // ── McpService ──────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -549,13 +562,16 @@ impl McpService {
 
 impl ServerHandler for McpService {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            instructions: Some(
+        let instructions = self.engine.instructions_override()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| {
                 "JavaScript execution service (stateful mode - with heap persistence). \
                  Use resources/list and resources/read to explore docs://readme, \
                  docs://llms-txt, docs://openapi, and docs://tools before calling tools."
                 .to_string()
-            ),
+            });
+        ServerInfo {
+            instructions: Some(instructions),
             capabilities: ServerCapabilities::builder()
                 .enable_tools()
                 .enable_resources()
@@ -593,6 +609,7 @@ impl ServerHandler for McpService {
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
         let mut tools = Self::tool_box().list();
+        apply_run_js_description_override(&mut tools, self.engine.run_js_description_override());
         if let Some(client) = &self.mcp_client {
             tools.extend(client.stub_tools());
         }
@@ -785,13 +802,16 @@ impl StatelessMcpService {
 
 impl ServerHandler for StatelessMcpService {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            instructions: Some(
+        let instructions = self.engine.instructions_override()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| {
                 "JavaScript execution service (stateless mode — no heap persistence). \
                  Use resources/list and resources/read to explore docs://readme, \
                  docs://llms-txt, docs://openapi, and docs://tools before calling tools."
                 .to_string()
-            ),
+            });
+        ServerInfo {
+            instructions: Some(instructions),
             capabilities: ServerCapabilities::builder()
                 .enable_tools()
                 .enable_resources()
@@ -829,6 +849,7 @@ impl ServerHandler for StatelessMcpService {
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
         let mut tools = Self::tool_box().list();
+        apply_run_js_description_override(&mut tools, self.engine.run_js_description_override());
         if let Some(client) = &self.mcp_client {
             tools.extend(client.stub_tools());
         }
@@ -898,5 +919,38 @@ impl ServerHandler for StatelessMcpService {
             }
         }
         Ok(self.get_info())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::apply_run_js_description_override;
+    use rmcp::model::Tool;
+    use std::sync::Arc;
+
+    fn tool(name: &'static str, desc: &'static str) -> Tool {
+        Tool {
+            name: name.into(),
+            description: Some(desc.into()),
+            input_schema: Arc::new(serde_json::Map::new()),
+            annotations: None,
+        }
+    }
+
+    #[test]
+    fn override_replaces_only_run_js_description() {
+        let mut tools = vec![tool("run_js", "original"), tool("get_execution", "other")];
+        apply_run_js_description_override(&mut tools, Some(Arc::from("custom description")));
+
+        assert_eq!(tools[0].description.as_deref(), Some("custom description"));
+        // Non-run_js tools are untouched.
+        assert_eq!(tools[1].description.as_deref(), Some("other"));
+    }
+
+    #[test]
+    fn no_override_leaves_descriptions_unchanged() {
+        let mut tools = vec![tool("run_js", "original")];
+        apply_run_js_description_override(&mut tools, None);
+        assert_eq!(tools[0].description.as_deref(), Some("original"));
     }
 }

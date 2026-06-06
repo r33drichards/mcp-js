@@ -70,6 +70,23 @@ pub struct Cli {
     #[arg(long, default_value = "/tmp/mcp-v8-sessions", help_heading = "Core")]
     pub session_db_path: String,
 
+    /// Override the MCP server `instructions` (the "system prompt" the server
+    /// reports to clients during `initialize`). The value is used verbatim as
+    /// inline text, unless it begins with `@`, in which case the remainder is
+    /// treated as a path to a file whose contents are used (`@-` is not special;
+    /// use `@@` for a literal leading `@`).
+    /// Examples: --instructions "Run JS for me"  --instructions @./prompt.txt
+    #[arg(long, value_name = "TEXT_OR_@FILE", help_heading = "Prompt")]
+    pub instructions: Option<String>,
+
+    /// Override the description advertised for the `run_js` tool in `tools/list`.
+    /// The value is used verbatim as inline text, unless it begins with `@`, in
+    /// which case the remainder is treated as a path to a file whose contents are
+    /// used (use `@@` for a literal leading `@`).
+    /// Examples: --run-js-description "Execute JS"  --run-js-description @./run_js.md
+    #[arg(long = "run-js-description", value_name = "TEXT_OR_@FILE", help_heading = "Prompt")]
+    pub run_js_description: Option<String>,
+
     /// Port for the Raft cluster HTTP server. Enables cluster mode when set.
     #[arg(long, help_heading = "Cluster")]
     pub cluster_port: Option<u16>,

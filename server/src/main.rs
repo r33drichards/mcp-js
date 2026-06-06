@@ -363,6 +363,23 @@ async fn main() -> Result<()> {
         engine
     };
 
+    // ── Prompt / tool description overrides ──────────────────────────────
+    // Both flags accept inline text or, with a leading `@`, a path to a file.
+    let engine = if let Some(ref value) = cli.instructions {
+        let text = resolve_text_or_file(value, "--instructions")?;
+        tracing::info!("Overriding MCP server instructions ({} chars)", text.len());
+        engine.with_instructions_override(text)
+    } else {
+        engine
+    };
+    let engine = if let Some(ref value) = cli.run_js_description {
+        let text = resolve_text_or_file(value, "--run-js-description")?;
+        tracing::info!("Overriding run_js tool description ({} chars)", text.len());
+        engine.with_run_js_description_override(text)
+    } else {
+        engine
+    };
+
     // ── Build session verifier (if --jwks-url) ─────────────────────────
     let session_verifier: Option<Arc<SessionVerifier>> = if let Some(ref jwks_url) = cli.jwks_url {
         tracing::info!("Fetching JWKS keys from {}", jwks_url);
@@ -632,6 +649,18 @@ fn load_wasm_modules(
     }
 
     Ok(modules)
+}
+
+/// Resolve a CLI value that may be either inline text or a `@path` file
+/// reference. A leading `@` means "read the rest as a file path"; `@@` escapes
+/// to a literal value beginning with `@`. Any other value is returned verbatim.
+fn resolve_text_or_file(value: &str, flag: &str) -> Result<String> {
+    match value.strip_prefix('@') {
+        Some(rest) if rest.starts_with('@') => Ok(rest.to_string()),
+        Some(path) => std::fs::read_to_string(path)
+            .map_err(|e| anyhow::anyhow!("Failed to read {} file '{}': {}", flag, path, e)),
+        None => Ok(value.to_string()),
+    }
 }
 
 /// Parse a human-readable memory size string into bytes.
@@ -961,7 +990,40 @@ fn load_mcp_server_configs(
 
 #[cfg(test)]
 mod tests {
-    use super::{load_fetch_header_rules, parse_fetch_header_cli};
+    use super::{load_fetch_header_rules, parse_fetch_header_cli, resolve_text_or_file};
+
+    #[test]
+    fn resolve_text_or_file_returns_inline_text_verbatim() {
+        let resolved = resolve_text_or_file("just some text", "--instructions")
+            .expect("inline text should resolve");
+        assert_eq!(resolved, "just some text");
+    }
+
+    #[test]
+    fn resolve_text_or_file_reads_file_for_at_prefix() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let path = dir.path().join("prompt.txt");
+        std::fs::write(&path, "from a file\n").expect("file should be written");
+
+        let arg = format!("@{}", path.display());
+        let resolved = resolve_text_or_file(&arg, "--instructions")
+            .expect("file value should resolve");
+        assert_eq!(resolved, "from a file\n");
+    }
+
+    #[test]
+    fn resolve_text_or_file_escapes_double_at_to_literal() {
+        let resolved = resolve_text_or_file("@@literal", "--instructions")
+            .expect("escaped value should resolve");
+        assert_eq!(resolved, "@literal");
+    }
+
+    #[test]
+    fn resolve_text_or_file_errors_on_missing_file() {
+        let err = resolve_text_or_file("@/no/such/file/here.txt", "--run-js-description")
+            .expect_err("missing file should error");
+        assert!(err.to_string().contains("Failed to read --run-js-description file"));
+    }
 
     #[test]
     fn parse_fetch_header_cli_supports_static_rules() {

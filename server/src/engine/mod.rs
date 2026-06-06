@@ -1167,6 +1167,13 @@ pub struct Engine {
     mcp_tools_policy_chain: Option<Arc<opa::PolicyChain>>,
     /// Policy-gated subprocess configuration. When Some, subprocess execution is injected into the JS runtime.
     subprocess_config: Option<Arc<subprocess::SubprocessConfig>>,
+    /// Optional override for the MCP server `instructions` field (the "system
+    /// prompt" returned during `initialize`). When `None`, the built-in default
+    /// is used.
+    instructions_override: Option<Arc<str>>,
+    /// Optional override for the `run_js` tool description advertised in
+    /// `tools/list`. When `None`, the compiled-in description is used.
+    run_js_description_override: Option<Arc<str>>,
 }
 
 /// Builder for `Engine::run_js()`. Only `code` is required; everything else
@@ -1263,6 +1270,8 @@ impl Engine {
             mcp_client_manager: None,
             mcp_tools_policy_chain: None,
             subprocess_config: None,
+            instructions_override: None,
+            run_js_description_override: None,
         }
     }
 
@@ -1294,6 +1303,8 @@ impl Engine {
             mcp_client_manager: None,
             mcp_tools_policy_chain: None,
             subprocess_config: None,
+            instructions_override: None,
+            run_js_description_override: None,
         }
     }
 
@@ -1356,6 +1367,29 @@ impl Engine {
     pub fn with_subprocess_config(mut self, config: subprocess::SubprocessConfig) -> Self {
         self.subprocess_config = Some(Arc::new(config));
         self
+    }
+
+    /// Override the MCP server `instructions` (the "system prompt" returned
+    /// during `initialize`).
+    pub fn with_instructions_override(mut self, text: String) -> Self {
+        self.instructions_override = Some(Arc::from(text));
+        self
+    }
+
+    /// Get the MCP server `instructions` override, if one was configured.
+    pub fn instructions_override(&self) -> Option<Arc<str>> {
+        self.instructions_override.clone()
+    }
+
+    /// Override the `run_js` tool description advertised in `tools/list`.
+    pub fn with_run_js_description_override(mut self, text: String) -> Self {
+        self.run_js_description_override = Some(Arc::from(text));
+        self
+    }
+
+    /// Get the `run_js` tool description override, if one was configured.
+    pub fn run_js_description_override(&self) -> Option<Arc<str>> {
+        self.run_js_description_override.clone()
     }
 
     /// Create a builder for submitting JavaScript code for execution.
