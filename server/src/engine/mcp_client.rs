@@ -16,6 +16,9 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
+
+use tokio::sync::RwLock;
 
 use deno_core::{JsRuntime, OpState, op2};
 use deno_error::JsErrorBox;
@@ -76,12 +79,77 @@ impl ToolInfo {
 
 // ── Connected server ─────────────────────────────────────────────────────
 
-/// A connected MCP server with its cached tool list.
+/// The result of a single `connect_one` handshake: a live peer, its tool list,
+/// and the task that holds the underlying RunningService alive.
 struct ConnectedMcpServer {
     peer: Peer<RoleClient>,
     tools: Vec<Tool>,
     /// Holds the RunningService alive. Aborting this drops the connection.
     _keep_alive: tokio::task::AbortHandle,
+}
+
+/// The live connection for one downstream server. Swapped wholesale by
+/// `reconnect` when the server goes unhealthy (e.g. the downstream restarted),
+/// so an established connection can self-heal without restarting MCPJS.
+struct LiveConn {
+    peer: Peer<RoleClient>,
+    /// Holds the RunningService alive; aborted when the connection is replaced.
+    keep_alive: tokio::task::AbortHandle,
+}
+
+/// A named downstream server: the config needed to reconnect, plus the current
+/// live connection behind a lock so a background liveness task (or a failed
+/// `call_tool`) can replace it in place.
+struct ServerConn {
+    config: McpServerConfig,
+    live: RwLock<LiveConn>,
+}
+
+/// How often the background liveness task probes each downstream connection.
+const LIVENESS_INTERVAL: Duration = Duration::from_secs(20);
+
+/// A cheap round-trip that fails if the transport is disconnected. Used both as
+/// the periodic liveness probe and to tell a dead connection apart from a
+/// genuine tool error inside `call_tool`.
+async fn is_healthy(peer: &Peer<RoleClient>) -> bool {
+    peer.list_all_tools().await.is_ok()
+}
+
+/// Re-run the handshake for a server and swap in the fresh peer, aborting the
+/// stale RunningService. Tools are intentionally left as first-connect values.
+async fn reconnect(server: &ServerConn) -> Result<(), String> {
+    let fresh = connect_one(&server.config).await?;
+    let mut live = server.live.write().await;
+    live.keep_alive.abort();
+    live.peer = fresh.peer;
+    live.keep_alive = fresh._keep_alive;
+    Ok(())
+}
+
+/// Spawn a detached task that periodically health-checks one server and
+/// reconnects it when the probe fails.
+fn spawn_liveness(server: Arc<ServerConn>) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(LIVENESS_INTERVAL).await;
+            let peer = { server.live.read().await.peer.clone() };
+            if is_healthy(&peer).await {
+                continue;
+            }
+            tracing::warn!(
+                "MCP server '{}' failed liveness check; reconnecting...",
+                server.config.name
+            );
+            match reconnect(&server).await {
+                Ok(()) => tracing::info!("MCP server '{}' reconnected", server.config.name),
+                Err(e) => tracing::warn!(
+                    "MCP server '{}' reconnect attempt failed: {} (will retry)",
+                    server.config.name,
+                    e
+                ),
+            }
+        }
+    });
 }
 
 // ── McpClientManager ─────────────────────────────────────────────────────
@@ -118,7 +186,7 @@ impl Default for StubConfig {
 #[derive(Clone)]
 pub struct McpClientManager {
     tools_by_server: Arc<HashMap<String, Vec<Tool>>>,
-    servers: Arc<HashMap<String, ConnectedMcpServer>>,
+    servers: Arc<HashMap<String, Arc<ServerConn>>>,
     stub_config: StubConfig,
 }
 
@@ -144,8 +212,20 @@ impl McpClientManager {
             if servers.contains_key(&config.name) {
                 return Err(format!("Duplicate MCP server name: '{}'", config.name));
             }
-            tools_by_server.insert(config.name.clone(), connected.tools.clone());
-            servers.insert(config.name.clone(), connected);
+            let name = config.name.clone();
+            tools_by_server.insert(name.clone(), connected.tools.clone());
+            let server = Arc::new(ServerConn {
+                config,
+                live: RwLock::new(LiveConn {
+                    peer: connected.peer,
+                    keep_alive: connected._keep_alive,
+                }),
+            });
+            // Self-heal: probe this connection periodically and reconnect if the
+            // downstream server restarts (the long-lived handshake otherwise
+            // stays dead until MCPJS is restarted).
+            spawn_liveness(server.clone());
+            servers.insert(name, server);
         }
 
         Ok(Self {
@@ -265,14 +345,43 @@ impl McpClientManager {
             )
         })?;
 
-        let result = server
-            .peer
-            .call_tool(CallToolRequestParam {
-                name: tool_name.to_string().into(),
-                arguments,
-            })
-            .await
-            .map_err(|e| format!("mcp.callTool({}.{}): {}", server_name, tool_name, e))?;
+        let make_req = || CallToolRequestParam {
+            name: tool_name.to_string().into(),
+            arguments: arguments.clone(),
+        };
+
+        let peer = { server.live.read().await.peer.clone() };
+        let result = match peer.call_tool(make_req()).await {
+            Ok(r) => r,
+            Err(e) => {
+                // A call can fail because the tool errored OR because the
+                // downstream connection died (e.g. the server restarted). Probe
+                // to tell them apart: if the connection is still healthy the
+                // error is genuine; otherwise reconnect and retry once so a
+                // restarted downstream heals transparently.
+                if is_healthy(&peer).await {
+                    return Err(format!("mcp.callTool({}.{}): {}", server_name, tool_name, e));
+                }
+                tracing::warn!(
+                    "MCP server '{}' looks disconnected ({}); reconnecting and retrying",
+                    server_name,
+                    e
+                );
+                reconnect(server).await.map_err(|re| {
+                    format!(
+                        "mcp.callTool({}.{}): reconnect failed: {}",
+                        server_name, tool_name, re
+                    )
+                })?;
+                let peer = { server.live.read().await.peer.clone() };
+                peer.call_tool(make_req()).await.map_err(|e| {
+                    format!(
+                        "mcp.callTool({}.{}): {} (after reconnect)",
+                        server_name, tool_name, e
+                    )
+                })?
+            }
+        };
 
         // Serialize content to JSON for JS consumption.
         let content_json: Vec<serde_json::Value> = result
