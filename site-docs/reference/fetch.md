@@ -22,7 +22,7 @@ fetch(url: string, init?: FetchInit): Promise<Response>
 |---|---|---|---|
 | `method` | string | `"GET"` | HTTP method. Normalised to upper-case. |
 | `headers` | object | `{}` | Request headers as plain key/value object. Keys are lower-cased before sending. |
-| `body` | string | `""` | Request body. Any non-string value is coerced with `String()`. An empty string sends no body. |
+| `body` | string \| FormData | `""` | Request body. A `FormData` instance is serialized as `multipart/form-data` with an auto-generated boundary; the `Content-Type` header is set automatically. Any other non-string value is coerced with `String()`. An empty string sends no body. |
 
 ### Response
 
@@ -38,6 +38,7 @@ fetch(url: string, init?: FetchInit): Promise<Response>
 | `bodyUsed` | boolean | Always `false`. |
 | `text()` | `() => Promise<string>` | Resolves with the response body as a string. |
 | `json()` | `() => Promise<any>` | Resolves with `JSON.parse(body)`. |
+| `blob()` | `() => Promise<Blob>` | Resolves with the response body as a `Blob`. |
 | `clone()` | `() => Response` | Returns a shallow clone of the response. |
 
 ### Headers
@@ -48,12 +49,76 @@ The `response.headers` object exposes the following methods:
 |---|---|---|
 | `get` | `(name: string) => string \| null` | Returns the header value, or `null` if absent. Name is case-insensitive. |
 | `has` | `(name: string) => boolean` | Returns `true` if the header is present. |
+| `set` | `(name: string, value: string) => void` | Sets the header value, replacing any existing value. |
+| `append` | `(name: string, value: string) => void` | Appends to the header value (comma-separated) or sets it if absent. |
+| `delete` | `(name: string) => void` | Removes the header. |
 | `entries` | `() => [string, string][]` | Returns all header `[name, value]` pairs. |
 | `keys` | `() => string[]` | Returns all header names. |
 | `values` | `() => string[]` | Returns all header values. |
 | `forEach` | `(cb: (value, name, headers) => void) => void` | Iterates over all headers. |
 
 Header names are stored and returned in lower-case.
+
+### Blob
+
+`globalThis.Blob` is available for constructing binary-like payloads from
+strings. This is a text-only polyfill — all parts are stored as strings.
+
+```js
+const blob = new Blob(["hello ", "world"], { type: "text/plain" });
+blob.size;          // 11
+blob.type;          // "text/plain"
+await blob.text();  // "hello world"
+```
+
+| Property / Method | Type | Description |
+|---|---|---|
+| `size` | number | Length of the content in characters. |
+| `type` | string | MIME type. |
+| `text()` | `() => Promise<string>` | Content as a string. |
+| `slice(start?, end?, contentType?)` | `(...) => Blob` | Returns a new Blob with a substring of the content. |
+| `arrayBuffer()` | `() => Promise<ArrayBuffer>` | Content as an ArrayBuffer (one byte per char, low byte only). |
+
+### File
+
+`globalThis.File` extends `Blob` with a `name` and `lastModified` timestamp.
+
+```js
+const file = new File(["col1,col2\na,b\n"], "data.csv", { type: "text/csv" });
+file.name;          // "data.csv"
+file.lastModified;  // number (epoch ms)
+```
+
+| Property | Type | Description |
+|---|---|---|
+| `name` | string | Filename. |
+| `lastModified` | number | Epoch milliseconds. Defaults to `Date.now()`. |
+
+### FormData
+
+`globalThis.FormData` builds `multipart/form-data` request bodies. When passed
+as the `body` of a `fetch()` call, it is serialized automatically and the
+`Content-Type` header is set.
+
+```js
+const fd = new FormData();
+fd.append("field", "value");
+fd.append("file", new Blob(["content"]), "upload.txt");
+const resp = await fetch(url, { method: "POST", body: fd });
+```
+
+| Method | Signature | Description |
+|---|---|---|
+| `append` | `(name, value, filename?) => void` | Adds a new entry. For `Blob`/`File` values, `filename` sets the `filename` parameter in the `Content-Disposition` header. |
+| `set` | `(name, value, filename?) => void` | Replaces all entries with the given name. |
+| `get` | `(name) => value \| null` | Returns the first value for the name, or `null`. |
+| `getAll` | `(name) => value[]` | Returns all values for the name. |
+| `has` | `(name) => boolean` | Returns `true` if any entry has the name. |
+| `delete` | `(name) => void` | Removes all entries with the name. |
+| `entries` | `() => [name, value][]` | All entries as `[name, value]` pairs. |
+| `keys` | `() => string[]` | All entry names. |
+| `values` | `() => value[]` | All entry values. |
+| `forEach` | `(cb: (value, name, fd) => void) => void` | Iterates over all entries. |
 
 ### Example
 
@@ -70,6 +135,20 @@ if (!response.ok) {
 
 const data = await response.json();
 console.log(data);
+```
+
+### Multipart upload example
+
+```js
+const fd = new FormData();
+fd.append("f", new Blob(["file content here"]), "notes.txt");
+
+const resp = await fetch("https://example.com/upload", {
+  method: "POST",
+  body: fd,
+});
+const text = await resp.text();
+console.log(text);
 ```
 
 ## --fetch-header CLI flag

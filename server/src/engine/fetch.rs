@@ -436,6 +436,20 @@ const FETCH_JS_WRAPPER: &str = r#"
     Headers.prototype.has = function(name) {
         return name.toLowerCase() in this._map;
     };
+    Headers.prototype.set = function(name, value) {
+        this._map[name.toLowerCase()] = String(value);
+    };
+    Headers.prototype.append = function(name, value) {
+        const key = name.toLowerCase();
+        if (key in this._map) {
+            this._map[key] += ', ' + String(value);
+        } else {
+            this._map[key] = String(value);
+        }
+    };
+    Headers.prototype.delete = function(name) {
+        delete this._map[name.toLowerCase()];
+    };
     Headers.prototype.entries = function() {
         return Object.entries(this._map);
     };
@@ -451,6 +465,108 @@ const FETCH_JS_WRAPPER: &str = r#"
         }
     };
 
+    // ── Blob ────────────────────────────────────────────────────────────
+    globalThis.Blob = function Blob(parts, options) {
+        const opt = options || {};
+        this.type = opt.type || '';
+        const chunks = [];
+        for (const part of (parts || [])) {
+            if (part instanceof Blob) {
+                chunks.push(part._data);
+            } else if (typeof part === 'string') {
+                chunks.push(part);
+            } else {
+                chunks.push(String(part));
+            }
+        }
+        this._data = chunks.join('');
+        this.size = this._data.length;
+    };
+    Blob.prototype.text = function() { return Promise.resolve(this._data); };
+    Blob.prototype.slice = function(start, end, contentType) {
+        const s = this._data.slice(start, end);
+        return new Blob([s], { type: contentType || this.type });
+    };
+    Blob.prototype.arrayBuffer = function() {
+        const buf = new ArrayBuffer(this._data.length);
+        const view = new Uint8Array(buf);
+        for (let i = 0; i < this._data.length; i++) view[i] = this._data.charCodeAt(i) & 0xff;
+        return Promise.resolve(buf);
+    };
+
+    // ── File (extends Blob) ─────────────────────────────────────────────
+    globalThis.File = function File(parts, name, options) {
+        Blob.call(this, parts, options);
+        this.name = name;
+        this.lastModified = (options && options.lastModified) || Date.now();
+    };
+    File.prototype = Object.create(Blob.prototype);
+    File.prototype.constructor = File;
+
+    // ── FormData ────────────────────────────────────────────────────────
+    globalThis.FormData = function FormData() {
+        this._entries = [];
+    };
+    FormData.prototype.append = function(name, value, filename) {
+        this._entries.push({ name: String(name), value: value, filename: filename });
+    };
+    FormData.prototype.set = function(name, value, filename) {
+        const n = String(name);
+        this._entries = this._entries.filter(function(e) { return e.name !== n; });
+        this._entries.push({ name: n, value: value, filename: filename });
+    };
+    FormData.prototype.get = function(name) {
+        const n = String(name);
+        for (const e of this._entries) { if (e.name === n) return e.value; }
+        return null;
+    };
+    FormData.prototype.getAll = function(name) {
+        const n = String(name);
+        return this._entries.filter(function(e) { return e.name === n; }).map(function(e) { return e.value; });
+    };
+    FormData.prototype.has = function(name) {
+        const n = String(name);
+        return this._entries.some(function(e) { return e.name === n; });
+    };
+    FormData.prototype.delete = function(name) {
+        const n = String(name);
+        this._entries = this._entries.filter(function(e) { return e.name !== n; });
+    };
+    FormData.prototype.entries = function() { return this._entries.map(function(e) { return [e.name, e.value]; }); };
+    FormData.prototype.keys = function() { return this._entries.map(function(e) { return e.name; }); };
+    FormData.prototype.values = function() { return this._entries.map(function(e) { return e.value; }); };
+    FormData.prototype.forEach = function(cb) {
+        for (const e of this._entries) { cb(e.value, e.name, this); }
+    };
+    FormData.prototype._serialize = function() {
+        const boundary = '----FormData' + Math.random().toString(36).slice(2) + Date.now().toString(36);
+        const parts = [];
+        for (const entry of this._entries) {
+            let disposition = 'form-data; name="' + entry.name + '"';
+            let contentType = null;
+            let body;
+            if (entry.value instanceof File) {
+                const fn = entry.filename || entry.value.name || 'blob';
+                disposition += '; filename="' + fn + '"';
+                contentType = entry.value.type || 'application/octet-stream';
+                body = entry.value._data;
+            } else if (entry.value instanceof Blob) {
+                const fn = entry.filename || 'blob';
+                disposition += '; filename="' + fn + '"';
+                contentType = entry.value.type || 'application/octet-stream';
+                body = entry.value._data;
+            } else {
+                body = String(entry.value);
+            }
+            let part = '--' + boundary + '\r\nContent-Disposition: ' + disposition + '\r\n';
+            if (contentType) part += 'Content-Type: ' + contentType + '\r\n';
+            part += '\r\n' + body + '\r\n';
+            parts.push(part);
+        }
+        parts.push('--' + boundary + '--\r\n');
+        return { boundary: boundary, body: parts.join('') };
+    };
+
     globalThis.fetch = async function fetch(resource, init) {
         if (typeof resource !== 'string') {
             throw new TypeError('fetch: first argument must be a URL string');
@@ -459,14 +575,30 @@ const FETCH_JS_WRAPPER: &str = r#"
         const opts = init || {};
         const method = (opts.method || 'GET').toUpperCase();
         const headers = opts.headers || {};
-        const body = opts.body !== undefined ? String(opts.body) : "";
 
         // Normalize headers to plain object with lowercase keys
         const normalizedHeaders = {};
         if (headers && typeof headers === 'object') {
-            for (const key of Object.keys(headers)) {
-                normalizedHeaders[key.toLowerCase()] = String(headers[key]);
+            if (typeof headers.entries === 'function' && headers instanceof Headers) {
+                for (const [k, v] of headers.entries()) {
+                    normalizedHeaders[k] = v;
+                }
+            } else {
+                for (const key of Object.keys(headers)) {
+                    normalizedHeaders[key.toLowerCase()] = String(headers[key]);
+                }
             }
+        }
+
+        let body;
+        if (opts.body instanceof FormData) {
+            const serialized = opts.body._serialize();
+            body = serialized.body;
+            if (!('content-type' in normalizedHeaders)) {
+                normalizedHeaders['content-type'] = 'multipart/form-data; boundary=' + serialized.boundary;
+            }
+        } else {
+            body = opts.body !== undefined ? String(opts.body) : "";
         }
 
         const headersJson = JSON.stringify(normalizedHeaders);
@@ -489,6 +621,7 @@ const FETCH_JS_WRAPPER: &str = r#"
             bodyUsed: false,
             text: function() { return Promise.resolve(responseBody); },
             json: function() { return Promise.resolve(JSON.parse(responseBody)); },
+            blob: function() { return Promise.resolve(new Blob([responseBody], { type: responseHeaders.get('content-type') || '' })); },
             clone: function() {
                 return {
                     ok: this.ok,
@@ -501,6 +634,7 @@ const FETCH_JS_WRAPPER: &str = r#"
                     bodyUsed: false,
                     text: function() { return Promise.resolve(responseBody); },
                     json: function() { return Promise.resolve(JSON.parse(responseBody)); },
+                    blob: function() { return Promise.resolve(new Blob([responseBody], { type: responseHeaders.get('content-type') || '' })); },
                 };
             }
         };
@@ -1232,5 +1366,70 @@ allow if {{
             !err.contains("server-refresh-token"),
             "refresh token leaked in error: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_do_fetch_sends_multipart_body() {
+        #[derive(Clone)]
+        struct MultipartState {
+            requests: Arc<tokio::sync::Mutex<Vec<(String, String)>>>,
+        }
+
+        async fn multipart_handler(
+            State(state): State<MultipartState>,
+            headers: HeaderMap,
+            body: axum::body::Bytes,
+        ) -> impl IntoResponse {
+            let ct = headers
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_string();
+            let body_str = String::from_utf8_lossy(&body).to_string();
+            state.requests.lock().await.push((ct, body_str));
+            (StatusCode::OK, Json(json!({"received": true})))
+        }
+
+        let state = MultipartState {
+            requests: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+        };
+
+        let app = Router::new()
+            .route("/upload", post(multipart_handler))
+            .with_state(state.clone());
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let url = format!("http://{}/upload", addr);
+        let boundary = "----TestBoundary123";
+        let body = format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"f\"; filename=\"test.txt\"\r\nContent-Type: text/plain\r\n\r\nhello world\r\n--{boundary}--\r\n"
+        );
+        let ct = format!("multipart/form-data; boundary={boundary}");
+        let headers_json = serde_json::json!({"content-type": ct}).to_string();
+
+        let resp = do_fetch(
+            url,
+            "POST".to_string(),
+            headers_json,
+            Some(body.clone()),
+            Arc::new(PolicyChain::new(vec![], EvalMode::All)),
+            reqwest::Client::new(),
+            vec![],
+        )
+        .await
+        .expect("multipart fetch should succeed");
+
+        let parsed: Value = serde_json::from_str(&resp).unwrap();
+        assert_eq!(parsed["status"], 200);
+
+        let reqs = state.requests.lock().await;
+        assert_eq!(reqs.len(), 1);
+        assert!(reqs[0].0.starts_with("multipart/form-data; boundary="));
+        assert!(reqs[0].1.contains("hello world"));
+        assert!(reqs[0].1.contains("name=\"f\""));
+        assert!(reqs[0].1.contains("filename=\"test.txt\""));
     }
 }
