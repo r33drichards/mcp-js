@@ -280,6 +280,80 @@ const HARDENING_JS: &str = r#"
 })();
 "#;
 
+// ── Base64 globals (atob / btoa) ────────────────────────────────────────
+
+pub fn inject_base64(runtime: &mut JsRuntime) -> Result<(), String> {
+    runtime
+        .execute_script("<base64-setup>", BASE64_JS.to_string())
+        .map_err(|e| format!("Failed to install atob/btoa: {}", e))?;
+    Ok(())
+}
+
+pub fn inject_base64_snapshot(runtime: &mut deno_core::JsRuntimeForSnapshot) -> Result<(), String> {
+    runtime
+        .execute_script("<base64-setup>", BASE64_JS.to_string())
+        .map_err(|e| format!("Failed to install atob/btoa: {}", e))?;
+    Ok(())
+}
+
+const BASE64_JS: &str = r#"
+(function() {
+    var chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+
+    globalThis.btoa = function btoa(input) {
+        var str = String(input);
+        for (var i = 0; i < str.length; i++) {
+            if (str.charCodeAt(i) > 255) {
+                throw new DOMException(
+                    "The string to be encoded contains characters outside of the Latin1 range.",
+                    "InvalidCharacterError"
+                );
+            }
+        }
+        var out = '';
+        for (var i = 0; i < str.length; i += 3) {
+            var a = str.charCodeAt(i);
+            var b = i + 1 < str.length ? str.charCodeAt(i + 1) : 0;
+            var c = i + 2 < str.length ? str.charCodeAt(i + 2) : 0;
+            out += chars[a >> 2];
+            out += chars[((a & 3) << 4) | (b >> 4)];
+            out += i + 1 < str.length ? chars[((b & 15) << 2) | (c >> 6)] : '=';
+            out += i + 2 < str.length ? chars[c & 63] : '=';
+        }
+        return out;
+    };
+
+    globalThis.atob = function atob(input) {
+        var str = String(input).replace(/[\t\n\f\r ]/g, '');
+        if (str.length % 4 === 1) {
+            throw new DOMException(
+                "The string to be decoded is not correctly encoded.",
+                "InvalidCharacterError"
+            );
+        }
+        var out = '';
+        var buf = 0, bits = 0;
+        for (var i = 0; i < str.length; i++) {
+            if (str[i] === '=') break;
+            var idx = chars.indexOf(str[i]);
+            if (idx === -1) {
+                throw new DOMException(
+                    "The string to be decoded contains invalid characters.",
+                    "InvalidCharacterError"
+                );
+            }
+            buf = (buf << 6) | idx;
+            bits += 6;
+            if (bits >= 8) {
+                bits -= 8;
+                out += String.fromCharCode((buf >> bits) & 0xff);
+            }
+        }
+        return out;
+    };
+})();
+"#;
+
 // ── Flush helper ─────────────────────────────────────────────────────────
 
 /// Flush any remaining console output from the runtime's OpState.
