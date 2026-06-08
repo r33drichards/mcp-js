@@ -41,6 +41,14 @@ pub enum McpServerTransport {
     Sse {
         url: String,
     },
+    /// MCP "Streamable HTTP" transport (MCP 2025-03-26+). A single endpoint
+    /// URL handles all JSON-RPC traffic; optional `headers` (e.g. an
+    /// `Authorization` header) are sent on every request.
+    Http {
+        url: String,
+        #[serde(default)]
+        headers: HashMap<String, String>,
+    },
 }
 
 /// Configuration for a single named MCP server.
@@ -435,6 +443,37 @@ async fn connect_one(config: &McpServerConfig) -> Result<ConnectedMcpServer, Str
                 ().serve(transport)
                     .await
                     .map_err(|e| format!("MCP client handshake with '{}' failed: {}", config.name, e))?;
+
+            let peer = service.peer().clone();
+            let tools = peer
+                .list_all_tools()
+                .await
+                .map_err(|e| format!("Failed to list tools from '{}': {}", config.name, e))?;
+
+            let keep_alive = tokio::spawn(async move {
+                let _ = service.waiting().await;
+            });
+
+            Ok(ConnectedMcpServer {
+                peer,
+                tools,
+                _keep_alive: keep_alive.abort_handle(),
+            })
+        }
+        McpServerTransport::Http { url, headers } => {
+            let transport =
+                super::streamable_http_client::StreamableHttpClientTransport::start(url, headers)
+                    .map_err(|e| {
+                        format!(
+                            "Failed to create Streamable HTTP transport for '{}' ({}): {}",
+                            config.name, url, e
+                        )
+                    })?;
+
+            let service: rmcp::service::RunningService<RoleClient, ()> =
+                ().serve(transport).await.map_err(|e| {
+                    format!("MCP client handshake with '{}' failed: {}", config.name, e)
+                })?;
 
             let peer = service.peer().clone();
             let tools = peer

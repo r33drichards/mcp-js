@@ -998,9 +998,24 @@ fn load_mcp_server_configs(
                     url: url.to_string(),
                 },
             });
+        } else if let Some(url) = rest.strip_prefix("http:") {
+            // `http:` is shorthand for the Streamable HTTP transport. The URL
+            // scheme itself is preserved, so `name=http:https://host/mcp`
+            // connects over HTTPS. Custom headers aren't expressible on the
+            // CLI form — use --mcp-config for those.
+            if url.is_empty() {
+                anyhow::bail!("--mcp-server http transport requires a URL");
+            }
+            configs.push(McpServerConfig {
+                name,
+                transport: McpServerTransport::Http {
+                    url: url.to_string(),
+                    headers: std::collections::HashMap::new(),
+                },
+            });
         } else {
             anyhow::bail!(
-                "Invalid --mcp-server transport for '{}': must start with 'stdio:' or 'sse:'. Got: '{}'",
+                "Invalid --mcp-server transport for '{}': must start with 'stdio:', 'sse:', or 'http:'. Got: '{}'",
                 name, rest
             );
         }
@@ -1028,7 +1043,44 @@ fn load_mcp_server_configs(
 
 #[cfg(test)]
 mod tests {
-    use super::{load_fetch_header_rules, parse_fetch_header_cli, resolve_text_or_file};
+    use super::{
+        load_fetch_header_rules, load_mcp_server_configs, parse_fetch_header_cli,
+        resolve_text_or_file,
+    };
+    use crate::engine::mcp_client::McpServerTransport;
+
+    #[test]
+    fn parse_mcp_server_http_transport() {
+        let configs = load_mcp_server_configs(
+            &["payments=http:https://host.internal/mcp".to_string()],
+            &None,
+        )
+        .expect("http transport should parse");
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].name, "payments");
+        match &configs[0].transport {
+            McpServerTransport::Http { url, headers } => {
+                assert_eq!(url, "https://host.internal/mcp");
+                assert!(headers.is_empty());
+            }
+            other => panic!("expected Http transport, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_mcp_server_http_requires_url() {
+        let err = load_mcp_server_configs(&["x=http:".to_string()], &None)
+            .expect_err("empty http url should be rejected");
+        assert!(err.to_string().contains("requires a URL"), "{}", err);
+    }
+
+    #[test]
+    fn parse_mcp_server_rejects_unknown_transport() {
+        let err = load_mcp_server_configs(&["x=ftp:host".to_string()], &None)
+            .expect_err("unknown transport should be rejected");
+        assert!(err.to_string().contains("stdio:"), "{}", err);
+        assert!(err.to_string().contains("http:"), "{}", err);
+    }
 
     #[test]
     fn resolve_text_or_file_returns_inline_text_verbatim() {

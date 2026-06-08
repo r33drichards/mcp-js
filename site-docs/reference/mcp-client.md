@@ -33,6 +33,18 @@ Arguments after the command are delimited by `:`. The subprocess inherits the mc
 --mcp-server analytics=sse:http://analytics-mcp.internal:9000/sse
 ```
 
+**Streamable HTTP transport** — connects to an existing MCP server over the Streamable HTTP transport (MCP 2025-03-26+):
+
+```
+--mcp-server name=http:URL
+```
+
+The URL must include its scheme, so the value after `http:` is the full endpoint (`http:https://...` connects over HTTPS). Custom request headers are not expressible on the CLI form; use `--mcp-config` for those.
+
+```bash
+--mcp-server payments=http:https://payments-mcp.internal/mcp
+```
+
 ---
 
 ### `--mcp-config`
@@ -111,6 +123,26 @@ The file must contain a JSON array. Each element is one of the following object 
 | `name` | string | yes | Unique logical name; used in the JS API and in stub tool names |
 | `transport` | `"sse"` | yes | Transport discriminator |
 | `url` | string | yes | Full URL of the upstream server's SSE endpoint |
+
+### Streamable HTTP server object
+
+```json
+{
+  "name": "<unique-server-name>",
+  "transport": "http",
+  "url": "<Streamable HTTP endpoint URL>",
+  "headers": {
+    "Authorization": "Bearer <token>"
+  }
+}
+```
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `name` | string | yes | — | Unique logical name; used in the JS API and in stub tool names |
+| `transport` | `"http"` | yes | — | Transport discriminator |
+| `url` | string | yes | — | Full URL of the upstream server's Streamable HTTP endpoint |
+| `headers` | object (string → string) | no | `{}` | Extra HTTP headers sent on every request (e.g. `Authorization`) |
 
 ---
 

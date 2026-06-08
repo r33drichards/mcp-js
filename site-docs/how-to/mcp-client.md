@@ -22,6 +22,17 @@ mcp-v8 --http-port 8080 \
   --mcp-server analytics=sse:http://analytics-mcp.internal:9000/sse
 ```
 
+## Connect a Streamable HTTP server
+
+Use `--mcp-server name=http:URL`. mcp-v8 attaches to the endpoint using the MCP Streamable HTTP transport (MCP 2025-03-26+) at startup. Include the full URL, scheme and all.
+
+```bash
+mcp-v8 --http-port 8080 \
+  --mcp-server payments=http:https://payments-mcp.internal/mcp
+```
+
+The CLI form cannot express custom request headers — use `--mcp-config` (below) when the endpoint requires an `Authorization` header or similar.
+
 ## Connect multiple servers at once
 
 Repeat `--mcp-server` for each server. Names must be unique.
@@ -29,7 +40,8 @@ Repeat `--mcp-server` for each server. Names must be unique.
 ```bash
 mcp-v8 --http-port 8080 \
   --mcp-server github=stdio:npx:-y:@modelcontextprotocol/server-github \
-  --mcp-server db=sse:http://db-mcp.internal:9000/sse
+  --mcp-server db=sse:http://db-mcp.internal:9000/sse \
+  --mcp-server payments=http:https://payments-mcp.internal/mcp
 ```
 
 ## Use --mcp-config for richer configuration
@@ -53,6 +65,14 @@ Create `mcp-servers.json`:
     "name": "analytics",
     "transport": "sse",
     "url": "http://analytics-mcp.internal:9000/sse"
+  },
+  {
+    "name": "payments",
+    "transport": "http",
+    "url": "https://payments-mcp.internal/mcp",
+    "headers": {
+      "Authorization": "Bearer xxxxxxxxxxxxxxxxxxxx"
+    }
   }
 ]
 ```

@@ -9,6 +9,7 @@ pub mod mcp_client;
 pub mod module_loader;
 pub mod opa;
 pub mod session_log;
+pub mod streamable_http_client;
 pub mod subprocess;
 pub mod timers;
 pub mod wasm_stub;

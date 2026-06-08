@@ -45,7 +45,8 @@ tokio-util = "0.7"
 rand = "0.8"
 http-body-util = "0.1"
 regorus = "0.5"
-reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"], default-features = false }
+sse-stream = "0.1.4"
 url = "2"
 futures = "0.3"
 wasmparser = "0.225"
