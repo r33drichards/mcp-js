@@ -16,6 +16,71 @@ curl -s -X POST http://localhost:3000/api/exec \
 
 Plain JavaScript is valid TypeScript and always works. JSX/TSX is **not** supported — code containing JSX is rejected with a parse error, so write plain TypeScript or JavaScript. Angle-bracket type assertions (`<T>value`) are permitted because TSX is disabled.
 
+## How to run a script from a file on the server
+
+Instead of inlining `code`, the `run_js` tool can read a script **from the
+server's own filesystem** via the `file` parameter. This is handy when the
+server and the agent share a filesystem (e.g. a local stdio server, or scripts
+baked into a container).
+
+It is **off by default**. Enable it one of two ways:
+
+```bash
+# Easy "allow all": read any path the server process can access.
+mcp-v8 --stateless --http-port 3000 --allow-run-js-file
+
+# Or gate it with a policy that only permits a directory:
+mcp-v8 --stateless --http-port 3000 \
+  --policies-json '{"run_js_file":{"policies":[{"url":"file:///etc/mcp/run_js_file.rego"}]}}'
+```
+
+`/etc/mcp/run_js_file.rego`:
+
+```rego
+package mcp.run_js_file
+default allow = false
+allow if { startswith(input.path, "/srv/scripts/") }
+```
+
+Then call `run_js` with `file` instead of `code`:
+
+```json
+{
+  "tool": "run_js",
+  "arguments": { "file": "/srv/scripts/report.js" }
+}
+```
+
+Provide either `code` or `file`, not both. The path is canonicalized before the
+policy sees it, so `../` cannot escape an allowed directory. If the feature is
+disabled, or the policy denies the path, the call fails with a descriptive
+error. See [File-path execution](../reference/js-execution.md#file-path-execution-run_js-file-parameter)
+and the [`run_js_file` policy input](../reference/policies.md#run_js_file).
+
+## How to upload a script file to the REST endpoint
+
+`POST /api/exec` also accepts `multipart/form-data`, so a remote client can
+upload a script file instead of embedding it in a JSON string. Unlike the
+`run_js` `file` parameter above, the script **content comes from the client**,
+so no server flag or policy is needed.
+
+```bash
+# Upload a file part named "file"
+curl -s -X POST http://localhost:3000/api/exec -F 'file=@report.js'
+
+# Optional fields ride alongside the upload as form parts
+curl -s -X POST http://localhost:3000/api/exec \
+  -F 'file=@report.js' \
+  -F 'execution_timeout_secs=60' \
+  -F 'tags={"env":"prod"}'
+```
+
+The bundled CLI client reads a local file for you and submits its contents:
+
+```bash
+mcp-v8-cli --url http://localhost:3000 exec --file report.js
+```
+
 ## How to capture console output
 
 Submit the execution, then read its output with `get_execution_output` (MCP) or

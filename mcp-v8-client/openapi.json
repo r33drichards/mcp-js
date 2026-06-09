@@ -73,7 +73,7 @@
           "executions"
         ],
         "summary": "Submit JavaScript code for asynchronous execution.",
-        "description": "Returns immediately with an `execution_id`. Use `GET /api/executions/{id}`\nto poll status and `GET /api/executions/{id}/output` to read console output.",
+        "description": "Returns immediately with an `execution_id`. Use `GET /api/executions/{id}`\nto poll status and `GET /api/executions/{id}/output` to read console output.\n\nAccepts two request encodings, selected by `Content-Type`: an\n`application/json` body (the schema below), or `multipart/form-data` to\nupload the code as a file. For multipart, send the script source in a\n`file` (or `code`) part; the optional `heap`, `session`,\n`heap_memory_max_mb`, `execution_timeout_secs`, and `tags` (a JSON object)\nparts mirror the JSON fields.",
         "operationId": "exec_handler",
         "requestBody": {
           "content": {
@@ -92,6 +92,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ExecAccepted"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed request body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
                 }
               }
             }

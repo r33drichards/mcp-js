@@ -14,6 +14,7 @@ using the same help headings exposed by the CLI itself.
 - [Module Import](#module-import)
 - [Policy](#policy)
 - [Prompt](#prompt)
+- [Run JS File](#run-js-file)
 - [WASM](#wasm)
 
 ## Cluster
@@ -218,6 +219,14 @@ Override the MCP server `instructions` (the "system prompt" the server reports t
 Override the description advertised for the `run_js` tool in `tools/list`. The value is used verbatim as inline text, unless it begins with `@`, in which case the remainder is treated as a path to a file whose contents are used (use `@@` for a literal leading `@`). Examples: --run-js-description "Execute JS" --run-js-description @./run_js.md
 
 - Value: `TEXT_OR_@FILE`
+
+## Run JS File
+
+### `--allow-run-js-file`
+
+Allow the `run_js` tool to read its code from a file on the server's own filesystem (the `file` parameter). OFF by default. When set, ANY path the server process can read is allowed — this is the easy "allow all" switch. For finer control, leave this off and configure a `run_js_file` policy in --policies-json instead (a Rego/OPA chain decides which paths are allowed); the policy input is `{ "operation": "read", "path": "<canonical path>" }`. This flag takes precedence over a configured run_js_file policy
+
+- Default: `false`
 
 ## WASM
 

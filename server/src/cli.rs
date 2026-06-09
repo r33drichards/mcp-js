@@ -192,6 +192,16 @@ pub struct Cli {
     #[arg(long = "allow-external-modules", default_value = "false", help_heading = "Module Import")]
     pub allow_external_modules: bool,
 
+    /// Allow the `run_js` tool to read its code from a file on the server's own
+    /// filesystem (the `file` parameter). OFF by default. When set, ANY path the
+    /// server process can read is allowed — this is the easy "allow all" switch.
+    /// For finer control, leave this off and configure a `run_js_file` policy in
+    /// --policies-json instead (a Rego/OPA chain decides which paths are allowed);
+    /// the policy input is `{ "operation": "read", "path": "<canonical path>" }`.
+    /// This flag takes precedence over a configured run_js_file policy.
+    #[arg(long = "allow-run-js-file", default_value = "false", help_heading = "Run JS File")]
+    pub allow_run_js_file: bool,
+
     /// JSON policy configuration (inline JSON or path to a JSON file).
     /// Enables fetch() and/or module policy gating via local Rego files
     /// and/or remote OPA servers.

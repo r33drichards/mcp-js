@@ -5,7 +5,8 @@ Executes code and returns the console output directly. Each call runs in a fresh
 TypeScript support is type removal only — types are stripped before execution, not checked. Invalid types will be silently removed, not reported as errors.
 
 params:
-- code: the javascript or typescript code to run
+- code (optional): the javascript or typescript code to run. Provide either `code` or `file`.
+- file (optional): path to a JavaScript/TypeScript file **on the server's own filesystem** to read and execute instead of inline `code`. Provide either `code` or `file`, not both. This is disabled by default: the server must be started with `--allow-run-js-file` (allow any path) or a `run_js_file` policy in `--policies-json` (allow specific paths/dirs), otherwise the call is rejected. The path is resolved on the server, not uploaded from the client.
 - heap_memory_max_mb (optional): maximum V8 heap memory in megabytes (minimum: 4, default: 8). Override the server default for this execution.
 - execution_timeout_secs (optional): maximum execution time in seconds (1–300, default: 30). Override the server default for this execution.
 

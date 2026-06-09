@@ -340,7 +340,12 @@ impl McpService {
     #[tool(description = include_str!("run_js_tool_description.md"))]
     pub async fn run_js(
         &self,
-        #[tool(param)] code: String,
+        #[tool(param)]
+        #[serde(default)]
+        code: Option<String>,
+        #[tool(param)]
+        #[serde(default)]
+        file: Option<String>,
         #[tool(param)]
         #[serde(default)]
         heap: Option<String>,
@@ -354,7 +359,8 @@ impl McpService {
         #[serde(default)]
         tags: Option<HashMap<String, String>>,
     ) -> RunJsResponse {
-        let mut req = self.engine.run_js(code);
+        let mut req = self.engine.run_js(code.unwrap_or_default());
+        req = req.maybe_file(file);
         if let Some(h) = heap { req = req.heap(h); }
         if let Some(s) = self.session_id.get() { req = req.session(s.clone()); }
         if let Some(mb) = heap_memory_max_mb { req = req.heap_memory_max_mb(mb); }
@@ -740,7 +746,12 @@ impl StatelessMcpService {
     #[tool(description = include_str!("run_js_tool_stateless.md"))]
     pub async fn run_js(
         &self,
-        #[tool(param)] code: String,
+        #[tool(param)]
+        #[serde(default)]
+        code: Option<String>,
+        #[tool(param)]
+        #[serde(default)]
+        file: Option<String>,
         #[tool(param)]
         #[serde(default)]
         heap_memory_max_mb: Option<usize>,
@@ -749,7 +760,8 @@ impl StatelessMcpService {
         execution_timeout_secs: Option<u64>,
     ) -> StatelessRunJsResponse {
         // 1. Submit to engine (fire-and-forget internally)
-        let mut req = self.engine.run_js(code);
+        let mut req = self.engine.run_js(code.unwrap_or_default());
+        req = req.maybe_file(file);
         if let Some(mb) = heap_memory_max_mb { req = req.heap_memory_max_mb(mb); }
         if let Some(secs) = execution_timeout_secs { req = req.execution_timeout_secs(secs); }
         req = req.maybe_mcp_headers(self.mcp_headers.get().cloned());

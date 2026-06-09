@@ -69,8 +69,14 @@ Then ask the agent: *"Run this JavaScript: `console.log([1,2,3].map(x => x*2))`"
 ```bash
 mcp-v8 --stateless --http-port 8080
 # MCP endpoint: POST http://localhost:8080/mcp
-# REST sidecar: POST http://localhost:8080/api/exec
+# REST sidecar: POST http://localhost:8080/api/exec  (JSON body, or a multipart file upload)
 ```
+
+`/api/exec` accepts either a JSON body or a `multipart/form-data` file upload
+(`curl -F 'file=@script.js' .../api/exec`). The `run_js` MCP tool can also read
+a script from a path on the server itself via an optional `file` parameter —
+off by default, enabled with `--allow-run-js-file` or a `run_js_file`
+[policy](https://r33drichards.github.io/mcp-js/reference/policies/).
 
 See the [Quick Start tutorials](https://r33drichards.github.io/mcp-js/) and the
 [transports guide](https://r33drichards.github.io/mcp-js/concepts/transports/) for more.
@@ -140,6 +146,7 @@ A fully-typed client for the REST API, generated from the OpenAPI spec via
 ```bash
 mcp-v8 --stateless --http-port 3000 &
 mcp-v8-cli exec "console.log('hello'); 1 + 1"
+mcp-v8-cli exec --file ./script.js                # run a local file (uploaded as the code)
 mcp-v8-cli executions get <execution_id>
 mcp-v8-cli executions output <execution_id>
 export MCP_V8_URL=https://my-server.example.com   # point at a remote server

@@ -8,6 +8,7 @@ pub mod heap_tags;
 pub mod mcp_client;
 pub mod module_loader;
 pub mod opa;
+pub mod run_js_file;
 pub mod session_log;
 pub mod subprocess;
 pub mod timers;
@@ -1186,6 +1187,10 @@ pub struct Engine {
     /// Optional override for the `run_js` tool description advertised in
     /// `tools/list`. When `None`, the compiled-in description is used.
     run_js_description_override: Option<Arc<str>>,
+    /// Controls whether `run_js` may read its code from a file on the server's
+    /// own filesystem (the `file` parameter). `None` disables it entirely (the
+    /// default); `Some` either allows all paths or gates them behind a policy.
+    run_js_file_policy: Option<run_js_file::RunJsFilePolicy>,
 }
 
 /// Builder for `Engine::run_js()`. Only `code` is required; everything else
@@ -1193,6 +1198,9 @@ pub struct Engine {
 pub struct RunJsRequest<'a> {
     engine: &'a Engine,
     code: String,
+    /// Optional path to a file on the server's filesystem whose contents are
+    /// executed instead of `code`. Policy-gated (see `run_js_file_policy`).
+    file: Option<String>,
     heap: Option<String>,
     session: Option<String>,
     heap_memory_max_mb: Option<usize>,
@@ -1202,6 +1210,19 @@ pub struct RunJsRequest<'a> {
 }
 
 impl<'a> RunJsRequest<'a> {
+    /// Read the code from a file on the server's filesystem instead of an
+    /// inline `code` string. Subject to the engine's `run_js_file` policy.
+    pub fn file(mut self, file: impl Into<String>) -> Self {
+        self.file = Some(file.into());
+        self
+    }
+
+    /// Set the file path from an `Option`, leaving it unset when `None`.
+    pub fn maybe_file(mut self, file: Option<String>) -> Self {
+        self.file = file;
+        self
+    }
+
     pub fn heap(mut self, heap: impl Into<String>) -> Self {
         self.heap = Some(heap.into());
         self
@@ -1246,6 +1267,7 @@ impl<'a> RunJsRequest<'a> {
     pub async fn execute(self) -> Result<ExecutionId, String> {
         self.engine.run_js_inner(
             self.code,
+            self.file,
             self.heap,
             self.session,
             self.heap_memory_max_mb,
@@ -1285,6 +1307,7 @@ impl Engine {
             subprocess_config: None,
             instructions_override: None,
             run_js_description_override: None,
+            run_js_file_policy: None,
         }
     }
 
@@ -1319,6 +1342,7 @@ impl Engine {
             subprocess_config: None,
             instructions_override: None,
             run_js_description_override: None,
+            run_js_file_policy: None,
         }
     }
 
@@ -1431,11 +1455,38 @@ impl Engine {
         self.run_js_description_override.clone()
     }
 
+    /// Enable `run_js` file-path reads, either allowing all paths or gating
+    /// them behind a policy. When this is never called, the `file` parameter
+    /// is rejected.
+    pub fn with_run_js_file_policy(mut self, policy: run_js_file::RunJsFilePolicy) -> Self {
+        self.run_js_file_policy = Some(policy);
+        self
+    }
+
+    /// Resolve a `run_js` `file` parameter to source code, applying the
+    /// configured policy. Errors if file-path execution is disabled or denied.
+    async fn resolve_run_js_file(
+        &self,
+        path: &str,
+        mcp_headers: Option<&serde_json::Value>,
+    ) -> Result<String, String> {
+        match &self.run_js_file_policy {
+            None => Err(
+                "run_js file-path execution is disabled. Enable it with \
+                 --allow-run-js-file or configure a `run_js_file` policy in \
+                 --policies-json."
+                    .to_string(),
+            ),
+            Some(policy) => policy.read(path, mcp_headers).await,
+        }
+    }
+
     /// Create a builder for submitting JavaScript code for execution.
     pub fn run_js(&self, code: impl Into<String>) -> RunJsRequest<'_> {
         RunJsRequest {
             engine: self,
             code: code.into(),
+            file: None,
             heap: None,
             session: None,
             heap_memory_max_mb: None,
@@ -1449,6 +1500,7 @@ impl Engine {
     async fn run_js_inner(
         &self,
         code: String,
+        file: Option<String>,
         heap: Option<String>,
         session: Option<String>,
         heap_memory_max_mb: Option<usize>,
@@ -1458,6 +1510,20 @@ impl Engine {
     ) -> Result<ExecutionId, String> {
         let registry = self.execution_registry.as_ref()
             .ok_or_else(|| "Execution registry not configured".to_string())?;
+
+        // Resolve a file-path source (policy-gated) when provided; otherwise
+        // use the inline code. Supplying both is an error to avoid ambiguity.
+        let code = match file {
+            Some(path) => {
+                if !code.trim().is_empty() {
+                    return Err(
+                        "run_js: provide either `code` or `file`, not both".to_string()
+                    );
+                }
+                self.resolve_run_js_file(&path, mcp_headers.as_ref()).await?
+            }
+            None => code,
+        };
 
         // Strip TypeScript types before V8 execution (no-op for plain JS)
         let code = strip_typescript_types(&code)?;

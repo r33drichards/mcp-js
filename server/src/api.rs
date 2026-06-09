@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, Query, State},
+    extract::{FromRequest, Multipart, Path, Query, Request, State},
     http::{header, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -8,6 +8,10 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use utoipa::{OpenApi, ToSchema};
+
+/// Maximum size of a JSON `/api/exec` body (16 MiB). Multipart uploads are
+/// read field-by-field and are not bounded by this constant.
+const MAX_EXEC_JSON_BYTES: usize = 16 * 1024 * 1024;
 
 use crate::engine::Engine;
 
@@ -231,19 +235,141 @@ pub struct ApiDoc;
 ///
 /// Returns immediately with an `execution_id`. Use `GET /api/executions/{id}`
 /// to poll status and `GET /api/executions/{id}/output` to read console output.
+///
+/// Accepts two request encodings, selected by `Content-Type`: an
+/// `application/json` body (the schema below), or `multipart/form-data` to
+/// upload the code as a file. For multipart, send the script source in a
+/// `file` (or `code`) part; the optional `heap`, `session`,
+/// `heap_memory_max_mb`, `execution_timeout_secs`, and `tags` (a JSON object)
+/// parts mirror the JSON fields.
 #[utoipa::path(
     post,
     path = "/api/exec",
     request_body = ExecRequest,
     responses(
         (status = 202, description = "Execution queued", body = ExecAccepted),
+        (status = 400, description = "Malformed request body", body = ApiError),
         (status = 500, description = "Internal error", body = ApiError),
     ),
     tag = "executions"
 )]
 async fn exec_handler(
     State(engine): State<Engine>,
-    Json(req): Json<ExecRequest>,
+    request: Request,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let content_type = request
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+
+    let exec_req = if content_type.starts_with("multipart/form-data") {
+        match parse_multipart_exec(request).await {
+            Ok(req) => req,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": e })),
+                )
+            }
+        }
+    } else {
+        // Default to a JSON body (back-compatible with existing clients).
+        let bytes = match axum::body::to_bytes(request.into_body(), MAX_EXEC_JSON_BYTES).await {
+            Ok(b) => b,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": format!("failed to read request body: {}", e) })),
+                )
+            }
+        };
+        match serde_json::from_slice::<ExecRequest>(&bytes) {
+            Ok(req) => req,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": format!("invalid JSON body: {}", e) })),
+                )
+            }
+        }
+    };
+
+    submit_exec(engine, exec_req).await
+}
+
+/// Build an [`ExecRequest`] from a `multipart/form-data` upload.
+///
+/// The script source comes from a `file` part (an uploaded file) or a `code`
+/// part (a plain text field); the remaining parts map to the optional
+/// [`ExecRequest`] fields. Unknown parts are ignored.
+async fn parse_multipart_exec(request: Request) -> Result<ExecRequest, String> {
+    let mut multipart = Multipart::from_request(request, &())
+        .await
+        .map_err(|e| format!("invalid multipart request: {}", e))?;
+
+    let mut code: Option<String> = None;
+    let mut heap: Option<String> = None;
+    let mut session: Option<String> = None;
+    let mut heap_memory_max_mb: Option<usize> = None;
+    let mut execution_timeout_secs: Option<u64> = None;
+    let mut tags: Option<HashMap<String, String>> = None;
+
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| format!("malformed multipart field: {}", e))?
+    {
+        let name = field.name().unwrap_or("").to_string();
+        let text = field
+            .text()
+            .await
+            .map_err(|e| format!("failed to read multipart part '{}': {}", name, e))?;
+        match name.as_str() {
+            // `file` (an uploaded file) and `code` (a text field) are aliases
+            // for the script source; whichever appears last wins.
+            "file" | "code" => code = Some(text),
+            "heap" => heap = Some(text),
+            "session" => session = Some(text),
+            "heap_memory_max_mb" => {
+                heap_memory_max_mb = Some(text.trim().parse::<usize>().map_err(|e| {
+                    format!("invalid heap_memory_max_mb '{}': {}", text.trim(), e)
+                })?);
+            }
+            "execution_timeout_secs" => {
+                execution_timeout_secs = Some(text.trim().parse::<u64>().map_err(|e| {
+                    format!("invalid execution_timeout_secs '{}': {}", text.trim(), e)
+                })?);
+            }
+            "tags" => {
+                tags = Some(
+                    serde_json::from_str::<HashMap<String, String>>(&text)
+                        .map_err(|e| format!("invalid tags JSON: {}", e))?,
+                );
+            }
+            _ => { /* ignore unknown parts */ }
+        }
+    }
+
+    let code = code
+        .ok_or_else(|| "multipart request must include a 'file' or 'code' part".to_string())?;
+
+    Ok(ExecRequest {
+        code,
+        heap,
+        session,
+        heap_memory_max_mb,
+        execution_timeout_secs,
+        tags,
+    })
+}
+
+/// Queue an [`ExecRequest`] on the engine and map the result to an HTTP
+/// response. Shared by the JSON and multipart code paths.
+async fn submit_exec(
+    engine: Engine,
+    req: ExecRequest,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let mut r = engine.run_js(req.code);
     if let Some(h) = req.heap { r = r.heap(h); }

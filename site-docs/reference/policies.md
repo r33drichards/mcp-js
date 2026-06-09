@@ -19,15 +19,16 @@ The JSON is deserialized into `PoliciesConfig`. Invalid JSON or an unsupported U
 
 ```json
 {
-  "fetch":      <OperationPolicies | null>,
-  "modules":    <OperationPolicies | null>,
-  "filesystem": <OperationPolicies | null>,
-  "mcp_tools":  <OperationPolicies | null>,
-  "subprocess": <OperationPolicies | null>
+  "fetch":       <OperationPolicies | null>,
+  "modules":     <OperationPolicies | null>,
+  "filesystem":  <OperationPolicies | null>,
+  "mcp_tools":   <OperationPolicies | null>,
+  "subprocess":  <OperationPolicies | null>,
+  "run_js_file": <OperationPolicies | null>
 }
 ```
 
-All five keys are optional. Omitting a key means the corresponding capability is not available.
+All keys are optional. Omitting a key means the corresponding capability is not available.
 
 ## `OperationPolicies` schema
 
@@ -80,6 +81,7 @@ Any other scheme is a fatal startup error.
 | `filesystem` | `mcp/filesystem` | `data.mcp.filesystem.allow` |
 | `mcp_tools` | `mcp/tools` | `data.mcp.tools.allow` |
 | `subprocess` | `mcp/subprocess` | `data.mcp.subprocess.allow` |
+| `run_js_file` | `mcp/run_js_file` | `data.mcp.run_js_file.allow` |
 
 ## Input documents
 
@@ -278,6 +280,33 @@ allow if {
 }
 ```
 
+### `run_js_file`
+
+Passed to the policy each time a `run_js` call supplies a `file` path, before
+the file is read. Gates host-side file reads (the `run_js` `file` parameter);
+see [File-path execution](js-execution.md#file-path-execution-run_js-file-parameter).
+
+| Field | Type | Description |
+|---|---|---|
+| `operation` | string | Always `"read"`. |
+| `path` | string | The **canonicalized** absolute path (symlinks and `..` resolved) the server is about to read. |
+| `mcp_headers` | object\|omitted | `X-MCP-*` headers from the MCP session, when present. |
+
+This category is only consulted when a `run_js_file` policy is configured.
+`--allow-run-js-file` bypasses it and allows every path.
+
+Example Rego — allow only files under `/srv/scripts`:
+
+```rego
+package mcp.run_js_file
+
+default allow = false
+
+allow if {
+    startswith(input.path, "/srv/scripts/")
+}
+```
+
 ## Complete example configuration
 
 ```json
@@ -316,6 +345,11 @@ allow if {
     "mode": "any",
     "policies": [
       {"url": "file:///etc/mcp/mcp_tools.rego"}
+    ]
+  },
+  "run_js_file": {
+    "policies": [
+      {"url": "file:///etc/mcp/run_js_file.rego"}
     ]
   }
 }

@@ -23,6 +23,7 @@ use engine::fs::FsConfig;
 use engine::execution::ExecutionRegistry;
 use engine::module_loader::ModuleLoaderConfig;
 use engine::subprocess::SubprocessConfig;
+use engine::run_js_file::RunJsFilePolicy;
 use engine::opa::{PoliciesConfig, build_policy_chain};
 use engine::heap_storage::{AnyHeapStorage, S3HeapStorage, WriteThroughCacheHeapStorage, FileHeapStorage};
 use engine::heap_tags::HeapTagStore;
@@ -287,6 +288,19 @@ async fn main() -> Result<()> {
         None
     };
 
+    let run_js_file_policy_chain = if let Some(ref config) = policies_config {
+        if let Some(ref run_js_file_policies) = config.run_js_file {
+            let chain = build_policy_chain(run_js_file_policies, "mcp/run_js_file", "data.mcp.run_js_file.allow")
+                .map_err(|e| anyhow::anyhow!("Failed to build run_js_file policy chain: {}", e))?;
+            tracing::info!("run_js file policy chain: {} evaluator(s), mode={:?}", run_js_file_policies.policies.len(), run_js_file_policies.mode);
+            Some(Arc::new(chain))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     // ── Fetch policy ───────────────────────────────────────────────────
     let header_rules = load_fetch_header_rules(&cli.fetch_headers, &cli.fetch_header_config)?;
     if !header_rules.is_empty() {
@@ -327,6 +341,24 @@ async fn main() -> Result<()> {
     let engine = if let Some(chain) = subprocess_policy_chain {
         engine.with_subprocess_config(SubprocessConfig::new(chain))
     } else {
+        engine
+    };
+
+    // ── run_js file-path reads ─────────────────────────────────────────
+    // OFF by default. `--allow-run-js-file` allows any server-readable path;
+    // a `run_js_file` policy in --policies-json gates reads per path. The flag
+    // wins over a configured policy (it is the explicit "allow all" switch).
+    let engine = if cli.allow_run_js_file {
+        if run_js_file_policy_chain.is_some() {
+            tracing::warn!("--allow-run-js-file overrides the configured run_js_file policy (all paths allowed)");
+        }
+        tracing::info!("run_js file-path reads: ENABLED (allow all server-readable paths)");
+        engine.with_run_js_file_policy(RunJsFilePolicy::AllowAll)
+    } else if let Some(chain) = run_js_file_policy_chain {
+        tracing::info!("run_js file-path reads: ENABLED (policy-gated)");
+        engine.with_run_js_file_policy(RunJsFilePolicy::Policy(chain))
+    } else {
+        tracing::info!("run_js file-path reads: DISABLED (enable with --allow-run-js-file or a run_js_file policy)");
         engine
     };
 
