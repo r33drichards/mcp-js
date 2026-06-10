@@ -7,3 +7,4 @@ snapshot.bin
 .DS_Store
 node_modules
 site/
+.worktrees/
