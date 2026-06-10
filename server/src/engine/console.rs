@@ -280,6 +280,203 @@ const HARDENING_JS: &str = r#"
 })();
 "#;
 
+// ── Base64 globals (atob / btoa) ────────────────────────────────────────
+
+pub fn inject_base64(runtime: &mut JsRuntime) -> Result<(), String> {
+    runtime
+        .execute_script("<base64-setup>", BASE64_JS.to_string())
+        .map_err(|e| format!("Failed to install atob/btoa: {}", e))?;
+    Ok(())
+}
+
+pub fn inject_base64_snapshot(runtime: &mut deno_core::JsRuntimeForSnapshot) -> Result<(), String> {
+    runtime
+        .execute_script("<base64-setup>", BASE64_JS.to_string())
+        .map_err(|e| format!("Failed to install atob/btoa: {}", e))?;
+    Ok(())
+}
+
+const BASE64_JS: &str = r#"
+(function() {
+    var chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+
+    function InvalidCharacterError(message) {
+        this.name = 'InvalidCharacterError';
+        this.message = message;
+    }
+    InvalidCharacterError.prototype = Object.create(Error.prototype);
+    InvalidCharacterError.prototype.constructor = InvalidCharacterError;
+
+    globalThis.btoa = function btoa(input) {
+        var str = String(input);
+        for (var i = 0; i < str.length; i++) {
+            if (str.charCodeAt(i) > 255) {
+                throw new InvalidCharacterError(
+                    "The string to be encoded contains characters outside of the Latin1 range."
+                );
+            }
+        }
+        var out = '';
+        for (var i = 0; i < str.length; i += 3) {
+            var a = str.charCodeAt(i);
+            var b = i + 1 < str.length ? str.charCodeAt(i + 1) : 0;
+            var c = i + 2 < str.length ? str.charCodeAt(i + 2) : 0;
+            out += chars[a >> 2];
+            out += chars[((a & 3) << 4) | (b >> 4)];
+            out += i + 1 < str.length ? chars[((b & 15) << 2) | (c >> 6)] : '=';
+            out += i + 2 < str.length ? chars[c & 63] : '=';
+        }
+        return out;
+    };
+
+    globalThis.atob = function atob(input) {
+        var str = String(input).replace(/[\t\n\f\r ]/g, '');
+        if (str.length % 4 === 1) {
+            throw new InvalidCharacterError(
+                "The string to be decoded is not correctly encoded."
+            );
+        }
+        var out = '';
+        var buf = 0, bits = 0;
+        for (var i = 0; i < str.length; i++) {
+            if (str[i] === '=') break;
+            var idx = chars.indexOf(str[i]);
+            if (idx === -1) {
+                throw new InvalidCharacterError(
+                    "The string to be decoded contains invalid characters."
+                );
+            }
+            buf = (buf << 6) | idx;
+            bits += 6;
+            if (bits >= 8) {
+                bits -= 8;
+                out += String.fromCharCode((buf >> bits) & 0xff);
+            }
+        }
+        return out;
+    };
+})();
+"#;
+
+// ── Blob / File / FormData globals ──────────────────────────────────────
+
+pub fn inject_web_apis(runtime: &mut JsRuntime) -> Result<(), String> {
+    runtime
+        .execute_script("<web-apis-setup>", WEB_APIS_JS.to_string())
+        .map_err(|e| format!("Failed to install Blob/File/FormData: {}", e))?;
+    Ok(())
+}
+
+pub fn inject_web_apis_snapshot(runtime: &mut deno_core::JsRuntimeForSnapshot) -> Result<(), String> {
+    runtime
+        .execute_script("<web-apis-setup>", WEB_APIS_JS.to_string())
+        .map_err(|e| format!("Failed to install Blob/File/FormData: {}", e))?;
+    Ok(())
+}
+
+const WEB_APIS_JS: &str = r#"
+(function() {
+    globalThis.Blob = function Blob(parts, options) {
+        const opt = options || {};
+        this.type = opt.type || '';
+        const chunks = [];
+        for (const part of (parts || [])) {
+            if (part instanceof Blob) {
+                chunks.push(part._data);
+            } else if (typeof part === 'string') {
+                chunks.push(part);
+            } else {
+                chunks.push(String(part));
+            }
+        }
+        this._data = chunks.join('');
+        this.size = this._data.length;
+    };
+    Blob.prototype.text = function() { return Promise.resolve(this._data); };
+    Blob.prototype.slice = function(start, end, contentType) {
+        const s = this._data.slice(start, end);
+        return new Blob([s], { type: contentType || this.type });
+    };
+    Blob.prototype.arrayBuffer = function() {
+        const buf = new ArrayBuffer(this._data.length);
+        const view = new Uint8Array(buf);
+        for (let i = 0; i < this._data.length; i++) view[i] = this._data.charCodeAt(i) & 0xff;
+        return Promise.resolve(buf);
+    };
+
+    globalThis.File = function File(parts, name, options) {
+        Blob.call(this, parts, options);
+        this.name = name;
+        this.lastModified = (options && options.lastModified) || Date.now();
+    };
+    File.prototype = Object.create(Blob.prototype);
+    File.prototype.constructor = File;
+
+    globalThis.FormData = function FormData() {
+        this._entries = [];
+    };
+    FormData.prototype.append = function(name, value, filename) {
+        this._entries.push({ name: String(name), value: value, filename: filename });
+    };
+    FormData.prototype.set = function(name, value, filename) {
+        const n = String(name);
+        this._entries = this._entries.filter(function(e) { return e.name !== n; });
+        this._entries.push({ name: n, value: value, filename: filename });
+    };
+    FormData.prototype.get = function(name) {
+        const n = String(name);
+        for (const e of this._entries) { if (e.name === n) return e.value; }
+        return null;
+    };
+    FormData.prototype.getAll = function(name) {
+        const n = String(name);
+        return this._entries.filter(function(e) { return e.name === n; }).map(function(e) { return e.value; });
+    };
+    FormData.prototype.has = function(name) {
+        const n = String(name);
+        return this._entries.some(function(e) { return e.name === n; });
+    };
+    FormData.prototype.delete = function(name) {
+        const n = String(name);
+        this._entries = this._entries.filter(function(e) { return e.name !== n; });
+    };
+    FormData.prototype.entries = function() { return this._entries.map(function(e) { return [e.name, e.value]; }); };
+    FormData.prototype.keys = function() { return this._entries.map(function(e) { return e.name; }); };
+    FormData.prototype.values = function() { return this._entries.map(function(e) { return e.value; }); };
+    FormData.prototype.forEach = function(cb) {
+        for (const e of this._entries) { cb(e.value, e.name, this); }
+    };
+    FormData.prototype._serialize = function() {
+        const boundary = '----FormData' + Math.random().toString(36).slice(2) + Date.now().toString(36);
+        const parts = [];
+        for (const entry of this._entries) {
+            let disposition = 'form-data; name="' + entry.name + '"';
+            let contentType = null;
+            let body;
+            if (entry.value instanceof File) {
+                const fn = entry.filename || entry.value.name || 'blob';
+                disposition += '; filename="' + fn + '"';
+                contentType = entry.value.type || 'application/octet-stream';
+                body = entry.value._data;
+            } else if (entry.value instanceof Blob) {
+                const fn = entry.filename || 'blob';
+                disposition += '; filename="' + fn + '"';
+                contentType = entry.value.type || 'application/octet-stream';
+                body = entry.value._data;
+            } else {
+                body = String(entry.value);
+            }
+            let part = '--' + boundary + '\r\nContent-Disposition: ' + disposition + '\r\n';
+            if (contentType) part += 'Content-Type: ' + contentType + '\r\n';
+            part += '\r\n' + body + '\r\n';
+            parts.push(part);
+        }
+        parts.push('--' + boundary + '--\r\n');
+        return { boundary: boundary, body: parts.join('') };
+    };
+})();
+"#;
+
 // ── Flush helper ─────────────────────────────────────────────────────────
 
 /// Flush any remaining console output from the runtime's OpState.
