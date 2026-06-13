@@ -1,11 +1,13 @@
-//! Integration tests for POST /api/exec accepting file uploads.
+//! Integration tests for POST /api/exec accepting script uploads.
 //!
-//! `/api/exec` accepts two encodings:
+//! `/api/exec` accepts two encodings, selected by `Content-Type`:
 //!   - `application/json` (existing behaviour) — an ExecRequest body
-//!   - `multipart/form-data` — the code is uploaded as a `file` (or `code`) part
+//!   - any other type (e.g. `application/javascript`) — the raw request body is
+//!     the script source (a file upload, `curl --data-binary @script.js`), with
+//!     optional params passed as query-string parameters.
 //!
 //! These tests start the real server binary in stateless mode and exercise the
-//! multipart path end-to-end, plus a JSON regression check and the error case.
+//! raw-upload path end-to-end, a JSON regression, and the multipart-rejection.
 
 use reqwest::Client;
 use std::process::Stdio;
@@ -98,26 +100,19 @@ async fn run_to_output(base_url: &str, client: &Client, execution_id: &str) -> S
 
 // ── Tests ──────────────────────────────────────────────────────────────────
 
-/// Uploading the code as a `file` part runs it and produces console output.
+/// A raw-body upload with a non-JSON Content-Type runs the body as the script.
 #[tokio::test]
-async fn test_exec_multipart_file_upload_runs_code() {
+async fn test_exec_raw_upload_runs_code() {
     let mut server = HttpServer::start().await.expect("server start");
     let client = Client::new();
 
-    let form = reqwest::multipart::Form::new().part(
-        "file",
-        reqwest::multipart::Part::text("console.log(6 * 7);")
-            .file_name("script.js")
-            .mime_str("application/javascript")
-            .unwrap(),
-    );
-
     let resp = client
         .post(format!("{}/api/exec", server.base_url))
-        .multipart(form)
+        .header(reqwest::header::CONTENT_TYPE, "application/javascript")
+        .body("console.log(6 * 7);")
         .send()
         .await
-        .expect("POST multipart /api/exec");
+        .expect("POST raw /api/exec");
 
     assert_eq!(resp.status(), 202, "expected 202 Accepted");
     let body: serde_json::Value = resp.json().await.expect("parse JSON");
@@ -129,23 +124,22 @@ async fn test_exec_multipart_file_upload_runs_code() {
     server.stop().await;
 }
 
-/// The optional `code` text part is an alias for `file` and also carries
-/// extra fields (here, an execution timeout).
+/// Optional parameters ride along a raw upload as query-string params.
 #[tokio::test]
-async fn test_exec_multipart_code_part_with_fields() {
+async fn test_exec_raw_upload_with_query_params() {
     let mut server = HttpServer::start().await.expect("server start");
     let client = Client::new();
 
-    let form = reqwest::multipart::Form::new()
-        .text("code", "console.log('hello from multipart');")
-        .text("execution_timeout_secs", "60");
-
     let resp = client
-        .post(format!("{}/api/exec", server.base_url))
-        .multipart(form)
+        .post(format!(
+            "{}/api/exec?execution_timeout_secs=60&session=upload-test",
+            server.base_url
+        ))
+        .header(reqwest::header::CONTENT_TYPE, "text/javascript")
+        .body("console.log('hello from upload');")
         .send()
         .await
-        .expect("POST multipart /api/exec");
+        .expect("POST raw /api/exec with query params");
 
     assert_eq!(resp.status(), 202);
     let body: serde_json::Value = resp.json().await.expect("parse JSON");
@@ -153,32 +147,34 @@ async fn test_exec_multipart_code_part_with_fields() {
 
     let output = run_to_output(&server.base_url, &client, exec_id).await;
     assert!(
-        output.contains("hello from multipart"),
+        output.contains("hello from upload"),
         "expected greeting in output, got: {output:?}"
     );
 
     server.stop().await;
 }
 
-/// A multipart request without a `file` or `code` part is a 400.
+/// multipart/form-data is explicitly unsupported and returns 415 with guidance.
 #[tokio::test]
-async fn test_exec_multipart_missing_code_is_400() {
+async fn test_exec_multipart_is_415() {
     let mut server = HttpServer::start().await.expect("server start");
     let client = Client::new();
 
-    let form = reqwest::multipart::Form::new().text("session", "abc");
-
     let resp = client
         .post(format!("{}/api/exec", server.base_url))
-        .multipart(form)
+        .header(
+            reqwest::header::CONTENT_TYPE,
+            "multipart/form-data; boundary=xyz",
+        )
+        .body("--xyz\r\nContent-Disposition: form-data; name=\"file\"\r\n\r\nconsole.log(1)\r\n--xyz--\r\n")
         .send()
         .await
         .expect("POST multipart /api/exec");
 
-    assert_eq!(resp.status(), 400);
+    assert_eq!(resp.status(), 415);
     let body: serde_json::Value = resp.json().await.expect("parse JSON");
     let error = body["error"].as_str().expect("error field");
-    assert!(error.contains("file") || error.contains("code"), "got: {error}");
+    assert!(error.contains("multipart"), "got: {error}");
 
     server.stop().await;
 }

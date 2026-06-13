@@ -103,12 +103,14 @@ Authentication: none.
 Returns immediately with an `execution_id`. Use `GET /api/executions/{id}`
 to poll status and `GET /api/executions/{id}/output` to read console output.
 
-Accepts two request encodings, selected by `Content-Type`: an
-`application/json` body (the schema below), or `multipart/form-data` to
-upload the code as a file. For multipart, send the script source in a
-`file` (or `code`) part; the optional `heap`, `session`,
-`heap_memory_max_mb`, `execution_timeout_secs`, and `tags` (a JSON object)
-parts mirror the JSON fields.
+Two request encodings are accepted, selected by `Content-Type`:
+- `application/json` (or no `Content-Type`): a JSON `ExecRequest` body (the
+schema below).
+- any other type (e.g. `application/javascript`, `text/plain`): the raw
+request body is taken as the script source — i.e. a file upload (`curl
+--data-binary @script.js`). Optional `heap`, `session`,
+`heap_memory_max_mb`, and `execution_timeout_secs` may be passed as
+query-string parameters.
 
 > Body parameter
 
@@ -152,6 +154,7 @@ parts mirror the JSON fields.
 |---|---|---|---|
 |202|[Accepted](https://tools.ietf.org/html/rfc7231#section-6.3.3)|Execution queued|[ExecAccepted](#schemaexecaccepted)|
 |400|[Bad Request](https://tools.ietf.org/html/rfc7231#section-6.5.1)|Malformed request body|[ApiError](#schemaapierror)|
+|415|[Unsupported Media Type](https://tools.ietf.org/html/rfc7231#section-6.5.13)|Unsupported Content-Type (e.g. multipart/form-data)|[ApiError](#schemaapierror)|
 |500|[Internal Server Error](https://tools.ietf.org/html/rfc7231#section-6.6.1)|Internal error|[ApiError](#schemaapierror)|
 
 Authentication: none.

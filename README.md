@@ -69,13 +69,15 @@ Then ask the agent: *"Run this JavaScript: `console.log([1,2,3].map(x => x*2))`"
 ```bash
 mcp-v8 --stateless --http-port 8080
 # MCP endpoint: POST http://localhost:8080/mcp
-# REST sidecar: POST http://localhost:8080/api/exec  (JSON body, or a multipart file upload)
+# REST sidecar: POST http://localhost:8080/api/exec  (JSON body, or a raw-body file upload)
 ```
 
-`/api/exec` accepts either a JSON body or a `multipart/form-data` file upload
-(`curl -F 'file=@script.js' .../api/exec`). The `run_js` MCP tool can also read
-a script from a path on the server itself via an optional `file` parameter —
-off by default, enabled with `--allow-run-js-file` or a `run_js_file`
+`/api/exec` accepts either a JSON body or a raw-body file upload — send the
+script as the request body with a non-JSON `Content-Type`
+(`curl --data-binary @script.js -H 'Content-Type: application/javascript' .../api/exec`).
+The `run_js` MCP tool can also read a script from a path on the server itself
+via an optional `file` parameter — off by default, enabled with
+`--allow-run-js-file` or a `run_js_file`
 [policy](https://r33drichards.github.io/mcp-js/reference/policies/).
 
 See the [Quick Start tutorials](https://r33drichards.github.io/mcp-js/) and the

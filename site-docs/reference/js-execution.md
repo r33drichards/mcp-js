@@ -77,32 +77,34 @@ curl -X POST http://localhost:8080/api/exec \
   -d '{"code": "console.log(6 * 7)"}'
 ```
 
-### `multipart/form-data` (file upload)
+### Raw body (file upload)
 
-Upload the script as a file instead of embedding it in a JSON string. The
-source is read from a **`file`** part (an uploaded file) or a **`code`** part
-(a plain text field); whichever appears last wins. The remaining parts mirror
-the JSON fields above.
+Send the script as the **raw request body** with any non-JSON `Content-Type`
+(e.g. `application/javascript`, `text/javascript`, `text/plain`, or
+`application/octet-stream`) — i.e. a plain file upload. The entire body becomes
+the code. Optional parameters are supplied as **query-string** parameters.
 
-| Part | Type | Required | Description |
+| Query param | Type | Required | Description |
 |---|---|---|---|
-| `file` | file | One of `file`/`code` | Uploaded script file. Its contents become the code. |
-| `code` | text | One of `file`/`code` | Script source as a plain text field (alias for `file`). |
-| `heap` | text | No | Input heap content hash. |
-| `session` | text | No | Named session identifier. |
-| `tags` | text | No | A JSON object of key-value string pairs, e.g. `{"env":"prod"}`. |
-| `heap_memory_max_mb` | text | No | Per-call heap cap in MB. |
-| `execution_timeout_secs` | text | No | Per-call timeout in seconds. |
+| `heap` | string | No | Input heap content hash (stateful mode). |
+| `session` | string | No | Named session identifier. |
+| `heap_memory_max_mb` | integer | No | Per-call heap cap in MB. |
+| `execution_timeout_secs` | integer | No | Per-call timeout in seconds. |
+
+`tags` is not accepted on the raw-upload path; use the JSON body for tags.
 
 ```bash
-curl -X POST http://localhost:8080/api/exec \
-  -F 'file=@script.js' \
-  -F 'execution_timeout_secs=60'
+curl -X POST 'http://localhost:8080/api/exec?execution_timeout_secs=60' \
+  -H 'Content-Type: application/javascript' \
+  --data-binary @script.js
 ```
 
-Unlike the `run_js` `file` parameter (which reads a path on the server),
-multipart uploads carry the script **content from the client**, so they need
-no server-side policy or flag.
+Unlike the `run_js` `file` parameter (which reads a path on the server), a raw
+upload carries the script **content from the client**, so it needs no
+server-side policy or flag.
+
+`multipart/form-data` is **not** supported and returns `415 Unsupported Media
+Type` with guidance to use the raw-body upload instead.
 
 ### Response — 202 Accepted
 
@@ -110,8 +112,8 @@ no server-side policy or flag.
 {"execution_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6"}
 ```
 
-A malformed body (invalid JSON, or a multipart request with no `file`/`code`
-part) returns `400 Bad Request` with an `{"error": "..."}` body.
+A malformed body (invalid JSON on the JSON path, or a non-UTF-8 raw body)
+returns `400 Bad Request` with an `{"error": "..."}` body.
 
 ## File-path execution (run_js `file` parameter)
 

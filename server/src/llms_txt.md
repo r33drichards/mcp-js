@@ -83,7 +83,7 @@ In stateful mode, pass the returned `heap` hash back to `run_js` to resume that 
 
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | /api/exec | Submit JS code for async execution (JSON body, or multipart/form-data to upload the code as a `file`) |
+| POST | /api/exec | Submit JS code for async execution (JSON body, or a raw-body file upload with a non-JSON Content-Type) |
 | GET | /api/executions | List all executions |
 | GET | /api/executions/{id} | Get execution status + result |
 | GET | /api/executions/{id}/output | Read paginated console output |

@@ -13,7 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0.98"
-axum = { version = "0.8.4", features = ["multipart"] }
+axum = "0.8.4"
 rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", rev = "787cc015b719773f66d4ac32e695b9a0079e12ef", features = ["transport-io", "transport-sse-server", "transport-streamable-http-server", "client", "transport-child-process", "transport-sse"] }
 
 # rmcp = { version = "0.1.5", }
@@ -56,7 +56,7 @@ utoipa = { version = "4", features = ["axum_extras"] }
 
 [dev-dependencies]
 tokio-test = "0.4"
-reqwest = { version = "0.12", features = ["json", "cookies", "stream", "multipart", "rustls-tls"], default-features = false }
+reqwest = { version = "0.12", features = ["json", "cookies", "stream", "rustls-tls"], default-features = false }
 uuid = { version = "1.0", features = ["v4"] }
 futures = "0.3"
 tempfile = "3"

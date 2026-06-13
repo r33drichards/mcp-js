@@ -59,23 +59,27 @@ and the [`run_js_file` policy input](../reference/policies.md#run_js_file).
 
 ## How to upload a script file to the REST endpoint
 
-`POST /api/exec` also accepts `multipart/form-data`, so a remote client can
-upload a script file instead of embedding it in a JSON string. Unlike the
-`run_js` `file` parameter above, the script **content comes from the client**,
-so no server flag or policy is needed.
+`POST /api/exec` also accepts a **raw-body** upload, so a remote client can
+upload a script file instead of embedding it in a JSON string: send the file as
+the request body with any non-JSON `Content-Type`. Unlike the `run_js` `file`
+parameter above, the script **content comes from the client**, so no server
+flag or policy is needed.
 
 ```bash
-# Upload a file part named "file"
-curl -s -X POST http://localhost:3000/api/exec -F 'file=@report.js'
-
-# Optional fields ride alongside the upload as form parts
+# Upload a file as the raw body
 curl -s -X POST http://localhost:3000/api/exec \
-  -F 'file=@report.js' \
-  -F 'execution_timeout_secs=60' \
-  -F 'tags={"env":"prod"}'
+  -H 'Content-Type: application/javascript' \
+  --data-binary @report.js
+
+# Optional params ride alongside as query-string parameters
+curl -s -X POST 'http://localhost:3000/api/exec?execution_timeout_secs=60&session=nightly' \
+  -H 'Content-Type: application/javascript' \
+  --data-binary @report.js
 ```
 
-The bundled CLI client reads a local file for you and submits its contents:
+`multipart/form-data` is not supported (it returns `415`); use the raw body as
+above. The bundled CLI client reads a local file for you and submits its
+contents:
 
 ```bash
 mcp-v8-cli --url http://localhost:3000 exec --file report.js
