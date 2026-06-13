@@ -860,6 +860,14 @@ pub fn execute_stateless(
                 if let Err(e) = console::neutralize_dangerous_ops(&mut runtime) {
                     return Err(e);
                 }
+                // Inject atob/btoa (always available).
+                if let Err(e) = console::inject_base64(&mut runtime) {
+                    return Err(e);
+                }
+                // Inject Blob/File/FormData (always available).
+                if let Err(e) = console::inject_web_apis(&mut runtime) {
+                    return Err(e);
+                }
                 // Inject fetch() JS wrapper if OPA is configured.
                 if fetch_config.is_some() {
                     if let Err(e) = fetch::inject_fetch(&mut runtime) {
@@ -1049,6 +1057,14 @@ pub fn execute_stateful(
                     }
                     // Neutralize dangerous built-in ops (op_panic, print).
                     if let Err(e) = console::neutralize_dangerous_ops(&mut runtime) {
+                        return Err(e);
+                    }
+                    // Inject atob/btoa (always available).
+                    if let Err(e) = console::inject_base64_snapshot(&mut runtime) {
+                        return Err(e);
+                    }
+                    // Inject Blob/File/FormData (always available).
+                    if let Err(e) = console::inject_web_apis_snapshot(&mut runtime) {
                         return Err(e);
                     }
                     // Inject fetch() JS wrapper if OPA is configured.

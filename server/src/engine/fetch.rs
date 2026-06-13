@@ -436,6 +436,20 @@ const FETCH_JS_WRAPPER: &str = r#"
     Headers.prototype.has = function(name) {
         return name.toLowerCase() in this._map;
     };
+    Headers.prototype.set = function(name, value) {
+        this._map[name.toLowerCase()] = String(value);
+    };
+    Headers.prototype.append = function(name, value) {
+        const key = name.toLowerCase();
+        if (key in this._map) {
+            this._map[key] += ', ' + String(value);
+        } else {
+            this._map[key] = String(value);
+        }
+    };
+    Headers.prototype.delete = function(name) {
+        delete this._map[name.toLowerCase()];
+    };
     Headers.prototype.entries = function() {
         return Object.entries(this._map);
     };
@@ -459,14 +473,30 @@ const FETCH_JS_WRAPPER: &str = r#"
         const opts = init || {};
         const method = (opts.method || 'GET').toUpperCase();
         const headers = opts.headers || {};
-        const body = opts.body !== undefined ? String(opts.body) : "";
 
         // Normalize headers to plain object with lowercase keys
         const normalizedHeaders = {};
         if (headers && typeof headers === 'object') {
-            for (const key of Object.keys(headers)) {
-                normalizedHeaders[key.toLowerCase()] = String(headers[key]);
+            if (typeof headers.entries === 'function' && headers instanceof Headers) {
+                for (const [k, v] of headers.entries()) {
+                    normalizedHeaders[k] = v;
+                }
+            } else {
+                for (const key of Object.keys(headers)) {
+                    normalizedHeaders[key.toLowerCase()] = String(headers[key]);
+                }
             }
+        }
+
+        let body;
+        if (typeof FormData !== 'undefined' && opts.body instanceof FormData) {
+            const serialized = opts.body._serialize();
+            body = serialized.body;
+            if (!('content-type' in normalizedHeaders)) {
+                normalizedHeaders['content-type'] = 'multipart/form-data; boundary=' + serialized.boundary;
+            }
+        } else {
+            body = opts.body !== undefined ? String(opts.body) : "";
         }
 
         const headersJson = JSON.stringify(normalizedHeaders);
@@ -489,6 +519,7 @@ const FETCH_JS_WRAPPER: &str = r#"
             bodyUsed: false,
             text: function() { return Promise.resolve(responseBody); },
             json: function() { return Promise.resolve(JSON.parse(responseBody)); },
+            blob: function() { return Promise.resolve(new Blob([responseBody], { type: responseHeaders.get('content-type') || '' })); },
             clone: function() {
                 return {
                     ok: this.ok,
@@ -501,6 +532,7 @@ const FETCH_JS_WRAPPER: &str = r#"
                     bodyUsed: false,
                     text: function() { return Promise.resolve(responseBody); },
                     json: function() { return Promise.resolve(JSON.parse(responseBody)); },
+                    blob: function() { return Promise.resolve(new Blob([responseBody], { type: responseHeaders.get('content-type') || '' })); },
                 };
             }
         };
@@ -1232,5 +1264,70 @@ allow if {{
             !err.contains("server-refresh-token"),
             "refresh token leaked in error: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_do_fetch_sends_multipart_body() {
+        #[derive(Clone)]
+        struct MultipartState {
+            requests: Arc<tokio::sync::Mutex<Vec<(String, String)>>>,
+        }
+
+        async fn multipart_handler(
+            State(state): State<MultipartState>,
+            headers: HeaderMap,
+            body: axum::body::Bytes,
+        ) -> impl IntoResponse {
+            let ct = headers
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_string();
+            let body_str = String::from_utf8_lossy(&body).to_string();
+            state.requests.lock().await.push((ct, body_str));
+            (StatusCode::OK, Json(json!({"received": true})))
+        }
+
+        let state = MultipartState {
+            requests: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+        };
+
+        let app = Router::new()
+            .route("/upload", post(multipart_handler))
+            .with_state(state.clone());
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let url = format!("http://{}/upload", addr);
+        let boundary = "----TestBoundary123";
+        let body = format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"f\"; filename=\"test.txt\"\r\nContent-Type: text/plain\r\n\r\nhello world\r\n--{boundary}--\r\n"
+        );
+        let ct = format!("multipart/form-data; boundary={boundary}");
+        let headers_json = serde_json::json!({"content-type": ct}).to_string();
+
+        let resp = do_fetch(
+            url,
+            "POST".to_string(),
+            headers_json,
+            Some(body.clone()),
+            Arc::new(PolicyChain::new(vec![], EvalMode::All)),
+            reqwest::Client::new(),
+            vec![],
+        )
+        .await
+        .expect("multipart fetch should succeed");
+
+        let parsed: Value = serde_json::from_str(&resp).unwrap();
+        assert_eq!(parsed["status"], 200);
+
+        let reqs = state.requests.lock().await;
+        assert_eq!(reqs.len(), 1);
+        assert!(reqs[0].0.starts_with("multipart/form-data; boundary="));
+        assert!(reqs[0].1.contains("hello world"));
+        assert!(reqs[0].1.contains("name=\"f\""));
+        assert!(reqs[0].1.contains("filename=\"test.txt\""));
     }
 }
