@@ -12,6 +12,39 @@ pub trait HeapStorage: Send + Sync + 'static {
     async fn get(&self, name: &str) -> Result<Vec<u8>, String>;
 }
 
+/// In-memory blob backend. Primarily for tests and the `FsStore::in_memory`
+/// constructor, but kept in the normal build so integration test crates (which
+/// compile the lib without `--cfg test`) can use it.
+#[derive(Clone, Default)]
+pub struct MemoryHeapStorage {
+    map: Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>>,
+}
+
+impl MemoryHeapStorage {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+#[async_trait]
+impl HeapStorage for MemoryHeapStorage {
+    async fn put(&self, name: &str, data: &[u8]) -> Result<(), String> {
+        self.map
+            .lock()
+            .unwrap()
+            .insert(name.to_string(), data.to_vec());
+        Ok(())
+    }
+    async fn get(&self, name: &str) -> Result<Vec<u8>, String> {
+        self.map
+            .lock()
+            .unwrap()
+            .get(name)
+            .cloned()
+            .ok_or_else(|| format!("not found: {name}"))
+    }
+}
+
 #[derive(Clone)]
 pub struct FileHeapStorage {
     dir: PathBuf,
