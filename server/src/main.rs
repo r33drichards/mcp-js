@@ -25,7 +25,10 @@ use engine::module_loader::ModuleLoaderConfig;
 use engine::subprocess::SubprocessConfig;
 use engine::run_js_file::RunJsFilePolicy;
 use engine::opa::{PoliciesConfig, build_policy_chain};
-use engine::heap_storage::{AnyHeapStorage, S3HeapStorage, WriteThroughCacheHeapStorage, FileHeapStorage};
+use engine::heap_storage::{AnyHeapStorage, HeapStorage, S3HeapStorage, WriteThroughCacheHeapStorage, FileHeapStorage};
+use engine::fs_store::FsStore;
+use engine::fs_labels::LabelStore;
+use engine::opa::{EvalMode, PolicyChain};
 use engine::heap_tags::HeapTagStore;
 use engine::session_log::SessionLog;
 use mcp::{McpService, StatelessMcpService};
@@ -316,8 +319,42 @@ async fn main() -> Result<()> {
     };
 
     // ── Filesystem policy ────────────────────────────────────────────────
+    // A mount needs the fs surface present, so when snapshots are enabled but
+    // no fs policy was supplied, default to an allow-all policy chain.
     let engine = if let Some(chain) = fs_policy_chain {
         engine.with_fs_config(FsConfig::new(chain))
+    } else if cli.enable_fs_snapshots {
+        engine.with_fs_config(FsConfig::new(Arc::new(PolicyChain::new(vec![], EvalMode::All))))
+    } else {
+        engine
+    };
+
+    // ── Filesystem snapshots (content-addressed store + label/reflog) ─────
+    let engine = if cli.enable_fs_snapshots {
+        let store_dir = cli
+            .fs_store_dir
+            .clone()
+            .unwrap_or_else(|| format!("{}/fs-blobs", cli.session_db_path));
+        let labels_db = cli
+            .fs_labels_db
+            .clone()
+            .unwrap_or_else(|| format!("{}/fs-labels", cli.session_db_path));
+        let backend: Arc<dyn HeapStorage> = Arc::new(FileHeapStorage::new(&store_dir));
+        let store = Arc::new(FsStore::new(backend));
+        match LabelStore::new(&labels_db) {
+            Ok(labels) => {
+                tracing::info!(
+                    "FS snapshots: ENABLED (blobs at {}, labels at {})",
+                    store_dir,
+                    labels_db
+                );
+                engine.with_fs_snapshots(store, Arc::new(labels))
+            }
+            Err(e) => {
+                tracing::error!("FS snapshots: failed to open label store at {}: {}. Disabled.", labels_db, e);
+                engine
+            }
+        }
     } else {
         engine
     };

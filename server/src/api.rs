@@ -59,6 +59,10 @@ pub struct ExecRequest {
     /// Serialised heap snapshot key to restore before execution.
     #[serde(default)]
     pub heap: Option<String>,
+    /// Filesystem snapshot handle to mount: a label name or 64-hex CA id.
+    /// Independent of `heap`.
+    #[serde(default)]
+    pub fs: Option<String>,
     /// Session identifier used for tagging / logging.
     #[serde(default)]
     pub session: Option<String>,
@@ -90,6 +94,9 @@ pub struct ExecutionInfo {
     pub result: Option<String>,
     /// Heap snapshot key produced after execution.
     pub heap: Option<String>,
+    /// Filesystem snapshot CA id produced after execution (when a mount was
+    /// attached), independent of the heap.
+    pub fs: Option<String>,
     /// Error message (present when `status` is `failed`).
     pub error: Option<String>,
     /// ISO-8601 timestamp when execution started.
@@ -212,6 +219,12 @@ pub struct OutputQuery {
         cancel_execution_handler,
         cli_index_handler,
         cli_download_handler,
+        fs_labels_handler,
+        fs_set_label_handler,
+        fs_resolve_handler,
+        fs_log_handler,
+        fs_push_handler,
+        fs_reset_handler,
     ),
     components(schemas(
         ExecRequest,
@@ -225,6 +238,9 @@ pub struct OutputQuery {
         OutputQuery,
         CliAsset,
         CliIndex,
+        FsPushRequest,
+        FsLabelRequest,
+        FsResetRequest,
     ))
 )]
 pub struct ApiDoc;
@@ -314,6 +330,7 @@ async fn exec_handler(
         ExecRequest {
             code,
             heap: params.heap,
+            fs: params.fs,
             session: params.session,
             heap_memory_max_mb: params.heap_memory_max_mb,
             execution_timeout_secs: params.execution_timeout_secs,
@@ -332,6 +349,8 @@ struct ExecUploadParams {
     #[serde(default)]
     heap: Option<String>,
     #[serde(default)]
+    fs: Option<String>,
+    #[serde(default)]
     session: Option<String>,
     #[serde(default)]
     heap_memory_max_mb: Option<usize>,
@@ -347,6 +366,7 @@ async fn submit_exec(
 ) -> (StatusCode, Json<serde_json::Value>) {
     let mut r = engine.run_js(req.code);
     if let Some(h) = req.heap { r = r.heap(h); }
+    r = r.maybe_fs(req.fs);
     if let Some(s) = req.session { r = r.session(s); }
     if let Some(mb) = req.heap_memory_max_mb { r = r.heap_memory_max_mb(mb); }
     if let Some(secs) = req.execution_timeout_secs { r = r.execution_timeout_secs(secs); }
@@ -388,6 +408,7 @@ async fn get_execution_handler(
                 "status": info.status,
                 "result": info.result,
                 "heap": info.heap,
+                "fs": info.fs,
                 "error": info.error,
                 "started_at": info.started_at,
                 "completed_at": info.completed_at,
@@ -647,6 +668,194 @@ async fn docs_handler() -> Response {
         .unwrap()
 }
 
+// ── fs snapshot endpoints ─────────────────────────────────────────────────
+
+/// Request body for advancing a filesystem snapshot label (`POST /api/fs/push`).
+#[derive(Deserialize, ToSchema)]
+pub struct FsPushRequest {
+    /// The CA id (hex) to point the label at — typically the `fs` value from a
+    /// completed execution.
+    pub ca_id: String,
+    /// Label to advance. Omit only when `detach` is true.
+    #[serde(default)]
+    pub label: Option<String>,
+    /// The head the caller pulled. The push is rejected if the label has moved
+    /// since (reject-and-rebase). Ignored when `force` is true.
+    #[serde(default)]
+    pub expected: Option<String>,
+    /// Override the conflict check and move the label unconditionally.
+    #[serde(default)]
+    pub force: bool,
+    /// Do not touch any label; just echo the CA id back.
+    #[serde(default)]
+    pub detach: bool,
+}
+
+/// Request body for `POST /api/fs/labels` (create or repoint a label).
+#[derive(Deserialize, ToSchema)]
+pub struct FsLabelRequest {
+    pub name: String,
+    pub ca_id: String,
+}
+
+/// Request body for `POST /api/fs/reset`.
+#[derive(Deserialize, ToSchema)]
+pub struct FsResetRequest {
+    pub label: String,
+    pub ca_id: String,
+    /// Allow resetting to a CA id that is not in the label's reflog.
+    #[serde(default)]
+    pub allow_unlogged: bool,
+}
+
+/// List filesystem snapshot labels.
+#[utoipa::path(
+    get,
+    path = "/api/fs/labels",
+    responses((status = 200, description = "Labels and their head CA ids")),
+    tag = "fs"
+)]
+async fn fs_labels_handler(
+    State(engine): State<Engine>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    match engine.fs_list_labels().await {
+        Ok(labels) => (StatusCode::OK, Json(serde_json::json!({ "labels": labels }))),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))),
+    }
+}
+
+/// Create or repoint a filesystem snapshot label.
+#[utoipa::path(
+    post,
+    path = "/api/fs/labels",
+    request_body = FsLabelRequest,
+    responses((status = 200, description = "Label set")),
+    tag = "fs"
+)]
+async fn fs_set_label_handler(
+    State(engine): State<Engine>,
+    Json(req): Json<FsLabelRequest>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    match engine.fs_set_label(&req.name, &req.ca_id).await {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "label": req.name, "ca_id": req.ca_id })),
+        ),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))),
+    }
+}
+
+/// Resolve a label to its current head CA id.
+#[utoipa::path(
+    get,
+    path = "/api/fs/labels/{label}",
+    params(("label" = String, Path, description = "Label name")),
+    responses(
+        (status = 200, description = "Current head CA id"),
+        (status = 404, description = "Unknown label"),
+    ),
+    tag = "fs"
+)]
+async fn fs_resolve_handler(
+    State(engine): State<Engine>,
+    Path(label): Path<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    match engine.fs_resolve_label(&label).await {
+        Ok(Some(ca_id)) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "label": label, "ca_id": ca_id })),
+        ),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": format!("unknown label: {label}") })),
+        ),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))),
+    }
+}
+
+/// Show the reflog for a label.
+#[utoipa::path(
+    get,
+    path = "/api/fs/labels/{label}/log",
+    params(("label" = String, Path, description = "Label name")),
+    responses((status = 200, description = "Reflog entries, oldest first")),
+    tag = "fs"
+)]
+async fn fs_log_handler(
+    State(engine): State<Engine>,
+    Path(label): Path<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    match engine.fs_label_log(&label).await {
+        Ok(log) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "label": label, "log": log })),
+        ),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))),
+    }
+}
+
+/// Advance a label to a CA id (reject-and-rebase by default).
+#[utoipa::path(
+    post,
+    path = "/api/fs/push",
+    request_body = FsPushRequest,
+    responses(
+        (status = 200, description = "Push advanced the label"),
+        (status = 409, description = "Rejected — the label moved since the caller pulled"),
+    ),
+    tag = "fs"
+)]
+async fn fs_push_handler(
+    State(engine): State<Engine>,
+    Json(req): Json<FsPushRequest>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if req.detach {
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({ "status": "detached", "ca_id": req.ca_id })),
+        );
+    }
+    let Some(label) = req.label else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "fs push requires a label unless detach is true" })),
+        );
+    };
+    match engine.fs_push(&label, &req.ca_id, req.expected, req.force).await {
+        Ok(outcome) => {
+            let value = serde_json::to_value(&outcome).unwrap_or_default();
+            let is_rejected = matches!(outcome, crate::engine::FsPushOutcome::Rejected { .. });
+            let code = if is_rejected { StatusCode::CONFLICT } else { StatusCode::OK };
+            (code, Json(value))
+        }
+        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))),
+    }
+}
+
+/// Reset a label to an earlier CA id from its reflog.
+#[utoipa::path(
+    post,
+    path = "/api/fs/reset",
+    request_body = FsResetRequest,
+    responses(
+        (status = 200, description = "Label reset"),
+        (status = 400, description = "CA id not in reflog (and allow_unlogged not set)"),
+    ),
+    tag = "fs"
+)]
+async fn fs_reset_handler(
+    State(engine): State<Engine>,
+    Json(req): Json<FsResetRequest>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    match engine.fs_reset(&req.label, &req.ca_id, req.allow_unlogged).await {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "label": req.label, "ca_id": req.ca_id })),
+        ),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))),
+    }
+}
+
 // ── Router builders ──────────────────────────────────────────────────────
 
 /// Build the plain Axum router (no OpenAPI metadata attached).
@@ -666,5 +875,10 @@ pub fn api_router(engine: Engine) -> Router {
         .route("/api/executions/{id}/cancel", post(cancel_execution_handler))
         .route("/api/cli", get(cli_index_handler))
         .route("/api/cli/{platform}", get(cli_download_handler))
+        .route("/api/fs/labels", get(fs_labels_handler).post(fs_set_label_handler))
+        .route("/api/fs/labels/{label}", get(fs_resolve_handler))
+        .route("/api/fs/labels/{label}/log", get(fs_log_handler))
+        .route("/api/fs/push", post(fs_push_handler))
+        .route("/api/fs/reset", post(fs_reset_handler))
         .with_state(engine)
 }

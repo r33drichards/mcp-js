@@ -335,6 +335,149 @@
         }
       }
     },
+    "/api/fs/labels": {
+      "get": {
+        "tags": [
+          "fs"
+        ],
+        "summary": "List filesystem snapshot labels.",
+        "operationId": "fs_labels_handler",
+        "responses": {
+          "200": {
+            "description": "Labels and their head CA ids"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "fs"
+        ],
+        "summary": "Create or repoint a filesystem snapshot label.",
+        "operationId": "fs_set_label_handler",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FsLabelRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Label set"
+          }
+        }
+      }
+    },
+    "/api/fs/labels/{label}": {
+      "get": {
+        "tags": [
+          "fs"
+        ],
+        "summary": "Resolve a label to its current head CA id.",
+        "operationId": "fs_resolve_handler",
+        "parameters": [
+          {
+            "name": "label",
+            "in": "path",
+            "description": "Label name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current head CA id"
+          },
+          "404": {
+            "description": "Unknown label"
+          }
+        }
+      }
+    },
+    "/api/fs/labels/{label}/log": {
+      "get": {
+        "tags": [
+          "fs"
+        ],
+        "summary": "Show the reflog for a label.",
+        "operationId": "fs_log_handler",
+        "parameters": [
+          {
+            "name": "label",
+            "in": "path",
+            "description": "Label name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Reflog entries, oldest first"
+          }
+        }
+      }
+    },
+    "/api/fs/push": {
+      "post": {
+        "tags": [
+          "fs"
+        ],
+        "summary": "Advance a label to a CA id (reject-and-rebase by default).",
+        "operationId": "fs_push_handler",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FsPushRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Push advanced the label"
+          },
+          "409": {
+            "description": "Rejected — the label moved since the caller pulled"
+          }
+        }
+      }
+    },
+    "/api/fs/reset": {
+      "post": {
+        "tags": [
+          "fs"
+        ],
+        "summary": "Reset a label to an earlier CA id from its reflog.",
+        "operationId": "fs_reset_handler",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FsResetRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Label reset"
+          },
+          "400": {
+            "description": "CA id not in reflog (and allow_unlogged not set)"
+          }
+        }
+      }
+    },
     "/api/version": {
       "get": {
         "tags": [
@@ -455,6 +598,11 @@
             "nullable": true,
             "minimum": 0
           },
+          "fs": {
+            "type": "string",
+            "description": "Filesystem snapshot handle to mount: a label name or 64-hex CA id.\nIndependent of `heap`.",
+            "nullable": true
+          },
           "heap": {
             "type": "string",
             "description": "Serialised heap snapshot key to restore before execution.",
@@ -502,6 +650,11 @@
           },
           "execution_id": {
             "type": "string"
+          },
+          "fs": {
+            "type": "string",
+            "description": "Filesystem snapshot CA id produced after execution (when a mount was\nattached), independent of the heap.",
+            "nullable": true
           },
           "heap": {
             "type": "string",
@@ -639,6 +792,73 @@
             "type": "string"
           },
           "status": {
+            "type": "string"
+          }
+        }
+      },
+      "FsLabelRequest": {
+        "type": "object",
+        "description": "Request body for `POST /api/fs/labels` (create or repoint a label).",
+        "required": [
+          "name",
+          "ca_id"
+        ],
+        "properties": {
+          "ca_id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "FsPushRequest": {
+        "type": "object",
+        "description": "Request body for advancing a filesystem snapshot label (`POST /api/fs/push`).",
+        "required": [
+          "ca_id"
+        ],
+        "properties": {
+          "ca_id": {
+            "type": "string",
+            "description": "The CA id (hex) to point the label at — typically the `fs` value from a\ncompleted execution."
+          },
+          "detach": {
+            "type": "boolean",
+            "description": "Do not touch any label; just echo the CA id back."
+          },
+          "expected": {
+            "type": "string",
+            "description": "The head the caller pulled. The push is rejected if the label has moved\nsince (reject-and-rebase). Ignored when `force` is true.",
+            "nullable": true
+          },
+          "force": {
+            "type": "boolean",
+            "description": "Override the conflict check and move the label unconditionally."
+          },
+          "label": {
+            "type": "string",
+            "description": "Label to advance. Omit only when `detach` is true.",
+            "nullable": true
+          }
+        }
+      },
+      "FsResetRequest": {
+        "type": "object",
+        "description": "Request body for `POST /api/fs/reset`.",
+        "required": [
+          "label",
+          "ca_id"
+        ],
+        "properties": {
+          "allow_unlogged": {
+            "type": "boolean",
+            "description": "Allow resetting to a CA id that is not in the label's reflog."
+          },
+          "ca_id": {
+            "type": "string"
+          },
+          "label": {
             "type": "string"
           }
         }

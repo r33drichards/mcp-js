@@ -202,6 +202,22 @@ pub struct Cli {
     #[arg(long = "allow-run-js-file", default_value = "false", help_heading = "Run JS File")]
     pub allow_run_js_file: bool,
 
+    /// Enable the content-addressed, snapshottable filesystem. When set, the
+    /// `fs` parameter of run_js can mount a snapshot (by label or CA id) and the
+    /// `fs_*` tools / `/api/fs/...` endpoints become functional.
+    #[arg(long = "enable-fs-snapshots", default_value = "false", help_heading = "FS Snapshots")]
+    pub enable_fs_snapshots: bool,
+
+    /// Directory for the fs snapshot blob store (chunks + manifests). Defaults
+    /// to `<session-db-path>/fs-blobs`.
+    #[arg(long = "fs-store-dir", value_name = "DIR", help_heading = "FS Snapshots")]
+    pub fs_store_dir: Option<String>,
+
+    /// Path for the fs label/reflog database (sled). Defaults to
+    /// `<session-db-path>/fs-labels`.
+    #[arg(long = "fs-labels-db", value_name = "PATH", help_heading = "FS Snapshots")]
+    pub fs_labels_db: Option<String>,
+
     /// JSON policy configuration (inline JSON or path to a JSON file).
     /// Enables fetch() and/or module policy gating via local Rego files
     /// and/or remote OPA servers.
