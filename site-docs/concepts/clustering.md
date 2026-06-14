@@ -86,6 +86,17 @@ Initial peer addresses are supplied via `--peers` using the format `id@host:port
 
 Peer information is persisted to the local sled database under the key `raft_peers`, so a restarting node recovers its peer list without reconfiguration.
 
+## Non-voting learners
+
+A node can join as a **non-voting learner** with `--join-as-learner`. A learner participates in replication exactly like a voter — the leader sends it `AppendEntries` and it applies committed entries — but it is excluded from both quorums:
+
+- It never starts an election and never grants a vote, so it cannot become leader or split a vote.
+- The leader does **not** count it toward the commit majority, and candidates do not count it toward the election majority.
+
+This matters for **ephemeral nodes**. With ordinary voters, the majority grows with the cluster (`⌊N/2⌋ + 1`), so a node that joins and then disappears can stall writes until it is removed — a real hazard when nodes are spawned and torn down frequently (for example, one worker per session). Learners sidestep this: a cluster of one voter plus any number of learners still commits as soon as the voter has the entry, and a learner crashing or leaving never affects availability.
+
+The leader tracks which members are learners and propagates that set to followers (alongside `peer_addrs`) so every node computes the same voting membership; the classification is persisted under `raft_learners`. A learner is promoted or removed through the same dynamic-membership path as any other peer (`POST /raft/leave`, or `remove_peer` on the leader).
+
 ## See also
 
 - [How-to: Clustering & replication (Raft)](../how-to/clustering.md)

@@ -78,6 +78,7 @@ async fn main() -> Result<()> {
             heartbeat_interval: std::time::Duration::from_millis(cli.heartbeat_interval),
             election_timeout_min: std::time::Duration::from_millis(cli.election_timeout_min),
             election_timeout_max: std::time::Duration::from_millis(cli.election_timeout_max),
+            learner: cli.join_as_learner,
         };
 
         let cluster_db_path = format!("{}/cluster-{}", cli.session_db_path, cli.node_id);
@@ -95,6 +96,7 @@ async fn main() -> Result<()> {
             let join_req = cluster::JoinRequest {
                 node_id: cli.node_id.clone(),
                 addr: my_addr,
+                as_learner: cli.join_as_learner,
             };
             let client = reqwest::Client::new();
             let url = format!("http://{}/raft/join", seed_addr);
