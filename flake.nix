@@ -43,7 +43,10 @@
           cargo = rustToolchain;
         } {
           src = ./server;
-          hash = "sha256-L1IGe3cHLFT35OQ/aJ4xq0RJqRZ4Yu6YbTSMf6ziMr0=";
+          # Updated when server deps changed (added fastcdc/zstd/blake3/bincode/diffy
+          # for fs snapshots). Placeholder to trigger a hash mismatch; corrected
+          # from the CI build log.
+          hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
         });
 
         docsPython = pkgs.python3.withPackages (
