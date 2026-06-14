@@ -1,0 +1,252 @@
+# Embedding mcp-v8 in Node.js (in-process, no subprocess)
+
+**Status:** Design / plan. No code written yet.
+**Goal chosen:** Node.js runtime · full MCP server in-memory · plan first.
+
+## 1. What we're building
+
+A Node-importable package that boots the **entire mcp-v8 MCP server inside the
+Node process** and hands TypeScript a normal MCP `Client` — no child process, no
+sockets, no `mcp-v8` binary on `PATH`.
+
+```ts
+import { createEmbeddedMcpV8 } from "@mcp-v8/embedded";
+
+// Boots the Rust MCP server in-process and returns a connected MCP client.
+const { client, close } = await createEmbeddedMcpV8({ stateless: true });
+
+const tools = await client.listTools();
+const res = await client.callTool({
+  name: "run_js",
+  arguments: { code: "console.log([1,2,3].map(x => x*2)); 1+1" },
+});
+
+await close();
+```
+
+The `client` is the off-the-shelf `@modelcontextprotocol/sdk` `Client`, so every
+existing piece of MCP tooling (tool listing, `callTool`, notifications) works
+unchanged. We are *not* re-implementing the protocol in TS — we're feeding the
+real Rust server JSON-RPC bytes through an in-memory pipe.
+
+### Non-goals
+- Re-implementing the V8 engine in TS/WASM (impossible: it embeds *native* V8).
+- Replacing the existing `@mcp-v8/client` REST client (it stays for the
+  remote/HTTP case). This is the in-process complement.
+- Clustering / Raft inside the embedded server (HTTP-only feature; out of scope).
+
+## 2. Why this shape
+
+Under the transports, the server is just two synchronous Rust functions in
+`server/src/engine/mod.rs`:
+
+- `execute_stateless(code, config)` — `mod.rs:763`
+- `execute_stateful(code, raw_snapshot, config)` — `mod.rs:932`
+
+Each builds its own `deno_core::JsRuntime`, runs the code (with its own async
+event loop) to completion, optionally snapshots the heap, and tears down. The
+stdio/HTTP/SSE layers in `mcp.rs` / `main.rs` are thin shims. Crucially, the
+stdio path is literally:
+
+```rust
+// server/src/main.rs:462
+let service = McpService::new(engine, None).serve(stdio()).await?;
+service.waiting().await?;
+```
+
+`stdio()` is just an `(AsyncRead, AsyncWrite)` pair fed to rmcp's `transport-io`.
+**We swap `stdio()` for an in-memory `tokio::io::duplex()` pair** and pump the
+other end across the Node boundary. That reuses the server's existing
+serve/transport machinery verbatim — no new protocol code on the Rust side.
+
+`server` already builds as a `lib` (`server/src/lib.rs`), so all of this is
+reachable from another crate.
+
+## 3. The one real risk: two V8s in one process (GATE 0)
+
+`deno_core` embeds and initializes **its own V8**. `V8::InitializePlatform` /
+`V8::Initialize` are process-global and must be called exactly once. **Node is
+itself V8 and already called them at startup.** A native addon that statically
+links rusty_v8 therefore drags a *second* copy of V8 into a process that already
+has one. The danger is symbol resolution: Node exports its V8 symbols, and the
+dynamic linker may bind the addon's `v8::*` calls to **Node's** already-running
+V8, which then asserts/crashes (platform already initialized, ICU mismatch,
+snapshot mismatch).
+
+**This must be de-risked before anything else is built.** Milestone 0 is a spike
+whose only job is to answer: *can a napi addon create one `deno_core::JsRuntime`
+and run `1+1` inside a running Node process without crashing?*
+
+Mitigations to apply in the spike, in order:
+1. **Symbol isolation.** Build the `cdylib` so its V8 symbols don't bind to
+   Node's: link with `-Bsymbolic` / `-Bsymbolic-functions`, a version script
+   that keeps everything but the N-API entry local, and
+   `-fvisibility=hidden`. On macOS use `-load_hidden` / a single exported
+   `napi_register_module_v1`. Goal: the addon resolves its own V8 internally.
+2. **Load scope.** Node `dlopen`s addons; ensure local scope (don't promote V8
+   symbols to global). Combined with (1) this is the primary fix on Linux.
+3. **Dedicated thread.** All deno_core/V8 work runs on the addon's own OS
+   thread(s) with its own tokio runtime — never on Node's libuv/main thread or
+   Node's isolate. (Required regardless, see §6.)
+
+**Decision gate:** if the spike runs `1+1` reliably across Linux x64/arm64 and
+macOS arm64 → proceed. If it cannot be made stable, fall back (see §12) to a
+"co-process that *feels* in-process" (auto-spawned, lifecycle-managed child over
+the same in-memory-style API) and report back before building further.
+
+## 4. Layout
+
+```
+bindings/node/                 # new
+  Cargo.toml                   # crate-type = ["cdylib"], deps: napi, napi-derive, server, tokio
+  build.rs                     # napi build + linker flags from §3
+  src/lib.rs                   # the napi bridge (Rust)
+  package.json                 # @mcp-v8/embedded, napi cli, prebuild config
+  index.ts                     # createEmbeddedMcpV8(): wraps the addon as an MCP Transport
+  index.d.ts                   # generated by napi
+  __test__/embedded.test.ts
+```
+
+Add `bindings/node` to the workspace `members` in the root `Cargo.toml`. Built
+with [`napi-rs`](https://napi.rs) (N-API, ABI-stable across Node versions; has
+batteries for cross-platform prebuilds).
+
+## 5. Rust addon API (napi bridge)
+
+Thin and byte-oriented — it owns the server thread and shuttles JSON-RPC frames.
+
+```rust
+#[napi]
+pub struct EmbeddedServer { /* holds duplex write half + shutdown handle */ }
+
+/// Boot the MCP server on a dedicated runtime. `config_json` mirrors the CLI.
+/// `on_message` is a ThreadsafeFunction called with each server->client frame.
+#[napi]
+pub fn start(config_json: String, on_message: ThreadsafeFunction<Buffer>)
+  -> Result<EmbeddedServer>;
+
+#[napi]
+impl EmbeddedServer {
+  /// client -> server JSON-RPC frame (newline-delimited bytes).
+  #[napi] pub fn send(&self, frame: Buffer) -> Result<()>;
+  /// graceful shutdown: stop serving, join the thread, drop the runtime.
+  #[napi] pub async fn close(&self) -> Result<()>;
+}
+```
+
+Internals of `start`:
+1. Parse `config_json` → build an `Engine` by **reusing the existing config
+   path**. Refactor the engine-construction block in `main.rs` (lines ~100–390)
+   into a reusable `pub fn build_engine(cli: &Cli) -> Result<Engine>` in the
+   `server` lib so both `main.rs` and the addon call it (no duplication, no
+   drift). The addon constructs a `Cli` from the JSON (clap's `derive` already
+   gives us the struct; we deserialize/fill it).
+2. Spawn a dedicated OS thread; on it build a multi-thread tokio runtime.
+3. `let (a, b) = tokio::io::duplex(64 * 1024);` Give `a` (as the server's
+   `(read, write)`) to `Service::serve(a)` — same call as `serve(stdio())`.
+4. Read loop on `b`: server output frames → `on_message` ThreadsafeFunction.
+   `send()` writes client frames into `b`.
+
+No protocol logic is added; rmcp's `transport-io` does framing exactly as it
+does for stdio today.
+
+## 6. Threading model
+
+- **Node side:** all addon entry points are non-blocking. `send()` is a quick
+  channel push. Server output arrives via `ThreadsafeFunction` (queued onto the
+  Node event loop) — never blocks libuv.
+- **Rust side:** one dedicated runtime/thread owns the rmcp service and every
+  `JsRuntime`. V8 isolates are `!Send` and single-threaded; keeping all V8 work
+  on this owned thread is mandatory and also neatly satisfies the §3 isolation
+  requirement.
+- Backpressure: `duplex` has a bounded buffer; if needed, expose a small queue
+  and surface `send()` rejection rather than unbounded growth.
+
+## 7. TypeScript wrapper
+
+`index.ts` adapts the addon to an MCP SDK `Transport`, then connects a `Client`:
+
+```ts
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import { start } from "./index.node"; // napi addon
+
+class EmbeddedTransport implements Transport {
+  onmessage?: (m: JSONRPCMessage) => void;
+  onclose?: () => void;
+  private server = start(this.configJson, (buf: Buffer) => {
+    for (const line of splitFrames(buf)) this.onmessage?.(JSON.parse(line));
+  });
+  async start() {}
+  async send(msg: JSONRPCMessage) {
+    this.server.send(Buffer.from(JSON.stringify(msg) + "\n"));
+  }
+  async close() { await this.server.close(); this.onclose?.(); }
+}
+
+export async function createEmbeddedMcpV8(opts: EmbeddedOptions) {
+  const transport = new EmbeddedTransport(toConfigJson(opts));
+  const client = new Client({ name: "embedded", version: "0.1.0" });
+  await client.connect(transport);
+  return { client, close: () => transport.close() };
+}
+```
+
+`EmbeddedOptions` is a typed subset of the CLI (stateless/stateful,
+directory-path, policies, wasm modules, instructions overrides, limits) that we
+serialize to the `config_json` the Rust side expects. Document the mapping in the
+package README and keep it 1:1 with CLI flag names.
+
+## 8. Build & distribution
+
+- napi-rs `build` produces `index.node` + `index.d.ts`.
+- Prebuilt binaries per platform (the same matrix the project already ships:
+  linux x64/arm64, macOS arm64) published as optional-deps npm packages
+  (`@mcp-v8/embedded-linux-x64-gnu`, etc.), with source build as fallback.
+- The V8/deno_core build is heavy and offline-sensitive; **reuse the existing
+  Nix flake's prefetched V8 archive** so CI builds stay reproducible (the flake
+  already wires this up for `server`).
+- CI: add a job that builds the addon and runs the TS smoke test on each target.
+
+## 9. Lifecycle & safety
+
+- `close()` stops the rmcp service, drops the duplex, and joins the thread so V8
+  is torn down deterministically. Also register an `exit` hook so a forgotten
+  `close()` doesn't leak the thread.
+- Multiple `createEmbeddedMcpV8()` calls → multiple independent server threads.
+  Confirm in the spike that N coexisting `JsRuntime`s on N threads are fine
+  (expected yes; isolates are per-thread).
+- Errors from engine construction surface as a rejected promise from
+  `createEmbeddedMcpV8`, with the Rust error string.
+
+## 10. Testing
+
+- **Gate 0 spike test:** addon creates a `JsRuntime`, runs `1+1`, returns 2.
+- **Round-trip:** `initialize` → `tools/list` includes `run_js` → `tools/call
+  run_js` with `console.log` returns captured output.
+- **Stateful:** two `run_js` calls thread a heap snapshot and observe persisted
+  state (directory-path backend in a tmpdir).
+- **Lifecycle:** create/close 100× with no fd/thread leak.
+- **Parity:** same script via embedded vs the stdio binary yields identical
+  output (guards against transport drift).
+
+## 11. Milestones / checklist
+
+- [ ] **M0 — V8-in-Node spike (GATE).** Minimal napi addon links `deno_core`,
+      runs `1+1` inside Node on all target platforms. Decide go / fallback.
+- [ ] **M1 — Engine refactor.** Extract `build_engine(&Cli)` in `server` lib;
+      `main.rs` uses it (pure refactor, no behavior change; existing tests pass).
+- [ ] **M2 — In-memory transport.** `start/send/close` over `tokio::io::duplex`
+      + `serve()`; ThreadsafeFunction output pump.
+- [ ] **M3 — TS wrapper.** `EmbeddedTransport` + `createEmbeddedMcpV8`, typed
+      options → config JSON.
+- [ ] **M4 — Tests + CI + prebuilds.**
+- [ ] **M5 — Docs.** README + site-docs how-to ("Embed in Node").
+
+## 12. Fallback if Gate 0 fails
+
+If two V8s cannot be made stable in one process, keep the *exact same TS API*
+(`createEmbeddedMcpV8` → `{ client, close }`) but back it with an
+auto-managed child process the package owns and lifecycles (spawn on create,
+kill on close, in-memory-feeling from the caller's view). It's not a true static
+link, but it preserves the ergonomics; we'd report the tradeoff before shipping.
