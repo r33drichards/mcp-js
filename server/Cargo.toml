@@ -53,6 +53,10 @@ uuid = { version = "1.0", features = ["v4"] }
 dashmap = "6"
 jsonwebtoken = "9"
 utoipa = { version = "4", features = ["axum_extras"] }
+fastcdc = "3"
+zstd = "0.13"
+blake3 = "1"
+bincode = "1"
 
 [dev-dependencies]
 tokio-test = "0.4"

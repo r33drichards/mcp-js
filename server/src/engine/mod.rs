@@ -3,6 +3,7 @@ pub mod execution;
 pub mod fetch;
 pub mod fetch_auth;
 pub mod fs;
+pub mod fs_chunker;
 pub mod heap_storage;
 pub mod heap_tags;
 pub mod mcp_client;
