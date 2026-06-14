@@ -21,8 +21,9 @@ mcp-v8 exposes a V8 JavaScript runtime as MCP tools. Agents can run JS/TS code, 
 
 ### Core tools
 
-- Stateful MCP: `run_js(code, [heap], [heap_memory_max_mb], [execution_timeout_secs], [tags])` submits async execution and returns `execution_id`; use `get_execution(execution_id)` and `get_execution_output(execution_id, ...)` to poll/read output.
-- Stateless MCP: `run_js(code, [heap_memory_max_mb], [execution_timeout_secs])` waits internally and returns `{output, error}` directly.
+- Stateful MCP: `run_js(code, [file], [heap], [heap_memory_max_mb], [execution_timeout_secs], [tags])` submits async execution and returns `execution_id`; use `get_execution(execution_id)` and `get_execution_output(execution_id, ...)` to poll/read output.
+- Stateless MCP: `run_js(code, [file], [heap_memory_max_mb], [execution_timeout_secs])` waits internally and returns `{output, error}` directly.
+- `code` vs `file`: pass inline `code`, or `file` to read the script from a path on the server's own filesystem (provide one, not both). `file` is off by default — the server must be started with `--allow-run-js-file` or a `run_js_file` policy.
 - Stateful MCP only: `cancel_execution(execution_id)` and `list_executions()`.
 
 ### Additional tools (stateful mode only)
@@ -82,7 +83,7 @@ In stateful mode, pass the returned `heap` hash back to `run_js` to resume that 
 
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | /api/exec | Submit JS code for async execution |
+| POST | /api/exec | Submit JS code for async execution (JSON body, or a raw-body file upload with a non-JSON Content-Type) |
 | GET | /api/executions | List all executions |
 | GET | /api/executions/{id} | Get execution status + result |
 | GET | /api/executions/{id}/output | Read paginated console output |

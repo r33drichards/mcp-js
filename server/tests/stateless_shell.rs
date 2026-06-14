@@ -4,6 +4,7 @@
 use std::sync::{Arc, Once};
 use server::engine::{initialize_v8, Engine};
 use server::engine::execution::ExecutionRegistry;
+use server::engine::run_js_file::RunJsFilePolicy;
 use server::mcp::StatelessMcpService;
 
 static INIT: Once = Once::new();
@@ -27,6 +28,12 @@ fn create_test_engine() -> Engine {
         .with_execution_registry(Arc::new(registry))
 }
 
+/// Like `create_test_engine`, but with `run_js` file-path reads allowed for
+/// any path (`--allow-run-js-file` equivalent).
+fn create_test_engine_allow_file() -> Engine {
+    create_test_engine().with_run_js_file_policy(RunJsFilePolicy::AllowAll)
+}
+
 use server::mcp::StatelessRunJsResponse;
 
 /// Extract the JSON value from a StatelessRunJsResponse.
@@ -40,7 +47,7 @@ async fn test_stateless_shell_console_log() {
     let engine = create_test_engine();
     let service = StatelessMcpService::new(engine, None);
 
-    let resp = service.run_js("console.log('hello world')".to_string(), None, None).await;
+    let resp = service.run_js(Some("console.log('hello world')".to_string()), None, None, None).await;
     let value = parse_response(resp);
 
     assert!(value["error"].is_null(), "Should not have error: {:?}", value);
@@ -60,7 +67,7 @@ async fn test_stateless_shell_multiple_console_logs() {
         console.log("line 3");
     "#;
 
-    let resp = service.run_js(code.to_string(), None, None).await;
+    let resp = service.run_js(Some(code.to_string()), None, None, None).await;
     let value = parse_response(resp);
 
     let output = value["output"].as_str().expect("Should have output");
@@ -75,7 +82,7 @@ async fn test_stateless_shell_error_handling() {
     let engine = create_test_engine();
     let service = StatelessMcpService::new(engine, None);
 
-    let resp = service.run_js("throw new Error('boom')".to_string(), None, None).await;
+    let resp = service.run_js(Some("throw new Error('boom')".to_string()), None, None, None).await;
     let value = parse_response(resp);
 
     assert!(!value["error"].is_null(), "Should have error field: {:?}", value);
@@ -89,7 +96,7 @@ async fn test_stateless_shell_no_execution_id_exposed() {
     let engine = create_test_engine();
     let service = StatelessMcpService::new(engine, None);
 
-    let resp = service.run_js("console.log('test')".to_string(), None, None).await;
+    let resp = service.run_js(Some("console.log('test')".to_string()), None, None, None).await;
     let value = parse_response(resp);
 
     assert!(value["execution_id"].is_null(), "Should not expose execution_id: {:?}", value);
@@ -106,7 +113,7 @@ async fn test_stateless_shell_computation_with_output() {
         console.log("sum is", sum);
     "#;
 
-    let resp = service.run_js(code.to_string(), None, None).await;
+    let resp = service.run_js(Some(code.to_string()), None, None, None).await;
     let value = parse_response(resp);
 
     let output = value["output"].as_str().expect("Should have output");
@@ -124,7 +131,7 @@ async fn test_stateless_shell_top_level_await() {
         console.log("result is", result);
     "#;
 
-    let resp = service.run_js(code.to_string(), None, None).await;
+    let resp = service.run_js(Some(code.to_string()), None, None, None).await;
     let value = parse_response(resp);
 
     assert!(value["error"].is_null(), "Top-level await should not error: {:?}", value);
@@ -144,10 +151,75 @@ async fn test_stateless_shell_top_level_await_async_chain() {
         console.log(a + b);
     "#;
 
-    let resp = service.run_js(code.to_string(), None, None).await;
+    let resp = service.run_js(Some(code.to_string()), None, None, None).await;
     let value = parse_response(resp);
 
     assert!(value["error"].is_null(), "Chained top-level await should not error: {:?}", value);
     let output = value["output"].as_str().expect("Should have output");
     assert!(output.contains("30"), "Output should contain '30', got: {}", output);
+}
+
+// ── run_js `file` parameter (server-side file-path execution) ────────────
+
+#[tokio::test]
+async fn test_run_js_file_allow_all_reads_and_runs() {
+    ensure_v8();
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("script.js");
+    std::fs::write(&script, "console.log('from a file', 6 * 7);").unwrap();
+
+    let service = StatelessMcpService::new(create_test_engine_allow_file(), None);
+
+    // code omitted; file provided.
+    let resp = service
+        .run_js(None, Some(script.to_str().unwrap().to_string()), None, None)
+        .await;
+    let value = parse_response(resp);
+
+    assert!(value["error"].is_null(), "file read should not error: {:?}", value);
+    let output = value["output"].as_str().expect("Should have output");
+    assert!(output.contains("from a file 42"), "got: {}", output);
+}
+
+#[tokio::test]
+async fn test_run_js_file_disabled_by_default_errors() {
+    ensure_v8();
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("script.js");
+    std::fs::write(&script, "console.log('nope');").unwrap();
+
+    // Default engine has no run_js_file policy → file reads are disabled.
+    let service = StatelessMcpService::new(create_test_engine(), None);
+
+    let resp = service
+        .run_js(None, Some(script.to_str().unwrap().to_string()), None, None)
+        .await;
+    let value = parse_response(resp);
+
+    let error = value["error"].as_str().unwrap_or("");
+    assert!(error.contains("disabled"), "expected 'disabled' error, got: {:?}", value);
+}
+
+#[tokio::test]
+async fn test_run_js_file_and_code_conflict_errors() {
+    ensure_v8();
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("script.js");
+    std::fs::write(&script, "console.log('file');").unwrap();
+
+    let service = StatelessMcpService::new(create_test_engine_allow_file(), None);
+
+    // Both code and file supplied → error.
+    let resp = service
+        .run_js(
+            Some("console.log('inline')".to_string()),
+            Some(script.to_str().unwrap().to_string()),
+            None,
+            None,
+        )
+        .await;
+    let value = parse_response(resp);
+
+    let error = value["error"].as_str().unwrap_or("");
+    assert!(error.contains("either"), "expected 'either ... not both' error, got: {:?}", value);
 }

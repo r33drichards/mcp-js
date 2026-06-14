@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Path, Query, Request, State},
     http::{header, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -8,6 +8,10 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use utoipa::{OpenApi, ToSchema};
+
+/// Maximum size of an `/api/exec` request body (16 MiB), for both the JSON
+/// body and raw script uploads.
+const MAX_EXEC_BODY_BYTES: usize = 16 * 1024 * 1024;
 
 use crate::engine::Engine;
 
@@ -231,19 +235,115 @@ pub struct ApiDoc;
 ///
 /// Returns immediately with an `execution_id`. Use `GET /api/executions/{id}`
 /// to poll status and `GET /api/executions/{id}/output` to read console output.
+///
+/// Two request encodings are accepted, selected by `Content-Type`:
+/// - `application/json` (or no `Content-Type`): a JSON `ExecRequest` body (the
+///   schema below).
+/// - any other type (e.g. `application/javascript`, `text/plain`): the raw
+///   request body is taken as the script source — i.e. a file upload (`curl
+///   --data-binary @script.js`). Optional `heap`, `session`,
+///   `heap_memory_max_mb`, and `execution_timeout_secs` may be passed as
+///   query-string parameters.
 #[utoipa::path(
     post,
     path = "/api/exec",
     request_body = ExecRequest,
     responses(
         (status = 202, description = "Execution queued", body = ExecAccepted),
+        (status = 400, description = "Malformed request body", body = ApiError),
+        (status = 415, description = "Unsupported Content-Type (e.g. multipart/form-data)", body = ApiError),
         (status = 500, description = "Internal error", body = ApiError),
     ),
     tag = "executions"
 )]
 async fn exec_handler(
     State(engine): State<Engine>,
-    Json(req): Json<ExecRequest>,
+    Query(params): Query<ExecUploadParams>,
+    request: Request,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let content_type = request
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+
+    // multipart/form-data would require a multipart-parser dependency; steer
+    // callers to the simpler raw-body upload instead.
+    if content_type.starts_with("multipart/form-data") {
+        return (
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            Json(serde_json::json!({
+                "error": "multipart/form-data is not supported; upload the script as the raw request body with a non-JSON Content-Type (e.g. application/javascript), or send a JSON body"
+            })),
+        );
+    }
+
+    let bytes = match axum::body::to_bytes(request.into_body(), MAX_EXEC_BODY_BYTES).await {
+        Ok(b) => b,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": format!("failed to read request body: {}", e) })),
+            )
+        }
+    };
+
+    // JSON (or no Content-Type) → structured body; anything else → the raw body
+    // is the script source, with optional params taken from the query string.
+    let exec_req = if content_type.is_empty() || content_type.contains("json") {
+        match serde_json::from_slice::<ExecRequest>(&bytes) {
+            Ok(req) => req,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": format!("invalid JSON body: {}", e) })),
+                )
+            }
+        }
+    } else {
+        let code = match String::from_utf8(bytes.to_vec()) {
+            Ok(s) => s,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": format!("request body is not valid UTF-8: {}", e) })),
+                )
+            }
+        };
+        ExecRequest {
+            code,
+            heap: params.heap,
+            session: params.session,
+            heap_memory_max_mb: params.heap_memory_max_mb,
+            execution_timeout_secs: params.execution_timeout_secs,
+            tags: None,
+        }
+    };
+
+    submit_exec(engine, exec_req).await
+}
+
+/// Query-string parameters accepted alongside a raw-body script upload to
+/// `POST /api/exec`. They mirror the optional fields of [`ExecRequest`]
+/// (`tags` is only available via the JSON body).
+#[derive(Deserialize)]
+struct ExecUploadParams {
+    #[serde(default)]
+    heap: Option<String>,
+    #[serde(default)]
+    session: Option<String>,
+    #[serde(default)]
+    heap_memory_max_mb: Option<usize>,
+    #[serde(default)]
+    execution_timeout_secs: Option<u64>,
+}
+
+/// Queue an [`ExecRequest`] on the engine and map the result to an HTTP
+/// response. Shared by the JSON and raw-upload code paths.
+async fn submit_exec(
+    engine: Engine,
+    req: ExecRequest,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let mut r = engine.run_js(req.code);
     if let Some(h) = req.heap { r = r.heap(h); }

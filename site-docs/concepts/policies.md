@@ -13,8 +13,11 @@ JavaScript code running inside a V8 isolate has no host access by default. Each 
 | `Deno.Command` / `child_process.exec` | subprocess policy present | `subprocess` |
 | ES `import` | `--allow-external-modules` + optional policy | `modules` |
 | `mcp.callTool()` | `--mcp-server` + MCP tools policy | `mcp_tools` |
+| `run_js` `file` parameter | `--allow-run-js-file` or run_js_file policy | `run_js_file` |
 
 Absent a policy for a category, the capability is unavailable. The JS globals (`fetch`, `fs`, `Deno.Command`, etc.) are not injected into the isolate at all when the corresponding policy chain is not configured. This means a capability cannot be reached even if malicious code attempts to access it by name.
+
+The `run_js_file` category is slightly different from the others: rather than gating a JS global inside the isolate, it gates a **host-side file read** that happens *before* execution — when a `run_js` call supplies a `file` path instead of inline `code`, the server reads that path from its own filesystem. It is off by default; `--allow-run-js-file` allows any path, while a `run_js_file` policy authorizes paths individually (the path is canonicalized first, so `..` cannot escape an allowed directory).
 
 ## Default-deny within a category
 

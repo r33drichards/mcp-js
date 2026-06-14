@@ -31,9 +31,15 @@ struct Cli {
 enum Commands {
     /// Submit JavaScript code for asynchronous execution.
     Exec {
-        /// JavaScript (or TypeScript) code to execute.
+        /// JavaScript (or TypeScript) code to execute. Omit when using --file.
         #[arg(value_name = "CODE")]
-        code: String,
+        code: Option<String>,
+
+        /// Read the code from a local file instead of the CODE argument.
+        /// The file is read on this machine and its contents are submitted as
+        /// the code (provide either CODE or --file, not both).
+        #[arg(long, short = 'f', value_name = "PATH")]
+        file: Option<String>,
 
         /// Heap snapshot key to restore before execution.
         #[arg(long)]
@@ -101,12 +107,26 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Commands::Exec {
             code,
+            file,
             heap,
             session,
             heap_memory_max_mb,
             execution_timeout_secs,
             tags,
         } => {
+            // Resolve the code from either the positional CODE or --file.
+            let code = match (code, file) {
+                (Some(_), Some(_)) => {
+                    anyhow::bail!("provide either the CODE argument or --file, not both");
+                }
+                (None, None) => {
+                    anyhow::bail!("no code provided: pass a CODE argument or --file <PATH>");
+                }
+                (Some(code), None) => code,
+                (None, Some(path)) => std::fs::read_to_string(&path)
+                    .map_err(|e| anyhow::anyhow!("failed to read file '{}': {}", path, e))?,
+            };
+
             let tag_map: Option<HashMap<String, String>> = if tags.is_empty() {
                 None
             } else {

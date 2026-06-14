@@ -269,6 +269,9 @@ pub struct PoliciesConfig {
     pub mcp_tools: Option<OperationPolicies>,
     /// Policy chain for subprocess execution (`Deno.Command`, `child_process.exec`).
     pub subprocess: Option<OperationPolicies>,
+    /// Policy chain for `run_js` file-path reads (the `file` parameter). The
+    /// policy input is `{ "operation": "read", "path": "<canonical path>" }`.
+    pub run_js_file: Option<OperationPolicies>,
 }
 
 /// Per-operation policy configuration.
@@ -797,6 +800,28 @@ allow if {
         assert_eq!(subprocess.mode, EvalMode::All);
         assert_eq!(subprocess.policies.len(), 1);
         assert_eq!(subprocess.policies[0].rule.as_deref(), Some("data.mcp.subprocess.allow"));
+    }
+
+    #[test]
+    fn test_policies_config_run_js_file() {
+        let json = r#"{
+            "run_js_file": {
+                "mode": "any",
+                "policies": [
+                    {"url": "file:///etc/policies/run_js_file.rego", "rule": "data.mcp.run_js_file.allow"}
+                ]
+            }
+        }"#;
+        let config: PoliciesConfig = serde_json::from_str(json).unwrap();
+        assert!(config.fetch.is_none());
+        assert!(config.modules.is_none());
+        assert!(config.filesystem.is_none());
+        assert!(config.mcp_tools.is_none());
+        assert!(config.subprocess.is_none());
+        let run_js_file = config.run_js_file.unwrap();
+        assert_eq!(run_js_file.mode, EvalMode::Any);
+        assert_eq!(run_js_file.policies.len(), 1);
+        assert_eq!(run_js_file.policies[0].rule.as_deref(), Some("data.mcp.run_js_file.allow"));
     }
 
     // ── Subprocess policy tests ──────────────────────────────────────────

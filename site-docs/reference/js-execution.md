@@ -10,7 +10,8 @@ Available when the server is **not** started with `--stateless`. Dispatches exec
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `code` | string | Yes | JavaScript or TypeScript source. TypeScript types are stripped by SWC before execution. JSX/TSX is not supported (rejected with a parse error). |
+| `code` | string | One of `code`/`file` | JavaScript or TypeScript source. TypeScript types are stripped by SWC before execution. JSX/TSX is not supported (rejected with a parse error). |
+| `file` | string | One of `code`/`file` | Path to a script file **on the server's own filesystem** to read and execute instead of inline `code`. Off by default; requires `--allow-run-js-file` or a `run_js_file` policy (see [File-path execution](#file-path-execution-run_js-file-parameter)). Supplying both `code` and `file` is an error. |
 | `heap` | string | No | Content hash of a previously saved heap snapshot. Omit or pass empty string to start from a fresh isolate. |
 | `heap_memory_max_mb` | integer | No | V8 heap cap in MB for this call. Effective minimum: 8. Overrides `--heap-memory-max`. |
 | `execution_timeout_secs` | integer | No | Wall-clock timeout in seconds (1–300). Overrides `--execution-timeout`. |
@@ -32,7 +33,8 @@ Available when the server is started with `--stateless`. Polls completion intern
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `code` | string | Yes | JavaScript or TypeScript source. TypeScript types are stripped before execution. JSX/TSX is not supported (rejected with a parse error). |
+| `code` | string | One of `code`/`file` | JavaScript or TypeScript source. TypeScript types are stripped before execution. JSX/TSX is not supported (rejected with a parse error). |
+| `file` | string | One of `code`/`file` | Path to a script file **on the server's own filesystem** to read and execute instead of inline `code`. Off by default; requires `--allow-run-js-file` or a `run_js_file` policy (see [File-path execution](#file-path-execution-run_js-file-parameter)). Supplying both `code` and `file` is an error. |
 | `heap_memory_max_mb` | integer | No | V8 heap cap in MB. Effective minimum: 8. Overrides `--heap-memory-max`. |
 | `execution_timeout_secs` | integer | No | Timeout in seconds (1–300). Overrides `--execution-timeout`. |
 
@@ -56,9 +58,9 @@ Available when the server is started with `--stateless`. Polls completion intern
 
 ## POST /api/exec — REST endpoint
 
-Available on HTTP and SSE transports (`--http-port` or `--sse-port`). Always asynchronous.
+Available on HTTP and SSE transports (`--http-port` or `--sse-port`). Always asynchronous. Accepts two request encodings, selected by the `Content-Type` header.
 
-### Request body
+### `application/json` (default)
 
 | Field | Type | Required | Description |
 |---|---|---|---|
@@ -69,11 +71,79 @@ Available on HTTP and SSE transports (`--http-port` or `--sse-port`). Always asy
 | `heap_memory_max_mb` | integer | No | Per-call heap cap in MB (minimum 8). |
 | `execution_timeout_secs` | integer | No | Per-call timeout in seconds (1–300). |
 
+```bash
+curl -X POST http://localhost:8080/api/exec \
+  -H 'Content-Type: application/json' \
+  -d '{"code": "console.log(6 * 7)"}'
+```
+
+### Raw body (file upload)
+
+Send the script as the **raw request body** with any non-JSON `Content-Type`
+(e.g. `application/javascript`, `text/javascript`, `text/plain`, or
+`application/octet-stream`) — i.e. a plain file upload. The entire body becomes
+the code. Optional parameters are supplied as **query-string** parameters.
+
+| Query param | Type | Required | Description |
+|---|---|---|---|
+| `heap` | string | No | Input heap content hash (stateful mode). |
+| `session` | string | No | Named session identifier. |
+| `heap_memory_max_mb` | integer | No | Per-call heap cap in MB. |
+| `execution_timeout_secs` | integer | No | Per-call timeout in seconds. |
+
+`tags` is not accepted on the raw-upload path; use the JSON body for tags.
+
+```bash
+curl -X POST 'http://localhost:8080/api/exec?execution_timeout_secs=60' \
+  -H 'Content-Type: application/javascript' \
+  --data-binary @script.js
+```
+
+Unlike the `run_js` `file` parameter (which reads a path on the server), a raw
+upload carries the script **content from the client**, so it needs no
+server-side policy or flag.
+
+`multipart/form-data` is **not** supported and returns `415 Unsupported Media
+Type` with guidance to use the raw-body upload instead.
+
 ### Response — 202 Accepted
 
 ```json
 {"execution_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6"}
 ```
+
+A malformed body (invalid JSON on the JSON path, or a non-UTF-8 raw body)
+returns `400 Bad Request` with an `{"error": "..."}` body.
+
+## File-path execution (run_js `file` parameter)
+
+The `run_js` tool can read its source from a file **on the machine where the
+server runs**, via the optional `file` parameter. Because this is a host-side
+read driven by caller input, it is **off by default** — a `run_js` call that
+sets `file` is rejected unless the server enables it one of two ways:
+
+| Mechanism | Effect |
+|---|---|
+| `--allow-run-js-file` | Allow reading **any** path the server process can access (the easy "allow all" switch). |
+| `run_js_file` policy in `--policies-json` | A Rego/OPA chain decides per path — e.g. restrict reads to one directory. |
+
+`--allow-run-js-file` takes precedence over a configured policy. The path is
+canonicalized (symlinks and `..` resolved) before the policy sees it and before
+it is read, so a directory-prefix rule cannot be bypassed with `../` segments.
+The policy input is:
+
+```json
+{"operation": "read", "path": "/canonical/abs/path/to/script.js"}
+```
+
+A denied or disabled read fails the execution with a descriptive error. See
+[Security policies](../reference/policies.md) for the `run_js_file` policy
+schema and an example, and [How-to — execution recipes](../how-to/js-execution.md)
+for end-to-end usage.
+
+This is distinct from the REST `multipart/form-data` upload above: `file`
+names a path the **server** reads; an upload sends the script **content** from
+the client.
 
 ## ExecutionInfo shape
 

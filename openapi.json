@@ -73,7 +73,7 @@
           "executions"
         ],
         "summary": "Submit JavaScript code for asynchronous execution.",
-        "description": "Returns immediately with an `execution_id`. Use `GET /api/executions/{id}`\nto poll status and `GET /api/executions/{id}/output` to read console output.",
+        "description": "Returns immediately with an `execution_id`. Use `GET /api/executions/{id}`\nto poll status and `GET /api/executions/{id}/output` to read console output.\n\nTwo request encodings are accepted, selected by `Content-Type`:\n- `application/json` (or no `Content-Type`): a JSON `ExecRequest` body (the\nschema below).\n- any other type (e.g. `application/javascript`, `text/plain`): the raw\nrequest body is taken as the script source — i.e. a file upload (`curl\n--data-binary @script.js`). Optional `heap`, `session`,\n`heap_memory_max_mb`, and `execution_timeout_secs` may be passed as\nquery-string parameters.",
         "operationId": "exec_handler",
         "requestBody": {
           "content": {
@@ -92,6 +92,26 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ExecAccepted"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed request body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Unsupported Content-Type (e.g. multipart/form-data)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
                 }
               }
             }

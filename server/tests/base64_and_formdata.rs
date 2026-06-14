@@ -45,7 +45,7 @@ async fn test_btoa_basic() {
     let engine = create_test_engine();
     let service = StatelessMcpService::new(engine, None);
 
-    let resp = service.run_js("console.log(btoa('hello'))".to_string(), None, None).await;
+    let resp = service.run_js(Some("console.log(btoa('hello'))".to_string()), None, None, None).await;
     let value = parse_response(resp);
     assert_output_contains(&value, "aGVsbG8=");
 }
@@ -56,7 +56,7 @@ async fn test_btoa_empty() {
     let engine = create_test_engine();
     let service = StatelessMcpService::new(engine, None);
 
-    let resp = service.run_js("console.log(btoa(''))".to_string(), None, None).await;
+    let resp = service.run_js(Some("console.log(btoa(''))".to_string()), None, None, None).await;
     let value = parse_response(resp);
     let output = value["output"].as_str().unwrap();
     assert!(output.trim().is_empty() || output.contains(""), "btoa('') should return empty string");
@@ -69,7 +69,7 @@ async fn test_btoa_binary_chars() {
     let service = StatelessMcpService::new(engine, None);
 
     // Test with bytes 0-255 (Latin1 range)
-    let resp = service.run_js(r#"console.log(btoa('\x00\x01\xff'))"#.to_string(), None, None).await;
+    let resp = service.run_js(Some(r#"console.log(btoa('\x00\x01\xff'))"#.to_string()), None, None, None).await;
     let value = parse_response(resp);
     assert_output_contains(&value, "AAH/");
 }
@@ -80,10 +80,10 @@ async fn test_btoa_rejects_non_latin1() {
     let engine = create_test_engine();
     let service = StatelessMcpService::new(engine, None);
 
-    let resp = service.run_js(r#"
+    let resp = service.run_js(Some(r#"
         try { btoa('Ā'); console.log('NO ERROR'); }
         catch(e) { console.log('CAUGHT: ' + e.name + ': ' + e.message); }
-    "#.to_string(), None, None).await;
+    "#.to_string()), None, None, None).await;
     let value = parse_response(resp);
     assert_output_contains(&value, "CAUGHT:");
     assert_output_contains(&value, "Latin1");
@@ -97,7 +97,7 @@ async fn test_atob_basic() {
     let engine = create_test_engine();
     let service = StatelessMcpService::new(engine, None);
 
-    let resp = service.run_js("console.log(atob('aGVsbG8='))".to_string(), None, None).await;
+    let resp = service.run_js(Some("console.log(atob('aGVsbG8='))".to_string()), None, None, None).await;
     let value = parse_response(resp);
     assert_output_contains(&value, "hello");
 }
@@ -108,7 +108,7 @@ async fn test_atob_no_padding() {
     let engine = create_test_engine();
     let service = StatelessMcpService::new(engine, None);
 
-    let resp = service.run_js("console.log(atob('aGVsbG8'))".to_string(), None, None).await;
+    let resp = service.run_js(Some("console.log(atob('aGVsbG8'))".to_string()), None, None, None).await;
     let value = parse_response(resp);
     assert_output_contains(&value, "hello");
 }
@@ -119,10 +119,10 @@ async fn test_atob_rejects_invalid() {
     let engine = create_test_engine();
     let service = StatelessMcpService::new(engine, None);
 
-    let resp = service.run_js(r#"
+    let resp = service.run_js(Some(r#"
         try { atob('!!!!'); console.log('NO ERROR'); }
         catch(e) { console.log('CAUGHT: ' + e.message); }
-    "#.to_string(), None, None).await;
+    "#.to_string()), None, None, None).await;
     let value = parse_response(resp);
     assert_output_contains(&value, "CAUGHT:");
 }
@@ -133,12 +133,12 @@ async fn test_btoa_atob_roundtrip() {
     let engine = create_test_engine();
     let service = StatelessMcpService::new(engine, None);
 
-    let resp = service.run_js(r#"
+    let resp = service.run_js(Some(r#"
         var original = 'The quick brown fox jumps over the lazy dog';
         var encoded = btoa(original);
         var decoded = atob(encoded);
         console.log(decoded === original ? 'ROUNDTRIP_OK' : 'MISMATCH');
-    "#.to_string(), None, None).await;
+    "#.to_string()), None, None, None).await;
     let value = parse_response(resp);
     assert_output_contains(&value, "ROUNDTRIP_OK");
 }
@@ -151,10 +151,10 @@ async fn test_blob_basic() {
     let engine = create_test_engine();
     let service = StatelessMcpService::new(engine, None);
 
-    let resp = service.run_js(r#"
+    let resp = service.run_js(Some(r#"
         var b = new Blob(['hello ', 'world'], { type: 'text/plain' });
         console.log(b.size + '|' + b.type);
-    "#.to_string(), None, None).await;
+    "#.to_string()), None, None, None).await;
     let value = parse_response(resp);
     assert_output_contains(&value, "11|text/plain");
 }
@@ -165,12 +165,12 @@ async fn test_blob_text() {
     let engine = create_test_engine();
     let service = StatelessMcpService::new(engine, None);
 
-    let resp = service.run_js(r#"
+    let resp = service.run_js(Some(r#"
         (async () => {
             var b = new Blob(['abc', 'def']);
             console.log(await b.text());
         })();
-    "#.to_string(), None, None).await;
+    "#.to_string()), None, None, None).await;
     let value = parse_response(resp);
     assert_output_contains(&value, "abcdef");
 }
@@ -181,13 +181,13 @@ async fn test_blob_slice() {
     let engine = create_test_engine();
     let service = StatelessMcpService::new(engine, None);
 
-    let resp = service.run_js(r#"
+    let resp = service.run_js(Some(r#"
         (async () => {
             var b = new Blob(['hello world']);
             var sliced = b.slice(0, 5);
             console.log(await sliced.text());
         })();
-    "#.to_string(), None, None).await;
+    "#.to_string()), None, None, None).await;
     let value = parse_response(resp);
     assert_output_contains(&value, "hello");
 }
@@ -200,10 +200,10 @@ async fn test_file_basic() {
     let engine = create_test_engine();
     let service = StatelessMcpService::new(engine, None);
 
-    let resp = service.run_js(r#"
+    let resp = service.run_js(Some(r#"
         var f = new File(['content'], 'test.txt', { type: 'text/plain' });
         console.log(f.name + '|' + f.size + '|' + f.type + '|' + (f instanceof Blob));
-    "#.to_string(), None, None).await;
+    "#.to_string()), None, None, None).await;
     let value = parse_response(resp);
     assert_output_contains(&value, "test.txt|7|text/plain|true");
 }
@@ -216,12 +216,12 @@ async fn test_formdata_append_get() {
     let engine = create_test_engine();
     let service = StatelessMcpService::new(engine, None);
 
-    let resp = service.run_js(r#"
+    let resp = service.run_js(Some(r#"
         var fd = new FormData();
         fd.append('name', 'alice');
         fd.append('name', 'bob');
         console.log(fd.get('name') + '|' + fd.getAll('name').join(','));
-    "#.to_string(), None, None).await;
+    "#.to_string()), None, None, None).await;
     let value = parse_response(resp);
     assert_output_contains(&value, "alice|alice,bob");
 }
@@ -232,13 +232,13 @@ async fn test_formdata_set_replaces() {
     let engine = create_test_engine();
     let service = StatelessMcpService::new(engine, None);
 
-    let resp = service.run_js(r#"
+    let resp = service.run_js(Some(r#"
         var fd = new FormData();
         fd.append('x', '1');
         fd.append('x', '2');
         fd.set('x', '3');
         console.log(fd.getAll('x').join(','));
-    "#.to_string(), None, None).await;
+    "#.to_string()), None, None, None).await;
     let value = parse_response(resp);
     assert_output_contains(&value, "3");
 }
@@ -249,14 +249,14 @@ async fn test_formdata_has_delete() {
     let engine = create_test_engine();
     let service = StatelessMcpService::new(engine, None);
 
-    let resp = service.run_js(r#"
+    let resp = service.run_js(Some(r#"
         var fd = new FormData();
         fd.append('key', 'val');
         var before = fd.has('key');
         fd.delete('key');
         var after = fd.has('key');
         console.log(before + '|' + after);
-    "#.to_string(), None, None).await;
+    "#.to_string()), None, None, None).await;
     let value = parse_response(resp);
     assert_output_contains(&value, "true|false");
 }
@@ -267,7 +267,7 @@ async fn test_formdata_serialize_text() {
     let engine = create_test_engine();
     let service = StatelessMcpService::new(engine, None);
 
-    let resp = service.run_js(r#"
+    let resp = service.run_js(Some(r#"
         var fd = new FormData();
         fd.append('field', 'value');
         var s = fd._serialize();
@@ -275,7 +275,7 @@ async fn test_formdata_serialize_text() {
               && s.body.includes('value')
               && s.body.includes('--' + s.boundary + '--');
         console.log(ok ? 'SERIALIZE_OK' : 'FAIL: ' + s.body);
-    "#.to_string(), None, None).await;
+    "#.to_string()), None, None, None).await;
     let value = parse_response(resp);
     assert_output_contains(&value, "SERIALIZE_OK");
 }
@@ -286,7 +286,7 @@ async fn test_formdata_serialize_blob_with_filename() {
     let engine = create_test_engine();
     let service = StatelessMcpService::new(engine, None);
 
-    let resp = service.run_js(r#"
+    let resp = service.run_js(Some(r#"
         var fd = new FormData();
         fd.append('f', new Blob(['file data'], { type: 'text/plain' }), 'upload.txt');
         var s = fd._serialize();
@@ -294,7 +294,7 @@ async fn test_formdata_serialize_blob_with_filename() {
               && s.body.includes('Content-Type: text/plain')
               && s.body.includes('file data');
         console.log(ok ? 'BLOB_OK' : 'FAIL: ' + s.body);
-    "#.to_string(), None, None).await;
+    "#.to_string()), None, None, None).await;
     let value = parse_response(resp);
     assert_output_contains(&value, "BLOB_OK");
 }
@@ -305,7 +305,7 @@ async fn test_formdata_serialize_file() {
     let engine = create_test_engine();
     let service = StatelessMcpService::new(engine, None);
 
-    let resp = service.run_js(r#"
+    let resp = service.run_js(Some(r#"
         var fd = new FormData();
         fd.append('doc', new File(['csv,data'], 'data.csv', { type: 'text/csv' }));
         var s = fd._serialize();
@@ -313,7 +313,7 @@ async fn test_formdata_serialize_file() {
               && s.body.includes('Content-Type: text/csv')
               && s.body.includes('csv,data');
         console.log(ok ? 'FILE_OK' : 'FAIL: ' + s.body);
-    "#.to_string(), None, None).await;
+    "#.to_string()), None, None, None).await;
     let value = parse_response(resp);
     assert_output_contains(&value, "FILE_OK");
 }
