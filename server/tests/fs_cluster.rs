@@ -142,3 +142,57 @@ async fn two_followers_race_a_push_exactly_one_wins() {
         n.shutdown();
     }
 }
+
+/// The combined atomic write (specs/FsLabelAtomicWrite): each label move
+/// replicates the head pointer AND its reflog entry in one Raft entry, so a
+/// follower that observes the moved head also observes the full reflog — the
+/// head is never replicated ahead of the reflog that records it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn head_and_reflog_commit_together_across_nodes() {
+    let ports = [19543u16, 19544, 19545];
+    let mut nodes: Vec<Arc<ClusterNode>> = Vec::new();
+    for i in 0..3 {
+        let node = ClusterNode::new(make_config_3(i, &ports), temp_sled(&format!("r{i}")));
+        node.start().await;
+        nodes.push(node);
+    }
+    let leader = wait_for_leader(&nodes, Duration::from_secs(20))
+        .await
+        .expect("no leader elected");
+    let stores: Vec<LabelStore> = nodes
+        .iter()
+        .map(|n| LabelStore::in_memory().with_cluster(n.clone()))
+        .collect();
+
+    let c0 = [0u8; 32];
+    let c1 = [1u8; 32];
+
+    // Two moves through the leader, each carrying a message on its reflog entry.
+    stores[leader].create("main", c0, Some("genesis".into())).await.unwrap();
+    assert!(stores[leader]
+        .cas("main", Some(c0), c1, Some("advance".into()))
+        .await
+        .unwrap());
+
+    // On a follower, the moment the head reaches c1 the reflog must already hold
+    // both moves with their messages — never a head without its reflog entry.
+    let follower = (leader + 1) % 3;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if stores[follower].resolve("main").await.ok().flatten() == Some(c1) {
+            let log = stores[follower].log("main").await.unwrap();
+            assert_eq!(log.len(), 2, "follower saw head=c1 but reflog is incomplete");
+            assert_eq!(log[0].to, c0);
+            assert_eq!(log[0].message.as_deref(), Some("genesis"));
+            assert_eq!(log[1].to, c1);
+            assert_eq!(log[1].message.as_deref(), Some("advance"));
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "follower never saw c1");
+        sleep(Duration::from_millis(100)).await;
+    }
+
+    for n in &nodes {
+        n.shutdown();
+    }
+}

@@ -147,14 +147,14 @@ impl LabelStore {
         format!("{CL_LOG_PREFIX}{label}\u{0}")
     }
 
-    async fn cl_append_log(
-        cluster: &ClusterNode,
-        label: &str,
-        entry: &RefLogEntry,
-    ) -> Result<(), String> {
+    /// The replicated (key, value) pair for a reflog entry. Passed as an `extra`
+    /// companion write so the reflog append commits atomically with the head
+    /// move it records, never as a separate write (see the
+    /// `specs/FsLabelAtomicWrite` TLA+ model).
+    fn cl_log_kv(label: &str, entry: &RefLogEntry) -> Result<(String, String), String> {
         let key = Self::cl_log_key(label, entry.at);
         let val = serde_json::to_string(entry).map_err(|e| e.to_string())?;
-        cluster.put_or_forward(key, val).await
+        Ok((key, val))
     }
 
     fn heads(&self) -> Result<sled::Tree, String> {
@@ -203,18 +203,21 @@ impl LabelStore {
         let message = check_message(message)?;
         if let Some(cluster) = &self.cluster_node {
             // CAS from "absent" (expected None) creates exclusively cluster-wide.
+            // The reflog entry rides along as an atomic companion write so the
+            // head and reflog can never diverge across a leader change.
+            let entry =
+                RefLogEntry { at: Self::now(), from: None, to: head, op: RefOp::Create, message };
             let applied = cluster
-                .cas_or_forward(Self::cl_head_key(label), None, to_hex(&head))
+                .cas_with_or_forward(
+                    Self::cl_head_key(label),
+                    None,
+                    to_hex(&head),
+                    vec![Self::cl_log_kv(label, &entry)?],
+                )
                 .await?;
             if !applied {
                 return Err(format!("label already exists: {label}"));
             }
-            Self::cl_append_log(
-                cluster,
-                label,
-                &RefLogEntry { at: Self::now(), from: None, to: head, op: RefOp::Create, message },
-            )
-            .await?;
             return Ok(());
         }
         let _guard = self.lock.lock().await;
@@ -259,21 +262,18 @@ impl LabelStore {
     ) -> Result<bool, String> {
         let message = check_message(message)?;
         if let Some(cluster) = &self.cluster_node {
+            // The reflog append is an atomic companion of the head CAS: it is
+            // committed in the same replicated entry iff the compare matches.
+            let entry =
+                RefLogEntry { at: Self::now(), from: expect, to: new, op: RefOp::Push, message };
             let applied = cluster
-                .cas_or_forward(
+                .cas_with_or_forward(
                     Self::cl_head_key(label),
                     expect.as_ref().map(to_hex),
                     to_hex(&new),
+                    vec![Self::cl_log_kv(label, &entry)?],
                 )
                 .await?;
-            if applied {
-                Self::cl_append_log(
-                    cluster,
-                    label,
-                    &RefLogEntry { at: Self::now(), from: expect, to: new, op: RefOp::Push, message },
-                )
-                .await?;
-            }
             return Ok(applied);
         }
         let _guard = self.lock.lock().await;
@@ -309,16 +309,23 @@ impl LabelStore {
         let message = check_message(message)?;
         if let Some(cluster) = &self.cluster_node {
             let current = self.resolve(label).await?;
-            // Unconditional move: a blind put forwarded to the leader.
+            // Unconditional move: a blind put forwarded to the leader, with the
+            // reflog entry as an atomic companion write so the move is always
+            // recorded.
+            let entry = RefLogEntry {
+                at: Self::now(),
+                from: current,
+                to: target,
+                op: RefOp::Reset,
+                message,
+            };
             cluster
-                .put_or_forward(Self::cl_head_key(label), to_hex(&target))
+                .put_with_or_forward(
+                    Self::cl_head_key(label),
+                    to_hex(&target),
+                    vec![Self::cl_log_kv(label, &entry)?],
+                )
                 .await?;
-            Self::cl_append_log(
-                cluster,
-                label,
-                &RefLogEntry { at: Self::now(), from: current, to: target, op: RefOp::Reset, message },
-            )
-            .await?;
             return Ok(());
         }
         let _guard = self.lock.lock().await;

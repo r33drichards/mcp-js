@@ -34,6 +34,13 @@ pub struct LogEntry {
     pub index: u64,
     pub key: String,
     pub value: String,
+    /// Additional key/value writes applied atomically with `key`/`value` when
+    /// this entry commits. Lets a single replicated entry move a label head AND
+    /// append its reflog entry as one all-or-nothing unit (see the
+    /// `specs/FsLabelAtomicWrite` TLA+ model). Empty for ordinary single-key
+    /// writes, and absent on the wire for backwards compatibility.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra: Vec<(String, String)>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -87,6 +94,10 @@ pub struct ClusterStatus {
 pub struct PutRequest {
     pub key: String,
     pub value: String,
+    /// Companion writes committed atomically with `key`/`value` (see
+    /// `LogEntry::extra`). Absent on the wire for backwards compatibility.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra: Vec<(String, String)>,
 }
 
 /// Linearizable compare-and-set, forwarded to the leader. Advances `key` to
@@ -96,6 +107,10 @@ pub struct CasRequest {
     pub key: String,
     pub expected: Option<String>,
     pub new: String,
+    /// Companion writes committed atomically with `new` when the compare matches
+    /// (see `LogEntry::extra`). Absent on the wire for backwards compatibility.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra: Vec<(String, String)>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -655,11 +670,30 @@ impl ClusterNode {
         while state.last_applied < state.commit_index {
             state.last_applied += 1;
             if let Some(entry) = state.log.get((state.last_applied - 1) as usize) {
-                if let Ok(data_tree) = self.db.open_tree("data") {
-                    let _ = data_tree.insert(entry.key.as_bytes(), entry.value.as_bytes());
-                }
+                self.apply_log_entry(entry);
             }
         }
+    }
+
+    /// Apply one committed log entry to the state-machine tree. The primary
+    /// write and any `extra` companion writes land in a single sled batch so a
+    /// combined entry (e.g. a label head move plus its reflog append) is
+    /// all-or-nothing on the node, matching the atomicity the entry was
+    /// replicated with.
+    fn apply_log_entry(&self, entry: &LogEntry) {
+        let Ok(data_tree) = self.db.open_tree("data") else {
+            return;
+        };
+        if entry.extra.is_empty() {
+            let _ = data_tree.insert(entry.key.as_bytes(), entry.value.as_bytes());
+            return;
+        }
+        let mut batch = sled::Batch::default();
+        batch.insert(entry.key.as_bytes(), entry.value.as_bytes());
+        for (k, v) in &entry.extra {
+            batch.insert(k.as_bytes(), v.as_bytes());
+        }
+        let _ = data_tree.apply_batch(batch);
     }
 
     // --- RPC Handlers -------------------------------------------------------
@@ -773,9 +807,7 @@ impl ClusterNode {
         while state.last_applied < state.commit_index {
             state.last_applied += 1;
             if let Some(entry) = state.log.get((state.last_applied - 1) as usize) {
-                if let Ok(data_tree) = self.db.open_tree("data") {
-                    let _ = data_tree.insert(entry.key.as_bytes(), entry.value.as_bytes());
-                }
+                self.apply_log_entry(entry);
             }
         }
 
@@ -832,6 +864,17 @@ impl ClusterNode {
 
     /// Write a key-value pair. Must be called on the leader.
     pub async fn put(&self, key: String, value: String) -> Result<(), String> {
+        self.put_with(key, value, Vec::new()).await
+    }
+
+    /// Leader-only blind write that also applies `extra` key/value pairs in the
+    /// same committed entry, so all writes land atomically (all-or-nothing).
+    pub async fn put_with(
+        &self,
+        key: String,
+        value: String,
+        extra: Vec<(String, String)>,
+    ) -> Result<(), String> {
         let entry = {
             let mut state = self.state.write().await;
             if state.role != Role::Leader {
@@ -845,6 +888,7 @@ impl ClusterNode {
                 index: state.last_log_index() + 1,
                 key,
                 value,
+                extra,
             };
             state.log.push(entry.clone());
             self.persist_log_entry(&entry);
@@ -874,6 +918,18 @@ impl ClusterNode {
     /// follower.  Uses the dynamic peer_addrs table to resolve the leader's
     /// network address from its node-id.
     pub async fn put_or_forward(&self, key: String, value: String) -> Result<(), String> {
+        self.put_with_or_forward(key, value, Vec::new()).await
+    }
+
+    /// `put_with`, forwarding to the leader when this node is a follower. The
+    /// `extra` writes are carried through so they commit atomically with the
+    /// primary write on the leader.
+    pub async fn put_with_or_forward(
+        &self,
+        key: String,
+        value: String,
+        extra: Vec<(String, String)>,
+    ) -> Result<(), String> {
         let (is_leader, leader_id, leader_addr) = {
             let state = self.state.read().await;
             let lid = state.leader_id.clone();
@@ -884,7 +940,7 @@ impl ClusterNode {
         };
 
         if is_leader {
-            return self.put(key, value).await;
+            return self.put_with(key, value, extra).await;
         }
 
         // We are not the leader – try to forward.
@@ -896,6 +952,7 @@ impl ClusterNode {
                 let req = PutRequest {
                     key,
                     value,
+                    extra,
                 };
                 let resp = self
                     .http_client
@@ -926,6 +983,20 @@ impl ClusterNode {
         expected: Option<String>,
         new: String,
     ) -> Result<bool, String> {
+        self.cas_with(key, expected, new, Vec::new()).await
+    }
+
+    /// Linearizable compare-and-set that, when the compare matches, also applies
+    /// `extra` key/value writes in the same committed entry. The compare is made
+    /// against `key` only; `extra` writes are unconditional companions (e.g. a
+    /// reflog append that must land atomically with the head move it records).
+    pub async fn cas_with(
+        &self,
+        key: String,
+        expected: Option<String>,
+        new: String,
+        extra: Vec<(String, String)>,
+    ) -> Result<bool, String> {
         let entry = {
             let mut state = self.state.write().await;
             if state.role != Role::Leader {
@@ -948,6 +1019,7 @@ impl ClusterNode {
                 index: state.last_log_index() + 1,
                 key,
                 value: new,
+                extra,
             };
             state.log.push(entry.clone());
             self.persist_log_entry(&entry);
@@ -979,6 +1051,19 @@ impl ClusterNode {
         expected: Option<String>,
         new: String,
     ) -> Result<bool, String> {
+        self.cas_with_or_forward(key, expected, new, Vec::new()).await
+    }
+
+    /// `cas_with`, forwarding to the leader when this node is a follower. The
+    /// `extra` writes are carried through so, on a matching compare, they commit
+    /// atomically with the new value on the leader.
+    pub async fn cas_with_or_forward(
+        &self,
+        key: String,
+        expected: Option<String>,
+        new: String,
+        extra: Vec<(String, String)>,
+    ) -> Result<bool, String> {
         let (is_leader, leader_id, leader_addr) = {
             let state = self.state.read().await;
             let lid = state.leader_id.clone();
@@ -987,7 +1072,7 @@ impl ClusterNode {
         };
 
         if is_leader {
-            return self.cas(key, expected, new).await;
+            return self.cas_with(key, expected, new, extra).await;
         }
 
         match leader_id {
@@ -995,7 +1080,7 @@ impl ClusterNode {
                 let leader_addr = leader_addr
                     .ok_or_else(|| format!("unknown leader address for node '{}'", id))?;
                 let url = format!("http://{}/data/cas", leader_addr);
-                let req = CasRequest { key, expected, new };
+                let req = CasRequest { key, expected, new, extra };
                 let resp = self
                     .http_client
                     .post(&url)
@@ -1327,7 +1412,10 @@ async fn route(
             match read_body(req).await.and_then(|b| {
                 serde_json::from_slice::<PutRequest>(&b).map_err(|e| e.to_string())
             }) {
-                Ok(put_req) => match node.put_or_forward(put_req.key, put_req.value).await {
+                Ok(put_req) => match node
+                    .put_with_or_forward(put_req.key, put_req.value, put_req.extra)
+                    .await
+                {
                     Ok(()) => json_response(200, &serde_json::json!({"ok": true})),
                     Err(e) => error_response(503, &e),
                 },
@@ -1340,7 +1428,15 @@ async fn route(
                 serde_json::from_slice::<CasRequest>(&b).map_err(|e| e.to_string())
             }) {
                 Ok(cas_req) => {
-                    match node.cas_or_forward(cas_req.key, cas_req.expected, cas_req.new).await {
+                    match node
+                        .cas_with_or_forward(
+                            cas_req.key,
+                            cas_req.expected,
+                            cas_req.new,
+                            cas_req.extra,
+                        )
+                        .await
+                    {
                         Ok(applied) => json_response(200, &CasResponse { applied }),
                         Err(e) => error_response(503, &e),
                     }

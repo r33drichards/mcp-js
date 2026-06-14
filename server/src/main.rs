@@ -1,7 +1,7 @@
 use anyhow::Result;
 use rmcp::{ServerHandler, ServiceExt, transport::stdio};
 use tracing_subscriber::{self};
-use clap::Parser;
+use clap::{Parser, CommandFactory};
 use rmcp::transport::sse_server::{SseServer, SseServerConfig};
 use rmcp::transport::StreamableHttpServer;
 use rmcp::transport::streamable_http_server::axum::StreamableHttpServerConfig;
@@ -130,6 +130,11 @@ async fn main() -> Result<()> {
         tracing::info!("Loaded {} WASM module(s): {}", wasm_modules.len(),
             wasm_modules.iter().map(|m| m.name.as_str()).collect::<Vec<_>>().join(", "));
     }
+
+    // Captured before the engine build consumes them, so fs snapshots can reuse
+    // the same shared storage backend (see the fs-snapshots block below).
+    let fs_s3_bucket = cli.s3_bucket.clone();
+    let fs_cache_dir = cli.cache_dir.clone();
 
     // ── Build Engine ────────────────────────────────────────────────────
     let engine = if cli.stateless {
@@ -352,7 +357,44 @@ async fn main() -> Result<()> {
             .fs_labels_db
             .clone()
             .unwrap_or_else(|| format!("{}/fs-labels", cli.session_db_path));
-        let backend: Arc<dyn HeapStorage> = Arc::new(FileHeapStorage::new(&store_dir));
+
+        // Labels replicate cluster-wide, but blobs/manifests are only shared if
+        // they sit on shared storage. Node-local file blobs are single-node
+        // only: in a cluster a label advanced on one node would resolve on
+        // another to a manifest that node is missing. Refuse that combination up
+        // front rather than failing later after a rebalance.
+        if cluster_node.is_some() && fs_s3_bucket.is_none() {
+            Cli::command()
+                .error(
+                    clap::error::ErrorKind::ArgumentConflict,
+                    "--enable-fs-snapshots in cluster mode requires shared blob storage: \
+                     pass --s3-bucket (optionally with --cache-dir for a write-through \
+                     cache). Node-local fs snapshot blobs are single-node only.",
+                )
+                .exit();
+        }
+
+        // Back the blob store with shared S3 (matching the heap backend) when a
+        // bucket is configured, so mounts resolve on any node; otherwise use
+        // node-local files (single-node).
+        let backend: Arc<dyn HeapStorage> = if let Some(bucket) = &fs_s3_bucket {
+            if let Some(cache_dir) = &fs_cache_dir {
+                tracing::info!(
+                    "FS snapshots: shared S3 blob storage (bucket {}) with write-through cache at {}",
+                    bucket,
+                    cache_dir
+                );
+                Arc::new(WriteThroughCacheHeapStorage::new(
+                    S3HeapStorage::new(bucket.clone()).await,
+                    cache_dir.clone(),
+                ))
+            } else {
+                tracing::info!("FS snapshots: shared S3 blob storage (bucket {})", bucket);
+                Arc::new(S3HeapStorage::new(bucket.clone()).await)
+            }
+        } else {
+            Arc::new(FileHeapStorage::new(&store_dir))
+        };
         let store = Arc::new(FsStore::new(backend));
         match LabelStore::new(&labels_db) {
             Ok(labels) => {

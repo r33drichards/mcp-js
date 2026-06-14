@@ -9,7 +9,18 @@ server --stateless --http-port 3000 --enable-fs-snapshots
 By default the blob store lives at `<session-db-path>/fs-blobs` and the
 label/reflog database at `<session-db-path>/fs-labels`; override with
 `--fs-store-dir` and `--fs-labels-db`. In cluster mode label writes
-automatically route through the Raft leader.
+automatically route through the Raft leader, and each move replicates the head
+pointer and its reflog entry as a single atomic entry (so the head never
+advances without the reflog recording it; see `specs/FsLabelAtomicWrite`).
+
+### Storage in a cluster
+
+Labels and reflogs replicate cluster-wide, but the **blob store does not** — the
+default node-local `--fs-store-dir` blobs are **single-node only**. In a cluster
+a label advanced on one node would otherwise resolve on another to a manifest
+that node is missing. So enabling fs snapshots in a cluster requires shared blob
+storage via `--s3-bucket` (optionally with `--cache-dir` for a write-through
+cache); the server refuses to start with node-local blobs in cluster mode.
 
 ## Mounting in `run_js`
 

@@ -152,13 +152,13 @@ Path to the sled database for session logging (default: /tmp/mcp-v8-sessions)
 
 ### `--enable-fs-snapshots`
 
-Enable the content-addressed, snapshottable filesystem. When set, the `fs` parameter of run_js can mount a snapshot (by label or CA id) and the `fs_*` tools / `/api/fs/...` endpoints become functional
+Enable the content-addressed, snapshottable filesystem. When set, the `fs` parameter of run_js can mount a snapshot (by label or CA id) and the `fs_*` tools / `/api/fs/...` endpoints become functional. In cluster mode labels replicate cluster-wide, but blobs/manifests are only shared when stored on shared storage. Node-local file blobs are single-node only; enabling fs snapshots in a cluster therefore requires `--s3-bucket` (optionally `--cache-dir` for a write-through cache), otherwise startup is refused.
 
 - Default: `false`
 
 ### `--fs-store-dir`
 
-Directory for the fs snapshot blob store (chunks + manifests). Defaults to `<session-db-path>/fs-blobs`
+Directory for the fs snapshot blob store (chunks + manifests). Defaults to `<session-db-path>/fs-blobs`. Node-local and single-node only; in a cluster, configure `--s3-bucket` instead so blobs are shared across nodes (this directory is then used only as the write-through cache when `--cache-dir` is set)
 
 - Value: `DIR`
 
