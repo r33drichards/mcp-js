@@ -29,7 +29,7 @@ async fn gc_keeps_reachable_and_sweeps_unreferenced() {
 
     let live = snapshot(&store, &[("a.txt", b"live")]).await;
     let garbage = snapshot(&store, &[("b.txt", b"orphan never labelled")]).await;
-    labels.create("main", live).await.unwrap();
+    labels.create("main", live, None).await.unwrap();
 
     let stats = collect(&store, &labels, ReflogRetention::KeepAll)
         .await
@@ -49,9 +49,9 @@ async fn reset_then_gc_does_not_collect_rolled_past_snapshot() {
 
     let v1 = snapshot(&store, &[("f", b"v1")]).await;
     let v2 = snapshot(&store, &[("f", b"v2")]).await;
-    labels.create("main", v1).await.unwrap();
-    labels.cas("main", Some(v1), v2).await.unwrap(); // advance to v2
-    labels.force("main", v1).await.unwrap(); // reset back to v1
+    labels.create("main", v1, None).await.unwrap();
+    labels.cas("main", Some(v1), v2, None).await.unwrap(); // advance to v2
+    labels.force("main", v1, None).await.unwrap(); // reset back to v1
 
     // KeepAll: v2 is still in the reflog, so it must survive GC (roll-forward).
     let stats = collect(&store, &labels, ReflogRetention::KeepAll)
@@ -95,8 +95,8 @@ async fn gc_preserves_shared_chunks_across_snapshots() {
     };
     let shared = snapshot(&store, &[("big.bin", &big)]).await;
     let also = snapshot(&store, &[("big.bin", &big), ("note", b"x")]).await;
-    labels.create("a", shared).await.unwrap();
-    labels.create("b", also).await.unwrap();
+    labels.create("a", shared, None).await.unwrap();
+    labels.create("b", also, None).await.unwrap();
 
     collect(&store, &labels, ReflogRetention::KeepAll)
         .await

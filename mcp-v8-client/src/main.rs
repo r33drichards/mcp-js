@@ -88,6 +88,9 @@ enum FsCmd {
         name: String,
         /// CA id (hex) to point at.
         ca_id: String,
+        /// Optional note to record on the reflog entry (like a commit message).
+        #[arg(long, short = 'm')]
+        message: Option<String>,
     },
     /// Show a label's reflog (move history), oldest first.
     Log {
@@ -110,6 +113,9 @@ enum FsCmd {
         /// Do not touch any label; just echo the CA id back.
         #[arg(long)]
         detach: bool,
+        /// Optional note to record on the reflog entry (like a commit message).
+        #[arg(long, short = 'm')]
+        message: Option<String>,
     },
     /// Reset a label to an earlier CA id from its reflog (rollback).
     Reset {
@@ -120,6 +126,9 @@ enum FsCmd {
         /// Allow resetting to a CA id not present in the reflog.
         #[arg(long)]
         allow_unlogged: bool,
+        /// Optional note to record on the reflog entry (like a commit message).
+        #[arg(long, short = 'm')]
+        message: Option<String>,
     },
     /// Three-way merge two snapshots into a new one.
     Merge {
@@ -352,8 +361,8 @@ async fn main() -> anyhow::Result<()> {
                     .map_err(|e| anyhow::anyhow!("Request failed: {}", e))?;
                 println!("{}", serde_json::to_string_pretty(&result.into_inner())?);
             }
-            FsCmd::Label { name, ca_id } => {
-                let body = mcp_v8_client::types::FsLabelRequest { name, ca_id };
+            FsCmd::Label { name, ca_id, message } => {
+                let body = mcp_v8_client::types::FsLabelRequest { name, ca_id, message };
                 let result = client.fs_set_label_handler(&body).await
                     .map_err(|e| anyhow::anyhow!("Request failed: {}", e))?;
                 println!("{}", serde_json::to_string_pretty(&result.into_inner())?);
@@ -363,23 +372,25 @@ async fn main() -> anyhow::Result<()> {
                     .map_err(|e| anyhow::anyhow!("Request failed: {}", e))?;
                 println!("{}", serde_json::to_string_pretty(&result.into_inner())?);
             }
-            FsCmd::Push { ca_id, label, expected, force, detach } => {
+            FsCmd::Push { ca_id, label, expected, force, detach, message } => {
                 let body = mcp_v8_client::types::FsPushRequest {
                     ca_id,
                     label,
                     expected,
                     force: Some(force),
                     detach: Some(detach),
+                    message,
                 };
                 let result = client.fs_push_handler(&body).await
                     .map_err(|e| anyhow::anyhow!("Request failed: {}", e))?;
                 println!("{}", serde_json::to_string_pretty(&result.into_inner())?);
             }
-            FsCmd::Reset { label, ca_id, allow_unlogged } => {
+            FsCmd::Reset { label, ca_id, allow_unlogged, message } => {
                 let body = mcp_v8_client::types::FsResetRequest {
                     label,
                     ca_id,
                     allow_unlogged: Some(allow_unlogged),
+                    message,
                 };
                 let result = client.fs_reset_handler(&body).await
                     .map_err(|e| anyhow::anyhow!("Request failed: {}", e))?;

@@ -691,6 +691,9 @@ pub struct FsPushRequest {
     /// Do not touch any label; just echo the CA id back.
     #[serde(default)]
     pub detach: bool,
+    /// Optional human note recorded on the reflog entry, like a commit message.
+    #[serde(default)]
+    pub message: Option<String>,
 }
 
 /// Request body for `POST /api/fs/labels` (create or repoint a label).
@@ -698,6 +701,9 @@ pub struct FsPushRequest {
 pub struct FsLabelRequest {
     pub name: String,
     pub ca_id: String,
+    /// Optional human note recorded on the reflog entry, like a commit message.
+    #[serde(default)]
+    pub message: Option<String>,
 }
 
 /// Request body for `POST /api/fs/reset`.
@@ -708,6 +714,9 @@ pub struct FsResetRequest {
     /// Allow resetting to a CA id that is not in the label's reflog.
     #[serde(default)]
     pub allow_unlogged: bool,
+    /// Optional human note recorded on the reflog entry, like a commit message.
+    #[serde(default)]
+    pub message: Option<String>,
 }
 
 /// List filesystem snapshot labels.
@@ -738,7 +747,7 @@ async fn fs_set_label_handler(
     State(engine): State<Engine>,
     Json(req): Json<FsLabelRequest>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    match engine.fs_set_label(&req.name, &req.ca_id).await {
+    match engine.fs_set_label(&req.name, &req.ca_id, req.message).await {
         Ok(()) => (
             StatusCode::OK,
             Json(serde_json::json!({ "label": req.name, "ca_id": req.ca_id })),
@@ -823,7 +832,7 @@ async fn fs_push_handler(
             Json(serde_json::json!({ "error": "fs push requires a label unless detach is true" })),
         );
     };
-    match engine.fs_push(&label, &req.ca_id, req.expected, req.force).await {
+    match engine.fs_push(&label, &req.ca_id, req.expected, req.force, req.message).await {
         Ok(outcome) => {
             let value = serde_json::to_value(&outcome).unwrap_or_default();
             let is_rejected = matches!(outcome, crate::engine::FsPushOutcome::Rejected { .. });
@@ -849,7 +858,7 @@ async fn fs_reset_handler(
     State(engine): State<Engine>,
     Json(req): Json<FsResetRequest>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    match engine.fs_reset(&req.label, &req.ca_id, req.allow_unlogged).await {
+    match engine.fs_reset(&req.label, &req.ca_id, req.allow_unlogged, req.message).await {
         Ok(()) => (
             StatusCode::OK,
             Json(serde_json::json!({ "label": req.label, "ca_id": req.ca_id })),

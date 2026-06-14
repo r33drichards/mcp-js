@@ -84,6 +84,18 @@ curl -s localhost:3000/api/fs/push -H 'content-type: application/json' -d '{
 `force: true` overrides the conflict; `detach: true` returns the CA id without
 touching any label.
 
+Pass an optional `message` — a commit-style note — on `push`, `reset`, or
+`label` to annotate the move. It is stored on the reflog entry and shown by
+`fs_log` (the `message` field). Messages are capped at 4096 bytes. `fs_push`,
+`fs_label`, and the `POST /api/fs/{push,labels,reset}` bodies all accept it:
+
+```bash
+curl -s localhost:3000/api/fs/push -H 'content-type: application/json' -d '{
+  "label": "main", "ca_id": "<ca>", "expected": "<head-you-pulled>",
+  "message": "apply migration 0007"
+}'
+```
+
 ### Reset (rollback)
 
 `fs_reset` moves a label to an earlier CA id from its reflog (see `fs_log`). The

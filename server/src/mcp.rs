@@ -615,13 +615,16 @@ impl McpService {
         }
     }
 
-    #[tool(description = "Create or repoint a filesystem snapshot label to a CA id (hex).")]
+    #[tool(description = "Create or repoint a filesystem snapshot label to a CA id (hex). Pass an optional `message` (a commit-style note) to record on the reflog entry.")]
     pub async fn fs_label(
         &self,
         #[tool(param)] name: String,
         #[tool(param)] ca_id: String,
+        #[tool(param)]
+        #[serde(default)]
+        message: Option<String>,
     ) -> FsResponse {
-        match self.engine.fs_set_label(&name, &ca_id).await {
+        match self.engine.fs_set_label(&name, &ca_id, message).await {
             Ok(()) => FsResponse::ok(json!({ "label": name, "ca_id": ca_id })),
             Err(e) => FsResponse::err(e),
         }
@@ -635,7 +638,7 @@ impl McpService {
         }
     }
 
-    #[tool(description = "Advance a filesystem snapshot label to a CA id (typically the `fs` value returned by a completed run_js execution). Default is reject-and-rebase: pass `expected` (the head you pulled) and the push fails if the label moved since. Set force=true to override, or detach=true to just return the CA id without touching the label.")]
+    #[tool(description = "Advance a filesystem snapshot label to a CA id (typically the `fs` value returned by a completed run_js execution). Default is reject-and-rebase: pass `expected` (the head you pulled) and the push fails if the label moved since. Set force=true to override, or detach=true to just return the CA id without touching the label. Pass an optional `message` (a commit-style note, max 4096 bytes) to record on the reflog entry.")]
     pub async fn fs_push(
         &self,
         #[tool(param)] ca_id: String,
@@ -651,6 +654,9 @@ impl McpService {
         #[tool(param)]
         #[serde(default)]
         detach: Option<bool>,
+        #[tool(param)]
+        #[serde(default)]
+        message: Option<String>,
     ) -> FsResponse {
         if detach.unwrap_or(false) {
             return FsResponse::ok(json!({ "status": "detached", "ca_id": ca_id }));
@@ -662,7 +668,7 @@ impl McpService {
         };
         match self
             .engine
-            .fs_push(&label, &ca_id, expected, force.unwrap_or(false))
+            .fs_push(&label, &ca_id, expected, force.unwrap_or(false), message)
             .await
         {
             Ok(outcome) => match serde_json::to_value(&outcome) {
@@ -673,7 +679,7 @@ impl McpService {
         }
     }
 
-    #[tool(description = "Reset a filesystem snapshot label to an earlier CA id from its reflog (rollback). The CA id must appear in the label's reflog (see fs_log) unless allow_unlogged=true.")]
+    #[tool(description = "Reset a filesystem snapshot label to an earlier CA id from its reflog (rollback). The CA id must appear in the label's reflog (see fs_log) unless allow_unlogged=true. Pass an optional `message` (a commit-style note) to record on the reflog entry.")]
     pub async fn fs_reset(
         &self,
         #[tool(param)] label: String,
@@ -681,10 +687,13 @@ impl McpService {
         #[tool(param)]
         #[serde(default)]
         allow_unlogged: Option<bool>,
+        #[tool(param)]
+        #[serde(default)]
+        message: Option<String>,
     ) -> FsResponse {
         match self
             .engine
-            .fs_reset(&label, &ca_id, allow_unlogged.unwrap_or(false))
+            .fs_reset(&label, &ca_id, allow_unlogged.unwrap_or(false), message)
             .await
         {
             Ok(()) => FsResponse::ok(json!({ "label": label, "ca_id": ca_id })),

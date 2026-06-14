@@ -404,6 +404,9 @@ pub struct FsRefLogView {
     pub from: Option<String>,
     pub to: String,
     pub op: String,
+    /// Optional human note recorded with the move (omitted when absent).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 /// Outcome of an [`Engine::fs_push`].
@@ -1993,14 +1996,20 @@ impl Engine {
         Ok(labels.resolve(name).await?.map(|id| ca_to_hex(&id)))
     }
 
-    /// Create a label, or repoint an existing one, to a CA id.
-    pub async fn fs_set_label(&self, name: &str, ca_hex: &str) -> Result<(), String> {
+    /// Create a label, or repoint an existing one, to a CA id. `message` is an
+    /// optional human note recorded on the reflog entry.
+    pub async fn fs_set_label(
+        &self,
+        name: &str,
+        ca_hex: &str,
+        message: Option<String>,
+    ) -> Result<(), String> {
         self.check_fs_snapshot_policy("label", Some(name), Some(ca_hex)).await?;
         let labels = self.labels_or_err()?;
         let id = parse_ca_hex(ca_hex).ok_or_else(|| format!("invalid CA id: {ca_hex}"))?;
         match labels.resolve(name).await? {
-            Some(_) => labels.force(name, id).await,
-            None => labels.create(name, id).await,
+            Some(_) => labels.force(name, id, message).await,
+            None => labels.create(name, id, message).await,
         }
     }
 
@@ -2016,6 +2025,7 @@ impl Engine {
                 from: e.from.as_ref().map(ca_to_hex),
                 to: ca_to_hex(&e.to),
                 op: refop_str(e.op).to_string(),
+                message: e.message,
             })
             .collect())
     }
@@ -2029,13 +2039,14 @@ impl Engine {
         ca_hex: &str,
         expected: Option<String>,
         force: bool,
+        message: Option<String>,
     ) -> Result<FsPushOutcome, String> {
         self.check_fs_snapshot_policy("push", Some(label), Some(ca_hex)).await?;
         let labels = self.labels_or_err()?;
         let new = parse_ca_hex(ca_hex).ok_or_else(|| format!("invalid CA id: {ca_hex}"))?;
 
         if force {
-            labels.force(label, new).await?;
+            labels.force(label, new, message).await?;
             return Ok(FsPushOutcome::Advanced {
                 label: label.to_string(),
                 ca_id: ca_hex.to_string(),
@@ -2048,10 +2059,10 @@ impl Engine {
         };
         let current = labels.resolve(label).await?;
         let advanced = if current.is_none() && expected.is_none() {
-            labels.create(label, new).await?;
+            labels.create(label, new, message).await?;
             true
         } else {
-            labels.cas(label, expected, new).await?
+            labels.cas(label, expected, new, message).await?
         };
 
         if advanced {
@@ -2075,6 +2086,7 @@ impl Engine {
         label: &str,
         ca_hex: &str,
         allow_unlogged: bool,
+        message: Option<String>,
     ) -> Result<(), String> {
         self.check_fs_snapshot_policy("reset", Some(label), Some(ca_hex)).await?;
         let labels = self.labels_or_err()?;
@@ -2092,7 +2104,7 @@ impl Engine {
                 ));
             }
         }
-        labels.force(label, target).await
+        labels.force(label, target, message).await
     }
 
     /// Flush a session's overlay mount into a new pure manifest and return its

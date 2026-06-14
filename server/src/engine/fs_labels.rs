@@ -14,6 +14,26 @@ use crate::cluster::ClusterNode;
 
 pub type CaId = [u8; 32];
 
+/// Upper bound on a reflog message, in bytes. The reflog is append-only and
+/// `log()` loads every entry into memory, so an unbounded message would let a
+/// single push bloat the log and slow every later scan. 4 KiB is generous for a
+/// commit-style note while keeping per-entry cost bounded.
+pub const MAX_MESSAGE_LEN: usize = 4096;
+
+/// Reject a reflog message that exceeds [`MAX_MESSAGE_LEN`]. Returns the message
+/// unchanged when acceptable so callers can use it inline.
+fn check_message(message: Option<String>) -> Result<Option<String>, String> {
+    if let Some(m) = &message {
+        if m.len() > MAX_MESSAGE_LEN {
+            return Err(format!(
+                "label message too long: {} bytes (max {MAX_MESSAGE_LEN})",
+                m.len()
+            ));
+        }
+    }
+    Ok(message)
+}
+
 const HEAD_TREE: &str = "fs_label_heads";
 const LOG_TREE: &str = "fs_label_log";
 
@@ -56,6 +76,11 @@ pub struct RefLogEntry {
     pub from: Option<CaId>,
     pub to: CaId,
     pub op: RefOp,
+    /// Optional human note recorded with the move, like a commit message.
+    /// `#[serde(default)]` keeps reflog entries written before this field
+    /// existed deserializable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 #[derive(Clone)]
@@ -168,7 +193,14 @@ impl LabelStore {
     }
 
     /// Create a new label pointing at `head`. Fails if it already exists.
-    pub async fn create(&self, label: &str, head: CaId) -> Result<(), String> {
+    /// `message` is an optional human note recorded on the reflog entry.
+    pub async fn create(
+        &self,
+        label: &str,
+        head: CaId,
+        message: Option<String>,
+    ) -> Result<(), String> {
+        let message = check_message(message)?;
         if let Some(cluster) = &self.cluster_node {
             // CAS from "absent" (expected None) creates exclusively cluster-wide.
             let applied = cluster
@@ -180,7 +212,7 @@ impl LabelStore {
             Self::cl_append_log(
                 cluster,
                 label,
-                &RefLogEntry { at: Self::now(), from: None, to: head, op: RefOp::Create },
+                &RefLogEntry { at: Self::now(), from: None, to: head, op: RefOp::Create, message },
             )
             .await?;
             return Ok(());
@@ -199,6 +231,7 @@ impl LabelStore {
                 from: None,
                 to: head,
                 op: RefOp::Create,
+                message,
             },
         )?;
         Ok(())
@@ -215,8 +248,16 @@ impl LabelStore {
     }
 
     /// Atomic compare-and-set. Advances `label` to `new` only if its current
-    /// head equals `expect`; records a `Push` reflog entry on success.
-    pub async fn cas(&self, label: &str, expect: Option<CaId>, new: CaId) -> Result<bool, String> {
+    /// head equals `expect`; records a `Push` reflog entry (carrying the
+    /// optional `message`) on success.
+    pub async fn cas(
+        &self,
+        label: &str,
+        expect: Option<CaId>,
+        new: CaId,
+        message: Option<String>,
+    ) -> Result<bool, String> {
+        let message = check_message(message)?;
         if let Some(cluster) = &self.cluster_node {
             let applied = cluster
                 .cas_or_forward(
@@ -229,7 +270,7 @@ impl LabelStore {
                 Self::cl_append_log(
                     cluster,
                     label,
-                    &RefLogEntry { at: Self::now(), from: expect, to: new, op: RefOp::Push },
+                    &RefLogEntry { at: Self::now(), from: expect, to: new, op: RefOp::Push, message },
                 )
                 .await?;
             }
@@ -250,14 +291,22 @@ impl LabelStore {
                 from: current,
                 to: new,
                 op: RefOp::Push,
+                message,
             },
         )?;
         Ok(true)
     }
 
     /// Unconditionally move `label` to `target` (the `reset` verb). Records a
-    /// `Reset` reflog entry, retaining the rolled-past id for roll-forward/GC.
-    pub async fn force(&self, label: &str, target: CaId) -> Result<(), String> {
+    /// `Reset` reflog entry (carrying the optional `message`), retaining the
+    /// rolled-past id for roll-forward/GC.
+    pub async fn force(
+        &self,
+        label: &str,
+        target: CaId,
+        message: Option<String>,
+    ) -> Result<(), String> {
+        let message = check_message(message)?;
         if let Some(cluster) = &self.cluster_node {
             let current = self.resolve(label).await?;
             // Unconditional move: a blind put forwarded to the leader.
@@ -267,7 +316,7 @@ impl LabelStore {
             Self::cl_append_log(
                 cluster,
                 label,
-                &RefLogEntry { at: Self::now(), from: current, to: target, op: RefOp::Reset },
+                &RefLogEntry { at: Self::now(), from: current, to: target, op: RefOp::Reset, message },
             )
             .await?;
             return Ok(());
@@ -284,6 +333,7 @@ impl LabelStore {
                 from: current,
                 to: target,
                 op: RefOp::Reset,
+                message,
             },
         )?;
         Ok(())

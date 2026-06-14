@@ -62,13 +62,14 @@ Parameters:
 ### `fs_label`
 <a id="stateful-fs-label"></a>
 
-Create or repoint a filesystem snapshot label to a CA id (hex).
+Create or repoint a filesystem snapshot label to a CA id (hex). Pass an optional `message` (a commit-style note) to record on the reflog entry.
 
 Parameters:
 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
 | `ca_id` | `string` | yes | - |
+| `message` | `string | null` | no | - |
 | `name` | `string` | yes | - |
 
 ### `fs_log`
@@ -117,7 +118,7 @@ Parameters:
 ### `fs_push`
 <a id="stateful-fs-push"></a>
 
-Advance a filesystem snapshot label to a CA id (typically the `fs` value returned by a completed run_js execution). Default is reject-and-rebase: pass `expected` (the head you pulled) and the push fails if the label moved since. Set force=true to override, or detach=true to just return the CA id without touching the label.
+Advance a filesystem snapshot label to a CA id (typically the `fs` value returned by a completed run_js execution). Default is reject-and-rebase: pass `expected` (the head you pulled) and the push fails if the label moved since. Set force=true to override, or detach=true to just return the CA id without touching the label. Pass an optional `message` (a commit-style note, max 4096 bytes) to record on the reflog entry.
 
 Parameters:
 
@@ -128,11 +129,12 @@ Parameters:
 | `expected` | `string | null` | no | - |
 | `force` | `boolean | null` | no | - |
 | `label` | `string | null` | no | - |
+| `message` | `string | null` | no | - |
 
 ### `fs_reset`
 <a id="stateful-fs-reset"></a>
 
-Reset a filesystem snapshot label to an earlier CA id from its reflog (rollback). The CA id must appear in the label's reflog (see fs_log) unless allow_unlogged=true.
+Reset a filesystem snapshot label to an earlier CA id from its reflog (rollback). The CA id must appear in the label's reflog (see fs_log) unless allow_unlogged=true. Pass an optional `message` (a commit-style note) to record on the reflog entry.
 
 Parameters:
 
@@ -141,6 +143,7 @@ Parameters:
 | `allow_unlogged` | `boolean | null` | no | - |
 | `ca_id` | `string` | yes | - |
 | `label` | `string` | yes | - |
+| `message` | `string | null` | no | - |
 
 ### `get_execution`
 <a id="stateful-get-execution"></a>

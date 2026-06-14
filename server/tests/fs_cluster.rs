@@ -84,7 +84,7 @@ async fn two_followers_race_a_push_exactly_one_wins() {
     let c2 = [2u8; 32];
 
     // Create the label at c0 through the leader; wait for both followers to see it.
-    stores[leader].create("main", c0).await.expect("create main");
+    stores[leader].create("main", c0, None).await.expect("create main");
     let f1 = (leader + 1) % 3;
     let f2 = (leader + 2) % 3;
     for f in [f1, f2] {
@@ -102,8 +102,8 @@ async fn two_followers_race_a_push_exactly_one_wins() {
     let s1 = stores[f1].clone();
     let s2 = stores[f2].clone();
     let (r1, r2) = tokio::join!(
-        async move { s1.cas("main", Some(c0), c1).await },
-        async move { s2.cas("main", Some(c0), c2).await },
+        async move { s1.cas("main", Some(c0), c1, None).await },
+        async move { s2.cas("main", Some(c0), c2, None).await },
     );
     let r1 = r1.expect("cas 1 ok");
     let r2 = r2.expect("cas 2 ok");
@@ -130,11 +130,11 @@ async fn two_followers_race_a_push_exactly_one_wins() {
     // The loser's stale-expected retry is rejected; rebasing onto the winner works.
     let loser_new = if r1 { c2 } else { c1 };
     assert!(
-        !loser_store.cas("main", Some(c0), loser_new).await.unwrap(),
+        !loser_store.cas("main", Some(c0), loser_new, None).await.unwrap(),
         "stale-expected CAS must be rejected"
     );
     assert!(
-        loser_store.cas("main", Some(winner), loser_new).await.unwrap(),
+        loser_store.cas("main", Some(winner), loser_new, None).await.unwrap(),
         "rebased CAS onto the current head should succeed"
     );
 

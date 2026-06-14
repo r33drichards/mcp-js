@@ -1,4 +1,4 @@
-use server::engine::fs_labels::{LabelStore, RefOp};
+use server::engine::fs_labels::{LabelStore, RefOp, MAX_MESSAGE_LEN};
 
 #[tokio::test]
 async fn cas_advances_only_from_expected_head() {
@@ -6,10 +6,10 @@ async fn cas_advances_only_from_expected_head() {
     let c0 = [0u8; 32];
     let c1 = [1u8; 32];
     let c2 = [2u8; 32];
-    s.create("main", c0).await.unwrap();
+    s.create("main", c0, None).await.unwrap();
 
-    assert!(s.cas("main", Some(c0), c1).await.unwrap()); // fast-forward ok
-    assert!(!s.cas("main", Some(c0), c2).await.unwrap()); // stale expectation rejected
+    assert!(s.cas("main", Some(c0), c1, None).await.unwrap()); // fast-forward ok
+    assert!(!s.cas("main", Some(c0), c2, None).await.unwrap()); // stale expectation rejected
     assert_eq!(s.resolve("main").await.unwrap(), Some(c1));
 }
 
@@ -18,9 +18,9 @@ async fn reset_moves_pointer_and_reflog_records_history() {
     let s = LabelStore::in_memory();
     let c0 = [0u8; 32];
     let c1 = [1u8; 32];
-    s.create("main", c0).await.unwrap();
-    s.cas("main", Some(c0), c1).await.unwrap();
-    s.force("main", c0).await.unwrap(); // reset back
+    s.create("main", c0, None).await.unwrap();
+    s.cas("main", Some(c0), c1, None).await.unwrap();
+    s.force("main", c0, None).await.unwrap(); // reset back
 
     assert_eq!(s.resolve("main").await.unwrap(), Some(c0));
     let log = s.log("main").await.unwrap();
@@ -36,8 +36,8 @@ async fn create_is_exclusive_and_resolve_unknown_is_none() {
     let s = LabelStore::in_memory();
     let c0 = [9u8; 32];
     assert_eq!(s.resolve("nope").await.unwrap(), None);
-    s.create("main", c0).await.unwrap();
-    assert!(s.create("main", c0).await.is_err(), "create must be exclusive");
+    s.create("main", c0, None).await.unwrap();
+    assert!(s.create("main", c0, None).await.is_err(), "create must be exclusive");
 }
 
 #[tokio::test]
@@ -45,15 +45,15 @@ async fn cas_on_missing_label_requires_none_expectation() {
     let s = LabelStore::in_memory();
     let c1 = [1u8; 32];
     // Wrong expectation against a non-existent label is rejected, not created.
-    assert!(!s.cas("ghost", Some([0u8; 32]), c1).await.unwrap());
+    assert!(!s.cas("ghost", Some([0u8; 32]), c1, None).await.unwrap());
     assert_eq!(s.resolve("ghost").await.unwrap(), None);
 }
 
 #[tokio::test]
 async fn list_returns_all_label_heads() {
     let s = LabelStore::in_memory();
-    s.create("a", [1u8; 32]).await.unwrap();
-    s.create("b", [2u8; 32]).await.unwrap();
+    s.create("a", [1u8; 32], None).await.unwrap();
+    s.create("b", [2u8; 32], None).await.unwrap();
     let mut labels = s.list().await.unwrap();
     labels.sort();
     assert_eq!(
@@ -67,12 +67,51 @@ async fn reflog_is_ordered_create_then_push() {
     let s = LabelStore::in_memory();
     let c0 = [0u8; 32];
     let c1 = [1u8; 32];
-    s.create("main", c0).await.unwrap();
-    s.cas("main", Some(c0), c1).await.unwrap();
+    s.create("main", c0, None).await.unwrap();
+    s.cas("main", Some(c0), c1, None).await.unwrap();
     let log = s.log("main").await.unwrap();
     assert_eq!(log[0].op, RefOp::Create);
     assert_eq!(log[0].to, c0);
     assert_eq!(log[1].op, RefOp::Push);
     assert_eq!(log[1].from, Some(c0));
     assert_eq!(log[1].to, c1);
+}
+
+#[tokio::test]
+async fn reflog_records_optional_message_per_entry() {
+    let s = LabelStore::in_memory();
+    let c0 = [0u8; 32];
+    let c1 = [1u8; 32];
+    s.create("main", c0, Some("seed".into())).await.unwrap();
+    // A move without a message leaves the field absent.
+    s.cas("main", Some(c0), c1, None).await.unwrap();
+    s.force("main", c0, Some("roll back to seed".into())).await.unwrap();
+
+    let log = s.log("main").await.unwrap();
+    assert_eq!(log[0].message.as_deref(), Some("seed"));
+    assert_eq!(log[1].message, None);
+    assert_eq!(log[2].message.as_deref(), Some("roll back to seed"));
+}
+
+#[tokio::test]
+async fn oversized_message_is_rejected_and_nothing_moves() {
+    let s = LabelStore::in_memory();
+    let c0 = [0u8; 32];
+    let c1 = [1u8; 32];
+    s.create("main", c0, None).await.unwrap();
+
+    let too_long = "x".repeat(MAX_MESSAGE_LEN + 1);
+    let err = s
+        .cas("main", Some(c0), c1, Some(too_long))
+        .await
+        .unwrap_err();
+    assert!(err.contains("message too long"), "got: {err}");
+
+    // The rejected push must not have advanced the head or appended a reflog entry.
+    assert_eq!(s.resolve("main").await.unwrap(), Some(c0));
+    assert_eq!(s.log("main").await.unwrap().len(), 1);
+
+    // Exactly at the cap is accepted.
+    let at_cap = "y".repeat(MAX_MESSAGE_LEN);
+    assert!(s.cas("main", Some(c0), c1, Some(at_cap)).await.unwrap());
 }

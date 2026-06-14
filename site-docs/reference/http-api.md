@@ -363,6 +363,7 @@ Authentication: none.
 ```json
 {
   "ca_id": "string",
+  "message": "string",
   "name": "string"
 }
 ```
@@ -492,7 +493,8 @@ Authentication: none.
   "detach": true,
   "expected": "string",
   "force": true,
-  "label": "string"
+  "label": "string",
+  "message": "string"
 }
 ```
 
@@ -529,7 +531,8 @@ Authentication: none.
 {
   "allow_unlogged": true,
   "ca_id": "string",
-  "label": "string"
+  "label": "string",
+  "message": "string"
 }
 ```
 
@@ -880,6 +883,7 @@ A brief summary of a single execution (used in list responses).
 ```json
 {
   "ca_id": "string",
+  "message": "string",
   "name": "string"
 }
 
@@ -892,6 +896,7 @@ Request body for `POST /api/fs/labels` (create or repoint a label).
 |Name|Type|Required|Restrictions|Description|
 |---|---|---|---|---|
 |ca_id|string|true|none|none|
+|message|string¦null|false|none|Optional human note recorded on the reflog entry, like a commit message.|
 |name|string|true|none|none|
 
 <h2 id="tocS_FsMergeRequest">FsMergeRequest</h2>
@@ -935,7 +940,8 @@ Request body for `POST /api/fs/merge`.
   "detach": true,
   "expected": "string",
   "force": true,
-  "label": "string"
+  "label": "string",
+  "message": "string"
 }
 
 ```
@@ -951,6 +957,7 @@ Request body for advancing a filesystem snapshot label (`POST /api/fs/push`).
 |expected|string¦null|false|none|The head the caller pulled. The push is rejected if the label has moved<br>since (reject-and-rebase). Ignored when `force` is true.|
 |force|boolean|false|none|Override the conflict check and move the label unconditionally.|
 |label|string¦null|false|none|Label to advance. Omit only when `detach` is true.|
+|message|string¦null|false|none|Optional human note recorded on the reflog entry, like a commit message.|
 
 <h2 id="tocS_FsResetRequest">FsResetRequest</h2>
 <!-- backwards compatibility -->
@@ -963,7 +970,8 @@ Request body for advancing a filesystem snapshot label (`POST /api/fs/push`).
 {
   "allow_unlogged": true,
   "ca_id": "string",
-  "label": "string"
+  "label": "string",
+  "message": "string"
 }
 
 ```
@@ -977,6 +985,7 @@ Request body for `POST /api/fs/reset`.
 |allow_unlogged|boolean|false|none|Allow resetting to a CA id that is not in the label's reflog.|
 |ca_id|string|true|none|none|
 |label|string|true|none|none|
+|message|string¦null|false|none|Optional human note recorded on the reflog entry, like a commit message.|
 
 <h2 id="tocS_OutputQuery">OutputQuery</h2>
 <!-- backwards compatibility -->

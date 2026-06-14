@@ -834,6 +834,11 @@
           "ca_id": {
             "type": "string"
           },
+          "message": {
+            "type": "string",
+            "description": "Optional human note recorded on the reflog entry, like a commit message.",
+            "nullable": true
+          },
           "name": {
             "type": "string"
           }
@@ -895,6 +900,11 @@
             "type": "string",
             "description": "Label to advance. Omit only when `detach` is true.",
             "nullable": true
+          },
+          "message": {
+            "type": "string",
+            "description": "Optional human note recorded on the reflog entry, like a commit message.",
+            "nullable": true
           }
         }
       },
@@ -915,6 +925,11 @@
           },
           "label": {
             "type": "string"
+          },
+          "message": {
+            "type": "string",
+            "description": "Optional human note recorded on the reflog entry, like a commit message.",
+            "nullable": true
           }
         }
       },
