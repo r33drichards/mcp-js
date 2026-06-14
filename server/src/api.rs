@@ -201,6 +201,14 @@ pub struct OutputQuery {
     pub byte_limit: Option<u64>,
 }
 
+/// Optional query parameters for a label reflog read.
+#[derive(Deserialize, ToSchema, utoipa::IntoParams)]
+pub struct FsLogQuery {
+    /// Return only the most recent N reflog entries (oldest-first). Omit for the full history.
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
 // ── OpenAPI document ─────────────────────────────────────────────────────
 
 #[derive(OpenApi)]
@@ -237,6 +245,7 @@ pub struct OutputQuery {
         CancelResult,
         ApiError,
         OutputQuery,
+        FsLogQuery,
         CliAsset,
         CliIndex,
         FsPushRequest,
@@ -788,15 +797,19 @@ async fn fs_resolve_handler(
 #[utoipa::path(
     get,
     path = "/api/fs/labels/{label}/log",
-    params(("label" = String, Path, description = "Label name")),
+    params(
+        ("label" = String, Path, description = "Label name"),
+        FsLogQuery,
+    ),
     responses((status = 200, description = "Reflog entries, oldest first")),
     tag = "fs"
 )]
 async fn fs_log_handler(
     State(engine): State<Engine>,
     Path(label): Path<String>,
+    Query(query): Query<FsLogQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    match engine.fs_label_log(&label).await {
+    match engine.fs_label_log(&label, query.limit).await {
         Ok(log) => (
             StatusCode::OK,
             Json(serde_json::json!({ "label": label, "log": log })),

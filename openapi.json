@@ -415,6 +415,17 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Return only the most recent N reflog entries (oldest-first). Omit for the full history.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "nullable": true,
+              "minimum": 0
+            }
           }
         ],
         "responses": {
@@ -841,6 +852,18 @@
           },
           "name": {
             "type": "string"
+          }
+        }
+      },
+      "FsLogQuery": {
+        "type": "object",
+        "description": "Optional query parameters for a label reflog read.",
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "description": "Return only the most recent N reflog entries (oldest-first). Omit for the full history.",
+            "nullable": true,
+            "minimum": 0
           }
         }
       },

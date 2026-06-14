@@ -428,6 +428,7 @@ Authentication: none.
 |Name|In|Type|Required|Description|
 |---|---|---|---|---|
 |label|path|string|true|Label name|
+|limit|query|integer|false|Return only the most recent N reflog entries (oldest-first). Omit for the full history.|
 
 <a id="show-the-reflog-for-a-label.-responses"></a>
 #### Responses
@@ -898,6 +899,28 @@ Request body for `POST /api/fs/labels` (create or repoint a label).
 |ca_id|string|true|none|none|
 |message|string¦null|false|none|Optional human note recorded on the reflog entry, like a commit message.|
 |name|string|true|none|none|
+
+<h2 id="tocS_FsLogQuery">FsLogQuery</h2>
+<!-- backwards compatibility -->
+<a id="schemafslogquery"></a>
+<a id="schema_FsLogQuery"></a>
+<a id="tocSfslogquery"></a>
+<a id="tocsfslogquery"></a>
+
+```json
+{
+  "limit": 0
+}
+
+```
+
+Optional query parameters for a label reflog read.
+
+### Properties
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|limit|integer¦null|false|none|Return only the most recent N reflog entries (oldest-first). Omit for the full history.|
 
 <h2 id="tocS_FsMergeRequest">FsMergeRequest</h2>
 <!-- backwards compatibility -->

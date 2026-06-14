@@ -75,13 +75,14 @@ Parameters:
 ### `fs_log`
 <a id="stateful-fs-log"></a>
 
-Show the reflog (move history) for a filesystem snapshot label, oldest first. Each entry has at, from, to (CA ids), and op (create/push/reset/force). Use a `to` value as the ca_id for fs_reset.
+Show the reflog (move history) for a filesystem snapshot label, oldest first. Each entry has at, from, to (CA ids), op (create/push/reset/force), and an optional message. Use a `to` value as the ca_id for fs_reset. Pass `limit` to return only the most recent N entries (bounding the scan over long histories).
 
 Parameters:
 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
 | `label` | `string` | yes | - |
+| `limit` | `integer | null` | no | - |
 
 ### `fs_ls`
 <a id="stateful-fs-ls"></a>

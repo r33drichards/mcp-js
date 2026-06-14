@@ -180,7 +180,7 @@ async fn list_and_log_reflect_operations() {
     labels.sort();
     assert_eq!(labels, vec![("a".into(), c0.clone()), ("b".into(), c1)]);
 
-    let log = e.fs_label_log("a").await.unwrap();
+    let log = e.fs_label_log("a", None).await.unwrap();
     assert_eq!(log.len(), 1);
     assert_eq!(log[0].op, "create");
     assert_eq!(log[0].to, c0);
@@ -202,7 +202,7 @@ async fn push_and_reset_messages_surface_in_the_reflog_view() {
         .await
         .unwrap();
 
-    let log = e.fs_label_log("main").await.unwrap();
+    let log = e.fs_label_log("main", None).await.unwrap();
     assert_eq!(log.len(), 3);
     assert_eq!(log[0].message.as_deref(), Some("import baseline"));
     assert_eq!(log[1].message.as_deref(), Some("apply migration"));
@@ -215,4 +215,31 @@ async fn push_and_reset_messages_surface_in_the_reflog_view() {
         .await
         .unwrap_err();
     assert!(err.contains("message too long"), "got: {err}");
+}
+
+#[tokio::test]
+async fn log_limit_returns_the_most_recent_entries_oldest_first() {
+    let e = engine();
+
+    // Build a history of 5 moves: create, then four fast-forwards.
+    let ids: Vec<String> = (0..5).map(hexid).collect();
+    e.fs_push("main", &ids[0], None, false, None).await.unwrap();
+    for i in 1..5 {
+        e.fs_push("main", &ids[i], Some(ids[i - 1].clone()), false, None)
+            .await
+            .unwrap();
+    }
+
+    // No limit → full history.
+    assert_eq!(e.fs_label_log("main", None).await.unwrap().len(), 5);
+
+    // limit=2 → the two most recent moves, still oldest-first within the window.
+    let tail = e.fs_label_log("main", Some(2)).await.unwrap();
+    assert_eq!(tail.len(), 2);
+    assert_eq!(tail[0].to, ids[3]);
+    assert_eq!(tail[1].to, ids[4]);
+
+    // A limit larger than the history is clamped to what exists; limit=0 is empty.
+    assert_eq!(e.fs_label_log("main", Some(100)).await.unwrap().len(), 5);
+    assert_eq!(e.fs_label_log("main", Some(0)).await.unwrap().len(), 0);
 }

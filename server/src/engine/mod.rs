@@ -2013,12 +2013,20 @@ impl Engine {
         }
     }
 
-    /// The reflog for a label (hex-rendered), oldest first.
-    pub async fn fs_label_log(&self, name: &str) -> Result<Vec<FsRefLogView>, String> {
+    /// The reflog for a label (hex-rendered), oldest first. When `limit` is
+    /// given, only the most recent `limit` entries are read and returned —
+    /// bounding the scan over very long histories.
+    pub async fn fs_label_log(
+        &self,
+        name: &str,
+        limit: Option<usize>,
+    ) -> Result<Vec<FsRefLogView>, String> {
         let labels = self.labels_or_err()?;
-        Ok(labels
-            .log(name)
-            .await?
+        let entries = match limit {
+            Some(n) => labels.log_recent(name, n).await?,
+            None => labels.log(name).await?,
+        };
+        Ok(entries
             .into_iter()
             .map(|e| FsRefLogView {
                 at: e.at,

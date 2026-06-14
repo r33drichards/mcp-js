@@ -630,9 +630,15 @@ impl McpService {
         }
     }
 
-    #[tool(description = "Show the reflog (move history) for a filesystem snapshot label, oldest first. Each entry has at, from, to (CA ids), and op (create/push/reset/force). Use a `to` value as the ca_id for fs_reset.")]
-    pub async fn fs_log(&self, #[tool(param)] label: String) -> FsResponse {
-        match self.engine.fs_label_log(&label).await {
+    #[tool(description = "Show the reflog (move history) for a filesystem snapshot label, oldest first. Each entry has at, from, to (CA ids), op (create/push/reset/force), and an optional message. Use a `to` value as the ca_id for fs_reset. Pass `limit` to return only the most recent N entries (bounding the scan over long histories).")]
+    pub async fn fs_log(
+        &self,
+        #[tool(param)] label: String,
+        #[tool(param)]
+        #[serde(default)]
+        limit: Option<usize>,
+    ) -> FsResponse {
+        match self.engine.fs_label_log(&label, limit).await {
             Ok(entries) => FsResponse::ok(json!({ "label": label, "log": entries })),
             Err(e) => FsResponse::err(e),
         }

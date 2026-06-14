@@ -101,6 +101,17 @@ curl -s localhost:3000/api/fs/push -H 'content-type: application/json' -d '{
 `fs_reset` moves a label to an earlier CA id from its reflog (see `fs_log`). The
 target must appear in the reflog unless `allow_unlogged` is set.
 
+### Reading the reflog
+
+`fs_log` returns the full move history oldest-first. The reflog is append-only,
+so a long-lived label accumulates one entry per move; pass `limit` (MCP/CLI) or
+`?limit=N` (HTTP) to read only the most recent N entries and bound the scan:
+
+```bash
+curl -s 'localhost:3000/api/fs/labels/main/log?limit=20'
+mcp-v8-cli fs log main --limit 20
+```
+
 ## Policy gating
 
 Pointer moves can be gated by an `fs_snapshot` policy namespace. The policy

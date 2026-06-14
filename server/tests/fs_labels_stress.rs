@@ -59,9 +59,19 @@ async fn sequential_pushes_with_messages_scale_linearly() {
     // The reflog is append-ordered, so the i-th entry points at the i-th head.
     assert_eq!(log[N / 2].to, caid((N / 2) as u64));
 
+    // A bounded read over the same long history returns just the tail without
+    // loading every entry — the mitigation for very long histories.
+    let tail_start = Instant::now();
+    let tail = s.log_recent("main", 50).await.unwrap();
+    let tail_elapsed = tail_start.elapsed();
+    assert_eq!(tail.len(), 50);
+    assert_eq!(tail[49].to, head, "tail ends at the current head");
+    assert_eq!(tail[0].message, msg(N - 50));
+
     eprintln!(
         "fs_labels stress: {N} message-carrying pushes in {push_elapsed:?} \
-         ({:.0} pushes/s); full {N}-entry reflog scan in {scan_elapsed:?}",
+         ({:.0} pushes/s); full {N}-entry reflog scan in {scan_elapsed:?}; \
+         bounded log_recent(50) in {tail_elapsed:?}",
         N as f64 / push_elapsed.as_secs_f64().max(1e-9),
     );
 }

@@ -96,6 +96,9 @@ enum FsCmd {
     Log {
         /// Label name.
         label: String,
+        /// Return only the most recent N entries (bounds the scan over long histories).
+        #[arg(long)]
+        limit: Option<u64>,
     },
     /// Advance a label to a CA id (reject-and-rebase by default).
     Push {
@@ -367,8 +370,8 @@ async fn main() -> anyhow::Result<()> {
                     .map_err(|e| anyhow::anyhow!("Request failed: {}", e))?;
                 println!("{}", serde_json::to_string_pretty(&result.into_inner())?);
             }
-            FsCmd::Log { label } => {
-                let result = client.fs_log_handler(&label).await
+            FsCmd::Log { label, limit } => {
+                let result = client.fs_log_handler(&label, limit).await
                     .map_err(|e| anyhow::anyhow!("Request failed: {}", e))?;
                 println!("{}", serde_json::to_string_pretty(&result.into_inner())?);
             }

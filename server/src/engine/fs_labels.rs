@@ -359,6 +359,45 @@ impl LabelStore {
         Ok(out)
     }
 
+    /// Return the most recent `limit` reflog entries for `label`, oldest-first
+    /// within that window. This bounds the read so a very long history doesn't
+    /// force loading every entry — the single-node path walks the prefix
+    /// newest-first and stops after `limit`. `limit == 0` yields an empty vec.
+    pub async fn log_recent(
+        &self,
+        label: &str,
+        limit: usize,
+    ) -> Result<Vec<RefLogEntry>, String> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        if let Some(cluster) = &self.cluster_node {
+            // The replicated KV materializes the whole prefix scan; keep the
+            // tail so the result still honours `limit`.
+            let all = cluster.scan_prefix(&Self::cl_log_prefix(label))?;
+            let start = all.len().saturating_sub(limit);
+            let mut out = Vec::with_capacity(all.len() - start);
+            for (_k, v) in &all[start..] {
+                out.push(serde_json::from_str(v).map_err(|e| e.to_string())?);
+            }
+            return Ok(out);
+        }
+        let logs = self.logs()?;
+        let prefix = log_prefix(label);
+        // scan_prefix is double-ended: take the newest `limit` entries, then
+        // flip back to oldest-first to match `log`'s ordering.
+        let mut out = Vec::with_capacity(limit);
+        for item in logs.scan_prefix(&prefix).rev() {
+            let (_k, v) = item.map_err(|e| e.to_string())?;
+            out.push(serde_json::from_slice(&v).map_err(|e| e.to_string())?);
+            if out.len() == limit {
+                break;
+            }
+        }
+        out.reverse();
+        Ok(out)
+    }
+
     pub async fn list(&self) -> Result<Vec<(String, CaId)>, String> {
         if let Some(cluster) = &self.cluster_node {
             let mut out = Vec::new();
