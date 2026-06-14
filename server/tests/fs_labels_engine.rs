@@ -40,6 +40,65 @@ fn hexid(b: u8) -> String {
     ca_to_hex(&[b; 32])
 }
 
+/// An engine whose fs-snapshot pointer moves are gated by an inline Rego policy.
+fn engine_with_policy(rego: &str) -> Engine {
+    use server::engine::opa::{build_policy_chain, EvalMode, OperationPolicies, PolicySource};
+    let dir = std::env::temp_dir().join(format!("mcp-fssnap-rego-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!(
+        "snap-{}.rego",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::write(&path, rego).unwrap();
+    let op = OperationPolicies {
+        mode: EvalMode::All,
+        policies: vec![PolicySource {
+            url: format!("file://{}", path.display()),
+            policy_path: None,
+            rule: None,
+        }],
+    };
+    let chain =
+        build_policy_chain(&op, "mcp/fs_snapshot", "data.mcp.fs_snapshot.allow").unwrap();
+    let registry = ExecutionRegistry::new(&tmp("reg")).unwrap();
+    Engine::new_stateless(32 * 1024 * 1024, 30, 2)
+        .with_fs_config(FsConfig::new(Arc::new(PolicyChain::new(vec![], EvalMode::All))))
+        .with_execution_registry(Arc::new(registry))
+        .with_fs_snapshots(
+            Arc::new(FsStore::in_memory()),
+            Arc::new(LabelStore::in_memory()),
+        )
+        .with_fs_snapshot_policy(Arc::new(chain))
+}
+
+#[tokio::test]
+async fn fs_snapshot_policy_denies_push_to_protected_label() {
+    // Allow any op except a push to the "protected" label.
+    let rego = r#"
+package mcp.fs_snapshot
+default allow = false
+allow if { input.op != "push" }
+allow if {
+    input.op == "push"
+    input.label != "protected"
+}
+"#;
+    let e = engine_with_policy(rego);
+    let c0 = hexid(0);
+
+    // Push to an ordinary label is allowed.
+    assert!(e.fs_push("main", &c0, None, false).await.is_ok());
+
+    // Push to the protected label is denied by policy.
+    let err = e.fs_push("protected", &c0, None, false).await.unwrap_err();
+    assert!(err.contains("denied by policy"), "unexpected error: {err}");
+    // And the label was never created.
+    assert_eq!(e.fs_resolve_label("protected").await.unwrap(), None);
+}
+
 #[tokio::test]
 async fn push_creates_then_advances_with_expected() {
     let e = engine();

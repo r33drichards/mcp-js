@@ -265,6 +265,19 @@ async fn main() -> Result<()> {
         None
     };
 
+    let fs_snapshot_policy_chain = if let Some(ref config) = policies_config {
+        if let Some(ref snap_policies) = config.fs_snapshot {
+            let chain = build_policy_chain(snap_policies, "mcp/fs_snapshot", "data.mcp.fs_snapshot.allow")
+                .map_err(|e| anyhow::anyhow!("Failed to build fs_snapshot policy chain: {}", e))?;
+            tracing::info!("FS snapshot policy chain: {} evaluator(s), mode={:?}", snap_policies.policies.len(), snap_policies.mode);
+            Some(Arc::new(chain))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     let mcp_tools_policy_chain = if let Some(ref config) = policies_config {
         if let Some(ref mcp_tools_policies) = config.mcp_tools {
             let chain = build_policy_chain(mcp_tools_policies, "mcp/tools", "data.mcp.tools.allow")
@@ -348,7 +361,13 @@ async fn main() -> Result<()> {
                     store_dir,
                     labels_db
                 );
-                engine.with_fs_snapshots(store, Arc::new(labels))
+                let engine = engine.with_fs_snapshots(store, Arc::new(labels));
+                if let Some(chain) = fs_snapshot_policy_chain {
+                    tracing::info!("FS snapshot pointer moves are policy-gated");
+                    engine.with_fs_snapshot_policy(chain)
+                } else {
+                    engine
+                }
             }
             Err(e) => {
                 tracing::error!("FS snapshots: failed to open label store at {}: {}. Disabled.", labels_db, e);

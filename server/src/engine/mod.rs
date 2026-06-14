@@ -1300,6 +1300,8 @@ pub struct Engine {
     fs_store: Option<Arc<fs_store::FsStore>>,
     /// Mutable label → manifest pointer store with reflog.
     label_store: Option<Arc<fs_labels::LabelStore>>,
+    /// Policy chain gating fs snapshot pointer moves (pull/push/reset/label).
+    fs_snapshot_policy_chain: Option<Arc<opa::PolicyChain>>,
 }
 
 /// Builder for `Engine::run_js()`. Only `code` is required; everything else
@@ -1435,6 +1437,7 @@ impl Engine {
             run_js_file_policy: None,
             fs_store: None,
             label_store: None,
+            fs_snapshot_policy_chain: None,
         }
     }
 
@@ -1472,6 +1475,7 @@ impl Engine {
             run_js_file_policy: None,
             fs_store: None,
             label_store: None,
+            fs_snapshot_policy_chain: None,
         }
     }
 
@@ -1605,6 +1609,36 @@ impl Engine {
         self
     }
 
+    /// Gate fs snapshot pointer moves (pull/push/reset/label) behind a policy.
+    pub fn with_fs_snapshot_policy(mut self, chain: Arc<opa::PolicyChain>) -> Self {
+        self.fs_snapshot_policy_chain = Some(chain);
+        self
+    }
+
+    /// Evaluate the fs-snapshot policy for an operation, if a chain is set.
+    /// Input: `{ "op": ..., "label": ..., "ca_id": ... }`.
+    async fn check_fs_snapshot_policy(
+        &self,
+        op: &str,
+        label: Option<&str>,
+        ca_id: Option<&str>,
+    ) -> Result<(), String> {
+        let Some(chain) = &self.fs_snapshot_policy_chain else {
+            return Ok(());
+        };
+        let input = serde_json::json!({ "op": op, "label": label, "ca_id": ca_id });
+        let allowed = chain
+            .evaluate(&input)
+            .await
+            .map_err(|e| format!("fs_snapshot policy error: {e}"))?;
+        if !allowed {
+            return Err(format!(
+                "fs_snapshot {op} denied by policy (label={label:?}, ca_id={ca_id:?})"
+            ));
+        }
+        Ok(())
+    }
+
     /// The fs object store, if configured.
     pub fn fs_store(&self) -> Option<&Arc<fs_store::FsStore>> {
         self.fs_store.as_ref()
@@ -1625,6 +1659,7 @@ impl Engine {
         let Some(handle) = fs.as_ref().filter(|s| !s.is_empty()) else {
             return Ok(None);
         };
+        self.check_fs_snapshot_policy("pull", Some(handle), None).await?;
         let store = self
             .fs_store
             .as_ref()
@@ -1788,6 +1823,7 @@ impl Engine {
 
     /// Create a label, or repoint an existing one, to a CA id.
     pub async fn fs_set_label(&self, name: &str, ca_hex: &str) -> Result<(), String> {
+        self.check_fs_snapshot_policy("label", Some(name), Some(ca_hex)).await?;
         let labels = self.labels_or_err()?;
         let id = parse_ca_hex(ca_hex).ok_or_else(|| format!("invalid CA id: {ca_hex}"))?;
         match labels.resolve(name).await? {
@@ -1822,6 +1858,7 @@ impl Engine {
         expected: Option<String>,
         force: bool,
     ) -> Result<FsPushOutcome, String> {
+        self.check_fs_snapshot_policy("push", Some(label), Some(ca_hex)).await?;
         let labels = self.labels_or_err()?;
         let new = parse_ca_hex(ca_hex).ok_or_else(|| format!("invalid CA id: {ca_hex}"))?;
 
@@ -1867,6 +1904,7 @@ impl Engine {
         ca_hex: &str,
         allow_unlogged: bool,
     ) -> Result<(), String> {
+        self.check_fs_snapshot_policy("reset", Some(label), Some(ca_hex)).await?;
         let labels = self.labels_or_err()?;
         let target = parse_ca_hex(ca_hex).ok_or_else(|| format!("invalid CA id: {ca_hex}"))?;
         if !allow_unlogged {
