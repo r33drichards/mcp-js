@@ -173,6 +173,21 @@ let resp = client.exec_handler(&body).await?;
 println!("execution_id: {}", resp.into_inner().execution_id);
 ```
 
+## TypeScript client (`@mcp-v8/client`)
+
+A fully-typed TypeScript client, also generated from the OpenAPI spec
+(`openapi-typescript` types + the `openapi-fetch` runtime). Lives in
+[`clients/typescript`](clients/typescript/README.md).
+
+```ts
+import { createMcpV8Client } from "@mcp-v8/client";
+
+const client = createMcpV8Client("http://localhost:3000");
+const { status, output, heap } = await client.runJs("console.log('hi'); 1 + 1");
+```
+
+Regenerate types after API changes with `npm run generate` (reads `openapi.json`).
+
 ## Build from source
 
 The repo is a Nix flake (it wires up the prefetched V8 archive so the build stays
