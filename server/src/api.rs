@@ -225,6 +225,7 @@ pub struct OutputQuery {
         fs_log_handler,
         fs_push_handler,
         fs_reset_handler,
+        fs_merge_handler,
     ),
     components(schemas(
         ExecRequest,
@@ -241,6 +242,7 @@ pub struct OutputQuery {
         FsPushRequest,
         FsLabelRequest,
         FsResetRequest,
+        FsMergeRequest,
     ))
 )]
 pub struct ApiDoc;
@@ -856,6 +858,48 @@ async fn fs_reset_handler(
     }
 }
 
+/// Request body for `POST /api/fs/merge`.
+#[derive(Deserialize, ToSchema)]
+pub struct FsMergeRequest {
+    /// One side of the merge (CA id, e.g. an execution's `fs` result).
+    pub ours: String,
+    /// The other side (CA id).
+    pub theirs: String,
+    /// The common ancestor both sides diverged from. Omit for a 2-way merge.
+    #[serde(default)]
+    pub base: Option<String>,
+    /// `ours` or `theirs` to auto-resolve conflicts; omit to report them.
+    #[serde(default)]
+    pub prefer: Option<String>,
+}
+
+/// Three-way merge two snapshots into a new one.
+#[utoipa::path(
+    post,
+    path = "/api/fs/merge",
+    request_body = FsMergeRequest,
+    responses(
+        (status = 200, description = "Merge ran — body has status=merged (with ca_id) or status=conflict (with conflicting paths)"),
+        (status = 400, description = "Invalid CA id or prefer value"),
+    ),
+    tag = "fs"
+)]
+async fn fs_merge_handler(
+    State(engine): State<Engine>,
+    Json(req): Json<FsMergeRequest>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let prefer = match crate::engine::fs_merge::Prefer::parse(req.prefer.as_deref()) {
+        Ok(p) => p,
+        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))),
+    };
+    match engine.fs_merge(&req.ours, &req.theirs, req.base, prefer).await {
+        // Both clean merges and conflicts are successful outcomes carrying a
+        // `status`-tagged body the caller acts on; only bad input is an error.
+        Ok(result) => (StatusCode::OK, Json(serde_json::to_value(&result).unwrap_or_default())),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))),
+    }
+}
+
 // ── Router builders ──────────────────────────────────────────────────────
 
 /// Build the plain Axum router (no OpenAPI metadata attached).
@@ -880,5 +924,6 @@ pub fn api_router(engine: Engine) -> Router {
         .route("/api/fs/labels/{label}/log", get(fs_log_handler))
         .route("/api/fs/push", post(fs_push_handler))
         .route("/api/fs/reset", post(fs_reset_handler))
+        .route("/api/fs/merge", post(fs_merge_handler))
         .with_state(engine)
 }

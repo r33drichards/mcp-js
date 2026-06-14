@@ -6,6 +6,7 @@ pub mod fs;
 pub mod fs_chunker;
 pub mod fs_gc;
 pub mod fs_labels;
+pub mod fs_merge;
 pub mod fs_mount;
 pub mod fs_store;
 pub mod heap_storage;
@@ -415,6 +416,33 @@ pub enum FsPushOutcome {
         label: String,
         current: Option<String>,
     },
+}
+
+/// Result of an [`Engine::fs_merge`].
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "status", rename_all = "lowercase")]
+pub enum FsMergeResult {
+    /// A clean merge; the new snapshot has this CA id.
+    Merged { ca_id: String },
+    /// Unresolved conflicts; no snapshot was produced.
+    Conflict { conflicts: Vec<FsMergeConflictView> },
+}
+
+/// One conflicting path. Each side is a content id (hex of the entry) when the
+/// file is present on that side, or `null` when it is absent (delete).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct FsMergeConflictView {
+    pub path: String,
+    pub base: Option<String>,
+    pub ours: Option<String>,
+    pub theirs: Option<String>,
+}
+
+/// A stable content id for a manifest entry: blake3 of its canonical encoding.
+/// Lets a caller tell whether two sides' versions of a path differ.
+fn entry_content_id(e: &fs_store::Entry) -> String {
+    let bytes = bincode::serialize(e).unwrap_or_default();
+    ca_to_hex(blake3::hash(&bytes).as_bytes())
 }
 
 /// Render a 32-byte CA id as lowercase hex.
@@ -1800,6 +1828,76 @@ impl Engine {
         self.label_store
             .as_ref()
             .ok_or_else(|| "fs labels are not configured on this server".to_string())
+    }
+
+    fn fs_store_or_err(&self) -> Result<&Arc<fs_store::FsStore>, String> {
+        self.fs_store
+            .as_ref()
+            .ok_or_else(|| "fs snapshots are not configured on this server".to_string())
+    }
+
+    /// Three-way merge two snapshots into a new one. `base` (the common
+    /// ancestor the two sides diverged from — typically the label head both
+    /// were mounted from) is optional: with it, only paths both sides changed
+    /// conflict; without it, the merge is 2-way. `prefer` auto-resolves
+    /// conflicts to one side. A clean merge yields the new snapshot's CA id;
+    /// otherwise the conflicting paths are reported. The merge produces a normal
+    /// pure manifest and does NOT move any label (push it explicitly).
+    pub async fn fs_merge(
+        &self,
+        ours: &str,
+        theirs: &str,
+        base: Option<String>,
+        prefer: fs_merge::Prefer,
+    ) -> Result<FsMergeResult, String> {
+        self.check_fs_snapshot_policy("merge", None, None).await?;
+        let store = self.fs_store_or_err()?;
+
+        let load = |hex: &str| -> Result<blake3::Hash, String> {
+            parse_ca_hex(hex)
+                .map(blake3::Hash::from_bytes)
+                .ok_or_else(|| format!("invalid CA id: {hex}"))
+        };
+        let ours_m = store
+            .get_manifest(&load(ours)?)
+            .await
+            .map_err(|e| format!("fs_merge: load ours: {e}"))?;
+        let theirs_m = store
+            .get_manifest(&load(theirs)?)
+            .await
+            .map_err(|e| format!("fs_merge: load theirs: {e}"))?;
+        let base_m = match &base {
+            Some(b) => Some(
+                store
+                    .get_manifest(&load(b)?)
+                    .await
+                    .map_err(|e| format!("fs_merge: load base: {e}"))?,
+            ),
+            None => None,
+        };
+
+        match fs_merge::merge_manifests(base_m.as_ref(), &ours_m, &theirs_m, prefer) {
+            fs_merge::MergeOutcome::Merged(manifest) => {
+                let id = store
+                    .put_manifest(&manifest)
+                    .await
+                    .map_err(|e| format!("fs_merge: store result: {e}"))?;
+                Ok(FsMergeResult::Merged {
+                    ca_id: ca_to_hex(id.as_bytes()),
+                })
+            }
+            fs_merge::MergeOutcome::Conflicts(conflicts) => Ok(FsMergeResult::Conflict {
+                conflicts: conflicts
+                    .into_iter()
+                    .map(|c| FsMergeConflictView {
+                        path: c.path.to_string_lossy().to_string(),
+                        base: c.base.as_ref().map(entry_content_id),
+                        ours: c.ours.as_ref().map(entry_content_id),
+                        theirs: c.theirs.as_ref().map(entry_content_id),
+                    })
+                    .collect(),
+            }),
+        }
     }
 
     /// List every label and its current head CA id (hex).

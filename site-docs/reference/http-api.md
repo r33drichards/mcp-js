@@ -439,6 +439,44 @@ Authentication: none.
 Authentication: none.
 
 
+### Three-way merge two snapshots into a new one.
+
+
+<a id="opIdfs_merge_handler"></a>
+
+`POST /api/fs/merge`
+
+> Body parameter
+
+```json
+{
+  "base": "string",
+  "ours": "string",
+  "prefer": "string",
+  "theirs": "string"
+}
+```
+
+<a id="three-way-merge-two-snapshots-into-a-new-one.-parameters"></a>
+#### Parameters
+
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|body|body|[FsMergeRequest](#schemafsmergerequest)|true|none|
+
+<a id="three-way-merge-two-snapshots-into-a-new-one.-responses"></a>
+#### Responses
+
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Merge ran — body has status=merged (with ca_id) or status=conflict (with conflicting paths)|None|
+|400|[Bad Request](https://tools.ietf.org/html/rfc7231#section-6.5.1)|Invalid CA id or prefer value|None|
+
+Authentication: none.
+
+
 ### Advance a label to a CA id (reject-and-rebase by default).
 
 
@@ -855,6 +893,34 @@ Request body for `POST /api/fs/labels` (create or repoint a label).
 |---|---|---|---|---|
 |ca_id|string|true|none|none|
 |name|string|true|none|none|
+
+<h2 id="tocS_FsMergeRequest">FsMergeRequest</h2>
+<!-- backwards compatibility -->
+<a id="schemafsmergerequest"></a>
+<a id="schema_FsMergeRequest"></a>
+<a id="tocSfsmergerequest"></a>
+<a id="tocsfsmergerequest"></a>
+
+```json
+{
+  "base": "string",
+  "ours": "string",
+  "prefer": "string",
+  "theirs": "string"
+}
+
+```
+
+Request body for `POST /api/fs/merge`.
+
+### Properties
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|base|string¦null|false|none|The common ancestor both sides diverged from. Omit for a 2-way merge.|
+|ours|string|true|none|One side of the merge (CA id, e.g. an execution's `fs` result).|
+|prefer|string¦null|false|none|`ours` or `theirs` to auto-resolve conflicts; omit to report them.|
+|theirs|string|true|none|The other side (CA id).|
 
 <h2 id="tocS_FsPushRequest">FsPushRequest</h2>
 <!-- backwards compatibility -->

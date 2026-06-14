@@ -424,6 +424,33 @@
         }
       }
     },
+    "/api/fs/merge": {
+      "post": {
+        "tags": [
+          "fs"
+        ],
+        "summary": "Three-way merge two snapshots into a new one.",
+        "operationId": "fs_merge_handler",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FsMergeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Merge ran — body has status=merged (with ca_id) or status=conflict (with conflicting paths)"
+          },
+          "400": {
+            "description": "Invalid CA id or prefer value"
+          }
+        }
+      }
+    },
     "/api/fs/push": {
       "post": {
         "tags": [
@@ -809,6 +836,34 @@
           },
           "name": {
             "type": "string"
+          }
+        }
+      },
+      "FsMergeRequest": {
+        "type": "object",
+        "description": "Request body for `POST /api/fs/merge`.",
+        "required": [
+          "ours",
+          "theirs"
+        ],
+        "properties": {
+          "base": {
+            "type": "string",
+            "description": "The common ancestor both sides diverged from. Omit for a 2-way merge.",
+            "nullable": true
+          },
+          "ours": {
+            "type": "string",
+            "description": "One side of the merge (CA id, e.g. an execution's `fs` result)."
+          },
+          "prefer": {
+            "type": "string",
+            "description": "`ours` or `theirs` to auto-resolve conflicts; omit to report them.",
+            "nullable": true
+          },
+          "theirs": {
+            "type": "string",
+            "description": "The other side (CA id)."
           }
         }
       },

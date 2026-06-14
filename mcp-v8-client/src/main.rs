@@ -121,6 +121,19 @@ enum FsCmd {
         #[arg(long)]
         allow_unlogged: bool,
     },
+    /// Three-way merge two snapshots into a new one.
+    Merge {
+        /// One side (CA id).
+        ours: String,
+        /// The other side (CA id).
+        theirs: String,
+        /// Common ancestor both sides diverged from (omit for a 2-way merge).
+        #[arg(long)]
+        base: Option<String>,
+        /// Auto-resolve conflicts to a side: ours or theirs.
+        #[arg(long)]
+        prefer: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -369,6 +382,17 @@ async fn main() -> anyhow::Result<()> {
                     allow_unlogged: Some(allow_unlogged),
                 };
                 let result = client.fs_reset_handler(&body).await
+                    .map_err(|e| anyhow::anyhow!("Request failed: {}", e))?;
+                println!("{}", serde_json::to_string_pretty(&result.into_inner())?);
+            }
+            FsCmd::Merge { ours, theirs, base, prefer } => {
+                let body = mcp_v8_client::types::FsMergeRequest {
+                    ours,
+                    theirs,
+                    base,
+                    prefer,
+                };
+                let result = client.fs_merge_handler(&body).await
                     .map_err(|e| anyhow::anyhow!("Request failed: {}", e))?;
                 println!("{}", serde_json::to_string_pretty(&result.into_inner())?);
             }

@@ -22,6 +22,7 @@ These tools keep execution records and heap state available across calls.
 - [`fs_label`](#stateful-fs-label)
 - [`fs_log`](#stateful-fs-log)
 - [`fs_ls`](#stateful-fs-ls)
+- [`fs_merge`](#stateful-fs-merge)
 - [`fs_pull`](#stateful-fs-pull)
 - [`fs_push`](#stateful-fs-push)
 - [`fs_reset`](#stateful-fs-reset)
@@ -87,6 +88,20 @@ Parameters:
 List filesystem snapshot labels. Returns each label name and its current head CA id (hex).
 
 This tool does not take structured parameters.
+
+### `fs_merge`
+<a id="stateful-fs-merge"></a>
+
+Three-way merge two filesystem snapshots (CA ids) into a new snapshot. Pass `base` — the snapshot both sides diverged from (e.g. the label head you mounted before two runs) — so only paths BOTH sides changed conflict; omit it for a 2-way merge. On success returns the merged snapshot's ca_id (push it to a label separately). On conflict returns status=conflict with the list of conflicting paths and each side's content id (null = absent). Set prefer=ours|theirs to auto-resolve all conflicts to that side.
+
+Parameters:
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `base` | `string | null` | no | - |
+| `ours` | `string` | yes | - |
+| `prefer` | `string | null` | no | - |
+| `theirs` | `string` | yes | - |
 
 ### `fs_pull`
 <a id="stateful-fs-pull"></a>

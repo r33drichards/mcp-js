@@ -691,6 +691,31 @@ impl McpService {
             Err(e) => FsResponse::err(e),
         }
     }
+
+    #[tool(description = "Three-way merge two filesystem snapshots (CA ids) into a new snapshot. Pass `base` — the snapshot both sides diverged from (e.g. the label head you mounted before two runs) — so only paths BOTH sides changed conflict; omit it for a 2-way merge. On success returns the merged snapshot's ca_id (push it to a label separately). On conflict returns status=conflict with the list of conflicting paths and each side's content id (null = absent). Set prefer=ours|theirs to auto-resolve all conflicts to that side.")]
+    pub async fn fs_merge(
+        &self,
+        #[tool(param)] ours: String,
+        #[tool(param)] theirs: String,
+        #[tool(param)]
+        #[serde(default)]
+        base: Option<String>,
+        #[tool(param)]
+        #[serde(default)]
+        prefer: Option<String>,
+    ) -> FsResponse {
+        let prefer = match crate::engine::fs_merge::Prefer::parse(prefer.as_deref()) {
+            Ok(p) => p,
+            Err(e) => return FsResponse::err(e),
+        };
+        match self.engine.fs_merge(&ours, &theirs, base, prefer).await {
+            Ok(result) => match serde_json::to_value(&result) {
+                Ok(v) => FsResponse::ok(v),
+                Err(e) => FsResponse::err(e.to_string()),
+            },
+            Err(e) => FsResponse::err(e),
+        }
+    }
 }
 
 impl ServerHandler for McpService {
