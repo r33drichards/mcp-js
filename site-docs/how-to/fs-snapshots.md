@@ -71,6 +71,20 @@ curl -s http://localhost:3000/api/executions/$EXEC | jq '{status, fs}'
 
 The `fs` field of a completed execution is the durable CA id of the snapshot the run produced. It is **not** automatically attached to any label — pushing it to a label is a separate step (`fs_push`).
 
+### Writing a large file without buffering it
+
+`fs.writeFile(path, value)` hands the whole `value` across in one call. For a file too big to hold in memory, use a streaming write handle — feed it in pieces (`Uint8Array` or string), then `close()`; the bytes are chunked on the fly and the file appears only after `close()`:
+
+```js
+const w = await fs.createWriteStream("/big/dump.bin");
+for await (const chunk of source) {   // chunks of any size
+  await w.write(chunk);
+}
+await w.close();
+```
+
+Copying a large file is also cheap: `fs.copyFile(src, dest)` clones the source's content-addressed entry by reference — no bytes are read or re-chunked.
+
 ## Operations table
 
 Every operation routes through the same engine logic regardless of surface, so behaviour is identical across the three.

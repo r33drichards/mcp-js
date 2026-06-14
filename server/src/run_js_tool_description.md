@@ -86,6 +86,7 @@ When the server is configured with policies, JavaScript code can use an `fs` mod
 - `await fs.rm(path, [options])` — Delete file or directory (supports `{recursive: true}`)
 - `await fs.rename(oldPath, newPath)` — Rename or move file
 - `await fs.copyFile(src, dest)` — Copy file
+- `await fs.createWriteStream(path)` — Open a streaming write handle (`await w.write(chunk)`, `await w.close()`) for large files
 - `await fs.exists(path)` — Check if path exists
 - `await fs.unlink(path)` — Delete a file
 

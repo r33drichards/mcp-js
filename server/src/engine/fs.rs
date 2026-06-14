@@ -33,7 +33,9 @@ use deno_error::JsErrorBox;
 use serde::Serialize;
 
 use super::fs_mount::SessionMount;
+use super::fs_store::FileWriter;
 use super::opa::PolicyChain;
+use std::collections::HashMap;
 use std::path::Path;
 
 // ── Configuration ────────────────────────────────────────────────────────
@@ -66,6 +68,31 @@ impl FsConfig {
         self.mcp_headers = mcp_headers;
         self
     }
+}
+
+/// Open streaming writers for the current session, keyed by a small integer
+/// handle. Stored in `OpState` so a `createWriteStream` handle survives across
+/// the separate open / write / close ops.
+#[derive(Clone)]
+pub struct FsWriters(Arc<tokio::sync::Mutex<FsWritersInner>>);
+
+#[derive(Default)]
+struct FsWritersInner {
+    next: u32,
+    map: HashMap<u32, OpenWrite>,
+}
+
+impl Default for FsWriters {
+    fn default() -> Self {
+        Self(Arc::new(tokio::sync::Mutex::new(FsWritersInner::default())))
+    }
+}
+
+/// A single open write stream: an overlay file being chunked incrementally, or a
+/// real-filesystem file handle.
+enum OpenWrite {
+    Overlay { path: String, writer: FileWriter },
+    Real(tokio::fs::File),
 }
 
 // ── Policy input ─────────────────────────────────────────────────────────
@@ -486,6 +513,131 @@ async fn op_fs_exists(
     .map_err(|e: String| JsErrorBox::generic(e))
 }
 
+// ── Streaming writes ─────────────────────────────────────────────────────
+
+/// Open a streaming write to `path`, returning a small integer handle. Bytes are
+/// fed incrementally (chunked on the fly), so a multi-GB file never has to exist
+/// in memory all at once.
+#[op2(async)]
+#[smi]
+async fn op_fs_write_stream_open(
+    state: Rc<RefCell<OpState>>,
+    #[string] path: String,
+) -> Result<u32, JsErrorBox> {
+    let config = extract_config(&state)?;
+    let mount = extract_mount(&state);
+    let writers = extract_writers(&state)?;
+
+    tokio::spawn(async move {
+        check_policy(&config.policy_chain, "writeFile", &path, None, None, None, config.mcp_headers.as_ref()).await?;
+
+        let ow = if let Some(m) = mount {
+            let store = m.0.lock().await.store_handle();
+            OpenWrite::Overlay { path: path.clone(), writer: FileWriter::new(store) }
+        } else {
+            let f = tokio::fs::File::create(&path).await
+                .map_err(|e| format!("fs.createWriteStream: {}: {}", path, e))?;
+            OpenWrite::Real(f)
+        };
+        let mut g = writers.0.lock().await;
+        let id = g.next;
+        g.next = g.next.wrapping_add(1);
+        g.map.insert(id, ow);
+        Ok::<u32, String>(id)
+    })
+    .await
+    .map_err(|e| JsErrorBox::generic(format!("fs task join error: {}", e)))?
+    .map_err(|e: String| JsErrorBox::generic(e))
+}
+
+/// Feed a chunk of bytes to an open write stream.
+#[op2(async)]
+#[string]
+async fn op_fs_write_stream_chunk_buffer(
+    state: Rc<RefCell<OpState>>,
+    #[smi] id: u32,
+    #[buffer(copy)] data: Vec<u8>,
+) -> Result<String, JsErrorBox> {
+    let writers = extract_writers(&state)?;
+    tokio::spawn(async move { feed_stream(&writers, id, &data).await })
+        .await
+        .map_err(|e| JsErrorBox::generic(format!("fs task join error: {}", e)))?
+        .map_err(JsErrorBox::generic)
+}
+
+/// Feed a chunk of text to an open write stream.
+#[op2(async)]
+#[string]
+async fn op_fs_write_stream_chunk_text(
+    state: Rc<RefCell<OpState>>,
+    #[smi] id: u32,
+    #[string] data: String,
+) -> Result<String, JsErrorBox> {
+    let writers = extract_writers(&state)?;
+    tokio::spawn(async move { feed_stream(&writers, id, data.as_bytes()).await })
+        .await
+        .map_err(|e| JsErrorBox::generic(format!("fs task join error: {}", e)))?
+        .map_err(JsErrorBox::generic)
+}
+
+/// Finish an open write stream: flush the final chunk and install the file.
+#[op2(async)]
+#[string]
+async fn op_fs_write_stream_close(
+    state: Rc<RefCell<OpState>>,
+    #[smi] id: u32,
+) -> Result<String, JsErrorBox> {
+    let mount = extract_mount(&state);
+    let writers = extract_writers(&state)?;
+    tokio::spawn(async move {
+        let ow = writers
+            .0
+            .lock()
+            .await
+            .map
+            .remove(&id)
+            .ok_or_else(|| "fs write stream: invalid handle".to_string())?;
+        match ow {
+            OpenWrite::Overlay { path, writer } => {
+                let entry = writer.finish().await.map_err(|e| e.to_string())?;
+                if let Some(m) = mount {
+                    m.0.lock().await.put_entry(Path::new(&path), entry);
+                }
+            }
+            OpenWrite::Real(mut f) => {
+                use tokio::io::AsyncWriteExt;
+                f.flush().await.map_err(|e| e.to_string())?;
+            }
+        }
+        Ok::<String, String>("{}".to_string())
+    })
+    .await
+    .map_err(|e| JsErrorBox::generic(format!("fs task join error: {}", e)))?
+    .map_err(JsErrorBox::generic)
+}
+
+/// Feed bytes to writer `id`: take it out of the registry, feed, put it back, so
+/// the registry lock is never held across the await.
+async fn feed_stream(writers: &FsWriters, id: u32, data: &[u8]) -> Result<String, String> {
+    let mut ow = writers
+        .0
+        .lock()
+        .await
+        .map
+        .remove(&id)
+        .ok_or_else(|| "fs write stream: invalid handle".to_string())?;
+    let res = match &mut ow {
+        OpenWrite::Overlay { writer, .. } => writer.feed(data).await.map_err(|e| e.to_string()),
+        OpenWrite::Real(f) => {
+            use tokio::io::AsyncWriteExt;
+            f.write_all(data).await.map_err(|e| e.to_string())
+        }
+    };
+    writers.0.lock().await.map.insert(id, ow);
+    res?;
+    Ok("{}".to_string())
+}
+
 // ── Extension registration ──────────────────────────────────────────────
 
 deno_core::extension!(
@@ -503,7 +655,14 @@ deno_core::extension!(
         op_fs_rename,
         op_fs_copy_file,
         op_fs_exists,
+        op_fs_write_stream_open,
+        op_fs_write_stream_chunk_buffer,
+        op_fs_write_stream_chunk_text,
+        op_fs_write_stream_close,
     ],
+    state = |state| {
+        state.put(FsWriters::default());
+    },
 );
 
 pub fn create_extension() -> deno_core::Extension {
@@ -590,6 +749,30 @@ const FS_JS_WRAPPER: &str = r#"
             const raw = await Deno.core.ops.op_fs_exists(path);
             return raw === 'true';
         },
+
+        // Streaming write handle: feed a large file in pieces so neither JS nor
+        // the runtime ever holds the whole thing. The file becomes visible only
+        // after close().
+        createWriteStream: async function(path) {
+            if (typeof path !== 'string') throw new TypeError('fs.createWriteStream: path must be a string');
+            const id = await Deno.core.ops.op_fs_write_stream_open(path);
+            let closed = false;
+            return {
+                write: async function(chunk) {
+                    if (closed) throw new Error('fs.createWriteStream: write after close');
+                    if (chunk instanceof Uint8Array) {
+                        await Deno.core.ops.op_fs_write_stream_chunk_buffer(id, chunk);
+                    } else {
+                        await Deno.core.ops.op_fs_write_stream_chunk_text(id, String(chunk));
+                    }
+                },
+                close: async function() {
+                    if (closed) return;
+                    closed = true;
+                    await Deno.core.ops.op_fs_write_stream_close(id);
+                },
+            };
+        },
     };
 })();
 "#;
@@ -607,6 +790,16 @@ fn extract_config(state: &Rc<RefCell<OpState>>) -> Result<FsConfig, JsErrorBox> 
 /// rather than the host filesystem.
 fn extract_mount(state: &Rc<RefCell<OpState>>) -> Option<FsMountHandle> {
     state.borrow().try_borrow::<FsMountHandle>().cloned()
+}
+
+/// The session's streaming-write registry (installed by the extension's `state`
+/// initializer, so it is always present).
+fn extract_writers(state: &Rc<RefCell<OpState>>) -> Result<FsWriters, JsErrorBox> {
+    state
+        .borrow()
+        .try_borrow::<FsWriters>()
+        .cloned()
+        .ok_or_else(|| JsErrorBox::generic("fs: internal error — no write-stream registry"))
 }
 
 /// Build the JSON stat blob fs.stat returns, from overlay metadata.

@@ -174,3 +174,43 @@ async fn run_without_fs_handle_has_no_fs_ca_id() {
     let fs = run(&h.engine, r#"(async () => { 1 + 1; })()"#, None).await;
     assert!(fs.is_none(), "no mount → no fs CA id");
 }
+
+#[tokio::test]
+async fn create_write_stream_assembles_a_large_file() {
+    ensure_v8();
+    let h = build_harness();
+
+    // Stream a large file in many small pieces via fs.createWriteStream — the
+    // whole value is never materialised in one JS string/buffer.
+    let ca = run(
+        &h.engine,
+        r#"(async () => {
+            const w = await fs.createWriteStream("/big/data.bin");
+            // 512 KiB of deterministic bytes, fed 4 KiB at a time.
+            const piece = new Uint8Array(4096);
+            for (let i = 0; i < piece.length; i++) piece[i] = (i * 7 + 3) & 0xff;
+            for (let n = 0; n < 128; n++) await w.write(piece);
+            // A trailing text chunk too, to exercise the text path.
+            await w.write("TAIL");
+            await w.close();
+        })()"#,
+        Some("main"),
+    )
+    .await
+    .expect("streaming write should yield an fs CA id");
+
+    let bytes = read_snapshot_file(&h.store, &ca, "big/data.bin").await;
+    assert_eq!(bytes.len(), 128 * 4096 + 4);
+
+    // Verify the assembled content matches what was streamed.
+    let mut expected = Vec::with_capacity(bytes.len());
+    let mut piece = [0u8; 4096];
+    for (i, b) in piece.iter_mut().enumerate() {
+        *b = ((i * 7 + 3) & 0xff) as u8;
+    }
+    for _ in 0..128 {
+        expected.extend_from_slice(&piece);
+    }
+    expected.extend_from_slice(b"TAIL");
+    assert_eq!(bytes, expected, "streamed file content must round-trip");
+}

@@ -62,6 +62,17 @@ impl SessionMount {
         self.base_id.map(|h| *h.as_bytes())
     }
 
+    /// A clone of the backing store — used to drive a streaming [`FileWriter`]
+    /// whose finished entry is later handed back via [`SessionMount::put_entry`].
+    pub fn store_handle(&self) -> FsStore {
+        self.store.clone()
+    }
+
+    /// Install an already-built entry (e.g. from a streaming write) at `p`.
+    pub fn put_entry(&mut self, p: &Path, entry: Entry) {
+        self.upper.insert(path_of(&components_of(p)), Write::Data(entry));
+    }
+
     /// Resolve the effective file entry for a path: an upper `Data` shadows the
     /// base; an upper `Whiteout` (or a missing base entry) means "no file here".
     async fn effective(&self, comps: &[String], key: &Path) -> anyhow::Result<Option<Entry>> {

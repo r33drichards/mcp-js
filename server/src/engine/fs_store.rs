@@ -15,14 +15,13 @@
 //! materialises a whole `Manifest`; it walks the tree lazily so a multi-TB
 //! snapshot costs O(touched paths), not O(total).
 
-use crate::engine::fs_chunker::{decompress, maybe_compress, SMALL_FILE_MAX, AVG, MAX, MIN};
+use crate::engine::fs_chunker::{chunk_refs, decompress, maybe_compress, SMALL_FILE_MAX, MAX};
 use crate::engine::fs_tree::{components_of, path_of, tree_key, TreeChild, TreeNode};
 use crate::engine::heap_storage::{HeapStorage, MemoryHeapStorage};
 use blake3::Hash;
-use fastcdc::v2020::StreamCDC;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::io::{Cursor, Read};
+use std::io::Read;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -125,54 +124,28 @@ impl FsStore {
     }
 
     /// Persist file bytes (chunking large files) and return its manifest Entry.
+    /// Goes through the same incremental chunker as the streaming paths, so all
+    /// write paths produce identical chunk boundaries (consistent dedup).
     pub async fn put_file(&self, data: &[u8]) -> anyhow::Result<Entry> {
-        self.put_file_stream(Cursor::new(data)).await
+        let mut w = FileWriter::new(self.clone());
+        w.feed(data).await?;
+        w.finish().await
     }
 
-    /// Persist a file from a streaming reader, chunking in bounded memory.
-    ///
-    /// The reader is consumed incrementally: only a peek up to the inline
-    /// threshold plus one content-defined chunk (≤ `MAX`) is ever held at once,
-    /// so a multi-GB file is ingested without buffering the whole thing. Tiny
-    /// files (≤ `SMALL_FILE_MAX`) are inlined; larger ones are split with FastCDC
-    /// and each chunk hashed by its plaintext and stored (optionally compressed).
+    /// Persist a file from a streaming reader, chunking in bounded memory: the
+    /// reader is consumed one block at a time and never fully buffered, so a
+    /// multi-GB file is ingested without holding it all at once.
     pub async fn put_file_stream<R: Read>(&self, mut reader: R) -> anyhow::Result<Entry> {
-        // Peek enough to decide inline vs chunked without rewinding.
-        let mut head = Vec::with_capacity(SMALL_FILE_MAX + 1);
-        (&mut reader)
-            .take((SMALL_FILE_MAX + 1) as u64)
-            .read_to_end(&mut head)?;
-        if head.len() <= SMALL_FILE_MAX {
-            return Ok(Entry {
-                mode: 0o644,
-                size: head.len() as u64,
-                content: Content::Inline(head),
-                symlink: None,
-            });
+        let mut w = FileWriter::new(self.clone());
+        let mut block = vec![0u8; 1024 * 1024];
+        loop {
+            let n = reader.read(&mut block)?;
+            if n == 0 {
+                break;
+            }
+            w.feed(&block[..n]).await?;
         }
-
-        // Large file: stream-chunk the peeked head followed by the rest.
-        let source = Cursor::new(head).chain(reader);
-        let mut hashes = Vec::new();
-        let mut total: u64 = 0;
-        for chunk in StreamCDC::new(source, MIN, AVG, MAX) {
-            let chunk = chunk.map_err(|e| anyhow::anyhow!("chunking: {e}"))?;
-            let hash = blake3::hash(&chunk.data);
-            let key = chunk_key(hash.as_bytes());
-            let stored = maybe_compress(&chunk.data);
-            self.blobs
-                .put(&key, &stored)
-                .await
-                .map_err(|e| anyhow::anyhow!("put chunk: {e}"))?;
-            hashes.push(*hash.as_bytes());
-            total += chunk.length as u64;
-        }
-        Ok(Entry {
-            mode: 0o644,
-            size: total,
-            content: Content::Chunks(hashes),
-            symlink: None,
-        })
+        w.finish().await
     }
 
     pub async fn read_file(&self, entry: &Entry) -> anyhow::Result<Vec<u8>> {
@@ -411,5 +384,110 @@ impl FsStore {
     /// Access to the underlying blob backend (used by GC).
     pub fn blobs(&self) -> &Arc<dyn HeapStorage> {
         &self.blobs
+    }
+}
+
+/// Once the buffered tail exceeds this, [`FileWriter`] flushes the complete
+/// content-defined chunks it has accumulated, keeping only a bounded carry. So
+/// the writer's resident memory is ~`FLUSH_THRESHOLD` plus the largest single
+/// `feed`, never the whole file.
+const FLUSH_THRESHOLD: usize = 2 * MAX as usize;
+
+/// Incremental, push-based file writer: bytes are `feed`-ed in arbitrary pieces
+/// and chunked on the fly, so a multi-GB file is stored without ever buffering
+/// the whole thing. The chunk boundaries match the one-shot chunker (each
+/// emitted chunk ends at a real content-defined cut), so dedup is preserved.
+pub struct FileWriter {
+    store: FsStore,
+    buf: Vec<u8>,        // bytes not yet emitted as a chunk (bounded carry)
+    hashes: Vec<[u8; 32]>,
+    total: u64,
+    chunked: bool, // crossed past the inline threshold
+}
+
+impl FileWriter {
+    pub fn new(store: FsStore) -> Self {
+        Self {
+            store,
+            buf: Vec::new(),
+            hashes: Vec::new(),
+            total: 0,
+            chunked: false,
+        }
+    }
+
+    async fn put_chunk(&mut self, hash: &[u8; 32], bytes: &[u8]) -> anyhow::Result<()> {
+        let stored = maybe_compress(bytes);
+        self.store
+            .blobs
+            .put(&chunk_key(hash), &stored)
+            .await
+            .map_err(|e| anyhow::anyhow!("put chunk: {e}"))?;
+        self.hashes.push(*hash);
+        Ok(())
+    }
+
+    /// Append `data`; once enough is buffered, flush the complete chunks and keep
+    /// a bounded carry.
+    pub async fn feed(&mut self, data: &[u8]) -> anyhow::Result<()> {
+        self.total += data.len() as u64;
+        self.buf.extend_from_slice(data);
+        if self.buf.len() > FLUSH_THRESHOLD {
+            self.chunked = true;
+            // Emit every complete chunk except the last (which may be a premature
+            // end-of-buffer cut); carry the last for the next feed.
+            let refs = chunk_refs(&self.buf);
+            if refs.len() > 1 {
+                let keep_from = refs.last().unwrap().offset;
+                let emit: Vec<([u8; 32], usize, usize)> = refs[..refs.len() - 1]
+                    .iter()
+                    .map(|c| (*c.hash.as_bytes(), c.offset, c.length))
+                    .collect();
+                for (h, off, len) in emit {
+                    let bytes = self.buf[off..off + len].to_vec();
+                    self.put_chunk(&h, &bytes).await?;
+                }
+                self.buf.drain(..keep_from);
+            }
+        }
+        Ok(())
+    }
+
+    /// Finish the file: inline if it never grew past the threshold, else flush
+    /// the remaining bytes as chunks. Returns the content-addressed entry.
+    pub async fn finish(mut self) -> anyhow::Result<Entry> {
+        if !self.chunked && self.buf.len() <= SMALL_FILE_MAX {
+            return Ok(Entry {
+                mode: 0o644,
+                size: self.total,
+                content: Content::Inline(std::mem::take(&mut self.buf)),
+                symlink: None,
+            });
+        }
+        // Flush whatever remains. `chunk_refs` returns empty for a sub-threshold
+        // carry, which must still be stored as a (single) chunk.
+        let refs = chunk_refs(&self.buf);
+        if refs.is_empty() {
+            if !self.buf.is_empty() {
+                let bytes = std::mem::take(&mut self.buf);
+                let h = *blake3::hash(&bytes).as_bytes();
+                self.put_chunk(&h, &bytes).await?;
+            }
+        } else {
+            let emit: Vec<([u8; 32], usize, usize)> = refs
+                .iter()
+                .map(|c| (*c.hash.as_bytes(), c.offset, c.length))
+                .collect();
+            for (h, off, len) in emit {
+                let bytes = self.buf[off..off + len].to_vec();
+                self.put_chunk(&h, &bytes).await?;
+            }
+        }
+        Ok(Entry {
+            mode: 0o644,
+            size: self.total,
+            content: Content::Chunks(self.hashes),
+            symlink: None,
+        })
     }
 }

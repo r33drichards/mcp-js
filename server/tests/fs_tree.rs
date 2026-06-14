@@ -296,3 +296,38 @@ async fn copy_is_by_reference_no_rechunk() {
         Content::Chunks(_)
     ));
 }
+
+#[tokio::test]
+async fn streaming_writer_round_trips_and_dedups() {
+    use server::engine::fs_store::FileWriter;
+    let store = FsStore::in_memory();
+    let data = pseudo_random(5 * 1024 * 1024 + 4242, 0x77); // ~5 MiB, odd size
+
+    // Feed in small (64 KiB) pieces — the writer never holds the whole file.
+    let mut w = FileWriter::new(store.clone());
+    for piece in data.chunks(64 * 1024) {
+        w.feed(piece).await.unwrap();
+    }
+    let streamed = w.finish().await.unwrap();
+
+    assert!(matches!(streamed.content, Content::Chunks(_)));
+    assert_eq!(streamed.size as usize, data.len());
+    assert_eq!(store.read_file(&streamed).await.unwrap(), data);
+
+    // Same boundaries as a one-shot put_file => streamed writes dedup against
+    // ordinary writes.
+    let oneshot = store.put_file(&data).await.unwrap();
+    assert_eq!(streamed.content, oneshot.content, "streaming must match one-shot chunking");
+}
+
+#[tokio::test]
+async fn streaming_writer_small_file_inlines() {
+    use server::engine::fs_store::FileWriter;
+    let store = FsStore::in_memory();
+    let mut w = FileWriter::new(store.clone());
+    w.feed(b"hello ").await.unwrap();
+    w.feed(b"world").await.unwrap();
+    let entry = w.finish().await.unwrap();
+    assert!(matches!(entry.content, Content::Inline(_)));
+    assert_eq!(store.read_file(&entry).await.unwrap(), b"hello world");
+}
