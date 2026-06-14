@@ -10,6 +10,17 @@ use async_trait::async_trait;
 pub trait HeapStorage: Send + Sync + 'static {
     async fn put(&self, name: &str, data: &[u8]) -> Result<(), String>;
     async fn get(&self, name: &str) -> Result<Vec<u8>, String>;
+
+    /// List every blob name in the backend. Used by fs snapshot GC. Backends
+    /// that cannot enumerate return an error (GC is then unavailable on them).
+    async fn list(&self) -> Result<Vec<String>, String> {
+        Err("list is not supported by this storage backend".to_string())
+    }
+
+    /// Delete a blob by name. Used by fs snapshot GC sweep.
+    async fn delete(&self, _name: &str) -> Result<(), String> {
+        Err("delete is not supported by this storage backend".to_string())
+    }
 }
 
 /// In-memory blob backend. Primarily for tests and the `FsStore::in_memory`
@@ -43,6 +54,13 @@ impl HeapStorage for MemoryHeapStorage {
             .cloned()
             .ok_or_else(|| format!("not found: {name}"))
     }
+    async fn list(&self) -> Result<Vec<String>, String> {
+        Ok(self.map.lock().unwrap().keys().cloned().collect())
+    }
+    async fn delete(&self, name: &str) -> Result<(), String> {
+        self.map.lock().unwrap().remove(name);
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
@@ -68,6 +86,32 @@ impl HeapStorage for FileHeapStorage {
     async fn get(&self, name: &str) -> Result<Vec<u8>, String> {
         let path = self.dir.join(name);
         std::fs::read(path).map_err(|e| e.to_string())
+    }
+    async fn list(&self) -> Result<Vec<String>, String> {
+        let mut out = Vec::new();
+        let entries = match std::fs::read_dir(&self.dir) {
+            Ok(e) => e,
+            // A backend dir that was never written to has nothing to list.
+            Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+            Err(e) => return Err(e.to_string()),
+        };
+        for entry in entries {
+            let entry = entry.map_err(|e| e.to_string())?;
+            if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                if let Some(name) = entry.file_name().to_str() {
+                    out.push(name.to_string());
+                }
+            }
+        }
+        Ok(out)
+    }
+    async fn delete(&self, name: &str) -> Result<(), String> {
+        let path = self.dir.join(name);
+        match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.to_string()),
+        }
     }
 }
 
@@ -168,6 +212,14 @@ impl<P: HeapStorage + Clone> HeapStorage for WriteThroughCacheHeapStorage<P> {
         }
         Ok(data)
     }
+    async fn list(&self) -> Result<Vec<String>, String> {
+        self.primary.list().await
+    }
+    async fn delete(&self, name: &str) -> Result<(), String> {
+        // Remove from both layers; the cache delete is best-effort.
+        let _ = self.cache.delete(name).await;
+        self.primary.delete(name).await
+    }
 }
 
 /// S3 with local filesystem write-through cache.
@@ -199,4 +251,18 @@ impl HeapStorage for AnyHeapStorage {
             AnyHeapStorage::S3WithFsCache(inner) => inner.get(name).await,
         }
     }
-} 
+    async fn list(&self) -> Result<Vec<String>, String> {
+        match self {
+            AnyHeapStorage::File(inner) => inner.list().await,
+            AnyHeapStorage::S3(inner) => inner.list().await,
+            AnyHeapStorage::S3WithFsCache(inner) => inner.list().await,
+        }
+    }
+    async fn delete(&self, name: &str) -> Result<(), String> {
+        match self {
+            AnyHeapStorage::File(inner) => inner.delete(name).await,
+            AnyHeapStorage::S3(inner) => inner.delete(name).await,
+            AnyHeapStorage::S3WithFsCache(inner) => inner.delete(name).await,
+        }
+    }
+}

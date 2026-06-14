@@ -4,6 +4,7 @@ pub mod fetch;
 pub mod fetch_auth;
 pub mod fs;
 pub mod fs_chunker;
+pub mod fs_gc;
 pub mod fs_labels;
 pub mod fs_mount;
 pub mod fs_store;
