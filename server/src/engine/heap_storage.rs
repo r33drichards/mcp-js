@@ -3,7 +3,8 @@ use aws_sdk_s3::Client as S3Client;
 use aws_sdk_s3::ByteStream;
 
 use aws_config;
-use std::sync::Arc;
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 
 #[async_trait]
@@ -173,20 +174,95 @@ impl HeapStorage for S3HeapStorage {
     }
 }
 
-/// Write-through cache that wraps any primary HeapStorage with a local filesystem cache.
+/// Default local-cache capacity (8 GiB). Large enough that small/medium working
+/// sets stay fully cached, bounded enough that a multi-TB primary never tries to
+/// mirror itself onto local disk.
+pub const DEFAULT_CACHE_CAPACITY_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+
+/// Size-bounded record of what currently lives in the local cache. Eviction is
+/// FIFO by insertion (a simple, allocation-free approximation of LRU); the
+/// primary remains the source of truth, so an evicted blob is simply re-fetched
+/// and re-cached on the next `get`.
+#[derive(Default)]
+struct CacheBound {
+    sizes: HashMap<String, u64>,
+    order: VecDeque<String>,
+    total: u64,
+    cap: u64,
+}
+
+impl CacheBound {
+    /// Record `name` at `size` bytes and return the keys that must be evicted
+    /// from the local cache to stay within `cap`.
+    fn record(&mut self, name: &str, size: u64) -> Vec<String> {
+        if let Some(old) = self.sizes.insert(name.to_string(), size) {
+            self.total -= old;
+        } else {
+            self.order.push_back(name.to_string());
+        }
+        self.total += size;
+
+        let mut evicted = Vec::new();
+        while self.total > self.cap {
+            // Never evict the entry we just recorded (it is at the back).
+            if self.order.len() <= 1 {
+                break;
+            }
+            let Some(victim) = self.order.pop_front() else { break };
+            if let Some(sz) = self.sizes.remove(&victim) {
+                self.total -= sz;
+            }
+            evicted.push(victim);
+        }
+        evicted
+    }
+
+    fn forget(&mut self, name: &str) {
+        if let Some(sz) = self.sizes.remove(name) {
+            self.total -= sz;
+            if let Some(pos) = self.order.iter().position(|k| k == name) {
+                self.order.remove(pos);
+            }
+        }
+    }
+}
+
+/// Write-through cache that wraps any primary HeapStorage with a **size-bounded**
+/// local filesystem cache.
 /// On put: writes to both the local FS cache and the primary storage.
-/// On get: checks the FS cache first; falls back to the primary and caches the result locally.
+/// On get: checks the FS cache first; falls back to the primary and caches the
+/// result locally. When the cache exceeds its capacity, the oldest entries are
+/// evicted from local disk (the primary is untouched, so reads still succeed).
 #[derive(Clone)]
 pub struct WriteThroughCacheHeapStorage<P: HeapStorage + Clone> {
     primary: P,
     cache: FileHeapStorage,
+    bound: Arc<Mutex<CacheBound>>,
 }
 
 impl<P: HeapStorage + Clone> WriteThroughCacheHeapStorage<P> {
     pub fn new(primary: P, cache_dir: impl Into<PathBuf>) -> Self {
+        Self::with_capacity_bytes(primary, cache_dir, DEFAULT_CACHE_CAPACITY_BYTES)
+    }
+
+    /// Build a write-through cache capped at `cap_bytes` of resident local data.
+    pub fn with_capacity_bytes(primary: P, cache_dir: impl Into<PathBuf>, cap_bytes: u64) -> Self {
         Self {
             primary,
             cache: FileHeapStorage::new(cache_dir),
+            bound: Arc::new(Mutex::new(CacheBound {
+                cap: cap_bytes.max(1),
+                ..Default::default()
+            })),
+        }
+    }
+
+    /// Record a freshly-cached blob and evict the oldest entries (from the local
+    /// cache only) to stay within capacity. Eviction is best-effort.
+    async fn note_cached(&self, name: &str, size: u64) {
+        let evicted = self.bound.lock().unwrap().record(name, size);
+        for key in evicted {
+            let _ = self.cache.delete(&key).await;
         }
     }
 }
@@ -197,6 +273,7 @@ impl<P: HeapStorage + Clone> HeapStorage for WriteThroughCacheHeapStorage<P> {
         // Write-through: write to both FS cache and primary
         self.cache.put(name, data).await?;
         self.primary.put(name, data).await?;
+        self.note_cached(name, data.len() as u64).await;
         Ok(())
     }
     async fn get(&self, name: &str) -> Result<Vec<u8>, String> {
@@ -209,6 +286,8 @@ impl<P: HeapStorage + Clone> HeapStorage for WriteThroughCacheHeapStorage<P> {
         // Best-effort cache population; don't fail if local write fails
         if let Err(e) = self.cache.put(name, &data).await {
             tracing::warn!("Failed to populate FS cache for {}: {}", name, e);
+        } else {
+            self.note_cached(name, data.len() as u64).await;
         }
         Ok(data)
     }
@@ -217,6 +296,7 @@ impl<P: HeapStorage + Clone> HeapStorage for WriteThroughCacheHeapStorage<P> {
     }
     async fn delete(&self, name: &str) -> Result<(), String> {
         // Remove from both layers; the cache delete is best-effort.
+        self.bound.lock().unwrap().forget(name);
         let _ = self.cache.delete(name).await;
         self.primary.delete(name).await
     }

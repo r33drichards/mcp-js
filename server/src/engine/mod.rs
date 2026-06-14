@@ -10,6 +10,7 @@ pub mod fs_labels;
 pub mod fs_merge;
 pub mod fs_mount;
 pub mod fs_store;
+pub mod fs_tree;
 pub mod heap_storage;
 pub mod heap_tags;
 pub mod mcp_client;

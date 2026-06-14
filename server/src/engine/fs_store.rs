@@ -1,32 +1,35 @@
 //! Content-addressed object store for the snapshottable filesystem.
 //!
-//! Two object kinds live in the blob backend (shared with the heap store):
+//! Three object kinds live in the blob backend (shared with the heap store):
 //!   * **chunks** — the bytes of large files, keyed by their plaintext hash;
-//!   * **manifests** — pure-content directory trees, keyed by the hash of their
-//!     canonical (`bincode` over a `BTreeMap`) encoding.
+//!   * **tree nodes** — one directory level of a snapshot, keyed by the hash of
+//!     its `bincode` encoding (see [`crate::engine::fs_tree`]);
+//!   * a snapshot **root** is just the hash of its top-level tree node.
 //!
-//! Both are immutable and idempotent: a content-addressed id always names the
+//! All are immutable and idempotent: a content-addressed id always names the
 //! same bytes, so they can be written from any node with no coordination.
+//!
+//! The flat [`Manifest`] type is retained as a convenience view (used by merge,
+//! GC roots, and tests): [`FsStore::put_manifest`] builds a tree from it and
+//! [`FsStore::get_manifest`] flattens a tree back. The mount itself never
+//! materialises a whole `Manifest`; it walks the tree lazily so a multi-TB
+//! snapshot costs O(touched paths), not O(total).
 
 use crate::engine::fs_chunker::{chunk_refs, decompress, maybe_compress, Chunked};
+use crate::engine::fs_tree::{components_of, path_of, tree_key, TreeChild, TreeNode};
 use crate::engine::heap_storage::{HeapStorage, MemoryHeapStorage};
 use blake3::Hash;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-/// Blob-name prefixes keep fs objects from colliding with heap blobs in the
-/// shared backend and let GC recognise what it is scanning.
+/// Blob-name prefix keeps chunk blobs from colliding with heap blobs in the
+/// shared backend and lets GC recognise what it is scanning.
 const CHUNK_PREFIX: &str = "fschunk:";
-const MANIFEST_PREFIX: &str = "fsmanifest:";
 
 pub fn chunk_key(hash: &[u8; 32]) -> String {
     format!("{CHUNK_PREFIX}{}", hex(hash))
-}
-
-pub fn manifest_key(hash: &[u8; 32]) -> String {
-    format!("{MANIFEST_PREFIX}{}", hex(hash))
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -54,21 +57,62 @@ pub struct Entry {
 }
 
 /// PURE CONTENT — no parent/lineage field. Identical trees => identical id.
-/// Lineage lives only in the pointer plane (labels + reflog).
+/// Lineage lives only in the pointer plane (labels + reflog). This flat form is
+/// a view over the on-disk recursive tree (see module docs).
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug, Default)]
 pub struct Manifest {
     pub entries: BTreeMap<PathBuf, Entry>,
 }
 
+/// Bounded FIFO cache of decoded tree nodes, shared across clones of an
+/// `FsStore`. Bounds the resident node set so walking (or building over) a huge
+/// tree never pins the whole thing in memory.
+struct NodeCache {
+    map: HashMap<[u8; 32], Arc<TreeNode>>,
+    order: VecDeque<[u8; 32]>,
+    cap: usize,
+}
+
+impl NodeCache {
+    fn new(cap: usize) -> Self {
+        Self {
+            map: HashMap::new(),
+            order: VecDeque::new(),
+            cap,
+        }
+    }
+
+    fn get(&self, id: &[u8; 32]) -> Option<Arc<TreeNode>> {
+        self.map.get(id).cloned()
+    }
+
+    fn put(&mut self, id: [u8; 32], node: Arc<TreeNode>) {
+        if self.map.insert(id, node).is_none() {
+            self.order.push_back(id);
+            while self.order.len() > self.cap {
+                if let Some(old) = self.order.pop_front() {
+                    if old != id {
+                        self.map.remove(&old);
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct FsStore {
     blobs: Arc<dyn HeapStorage>,
+    nodes: Arc<Mutex<NodeCache>>,
 }
 
 impl FsStore {
     /// Reuse the same blob backend the heap store already uses.
     pub fn new(blobs: Arc<dyn HeapStorage>) -> Self {
-        Self { blobs }
+        Self {
+            blobs,
+            nodes: Arc::new(Mutex::new(NodeCache::new(8192))),
+        }
     }
 
     /// In-memory backend. Available in normal builds (not just `cfg(test)`) so
@@ -131,23 +175,218 @@ impl FsStore {
         }
     }
 
-    pub async fn put_manifest(&self, m: &Manifest) -> anyhow::Result<Hash> {
-        let bytes = bincode::serialize(m)?; // deterministic
-        let id = blake3::hash(&bytes);
-        self.blobs
-            .put(&manifest_key(id.as_bytes()), &bytes)
+    // ── Tree nodes ─────────────────────────────────────────────────────────
+
+    /// Fetch and decode a tree node, consulting the shared node cache first.
+    pub async fn get_node(&self, id: &[u8; 32]) -> anyhow::Result<Arc<TreeNode>> {
+        if let Some(n) = self.nodes.lock().unwrap().get(id) {
+            return Ok(n);
+        }
+        let bytes = self
+            .blobs
+            .get(&tree_key(id))
             .await
-            .map_err(|e| anyhow::anyhow!("put manifest: {e}"))?; // idempotent
+            .map_err(|e| anyhow::anyhow!("get tree node: {e}"))?;
+        let node: TreeNode = bincode::deserialize(&bytes)?;
+        let arc = Arc::new(node);
+        self.nodes.lock().unwrap().put(*id, arc.clone());
+        Ok(arc)
+    }
+
+    /// Encode and persist a tree node (idempotent); returns its content id.
+    pub async fn put_node(&self, node: &TreeNode) -> anyhow::Result<[u8; 32]> {
+        let bytes = bincode::serialize(node)?;
+        let id = *blake3::hash(&bytes).as_bytes();
+        self.blobs
+            .put(&tree_key(&id), &bytes)
+            .await
+            .map_err(|e| anyhow::anyhow!("put tree node: {e}"))?;
+        self.nodes.lock().unwrap().put(id, Arc::new(node.clone()));
         Ok(id)
     }
 
+    /// Resolve the child at `comps` under `root`, walking only the nodes on the
+    /// path (lazy). The empty path resolves to the root itself (a directory).
+    pub async fn resolve(
+        &self,
+        root: Option<[u8; 32]>,
+        comps: &[String],
+    ) -> anyhow::Result<Option<TreeChild>> {
+        let Some(root) = root else { return Ok(None) };
+        if comps.is_empty() {
+            return Ok(Some(TreeChild {
+                file: None,
+                dir: Some(root),
+            }));
+        }
+        let mut node = self.get_node(&root).await?;
+        for (i, name) in comps.iter().enumerate() {
+            let Some(child) = node.children.get(name) else {
+                return Ok(None);
+            };
+            if i + 1 == comps.len() {
+                return Ok(Some(child.clone()));
+            }
+            let Some(dir) = child.dir else { return Ok(None) };
+            node = self.get_node(&dir).await?;
+        }
+        Ok(None)
+    }
+
+    /// The file `Entry` at `comps`, if any.
+    pub async fn resolve_file(
+        &self,
+        root: Option<[u8; 32]>,
+        comps: &[String],
+    ) -> anyhow::Result<Option<Entry>> {
+        Ok(self.resolve(root, comps).await?.and_then(|c| c.file))
+    }
+
+    /// The directory node at `comps` (the root node for the empty path), or
+    /// `None` if `comps` does not name a directory.
+    pub async fn dir_node_at(
+        &self,
+        root: Option<[u8; 32]>,
+        comps: &[String],
+    ) -> anyhow::Result<Option<Arc<TreeNode>>> {
+        let Some(root) = root else { return Ok(None) };
+        if comps.is_empty() {
+            return Ok(Some(self.get_node(&root).await?));
+        }
+        match self.resolve(Some(root), comps).await? {
+            Some(TreeChild { dir: Some(d), .. }) => Ok(Some(self.get_node(&d).await?)),
+            _ => Ok(None),
+        }
+    }
+
+    /// Every file path (as component lists) under the subtree at `comps`. Bounded
+    /// to that subtree, so it is O(subtree) — used by `remove`/`rename` of a
+    /// directory, which inherently touch the whole subtree.
+    pub async fn list_subtree(
+        &self,
+        root: Option<[u8; 32]>,
+        comps: &[String],
+    ) -> anyhow::Result<Vec<Vec<String>>> {
+        let Some(start) = self.dir_node_at(root, comps).await? else {
+            return Ok(Vec::new());
+        };
+        let mut out = Vec::new();
+        let mut stack: Vec<(Vec<String>, Arc<TreeNode>)> = vec![(comps.to_vec(), start)];
+        while let Some((prefix, node)) = stack.pop() {
+            for (name, child) in &node.children {
+                let mut p = prefix.clone();
+                p.push(name.clone());
+                if child.file.is_some() {
+                    out.push(p.clone());
+                }
+                if let Some(d) = child.dir {
+                    stack.push((p, self.get_node(&d).await?));
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Build a new tree from `base_id` with `changes` applied — each `(comps,
+    /// Some(entry))` sets a file, each `(comps, None)` clears the file at that
+    /// path. Only the nodes on the path-to-root spine of a change are rewritten;
+    /// untouched subtrees keep their existing hash (structural sharing). Returns
+    /// `None` when the resulting subtree is empty.
+    async fn build_node(
+        &self,
+        base_id: Option<[u8; 32]>,
+        changes: Vec<(Vec<String>, Option<Entry>)>,
+    ) -> anyhow::Result<Option<[u8; 32]>> {
+        let mut node: TreeNode = match base_id {
+            Some(id) => (*self.get_node(&id).await?).clone(),
+            None => TreeNode::default(),
+        };
+
+        // Partition into direct (file at this level) and nested (recurse).
+        let mut direct: Vec<(String, Option<Entry>)> = Vec::new();
+        let mut nested: BTreeMap<String, Vec<(Vec<String>, Option<Entry>)>> = BTreeMap::new();
+        for (mut comps, val) in changes {
+            if comps.is_empty() {
+                continue;
+            }
+            if comps.len() == 1 {
+                direct.push((comps.pop().unwrap(), val));
+            } else {
+                let first = comps.remove(0);
+                nested.entry(first).or_default().push((comps, val));
+            }
+        }
+
+        for (name, val) in direct {
+            let child = node.children.entry(name.clone()).or_default();
+            child.file = val;
+            if child.is_empty() {
+                node.children.remove(&name);
+            }
+        }
+
+        for (name, sub) in nested {
+            let base_child = node.children.get(&name).and_then(|c| c.dir);
+            let new_dir = Box::pin(self.build_node(base_child, sub)).await?;
+            let child = node.children.entry(name.clone()).or_default();
+            child.dir = new_dir;
+            if child.is_empty() {
+                node.children.remove(&name);
+            }
+        }
+
+        if node.children.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(self.put_node(&node).await?))
+    }
+
+    /// Build a snapshot root from `base_id` + `changes`. Always returns a hash
+    /// (an empty snapshot becomes the canonical empty-node hash).
+    pub async fn build_root(
+        &self,
+        base_id: Option<[u8; 32]>,
+        changes: Vec<(Vec<String>, Option<Entry>)>,
+    ) -> anyhow::Result<[u8; 32]> {
+        match self.build_node(base_id, changes).await? {
+            Some(h) => Ok(h),
+            None => self.put_node(&TreeNode::default()).await,
+        }
+    }
+
+    // ── Flat-manifest view (compat: merge / GC roots / tests) ────────────────
+
+    /// Build a tree from a flat manifest and return its root id.
+    pub async fn put_manifest(&self, m: &Manifest) -> anyhow::Result<Hash> {
+        let changes: Vec<(Vec<String>, Option<Entry>)> = m
+            .entries
+            .iter()
+            .map(|(p, e)| (components_of(p), Some(e.clone())))
+            .collect();
+        let root = self.build_root(None, changes).await?;
+        Ok(Hash::from_bytes(root))
+    }
+
+    /// Flatten the tree rooted at `id` into a manifest. Errors if the root node
+    /// is absent (a never-materialised id), matching the old behaviour.
     pub async fn get_manifest(&self, id: &Hash) -> anyhow::Result<Manifest> {
-        let bytes = self
-            .blobs
-            .get(&manifest_key(id.as_bytes()))
-            .await
-            .map_err(|e| anyhow::anyhow!("get manifest: {e}"))?;
-        Ok(bincode::deserialize(&bytes)?)
+        let root = *id.as_bytes();
+        let node = self.get_node(&root).await?;
+        let mut entries = BTreeMap::new();
+        let mut stack: Vec<(Vec<String>, Arc<TreeNode>)> = vec![(Vec::new(), node)];
+        while let Some((prefix, node)) = stack.pop() {
+            for (name, child) in &node.children {
+                let mut p = prefix.clone();
+                p.push(name.clone());
+                if let Some(e) = &child.file {
+                    entries.insert(path_of(&p), e.clone());
+                }
+                if let Some(d) = child.dir {
+                    stack.push((p, self.get_node(&d).await?));
+                }
+            }
+        }
+        Ok(Manifest { entries })
     }
 
     /// Access to the underlying blob backend (used by GC).

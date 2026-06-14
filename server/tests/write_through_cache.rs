@@ -187,3 +187,36 @@ async fn test_large_binary_data() {
     cleanup(&primary_dir);
     cleanup(&cache_dir);
 }
+
+#[tokio::test]
+async fn test_capacity_bound_evicts_oldest_but_reads_still_succeed() {
+    let primary_dir = temp_dir("primary-evict");
+    let cache_dir = temp_dir("cache-evict");
+
+    let primary = FileHeapStorage::new(&primary_dir);
+    // Cap at 100 bytes: two 60-byte blobs cannot both stay resident.
+    let cached =
+        WriteThroughCacheHeapStorage::with_capacity_bytes(primary, &cache_dir, 100);
+
+    cached.put("a", &[1u8; 60]).await.unwrap();
+    cached.put("b", &[2u8; 60]).await.unwrap(); // pushes total to 120 -> evict "a"
+
+    // "a" was evicted from the *local cache* only…
+    let direct_cache = FileHeapStorage::new(&cache_dir);
+    assert!(
+        direct_cache.get("a").await.is_err(),
+        "oldest entry should be evicted from local cache"
+    );
+    assert!(
+        direct_cache.get("b").await.is_ok(),
+        "most-recent entry should remain cached"
+    );
+
+    // …but it is still readable through the wrapper via the primary fallback,
+    // and that re-caches it (evicting "b" in turn).
+    assert_eq!(cached.get("a").await.unwrap(), vec![1u8; 60]);
+    assert_eq!(cached.get("b").await.unwrap(), vec![2u8; 60]);
+
+    cleanup(&primary_dir);
+    cleanup(&cache_dir);
+}

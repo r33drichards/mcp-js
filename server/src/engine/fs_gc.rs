@@ -13,7 +13,8 @@
 use std::collections::HashSet;
 
 use crate::engine::fs_labels::{CaId, LabelStore};
-use crate::engine::fs_store::{chunk_key, manifest_key, Content, FsStore};
+use crate::engine::fs_store::{chunk_key, Content, FsStore};
+use crate::engine::fs_tree::tree_key;
 
 /// Which reflog entries count as GC roots.
 #[derive(Clone, Copy, Debug)]
@@ -63,7 +64,7 @@ pub async fn collect(
     // ── Mark ─────────────────────────────────────────────────────────────
     let mut marked: HashSet<String> = HashSet::new();
     for root in &roots {
-        mark_manifest(store, root, &mut marked).await?;
+        mark_tree(store, root, &mut marked).await?;
     }
 
     // ── Sweep ────────────────────────────────────────────────────────────
@@ -89,26 +90,35 @@ pub async fn collect(
     })
 }
 
-/// Mark a manifest blob and all of its referenced chunk blobs. A missing
-/// manifest (e.g. a root that was never materialized) is skipped, not fatal.
-async fn mark_manifest(
+/// Walk the snapshot tree rooted at `id`, marking every tree-node blob and the
+/// chunk blobs of every file entry. Shared subtrees are visited once (the
+/// `marked` set short-circuits a repeated node hash), so the walk is O(reachable
+/// nodes), not O(snapshots × tree). A missing node (a root that was never
+/// materialized, or a partial subtree) is skipped, not fatal.
+async fn mark_tree(
     store: &FsStore,
     id: &CaId,
     marked: &mut HashSet<String>,
 ) -> Result<(), String> {
-    let mkey = manifest_key(id);
-    if !marked.insert(mkey) {
-        return Ok(()); // already visited
-    }
-    let hash = blake3::Hash::from_bytes(*id);
-    let manifest = match store.get_manifest(&hash).await {
-        Ok(m) => m,
-        Err(_) => return Ok(()),
-    };
-    for entry in manifest.entries.values() {
-        if let Content::Chunks(hashes) = &entry.content {
-            for h in hashes {
-                marked.insert(chunk_key(h));
+    let mut stack: Vec<[u8; 32]> = vec![*id];
+    while let Some(node_id) = stack.pop() {
+        if !marked.insert(tree_key(&node_id)) {
+            continue; // already visited this (possibly shared) subtree
+        }
+        let node = match store.get_node(&node_id).await {
+            Ok(n) => n,
+            Err(_) => continue,
+        };
+        for child in node.children.values() {
+            if let Some(entry) = &child.file {
+                if let Content::Chunks(hashes) = &entry.content {
+                    for h in hashes {
+                        marked.insert(chunk_key(h));
+                    }
+                }
+            }
+            if let Some(d) = &child.dir {
+                stack.push(*d);
             }
         }
     }
@@ -116,5 +126,5 @@ async fn mark_manifest(
 }
 
 fn is_fs_blob(key: &str) -> bool {
-    key.starts_with("fschunk:") || key.starts_with("fsmanifest:")
+    key.starts_with("fschunk:") || key.starts_with("fstree:") || key.starts_with("fsmanifest:")
 }

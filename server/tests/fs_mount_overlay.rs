@@ -116,12 +116,12 @@ async fn rename_moves_implicit_directory_recursively() {
     // Old paths are gone; the directory no longer exists.
     assert!(m.read("dir/file".as_ref()).await.is_err());
     assert!(m.read("dir/sub/deep".as_ref()).await.is_err());
-    assert!(!m.exists("dir".as_ref()));
+    assert!(!m.exists("dir".as_ref()).await);
     // New paths carry the moved content, including the upper override.
     assert_eq!(m.read("newdir/file".as_ref()).await.unwrap(), b"override");
     assert_eq!(m.read("newdir/sub/deep".as_ref()).await.unwrap(), b"two");
-    assert!(m.exists("newdir".as_ref()));
-    assert!(m.exists("newdir/sub".as_ref()));
+    assert!(m.exists("newdir".as_ref()).await);
+    assert!(m.exists("newdir/sub".as_ref()).await);
 }
 
 #[tokio::test]

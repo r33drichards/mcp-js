@@ -37,7 +37,7 @@ mcp-v8 --http-port=3000 --cluster-port=4000 --node-id=node1 \
        --cache-dir=/var/lib/mcp-v8/fs-cache
 ```
 
-With `--s3-bucket` set, `--fs-store-dir` is used only as the write-through cache directory (when `--cache-dir` is also given).
+With `--s3-bucket` set, blobs and tree nodes live in S3 (so every node resolves them identically), and `--cache-dir` is a **size-bounded** local write-through cache in front of it — it never tries to mirror the whole bucket, so a multi-terabyte snapshot store stays usable on a node with a modest local disk.
 
 ## Mount a snapshot in run_js
 

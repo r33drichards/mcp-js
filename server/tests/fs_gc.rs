@@ -3,7 +3,8 @@
 use server::engine::fs_gc::{collect, ReflogRetention};
 use server::engine::fs_labels::LabelStore;
 use server::engine::fs_mount::SessionMount;
-use server::engine::fs_store::{manifest_key, FsStore};
+use server::engine::fs_store::FsStore;
+use server::engine::fs_tree::tree_key;
 
 /// Push `files` as a snapshot via a mount and return its CA id (32 bytes).
 async fn snapshot(store: &FsStore, files: &[(&str, &[u8])]) -> [u8; 32] {
@@ -14,12 +15,9 @@ async fn snapshot(store: &FsStore, files: &[(&str, &[u8])]) -> [u8; 32] {
     *mnt.push().await.unwrap().as_bytes()
 }
 
+/// Whether the snapshot's root tree node is still present in the backend.
 async fn manifest_exists(store: &FsStore, id: &[u8; 32]) -> bool {
-    store
-        .blobs()
-        .get(&manifest_key(id))
-        .await
-        .is_ok()
+    store.blobs().get(&tree_key(id)).await.is_ok()
 }
 
 #[tokio::test]

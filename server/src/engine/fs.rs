@@ -477,7 +477,7 @@ async fn op_fs_exists(
         check_policy(&config.policy_chain, "exists", &path, None, None, None, config.mcp_headers.as_ref()).await?;
 
         let exists = if let Some(m) = mount {
-            m.0.lock().await.exists(Path::new(&path))
+            m.0.lock().await.exists(Path::new(&path)).await
         } else {
             tokio::fs::try_exists(&path).await.unwrap_or(false)
         };
