@@ -364,6 +364,29 @@ fn classify_termination_error(
 // only — no type checking is performed. Plain JavaScript passes through
 // unchanged.
 
+/// Parse a 64-char lowercase/uppercase hex string into a 32-byte CA id.
+/// Returns `None` for anything that is not exactly a 32-byte hex blob (e.g. a
+/// human-readable label name).
+pub fn parse_ca_hex(s: &str) -> Option<[u8; 32]> {
+    if s.len() != 64 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(out)
+}
+
+/// Render a 32-byte CA id as lowercase hex.
+pub fn ca_to_hex(id: &[u8; 32]) -> String {
+    let mut s = String::with_capacity(64);
+    for b in id {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
 pub fn strip_typescript_types(code: &str) -> Result<String, String> {
     let cm: Lrc<SourceMap> = Default::default();
 
@@ -679,6 +702,9 @@ pub struct ExecutionConfig<'a> {
     pub wasm_default_max_bytes: usize,
     pub fetch_config: Option<&'a fetch::FetchConfig>,
     pub fs_config: Option<&'a fs::FsConfig>,
+    /// Optional overlay mount. When present, the fs ops operate on this virtual
+    /// filesystem instead of the host. Independent of the heap snapshot handle.
+    pub fs_mount: Option<fs::FsMountHandle>,
     pub mcp_headers: Option<serde_json::Value>,
     pub subprocess_config: Option<&'a subprocess::SubprocessConfig>,
     pub console_tree: Option<sled::Tree>,
@@ -695,6 +721,7 @@ impl<'a> ExecutionConfig<'a> {
             wasm_default_max_bytes: heap_memory_max_bytes,
             fetch_config: None,
             fs_config: None,
+            fs_mount: None,
             mcp_headers: None,
             subprocess_config: None,
             console_tree: None,
@@ -754,6 +781,11 @@ impl<'a> ExecutionConfig<'a> {
         self
     }
 
+    pub fn maybe_fs_mount(mut self, mount: Option<fs::FsMountHandle>) -> Self {
+        self.fs_mount = mount;
+        self
+    }
+
     pub fn maybe_mcp_config(mut self, config: Option<&'a mcp_client::McpConfig>) -> Self {
         self.mcp_config = config;
         self
@@ -775,6 +807,7 @@ pub fn execute_stateless(
         wasm_default_max_bytes,
         fetch_config,
         fs_config,
+        fs_mount,
         mcp_headers,
             subprocess_config,
         console_tree,
@@ -830,6 +863,12 @@ pub fn execute_stateless(
         if let Some(fsc) = fs_config {
             let fsc = fsc.clone().with_mcp_headers(mcp_headers.clone());
             runtime.op_state().borrow_mut().put(fsc);
+
+            // Attach the session's overlay mount, if any, so fs ops operate on
+            // the virtual filesystem (behind the same policy gate).
+            if let Some(mount) = fs_mount.clone() {
+                runtime.op_state().borrow_mut().put(mount);
+            }
 
             // Put subprocess config in OpState if subprocess policies are configured.
             if let Some(sc) = subprocess_config {
@@ -945,6 +984,7 @@ pub fn execute_stateful(
         wasm_default_max_bytes,
         fetch_config,
         fs_config,
+        fs_mount,
         mcp_headers,
             subprocess_config,
         console_tree,
@@ -1019,6 +1059,12 @@ pub fn execute_stateful(
         if let Some(fsc) = fs_config {
             let fsc = fsc.clone().with_mcp_headers(mcp_headers.clone());
             runtime.op_state().borrow_mut().put(fsc);
+
+            // Attach the session's overlay mount, if any, so fs ops operate on
+            // the virtual filesystem (behind the same policy gate).
+            if let Some(mount) = fs_mount.clone() {
+                runtime.op_state().borrow_mut().put(mount);
+            }
 
             // Put subprocess config in OpState if subprocess policies are configured.
             if let Some(sc) = subprocess_config {
@@ -1211,6 +1257,11 @@ pub struct Engine {
     /// own filesystem (the `file` parameter). `None` disables it entirely (the
     /// default); `Some` either allows all paths or gates them behind a policy.
     run_js_file_policy: Option<run_js_file::RunJsFilePolicy>,
+    /// Content-addressed object store for fs snapshots. Shares the heap blob
+    /// backend. When set, `run_js` may mount a snapshot via the `fs` parameter.
+    fs_store: Option<Arc<fs_store::FsStore>>,
+    /// Mutable label → manifest pointer store with reflog.
+    label_store: Option<Arc<fs_labels::LabelStore>>,
 }
 
 /// Builder for `Engine::run_js()`. Only `code` is required; everything else
@@ -1222,6 +1273,9 @@ pub struct RunJsRequest<'a> {
     /// executed instead of `code`. Policy-gated (see `run_js_file_policy`).
     file: Option<String>,
     heap: Option<String>,
+    /// Optional fs snapshot handle (label name or 64-hex CA id). Independent of
+    /// `heap` — the two are never coupled.
+    fs: Option<String>,
     session: Option<String>,
     heap_memory_max_mb: Option<usize>,
     execution_timeout_secs: Option<u64>,
@@ -1245,6 +1299,18 @@ impl<'a> RunJsRequest<'a> {
 
     pub fn heap(mut self, heap: impl Into<String>) -> Self {
         self.heap = Some(heap.into());
+        self
+    }
+
+    /// Mount an fs snapshot (label name or 64-hex CA id) for this execution.
+    pub fn fs(mut self, fs: impl Into<String>) -> Self {
+        self.fs = Some(fs.into());
+        self
+    }
+
+    /// Set the fs handle from an `Option`, leaving it unset when `None`.
+    pub fn maybe_fs(mut self, fs: Option<String>) -> Self {
+        self.fs = fs;
         self
     }
 
@@ -1289,6 +1355,7 @@ impl<'a> RunJsRequest<'a> {
             self.code,
             self.file,
             self.heap,
+            self.fs,
             self.session,
             self.heap_memory_max_mb,
             self.execution_timeout_secs,
@@ -1328,6 +1395,8 @@ impl Engine {
             instructions_override: None,
             run_js_description_override: None,
             run_js_file_policy: None,
+            fs_store: None,
+            label_store: None,
         }
     }
 
@@ -1363,6 +1432,8 @@ impl Engine {
             instructions_override: None,
             run_js_description_override: None,
             run_js_file_policy: None,
+            fs_store: None,
+            label_store: None,
         }
     }
 
@@ -1483,6 +1554,71 @@ impl Engine {
         self
     }
 
+    /// Configure the content-addressed fs snapshot store (the object store) and
+    /// the label/reflog pointer store. Both are required for the `fs` mount
+    /// parameter and the `fs_*` tools to function.
+    pub fn with_fs_snapshots(
+        mut self,
+        store: Arc<fs_store::FsStore>,
+        labels: Arc<fs_labels::LabelStore>,
+    ) -> Self {
+        self.fs_store = Some(store);
+        self.label_store = Some(labels);
+        self
+    }
+
+    /// The fs object store, if configured.
+    pub fn fs_store(&self) -> Option<&Arc<fs_store::FsStore>> {
+        self.fs_store.as_ref()
+    }
+
+    /// The fs label/reflog store, if configured.
+    pub fn label_store(&self) -> Option<&Arc<fs_labels::LabelStore>> {
+        self.label_store.as_ref()
+    }
+
+    /// Resolve a `run_js` `fs` handle to an attached overlay mount. The handle
+    /// is a label name (mounted at its current head) or a 64-hex CA id (mounted
+    /// detached/pinned). Returns `None` when no handle was supplied.
+    async fn build_fs_mount(
+        &self,
+        fs: &Option<String>,
+    ) -> Result<Option<fs::FsMountHandle>, String> {
+        let Some(handle) = fs.as_ref().filter(|s| !s.is_empty()) else {
+            return Ok(None);
+        };
+        let store = self
+            .fs_store
+            .as_ref()
+            .ok_or_else(|| "fs snapshots are not configured on this server".to_string())?;
+
+        // A 64-char hex string is treated as a detached CA id; anything else is
+        // a label resolved to its current head.
+        let mount = if let Some(id) = parse_ca_hex(handle) {
+            let hash = blake3::Hash::from_bytes(id);
+            fs_mount::SessionMount::pull((**store).clone(), hash)
+                .await
+                .map_err(|e| format!("fs mount: pull {handle}: {e}"))?
+        } else {
+            let labels = self
+                .label_store
+                .as_ref()
+                .ok_or_else(|| "fs labels are not configured on this server".to_string())?;
+            match labels.resolve(handle).await? {
+                Some(id) => {
+                    let hash = blake3::Hash::from_bytes(id);
+                    fs_mount::SessionMount::pull((**store).clone(), hash)
+                        .await
+                        .map_err(|e| format!("fs mount: pull label {handle}: {e}"))?
+                }
+                // Unknown label → start from an empty overlay so the first push
+                // can create it.
+                None => fs_mount::SessionMount::empty((**store).clone()),
+            }
+        };
+        Ok(Some(fs::FsMountHandle::new(mount)))
+    }
+
     /// Resolve a `run_js` `file` parameter to source code, applying the
     /// configured policy. Errors if file-path execution is disabled or denied.
     async fn resolve_run_js_file(
@@ -1508,6 +1644,7 @@ impl Engine {
             code: code.into(),
             file: None,
             heap: None,
+            fs: None,
             session: None,
             heap_memory_max_mb: None,
             execution_timeout_secs: None,
@@ -1517,11 +1654,13 @@ impl Engine {
     }
 
     /// Internal: actually submit the run_js request.
+    #[allow(clippy::too_many_arguments)]
     async fn run_js_inner(
         &self,
         code: String,
         file: Option<String>,
         heap: Option<String>,
+        fs: Option<String>,
         session: Option<String>,
         heap_memory_max_mb: Option<usize>,
         execution_timeout_secs: Option<u64>,
@@ -1570,7 +1709,7 @@ impl Engine {
 
         tokio::spawn(async move {
             engine.execute_in_background(
-                id_bg, code, heap, session, heap_memory_max_mb,
+                id_bg, code, heap, fs, session, heap_memory_max_mb,
                 execution_timeout_secs, tags, raw_snapshot, console_tree,
                 mcp_headers,
             ).await;
@@ -1579,12 +1718,29 @@ impl Engine {
         Ok(id)
     }
 
+    /// Flush a session's overlay mount into a new pure manifest and return its
+    /// CA id (hex). This is the durable fs artifact recorded on completion; it
+    /// does NOT advance any label (pushing a label is the explicit `fs_push`
+    /// verb).
+    async fn push_mount(&self, fm: &Option<fs::FsMountHandle>) -> Option<String> {
+        let fm = fm.as_ref()?;
+        match fm.0.lock().await.push().await {
+            Ok(h) => Some(ca_to_hex(h.as_bytes())),
+            Err(e) => {
+                tracing::warn!("fs push after execution failed: {e}");
+                None
+            }
+        }
+    }
+
     /// Background execution task — runs V8 on the blocking pool with timeout.
+    #[allow(clippy::too_many_arguments)]
     async fn execute_in_background(
         &self,
         id: ExecutionId,
         code: String,
         heap: Option<String>,
+        fs: Option<String>,
         session: Option<String>,
         heap_memory_max_mb: Option<usize>,
         execution_timeout_secs: Option<u64>,
@@ -1596,6 +1752,15 @@ impl Engine {
         let registry = match &self.execution_registry {
             Some(r) => r.clone(),
             None => return,
+        };
+
+        // Resolve and attach the fs overlay mount (independent of the heap).
+        let fs_mount = match self.build_fs_mount(&fs).await {
+            Ok(m) => m,
+            Err(e) => {
+                registry.fail(&id, e);
+                return;
+            }
         };
 
         let max_bytes = heap_memory_max_mb
@@ -1628,9 +1793,11 @@ impl Engine {
                 let ct = console_tree;
                 let mlc = self.module_loader_config.clone();
                 let mc = self.mcp_client_manager.as_ref().map(|m| mcp_client::McpConfig { client_manager: (**m).clone(), policy_chain: self.mcp_tools_policy_chain.clone() });
+                let fm = fs_mount.clone();
                 let mut join_handle = tokio::task::spawn_blocking(move || {
                     execute_stateless(&code, ExecutionConfig::new(max_bytes)
                         .isolate_handle(ih)
+                        .maybe_fs_mount(fm)
                         .wasm_modules(&wasm)
                         .wasm_default_max_bytes(wasm_default)
                         .maybe_fetch_config(fc.as_deref())
@@ -1676,7 +1843,11 @@ impl Engine {
                 };
 
                 match result {
-                    Ok(js_result) => registry.complete(&id, js_result.output, None),
+                    Ok(js_result) => {
+                        registry.complete(&id, js_result.output, None);
+                        let output_fs = self.push_mount(&fs_mount).await;
+                        registry.set_fs(&id, output_fs);
+                    }
                     Err(e) if e.contains("timed out") => registry.timed_out(&id),
                     Err(e) => registry.fail(&id, e),
                 }
@@ -1696,10 +1867,12 @@ impl Engine {
                 let mc = self.mcp_client_manager.as_ref().map(|m| mcp_client::McpConfig { client_manager: (**m).clone(), policy_chain: self.mcp_tools_policy_chain.clone() });
 
                 let snap_mutex = self.snapshot_mutex.clone();
+                let fm = fs_mount.clone();
                 let mut join_handle = tokio::task::spawn_blocking(move || {
                     let _guard = snap_mutex.blocking_lock();
                     execute_stateful(&code, raw_snapshot, ExecutionConfig::new(max_bytes)
                         .isolate_handle(ih)
+                        .maybe_fs_mount(fm)
                         .wasm_modules(&wasm)
                         .wasm_default_max_bytes(wasm_default)
                         .maybe_fetch_config(fc.as_deref())
@@ -1749,10 +1922,16 @@ impl Engine {
                             return;
                         }
 
+                        // Record the resulting fs snapshot CA id independently of
+                        // the heap. Does not advance any label.
+                        let output_fs = self.push_mount(&fs_mount).await;
+                        registry.set_fs(&id, output_fs.clone());
+
                         if let (Some(session_name), Some(log)) = (&session, &self.session_log) {
                             let entry = SessionLogEntry {
                                 input_heap: heap.clone(),
                                 output_heap: content_hash.clone(),
+                                output_fs: output_fs.clone(),
                                 code: code_for_log,
                                 timestamp: chrono::Utc::now().to_rfc3339(),
                             };

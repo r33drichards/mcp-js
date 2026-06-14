@@ -32,9 +32,23 @@ use deno_core::{JsRuntime, OpState, op2};
 use deno_error::JsErrorBox;
 use serde::Serialize;
 
+use super::fs_mount::SessionMount;
 use super::opa::PolicyChain;
+use std::path::Path;
 
 // ── Configuration ────────────────────────────────────────────────────────
+
+/// Handle to the session's active overlay mount. When present in `OpState`, the
+/// fs ops delegate to it (after the policy gate) instead of touching the real
+/// filesystem. Cheap to clone — it's an `Arc` over the shared mount.
+#[derive(Clone)]
+pub struct FsMountHandle(pub Arc<tokio::sync::Mutex<SessionMount>>);
+
+impl FsMountHandle {
+    pub fn new(mount: SessionMount) -> Self {
+        Self(Arc::new(tokio::sync::Mutex::new(mount)))
+    }
+}
 
 /// Configuration for the fs module. Stored in deno_core's `OpState`.
 #[derive(Clone, Debug)]
@@ -80,12 +94,18 @@ async fn op_fs_read_file_text(
     #[string] path: String,
 ) -> Result<String, JsErrorBox> {
     let config = extract_config(&state)?;
+    let mount = extract_mount(&state);
 
     tokio::spawn(async move {
         check_policy(&config.policy_chain, "readFile", &path, None, None, Some("utf8"), config.mcp_headers.as_ref()).await?;
 
-        let content = tokio::fs::read(&path).await
-            .map_err(|e| format!("fs.readFile: {}: {}", path, e))?;
+        let content = if let Some(m) = mount {
+            m.0.lock().await.read(Path::new(&path)).await
+                .map_err(|e| format!("fs.readFile: {}: {}", path, e))?
+        } else {
+            tokio::fs::read(&path).await
+                .map_err(|e| format!("fs.readFile: {}: {}", path, e))?
+        };
 
         String::from_utf8(content)
             .map_err(|e| format!("fs.readFile: invalid UTF-8 in {}: {}", path, e))
@@ -103,10 +123,15 @@ async fn op_fs_read_file_buffer(
     #[string] path: String,
 ) -> Result<Vec<u8>, JsErrorBox> {
     let config = extract_config(&state)?;
+    let mount = extract_mount(&state);
 
     tokio::spawn(async move {
         check_policy(&config.policy_chain, "readFile", &path, None, None, Some("buffer"), config.mcp_headers.as_ref()).await?;
 
+        if let Some(m) = mount {
+            return m.0.lock().await.read(Path::new(&path)).await
+                .map_err(|e| format!("fs.readFile: {}: {}", path, e));
+        }
         tokio::fs::read(&path).await
             .map_err(|e| format!("fs.readFile: {}: {}", path, e))
     })
@@ -124,10 +149,16 @@ async fn op_fs_write_file_text(
     #[string] data: String,
 ) -> Result<String, JsErrorBox> {
     let config = extract_config(&state)?;
+    let mount = extract_mount(&state);
 
     tokio::spawn(async move {
         check_policy(&config.policy_chain, "writeFile", &path, None, None, None, config.mcp_headers.as_ref()).await?;
 
+        if let Some(m) = mount {
+            m.0.lock().await.write(Path::new(&path), data.as_bytes()).await
+                .map_err(|e| format!("fs.writeFile: {}: {}", path, e))?;
+            return Ok("{}".to_string());
+        }
         tokio::fs::write(&path, data.as_bytes()).await
             .map_err(|e| format!("fs.writeFile: {}: {}", path, e))?;
 
@@ -147,10 +178,16 @@ async fn op_fs_write_file_buffer(
     #[buffer(copy)] data: Vec<u8>,
 ) -> Result<String, JsErrorBox> {
     let config = extract_config(&state)?;
+    let mount = extract_mount(&state);
 
     tokio::spawn(async move {
         check_policy(&config.policy_chain, "writeFile", &path, None, None, None, config.mcp_headers.as_ref()).await?;
 
+        if let Some(m) = mount {
+            m.0.lock().await.write(Path::new(&path), &data).await
+                .map_err(|e| format!("fs.writeFile: {}: {}", path, e))?;
+            return Ok("{}".to_string());
+        }
         tokio::fs::write(&path, &data).await
             .map_err(|e| format!("fs.writeFile: {}: {}", path, e))?;
 
@@ -170,9 +207,19 @@ async fn op_fs_append_file(
     #[string] data: String,
 ) -> Result<String, JsErrorBox> {
     let config = extract_config(&state)?;
+    let mount = extract_mount(&state);
 
     tokio::spawn(async move {
         check_policy(&config.policy_chain, "appendFile", &path, None, None, None, config.mcp_headers.as_ref()).await?;
+
+        if let Some(m) = mount {
+            let mut guard = m.0.lock().await;
+            let mut existing = guard.read(Path::new(&path)).await.unwrap_or_default();
+            existing.extend_from_slice(data.as_bytes());
+            guard.write(Path::new(&path), &existing).await
+                .map_err(|e| format!("fs.appendFile: {}: {}", path, e))?;
+            return Ok("{}".to_string());
+        }
 
         use tokio::io::AsyncWriteExt;
         let mut file = tokio::fs::OpenOptions::new()
@@ -200,9 +247,16 @@ async fn op_fs_readdir(
     #[string] path: String,
 ) -> Result<String, JsErrorBox> {
     let config = extract_config(&state)?;
+    let mount = extract_mount(&state);
 
     tokio::spawn(async move {
         check_policy(&config.policy_chain, "readdir", &path, None, None, None, config.mcp_headers.as_ref()).await?;
+
+        if let Some(m) = mount {
+            let names = m.0.lock().await.readdir(Path::new(&path)).await
+                .map_err(|e| format!("fs.readdir: {}: {}", path, e))?;
+            return Ok(deno_core::serde_json::json!(names).to_string());
+        }
 
         let mut entries = Vec::new();
         let mut dir = tokio::fs::read_dir(&path).await
@@ -231,9 +285,16 @@ async fn op_fs_stat(
     #[string] path: String,
 ) -> Result<String, JsErrorBox> {
     let config = extract_config(&state)?;
+    let mount = extract_mount(&state);
 
     tokio::spawn(async move {
         check_policy(&config.policy_chain, "stat", &path, None, None, None, config.mcp_headers.as_ref()).await?;
+
+        if let Some(m) = mount {
+            let s = m.0.lock().await.stat(Path::new(&path)).await
+                .map_err(|e| format!("fs.stat: {}: {}", path, e))?;
+            return Ok(mount_stat_json(&s));
+        }
 
         let metadata = tokio::fs::metadata(&path).await
             .map_err(|e| format!("fs.stat: {}: {}", path, e))?;
@@ -275,10 +336,17 @@ async fn op_fs_mkdir(
     #[smi] recursive: i32,
 ) -> Result<String, JsErrorBox> {
     let config = extract_config(&state)?;
+    let mount = extract_mount(&state);
     let recursive = recursive != 0;
 
     tokio::spawn(async move {
         check_policy(&config.policy_chain, "mkdir", &path, None, Some(recursive), None, config.mcp_headers.as_ref()).await?;
+
+        if let Some(m) = mount {
+            m.0.lock().await.mkdir(Path::new(&path)).await
+                .map_err(|e| format!("fs.mkdir: {}: {}", path, e))?;
+            return Ok("{}".to_string());
+        }
 
         if recursive {
             tokio::fs::create_dir_all(&path).await
@@ -302,10 +370,17 @@ async fn op_fs_rm(
     #[smi] recursive: i32,
 ) -> Result<String, JsErrorBox> {
     let config = extract_config(&state)?;
+    let mount = extract_mount(&state);
     let recursive = recursive != 0;
 
     tokio::spawn(async move {
         check_policy(&config.policy_chain, "rm", &path, None, Some(recursive), None, config.mcp_headers.as_ref()).await?;
+
+        if let Some(m) = mount {
+            m.0.lock().await.remove(Path::new(&path), recursive).await
+                .map_err(|e| format!("fs.rm: {}: {}", path, e))?;
+            return Ok("{}".to_string());
+        }
 
         let metadata = tokio::fs::metadata(&path).await
             .map_err(|e| format!("fs.rm: {}: {}", path, e))?;
@@ -336,10 +411,16 @@ async fn op_fs_rename(
     #[string] to: String,
 ) -> Result<String, JsErrorBox> {
     let config = extract_config(&state)?;
+    let mount = extract_mount(&state);
 
     tokio::spawn(async move {
         check_policy(&config.policy_chain, "rename", &from, Some(&to), None, None, config.mcp_headers.as_ref()).await?;
 
+        if let Some(m) = mount {
+            m.0.lock().await.rename(Path::new(&from), Path::new(&to)).await
+                .map_err(|e| format!("fs.rename: {} -> {}: {}", from, to, e))?;
+            return Ok("{}".to_string());
+        }
         tokio::fs::rename(&from, &to).await
             .map_err(|e| format!("fs.rename: {} -> {}: {}", from, to, e))?;
 
@@ -359,10 +440,19 @@ async fn op_fs_copy_file(
     #[string] to: String,
 ) -> Result<String, JsErrorBox> {
     let config = extract_config(&state)?;
+    let mount = extract_mount(&state);
 
     tokio::spawn(async move {
         check_policy(&config.policy_chain, "copyFile", &from, Some(&to), None, None, config.mcp_headers.as_ref()).await?;
 
+        if let Some(m) = mount {
+            let mut guard = m.0.lock().await;
+            let bytes = guard.read(Path::new(&from)).await
+                .map_err(|e| format!("fs.copyFile: {}: {}", from, e))?;
+            guard.write(Path::new(&to), &bytes).await
+                .map_err(|e| format!("fs.copyFile: {} -> {}: {}", from, to, e))?;
+            return Ok("{}".to_string());
+        }
         tokio::fs::copy(&from, &to).await
             .map_err(|e| format!("fs.copyFile: {} -> {}: {}", from, to, e))?;
 
@@ -381,11 +471,16 @@ async fn op_fs_exists(
     #[string] path: String,
 ) -> Result<String, JsErrorBox> {
     let config = extract_config(&state)?;
+    let mount = extract_mount(&state);
 
     tokio::spawn(async move {
         check_policy(&config.policy_chain, "exists", &path, None, None, None, config.mcp_headers.as_ref()).await?;
 
-        let exists = tokio::fs::try_exists(&path).await.unwrap_or(false);
+        let exists = if let Some(m) = mount {
+            m.0.lock().await.exists(Path::new(&path))
+        } else {
+            tokio::fs::try_exists(&path).await.unwrap_or(false)
+        };
         Ok(if exists { "true" } else { "false" }.to_string())
     })
     .await
@@ -508,6 +603,27 @@ fn extract_config(state: &Rc<RefCell<OpState>>) -> Result<FsConfig, JsErrorBox> 
     let config = state.try_borrow::<FsConfig>()
         .ok_or_else(|| JsErrorBox::generic("fs: internal error — no fs config available"))?;
     Ok(config.clone())
+}
+
+/// The active mount, if any. When `Some`, fs ops operate on the virtual overlay
+/// rather than the host filesystem.
+fn extract_mount(state: &Rc<RefCell<OpState>>) -> Option<FsMountHandle> {
+    state.borrow().try_borrow::<FsMountHandle>().cloned()
+}
+
+/// Build the JSON stat blob fs.stat returns, from overlay metadata.
+fn mount_stat_json(s: &super::fs_mount::Stat) -> String {
+    deno_core::serde_json::json!({
+        "size": s.size,
+        "isFile": !s.is_dir,
+        "isDirectory": s.is_dir,
+        "isSymlink": s.symlink.is_some(),
+        "readonly": false,
+        "mtimeMs": null,
+        "atimeMs": null,
+        "birthtimeMs": null,
+    })
+    .to_string()
 }
 
 async fn check_policy(

@@ -8,6 +8,11 @@ use crate::cluster::ClusterNode;
 pub struct SessionLogEntry {
     pub input_heap: Option<String>,
     pub output_heap: String,
+    /// Resulting filesystem snapshot CA id (hex), independent of the heap.
+    /// `None` for executions that ran without a mount. Defaults for entries
+    /// written before fs snapshots existed.
+    #[serde(default)]
+    pub output_fs: Option<String>,
     pub code: String,
     pub timestamp: String, // ISO 8601 UTC
 }

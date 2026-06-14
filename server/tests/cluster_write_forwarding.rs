@@ -348,6 +348,7 @@ async fn test_session_log_replication_through_raft() {
     let entry = SessionLogEntry {
         input_heap: None,
         output_heap: "abc123".to_string(),
+        output_fs: None,
         code: "console.log('hello')".to_string(),
         timestamp: "2025-01-01T00:00:00Z".to_string(),
     };

@@ -89,6 +89,39 @@ impl SessionMount {
         Ok(())
     }
 
+    /// Whether `p` names an existing file or (implicit) directory.
+    pub fn exists(&self, p: &Path) -> bool {
+        let p = normalize(p);
+        self.effective(&p).is_some() || self.is_implicit_dir(&p)
+    }
+
+    /// Remove a file, or a directory (recursively whiting out descendants).
+    /// Mirrors Node `fs.rm`: non-recursive removal of a non-empty directory
+    /// fails.
+    pub async fn remove(&mut self, p: &Path, recursive: bool) -> anyhow::Result<()> {
+        let p = normalize(p);
+        if self.effective(&p).is_some() {
+            // Plain file.
+            self.upper.insert(p, Write::Whiteout);
+            return Ok(());
+        }
+        let descendants: Vec<PathBuf> = self
+            .effective_paths()
+            .into_iter()
+            .filter(|x| child_suffix(&p, x).is_some())
+            .collect();
+        if descendants.is_empty() {
+            anyhow::bail!("ENOENT: {}", p.display());
+        }
+        if !recursive {
+            anyhow::bail!("ENOTEMPTY: {}", p.display());
+        }
+        for d in descendants {
+            self.upper.insert(d, Write::Whiteout);
+        }
+        Ok(())
+    }
+
     pub async fn stat(&self, p: &Path) -> anyhow::Result<Stat> {
         let p = normalize(p);
         if let Some(e) = self.effective(&p) {

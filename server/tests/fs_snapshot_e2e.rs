@@ -1,0 +1,176 @@
+//! End-to-end fs snapshot flow through the `Engine`: mount → write → push →
+//! inspect the resulting snapshot, plus heap/fs handle independence.
+//!
+//! Uses the real `Engine::run_js().execute()` path (async execution on the
+//! blocking pool), which is the only place async fs ops are correctly driven.
+//! Stateless executions return an empty `result` (output goes to console), so
+//! we assert on the durable artifact — the pushed manifest — by reading it back
+//! out of the shared `FsStore`.
+
+use std::sync::{Arc, Once};
+
+use server::engine::execution::ExecutionRegistry;
+use server::engine::fs::FsConfig;
+use server::engine::fs_labels::LabelStore;
+use server::engine::fs_mount::SessionMount;
+use server::engine::fs_store::FsStore;
+use server::engine::opa::{EvalMode, PolicyChain};
+use server::engine::{initialize_v8, parse_ca_hex, Engine};
+
+static INIT: Once = Once::new();
+fn ensure_v8() {
+    INIT.call_once(initialize_v8);
+}
+
+fn tmp_dir(tag: &str) -> String {
+    std::env::temp_dir()
+        .join(format!(
+            "mcp-fs-e2e-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+        .to_str()
+        .unwrap()
+        .to_string()
+}
+
+struct Harness {
+    engine: Engine,
+    store: Arc<FsStore>,
+}
+
+fn build_harness() -> Harness {
+    let registry = ExecutionRegistry::new(&tmp_dir("reg")).expect("registry");
+    let fs_config = FsConfig::new(Arc::new(PolicyChain::new(vec![], EvalMode::All)));
+    let store = Arc::new(FsStore::in_memory());
+    let engine = Engine::new_stateless(64 * 1024 * 1024, 30, 4)
+        .with_fs_config(fs_config)
+        .with_execution_registry(Arc::new(registry))
+        .with_fs_snapshots(store.clone(), Arc::new(LabelStore::in_memory()));
+    Harness { engine, store }
+}
+
+/// Read a file out of a pushed snapshot by its CA-id hex.
+async fn read_snapshot_file(store: &FsStore, ca_hex: &str, path: &str) -> Vec<u8> {
+    let id = blake3::Hash::from_bytes(parse_ca_hex(ca_hex).expect("valid ca hex"));
+    let mount = SessionMount::pull(store.clone(), id).await.unwrap();
+    mount.read(path.as_ref()).await.unwrap()
+}
+
+/// Submit code with an optional fs handle and wait for terminal status.
+/// Returns the resulting fs CA id (hex), if any.
+async fn run(engine: &Engine, code: &str, fs: Option<&str>) -> Option<String> {
+    let exec_id = engine
+        .run_js(code.to_string())
+        .maybe_fs(fs.map(|s| s.to_string()))
+        .execute()
+        .await
+        .expect("submit");
+
+    for _ in 0..600 {
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        if let Ok(info) = engine.get_execution(&exec_id) {
+            match info.status.as_str() {
+                "completed" => return info.fs,
+                "failed" => panic!("execution failed: {:?}", info.error),
+                "timed_out" => panic!("execution timed out"),
+                _ => continue,
+            }
+        }
+    }
+    panic!("timeout waiting for execution");
+}
+
+#[tokio::test]
+async fn mount_write_push_then_read_back_by_ca_id() {
+    ensure_v8();
+    let h = build_harness();
+
+    // Mount the (new) label "main", write a file. The resulting fs CA id is
+    // surfaced on completion without advancing the label.
+    let ca1 = run(
+        &h.engine,
+        r#"(async () => {
+            await fs.writeFile("/data/note.txt", "hello snapshot");
+        })()"#,
+        Some("main"),
+    )
+    .await
+    .expect("first run should yield an fs CA id");
+
+    // The write is durable in the content store.
+    assert_eq!(
+        read_snapshot_file(&h.store, &ca1, "data/note.txt").await,
+        b"hello snapshot"
+    );
+
+    // Re-mounting that exact snapshot (detached, by CA id) and reading it works
+    // end-to-end through the engine too.
+    let ca2 = run(
+        &h.engine,
+        r#"(async () => {
+            const c = await fs.readFile("/data/note.txt");
+            if (c !== "hello snapshot") throw new Error("readback mismatch: " + c);
+            await fs.writeFile("/data/extra.txt", "more");
+        })()"#,
+        Some(&ca1),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        read_snapshot_file(&h.store, &ca2, "data/note.txt").await,
+        b"hello snapshot"
+    );
+    assert_eq!(
+        read_snapshot_file(&h.store, &ca2, "data/extra.txt").await,
+        b"more"
+    );
+}
+
+#[tokio::test]
+async fn fs_handle_and_heap_handle_are_independent() {
+    ensure_v8();
+    let h = build_harness();
+
+    // A base snapshot, then two divergent branches off it produce two distinct
+    // fs CA ids — the fs handle moves independently of any heap (stateless).
+    let base = run(
+        &h.engine,
+        r#"(async () => { await fs.writeFile("/a", "base"); })()"#,
+        Some("data"),
+    )
+    .await
+    .unwrap();
+
+    let fs_a = run(
+        &h.engine,
+        r#"(async () => { await fs.writeFile("/a", "branch-A"); })()"#,
+        Some(&base),
+    )
+    .await
+    .unwrap();
+    let fs_b = run(
+        &h.engine,
+        r#"(async () => { await fs.writeFile("/a", "branch-B"); })()"#,
+        Some(&base),
+    )
+    .await
+    .unwrap();
+
+    assert_ne!(fs_a, fs_b, "divergent writes must yield distinct CA ids");
+    assert_eq!(read_snapshot_file(&h.store, &fs_a, "a").await, b"branch-A");
+    assert_eq!(read_snapshot_file(&h.store, &fs_b, "a").await, b"branch-B");
+    // The base snapshot is untouched by either branch.
+    assert_eq!(read_snapshot_file(&h.store, &base, "a").await, b"base");
+}
+
+#[tokio::test]
+async fn run_without_fs_handle_has_no_fs_ca_id() {
+    ensure_v8();
+    let h = build_harness();
+    let fs = run(&h.engine, r#"(async () => { 1 + 1; })()"#, None).await;
+    assert!(fs.is_none(), "no mount → no fs CA id");
+}
