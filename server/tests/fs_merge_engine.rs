@@ -140,6 +140,56 @@ async fn clean_merge_is_deterministic_and_dedups() {
 }
 
 #[tokio::test]
+async fn text_edits_to_different_lines_auto_merge_through_engine() {
+    let h = harness();
+    let base = snap(&h.store, &[("notes.txt", b"alpha\nbeta\ngamma\n")]).await;
+    let ours = snap(&h.store, &[("notes.txt", b"ALPHA\nbeta\ngamma\n")]).await;
+    let theirs = snap(&h.store, &[("notes.txt", b"alpha\nbeta\nGAMMA\n")]).await;
+
+    // Same path changed on both sides, but on different lines -> line-level
+    // 3-way resolves it with no conflict.
+    let merged = match h
+        .engine
+        .fs_merge(&ours, &theirs, Some(base), Prefer::None)
+        .await
+        .unwrap()
+    {
+        FsMergeResult::Merged { ca_id } => ca_id,
+        other => panic!("expected clean text auto-merge, got {other:?}"),
+    };
+    assert_eq!(
+        read_file(&h.store, &merged, "notes.txt").await,
+        b"ALPHA\nbeta\nGAMMA\n"
+    );
+}
+
+#[tokio::test]
+async fn text_same_line_conflict_reports_kind_and_markers() {
+    let h = harness();
+    let base = snap(&h.store, &[("notes.txt", b"alpha\nbeta\ngamma\n")]).await;
+    let ours = snap(&h.store, &[("notes.txt", b"alpha\nOURS\ngamma\n")]).await;
+    let theirs = snap(&h.store, &[("notes.txt", b"alpha\nTHEIRS\ngamma\n")]).await;
+
+    match h
+        .engine
+        .fs_merge(&ours, &theirs, Some(base), Prefer::None)
+        .await
+        .unwrap()
+    {
+        FsMergeResult::Conflict { conflicts } => {
+            assert_eq!(conflicts.len(), 1);
+            let c = &conflicts[0];
+            assert_eq!(c.path, "notes.txt");
+            assert_eq!(c.kind, "text");
+            let markers = c.markers.as_ref().expect("text conflict has markers");
+            assert!(markers.contains("OURS") && markers.contains("THEIRS"));
+            assert!(c.diff_ours.is_some() && c.diff_theirs.is_some());
+        }
+        other => panic!("expected text conflict, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn two_way_merge_without_base_conflicts_on_divergence() {
     let h = harness();
     let ours = snap(&h.store, &[("a", b"a1"), ("x", b"x")]).await;

@@ -57,6 +57,7 @@ fastcdc = "3"
 zstd = "0.13"
 blake3 = "1"
 bincode = "1"
+diffy = "0.4"
 
 [dev-dependencies]
 tokio-test = "0.4"

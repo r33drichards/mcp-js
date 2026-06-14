@@ -879,7 +879,7 @@ pub struct FsMergeRequest {
     path = "/api/fs/merge",
     request_body = FsMergeRequest,
     responses(
-        (status = 200, description = "Merge ran — body has status=merged (with ca_id) or status=conflict (with conflicting paths)"),
+        (status = 200, description = "Merge ran — body has status=merged (ca_id) or status=conflict. Text files auto-merge at line level; each conflict carries kind plus, for text, diff3 markers and unified diffs."),
         (status = 400, description = "Invalid CA id or prefer value"),
     ),
     tag = "fs"

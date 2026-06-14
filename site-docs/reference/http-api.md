@@ -471,7 +471,7 @@ Authentication: none.
 
 |Status|Meaning|Description|Schema|
 |---|---|---|---|
-|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Merge ran — body has status=merged (with ca_id) or status=conflict (with conflicting paths)|None|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Merge ran — body has status=merged (ca_id) or status=conflict. Text files auto-merge at line level; each conflict carries kind plus, for text, diff3 markers and unified diffs.|None|
 |400|[Bad Request](https://tools.ietf.org/html/rfc7231#section-6.5.1)|Invalid CA id or prefer value|None|
 
 Authentication: none.

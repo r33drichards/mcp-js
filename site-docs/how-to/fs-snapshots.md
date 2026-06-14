@@ -55,11 +55,19 @@ curl -s localhost:3000/api/fs/merge -H 'content-type: application/json' -d '{
 }'
 ```
 
-Set `prefer` to `ours` or `theirs` to auto-resolve every conflict to that side.
-To resolve conflicts by hand, read each side's file via `run_js`, write the
-merged tree, and push that. The merge is a flat per-path 3-way (identical or
-one-sided changes auto-resolve; both-sides-diverged conflicts); renames and
-line-level content merges are out of scope.
+**Type-aware content merge.** When the same path changed on both sides, a
+type-specific merger gets a shot before reporting a conflict. **Text** files are
+merged at line level (diff3): edits to *different lines* of the same file merge
+cleanly and never reach you. A genuine same-line clash is reported with
+`kind: "text"`, the diff3 conflict `markers` (`<<<<<<< ======= >>>>>>>`), and
+unified `diff_ours` / `diff_theirs`, so you can resolve at line level — edit the
+marker text, write it back with `run_js`, and push. Binary files (and SQLite
+databases, detected but not yet auto-merged) report a whole-file conflict with
+their `kind`; richer per-type drivers plug in behind the same extension point.
+
+Set `prefer` to `ours` or `theirs` to auto-resolve any remaining conflicts to
+that side. The structural merge itself is a flat per-path 3-way; renames and a
+recursive virtual base for criss-cross histories remain out of scope.
 
 ### Push (reject-and-rebase)
 

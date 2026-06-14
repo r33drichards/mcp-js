@@ -57,11 +57,19 @@ directory hashes), the merge mirrors Mercurial's `manifestmerge` rather than
 git's recursive tree walk: it diffs the three flat maps and decides each path
 independently. With a common `base`, a path auto-resolves when it is identical
 on both sides or changed on only one; only paths both sides changed differently
-conflict. Without a base it degrades to a 2-way merge. Conflicts are returned as
-a structured `base`/`ours`/`theirs` list (not in-file markers) so an automated
-caller can resolve them deterministically; `prefer=ours|theirs` opts into
-auto-resolution. The result is an ordinary pure manifest — lineage stays in the
-reflog, and no merge-commit object is needed.
+conflict. Without a base it degrades to a 2-way merge.
+
+When a path conflicts structurally, a **type-aware content merger** (the
+mergeable-types pattern from Irmin) runs before a conflict is reported: text is
+sniffed and merged at line level via diff3, so edits to different lines of the
+same file reconcile automatically. Remaining conflicts are returned as a
+structured list — per path the `kind`, each side's content id, and for text the
+diff3 markers plus unified diffs — not as a corrupted in-file artifact, so an
+automated caller can resolve them deterministically. `prefer=ours|theirs` opts
+into whole-side auto-resolution. Binary types (including SQLite, which is
+detected) are the extension point where richer drivers plug in. The result is an
+ordinary pure manifest — lineage stays in the reflog, and no merge-commit object
+is needed.
 
 ## Out of scope
 
@@ -72,9 +80,10 @@ These are deliberate non-goals of the current (virtual) implementation:
   it, then pushing by diffing the directory. This is where reflink copy-up
   (APFS `clonefile`, XFS/Btrfs `FICLONE`, ReFS block clone) would belong. v1
   intercepts only the in-process Node `fs` surface.
-- **Merge refinements.** Rename/move detection, line-level (diff3) content
-  merges, and a recursive virtual base for criss-cross histories are future
-  work; `fs_merge` is a flat per-path three-way merge today.
+- **Merge refinements.** Rename/move detection and a recursive virtual base for
+  criss-cross histories are future work. Type-aware content merge exists for
+  text (line-level diff3); rich binary drivers (e.g. a SQLite changeset merger)
+  are stubbed at the extension point but not yet implemented.
 - **CRDT semantics.** Conflict-free merging would require a per-operation log
   with Lamport timestamps; our snapshot + reflog model has no such log, so
   three-way merge is the lower-cost fit.

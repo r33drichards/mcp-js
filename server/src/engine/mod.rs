@@ -4,6 +4,7 @@ pub mod fetch;
 pub mod fetch_auth;
 pub mod fs;
 pub mod fs_chunker;
+pub mod fs_content_merge;
 pub mod fs_gc;
 pub mod fs_labels;
 pub mod fs_merge;
@@ -429,13 +430,26 @@ pub enum FsMergeResult {
 }
 
 /// One conflicting path. Each side is a content id (hex of the entry) when the
-/// file is present on that side, or `null` when it is absent (delete).
+/// file is present on that side, or `null` when it is absent (delete). For text
+/// files the response also carries diff3 conflict markers and unified diffs so
+/// the caller can review and resolve at line level.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct FsMergeConflictView {
     pub path: String,
     pub base: Option<String>,
     pub ours: Option<String>,
     pub theirs: Option<String>,
+    /// Detected content type: `text`, `binary`, `sqlite`, or `modify/delete`.
+    pub kind: String,
+    /// diff3-marked text to edit and write back (text conflicts only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub markers: Option<String>,
+    /// Unified diff base -> ours (text conflicts only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diff_ours: Option<String>,
+    /// Unified diff base -> theirs (text conflicts only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diff_theirs: Option<String>,
 }
 
 /// A stable content id for a manifest entry: blake3 of its canonical encoding.
@@ -1876,27 +1890,86 @@ impl Engine {
             None => None,
         };
 
-        match fs_merge::merge_manifests(base_m.as_ref(), &ours_m, &theirs_m, prefer) {
-            fs_merge::MergeOutcome::Merged(manifest) => {
-                let id = store
-                    .put_manifest(&manifest)
-                    .await
-                    .map_err(|e| format!("fs_merge: store result: {e}"))?;
-                Ok(FsMergeResult::Merged {
-                    ca_id: ca_to_hex(id.as_bytes()),
-                })
-            }
-            fs_merge::MergeOutcome::Conflicts(conflicts) => Ok(FsMergeResult::Conflict {
-                conflicts: conflicts
-                    .into_iter()
-                    .map(|c| FsMergeConflictView {
-                        path: c.path.to_string_lossy().to_string(),
-                        base: c.base.as_ref().map(entry_content_id),
-                        ours: c.ours.as_ref().map(entry_content_id),
-                        theirs: c.theirs.as_ref().map(entry_content_id),
-                    })
-                    .collect(),
-            }),
+        // Structural per-path 3-way merge: clean parts land in `merged`,
+        // divergent paths come back as conflicts.
+        let structural = fs_merge::merge_manifests(base_m.as_ref(), &ours_m, &theirs_m, prefer);
+        let mut merged = structural.merged;
+
+        // Content-merge pass: give a type-aware merger a shot at each conflict
+        // before reporting it. Clean text merges resolve silently; the rest are
+        // surfaced with diffs/markers.
+        let mergers = fs_content_merge::default_mergers();
+        let mut conflict_views = Vec::new();
+        for c in structural.conflicts {
+            let view = match (&c.ours, &c.theirs) {
+                (Some(oe), Some(te)) => {
+                    let ours_b = store
+                        .read_file(oe)
+                        .await
+                        .map_err(|e| format!("fs_merge: read ours {}: {e}", c.path.display()))?;
+                    let theirs_b = store
+                        .read_file(te)
+                        .await
+                        .map_err(|e| format!("fs_merge: read theirs {}: {e}", c.path.display()))?;
+                    let base_b = match &c.base {
+                        Some(be) => Some(store.read_file(be).await.map_err(|e| {
+                            format!("fs_merge: read base {}: {e}", c.path.display())
+                        })?),
+                        None => None,
+                    };
+                    match fs_content_merge::merge_content(
+                        &mergers,
+                        base_b.as_deref(),
+                        &ours_b,
+                        &theirs_b,
+                    ) {
+                        fs_content_merge::ContentMergeResult::Clean(bytes) => {
+                            let entry = store
+                                .put_file(&bytes)
+                                .await
+                                .map_err(|e| format!("fs_merge: store merged {}: {e}", c.path.display()))?;
+                            merged.entries.insert(c.path.clone(), entry);
+                            continue; // resolved — not a conflict
+                        }
+                        fs_content_merge::ContentMergeResult::Conflict(cc) => FsMergeConflictView {
+                            path: c.path.to_string_lossy().to_string(),
+                            base: c.base.as_ref().map(entry_content_id),
+                            ours: c.ours.as_ref().map(entry_content_id),
+                            theirs: c.theirs.as_ref().map(entry_content_id),
+                            kind: cc.kind.as_str().to_string(),
+                            markers: cc.markers,
+                            diff_ours: cc.diff_ours,
+                            diff_theirs: cc.diff_theirs,
+                        },
+                    }
+                }
+                // A modify/delete (or add on one side): no content to reconcile.
+                _ => FsMergeConflictView {
+                    path: c.path.to_string_lossy().to_string(),
+                    base: c.base.as_ref().map(entry_content_id),
+                    ours: c.ours.as_ref().map(entry_content_id),
+                    theirs: c.theirs.as_ref().map(entry_content_id),
+                    kind: "modify/delete".to_string(),
+                    markers: None,
+                    diff_ours: None,
+                    diff_theirs: None,
+                },
+            };
+            conflict_views.push(view);
+        }
+
+        if conflict_views.is_empty() {
+            let id = store
+                .put_manifest(&merged)
+                .await
+                .map_err(|e| format!("fs_merge: store result: {e}"))?;
+            Ok(FsMergeResult::Merged {
+                ca_id: ca_to_hex(id.as_bytes()),
+            })
+        } else {
+            Ok(FsMergeResult::Conflict {
+                conflicts: conflict_views,
+            })
         }
     }
 

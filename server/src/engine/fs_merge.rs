@@ -53,12 +53,14 @@ pub struct MergeConflict {
     pub theirs: Option<Entry>,
 }
 
-#[derive(Debug)]
-pub enum MergeOutcome {
-    /// A clean merged manifest (possibly conflict-free thanks to `prefer`).
-    Merged(Manifest),
-    /// Unresolved conflicts; no manifest is produced.
-    Conflicts(Vec<MergeConflict>),
+/// The structural result of a merge: the cleanly-resolved tree plus any paths
+/// that diverged. `conflicts` is empty for a fully clean merge. A content-merge
+/// pass (see `fs_content_merge`) can still reconcile some of the conflicts by
+/// looking at the actual file bytes.
+#[derive(Debug, Default)]
+pub struct MergeResult {
+    pub merged: Manifest,
+    pub conflicts: Vec<MergeConflict>,
 }
 
 /// Three-way merge `ours` and `theirs` against an optional common `base`.
@@ -67,7 +69,7 @@ pub fn merge_manifests(
     ours: &Manifest,
     theirs: &Manifest,
     prefer: Prefer,
-) -> MergeOutcome {
+) -> MergeResult {
     // Union of every path across the three manifests.
     let mut paths: BTreeSet<&PathBuf> = BTreeSet::new();
     if let Some(b) = base {
@@ -114,9 +116,5 @@ pub fn merge_manifests(
         }
     }
 
-    if conflicts.is_empty() {
-        MergeOutcome::Merged(merged)
-    } else {
-        MergeOutcome::Conflicts(conflicts)
-    }
+    MergeResult { merged, conflicts }
 }

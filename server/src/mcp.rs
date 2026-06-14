@@ -692,7 +692,7 @@ impl McpService {
         }
     }
 
-    #[tool(description = "Three-way merge two filesystem snapshots (CA ids) into a new snapshot. Pass `base` — the snapshot both sides diverged from (e.g. the label head you mounted before two runs) — so only paths BOTH sides changed conflict; omit it for a 2-way merge. On success returns the merged snapshot's ca_id (push it to a label separately). On conflict returns status=conflict with the list of conflicting paths and each side's content id (null = absent). Set prefer=ours|theirs to auto-resolve all conflicts to that side.")]
+    #[tool(description = "Three-way merge two filesystem snapshots (CA ids) into a new snapshot. Pass `base` — the snapshot both sides diverged from (e.g. the label head you mounted before two runs) — so only paths BOTH sides changed conflict; omit it for a 2-way merge. Text files are merged at line level: edits to different lines of the same file auto-merge cleanly. On success returns the merged snapshot's ca_id (push it to a label separately). On conflict returns status=conflict with, per path: each side's content id (null = absent), kind (text/binary/sqlite/modify-delete), and for text the diff3 conflict `markers` plus unified `diff_ours`/`diff_theirs` so you can resolve at line level (edit the markers, write the file back, push). Set prefer=ours|theirs to auto-resolve remaining conflicts to that side.")]
     pub async fn fs_merge(
         &self,
         #[tool(param)] ours: String,
