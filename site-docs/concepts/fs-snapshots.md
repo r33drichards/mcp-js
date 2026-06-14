@@ -49,6 +49,20 @@ still in every label's reflog (within the retention window). A label that was
 roll-forward still works; only once the reflog entry is pruned does the snapshot
 become collectable.
 
+## Merging
+
+Two divergent snapshots can be combined with a **flat per-path three-way merge**
+(`fs_merge`). Because a manifest is a flat content-addressed map (no nested
+directory hashes), the merge mirrors Mercurial's `manifestmerge` rather than
+git's recursive tree walk: it diffs the three flat maps and decides each path
+independently. With a common `base`, a path auto-resolves when it is identical
+on both sides or changed on only one; only paths both sides changed differently
+conflict. Without a base it degrades to a 2-way merge. Conflicts are returned as
+a structured `base`/`ours`/`theirs` list (not in-file markers) so an automated
+caller can resolve them deterministically; `prefer=ours|theirs` opts into
+auto-resolution. The result is an ordinary pure manifest — lineage stays in the
+reflog, and no merge-commit object is needed.
+
 ## Out of scope
 
 These are deliberate non-goals of the current (virtual) implementation:
@@ -58,7 +72,12 @@ These are deliberate non-goals of the current (virtual) implementation:
   it, then pushing by diffing the directory. This is where reflink copy-up
   (APFS `clonefile`, XFS/Btrfs `FICLONE`, ReFS block clone) would belong. v1
   intercepts only the in-process Node `fs` surface.
-- **Merging diverged labels.** v1 is reject-and-rebase plus `force` only.
+- **Merge refinements.** Rename/move detection, line-level (diff3) content
+  merges, and a recursive virtual base for criss-cross histories are future
+  work; `fs_merge` is a flat per-path three-way merge today.
+- **CRDT semantics.** Conflict-free merging would require a per-operation log
+  with Lamport timestamps; our snapshot + reflog model has no such log, so
+  three-way merge is the lower-cost fit.
 - **Cross-label / cross-repo sharing UI.**
 
 See the [how-to guide](../how-to/fs-snapshots.md) for the tools, HTTP endpoints,

@@ -38,6 +38,28 @@ is a separate, explicit step.
 | Show the reflog | `fs_log` | `GET /api/fs/labels/{label}/log` | `mcp-v8-cli fs log <label>` |
 | Advance a label | `fs_push` | `POST /api/fs/push` | `mcp-v8-cli fs push <ca> --label <l>` |
 | Reset to an earlier id | `fs_reset` | `POST /api/fs/reset` | `mcp-v8-cli fs reset <label> <ca>` |
+| Merge two snapshots | `fs_merge` | `POST /api/fs/merge` | `mcp-v8-cli fs merge <ours> <theirs>` |
+
+### Merge (three-way)
+
+`fs_merge` combines two snapshots into a new one. Pass `base` — the snapshot
+both sides diverged from (e.g. the label head you mounted before two runs) — so
+only paths **both** sides changed conflict; omit it for a 2-way merge. A clean
+merge returns the merged snapshot's `ca_id` (push it to a label separately); a
+conflict returns `status: "conflict"` with the conflicting paths and each side's
+content id (`null` = the file is absent on that side):
+
+```bash
+curl -s localhost:3000/api/fs/merge -H 'content-type: application/json' -d '{
+  "ours": "<ca-A>", "theirs": "<ca-B>", "base": "<common-ancestor-ca>"
+}'
+```
+
+Set `prefer` to `ours` or `theirs` to auto-resolve every conflict to that side.
+To resolve conflicts by hand, read each side's file via `run_js`, write the
+merged tree, and push that. The merge is a flat per-path 3-way (identical or
+one-sided changes auto-resolve; both-sides-diverged conflicts); renames and
+line-level content merges are out of scope.
 
 ### Push (reject-and-rebase)
 
