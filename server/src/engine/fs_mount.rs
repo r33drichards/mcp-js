@@ -87,6 +87,21 @@ impl SessionMount {
         Ok(())
     }
 
+    /// Copy a file by **reference**: the destination reuses the source's content
+    /// (inline bytes or chunk hashes) directly, so no data is read, re-chunked,
+    /// or buffered — copying a multi-GB file moves only its entry.
+    pub async fn copy(&mut self, from: &Path, to: &Path) -> anyhow::Result<()> {
+        let from_c = components_of(from);
+        let from_k = path_of(&from_c);
+        match self.effective(&from_c, &from_k).await? {
+            Some(entry) => {
+                self.upper.insert(path_of(&components_of(to)), Write::Data(entry));
+                Ok(())
+            }
+            None => anyhow::bail!("ENOENT: {}", from_k.display()),
+        }
+    }
+
     pub async fn unlink(&mut self, p: &Path) -> anyhow::Result<()> {
         let comps = components_of(p);
         let key = path_of(&comps);

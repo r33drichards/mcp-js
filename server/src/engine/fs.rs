@@ -446,10 +446,8 @@ async fn op_fs_copy_file(
         check_policy(&config.policy_chain, "copyFile", &from, Some(&to), None, None, config.mcp_headers.as_ref()).await?;
 
         if let Some(m) = mount {
-            let mut guard = m.0.lock().await;
-            let bytes = guard.read(Path::new(&from)).await
-                .map_err(|e| format!("fs.copyFile: {}: {}", from, e))?;
-            guard.write(Path::new(&to), &bytes).await
+            // Copy by reference: clones the content-addressed entry, no rechunk.
+            m.0.lock().await.copy(Path::new(&from), Path::new(&to)).await
                 .map_err(|e| format!("fs.copyFile: {} -> {}: {}", from, to, e))?;
             return Ok("{}".to_string());
         }

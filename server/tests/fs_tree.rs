@@ -230,3 +230,69 @@ async fn mount_matches_flat_reference_through_push_pull() {
     let m2 = SessionMount::pull(store.clone(), new_root).await.unwrap();
     assert_consistent(&m2, &reference, &files, &dirs).await;
 }
+
+// ── Streaming chunker + copy-by-reference ───────────────────────────────────
+
+use server::engine::fs_store::Content;
+
+fn pseudo_random(len: usize, seed: u64) -> Vec<u8> {
+    let mut s = seed | 1;
+    (0..len)
+        .map(|_| {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            (s >> 24) as u8
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn large_file_streams_and_round_trips() {
+    let store = FsStore::in_memory();
+    let big = pseudo_random(3 * 1024 * 1024, 0xABCD); // 3 MiB -> chunked
+
+    // Ingest straight from a streaming reader (bounded memory).
+    let entry = store
+        .put_file_stream(std::io::Cursor::new(big.clone()))
+        .await
+        .unwrap();
+    assert!(matches!(entry.content, Content::Chunks(_)), "large file must chunk");
+    assert_eq!(store.read_file(&entry).await.unwrap(), big);
+
+    // And through the mount (writeFile path) + push/pull.
+    let mut m = SessionMount::empty(store.clone());
+    m.write("d/big.bin".as_ref(), &big).await.unwrap();
+    let root = m.push().await.unwrap();
+    let m2 = SessionMount::pull(store.clone(), root).await.unwrap();
+    assert_eq!(m2.read("d/big.bin".as_ref()).await.unwrap(), big);
+}
+
+#[tokio::test]
+async fn copy_is_by_reference_no_rechunk() {
+    let store = FsStore::in_memory();
+    let big = pseudo_random(2 * 1024 * 1024, 0x1234);
+
+    let mut m = SessionMount::empty(store.clone());
+    m.write("a/big".as_ref(), &big).await.unwrap();
+    m.copy("a/big".as_ref(), "b/copy".as_ref()).await.unwrap();
+
+    // Both readable and identical.
+    assert_eq!(m.read("a/big".as_ref()).await.unwrap(), big);
+    assert_eq!(m.read("b/copy".as_ref()).await.unwrap(), big);
+
+    // After push, both paths point at the very same chunk list — the copy moved
+    // the entry, it did not re-chunk the bytes.
+    let snap = store
+        .get_manifest(&m.push().await.unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        snap.entries["a/big".as_ref() as &std::path::Path].content,
+        snap.entries["b/copy".as_ref() as &std::path::Path].content,
+    );
+    assert!(matches!(
+        snap.entries["a/big".as_ref() as &std::path::Path].content,
+        Content::Chunks(_)
+    ));
+}

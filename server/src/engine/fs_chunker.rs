@@ -11,9 +11,11 @@ use fastcdc::v2020::FastCDC;
 /// Files at or below this size are stored whole (and inlined into the manifest).
 pub const SMALL_FILE_MAX: usize = 64 * 1024;
 
-const MIN: u32 = 256 * 1024;
-const AVG: u32 = 1024 * 1024;
-const MAX: u32 = 4 * 1024 * 1024;
+/// FastCDC content-defined chunking parameters (min/avg/max chunk size). Shared
+/// by the slice chunker here and the streaming chunker in `fs_store`.
+pub const MIN: u32 = 256 * 1024;
+pub const AVG: u32 = 1024 * 1024;
+pub const MAX: u32 = 4 * 1024 * 1024;
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Chunked {

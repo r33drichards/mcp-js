@@ -16,9 +16,13 @@
 //! With no base, every path where both sides changed (and differ) conflicts —
 //! a true 2-way merge.
 
-use crate::engine::fs_store::{Entry, Manifest};
+use crate::engine::fs_store::{Entry, FsStore, Manifest};
+use crate::engine::fs_tree::{path_of, TreeChild, TreeNode};
 use std::collections::BTreeSet;
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
+use std::sync::Arc;
 
 /// How to resolve a divergent path.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -117,4 +121,164 @@ pub fn merge_manifests(
     }
 
     MergeResult { merged, conflicts }
+}
+
+// ── Lazy tree merge ─────────────────────────────────────────────────────────
+//
+// The same per-path 3-way rule, but over the recursive tree: equal subtrees are
+// pruned by hash comparison without ever being loaded, so a merge of two
+// snapshots that differ in one corner costs O(differing paths), not O(tree). The
+// structurally-merged result is written as a new tree (sharing unchanged nodes);
+// conflicting files are left out of it and returned for the content-merge pass,
+// exactly as the flat merge does.
+
+/// The outcome of a tree merge: the structurally-merged root (conflicting paths
+/// omitted, to be patched by the caller's content merge) and the conflicts.
+pub struct TreeMergeOutcome {
+    pub root: [u8; 32],
+    pub conflicts: Vec<MergeConflict>,
+}
+
+/// Three-way merge of snapshot roots `ours`/`theirs` against optional `base`.
+pub async fn merge_trees(
+    store: &FsStore,
+    base: Option<[u8; 32]>,
+    ours: Option<[u8; 32]>,
+    theirs: Option<[u8; 32]>,
+    prefer: Prefer,
+) -> anyhow::Result<TreeMergeOutcome> {
+    let (root, conflicts) = merge_node(store, base, ours, theirs, prefer, Vec::new()).await?;
+    let root = match root {
+        Some(h) => h,
+        None => store.put_node(&TreeNode::default()).await?, // empty merged tree
+    };
+    Ok(TreeMergeOutcome { root, conflicts })
+}
+
+enum FileDecision {
+    Take(Option<Entry>),
+    Conflict,
+}
+
+/// The per-path 3-way rule applied to the file part of a name (mirrors
+/// `merge_manifests`' inner logic).
+fn decide_file(
+    b: &Option<Entry>,
+    o: &Option<Entry>,
+    t: &Option<Entry>,
+    prefer: Prefer,
+) -> FileDecision {
+    if o == t {
+        FileDecision::Take(o.clone())
+    } else if o == b {
+        FileDecision::Take(t.clone())
+    } else if t == b {
+        FileDecision::Take(o.clone())
+    } else {
+        match prefer {
+            Prefer::Ours => FileDecision::Take(o.clone()),
+            Prefer::Theirs => FileDecision::Take(t.clone()),
+            Prefer::None => FileDecision::Conflict,
+        }
+    }
+}
+
+async fn load_opt(
+    store: &FsStore,
+    id: Option<[u8; 32]>,
+) -> anyhow::Result<Option<Arc<TreeNode>>> {
+    match id {
+        Some(h) => Ok(Some(store.get_node(&h).await?)),
+        None => Ok(None),
+    }
+}
+
+fn child_of(node: &Option<Arc<TreeNode>>, name: &str) -> TreeChild {
+    node.as_ref()
+        .and_then(|n| n.children.get(name).cloned())
+        .unwrap_or_default()
+}
+
+#[allow(clippy::type_complexity)]
+fn merge_node<'a>(
+    store: &'a FsStore,
+    base: Option<[u8; 32]>,
+    ours: Option<[u8; 32]>,
+    theirs: Option<[u8; 32]>,
+    prefer: Prefer,
+    prefix: Vec<String>,
+) -> Pin<Box<dyn Future<Output = anyhow::Result<(Option<[u8; 32]>, Vec<MergeConflict>)>> + Send + 'a>>
+{
+    Box::pin(async move {
+        // Prune whole subtrees by hash, without loading them.
+        if ours == theirs {
+            return Ok((ours, Vec::new())); // identical (incl. both absent)
+        }
+        if base == ours {
+            return Ok((theirs, Vec::new())); // only theirs changed -> take theirs
+        }
+        if base == theirs {
+            return Ok((ours, Vec::new())); // only ours changed -> take ours
+        }
+
+        let bn = load_opt(store, base).await?;
+        let on = load_opt(store, ours).await?;
+        let tn = load_opt(store, theirs).await?;
+
+        let mut names: BTreeSet<String> = BTreeSet::new();
+        for n in [bn.as_ref(), on.as_ref(), tn.as_ref()].into_iter().flatten() {
+            names.extend(n.children.keys().cloned());
+        }
+
+        let mut out = TreeNode::default();
+        let mut conflicts = Vec::new();
+        for name in names {
+            let bc = child_of(&bn, &name);
+            let oc = child_of(&on, &name);
+            let tc = child_of(&tn, &name);
+            let mut child = TreeChild::default();
+
+            match decide_file(&bc.file, &oc.file, &tc.file, prefer) {
+                FileDecision::Take(f) => child.file = f,
+                FileDecision::Conflict => {
+                    let mut p = prefix.clone();
+                    p.push(name.clone());
+                    conflicts.push(MergeConflict {
+                        path: path_of(&p),
+                        base: bc.file.clone(),
+                        ours: oc.file.clone(),
+                        theirs: tc.file.clone(),
+                    });
+                    // file left None — patched later by the content merge.
+                }
+            }
+
+            // Directory part: prune equal subtrees, else descend.
+            child.dir = if oc.dir == tc.dir {
+                oc.dir
+            } else if bc.dir == oc.dir {
+                tc.dir
+            } else if bc.dir == tc.dir {
+                oc.dir
+            } else {
+                let mut cp = prefix.clone();
+                cp.push(name.clone());
+                let (d, mut sub) =
+                    merge_node(store, bc.dir, oc.dir, tc.dir, prefer, cp).await?;
+                conflicts.append(&mut sub);
+                d
+            };
+
+            if !child.is_empty() {
+                out.children.insert(name, child);
+            }
+        }
+
+        let id = if out.children.is_empty() {
+            None
+        } else {
+            Some(store.put_node(&out).await?)
+        };
+        Ok((id, conflicts))
+    })
 }

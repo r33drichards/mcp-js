@@ -1871,39 +1871,29 @@ impl Engine {
         self.check_fs_snapshot_policy("merge", None, None).await?;
         let store = self.fs_store_or_err()?;
 
-        let load = |hex: &str| -> Result<blake3::Hash, String> {
-            parse_ca_hex(hex)
-                .map(blake3::Hash::from_bytes)
-                .ok_or_else(|| format!("invalid CA id: {hex}"))
+        let load = |hex: &str| -> Result<[u8; 32], String> {
+            parse_ca_hex(hex).ok_or_else(|| format!("invalid CA id: {hex}"))
         };
-        let ours_m = store
-            .get_manifest(&load(ours)?)
-            .await
-            .map_err(|e| format!("fs_merge: load ours: {e}"))?;
-        let theirs_m = store
-            .get_manifest(&load(theirs)?)
-            .await
-            .map_err(|e| format!("fs_merge: load theirs: {e}"))?;
-        let base_m = match &base {
-            Some(b) => Some(
-                store
-                    .get_manifest(&load(b)?)
-                    .await
-                    .map_err(|e| format!("fs_merge: load base: {e}"))?,
-            ),
+        let base_root = match &base {
+            Some(b) => Some(load(b)?),
             None => None,
         };
 
-        // Structural per-path 3-way merge: clean parts land in `merged`,
+        // Structural per-path 3-way merge over the trees: equal subtrees are
+        // pruned by hash (never loaded), clean parts land in the merged tree,
         // divergent paths come back as conflicts.
-        let structural = fs_merge::merge_manifests(base_m.as_ref(), &ours_m, &theirs_m, prefer);
-        let mut merged = structural.merged;
+        let structural =
+            fs_merge::merge_trees(store, base_root, Some(load(ours)?), Some(load(theirs)?), prefer)
+                .await
+                .map_err(|e| format!("fs_merge: {e}"))?;
+        let merged_root = structural.root;
 
         // Content-merge pass: give a type-aware merger a shot at each conflict
-        // before reporting it. Clean text merges resolve silently; the rest are
-        // surfaced with diffs/markers.
+        // before reporting it. Clean text merges resolve silently and are patched
+        // back into the merged tree; the rest are surfaced with diffs/markers.
         let mergers = fs_content_merge::default_mergers();
         let mut conflict_views = Vec::new();
+        let mut resolved: Vec<(Vec<String>, Option<fs_store::Entry>)> = Vec::new();
         for c in structural.conflicts {
             let view = match (&c.ours, &c.theirs) {
                 (Some(oe), Some(te)) => {
@@ -1932,7 +1922,7 @@ impl Engine {
                                 .put_file(&bytes)
                                 .await
                                 .map_err(|e| format!("fs_merge: store merged {}: {e}", c.path.display()))?;
-                            merged.entries.insert(c.path.clone(), entry);
+                            resolved.push((fs_tree::components_of(&c.path), Some(entry)));
                             continue; // resolved — not a conflict
                         }
                         fs_content_merge::ContentMergeResult::Conflict(cc) => FsMergeConflictView {
@@ -1963,12 +1953,18 @@ impl Engine {
         }
 
         if conflict_views.is_empty() {
-            let id = store
-                .put_manifest(&merged)
-                .await
-                .map_err(|e| format!("fs_merge: store result: {e}"))?;
+            // Patch the content-merge resolutions onto the structurally-merged
+            // tree (writing only the touched spine).
+            let final_root = if resolved.is_empty() {
+                merged_root
+            } else {
+                store
+                    .build_root(Some(merged_root), resolved)
+                    .await
+                    .map_err(|e| format!("fs_merge: store result: {e}"))?
+            };
             Ok(FsMergeResult::Merged {
-                ca_id: ca_to_hex(id.as_bytes()),
+                ca_id: ca_to_hex(&final_root),
             })
         } else {
             Ok(FsMergeResult::Conflict {

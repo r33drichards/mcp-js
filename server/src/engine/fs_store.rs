@@ -15,12 +15,14 @@
 //! materialises a whole `Manifest`; it walks the tree lazily so a multi-TB
 //! snapshot costs O(touched paths), not O(total).
 
-use crate::engine::fs_chunker::{chunk_refs, decompress, maybe_compress, Chunked};
+use crate::engine::fs_chunker::{decompress, maybe_compress, SMALL_FILE_MAX, AVG, MAX, MIN};
 use crate::engine::fs_tree::{components_of, path_of, tree_key, TreeChild, TreeNode};
 use crate::engine::heap_storage::{HeapStorage, MemoryHeapStorage};
 use blake3::Hash;
+use fastcdc::v2020::StreamCDC;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::io::{Cursor, Read};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -123,35 +125,52 @@ impl FsStore {
     }
 
     /// Persist file bytes (chunking large files) and return its manifest Entry.
-    /// Chunks and persists in a single pass over `data`.
     pub async fn put_file(&self, data: &[u8]) -> anyhow::Result<Entry> {
-        let refs = chunk_refs(data);
-        let content = if refs.is_empty() {
-            // Tiny file: inline, no blob round-trip. (`chunk_refs` returns empty
-            // for files at or below the inline threshold.)
-            debug_assert!(matches!(
-                crate::engine::fs_chunker::chunk_bytes(data),
-                Chunked::Inline(_)
-            ));
-            Content::Inline(data.to_vec())
-        } else {
-            let mut out = Vec::with_capacity(refs.len());
-            for c in refs {
-                let raw = &data[c.offset..c.offset + c.length];
-                let key = chunk_key(c.hash.as_bytes());
-                let stored = maybe_compress(raw);
-                self.blobs
-                    .put(&key, &stored)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("put chunk: {e}"))?;
-                out.push(*c.hash.as_bytes());
-            }
-            Content::Chunks(out)
-        };
+        self.put_file_stream(Cursor::new(data)).await
+    }
+
+    /// Persist a file from a streaming reader, chunking in bounded memory.
+    ///
+    /// The reader is consumed incrementally: only a peek up to the inline
+    /// threshold plus one content-defined chunk (≤ `MAX`) is ever held at once,
+    /// so a multi-GB file is ingested without buffering the whole thing. Tiny
+    /// files (≤ `SMALL_FILE_MAX`) are inlined; larger ones are split with FastCDC
+    /// and each chunk hashed by its plaintext and stored (optionally compressed).
+    pub async fn put_file_stream<R: Read>(&self, mut reader: R) -> anyhow::Result<Entry> {
+        // Peek enough to decide inline vs chunked without rewinding.
+        let mut head = Vec::with_capacity(SMALL_FILE_MAX + 1);
+        (&mut reader)
+            .take((SMALL_FILE_MAX + 1) as u64)
+            .read_to_end(&mut head)?;
+        if head.len() <= SMALL_FILE_MAX {
+            return Ok(Entry {
+                mode: 0o644,
+                size: head.len() as u64,
+                content: Content::Inline(head),
+                symlink: None,
+            });
+        }
+
+        // Large file: stream-chunk the peeked head followed by the rest.
+        let source = Cursor::new(head).chain(reader);
+        let mut hashes = Vec::new();
+        let mut total: u64 = 0;
+        for chunk in StreamCDC::new(source, MIN, AVG, MAX) {
+            let chunk = chunk.map_err(|e| anyhow::anyhow!("chunking: {e}"))?;
+            let hash = blake3::hash(&chunk.data);
+            let key = chunk_key(hash.as_bytes());
+            let stored = maybe_compress(&chunk.data);
+            self.blobs
+                .put(&key, &stored)
+                .await
+                .map_err(|e| anyhow::anyhow!("put chunk: {e}"))?;
+            hashes.push(*hash.as_bytes());
+            total += chunk.length as u64;
+        }
         Ok(Entry {
             mode: 0o644,
-            size: data.len() as u64,
-            content,
+            size: total,
+            content: Content::Chunks(hashes),
             symlink: None,
         })
     }

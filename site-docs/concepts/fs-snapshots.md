@@ -20,9 +20,9 @@ Lineage — "this snapshot came after that one" — lives entirely in the pointe
 Each file is one `Entry` (mode, size, content, optional symlink) held in its directory's tree node. The content is stored one of two ways depending on size:
 
 - **Small files** (at or below 64 KiB) are *inlined* — their bytes live directly in the tree-node entry, with no separate blob.
-- **Large files** are split into content-defined chunks with FastCDC, each chunk hashed by its plaintext bytes and stored (optionally zstd-compressed) as a blob keyed by that hash. The entry holds the ordered list of chunk hashes.
+- **Large files** are split into content-defined chunks with FastCDC, each chunk hashed by its plaintext bytes and stored (optionally zstd-compressed) as a blob keyed by that hash. The entry holds the ordered list of chunk hashes. Chunking is *streamed*: a file is split and stored one bounded chunk at a time, so ingesting a multi-GB file never buffers the whole thing.
 
-Content-defined chunking means an edit in the middle of a large file re-chunks only the affected region, so successive snapshots of a slowly-changing file share most of their chunks. Dedup happens at every level: identical chunks, identical files, and — because each directory node is content-addressed — identical whole subtrees, which share a single stored node across snapshots.
+Content-defined chunking means an edit in the middle of a large file re-chunks only the affected region, so successive snapshots of a slowly-changing file share most of their chunks. Dedup happens at every level: identical chunks, identical files, and — because each directory node is content-addressed — identical whole subtrees, which share a single stored node across snapshots. Copying a file (`copyFile`) clones its entry by reference — the same chunk list, no bytes re-read or re-chunked.
 
 The blob backend is the **same `HeapStorage`** the heap store already uses; fs objects are simply namespaced with `fschunk:` and `fstree:` key prefixes so they never collide with heap snapshots in a shared backend.
 
@@ -68,7 +68,7 @@ This interacts directly with garbage collection. GC is a **reflog-rooted mark-an
 
 ## Merging snapshots
 
-Two snapshots that diverged from a common point can be merged into a new one. Although a snapshot is *stored* as a recursive tree, the merge currently operates on the **flattened** path map: it mirrors Mercurial's `manifestmerge` — diff the three flat path maps and decide each path independently — rather than git's recursive tree walk. (A tree-diff merge that skips equal subtrees is a natural future optimisation; see the non-goals.)
+Two snapshots that diverged from a common point can be merged into a new one. The merge is a **recursive tree-diff**: it walks the three trees together and **prunes equal subtrees by hash** — where two sides' subtree hashes match, or one side equals the base, that whole subtree is taken wholesale without being loaded — descending only where all three differ. The per-path rule is the familiar three-way one (a path is clean when both sides agree, or only one side changed from the base; otherwise it conflicts), so the *decisions* match Mercurial's `manifestmerge`, but the *cost* is O(differing paths), not O(tree). The merged result is written as a new tree that shares every unchanged subtree node with its inputs.
 
 The merge is **three-way** when given a `base` (the common ancestor both sides were mounted from): a path conflicts only if *both* sides changed it away from the base and away from each other. Omitting the base gives a **two-way** merge, where any path both sides changed (and that now differs) conflicts. Per path, the cheap short-circuit is content equality: if both sides are identical, or one side never moved from the base, there is nothing to reconcile.
 
@@ -86,7 +86,7 @@ The two-plane split is what makes clustering tractable. The planes are replicate
 The feature is deliberately scoped to a content-addressed overlay with labels and a three-way merge. The following are explicitly *not* implemented:
 
 - **Materialised real-path mode** (backing the mount with actual files on disk) and **reflink copy-up**. The mount is the in-process virtual overlay only.
-- **Lazy merge and single-file streaming.** Reads and `push` walk the tree lazily, but `merge` still loads the full flattened manifests of both sides, and a single file is chunked from a whole in-memory buffer. That is fine for large trees of moderate files, but merging multi-TB snapshots or writing a single multi-GB file is not yet streamed.
+- **Whole-file `writeFile` buffering.** Chunking is streamed (a file is split and stored in bounded memory, and `copyFile` clones a file's entry without re-reading it), but the Node `fs.writeFile(path, value)` API still hands the *entire* `value` to the runtime at once — so a single multi-GB file written in one `writeFile` call is bounded by the value already materialised in JS. Streaming write handles (or writing from a source path) would lift that; the merge's content-merge step likewise still reads each *conflicting* file in full.
 - **Rename/move detection in merge**, and a **recursive virtual base** for resolving criss-cross histories. The merge is flat and per-path; it does not track that a file moved.
 - **Rich binary or SQLite merge drivers.** The merge reports a `kind` for these, but only the text line-level driver actually reconciles content; binary/SQLite drivers are stubbed, not implemented.
 - **CRDT semantics.** Concurrency is handled by reject-and-rebase plus explicit merge, not by automatic conflict-free convergence.
