@@ -89,6 +89,21 @@ pub struct PutRequest {
     pub value: String,
 }
 
+/// Linearizable compare-and-set, forwarded to the leader. Advances `key` to
+/// `new` only if its current committed/pending value equals `expected`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CasRequest {
+    pub key: String,
+    pub expected: Option<String>,
+    pub new: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CasResponse {
+    /// Whether the compare matched and the new value was committed.
+    pub applied: bool,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GetResponse {
     pub key: String,
@@ -900,6 +915,118 @@ impl ClusterNode {
         }
     }
 
+    /// Leader-only linearizable compare-and-set. The compare is made under the
+    /// state lock against the latest *pending or committed* value of `key` (so
+    /// two concurrent CAS serialize correctly: the first to append shifts the
+    /// value the second sees). Returns `Ok(true)` when the new value was
+    /// appended and committed, `Ok(false)` when the compare did not match.
+    pub async fn cas(
+        &self,
+        key: String,
+        expected: Option<String>,
+        new: String,
+    ) -> Result<bool, String> {
+        let entry = {
+            let mut state = self.state.write().await;
+            if state.role != Role::Leader {
+                return Err(format!("not the leader; current leader: {:?}", state.leader_id));
+            }
+            // Latest value = most recent log entry for the key (covers
+            // appended-but-not-yet-committed writes), else the applied value.
+            let current = state
+                .log
+                .iter()
+                .rev()
+                .find(|e| e.key == key)
+                .map(|e| e.value.clone())
+                .or_else(|| self.read_applied(&key));
+            if current.as_deref() != expected.as_deref() {
+                return Ok(false);
+            }
+            let entry = LogEntry {
+                term: state.current_term,
+                index: state.last_log_index() + 1,
+                key,
+                value: new,
+            };
+            state.log.push(entry.clone());
+            self.persist_log_entry(&entry);
+            entry
+        };
+
+        // Wait for the entry to commit (replicated to a majority).
+        let target_index = entry.index;
+        for _ in 0..100 {
+            tokio::select! {
+                _ = self.commit_notify.notified() => {}
+                _ = sleep(Duration::from_millis(50)) => {}
+            }
+            let state = self.state.read().await;
+            if state.commit_index >= target_index {
+                return Ok(true);
+            }
+            if state.role != Role::Leader {
+                return Err("lost leadership during replication".to_string());
+            }
+        }
+        Err("timeout waiting for commit".to_string())
+    }
+
+    /// Compare-and-set, forwarding to the leader when this node is a follower.
+    pub async fn cas_or_forward(
+        &self,
+        key: String,
+        expected: Option<String>,
+        new: String,
+    ) -> Result<bool, String> {
+        let (is_leader, leader_id, leader_addr) = {
+            let state = self.state.read().await;
+            let lid = state.leader_id.clone();
+            let addr = lid.as_ref().and_then(|id| state.peer_addrs.get(id).cloned());
+            (state.role == Role::Leader, lid, addr)
+        };
+
+        if is_leader {
+            return self.cas(key, expected, new).await;
+        }
+
+        match leader_id {
+            Some(id) => {
+                let leader_addr = leader_addr
+                    .ok_or_else(|| format!("unknown leader address for node '{}'", id))?;
+                let url = format!("http://{}/data/cas", leader_addr);
+                let req = CasRequest { key, expected, new };
+                let resp = self
+                    .http_client
+                    .post(&url)
+                    .json(&req)
+                    .send()
+                    .await
+                    .map_err(|e| format!("failed to forward cas to leader: {}", e))?;
+                if resp.status().is_success() {
+                    let body: CasResponse = resp
+                        .json()
+                        .await
+                        .map_err(|e| format!("invalid cas response: {}", e))?;
+                    Ok(body.applied)
+                } else {
+                    let body = resp.text().await.unwrap_or_default();
+                    Err(format!("leader returned error: {}", body))
+                }
+            }
+            None => Err("no leader elected yet".to_string()),
+        }
+    }
+
+    /// Read the applied (committed) value of a key from the state-machine tree.
+    fn read_applied(&self, key: &str) -> Option<String> {
+        let tree = self.db.open_tree("data").ok()?;
+        match tree.get(key.as_bytes()) {
+            Ok(Some(v)) => Some(String::from_utf8_lossy(&v).to_string()),
+            _ => None,
+        }
+    }
+
     // --- Dynamic Membership ------------------------------------------------
 
     /// Add a peer to the cluster.  Must be called on the leader.
@@ -1204,6 +1331,20 @@ async fn route(
                     Ok(()) => json_response(200, &serde_json::json!({"ok": true})),
                     Err(e) => error_response(503, &e),
                 },
+                Err(e) => error_response(400, &e),
+            }
+        }
+
+        (Method::POST, "/data/cas") => {
+            match read_body(req).await.and_then(|b| {
+                serde_json::from_slice::<CasRequest>(&b).map_err(|e| e.to_string())
+            }) {
+                Ok(cas_req) => {
+                    match node.cas_or_forward(cas_req.key, cas_req.expected, cas_req.new).await {
+                        Ok(applied) => json_response(200, &CasResponse { applied }),
+                        Err(e) => error_response(503, &e),
+                    }
+                }
                 Err(e) => error_response(400, &e),
             }
         }

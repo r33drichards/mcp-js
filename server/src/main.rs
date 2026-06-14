@@ -361,6 +361,12 @@ async fn main() -> Result<()> {
                     store_dir,
                     labels_db
                 );
+                let labels = if let Some(ref cn) = cluster_node {
+                    tracing::info!("FS label writes will route through the Raft cluster leader");
+                    labels.with_cluster(cn.clone())
+                } else {
+                    labels
+                };
                 let engine = engine.with_fs_snapshots(store, Arc::new(labels));
                 if let Some(chain) = fs_snapshot_policy_chain {
                     tracing::info!("FS snapshot pointer moves are policy-gated");

@@ -3,16 +3,43 @@
 //!
 //! This is the only coordinated write in the system — blobs and manifests are
 //! immutable and idempotent. In single-node mode CAS is serialized by an
-//! in-process mutex around read-compare-write; cluster forwarding is wired in
-//! a later task. Persistence mirrors `heap_tags.rs` (a sled DB).
+//! in-process mutex around read-compare-write; in cluster mode (`with_cluster`)
+//! pointer moves route through the Raft leader so CAS is linearizable
+//! cluster-wide. Persistence mirrors `heap_tags.rs` (a sled DB).
 
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+
+use crate::cluster::ClusterNode;
 
 pub type CaId = [u8; 32];
 
 const HEAD_TREE: &str = "fs_label_heads";
 const LOG_TREE: &str = "fs_label_log";
+
+// Replicated-KV key prefixes used in cluster mode (mirrors heap_tags style).
+const CL_HEAD_PREFIX: &str = "fl:head:";
+const CL_LOG_PREFIX: &str = "fl:log:";
+
+fn to_hex(id: &CaId) -> String {
+    let mut s = String::with_capacity(64);
+    for b in id {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
+fn from_hex(s: &str) -> Result<CaId, String> {
+    if s.len() != 64 {
+        return Err(format!("invalid CA id hex length: {}", s.len()));
+    }
+    let mut out = [0u8; 32];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16)
+            .map_err(|e| format!("invalid CA id hex: {e}"))?;
+    }
+    Ok(out)
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum RefOp {
@@ -36,6 +63,9 @@ pub struct LabelStore {
     db: sled::Db,
     /// Serializes read-compare-write across in-process callers so CAS is atomic.
     lock: Arc<tokio::sync::Mutex<()>>,
+    /// When set, label pointer moves are coordinated through the Raft leader so
+    /// CAS is linearizable cluster-wide; otherwise they are single-node.
+    cluster_node: Option<Arc<ClusterNode>>,
 }
 
 impl LabelStore {
@@ -44,6 +74,7 @@ impl LabelStore {
         Ok(Self {
             db,
             lock: Arc::new(tokio::sync::Mutex::new(())),
+            cluster_node: None,
         })
     }
 
@@ -51,6 +82,7 @@ impl LabelStore {
         Self {
             db,
             lock: Arc::new(tokio::sync::Mutex::new(())),
+            cluster_node: None,
         }
     }
 
@@ -62,6 +94,42 @@ impl LabelStore {
             .open()
             .expect("open temporary sled db");
         Self::from_db(db)
+    }
+
+    /// Coordinate label pointer moves through the Raft cluster so CAS is
+    /// linearizable cluster-wide. Blobs and manifests remain node-local.
+    pub fn with_cluster(mut self, node: Arc<ClusterNode>) -> Self {
+        self.cluster_node = Some(node);
+        self
+    }
+
+    fn cl_head_key(label: &str) -> String {
+        format!("{CL_HEAD_PREFIX}{label}")
+    }
+
+    /// Cluster reflog keys sort by time within a label's prefix; a uuid suffix
+    /// keeps entries written in the same millisecond (possibly on different
+    /// nodes) distinct.
+    fn cl_log_key(label: &str, at: i64) -> String {
+        format!(
+            "{CL_LOG_PREFIX}{label}\u{0}{:020}-{}",
+            at.max(0),
+            uuid::Uuid::new_v4()
+        )
+    }
+
+    fn cl_log_prefix(label: &str) -> String {
+        format!("{CL_LOG_PREFIX}{label}\u{0}")
+    }
+
+    async fn cl_append_log(
+        cluster: &ClusterNode,
+        label: &str,
+        entry: &RefLogEntry,
+    ) -> Result<(), String> {
+        let key = Self::cl_log_key(label, entry.at);
+        let val = serde_json::to_string(entry).map_err(|e| e.to_string())?;
+        cluster.put_or_forward(key, val).await
     }
 
     fn heads(&self) -> Result<sled::Tree, String> {
@@ -101,6 +169,22 @@ impl LabelStore {
 
     /// Create a new label pointing at `head`. Fails if it already exists.
     pub async fn create(&self, label: &str, head: CaId) -> Result<(), String> {
+        if let Some(cluster) = &self.cluster_node {
+            // CAS from "absent" (expected None) creates exclusively cluster-wide.
+            let applied = cluster
+                .cas_or_forward(Self::cl_head_key(label), None, to_hex(&head))
+                .await?;
+            if !applied {
+                return Err(format!("label already exists: {label}"));
+            }
+            Self::cl_append_log(
+                cluster,
+                label,
+                &RefLogEntry { at: Self::now(), from: None, to: head, op: RefOp::Create },
+            )
+            .await?;
+            return Ok(());
+        }
         let _guard = self.lock.lock().await;
         if self.read_head(label)?.is_some() {
             return Err(format!("label already exists: {label}"));
@@ -121,12 +205,36 @@ impl LabelStore {
     }
 
     pub async fn resolve(&self, label: &str) -> Result<Option<CaId>, String> {
+        if let Some(cluster) = &self.cluster_node {
+            return match cluster.get(&Self::cl_head_key(label)).await? {
+                Some(hex) => from_hex(&hex).map(Some),
+                None => Ok(None),
+            };
+        }
         self.read_head(label)
     }
 
     /// Atomic compare-and-set. Advances `label` to `new` only if its current
     /// head equals `expect`; records a `Push` reflog entry on success.
     pub async fn cas(&self, label: &str, expect: Option<CaId>, new: CaId) -> Result<bool, String> {
+        if let Some(cluster) = &self.cluster_node {
+            let applied = cluster
+                .cas_or_forward(
+                    Self::cl_head_key(label),
+                    expect.as_ref().map(to_hex),
+                    to_hex(&new),
+                )
+                .await?;
+            if applied {
+                Self::cl_append_log(
+                    cluster,
+                    label,
+                    &RefLogEntry { at: Self::now(), from: expect, to: new, op: RefOp::Push },
+                )
+                .await?;
+            }
+            return Ok(applied);
+        }
         let _guard = self.lock.lock().await;
         let current = self.read_head(label)?;
         if current != expect {
@@ -150,6 +258,20 @@ impl LabelStore {
     /// Unconditionally move `label` to `target` (the `reset` verb). Records a
     /// `Reset` reflog entry, retaining the rolled-past id for roll-forward/GC.
     pub async fn force(&self, label: &str, target: CaId) -> Result<(), String> {
+        if let Some(cluster) = &self.cluster_node {
+            let current = self.resolve(label).await?;
+            // Unconditional move: a blind put forwarded to the leader.
+            cluster
+                .put_or_forward(Self::cl_head_key(label), to_hex(&target))
+                .await?;
+            Self::cl_append_log(
+                cluster,
+                label,
+                &RefLogEntry { at: Self::now(), from: current, to: target, op: RefOp::Reset },
+            )
+            .await?;
+            return Ok(());
+        }
         let _guard = self.lock.lock().await;
         let current = self.read_head(label)?;
         self.heads()?
@@ -168,6 +290,14 @@ impl LabelStore {
     }
 
     pub async fn log(&self, label: &str) -> Result<Vec<RefLogEntry>, String> {
+        if let Some(cluster) = &self.cluster_node {
+            let mut out = Vec::new();
+            // scan_prefix returns entries sorted by key, i.e. by timestamp.
+            for (_k, v) in cluster.scan_prefix(&Self::cl_log_prefix(label))? {
+                out.push(serde_json::from_str(&v).map_err(|e| e.to_string())?);
+            }
+            return Ok(out);
+        }
         let logs = self.logs()?;
         let prefix = log_prefix(label);
         let mut out = Vec::new();
@@ -180,6 +310,14 @@ impl LabelStore {
     }
 
     pub async fn list(&self) -> Result<Vec<(String, CaId)>, String> {
+        if let Some(cluster) = &self.cluster_node {
+            let mut out = Vec::new();
+            for (k, v) in cluster.scan_prefix(CL_HEAD_PREFIX)? {
+                let label = k[CL_HEAD_PREFIX.len()..].to_string();
+                out.push((label, from_hex(&v)?));
+            }
+            return Ok(out);
+        }
         let heads = self.heads()?;
         let mut out = Vec::new();
         for item in heads.iter() {
