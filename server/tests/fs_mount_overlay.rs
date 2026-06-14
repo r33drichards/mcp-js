@@ -101,3 +101,41 @@ async fn rename_moves_content_and_whiteouts_source() {
     assert!(m.read("from.txt".as_ref()).await.is_err());
     assert_eq!(m.read("to.txt".as_ref()).await.unwrap(), b"data");
 }
+
+#[tokio::test]
+async fn rename_moves_implicit_directory_recursively() {
+    // `dir` is an implicit directory (no exact entry) holding two files, one of
+    // which is shadowed by an upper write. Renaming the directory must move all
+    // descendants and leave nothing behind at the old prefix.
+    let (store, base) = base_with(&[("dir/file", b"one"), ("dir/sub/deep", b"two")]).await;
+    let mut m = SessionMount::pull(store.clone(), base).await.unwrap();
+    m.write("dir/file".as_ref(), b"override").await.unwrap();
+
+    m.rename("dir".as_ref(), "newdir".as_ref()).await.unwrap();
+
+    // Old paths are gone; the directory no longer exists.
+    assert!(m.read("dir/file".as_ref()).await.is_err());
+    assert!(m.read("dir/sub/deep".as_ref()).await.is_err());
+    assert!(!m.exists("dir".as_ref()));
+    // New paths carry the moved content, including the upper override.
+    assert_eq!(m.read("newdir/file".as_ref()).await.unwrap(), b"override");
+    assert_eq!(m.read("newdir/sub/deep".as_ref()).await.unwrap(), b"two");
+    assert!(m.exists("newdir".as_ref()));
+    assert!(m.exists("newdir/sub".as_ref()));
+}
+
+#[tokio::test]
+async fn rename_rejects_moving_a_directory_into_its_own_subtree() {
+    let (store, base) = base_with(&[("dir/file", b"x")]).await;
+    let mut m = SessionMount::pull(store.clone(), base).await.unwrap();
+    assert!(m.rename("dir".as_ref(), "dir/inner".as_ref()).await.is_err());
+    // The original tree is untouched.
+    assert_eq!(m.read("dir/file".as_ref()).await.unwrap(), b"x");
+}
+
+#[tokio::test]
+async fn rename_of_missing_path_is_enoent() {
+    let (store, base) = base_with(&[("a.txt", b"x")]).await;
+    let mut m = SessionMount::pull(store.clone(), base).await.unwrap();
+    assert!(m.rename("nope".as_ref(), "elsewhere".as_ref()).await.is_err());
+}

@@ -2119,14 +2119,18 @@ impl Engine {
     /// CA id (hex). This is the durable fs artifact recorded on completion; it
     /// does NOT advance any label (pushing a label is the explicit `fs_push`
     /// verb).
-    async fn push_mount(&self, fm: &Option<fs::FsMountHandle>) -> Option<String> {
-        let fm = fm.as_ref()?;
+    ///
+    /// `Ok(None)` means no mount was attached; `Ok(Some(ca))` is a flushed
+    /// snapshot. A flush failure on an attached mount is returned as `Err` so
+    /// the caller can fail the execution rather than silently reporting it
+    /// complete with the filesystem changes lost.
+    async fn push_mount(&self, fm: &Option<fs::FsMountHandle>) -> Result<Option<String>, String> {
+        let Some(fm) = fm.as_ref() else {
+            return Ok(None);
+        };
         match fm.0.lock().await.push().await {
-            Ok(h) => Some(ca_to_hex(h.as_bytes())),
-            Err(e) => {
-                tracing::warn!("fs push after execution failed: {e}");
-                None
-            }
+            Ok(h) => Ok(Some(ca_to_hex(h.as_bytes()))),
+            Err(e) => Err(format!("fs snapshot flush failed: {e}")),
         }
     }
 
@@ -2241,9 +2245,17 @@ impl Engine {
 
                 match result {
                     Ok(js_result) => {
-                        registry.complete(&id, js_result.output, None);
-                        let output_fs = self.push_mount(&fs_mount).await;
-                        registry.set_fs(&id, output_fs);
+                        // Flush and publish the fs snapshot id *before* marking
+                        // the run complete, so a client that stops polling on the
+                        // first terminal status cannot miss it. A flush failure
+                        // fails the run rather than reporting lost fs changes.
+                        match self.push_mount(&fs_mount).await {
+                            Ok(output_fs) => {
+                                registry.set_fs(&id, output_fs);
+                                registry.complete(&id, js_result.output, None);
+                            }
+                            Err(e) => registry.fail(&id, e),
+                        }
                     }
                     Err(e) if e.contains("timed out") => registry.timed_out(&id),
                     Err(e) => registry.fail(&id, e),
@@ -2320,8 +2332,16 @@ impl Engine {
                         }
 
                         // Record the resulting fs snapshot CA id independently of
-                        // the heap. Does not advance any label.
-                        let output_fs = self.push_mount(&fs_mount).await;
+                        // the heap. Does not advance any label. A flush failure
+                        // on an attached mount fails the run rather than reporting
+                        // it complete with the filesystem changes lost.
+                        let output_fs = match self.push_mount(&fs_mount).await {
+                            Ok(v) => v,
+                            Err(e) => {
+                                registry.fail(&id, e);
+                                return;
+                            }
+                        };
                         registry.set_fs(&id, output_fs.clone());
 
                         if let (Some(session_name), Some(log)) = (&session, &self.session_log) {

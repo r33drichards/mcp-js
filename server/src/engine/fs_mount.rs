@@ -153,12 +153,36 @@ impl SessionMount {
     pub async fn rename(&mut self, from: &Path, to: &Path) -> anyhow::Result<()> {
         let from = normalize(from);
         let to = normalize(to);
-        let entry = self
-            .effective(&from)
-            .ok_or_else(|| anyhow::anyhow!("ENOENT: {}", from.display()))?
-            .clone();
-        self.upper.insert(to, Write::Data(entry));
-        self.upper.insert(from, Write::Whiteout);
+        if from == to {
+            return Ok(());
+        }
+        // Plain file: move the single entry.
+        if let Some(entry) = self.effective(&from).cloned() {
+            self.upper.insert(to, Write::Data(entry));
+            self.upper.insert(from, Write::Whiteout);
+            return Ok(());
+        }
+        // Directory (implicit): move every descendant, rewriting its path prefix
+        // from `from/...` to `to/...`. Mirrors the host-backed recursive rename.
+        if child_suffix(&from, &to).is_some() {
+            anyhow::bail!("EINVAL: cannot rename {} into its own subtree", from.display());
+        }
+        let moves: Vec<(PathBuf, Entry)> = self
+            .effective_paths()
+            .into_iter()
+            .filter_map(|p| {
+                let rest = child_suffix(&from, &p)?;
+                let entry = self.effective(&p)?.clone();
+                Some((rest, entry))
+            })
+            .collect();
+        if moves.is_empty() {
+            anyhow::bail!("ENOENT: {}", from.display());
+        }
+        for (rest, entry) in moves {
+            self.upper.insert(to.join(&rest), Write::Data(entry));
+            self.upper.insert(from.join(&rest), Write::Whiteout);
+        }
         Ok(())
     }
 
