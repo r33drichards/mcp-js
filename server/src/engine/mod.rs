@@ -1547,6 +1547,30 @@ impl Engine {
         let id = uuid::Uuid::new_v4().to_string();
         let console_tree = registry.register(&id)?;
 
+        // Resolve which heap snapshot to restore. An explicit `heap` always
+        // wins. Otherwise, when a `session` is given, fall back to that
+        // session's most-recent output heap so `session` acts as a stable,
+        // unchanging label for accumulated state (callers can persist just the
+        // session name and never have to track the content-addressed heap key).
+        let heap = match &heap {
+            Some(h) if !h.is_empty() => heap,
+            _ => match (session.as_ref(), self.session_log.as_ref()) {
+                (Some(session_name), Some(log)) => match log.get_latest(session_name).await {
+                    Ok(Some(entry)) => Some(entry.output_heap),
+                    Ok(None) => None,
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to resolve latest heap for session '{}': {}",
+                            session_name,
+                            e
+                        );
+                        None
+                    }
+                },
+                _ => None,
+            },
+        };
+
         // For stateful mode, unwrap snapshot before spawning background task.
         let raw_snapshot = if let Some(storage) = &self.heap_storage {
             let snapshot = match &heap {
