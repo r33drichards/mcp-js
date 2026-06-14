@@ -378,6 +378,44 @@ pub fn parse_ca_hex(s: &str) -> Option<[u8; 32]> {
     Some(out)
 }
 
+fn refop_str(op: fs_labels::RefOp) -> &'static str {
+    match op {
+        fs_labels::RefOp::Create => "create",
+        fs_labels::RefOp::Push => "push",
+        fs_labels::RefOp::Reset => "reset",
+        fs_labels::RefOp::Force => "force",
+    }
+}
+
+/// A label and its current head CA id (hex), for API/CLI responses.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct FsLabelView {
+    pub name: String,
+    pub ca_id: String,
+}
+
+/// One reflog entry, hex-rendered, for API/CLI responses.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct FsRefLogView {
+    pub at: i64,
+    pub from: Option<String>,
+    pub to: String,
+    pub op: String,
+}
+
+/// Outcome of an [`Engine::fs_push`].
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "status", rename_all = "lowercase")]
+pub enum FsPushOutcome {
+    /// The label now points at `ca_id`.
+    Advanced { label: String, ca_id: String },
+    /// The label moved since the caller pulled — re-pull and retry (or force).
+    Rejected {
+        label: String,
+        current: Option<String>,
+    },
+}
+
 /// Render a 32-byte CA id as lowercase hex.
 pub fn ca_to_hex(id: &[u8; 32]) -> String {
     let mut s = String::with_capacity(64);
@@ -1716,6 +1754,135 @@ impl Engine {
         });
 
         Ok(id)
+    }
+
+    // ── fs snapshot label operations ─────────────────────────────────────
+    // Thin orchestration over the LabelStore; the MCP tools, HTTP API, and CLI
+    // all route through these so behavior stays identical across surfaces.
+
+    fn labels_or_err(&self) -> Result<&Arc<fs_labels::LabelStore>, String> {
+        self.label_store
+            .as_ref()
+            .ok_or_else(|| "fs labels are not configured on this server".to_string())
+    }
+
+    /// List every label and its current head CA id (hex).
+    pub async fn fs_list_labels(&self) -> Result<Vec<FsLabelView>, String> {
+        let labels = self.labels_or_err()?;
+        Ok(labels
+            .list()
+            .await?
+            .into_iter()
+            .map(|(name, id)| FsLabelView {
+                name,
+                ca_id: ca_to_hex(&id),
+            })
+            .collect())
+    }
+
+    /// Resolve a label to its current head CA id (hex), if it exists.
+    pub async fn fs_resolve_label(&self, name: &str) -> Result<Option<String>, String> {
+        let labels = self.labels_or_err()?;
+        Ok(labels.resolve(name).await?.map(|id| ca_to_hex(&id)))
+    }
+
+    /// Create a label, or repoint an existing one, to a CA id.
+    pub async fn fs_set_label(&self, name: &str, ca_hex: &str) -> Result<(), String> {
+        let labels = self.labels_or_err()?;
+        let id = parse_ca_hex(ca_hex).ok_or_else(|| format!("invalid CA id: {ca_hex}"))?;
+        match labels.resolve(name).await? {
+            Some(_) => labels.force(name, id).await,
+            None => labels.create(name, id).await,
+        }
+    }
+
+    /// The reflog for a label (hex-rendered), oldest first.
+    pub async fn fs_label_log(&self, name: &str) -> Result<Vec<FsRefLogView>, String> {
+        let labels = self.labels_or_err()?;
+        Ok(labels
+            .log(name)
+            .await?
+            .into_iter()
+            .map(|e| FsRefLogView {
+                at: e.at,
+                from: e.from.as_ref().map(ca_to_hex),
+                to: ca_to_hex(&e.to),
+                op: refop_str(e.op).to_string(),
+            })
+            .collect())
+    }
+
+    /// Advance a label to a CA id. Default is reject-and-rebase: the move only
+    /// succeeds if the label's current head equals `expected` (or the label does
+    /// not yet exist and `expected` is `None`). `force` skips the check.
+    pub async fn fs_push(
+        &self,
+        label: &str,
+        ca_hex: &str,
+        expected: Option<String>,
+        force: bool,
+    ) -> Result<FsPushOutcome, String> {
+        let labels = self.labels_or_err()?;
+        let new = parse_ca_hex(ca_hex).ok_or_else(|| format!("invalid CA id: {ca_hex}"))?;
+
+        if force {
+            labels.force(label, new).await?;
+            return Ok(FsPushOutcome::Advanced {
+                label: label.to_string(),
+                ca_id: ca_hex.to_string(),
+            });
+        }
+
+        let expected = match expected {
+            Some(h) => Some(parse_ca_hex(&h).ok_or_else(|| format!("invalid expected CA id: {h}"))?),
+            None => None,
+        };
+        let current = labels.resolve(label).await?;
+        let advanced = if current.is_none() && expected.is_none() {
+            labels.create(label, new).await?;
+            true
+        } else {
+            labels.cas(label, expected, new).await?
+        };
+
+        if advanced {
+            Ok(FsPushOutcome::Advanced {
+                label: label.to_string(),
+                ca_id: ca_hex.to_string(),
+            })
+        } else {
+            Ok(FsPushOutcome::Rejected {
+                label: label.to_string(),
+                current: current.as_ref().map(ca_to_hex),
+            })
+        }
+    }
+
+    /// Reset a label to an earlier CA id from its reflog (the rollback verb).
+    /// Unless `allow_unlogged` is set, the target must appear in the label's
+    /// reflog so resets stay within recorded history.
+    pub async fn fs_reset(
+        &self,
+        label: &str,
+        ca_hex: &str,
+        allow_unlogged: bool,
+    ) -> Result<(), String> {
+        let labels = self.labels_or_err()?;
+        let target = parse_ca_hex(ca_hex).ok_or_else(|| format!("invalid CA id: {ca_hex}"))?;
+        if !allow_unlogged {
+            let in_log = labels
+                .log(label)
+                .await?
+                .iter()
+                .any(|e| e.to == target || e.from == Some(target));
+            if !in_log {
+                return Err(format!(
+                    "CA id {ca_hex} is not in the reflog for label '{label}'; \
+                     pass allow_unlogged to reset anyway"
+                ));
+            }
+        }
+        labels.force(label, target).await
     }
 
     /// Flush a session's overlay mount into a new pure manifest and return its
