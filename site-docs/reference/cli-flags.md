@@ -9,6 +9,7 @@ using the same help headings exposed by the CLI itself.
 
 - [Cluster](#cluster)
 - [Core](#core)
+- [FS Snapshots](#fs-snapshots)
 - [Fetch](#fetch)
 - [MCP Server Module](#mcp-server-module)
 - [Module Import](#module-import)
@@ -146,6 +147,26 @@ Path to the sled database for session logging (default: /tmp/mcp-v8-sessions)
 
 - Default: `/tmp/mcp-v8-sessions`
 - Value: `SESSION_DB_PATH`
+
+## FS Snapshots
+
+### `--enable-fs-snapshots`
+
+Enable the content-addressed, snapshottable filesystem. When set, the `fs` parameter of run_js can mount a snapshot (by label or CA id) and the `fs_*` tools / `/api/fs/...` endpoints become functional
+
+- Default: `false`
+
+### `--fs-store-dir`
+
+Directory for the fs snapshot blob store (chunks + manifests). Defaults to `<session-db-path>/fs-blobs`
+
+- Value: `DIR`
+
+### `--fs-labels-db`
+
+Path for the fs label/reflog database (sled). Defaults to `<session-db-path>/fs-labels`
+
+- Value: `PATH`
 
 ## Fetch
 
