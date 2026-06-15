@@ -32,6 +32,7 @@ fn make_config_3(idx: usize, ports: &[u16; 3]) -> ClusterConfig {
         heartbeat_interval: Duration::from_millis(80),
         election_timeout_min: Duration::from_millis(250),
         election_timeout_max: Duration::from_millis(500),
+        learner: false,
     }
 }
 
