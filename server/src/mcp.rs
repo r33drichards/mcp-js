@@ -173,6 +173,32 @@ impl IntoContents for RunJsResponse {
     }
 }
 
+/// Generic JSON response for the `fs_*` tools.
+#[derive(Debug, Clone)]
+pub struct FsResponse {
+    pub value: serde_json::Value,
+}
+
+impl FsResponse {
+    fn ok(value: serde_json::Value) -> Self {
+        Self { value }
+    }
+    fn err(error: impl Into<String>) -> Self {
+        Self {
+            value: json!({ "error": error.into() }),
+        }
+    }
+}
+
+impl IntoContents for FsResponse {
+    fn into_contents(self) -> Vec<Content> {
+        match Content::json(self.value) {
+            Ok(content) => vec![content],
+            Err(e) => vec![Content::text(format!("Failed to convert fs response: {}", e))],
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ExecutionStatusResponse {
     pub value: serde_json::Value,
@@ -351,6 +377,9 @@ impl McpService {
         heap: Option<String>,
         #[tool(param)]
         #[serde(default)]
+        fs: Option<String>,
+        #[tool(param)]
+        #[serde(default)]
         heap_memory_max_mb: Option<usize>,
         #[tool(param)]
         #[serde(default)]
@@ -362,6 +391,7 @@ impl McpService {
         let mut req = self.engine.run_js(code.unwrap_or_default());
         req = req.maybe_file(file);
         if let Some(h) = heap { req = req.heap(h); }
+        req = req.maybe_fs(fs);
         if let Some(s) = self.session_id.get() { req = req.session(s.clone()); }
         if let Some(mb) = heap_memory_max_mb { req = req.heap_memory_max_mb(mb); }
         if let Some(secs) = execution_timeout_secs { req = req.execution_timeout_secs(secs); }
@@ -375,7 +405,7 @@ impl McpService {
         }
     }
 
-    #[tool(description = "Get the status and result of an execution. Returns execution_id, status (running/completed/failed/cancelled/timed_out), result (if completed), heap (if stateful), error (if failed), started_at, and completed_at.")]
+    #[tool(description = "Get the status and result of an execution. Returns execution_id, status (running/completed/failed/cancelled/timed_out), result (if completed), heap (if stateful), fs (resulting filesystem snapshot CA id, if a mount was attached), error (if failed), started_at, and completed_at.")]
     pub async fn get_execution(
         &self,
         #[tool(param)] execution_id: String,
@@ -387,6 +417,7 @@ impl McpService {
                     "status": info.status,
                     "result": info.result,
                     "heap": info.heap,
+                    "fs": info.fs,
                     "error": info.error,
                     "started_at": info.started_at,
                     "completed_at": info.completed_at,
@@ -562,6 +593,142 @@ impl McpService {
                     },
                 }],
             },
+        }
+    }
+
+    // ── fs snapshot tools ────────────────────────────────────────────────
+
+    #[tool(description = "List filesystem snapshot labels. Returns each label name and its current head CA id (hex).")]
+    pub async fn fs_ls(&self) -> FsResponse {
+        match self.engine.fs_list_labels().await {
+            Ok(labels) => FsResponse::ok(json!({ "labels": labels })),
+            Err(e) => FsResponse::err(e),
+        }
+    }
+
+    #[tool(description = "Resolve a filesystem snapshot label to its current head CA id (hex). Use this as the `fs` argument to run_js to mount it.")]
+    pub async fn fs_pull(&self, #[tool(param)] label: String) -> FsResponse {
+        match self.engine.fs_resolve_label(&label).await {
+            Ok(Some(ca_id)) => FsResponse::ok(json!({ "label": label, "ca_id": ca_id })),
+            Ok(None) => FsResponse::err(format!("unknown label: {label}")),
+            Err(e) => FsResponse::err(e),
+        }
+    }
+
+    #[tool(description = "Create or repoint a filesystem snapshot label to a CA id (hex). Pass an optional `message` (a commit-style note) to record on the reflog entry.")]
+    pub async fn fs_label(
+        &self,
+        #[tool(param)] name: String,
+        #[tool(param)] ca_id: String,
+        #[tool(param)]
+        #[serde(default)]
+        message: Option<String>,
+    ) -> FsResponse {
+        match self.engine.fs_set_label(&name, &ca_id, message).await {
+            Ok(()) => FsResponse::ok(json!({ "label": name, "ca_id": ca_id })),
+            Err(e) => FsResponse::err(e),
+        }
+    }
+
+    #[tool(description = "Show the reflog (move history) for a filesystem snapshot label, oldest first. Each entry has at, from, to (CA ids), op (create/push/reset/force), and an optional message. Use a `to` value as the ca_id for fs_reset. Pass `limit` to return only the most recent N entries (bounding the scan over long histories).")]
+    pub async fn fs_log(
+        &self,
+        #[tool(param)] label: String,
+        #[tool(param)]
+        #[serde(default)]
+        limit: Option<usize>,
+    ) -> FsResponse {
+        match self.engine.fs_label_log(&label, limit).await {
+            Ok(entries) => FsResponse::ok(json!({ "label": label, "log": entries })),
+            Err(e) => FsResponse::err(e),
+        }
+    }
+
+    #[tool(description = "Advance a filesystem snapshot label to a CA id (typically the `fs` value returned by a completed run_js execution). Default is reject-and-rebase: pass `expected` (the head you pulled) and the push fails if the label moved since. Set force=true to override, or detach=true to just return the CA id without touching the label. Pass an optional `message` (a commit-style note, max 4096 bytes) to record on the reflog entry.")]
+    pub async fn fs_push(
+        &self,
+        #[tool(param)] ca_id: String,
+        #[tool(param)]
+        #[serde(default)]
+        label: Option<String>,
+        #[tool(param)]
+        #[serde(default)]
+        expected: Option<String>,
+        #[tool(param)]
+        #[serde(default)]
+        force: Option<bool>,
+        #[tool(param)]
+        #[serde(default)]
+        detach: Option<bool>,
+        #[tool(param)]
+        #[serde(default)]
+        message: Option<String>,
+    ) -> FsResponse {
+        if detach.unwrap_or(false) {
+            return FsResponse::ok(json!({ "status": "detached", "ca_id": ca_id }));
+        }
+        let Some(label) = label else {
+            return FsResponse::err(
+                "fs_push requires a `label` unless detach=true".to_string(),
+            );
+        };
+        match self
+            .engine
+            .fs_push(&label, &ca_id, expected, force.unwrap_or(false), message)
+            .await
+        {
+            Ok(outcome) => match serde_json::to_value(&outcome) {
+                Ok(v) => FsResponse::ok(v),
+                Err(e) => FsResponse::err(e.to_string()),
+            },
+            Err(e) => FsResponse::err(e),
+        }
+    }
+
+    #[tool(description = "Reset a filesystem snapshot label to an earlier CA id from its reflog (rollback). The CA id must appear in the label's reflog (see fs_log) unless allow_unlogged=true. Pass an optional `message` (a commit-style note) to record on the reflog entry.")]
+    pub async fn fs_reset(
+        &self,
+        #[tool(param)] label: String,
+        #[tool(param)] ca_id: String,
+        #[tool(param)]
+        #[serde(default)]
+        allow_unlogged: Option<bool>,
+        #[tool(param)]
+        #[serde(default)]
+        message: Option<String>,
+    ) -> FsResponse {
+        match self
+            .engine
+            .fs_reset(&label, &ca_id, allow_unlogged.unwrap_or(false), message)
+            .await
+        {
+            Ok(()) => FsResponse::ok(json!({ "label": label, "ca_id": ca_id })),
+            Err(e) => FsResponse::err(e),
+        }
+    }
+
+    #[tool(description = "Three-way merge two filesystem snapshots (CA ids) into a new snapshot. Pass `base` — the snapshot both sides diverged from (e.g. the label head you mounted before two runs) — so only paths BOTH sides changed conflict; omit it for a 2-way merge. Text files are merged at line level: edits to different lines of the same file auto-merge cleanly. On success returns the merged snapshot's ca_id (push it to a label separately). On conflict returns status=conflict with, per path: each side's content id (null = absent), kind (text/binary/sqlite/modify-delete), and for text the diff3 conflict `markers` plus unified `diff_ours`/`diff_theirs` so you can resolve at line level (edit the markers, write the file back, push). Set prefer=ours|theirs to auto-resolve remaining conflicts to that side.")]
+    pub async fn fs_merge(
+        &self,
+        #[tool(param)] ours: String,
+        #[tool(param)] theirs: String,
+        #[tool(param)]
+        #[serde(default)]
+        base: Option<String>,
+        #[tool(param)]
+        #[serde(default)]
+        prefer: Option<String>,
+    ) -> FsResponse {
+        let prefer = match crate::engine::fs_merge::Prefer::parse(prefer.as_deref()) {
+            Ok(p) => p,
+            Err(e) => return FsResponse::err(e),
+        };
+        match self.engine.fs_merge(&ours, &theirs, base, prefer).await {
+            Ok(result) => match serde_json::to_value(&result) {
+                Ok(v) => FsResponse::ok(v),
+                Err(e) => FsResponse::err(e.to_string()),
+            },
+            Err(e) => FsResponse::err(e),
         }
     }
 }

@@ -1,0 +1,7 @@
+# TLA+ tools jar (download separately) and TLC scratch output.
+tla2tools.jar
+states/
+*.st
+MC.tla
+MC.cfg
+*_TTrace_*

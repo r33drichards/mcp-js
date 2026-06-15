@@ -265,6 +265,10 @@ pub struct PoliciesConfig {
     pub modules: Option<OperationPolicies>,
     /// Policy chain for filesystem operations.
     pub filesystem: Option<OperationPolicies>,
+    /// Policy chain for fs snapshot pointer moves (pull/push/reset/label). The
+    /// policy input is `{ "op": "pull"|"push"|"reset"|"label", "label": "...",
+    /// "ca_id": "..." }`.
+    pub fs_snapshot: Option<OperationPolicies>,
     /// Policy chain for MCP tool calls (`mcp.callTool()`).
     pub mcp_tools: Option<OperationPolicies>,
     /// Policy chain for subprocess execution (`Deno.Command`, `child_process.exec`).

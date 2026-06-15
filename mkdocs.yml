@@ -39,6 +39,7 @@ nav:
       - Transports (stdio, HTTP, SSE): how-to/transports.md
       - Network access with fetch: how-to/fetch.md
       - Filesystem access: how-to/filesystem.md
+      - Filesystem snapshots: how-to/fs-snapshots.md
       - Subprocess execution: how-to/subprocess.md
       - WebAssembly modules: how-to/wasm-modules.md
       - ES module imports: how-to/module-imports.md
@@ -57,6 +58,7 @@ nav:
       - Transports (stdio, HTTP, SSE): concepts/transports.md
       - Network access with fetch: concepts/fetch.md
       - Filesystem access: concepts/filesystem.md
+      - Filesystem snapshots: concepts/fs-snapshots.md
       - Subprocess execution: concepts/subprocess.md
       - WebAssembly modules: concepts/wasm-modules.md
       - ES module imports: concepts/module-imports.md

@@ -118,6 +118,7 @@ query-string parameters.
 {
   "code": "string",
   "execution_timeout_secs": 0,
+  "fs": "string",
   "heap": "string",
   "heap_memory_max_mb": 0,
   "session": "string",
@@ -215,6 +216,7 @@ Authentication: none.
   "completed_at": "string",
   "error": "string",
   "execution_id": "string",
+  "fs": "string",
   "heap": "string",
   "result": "string",
   "started_at": "string",
@@ -324,6 +326,233 @@ Supports both line-based (`line_offset` / `line_limit`) and byte-based
 |---|---|---|---|
 |200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Output page|[ExecutionOutput](#schemaexecutionoutput)|
 |404|[Not Found](https://tools.ietf.org/html/rfc7231#section-6.5.4)|Execution not found|[ApiError](#schemaapierror)|
+
+Authentication: none.
+
+
+## Fs
+
+
+### List filesystem snapshot labels.
+
+
+<a id="opIdfs_labels_handler"></a>
+
+`GET /api/fs/labels`
+
+<a id="list-filesystem-snapshot-labels.-responses"></a>
+#### Responses
+
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Labels and their head CA ids|None|
+
+Authentication: none.
+
+
+### Create or repoint a filesystem snapshot label.
+
+
+<a id="opIdfs_set_label_handler"></a>
+
+`POST /api/fs/labels`
+
+> Body parameter
+
+```json
+{
+  "ca_id": "string",
+  "message": "string",
+  "name": "string"
+}
+```
+
+<a id="create-or-repoint-a-filesystem-snapshot-label.-parameters"></a>
+#### Parameters
+
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|body|body|[FsLabelRequest](#schemafslabelrequest)|true|none|
+
+<a id="create-or-repoint-a-filesystem-snapshot-label.-responses"></a>
+#### Responses
+
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Label set|None|
+
+Authentication: none.
+
+
+### Resolve a label to its current head CA id.
+
+
+<a id="opIdfs_resolve_handler"></a>
+
+`GET /api/fs/labels/{label}`
+
+<a id="resolve-a-label-to-its-current-head-ca-id.-parameters"></a>
+#### Parameters
+
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|label|path|string|true|Label name|
+
+<a id="resolve-a-label-to-its-current-head-ca-id.-responses"></a>
+#### Responses
+
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Current head CA id|None|
+|404|[Not Found](https://tools.ietf.org/html/rfc7231#section-6.5.4)|Unknown label|None|
+
+Authentication: none.
+
+
+### Show the reflog for a label.
+
+
+<a id="opIdfs_log_handler"></a>
+
+`GET /api/fs/labels/{label}/log`
+
+<a id="show-the-reflog-for-a-label.-parameters"></a>
+#### Parameters
+
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|label|path|string|true|Label name|
+|limit|query|integer|false|Return only the most recent N reflog entries (oldest-first). Omit for the full history.|
+
+<a id="show-the-reflog-for-a-label.-responses"></a>
+#### Responses
+
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Reflog entries, oldest first|None|
+
+Authentication: none.
+
+
+### Three-way merge two snapshots into a new one.
+
+
+<a id="opIdfs_merge_handler"></a>
+
+`POST /api/fs/merge`
+
+> Body parameter
+
+```json
+{
+  "base": "string",
+  "ours": "string",
+  "prefer": "string",
+  "theirs": "string"
+}
+```
+
+<a id="three-way-merge-two-snapshots-into-a-new-one.-parameters"></a>
+#### Parameters
+
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|body|body|[FsMergeRequest](#schemafsmergerequest)|true|none|
+
+<a id="three-way-merge-two-snapshots-into-a-new-one.-responses"></a>
+#### Responses
+
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Merge ran — body has status=merged (ca_id) or status=conflict. Text files auto-merge at line level; each conflict carries kind plus, for text, diff3 markers and unified diffs.|None|
+|400|[Bad Request](https://tools.ietf.org/html/rfc7231#section-6.5.1)|Invalid CA id or prefer value|None|
+
+Authentication: none.
+
+
+### Advance a label to a CA id (reject-and-rebase by default).
+
+
+<a id="opIdfs_push_handler"></a>
+
+`POST /api/fs/push`
+
+> Body parameter
+
+```json
+{
+  "ca_id": "string",
+  "detach": true,
+  "expected": "string",
+  "force": true,
+  "label": "string",
+  "message": "string"
+}
+```
+
+<a id="advance-a-label-to-a-ca-id-(reject-and-rebase-by-default).-parameters"></a>
+#### Parameters
+
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|body|body|[FsPushRequest](#schemafspushrequest)|true|none|
+
+<a id="advance-a-label-to-a-ca-id-(reject-and-rebase-by-default).-responses"></a>
+#### Responses
+
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Push advanced the label|None|
+|409|[Conflict](https://tools.ietf.org/html/rfc7231#section-6.5.8)|Rejected — the label moved since the caller pulled|None|
+
+Authentication: none.
+
+
+### Reset a label to an earlier CA id from its reflog.
+
+
+<a id="opIdfs_reset_handler"></a>
+
+`POST /api/fs/reset`
+
+> Body parameter
+
+```json
+{
+  "allow_unlogged": true,
+  "ca_id": "string",
+  "label": "string",
+  "message": "string"
+}
+```
+
+<a id="reset-a-label-to-an-earlier-ca-id-from-its-reflog.-parameters"></a>
+#### Parameters
+
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|body|body|[FsResetRequest](#schemafsresetrequest)|true|none|
+
+<a id="reset-a-label-to-an-earlier-ca-id-from-its-reflog.-responses"></a>
+#### Responses
+
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Label reset|None|
+|400|[Bad Request](https://tools.ietf.org/html/rfc7231#section-6.5.1)|CA id not in reflog (and allow_unlogged not set)|None|
 
 Authentication: none.
 
@@ -486,6 +715,7 @@ Accepted response containing the new execution's ID.
 {
   "code": "string",
   "execution_timeout_secs": 0,
+  "fs": "string",
   "heap": "string",
   "heap_memory_max_mb": 0,
   "session": "string",
@@ -505,6 +735,7 @@ Request body for executing JavaScript code.
 |---|---|---|---|---|
 |code|string|true|none|JavaScript (or TypeScript) source code to execute.|
 |execution_timeout_secs|integer(int64)¦null|false|none|Per-execution timeout in seconds (overrides server default).|
+|fs|string¦null|false|none|Filesystem snapshot handle to mount: a label name or 64-hex CA id.<br>Independent of `heap`.|
 |heap|string¦null|false|none|Serialised heap snapshot key to restore before execution.|
 |heap_memory_max_mb|integer¦null|false|none|Per-execution V8 heap memory cap in megabytes.|
 |session|string¦null|false|none|Session identifier used for tagging / logging.|
@@ -523,6 +754,7 @@ Request body for executing JavaScript code.
   "completed_at": "string",
   "error": "string",
   "execution_id": "string",
+  "fs": "string",
   "heap": "string",
   "result": "string",
   "started_at": "string",
@@ -540,6 +772,7 @@ Detailed status of a single execution.
 |completed_at|string¦null|false|none|ISO-8601 timestamp when execution finished (absent while running).|
 |error|string¦null|false|none|Error message (present when `status` is `failed`).|
 |execution_id|string|true|none|none|
+|fs|string¦null|false|none|Filesystem snapshot CA id produced after execution (when a mount was<br>attached), independent of the heap.|
 |heap|string¦null|false|none|Heap snapshot key produced after execution.|
 |result|string¦null|false|none|Final return value serialised to JSON (present when `status` is `completed`).|
 |started_at|string|true|none|ISO-8601 timestamp when execution started.|
@@ -640,6 +873,142 @@ A brief summary of a single execution (used in list responses).
 |execution_id|string|true|none|none|
 |started_at|string|true|none|none|
 |status|string|true|none|none|
+
+<h2 id="tocS_FsLabelRequest">FsLabelRequest</h2>
+<!-- backwards compatibility -->
+<a id="schemafslabelrequest"></a>
+<a id="schema_FsLabelRequest"></a>
+<a id="tocSfslabelrequest"></a>
+<a id="tocsfslabelrequest"></a>
+
+```json
+{
+  "ca_id": "string",
+  "message": "string",
+  "name": "string"
+}
+
+```
+
+Request body for `POST /api/fs/labels` (create or repoint a label).
+
+### Properties
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|ca_id|string|true|none|none|
+|message|string¦null|false|none|Optional human note recorded on the reflog entry, like a commit message.|
+|name|string|true|none|none|
+
+<h2 id="tocS_FsLogQuery">FsLogQuery</h2>
+<!-- backwards compatibility -->
+<a id="schemafslogquery"></a>
+<a id="schema_FsLogQuery"></a>
+<a id="tocSfslogquery"></a>
+<a id="tocsfslogquery"></a>
+
+```json
+{
+  "limit": 0
+}
+
+```
+
+Optional query parameters for a label reflog read.
+
+### Properties
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|limit|integer¦null|false|none|Return only the most recent N reflog entries (oldest-first). Omit for the full history.|
+
+<h2 id="tocS_FsMergeRequest">FsMergeRequest</h2>
+<!-- backwards compatibility -->
+<a id="schemafsmergerequest"></a>
+<a id="schema_FsMergeRequest"></a>
+<a id="tocSfsmergerequest"></a>
+<a id="tocsfsmergerequest"></a>
+
+```json
+{
+  "base": "string",
+  "ours": "string",
+  "prefer": "string",
+  "theirs": "string"
+}
+
+```
+
+Request body for `POST /api/fs/merge`.
+
+### Properties
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|base|string¦null|false|none|The common ancestor both sides diverged from. Omit for a 2-way merge.|
+|ours|string|true|none|One side of the merge (CA id, e.g. an execution's `fs` result).|
+|prefer|string¦null|false|none|`ours` or `theirs` to auto-resolve conflicts; omit to report them.|
+|theirs|string|true|none|The other side (CA id).|
+
+<h2 id="tocS_FsPushRequest">FsPushRequest</h2>
+<!-- backwards compatibility -->
+<a id="schemafspushrequest"></a>
+<a id="schema_FsPushRequest"></a>
+<a id="tocSfspushrequest"></a>
+<a id="tocsfspushrequest"></a>
+
+```json
+{
+  "ca_id": "string",
+  "detach": true,
+  "expected": "string",
+  "force": true,
+  "label": "string",
+  "message": "string"
+}
+
+```
+
+Request body for advancing a filesystem snapshot label (`POST /api/fs/push`).
+
+### Properties
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|ca_id|string|true|none|The CA id (hex) to point the label at — typically the `fs` value from a<br>completed execution.|
+|detach|boolean|false|none|Do not touch any label; just echo the CA id back.|
+|expected|string¦null|false|none|The head the caller pulled. The push is rejected if the label has moved<br>since (reject-and-rebase). Ignored when `force` is true.|
+|force|boolean|false|none|Override the conflict check and move the label unconditionally.|
+|label|string¦null|false|none|Label to advance. Omit only when `detach` is true.|
+|message|string¦null|false|none|Optional human note recorded on the reflog entry, like a commit message.|
+
+<h2 id="tocS_FsResetRequest">FsResetRequest</h2>
+<!-- backwards compatibility -->
+<a id="schemafsresetrequest"></a>
+<a id="schema_FsResetRequest"></a>
+<a id="tocSfsresetrequest"></a>
+<a id="tocsfsresetrequest"></a>
+
+```json
+{
+  "allow_unlogged": true,
+  "ca_id": "string",
+  "label": "string",
+  "message": "string"
+}
+
+```
+
+Request body for `POST /api/fs/reset`.
+
+### Properties
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|allow_unlogged|boolean|false|none|Allow resetting to a CA id that is not in the label's reflog.|
+|ca_id|string|true|none|none|
+|label|string|true|none|none|
+|message|string¦null|false|none|Optional human note recorded on the reflog entry, like a commit message.|
 
 <h2 id="tocS_OutputQuery">OutputQuery</h2>
 <!-- backwards compatibility -->

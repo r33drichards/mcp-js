@@ -43,7 +43,9 @@
           cargo = rustToolchain;
         } {
           src = ./server;
-          hash = "sha256-L1IGe3cHLFT35OQ/aJ4xq0RJqRZ4Yu6YbTSMf6ziMr0=";
+          # Vendor hash for server's cargo deps; refreshed when deps changed
+          # (added fastcdc/zstd/blake3/bincode/diffy for fs snapshots).
+          hash = "sha256-vfNOfitsgxQpfftQCfwEhzQLTFtUAQR6R2gHScM/iE4=";
         });
 
         docsPython = pkgs.python3.withPackages (

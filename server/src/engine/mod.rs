@@ -3,6 +3,14 @@ pub mod execution;
 pub mod fetch;
 pub mod fetch_auth;
 pub mod fs;
+pub mod fs_chunker;
+pub mod fs_content_merge;
+pub mod fs_gc;
+pub mod fs_labels;
+pub mod fs_merge;
+pub mod fs_mount;
+pub mod fs_store;
+pub mod fs_tree;
 pub mod heap_storage;
 pub mod heap_tags;
 pub mod mcp_client;
@@ -360,6 +368,110 @@ fn classify_termination_error(
 // only — no type checking is performed. Plain JavaScript passes through
 // unchanged.
 
+/// Parse a 64-char lowercase/uppercase hex string into a 32-byte CA id.
+/// Returns `None` for anything that is not exactly a 32-byte hex blob (e.g. a
+/// human-readable label name).
+pub fn parse_ca_hex(s: &str) -> Option<[u8; 32]> {
+    if s.len() != 64 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(out)
+}
+
+fn refop_str(op: fs_labels::RefOp) -> &'static str {
+    match op {
+        fs_labels::RefOp::Create => "create",
+        fs_labels::RefOp::Push => "push",
+        fs_labels::RefOp::Reset => "reset",
+        fs_labels::RefOp::Force => "force",
+    }
+}
+
+/// A label and its current head CA id (hex), for API/CLI responses.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct FsLabelView {
+    pub name: String,
+    pub ca_id: String,
+}
+
+/// One reflog entry, hex-rendered, for API/CLI responses.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct FsRefLogView {
+    pub at: i64,
+    pub from: Option<String>,
+    pub to: String,
+    pub op: String,
+    /// Optional human note recorded with the move (omitted when absent).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// Outcome of an [`Engine::fs_push`].
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "status", rename_all = "lowercase")]
+pub enum FsPushOutcome {
+    /// The label now points at `ca_id`.
+    Advanced { label: String, ca_id: String },
+    /// The label moved since the caller pulled — re-pull and retry (or force).
+    Rejected {
+        label: String,
+        current: Option<String>,
+    },
+}
+
+/// Result of an [`Engine::fs_merge`].
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "status", rename_all = "lowercase")]
+pub enum FsMergeResult {
+    /// A clean merge; the new snapshot has this CA id.
+    Merged { ca_id: String },
+    /// Unresolved conflicts; no snapshot was produced.
+    Conflict { conflicts: Vec<FsMergeConflictView> },
+}
+
+/// One conflicting path. Each side is a content id (hex of the entry) when the
+/// file is present on that side, or `null` when it is absent (delete). For text
+/// files the response also carries diff3 conflict markers and unified diffs so
+/// the caller can review and resolve at line level.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct FsMergeConflictView {
+    pub path: String,
+    pub base: Option<String>,
+    pub ours: Option<String>,
+    pub theirs: Option<String>,
+    /// Detected content type: `text`, `binary`, `sqlite`, or `modify/delete`.
+    pub kind: String,
+    /// diff3-marked text to edit and write back (text conflicts only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub markers: Option<String>,
+    /// Unified diff base -> ours (text conflicts only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diff_ours: Option<String>,
+    /// Unified diff base -> theirs (text conflicts only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diff_theirs: Option<String>,
+}
+
+/// A stable content id for a manifest entry: blake3 of its canonical encoding.
+/// Lets a caller tell whether two sides' versions of a path differ.
+fn entry_content_id(e: &fs_store::Entry) -> String {
+    let bytes = bincode::serialize(e).unwrap_or_default();
+    ca_to_hex(blake3::hash(&bytes).as_bytes())
+}
+
+/// Render a 32-byte CA id as lowercase hex.
+pub fn ca_to_hex(id: &[u8; 32]) -> String {
+    let mut s = String::with_capacity(64);
+    for b in id {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
 pub fn strip_typescript_types(code: &str) -> Result<String, String> {
     let cm: Lrc<SourceMap> = Default::default();
 
@@ -675,6 +787,9 @@ pub struct ExecutionConfig<'a> {
     pub wasm_default_max_bytes: usize,
     pub fetch_config: Option<&'a fetch::FetchConfig>,
     pub fs_config: Option<&'a fs::FsConfig>,
+    /// Optional overlay mount. When present, the fs ops operate on this virtual
+    /// filesystem instead of the host. Independent of the heap snapshot handle.
+    pub fs_mount: Option<fs::FsMountHandle>,
     pub mcp_headers: Option<serde_json::Value>,
     pub subprocess_config: Option<&'a subprocess::SubprocessConfig>,
     pub console_tree: Option<sled::Tree>,
@@ -691,6 +806,7 @@ impl<'a> ExecutionConfig<'a> {
             wasm_default_max_bytes: heap_memory_max_bytes,
             fetch_config: None,
             fs_config: None,
+            fs_mount: None,
             mcp_headers: None,
             subprocess_config: None,
             console_tree: None,
@@ -750,6 +866,11 @@ impl<'a> ExecutionConfig<'a> {
         self
     }
 
+    pub fn maybe_fs_mount(mut self, mount: Option<fs::FsMountHandle>) -> Self {
+        self.fs_mount = mount;
+        self
+    }
+
     pub fn maybe_mcp_config(mut self, config: Option<&'a mcp_client::McpConfig>) -> Self {
         self.mcp_config = config;
         self
@@ -771,6 +892,7 @@ pub fn execute_stateless(
         wasm_default_max_bytes,
         fetch_config,
         fs_config,
+        fs_mount,
         mcp_headers,
             subprocess_config,
         console_tree,
@@ -826,6 +948,12 @@ pub fn execute_stateless(
         if let Some(fsc) = fs_config {
             let fsc = fsc.clone().with_mcp_headers(mcp_headers.clone());
             runtime.op_state().borrow_mut().put(fsc);
+
+            // Attach the session's overlay mount, if any, so fs ops operate on
+            // the virtual filesystem (behind the same policy gate).
+            if let Some(mount) = fs_mount.clone() {
+                runtime.op_state().borrow_mut().put(mount);
+            }
 
             // Put subprocess config in OpState if subprocess policies are configured.
             if let Some(sc) = subprocess_config {
@@ -941,6 +1069,7 @@ pub fn execute_stateful(
         wasm_default_max_bytes,
         fetch_config,
         fs_config,
+        fs_mount,
         mcp_headers,
             subprocess_config,
         console_tree,
@@ -1015,6 +1144,12 @@ pub fn execute_stateful(
         if let Some(fsc) = fs_config {
             let fsc = fsc.clone().with_mcp_headers(mcp_headers.clone());
             runtime.op_state().borrow_mut().put(fsc);
+
+            // Attach the session's overlay mount, if any, so fs ops operate on
+            // the virtual filesystem (behind the same policy gate).
+            if let Some(mount) = fs_mount.clone() {
+                runtime.op_state().borrow_mut().put(mount);
+            }
 
             // Put subprocess config in OpState if subprocess policies are configured.
             if let Some(sc) = subprocess_config {
@@ -1207,6 +1342,13 @@ pub struct Engine {
     /// own filesystem (the `file` parameter). `None` disables it entirely (the
     /// default); `Some` either allows all paths or gates them behind a policy.
     run_js_file_policy: Option<run_js_file::RunJsFilePolicy>,
+    /// Content-addressed object store for fs snapshots. Shares the heap blob
+    /// backend. When set, `run_js` may mount a snapshot via the `fs` parameter.
+    fs_store: Option<Arc<fs_store::FsStore>>,
+    /// Mutable label → manifest pointer store with reflog.
+    label_store: Option<Arc<fs_labels::LabelStore>>,
+    /// Policy chain gating fs snapshot pointer moves (pull/push/reset/label).
+    fs_snapshot_policy_chain: Option<Arc<opa::PolicyChain>>,
 }
 
 /// Builder for `Engine::run_js()`. Only `code` is required; everything else
@@ -1218,6 +1360,9 @@ pub struct RunJsRequest<'a> {
     /// executed instead of `code`. Policy-gated (see `run_js_file_policy`).
     file: Option<String>,
     heap: Option<String>,
+    /// Optional fs snapshot handle (label name or 64-hex CA id). Independent of
+    /// `heap` — the two are never coupled.
+    fs: Option<String>,
     session: Option<String>,
     heap_memory_max_mb: Option<usize>,
     execution_timeout_secs: Option<u64>,
@@ -1241,6 +1386,18 @@ impl<'a> RunJsRequest<'a> {
 
     pub fn heap(mut self, heap: impl Into<String>) -> Self {
         self.heap = Some(heap.into());
+        self
+    }
+
+    /// Mount an fs snapshot (label name or 64-hex CA id) for this execution.
+    pub fn fs(mut self, fs: impl Into<String>) -> Self {
+        self.fs = Some(fs.into());
+        self
+    }
+
+    /// Set the fs handle from an `Option`, leaving it unset when `None`.
+    pub fn maybe_fs(mut self, fs: Option<String>) -> Self {
+        self.fs = fs;
         self
     }
 
@@ -1285,6 +1442,7 @@ impl<'a> RunJsRequest<'a> {
             self.code,
             self.file,
             self.heap,
+            self.fs,
             self.session,
             self.heap_memory_max_mb,
             self.execution_timeout_secs,
@@ -1324,6 +1482,9 @@ impl Engine {
             instructions_override: None,
             run_js_description_override: None,
             run_js_file_policy: None,
+            fs_store: None,
+            label_store: None,
+            fs_snapshot_policy_chain: None,
         }
     }
 
@@ -1359,6 +1520,9 @@ impl Engine {
             instructions_override: None,
             run_js_description_override: None,
             run_js_file_policy: None,
+            fs_store: None,
+            label_store: None,
+            fs_snapshot_policy_chain: None,
         }
     }
 
@@ -1479,6 +1643,102 @@ impl Engine {
         self
     }
 
+    /// Configure the content-addressed fs snapshot store (the object store) and
+    /// the label/reflog pointer store. Both are required for the `fs` mount
+    /// parameter and the `fs_*` tools to function.
+    pub fn with_fs_snapshots(
+        mut self,
+        store: Arc<fs_store::FsStore>,
+        labels: Arc<fs_labels::LabelStore>,
+    ) -> Self {
+        self.fs_store = Some(store);
+        self.label_store = Some(labels);
+        self
+    }
+
+    /// Gate fs snapshot pointer moves (pull/push/reset/label) behind a policy.
+    pub fn with_fs_snapshot_policy(mut self, chain: Arc<opa::PolicyChain>) -> Self {
+        self.fs_snapshot_policy_chain = Some(chain);
+        self
+    }
+
+    /// Evaluate the fs-snapshot policy for an operation, if a chain is set.
+    /// Input: `{ "op": ..., "label": ..., "ca_id": ... }`.
+    async fn check_fs_snapshot_policy(
+        &self,
+        op: &str,
+        label: Option<&str>,
+        ca_id: Option<&str>,
+    ) -> Result<(), String> {
+        let Some(chain) = &self.fs_snapshot_policy_chain else {
+            return Ok(());
+        };
+        let input = serde_json::json!({ "op": op, "label": label, "ca_id": ca_id });
+        let allowed = chain
+            .evaluate(&input)
+            .await
+            .map_err(|e| format!("fs_snapshot policy error: {e}"))?;
+        if !allowed {
+            return Err(format!(
+                "fs_snapshot {op} denied by policy (label={label:?}, ca_id={ca_id:?})"
+            ));
+        }
+        Ok(())
+    }
+
+    /// The fs object store, if configured.
+    pub fn fs_store(&self) -> Option<&Arc<fs_store::FsStore>> {
+        self.fs_store.as_ref()
+    }
+
+    /// The fs label/reflog store, if configured.
+    pub fn label_store(&self) -> Option<&Arc<fs_labels::LabelStore>> {
+        self.label_store.as_ref()
+    }
+
+    /// Resolve a `run_js` `fs` handle to an attached overlay mount. The handle
+    /// is a label name (mounted at its current head) or a 64-hex CA id (mounted
+    /// detached/pinned). Returns `None` when no handle was supplied.
+    async fn build_fs_mount(
+        &self,
+        fs: &Option<String>,
+    ) -> Result<Option<fs::FsMountHandle>, String> {
+        let Some(handle) = fs.as_ref().filter(|s| !s.is_empty()) else {
+            return Ok(None);
+        };
+        self.check_fs_snapshot_policy("pull", Some(handle), None).await?;
+        let store = self
+            .fs_store
+            .as_ref()
+            .ok_or_else(|| "fs snapshots are not configured on this server".to_string())?;
+
+        // A 64-char hex string is treated as a detached CA id; anything else is
+        // a label resolved to its current head.
+        let mount = if let Some(id) = parse_ca_hex(handle) {
+            let hash = blake3::Hash::from_bytes(id);
+            fs_mount::SessionMount::pull((**store).clone(), hash)
+                .await
+                .map_err(|e| format!("fs mount: pull {handle}: {e}"))?
+        } else {
+            let labels = self
+                .label_store
+                .as_ref()
+                .ok_or_else(|| "fs labels are not configured on this server".to_string())?;
+            match labels.resolve(handle).await? {
+                Some(id) => {
+                    let hash = blake3::Hash::from_bytes(id);
+                    fs_mount::SessionMount::pull((**store).clone(), hash)
+                        .await
+                        .map_err(|e| format!("fs mount: pull label {handle}: {e}"))?
+                }
+                // Unknown label → start from an empty overlay so the first push
+                // can create it.
+                None => fs_mount::SessionMount::empty((**store).clone()),
+            }
+        };
+        Ok(Some(fs::FsMountHandle::new(mount)))
+    }
+
     /// Resolve a `run_js` `file` parameter to source code, applying the
     /// configured policy. Errors if file-path execution is disabled or denied.
     async fn resolve_run_js_file(
@@ -1504,6 +1764,7 @@ impl Engine {
             code: code.into(),
             file: None,
             heap: None,
+            fs: None,
             session: None,
             heap_memory_max_mb: None,
             execution_timeout_secs: None,
@@ -1513,11 +1774,13 @@ impl Engine {
     }
 
     /// Internal: actually submit the run_js request.
+    #[allow(clippy::too_many_arguments)]
     async fn run_js_inner(
         &self,
         code: String,
         file: Option<String>,
         heap: Option<String>,
+        fs: Option<String>,
         session: Option<String>,
         heap_memory_max_mb: Option<usize>,
         execution_timeout_secs: Option<u64>,
@@ -1590,7 +1853,7 @@ impl Engine {
 
         tokio::spawn(async move {
             engine.execute_in_background(
-                id_bg, code, heap, session, heap_memory_max_mb,
+                id_bg, code, heap, fs, session, heap_memory_max_mb,
                 execution_timeout_secs, tags, raw_snapshot, console_tree,
                 mcp_headers,
             ).await;
@@ -1599,12 +1862,307 @@ impl Engine {
         Ok(id)
     }
 
+    // ── fs snapshot label operations ─────────────────────────────────────
+    // Thin orchestration over the LabelStore; the MCP tools, HTTP API, and CLI
+    // all route through these so behavior stays identical across surfaces.
+
+    fn labels_or_err(&self) -> Result<&Arc<fs_labels::LabelStore>, String> {
+        self.label_store
+            .as_ref()
+            .ok_or_else(|| "fs labels are not configured on this server".to_string())
+    }
+
+    fn fs_store_or_err(&self) -> Result<&Arc<fs_store::FsStore>, String> {
+        self.fs_store
+            .as_ref()
+            .ok_or_else(|| "fs snapshots are not configured on this server".to_string())
+    }
+
+    /// Three-way merge two snapshots into a new one. `base` (the common
+    /// ancestor the two sides diverged from — typically the label head both
+    /// were mounted from) is optional: with it, only paths both sides changed
+    /// conflict; without it, the merge is 2-way. `prefer` auto-resolves
+    /// conflicts to one side. A clean merge yields the new snapshot's CA id;
+    /// otherwise the conflicting paths are reported. The merge produces a normal
+    /// pure manifest and does NOT move any label (push it explicitly).
+    pub async fn fs_merge(
+        &self,
+        ours: &str,
+        theirs: &str,
+        base: Option<String>,
+        prefer: fs_merge::Prefer,
+    ) -> Result<FsMergeResult, String> {
+        self.check_fs_snapshot_policy("merge", None, None).await?;
+        let store = self.fs_store_or_err()?;
+
+        let load = |hex: &str| -> Result<[u8; 32], String> {
+            parse_ca_hex(hex).ok_or_else(|| format!("invalid CA id: {hex}"))
+        };
+        let base_root = match &base {
+            Some(b) => Some(load(b)?),
+            None => None,
+        };
+
+        // Structural per-path 3-way merge over the trees: equal subtrees are
+        // pruned by hash (never loaded), clean parts land in the merged tree,
+        // divergent paths come back as conflicts.
+        let structural =
+            fs_merge::merge_trees(store, base_root, Some(load(ours)?), Some(load(theirs)?), prefer)
+                .await
+                .map_err(|e| format!("fs_merge: {e}"))?;
+        let merged_root = structural.root;
+
+        // Content-merge pass: give a type-aware merger a shot at each conflict
+        // before reporting it. Clean text merges resolve silently and are patched
+        // back into the merged tree; the rest are surfaced with diffs/markers.
+        let mergers = fs_content_merge::default_mergers();
+        let mut conflict_views = Vec::new();
+        let mut resolved: Vec<(Vec<String>, Option<fs_store::Entry>)> = Vec::new();
+        for c in structural.conflicts {
+            let view = match (&c.ours, &c.theirs) {
+                (Some(oe), Some(te)) => {
+                    let ours_b = store
+                        .read_file(oe)
+                        .await
+                        .map_err(|e| format!("fs_merge: read ours {}: {e}", c.path.display()))?;
+                    let theirs_b = store
+                        .read_file(te)
+                        .await
+                        .map_err(|e| format!("fs_merge: read theirs {}: {e}", c.path.display()))?;
+                    let base_b = match &c.base {
+                        Some(be) => Some(store.read_file(be).await.map_err(|e| {
+                            format!("fs_merge: read base {}: {e}", c.path.display())
+                        })?),
+                        None => None,
+                    };
+                    match fs_content_merge::merge_content(
+                        &mergers,
+                        base_b.as_deref(),
+                        &ours_b,
+                        &theirs_b,
+                    ) {
+                        fs_content_merge::ContentMergeResult::Clean(bytes) => {
+                            let entry = store
+                                .put_file(&bytes)
+                                .await
+                                .map_err(|e| format!("fs_merge: store merged {}: {e}", c.path.display()))?;
+                            resolved.push((fs_tree::components_of(&c.path), Some(entry)));
+                            continue; // resolved — not a conflict
+                        }
+                        fs_content_merge::ContentMergeResult::Conflict(cc) => FsMergeConflictView {
+                            path: c.path.to_string_lossy().to_string(),
+                            base: c.base.as_ref().map(entry_content_id),
+                            ours: c.ours.as_ref().map(entry_content_id),
+                            theirs: c.theirs.as_ref().map(entry_content_id),
+                            kind: cc.kind.as_str().to_string(),
+                            markers: cc.markers,
+                            diff_ours: cc.diff_ours,
+                            diff_theirs: cc.diff_theirs,
+                        },
+                    }
+                }
+                // A modify/delete (or add on one side): no content to reconcile.
+                _ => FsMergeConflictView {
+                    path: c.path.to_string_lossy().to_string(),
+                    base: c.base.as_ref().map(entry_content_id),
+                    ours: c.ours.as_ref().map(entry_content_id),
+                    theirs: c.theirs.as_ref().map(entry_content_id),
+                    kind: "modify/delete".to_string(),
+                    markers: None,
+                    diff_ours: None,
+                    diff_theirs: None,
+                },
+            };
+            conflict_views.push(view);
+        }
+
+        if conflict_views.is_empty() {
+            // Patch the content-merge resolutions onto the structurally-merged
+            // tree (writing only the touched spine).
+            let final_root = if resolved.is_empty() {
+                merged_root
+            } else {
+                store
+                    .build_root(Some(merged_root), resolved)
+                    .await
+                    .map_err(|e| format!("fs_merge: store result: {e}"))?
+            };
+            Ok(FsMergeResult::Merged {
+                ca_id: ca_to_hex(&final_root),
+            })
+        } else {
+            Ok(FsMergeResult::Conflict {
+                conflicts: conflict_views,
+            })
+        }
+    }
+
+    /// List every label and its current head CA id (hex).
+    pub async fn fs_list_labels(&self) -> Result<Vec<FsLabelView>, String> {
+        let labels = self.labels_or_err()?;
+        Ok(labels
+            .list()
+            .await?
+            .into_iter()
+            .map(|(name, id)| FsLabelView {
+                name,
+                ca_id: ca_to_hex(&id),
+            })
+            .collect())
+    }
+
+    /// Resolve a label to its current head CA id (hex), if it exists.
+    pub async fn fs_resolve_label(&self, name: &str) -> Result<Option<String>, String> {
+        let labels = self.labels_or_err()?;
+        Ok(labels.resolve(name).await?.map(|id| ca_to_hex(&id)))
+    }
+
+    /// Create a label, or repoint an existing one, to a CA id. `message` is an
+    /// optional human note recorded on the reflog entry.
+    pub async fn fs_set_label(
+        &self,
+        name: &str,
+        ca_hex: &str,
+        message: Option<String>,
+    ) -> Result<(), String> {
+        self.check_fs_snapshot_policy("label", Some(name), Some(ca_hex)).await?;
+        let labels = self.labels_or_err()?;
+        let id = parse_ca_hex(ca_hex).ok_or_else(|| format!("invalid CA id: {ca_hex}"))?;
+        match labels.resolve(name).await? {
+            Some(_) => labels.force(name, id, message).await,
+            None => labels.create(name, id, message).await,
+        }
+    }
+
+    /// The reflog for a label (hex-rendered), oldest first. When `limit` is
+    /// given, only the most recent `limit` entries are read and returned —
+    /// bounding the scan over very long histories.
+    pub async fn fs_label_log(
+        &self,
+        name: &str,
+        limit: Option<usize>,
+    ) -> Result<Vec<FsRefLogView>, String> {
+        let labels = self.labels_or_err()?;
+        let entries = match limit {
+            Some(n) => labels.log_recent(name, n).await?,
+            None => labels.log(name).await?,
+        };
+        Ok(entries
+            .into_iter()
+            .map(|e| FsRefLogView {
+                at: e.at,
+                from: e.from.as_ref().map(ca_to_hex),
+                to: ca_to_hex(&e.to),
+                op: refop_str(e.op).to_string(),
+                message: e.message,
+            })
+            .collect())
+    }
+
+    /// Advance a label to a CA id. Default is reject-and-rebase: the move only
+    /// succeeds if the label's current head equals `expected` (or the label does
+    /// not yet exist and `expected` is `None`). `force` skips the check.
+    pub async fn fs_push(
+        &self,
+        label: &str,
+        ca_hex: &str,
+        expected: Option<String>,
+        force: bool,
+        message: Option<String>,
+    ) -> Result<FsPushOutcome, String> {
+        self.check_fs_snapshot_policy("push", Some(label), Some(ca_hex)).await?;
+        let labels = self.labels_or_err()?;
+        let new = parse_ca_hex(ca_hex).ok_or_else(|| format!("invalid CA id: {ca_hex}"))?;
+
+        if force {
+            labels.force(label, new, message).await?;
+            return Ok(FsPushOutcome::Advanced {
+                label: label.to_string(),
+                ca_id: ca_hex.to_string(),
+            });
+        }
+
+        let expected = match expected {
+            Some(h) => Some(parse_ca_hex(&h).ok_or_else(|| format!("invalid expected CA id: {h}"))?),
+            None => None,
+        };
+        let current = labels.resolve(label).await?;
+        let advanced = if current.is_none() && expected.is_none() {
+            labels.create(label, new, message).await?;
+            true
+        } else {
+            labels.cas(label, expected, new, message).await?
+        };
+
+        if advanced {
+            Ok(FsPushOutcome::Advanced {
+                label: label.to_string(),
+                ca_id: ca_hex.to_string(),
+            })
+        } else {
+            Ok(FsPushOutcome::Rejected {
+                label: label.to_string(),
+                current: current.as_ref().map(ca_to_hex),
+            })
+        }
+    }
+
+    /// Reset a label to an earlier CA id from its reflog (the rollback verb).
+    /// Unless `allow_unlogged` is set, the target must appear in the label's
+    /// reflog so resets stay within recorded history.
+    pub async fn fs_reset(
+        &self,
+        label: &str,
+        ca_hex: &str,
+        allow_unlogged: bool,
+        message: Option<String>,
+    ) -> Result<(), String> {
+        self.check_fs_snapshot_policy("reset", Some(label), Some(ca_hex)).await?;
+        let labels = self.labels_or_err()?;
+        let target = parse_ca_hex(ca_hex).ok_or_else(|| format!("invalid CA id: {ca_hex}"))?;
+        if !allow_unlogged {
+            let in_log = labels
+                .log(label)
+                .await?
+                .iter()
+                .any(|e| e.to == target || e.from == Some(target));
+            if !in_log {
+                return Err(format!(
+                    "CA id {ca_hex} is not in the reflog for label '{label}'; \
+                     pass allow_unlogged to reset anyway"
+                ));
+            }
+        }
+        labels.force(label, target, message).await
+    }
+
+    /// Flush a session's overlay mount into a new pure manifest and return its
+    /// CA id (hex). This is the durable fs artifact recorded on completion; it
+    /// does NOT advance any label (pushing a label is the explicit `fs_push`
+    /// verb).
+    ///
+    /// `Ok(None)` means no mount was attached; `Ok(Some(ca))` is a flushed
+    /// snapshot. A flush failure on an attached mount is returned as `Err` so
+    /// the caller can fail the execution rather than silently reporting it
+    /// complete with the filesystem changes lost.
+    async fn push_mount(&self, fm: &Option<fs::FsMountHandle>) -> Result<Option<String>, String> {
+        let Some(fm) = fm.as_ref() else {
+            return Ok(None);
+        };
+        match fm.0.lock().await.push().await {
+            Ok(h) => Ok(Some(ca_to_hex(h.as_bytes()))),
+            Err(e) => Err(format!("fs snapshot flush failed: {e}")),
+        }
+    }
+
     /// Background execution task — runs V8 on the blocking pool with timeout.
+    #[allow(clippy::too_many_arguments)]
     async fn execute_in_background(
         &self,
         id: ExecutionId,
         code: String,
         heap: Option<String>,
+        fs: Option<String>,
         session: Option<String>,
         heap_memory_max_mb: Option<usize>,
         execution_timeout_secs: Option<u64>,
@@ -1616,6 +2174,15 @@ impl Engine {
         let registry = match &self.execution_registry {
             Some(r) => r.clone(),
             None => return,
+        };
+
+        // Resolve and attach the fs overlay mount (independent of the heap).
+        let fs_mount = match self.build_fs_mount(&fs).await {
+            Ok(m) => m,
+            Err(e) => {
+                registry.fail(&id, e);
+                return;
+            }
         };
 
         let max_bytes = heap_memory_max_mb
@@ -1648,9 +2215,11 @@ impl Engine {
                 let ct = console_tree;
                 let mlc = self.module_loader_config.clone();
                 let mc = self.mcp_client_manager.as_ref().map(|m| mcp_client::McpConfig { client_manager: (**m).clone(), policy_chain: self.mcp_tools_policy_chain.clone() });
+                let fm = fs_mount.clone();
                 let mut join_handle = tokio::task::spawn_blocking(move || {
                     execute_stateless(&code, ExecutionConfig::new(max_bytes)
                         .isolate_handle(ih)
+                        .maybe_fs_mount(fm)
                         .wasm_modules(&wasm)
                         .wasm_default_max_bytes(wasm_default)
                         .maybe_fetch_config(fc.as_deref())
@@ -1696,7 +2265,19 @@ impl Engine {
                 };
 
                 match result {
-                    Ok(js_result) => registry.complete(&id, js_result.output, None),
+                    Ok(js_result) => {
+                        // Flush and publish the fs snapshot id *before* marking
+                        // the run complete, so a client that stops polling on the
+                        // first terminal status cannot miss it. A flush failure
+                        // fails the run rather than reporting lost fs changes.
+                        match self.push_mount(&fs_mount).await {
+                            Ok(output_fs) => {
+                                registry.set_fs(&id, output_fs);
+                                registry.complete(&id, js_result.output, None);
+                            }
+                            Err(e) => registry.fail(&id, e),
+                        }
+                    }
                     Err(e) if e.contains("timed out") => registry.timed_out(&id),
                     Err(e) => registry.fail(&id, e),
                 }
@@ -1716,10 +2297,12 @@ impl Engine {
                 let mc = self.mcp_client_manager.as_ref().map(|m| mcp_client::McpConfig { client_manager: (**m).clone(), policy_chain: self.mcp_tools_policy_chain.clone() });
 
                 let snap_mutex = self.snapshot_mutex.clone();
+                let fm = fs_mount.clone();
                 let mut join_handle = tokio::task::spawn_blocking(move || {
                     let _guard = snap_mutex.blocking_lock();
                     execute_stateful(&code, raw_snapshot, ExecutionConfig::new(max_bytes)
                         .isolate_handle(ih)
+                        .maybe_fs_mount(fm)
                         .wasm_modules(&wasm)
                         .wasm_default_max_bytes(wasm_default)
                         .maybe_fetch_config(fc.as_deref())
@@ -1769,10 +2352,24 @@ impl Engine {
                             return;
                         }
 
+                        // Record the resulting fs snapshot CA id independently of
+                        // the heap. Does not advance any label. A flush failure
+                        // on an attached mount fails the run rather than reporting
+                        // it complete with the filesystem changes lost.
+                        let output_fs = match self.push_mount(&fs_mount).await {
+                            Ok(v) => v,
+                            Err(e) => {
+                                registry.fail(&id, e);
+                                return;
+                            }
+                        };
+                        registry.set_fs(&id, output_fs.clone());
+
                         if let (Some(session_name), Some(log)) = (&session, &self.session_log) {
                             let entry = SessionLogEntry {
                                 input_heap: heap.clone(),
                                 output_heap: content_hash.clone(),
+                                output_fs: output_fs.clone(),
                                 code: code_for_log,
                                 timestamp: chrono::Utc::now().to_rfc3339(),
                             };

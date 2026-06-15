@@ -1,7 +1,7 @@
 use anyhow::Result;
 use rmcp::{ServerHandler, ServiceExt, transport::stdio};
 use tracing_subscriber::{self};
-use clap::Parser;
+use clap::{Parser, CommandFactory};
 use rmcp::transport::sse_server::{SseServer, SseServerConfig};
 use rmcp::transport::StreamableHttpServer;
 use rmcp::transport::streamable_http_server::axum::StreamableHttpServerConfig;
@@ -25,7 +25,10 @@ use engine::module_loader::ModuleLoaderConfig;
 use engine::subprocess::SubprocessConfig;
 use engine::run_js_file::RunJsFilePolicy;
 use engine::opa::{PoliciesConfig, build_policy_chain};
-use engine::heap_storage::{AnyHeapStorage, S3HeapStorage, WriteThroughCacheHeapStorage, FileHeapStorage};
+use engine::heap_storage::{AnyHeapStorage, HeapStorage, S3HeapStorage, WriteThroughCacheHeapStorage, FileHeapStorage};
+use engine::fs_store::FsStore;
+use engine::fs_labels::LabelStore;
+use engine::opa::{EvalMode, PolicyChain};
 use engine::heap_tags::HeapTagStore;
 use engine::session_log::SessionLog;
 use mcp::{McpService, StatelessMcpService};
@@ -127,6 +130,11 @@ async fn main() -> Result<()> {
         tracing::info!("Loaded {} WASM module(s): {}", wasm_modules.len(),
             wasm_modules.iter().map(|m| m.name.as_str()).collect::<Vec<_>>().join(", "));
     }
+
+    // Captured before the engine build consumes them, so fs snapshots can reuse
+    // the same shared storage backend (see the fs-snapshots block below).
+    let fs_s3_bucket = cli.s3_bucket.clone();
+    let fs_cache_dir = cli.cache_dir.clone();
 
     // ── Build Engine ────────────────────────────────────────────────────
     let engine = if cli.stateless {
@@ -262,6 +270,19 @@ async fn main() -> Result<()> {
         None
     };
 
+    let fs_snapshot_policy_chain = if let Some(ref config) = policies_config {
+        if let Some(ref snap_policies) = config.fs_snapshot {
+            let chain = build_policy_chain(snap_policies, "mcp/fs_snapshot", "data.mcp.fs_snapshot.allow")
+                .map_err(|e| anyhow::anyhow!("Failed to build fs_snapshot policy chain: {}", e))?;
+            tracing::info!("FS snapshot policy chain: {} evaluator(s), mode={:?}", snap_policies.policies.len(), snap_policies.mode);
+            Some(Arc::new(chain))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     let mcp_tools_policy_chain = if let Some(ref config) = policies_config {
         if let Some(ref mcp_tools_policies) = config.mcp_tools {
             let chain = build_policy_chain(mcp_tools_policies, "mcp/tools", "data.mcp.tools.allow")
@@ -316,8 +337,91 @@ async fn main() -> Result<()> {
     };
 
     // ── Filesystem policy ────────────────────────────────────────────────
+    // A mount needs the fs surface present, so when snapshots are enabled but
+    // no fs policy was supplied, default to an allow-all policy chain.
     let engine = if let Some(chain) = fs_policy_chain {
         engine.with_fs_config(FsConfig::new(chain))
+    } else if cli.enable_fs_snapshots {
+        engine.with_fs_config(FsConfig::new(Arc::new(PolicyChain::new(vec![], EvalMode::All))))
+    } else {
+        engine
+    };
+
+    // ── Filesystem snapshots (content-addressed store + label/reflog) ─────
+    let engine = if cli.enable_fs_snapshots {
+        let store_dir = cli
+            .fs_store_dir
+            .clone()
+            .unwrap_or_else(|| format!("{}/fs-blobs", cli.session_db_path));
+        let labels_db = cli
+            .fs_labels_db
+            .clone()
+            .unwrap_or_else(|| format!("{}/fs-labels", cli.session_db_path));
+
+        // Labels replicate cluster-wide, but blobs/manifests are only shared if
+        // they sit on shared storage. Node-local file blobs are single-node
+        // only: in a cluster a label advanced on one node would resolve on
+        // another to a manifest that node is missing. Refuse that combination up
+        // front rather than failing later after a rebalance.
+        if cluster_node.is_some() && fs_s3_bucket.is_none() {
+            Cli::command()
+                .error(
+                    clap::error::ErrorKind::ArgumentConflict,
+                    "--enable-fs-snapshots in cluster mode requires shared blob storage: \
+                     pass --s3-bucket (optionally with --cache-dir for a write-through \
+                     cache). Node-local fs snapshot blobs are single-node only.",
+                )
+                .exit();
+        }
+
+        // Back the blob store with shared S3 (matching the heap backend) when a
+        // bucket is configured, so mounts resolve on any node; otherwise use
+        // node-local files (single-node).
+        let backend: Arc<dyn HeapStorage> = if let Some(bucket) = &fs_s3_bucket {
+            if let Some(cache_dir) = &fs_cache_dir {
+                tracing::info!(
+                    "FS snapshots: shared S3 blob storage (bucket {}) with write-through cache at {}",
+                    bucket,
+                    cache_dir
+                );
+                Arc::new(WriteThroughCacheHeapStorage::new(
+                    S3HeapStorage::new(bucket.clone()).await,
+                    cache_dir.clone(),
+                ))
+            } else {
+                tracing::info!("FS snapshots: shared S3 blob storage (bucket {})", bucket);
+                Arc::new(S3HeapStorage::new(bucket.clone()).await)
+            }
+        } else {
+            Arc::new(FileHeapStorage::new(&store_dir))
+        };
+        let store = Arc::new(FsStore::new(backend));
+        match LabelStore::new(&labels_db) {
+            Ok(labels) => {
+                tracing::info!(
+                    "FS snapshots: ENABLED (blobs at {}, labels at {})",
+                    store_dir,
+                    labels_db
+                );
+                let labels = if let Some(ref cn) = cluster_node {
+                    tracing::info!("FS label writes will route through the Raft cluster leader");
+                    labels.with_cluster(cn.clone())
+                } else {
+                    labels
+                };
+                let engine = engine.with_fs_snapshots(store, Arc::new(labels));
+                if let Some(chain) = fs_snapshot_policy_chain {
+                    tracing::info!("FS snapshot pointer moves are policy-gated");
+                    engine.with_fs_snapshot_policy(chain)
+                } else {
+                    engine
+                }
+            }
+            Err(e) => {
+                tracing::error!("FS snapshots: failed to open label store at {}: {}. Disabled.", labels_db, e);
+                engine
+            }
+        }
     } else {
         engine
     };

@@ -19,6 +19,13 @@ These tools keep execution records and heap state available across calls.
 
 - [`cancel_execution`](#stateful-cancel-execution)
 - [`delete_heap_tags`](#stateful-delete-heap-tags)
+- [`fs_label`](#stateful-fs-label)
+- [`fs_log`](#stateful-fs-log)
+- [`fs_ls`](#stateful-fs-ls)
+- [`fs_merge`](#stateful-fs-merge)
+- [`fs_pull`](#stateful-fs-pull)
+- [`fs_push`](#stateful-fs-push)
+- [`fs_reset`](#stateful-fs-reset)
 - [`get_execution`](#stateful-get-execution)
 - [`get_execution_output`](#stateful-get-execution-output)
 - [`get_heap_tags`](#stateful-get-heap-tags)
@@ -52,10 +59,97 @@ Parameters:
 | `heap` | `string` | yes | - |
 | `keys` | `string | null` | no | - |
 
+### `fs_label`
+<a id="stateful-fs-label"></a>
+
+Create or repoint a filesystem snapshot label to a CA id (hex). Pass an optional `message` (a commit-style note) to record on the reflog entry.
+
+Parameters:
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `ca_id` | `string` | yes | - |
+| `message` | `string | null` | no | - |
+| `name` | `string` | yes | - |
+
+### `fs_log`
+<a id="stateful-fs-log"></a>
+
+Show the reflog (move history) for a filesystem snapshot label, oldest first. Each entry has at, from, to (CA ids), op (create/push/reset/force), and an optional message. Use a `to` value as the ca_id for fs_reset. Pass `limit` to return only the most recent N entries (bounding the scan over long histories).
+
+Parameters:
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `label` | `string` | yes | - |
+| `limit` | `integer | null` | no | - |
+
+### `fs_ls`
+<a id="stateful-fs-ls"></a>
+
+List filesystem snapshot labels. Returns each label name and its current head CA id (hex).
+
+This tool does not take structured parameters.
+
+### `fs_merge`
+<a id="stateful-fs-merge"></a>
+
+Three-way merge two filesystem snapshots (CA ids) into a new snapshot. Pass `base` — the snapshot both sides diverged from (e.g. the label head you mounted before two runs) — so only paths BOTH sides changed conflict; omit it for a 2-way merge. Text files are merged at line level: edits to different lines of the same file auto-merge cleanly. On success returns the merged snapshot's ca_id (push it to a label separately). On conflict returns status=conflict with, per path: each side's content id (null = absent), kind (text/binary/sqlite/modify-delete), and for text the diff3 conflict `markers` plus unified `diff_ours`/`diff_theirs` so you can resolve at line level (edit the markers, write the file back, push). Set prefer=ours|theirs to auto-resolve remaining conflicts to that side.
+
+Parameters:
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `base` | `string | null` | no | - |
+| `ours` | `string` | yes | - |
+| `prefer` | `string | null` | no | - |
+| `theirs` | `string` | yes | - |
+
+### `fs_pull`
+<a id="stateful-fs-pull"></a>
+
+Resolve a filesystem snapshot label to its current head CA id (hex). Use this as the `fs` argument to run_js to mount it.
+
+Parameters:
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `label` | `string` | yes | - |
+
+### `fs_push`
+<a id="stateful-fs-push"></a>
+
+Advance a filesystem snapshot label to a CA id (typically the `fs` value returned by a completed run_js execution). Default is reject-and-rebase: pass `expected` (the head you pulled) and the push fails if the label moved since. Set force=true to override, or detach=true to just return the CA id without touching the label. Pass an optional `message` (a commit-style note, max 4096 bytes) to record on the reflog entry.
+
+Parameters:
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `ca_id` | `string` | yes | - |
+| `detach` | `boolean | null` | no | - |
+| `expected` | `string | null` | no | - |
+| `force` | `boolean | null` | no | - |
+| `label` | `string | null` | no | - |
+| `message` | `string | null` | no | - |
+
+### `fs_reset`
+<a id="stateful-fs-reset"></a>
+
+Reset a filesystem snapshot label to an earlier CA id from its reflog (rollback). The CA id must appear in the label's reflog (see fs_log) unless allow_unlogged=true. Pass an optional `message` (a commit-style note) to record on the reflog entry.
+
+Parameters:
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `allow_unlogged` | `boolean | null` | no | - |
+| `ca_id` | `string` | yes | - |
+| `label` | `string` | yes | - |
+| `message` | `string | null` | no | - |
+
 ### `get_execution`
 <a id="stateful-get-execution"></a>
 
-Get the status and result of an execution. Returns execution_id, status (running/completed/failed/cancelled/timed_out), result (if completed), heap (if stateful), error (if failed), started_at, and completed_at.
+Get the status and result of an execution. Returns execution_id, status (running/completed/failed/cancelled/timed_out), result (if completed), heap (if stateful), fs (resulting filesystem snapshot CA id, if a mount was attached), error (if failed), started_at, and completed_at.
 
 Parameters:
 
@@ -216,6 +310,7 @@ When the server is configured with policies, JavaScript code can use an `fs` mod
 - `await fs.rm(path, [options])` — Delete file or directory (supports `{recursive: true}`)
 - `await fs.rename(oldPath, newPath)` — Rename or move file
 - `await fs.copyFile(src, dest)` — Copy file
+- `await fs.createWriteStream(path)` — Open a streaming write handle (`await w.write(chunk)`, `await w.close()`) for large files
 - `await fs.exists(path)` — Check if path exists
 - `await fs.unlink(path)` — Delete a file
 
@@ -238,6 +333,7 @@ Parameters:
 | `code` | `string | null` | no | - |
 | `execution_timeout_secs` | `integer | null` | no | - |
 | `file` | `string | null` | no | - |
+| `fs` | `string | null` | no | - |
 | `heap` | `string | null` | no | - |
 | `heap_memory_max_mb` | `integer | null` | no | - |
 | `tags` | `object | null` | no | - |
@@ -328,6 +424,7 @@ When the server is configured with policies, JavaScript code can use an `fs` mod
 - `await fs.rm(path, [options])` — Delete file or directory (supports `{recursive: true}`)
 - `await fs.rename(oldPath, newPath)` — Rename or move file
 - `await fs.copyFile(src, dest)` — Copy file
+- `await fs.createWriteStream(path)` — Open a streaming write handle (`await w.write(chunk)`, `await w.close()`) for large files
 - `await fs.exists(path)` — Check if path exists
 - `await fs.unlink(path)` — Delete a file
 
