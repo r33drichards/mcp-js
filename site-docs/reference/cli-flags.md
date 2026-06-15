@@ -47,6 +47,10 @@ Join an existing cluster by contacting this seed address (host:port). The node w
 
 - Value: `JOIN`
 
+### `--join-as-learner`
+
+Join as a non-voting learner: the node replicates the log but is excluded from election and commit quorums and never starts elections. Use for ephemeral nodes whose churn must not affect availability
+
 ### `--advertise-addr`
 
 Advertise address for this node (host:port). Used for peer discovery and write forwarding. Defaults to <node-id>:<cluster-port>
