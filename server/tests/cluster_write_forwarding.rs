@@ -42,6 +42,7 @@ fn make_config_3(idx: usize, ports: &[u16; 3]) -> ClusterConfig {
         heartbeat_interval: Duration::from_millis(80),
         election_timeout_min: Duration::from_millis(250),
         election_timeout_max: Duration::from_millis(500),
+        learner: false,
     }
 }
 
@@ -441,6 +442,7 @@ async fn test_dynamic_peer_join() {
             heartbeat_interval: Duration::from_millis(80),
             election_timeout_min: Duration::from_millis(250),
             election_timeout_max: Duration::from_millis(500),
+            learner: false,
         }
     };
     let config2 = {
@@ -455,6 +457,7 @@ async fn test_dynamic_peer_join() {
             heartbeat_interval: Duration::from_millis(80),
             election_timeout_min: Duration::from_millis(250),
             election_timeout_max: Duration::from_millis(500),
+            learner: false,
         }
     };
 
@@ -492,6 +495,7 @@ async fn test_dynamic_peer_join() {
         heartbeat_interval: Duration::from_millis(80),
         election_timeout_min: Duration::from_millis(250),
         election_timeout_max: Duration::from_millis(500),
+        learner: false,
     };
     let db3 = temp_sled("dyn-join-node3");
     let node3 = ClusterNode::new(config3, db3);
@@ -502,6 +506,7 @@ async fn test_dynamic_peer_join() {
         .handle_join(JoinRequest {
             node_id: "node3".to_string(),
             addr: format!("127.0.0.1:{}", ports[2]),
+            as_learner: false,
         })
         .await
         .expect("Join should succeed on leader");

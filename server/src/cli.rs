@@ -105,6 +105,12 @@ pub struct Cli {
     #[arg(long, help_heading = "Cluster")]
     pub join: Option<String>,
 
+    /// Join as a non-voting learner: the node replicates the log but is
+    /// excluded from election and commit quorums and never starts elections.
+    /// Use for ephemeral nodes whose churn must not affect availability.
+    #[arg(long, help_heading = "Cluster")]
+    pub join_as_learner: bool,
+
     /// Advertise address for this node (host:port). Used for peer discovery
     /// and write forwarding. Defaults to <node-id>:<cluster-port>.
     #[arg(long, help_heading = "Cluster")]
