@@ -1834,6 +1834,39 @@ impl Engine {
             },
         };
 
+        // Resolve which fs snapshot to mount, mirroring the heap logic above so
+        // the content-addressed filesystem persists per `session` exactly like
+        // the heap. An explicit `fs` (label or CA id) always wins. Otherwise,
+        // when fs snapshots are configured and a `session` is given, mount that
+        // session's most-recent output fs; on the first run there is none yet,
+        // so fall back to the session name as the handle — `build_fs_mount`
+        // treats an unknown label as an empty overlay, which is exactly the
+        // desired starting state. The post-run output fs is recorded in the
+        // session log, so the next run picks it up with no label management.
+        let fs = match &fs {
+            Some(f) if !f.is_empty() => fs,
+            _ if self.fs_store.is_some() => {
+                match (session.as_ref(), self.session_log.as_ref()) {
+                    (Some(session_name), Some(log)) => {
+                        match log.get_latest(session_name).await {
+                            Ok(Some(entry)) if entry.output_fs.is_some() => entry.output_fs,
+                            Ok(_) => Some(session_name.clone()),
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to resolve latest fs for session '{}': {}",
+                                    session_name,
+                                    e
+                                );
+                                Some(session_name.clone())
+                            }
+                        }
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+
         // For stateful mode, unwrap snapshot before spawning background task.
         let raw_snapshot = if let Some(storage) = &self.heap_storage {
             let snapshot = match &heap {

@@ -123,16 +123,25 @@ async fn op_fs_read_file_text(
     let config = extract_config(&state)?;
     let mount = extract_mount(&state);
 
+    // Mount-backed reads must run on the current-thread isolate runtime: the
+    // CAS overlay uses deno_unsync, which asserts a current-thread flavor.
+    // tokio::spawn would move the work onto the multi-thread runtime and abort
+    // the process. Only the real-filesystem path is offloaded via spawn.
+    if let Some(m) = mount {
+        check_policy(&config.policy_chain, "readFile", &path, None, None, Some("utf8"), config.mcp_headers.as_ref())
+            .await
+            .map_err(JsErrorBox::generic)?;
+        let content = m.0.lock().await.read(Path::new(&path)).await
+            .map_err(|e| JsErrorBox::generic(format!("fs.readFile: {}: {}", path, e)))?;
+        return String::from_utf8(content)
+            .map_err(|e| JsErrorBox::generic(format!("fs.readFile: invalid UTF-8 in {}: {}", path, e)));
+    }
+
     tokio::spawn(async move {
         check_policy(&config.policy_chain, "readFile", &path, None, None, Some("utf8"), config.mcp_headers.as_ref()).await?;
 
-        let content = if let Some(m) = mount {
-            m.0.lock().await.read(Path::new(&path)).await
-                .map_err(|e| format!("fs.readFile: {}: {}", path, e))?
-        } else {
-            tokio::fs::read(&path).await
-                .map_err(|e| format!("fs.readFile: {}: {}", path, e))?
-        };
+        let content = tokio::fs::read(&path).await
+            .map_err(|e| format!("fs.readFile: {}: {}", path, e))?;
 
         String::from_utf8(content)
             .map_err(|e| format!("fs.readFile: invalid UTF-8 in {}: {}", path, e))
@@ -152,13 +161,18 @@ async fn op_fs_read_file_buffer(
     let config = extract_config(&state)?;
     let mount = extract_mount(&state);
 
+    // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
+    if let Some(m) = mount {
+        check_policy(&config.policy_chain, "readFile", &path, None, None, Some("buffer"), config.mcp_headers.as_ref())
+            .await
+            .map_err(JsErrorBox::generic)?;
+        return m.0.lock().await.read(Path::new(&path)).await
+            .map_err(|e| JsErrorBox::generic(format!("fs.readFile: {}: {}", path, e)));
+    }
+
     tokio::spawn(async move {
         check_policy(&config.policy_chain, "readFile", &path, None, None, Some("buffer"), config.mcp_headers.as_ref()).await?;
 
-        if let Some(m) = mount {
-            return m.0.lock().await.read(Path::new(&path)).await
-                .map_err(|e| format!("fs.readFile: {}: {}", path, e));
-        }
         tokio::fs::read(&path).await
             .map_err(|e| format!("fs.readFile: {}: {}", path, e))
     })
@@ -178,14 +192,21 @@ async fn op_fs_write_file_text(
     let config = extract_config(&state)?;
     let mount = extract_mount(&state);
 
+    // Mount-backed writes must run on the current-thread isolate runtime (the
+    // CAS overlay uses deno_unsync, which asserts a current-thread flavor).
+    // tokio::spawn would move the work onto the multi-thread runtime and abort.
+    if let Some(m) = mount {
+        check_policy(&config.policy_chain, "writeFile", &path, None, None, None, config.mcp_headers.as_ref())
+            .await
+            .map_err(JsErrorBox::generic)?;
+        m.0.lock().await.write(Path::new(&path), data.as_bytes()).await
+            .map_err(|e| JsErrorBox::generic(format!("fs.writeFile: {}: {}", path, e)))?;
+        return Ok("{}".to_string());
+    }
+
     tokio::spawn(async move {
         check_policy(&config.policy_chain, "writeFile", &path, None, None, None, config.mcp_headers.as_ref()).await?;
 
-        if let Some(m) = mount {
-            m.0.lock().await.write(Path::new(&path), data.as_bytes()).await
-                .map_err(|e| format!("fs.writeFile: {}: {}", path, e))?;
-            return Ok("{}".to_string());
-        }
         tokio::fs::write(&path, data.as_bytes()).await
             .map_err(|e| format!("fs.writeFile: {}: {}", path, e))?;
 
@@ -207,14 +228,19 @@ async fn op_fs_write_file_buffer(
     let config = extract_config(&state)?;
     let mount = extract_mount(&state);
 
+    // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
+    if let Some(m) = mount {
+        check_policy(&config.policy_chain, "writeFile", &path, None, None, None, config.mcp_headers.as_ref())
+            .await
+            .map_err(JsErrorBox::generic)?;
+        m.0.lock().await.write(Path::new(&path), &data).await
+            .map_err(|e| JsErrorBox::generic(format!("fs.writeFile: {}: {}", path, e)))?;
+        return Ok("{}".to_string());
+    }
+
     tokio::spawn(async move {
         check_policy(&config.policy_chain, "writeFile", &path, None, None, None, config.mcp_headers.as_ref()).await?;
 
-        if let Some(m) = mount {
-            m.0.lock().await.write(Path::new(&path), &data).await
-                .map_err(|e| format!("fs.writeFile: {}: {}", path, e))?;
-            return Ok("{}".to_string());
-        }
         tokio::fs::write(&path, &data).await
             .map_err(|e| format!("fs.writeFile: {}: {}", path, e))?;
 
@@ -236,17 +262,21 @@ async fn op_fs_append_file(
     let config = extract_config(&state)?;
     let mount = extract_mount(&state);
 
+    // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
+    if let Some(m) = mount {
+        check_policy(&config.policy_chain, "appendFile", &path, None, None, None, config.mcp_headers.as_ref())
+            .await
+            .map_err(JsErrorBox::generic)?;
+        let mut guard = m.0.lock().await;
+        let mut existing = guard.read(Path::new(&path)).await.unwrap_or_default();
+        existing.extend_from_slice(data.as_bytes());
+        guard.write(Path::new(&path), &existing).await
+            .map_err(|e| JsErrorBox::generic(format!("fs.appendFile: {}: {}", path, e)))?;
+        return Ok("{}".to_string());
+    }
+
     tokio::spawn(async move {
         check_policy(&config.policy_chain, "appendFile", &path, None, None, None, config.mcp_headers.as_ref()).await?;
-
-        if let Some(m) = mount {
-            let mut guard = m.0.lock().await;
-            let mut existing = guard.read(Path::new(&path)).await.unwrap_or_default();
-            existing.extend_from_slice(data.as_bytes());
-            guard.write(Path::new(&path), &existing).await
-                .map_err(|e| format!("fs.appendFile: {}: {}", path, e))?;
-            return Ok("{}".to_string());
-        }
 
         use tokio::io::AsyncWriteExt;
         let mut file = tokio::fs::OpenOptions::new()
@@ -276,14 +306,18 @@ async fn op_fs_readdir(
     let config = extract_config(&state)?;
     let mount = extract_mount(&state);
 
+    // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
+    if let Some(m) = mount {
+        check_policy(&config.policy_chain, "readdir", &path, None, None, None, config.mcp_headers.as_ref())
+            .await
+            .map_err(JsErrorBox::generic)?;
+        let names = m.0.lock().await.readdir(Path::new(&path)).await
+            .map_err(|e| JsErrorBox::generic(format!("fs.readdir: {}: {}", path, e)))?;
+        return Ok(deno_core::serde_json::json!(names).to_string());
+    }
+
     tokio::spawn(async move {
         check_policy(&config.policy_chain, "readdir", &path, None, None, None, config.mcp_headers.as_ref()).await?;
-
-        if let Some(m) = mount {
-            let names = m.0.lock().await.readdir(Path::new(&path)).await
-                .map_err(|e| format!("fs.readdir: {}: {}", path, e))?;
-            return Ok(deno_core::serde_json::json!(names).to_string());
-        }
 
         let mut entries = Vec::new();
         let mut dir = tokio::fs::read_dir(&path).await
@@ -314,14 +348,18 @@ async fn op_fs_stat(
     let config = extract_config(&state)?;
     let mount = extract_mount(&state);
 
+    // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
+    if let Some(m) = mount {
+        check_policy(&config.policy_chain, "stat", &path, None, None, None, config.mcp_headers.as_ref())
+            .await
+            .map_err(JsErrorBox::generic)?;
+        let s = m.0.lock().await.stat(Path::new(&path)).await
+            .map_err(|e| JsErrorBox::generic(format!("fs.stat: {}: {}", path, e)))?;
+        return Ok(mount_stat_json(&s));
+    }
+
     tokio::spawn(async move {
         check_policy(&config.policy_chain, "stat", &path, None, None, None, config.mcp_headers.as_ref()).await?;
-
-        if let Some(m) = mount {
-            let s = m.0.lock().await.stat(Path::new(&path)).await
-                .map_err(|e| format!("fs.stat: {}: {}", path, e))?;
-            return Ok(mount_stat_json(&s));
-        }
 
         let metadata = tokio::fs::metadata(&path).await
             .map_err(|e| format!("fs.stat: {}: {}", path, e))?;
@@ -366,14 +404,18 @@ async fn op_fs_mkdir(
     let mount = extract_mount(&state);
     let recursive = recursive != 0;
 
+    // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
+    if let Some(m) = mount {
+        check_policy(&config.policy_chain, "mkdir", &path, None, Some(recursive), None, config.mcp_headers.as_ref())
+            .await
+            .map_err(JsErrorBox::generic)?;
+        m.0.lock().await.mkdir(Path::new(&path)).await
+            .map_err(|e| JsErrorBox::generic(format!("fs.mkdir: {}: {}", path, e)))?;
+        return Ok("{}".to_string());
+    }
+
     tokio::spawn(async move {
         check_policy(&config.policy_chain, "mkdir", &path, None, Some(recursive), None, config.mcp_headers.as_ref()).await?;
-
-        if let Some(m) = mount {
-            m.0.lock().await.mkdir(Path::new(&path)).await
-                .map_err(|e| format!("fs.mkdir: {}: {}", path, e))?;
-            return Ok("{}".to_string());
-        }
 
         if recursive {
             tokio::fs::create_dir_all(&path).await
@@ -400,14 +442,18 @@ async fn op_fs_rm(
     let mount = extract_mount(&state);
     let recursive = recursive != 0;
 
+    // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
+    if let Some(m) = mount {
+        check_policy(&config.policy_chain, "rm", &path, None, Some(recursive), None, config.mcp_headers.as_ref())
+            .await
+            .map_err(JsErrorBox::generic)?;
+        m.0.lock().await.remove(Path::new(&path), recursive).await
+            .map_err(|e| JsErrorBox::generic(format!("fs.rm: {}: {}", path, e)))?;
+        return Ok("{}".to_string());
+    }
+
     tokio::spawn(async move {
         check_policy(&config.policy_chain, "rm", &path, None, Some(recursive), None, config.mcp_headers.as_ref()).await?;
-
-        if let Some(m) = mount {
-            m.0.lock().await.remove(Path::new(&path), recursive).await
-                .map_err(|e| format!("fs.rm: {}: {}", path, e))?;
-            return Ok("{}".to_string());
-        }
 
         let metadata = tokio::fs::metadata(&path).await
             .map_err(|e| format!("fs.rm: {}: {}", path, e))?;
@@ -440,14 +486,19 @@ async fn op_fs_rename(
     let config = extract_config(&state)?;
     let mount = extract_mount(&state);
 
+    // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
+    if let Some(m) = mount {
+        check_policy(&config.policy_chain, "rename", &from, Some(&to), None, None, config.mcp_headers.as_ref())
+            .await
+            .map_err(JsErrorBox::generic)?;
+        m.0.lock().await.rename(Path::new(&from), Path::new(&to)).await
+            .map_err(|e| JsErrorBox::generic(format!("fs.rename: {} -> {}: {}", from, to, e)))?;
+        return Ok("{}".to_string());
+    }
+
     tokio::spawn(async move {
         check_policy(&config.policy_chain, "rename", &from, Some(&to), None, None, config.mcp_headers.as_ref()).await?;
 
-        if let Some(m) = mount {
-            m.0.lock().await.rename(Path::new(&from), Path::new(&to)).await
-                .map_err(|e| format!("fs.rename: {} -> {}: {}", from, to, e))?;
-            return Ok("{}".to_string());
-        }
         tokio::fs::rename(&from, &to).await
             .map_err(|e| format!("fs.rename: {} -> {}: {}", from, to, e))?;
 
@@ -469,15 +520,20 @@ async fn op_fs_copy_file(
     let config = extract_config(&state)?;
     let mount = extract_mount(&state);
 
+    // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
+    if let Some(m) = mount {
+        check_policy(&config.policy_chain, "copyFile", &from, Some(&to), None, None, config.mcp_headers.as_ref())
+            .await
+            .map_err(JsErrorBox::generic)?;
+        // Copy by reference: clones the content-addressed entry, no rechunk.
+        m.0.lock().await.copy(Path::new(&from), Path::new(&to)).await
+            .map_err(|e| JsErrorBox::generic(format!("fs.copyFile: {} -> {}: {}", from, to, e)))?;
+        return Ok("{}".to_string());
+    }
+
     tokio::spawn(async move {
         check_policy(&config.policy_chain, "copyFile", &from, Some(&to), None, None, config.mcp_headers.as_ref()).await?;
 
-        if let Some(m) = mount {
-            // Copy by reference: clones the content-addressed entry, no rechunk.
-            m.0.lock().await.copy(Path::new(&from), Path::new(&to)).await
-                .map_err(|e| format!("fs.copyFile: {} -> {}: {}", from, to, e))?;
-            return Ok("{}".to_string());
-        }
         tokio::fs::copy(&from, &to).await
             .map_err(|e| format!("fs.copyFile: {} -> {}: {}", from, to, e))?;
 
@@ -498,14 +554,19 @@ async fn op_fs_exists(
     let config = extract_config(&state)?;
     let mount = extract_mount(&state);
 
+    // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
+    if let Some(m) = mount {
+        check_policy(&config.policy_chain, "exists", &path, None, None, None, config.mcp_headers.as_ref())
+            .await
+            .map_err(JsErrorBox::generic)?;
+        let exists = m.0.lock().await.exists(Path::new(&path)).await;
+        return Ok(if exists { "true" } else { "false" }.to_string());
+    }
+
     tokio::spawn(async move {
         check_policy(&config.policy_chain, "exists", &path, None, None, None, config.mcp_headers.as_ref()).await?;
 
-        let exists = if let Some(m) = mount {
-            m.0.lock().await.exists(Path::new(&path)).await
-        } else {
-            tokio::fs::try_exists(&path).await.unwrap_or(false)
-        };
+        let exists = tokio::fs::try_exists(&path).await.unwrap_or(false);
         Ok(if exists { "true" } else { "false" }.to_string())
     })
     .await
@@ -528,17 +589,26 @@ async fn op_fs_write_stream_open(
     let mount = extract_mount(&state);
     let writers = extract_writers(&state)?;
 
+    // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
+    if let Some(m) = mount {
+        check_policy(&config.policy_chain, "writeFile", &path, None, None, None, config.mcp_headers.as_ref())
+            .await
+            .map_err(JsErrorBox::generic)?;
+        let store = m.0.lock().await.store_handle();
+        let ow = OpenWrite::Overlay { path: path.clone(), writer: FileWriter::new(store) };
+        let mut g = writers.0.lock().await;
+        let id = g.next;
+        g.next = g.next.wrapping_add(1);
+        g.map.insert(id, ow);
+        return Ok(id);
+    }
+
     tokio::spawn(async move {
         check_policy(&config.policy_chain, "writeFile", &path, None, None, None, config.mcp_headers.as_ref()).await?;
 
-        let ow = if let Some(m) = mount {
-            let store = m.0.lock().await.store_handle();
-            OpenWrite::Overlay { path: path.clone(), writer: FileWriter::new(store) }
-        } else {
-            let f = tokio::fs::File::create(&path).await
-                .map_err(|e| format!("fs.createWriteStream: {}: {}", path, e))?;
-            OpenWrite::Real(f)
-        };
+        let f = tokio::fs::File::create(&path).await
+            .map_err(|e| format!("fs.createWriteStream: {}: {}", path, e))?;
+        let ow = OpenWrite::Real(f);
         let mut g = writers.0.lock().await;
         let id = g.next;
         g.next = g.next.wrapping_add(1);
@@ -559,10 +629,9 @@ async fn op_fs_write_stream_chunk_buffer(
     #[buffer(copy)] data: Vec<u8>,
 ) -> Result<String, JsErrorBox> {
     let writers = extract_writers(&state)?;
-    tokio::spawn(async move { feed_stream(&writers, id, &data).await })
-        .await
-        .map_err(|e| JsErrorBox::generic(format!("fs task join error: {}", e)))?
-        .map_err(JsErrorBox::generic)
+    // Run inline: the overlay FileWriter uses deno_unsync, which requires the
+    // current-thread isolate runtime; tokio::spawn would abort the process.
+    feed_stream(&writers, id, &data).await.map_err(JsErrorBox::generic)
 }
 
 /// Feed a chunk of text to an open write stream.
@@ -574,10 +643,9 @@ async fn op_fs_write_stream_chunk_text(
     #[string] data: String,
 ) -> Result<String, JsErrorBox> {
     let writers = extract_writers(&state)?;
-    tokio::spawn(async move { feed_stream(&writers, id, data.as_bytes()).await })
-        .await
-        .map_err(|e| JsErrorBox::generic(format!("fs task join error: {}", e)))?
-        .map_err(JsErrorBox::generic)
+    // Run inline: the overlay FileWriter uses deno_unsync, which requires the
+    // current-thread isolate runtime; tokio::spawn would abort the process.
+    feed_stream(&writers, id, data.as_bytes()).await.map_err(JsErrorBox::generic)
 }
 
 /// Finish an open write stream: flush the final chunk and install the file.
@@ -589,31 +657,28 @@ async fn op_fs_write_stream_close(
 ) -> Result<String, JsErrorBox> {
     let mount = extract_mount(&state);
     let writers = extract_writers(&state)?;
-    tokio::spawn(async move {
-        let ow = writers
-            .0
-            .lock()
-            .await
-            .map
-            .remove(&id)
-            .ok_or_else(|| "fs write stream: invalid handle".to_string())?;
-        match ow {
-            OpenWrite::Overlay { path, writer } => {
-                let entry = writer.finish().await.map_err(|e| e.to_string())?;
-                if let Some(m) = mount {
-                    m.0.lock().await.put_entry(Path::new(&path), entry);
-                }
-            }
-            OpenWrite::Real(mut f) => {
-                use tokio::io::AsyncWriteExt;
-                f.flush().await.map_err(|e| e.to_string())?;
+    // Run inline: the overlay writer.finish() / put_entry path uses deno_unsync,
+    // which requires the current-thread isolate runtime; tokio::spawn would abort.
+    let ow = writers
+        .0
+        .lock()
+        .await
+        .map
+        .remove(&id)
+        .ok_or_else(|| JsErrorBox::generic("fs write stream: invalid handle".to_string()))?;
+    match ow {
+        OpenWrite::Overlay { path, writer } => {
+            let entry = writer.finish().await.map_err(|e| JsErrorBox::generic(e.to_string()))?;
+            if let Some(m) = mount {
+                m.0.lock().await.put_entry(Path::new(&path), entry);
             }
         }
-        Ok::<String, String>("{}".to_string())
-    })
-    .await
-    .map_err(|e| JsErrorBox::generic(format!("fs task join error: {}", e)))?
-    .map_err(JsErrorBox::generic)
+        OpenWrite::Real(mut f) => {
+            use tokio::io::AsyncWriteExt;
+            f.flush().await.map_err(|e| JsErrorBox::generic(e.to_string()))?;
+        }
+    }
+    Ok("{}".to_string())
 }
 
 /// Feed bytes to writer `id`: take it out of the registry, feed, put it back, so
