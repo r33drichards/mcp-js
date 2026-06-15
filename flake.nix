@@ -45,7 +45,7 @@
           src = ./server;
           # Vendor hash for server's cargo deps; refreshed when deps changed
           # (added fastcdc/zstd/blake3/bincode/diffy for fs snapshots).
-          hash = "sha256-vfNOfitsgxQpfftQCfwEhzQLTFtUAQR6R2gHScM/iE4=";
+          hash = "sha256-6ABMFpKIlIZU1+HDt4gG7exjRTbMQY/JpN9X4d8oBLM=";
         });
 
         docsPython = pkgs.python3.withPackages (
