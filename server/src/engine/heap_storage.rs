@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use aws_sdk_s3::Client as S3Client;
-use aws_sdk_s3::ByteStream;
+use aws_sdk_s3::primitives::ByteStream;
 
 use aws_config;
 use std::collections::{HashMap, VecDeque};
@@ -124,8 +124,31 @@ pub struct S3HeapStorage {
 
 impl S3HeapStorage {
     pub async fn new(bucket: impl Into<String>) -> Self {
-        let config = aws_config::load_from_env().await;
-        let client = S3Client::new(&config);
+        let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .load()
+            .await;
+        let mut s3_builder = aws_sdk_s3::config::Builder::from(&config);
+
+        // Point at an S3-compatible store (MinIO, etc.) when a custom endpoint
+        // is configured. The modern SDK also honors AWS_ENDPOINT_URL on its own,
+        // but set it explicitly so behavior is independent of loader specifics.
+        if let Ok(endpoint) = std::env::var("AWS_ENDPOINT_URL") {
+            if !endpoint.is_empty() {
+                s3_builder = s3_builder.endpoint_url(endpoint);
+            }
+        }
+
+        // Path-style addressing — required by most S3-compatible stores
+        // (MinIO and friends serve `host/bucket/key`, not `bucket.host/key`).
+        // Real AWS uses virtual-hosted style, so this stays off unless asked.
+        let force_path_style = std::env::var("AWS_S3_FORCE_PATH_STYLE")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
+        if force_path_style {
+            s3_builder = s3_builder.force_path_style(true);
+        }
+
+        let client = S3Client::from_conf(s3_builder.build());
         Self {
             bucket: bucket.into(),
             client: Arc::new(client),
