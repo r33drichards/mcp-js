@@ -1464,6 +1464,38 @@ impl Engine {
         self.heap_storage.is_some()
     }
 
+    /// Heap persistence (V8 heap snapshots) is configured. Alias of
+    /// `is_stateful`, kept for readability now that heap and fs are independent.
+    pub fn heap_enabled(&self) -> bool {
+        self.heap_storage.is_some()
+    }
+
+    /// Filesystem persistence (content-addressed `/work` snapshots) is configured.
+    pub fn fs_enabled(&self) -> bool {
+        self.fs_store.is_some()
+    }
+
+    /// True when the engine carries any per-session state (heap and/or fs), and
+    /// therefore needs the session-capable MCP surface and a session log.
+    pub fn session_capable(&self) -> bool {
+        self.heap_enabled() || self.fs_enabled()
+    }
+
+    /// Attach a session log to an existing engine. Required for per-session
+    /// state resolution on either axis (heap or fs); the stateful constructor
+    /// passes one inline, but a stateless (heap-off) engine with fs persistence
+    /// needs one too.
+    pub fn with_session_log(mut self, log: SessionLog) -> Self {
+        self.session_log = Some(log);
+        self
+    }
+
+    /// Attach a heap-tag store to an existing engine (heap persistence only).
+    pub fn with_heap_tag_store(mut self, store: HeapTagStore) -> Self {
+        self.heap_tag_store = Some(store);
+        self
+    }
+
     pub fn new_stateless(heap_memory_max_bytes: usize, execution_timeout_secs: u64, max_concurrent: usize) -> Self {
         Self {
             heap_storage: None,
@@ -2267,6 +2299,9 @@ impl Engine {
                 let mlc = self.module_loader_config.clone();
                 let mc = self.mcp_client_manager.as_ref().map(|m| mcp_client::McpConfig { client_manager: (**m).clone(), policy_chain: self.mcp_tools_policy_chain.clone() });
                 let fm = fs_mount.clone();
+                // Cloned for the post-run session-log entry, since `code` is
+                // moved into the spawn_blocking closure below.
+                let code_for_log = code.clone();
                 let mut join_handle = tokio::task::spawn_blocking(move || {
                     execute_stateless(&code, ExecutionConfig::new(max_bytes)
                         .isolate_handle(ih)
@@ -2323,7 +2358,25 @@ impl Engine {
                         // fails the run rather than reporting lost fs changes.
                         match self.push_mount(&fs_mount).await {
                             Ok(output_fs) => {
-                                registry.set_fs(&id, output_fs);
+                                registry.set_fs(&id, output_fs.clone());
+                                // Record the resulting fs snapshot per session so a
+                                // later run in the same session resumes it. This is
+                                // what gives fs-only (heap-off) engines per-session
+                                // filesystem persistence; no heap fields are set.
+                                if let (Some(session_name), Some(log)) =
+                                    (&session, &self.session_log)
+                                {
+                                    let entry = SessionLogEntry {
+                                        input_heap: None,
+                                        output_heap: String::new(),
+                                        output_fs: output_fs.clone(),
+                                        code: code_for_log,
+                                        timestamp: chrono::Utc::now().to_rfc3339(),
+                                    };
+                                    if let Err(e) = log.append(session_name, entry).await {
+                                        tracing::warn!("Failed to log session entry: {}", e);
+                                    }
+                                }
                                 registry.complete(&id, js_result.output, None);
                             }
                             Err(e) => registry.fail(&id, e),

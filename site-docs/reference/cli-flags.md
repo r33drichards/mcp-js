@@ -9,13 +9,15 @@ using the same help headings exposed by the CLI itself.
 
 - [Cluster](#cluster)
 - [Core](#core)
-- [FS Snapshots](#fs-snapshots)
 - [Fetch](#fetch)
+- [Filesystem](#filesystem)
+- [Heap](#heap)
 - [MCP Server Module](#mcp-server-module)
 - [Module Import](#module-import)
 - [Policy](#policy)
 - [Prompt](#prompt)
 - [Run JS File](#run-js-file)
+- [Storage (S3)](#storage-s3)
 - [WASM](#wasm)
 
 ## Cluster
@@ -24,12 +26,14 @@ using the same help headings exposed by the CLI itself.
 
 Port for the Raft cluster HTTP server. Enables cluster mode when set
 
+- Environment: `MCP_V8_CLUSTER_PORT`
 - Value: `CLUSTER_PORT`
 
 ### `--node-id`
 
 Unique node identifier within the cluster
 
+- Environment: `MCP_V8_NODE_ID`
 - Default: `node1`
 - Value: `NODE_ID`
 
@@ -37,6 +41,7 @@ Unique node identifier within the cluster
 
 Comma-separated list of seed peer addresses. Format: id@host:port or host:port. Peers can also join dynamically via POST /raft/join
 
+- Environment: `MCP_V8_PEERS`
 - Value: `PEERS`
 - Delimiter: `,`
 - Repeatable: yes
@@ -45,22 +50,27 @@ Comma-separated list of seed peer addresses. Format: id@host:port or host:port. 
 
 Join an existing cluster by contacting this seed address (host:port). The node will register itself with the cluster leader via /raft/join
 
+- Environment: `MCP_V8_JOIN`
 - Value: `JOIN`
 
 ### `--join-as-learner`
 
 Join as a non-voting learner: the node replicates the log but is excluded from election and commit quorums and never starts elections. Use for ephemeral nodes whose churn must not affect availability
 
+- Environment: `MCP_V8_JOIN_AS_LEARNER`
+
 ### `--advertise-addr`
 
 Advertise address for this node (host:port). Used for peer discovery and write forwarding. Defaults to <node-id>:<cluster-port>
 
+- Environment: `MCP_V8_ADVERTISE_ADDR`
 - Value: `ADVERTISE_ADDR`
 
 ### `--heartbeat-interval`
 
 Heartbeat interval in milliseconds
 
+- Environment: `MCP_V8_HEARTBEAT_INTERVAL`
 - Default: `100`
 - Value: `HEARTBEAT_INTERVAL`
 
@@ -68,6 +78,7 @@ Heartbeat interval in milliseconds
 
 Minimum election timeout in milliseconds
 
+- Environment: `MCP_V8_ELECTION_TIMEOUT_MIN`
 - Default: `300`
 - Value: `ELECTION_TIMEOUT_MIN`
 
@@ -75,6 +86,7 @@ Minimum election timeout in milliseconds
 
 Maximum election timeout in milliseconds
 
+- Environment: `MCP_V8_ELECTION_TIMEOUT_MAX`
 - Default: `500`
 - Value: `ELECTION_TIMEOUT_MAX`
 
@@ -83,28 +95,6 @@ Maximum election timeout in milliseconds
 ### `--print-openapi`
 
 Print the OpenAPI JSON specification to stdout and exit. Use this to regenerate openapi.json: `./server --print-openapi > openapi.json`
-
-### `--s3-bucket`
-
-S3 bucket name (required if --use-s3)
-
-- Value: `S3_BUCKET`
-
-### `--cache-dir`
-
-Local filesystem cache directory for S3 write-through caching (only used with --s3-bucket)
-
-- Value: `CACHE_DIR`
-
-### `--directory-path`
-
-Directory path for filesystem storage (required if --use-filesystem)
-
-- Value: `DIRECTORY_PATH`
-
-### `--stateless`
-
-Run in stateless mode - no heap snapshots are saved or loaded
 
 ### `--jwks-url`
 
@@ -117,18 +107,29 @@ JWKS endpoint URL for fetching public keys (e.g., Keycloak OIDC certs URL). Enab
 
 HTTP port using Streamable HTTP transport (MCP 2025-03-26+, load-balanceable)
 
+- Environment: `MCP_V8_HTTP_PORT`
 - Value: `HTTP_PORT`
 
 ### `--sse-port`
 
 SSE port using the older HTTP+SSE transport
 
+- Environment: `MCP_V8_SSE_PORT`
 - Value: `SSE_PORT`
+
+### `--bind-host`
+
+Host/address the HTTP and SSE transports bind to. Defaults to all IPv4 interfaces (0.0.0.0). Set to "::" for a dual-stack IPv6 listener, which is required to be reachable over IPv6-resolving private networks (e.g. Railway)
+
+- Environment: `MCP_V8_BIND_HOST`
+- Default: `0.0.0.0`
+- Value: `BIND_HOST`
 
 ### `--heap-memory-max`
 
 Maximum V8 heap memory per isolate in megabytes (default: 8)
 
+- Environment: `MCP_V8_HEAP_MEMORY_MAX`
 - Default: `8`
 - Value: `HEAP_MEMORY_MAX`
 
@@ -136,6 +137,7 @@ Maximum V8 heap memory per isolate in megabytes (default: 8)
 
 Maximum execution timeout in seconds (default: 30, max: 300)
 
+- Environment: `MCP_V8_EXECUTION_TIMEOUT`
 - Default: `30`
 - Value: `EXECUTION_TIMEOUT`
 
@@ -143,34 +145,16 @@ Maximum execution timeout in seconds (default: 30, max: 300)
 
 Maximum concurrent V8 executions (default: CPU core count)
 
+- Environment: `MCP_V8_MAX_CONCURRENT_EXECUTIONS`
 - Value: `MAX_CONCURRENT_EXECUTIONS`
 
 ### `--session-db-path`
 
-Path to the sled database for session logging (default: /tmp/mcp-v8-sessions)
+Path to the sled database for the session log (per-session heap+fs history) and the execution registry. Also the default parent for the heap-tag store, fs blob store, and fs label db. Default: /tmp/mcp-v8-sessions
 
+- Environment: `MCP_V8_SESSION_DB_PATH`
 - Default: `/tmp/mcp-v8-sessions`
 - Value: `SESSION_DB_PATH`
-
-## FS Snapshots
-
-### `--enable-fs-snapshots`
-
-Enable the content-addressed, snapshottable filesystem. When set, the `fs` parameter of run_js can mount a snapshot (by label or CA id) and the `fs_*` tools / `/api/fs/...` endpoints become functional. In cluster mode labels replicate cluster-wide, but blobs/manifests are only shared when stored on shared storage. Node-local file blobs are single-node only; enabling fs snapshots in a cluster therefore requires `--s3-bucket` (optionally `--cache-dir` for a write-through cache), otherwise startup is refused.
-
-- Default: `false`
-
-### `--fs-store-dir`
-
-Directory for the fs snapshot blob store (chunks + manifests). Defaults to `<session-db-path>/fs-blobs`. Node-local and single-node only; in a cluster, configure `--s3-bucket` instead so blobs are shared across nodes (this directory is then used only as the write-through cache when `--cache-dir` is set)
-
-- Value: `DIR`
-
-### `--fs-labels-db`
-
-Path for the fs label/reflog database (sled). Defaults to `<session-db-path>/fs-labels`
-
-- Value: `PATH`
 
 ## Fetch
 
@@ -185,7 +169,49 @@ Inject headers into fetch requests matching host/method rules. Format: host=<hos
 
 Path to a JSON file with header injection rules. Format: [{"host": "api.github.com", "methods": ["GET","POST"], "headers": {"Authorization": "Bearer ..."}}]
 
+- Environment: `MCP_V8_FETCH_HEADER_CONFIG`
 - Value: `PATH`
+
+## Filesystem
+
+### `--fs-store`
+
+Content-addressed `/work` filesystem backend. `none` (default) = no fs persistence. `dir` = node-local blob store (`--fs-dir`). `s3` = shared `--s3-bucket`. When enabled, the `fs` parameter of run_js can mount a snapshot (by label or CA id) and the `fs_*` tools / `/api/fs/...` endpoints become functional. Works with any isolate (compatible with `--wasm-module`). In cluster mode labels replicate cluster-wide, but blobs/manifests are only shared when stored on shared storage — so `--fs-store s3` is required when running fs persistence in a cluster.
+
+- Environment: `MCP_V8_FS_STORE`
+- Default: `none`
+- Value: `FS_STORE`
+
+### `--fs-dir`
+
+Directory for the fs snapshot blob store (chunks + manifests) when `--fs-store dir`. Defaults to `<session-db-path>/fs-blobs`
+
+- Environment: `MCP_V8_FS_DIR`
+- Value: `DIR`
+
+### `--fs-labels-db`
+
+Path for the fs label/reflog database (sled). Defaults to `<session-db-path>/fs-labels`
+
+- Environment: `MCP_V8_FS_LABELS_DB`
+- Value: `PATH`
+
+## Heap
+
+### `--heap-store`
+
+V8 heap-snapshot backend. `none` (default) = no heap persistence; JS globals do NOT survive between runs. `dir` = node-local directory (`--heap-dir`). `s3` = shared `--s3-bucket` (optionally `--cache-dir`). Heap snapshots require a V8 SnapshotCreator isolate, which disables WebAssembly — so heap persistence is mutually exclusive with `--wasm-module`/`--wasm-config` (rejected at startup).
+
+- Environment: `MCP_V8_HEAP_STORE`
+- Default: `none`
+- Value: `HEAP_STORE`
+
+### `--heap-dir`
+
+Directory for the heap-snapshot store when `--heap-store dir`. Defaults to /tmp/mcp-v8-heaps
+
+- Environment: `MCP_V8_HEAP_DIR`
+- Value: `DIR`
 
 ## MCP Server Module
 
@@ -200,18 +226,21 @@ Connect to an external MCP server as a module. JS code can call its tools via th
 
 Path to a JSON config file for MCP server modules. Format: [{"name": "srv", "transport": "stdio", "command": "cmd", "args": ["a"]}, {"name": "srv2", "transport": "sse", "url": "http://..."}]
 
+- Environment: `MCP_V8_MCP_CONFIG`
 - Value: `PATH`
 
 ### `--mcp-stubs`
 
 Expose upstream MCP server tools on the MCPJS server itself as `<prefix><server>__<tool>` stubs. When `true` (the default whenever at least one --mcp-server is configured), an external client of MCPJS can discover those tools via tools/list and tool search; calling a stub returns instructional text telling the caller to invoke the tool from JavaScript via run_js + mcp.callTool(...). Pass `--mcp-stubs false` to disable
 
+- Environment: `MCP_V8_MCP_STUBS`
 - Default: `true`
 
 ### `--mcp-stub-prefix`
 
 Prefix applied to stub tool names. Defaults to `runjs__` so it is obvious to a calling agent that these tools execute through the JS runtime rather than dispatching directly. Has no effect when --mcp-stubs is false
 
+- Environment: `MCP_V8_MCP_STUB_PREFIX`
 - Default: `runjs__`
 - Value: `MCP_STUB_PREFIX`
 
@@ -221,6 +250,7 @@ Prefix applied to stub tool names. Defaults to `runjs__` so it is obvious to a c
 
 Allow external module imports (npm:, jsr:, and URL imports). When disabled (the default), code using import declarations for external packages will be rejected. Enable with --allow-external-modules
 
+- Environment: `MCP_V8_ALLOW_EXTERNAL_MODULES`
 - Default: `false`
 
 ## Policy
@@ -229,6 +259,7 @@ Allow external module imports (npm:, jsr:, and URL imports). When disabled (the 
 
 JSON policy configuration (inline JSON or path to a JSON file). Enables fetch() and/or module policy gating via local Rego files and/or remote OPA servers. Example: --policies-json '{"fetch":{"policies":[{"url":"file:///path/to/fetch.rego"}]}}' Schema: { "fetch": { "mode": "all"|"any", "policies": [{"url": "...", "policy_path": "...", "rule": "..."}] }, "modules": { ... } }
 
+- Environment: `MCP_V8_POLICIES_JSON`
 - Value: `JSON_OR_PATH`
 
 ## Prompt
@@ -237,12 +268,14 @@ JSON policy configuration (inline JSON or path to a JSON file). Enables fetch() 
 
 Override the MCP server `instructions` (the "system prompt" the server reports to clients during `initialize`). The value is used verbatim as inline text, unless it begins with `@`, in which case the remainder is treated as a path to a file whose contents are used (`@-` is not special; use `@@` for a literal leading `@`). Examples: --instructions "Run JS for me" --instructions @./prompt.txt
 
+- Environment: `MCP_V8_INSTRUCTIONS`
 - Value: `TEXT_OR_@FILE`
 
 ### `--run-js-description`
 
 Override the description advertised for the `run_js` tool in `tools/list`. The value is used verbatim as inline text, unless it begins with `@`, in which case the remainder is treated as a path to a file whose contents are used (use `@@` for a literal leading `@`). Examples: --run-js-description "Execute JS" --run-js-description @./run_js.md
 
+- Environment: `MCP_V8_RUN_JS_DESCRIPTION`
 - Value: `TEXT_OR_@FILE`
 
 ## Run JS File
@@ -251,27 +284,46 @@ Override the description advertised for the `run_js` tool in `tools/list`. The v
 
 Allow the `run_js` tool to read its code from a file on the server's own filesystem (the `file` parameter). OFF by default. When set, ANY path the server process can read is allowed — this is the easy "allow all" switch. For finer control, leave this off and configure a `run_js_file` policy in --policies-json instead (a Rego/OPA chain decides which paths are allowed); the policy input is `{ "operation": "read", "path": "<canonical path>" }`. This flag takes precedence over a configured run_js_file policy
 
+- Environment: `MCP_V8_ALLOW_RUN_JS_FILE`
 - Default: `false`
+
+## Storage (S3)
+
+### `--s3-bucket`
+
+S3 bucket backing whichever axes select `s3`. Required when `--heap-store s3` or `--fs-store s3` is set
+
+- Environment: `MCP_V8_S3_BUCKET`
+- Value: `S3_BUCKET`
+
+### `--cache-dir`
+
+Local filesystem cache directory for S3 write-through caching (only used with `--s3-bucket`)
+
+- Environment: `MCP_V8_CACHE_DIR`
+- Value: `CACHE_DIR`
 
 ## WASM
 
 ### `--wasm-module`
 
-Pre-load a WASM module as a global. Format: name=/path/to/module.wasm[:max_memory] The module's exports will be available as a global variable with the given name. Optional memory suffix caps the module's native memory (linear memory + tables). Supported suffixes: raw bytes, k/K (KiB), m/M (MiB), g/G (GiB). Examples: math=/path.wasm math=/path.wasm:16m math=/path.wasm:1048576 Can be specified multiple times for multiple modules
+Pre-load a WASM module as a global. Format: name=/path/to/module.wasm[:max_memory] The module's exports will be available as a global variable with the given name. Optional memory suffix caps the module's native memory (linear memory + tables). Supported suffixes: raw bytes, k/K (KiB), m/M (MiB), g/G (GiB). Examples: math=/path.wasm math=/path.wasm:16m math=/path.wasm:1048576 Can be specified multiple times for multiple modules. NOTE: incompatible with heap persistence (`--heap-store` other than none)
 
 - Value: `NAME=PATH[:LIMIT]`
 - Repeatable: yes
 
 ### `--wasm-config`
 
-Path to a JSON config file mapping global names to .wasm file paths or objects. String value: {"name": "/path/to/module.wasm"} Object value: {"name": {"path": "/path/to/module.wasm", "max_memory_bytes": 16777216, "description": "what the module does"}} The optional "description" sets the MCP stub tool's description
+Path to a JSON config file mapping global names to .wasm file paths or objects. String value: {"name": "/path/to/module.wasm"} Object value: {"name": {"path": "/path/to/module.wasm", "max_memory_bytes": 16777216, "description": "what the module does"}} The optional "description" sets the MCP stub tool's description. NOTE: incompatible with heap persistence (`--heap-store` other than none)
 
+- Environment: `MCP_V8_WASM_CONFIG`
 - Value: `PATH`
 
 ### `--wasm-default-max-memory`
 
 Default max native memory for WASM modules without a per-module limit. Supports suffixes: k/K (KiB), m/M (MiB), g/G (GiB), or raw bytes. This is separate from --heap-memory-max (JS heap); WASM linear memory is allocated as native memory outside the V8 heap
 
+- Environment: `MCP_V8_WASM_DEFAULT_MAX_MEMORY`
 - Default: `16m`
 - Value: `WASM_DEFAULT_MAX_MEMORY`
 
@@ -279,12 +331,14 @@ Default max native memory for WASM modules without a per-module limit. Supports 
 
 Expose pre-loaded WASM modules on the MCPJS server itself as `<prefix>wasm__<name>` stubs. When `true` (the default whenever at least one WASM module is loaded), an external client of MCPJS can discover the module via tools/list and tool search; calling a stub returns instructional text telling the caller to use the module from JavaScript via run_js (the module is available as the `__wasm_<name>` global). Pass `--wasm-stubs false` to disable
 
+- Environment: `MCP_V8_WASM_STUBS`
 - Default: `true`
 
 ### `--wasm-stub-prefix`
 
 Prefix applied to WASM stub tool names. Defaults to `runjs__` so it is obvious to a calling agent that these modules execute through the JS runtime rather than dispatching directly. Has no effect when --wasm-stubs is false
 
+- Environment: `MCP_V8_WASM_STUB_PREFIX`
 - Default: `runjs__`
 - Value: `WASM_STUB_PREFIX`
 

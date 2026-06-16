@@ -214,8 +214,10 @@ fn render_mode(catalog: ToolCatalog) -> Vec<String> {
 }
 
 fn main() {
-    let stateful = built_in_tool_catalog(true);
-    let stateless = built_in_tool_catalog(false);
+    // "stateful" doc = the full session-capable surface (heap + fs); "stateless"
+    // doc = the no-state surface.
+    let stateful = built_in_tool_catalog(true, true);
+    let stateless = built_in_tool_catalog(false, false);
 
     let mut lines = vec![
         "# MCP Tools".to_string(),

@@ -38,15 +38,17 @@ impl OuterServer {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let server_bin = env!("CARGO_BIN_EXE_server");
 
-        // The argument format is `name=stdio:command:arg1:arg2...`. We want
-        // the upstream invocation to be `<server_bin> --directory-path <upstream_heap>`.
+        // The argument format is `name=stdio:command:arg1:arg2...`. We want the
+        // upstream invocation to be `<server_bin> --heap-store dir --heap-dir <upstream_heap>`.
         let upstream_arg = format!(
-            "upstream=stdio:{}:--directory-path:{}",
+            "upstream=stdio:{}:--heap-store:dir:--heap-dir:{}",
             server_bin, upstream_heap
         );
 
         let mut args: Vec<String> = vec![
-            "--directory-path".to_string(),
+            "--heap-store".to_string(),
+            "dir".to_string(),
+            "--heap-dir".to_string(),
             outer_heap.to_string(),
             "--mcp-server".to_string(),
             upstream_arg,

@@ -26,7 +26,9 @@ impl WasmServer {
     /// `extra_args` lets a test pass flags like `--wasm-stubs false` or
     /// `--wasm-stub-prefix rj_`.
     async fn start_with_args(
-        heap: &str,
+        // WASM is incompatible with heap persistence (heap snapshots disable
+        // WebAssembly), so this server runs heap-off; the dir is unused.
+        _heap: &str,
         extra_args: &[&str],
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let server_bin = env!("CARGO_BIN_EXE_server");
@@ -36,8 +38,6 @@ impl WasmServer {
             .join("add.wasm");
 
         let mut args: Vec<String> = vec![
-            "--directory-path".to_string(),
-            heap.to_string(),
             "--wasm-module".to_string(),
             format!("math={}", wasm_path.display()),
         ];
