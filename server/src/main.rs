@@ -586,6 +586,19 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+// Resolve the listen address for the HTTP transports. Defaults to all IPv4
+// interfaces (0.0.0.0) so existing deployments are unchanged, but honours
+// MCP_V8_BIND_HOST so an operator can bind a dual-stack IPv6 address ("::"),
+// which is required to be reachable over private networks (e.g. Railway) that
+// resolve service hostnames to IPv6.
+fn resolve_bind_addr(port: u16) -> Result<std::net::SocketAddr> {
+    let host = std::env::var("MCP_V8_BIND_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
+    let ip: std::net::IpAddr = host
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid MCP_V8_BIND_HOST '{host}': {e}"))?;
+    Ok(std::net::SocketAddr::new(ip, port))
+}
+
 // ── Streamable HTTP transport (--http-port) ─────────────────────────────
 
 async fn start_streamable_http<S, F>(engine: Engine, port: u16, make_service: F) -> Result<()>
@@ -593,7 +606,7 @@ where
     S: ServerHandler + Send + Sync + 'static,
     F: Fn(Engine) -> S + Send + Sync + Clone + 'static,
 {
-    let bind: std::net::SocketAddr = format!("0.0.0.0:{}", port).parse()?;
+    let bind: std::net::SocketAddr = resolve_bind_addr(port)?;
     let ct = CancellationToken::new();
 
     let config = StreamableHttpServerConfig {
@@ -654,7 +667,7 @@ where
     S: ServerHandler + Send + Sync + 'static,
     F: Fn(Engine) -> S + Send + Sync + Clone + 'static,
 {
-    let addr = format!("0.0.0.0:{}", port).parse()?;
+    let addr = resolve_bind_addr(port)?;
 
     let config = SseServerConfig {
         bind: addr,
