@@ -30,6 +30,25 @@ The server initialises the S3 client from the environment at startup using the s
 
 S3 storage lets multiple nodes share the same heap store, which is required for a horizontally-scaled or clustered deployment.
 
+## Use an S3-compatible store (MinIO, LocalStack)
+
+Point the S3 client at a non-AWS endpoint with `AWS_ENDPOINT_URL`, and enable
+path-style addressing with `AWS_S3_FORCE_PATH_STYLE` (most S3-compatible stores
+serve `host/bucket/key` rather than `bucket.host/key`):
+
+```bash
+export AWS_ENDPOINT_URL=http://localhost:9000
+export AWS_S3_FORCE_PATH_STYLE=true
+export AWS_ACCESS_KEY_ID=minioadmin
+export AWS_SECRET_ACCESS_KEY=minioadmin
+export AWS_DEFAULT_REGION=us-east-1
+
+mcp-v8 --http-port=8080 --s3-bucket=my-mcp-heaps
+```
+
+The bucket must already exist (create it with `mc mb` or the store's console).
+Leave `AWS_ENDPOINT_URL` / `AWS_S3_FORCE_PATH_STYLE` unset for real AWS S3.
+
 ## Add a local FS write-through cache in front of S3
 
 Use `--cache-dir` together with `--s3-bucket` to keep a local disk cache:
