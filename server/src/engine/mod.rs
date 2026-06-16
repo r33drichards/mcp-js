@@ -744,19 +744,27 @@ fn execute_module(runtime: &mut JsRuntime, code: &str) -> Result<(), String> {
     let main_url = ModuleSpecifier::parse(&format!("file:///main_{}.js", id))
         .map_err(|e| format!("internal specifier error: {}", e))?;
 
-    // The isolate event loop MUST run on a current-thread tokio runtime, never
-    // the ambient multi-thread server runtime. deno_core's op driver schedules
-    // every pending async op via `deno_unsync::spawn`, which asserts a
-    // current-thread runtime flavor; on a multi-thread runtime any op that
-    // stays pending (e.g. an fs-snapshot blob fetched from S3 on a cold cache)
-    // hits that assertion and aborts the process. We are always invoked from a
-    // blocking context (spawn_blocking), so building and blocking on a
-    // dedicated current-thread runtime here is safe.
-    let owned_rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| format!("Failed to create tokio runtime: {}", e))?;
-    let handle = owned_rt.handle().clone();
+    // Use the current tokio runtime handle if available, otherwise create a
+    // temporary one. Direct callers (tests, fuzz targets) may not have a
+    // tokio runtime on the current thread.
+    //
+    // NOTE: the isolate runs on the ambient (multi-thread) server runtime on
+    // purpose. Async ops that await resources bound to that runtime — the child
+    // MCP clients (mcp.callTool) and the S3 client — only make progress there.
+    // Cross-worker fs-snapshot blobs are pre-staged into the local cache by
+    // `build_fs_mount` (on this runtime) before the isolate runs, so in-op fs
+    // reads are local and never await remote I/O from inside the isolate.
+    let owned_rt;
+    let handle = match tokio::runtime::Handle::try_current() {
+        Ok(h) => h,
+        Err(_) => {
+            owned_rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| format!("Failed to create tokio runtime: {}", e))?;
+            owned_rt.handle().clone()
+        }
+    };
 
     let _guard = handle.enter();
 
