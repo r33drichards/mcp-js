@@ -747,6 +747,13 @@ fn execute_module(runtime: &mut JsRuntime, code: &str) -> Result<(), String> {
     // Use the current tokio runtime handle if available, otherwise create a
     // temporary one. Direct callers (tests, fuzz targets) may not have a
     // tokio runtime on the current thread.
+    //
+    // NOTE: the isolate runs on the ambient (multi-thread) server runtime on
+    // purpose. Async ops that await resources bound to that runtime — the child
+    // MCP clients (mcp.callTool) and the S3 client — only make progress there.
+    // Cross-worker fs-snapshot blobs are pre-staged into the local cache by
+    // `build_fs_mount` (on this runtime) before the isolate runs, so in-op fs
+    // reads are local and never await remote I/O from inside the isolate.
     let owned_rt;
     let handle = match tokio::runtime::Handle::try_current() {
         Ok(h) => h,
@@ -1736,6 +1743,17 @@ impl Engine {
                 None => fs_mount::SessionMount::empty((**store).clone()),
             }
         };
+
+        // Pre-stage the mounted tree's blobs into the node-local cache now, on
+        // this (main) runtime. The isolate runs on its own current-thread
+        // runtime and its fs ops cannot await the blob backend's remote I/O, so
+        // a lazy in-op fetch from S3 would deadlock; warming here makes those
+        // reads pure local-cache hits.
+        mount
+            .warm()
+            .await
+            .map_err(|e| format!("fs mount: warm {handle}: {e}"))?;
+
         Ok(Some(fs::FsMountHandle::new(mount)))
     }
 

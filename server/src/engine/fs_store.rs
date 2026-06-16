@@ -167,6 +167,39 @@ impl FsStore {
         }
     }
 
+    /// Warm the node-local blob cache with every tree node and file chunk
+    /// reachable from `root`. Intended to run on the runtime that owns the blob
+    /// backend's remote I/O (the server's main runtime), BEFORE the isolate
+    /// executes: deno_core ops run on the isolate's own current-thread runtime
+    /// and cannot await remote I/O from another runtime, so a lazy in-op fetch
+    /// from S3 would deadlock. Pre-staging every reachable blob locally makes
+    /// the in-op reads pure local-cache hits. Already-local blobs are skipped
+    /// cheaply via `HeapStorage::contains`.
+    pub async fn prefetch(&self, root: [u8; 32]) -> anyhow::Result<()> {
+        let mut stack = vec![root];
+        while let Some(id) = stack.pop() {
+            // Fetching the node populates the cache (write-through) and lets us
+            // walk its children.
+            let node = self.get_node(&id).await?;
+            for child in node.children.values() {
+                if let Some(entry) = &child.file {
+                    if let Content::Chunks(hashes) = &entry.content {
+                        for h in hashes {
+                            self.blobs
+                                .warm(&chunk_key(h))
+                                .await
+                                .map_err(|e| anyhow::anyhow!("warm chunk: {e}"))?;
+                        }
+                    }
+                }
+                if let Some(d) = child.dir {
+                    stack.push(d);
+                }
+            }
+        }
+        Ok(())
+    }
+
     // ── Tree nodes ─────────────────────────────────────────────────────────
 
     /// Fetch and decode a tree node, consulting the shared node cache first.

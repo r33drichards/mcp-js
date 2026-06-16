@@ -41,7 +41,7 @@ The session DB is separate from the heap store. Losing the session DB does not d
 
 ## S3 credential expectations
 
-The S3 client is initialised at server startup via `aws_config::load_from_env()`, which walks the standard AWS SDK credential chain in order:
+The S3 client is initialised at server startup from the environment (the default AWS SDK config with the latest behavior version), which walks the standard AWS SDK credential chain in order:
 
 1. **Environment variables**: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and optionally `AWS_SESSION_TOKEN`.
 2. **Shared credentials file**: `~/.aws/credentials` (profile selected by `AWS_PROFILE`, default `default`).
@@ -53,6 +53,7 @@ Additional environment variables that influence S3 behaviour:
 |---|---|
 | `AWS_DEFAULT_REGION` | AWS region for the bucket (required if not in `~/.aws/config`) |
 | `AWS_ENDPOINT_URL` | Override the S3 endpoint URL (use for S3-compatible stores such as MinIO or LocalStack) |
+| `AWS_S3_FORCE_PATH_STYLE` | Set to `true` to use path-style addressing (`host/bucket/key`). Required by most S3-compatible stores (MinIO, etc.); leave unset for real AWS S3, which uses virtual-hosted style |
 | `AWS_SESSION_TOKEN` | Temporary session token for STS-issued credentials |
 
 The server does not accept S3 credentials via CLI flags. All credential configuration must be done through the AWS SDK credential chain before the process starts.
