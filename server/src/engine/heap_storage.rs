@@ -22,6 +22,23 @@ pub trait HeapStorage: Send + Sync + 'static {
     async fn delete(&self, _name: &str) -> Result<(), String> {
         Err("delete is not supported by this storage backend".to_string())
     }
+
+    /// Whether a blob is present in this backend's *local* layer. Cheap by
+    /// default only where it can be (a local file/memory store); the generic
+    /// fallback actually fetches. Used by `warm` to skip already-local blobs.
+    async fn contains(&self, name: &str) -> Result<bool, String> {
+        Ok(self.get(name).await.is_ok())
+    }
+
+    /// Ensure a blob is materialized in this backend's local layer so a later
+    /// `get` does not have to cross to a remote backend (or another tokio
+    /// runtime). On a write-through cache this populates the local cache from
+    /// the primary; on a purely-local backend it is a no-op. Pre-staging fs
+    /// blobs via `warm` on the main runtime is what lets the isolate's
+    /// current-thread ops read them without awaiting remote I/O.
+    async fn warm(&self, name: &str) -> Result<(), String> {
+        self.get(name).await.map(|_| ())
+    }
 }
 
 /// In-memory blob backend. Primarily for tests and the `FsStore::in_memory`
@@ -61,6 +78,12 @@ impl HeapStorage for MemoryHeapStorage {
     async fn delete(&self, name: &str) -> Result<(), String> {
         self.map.lock().unwrap().remove(name);
         Ok(())
+    }
+    async fn contains(&self, name: &str) -> Result<bool, String> {
+        Ok(self.map.lock().unwrap().contains_key(name))
+    }
+    async fn warm(&self, _name: &str) -> Result<(), String> {
+        Ok(()) // already local
     }
 }
 
@@ -114,12 +137,24 @@ impl HeapStorage for FileHeapStorage {
             Err(e) => Err(e.to_string()),
         }
     }
+    async fn contains(&self, name: &str) -> Result<bool, String> {
+        Ok(self.dir.join(name).exists())
+    }
+    async fn warm(&self, _name: &str) -> Result<(), String> {
+        Ok(()) // this backend IS the local layer
+    }
 }
 
 #[derive(Clone)]
 pub struct S3HeapStorage {
     bucket: String,
     client: Arc<S3Client>,
+    // The runtime the S3 client (and its hyper connection pool / IO reactor)
+    // was created on. S3 calls are dispatched here even when invoked from
+    // another runtime — e.g. the isolate's current-thread runtime during an
+    // fs-snapshot blob fetch. Awaiting the aws future directly on a different
+    // runtime hangs because the connection's IO reactor lives on this one.
+    runtime: tokio::runtime::Handle,
 }
 
 impl S3HeapStorage {
@@ -152,6 +187,7 @@ impl S3HeapStorage {
         Self {
             bucket: bucket.into(),
             client: Arc::new(client),
+            runtime: tokio::runtime::Handle::current(),
         }
     }
 
@@ -160,30 +196,42 @@ impl S3HeapStorage {
         let bucket = self.bucket.clone();
         let name = name.to_string();
         let data = data.to_vec();
-        client
-            .put_object()
-            .bucket(bucket)
-            .key(name)
-            .body(ByteStream::from(data))
-            .send()
+        // Run on the S3 client's own runtime (see `runtime` field), awaiting the
+        // JoinHandle — which is safe to poll from any runtime.
+        self.runtime
+            .spawn(async move {
+                client
+                    .put_object()
+                    .bucket(bucket)
+                    .key(name)
+                    .body(ByteStream::from(data))
+                    .send()
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            })
             .await
-            .map(|_| ())
-            .map_err(|e| e.to_string())
+            .map_err(|e| format!("s3 put task join error: {e}"))?
     }
 
     async fn get_blocking(&self, name: &str) -> Result<Vec<u8>, String> {
         let client = self.client.clone();
         let bucket = self.bucket.clone();
         let name = name.to_string();
-        let output = client
-            .get_object()
-            .bucket(bucket)
-            .key(name)
-            .send()
+        self.runtime
+            .spawn(async move {
+                let output = client
+                    .get_object()
+                    .bucket(bucket)
+                    .key(name)
+                    .send()
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let data = output.body.collect().await.map_err(|e| e.to_string())?;
+                Ok::<Vec<u8>, String>(data.into_bytes().to_vec())
+            })
             .await
-            .map_err(|e| e.to_string())?;
-        let data = output.body.collect().await.map_err(|e| e.to_string())?;
-        Ok(data.into_bytes().to_vec())
+            .map_err(|e| format!("s3 get task join error: {e}"))?
     }
 }
 
@@ -322,6 +370,24 @@ impl<P: HeapStorage + Clone> HeapStorage for WriteThroughCacheHeapStorage<P> {
         self.bound.lock().unwrap().forget(name);
         let _ = self.cache.delete(name).await;
         self.primary.delete(name).await
+    }
+    async fn contains(&self, name: &str) -> Result<bool, String> {
+        self.cache.contains(name).await
+    }
+    async fn warm(&self, name: &str) -> Result<(), String> {
+        // Already cached locally — nothing to fetch.
+        if self.cache.contains(name).await.unwrap_or(false) {
+            return Ok(());
+        }
+        // Pull from the primary (e.g. S3) and populate the local cache, so a
+        // later get() served from the cache never crosses to a remote backend.
+        let data = self.primary.get(name).await?;
+        if let Err(e) = self.cache.put(name, &data).await {
+            tracing::warn!("Failed to warm FS cache for {}: {}", name, e);
+        } else {
+            self.note_cached(name, data.len() as u64).await;
+        }
+        Ok(())
     }
 }
 

@@ -58,6 +58,17 @@ impl SessionMount {
         self.base_id
     }
 
+    /// Warm the node-local blob cache with this mount's entire base tree. Must
+    /// be called on the runtime that owns the blob backend's remote I/O (the
+    /// server's main runtime), before the isolate runs — see
+    /// [`FsStore::prefetch`]. No-op for an empty (fresh) mount.
+    pub async fn warm(&self) -> anyhow::Result<()> {
+        if let Some(id) = self.base_id {
+            self.store.prefetch(*id.as_bytes()).await?;
+        }
+        Ok(())
+    }
+
     fn base_root(&self) -> Option<[u8; 32]> {
         self.base_id.map(|h| *h.as_bytes())
     }

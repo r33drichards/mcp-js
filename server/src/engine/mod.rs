@@ -744,20 +744,19 @@ fn execute_module(runtime: &mut JsRuntime, code: &str) -> Result<(), String> {
     let main_url = ModuleSpecifier::parse(&format!("file:///main_{}.js", id))
         .map_err(|e| format!("internal specifier error: {}", e))?;
 
-    // Use the current tokio runtime handle if available, otherwise create a
-    // temporary one. Direct callers (tests, fuzz targets) may not have a
-    // tokio runtime on the current thread.
-    let owned_rt;
-    let handle = match tokio::runtime::Handle::try_current() {
-        Ok(h) => h,
-        Err(_) => {
-            owned_rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|e| format!("Failed to create tokio runtime: {}", e))?;
-            owned_rt.handle().clone()
-        }
-    };
+    // The isolate event loop MUST run on a current-thread tokio runtime, never
+    // the ambient multi-thread server runtime. deno_core's op driver schedules
+    // every pending async op via `deno_unsync::spawn`, which asserts a
+    // current-thread runtime flavor; on a multi-thread runtime any op that
+    // stays pending (e.g. an fs-snapshot blob fetched from S3 on a cold cache)
+    // hits that assertion and aborts the process. We are always invoked from a
+    // blocking context (spawn_blocking), so building and blocking on a
+    // dedicated current-thread runtime here is safe.
+    let owned_rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("Failed to create tokio runtime: {}", e))?;
+    let handle = owned_rt.handle().clone();
 
     let _guard = handle.enter();
 
@@ -1736,6 +1735,17 @@ impl Engine {
                 None => fs_mount::SessionMount::empty((**store).clone()),
             }
         };
+
+        // Pre-stage the mounted tree's blobs into the node-local cache now, on
+        // this (main) runtime. The isolate runs on its own current-thread
+        // runtime and its fs ops cannot await the blob backend's remote I/O, so
+        // a lazy in-op fetch from S3 would deadlock; warming here makes those
+        // reads pure local-cache hits.
+        mount
+            .warm()
+            .await
+            .map_err(|e| format!("fs mount: warm {handle}: {e}"))?;
+
         Ok(Some(fs::FsMountHandle::new(mount)))
     }
 
