@@ -881,14 +881,24 @@ await fs.writeFile("/tmp/out.txt", "hello");              // string data
 await fs.writeFile("/tmp/out.bin", uint8array);           // binary data
 await fs.appendFile("/tmp/out.txt", " world");
 const entries = await fs.readdir("/tmp");                  // string[]
-const info = await fs.stat("/tmp/data.txt");               // {size,isFile,isDirectory,...}
+const info = await fs.stat("/tmp/data.txt");               // Stats: info.isFile(), info.size, ...
+const link = await fs.lstat("/tmp/link");                  // Stats without following a symlink
 await fs.mkdir("/tmp/newdir", { recursive: true });
 await fs.rm("/tmp/data.txt");
 await fs.rm("/tmp/newdir", { recursive: true });
 await fs.rename("/tmp/old.txt", "/tmp/new.txt");
 await fs.copyFile("/tmp/a.txt", "/tmp/b.txt");
+await fs.symlink("/tmp/data.txt", "/tmp/link");            // symlink(target, path)
+const target = await fs.readlink("/tmp/link");
 const bool = await fs.exists("/tmp/data.txt");
 ```
+
+The same methods are also exposed under `fs.promises`, and `fs.stat`/`fs.lstat`
+return a Node `fs.Stats`-like object (`isFile()`, `isDirectory()`,
+`isSymbolicLink()`, plus `size`/`mode`/timestamps). Errors carry a Node-style
+`code` (e.g. `err.code === "ENOENT"`). This lets libraries that expect a Node
+`fs` / `fs.promises` interface — such as `isomorphic-git` — use the sandbox `fs`
+object directly.
 
 **1. Write a Rego policy**
 
@@ -919,7 +929,7 @@ allow if {
 ```
 
 The policy input includes:
-- `operation`: the filesystem operation being performed (e.g., `"readFile"`, `"writeFile"`, `"mkdir"`, `"rm"`, `"rename"`, `"copyFile"`, `"appendFile"`, `"readdir"`, `"stat"`, `"exists"`)
+- `operation`: the filesystem operation being performed (e.g., `"readFile"`, `"writeFile"`, `"mkdir"`, `"rm"`, `"rename"`, `"copyFile"`, `"appendFile"`, `"readdir"`, `"stat"`, `"lstat"`, `"symlink"`, `"readlink"`, `"exists"`)
 - `path`: the file or directory path being accessed
 - `destination`: (optional) the destination path for operations like `rename` and `copyFile`
 - `recursive`: (optional, boolean) whether a recursive operation was requested (for `mkdir` and `rm`)

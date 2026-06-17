@@ -9,7 +9,7 @@
 //! content-addressed tree lazily, and `push` rewrites only the changed nodes.
 //! So a session over a multi-TB snapshot costs O(touched paths), not O(total).
 
-use crate::engine::fs_store::{Entry, FsStore};
+use crate::engine::fs_store::{Content, Entry, FsStore};
 use crate::engine::fs_tree::{components_of, path_of};
 use blake3::Hash;
 use std::collections::{BTreeSet, HashMap};
@@ -206,6 +206,37 @@ impl SessionMount {
     /// of the files they contain. It succeeds so callers can mkdir-then-write.
     pub async fn mkdir(&mut self, _p: &Path) -> anyhow::Result<()> {
         Ok(())
+    }
+
+    /// Create a symlink at `link` pointing to `target`. Stored as an entry whose
+    /// `symlink` field records the target and whose bytes are the target path,
+    /// so the symlink survives a `push` and round-trips through the content
+    /// store like any other file.
+    pub async fn symlink(&mut self, target: &Path, link: &Path) -> anyhow::Result<()> {
+        let target_bytes = target.to_string_lossy().into_owned().into_bytes();
+        let entry = Entry {
+            mode: 0o120777,
+            size: target_bytes.len() as u64,
+            content: Content::Inline(target_bytes),
+            symlink: Some(target.to_path_buf()),
+        };
+        self.upper
+            .insert(path_of(&components_of(link)), Write::Data(entry));
+        Ok(())
+    }
+
+    /// Read a symlink's target. Mirrors Node `fs.readlink`: `EINVAL` when the
+    /// path exists but is not a symlink, `ENOENT` when it is absent.
+    pub async fn readlink(&self, p: &Path) -> anyhow::Result<PathBuf> {
+        let comps = components_of(p);
+        let key = path_of(&comps);
+        match self.effective(&comps, &key).await? {
+            Some(e) => match e.symlink {
+                Some(t) => Ok(t),
+                None => anyhow::bail!("EINVAL: {} is not a symlink", key.display()),
+            },
+            None => anyhow::bail!("ENOENT: {}", key.display()),
+        }
     }
 
     pub async fn rename(&mut self, from: &Path, to: &Path) -> anyhow::Result<()> {

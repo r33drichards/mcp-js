@@ -79,9 +79,9 @@ allow if {
 }
 ```
 
-Operation names match exactly what the JS wrapper passes: `readFile`, `writeFile`, `appendFile`, `readdir`, `stat`, `mkdir`, `rm`, `rename`, `copyFile`, `exists`.
+Operation names match exactly what the JS wrapper passes: `readFile`, `writeFile`, `appendFile`, `readdir`, `stat`, `lstat`, `mkdir`, `rm`, `rename`, `copyFile`, `symlink`, `readlink`, `exists`.
 
-Note: `fs.unlink` reuses the `rm` op internally, so its policy operation is `"rm"`.
+Note: `fs.unlink` and `fs.rmdir` reuse the `rm` op internally, so their policy operation is `"rm"`.
 
 ## Use a remote OPA server
 
@@ -163,7 +163,8 @@ const names = await fs.readdir("/var/mcp-workspace");
 
 ```js
 const info = await fs.stat("/var/mcp-workspace/config.json");
-// { size, isFile, isDirectory, isSymlink, readonly, mtimeMs, atimeMs, birthtimeMs }
+// Node fs.Stats-like: info.isFile(), info.isDirectory(), info.isSymbolicLink(),
+// plus info.size, info.mode, info.mtimeMs, info.mtime (Date), ...
 ```
 
 ### Create a directory
