@@ -103,6 +103,19 @@ impl SessionMount {
         }
     }
 
+    /// Like [`read`], but returns `Ok(None)` when the path is absent from the
+    /// overlay (instead of erroring), so callers can fall through to a lower
+    /// layer (the real filesystem), overlayfs-style. A whiteout (deleted in this
+    /// session) also yields `None`.
+    pub async fn read_opt(&self, p: &Path) -> anyhow::Result<Option<Vec<u8>>> {
+        let comps = components_of(p);
+        let key = path_of(&comps);
+        match self.effective(&comps, &key).await? {
+            Some(e) => Ok(Some(self.store.read_file(&e).await?)),
+            None => Ok(None),
+        }
+    }
+
     pub async fn write(&mut self, p: &Path, bytes: &[u8]) -> anyhow::Result<()> {
         let entry = self.store.put_file(bytes).await?;
         self.upper.insert(path_of(&components_of(p)), Write::Data(entry));

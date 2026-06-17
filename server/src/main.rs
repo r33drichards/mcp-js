@@ -383,9 +383,12 @@ async fn main() -> Result<()> {
     // A mount needs the fs surface present, so when snapshots are enabled but
     // no fs policy was supplied, default to an allow-all policy chain.
     let engine = if let Some(chain) = fs_policy_chain {
-        engine.with_fs_config(FsConfig::new(chain))
+        engine.with_fs_config(FsConfig::new(chain).with_passthrough(cli.fs_passthrough))
     } else if fs_enabled {
-        engine.with_fs_config(FsConfig::new(Arc::new(PolicyChain::new(vec![], EvalMode::All))))
+        engine.with_fs_config(
+            FsConfig::new(Arc::new(PolicyChain::new(vec![], EvalMode::All)))
+                .with_passthrough(cli.fs_passthrough),
+        )
     } else {
         engine
     };

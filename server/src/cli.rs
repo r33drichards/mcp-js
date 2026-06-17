@@ -132,6 +132,15 @@ pub struct Cli {
     #[arg(long = "fs-labels-db", env = "MCP_V8_FS_LABELS_DB", value_name = "PATH", help_heading = "Filesystem")]
     pub fs_labels_db: Option<String>,
 
+    /// Overlay read behaviour when a per-session fs snapshot is mounted.
+    /// Off (default): overlay-only — the mounted snapshot is the entire fs view,
+    /// so a read that misses it is ENOENT (strict isolation). On: overlayfs-style
+    /// — fall through to the real filesystem as a read-only lower layer (still
+    /// gated by the filesystem policy), so bundled read-only paths like
+    /// `/opt/languages` resolve while `/work` stays the per-session overlay.
+    #[arg(long = "fs-passthrough", env = "MCP_V8_FS_PASSTHROUGH", default_value = "false", help_heading = "Filesystem")]
+    pub fs_passthrough: bool,
+
     // ── Shared S3 backend (used by heap-store=s3 and/or fs-store=s3) ──────────
     /// S3 bucket backing whichever axes select `s3`. Required when
     /// `--heap-store s3` or `--fs-store s3` is set.

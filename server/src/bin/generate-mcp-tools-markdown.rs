@@ -230,7 +230,7 @@ fn main() {
         String::new(),
         "## Modes".to_string(),
         String::new(),
-        "- [Stateful mode](#stateful-mode)".to_string(),
+        "- [Heap+fs mode](#heapfs-mode)".to_string(),
         "- [Stateless mode](#stateless-mode)".to_string(),
         String::new(),
     ];

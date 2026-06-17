@@ -196,6 +196,13 @@ Path for the fs label/reflog database (sled). Defaults to `<session-db-path>/fs-
 - Environment: `MCP_V8_FS_LABELS_DB`
 - Value: `PATH`
 
+### `--fs-passthrough`
+
+Overlay read behaviour when a per-session fs snapshot is mounted. Off (default): overlay-only — the mounted snapshot is the entire fs view, so a read that misses it is ENOENT (strict isolation). On: overlayfs-style — fall through to the real filesystem as a read-only lower layer (still gated by the filesystem policy), so bundled read-only paths like `/opt/languages` resolve while `/work` stays the per-session overlay
+
+- Environment: `MCP_V8_FS_PASSTHROUGH`
+- Default: `false`
+
 ## Heap
 
 ### `--heap-store`
