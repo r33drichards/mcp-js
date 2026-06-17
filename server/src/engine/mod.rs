@@ -739,48 +739,58 @@ static MODULE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 /// Execute code as an ES module. All code is always executed as a module,
 /// which supports `import` declarations, `export`, and top-level `await`.
-fn execute_module(runtime: &mut JsRuntime, code: &str) -> Result<(), String> {
+// Build the dedicated current-thread runtime each isolate runs on.
+//
+// V8/deno_core is single-threaded and deno_core's async op driver dispatches ops
+// through `deno_unsync`, which requires a `RuntimeFlavor::CurrentThread` runtime
+// (on a multi-thread runtime it panics in debug and deadlocks fs ops in
+// release). We are called from `spawn_blocking` (a blocking task), so building
+// and driving a fresh current-thread runtime here is allowed — no dedicated OS
+// thread needed.
+//
+// Ops that need the server's multi-thread runtime don't run their I/O here: the
+// S3 client (heap + fs blobs) captures that runtime's Handle at construction and
+// bridges via `handle.spawn(...).await`, and cross-worker fs blobs are pre-staged
+// into the local cache by `build_fs_mount` before the isolate runs.
+fn isolate_runtime() -> Result<tokio::runtime::Runtime, String> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("Failed to create current-thread runtime: {}", e))
+}
+
+fn execute_module(
+    rt: &tokio::runtime::Runtime,
+    runtime: &mut JsRuntime,
+    code: &str,
+) -> Result<(), String> {
     let id = MODULE_COUNTER.fetch_add(1, Ordering::Relaxed);
     let main_url = ModuleSpecifier::parse(&format!("file:///main_{}.js", id))
         .map_err(|e| format!("internal specifier error: {}", e))?;
 
-    // Use the current tokio runtime handle if available, otherwise create a
-    // temporary one. Direct callers (tests, fuzz targets) may not have a
-    // tokio runtime on the current thread.
-    //
-    // NOTE: the isolate runs on the ambient (multi-thread) server runtime on
-    // purpose. Async ops that await resources bound to that runtime — the child
-    // MCP clients (mcp.callTool) and the S3 client — only make progress there.
-    // Cross-worker fs-snapshot blobs are pre-staged into the local cache by
-    // `build_fs_mount` (on this runtime) before the isolate runs, so in-op fs
-    // reads are local and never await remote I/O from inside the isolate.
-    let owned_rt;
-    let handle = match tokio::runtime::Handle::try_current() {
-        Ok(h) => h,
-        Err(_) => {
-            owned_rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|e| format!("Failed to create tokio runtime: {}", e))?;
-            owned_rt.handle().clone()
-        }
-    };
+    // CRITICAL: run the load, module evaluation, AND event loop inside ONE
+    // `block_on`. `mod_evaluate` runs the module's top-level synchronous code
+    // immediately (up to the first await), which submits async ops — so it must
+    // execute under this current-thread runtime's context too, not between
+    // `block_on` calls (where the ambient multi-thread runtime is current and
+    // deno_unsync's op spawn would panic/deadlock).
+    rt.block_on(async move {
+        let mod_id = runtime
+            .load_side_es_module_from_code(&main_url, code.to_string())
+            .await
+            .map_err(|e| format!("{}", e))?;
 
-    let _guard = handle.enter();
+        let eval_future = runtime.mod_evaluate(mod_id);
 
-    let mod_id = handle
-        .block_on(runtime.load_side_es_module_from_code(&main_url, code.to_string()))
-        .map_err(|e| format!("{}", e))?;
+        runtime
+            .run_event_loop(Default::default())
+            .await
+            .map_err(|e| format!("{}", e))?;
 
-    let eval_future = runtime.mod_evaluate(mod_id);
+        eval_future.await.map_err(|e| format!("{}", e))?;
 
-    handle
-        .block_on(runtime.run_event_loop(Default::default()))
-        .map_err(|e| format!("{}", e))?;
-
-    handle.block_on(eval_future).map_err(|e| format!("{}", e))?;
-
-    Ok(())
+        Ok(())
+    })
 }
 
 /// Configuration bundle for `execute_stateless` / `execute_stateful`.
@@ -941,6 +951,10 @@ pub fn execute_stateless(
             ..Default::default()
         });
 
+        // Current-thread runtime that drives this isolate's async ops (see
+        // `execute_module` / `isolate_runtime`).
+        let rt = isolate_runtime()?;
+
         // Put console log state in OpState.
         if let Some(tree) = console_tree {
             runtime.op_state().borrow_mut().put(ConsoleLogState::new(tree));
@@ -1036,7 +1050,7 @@ pub fn execute_stateless(
                 if let Err(e) = console::harden_runtime(&mut runtime) {
                     return Err(e);
                 }
-                execute_module(&mut runtime, code)
+                execute_module(&rt, &mut runtime, code)
             }
         };
 
@@ -1137,6 +1151,10 @@ pub fn execute_stateful(
             ..Default::default()
         });
 
+        // Current-thread runtime that drives this isolate's async ops (see
+        // `execute_module` / `isolate_runtime`).
+        let rt = isolate_runtime()?;
+
         // Put console log state in OpState.
         if let Some(tree) = console_tree {
             runtime.op_state().borrow_mut().put(ConsoleLogState::new(tree));
@@ -1186,7 +1204,7 @@ pub fn execute_stateful(
         let has_snapshot = leaked_snapshot.is_some();
 
         let output_result = if has_snapshot {
-            execute_module(&mut runtime, code)
+            execute_module(&rt, &mut runtime, code)
         } else {
             // Inject WASM modules as globals via V8 native API.
             // Do NOT early-return here — snapshot() must be called below.
@@ -1242,7 +1260,7 @@ pub fn execute_stateful(
                     if let Err(e) = console::harden_runtime(&mut runtime) {
                         return Err(e);
                     }
-                    execute_module(&mut runtime, code)
+                    execute_module(&rt, &mut runtime, code)
                 }
             }
         };
