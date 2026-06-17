@@ -243,42 +243,95 @@ const CONSOLE_JS_WRAPPER: &str = r#"
 /// inject_fs, inject_mcp, and inject_timers — otherwise it will freeze ops
 /// before they are set up, breaking the runtime.
 ///
-/// 1. Neutralizes dangerous introspection ops (op_get_proxy_details, etc.)
-/// 2. Freezes Deno.core.ops to prevent interception/replacement
-/// 3. Removes __bootstrap (event loop hooks, primordials, internals)
-/// 4. Removes SharedArrayBuffer (Spectre timer prerequisite)
-pub fn harden_runtime(runtime: &mut JsRuntime) -> Result<(), String> {
+/// Each mitigation is **opt-in** and OFF by default: with a default
+/// `HardeningConfig` this is a no-op and the runtime is left unhardened. Enable
+/// mitigations individually via the `--harden-*` CLI flags. Whatever is enabled
+/// is applied in an order that keeps op-neutralization before the
+/// `Object.freeze` that would otherwise lock those ops in place.
+///
+/// Mitigations (each gated by its `HardeningConfig` field):
+/// - `neutralize_proxy_details`: `op_get_proxy_details` → `undefined` (else it bypasses `Proxy` handlers)
+/// - `neutralize_introspection`: `op_memory_usage`/`op_is_terminal` neutralized (host info leaks)
+/// - `freeze_ops`: `Object.freeze(Deno.core.ops)` (no op interception/replacement)
+/// - `remove_bootstrap`: delete `__bootstrap` (event-loop hooks, primordials, internals)
+/// - `remove_shared_memory`: delete `SharedArrayBuffer`/`Atomics` (Spectre timer prerequisite; also the primitives emscripten wasm-threads need)
+pub fn harden_runtime(runtime: &mut JsRuntime, config: HardeningConfig) -> Result<(), String> {
+    if config.is_noop() {
+        return Ok(());
+    }
+    let mut js = String::from("(function() {\n");
+    // Op neutralization must run BEFORE Object.freeze (freeze locks the ops object).
+    if config.neutralize_proxy_details {
+        js.push_str("  Deno.core.ops.op_get_proxy_details = function() { return undefined; };\n");
+    }
+    if config.neutralize_introspection {
+        js.push_str("  Deno.core.ops.op_memory_usage = function() { return {}; };\n");
+        js.push_str("  Deno.core.ops.op_is_terminal = function() { return false; };\n");
+    }
+    if config.freeze_ops {
+        js.push_str("  Object.freeze(Deno.core.ops);\n");
+    }
+    if config.remove_bootstrap {
+        // __bootstrap exposes event-loop hooks (setMacrotaskCallback,
+        // setPromiseHooks, …), primordials (pristine Function constructor), and
+        // internal registration objects. deno_core's own bootstrap has already
+        // completed, so deleting it here is safe.
+        js.push_str("  delete globalThis.__bootstrap;\n");
+    }
+    if config.remove_shared_memory {
+        // SharedArrayBuffer is the prerequisite for a high-resolution Spectre
+        // timer (and for emscripten wasm-threads). V8 flags cannot disable it
+        // (stable spec feature), so remove from JS.
+        js.push_str("  delete globalThis.SharedArrayBuffer;\n");
+        js.push_str("  delete globalThis.Atomics;\n");
+    }
+    js.push_str("})();");
     runtime
-        .execute_script("<sandbox-hardening>", HARDENING_JS.to_string())
+        .execute_script("<sandbox-hardening>", js)
         .map_err(|e| format!("Failed to harden sandbox: {}", e))?;
     Ok(())
 }
 
-const HARDENING_JS: &str = r#"
-(function() {
-    // 1. Neutralize dangerous introspection/info-leak ops before freezing.
-    //    These must be replaced on the ops object before Object.freeze.
-    Deno.core.ops.op_get_proxy_details = function() { return undefined; };
-    Deno.core.ops.op_memory_usage = function() { return {}; };
-    Deno.core.ops.op_is_terminal = function() { return false; };
+/// Per-mitigation sandbox-hardening switches. All fields default to `false`
+/// (OFF) — mcp-v8 runs UNHARDENED unless mitigations are explicitly enabled (see
+/// the `--harden-*` CLI flags). Each field maps to one mitigation from the
+/// original combined hardening pass (commit a1d644d).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HardeningConfig {
+    /// Freeze `Deno.core.ops` so no op can be replaced/intercepted (e.g. a
+    /// persistent trojan op surviving in stateful/snapshot mode).
+    pub freeze_ops: bool,
+    /// Neutralize `op_get_proxy_details` (otherwise it bypasses `Proxy` handlers
+    /// and can read a proxied target).
+    pub neutralize_proxy_details: bool,
+    /// Neutralize `op_memory_usage` + `op_is_terminal` (host info leaks).
+    pub neutralize_introspection: bool,
+    /// Remove `globalThis.__bootstrap` (event-loop hooks, primordials such as a
+    /// pristine `Function` constructor, and internal registries).
+    pub remove_bootstrap: bool,
+    /// Remove `globalThis.SharedArrayBuffer` + `globalThis.Atomics` — the
+    /// high-resolution Spectre-timer prerequisite (and the shared-memory
+    /// primitives emscripten wasm-threads require).
+    pub remove_shared_memory: bool,
+}
 
-    // 2. Freeze ops to prevent interception/replacement of any op.
-    //    All setup (console, fetch, fs, mcp) has completed by this point.
-    Object.freeze(Deno.core.ops);
+impl HardeningConfig {
+    /// Every mitigation enabled (the original combined hardening behavior).
+    pub fn all() -> Self {
+        Self {
+            freeze_ops: true,
+            neutralize_proxy_details: true,
+            neutralize_introspection: true,
+            remove_bootstrap: true,
+            remove_shared_memory: true,
+        }
+    }
 
-    // 3. Remove __bootstrap: exposes event-loop hooks (setMacrotaskCallback,
-    //    setPromiseHooks, addMainModuleHandler, etc.), primordials (pristine
-    //    Function constructor), and internal registration objects.
-    //    deno_core's own bootstrap has already completed, so this is safe.
-    delete globalThis.__bootstrap;
-
-    // 4. Remove SharedArrayBuffer: prerequisite for Spectre-style timing
-    //    attacks. Workers are not available, but defense-in-depth applies.
-    //    V8 flags cannot disable it (stable spec feature), so remove from JS.
-    delete globalThis.SharedArrayBuffer;
-    delete globalThis.Atomics;
-})();
-"#;
+    /// True when no mitigation is enabled — `harden_runtime` is a no-op.
+    pub fn is_noop(&self) -> bool {
+        *self == Self::default()
+    }
+}
 
 // ── Base64 globals (atob / btoa) ────────────────────────────────────────
 
