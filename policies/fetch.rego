@@ -2,7 +2,7 @@ package mcp.fetch
 
 default allow = false
 
-# Read-only: GET and HEAD only
+
 allow if {
     input.method == "GET"
     domain_allowed
@@ -13,7 +13,7 @@ allow if {
     domain_allowed
 }
 
-# Exact domain matches
+
 exact_domains := {
     "github.com",
     "api.github.com",
@@ -35,7 +35,7 @@ exact_domains := {
     "registry.npmjs.org",
 }
 
-# Wildcard suffix matches (*.example.com)
+
 wildcard_suffixes := {
     ".github.com",
     ".githubusercontent.com",

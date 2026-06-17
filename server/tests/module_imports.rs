@@ -10,9 +10,8 @@ use server::engine::{initialize_v8, Engine};
 use server::engine::execution::ExecutionRegistry;
 use server::engine::module_loader::ModuleLoaderConfig;
 
-// ── Module specifier resolution unit tests ──────────────────────────────
 
-#[test]
+
 fn test_npm_specifier_resolves() {
     use deno_core::ResolutionKind;
     use server::engine::module_loader::NetworkModuleLoader;
@@ -28,7 +27,7 @@ fn test_npm_specifier_resolves() {
     assert_eq!(result.unwrap().as_str(), "https://esm.sh/cowsay@1.6.0");
 }
 
-#[test]
+
 fn test_jsr_specifier_resolves() {
     use deno_core::ResolutionKind;
     use server::engine::module_loader::NetworkModuleLoader;
@@ -47,7 +46,7 @@ fn test_jsr_specifier_resolves() {
     );
 }
 
-#[test]
+
 fn test_url_specifier_resolves() {
     use deno_core::ResolutionKind;
     use server::engine::module_loader::NetworkModuleLoader;
@@ -66,7 +65,7 @@ fn test_url_specifier_resolves() {
     );
 }
 
-#[test]
+
 fn test_relative_specifier_resolves() {
     use deno_core::ResolutionKind;
     use server::engine::module_loader::NetworkModuleLoader;
@@ -174,9 +173,8 @@ async fn run_and_wait(engine: &Engine, code: &str) -> Result<String, String> {
     Err("Execution did not complete within timeout".to_string())
 }
 
-// ── Top-level await execution ────────────────────────────────────────────
 
-#[tokio::test]
+
 async fn test_top_level_await_resolves() {
     ensure_v8();
     let engine = create_test_engine();
@@ -190,13 +188,12 @@ console.log("got", result);
     assert!(result.is_ok(), "Top-level await should succeed: {:?}", result);
 }
 
-#[tokio::test]
+
 async fn test_top_level_await_with_async_iife_also_works() {
     ensure_v8();
     let engine = create_test_engine();
 
-    // The old workaround should still work
-    let code = r#"
+        let code = r#"
 const result = await (async () => {
     return await Promise.resolve(99);
 })();
@@ -207,9 +204,8 @@ console.log("got", result);
     assert!(result.is_ok(), "Top-level await with IIFE should succeed: {:?}", result);
 }
 
-// ── Plain JS unaffected ─────────────────────────────────────────────────
 
-#[tokio::test]
+
 async fn test_plain_js_unaffected_by_module_support() {
     ensure_v8();
     let engine = create_test_engine();
@@ -218,7 +214,7 @@ async fn test_plain_js_unaffected_by_module_support() {
     assert!(result.is_ok(), "Plain JS should still work: {:?}", result);
 }
 
-#[tokio::test]
+
 async fn test_plain_js_with_dynamic_import_keyword() {
     ensure_v8();
     let engine = create_test_engine();
@@ -227,10 +223,9 @@ async fn test_plain_js_with_dynamic_import_keyword() {
     assert!(result.is_ok(), "String with 'import' should work: {:?}", result);
 }
 
-// ── npm imports (network required) ──────────────────────────────────────
 
-#[tokio::test]
-#[ignore]
+
+
 async fn test_npm_import_lodash_es() {
     ensure_v8();
     let engine = create_test_engine_with_external_modules();
@@ -249,10 +244,9 @@ console.log(camelCase("hello_world"));
     assert_eq!(result.unwrap(), "");
 }
 
-// ── jsr imports (network required) ──────────────────────────────────────
 
-#[tokio::test]
-#[ignore]
+
+
 async fn test_jsr_import_cases() {
     ensure_v8();
     let engine = create_test_engine_with_external_modules();
@@ -271,10 +265,9 @@ console.log(camelCase("hello_world"));
     assert_eq!(result.unwrap(), "");
 }
 
-// ── URL imports (network required) ──────────────────────────────────────
 
-#[tokio::test]
-#[ignore]
+
+
 async fn test_url_import() {
     ensure_v8();
     let engine = create_test_engine_with_external_modules();
@@ -293,10 +286,9 @@ console.log(camelCase("foo_bar"));
     assert_eq!(result.unwrap(), "");
 }
 
-// ── Module with console output (network required) ───────────────────────
 
-#[tokio::test]
-#[ignore]
+
+
 async fn test_module_console_log() {
     ensure_v8();
     let engine = create_test_engine_with_external_modules();
@@ -339,10 +331,9 @@ console.log("Result:", result);
     panic!("Execution did not complete within timeout");
 }
 
-// ── npm cowsay (network required) ───────────────────────────────────────
 
-#[tokio::test]
-#[ignore]
+
+
 async fn test_npm_cowsay() {
     ensure_v8();
     let engine = create_test_engine_with_external_modules();
@@ -389,10 +380,9 @@ console.log(result);
     panic!("Execution did not complete within timeout");
 }
 
-// ── Deno-style URL import of TypeScript (network required) ──────────────
 
-#[tokio::test]
-#[ignore]
+
+
 async fn test_url_import_typescript() {
     ensure_v8();
     let engine = create_test_engine_with_external_modules();
@@ -433,11 +423,8 @@ console.log(pascalCase("hello_world"));
     panic!("Execution did not complete within timeout");
 }
 
-// ══════════════════════════════════════════════════════════════════════════
-// External module blocking tests (no network required)
-// ══════════════════════════════════════════════════════════════════════════
 
-#[test]
+
 fn test_resolve_npm_blocked_when_external_disabled() {
     use deno_core::ResolutionKind;
     use server::engine::module_loader::NetworkModuleLoader;
@@ -457,7 +444,7 @@ fn test_resolve_npm_blocked_when_external_disabled() {
     );
 }
 
-#[test]
+
 fn test_resolve_jsr_blocked_when_external_disabled() {
     use deno_core::ResolutionKind;
     use server::engine::module_loader::NetworkModuleLoader;
@@ -473,7 +460,7 @@ fn test_resolve_jsr_blocked_when_external_disabled() {
     assert!(err.contains("External module imports are disabled"), "got: {}", err);
 }
 
-#[test]
+
 fn test_resolve_url_blocked_when_external_disabled() {
     use deno_core::ResolutionKind;
     use server::engine::module_loader::NetworkModuleLoader;
@@ -493,7 +480,7 @@ fn test_resolve_url_blocked_when_external_disabled() {
     assert!(err.contains("External module imports are disabled"), "got: {}", err);
 }
 
-#[test]
+
 fn test_resolve_relative_allowed_when_external_disabled() {
     use deno_core::ResolutionKind;
     use server::engine::module_loader::NetworkModuleLoader;
@@ -511,7 +498,7 @@ fn test_resolve_relative_allowed_when_external_disabled() {
     assert!(result.is_ok(), "Relative specifier should resolve even when external disabled: {:?}", result);
 }
 
-#[test]
+
 fn test_resolve_npm_allowed_when_external_enabled() {
     use deno_core::ResolutionKind;
     use server::engine::module_loader::NetworkModuleLoader;
@@ -526,11 +513,8 @@ fn test_resolve_npm_allowed_when_external_enabled() {
     assert_eq!(result.unwrap().as_str(), "https://esm.sh/lodash-es@4.17.21");
 }
 
-// ══════════════════════════════════════════════════════════════════════════
-// Engine-level blocking tests (no network required)
-// ══════════════════════════════════════════════════════════════════════════
 
-#[tokio::test]
+
 async fn test_engine_blocks_npm_import_by_default() {
     ensure_v8();
     let engine = create_test_engine_modules_blocked();
@@ -548,7 +532,7 @@ camelCase("hello_world");"#;
     );
 }
 
-#[tokio::test]
+
 async fn test_engine_blocks_jsr_import_by_default() {
     ensure_v8();
     let engine = create_test_engine_modules_blocked();
@@ -562,7 +546,7 @@ camelCase("hello_world");"#;
     assert!(err.contains("External module imports are disabled"), "got: {}", err);
 }
 
-#[tokio::test]
+
 async fn test_engine_blocks_url_import_by_default() {
     ensure_v8();
     let engine = create_test_engine_modules_blocked();
@@ -576,7 +560,7 @@ camelCase("hello_world");"#;
     assert!(err.contains("External module imports are disabled"), "got: {}", err);
 }
 
-#[tokio::test]
+
 async fn test_engine_plain_js_works_when_modules_blocked() {
     ensure_v8();
     let engine = create_test_engine_modules_blocked();
@@ -585,11 +569,10 @@ async fn test_engine_plain_js_works_when_modules_blocked() {
     assert!(result.is_ok(), "Plain JS should work when external modules blocked: {:?}", result);
 }
 
-#[tokio::test]
+
 async fn test_default_engine_blocks_external_modules() {
     ensure_v8();
-    let engine = create_test_engine(); // uses default (blocked)
-
+    let engine = create_test_engine(); 
     let code = r#"import { camelCase } from "npm:lodash-es@4.17.21";
 camelCase("hello_world");"#;
 

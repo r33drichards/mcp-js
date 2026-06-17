@@ -39,7 +39,7 @@ jobs:
       LABEL: ${{ matrix.topology }}-${{ matrix.mode }}
 
     steps:
-      # ── Setup ────────────────────────────────────────────────────────
+      
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -57,7 +57,7 @@ jobs:
           fi
           k6 version
 
-      # ── Build ───────────────────────────────────────────────────────
+      
       - name: Build MCP-V8 binary
         run: nix develop --command bash -c "cargo build --release -p server"
 
@@ -65,7 +65,7 @@ jobs:
         run: |
           ls -lh target/release/server
 
-      # ── Prepare data directories ────────────────────────────────────
+      
       - name: Create data directories
         run: |
           rm -rf /tmp/loadtest /tmp/mcp-v8-sessions /tmp/mcp-v8-executions*
@@ -73,7 +73,7 @@ jobs:
           mkdir -p /tmp/loadtest/node2/heaps /tmp/loadtest/node2/sessions
           mkdir -p /tmp/loadtest/node3/heaps /tmp/loadtest/node3/sessions
 
-      # ── Start server(s) ─────────────────────────────────────────────
+      
       - name: Start ${{ env.LABEL }} server(s)
         run: |
           BINARY="$(pwd)/target/release/server"
@@ -132,7 +132,7 @@ jobs:
             echo "TARGET_URLS=http://127.0.0.1:3001,http://127.0.0.1:3002,http://127.0.0.1:3003" >> "$GITHUB_ENV"
           fi
 
-      # ── Health check ────────────────────────────────────────────────
+      
       - name: Wait for services to be healthy
         run: |
           echo "Waiting for server(s) to accept connections..."
@@ -177,7 +177,7 @@ jobs:
             done
           fi
 
-      # ── Smoke test ──────────────────────────────────────────────────
+      
       - name: Smoke test — POST /api/exec
         run: |
           IFS=',' read -ra URLS <<< "$TARGET_URLS"
@@ -234,7 +234,7 @@ jobs:
           cat /tmp/loadtest/*.log || true
           exit 1
 
-      # ── Load tests at each rate ─────────────────────────────────────
+      
       - name: Run load tests
         run: |
           mkdir -p results
@@ -272,14 +272,14 @@ jobs:
             sleep 10
           done
 
-      # ── Collect server logs ─────────────────────────────────────────
+      
       - name: Collect server logs
         if: always()
         run: |
           mkdir -p results
           cp /tmp/loadtest/*.log results/ 2>/dev/null || true
 
-      # ── Tear down ───────────────────────────────────────────────────
+      
       - name: Stop server(s)
         if: always()
         run: |
@@ -299,14 +299,14 @@ jobs:
           done
           rm -rf /tmp/loadtest
 
-      # ── Generate report ─────────────────────────────────────────────
+      
       - name: Generate benchmark report
         if: always()
         run: |
           chmod +x loadtest/generate-report.sh
           loadtest/generate-report.sh results || true
 
-      # ── Upload artifacts ────────────────────────────────────────────
+      
       - name: Upload results
         if: always()
         uses: actions/upload-artifact@v4
@@ -315,7 +315,7 @@ jobs:
           path: results/
           if-no-files-found: ignore
 
-  # ── Comparison report (runs after all benchmarks complete) ──────────
+  
   report:
     name: Generate Comparison Report
     runs-on: [self-hosted, railway]

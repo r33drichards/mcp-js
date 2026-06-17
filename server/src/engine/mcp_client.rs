@@ -28,17 +28,16 @@ use rmcp::model::{CallToolRequestParam, CallToolResult, Content, Tool};
 use rmcp::service::Peer;
 use rmcp::RoleClient;
 
-// ── Configuration ────────────────────────────────────────────────────────
 
 /// Transport configuration for a single MCP server.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(tag = "transport", rename_all = "lowercase")]
+
+"transport""lowercase"
 pub enum McpServerTransport {
     Stdio {
         command: String,
-        #[serde(default)]
+        
         args: Vec<String>,
-        #[serde(default)]
+        
         env: HashMap<String, String>,
     },
     Sse {
@@ -47,18 +46,17 @@ pub enum McpServerTransport {
 }
 
 /// Configuration for a single named MCP server.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+
 pub struct McpServerConfig {
     pub name: String,
-    #[serde(flatten)]
+    
     pub transport: McpServerTransport,
 }
 
-// ── Tool metadata for JS ─────────────────────────────────────────────────
 
 /// Serializable tool info returned to JavaScript.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
+
+"camelCase"
 pub struct ToolInfo {
     pub server: String,
     pub name: String,
@@ -77,7 +75,6 @@ impl ToolInfo {
     }
 }
 
-// ── Connected server ─────────────────────────────────────────────────────
 
 /// The result of a single `connect_one` handshake: a live peer, its tool list,
 /// and the task that holds the underlying RunningService alive.
@@ -152,14 +149,13 @@ fn spawn_liveness(server: Arc<ServerConn>) {
     });
 }
 
-// ── McpClientManager ─────────────────────────────────────────────────────
 
 /// Configuration for the auto-generated MCP tool stubs that MCPJS exposes
 /// to its own clients on behalf of upstream servers. The default prefix
 /// `runjs__` makes it obvious to a calling agent that these tools execute
 /// indirectly through the JavaScript runtime (`run_js` + `mcp.callTool(...)`),
 /// rather than through MCPJS's normal tool dispatcher.
-#[derive(Debug, Clone)]
+
 pub struct StubConfig {
     pub prefix: String,
     pub enabled: bool,
@@ -183,7 +179,7 @@ impl Default for StubConfig {
 /// for the auto-generated MCP tool stubs that MCPJS exposes to its own
 /// clients). It is populated alongside `servers` during `connect()`, and can
 /// be populated independently for tests via `from_tools_for_test()`.
-#[derive(Clone)]
+
 pub struct McpClientManager {
     tools_by_server: Arc<HashMap<String, Vec<Tool>>>,
     servers: Arc<HashMap<String, Arc<ServerConn>>>,
@@ -227,10 +223,7 @@ impl McpClientManager {
                     keep_alive: connected._keep_alive,
                 }),
             });
-            // Self-heal: probe this connection periodically and reconnect if the
-            // downstream server restarts (the long-lived handshake otherwise
-            // stays dead until MCPJS is restarted).
-            spawn_liveness(server.clone());
+                                                spawn_liveness(server.clone());
             servers.insert(name, server);
         }
 
@@ -257,7 +250,7 @@ impl McpClientManager {
     /// `call_tool` will fail because no peers exist, but `list_tools`,
     /// `stub_tools`, and `stub_call_response` work as if the servers were
     /// connected. Reserved for unit tests.
-    #[cfg(test)]
+    
     pub fn from_tools_for_test(tools_by_server: HashMap<String, Vec<Tool>>) -> Self {
         Self {
             tools_by_server: Arc::new(tools_by_server),
@@ -359,12 +352,7 @@ impl McpClientManager {
         let server_name = server_name.to_string();
         let tool_name = tool_name.to_string();
 
-        // The downstream peer's transport I/O lives on the runtime that owns the
-        // connection (captured at `connect()`). run_js ops run on a per-execution
-        // current-thread runtime, from which awaiting the peer would stall, so run
-        // the whole call on the connection's runtime and await the JoinHandle
-        // (safe to poll from any runtime) — mirrors S3HeapStorage::*_blocking.
-        let call = async move {
+                                                let call = async move {
             let make_req = || CallToolRequestParam {
                 name: tool_name.clone().into(),
                 arguments: arguments.clone(),
@@ -374,12 +362,7 @@ impl McpClientManager {
             let result = match peer.call_tool(make_req()).await {
                 Ok(r) => r,
                 Err(e) => {
-                    // A call can fail because the tool errored OR because the
-                    // downstream connection died (e.g. the server restarted).
-                    // Probe to tell them apart: if the connection is still
-                    // healthy the error is genuine; otherwise reconnect and retry
-                    // once so a restarted downstream heals transparently.
-                    if is_healthy(&peer).await {
+                                                                                                                        if is_healthy(&peer).await {
                         return Err(format!("mcp.callTool({}.{}): {}", server_name, tool_name, e));
                     }
                     tracing::warn!(
@@ -403,8 +386,7 @@ impl McpClientManager {
                 }
             };
 
-            // Serialize content to JSON for JS consumption.
-            let content_json: Vec<serde_json::Value> = result
+                        let content_json: Vec<serde_json::Value> = result
                 .content
                 .iter()
                 .map(|c| {
@@ -429,13 +411,6 @@ impl McpClientManager {
     }
 }
 
-// ── Tool stubs ──────────────────────────────────────────────────────────
-//
-// Stub names follow `<prefix><server>__<tool>`. The default prefix is
-// `runjs__`, signalling that the tool is dispatched through the JS runtime
-// rather than through MCPJS's normal tool dispatcher. The stub Tool's
-// input schema is identical to the upstream tool's schema, so the agent
-// can plan a `run_js` call with correct arguments.
 
 const STUB_SEPARATOR: &str = "__";
 
@@ -482,18 +457,7 @@ pub fn make_stub_tool(prefix: &str, server: &str, tool: &Tool) -> Tool {
     } else {
         format!("{}\n\n{}", header, original_desc)
     };
-    // Drop annotations from stubs: upstream servers (e.g. GitHub MCP,
-    // Linear) may return `null` for optional boolean hint fields
-    // (readOnlyHint, destructiveHint, etc.). The rmcp ToolAnnotations
-    // struct serializes Option::None as JSON `null` (its fields lack
-    // skip_serializing_if), which violates the MCP spec and causes
-    // Claude Code SDK's Zod validator to reject the entire tools/list
-    // response.
-    //
-    // Since stubs are discovery mechanisms (they return instructions, not
-    // results), upstream annotations about behavior are misleading anyway.
-    // Setting annotations to None omits the field entirely from the JSON.
-    Tool {
+                                                Tool {
         name: stub_name.into(),
         description: Some(new_desc.into()),
         input_schema: tool.input_schema.clone(),
@@ -523,7 +487,6 @@ pub fn stub_call_instructions(
     )
 }
 
-// ── Connection logic ─────────────────────────────────────────────────────
 
 async fn connect_one(config: &McpServerConfig) -> Result<ConnectedMcpServer, String> {
     use rmcp::ServiceExt;
@@ -593,20 +556,18 @@ async fn connect_one(config: &McpServerConfig) -> Result<ConnectedMcpServer, Str
     }
 }
 
-// ── OpState config ───────────────────────────────────────────────────────
 
 /// Configuration stored in deno_core's OpState for the MCP ops.
-#[derive(Clone)]
+
 pub struct McpConfig {
     pub client_manager: McpClientManager,
     /// Optional OPA policy chain for gating `mcp.callTool()` calls.
     pub policy_chain: Option<std::sync::Arc<super::opa::PolicyChain>>,
 }
 
-// ── Deno ops ─────────────────────────────────────────────────────────────
 
 /// OPA policy input for MCP tool calls.
-#[derive(Serialize)]
+
 struct McpToolPolicyInput {
     operation: &'static str,
     server: String,
@@ -616,13 +577,13 @@ struct McpToolPolicyInput {
 
 /// Async op: call an MCP tool. Spawned on a separate tokio task to avoid
 /// RefCell re-entrancy issues (same pattern as op_fetch).
-#[op2(async)]
-#[string]
+
+
 async fn op_mcp_call_tool(
     state: Rc<RefCell<OpState>>,
-    #[string] server_name: String,
-    #[string] tool_name: String,
-    #[string] arguments_json: String,
+     server_name: String,
+     tool_name: String,
+     arguments_json: String,
 ) -> Result<String, JsErrorBox> {
     let (manager, policy_chain) = {
         let state = state.borrow();
@@ -643,11 +604,8 @@ async fn op_mcp_call_tool(
             )
         };
 
-    // Spawn on separate tokio task (same pattern as fetch) to avoid
-    // RefCell re-entrancy panic in deno_core's FuturesUnorderedDriver.
-    tokio::spawn(async move {
-        // Evaluate OPA policy if configured.
-        if let Some(ref chain) = policy_chain {
+            tokio::spawn(async move {
+                if let Some(ref chain) = policy_chain {
             let policy_input = McpToolPolicyInput {
                 operation: "mcp_call_tool",
                 server: server_name.clone(),
@@ -681,11 +639,11 @@ async fn op_mcp_call_tool(
 }
 
 /// Sync op: list available tools from cached data (no network call).
-#[op2]
-#[string]
+
+
 fn op_mcp_list_tools(
     state: &mut OpState,
-    #[string] server_name: String,
+     server_name: String,
 ) -> Result<String, JsErrorBox> {
     let config = state
         .try_borrow::<McpConfig>()
@@ -706,8 +664,8 @@ fn op_mcp_list_tools(
 }
 
 /// Sync op: list connected server names.
-#[op2]
-#[string]
+
+
 fn op_mcp_list_servers(state: &mut OpState) -> Result<String, JsErrorBox> {
     let config = state
         .try_borrow::<McpConfig>()
@@ -718,7 +676,6 @@ fn op_mcp_list_servers(state: &mut OpState) -> Result<String, JsErrorBox> {
         .map_err(|e| JsErrorBox::generic(format!("mcp.servers: serialization error: {}", e)))
 }
 
-// ── Extension registration ──────────────────────────────────────────────
 
 deno_core::extension!(
     mcp_client_ext,
@@ -730,7 +687,6 @@ pub fn create_extension() -> deno_core::Extension {
     mcp_client_ext::init()
 }
 
-// ── Inject mcp JS wrapper into the global scope ─────────────────────────
 
 /// Inject the `globalThis.mcp` JS wrapper. Must be called after the
 /// runtime is created (with the mcp_client extension) but before user code runs.
@@ -807,9 +763,8 @@ const MCP_JS_WRAPPER: &str = r#"
 })();
 "#;
 
-// ── Tests ───────────────────────────────────────────────────────────────
 
-#[cfg(test)]
+
 mod tests {
     use super::*;
     use rmcp::model::Tool;
@@ -833,16 +788,14 @@ mod tests {
         }
     }
 
-    #[test]
+    
     fn default_stub_prefix_is_runjs() {
-        // The default prefix advertises that the tool runs via the JS
-        // runtime rather than dispatching through MCPJS directly.
-        assert_eq!(StubConfig::default().prefix, "runjs__");
+                        assert_eq!(StubConfig::default().prefix, "runjs__");
         assert_eq!(DEFAULT_STUB_PREFIX, "runjs__");
         assert!(StubConfig::default().enabled);
     }
 
-    #[test]
+    
     fn stub_name_round_trips() {
         let n = stub_tool_name("runjs__", "github", "create_issue");
         assert_eq!(n, "runjs__github__create_issue");
@@ -852,7 +805,7 @@ mod tests {
         );
     }
 
-    #[test]
+    
     fn stub_name_round_trips_with_custom_prefix() {
         let n = stub_tool_name("rj_", "srv", "do_thing");
         assert_eq!(n, "rj_srv__do_thing");
@@ -860,14 +813,12 @@ mod tests {
             parse_stub_tool_name("rj_", &n),
             Some(("srv".to_string(), "do_thing".to_string()))
         );
-        // Default prefix should not match a name minted with a custom prefix.
-        assert_eq!(parse_stub_tool_name("runjs__", &n), None);
+                assert_eq!(parse_stub_tool_name("runjs__", &n), None);
     }
 
-    #[test]
+    
     fn parse_stub_preserves_underscores_in_tool_name() {
-        // Tool names with `__` should round-trip via the rest of the string.
-        let n = stub_tool_name("runjs__", "srv", "do__a_thing");
+                let n = stub_tool_name("runjs__", "srv", "do__a_thing");
         assert_eq!(n, "runjs__srv__do__a_thing");
         assert_eq!(
             parse_stub_tool_name("runjs__", &n),
@@ -875,37 +826,30 @@ mod tests {
         );
     }
 
-    #[test]
+    
     fn parse_stub_rejects_non_stub_names() {
-        // Built-in MCPJS tools should not be misclassified as stubs.
-        assert_eq!(parse_stub_tool_name("runjs__", "run_js"), None);
+                assert_eq!(parse_stub_tool_name("runjs__", "run_js"), None);
         assert_eq!(parse_stub_tool_name("runjs__", "get_execution"), None);
-        // Missing separator after server name.
-        assert_eq!(parse_stub_tool_name("runjs__", "runjs__github"), None);
-        // Empty server or tool segment.
-        assert_eq!(parse_stub_tool_name("runjs__", "runjs____tool"), None);
+                assert_eq!(parse_stub_tool_name("runjs__", "runjs__github"), None);
+                assert_eq!(parse_stub_tool_name("runjs__", "runjs____tool"), None);
         assert_eq!(parse_stub_tool_name("runjs__", "runjs__server__"), None);
-        // Wrong prefix.
-        assert_eq!(parse_stub_tool_name("runjs__", "mcp__server__tool"), None);
-        // Empty prefix is treated as "no stub recognition".
-        assert_eq!(parse_stub_tool_name("", "server__tool"), None);
+                assert_eq!(parse_stub_tool_name("runjs__", "mcp__server__tool"), None);
+                assert_eq!(parse_stub_tool_name("", "server__tool"), None);
     }
 
-    #[test]
+    
     fn make_stub_tool_preserves_schema_and_rewrites_description() {
         let upstream = tool("create_issue", "Create a GitHub issue.");
         let stub = make_stub_tool("runjs__", "github", &upstream);
         assert_eq!(stub.name, "runjs__github__create_issue");
-        // Schema is the *same Arc* — stubs share the upstream schema.
-        assert!(StdArc::ptr_eq(&stub.input_schema, &upstream.input_schema));
-        // Description hints at run_js usage and includes original docs.
-        let desc = stub.description.expect("description");
+                assert!(StdArc::ptr_eq(&stub.input_schema, &upstream.input_schema));
+                let desc = stub.description.expect("description");
         assert!(desc.contains("run_js"), "description should mention run_js: {}", desc);
         assert!(desc.contains("mcp.callTool"), "description should mention mcp.callTool: {}", desc);
         assert!(desc.contains("Create a GitHub issue."));
     }
 
-    #[test]
+    
     fn make_stub_handles_missing_description() {
         let upstream = Tool {
             name: "ping".into(),
@@ -916,11 +860,10 @@ mod tests {
         let stub = make_stub_tool("runjs__", "infra", &upstream);
         let desc = stub.description.unwrap();
         assert!(desc.contains("run_js"));
-        // No trailing duplicated newlines from empty original docs.
-        assert!(!desc.contains("\n\n\n"));
+                assert!(!desc.contains("\n\n\n"));
     }
 
-    #[test]
+    
     fn stub_call_instructions_includes_args() {
         let mut args = serde_json::Map::new();
         args.insert("title".into(), json!("hello"));
@@ -932,15 +875,14 @@ mod tests {
         assert!(text.contains("\"hello\""));
     }
 
-    #[test]
+    
     fn stub_call_instructions_handles_no_args() {
         let text = stub_call_instructions("srv", "ping", None);
         assert!(text.contains("mcp.callTool"));
-        // Should render an empty object placeholder, not "null".
-        assert!(text.contains("{}") || text.contains("{\n}"));
+                assert!(text.contains("{}") || text.contains("{\n}"));
     }
 
-    #[test]
+    
     fn manager_stub_tools_lists_every_upstream_tool() {
         let mut by_server = HashMap::new();
         by_server.insert(
@@ -966,7 +908,7 @@ mod tests {
         );
     }
 
-    #[test]
+    
     fn manager_stub_tools_honours_custom_prefix() {
         let mut by_server = HashMap::new();
         by_server.insert("github".to_string(), vec![tool("create_issue", "doc")]);
@@ -979,14 +921,12 @@ mod tests {
         let names: Vec<String> = mgr.stub_tools().into_iter().map(|t| t.name.to_string()).collect();
         assert_eq!(names, vec!["rj_github__create_issue".to_string()]);
 
-        // And the dispatcher recognises the custom-prefixed name.
-        let resp = mgr.stub_call_response("rj_github__create_issue", None);
+                let resp = mgr.stub_call_response("rj_github__create_issue", None);
         assert!(resp.is_some());
-        // The default-prefix name is no longer recognised.
-        assert!(mgr.stub_call_response("runjs__github__create_issue", None).is_none());
+                assert!(mgr.stub_call_response("runjs__github__create_issue", None).is_none());
     }
 
-    #[test]
+    
     fn manager_stub_tools_empty_when_disabled() {
         let mut by_server = HashMap::new();
         by_server.insert("github".to_string(), vec![tool("create_issue", "doc")]);
@@ -996,14 +936,11 @@ mod tests {
                 enabled: false,
             });
 
-        // No stub tools advertised at all.
-        assert!(mgr.stub_tools().is_empty());
-        // And calls to stub-shaped names fall through (return None, so the
-        // caller can dispatch as a normal tool / report not-found).
-        assert!(mgr.stub_call_response("runjs__github__create_issue", None).is_none());
+                assert!(mgr.stub_tools().is_empty());
+                        assert!(mgr.stub_call_response("runjs__github__create_issue", None).is_none());
     }
 
-    #[test]
+    
     fn manager_stub_call_response_matches_known_stub() {
         let mut by_server = HashMap::new();
         by_server.insert("github".to_string(), vec![tool("create_issue", "doc")]);
@@ -1014,8 +951,7 @@ mod tests {
         let resp = mgr
             .stub_call_response("runjs__github__create_issue", Some(&args))
             .expect("stub should match");
-        // Expect a single text content block with usage instructions.
-        assert_eq!(resp.is_error, Some(false));
+                assert_eq!(resp.is_error, Some(false));
         assert_eq!(resp.content.len(), 1);
         let json = serde_json::to_value(&resp.content[0]).unwrap();
         let text = json.get("text").and_then(|v| v.as_str()).unwrap_or_default();
@@ -1024,29 +960,23 @@ mod tests {
         assert!(text.contains("create_issue"));
     }
 
-    #[test]
+    
     fn manager_stub_call_response_returns_none_for_unknowns() {
         let mut by_server = HashMap::new();
         by_server.insert("github".to_string(), vec![tool("create_issue", "doc")]);
         let mgr = McpClientManager::from_tools_for_test(by_server);
 
-        // Built-in tool names: not stubs.
-        assert!(mgr.stub_call_response("run_js", None).is_none());
-        // Stub-shaped name but unknown server.
-        assert!(mgr.stub_call_response("runjs__other__tool", None).is_none());
-        // Stub-shaped name with known server but unknown tool.
-        assert!(mgr.stub_call_response("runjs__github__delete_issue", None).is_none());
-        // Default-prefix dispatcher should reject the old `mcp__` prefix.
-        assert!(mgr.stub_call_response("mcp__github__create_issue", None).is_none());
+                assert!(mgr.stub_call_response("run_js", None).is_none());
+                assert!(mgr.stub_call_response("runjs__other__tool", None).is_none());
+                assert!(mgr.stub_call_response("runjs__github__delete_issue", None).is_none());
+                assert!(mgr.stub_call_response("mcp__github__create_issue", None).is_none());
     }
 
-    #[test]
+    
     fn make_stub_drops_annotations_with_nulls() {
         use rmcp::model::ToolAnnotations;
 
-        // Simulate GitHub MCP server: hints with None values that would
-        // serialize as JSON null and break Claude Code SDK's Zod validator.
-        let upstream = Tool {
+                        let upstream = Tool {
             name: "create_issue".into(),
             description: Some("Create issue".into()),
             input_schema: schema(json!({"title": {"type": "string"}})),
@@ -1060,19 +990,16 @@ mod tests {
         };
         let stub = make_stub_tool("runjs__", "github", &upstream);
 
-        // Stubs should never carry upstream annotations — they are discovery
-        // mechanisms, not executable tools, so behavioral hints are misleading.
-        let json = serde_json::to_value(&stub).unwrap();
+                        let json = serde_json::to_value(&stub).unwrap();
         assert!(json.get("annotations").is_none(),
             "stub annotations should be absent to avoid null serialization issues");
     }
 
-    #[test]
+    
     fn make_stub_drops_annotations_even_when_valid() {
         use rmcp::model::ToolAnnotations;
 
-        // Even fully valid annotations are dropped — stubs don't execute.
-        let upstream = Tool {
+                let upstream = Tool {
             name: "get_file".into(),
             description: Some("Get file contents".into()),
             input_schema: schema(json!({"path": {"type": "string"}})),

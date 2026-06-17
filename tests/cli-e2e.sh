@@ -1,9 +1,3 @@
-#!/usr/bin/env bash
-# cli-e2e.sh — end-to-end tests for mcp-v8-cli against a live server
-#
-# Environment variables:
-#   CLI_BIN    — path to mcp-v8-cli binary (default: ./target/release/mcp-v8-cli)
-#   SERVER_URL — base URL of the running server  (default: http://localhost:3000)
 
 set -euo pipefail
 
@@ -14,14 +8,10 @@ PASS=0
 FAIL=0
 FAILED_TESTS=()
 
-# ── helpers ──────────────────────────────────────────────────────────────────
 
 pass() { echo "✅ PASS: $1"; PASS=$((PASS + 1)); }
 fail() { echo "❌ FAIL: $1"; FAIL=$((FAIL + 1)); FAILED_TESTS+=("$1"); }
 
-# Poll executions get until status=Completed (or Failed/TimedOut).
-# Usage: wait_for_completion <exec_id> [max_attempts]
-# Prints the final JSON response to stdout; returns non-zero on failure/timeout.
 wait_for_completion() {
     local id="$1"
     local max="${2:-30}"
@@ -44,7 +34,6 @@ wait_for_completion() {
     return 1
 }
 
-# ── verify prerequisites ──────────────────────────────────────────────────────
 
 echo "=== CLI E2E Tests ==="
 echo "CLI_BIN   : $CLI_BIN"
@@ -56,13 +45,11 @@ if [ ! -x "$CLI_BIN" ]; then
     exit 1
 fi
 
-# ── Test 1 — exec ─────────────────────────────────────────────────────────────
 echo "--- Test 1: exec (console.log(42)) ---"
 
 T1_OUT=$("$CLI_BIN" --url "$SERVER_URL" exec 'console.log(42)' 2>&1)
 echo "$T1_OUT"
 
-# Extract execution_id from the pretty output ("execution_id: <uuid>") or raw JSON
 EXEC_ID=$(echo "$T1_OUT" | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | head -1 || true)
 
 if [ -z "$EXEC_ID" ]; then
@@ -71,7 +58,6 @@ else
     pass "Test 1: exec — got execution_id: $EXEC_ID"
 fi
 
-# ── Test 2 — executions list ─────────────────────────────────────────────────
 echo ""
 echo "--- Test 2: executions list ---"
 
@@ -87,7 +73,6 @@ else
     pass "Test 2: executions list — exited 0 and printed output"
 fi
 
-# ── Test 3 — executions get ───────────────────────────────────────────────────
 echo ""
 echo "--- Test 3: executions get <id> ---"
 
@@ -104,15 +89,13 @@ else
     fi
 fi
 
-# ── Test 4 — executions output ────────────────────────────────────────────────
 echo ""
 echo "--- Test 4: executions output <id> (should contain '42') ---"
 
 if [ -z "$EXEC_ID" ]; then
     fail "Test 4: executions output — skipped (no execution_id from Test 1)"
 else
-    # Wait for test-1 execution to complete first
-    wait_for_completion "$EXEC_ID" 30 >/dev/null 2>&1 || true
+        wait_for_completion "$EXEC_ID" 30 >/dev/null 2>&1 || true
 
     OUTPUT_OUT=$("$CLI_BIN" --url "$SERVER_URL" executions output "$EXEC_ID" 2>&1)
     echo "$OUTPUT_OUT"
@@ -124,7 +107,6 @@ else
     fi
 fi
 
-# ── Test 5 — exec + poll loop ─────────────────────────────────────────────────
 echo ""
 echo "--- Test 5: exec + poll until Completed, assert output contains '4' ---"
 
@@ -141,8 +123,7 @@ else
     if [ "$FINAL_STATUS" != "Completed" ] && [ "$FINAL_STATUS" != "completed" ]; then
         fail "Test 5: exec+poll — execution did not reach Completed (got: '$FINAL_STATUS')"
     else
-        # Read output and assert it contains "4"
-        T5_OUTPUT=$("$CLI_BIN" --url "$SERVER_URL" executions output "$T5_ID" 2>&1)
+                T5_OUTPUT=$("$CLI_BIN" --url "$SERVER_URL" executions output "$T5_ID" 2>&1)
         echo "Output: $T5_OUTPUT"
         if echo "$T5_OUTPUT" | grep -q "4"; then
             pass "Test 5: exec+poll — status=Completed and output contains '4'"
@@ -152,7 +133,6 @@ else
     fi
 fi
 
-# ── Test 6 — exec --json flag ─────────────────────────────────────────────────
 echo ""
 echo "--- Test 6: exec --json flag produces valid JSON ---"
 
@@ -165,7 +145,6 @@ else
     fail "Test 6: exec --json — output is NOT valid JSON"
 fi
 
-# ── Test 7 — executions cancel ────────────────────────────────────────────────
 echo ""
 echo "--- Test 7: exec (infinite loop) + cancel ---"
 
@@ -187,7 +166,6 @@ else
     fi
 fi
 
-# ── Summary ───────────────────────────────────────────────────────────────────
 echo ""
 echo "==============================="
 echo "Results: $PASS passed, $FAIL failed"

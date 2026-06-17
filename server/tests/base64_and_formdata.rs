@@ -37,9 +37,8 @@ fn assert_output_contains(value: &serde_json::Value, expected: &str) {
     assert!(output.contains(expected), "Expected output to contain '{}', got: {}", expected, output);
 }
 
-// ── btoa tests ──────────────────────────────────────────────────────────────
 
-#[tokio::test]
+
 async fn test_btoa_basic() {
     ensure_v8();
     let engine = create_test_engine();
@@ -50,7 +49,7 @@ async fn test_btoa_basic() {
     assert_output_contains(&value, "aGVsbG8=");
 }
 
-#[tokio::test]
+
 async fn test_btoa_empty() {
     ensure_v8();
     let engine = create_test_engine();
@@ -62,19 +61,18 @@ async fn test_btoa_empty() {
     assert!(output.trim().is_empty() || output.contains(""), "btoa('') should return empty string");
 }
 
-#[tokio::test]
+
 async fn test_btoa_binary_chars() {
     ensure_v8();
     let engine = create_test_engine();
     let service = StatelessMcpService::new(engine, None);
 
-    // Test with bytes 0-255 (Latin1 range)
-    let resp = service.run_js(Some(r#"console.log(btoa('\x00\x01\xff'))"#.to_string()), None, None, None).await;
+        let resp = service.run_js(Some(r#"console.log(btoa('\x00\x01\xff'))"#.to_string()), None, None, None).await;
     let value = parse_response(resp);
     assert_output_contains(&value, "AAH/");
 }
 
-#[tokio::test]
+
 async fn test_btoa_rejects_non_latin1() {
     ensure_v8();
     let engine = create_test_engine();
@@ -89,9 +87,8 @@ async fn test_btoa_rejects_non_latin1() {
     assert_output_contains(&value, "Latin1");
 }
 
-// ── atob tests ──────────────────────────────────────────────────────────────
 
-#[tokio::test]
+
 async fn test_atob_basic() {
     ensure_v8();
     let engine = create_test_engine();
@@ -102,7 +99,7 @@ async fn test_atob_basic() {
     assert_output_contains(&value, "hello");
 }
 
-#[tokio::test]
+
 async fn test_atob_no_padding() {
     ensure_v8();
     let engine = create_test_engine();
@@ -113,7 +110,7 @@ async fn test_atob_no_padding() {
     assert_output_contains(&value, "hello");
 }
 
-#[tokio::test]
+
 async fn test_atob_rejects_invalid() {
     ensure_v8();
     let engine = create_test_engine();
@@ -127,7 +124,7 @@ async fn test_atob_rejects_invalid() {
     assert_output_contains(&value, "CAUGHT:");
 }
 
-#[tokio::test]
+
 async fn test_btoa_atob_roundtrip() {
     ensure_v8();
     let engine = create_test_engine();
@@ -143,9 +140,8 @@ async fn test_btoa_atob_roundtrip() {
     assert_output_contains(&value, "ROUNDTRIP_OK");
 }
 
-// ── Blob tests ──────────────────────────────────────────────────────────────
 
-#[tokio::test]
+
 async fn test_blob_basic() {
     ensure_v8();
     let engine = create_test_engine();
@@ -159,7 +155,7 @@ async fn test_blob_basic() {
     assert_output_contains(&value, "11|text/plain");
 }
 
-#[tokio::test]
+
 async fn test_blob_text() {
     ensure_v8();
     let engine = create_test_engine();
@@ -175,7 +171,7 @@ async fn test_blob_text() {
     assert_output_contains(&value, "abcdef");
 }
 
-#[tokio::test]
+
 async fn test_blob_slice() {
     ensure_v8();
     let engine = create_test_engine();
@@ -192,9 +188,8 @@ async fn test_blob_slice() {
     assert_output_contains(&value, "hello");
 }
 
-// ── File tests ──────────────────────────────────────────────────────────────
 
-#[tokio::test]
+
 async fn test_file_basic() {
     ensure_v8();
     let engine = create_test_engine();
@@ -208,9 +203,8 @@ async fn test_file_basic() {
     assert_output_contains(&value, "test.txt|7|text/plain|true");
 }
 
-// ── FormData tests ──────────────────────────────────────────────────────────
 
-#[tokio::test]
+
 async fn test_formdata_append_get() {
     ensure_v8();
     let engine = create_test_engine();
@@ -226,7 +220,7 @@ async fn test_formdata_append_get() {
     assert_output_contains(&value, "alice|alice,bob");
 }
 
-#[tokio::test]
+
 async fn test_formdata_set_replaces() {
     ensure_v8();
     let engine = create_test_engine();
@@ -243,7 +237,7 @@ async fn test_formdata_set_replaces() {
     assert_output_contains(&value, "3");
 }
 
-#[tokio::test]
+
 async fn test_formdata_has_delete() {
     ensure_v8();
     let engine = create_test_engine();
@@ -261,7 +255,7 @@ async fn test_formdata_has_delete() {
     assert_output_contains(&value, "true|false");
 }
 
-#[tokio::test]
+
 async fn test_formdata_serialize_text() {
     ensure_v8();
     let engine = create_test_engine();
@@ -280,7 +274,7 @@ async fn test_formdata_serialize_text() {
     assert_output_contains(&value, "SERIALIZE_OK");
 }
 
-#[tokio::test]
+
 async fn test_formdata_serialize_blob_with_filename() {
     ensure_v8();
     let engine = create_test_engine();
@@ -299,7 +293,7 @@ async fn test_formdata_serialize_blob_with_filename() {
     assert_output_contains(&value, "BLOB_OK");
 }
 
-#[tokio::test]
+
 async fn test_formdata_serialize_file() {
     ensure_v8();
     let engine = create_test_engine();

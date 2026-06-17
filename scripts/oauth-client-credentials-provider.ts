@@ -46,7 +46,7 @@ export class ClientCredentialsProvider implements OAuthClientProvider {
   }
 
   saveClientInformation(_info: OAuthClientInformationFull): void {
-    // No-op: pre-registered client
+    
   }
 
   async tokens(): Promise<OAuthTokens | undefined> {
@@ -69,7 +69,7 @@ export class ClientCredentialsProvider implements OAuthClientProvider {
   }
 
   saveCodeVerifier(_verifier: string): void {
-    // No-op
+    
   }
 
   codeVerifier(): string {
@@ -82,7 +82,7 @@ export class ClientCredentialsProvider implements OAuthClientProvider {
     let expiresIn = this.cachedTokens.expires_in;
 
     if (expiresIn === undefined) {
-      // Decode JWT to get exp claim
+      
       try {
         const parts = this.cachedTokens.access_token.split(".");
         const payload = JSON.parse(atob(parts[1]));
@@ -90,7 +90,7 @@ export class ClientCredentialsProvider implements OAuthClientProvider {
           return Date.now() >= payload.exp * 1000 - this.refreshBufferSecs * 1000;
         }
       } catch {
-        // Can't determine expiry, refresh to be safe
+        
         return true;
       }
     }

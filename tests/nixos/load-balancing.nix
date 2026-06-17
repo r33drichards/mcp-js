@@ -1,7 +1,7 @@
 { pkgs, mcp-js, ... }:
 
 let
-  # ── Peer list (3-node cluster) ───────────────────────────────────────
+  
 
   allPeerAddrs = [
     "node1@node1:4000"
@@ -13,7 +13,7 @@ let
     nodeId:
     builtins.filter (p: !(pkgs.lib.hasPrefix "${nodeId}@" p)) allPeerAddrs;
 
-  # ── Shared node configuration ─────────────────────────────────────────
+  
 
   nodeConfig =
     nodeId:
@@ -35,7 +35,7 @@ let
       networking.firewall.allowedTCPPorts = [ 3000 4000 ];
     };
 
-  # ── Nginx load balancer configuration ──────────────────────────────────
+  
 
   lbConfig = {
     services.nginx = {

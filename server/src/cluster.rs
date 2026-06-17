@@ -17,18 +17,15 @@ use tokio::sync::{Notify, RwLock};
 use tokio::time::{sleep, Instant};
 use tokio_util::sync::CancellationToken;
 
-// ============================================================================
-// Types
-// ============================================================================
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+
 pub enum Role {
     Leader,
     Follower,
     Candidate,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+
 pub struct LogEntry {
     pub term: u64,
     pub index: u64,
@@ -39,11 +36,11 @@ pub struct LogEntry {
     /// append its reflog entry as one all-or-nothing unit (see the
     /// `specs/FsLabelAtomicWrite` TLA+ model). Empty for ordinary single-key
     /// writes, and absent on the wire for backwards compatibility.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    "Vec::is_empty"
     pub extra: Vec<(String, String)>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+
 pub struct AppendEntriesRequest {
     pub term: u64,
     pub leader_id: String,
@@ -53,21 +50,21 @@ pub struct AppendEntriesRequest {
     pub leader_commit: u64,
     /// Current peer set from the leader, so followers can track membership
     /// changes. Absent (None) for backwards compatibility with older nodes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    "Option::is_none"
     pub peer_addrs: Option<HashMap<String, String>>,
     /// Addresses of non-voting learner members, so followers compute the same
     /// voting set the leader does. Absent (None) for older nodes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    "Option::is_none"
     pub learner_addrs: Option<Vec<String>>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+
 pub struct AppendEntriesResponse {
     pub term: u64,
     pub success: bool,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+
 pub struct RequestVoteRequest {
     pub term: u64,
     pub candidate_id: String,
@@ -75,13 +72,13 @@ pub struct RequestVoteRequest {
     pub last_log_term: u64,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+
 pub struct RequestVoteResponse {
     pub term: u64,
     pub vote_granted: bool,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+
 pub struct ClusterStatus {
     pub node_id: String,
     pub role: Role,
@@ -93,71 +90,67 @@ pub struct ClusterStatus {
     pub peers: Vec<String>,
     pub peer_addrs: HashMap<String, String>,
     /// Addresses of peers that are non-voting learners.
-    #[serde(default)]
+    
     pub learners: Vec<String>,
     /// Whether this node itself is a non-voting learner.
-    #[serde(default)]
+    
     pub is_learner: bool,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+
 pub struct PutRequest {
     pub key: String,
     pub value: String,
     /// Companion writes committed atomically with `key`/`value` (see
     /// `LogEntry::extra`). Absent on the wire for backwards compatibility.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    "Vec::is_empty"
     pub extra: Vec<(String, String)>,
 }
 
 /// Linearizable compare-and-set, forwarded to the leader. Advances `key` to
 /// `new` only if its current committed/pending value equals `expected`.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+
 pub struct CasRequest {
     pub key: String,
     pub expected: Option<String>,
     pub new: String,
     /// Companion writes committed atomically with `new` when the compare matches
     /// (see `LogEntry::extra`). Absent on the wire for backwards compatibility.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    "Vec::is_empty"
     pub extra: Vec<(String, String)>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+
 pub struct CasResponse {
     /// Whether the compare matched and the new value was committed.
     pub applied: bool,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+
 pub struct GetResponse {
     pub key: String,
     pub value: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+
 pub struct JoinRequest {
     pub node_id: String,
     pub addr: String,
     /// Join as a non-voting learner instead of a full voting member.
-    #[serde(default)]
+    
     pub as_learner: bool,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+
 pub struct LeaveRequest {
     pub node_id: String,
 }
 
-// ============================================================================
-// Configuration
-// ============================================================================
 
-#[derive(Clone, Debug)]
+
 pub struct ClusterConfig {
     pub node_id: String,
-    pub peers: Vec<String>, // "host:port" of other nodes
-    /// Mapping from node_id → peer address (host:port).
+    pub peers: Vec<String>,     /// Mapping from node_id → peer address (host:port).
     /// Populated when peers are specified as "id@host:port".
     pub peer_addrs: HashMap<String, String>,
     pub cluster_port: u16,
@@ -211,9 +204,6 @@ impl Default for ClusterConfig {
     }
 }
 
-// ============================================================================
-// Raft State
-// ============================================================================
 
 pub struct RaftState {
     pub role: Role,
@@ -223,19 +213,12 @@ pub struct RaftState {
     pub log: Vec<LogEntry>,
     pub commit_index: u64,
     pub last_applied: u64,
-    // Leader-only state
-    pub next_index: HashMap<String, u64>,
+        pub next_index: HashMap<String, u64>,
     pub match_index: HashMap<String, u64>,
-    // Timing
-    pub last_heartbeat: Instant,
-    // Dynamic peer set (addresses used for Raft RPCs)
-    pub peers: Vec<String>,
-    // node_id → address mapping for write forwarding and peer resolution.
-    // Includes this node itself so followers can resolve any node id.
-    pub peer_addrs: HashMap<String, String>,
-    // Addresses (subset of `peers`) that are non-voting learners. They receive
-    // replicated entries but are excluded from election and commit quorums.
-    pub learners: std::collections::HashSet<String>,
+        pub last_heartbeat: Instant,
+        pub peers: Vec<String>,
+            pub peer_addrs: HashMap<String, String>,
+            pub learners: std::collections::HashSet<String>,
 }
 
 impl RaftState {
@@ -275,9 +258,6 @@ impl RaftState {
     }
 }
 
-// ============================================================================
-// Cluster Node
-// ============================================================================
 
 pub struct ClusterNode {
     pub config: ClusterConfig,
@@ -293,16 +273,14 @@ impl ClusterNode {
     pub fn new(config: ClusterConfig, db: sled::Db) -> Arc<Self> {
         let mut raft_state = RaftState::new();
 
-        // Restore persisted state from sled
-        if let Ok(Some(data)) = db.get("raft_meta") {
+                if let Ok(Some(data)) = db.get("raft_meta") {
             if let Ok(meta) = serde_json::from_slice::<serde_json::Value>(&data) {
                 raft_state.current_term = meta["current_term"].as_u64().unwrap_or(0);
                 raft_state.voted_for = meta["voted_for"].as_str().map(|s| s.to_string());
             }
         }
 
-        // Restore log entries
-        if let Ok(log_tree) = db.open_tree("raft_log") {
+                if let Ok(log_tree) = db.open_tree("raft_log") {
             for item in log_tree.iter() {
                 if let Ok((_key, val)) = item {
                     if let Ok(entry) = serde_json::from_slice::<LogEntry>(&val) {
@@ -313,13 +291,10 @@ impl ClusterNode {
             raft_state.log.sort_by_key(|e| e.index);
         }
 
-        // Initialize peer set: start with CLI seed peers, then merge any
-        // persisted peers (from previous dynamic joins).
-        raft_state.peers = config.peers.clone();
+                        raft_state.peers = config.peers.clone();
         raft_state.peer_addrs = config.peer_addrs.clone();
 
-        // Include self in peer_addrs so it gets propagated to followers
-        let self_addr = config
+                let self_addr = config
             .advertise_addr
             .clone()
             .unwrap_or_else(|| format!("127.0.0.1:{}", config.cluster_port));
@@ -342,8 +317,7 @@ impl ClusterNode {
             }
         }
 
-        // Restore persisted learner addresses.
-        if let Ok(Some(data)) = db.get("raft_learners") {
+                if let Ok(Some(data)) = db.get("raft_learners") {
             if let Ok(persisted) = serde_json::from_slice::<Vec<String>>(&data) {
                 raft_state.learners = persisted.into_iter().collect();
             }
@@ -393,16 +367,13 @@ impl ClusterNode {
         self.shutdown.cancel();
     }
 
-    // --- Persistence helpers ------------------------------------------------
-
+    
     fn persist_peers(&self, state: &RaftState) {
         let _ = self.db.insert(
             "raft_peers",
             serde_json::to_vec(&state.peer_addrs).unwrap().as_slice(),
         );
-        // Learner classification is persisted alongside the peer set so a
-        // restarting leader does not mistakenly treat a learner as a voter.
-        let learners: Vec<String> = state.learners.iter().cloned().collect();
+                        let learners: Vec<String> = state.learners.iter().cloned().collect();
         let _ = self.db.insert(
             "raft_learners",
             serde_json::to_vec(&learners).unwrap().as_slice(),
@@ -428,8 +399,7 @@ impl ClusterNode {
 
     fn truncate_log_from(&self, from_index: u64) {
         if let Ok(log_tree) = self.db.open_tree("raft_log") {
-            // Remove entries with index >= from_index
-            let start = from_index.to_be_bytes();
+                        let start = from_index.to_be_bytes();
             for item in log_tree.range(start..) {
                 if let Ok((key, _)) = item {
                     let _ = log_tree.remove(key);
@@ -438,8 +408,7 @@ impl ClusterNode {
         }
     }
 
-    // --- Election -----------------------------------------------------------
-
+    
     async fn run_election_timer(self: Arc<Self>) {
         loop {
             let timeout = {
@@ -452,8 +421,7 @@ impl ClusterNode {
 
             tokio::select! {
                 _ = sleep(timeout) => {
-                    // Learners never start elections; they only follow.
-                    if self.config.learner {
+                                        if self.config.learner {
                         continue;
                     }
                     let state = self.state.read().await;
@@ -466,8 +434,7 @@ impl ClusterNode {
                     }
                 }
                 _ = self.heartbeat_notify.notified() => {
-                    // Heartbeat received, reset timer
-                    continue;
+                                        continue;
                 }
                 _ = self.shutdown.cancelled() => {
                     return;
@@ -499,13 +466,9 @@ impl ClusterNode {
             term
         );
 
-        // Only voting members count toward the election quorum. Learners are
-        // sent RequestVote (harmless) but refuse, so they cannot inflate votes.
-        let majority = (voter_count + 1) / 2 + 1;
-        let mut votes: usize = 1; // vote for self
-
-        // Send RequestVote RPCs to all peers in parallel
-        let mut handles = Vec::new();
+                        let majority = (voter_count + 1) / 2 + 1;
+        let mut votes: usize = 1; 
+                let mut handles = Vec::new();
         for peer in &peers {
             let req = RequestVoteRequest {
                 term,
@@ -564,8 +527,7 @@ impl ClusterNode {
         }
     }
 
-    // --- Heartbeat / Replication --------------------------------------------
-
+    
     async fn run_heartbeat(self: Arc<Self>) {
         loop {
             tokio::select! {
@@ -603,8 +565,7 @@ impl ClusterNode {
             let _ = handle.await;
         }
 
-        // Update commit index based on match_index
-        self.update_commit_index().await;
+                self.update_commit_index().await;
     }
 
     async fn send_append_entries_to_peer(self: &Arc<Self>, peer: &str) {
@@ -639,8 +600,7 @@ impl ClusterNode {
                 .filter(|e| e.index >= next_idx)
                 .cloned()
                 .collect();
-            // peer_addrs already includes self (set during initialization)
-            (
+                        (
                 state.current_term,
                 self.config.node_id.clone(),
                 prev_idx,
@@ -684,8 +644,7 @@ impl ClusterNode {
                             state.match_index.insert(peer.to_string(), last.index);
                         }
                     } else {
-                        // Decrement next_index and retry next heartbeat
-                        let ni = state.next_index.get(peer).copied().unwrap_or(1);
+                                                let ni = state.next_index.get(peer).copied().unwrap_or(1);
                         if ni > 1 {
                             state.next_index.insert(peer.to_string(), ni - 1);
                         }
@@ -693,8 +652,7 @@ impl ClusterNode {
                 }
             }
             Err(_) => {
-                // Peer unreachable, will retry on next heartbeat
-            }
+                            }
         }
     }
 
@@ -704,18 +662,12 @@ impl ClusterNode {
             return;
         }
 
-        // Only voting members count toward the commit quorum. Learners are
-        // still replicated to (they remain in `peers`), but a write commits as
-        // soon as a majority of voters — including the leader — has it.
-        let voter_peers = state.voter_peers();
+                                let voter_peers = state.voter_peers();
         let majority = (voter_peers.len() + 1) / 2 + 1;
 
-        // Find the highest N such that a majority of match_index[i] >= N
-        // and log[N].term == currentTerm
-        let last_idx = state.last_log_index();
+                        let last_idx = state.last_log_index();
         for n in (state.commit_index + 1..=last_idx).rev() {
-            let mut replication_count: usize = 1; // count self
-            for peer in &voter_peers {
+            let mut replication_count: usize = 1;             for peer in &voter_peers {
                 if state.match_index.get(peer).copied().unwrap_or(0) >= n {
                     replication_count += 1;
                 }
@@ -731,8 +683,7 @@ impl ClusterNode {
             }
         }
 
-        // Apply committed entries to the state machine
-        while state.last_applied < state.commit_index {
+                while state.last_applied < state.commit_index {
             state.last_applied += 1;
             if let Some(entry) = state.log.get((state.last_applied - 1) as usize) {
                 self.apply_log_entry(entry);
@@ -761,21 +712,18 @@ impl ClusterNode {
         let _ = data_tree.apply_batch(batch);
     }
 
-    // --- RPC Handlers -------------------------------------------------------
-
+    
     pub async fn handle_append_entries(&self, req: AppendEntriesRequest) -> AppendEntriesResponse {
         let mut state = self.state.write().await;
 
-        // Reply false if term < currentTerm
-        if req.term < state.current_term {
+                if req.term < state.current_term {
             return AppendEntriesResponse {
                 term: state.current_term,
                 success: false,
             };
         }
 
-        // Update term if needed
-        if req.term > state.current_term {
+                if req.term > state.current_term {
             state.current_term = req.term;
             state.voted_for = None;
         }
@@ -785,12 +733,10 @@ impl ClusterNode {
         state.last_heartbeat = Instant::now();
         self.heartbeat_notify.notify_one();
 
-        // Apply peer set from the leader if provided
-        if let Some(leader_peer_addrs) = &req.peer_addrs {
+                if let Some(leader_peer_addrs) = &req.peer_addrs {
             let mut changed = false;
             for (id, addr) in leader_peer_addrs {
-                // Skip self
-                if id == &self.config.node_id {
+                                if id == &self.config.node_id {
                     continue;
                 }
                 if !state.peer_addrs.contains_key(id) {
@@ -798,16 +744,14 @@ impl ClusterNode {
                     state.peer_addrs.insert(id.clone(), addr.clone());
                     changed = true;
                 } else if state.peer_addrs.get(id) != Some(addr) {
-                    // Address changed
-                    if let Some(old_addr) = state.peer_addrs.insert(id.clone(), addr.clone()) {
+                                        if let Some(old_addr) = state.peer_addrs.insert(id.clone(), addr.clone()) {
                         state.peers.retain(|p| p != &old_addr);
                     }
                     state.peers.push(addr.clone());
                     changed = true;
                 }
             }
-            // Remove peers that the leader no longer has (excluding self)
-            let leader_ids: std::collections::HashSet<&String> = leader_peer_addrs.keys().collect();
+                        let leader_ids: std::collections::HashSet<&String> = leader_peer_addrs.keys().collect();
             let local_ids: Vec<String> = state.peer_addrs.keys().cloned().collect();
             for id in local_ids {
                 if id != self.config.node_id && !leader_ids.contains(&id) {
@@ -822,9 +766,7 @@ impl ClusterNode {
             }
         }
 
-        // Adopt the leader's learner set so this node computes the same voting
-        // membership (matters if it ever becomes a candidate/leader).
-        if let Some(leader_learners) = &req.learner_addrs {
+                        if let Some(leader_learners) = &req.learner_addrs {
             let incoming: std::collections::HashSet<String> =
                 leader_learners.iter().cloned().collect();
             if incoming != state.learners {
@@ -833,12 +775,10 @@ impl ClusterNode {
             }
         }
 
-        // Log consistency check
-        if req.prev_log_index > 0 {
+                if req.prev_log_index > 0 {
             match state.log.get((req.prev_log_index - 1) as usize) {
                 Some(entry) if entry.term != req.prev_log_term => {
-                    // Conflicting entry, truncate
-                    state.log.truncate((req.prev_log_index - 1) as usize);
+                                        state.log.truncate((req.prev_log_index - 1) as usize);
                     self.truncate_log_from(req.prev_log_index);
                     self.persist_meta(&state);
                     return AppendEntriesResponse {
@@ -847,8 +787,7 @@ impl ClusterNode {
                     };
                 }
                 None if req.prev_log_index > state.log.len() as u64 => {
-                    // Missing entries
-                    self.persist_meta(&state);
+                                        self.persist_meta(&state);
                     return AppendEntriesResponse {
                         term: state.current_term,
                         success: false,
@@ -858,8 +797,7 @@ impl ClusterNode {
             }
         }
 
-        // Append new entries
-        for entry in &req.entries {
+                for entry in &req.entries {
             let idx = (entry.index - 1) as usize;
             if idx < state.log.len() {
                 if state.log[idx].term != entry.term {
@@ -874,13 +812,11 @@ impl ClusterNode {
             }
         }
 
-        // Update commit index
-        if req.leader_commit > state.commit_index {
+                if req.leader_commit > state.commit_index {
             state.commit_index = std::cmp::min(req.leader_commit, state.last_log_index());
         }
 
-        // Apply committed entries to state machine
-        while state.last_applied < state.commit_index {
+                while state.last_applied < state.commit_index {
             state.last_applied += 1;
             if let Some(entry) = state.log.get((state.last_applied - 1) as usize) {
                 self.apply_log_entry(entry);
@@ -897,11 +833,8 @@ impl ClusterNode {
     pub async fn handle_request_vote(&self, req: RequestVoteRequest) -> RequestVoteResponse {
         let mut state = self.state.write().await;
 
-        // Learners are non-voting: they never grant votes, so a candidate that
-        // (incorrectly) counted a learner's vote could not reach quorum from it.
-        if self.config.learner {
-            // Still adopt a higher term so we stay a passive follower.
-            if req.term > state.current_term {
+                        if self.config.learner {
+                        if req.term > state.current_term {
                 state.current_term = req.term;
                 state.voted_for = None;
                 self.persist_meta(&state);
@@ -951,8 +884,7 @@ impl ClusterNode {
         }
     }
 
-    // --- Client Data Operations ---------------------------------------------
-
+    
     /// Write a key-value pair. Must be called on the leader.
     pub async fn put(&self, key: String, value: String) -> Result<(), String> {
         self.put_with(key, value, Vec::new()).await
@@ -986,8 +918,7 @@ impl ClusterNode {
             entry
         };
 
-        // Wait for the entry to be committed (replicated to majority)
-        let target_index = entry.index;
+                let target_index = entry.index;
         for _ in 0..100 {
             tokio::select! {
                 _ = self.commit_notify.notified() => {}
@@ -1034,8 +965,7 @@ impl ClusterNode {
             return self.put_with(key, value, extra).await;
         }
 
-        // We are not the leader – try to forward.
-        match leader_id {
+                match leader_id {
             Some(id) => {
                 let leader_addr = leader_addr
                     .ok_or_else(|| format!("unknown leader address for node '{}'", id))?;
@@ -1093,9 +1023,7 @@ impl ClusterNode {
             if state.role != Role::Leader {
                 return Err(format!("not the leader; current leader: {:?}", state.leader_id));
             }
-            // Latest value = most recent log entry for the key (covers
-            // appended-but-not-yet-committed writes), else the applied value.
-            let current = state
+                                    let current = state
                 .log
                 .iter()
                 .rev()
@@ -1117,8 +1045,7 @@ impl ClusterNode {
             entry
         };
 
-        // Wait for the entry to commit (replicated to a majority).
-        let target_index = entry.index;
+                let target_index = entry.index;
         for _ in 0..100 {
             tokio::select! {
                 _ = self.commit_notify.notified() => {}
@@ -1203,8 +1130,7 @@ impl ClusterNode {
         }
     }
 
-    // --- Dynamic Membership ------------------------------------------------
-
+    
     /// Add a peer to the cluster.  Must be called on the leader.
     /// The peer is immediately added to the active peer set and persisted.
     /// When `as_learner` is true the peer is replicated to but excluded from
@@ -1223,8 +1149,7 @@ impl ClusterNode {
             ));
         }
 
-        // Idempotent: skip if already present
-        if state.peer_addrs.contains_key(&node_id) {
+                if state.peer_addrs.contains_key(&node_id) {
             return Ok(());
         }
 
@@ -1234,8 +1159,7 @@ impl ClusterNode {
             state.learners.insert(addr.clone());
         }
 
-        // Initialize replication state for the new peer
-        let last_index = state.last_log_index();
+                let last_index = state.last_log_index();
         state.next_index.insert(addr.clone(), last_index + 1);
         state.match_index.insert(addr.clone(), 0);
 
@@ -1289,8 +1213,7 @@ impl ClusterNode {
             }
         }
 
-        // Forward to the leader
-        let (leader_id, leader_addr) = {
+                let (leader_id, leader_addr) = {
             let state = self.state.read().await;
             let lid = state.leader_id.clone();
             let addr = lid
@@ -1310,9 +1233,7 @@ impl ClusterNode {
                     .await
                     .map_err(|e| format!("failed to forward join to leader: {}", e))?;
                 if resp.status().is_success() {
-                    // Also update our own peer set locally so we don't wait
-                    // for the next heartbeat to discover the new peer.
-                    let mut state = self.state.write().await;
+                                                            let mut state = self.state.write().await;
                     if !state.peer_addrs.contains_key(&req.node_id) {
                         state.peers.push(req.addr.clone());
                         state.peer_addrs.insert(req.node_id, req.addr.clone());
@@ -1342,8 +1263,7 @@ impl ClusterNode {
             }
         }
 
-        // Forward to the leader
-        let (leader_id, leader_addr) = {
+                let (leader_id, leader_addr) = {
             let state = self.state.read().await;
             let lid = state.leader_id.clone();
             let addr = lid
@@ -1363,8 +1283,7 @@ impl ClusterNode {
                     .await
                     .map_err(|e| format!("failed to forward leave to leader: {}", e))?;
                 if resp.status().is_success() {
-                    // Remove from local peer set too
-                    let mut state = self.state.write().await;
+                                        let mut state = self.state.write().await;
                     if let Some(addr) = state.peer_addrs.remove(&req.node_id) {
                         state.peers.retain(|p| p != &addr);
                         self.persist_peers(&state);
@@ -1422,9 +1341,6 @@ impl ClusterNode {
     }
 }
 
-// ============================================================================
-// HTTP Server for Raft RPCs + Data API
-// ============================================================================
 
 async fn read_body(req: Request<Incoming>) -> Result<Vec<u8>, String> {
     req.into_body()
@@ -1455,12 +1371,7 @@ async fn route(
     node: Arc<ClusterNode>,
     req: Request<Incoming>,
 ) -> Result<Response<String>, Infallible> {
-    // Reject all requests on a shut-down node.  The TCP listener stops
-    // accepting new connections on shutdown, but already-established HTTP/1.1
-    // keep-alive connections (held by reqwest's connection pool) can still
-    // deliver requests.  Without this guard a "dead" node can grant votes or
-    // acknowledge replication, breaking quorum guarantees.
-    if node.shutdown.is_cancelled() {
+                        if node.shutdown.is_cancelled() {
         return Ok(error_response(503, "node is shut down"));
     }
 

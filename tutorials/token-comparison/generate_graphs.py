@@ -1,11 +1,11 @@
-#!/usr/bin/env python3
-# /// script
-# requires-python = ">=3.11"
-# dependencies = [
-#     "matplotlib",
-#     "numpy",
-# ]
-# ///
+
+
+
+
+
+
+
+
 """Generate benchmark comparison graphs from results data."""
 
 import json
@@ -61,7 +61,7 @@ def plot_box_chart(data):
         patch.set_facecolor(color)
         patch.set_alpha(0.7)
 
-    # Overlay individual points
+    
     for i, (tots, color) in enumerate(zip(totals, colors)):
         jitter = np.random.normal(0, 0.04, len(tots))
         ax.scatter([i + 1 + j for j in jitter], tots, color=color,

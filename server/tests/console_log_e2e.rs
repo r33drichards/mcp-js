@@ -17,7 +17,6 @@ use tokio::time::{sleep, timeout, Duration};
 
 mod common;
 
-// ── Server helper ────────────────────────────────────────────────────────
 
 struct HttpServer {
     child: Option<tokio::process::Child>,
@@ -38,8 +37,7 @@ impl HttpServer {
 
         let base_url = format!("http://127.0.0.1:{}", port);
 
-        // Poll until the server is ready (up to 15s).
-        let client = Client::new();
+                let client = Client::new();
         let health_url = format!("{}/api/executions", base_url);
         for _ in 0..150 {
             if client
@@ -85,7 +83,6 @@ fn find_available_port() -> u16 {
         .port()
 }
 
-// ── Helpers ──────────────────────────────────────────────────────────────
 
 /// Submit code for execution and return the execution_id.
 async fn submit_code(client: &Client, base_url: &str, code: &str) -> String {
@@ -135,10 +132,9 @@ async fn get_output(
     resp.json().await.expect("Invalid JSON from output endpoint")
 }
 
-// ── Tests ────────────────────────────────────────────────────────────────
 
 /// Test that console.log output is captured and retrievable.
-#[tokio::test]
+
 async fn test_console_log_basic() -> Result<(), Box<dyn std::error::Error>> {
     let mut server = HttpServer::start().await?;
     let client = Client::new();
@@ -154,8 +150,7 @@ async fn test_console_log_basic() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(result["status"], "completed", "Execution should complete");
     assert_eq!(result["result"], "");
 
-    // Fetch console output
-    let output = get_output(&client, &server.base_url, &id, "").await;
+        let output = get_output(&client, &server.base_url, &id, "").await;
     let data = output["data"].as_str().expect("output.data should be a string");
     assert!(
         data.contains("hello world"),
@@ -169,7 +164,7 @@ async fn test_console_log_basic() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Test all console methods: log, info, warn, error, debug, trace.
-#[tokio::test]
+
 async fn test_console_methods() -> Result<(), Box<dyn std::error::Error>> {
     let mut server = HttpServer::start().await?;
     let client = Client::new();
@@ -191,18 +186,12 @@ async fn test_console_methods() -> Result<(), Box<dyn std::error::Error>> {
     let output = get_output(&client, &server.base_url, &id, "").await;
     let data = output["data"].as_str().unwrap();
 
-    // console.log → plain text
-    assert!(data.contains("LOG line"), "Should contain LOG line");
-    // console.info → [INFO] prefix
-    assert!(data.contains("[INFO] INFO line"), "Should contain [INFO] prefix");
-    // console.warn → [WARN] prefix
-    assert!(data.contains("[WARN] WARN line"), "Should contain [WARN] prefix");
-    // console.error → [ERROR] prefix
-    assert!(data.contains("[ERROR] ERROR line"), "Should contain [ERROR] prefix");
-    // console.debug → plain text (same as log)
-    assert!(data.contains("DEBUG line"), "Should contain DEBUG line");
-    // console.trace → plain text (same as log)
-    assert!(data.contains("TRACE line"), "Should contain TRACE line");
+        assert!(data.contains("LOG line"), "Should contain LOG line");
+        assert!(data.contains("[INFO] INFO line"), "Should contain [INFO] prefix");
+        assert!(data.contains("[WARN] WARN line"), "Should contain [WARN] prefix");
+        assert!(data.contains("[ERROR] ERROR line"), "Should contain [ERROR] prefix");
+        assert!(data.contains("DEBUG line"), "Should contain DEBUG line");
+        assert!(data.contains("TRACE line"), "Should contain TRACE line");
 
     assert_eq!(output["total_lines"], 6, "Should have 6 lines of output");
 
@@ -211,7 +200,7 @@ async fn test_console_methods() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Test console.log with multiple arguments and object formatting.
-#[tokio::test]
+
 async fn test_console_log_formatting() -> Result<(), Box<dyn std::error::Error>> {
     let mut server = HttpServer::start().await?;
     let client = Client::new();
@@ -241,13 +230,12 @@ async fn test_console_log_formatting() -> Result<(), Box<dyn std::error::Error>>
 }
 
 /// Test the async execution lifecycle: submit → running → completed.
-#[tokio::test]
+
 async fn test_execution_lifecycle() -> Result<(), Box<dyn std::error::Error>> {
     let mut server = HttpServer::start().await?;
     let client = Client::new();
 
-    // Submit code — response should be 202 with an execution_id
-    let resp = client
+        let resp = client
         .post(format!("{}/api/exec", server.base_url))
         .json(&json!({ "code": "1 + 1" }))
         .send()
@@ -257,8 +245,7 @@ async fn test_execution_lifecycle() -> Result<(), Box<dyn std::error::Error>> {
     let id = body["execution_id"].as_str().expect("Should have execution_id");
     assert!(!id.is_empty());
 
-    // Poll until done
-    let result = timeout(Duration::from_secs(10), poll_until_done(&client, &server.base_url, id)).await?;
+        let result = timeout(Duration::from_secs(10), poll_until_done(&client, &server.base_url, id)).await?;
     assert_eq!(result["status"], "completed");
     assert_eq!(result["result"], "");
     assert!(result["started_at"].is_string());
@@ -269,21 +256,18 @@ async fn test_execution_lifecycle() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Test listing executions.
-#[tokio::test]
+
 async fn test_list_executions() -> Result<(), Box<dyn std::error::Error>> {
     let mut server = HttpServer::start().await?;
     let client = Client::new();
 
-    // Submit two executions
-    let id1 = submit_code(&client, &server.base_url, "1").await;
+        let id1 = submit_code(&client, &server.base_url, "1").await;
     let id2 = submit_code(&client, &server.base_url, "2").await;
 
-    // Wait for both to complete
-    timeout(Duration::from_secs(10), poll_until_done(&client, &server.base_url, &id1)).await?;
+        timeout(Duration::from_secs(10), poll_until_done(&client, &server.base_url, &id1)).await?;
     timeout(Duration::from_secs(10), poll_until_done(&client, &server.base_url, &id2)).await?;
 
-    // List executions
-    let resp = client
+        let resp = client
         .get(format!("{}/api/executions", server.base_url))
         .send()
         .await?;
@@ -296,8 +280,7 @@ async fn test_list_executions() -> Result<(), Box<dyn std::error::Error>> {
         executions.len()
     );
 
-    // Both IDs should appear
-    let ids: Vec<&str> = executions
+        let ids: Vec<&str> = executions
         .iter()
         .filter_map(|e| e["execution_id"].as_str())
         .collect();
@@ -309,13 +292,12 @@ async fn test_list_executions() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Test console output pagination (line-offset mode).
-#[tokio::test]
+
 async fn test_console_output_line_pagination() -> Result<(), Box<dyn std::error::Error>> {
     let mut server = HttpServer::start().await?;
     let client = Client::new();
 
-    // Generate 10 lines of output
-    let code = r#"
+        let code = r#"
         for (let i = 1; i <= 10; i++) {
             console.log("line " + i);
         }
@@ -325,8 +307,7 @@ async fn test_console_output_line_pagination() -> Result<(), Box<dyn std::error:
     let id = submit_code(&client, &server.base_url, code).await;
     timeout(Duration::from_secs(10), poll_until_done(&client, &server.base_url, &id)).await?;
 
-    // Fetch first 3 lines
-    let page1 = get_output(&client, &server.base_url, &id, "line_offset=1&line_limit=3").await;
+        let page1 = get_output(&client, &server.base_url, &id, "line_offset=1&line_limit=3").await;
     assert_eq!(page1["total_lines"], 10, "Should have 10 total lines");
     assert_eq!(page1["start_line"], 1);
     assert_eq!(page1["end_line"], 3);
@@ -336,8 +317,7 @@ async fn test_console_output_line_pagination() -> Result<(), Box<dyn std::error:
     assert!(data1.contains("line 3"), "First page should include line 3");
     assert!(!data1.contains("line 4"), "First page should not include line 4");
 
-    // Fetch next page using next_line_offset
-    let next_offset = page1["next_line_offset"].as_u64().unwrap();
+        let next_offset = page1["next_line_offset"].as_u64().unwrap();
     let page2 = get_output(
         &client,
         &server.base_url,
@@ -354,7 +334,7 @@ async fn test_console_output_line_pagination() -> Result<(), Box<dyn std::error:
 }
 
 /// Test console output byte-offset pagination.
-#[tokio::test]
+
 async fn test_console_output_byte_pagination() -> Result<(), Box<dyn std::error::Error>> {
     let mut server = HttpServer::start().await?;
     let client = Client::new();
@@ -368,13 +348,11 @@ async fn test_console_output_byte_pagination() -> Result<(), Box<dyn std::error:
     let id = submit_code(&client, &server.base_url, code).await;
     timeout(Duration::from_secs(10), poll_until_done(&client, &server.base_url, &id)).await?;
 
-    // Fetch all output first to know total bytes
-    let full = get_output(&client, &server.base_url, &id, "").await;
+        let full = get_output(&client, &server.base_url, &id, "").await;
     let total_bytes = full["total_bytes"].as_u64().unwrap();
     assert!(total_bytes > 0, "Should have some bytes of output");
 
-    // Fetch first 5 bytes via byte-offset mode
-    let page = get_output(&client, &server.base_url, &id, "byte_offset=0&byte_limit=5").await;
+        let page = get_output(&client, &server.base_url, &id, "byte_offset=0&byte_limit=5").await;
     assert_eq!(page["start_byte"], 0);
     assert_eq!(page["end_byte"], 5);
     let data = page["data"].as_str().unwrap();
@@ -386,7 +364,7 @@ async fn test_console_output_byte_pagination() -> Result<(), Box<dyn std::error:
 }
 
 /// Test that a failed execution reports the error correctly.
-#[tokio::test]
+
 async fn test_execution_failure() -> Result<(), Box<dyn std::error::Error>> {
     let mut server = HttpServer::start().await?;
     let client = Client::new();
@@ -412,7 +390,7 @@ async fn test_execution_failure() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Test console output interleaved with computation and a return value.
-#[tokio::test]
+
 async fn test_console_log_with_return_value() -> Result<(), Box<dyn std::error::Error>> {
     let mut server = HttpServer::start().await?;
     let client = Client::new();
@@ -440,7 +418,7 @@ async fn test_console_log_with_return_value() -> Result<(), Box<dyn std::error::
 }
 
 /// Test that console output for an execution with no console calls returns empty data.
-#[tokio::test]
+
 async fn test_no_console_output() -> Result<(), Box<dyn std::error::Error>> {
     let mut server = HttpServer::start().await?;
     let client = Client::new();

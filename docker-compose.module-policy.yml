@@ -1,9 +1,9 @@
-# Docker Compose for module policy integration tests.
-#
-# Services:
-#   opa            – OPA server loaded with policies/
-#   mcp-default    – mcp-js with external modules DISABLED (default)
-#   mcp-opa-policy – mcp-js with --allow-external-modules + --opa-module-policy
+
+
+
+
+
+
 
 services:
   opa:

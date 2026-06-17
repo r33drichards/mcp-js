@@ -10,12 +10,11 @@ use dashmap::DashMap;
 use deno_core::v8;
 use serde::Serialize;
 
-// ── Types ────────────────────────────────────────────────────────────────
 
 pub type ExecutionId = String;
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "snake_case")]
+
+"snake_case"
 pub enum ExecutionStatus {
     Running,
     Completed,
@@ -51,9 +50,9 @@ pub struct ExecutionRecord {
 }
 
 /// Summary returned by `list()`.
-#[derive(Debug, Clone, Serialize)]
+
 pub struct ExecutionSummary {
-    #[serde(rename = "execution_id")]
+    "execution_id"
     pub id: ExecutionId,
     pub status: String,
     pub started_at: String,
@@ -61,18 +60,16 @@ pub struct ExecutionSummary {
 }
 
 /// A page of console output, including both line and byte coordinates.
-#[derive(Debug, Clone, Serialize)]
+
 pub struct ConsoleOutputPage {
     pub data: String,
 
-    // Line coordinates
-    pub start_line: u64,
+        pub start_line: u64,
     pub end_line: u64,
     pub next_line_offset: u64,
     pub total_lines: u64,
 
-    // Byte coordinates
-    pub start_byte: u64,
+        pub start_byte: u64,
     pub end_byte: u64,
     pub next_byte_offset: u64,
     pub total_bytes: u64,
@@ -80,9 +77,8 @@ pub struct ConsoleOutputPage {
     pub has_more: bool,
 }
 
-// ── ExecutionRegistry ────────────────────────────────────────────────────
 
-#[derive(Clone)]
+
 pub struct ExecutionRegistry {
     executions: Arc<DashMap<ExecutionId, ExecutionRecord>>,
     db: sled::Db,
@@ -242,8 +238,7 @@ impl ExecutionRegistry {
         let tree = self.db.open_tree(&tree_name)
             .map_err(|e| format!("Failed to open console tree: {}", e))?;
 
-        // Reconstruct full byte stream from WAL pages
-        let mut full_output = Vec::new();
+                let mut full_output = Vec::new();
         for item in tree.iter() {
             let (_, value) = item.map_err(|e| format!("Failed to read console entry: {}", e))?;
             full_output.extend_from_slice(&value);
@@ -253,8 +248,7 @@ impl ExecutionRegistry {
         let total_lines = full_str.matches('\n').count() as u64;
 
         if let Some(byte_off) = byte_offset {
-            // === Byte-offset mode ===
-            let limit = byte_limit.unwrap_or(4096);
+                        let limit = byte_limit.unwrap_or(4096);
             let start = (byte_off as usize).min(full_output.len());
             let end = (start + limit as usize).min(full_output.len());
             let data = String::from_utf8_lossy(&full_output[start..end]).to_string();
@@ -274,8 +268,7 @@ impl ExecutionRegistry {
                 has_more: end < full_output.len(),
             })
         } else {
-            // === Line-offset mode (default) ===
-            let line_off = line_offset.unwrap_or(1);
+                        let line_off = line_offset.unwrap_or(1);
             let limit = line_limit.unwrap_or(100);
 
             let lines: Vec<&str> = full_str.split('\n').collect();
@@ -292,8 +285,7 @@ impl ExecutionRegistry {
                 .copied()
                 .collect();
 
-            // Compute byte range for the selected lines
-            let start_byte: u64 = if start_idx < lines.len() {
+                        let start_byte: u64 = if start_idx < lines.len() {
                 lines[..start_idx].iter().map(|l| l.len() as u64 + 1).sum()
             } else {
                 total_bytes
@@ -325,7 +317,7 @@ impl ExecutionRegistry {
 }
 
 /// Execution info returned to callers.
-#[derive(Debug, Clone, Serialize)]
+
 pub struct ExecutionInfo {
     pub id: ExecutionId,
     pub status: String,

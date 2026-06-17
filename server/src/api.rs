@@ -15,7 +15,6 @@ const MAX_EXEC_BODY_BYTES: usize = 16 * 1024 * 1024;
 
 use crate::engine::Engine;
 
-// ── Embedded agent-discovery content ─────────────────────────────────
 
 /// llms.txt — machine-readable guide for AI agents (https://llmstxt.org/)
 const LLMS_TXT: &str = include_str!("llms_txt.md");
@@ -23,13 +22,10 @@ const LLMS_TXT: &str = include_str!("llms_txt.md");
 /// Full README for the /docs endpoint
 const README_MD: &str = include_str!("../README.md");
 
-// ── CLI download helpers ──────────────────────────────────────────────
 
 /// The version of this server binary, from Cargo.toml at compile time.
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-// Embedded CLI binaries — populated at compile time by build.rs.
-// Each is an empty slice in dev builds (no MCP_V8_CLI_* env vars set).
 static CLI_LINUX_X86_64:  &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cli-linux-x86_64.bin"));
 static CLI_LINUX_AARCH64: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cli-linux-aarch64.bin"));
 static CLI_MACOS_AARCH64: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cli-macos-aarch64.bin"));
@@ -49,43 +45,42 @@ const PLATFORMS: &[PlatformCli] = &[
 fn find_platform(platform: &str) -> Option<&'static PlatformCli> {
     PLATFORMS.iter().find(|p| p.platform == platform)
 }
-// ── Request / Response types ─────────────────────────────────────────────
 
 /// Request body for executing JavaScript code.
-#[derive(Deserialize, ToSchema)]
+
 pub struct ExecRequest {
     /// JavaScript (or TypeScript) source code to execute.
     pub code: String,
     /// Serialised heap snapshot key to restore before execution.
-    #[serde(default)]
+    
     pub heap: Option<String>,
     /// Filesystem snapshot handle to mount: a label name or 64-hex CA id.
     /// Independent of `heap`.
-    #[serde(default)]
+    
     pub fs: Option<String>,
     /// Session identifier used for tagging / logging.
-    #[serde(default)]
+    
     pub session: Option<String>,
     /// Per-execution V8 heap memory cap in megabytes.
-    #[serde(default)]
+    
     pub heap_memory_max_mb: Option<usize>,
     /// Per-execution timeout in seconds (overrides server default).
-    #[serde(default)]
+    
     pub execution_timeout_secs: Option<u64>,
     /// Arbitrary key/value tags attached to the resulting heap snapshot.
-    #[serde(default)]
+    
     pub tags: Option<HashMap<String, String>>,
 }
 
 /// Accepted response containing the new execution's ID.
-#[derive(Serialize, ToSchema)]
+
 pub struct ExecAccepted {
     /// Unique identifier for the queued execution.
     pub execution_id: String,
 }
 
 /// Detailed status of a single execution.
-#[derive(Serialize, ToSchema)]
+
 pub struct ExecutionInfo {
     pub execution_id: String,
     /// Current status: `running`, `completed`, `failed`, `cancelled`, `timed_out`.
@@ -106,7 +101,7 @@ pub struct ExecutionInfo {
 }
 
 /// A page of console output from an execution.
-#[derive(Serialize, ToSchema)]
+
 pub struct ExecutionOutput {
     pub execution_id: String,
     /// Text content for the requested window.
@@ -134,7 +129,7 @@ pub struct ExecutionOutput {
 }
 
 /// A brief summary of a single execution (used in list responses).
-#[derive(Serialize, ToSchema)]
+
 pub struct ExecutionSummary {
     pub execution_id: String,
     pub status: String,
@@ -143,21 +138,21 @@ pub struct ExecutionSummary {
 }
 
 /// List of execution summaries.
-#[derive(Serialize, ToSchema)]
+
 pub struct ExecutionList {
     pub executions: Vec<serde_json::Value>,
 }
 
 /// Result of a cancel request.
-#[derive(Serialize, ToSchema)]
+
 pub struct CancelResult {
     pub ok: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    "Option::is_none"
     pub error: Option<String>,
 }
 
 /// A single entry in the CLI download index.
-#[derive(Serialize, ToSchema)]
+
 pub struct CliAsset {
     /// Platform identifier (e.g. `linux-x86_64`).
     pub platform: String,
@@ -168,7 +163,7 @@ pub struct CliAsset {
 }
 
 /// Index of available CLI binary downloads for the running server version.
-#[derive(Serialize, ToSchema)]
+
 pub struct CliIndex {
     /// Server (and CLI) version string, e.g. `"0.1.0"`.
     pub version: String,
@@ -177,86 +172,42 @@ pub struct CliIndex {
 }
 
 /// Generic error body.
-#[derive(Serialize, ToSchema)]
+
 pub struct ApiError {
     pub error: String,
 }
 
-// ── Query params ─────────────────────────────────────────────────────────
 
 /// Optional pagination query parameters for console output.
-#[derive(Deserialize, ToSchema, utoipa::IntoParams)]
+
 pub struct OutputQuery {
     /// Return output starting at this line number (0-indexed).
-    #[serde(default)]
+    
     pub line_offset: Option<u64>,
     /// Maximum number of lines to return.
-    #[serde(default)]
+    
     pub line_limit: Option<u64>,
     /// Return output starting at this byte offset.
-    #[serde(default)]
+    
     pub byte_offset: Option<u64>,
     /// Maximum number of bytes to return.
-    #[serde(default)]
+    
     pub byte_limit: Option<u64>,
 }
 
 /// Optional query parameters for a label reflog read.
-#[derive(Deserialize, ToSchema, utoipa::IntoParams)]
+
 pub struct FsLogQuery {
     /// Return only the most recent N reflog entries (oldest-first). Omit for the full history.
-    #[serde(default)]
+    
     pub limit: Option<usize>,
 }
 
-// ── OpenAPI document ─────────────────────────────────────────────────────
 
-#[derive(OpenApi)]
-#[openapi(
-    info(
-        title = "mcp-v8",
-        version = "0.1.0",
-        description = "HTTP API for the mcp-v8 JavaScript execution server"
-    ),
-    paths(
-        version_handler,
-        exec_handler,
-        list_executions_handler,
-        get_execution_handler,
-        get_execution_output_handler,
-        cancel_execution_handler,
-        cli_index_handler,
-        cli_download_handler,
-        fs_labels_handler,
-        fs_set_label_handler,
-        fs_resolve_handler,
-        fs_log_handler,
-        fs_push_handler,
-        fs_reset_handler,
-        fs_merge_handler,
-    ),
-    components(schemas(
-        ExecRequest,
-        ExecAccepted,
-        ExecutionInfo,
-        ExecutionOutput,
-        ExecutionList,
-        ExecutionSummary,
-        CancelResult,
-        ApiError,
-        OutputQuery,
-        FsLogQuery,
-        CliAsset,
-        CliIndex,
-        FsPushRequest,
-        FsLabelRequest,
-        FsResetRequest,
-        FsMergeRequest,
-    ))
-)]
+
+"mcp-v8""0.1.0""HTTP API for the mcp-v8 JavaScript execution server"
 pub struct ApiDoc;
 
-// ── Handlers ─────────────────────────────────────────────────────────────
 
 /// Submit JavaScript code for asynchronous execution.
 ///
@@ -271,18 +222,7 @@ pub struct ApiDoc;
 ///   --data-binary @script.js`). Optional `heap`, `session`,
 ///   `heap_memory_max_mb`, and `execution_timeout_secs` may be passed as
 ///   query-string parameters.
-#[utoipa::path(
-    post,
-    path = "/api/exec",
-    request_body = ExecRequest,
-    responses(
-        (status = 202, description = "Execution queued", body = ExecAccepted),
-        (status = 400, description = "Malformed request body", body = ApiError),
-        (status = 415, description = "Unsupported Content-Type (e.g. multipart/form-data)", body = ApiError),
-        (status = 500, description = "Internal error", body = ApiError),
-    ),
-    tag = "executions"
-)]
+"/api/exec""Execution queued""Malformed request body""Unsupported Content-Type (e.g. multipart/form-data)""Internal error""executions"
 async fn exec_handler(
     State(engine): State<Engine>,
     Query(params): Query<ExecUploadParams>,
@@ -295,9 +235,7 @@ async fn exec_handler(
         .unwrap_or("")
         .to_string();
 
-    // multipart/form-data would require a multipart-parser dependency; steer
-    // callers to the simpler raw-body upload instead.
-    if content_type.starts_with("multipart/form-data") {
+            if content_type.starts_with("multipart/form-data") {
         return (
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
             Json(serde_json::json!({
@@ -316,9 +254,7 @@ async fn exec_handler(
         }
     };
 
-    // JSON (or no Content-Type) → structured body; anything else → the raw body
-    // is the script source, with optional params taken from the query string.
-    let exec_req = if content_type.is_empty() || content_type.contains("json") {
+            let exec_req = if content_type.is_empty() || content_type.contains("json") {
         match serde_json::from_slice::<ExecRequest>(&bytes) {
             Ok(req) => req,
             Err(e) => {
@@ -355,17 +291,17 @@ async fn exec_handler(
 /// Query-string parameters accepted alongside a raw-body script upload to
 /// `POST /api/exec`. They mirror the optional fields of [`ExecRequest`]
 /// (`tags` is only available via the JSON body).
-#[derive(Deserialize)]
+
 struct ExecUploadParams {
-    #[serde(default)]
+    
     heap: Option<String>,
-    #[serde(default)]
+    
     fs: Option<String>,
-    #[serde(default)]
+    
     session: Option<String>,
-    #[serde(default)]
+    
     heap_memory_max_mb: Option<usize>,
-    #[serde(default)]
+    
     execution_timeout_secs: Option<u64>,
 }
 
@@ -395,18 +331,7 @@ async fn submit_exec(
 }
 
 /// Get the status and result of an execution.
-#[utoipa::path(
-    get,
-    path = "/api/executions/{id}",
-    params(
-        ("id" = String, Path, description = "Execution ID returned by POST /api/exec")
-    ),
-    responses(
-        (status = 200, description = "Execution found", body = ExecutionInfo),
-        (status = 404, description = "Execution not found", body = ApiError),
-    ),
-    tag = "executions"
-)]
+"/api/executions/{id}""id""Execution ID returned by POST /api/exec""Execution found""Execution not found""executions"
 async fn get_execution_handler(
     State(engine): State<Engine>,
     Path(id): Path<String>,
@@ -437,19 +362,7 @@ async fn get_execution_handler(
 /// Supports both line-based (`line_offset` / `line_limit`) and byte-based
 /// (`byte_offset` / `byte_limit`) pagination.  Use `has_more` and
 /// `next_line_offset` / `next_byte_offset` to iterate.
-#[utoipa::path(
-    get,
-    path = "/api/executions/{id}/output",
-    params(
-        ("id" = String, Path, description = "Execution ID"),
-        OutputQuery,
-    ),
-    responses(
-        (status = 200, description = "Output page", body = ExecutionOutput),
-        (status = 404, description = "Execution not found", body = ApiError),
-    ),
-    tag = "executions"
-)]
+"/api/executions/{id}/output""id""Execution ID""Output page""Execution not found""executions"
 async fn get_execution_output_handler(
     State(engine): State<Engine>,
     Path(id): Path<String>,
@@ -485,18 +398,7 @@ async fn get_execution_output_handler(
 }
 
 /// Cancel a running execution.
-#[utoipa::path(
-    post,
-    path = "/api/executions/{id}/cancel",
-    params(
-        ("id" = String, Path, description = "Execution ID to cancel")
-    ),
-    responses(
-        (status = 200, description = "Cancel accepted", body = CancelResult),
-        (status = 400, description = "Cannot cancel (e.g. already finished)", body = CancelResult),
-    ),
-    tag = "executions"
-)]
+"/api/executions/{id}/cancel""id""Execution ID to cancel""Cancel accepted""Cannot cancel (e.g. already finished)""executions"
 async fn cancel_execution_handler(
     State(engine): State<Engine>,
     Path(id): Path<String>,
@@ -514,15 +416,7 @@ async fn cancel_execution_handler(
 }
 
 /// List all known executions (running and recently completed).
-#[utoipa::path(
-    get,
-    path = "/api/executions",
-    responses(
-        (status = 200, description = "Execution list", body = ExecutionList),
-        (status = 500, description = "Internal error", body = ApiError),
-    ),
-    tag = "executions"
-)]
+"/api/executions""Execution list""Internal error""executions"
 async fn list_executions_handler(
     State(engine): State<Engine>,
 ) -> (StatusCode, Json<serde_json::Value>) {
@@ -538,20 +432,12 @@ async fn list_executions_handler(
     }
 }
 
-// ── CLI download endpoints ────────────────────────────────────────────────
 
 /// List available CLI binary downloads for the running server version.
 ///
 /// Each `url` is a direct download from this server. `available: false` means
 /// the binary was not embedded at build time (dev/local builds).
-#[utoipa::path(
-    get,
-    path = "/api/cli",
-    responses(
-        (status = 200, description = "CLI download index", body = CliIndex),
-    ),
-    tag = "cli"
-)]
+"/api/cli""CLI download index""cli"
 async fn cli_index_handler(
     headers: axum::http::HeaderMap,
 ) -> Json<serde_json::Value> {
@@ -582,18 +468,7 @@ async fn cli_index_handler(
 /// (dev/local builds).
 ///
 /// Supported platforms: `linux-x86_64`, `linux-aarch64`, `macos-aarch64`.
-#[utoipa::path(
-    get,
-    path = "/api/cli/{platform}",
-    params(
-        ("platform" = String, Path, description = "Target platform (linux-x86_64 | linux-aarch64 | macos-aarch64)"),
-    ),
-    responses(
-        (status = 200, description = "CLI binary (application/octet-stream)"),
-        (status = 404, description = "Unknown platform or binary not embedded", body = ApiError),
-    ),
-    tag = "cli"
-)]
+"/api/cli/{platform}""platform""Target platform (linux-x86_64 | linux-aarch64 | macos-aarch64)""CLI binary (application/octet-stream)""Unknown platform or binary not embedded""cli"
 async fn cli_download_handler(
     Path(platform): Path<String>,
 ) -> Response {
@@ -633,22 +508,13 @@ async fn cli_download_handler(
     }
 }
 
-// ── Version endpoint ──────────────────────────────────────────────────────
 
 /// Return the running server version.
-#[utoipa::path(
-    get,
-    path = "/api/version",
-    responses(
-        (status = 200, description = "Server version"),
-    ),
-    tag = "meta"
-)]
+"/api/version""Server version""meta"
 async fn version_handler() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "version": SERVER_VERSION }))
 }
 
-// ── Agent-discovery endpoints ─────────────────────────────────────────────
 
 /// Redirect / → /llms.txt so agents that follow RFC 7231 redirects land on
 /// the machine-readable guide immediately.
@@ -679,62 +545,56 @@ async fn docs_handler() -> Response {
         .unwrap()
 }
 
-// ── fs snapshot endpoints ─────────────────────────────────────────────────
 
 /// Request body for advancing a filesystem snapshot label (`POST /api/fs/push`).
-#[derive(Deserialize, ToSchema)]
+
 pub struct FsPushRequest {
     /// The CA id (hex) to point the label at — typically the `fs` value from a
     /// completed execution.
     pub ca_id: String,
     /// Label to advance. Omit only when `detach` is true.
-    #[serde(default)]
+    
     pub label: Option<String>,
     /// The head the caller pulled. The push is rejected if the label has moved
     /// since (reject-and-rebase). Ignored when `force` is true.
-    #[serde(default)]
+    
     pub expected: Option<String>,
     /// Override the conflict check and move the label unconditionally.
-    #[serde(default)]
+    
     pub force: bool,
     /// Do not touch any label; just echo the CA id back.
-    #[serde(default)]
+    
     pub detach: bool,
     /// Optional human note recorded on the reflog entry, like a commit message.
-    #[serde(default)]
+    
     pub message: Option<String>,
 }
 
 /// Request body for `POST /api/fs/labels` (create or repoint a label).
-#[derive(Deserialize, ToSchema)]
+
 pub struct FsLabelRequest {
     pub name: String,
     pub ca_id: String,
     /// Optional human note recorded on the reflog entry, like a commit message.
-    #[serde(default)]
+    
     pub message: Option<String>,
 }
 
 /// Request body for `POST /api/fs/reset`.
-#[derive(Deserialize, ToSchema)]
+
 pub struct FsResetRequest {
     pub label: String,
     pub ca_id: String,
     /// Allow resetting to a CA id that is not in the label's reflog.
-    #[serde(default)]
+    
     pub allow_unlogged: bool,
     /// Optional human note recorded on the reflog entry, like a commit message.
-    #[serde(default)]
+    
     pub message: Option<String>,
 }
 
 /// List filesystem snapshot labels.
-#[utoipa::path(
-    get,
-    path = "/api/fs/labels",
-    responses((status = 200, description = "Labels and their head CA ids")),
-    tag = "fs"
-)]
+"/api/fs/labels""Labels and their head CA ids""fs"
 async fn fs_labels_handler(
     State(engine): State<Engine>,
 ) -> (StatusCode, Json<serde_json::Value>) {
@@ -745,13 +605,7 @@ async fn fs_labels_handler(
 }
 
 /// Create or repoint a filesystem snapshot label.
-#[utoipa::path(
-    post,
-    path = "/api/fs/labels",
-    request_body = FsLabelRequest,
-    responses((status = 200, description = "Label set")),
-    tag = "fs"
-)]
+"/api/fs/labels""Label set""fs"
 async fn fs_set_label_handler(
     State(engine): State<Engine>,
     Json(req): Json<FsLabelRequest>,
@@ -766,16 +620,7 @@ async fn fs_set_label_handler(
 }
 
 /// Resolve a label to its current head CA id.
-#[utoipa::path(
-    get,
-    path = "/api/fs/labels/{label}",
-    params(("label" = String, Path, description = "Label name")),
-    responses(
-        (status = 200, description = "Current head CA id"),
-        (status = 404, description = "Unknown label"),
-    ),
-    tag = "fs"
-)]
+"/api/fs/labels/{label}""label""Label name""Current head CA id""Unknown label""fs"
 async fn fs_resolve_handler(
     State(engine): State<Engine>,
     Path(label): Path<String>,
@@ -794,16 +639,7 @@ async fn fs_resolve_handler(
 }
 
 /// Show the reflog for a label.
-#[utoipa::path(
-    get,
-    path = "/api/fs/labels/{label}/log",
-    params(
-        ("label" = String, Path, description = "Label name"),
-        FsLogQuery,
-    ),
-    responses((status = 200, description = "Reflog entries, oldest first")),
-    tag = "fs"
-)]
+"/api/fs/labels/{label}/log""label""Label name""Reflog entries, oldest first""fs"
 async fn fs_log_handler(
     State(engine): State<Engine>,
     Path(label): Path<String>,
@@ -819,16 +655,7 @@ async fn fs_log_handler(
 }
 
 /// Advance a label to a CA id (reject-and-rebase by default).
-#[utoipa::path(
-    post,
-    path = "/api/fs/push",
-    request_body = FsPushRequest,
-    responses(
-        (status = 200, description = "Push advanced the label"),
-        (status = 409, description = "Rejected — the label moved since the caller pulled"),
-    ),
-    tag = "fs"
-)]
+"/api/fs/push""Push advanced the label""Rejected — the label moved since the caller pulled""fs"
 async fn fs_push_handler(
     State(engine): State<Engine>,
     Json(req): Json<FsPushRequest>,
@@ -857,16 +684,7 @@ async fn fs_push_handler(
 }
 
 /// Reset a label to an earlier CA id from its reflog.
-#[utoipa::path(
-    post,
-    path = "/api/fs/reset",
-    request_body = FsResetRequest,
-    responses(
-        (status = 200, description = "Label reset"),
-        (status = 400, description = "CA id not in reflog (and allow_unlogged not set)"),
-    ),
-    tag = "fs"
-)]
+"/api/fs/reset""Label reset""CA id not in reflog (and allow_unlogged not set)""fs"
 async fn fs_reset_handler(
     State(engine): State<Engine>,
     Json(req): Json<FsResetRequest>,
@@ -881,31 +699,22 @@ async fn fs_reset_handler(
 }
 
 /// Request body for `POST /api/fs/merge`.
-#[derive(Deserialize, ToSchema)]
+
 pub struct FsMergeRequest {
     /// One side of the merge (CA id, e.g. an execution's `fs` result).
     pub ours: String,
     /// The other side (CA id).
     pub theirs: String,
     /// The common ancestor both sides diverged from. Omit for a 2-way merge.
-    #[serde(default)]
+    
     pub base: Option<String>,
     /// `ours` or `theirs` to auto-resolve conflicts; omit to report them.
-    #[serde(default)]
+    
     pub prefer: Option<String>,
 }
 
 /// Three-way merge two snapshots into a new one.
-#[utoipa::path(
-    post,
-    path = "/api/fs/merge",
-    request_body = FsMergeRequest,
-    responses(
-        (status = 200, description = "Merge ran — body has status=merged (ca_id) or status=conflict. Text files auto-merge at line level; each conflict carries kind plus, for text, diff3 markers and unified diffs."),
-        (status = 400, description = "Invalid CA id or prefer value"),
-    ),
-    tag = "fs"
-)]
+"/api/fs/merge""Merge ran — body has status=merged (ca_id) or status=conflict. Text files auto-merge at line level; each conflict carries kind plus, for text, diff3 markers and unified diffs.""Invalid CA id or prefer value""fs"
 async fn fs_merge_handler(
     State(engine): State<Engine>,
     Json(req): Json<FsMergeRequest>,
@@ -915,14 +724,11 @@ async fn fs_merge_handler(
         Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))),
     };
     match engine.fs_merge(&req.ours, &req.theirs, req.base, prefer).await {
-        // Both clean merges and conflicts are successful outcomes carrying a
-        // `status`-tagged body the caller acts on; only bad input is an error.
-        Ok(result) => (StatusCode::OK, Json(serde_json::to_value(&result).unwrap_or_default())),
+                        Ok(result) => (StatusCode::OK, Json(serde_json::to_value(&result).unwrap_or_default())),
         Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))),
     }
 }
 
-// ── Router builders ──────────────────────────────────────────────────────
 
 /// Build the plain Axum router (no OpenAPI metadata attached).
 ///

@@ -1,10 +1,3 @@
-#!/usr/bin/env bash
-# run-local.sh — Run a load test benchmark locally.
-#
-# Usage:
-#   ./loadtest/run-local.sh                           # cluster-stateful, 1000 req/s, 60s
-#   ./loadtest/run-local.sh single stateless           # single-stateless
-#   ./loadtest/run-local.sh cluster stateful 5000 30s  # cluster-stateful, 5000 req/s, 30s
 set -euo pipefail
 
 TOPOLOGY="${1:-cluster}"
@@ -34,7 +27,6 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# ── Preflight ──────────────────────────────────────────────────────────
 if ! command -v k6 &>/dev/null; then
   echo "Error: k6 is not installed. Install with: brew install k6" >&2
   exit 1
@@ -45,7 +37,6 @@ if [ ! -x "$BINARY" ]; then
   (cd "$PROJECT_DIR" && nix develop --command bash -c "cargo build --release -p server")
 fi
 
-# ── Data dirs ──────────────────────────────────────────────────────────
 mkdir -p "${DATA_DIR}/node"{1,2,3}/{heaps,sessions}
 mkdir -p "${PROJECT_DIR}/results"
 
@@ -54,7 +45,6 @@ echo "  Benchmark: ${LABEL} @ ${RATE} req/s for ${DURATION}"
 echo "============================================================"
 echo ""
 
-# ── Start servers ──────────────────────────────────────────────────────
 if [ "$TOPOLOGY" = "single" ]; then
   if [ "$MODE" = "stateful" ]; then
     ARGS="--http-port=3001 --directory-path=${DATA_DIR}/node1/heaps --session-db-path=${DATA_DIR}/node1/sessions"
@@ -103,7 +93,6 @@ else
   TARGET_URLS="http://127.0.0.1:3001,http://127.0.0.1:3002,http://127.0.0.1:3003"
 fi
 
-# ── Health check ───────────────────────────────────────────────────────
 echo ""
 echo "Waiting for servers to be ready..."
 
@@ -138,7 +127,6 @@ if [ "$TOPOLOGY" = "cluster" ]; then
   done
 fi
 
-# ── Run k6 ─────────────────────────────────────────────────────────────
 echo ""
 k6 run \
   --out json="${PROJECT_DIR}/results/raw-${LABEL}-${RATE}.json" \
@@ -149,12 +137,10 @@ k6 run \
   "${SCRIPT_DIR}/k6-load-test.js" \
   || true
 
-# Move k6 handleSummary output
 if [ -f "results-${LABEL}-${RATE}rps.json" ]; then
   mv "results-${LABEL}-${RATE}rps.json" "${PROJECT_DIR}/results/"
 fi
 
-# ── Report ─────────────────────────────────────────────────────────────
 echo ""
 chmod +x "${SCRIPT_DIR}/generate-report.sh"
 "${SCRIPT_DIR}/generate-report.sh" "${PROJECT_DIR}/results" || true

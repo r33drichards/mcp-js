@@ -101,10 +101,8 @@ impl SessionVerifier {
 
         let alg = header.alg;
         let mut validation = Validation::new(alg);
-        // Keycloak client_credentials tokens may omit exp; be permissive.
-        validation.required_spec_claims = Default::default();
-        // Don't validate audience — Keycloak may not set aud for service accounts.
-        validation.validate_aud = false;
+                validation.required_spec_claims = Default::default();
+                validation.validate_aud = false;
 
         decode::<serde_json::Value>(token, &dk, &validation).is_ok()
     }

@@ -1,14 +1,5 @@
-#!/usr/bin/env bash
 set -euo pipefail
 
-# Build SQLite as a standalone WASM module for use with mcp-v8.
-#
-# Prerequisites:
-#   - Emscripten SDK (emsdk) installed and activated
-#     https://emscripten.org/docs/getting_started/downloads.html
-#
-# Output: sqlite3.wasm — a WASI-compatible WASM module that can be loaded
-#         with `mcp-v8 --wasm-module sqlite=sqlite3.wasm`
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BUILD_DIR="$SCRIPT_DIR/build"
@@ -19,7 +10,6 @@ SQLITE_URL="https://www.sqlite.org/${SQLITE_YEAR}/sqlite-amalgamation-${SQLITE_V
 mkdir -p "$BUILD_DIR"
 cd "$BUILD_DIR"
 
-# Download SQLite amalgamation if not already present
 if [ ! -f "sqlite3.c" ]; then
     echo "Downloading SQLite amalgamation..."
     curl -fSL "$SQLITE_URL" -o sqlite-amalgamation.zip

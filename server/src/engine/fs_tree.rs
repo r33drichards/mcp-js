@@ -37,11 +37,7 @@ pub fn tree_key(hash: &[u8; 32]) -> String {
 ///
 /// Both being set is legal and meaningful: the name is simultaneously a file and
 /// a directory prefix, exactly as a flat `BTreeMap<PathBuf, Entry>` permits.
-//
-// NOTE: fields are plain `Option`s with no `skip_serializing_if` — bincode is a
-// non-self-describing format and cannot skip fields, so a `None` must still emit
-// its one tag byte for deserialization to line up.
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug, Default)]
+
 pub struct TreeChild {
     /// A file living at this name.
     pub file: Option<Entry>,
@@ -57,7 +53,7 @@ impl TreeChild {
 
 /// A directory: its immediate children keyed by single path component. A
 /// `BTreeMap` keeps the encoding canonical so equal trees hash equal.
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug, Default)]
+
 pub struct TreeNode {
     pub children: BTreeMap<String, TreeChild>,
 }

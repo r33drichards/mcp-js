@@ -4,25 +4,24 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::cluster::ClusterNode;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+
 pub struct SessionLogEntry {
     pub input_heap: Option<String>,
     pub output_heap: String,
     /// Resulting filesystem snapshot CA id (hex), independent of the heap.
     /// `None` for executions that ran without a mount. Defaults for entries
     /// written before fs snapshots existed.
-    #[serde(default)]
+    
     pub output_fs: Option<String>,
     pub code: String,
-    pub timestamp: String, // ISO 8601 UTC
-}
+    pub timestamp: String, }
 
 /// Key prefixes used when storing session log data in the Raft-replicated
 /// data tree.
 const SL_SESSION_PREFIX: &str = "sl:s:";
 const SL_ENTRY_PREFIX: &str = "sl:e:";
 
-#[derive(Clone)]
+
 pub struct SessionLog {
     /// Local sled database – used in standalone (non-cluster) mode and as
     /// fallback if the cluster write fails.
@@ -55,10 +54,7 @@ impl SessionLog {
         self
     }
 
-    // --------------------------------------------------------------------
-    // Internal helpers for the cluster key scheme
-    // --------------------------------------------------------------------
-
+            
     fn make_session_key(session: &str) -> String {
         format!("{}{}", SL_SESSION_PREFIX, session)
     }
@@ -75,32 +71,24 @@ impl SessionLog {
         format!("{}{}:", SL_ENTRY_PREFIX, session)
     }
 
-    // --------------------------------------------------------------------
-    // Public API – all async to accommodate cluster round-trips.
-    // --------------------------------------------------------------------
-
+            
     /// Append a log entry to the given session. Returns the sequence number.
     pub async fn append(&self, session: &str, entry: SessionLogEntry) -> Result<u64, String> {
         if let Some(ref cluster) = self.cluster_node {
             let value = serde_json::to_string(&entry)
                 .map_err(|e| format!("Failed to serialize entry: {}", e))?;
 
-            // Register the session name (idempotent).
-            cluster
+                        cluster
                 .put_or_forward(Self::make_session_key(session), "1".to_string())
                 .await?;
 
-            // Store the entry itself.
-            let entry_key = Self::make_entry_key(session);
+                        let entry_key = Self::make_entry_key(session);
             cluster.put_or_forward(entry_key, value).await?;
 
-            // The sequence number is meaningless in cluster mode, but
-            // callers only use it for logging so return a placeholder.
-            return Ok(0);
+                                    return Ok(0);
         }
 
-        // Standalone mode – write directly to local sled.
-        let tree = self
+                let tree = self
             .db
             .open_tree(session)
             .map_err(|e| format!("Failed to open tree '{}': {}", session, e))?;
@@ -166,8 +154,7 @@ impl SessionLog {
             return Ok(results);
         }
 
-        // Standalone mode.
-        let tree = self
+                let tree = self
             .db
             .open_tree(session)
             .map_err(|e| format!("Failed to open tree '{}': {}", session, e))?;
@@ -233,10 +220,7 @@ impl SessionLog {
         Ok(())
     }
 
-    // --------------------------------------------------------------------
-    // Shared formatting helper
-    // --------------------------------------------------------------------
-
+            
     fn format_entry(
         index: u64,
         entry: &SessionLogEntry,

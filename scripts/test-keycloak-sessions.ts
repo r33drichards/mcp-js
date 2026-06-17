@@ -1,27 +1,27 @@
-#!/usr/bin/env -S deno run -A
-//
-// Test script for JWKS/OAuth secure sessions with Keycloak.
-//
-// Verifies:
-// 1. Token acquisition from Keycloak (JWT for auth only)
-// 2. Session isolation via X-MCP-Session-Id headers
-// 3. Invalid/forged tokens are rejected
-//
-// Prerequisites:
-//   docker compose -f docker-compose.secure-sessions.yml up --build -d
-//   Wait for Keycloak to be healthy (~30s)
-//
-// Usage:
-//   deno run -A scripts/test-keycloak-sessions.ts
-//
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 import { Client } from "npm:@modelcontextprotocol/sdk@1.12.1/client/index.js";
 import { StreamableHTTPClientTransport } from "npm:@modelcontextprotocol/sdk@1.12.1/client/streamableHttp.js";
 import { ClientCredentialsProvider } from "./oauth-client-credentials-provider.ts";
 
-// ---------------------------------------------------------------------------
-// Config
-// ---------------------------------------------------------------------------
+
+
+
 
 const KEYCLOAK_URL = Deno.env.get("KEYCLOAK_URL") ?? "http://localhost:8080";
 const MCP_URL = Deno.env.get("MCP_SERVER_URL") ?? "http://localhost:3000";
@@ -34,9 +34,9 @@ console.log(`Keycloak:   ${KEYCLOAK_URL}`);
 console.log(`MCP server: ${MCP_URL}`);
 console.log();
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+
+
+
 
 function decodeJwtPayload(token: string): Record<string, unknown> {
   const parts = token.split(".");
@@ -79,11 +79,11 @@ async function runCode(client: Client, code: string): Promise<string> {
   const content = result.content as Array<{ type: string; text?: string }>;
   const text = content.map((c) => c.text ?? JSON.stringify(c)).join("\n");
 
-  // Parse execution_id from result
+  
   try {
     const parsed = JSON.parse(text);
     if (parsed.execution_id && !parsed.execution_id.startsWith("error")) {
-      // Wait for completion and get output
+      
       await new Promise((r) => setTimeout(r, 500));
       const execResult = await client.callTool({
         name: "get_execution",
@@ -107,9 +107,9 @@ async function runCode(client: Client, code: string): Promise<string> {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Test runner
-// ---------------------------------------------------------------------------
+
+
+
 
 let passed = 0;
 let failed = 0;
@@ -124,9 +124,9 @@ function report(name: string, ok: boolean, detail?: string) {
   }
 }
 
-// ===========================================================================
-// Phase 1: Token acquisition and claim verification
-// ===========================================================================
+
+
+
 
 console.log("=".repeat(70));
 console.log("PHASE 1: Keycloak token acquisition");
@@ -155,9 +155,9 @@ report("token has azp claim", claims.azp === CLIENT_ID);
 report("session_id NOT in JWT (comes from X-MCP-Session-Id header instead)", claims.session_id === undefined);
 console.log();
 
-// ===========================================================================
-// Phase 2: Session isolation via MCP
-// ===========================================================================
+
+
+
 
 console.log("=".repeat(70));
 console.log("PHASE 2: Session isolation");
@@ -167,13 +167,13 @@ console.log();
 const { client: clientA } = await createMcpClient("session-alpha");
 const { client: clientB } = await createMcpClient("session-beta");
 
-// Session A: store a value
+
 console.log("--- Session A: store globalThis.secret = 42 ---");
 const resultA1 = await runCode(clientA, "globalThis.secret = 42; console.log('stored');");
 console.log(`  Result: ${resultA1.slice(0, 200)}`);
 report("session A store succeeds", resultA1.includes("stored") || !resultA1.includes("error"));
 
-// Get session A's latest heap for chaining
+
 const snapsA = await clientA.callTool({
   name: "list_session_snapshots",
   arguments: {},
@@ -185,34 +185,34 @@ try {
   if (snapsAData.entries?.length > 0) {
     heapA = snapsAData.entries[snapsAData.entries.length - 1].output_heap;
   }
-} catch { /* ignore */ }
+} catch {  }
 
-// Session A: read it back
+
 if (heapA) {
   console.log(`--- Session A: read secret via heap ${heapA.slice(0, 12)}... ---`);
   const resultA2 = await runCode(clientA, `console.log("secret=" + globalThis.secret);`);
-  // Note: without chaining the heap, the value won't persist in a new isolate
-  // But in secure session mode, consecutive run_js calls within the same session
-  // should share the session's heap chain
+  
+  
+  
 }
 
-// Session B: should NOT see the variable (different session)
+
 console.log("--- Session B: check isolation ---");
 const resultB = await runCode(clientB, "console.log('type=' + typeof globalThis.secret);");
 console.log(`  Result: ${resultB.slice(0, 200)}`);
 report("session B isolation (secret not visible)", resultB.includes("undefined") || !resultB.includes("secret=42"));
 console.log();
 
-// ===========================================================================
-// Phase 3: Invalid token rejection
-// ===========================================================================
+
+
+
 
 console.log("=".repeat(70));
 console.log("PHASE 3: Invalid token rejection");
 console.log("=".repeat(70));
 console.log();
 
-// Try connecting with a forged token (use static headers, no provider)
+
 console.log("--- Forged token ---");
 try {
   const forgedToken = tokens.access_token.slice(0, -5) + "XXXXX";
@@ -223,16 +223,16 @@ try {
   const clientForged = new Client({ name: "test-forged", version: "1.0.0" });
   await clientForged.connect(forgedTransport);
   const forgedResult = await runCode(clientForged, "console.log('should not run');");
-  // If we get here, the connection succeeded but run_js should fail (no valid session)
+  
   report("forged token rejected", forgedResult.includes("error") || forgedResult.includes("no valid"));
   await clientForged.close();
 } catch (e) {
-  // Connection itself may fail
+  
   report("forged token rejected", true);
   console.log(`  (rejected at connection level: ${(e as Error).message.slice(0, 100)})`);
 }
 
-// Try connecting with no token
+
 console.log("--- No token ---");
 try {
   const transport = new StreamableHTTPClientTransport(
@@ -250,9 +250,9 @@ try {
 
 console.log();
 
-// ===========================================================================
-// Summary
-// ===========================================================================
+
+
+
 
 console.log("=".repeat(70));
 console.log(`RESULTS: ${passed} passed, ${failed} failed`);

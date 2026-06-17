@@ -1,13 +1,13 @@
-# Patched version of nixpkgs' replace-workspace-values.py
-# Adds handling for the 'version' key in workspace-inherited dependencies.
-# Upstream bug: the script handles features, default-features, optional, and
-# package but not version, causing builds to fail for crates like rmcp that
-# specify version alongside workspace = true.
-#
-# This script implements the workspace inheritance mechanism described
-# here: https://doc.rust-lang.org/cargo/reference/workspaces.html#the-package-table
-#
-# Please run `mypy --strict`, `black`, and `isort --profile black` on this after editing, thanks!
+
+
+
+
+
+
+
+
+
+
 
 import sys
 from typing import Any
@@ -21,9 +21,9 @@ def load_file(path: str) -> dict[str, Any]:
         return tomli.load(f)
 
 
-# This replicates the dependency merging logic from Cargo.
-# See `inner_dependency_inherit_with`:
-# https://github.com/rust-lang/cargo/blob/4de0094ac78743d2c8ff682489e35c8a7cafe8e4/src/cargo/util/toml/mod.rs#L982
+
+
+
 def replace_key(
     workspace_manifest: dict[str, Any], table: dict[str, Any], section: str, key: str
 ) -> bool:
@@ -62,8 +62,8 @@ def replace_key(
             if "package" in local_dep:
                 final["package"] = local_dep.pop("package")
 
-            # Drop local 'version' — Cargo does not allow overriding version
-            # when inheriting from the workspace; the workspace value is used.
+            
+            
             local_dep.pop("version", None)
 
             if local_dep:
@@ -95,8 +95,8 @@ def main() -> None:
     top_cargo_toml = load_file(sys.argv[2])
 
     if "workspace" not in top_cargo_toml:
-        # If top_cargo_toml is not a workspace manifest, then this script was probably
-        # ran on something that does not actually use workspace dependencies
+        
+        
         print(f"{sys.argv[2]} is not a workspace manifest, doing nothing.")
         return
 

@@ -1,16 +1,3 @@
-#!/usr/bin/env bash
-# Integration test for docker-compose.yml (mcp-js + OPA)
-#
-# Asserts:
-#   1. JavaScript execution works
-#   2. fetch() to an allowed domain succeeds
-#   3. fetch() to a blocked domain is denied by OPA policy
-#   4. Heap snapshots are created and can be restored
-#
-# Usage:
-#   ./tests/docker-compose-integration.sh
-#
-# Prerequisites: docker compose, curl, jq
 
 set -euo pipefail
 
@@ -19,7 +6,6 @@ BASE_URL="http://localhost:3000"
 PASSED=0
 FAILED=0
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
 
 cleanup() {
   echo ""
@@ -66,8 +52,6 @@ wait_for_ready() {
   exit 1
 }
 
-# Submit code for execution and poll until completed/failed.
-# Returns the final execution JSON on stdout.
 run_js() {
   local code="$1"
   local extra_fields="${2:-}"
@@ -80,8 +64,7 @@ run_js() {
     payload="{\"code\": $(echo "$code" | jq -Rs .)}"
   fi
 
-  # Submit
-  local submit_resp
+    local submit_resp
   submit_resp=$(curl -sf -X POST "$BASE_URL/api/exec" \
     -H "Content-Type: application/json" \
     -d "$payload")
@@ -90,13 +73,11 @@ run_js() {
   exec_id=$(echo "$submit_resp" | jq -r '.execution_id // empty')
 
   if [ -z "$exec_id" ]; then
-    # Submission itself failed (HTTP 500)
-    echo "$submit_resp"
+        echo "$submit_resp"
     return 0
   fi
 
-  # Poll until terminal state
-  local elapsed=0
+    local elapsed=0
   while [ $elapsed -lt $timeout_secs ]; do
     sleep 1
     elapsed=$((elapsed + 1))
@@ -118,8 +99,6 @@ run_js() {
   echo '{"status":"poll_timeout","error":"Polling timed out after '"$timeout_secs"'s"}'
 }
 
-# Submit code that is expected to fail at submission time (HTTP 500).
-# Returns the HTTP status code and response body.
 exec_js_raw() {
   local payload="$1"
   local http_code
@@ -131,14 +110,12 @@ exec_js_raw() {
   echo "$http_code|$body"
 }
 
-# ── Start services ───────────────────────────────────────────────────────────
 
 echo "==> Starting docker-compose services..."
 docker compose -f "$COMPOSE_FILE" up -d
 
 wait_for_ready "$BASE_URL"
 
-# ── Test 1: Basic JavaScript execution ───────────────────────────────────────
 
 echo ""
 echo "==> Test 1: Basic JavaScript execution"
@@ -156,15 +133,13 @@ else
   fail "Expected status=completed, got status=$STATUS (full: $RESULT)"
 fi
 
-# ── Test 2: fetch() to allowed domain succeeds ──────────────────────────────
 
 echo ""
 echo "==> Test 2: fetch() to allowed domain (registry.npmjs.org)"
 RESULT=$(run_js 'const r = await fetch("https://registry.npmjs.org/"); console.log(r.ok);' '' 30)
 STATUS=$(echo "$RESULT" | jq -r '.status // empty')
 if [ "$STATUS" = "completed" ]; then
-  # Check console output for "true"
-  EXEC_ID=$(echo "$RESULT" | jq -r '.execution_id // empty')
+    EXEC_ID=$(echo "$RESULT" | jq -r '.execution_id // empty')
   CONSOLE_OUTPUT=$(curl -sf "$BASE_URL/api/executions/$EXEC_ID/output" 2>/dev/null | jq -r '.data // empty' 2>/dev/null || echo "")
   if echo "$CONSOLE_OUTPUT" | grep -q "true"; then
     pass "fetch() to allowed domain returned ok=true"
@@ -176,7 +151,6 @@ else
   fail "Expected completed, got status=$STATUS error=$ERROR"
 fi
 
-# ── Test 3: fetch() to blocked domain is denied by OPA ──────────────────────
 
 echo ""
 echo "==> Test 3: fetch() to blocked domain (evil.example.com)"
@@ -189,12 +163,10 @@ else
   fail "Expected failed with policy denial, got status=$STATUS error=$ERROR (full: $RESULT)"
 fi
 
-# ── Test 4: Heap snapshot created and restorable ─────────────────────────────
 
 echo ""
 echo "==> Test 4: Heap snapshot persistence"
 
-# 4a: Execute code that sets state on globalThis, capture the heap hash
 RESULT=$(run_js 'globalThis.counter = 42;')
 STATUS=$(echo "$RESULT" | jq -r '.status // empty')
 HEAP=$(echo "$RESULT" | jq -r '.heap // empty')
@@ -203,8 +175,7 @@ if [ "$STATUS" != "completed" ] || [ -z "$HEAP" ] || [ "$HEAP" = "null" ]; then
 else
   pass "Heap hash returned: ${HEAP:0:16}..."
 
-  # 4b: Restore the heap and read the persisted state via console output
-  RESULT2=$(run_js 'console.log(globalThis.counter);' "\"heap\": \"$HEAP\"")
+    RESULT2=$(run_js 'console.log(globalThis.counter);' "\"heap\": \"$HEAP\"")
   STATUS2=$(echo "$RESULT2" | jq -r '.status // empty')
   EXEC_ID2=$(echo "$RESULT2" | jq -r '.execution_id // empty')
   if [ "$STATUS2" = "completed" ]; then
@@ -219,7 +190,6 @@ else
   fi
 fi
 
-# ── Summary ──────────────────────────────────────────────────────────────────
 
 echo ""
 echo "=============================="

@@ -1,4 +1,4 @@
-#!/usr/bin/env -S deno run -A
+
 
 const KEYCLOAK_URL = getEnv("KEYCLOAK_URL", "http://localhost:8080");
 const MCP_URL = getEnv("MCP_SERVER_URL", "http://localhost:3000");

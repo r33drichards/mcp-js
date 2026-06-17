@@ -60,7 +60,7 @@ async fn read_file(store: &FsStore, ca: &str, path: &str) -> Vec<u8> {
         .unwrap()
 }
 
-#[tokio::test]
+
 async fn three_way_merge_combines_non_overlapping_changes() {
     let h = harness();
     let base = snap(&h.store, &[("a", b"a0"), ("b", b"b0")]).await;
@@ -80,7 +80,7 @@ async fn three_way_merge_combines_non_overlapping_changes() {
     assert_eq!(read_file(&h.store, &merged, "b").await, b"b1");
 }
 
-#[tokio::test]
+
 async fn divergent_path_reports_structured_conflict() {
     let h = harness();
     let base = snap(&h.store, &[("a", b"a0")]).await;
@@ -97,15 +97,14 @@ async fn divergent_path_reports_structured_conflict() {
             assert_eq!(conflicts.len(), 1);
             let c = &conflicts[0];
             assert_eq!(c.path, "a");
-            // All three sides present, ours != theirs.
-            assert!(c.base.is_some() && c.ours.is_some() && c.theirs.is_some());
+                        assert!(c.base.is_some() && c.ours.is_some() && c.theirs.is_some());
             assert_ne!(c.ours, c.theirs);
         }
         other => panic!("expected conflict, got {other:?}"),
     }
 }
 
-#[tokio::test]
+
 async fn prefer_ours_resolves_conflict_into_a_snapshot() {
     let h = harness();
     let base = snap(&h.store, &[("a", b"a0")]).await;
@@ -124,7 +123,7 @@ async fn prefer_ours_resolves_conflict_into_a_snapshot() {
     assert_eq!(read_file(&h.store, &merged, "a").await, b"mine");
 }
 
-#[tokio::test]
+
 async fn clean_merge_is_deterministic_and_dedups() {
     let h = harness();
     let base = snap(&h.store, &[("a", b"a0"), ("b", b"b0")]).await;
@@ -139,16 +138,14 @@ async fn clean_merge_is_deterministic_and_dedups() {
     assert_eq!(a, b, "same inputs must yield the same merged CA id");
 }
 
-#[tokio::test]
+
 async fn text_edits_to_different_lines_auto_merge_through_engine() {
     let h = harness();
     let base = snap(&h.store, &[("notes.txt", b"alpha\nbeta\ngamma\n")]).await;
     let ours = snap(&h.store, &[("notes.txt", b"ALPHA\nbeta\ngamma\n")]).await;
     let theirs = snap(&h.store, &[("notes.txt", b"alpha\nbeta\nGAMMA\n")]).await;
 
-    // Same path changed on both sides, but on different lines -> line-level
-    // 3-way resolves it with no conflict.
-    let merged = match h
+            let merged = match h
         .engine
         .fs_merge(&ours, &theirs, Some(base), Prefer::None)
         .await
@@ -163,7 +160,7 @@ async fn text_edits_to_different_lines_auto_merge_through_engine() {
     );
 }
 
-#[tokio::test]
+
 async fn text_same_line_conflict_reports_kind_and_markers() {
     let h = harness();
     let base = snap(&h.store, &[("notes.txt", b"alpha\nbeta\ngamma\n")]).await;
@@ -189,14 +186,13 @@ async fn text_same_line_conflict_reports_kind_and_markers() {
     }
 }
 
-#[tokio::test]
+
 async fn two_way_merge_without_base_conflicts_on_divergence() {
     let h = harness();
     let ours = snap(&h.store, &[("a", b"a1"), ("x", b"x")]).await;
     let theirs = snap(&h.store, &[("a", b"a2"), ("y", b"y")]).await;
 
-    // No base: divergent 'a' conflicts.
-    match h.engine.fs_merge(&ours, &theirs, None, Prefer::None).await.unwrap() {
+        match h.engine.fs_merge(&ours, &theirs, None, Prefer::None).await.unwrap() {
         FsMergeResult::Conflict { conflicts } => {
             assert_eq!(conflicts.len(), 1);
             assert_eq!(conflicts[0].path, "a");
@@ -204,8 +200,7 @@ async fn two_way_merge_without_base_conflicts_on_divergence() {
         }
         other => panic!("expected conflict, got {other:?}"),
     }
-    // prefer=theirs keeps both disjoint additions plus theirs' 'a'.
-    let merged = match h.engine.fs_merge(&ours, &theirs, None, Prefer::Theirs).await.unwrap() {
+        let merged = match h.engine.fs_merge(&ours, &theirs, None, Prefer::Theirs).await.unwrap() {
         FsMergeResult::Merged { ca_id } => ca_id,
         other => panic!("expected merge, got {other:?}"),
     };

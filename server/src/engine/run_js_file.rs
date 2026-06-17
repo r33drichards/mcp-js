@@ -21,7 +21,7 @@ use serde::Serialize;
 use super::opa::PolicyChain;
 
 /// How `run_js` file-path reads are authorized.
-#[derive(Clone, Debug)]
+
 pub enum RunJsFilePolicy {
     /// Allow reading any path the server process can access
     /// (`--allow-run-js-file`).
@@ -32,14 +32,14 @@ pub enum RunJsFilePolicy {
 }
 
 /// Input handed to a `run_js_file` policy for each read.
-#[derive(Serialize)]
+
 struct RunJsFilePolicyInput<'a> {
     /// Always `"read"` — the only operation on a script file.
     operation: &'a str,
     /// Canonicalized (symlink- and `..`-resolved) absolute path.
     path: &'a str,
     /// `X-MCP-*` headers from the MCP session, when available.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    "Option::is_none"
     mcp_headers: Option<&'a serde_json::Value>,
 }
 
@@ -54,10 +54,7 @@ impl RunJsFilePolicy {
         path: &str,
         mcp_headers: Option<&serde_json::Value>,
     ) -> Result<String, String> {
-        // Canonicalize first so policies (and our own checks) see the real,
-        // symlink-resolved path rather than caller-controlled `..` segments.
-        // This also surfaces a clear not-found error before policy evaluation.
-        let canonical = tokio::fs::canonicalize(path)
+                                let canonical = tokio::fs::canonicalize(path)
             .await
             .map_err(|e| format!("run_js file '{}': {}", path, e))?;
         let canonical_str = canonical.to_string_lossy().into_owned();
@@ -88,12 +85,12 @@ impl RunJsFilePolicy {
     }
 }
 
-#[cfg(test)]
+
 mod tests {
     use super::*;
     use crate::engine::opa::{EvalMode, LocalPolicyEvaluator, PolicyChain, PolicyEvaluatorKind};
 
-    #[tokio::test]
+    
     async fn test_allow_all_reads_any_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("script.js");
@@ -107,7 +104,7 @@ mod tests {
         assert_eq!(code, "console.log(1 + 1);\n");
     }
 
-    #[tokio::test]
+    
     async fn test_missing_file_errors() {
         let policy = RunJsFilePolicy::AllowAll;
         let err = policy
@@ -118,8 +115,7 @@ mod tests {
     }
 
     fn rego_allow_under_dir(dir: &str) -> String {
-        // Allow only paths beginning with `dir`.
-        format!(
+                format!(
             r#"
 package mcp.run_js_file
 
@@ -145,7 +141,7 @@ allow if {{
         ))
     }
 
-    #[tokio::test]
+    
     async fn test_policy_allows_path_in_directory() {
         let dir = tempfile::tempdir().unwrap();
         let allowed_dir = dir.path().join("allowed");
@@ -153,9 +149,7 @@ allow if {{
         let script = allowed_dir.join("ok.js");
         std::fs::write(&script, "console.log('ok');\n").unwrap();
 
-        // Canonicalize the directory for the rule so it matches the
-        // canonicalized path the policy receives.
-        let canonical_allowed = std::fs::canonicalize(&allowed_dir).unwrap();
+                        let canonical_allowed = std::fs::canonicalize(&allowed_dir).unwrap();
         let chain = chain_from_rego(
             dir.path(),
             &rego_allow_under_dir(&canonical_allowed.to_string_lossy()),
@@ -169,7 +163,7 @@ allow if {{
         assert_eq!(code, "console.log('ok');\n");
     }
 
-    #[tokio::test]
+    
     async fn test_policy_denies_path_outside_directory() {
         let dir = tempfile::tempdir().unwrap();
         let allowed_dir = dir.path().join("allowed");

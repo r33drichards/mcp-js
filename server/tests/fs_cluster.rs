@@ -61,7 +61,7 @@ async fn wait_for_leader(nodes: &[Arc<ClusterNode>], timeout: Duration) -> Optio
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+"multi_thread"
 async fn two_followers_race_a_push_exactly_one_wins() {
     let ports = [19540u16, 19541, 19542];
     let mut nodes: Vec<Arc<ClusterNode>> = Vec::new();
@@ -74,8 +74,7 @@ async fn two_followers_race_a_push_exactly_one_wins() {
         .await
         .expect("no leader elected");
 
-    // A LabelStore per node, each coordinating through its cluster node.
-    let stores: Vec<LabelStore> = nodes
+        let stores: Vec<LabelStore> = nodes
         .iter()
         .map(|n| LabelStore::in_memory().with_cluster(n.clone()))
         .collect();
@@ -84,8 +83,7 @@ async fn two_followers_race_a_push_exactly_one_wins() {
     let c1 = [1u8; 32];
     let c2 = [2u8; 32];
 
-    // Create the label at c0 through the leader; wait for both followers to see it.
-    stores[leader].create("main", c0, None).await.expect("create main");
+        stores[leader].create("main", c0, None).await.expect("create main");
     let f1 = (leader + 1) % 3;
     let f2 = (leader + 2) % 3;
     for f in [f1, f2] {
@@ -99,8 +97,7 @@ async fn two_followers_race_a_push_exactly_one_wins() {
         }
     }
 
-    // Both followers race a CAS from the same expected head c0.
-    let s1 = stores[f1].clone();
+        let s1 = stores[f1].clone();
     let s2 = stores[f2].clone();
     let (r1, r2) = tokio::join!(
         async move { s1.cas("main", Some(c0), c1, None).await },
@@ -109,12 +106,9 @@ async fn two_followers_race_a_push_exactly_one_wins() {
     let r1 = r1.expect("cas 1 ok");
     let r2 = r2.expect("cas 2 ok");
 
-    // Exactly one CAS wins.
-    assert!(r1 ^ r2, "exactly one CAS must win (r1={r1}, r2={r2})");
+        assert!(r1 ^ r2, "exactly one CAS must win (r1={r1}, r2={r2})");
 
-    // The committed head is the winner's value, and a fresh resolve on the
-    // loser's node now reflects it (reject-and-rebase: re-pull then retry).
-    let winner = if r1 { c1 } else { c2 };
+            let winner = if r1 { c1 } else { c2 };
     let loser_store = if r1 { &stores[f2] } else { &stores[f1] };
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
@@ -128,8 +122,7 @@ async fn two_followers_race_a_push_exactly_one_wins() {
         sleep(Duration::from_millis(100)).await;
     }
 
-    // The loser's stale-expected retry is rejected; rebasing onto the winner works.
-    let loser_new = if r1 { c2 } else { c1 };
+        let loser_new = if r1 { c2 } else { c1 };
     assert!(
         !loser_store.cas("main", Some(c0), loser_new, None).await.unwrap(),
         "stale-expected CAS must be rejected"
@@ -148,7 +141,7 @@ async fn two_followers_race_a_push_exactly_one_wins() {
 /// replicates the head pointer AND its reflog entry in one Raft entry, so a
 /// follower that observes the moved head also observes the full reflog — the
 /// head is never replicated ahead of the reflog that records it.
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+"multi_thread"
 async fn head_and_reflog_commit_together_across_nodes() {
     let ports = [19543u16, 19544, 19545];
     let mut nodes: Vec<Arc<ClusterNode>> = Vec::new();
@@ -168,16 +161,13 @@ async fn head_and_reflog_commit_together_across_nodes() {
     let c0 = [0u8; 32];
     let c1 = [1u8; 32];
 
-    // Two moves through the leader, each carrying a message on its reflog entry.
-    stores[leader].create("main", c0, Some("genesis".into())).await.unwrap();
+        stores[leader].create("main", c0, Some("genesis".into())).await.unwrap();
     assert!(stores[leader]
         .cas("main", Some(c0), c1, Some("advance".into()))
         .await
         .unwrap());
 
-    // On a follower, the moment the head reaches c1 the reflog must already hold
-    // both moves with their messages — never a head without its reflog entry.
-    let follower = (leader + 1) % 3;
+            let follower = (leader + 1) % 3;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
         if stores[follower].resolve("main").await.ok().flatten() == Some(c1) {

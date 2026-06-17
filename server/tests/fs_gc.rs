@@ -20,7 +20,7 @@ async fn manifest_exists(store: &FsStore, id: &[u8; 32]) -> bool {
     store.blobs().get(&tree_key(id)).await.is_ok()
 }
 
-#[tokio::test]
+
 async fn gc_keeps_reachable_and_sweeps_unreferenced() {
     let store = FsStore::in_memory();
     let labels = LabelStore::in_memory();
@@ -40,7 +40,7 @@ async fn gc_keeps_reachable_and_sweeps_unreferenced() {
     );
 }
 
-#[tokio::test]
+
 async fn reset_then_gc_does_not_collect_rolled_past_snapshot() {
     let store = FsStore::in_memory();
     let labels = LabelStore::in_memory();
@@ -48,11 +48,8 @@ async fn reset_then_gc_does_not_collect_rolled_past_snapshot() {
     let v1 = snapshot(&store, &[("f", b"v1")]).await;
     let v2 = snapshot(&store, &[("f", b"v2")]).await;
     labels.create("main", v1, None).await.unwrap();
-    labels.cas("main", Some(v1), v2, None).await.unwrap(); // advance to v2
-    labels.force("main", v1, None).await.unwrap(); // reset back to v1
-
-    // KeepAll: v2 is still in the reflog, so it must survive GC (roll-forward).
-    let stats = collect(&store, &labels, ReflogRetention::KeepAll)
+    labels.cas("main", Some(v1), v2, None).await.unwrap();     labels.force("main", v1, None).await.unwrap(); 
+        let stats = collect(&store, &labels, ReflogRetention::KeepAll)
         .await
         .unwrap();
     assert!(
@@ -62,9 +59,7 @@ async fn reset_then_gc_does_not_collect_rolled_past_snapshot() {
     assert!(manifest_exists(&store, &v1).await, "current head kept");
     assert_eq!(stats.deleted, 0);
 
-    // Once the reflog no longer roots v2 (retention pruned it), it becomes
-    // collectable — only the head (v1, the last entry) is retained.
-    collect(&store, &labels, ReflogRetention::KeepLast(1))
+            collect(&store, &labels, ReflogRetention::KeepLast(1))
         .await
         .unwrap();
     assert!(
@@ -74,13 +69,12 @@ async fn reset_then_gc_does_not_collect_rolled_past_snapshot() {
     assert!(manifest_exists(&store, &v1).await, "head still reachable");
 }
 
-#[tokio::test]
+
 async fn gc_preserves_shared_chunks_across_snapshots() {
     let store = FsStore::in_memory();
     let labels = LabelStore::in_memory();
 
-    // A large (chunked) file shared between two snapshots.
-    let big: Vec<u8> = {
+        let big: Vec<u8> = {
         let mut s = 0x1234u64 | 1;
         (0..(2 * 1024 * 1024))
             .map(|_| {
@@ -100,8 +94,7 @@ async fn gc_preserves_shared_chunks_across_snapshots() {
         .await
         .unwrap();
 
-    // Both snapshots are rooted; the shared chunks must remain readable.
-    let m = SessionMount::pull(store.clone(), blake3::Hash::from_bytes(shared))
+        let m = SessionMount::pull(store.clone(), blake3::Hash::from_bytes(shared))
         .await
         .unwrap();
     assert_eq!(m.read("big.bin".as_ref()).await.unwrap(), big);

@@ -1,15 +1,6 @@
-/*
- * Minimal in-memory VFS for SQLite WASM builds using SQLITE_OS_OTHER=1.
- *
- * Provides sqlite3_os_init() / sqlite3_os_end() which register a bare-minimum
- * VFS that supports :memory: databases and temporary files stored in memory.
- * No real filesystem access is performed.
- */
-#include "sqlite3.h"
-#include <string.h>
-#include <stdlib.h>
 
-/* ── In-memory file ────────────────────────────────────────────────── */
+   
+
 
 typedef struct MemFile {
     sqlite3_file base;
@@ -51,7 +42,7 @@ static int memWrite(sqlite3_file *pFile, const void *zBuf, int iAmt, sqlite3_int
         while (newCap < needed) newCap *= 2;
         char *newBuf = (char *)realloc(p->buf, newCap);
         if (!newBuf) return SQLITE_NOMEM;
-        /* Zero the gap between old size and the write offset */
+        
         if ((int)iOfst > p->sz) {
             memset(newBuf + p->sz, 0, (int)iOfst - p->sz);
         }
@@ -87,7 +78,7 @@ static int memSectorSize(sqlite3_file *f) { (void)f; return 512; }
 static int memDeviceCharacteristics(sqlite3_file *f) { (void)f; return 0; }
 
 static const sqlite3_io_methods memIoMethods = {
-    1,                          /* iVersion */
+    1,                          
     memClose,
     memRead,
     memWrite,
@@ -102,7 +93,7 @@ static const sqlite3_io_methods memIoMethods = {
     memDeviceCharacteristics,
 };
 
-/* ── VFS methods ───────────────────────────────────────────────────── */
+
 
 static int memVfsOpen(sqlite3_vfs *pVfs, const char *zName,
                       sqlite3_file *pFile, int flags, int *pOutFlags) {
@@ -121,7 +112,7 @@ static int memVfsDelete(sqlite3_vfs *v, const char *n, int s) {
 
 static int memVfsAccess(sqlite3_vfs *v, const char *zName, int flags, int *pResOut) {
     (void)v; (void)zName; (void)flags;
-    *pResOut = 0;  /* file does not exist */
+    *pResOut = 0;  
     return SQLITE_OK;
 }
 
@@ -147,7 +138,7 @@ static int memVfsSleep(sqlite3_vfs *v, int microseconds) {
 
 static int memVfsCurrentTime(sqlite3_vfs *v, double *pOut) {
     (void)v;
-    *pOut = 2460000.5;  /* arbitrary Julian day number */
+    *pOut = 2460000.5;  
     return SQLITE_OK;
 }
 
@@ -157,27 +148,27 @@ static int memVfsGetLastError(sqlite3_vfs *v, int n, char *buf) {
 }
 
 static sqlite3_vfs memVfs = {
-    1,                          /* iVersion */
-    (int)sizeof(MemFile),       /* szOsFile */
-    512,                        /* mxPathname */
-    0,                          /* pNext */
-    "memvfs",                   /* zName */
-    0,                          /* pAppData */
+    1,                          
+    (int)sizeof(MemFile),       
+    512,                        
+    0,                          
+    "memvfs",                   
+    0,                          
     memVfsOpen,
     memVfsDelete,
     memVfsAccess,
     memVfsFullPathname,
-    0, 0, 0, 0,                /* xDlOpen, xDlError, xDlSym, xDlClose */
+    0, 0, 0, 0,                
     memVfsRandomness,
     memVfsSleep,
     memVfsCurrentTime,
     memVfsGetLastError,
 };
 
-/* ── OS interface required by SQLITE_OS_OTHER ─────────────────────── */
+
 
 int sqlite3_os_init(void) {
-    return sqlite3_vfs_register(&memVfs, 1 /* make default */);
+    return sqlite3_vfs_register(&memVfs, 1 );
 }
 
 int sqlite3_os_end(void) {

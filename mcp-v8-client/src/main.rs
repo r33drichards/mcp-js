@@ -7,73 +7,68 @@ use clap::{Parser, Subcommand};
 use std::collections::HashMap;
 
 /// CLI for the mcp-v8 JavaScript execution server HTTP API.
-#[derive(Parser)]
-#[command(
-    name = "mcp-v8-cli",
-    version,
-    about = "Command-line client for the mcp-v8 HTTP API",
-    long_about = None
-)]
+
+"mcp-v8-cli""Command-line client for the mcp-v8 HTTP API"
 struct Cli {
     /// Base URL of the mcp-v8 server.
-    #[arg(long, env = "MCP_V8_URL", default_value = "http://localhost:3000")]
+    "MCP_V8_URL""http://localhost:3000"
     url: String,
 
     /// Output raw JSON instead of pretty-printed text.
-    #[arg(long, short = 'j', global = true)]
+    
     json: bool,
 
-    #[command(subcommand)]
+    
     command: Commands,
 }
 
-#[derive(Subcommand)]
+
 enum Commands {
     /// Submit JavaScript code for asynchronous execution.
     Exec {
         /// JavaScript (or TypeScript) code to execute. Omit when using --file.
-        #[arg(value_name = "CODE")]
+        "CODE"
         code: Option<String>,
 
         /// Read the code from a local file instead of the CODE argument.
         /// The file is read on this machine and its contents are submitted as
         /// the code (provide either CODE or --file, not both).
-        #[arg(long, short = 'f', value_name = "PATH")]
+        "PATH"
         file: Option<String>,
 
         /// Heap snapshot key to restore before execution.
-        #[arg(long)]
+        
         heap: Option<String>,
 
         /// Filesystem snapshot to mount: a label name or 64-hex CA id.
-        #[arg(long)]
+        
         fs: Option<String>,
 
         /// Session identifier for tagging / logging.
-        #[arg(long)]
+        
         session: Option<String>,
 
         /// Per-execution V8 heap memory cap in megabytes.
-        #[arg(long)]
+        
         heap_memory_max_mb: Option<u64>,
 
         /// Per-execution timeout in seconds.
-        #[arg(long)]
+        
         execution_timeout_secs: Option<i64>,
 
         /// Key=value tags (repeatable). Example: --tag env=prod
-        #[arg(long = "tag", value_name = "KEY=VALUE")]
+        "tag""KEY=VALUE"
         tags: Vec<String>,
     },
     /// Commands for inspecting and managing executions.
-    #[command(subcommand)]
+    
     Executions(ExecutionsCmd),
     /// Commands for content-addressed filesystem snapshots.
-    #[command(subcommand)]
+    
     Fs(FsCmd),
 }
 
-#[derive(Subcommand)]
+
 enum FsCmd {
     /// List filesystem snapshot labels and their head CA ids.
     Ls,
@@ -89,7 +84,7 @@ enum FsCmd {
         /// CA id (hex) to point at.
         ca_id: String,
         /// Optional note to record on the reflog entry (like a commit message).
-        #[arg(long, short = 'm')]
+        
         message: Option<String>,
     },
     /// Show a label's reflog (move history), oldest first.
@@ -97,7 +92,7 @@ enum FsCmd {
         /// Label name.
         label: String,
         /// Return only the most recent N entries (bounds the scan over long histories).
-        #[arg(long)]
+        
         limit: Option<u64>,
     },
     /// Advance a label to a CA id (reject-and-rebase by default).
@@ -105,19 +100,19 @@ enum FsCmd {
         /// CA id (hex) to point the label at (e.g. an execution's `fs` value).
         ca_id: String,
         /// Label to advance (omit only with --detach).
-        #[arg(long)]
+        
         label: Option<String>,
         /// The head you pulled; the push fails if the label moved since.
-        #[arg(long)]
+        
         expected: Option<String>,
         /// Override the conflict check and move the label unconditionally.
-        #[arg(long)]
+        
         force: bool,
         /// Do not touch any label; just echo the CA id back.
-        #[arg(long)]
+        
         detach: bool,
         /// Optional note to record on the reflog entry (like a commit message).
-        #[arg(long, short = 'm')]
+        
         message: Option<String>,
     },
     /// Reset a label to an earlier CA id from its reflog (rollback).
@@ -127,10 +122,10 @@ enum FsCmd {
         /// CA id (hex) from the reflog to reset to.
         ca_id: String,
         /// Allow resetting to a CA id not present in the reflog.
-        #[arg(long)]
+        
         allow_unlogged: bool,
         /// Optional note to record on the reflog entry (like a commit message).
-        #[arg(long, short = 'm')]
+        
         message: Option<String>,
     },
     /// Three-way merge two snapshots into a new one.
@@ -140,15 +135,15 @@ enum FsCmd {
         /// The other side (CA id).
         theirs: String,
         /// Common ancestor both sides diverged from (omit for a 2-way merge).
-        #[arg(long)]
+        
         base: Option<String>,
         /// Auto-resolve conflicts to a side: ours or theirs.
-        #[arg(long)]
+        
         prefer: Option<String>,
     },
 }
 
-#[derive(Subcommand)]
+
 enum ExecutionsCmd {
     /// List all known executions.
     List,
@@ -162,16 +157,16 @@ enum ExecutionsCmd {
         /// Execution ID.
         id: String,
         /// Start reading from this line number (0-indexed).
-        #[arg(long)]
+        
         line_offset: Option<i64>,
         /// Maximum number of lines to return.
-        #[arg(long)]
+        
         line_limit: Option<i64>,
         /// Start reading from this byte offset.
-        #[arg(long)]
+        
         byte_offset: Option<i64>,
         /// Maximum number of bytes to return.
-        #[arg(long)]
+        
         byte_limit: Option<i64>,
     },
     /// Cancel a running execution.
@@ -181,7 +176,7 @@ enum ExecutionsCmd {
     },
 }
 
-#[tokio::main]
+
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let client = mcp_v8_client::Client::new(&cli.url);
@@ -197,8 +192,7 @@ async fn main() -> anyhow::Result<()> {
             execution_timeout_secs,
             tags,
         } => {
-            // Resolve the code from either the positional CODE or --file.
-            let code = match (code, file) {
+                        let code = match (code, file) {
                 (Some(_), Some(_)) => {
                     anyhow::bail!("provide either the CODE argument or --file, not both");
                 }

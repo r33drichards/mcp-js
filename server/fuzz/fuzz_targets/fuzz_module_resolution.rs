@@ -1,4 +1,4 @@
-#![no_main]
+
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use server::engine::ExecutionConfig;
@@ -9,15 +9,13 @@ static INIT: Once = Once::new();
 
 fn ensure_v8() {
     INIT.call_once(|| {
-        // Disable V8 background threads to prevent cumulative memory exhaustion
-        deno_core::v8::V8::set_flags_from_string("--single-threaded");
+                deno_core::v8::V8::set_flags_from_string("--single-threaded");
         server::engine::initialize_v8();
-        // Override libfuzzer's abort-on-panic hook for graceful panic handling
-        std::panic::set_hook(Box::new(|_| {}));
+                std::panic::set_hook(Box::new(|_| {}));
     });
 }
 
-#[derive(Arbitrary, Debug)]
+
 struct ModuleResolutionInput {
     /// Import specifier (npm:, jsr:, http://, file://, or relative paths)
     specifier: String,
@@ -25,33 +23,17 @@ struct ModuleResolutionInput {
     include_version: bool,
 }
 
-// Fuzz module import resolution with edge cases:
-// - Empty specifiers
-// - Malformed npm: specifiers (missing package name, invalid versions)
-// - Malformed jsr: specifiers
-// - URL imports with various schemes (http, https, file, ftp, data, javascript)
-// - URL imports with special characters, unicode domains
-// - Very long specifiers
-// - Path traversal attempts in npm/jsr specifiers
-// - Control characters and null bytes in specifiers
-//
-// This exercises module specifier parsing and URL resolution paths.
-// Most imports will fail gracefully (network errors, invalid URLs, policy denial),
-// which is the expected behavior.
 fuzz_target!(|input: ModuleResolutionInput| {
     ensure_v8();
 
-    // Cap specifier length to avoid excessive code generation
-    let mut specifier = input.specifier;
+        let mut specifier = input.specifier;
     if specifier.len() > 10000 {
         let mut end = 10000;
         while !specifier.is_char_boundary(end) { end -= 1; }
         specifier.truncate(end);
     }
 
-    // Build JavaScript code that attempts various imports
-    // Wrap in try-catch since most will fail (no network, policy denial, etc.)
-    let specifier = escape_js_string(&specifier);
+            let specifier = escape_js_string(&specifier);
 
     let code = if input.include_version {
         format!(
@@ -95,10 +77,7 @@ try {{
         )
     };
 
-    // Execute stateless — we don't care about the result, only that it doesn't crash.
-    // Disable external modules so dynamic imports fail fast at resolution time
-    // instead of attempting real HTTP requests that would timeout.
-    let max_bytes = 8 * 1024 * 1024;
+                let max_bytes = 8 * 1024 * 1024;
     let handle = Arc::new(Mutex::new(None));
     let loader_config = ModuleLoaderConfig {
         allow_external: false,

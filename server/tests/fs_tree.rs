@@ -18,13 +18,12 @@ async fn snapshot(store: &FsStore, files: &[(&str, &[u8])]) -> [u8; 32] {
 
 /// Changing one subtree must leave every other subtree's node hash untouched, so
 /// the new snapshot shares all unchanged nodes with the old one.
-#[tokio::test]
+
 async fn push_shares_unchanged_subtrees() {
     let store = FsStore::in_memory();
     let r1 = snapshot(&store, &[("a/x", b"1"), ("a/y", b"2"), ("b/z", b"3")]).await;
 
-    // Pull r1, change only a/x, push r2.
-    let mut m = SessionMount::pull(store.clone(), blake3::Hash::from_bytes(r1))
+        let mut m = SessionMount::pull(store.clone(), blake3::Hash::from_bytes(r1))
         .await
         .unwrap();
     m.write("a/x".as_ref(), b"changed").await.unwrap();
@@ -42,20 +41,18 @@ async fn push_shares_unchanged_subtrees() {
         }
     };
 
-    // The untouched subtree `b` is the very same node in both snapshots…
-    assert_eq!(
+        assert_eq!(
         dir_hash(r1, "b").await,
         dir_hash(r2, "b").await,
         "unchanged subtree must be shared (identical node hash)"
     );
-    // …while the changed subtree `a` is a different node, and so is the root.
-    assert_ne!(dir_hash(r1, "a").await, dir_hash(r2, "a").await);
+        assert_ne!(dir_hash(r1, "a").await, dir_hash(r2, "a").await);
     assert_ne!(r1, r2);
 }
 
 /// An empty snapshot is a real, stable root (its single empty node), and pulling
 /// it yields an empty directory rather than an error.
-#[tokio::test]
+
 async fn empty_snapshot_is_canonical() {
     let store = FsStore::in_memory();
     let a = *SessionMount::empty(store.clone())
@@ -72,7 +69,6 @@ async fn empty_snapshot_is_canonical() {
     assert_eq!(m.readdir("".as_ref()).await.unwrap(), Vec::<String>::new());
 }
 
-// ── Differential test: tree-backed mount vs flat reference ──────────────────
 
 struct Rng(u64);
 impl Rng {
@@ -145,14 +141,13 @@ async fn assert_consistent(m: &SessionMount, r: &Ref, files: &[&str], dirs: &[&s
             assert!(m.readdir(d.as_ref()).await.is_err(), "absent dir readdir {d}");
         }
     }
-    // Root always lists, even when empty.
-    let mut root = m.readdir("".as_ref()).await.unwrap();
+        let mut root = m.readdir("".as_ref()).await.unwrap();
     root.sort();
     let want: Vec<String> = ref_dir_children(r, "").into_iter().collect();
     assert_eq!(root, want, "readdir root");
 }
 
-#[tokio::test]
+
 async fn mount_matches_flat_reference_through_push_pull() {
     let store = FsStore::in_memory();
     let dirs = ["a", "b", "c"];
@@ -162,8 +157,7 @@ async fn mount_matches_flat_reference_through_push_pull() {
 
     let mut rng = Rng(0x9E3779B97F4A7C15);
 
-    // Phase 1: build a base snapshot from a random subset.
-    let mut reference: Ref = BTreeMap::new();
+        let mut reference: Ref = BTreeMap::new();
     let mut base = SessionMount::empty(store.clone());
     for &p in &files {
         if rng.next() % 2 == 0 {
@@ -174,36 +168,29 @@ async fn mount_matches_flat_reference_through_push_pull() {
     }
     let root = base.push().await.unwrap();
 
-    // Phase 2: random edits on a mount pulled from the base; mirror each on the
-    // reference and assert full consistency after every step.
-    let mut m = SessionMount::pull(store.clone(), root).await.unwrap();
+            let mut m = SessionMount::pull(store.clone(), root).await.unwrap();
     assert_consistent(&m, &reference, &files, &dirs).await;
 
     for i in 0..400u64 {
         match rng.next() % 4 {
             0 => {
-                // write
-                let p = *rng.pick(&files);
+                                let p = *rng.pick(&files);
                 let content = format!("v{i}:{p}").into_bytes();
                 m.write(p.as_ref(), &content).await.unwrap();
                 reference.insert(p.to_string(), content);
             }
             1 => {
-                // remove a file (present -> Ok, absent -> Err)
-                let p = *rng.pick(&files);
+                                let p = *rng.pick(&files);
                 let present = reference.remove(p).is_some();
                 let res = m.remove(p.as_ref(), false).await;
-                // A leaf path: absent removal is ENOENT. (Skip the case where p
-                // is also a directory prefix — our files are all leaves.)
-                if present {
+                                                if present {
                     assert!(res.is_ok(), "remove present {p}");
                 } else if !ref_has_under(&reference, p) {
                     assert!(res.is_err(), "remove absent {p}");
                 }
             }
             2 => {
-                // recursive remove of a directory
-                let d = *rng.pick(&dirs);
+                                let d = *rng.pick(&dirs);
                 let had = ref_has_under(&reference, d);
                 let res = m.remove(d.as_ref(), true).await;
                 reference.retain(|k, _| !k.starts_with(&format!("{d}/")));
@@ -214,8 +201,7 @@ async fn mount_matches_flat_reference_through_push_pull() {
                 }
             }
             _ => {
-                // re-create a file to keep dirs populated
-                let p = *rng.pick(&files);
+                                let p = *rng.pick(&files);
                 let content = format!("re{i}:{p}").into_bytes();
                 m.write(p.as_ref(), &content).await.unwrap();
                 reference.insert(p.to_string(), content);
@@ -224,14 +210,11 @@ async fn mount_matches_flat_reference_through_push_pull() {
         assert_consistent(&m, &reference, &files, &dirs).await;
     }
 
-    // Phase 3: push and pull a fresh mount — the persisted tree must reproduce
-    // the reference exactly.
-    let new_root = m.push().await.unwrap();
+            let new_root = m.push().await.unwrap();
     let m2 = SessionMount::pull(store.clone(), new_root).await.unwrap();
     assert_consistent(&m2, &reference, &files, &dirs).await;
 }
 
-// ── Streaming chunker + copy-by-reference ───────────────────────────────────
 
 use server::engine::fs_store::Content;
 
@@ -247,28 +230,25 @@ fn pseudo_random(len: usize, seed: u64) -> Vec<u8> {
         .collect()
 }
 
-#[tokio::test]
+
 async fn large_file_streams_and_round_trips() {
     let store = FsStore::in_memory();
-    let big = pseudo_random(3 * 1024 * 1024, 0xABCD); // 3 MiB -> chunked
-
-    // Ingest straight from a streaming reader (bounded memory).
-    let entry = store
+    let big = pseudo_random(3 * 1024 * 1024, 0xABCD); 
+        let entry = store
         .put_file_stream(std::io::Cursor::new(big.clone()))
         .await
         .unwrap();
     assert!(matches!(entry.content, Content::Chunks(_)), "large file must chunk");
     assert_eq!(store.read_file(&entry).await.unwrap(), big);
 
-    // And through the mount (writeFile path) + push/pull.
-    let mut m = SessionMount::empty(store.clone());
+        let mut m = SessionMount::empty(store.clone());
     m.write("d/big.bin".as_ref(), &big).await.unwrap();
     let root = m.push().await.unwrap();
     let m2 = SessionMount::pull(store.clone(), root).await.unwrap();
     assert_eq!(m2.read("d/big.bin".as_ref()).await.unwrap(), big);
 }
 
-#[tokio::test]
+
 async fn copy_is_by_reference_no_rechunk() {
     let store = FsStore::in_memory();
     let big = pseudo_random(2 * 1024 * 1024, 0x1234);
@@ -277,13 +257,10 @@ async fn copy_is_by_reference_no_rechunk() {
     m.write("a/big".as_ref(), &big).await.unwrap();
     m.copy("a/big".as_ref(), "b/copy".as_ref()).await.unwrap();
 
-    // Both readable and identical.
-    assert_eq!(m.read("a/big".as_ref()).await.unwrap(), big);
+        assert_eq!(m.read("a/big".as_ref()).await.unwrap(), big);
     assert_eq!(m.read("b/copy".as_ref()).await.unwrap(), big);
 
-    // After push, both paths point at the very same chunk list — the copy moved
-    // the entry, it did not re-chunk the bytes.
-    let snap = store
+            let snap = store
         .get_manifest(&m.push().await.unwrap())
         .await
         .unwrap();
@@ -297,14 +274,12 @@ async fn copy_is_by_reference_no_rechunk() {
     ));
 }
 
-#[tokio::test]
+
 async fn streaming_writer_round_trips_and_dedups() {
     use server::engine::fs_store::FileWriter;
     let store = FsStore::in_memory();
-    let data = pseudo_random(5 * 1024 * 1024 + 4242, 0x77); // ~5 MiB, odd size
-
-    // Feed in small (64 KiB) pieces — the writer never holds the whole file.
-    let mut w = FileWriter::new(store.clone());
+    let data = pseudo_random(5 * 1024 * 1024 + 4242, 0x77); 
+        let mut w = FileWriter::new(store.clone());
     for piece in data.chunks(64 * 1024) {
         w.feed(piece).await.unwrap();
     }
@@ -314,13 +289,11 @@ async fn streaming_writer_round_trips_and_dedups() {
     assert_eq!(streamed.size as usize, data.len());
     assert_eq!(store.read_file(&streamed).await.unwrap(), data);
 
-    // Same boundaries as a one-shot put_file => streamed writes dedup against
-    // ordinary writes.
-    let oneshot = store.put_file(&data).await.unwrap();
+            let oneshot = store.put_file(&data).await.unwrap();
     assert_eq!(streamed.content, oneshot.content, "streaming must match one-shot chunking");
 }
 
-#[tokio::test]
+
 async fn streaming_writer_small_file_inlines() {
     use server::engine::fs_store::FileWriter;
     let store = FsStore::in_memory();

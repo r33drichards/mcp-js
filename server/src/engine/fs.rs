@@ -38,12 +38,11 @@ use super::opa::PolicyChain;
 use std::collections::HashMap;
 use std::path::Path;
 
-// ── Configuration ────────────────────────────────────────────────────────
 
 /// Handle to the session's active overlay mount. When present in `OpState`, the
 /// fs ops delegate to it (after the policy gate) instead of touching the real
 /// filesystem. Cheap to clone — it's an `Arc` over the shared mount.
-#[derive(Clone)]
+
 pub struct FsMountHandle(pub Arc<tokio::sync::Mutex<SessionMount>>);
 
 impl FsMountHandle {
@@ -53,7 +52,7 @@ impl FsMountHandle {
 }
 
 /// Configuration for the fs module. Stored in deno_core's `OpState`.
-#[derive(Clone, Debug)]
+
 pub struct FsConfig {
     pub policy_chain: Arc<PolicyChain>,
     pub mcp_headers: Option<serde_json::Value>,
@@ -84,10 +83,10 @@ impl FsConfig {
 /// Open streaming writers for the current session, keyed by a small integer
 /// handle. Stored in `OpState` so a `createWriteStream` handle survives across
 /// the separate open / write / close ops.
-#[derive(Clone)]
+
 pub struct FsWriters(Arc<tokio::sync::Mutex<FsWritersInner>>);
 
-#[derive(Default)]
+
 struct FsWritersInner {
     next: u32,
     map: HashMap<u32, OpenWrite>,
@@ -106,39 +105,33 @@ enum OpenWrite {
     Real(tokio::fs::File),
 }
 
-// ── Policy input ─────────────────────────────────────────────────────────
 
-#[derive(Serialize)]
+
 struct FsPolicyInput {
     operation: String,
     path: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    "Option::is_none"
     destination: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    "Option::is_none"
     recursive: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    "Option::is_none"
     encoding: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    "Option::is_none"
     mcp_headers: Option<serde_json::Value>,
 }
 
-// ── Async deno_core ops ──────────────────────────────────────────────────
 
 /// Read a file as UTF-8 text.
-#[op2(async)]
-#[string]
+
+
 async fn op_fs_read_file_text(
     state: Rc<RefCell<OpState>>,
-    #[string] path: String,
+     path: String,
 ) -> Result<String, JsErrorBox> {
     let config = extract_config(&state)?;
     let mount = extract_mount(&state);
 
-    // Mount-backed reads must run on the current-thread isolate runtime: the
-    // CAS overlay uses deno_unsync, which asserts a current-thread flavor.
-    // tokio::spawn would move the work onto the multi-thread runtime and abort
-    // the process. Only the real-filesystem path is offloaded via spawn.
-    if let Some(m) = mount {
+                    if let Some(m) = mount {
         check_policy(&config.policy_chain, "readFile", &path, None, None, Some("utf8"), config.mcp_headers.as_ref())
             .await
             .map_err(JsErrorBox::generic)?;
@@ -148,12 +141,7 @@ async fn op_fs_read_file_text(
             return String::from_utf8(content)
                 .map_err(|e| JsErrorBox::generic(format!("fs.readFile: invalid UTF-8 in {}: {}", path, e)));
         }
-        // Overlay miss. With passthrough off (default) the overlay is the whole
-        // fs view, so this is ENOENT. With passthrough on, fall through to the
-        // real filesystem as a read-only lower layer (already policy-gated above)
-        // so bundled paths like /opt/languages resolve while /work stays the
-        // per-session overlay.
-        if !config.passthrough {
+                                                if !config.passthrough {
             return Err(JsErrorBox::generic(format!("fs.readFile: {}: ENOENT", path)));
         }
         let content = std::fs::read(&path)
@@ -177,17 +165,16 @@ async fn op_fs_read_file_text(
 }
 
 /// Read a file as raw bytes, returned as a Uint8Array to JavaScript.
-#[op2(async)]
-#[buffer]
+
+
 async fn op_fs_read_file_buffer(
     state: Rc<RefCell<OpState>>,
-    #[string] path: String,
+     path: String,
 ) -> Result<Vec<u8>, JsErrorBox> {
     let config = extract_config(&state)?;
     let mount = extract_mount(&state);
 
-    // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
-    if let Some(m) = mount {
+        if let Some(m) = mount {
         check_policy(&config.policy_chain, "readFile", &path, None, None, Some("buffer"), config.mcp_headers.as_ref())
             .await
             .map_err(JsErrorBox::generic)?;
@@ -196,10 +183,7 @@ async fn op_fs_read_file_buffer(
         {
             return Ok(content);
         }
-        // Overlay miss: ENOENT unless passthrough is on, in which case fall
-        // through to the real filesystem (policy-gated above) so bundled
-        // read-only paths (e.g. /opt/languages) resolve.
-        if !config.passthrough {
+                                if !config.passthrough {
             return Err(JsErrorBox::generic(format!("fs.readFile: {}: ENOENT", path)));
         }
         return std::fs::read(&path)
@@ -218,20 +202,17 @@ async fn op_fs_read_file_buffer(
 }
 
 /// Write a file from a UTF-8 string.
-#[op2(async)]
-#[string]
+
+
 async fn op_fs_write_file_text(
     state: Rc<RefCell<OpState>>,
-    #[string] path: String,
-    #[string] data: String,
+     path: String,
+     data: String,
 ) -> Result<String, JsErrorBox> {
     let config = extract_config(&state)?;
     let mount = extract_mount(&state);
 
-    // Mount-backed writes must run on the current-thread isolate runtime (the
-    // CAS overlay uses deno_unsync, which asserts a current-thread flavor).
-    // tokio::spawn would move the work onto the multi-thread runtime and abort.
-    if let Some(m) = mount {
+                if let Some(m) = mount {
         check_policy(&config.policy_chain, "writeFile", &path, None, None, None, config.mcp_headers.as_ref())
             .await
             .map_err(JsErrorBox::generic)?;
@@ -254,18 +235,17 @@ async fn op_fs_write_file_text(
 }
 
 /// Write a file from raw bytes (Uint8Array from JavaScript).
-#[op2(async)]
-#[string]
+
+
 async fn op_fs_write_file_buffer(
     state: Rc<RefCell<OpState>>,
-    #[string] path: String,
-    #[buffer(copy)] data: Vec<u8>,
+     path: String,
+     data: Vec<u8>,
 ) -> Result<String, JsErrorBox> {
     let config = extract_config(&state)?;
     let mount = extract_mount(&state);
 
-    // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
-    if let Some(m) = mount {
+        if let Some(m) = mount {
         check_policy(&config.policy_chain, "writeFile", &path, None, None, None, config.mcp_headers.as_ref())
             .await
             .map_err(JsErrorBox::generic)?;
@@ -288,18 +268,17 @@ async fn op_fs_write_file_buffer(
 }
 
 /// Append to a file.
-#[op2(async)]
-#[string]
+
+
 async fn op_fs_append_file(
     state: Rc<RefCell<OpState>>,
-    #[string] path: String,
-    #[string] data: String,
+     path: String,
+     data: String,
 ) -> Result<String, JsErrorBox> {
     let config = extract_config(&state)?;
     let mount = extract_mount(&state);
 
-    // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
-    if let Some(m) = mount {
+        if let Some(m) = mount {
         check_policy(&config.policy_chain, "appendFile", &path, None, None, None, config.mcp_headers.as_ref())
             .await
             .map_err(JsErrorBox::generic)?;
@@ -333,17 +312,16 @@ async fn op_fs_append_file(
 }
 
 /// Read a directory. Returns JSON array of entry names.
-#[op2(async)]
-#[string]
+
+
 async fn op_fs_readdir(
     state: Rc<RefCell<OpState>>,
-    #[string] path: String,
+     path: String,
 ) -> Result<String, JsErrorBox> {
     let config = extract_config(&state)?;
     let mount = extract_mount(&state);
 
-    // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
-    if let Some(m) = mount {
+        if let Some(m) = mount {
         check_policy(&config.policy_chain, "readdir", &path, None, None, None, config.mcp_headers.as_ref())
             .await
             .map_err(JsErrorBox::generic)?;
@@ -375,17 +353,16 @@ async fn op_fs_readdir(
 }
 
 /// Stat a path. Returns JSON with size, isFile, isDirectory, etc.
-#[op2(async)]
-#[string]
+
+
 async fn op_fs_stat(
     state: Rc<RefCell<OpState>>,
-    #[string] path: String,
+     path: String,
 ) -> Result<String, JsErrorBox> {
     let config = extract_config(&state)?;
     let mount = extract_mount(&state);
 
-    // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
-    if let Some(m) = mount {
+        if let Some(m) = mount {
         check_policy(&config.policy_chain, "stat", &path, None, None, None, config.mcp_headers.as_ref())
             .await
             .map_err(JsErrorBox::generic)?;
@@ -429,19 +406,18 @@ async fn op_fs_stat(
 }
 
 /// Create a directory.
-#[op2(async)]
-#[string]
+
+
 async fn op_fs_mkdir(
     state: Rc<RefCell<OpState>>,
-    #[string] path: String,
-    #[smi] recursive: i32,
+     path: String,
+     recursive: i32,
 ) -> Result<String, JsErrorBox> {
     let config = extract_config(&state)?;
     let mount = extract_mount(&state);
     let recursive = recursive != 0;
 
-    // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
-    if let Some(m) = mount {
+        if let Some(m) = mount {
         check_policy(&config.policy_chain, "mkdir", &path, None, Some(recursive), None, config.mcp_headers.as_ref())
             .await
             .map_err(JsErrorBox::generic)?;
@@ -467,19 +443,18 @@ async fn op_fs_mkdir(
 }
 
 /// Remove a file or directory.
-#[op2(async)]
-#[string]
+
+
 async fn op_fs_rm(
     state: Rc<RefCell<OpState>>,
-    #[string] path: String,
-    #[smi] recursive: i32,
+     path: String,
+     recursive: i32,
 ) -> Result<String, JsErrorBox> {
     let config = extract_config(&state)?;
     let mount = extract_mount(&state);
     let recursive = recursive != 0;
 
-    // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
-    if let Some(m) = mount {
+        if let Some(m) = mount {
         check_policy(&config.policy_chain, "rm", &path, None, Some(recursive), None, config.mcp_headers.as_ref())
             .await
             .map_err(JsErrorBox::generic)?;
@@ -512,18 +487,17 @@ async fn op_fs_rm(
 }
 
 /// Rename (move) a file or directory.
-#[op2(async)]
-#[string]
+
+
 async fn op_fs_rename(
     state: Rc<RefCell<OpState>>,
-    #[string] from: String,
-    #[string] to: String,
+     from: String,
+     to: String,
 ) -> Result<String, JsErrorBox> {
     let config = extract_config(&state)?;
     let mount = extract_mount(&state);
 
-    // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
-    if let Some(m) = mount {
+        if let Some(m) = mount {
         check_policy(&config.policy_chain, "rename", &from, Some(&to), None, None, config.mcp_headers.as_ref())
             .await
             .map_err(JsErrorBox::generic)?;
@@ -546,23 +520,21 @@ async fn op_fs_rename(
 }
 
 /// Copy a file.
-#[op2(async)]
-#[string]
+
+
 async fn op_fs_copy_file(
     state: Rc<RefCell<OpState>>,
-    #[string] from: String,
-    #[string] to: String,
+     from: String,
+     to: String,
 ) -> Result<String, JsErrorBox> {
     let config = extract_config(&state)?;
     let mount = extract_mount(&state);
 
-    // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
-    if let Some(m) = mount {
+        if let Some(m) = mount {
         check_policy(&config.policy_chain, "copyFile", &from, Some(&to), None, None, config.mcp_headers.as_ref())
             .await
             .map_err(JsErrorBox::generic)?;
-        // Copy by reference: clones the content-addressed entry, no rechunk.
-        m.0.lock().await.copy(Path::new(&from), Path::new(&to)).await
+                m.0.lock().await.copy(Path::new(&from), Path::new(&to)).await
             .map_err(|e| JsErrorBox::generic(format!("fs.copyFile: {} -> {}: {}", from, to, e)))?;
         return Ok("{}".to_string());
     }
@@ -581,17 +553,16 @@ async fn op_fs_copy_file(
 }
 
 /// Check if a path exists.
-#[op2(async)]
-#[string]
+
+
 async fn op_fs_exists(
     state: Rc<RefCell<OpState>>,
-    #[string] path: String,
+     path: String,
 ) -> Result<String, JsErrorBox> {
     let config = extract_config(&state)?;
     let mount = extract_mount(&state);
 
-    // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
-    if let Some(m) = mount {
+        if let Some(m) = mount {
         check_policy(&config.policy_chain, "exists", &path, None, None, None, config.mcp_headers.as_ref())
             .await
             .map_err(JsErrorBox::generic)?;
@@ -610,23 +581,21 @@ async fn op_fs_exists(
     .map_err(|e: String| JsErrorBox::generic(e))
 }
 
-// ── Streaming writes ─────────────────────────────────────────────────────
 
 /// Open a streaming write to `path`, returning a small integer handle. Bytes are
 /// fed incrementally (chunked on the fly), so a multi-GB file never has to exist
 /// in memory all at once.
-#[op2(async)]
-#[smi]
+
+
 async fn op_fs_write_stream_open(
     state: Rc<RefCell<OpState>>,
-    #[string] path: String,
+     path: String,
 ) -> Result<u32, JsErrorBox> {
     let config = extract_config(&state)?;
     let mount = extract_mount(&state);
     let writers = extract_writers(&state)?;
 
-    // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
-    if let Some(m) = mount {
+        if let Some(m) = mount {
         check_policy(&config.policy_chain, "writeFile", &path, None, None, None, config.mcp_headers.as_ref())
             .await
             .map_err(JsErrorBox::generic)?;
@@ -657,45 +626,39 @@ async fn op_fs_write_stream_open(
 }
 
 /// Feed a chunk of bytes to an open write stream.
-#[op2(async)]
-#[string]
+
+
 async fn op_fs_write_stream_chunk_buffer(
     state: Rc<RefCell<OpState>>,
-    #[smi] id: u32,
-    #[buffer(copy)] data: Vec<u8>,
+     id: u32,
+     data: Vec<u8>,
 ) -> Result<String, JsErrorBox> {
     let writers = extract_writers(&state)?;
-    // Run inline: the overlay FileWriter uses deno_unsync, which requires the
-    // current-thread isolate runtime; tokio::spawn would abort the process.
-    feed_stream(&writers, id, &data).await.map_err(JsErrorBox::generic)
+            feed_stream(&writers, id, &data).await.map_err(JsErrorBox::generic)
 }
 
 /// Feed a chunk of text to an open write stream.
-#[op2(async)]
-#[string]
+
+
 async fn op_fs_write_stream_chunk_text(
     state: Rc<RefCell<OpState>>,
-    #[smi] id: u32,
-    #[string] data: String,
+     id: u32,
+     data: String,
 ) -> Result<String, JsErrorBox> {
     let writers = extract_writers(&state)?;
-    // Run inline: the overlay FileWriter uses deno_unsync, which requires the
-    // current-thread isolate runtime; tokio::spawn would abort the process.
-    feed_stream(&writers, id, data.as_bytes()).await.map_err(JsErrorBox::generic)
+            feed_stream(&writers, id, data.as_bytes()).await.map_err(JsErrorBox::generic)
 }
 
 /// Finish an open write stream: flush the final chunk and install the file.
-#[op2(async)]
-#[string]
+
+
 async fn op_fs_write_stream_close(
     state: Rc<RefCell<OpState>>,
-    #[smi] id: u32,
+     id: u32,
 ) -> Result<String, JsErrorBox> {
     let mount = extract_mount(&state);
     let writers = extract_writers(&state)?;
-    // Run inline: the overlay writer.finish() / put_entry path uses deno_unsync,
-    // which requires the current-thread isolate runtime; tokio::spawn would abort.
-    let ow = writers
+            let ow = writers
         .0
         .lock()
         .await
@@ -739,7 +702,6 @@ async fn feed_stream(writers: &FsWriters, id: u32, data: &[u8]) -> Result<String
     Ok("{}".to_string())
 }
 
-// ── Extension registration ──────────────────────────────────────────────
 
 deno_core::extension!(
     fs_ext,
@@ -770,7 +732,6 @@ pub fn create_extension() -> deno_core::Extension {
     fs_ext::init()
 }
 
-// ── Inject fs JS wrapper into the global scope ──────────────────────────
 
 pub fn inject_fs(runtime: &mut JsRuntime) -> Result<(), String> {
     runtime
@@ -878,7 +839,6 @@ const FS_JS_WRAPPER: &str = r#"
 })();
 "#;
 
-// ── Helpers ──────────────────────────────────────────────────────────────
 
 fn extract_config(state: &Rc<RefCell<OpState>>) -> Result<FsConfig, JsErrorBox> {
     let state = state.borrow();
@@ -954,11 +914,11 @@ async fn check_policy(
     Ok(())
 }
 
-#[cfg(test)]
+
 mod tests {
     use super::*;
 
-    #[test]
+    
     fn test_fs_policy_input_serialization() {
         let input = FsPolicyInput {
             operation: "readFile".to_string(),
@@ -977,7 +937,7 @@ mod tests {
         assert!(!json.contains("mcp_headers"));
     }
 
-    #[test]
+    
     fn test_fs_policy_input_with_mcp_headers() {
         let input = FsPolicyInput {
             operation: "readFile".to_string(),
@@ -992,7 +952,7 @@ mod tests {
         assert!(json.contains("abc-123"));
     }
 
-    #[test]
+    
     fn test_fs_policy_input_with_destination() {
         let input = FsPolicyInput {
             operation: "rename".to_string(),

@@ -43,7 +43,7 @@ fn read_console(tree: &sled::Tree) -> String {
     String::from_utf8_lossy(&buf).to_string()
 }
 
-#[test]
+
 fn test_op_panic_returns_error_instead_of_crashing() {
     ensure_v8();
     let heap_bytes = 8 * 1024 * 1024;
@@ -70,7 +70,7 @@ fn test_op_panic_returns_error_instead_of_crashing() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
-#[test]
+
 fn test_op_panic_uncaught_is_js_error() {
     ensure_v8();
     let heap_bytes = 8 * 1024 * 1024;
@@ -78,8 +78,7 @@ fn test_op_panic_uncaught_is_js_error() {
         r#"Deno.core.ops.op_panic("deliberate panic")"#,
         ExecutionConfig::new(heap_bytes),
     );
-    // Should be an Err (JS exception), but the process should NOT crash.
-    assert!(result.is_err(), "Uncaught panic should be a JS error");
+        assert!(result.is_err(), "Uncaught panic should be a JS error");
     let err = result.unwrap_err();
     assert!(
         err.contains("panic"),
@@ -88,7 +87,7 @@ fn test_op_panic_uncaught_is_js_error() {
     );
 }
 
-#[test]
+
 fn test_print_does_not_crash() {
     ensure_v8();
     let heap_bytes = 8 * 1024 * 1024;
@@ -112,7 +111,7 @@ fn test_print_does_not_crash() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
-#[test]
+
 fn test_print_routes_through_console_when_available() {
     ensure_v8();
     let heap_bytes = 8 * 1024 * 1024;
@@ -137,7 +136,7 @@ fn test_print_routes_through_console_when_available() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
-#[test]
+
 fn test_stateful_op_panic_returns_error() {
     ensure_v8();
     let heap_bytes = 8 * 1024 * 1024;
@@ -165,7 +164,7 @@ fn test_stateful_op_panic_returns_error() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
-#[test]
+
 fn test_print_prototype_bypass_is_neutralized() {
     ensure_v8();
     let heap_bytes = 8 * 1024 * 1024;
@@ -187,8 +186,7 @@ fn test_print_prototype_bypass_is_neutralized() {
     );
     assert!(result.is_ok(), "Should succeed, got: {:?}", result);
 
-    // The print output should appear in captured console (not raw stdout).
-    let output = read_console(&tree);
+        let output = read_console(&tree);
     assert!(
         output.contains("proto_bypass_test"),
         "Prototype print should route through console capture, got: '{}'",
@@ -197,7 +195,7 @@ fn test_print_prototype_bypass_is_neutralized() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
-#[test]
+
 fn test_core_not_reconfigurable() {
     ensure_v8();
     let heap_bytes = 8 * 1024 * 1024;
@@ -226,7 +224,7 @@ fn test_core_not_reconfigurable() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
-#[test]
+
 fn test_prototype_chain_severed() {
     ensure_v8();
     let heap_bytes = 8 * 1024 * 1024;
@@ -249,20 +247,18 @@ fn test_prototype_chain_severed() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
-#[test]
+
 fn test_process_survives_after_panic_interception() {
     ensure_v8();
     let heap_bytes = 8 * 1024 * 1024;
 
-    // First execution triggers the intercepted panic.
-    let (result1, _) = server::engine::execute_stateless(
+        let (result1, _) = server::engine::execute_stateless(
         r#"Deno.core.ops.op_panic("test")"#,
         ExecutionConfig::new(heap_bytes),
     );
     assert!(result1.is_err());
 
-    // Second execution should work fine -- V8 is not corrupted.
-    let (tree, tmp) = console_tree();
+        let (tree, tmp) = console_tree();
     let config = ExecutionConfig::new(heap_bytes).console_tree(tree.clone());
     let (result2, _) = server::engine::execute_stateless(
         r#"console.log(1 + 1)"#,
@@ -278,9 +274,8 @@ fn test_process_survives_after_panic_interception() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
-// ── Sandbox hardening tests ─────────────────────────────────────────────
 
-#[test]
+
 fn test_ops_are_frozen() {
     ensure_v8();
     let heap_bytes = 8 * 1024 * 1024;
@@ -302,7 +297,7 @@ fn test_ops_are_frozen() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
-#[test]
+
 fn test_bootstrap_not_accessible() {
     ensure_v8();
     let heap_bytes = 8 * 1024 * 1024;
@@ -324,7 +319,7 @@ fn test_bootstrap_not_accessible() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
-#[test]
+
 fn test_proxy_details_neutralized() {
     ensure_v8();
     let heap_bytes = 8 * 1024 * 1024;
@@ -351,7 +346,7 @@ fn test_proxy_details_neutralized() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
-#[test]
+
 fn test_ops_not_replaceable() {
     ensure_v8();
     let heap_bytes = 8 * 1024 * 1024;
@@ -360,8 +355,7 @@ fn test_ops_not_replaceable() {
         .console_tree(tree.clone())
         .hardening(HardeningConfig::all());
     let (result, _oom) = server::engine::execute_stateless(
-        // ES modules run in strict mode — assigning to a frozen property throws
-        r#"
+                r#"
         try {
             Deno.core.ops.op_console_write = function() {};
             console.log("replaced");
@@ -381,7 +375,7 @@ fn test_ops_not_replaceable() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
-#[test]
+
 fn test_shared_array_buffer_disabled() {
     ensure_v8();
     let heap_bytes = 8 * 1024 * 1024;
@@ -410,18 +404,13 @@ fn test_shared_array_buffer_disabled() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
-// ── Opt-in defaults: with no HardeningConfig, mitigations are OFF ────────────
-// These lock in the opt-in posture: a default ExecutionConfig leaves the
-// runtime unhardened, so each primitive is present until a `--harden-*` flag
-// (HardeningConfig field) enables its removal.
 
-#[test]
+
 fn test_shared_array_buffer_available_by_default() {
     ensure_v8();
     let heap_bytes = 8 * 1024 * 1024;
     let (tree, tmp) = console_tree();
-    // No .hardening(...) — default is all-off.
-    let config = ExecutionConfig::new(heap_bytes).console_tree(tree.clone());
+        let config = ExecutionConfig::new(heap_bytes).console_tree(tree.clone());
     let (result, _oom) = server::engine::execute_stateless(
         r#"
         try {
@@ -443,7 +432,7 @@ fn test_shared_array_buffer_available_by_default() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
-#[test]
+
 fn test_ops_not_frozen_by_default() {
     ensure_v8();
     let heap_bytes = 8 * 1024 * 1024;
@@ -463,13 +452,12 @@ fn test_ops_not_frozen_by_default() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
-#[test]
+
 fn test_only_requested_mitigation_applies() {
     ensure_v8();
     let heap_bytes = 8 * 1024 * 1024;
     let (tree, tmp) = console_tree();
-    // Enable ONLY remove_shared_memory: SAB goes away but ops stay unfrozen.
-    let config = ExecutionConfig::new(heap_bytes)
+        let config = ExecutionConfig::new(heap_bytes)
         .console_tree(tree.clone())
         .hardening(HardeningConfig {
             remove_shared_memory: true,
@@ -492,5 +480,3 @@ fn test_only_requested_mitigation_applies() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
-// Note: ReDoS (catastrophic regex backtracking) is mitigated by the
-// per-execution timeout. V8 145 does not support --regexp-backtrace-limit.

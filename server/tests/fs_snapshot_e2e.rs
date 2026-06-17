@@ -84,14 +84,12 @@ async fn run(engine: &Engine, code: &str, fs: Option<&str>) -> Option<String> {
     panic!("timeout waiting for execution");
 }
 
-#[tokio::test]
+
 async fn mount_write_push_then_read_back_by_ca_id() {
     ensure_v8();
     let h = build_harness();
 
-    // Mount the (new) label "main", write a file. The resulting fs CA id is
-    // surfaced on completion without advancing the label.
-    let ca1 = run(
+            let ca1 = run(
         &h.engine,
         r#"(async () => {
             await fs.writeFile("/data/note.txt", "hello snapshot");
@@ -101,15 +99,12 @@ async fn mount_write_push_then_read_back_by_ca_id() {
     .await
     .expect("first run should yield an fs CA id");
 
-    // The write is durable in the content store.
-    assert_eq!(
+        assert_eq!(
         read_snapshot_file(&h.store, &ca1, "data/note.txt").await,
         b"hello snapshot"
     );
 
-    // Re-mounting that exact snapshot (detached, by CA id) and reading it works
-    // end-to-end through the engine too.
-    let ca2 = run(
+            let ca2 = run(
         &h.engine,
         r#"(async () => {
             const c = await fs.readFile("/data/note.txt");
@@ -130,14 +125,12 @@ async fn mount_write_push_then_read_back_by_ca_id() {
     );
 }
 
-#[tokio::test]
+
 async fn fs_handle_and_heap_handle_are_independent() {
     ensure_v8();
     let h = build_harness();
 
-    // A base snapshot, then two divergent branches off it produce two distinct
-    // fs CA ids — the fs handle moves independently of any heap (stateless).
-    let base = run(
+            let base = run(
         &h.engine,
         r#"(async () => { await fs.writeFile("/a", "base"); })()"#,
         Some("data"),
@@ -163,11 +156,10 @@ async fn fs_handle_and_heap_handle_are_independent() {
     assert_ne!(fs_a, fs_b, "divergent writes must yield distinct CA ids");
     assert_eq!(read_snapshot_file(&h.store, &fs_a, "a").await, b"branch-A");
     assert_eq!(read_snapshot_file(&h.store, &fs_b, "a").await, b"branch-B");
-    // The base snapshot is untouched by either branch.
-    assert_eq!(read_snapshot_file(&h.store, &base, "a").await, b"base");
+        assert_eq!(read_snapshot_file(&h.store, &base, "a").await, b"base");
 }
 
-#[tokio::test]
+
 async fn run_without_fs_handle_has_no_fs_ca_id() {
     ensure_v8();
     let h = build_harness();
@@ -175,14 +167,12 @@ async fn run_without_fs_handle_has_no_fs_ca_id() {
     assert!(fs.is_none(), "no mount → no fs CA id");
 }
 
-#[tokio::test]
+
 async fn create_write_stream_assembles_a_large_file() {
     ensure_v8();
     let h = build_harness();
 
-    // Stream a large file in many small pieces via fs.createWriteStream — the
-    // whole value is never materialised in one JS string/buffer.
-    let ca = run(
+            let ca = run(
         &h.engine,
         r#"(async () => {
             const w = await fs.createWriteStream("/big/data.bin");
@@ -202,8 +192,7 @@ async fn create_write_stream_assembles_a_large_file() {
     let bytes = read_snapshot_file(&h.store, &ca, "big/data.bin").await;
     assert_eq!(bytes.len(), 128 * 4096 + 4);
 
-    // Verify the assembled content matches what was streamed.
-    let mut expected = Vec::with_capacity(bytes.len());
+        let mut expected = Vec::with_capacity(bytes.len());
     let mut piece = [0u8; 4096];
     for (i, b) in piece.iter_mut().enumerate() {
         *b = ((i * 7 + 3) & 0xff) as u8;

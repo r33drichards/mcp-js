@@ -41,7 +41,7 @@ fn parse_response(resp: StatelessRunJsResponse) -> serde_json::Value {
     resp.value
 }
 
-#[tokio::test]
+
 async fn test_stateless_shell_console_log() {
     ensure_v8();
     let engine = create_test_engine();
@@ -55,7 +55,7 @@ async fn test_stateless_shell_console_log() {
     assert!(output.contains("hello world"), "Output should contain 'hello world', got: {}", output);
 }
 
-#[tokio::test]
+
 async fn test_stateless_shell_multiple_console_logs() {
     ensure_v8();
     let engine = create_test_engine();
@@ -76,7 +76,7 @@ async fn test_stateless_shell_multiple_console_logs() {
     assert!(output.contains("line 3"), "Should contain line 3");
 }
 
-#[tokio::test]
+
 async fn test_stateless_shell_error_handling() {
     ensure_v8();
     let engine = create_test_engine();
@@ -90,7 +90,7 @@ async fn test_stateless_shell_error_handling() {
     assert!(error.contains("boom"), "Error should mention 'boom', got: {}", error);
 }
 
-#[tokio::test]
+
 async fn test_stateless_shell_no_execution_id_exposed() {
     ensure_v8();
     let engine = create_test_engine();
@@ -102,7 +102,7 @@ async fn test_stateless_shell_no_execution_id_exposed() {
     assert!(value["execution_id"].is_null(), "Should not expose execution_id: {:?}", value);
 }
 
-#[tokio::test]
+
 async fn test_stateless_shell_computation_with_output() {
     ensure_v8();
     let engine = create_test_engine();
@@ -120,7 +120,7 @@ async fn test_stateless_shell_computation_with_output() {
     assert!(output.contains("sum is 15"), "Output should contain 'sum is 15', got: {}", output);
 }
 
-#[tokio::test]
+
 async fn test_stateless_shell_top_level_await() {
     ensure_v8();
     let engine = create_test_engine();
@@ -139,7 +139,7 @@ async fn test_stateless_shell_top_level_await() {
     assert!(output.contains("result is 42"), "Output should contain 'result is 42', got: {}", output);
 }
 
-#[tokio::test]
+
 async fn test_stateless_shell_top_level_await_async_chain() {
     ensure_v8();
     let engine = create_test_engine();
@@ -159,9 +159,8 @@ async fn test_stateless_shell_top_level_await_async_chain() {
     assert!(output.contains("30"), "Output should contain '30', got: {}", output);
 }
 
-// ── run_js `file` parameter (server-side file-path execution) ────────────
 
-#[tokio::test]
+
 async fn test_run_js_file_allow_all_reads_and_runs() {
     ensure_v8();
     let dir = tempfile::tempdir().unwrap();
@@ -170,8 +169,7 @@ async fn test_run_js_file_allow_all_reads_and_runs() {
 
     let service = StatelessMcpService::new(create_test_engine_allow_file(), None);
 
-    // code omitted; file provided.
-    let resp = service
+        let resp = service
         .run_js(None, Some(script.to_str().unwrap().to_string()), None, None)
         .await;
     let value = parse_response(resp);
@@ -181,15 +179,14 @@ async fn test_run_js_file_allow_all_reads_and_runs() {
     assert!(output.contains("from a file 42"), "got: {}", output);
 }
 
-#[tokio::test]
+
 async fn test_run_js_file_disabled_by_default_errors() {
     ensure_v8();
     let dir = tempfile::tempdir().unwrap();
     let script = dir.path().join("script.js");
     std::fs::write(&script, "console.log('nope');").unwrap();
 
-    // Default engine has no run_js_file policy → file reads are disabled.
-    let service = StatelessMcpService::new(create_test_engine(), None);
+        let service = StatelessMcpService::new(create_test_engine(), None);
 
     let resp = service
         .run_js(None, Some(script.to_str().unwrap().to_string()), None, None)
@@ -200,7 +197,7 @@ async fn test_run_js_file_disabled_by_default_errors() {
     assert!(error.contains("disabled"), "expected 'disabled' error, got: {:?}", value);
 }
 
-#[tokio::test]
+
 async fn test_run_js_file_and_code_conflict_errors() {
     ensure_v8();
     let dir = tempfile::tempdir().unwrap();
@@ -209,8 +206,7 @@ async fn test_run_js_file_and_code_conflict_errors() {
 
     let service = StatelessMcpService::new(create_test_engine_allow_file(), None);
 
-    // Both code and file supplied → error.
-    let resp = service
+        let resp = service
         .run_js(
             Some("console.log('inline')".to_string()),
             Some(script.to_str().unwrap().to_string()),

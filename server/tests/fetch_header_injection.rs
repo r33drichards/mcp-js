@@ -28,7 +28,7 @@ fn ensure_v8() {
     });
 }
 
-#[derive(Clone)]
+
 struct TestTokenServer {
     base_url: String,
     state: TestTokenServerState,
@@ -44,13 +44,13 @@ impl TestTokenServer {
     }
 }
 
-#[derive(Clone)]
+
 struct TestTokenServerState {
     responses: Arc<tokio::sync::Mutex<VecDeque<TestTokenResponse>>>,
     requests: Arc<tokio::sync::Mutex<Vec<TestTokenRequest>>>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+
 struct TestTokenResponse {
     status: StatusCode,
     body: Value,
@@ -69,7 +69,7 @@ impl TestTokenResponse {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+
 struct TestTokenRequest {
     grant_type: String,
     refresh_token: Option<String>,
@@ -117,7 +117,7 @@ async fn start_token_server(responses: Vec<TestTokenResponse>) -> TestTokenServe
     }
 }
 
-#[derive(Clone)]
+
 struct EchoServer {
     url: String,
     state: EchoServerState,
@@ -129,12 +129,12 @@ impl EchoServer {
     }
 }
 
-#[derive(Clone)]
+
 struct EchoServerState {
     requests: Arc<tokio::sync::Mutex<Vec<EchoRequestRecord>>>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+
 struct EchoRequestRecord {
     method: String,
     authorization: Option<String>,
@@ -296,7 +296,7 @@ async fn run_fetch(
     run_js(engine, code).await.map(|_| ())
 }
 
-#[tokio::test]
+
 async fn matching_request_receives_injected_bearer_token_from_mock_token_server() {
     ensure_v8();
 
@@ -333,7 +333,7 @@ async fn matching_request_receives_injected_bearer_token_from_mock_token_server(
     );
 }
 
-#[tokio::test]
+
 async fn matching_request_receives_static_authorization_header() {
     ensure_v8();
 
@@ -358,7 +358,7 @@ async fn matching_request_receives_static_authorization_header() {
     );
 }
 
-#[tokio::test]
+
 async fn user_provided_authorization_overrides_static_injection() {
     ensure_v8();
 
@@ -388,7 +388,7 @@ async fn user_provided_authorization_overrides_static_injection() {
     );
 }
 
-#[tokio::test]
+
 async fn static_injection_skips_non_matching_host_and_method() {
     ensure_v8();
 
@@ -428,7 +428,7 @@ async fn static_injection_skips_non_matching_host_and_method() {
     );
 }
 
-#[tokio::test]
+
 async fn repeated_requests_reuse_cached_token() {
     ensure_v8();
 
@@ -474,7 +474,7 @@ async fn repeated_requests_reuse_cached_token() {
     );
 }
 
-#[tokio::test]
+
 async fn post_expiry_request_uses_refresh_token_grant_when_available() {
     ensure_v8();
 
@@ -535,7 +535,7 @@ async fn post_expiry_request_uses_refresh_token_grant_when_available() {
     );
 }
 
-#[tokio::test]
+
 async fn post_expiry_request_reacquires_with_client_credentials_without_refresh_token() {
     ensure_v8();
 
@@ -594,7 +594,7 @@ async fn post_expiry_request_reacquires_with_client_credentials_without_refresh_
     );
 }
 
-#[tokio::test]
+
 async fn user_provided_authorization_overrides_dynamic_injection() {
     ensure_v8();
 
@@ -625,7 +625,7 @@ async fn user_provided_authorization_overrides_dynamic_injection() {
     assert!(token_server.requests().await.is_empty());
 }
 
-#[tokio::test]
+
 async fn non_matching_host_performs_no_token_lookup() {
     ensure_v8();
 
@@ -651,7 +651,7 @@ async fn non_matching_host_performs_no_token_lookup() {
     assert!(token_server.requests().await.is_empty());
 }
 
-#[tokio::test]
+
 async fn non_matching_method_performs_no_token_lookup() {
     ensure_v8();
 

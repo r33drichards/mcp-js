@@ -11,7 +11,7 @@
 //! session/changeset merger) plug in via [`ContentMerger`].
 
 /// Detected kind of a file's bytes.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+
 pub enum ContentKind {
     Text,
     /// A SQLite database (`SQLite format 3\0` magic). Reserved for a future
@@ -48,13 +48,12 @@ fn is_textual(b: &[u8]) -> bool {
         return true;
     }
     if b.contains(&0) {
-        return false; // a NUL byte is the classic binary signal
-    }
+        return false;     }
     std::str::from_utf8(b).is_ok()
 }
 
 /// A description of an unresolved content conflict, for the merge response.
-#[derive(Clone, Debug, PartialEq, Eq)]
+
 pub struct ContentConflict {
     pub kind: ContentKind,
     /// diff3-style conflict-marked text (`<<<<<<< ======= >>>>>>>`), when the
@@ -66,7 +65,7 @@ pub struct ContentConflict {
     pub diff_theirs: Option<String>,
 }
 
-#[derive(Clone, Debug)]
+
 pub enum ContentMergeResult {
     /// The bytes reconciled cleanly.
     Clean(Vec<u8>),
@@ -93,8 +92,7 @@ impl ContentMerger for TextMerger {
     }
 
     fn merge(&self, base: Option<&[u8]>, ours: &[u8], theirs: &[u8]) -> ContentMergeResult {
-        // All three must be valid UTF-8 to do a text merge.
-        let (Ok(ours_s), Ok(theirs_s)) = (std::str::from_utf8(ours), std::str::from_utf8(theirs))
+                let (Ok(ours_s), Ok(theirs_s)) = (std::str::from_utf8(ours), std::str::from_utf8(theirs))
         else {
             return ContentMergeResult::Conflict(binary_conflict(ContentKind::Binary));
         };
@@ -142,12 +140,9 @@ pub fn merge_content(
     ours: &[u8],
     theirs: &[u8],
 ) -> ContentMergeResult {
-    // Identical bytes never reach here (the structural pass already resolved
-    // them), so we only need to pick a merger by kind.
-    let kind = detect_kind(ours);
+            let kind = detect_kind(ours);
     let theirs_kind = detect_kind(theirs);
-    // If the two sides disagree on kind (e.g. text vs binary), don't guess.
-    if kind != theirs_kind {
+        if kind != theirs_kind {
         return ContentMergeResult::Conflict(binary_conflict(ContentKind::Binary));
     }
     for m in mergers {

@@ -27,12 +27,11 @@ arr.length;
 /// Small JS that should succeed with any reasonable heap limit.
 const SMALL_JS: &str = "1 + 1;";
 
-#[test]
+
 fn test_stateless_small_heap_limit_rejects_large_allocation() {
     ensure_v8();
 
-    // 5 MB heap limit — too small for a 2M-element string array
-    let max_bytes = 5 * 1024 * 1024;
+        let max_bytes = 5 * 1024 * 1024;
     let (result, _oom) = server::engine::execute_stateless(MEMORY_HOG_JS, ExecutionConfig::new(max_bytes));
 
     assert!(
@@ -42,7 +41,7 @@ fn test_stateless_small_heap_limit_rejects_large_allocation() {
     );
 }
 
-#[test]
+
 fn test_stateless_default_limit_allows_small_code() {
     ensure_v8();
 
@@ -56,12 +55,11 @@ fn test_stateless_default_limit_allows_small_code() {
     );
 }
 
-#[test]
+
 fn test_stateless_generous_limit_allows_large_allocation() {
     ensure_v8();
 
-    // 256 MB — should be plenty for 2M strings
-    let max_bytes = 256 * 1024 * 1024;
+        let max_bytes = 256 * 1024 * 1024;
     let (result, _oom) = server::engine::execute_stateless(MEMORY_HOG_JS, ExecutionConfig::new(max_bytes));
 
     assert!(
@@ -71,12 +69,11 @@ fn test_stateless_generous_limit_allows_large_allocation() {
     );
 }
 
-#[test]
+
 fn test_stateful_small_heap_limit_rejects_large_allocation() {
     ensure_v8();
 
-    // 5 MB heap limit — too small for a 2M-element string array
-    let max_bytes = 5 * 1024 * 1024;
+        let max_bytes = 5 * 1024 * 1024;
     let (result, _oom) = server::engine::execute_stateful(MEMORY_HOG_JS, None, ExecutionConfig::new(max_bytes));
 
     assert!(
@@ -86,7 +83,7 @@ fn test_stateful_small_heap_limit_rejects_large_allocation() {
     );
 }
 
-#[test]
+
 fn test_stateful_default_limit_allows_small_code() {
     ensure_v8();
 
@@ -102,12 +99,11 @@ fn test_stateful_default_limit_allows_small_code() {
     assert!(!snapshot.is_empty(), "Snapshot should be non-empty");
 }
 
-#[test]
+
 fn test_stateful_generous_limit_allows_large_allocation() {
     ensure_v8();
 
-    // 256 MB — should be plenty for 2M strings
-    let max_bytes = 256 * 1024 * 1024;
+        let max_bytes = 256 * 1024 * 1024;
     let (result, _oom) = server::engine::execute_stateful(MEMORY_HOG_JS, None, ExecutionConfig::new(max_bytes));
 
     assert!(
@@ -118,12 +114,11 @@ fn test_stateful_generous_limit_allows_large_allocation() {
     let (_output, _, _) = result.unwrap();
 }
 
-#[test]
+
 fn test_different_limits_produce_different_outcomes() {
     ensure_v8();
 
-    // Same code, different limits — small should fail, large should succeed
-    let small_limit = 5 * 1024 * 1024;
+        let small_limit = 5 * 1024 * 1024;
     let large_limit = 256 * 1024 * 1024;
 
     let (small_result, _) = server::engine::execute_stateless(MEMORY_HOG_JS, ExecutionConfig::new(small_limit));
@@ -139,7 +134,6 @@ fn test_different_limits_produce_different_outcomes() {
     );
 }
 
-// ── Typed-array OOM (hard crash regression) ──────────────────────────────
 
 /// Typed arrays (Uint8Array) allocate backing stores outside V8's managed
 /// JS heap, so an OOM from unbounded typed-array growth can terminate the
@@ -164,18 +158,14 @@ try {
 }
 "#;
 
-#[test]
+
 fn test_typed_array_oom_does_not_crash_stateless() {
     ensure_v8();
 
-    // 8 MB heap — typed array backing stores will exceed this quickly
-    let heap_bytes = 8 * 1024 * 1024;
+        let heap_bytes = 8 * 1024 * 1024;
     let (result, _oom) = server::engine::execute_stateless(TYPED_ARRAY_OOM_JS, ExecutionConfig::new(heap_bytes));
 
-    // We don't care whether it's Ok (the JS catch fired) or Err (V8 killed it) —
-    // the critical thing is that we *get here* instead of a process crash.
-    // If this is an Err, the message should be descriptive.
-    if let Err(ref e) = result {
+                if let Err(ref e) = result {
         assert!(
             !e.contains("Error occurred during tool execution"),
             "Typed-array OOM should produce a V8-level error, not a hard crash. Got: {}",
@@ -184,7 +174,7 @@ fn test_typed_array_oom_does_not_crash_stateless() {
     }
 }
 
-#[test]
+
 fn test_typed_array_oom_does_not_crash_stateful() {
     ensure_v8();
 
@@ -200,38 +190,22 @@ fn test_typed_array_oom_does_not_crash_stateful() {
     }
 }
 
-// ── Extreme OOM regression (1 MB heap + 1 billion element array) ──────
-//
-// `new Array(1e9).fill(0)` asks V8 to create a FixedArray of 1 billion
-// entries, which exceeds V8's internal `FixedArray::kMaxLength`. V8 calls
-// `FatalProcessOutOfMemory("invalid table size")` → `abort()` before the
-// near-heap-limit callback can fire. This is NOT a recoverable OOM — it
-// is a V8 internal structural limit. Approaches like setjmp/longjmp or
-// panic corrupt V8's global state (held locks, allocator state) and cause
-// SIGSEGV in subsequent V8 operations.
-//
-// We test this in a subprocess: the child process runs the pathological
-// allocation and V8 aborts it. The parent verifies the child terminated
-// (didn't hang) and the parent process is unaffected.
 
 /// Helper binary entrypoint for extreme OOM subprocess tests.
 /// Invoked via `std::process::Command` with env EXTREME_OOM_SUBPROCESS=stateless|stateful.
-#[test]
+
 fn extreme_oom_subprocess_worker() {
     let mode = match std::env::var("EXTREME_OOM_SUBPROCESS") {
         Ok(m) => m,
-        Err(_) => return, // Skip unless explicitly invoked as subprocess
-    };
+        Err(_) => return,     };
 
     ensure_v8();
     let code = "const arr = new Array(1e9).fill(0); arr.length";
-    let heap_bytes = 1 * 1024 * 1024; // 1 MB (clamped to MIN_HEAP_MEMORY_MB internally)
-
+    let heap_bytes = 1 * 1024 * 1024; 
     match mode.as_str() {
         "stateless" => {
             let (result, _) = server::engine::execute_stateless(code, ExecutionConfig::new(heap_bytes));
-            // If we reach here (V8 didn't abort), exit cleanly.
-            if result.is_err() {
+                        if result.is_err() {
                 std::process::exit(0);
             }
             std::process::exit(0);
@@ -261,14 +235,8 @@ fn run_extreme_oom_subprocess(mode: &str) {
         .output()
         .expect("Failed to spawn subprocess");
 
-    // The subprocess should terminate (not hang). It may exit 0 (clean
-    // OOM error) or non-zero (V8 abort). Both are acceptable — the
-    // critical thing is that the parent process is unaffected.
-    let _ = output.status; // We don't assert on the exit code — V8 abort is expected.
-
-    // The parent process is still running — V8 global state is intact.
-    // Verify by running a simple V8 execution.
-    ensure_v8();
+                let _ = output.status; 
+            ensure_v8();
     let (result, _) = server::engine::execute_stateless("1 + 1;", ExecutionConfig::new(8 * 1024 * 1024)
         .wasm_default_max_bytes(16 * 1024 * 1024));
     assert!(
@@ -278,12 +246,12 @@ fn run_extreme_oom_subprocess(mode: &str) {
     );
 }
 
-#[test]
+
 fn test_extreme_oom_1mb_heap_subprocess_stateless() {
     run_extreme_oom_subprocess("stateless");
 }
 
-#[test]
+
 fn test_extreme_oom_1mb_heap_subprocess_stateful() {
     run_extreme_oom_subprocess("stateful");
 }

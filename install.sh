@@ -1,10 +1,8 @@
-#!/usr/bin/env bash
 set -e
 
 REPO="r33drichards/mcp-js"
 INSTALL_DIR="/usr/local/bin"
 
-# Detect latest version if not specified
 if [ -z "$MCP_V8_VERSION" ]; then
   MCP_V8_VERSION=$(curl -s "https://api.github.com/repos/$REPO/releases/latest" | grep '"tag_name":' | sed -E 's/.*"tag_name": "([^"]+)".*/\1/')
 fi
@@ -16,7 +14,6 @@ fi
 
 echo "Installing mcp-v8 version: $MCP_V8_VERSION"
 
-# Detect OS and ARCH
 OS=$(uname -s)
 ARCH=$(uname -m)
 
@@ -47,7 +44,6 @@ curl -L -o "$BINARY_GZ" "$DOWNLOAD_URL"
 echo "Extracting binary..."
 gunzip -f "$BINARY_GZ"
 
-# Find install dir
 if [ -w "$INSTALL_DIR" ]; then
   TARGET="$INSTALL_DIR/mcp-v8"
   mv "$BINARY_NAME" "$TARGET"

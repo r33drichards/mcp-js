@@ -38,9 +38,7 @@ impl OuterServer {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let server_bin = env!("CARGO_BIN_EXE_server");
 
-        // The argument format is `name=stdio:command:arg1:arg2...`. We want the
-        // upstream invocation to be `<server_bin> --heap-store dir --heap-dir <upstream_heap>`.
-        let upstream_arg = format!(
+                        let upstream_arg = format!(
             "upstream=stdio:{}:--heap-store:dir:--heap-dir:{}",
             server_bin, upstream_heap
         );
@@ -65,8 +63,7 @@ impl OuterServer {
         let stdin = child.stdin.take().expect("stdin");
         let stdout = BufReader::new(child.stdout.take().expect("stdout"));
 
-        // Give the outer server time to spawn the upstream + handshake.
-        tokio::time::sleep(Duration::from_millis(1500)).await;
+                tokio::time::sleep(Duration::from_millis(1500)).await;
 
         Ok(Self { child, stdin, stdout })
     }
@@ -127,7 +124,7 @@ fn tool_names(list_response: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-#[tokio::test]
+
 async fn outer_server_advertises_upstream_tools_as_stubs() -> Result<(), Box<dyn std::error::Error>> {
     let outer_heap = common::create_temp_heap_dir() + "-outer";
     let upstream_heap = common::create_temp_heap_dir() + "-upstream";
@@ -137,8 +134,7 @@ async fn outer_server_advertises_upstream_tools_as_stubs() -> Result<(), Box<dyn
     let mut server = OuterServer::start(&outer_heap, &upstream_heap).await?;
     server.initialize().await?;
 
-    // Ask for the tool list.
-    let list = server
+        let list = server
         .send(json!({
             "jsonrpc": "2.0",
             "id": 2,
@@ -148,21 +144,16 @@ async fn outer_server_advertises_upstream_tools_as_stubs() -> Result<(), Box<dyn
         .await?;
 
     let names = tool_names(&list);
-    // Native tools still present.
-    assert!(names.contains(&"run_js".to_string()), "native run_js missing: {:?}", names);
-    // Upstream tools stubbed: at minimum, run_js from upstream.
-    assert!(
+        assert!(names.contains(&"run_js".to_string()), "native run_js missing: {:?}", names);
+        assert!(
         names.contains(&"runjs__upstream__run_js".to_string()),
         "expected runjs__upstream__run_js in tool list, got: {:?}",
         names,
     );
-    // Several upstream tools should be stubbed (run_js, get_execution, list_executions, ...).
-    let stub_count = names.iter().filter(|n| n.starts_with("runjs__upstream__")).count();
+        let stub_count = names.iter().filter(|n| n.starts_with("runjs__upstream__")).count();
     assert!(stub_count >= 2, "expected multiple upstream stubs, got: {:?}", names);
 
-    // Stub schemas should mirror the upstream tool's schema. For run_js
-    // upstream tool, the stub should describe a `code` parameter.
-    let stub = list["result"]["tools"]
+            let stub = list["result"]["tools"]
         .as_array()
         .unwrap()
         .iter()
@@ -184,7 +175,7 @@ async fn outer_server_advertises_upstream_tools_as_stubs() -> Result<(), Box<dyn
     Ok(())
 }
 
-#[tokio::test]
+
 async fn calling_a_stub_returns_run_js_instructions() -> Result<(), Box<dyn std::error::Error>> {
     let outer_heap = common::create_temp_heap_dir() + "-outer2";
     let upstream_heap = common::create_temp_heap_dir() + "-upstream2";
@@ -206,9 +197,7 @@ async fn calling_a_stub_returns_run_js_instructions() -> Result<(), Box<dyn std:
         }))
         .await?;
 
-    // Expect a successful call_tool result whose first content block tells
-    // the caller to invoke the tool from JS instead.
-    assert_eq!(resp["result"]["isError"], json!(false));
+            assert_eq!(resp["result"]["isError"], json!(false));
     let text = resp["result"]["content"][0]["text"]
         .as_str()
         .unwrap_or_default()
@@ -218,8 +207,7 @@ async fn calling_a_stub_returns_run_js_instructions() -> Result<(), Box<dyn std:
     assert!(text.contains("run_js"), "stub call text: {}", text);
     assert!(text.contains("return 1 + 1"), "stub call text should echo args: {}", text);
 
-    // Sanity: a non-stub native tool still dispatches normally.
-    let resp = server
+        let resp = server
         .send(json!({
             "jsonrpc": "2.0",
             "id": 3,
@@ -230,9 +218,7 @@ async fn calling_a_stub_returns_run_js_instructions() -> Result<(), Box<dyn std:
             }
         }))
         .await?;
-    // Native tool responds with structured executions JSON, not the stub
-    // instruction text.
-    let text = resp["result"]["content"][0]["text"]
+            let text = resp["result"]["content"][0]["text"]
         .as_str()
         .unwrap_or_default()
         .to_string();
@@ -244,7 +230,7 @@ async fn calling_a_stub_returns_run_js_instructions() -> Result<(), Box<dyn std:
     Ok(())
 }
 
-#[tokio::test]
+
 async fn mcp_stub_prefix_flag_overrides_default() -> Result<(), Box<dyn std::error::Error>> {
     let outer_heap = common::create_temp_heap_dir() + "-outer3";
     let upstream_heap = common::create_temp_heap_dir() + "-upstream3";
@@ -268,14 +254,12 @@ async fn mcp_stub_prefix_flag_overrides_default() -> Result<(), Box<dyn std::err
         }))
         .await?;
     let names = tool_names(&list);
-    // Stubs use the new prefix.
-    assert!(
+        assert!(
         names.contains(&"rj_upstream__run_js".to_string()),
         "expected rj_upstream__run_js in tool list, got: {:?}",
         names,
     );
-    // The default prefix is no longer present.
-    assert!(
+        assert!(
         !names.iter().any(|n| n.starts_with("runjs__")),
         "default-prefixed stubs should not appear: {:?}",
         names,
@@ -287,7 +271,7 @@ async fn mcp_stub_prefix_flag_overrides_default() -> Result<(), Box<dyn std::err
     Ok(())
 }
 
-#[tokio::test]
+
 async fn mcp_stubs_disabled_flag_hides_stubs() -> Result<(), Box<dyn std::error::Error>> {
     let outer_heap = common::create_temp_heap_dir() + "-outer4";
     let upstream_heap = common::create_temp_heap_dir() + "-upstream4";
@@ -311,18 +295,14 @@ async fn mcp_stubs_disabled_flag_hides_stubs() -> Result<(), Box<dyn std::error:
         }))
         .await?;
     let names = tool_names(&list);
-    // Native tools still present.
-    assert!(names.contains(&"run_js".to_string()), "native run_js missing: {:?}", names);
-    // No stubs at all.
-    assert!(
+        assert!(names.contains(&"run_js".to_string()), "native run_js missing: {:?}", names);
+        assert!(
         !names.iter().any(|n| n.starts_with("runjs__")),
         "stubs should be hidden when --mcp-stubs false: {:?}",
         names,
     );
 
-    // Calling a stub-shaped name now falls through to the normal dispatcher,
-    // which returns "tool not found" rather than a stub instruction.
-    let resp = server
+            let resp = server
         .send(json!({
             "jsonrpc": "2.0",
             "id": 3,

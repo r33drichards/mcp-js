@@ -25,18 +25,13 @@ async fn send_mcp_message(stream: &mut TcpStream, message: Value) -> Result<Valu
 }
 
 /// Test full HTTP upgrade to MCP protocol flow
-#[tokio::test]
-#[ignore] // Run with `cargo test -- --ignored` when server is available
-async fn test_http_upgrade_to_mcp() -> Result<(), Box<dyn std::error::Error>> {
-    // Start the server in a background task
-    let server_handle = tokio::spawn(async {
-        // This would start the actual server
-        // For now, we just simulate it running
-        tokio::time::sleep(Duration::from_secs(10)).await;
+
+ async fn test_http_upgrade_to_mcp() -> Result<(), Box<dyn std::error::Error>> {
+        let server_handle = tokio::spawn(async {
+                        tokio::time::sleep(Duration::from_secs(10)).await;
     });
 
-    // Give server time to start
-    tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
 
     let port = 8765;
     let mut stream = timeout(
@@ -44,8 +39,7 @@ async fn test_http_upgrade_to_mcp() -> Result<(), Box<dyn std::error::Error>> {
         TcpStream::connect(format!("127.0.0.1:{}", port))
     ).await??;
 
-    // Send HTTP upgrade request
-    let upgrade_request = format!(
+        let upgrade_request = format!(
         "GET / HTTP/1.1\r\n\
          Host: localhost:{}\r\n\
          Upgrade: mcp\r\n\
@@ -57,13 +51,11 @@ async fn test_http_upgrade_to_mcp() -> Result<(), Box<dyn std::error::Error>> {
     stream.write_all(upgrade_request.as_bytes()).await?;
     stream.flush().await?;
 
-    // Read HTTP response headers
-    let mut buf = vec![0u8; 4096];
+        let mut buf = vec![0u8; 4096];
     let n = timeout(Duration::from_secs(2), stream.peek(&mut buf)).await??;
     let response = String::from_utf8_lossy(&buf[..n]);
 
-    // Verify we got a 101 Switching Protocols response
-    assert!(response.contains("101") || response.contains("Switching Protocols"),
+        assert!(response.contains("101") || response.contains("Switching Protocols"),
             "Expected HTTP 101 Switching Protocols response");
 
     server_handle.abort();
@@ -71,26 +63,22 @@ async fn test_http_upgrade_to_mcp() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Test MCP initialize handshake
-#[tokio::test]
-#[ignore] // Run with `cargo test -- --ignored` when server is available
-async fn test_mcp_initialize_handshake() -> Result<(), Box<dyn std::error::Error>> {
+
+ async fn test_mcp_initialize_handshake() -> Result<(), Box<dyn std::error::Error>> {
     let port = 8766;
 
-    // Simulate upgraded connection (after HTTP upgrade)
-    let mut stream = timeout(
+        let mut stream = timeout(
         Duration::from_secs(2),
         TcpStream::connect(format!("127.0.0.1:{}", port))
     ).await?;
 
     if stream.is_err() {
-        // Server not running, skip test
-        return Ok(());
+                return Ok(());
     }
 
     let mut stream = stream?;
 
-    // Send initialize request
-    let initialize_msg = json!({
+        let initialize_msg = json!({
         "jsonrpc": "2.0",
         "id": 1,
         "method": "initialize",
@@ -109,8 +97,7 @@ async fn test_mcp_initialize_handshake() -> Result<(), Box<dyn std::error::Error
         send_mcp_message(&mut stream, initialize_msg)
     ).await??;
 
-    // Verify response structure
-    assert_eq!(response["jsonrpc"], "2.0");
+        assert_eq!(response["jsonrpc"], "2.0");
     assert_eq!(response["id"], 1);
     assert!(response["result"].is_object(), "Should have result object");
     assert!(response["result"]["capabilities"].is_object(),
@@ -120,9 +107,8 @@ async fn test_mcp_initialize_handshake() -> Result<(), Box<dyn std::error::Error
 }
 
 /// Test run_js tool execution via MCP
-#[tokio::test]
-#[ignore] // Run with `cargo test -- --ignored` when server is available
-async fn test_run_js_tool_execution() -> Result<(), Box<dyn std::error::Error>> {
+
+ async fn test_run_js_tool_execution() -> Result<(), Box<dyn std::error::Error>> {
     let port = 8767;
 
     let mut stream = timeout(
@@ -136,8 +122,7 @@ async fn test_run_js_tool_execution() -> Result<(), Box<dyn std::error::Error>> 
 
     let mut stream = stream?;
 
-    // First, initialize
-    let initialize_msg = json!({
+        let initialize_msg = json!({
         "jsonrpc": "2.0",
         "id": 1,
         "method": "initialize",
@@ -156,8 +141,7 @@ async fn test_run_js_tool_execution() -> Result<(), Box<dyn std::error::Error>> 
         send_mcp_message(&mut stream, initialize_msg)
     ).await??;
 
-    // Then call run_js tool
-    let tool_call_msg = json!({
+        let tool_call_msg = json!({
         "jsonrpc": "2.0",
         "id": 2,
         "method": "tools/call",
@@ -174,13 +158,11 @@ async fn test_run_js_tool_execution() -> Result<(), Box<dyn std::error::Error>> 
         send_mcp_message(&mut stream, tool_call_msg)
     ).await??;
 
-    // Verify response
-    assert_eq!(response["jsonrpc"], "2.0");
+        assert_eq!(response["jsonrpc"], "2.0");
     assert_eq!(response["id"], 2);
     assert!(response["result"].is_object(), "Should have result object");
 
-    // Check for output in result
-    if let Some(content) = response["result"]["content"].as_array() {
+        if let Some(content) = response["result"]["content"].as_array() {
         assert!(!content.is_empty(), "Should have content in response");
     }
 
@@ -188,9 +170,8 @@ async fn test_run_js_tool_execution() -> Result<(), Box<dyn std::error::Error>> 
 }
 
 /// Test heap persistence across multiple calls
-#[tokio::test]
-#[ignore] // Run with `cargo test -- --ignored` when server is available
-async fn test_heap_persistence() -> Result<(), Box<dyn std::error::Error>> {
+
+ async fn test_heap_persistence() -> Result<(), Box<dyn std::error::Error>> {
     let port = 8768;
 
     let mut stream = timeout(
@@ -204,8 +185,7 @@ async fn test_heap_persistence() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut stream = stream?;
 
-    // Initialize
-    let initialize_msg = json!({
+        let initialize_msg = json!({
         "jsonrpc": "2.0",
         "id": 1,
         "method": "initialize",
@@ -224,8 +204,7 @@ async fn test_heap_persistence() -> Result<(), Box<dyn std::error::Error>> {
         send_mcp_message(&mut stream, initialize_msg)
     ).await??;
 
-    // Set a variable on globalThis in a fresh heap (var is module-scoped in ES modules)
-    let set_var_msg = json!({
+        let set_var_msg = json!({
         "jsonrpc": "2.0",
         "id": 2,
         "method": "tools/call",
@@ -242,15 +221,12 @@ async fn test_heap_persistence() -> Result<(), Box<dyn std::error::Error>> {
         send_mcp_message(&mut stream, set_var_msg)
     ).await??;
 
-    // Verify first call succeeded
-    assert!(response1["result"].is_object());
+        assert!(response1["result"].is_object());
 
-    // Extract content hash from first response
-    let heap_hash = common::extract_heap_hash(&response1)
+        let heap_hash = common::extract_heap_hash(&response1)
         .expect("First response should contain a heap content hash");
 
-    // Read the variable from heap using the content hash
-    let read_var_msg = json!({
+        let read_var_msg = json!({
         "jsonrpc": "2.0",
         "id": 3,
         "method": "tools/call",
@@ -268,16 +244,14 @@ async fn test_heap_persistence() -> Result<(), Box<dyn std::error::Error>> {
         send_mcp_message(&mut stream, read_var_msg)
     ).await??;
 
-    // Verify second call succeeded and has result
-    assert!(response2["result"].is_object());
+        assert!(response2["result"].is_object());
 
     Ok(())
 }
 
 /// Test error handling for invalid JavaScript
-#[tokio::test]
-#[ignore] // Run with `cargo test -- --ignored` when server is available
-async fn test_invalid_javascript_error() -> Result<(), Box<dyn std::error::Error>> {
+
+ async fn test_invalid_javascript_error() -> Result<(), Box<dyn std::error::Error>> {
     let port = 8769;
 
     let mut stream = timeout(
@@ -291,8 +265,7 @@ async fn test_invalid_javascript_error() -> Result<(), Box<dyn std::error::Error
 
     let mut stream = stream?;
 
-    // Initialize
-    let initialize_msg = json!({
+        let initialize_msg = json!({
         "jsonrpc": "2.0",
         "id": 1,
         "method": "initialize",
@@ -311,8 +284,7 @@ async fn test_invalid_javascript_error() -> Result<(), Box<dyn std::error::Error
         send_mcp_message(&mut stream, initialize_msg)
     ).await??;
 
-    // Send invalid JavaScript
-    let invalid_js_msg = json!({
+        let invalid_js_msg = json!({
         "jsonrpc": "2.0",
         "id": 2,
         "method": "tools/call",
@@ -329,12 +301,10 @@ async fn test_invalid_javascript_error() -> Result<(), Box<dyn std::error::Error
         send_mcp_message(&mut stream, invalid_js_msg)
     ).await??;
 
-    // The server should return a response (either error or result with error message)
-    assert_eq!(response["jsonrpc"], "2.0");
+        assert_eq!(response["jsonrpc"], "2.0");
     assert_eq!(response["id"], 2);
 
-    // It should either be an error response or a result with error info
-    let has_error = response["error"].is_object() ||
+        let has_error = response["error"].is_object() ||
                    (response["result"].is_object() &&
                     response["result"]["content"].as_array()
                         .and_then(|arr| arr.first())

@@ -25,7 +25,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 /// How to resolve a divergent path.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+
 pub enum Prefer {
     /// Report conflicts instead of resolving them.
     None,
@@ -49,7 +49,7 @@ impl Prefer {
 
 /// A path that diverged on both sides (and `prefer` was `None`). Each field is
 /// the side's entry, or `None` if the file is absent on that side.
-#[derive(Clone, Debug, PartialEq, Eq)]
+
 pub struct MergeConflict {
     pub path: PathBuf,
     pub base: Option<Entry>,
@@ -61,7 +61,7 @@ pub struct MergeConflict {
 /// that diverged. `conflicts` is empty for a fully clean merge. A content-merge
 /// pass (see `fs_content_merge`) can still reconcile some of the conflicts by
 /// looking at the actual file bytes.
-#[derive(Debug, Default)]
+
 pub struct MergeResult {
     pub merged: Manifest,
     pub conflicts: Vec<MergeConflict>,
@@ -74,8 +74,7 @@ pub fn merge_manifests(
     theirs: &Manifest,
     prefer: Prefer,
 ) -> MergeResult {
-    // Union of every path across the three manifests.
-    let mut paths: BTreeSet<&PathBuf> = BTreeSet::new();
+        let mut paths: BTreeSet<&PathBuf> = BTreeSet::new();
     if let Some(b) = base {
         paths.extend(b.entries.keys());
     }
@@ -90,15 +89,10 @@ pub fn merge_manifests(
         let o = ours.entries.get(path);
         let t = theirs.entries.get(path);
 
-        // `Some(side)` picks a side (which may itself be `None` = deletion);
-        // the outer `None` means "conflict".
-        let chosen: Option<Option<&Entry>> = if o == t {
-            Some(o) // identical on both sides (incl. both-deleted)
-        } else if o == b {
-            Some(t) // ours unchanged from base -> take theirs
-        } else if t == b {
-            Some(o) // theirs unchanged from base -> take ours
-        } else {
+                        let chosen: Option<Option<&Entry>> = if o == t {
+            Some(o)         } else if o == b {
+            Some(t)         } else if t == b {
+            Some(o)         } else {
             match prefer {
                 Prefer::Ours => Some(o),
                 Prefer::Theirs => Some(t),
@@ -110,7 +104,7 @@ pub fn merge_manifests(
             Some(Some(e)) => {
                 merged.entries.insert(path.clone(), e.clone());
             }
-            Some(None) => { /* resolved as a deletion: omit from the result */ }
+            Some(None) => {  }
             None => conflicts.push(MergeConflict {
                 path: path.clone(),
                 base: b.cloned(),
@@ -123,14 +117,6 @@ pub fn merge_manifests(
     MergeResult { merged, conflicts }
 }
 
-// ── Lazy tree merge ─────────────────────────────────────────────────────────
-//
-// The same per-path 3-way rule, but over the recursive tree: equal subtrees are
-// pruned by hash comparison without ever being loaded, so a merge of two
-// snapshots that differ in one corner costs O(differing paths), not O(tree). The
-// structurally-merged result is written as a new tree (sharing unchanged nodes);
-// conflicting files are left out of it and returned for the content-merge pass,
-// exactly as the flat merge does.
 
 /// The outcome of a tree merge: the structurally-merged root (conflicting paths
 /// omitted, to be patched by the caller's content merge) and the conflicts.
@@ -150,8 +136,7 @@ pub async fn merge_trees(
     let (root, conflicts) = merge_node(store, base, ours, theirs, prefer, Vec::new()).await?;
     let root = match root {
         Some(h) => h,
-        None => store.put_node(&TreeNode::default()).await?, // empty merged tree
-    };
+        None => store.put_node(&TreeNode::default()).await?,     };
     Ok(TreeMergeOutcome { root, conflicts })
 }
 
@@ -199,7 +184,7 @@ fn child_of(node: &Option<Arc<TreeNode>>, name: &str) -> TreeChild {
         .unwrap_or_default()
 }
 
-#[allow(clippy::type_complexity)]
+
 fn merge_node<'a>(
     store: &'a FsStore,
     base: Option<[u8; 32]>,
@@ -210,16 +195,12 @@ fn merge_node<'a>(
 ) -> Pin<Box<dyn Future<Output = anyhow::Result<(Option<[u8; 32]>, Vec<MergeConflict>)>> + Send + 'a>>
 {
     Box::pin(async move {
-        // Prune whole subtrees by hash, without loading them.
-        if ours == theirs {
-            return Ok((ours, Vec::new())); // identical (incl. both absent)
-        }
+                if ours == theirs {
+            return Ok((ours, Vec::new()));         }
         if base == ours {
-            return Ok((theirs, Vec::new())); // only theirs changed -> take theirs
-        }
+            return Ok((theirs, Vec::new()));         }
         if base == theirs {
-            return Ok((ours, Vec::new())); // only ours changed -> take ours
-        }
+            return Ok((ours, Vec::new()));         }
 
         let bn = load_opt(store, base).await?;
         let on = load_opt(store, ours).await?;
@@ -249,12 +230,10 @@ fn merge_node<'a>(
                         ours: oc.file.clone(),
                         theirs: tc.file.clone(),
                     });
-                    // file left None — patched later by the content merge.
-                }
+                                    }
             }
 
-            // Directory part: prune equal subtrees, else descend.
-            child.dir = if oc.dir == tc.dir {
+                        child.dir = if oc.dir == tc.dir {
                 oc.dir
             } else if bc.dir == oc.dir {
                 tc.dir

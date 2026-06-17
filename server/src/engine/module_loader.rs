@@ -27,7 +27,7 @@ const MODULE_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 const MODULE_FETCH_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Configuration for the module loader controlling external module access.
-#[derive(Clone, Debug)]
+
 pub struct ModuleLoaderConfig {
     /// When false, all external module imports (npm:, jsr:, URL) are rejected.
     pub allow_external: bool,
@@ -36,7 +36,7 @@ pub struct ModuleLoaderConfig {
 }
 
 /// Input sent to OPA for module import auditing.
-#[derive(Serialize)]
+
 struct ModulePolicyInput {
     /// The original specifier as written in code (e.g. "npm:lodash-es@4.17.21").
     specifier: String,
@@ -48,7 +48,7 @@ struct ModulePolicyInput {
     url_parsed: ModuleUrlParsed,
 }
 
-#[derive(Serialize)]
+
 struct ModuleUrlParsed {
     scheme: String,
     host: String,
@@ -101,8 +101,7 @@ impl ModuleLoader for NetworkModuleLoader {
         referrer: &str,
         _kind: ResolutionKind,
     ) -> Result<ModuleSpecifier, JsErrorBox> {
-        // npm:cowsay@1.6.0 → https://esm.sh/cowsay@1.6.0
-        if let Some(rest) = specifier.strip_prefix("npm:") {
+                if let Some(rest) = specifier.strip_prefix("npm:") {
             if !self.config.allow_external {
                 return Err(JsErrorBox::generic(format!(
                     "External module imports are disabled. Cannot import npm package '{}'. \
@@ -115,8 +114,7 @@ impl ModuleLoader for NetworkModuleLoader {
                 .map_err(|e| JsErrorBox::generic(format!("Bad npm specifier '{}': {}", specifier, e)));
         }
 
-        // jsr:@luca/cases@1.0.0 → https://esm.sh/jsr/@luca/cases@1.0.0
-        if let Some(rest) = specifier.strip_prefix("jsr:") {
+                if let Some(rest) = specifier.strip_prefix("jsr:") {
             if !self.config.allow_external {
                 return Err(JsErrorBox::generic(format!(
                     "External module imports are disabled. Cannot import JSR package '{}'. \
@@ -129,11 +127,7 @@ impl ModuleLoader for NetworkModuleLoader {
                 .map_err(|e| JsErrorBox::generic(format!("Bad jsr specifier '{}': {}", specifier, e)));
         }
 
-        // Absolute URLs pass through directly.
-        // Check for "https:" / "http:" (not just "https://" / "http://") so that
-        // malformed specifiers like "https:1/es" are caught here rather than
-        // falling through to resolve_import which would parse them as valid URLs.
-        if specifier.starts_with("https:") || specifier.starts_with("http:") {
+                                        if specifier.starts_with("https:") || specifier.starts_with("http:") {
             if !self.config.allow_external {
                 return Err(JsErrorBox::generic(format!(
                     "External module imports are disabled. Cannot import URL module '{}'. \
@@ -145,8 +139,7 @@ impl ModuleLoader for NetworkModuleLoader {
                 .map_err(|e| JsErrorBox::generic(format!("Bad URL '{}': {}", specifier, e)));
         }
 
-        // Relative specifiers (./foo, ../bar) resolve against the referrer.
-        resolve_import(specifier, referrer).map_err(JsErrorBox::from_err)
+                resolve_import(specifier, referrer).map_err(JsErrorBox::from_err)
     }
 
     fn load(
@@ -165,8 +158,7 @@ impl ModuleLoader for NetworkModuleLoader {
             )));
         }
 
-        // Defense-in-depth: block network requests even if resolve() let something through.
-        if !self.config.allow_external {
+                if !self.config.allow_external {
             return ModuleLoadResponse::Sync(Err(JsErrorBox::generic(format!(
                 "External module imports are disabled. Cannot import URL module '{}'. \
                  Start the server with --allow-external-modules to enable.",
@@ -180,8 +172,7 @@ impl ModuleLoader for NetworkModuleLoader {
         let specifier_url_str = specifier.to_string();
 
         let fut = async move {
-            // Evaluate policy chain if configured.
-            if let Some(ref chain) = policy_chain {
+                        if let Some(ref chain) = policy_chain {
                 let parsed = url::Url::parse(specifier_url_str.as_str()).ok();
                 let url_parsed = parsed.as_ref().map(|p| ModuleUrlParsed {
                     scheme: p.scheme().to_string(),
@@ -256,8 +247,7 @@ impl ModuleLoader for NetworkModuleLoader {
                 ))
             })?;
 
-            // Strip TypeScript types for .ts/.tsx URLs.
-            let url_path = final_url.path();
+                        let url_path = final_url.path();
             let code = if url_path.ends_with(".ts") || url_path.ends_with(".tsx") {
                 crate::engine::strip_typescript_types(&text).map_err(|e| {
                     JsErrorBox::generic(format!(
@@ -269,10 +259,7 @@ impl ModuleLoader for NetworkModuleLoader {
                 text
             };
 
-            // If the server redirected (e.g. esm.sh version resolution), record
-            // the final URL so that relative imports within the module resolve
-            // against the correct base.
-            let source = if final_url.as_str() != specifier.as_str() {
+                                                let source = if final_url.as_str() != specifier.as_str() {
                 ModuleSource::new_with_redirect(
                     ModuleType::JavaScript,
                     ModuleSourceCode::String(FastString::from(code)),

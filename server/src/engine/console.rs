@@ -10,7 +10,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use deno_core::{JsRuntime, OpState, op2};
 
-// ── Configuration ────────────────────────────────────────────────────────
 
 /// Page size for WAL-style writes to sled. When the in-memory buffer reaches
 /// this size, a full page is flushed to sled. Remaining bytes are flushed on
@@ -25,9 +24,6 @@ pub struct ConsoleLogState {
     buffer: RefCell<Vec<u8>>,
 }
 
-// Safety: ConsoleLogState is only accessed from a single V8 thread.
-// The RefCell ensures runtime borrow checking. AtomicU64 is inherently
-// thread-safe. sled::Tree is Send+Sync.
 unsafe impl Send for ConsoleLogState {}
 unsafe impl Sync for ConsoleLogState {}
 
@@ -62,13 +58,12 @@ impl ConsoleLogState {
     }
 }
 
-// ── Op definition ────────────────────────────────────────────────────────
 
 /// Sync op: writes formatted console output bytes into the buffered WAL.
 /// Called from JS via `Deno.core.ops.op_console_write(msg, level)`.
 /// level: 0=log, 1=info, 2=warn, 3=error
-#[op2(fast)]
-fn op_console_write(state: &mut OpState, #[string] msg: &str, #[smi] level: i32) {
+
+fn op_console_write(state: &mut OpState,  msg: &str,  level: i32) {
     let console_state = state.borrow::<ConsoleLogState>();
 
     let formatted = match level {
@@ -81,7 +76,6 @@ fn op_console_write(state: &mut OpState, #[string] msg: &str, #[smi] level: i32)
     console_state.write(formatted.as_bytes());
 }
 
-// ── Extension registration ───────────────────────────────────────────────
 
 deno_core::extension!(
     console_ext,
@@ -93,7 +87,6 @@ pub fn create_extension() -> deno_core::Extension {
     console_ext::init()
 }
 
-// ── Neutralize dangerous built-in ops ────────────────────────────────────
 
 /// Replace dangerous built-in deno_core ops with safe pure-JS alternatives.
 ///
@@ -194,7 +187,6 @@ const SANDBOX_SETUP_JS: &str = r#"
 })();
 "#;
 
-// ── Inject console JS wrapper into the global scope ──────────────────────
 
 /// Inject the `globalThis.console` JS wrapper. Must be called after the
 /// runtime is created (with the console extension) but before user code runs.
@@ -234,7 +226,6 @@ const CONSOLE_JS_WRAPPER: &str = r#"
 })();
 "#;
 
-// ── Post-setup sandbox hardening ─────────────────────────────────────────
 
 /// Final hardening pass that locks down the sandbox after all extensions and
 /// JS wrappers have been injected, but before user code runs.
@@ -260,8 +251,7 @@ pub fn harden_runtime(runtime: &mut JsRuntime, config: HardeningConfig) -> Resul
         return Ok(());
     }
     let mut js = String::from("(function() {\n");
-    // Op neutralization must run BEFORE Object.freeze (freeze locks the ops object).
-    if config.neutralize_proxy_details {
+        if config.neutralize_proxy_details {
         js.push_str("  Deno.core.ops.op_get_proxy_details = function() { return undefined; };\n");
     }
     if config.neutralize_introspection {
@@ -272,17 +262,10 @@ pub fn harden_runtime(runtime: &mut JsRuntime, config: HardeningConfig) -> Resul
         js.push_str("  Object.freeze(Deno.core.ops);\n");
     }
     if config.remove_bootstrap {
-        // __bootstrap exposes event-loop hooks (setMacrotaskCallback,
-        // setPromiseHooks, …), primordials (pristine Function constructor), and
-        // internal registration objects. deno_core's own bootstrap has already
-        // completed, so deleting it here is safe.
-        js.push_str("  delete globalThis.__bootstrap;\n");
+                                        js.push_str("  delete globalThis.__bootstrap;\n");
     }
     if config.remove_shared_memory {
-        // SharedArrayBuffer is the prerequisite for a high-resolution Spectre
-        // timer (and for emscripten wasm-threads). V8 flags cannot disable it
-        // (stable spec feature), so remove from JS.
-        js.push_str("  delete globalThis.SharedArrayBuffer;\n");
+                                js.push_str("  delete globalThis.SharedArrayBuffer;\n");
         js.push_str("  delete globalThis.Atomics;\n");
     }
     js.push_str("})();");
@@ -296,7 +279,7 @@ pub fn harden_runtime(runtime: &mut JsRuntime, config: HardeningConfig) -> Resul
 /// (OFF) — mcp-v8 runs UNHARDENED unless mitigations are explicitly enabled (see
 /// the `--harden-*` CLI flags). Each field maps to one mitigation from the
 /// original combined hardening pass (commit a1d644d).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+
 pub struct HardeningConfig {
     /// Freeze `Deno.core.ops` so no op can be replaced/intercepted (e.g. a
     /// persistent trojan op surviving in stateful/snapshot mode).
@@ -333,7 +316,6 @@ impl HardeningConfig {
     }
 }
 
-// ── Base64 globals (atob / btoa) ────────────────────────────────────────
 
 pub fn inject_base64(runtime: &mut JsRuntime) -> Result<(), String> {
     runtime
@@ -411,7 +393,6 @@ const BASE64_JS: &str = r#"
 })();
 "#;
 
-// ── Blob / File / FormData globals ──────────────────────────────────────
 
 pub fn inject_web_apis(runtime: &mut JsRuntime) -> Result<(), String> {
     runtime
@@ -530,7 +511,6 @@ const WEB_APIS_JS: &str = r#"
 })();
 "#;
 
-// ── Flush helper ─────────────────────────────────────────────────────────
 
 /// Flush any remaining console output from the runtime's OpState.
 /// Call this after V8 execution completes but before the runtime is dropped.

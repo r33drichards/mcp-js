@@ -41,7 +41,7 @@ fn hex(bytes: &[u8]) -> String {
     s
 }
 
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
+
 pub enum Content {
     /// Tiny files: bytes live directly in the manifest entry.
     Inline(Vec<u8>),
@@ -49,7 +49,7 @@ pub enum Content {
     Chunks(Vec<[u8; 32]>),
 }
 
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
+
 pub struct Entry {
     pub mode: u32,
     pub size: u64,
@@ -60,7 +60,7 @@ pub struct Entry {
 /// PURE CONTENT — no parent/lineage field. Identical trees => identical id.
 /// Lineage lives only in the pointer plane (labels + reflog). This flat form is
 /// a view over the on-disk recursive tree (see module docs).
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug, Default)]
+
 pub struct Manifest {
     pub entries: BTreeMap<PathBuf, Entry>,
 }
@@ -101,7 +101,7 @@ impl NodeCache {
     }
 }
 
-#[derive(Clone)]
+
 pub struct FsStore {
     blobs: Arc<dyn HeapStorage>,
     nodes: Arc<Mutex<NodeCache>>,
@@ -178,9 +178,7 @@ impl FsStore {
     pub async fn prefetch(&self, root: [u8; 32]) -> anyhow::Result<()> {
         let mut stack = vec![root];
         while let Some(id) = stack.pop() {
-            // Fetching the node populates the cache (write-through) and lets us
-            // walk its children.
-            let node = self.get_node(&id).await?;
+                                    let node = self.get_node(&id).await?;
             for child in node.children.values() {
                 if let Some(entry) = &child.file {
                     if let Content::Chunks(hashes) = &entry.content {
@@ -200,8 +198,7 @@ impl FsStore {
         Ok(())
     }
 
-    // ── Tree nodes ─────────────────────────────────────────────────────────
-
+    
     /// Fetch and decode a tree node, consulting the shared node cache first.
     pub async fn get_node(&self, id: &[u8; 32]) -> anyhow::Result<Arc<TreeNode>> {
         if let Some(n) = self.nodes.lock().unwrap().get(id) {
@@ -327,8 +324,7 @@ impl FsStore {
             None => TreeNode::default(),
         };
 
-        // Partition into direct (file at this level) and nested (recurse).
-        let mut direct: Vec<(String, Option<Entry>)> = Vec::new();
+                let mut direct: Vec<(String, Option<Entry>)> = Vec::new();
         let mut nested: BTreeMap<String, Vec<(Vec<String>, Option<Entry>)>> = BTreeMap::new();
         for (mut comps, val) in changes {
             if comps.is_empty() {
@@ -379,8 +375,7 @@ impl FsStore {
         }
     }
 
-    // ── Flat-manifest view (compat: merge / GC roots / tests) ────────────────
-
+    
     /// Build a tree from a flat manifest and return its root id.
     pub async fn put_manifest(&self, m: &Manifest) -> anyhow::Result<Hash> {
         let changes: Vec<(Vec<String>, Option<Entry>)> = m
@@ -432,11 +427,9 @@ const FLUSH_THRESHOLD: usize = 2 * MAX as usize;
 /// emitted chunk ends at a real content-defined cut), so dedup is preserved.
 pub struct FileWriter {
     store: FsStore,
-    buf: Vec<u8>,        // bytes not yet emitted as a chunk (bounded carry)
-    hashes: Vec<[u8; 32]>,
+    buf: Vec<u8>,            hashes: Vec<[u8; 32]>,
     total: u64,
-    chunked: bool, // crossed past the inline threshold
-}
+    chunked: bool, }
 
 impl FileWriter {
     pub fn new(store: FsStore) -> Self {
@@ -467,9 +460,7 @@ impl FileWriter {
         self.buf.extend_from_slice(data);
         if self.buf.len() > FLUSH_THRESHOLD {
             self.chunked = true;
-            // Emit every complete chunk except the last (which may be a premature
-            // end-of-buffer cut); carry the last for the next feed.
-            let refs = chunk_refs(&self.buf);
+                                    let refs = chunk_refs(&self.buf);
             if refs.len() > 1 {
                 let keep_from = refs.last().unwrap().offset;
                 let emit: Vec<([u8; 32], usize, usize)> = refs[..refs.len() - 1]
@@ -497,9 +488,7 @@ impl FileWriter {
                 symlink: None,
             });
         }
-        // Flush whatever remains. `chunk_refs` returns empty for a sub-threshold
-        // carry, which must still be stored as a (single) chunk.
-        let refs = chunk_refs(&self.buf);
+                        let refs = chunk_refs(&self.buf);
         if refs.is_empty() {
             if !self.buf.is_empty() {
                 let bytes = std::mem::take(&mut self.buf);

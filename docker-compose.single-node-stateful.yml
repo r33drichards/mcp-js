@@ -1,15 +1,15 @@
 version: "3.8"
 
-# Single-node MCP-JS in STATEFUL mode with nginx reverse proxy.
-# Each JS execution creates and stores a V8 heap snapshot.
-#
-# Usage:
-#   docker compose -f docker-compose.single-node-stateful.yml up --build
-#
-# The server is accessible at http://localhost:8080/mcp
+
+
+
+
+
+
+
 
 services:
-  # ── Nginx reverse proxy (same layer as cluster tests) ──────────────────
+  
   lb:
     image: nginx:alpine
     ports:
@@ -19,7 +19,7 @@ services:
     depends_on:
       - node1
 
-  # ── Single MCP-JS node (stateful — heap snapshots on local FS) ─────────
+  
   node1:
     build: .
     command:

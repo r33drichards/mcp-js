@@ -2,8 +2,8 @@ package mcp.filesystem
 
 default allow = false
 
-# Filesystem operations are restricted to /data/workspace/<sub>/<session_id>/.
-# JWT claims are passed as input.claims; any claim can be used for policy decisions.
+
+
 
 allow if {
     input.claims

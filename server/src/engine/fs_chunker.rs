@@ -17,7 +17,7 @@ pub const MIN: u32 = 256 * 1024;
 pub const AVG: u32 = 1024 * 1024;
 pub const MAX: u32 = 4 * 1024 * 1024;
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+
 pub enum Chunked {
     /// Inlined directly in the manifest entry (tiny files, no blob round-trip).
     Inline(Vec<u8>),
@@ -28,7 +28,7 @@ pub enum Chunked {
 /// A single content-defined chunk: its plaintext hash plus the byte range
 /// `[offset, offset+length)` within the original buffer. Lets callers persist
 /// chunk bytes in a single pass over the data without re-slicing.
-#[derive(Clone, PartialEq, Eq, Debug)]
+
 pub struct ChunkRef {
     pub hash: Hash,
     pub offset: usize,

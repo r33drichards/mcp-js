@@ -1,11 +1,11 @@
 { pkgs, mcp-js, ... }:
 
 let
-  # ── Rego policy ──────────────────────────────────────────────────────
-  #
-  # Deno.Command (command_output): allow "echo" and "cat".
-  # child_process.exec (exec):    allow commands starting with "echo" or "cat".
-  # Everything else is denied.
+  
+  
+  
+  
+  
 
   regoPolicy = pkgs.writeText "subprocess-policy.rego" ''
     package mcp.subprocess
@@ -38,7 +38,7 @@ in
     machine = { ... }: {
       imports = [ ../../nix/module.nix ];
 
-      # ── mcp-js server (stateless, with subprocess policy) ───────────
+      
       services.mcp-js = {
         enable = true;
         package = mcp-js;

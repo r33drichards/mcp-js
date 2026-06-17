@@ -10,8 +10,8 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
-# Pin serde below 1.0.220 to avoid incompatibility with swc_config 2.0.0
-# (swc_config uses serde::__private which was removed in serde 1.0.220+)
+
+
 serde = ">=1.0,<1.0.220"
 
 [dependencies.server]
@@ -20,13 +20,13 @@ path = ".."
 [dependencies.deno_core]
 version = "0.381"
 
-# Override rmcp to use the same git source as the server crate
+
 [patch.crates-io]
 rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", rev = "787cc015b719773f66d4ac32e695b9a0079e12ef" }
-# Fixes Vec<&str> heap leak in prepare_for_snapshot; upstream PR pending.
+
 deno_core = { git = "https://github.com/r33drichards/deno_core", rev = "1c97a0ad596fed8c258803c020194243ef4441cc" }
 
-# Prevent this from interfering with workspaces
+
 [workspace]
 members = ["."]
 
@@ -69,4 +69,3 @@ doc = false
 name = "fuzz_module_resolution"
 path = "fuzz_targets/fuzz_module_resolution.rs"
 doc = false
-

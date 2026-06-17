@@ -1,16 +1,16 @@
-# Build SQLite as a standalone WASM module for use with mcp-v8.
-#
-# Uses the SQLite autoconf source from nixpkgs (which includes the
-# amalgamation sqlite3.c) and Emscripten to produce a WASI-compatible
-# sqlite3.wasm that can be loaded with `--wasm-module sqlite=sqlite3.wasm`.
+
+
+
+
+
 { pkgs }:
 
 pkgs.stdenv.mkDerivation {
   pname = "sqlite3-wasm";
   version = pkgs.sqlite.version;
 
-  # Re-use the SQLite autoconf source that nixpkgs already fetches.
-  # It contains the amalgamation (sqlite3.c / sqlite3.h) at the top level.
+  
+  
   src = pkgs.sqlite.src;
 
   nativeBuildInputs = [ pkgs.emscripten ];

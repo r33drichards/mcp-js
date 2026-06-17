@@ -1,29 +1,29 @@
-// SQLite WASM example for mcp-v8
-//
-// This script is designed to run inside mcp-v8 with the SQLite WASM module
-// pre-loaded via:
-//
-//   mcp-v8 --stateless --wasm-module sqlite=examples/sqlite-wasm/sqlite3.wasm
-//
-// The compiled WebAssembly.Module is available as the global `__wasm_sqlite`.
-// Because the module has WASI imports, it is NOT auto-instantiated — we
-// provide the imports ourselves and instantiate it manually.
 
-// ── WASI stubs ──────────────────────────────────────────────────────────
-// SQLite compiled with Emscripten STANDALONE_WASM imports a handful of
-// WASI functions. For an in-memory-only database none of these need real
-// implementations — simple stubs are sufficient.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 var wasiStubs = {
-    // fd_close(fd) -> errno
+    
     fd_close: function () { return 0; },
-    // fd_fdstat_get(fd, buf) -> errno
+    
     fd_fdstat_get: function () { return 0; },
-    // fd_seek(fd, offset_lo, offset_hi, whence, newoffset_ptr) -> errno
+    
     fd_seek: function () { return 0; },
-    // fd_write(fd, iovs, iovs_len, nwritten_ptr) -> errno
+    
     fd_write: function (fd, iovs, iovsLen, nwrittenPtr) {
-        // Silently discard output (used by sqlite3_log / fprintf)
+        
         var view = new DataView(memory.buffer);
         var totalWritten = 0;
         for (var i = 0; i < iovsLen; i++) {
@@ -33,20 +33,20 @@ var wasiStubs = {
         view.setUint32(nwrittenPtr, totalWritten, true);
         return 0;
     },
-    // fd_read(fd, iovs, iovs_len, nread_ptr) -> errno
+    
     fd_read: function () { return 0; },
-    // environ_get(environ, environ_buf) -> errno
+    
     environ_get: function () { return 0; },
-    // environ_sizes_get(count_ptr, buf_size_ptr) -> errno
+    
     environ_sizes_get: function (countPtr, bufSizePtr) {
         var view = new DataView(memory.buffer);
         view.setUint32(countPtr, 0, true);
         view.setUint32(bufSizePtr, 0, true);
         return 0;
     },
-    // proc_exit(code) — should never be called
+    
     proc_exit: function () {},
-    // clock_time_get(id, precision, time_ptr) -> errno
+    
     clock_time_get: function (id, precLo, precHi, timePtr) {
         var view = new DataView(memory.buffer);
         view.setBigUint64(timePtr, BigInt(0), true);
@@ -54,14 +54,14 @@ var wasiStubs = {
     },
 };
 
-// ── Instantiate the WASM module ─────────────────────────────────────────
 
-var memory; // will be set from the module's exported memory
 
-// Build import object dynamically — enumerate the module's imports and
-// provide stubs for anything not explicitly handled above.  This makes
-// the example resilient to different Emscripten versions which may add
-// or remove WASI / env imports.
+var memory; 
+
+
+
+
+
 var knownImports = {
     wasi_snapshot_preview1: wasiStubs,
     env: {
@@ -76,7 +76,7 @@ for (var i = 0; i < moduleImports.length; i++) {
     if (!importObject[imp.module]) {
         importObject[imp.module] = {};
     }
-    // Use the known stub if available, otherwise provide a no-op.
+    
     var known = knownImports[imp.module];
     if (known && known[imp.name] !== undefined) {
         importObject[imp.module][imp.name] = known[imp.name];
@@ -90,8 +90,8 @@ var instance = new WebAssembly.Instance(__wasm_sqlite, importObject);
 var exports = instance.exports;
 memory = exports.memory;
 
-// ── Low-level helpers ───────────────────────────────────────────────────
-// These translate between JS strings and WASM linear memory.
+
+
 
 function encodeString(str) {
     var bytes = [];
@@ -103,7 +103,7 @@ function encodeString(str) {
             bytes.push(0xc0 | (c >> 6));
             bytes.push(0x80 | (c & 0x3f));
         } else if (c >= 0xd800 && c <= 0xdbff) {
-            // surrogate pair
+            
             var hi = c;
             var lo = str.charCodeAt(++i);
             var cp = ((hi - 0xd800) << 10) + (lo - 0xdc00) + 0x10000;
@@ -117,7 +117,7 @@ function encodeString(str) {
             bytes.push(0x80 | (c & 0x3f));
         }
     }
-    bytes.push(0); // null terminator
+    bytes.push(0); 
     return bytes;
 }
 
@@ -136,7 +136,7 @@ function readCString(ptr) {
     var end = ptr;
     while (view[end] !== 0) end++;
     var bytes = view.slice(ptr, end);
-    // Decode UTF-8
+    
     var result = "";
     var i = 0;
     while (i < bytes.length) {
@@ -166,13 +166,13 @@ function readCString(ptr) {
     return result;
 }
 
-// ── SQLite wrapper ──────────────────────────────────────────────────────
+
 
 var SQLITE_OK = 0;
 var SQLITE_ROW = 100;
 var SQLITE_DONE = 101;
 
-// Column type constants
+
 var SQLITE_INTEGER = 1;
 var SQLITE_FLOAT = 2;
 var SQLITE_TEXT = 3;
@@ -180,7 +180,7 @@ var SQLITE_BLOB = 4;
 var SQLITE_NULL = 5;
 
 function SQLite() {
-    // Allocate a pointer-sized slot for sqlite3_open's output parameter
+    
     this._dbPtrPtr = exports.malloc(4);
     var namePtr = allocString(":memory:");
     var rc = exports.sqlite3_open(namePtr, this._dbPtrPtr);
@@ -222,14 +222,14 @@ SQLite.prototype.query = function (sql) {
 
     var colCount = exports.sqlite3_column_count(stmt);
 
-    // Read column names
+    
     var columns = [];
     for (var c = 0; c < colCount; c++) {
         var namePtr = exports.sqlite3_column_name(stmt, c);
         columns.push(readCString(namePtr));
     }
 
-    // Read rows
+    
     var rows = [];
     while (true) {
         rc = exports.sqlite3_step(stmt);
@@ -250,7 +250,7 @@ SQLite.prototype.query = function (sql) {
             } else if (colType === SQLITE_FLOAT) {
                 row[name] = exports.sqlite3_column_double(stmt, c);
             } else {
-                // TEXT or BLOB — read as string
+                
                 var textPtr = exports.sqlite3_column_text(stmt, c);
                 row[name] = readCString(textPtr);
             }
@@ -278,22 +278,22 @@ SQLite.prototype.close = function () {
     }
 };
 
-// ── Demo ────────────────────────────────────────────────────────────────
+
 
 var db = new SQLite();
 
-// Create a table
+
 db.exec("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, email TEXT, age INTEGER)");
 
-// Insert data
+
 db.exec("INSERT INTO users (name, email, age) VALUES ('Alice', 'alice@example.com', 30)");
 db.exec("INSERT INTO users (name, email, age) VALUES ('Bob', 'bob@example.com', 25)");
 db.exec("INSERT INTO users (name, email, age) VALUES ('Charlie', 'charlie@example.com', 35)");
 
-// Query data
+
 var result = db.query("SELECT * FROM users ORDER BY age");
 
-// Aggregate query
+
 var stats = db.query("SELECT COUNT(*) as count, AVG(age) as avg_age FROM users");
 
 db.close();

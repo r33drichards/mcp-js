@@ -23,15 +23,13 @@ impl StdioServer {
             .args(&["run", "--", "--heap-store", "dir", "--heap-dir", heap_dir])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null()) // Suppress server logs during tests
-            .spawn()?;
+            .stderr(Stdio::null())             .spawn()?;
 
         let stdin = child.stdin.take().expect("Failed to get stdin");
         let stdout = child.stdout.take().expect("Failed to get stdout");
         let stdout = BufReader::new(stdout);
 
-        // Give server time to initialize
-        tokio::time::sleep(Duration::from_millis(500)).await;
+                tokio::time::sleep(Duration::from_millis(500)).await;
 
         Ok(StdioServer {
             child,
@@ -42,20 +40,16 @@ impl StdioServer {
 
     /// Send a message to the server and read the response
     async fn send_message(&mut self, message: Value) -> Result<Value, Box<dyn std::error::Error>> {
-        // Serialize message as newline-delimited JSON
-        let message_str = serde_json::to_string(&message)?;
+                let message_str = serde_json::to_string(&message)?;
         let message_with_newline = format!("{}\n", message_str);
 
-        // Write to stdin
-        self.stdin.write_all(message_with_newline.as_bytes()).await?;
+                self.stdin.write_all(message_with_newline.as_bytes()).await?;
         self.stdin.flush().await?;
 
-        // Read response from stdout
-        let mut response_line = String::new();
+                let mut response_line = String::new();
         timeout(Duration::from_secs(5), self.stdout.read_line(&mut response_line)).await??;
 
-        // Parse response
-        let response: Value = serde_json::from_str(&response_line)?;
+                let response: Value = serde_json::from_str(&response_line)?;
         Ok(response)
     }
 
@@ -66,13 +60,12 @@ impl StdioServer {
 }
 
 /// Test full stdio MCP initialize handshake
-#[tokio::test]
+
 async fn test_stdio_initialize_handshake() -> Result<(), Box<dyn std::error::Error>> {
     let heap_dir = common::create_temp_heap_dir();
     let mut server = StdioServer::start(&heap_dir).await?;
 
-    // Send initialize request
-    let initialize_msg = json!({
+        let initialize_msg = json!({
         "jsonrpc": "2.0",
         "id": 1,
         "method": "initialize",
@@ -88,8 +81,7 @@ async fn test_stdio_initialize_handshake() -> Result<(), Box<dyn std::error::Err
 
     let response = server.send_message(initialize_msg).await?;
 
-    // Verify response structure
-    assert_eq!(response["jsonrpc"], "2.0");
+        assert_eq!(response["jsonrpc"], "2.0");
     assert_eq!(response["id"], 1);
     assert!(response["result"].is_object(), "Should have result object");
     assert!(response["result"]["capabilities"].is_object(),
@@ -103,13 +95,12 @@ async fn test_stdio_initialize_handshake() -> Result<(), Box<dyn std::error::Err
 }
 
 /// Test run_js tool execution via stdio
-#[tokio::test]
+
 async fn test_stdio_run_js_execution() -> Result<(), Box<dyn std::error::Error>> {
     let heap_dir = common::create_temp_heap_dir();
     let mut server = StdioServer::start(&heap_dir).await?;
 
-    // Initialize first
-    let initialize_msg = json!({
+        let initialize_msg = json!({
         "jsonrpc": "2.0",
         "id": 1,
         "method": "initialize",
@@ -125,8 +116,7 @@ async fn test_stdio_run_js_execution() -> Result<(), Box<dyn std::error::Error>>
 
     server.send_message(initialize_msg).await?;
 
-    // Call run_js tool
-    let tool_call_msg = json!({
+        let tool_call_msg = json!({
         "jsonrpc": "2.0",
         "id": 2,
         "method": "tools/call",
@@ -141,16 +131,13 @@ async fn test_stdio_run_js_execution() -> Result<(), Box<dyn std::error::Error>>
 
     let response = server.send_message(tool_call_msg).await?;
 
-    // Verify response
-    assert_eq!(response["jsonrpc"], "2.0");
+        assert_eq!(response["jsonrpc"], "2.0");
     assert_eq!(response["id"], 2);
     assert!(response["result"].is_object(), "Should have result object");
 
-    // Check for output in result
-    if let Some(content) = response["result"]["content"].as_array() {
+        if let Some(content) = response["result"]["content"].as_array() {
         assert!(!content.is_empty(), "Should have content in response");
-        // Verify the result contains "2" (result of 1 + 1)
-        let content_str = serde_json::to_string(&content)?;
+                let content_str = serde_json::to_string(&content)?;
         assert!(content_str.contains("2"), "Response should contain result '2'");
     }
 
@@ -160,13 +147,12 @@ async fn test_stdio_run_js_execution() -> Result<(), Box<dyn std::error::Error>>
 }
 
 /// Test heap persistence across multiple stdio calls
-#[tokio::test]
+
 async fn test_stdio_heap_persistence() -> Result<(), Box<dyn std::error::Error>> {
     let heap_dir = common::create_temp_heap_dir();
     let mut server = StdioServer::start(&heap_dir).await?;
 
-    // Initialize
-    let initialize_msg = json!({
+        let initialize_msg = json!({
         "jsonrpc": "2.0",
         "id": 1,
         "method": "initialize",
@@ -182,8 +168,7 @@ async fn test_stdio_heap_persistence() -> Result<(), Box<dyn std::error::Error>>
 
     server.send_message(initialize_msg).await?;
 
-    // Set a variable in the heap
-    let set_var_msg = json!({
+        let set_var_msg = json!({
         "jsonrpc": "2.0",
         "id": 2,
         "method": "tools/call",
@@ -199,8 +184,7 @@ async fn test_stdio_heap_persistence() -> Result<(), Box<dyn std::error::Error>>
     let response1 = server.send_message(set_var_msg).await?;
     assert!(response1["result"].is_object(), "First call should succeed");
 
-    // Read the variable from the heap in a second call
-    let read_var_msg = json!({
+        let read_var_msg = json!({
         "jsonrpc": "2.0",
         "id": 3,
         "method": "tools/call",
@@ -216,8 +200,7 @@ async fn test_stdio_heap_persistence() -> Result<(), Box<dyn std::error::Error>>
     let response2 = server.send_message(read_var_msg).await?;
     assert!(response2["result"].is_object(), "Second call should succeed");
 
-    // Verify the value persisted
-    let content_str = serde_json::to_string(&response2["result"]["content"])?;
+        let content_str = serde_json::to_string(&response2["result"]["content"])?;
     assert!(content_str.contains("42"), "Persisted value should be 42");
 
     server.stop().await;
@@ -226,13 +209,12 @@ async fn test_stdio_heap_persistence() -> Result<(), Box<dyn std::error::Error>>
 }
 
 /// Test error handling for invalid JavaScript via stdio
-#[tokio::test]
+
 async fn test_stdio_invalid_javascript_error() -> Result<(), Box<dyn std::error::Error>> {
     let heap_dir = common::create_temp_heap_dir();
     let mut server = StdioServer::start(&heap_dir).await?;
 
-    // Initialize
-    let initialize_msg = json!({
+        let initialize_msg = json!({
         "jsonrpc": "2.0",
         "id": 1,
         "method": "initialize",
@@ -248,8 +230,7 @@ async fn test_stdio_invalid_javascript_error() -> Result<(), Box<dyn std::error:
 
     server.send_message(initialize_msg).await?;
 
-    // Send invalid JavaScript
-    let invalid_js_msg = json!({
+        let invalid_js_msg = json!({
         "jsonrpc": "2.0",
         "id": 2,
         "method": "tools/call",
@@ -264,12 +245,10 @@ async fn test_stdio_invalid_javascript_error() -> Result<(), Box<dyn std::error:
 
     let response = server.send_message(invalid_js_msg).await?;
 
-    // The server should return a response
-    assert_eq!(response["jsonrpc"], "2.0");
+        assert_eq!(response["jsonrpc"], "2.0");
     assert_eq!(response["id"], 2);
 
-    // It should have error information
-    let has_error = response["error"].is_object() ||
+        let has_error = response["error"].is_object() ||
                    (response["result"].is_object() &&
                     response["result"]["content"].as_array()
                         .and_then(|arr| arr.first())
@@ -286,13 +265,12 @@ async fn test_stdio_invalid_javascript_error() -> Result<(), Box<dyn std::error:
 }
 
 /// Test multiple sequential operations via stdio
-#[tokio::test]
+
 async fn test_stdio_sequential_operations() -> Result<(), Box<dyn std::error::Error>> {
     let heap_dir = common::create_temp_heap_dir();
     let mut server = StdioServer::start(&heap_dir).await?;
 
-    // Initialize
-    let initialize_msg = json!({
+        let initialize_msg = json!({
         "jsonrpc": "2.0",
         "id": 1,
         "method": "initialize",
@@ -308,8 +286,7 @@ async fn test_stdio_sequential_operations() -> Result<(), Box<dyn std::error::Er
 
     server.send_message(initialize_msg).await?;
 
-    // Perform multiple sequential operations
-    let operations = vec![
+        let operations = vec![
         ("var counter = 0; counter", "0"),
         ("counter = counter + 1; counter", "1"),
         ("counter = counter + 1; counter", "2"),
@@ -344,13 +321,12 @@ async fn test_stdio_sequential_operations() -> Result<(), Box<dyn std::error::Er
 }
 
 /// Test using different heaps concurrently via stdio
-#[tokio::test]
+
 async fn test_stdio_multiple_heaps() -> Result<(), Box<dyn std::error::Error>> {
     let heap_dir = common::create_temp_heap_dir();
     let mut server = StdioServer::start(&heap_dir).await?;
 
-    // Initialize
-    let initialize_msg = json!({
+        let initialize_msg = json!({
         "jsonrpc": "2.0",
         "id": 1,
         "method": "initialize",
@@ -366,8 +342,7 @@ async fn test_stdio_multiple_heaps() -> Result<(), Box<dyn std::error::Error>> {
 
     server.send_message(initialize_msg).await?;
 
-    // Set variable in heap A
-    let set_heap_a = json!({
+        let set_heap_a = json!({
         "jsonrpc": "2.0",
         "id": 2,
         "method": "tools/call",
@@ -383,8 +358,7 @@ async fn test_stdio_multiple_heaps() -> Result<(), Box<dyn std::error::Error>> {
     let response_a = server.send_message(set_heap_a).await?;
     assert!(response_a["result"].is_object());
 
-    // Set variable in heap B
-    let set_heap_b = json!({
+        let set_heap_b = json!({
         "jsonrpc": "2.0",
         "id": 3,
         "method": "tools/call",
@@ -400,8 +374,7 @@ async fn test_stdio_multiple_heaps() -> Result<(), Box<dyn std::error::Error>> {
     let response_b = server.send_message(set_heap_b).await?;
     assert!(response_b["result"].is_object());
 
-    // Read from heap A - should still be 'A'
-    let read_heap_a = json!({
+        let read_heap_a = json!({
         "jsonrpc": "2.0",
         "id": 4,
         "method": "tools/call",
@@ -418,8 +391,7 @@ async fn test_stdio_multiple_heaps() -> Result<(), Box<dyn std::error::Error>> {
     let content_a = serde_json::to_string(&verify_a["result"]["content"])?;
     assert!(content_a.contains("A"), "Heap A should contain 'A', got: {}", content_a);
 
-    // Read from heap B - should still be 'B'
-    let read_heap_b = json!({
+        let read_heap_b = json!({
         "jsonrpc": "2.0",
         "id": 5,
         "method": "tools/call",
@@ -442,13 +414,12 @@ async fn test_stdio_multiple_heaps() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Test complex JavaScript operations via stdio
-#[tokio::test]
+
 async fn test_stdio_complex_javascript() -> Result<(), Box<dyn std::error::Error>> {
     let heap_dir = common::create_temp_heap_dir();
     let mut server = StdioServer::start(&heap_dir).await?;
 
-    // Initialize
-    let initialize_msg = json!({
+        let initialize_msg = json!({
         "jsonrpc": "2.0",
         "id": 1,
         "method": "initialize",
@@ -464,8 +435,7 @@ async fn test_stdio_complex_javascript() -> Result<(), Box<dyn std::error::Error
 
     server.send_message(initialize_msg).await?;
 
-    // Test array operations
-    let array_op = json!({
+        let array_op = json!({
         "jsonrpc": "2.0",
         "id": 2,
         "method": "tools/call",
@@ -482,8 +452,7 @@ async fn test_stdio_complex_javascript() -> Result<(), Box<dyn std::error::Error
     let content = serde_json::to_string(&response["result"]["content"])?;
     assert!(content.contains("15"), "Array sum should be 15");
 
-    // Test object operations
-    let object_op = json!({
+        let object_op = json!({
         "jsonrpc": "2.0",
         "id": 3,
         "method": "tools/call",
@@ -506,13 +475,12 @@ async fn test_stdio_complex_javascript() -> Result<(), Box<dyn std::error::Error
 }
 
 /// Test that server handles graceful shutdown
-#[tokio::test]
+
 async fn test_stdio_graceful_shutdown() -> Result<(), Box<dyn std::error::Error>> {
     let heap_dir = common::create_temp_heap_dir();
     let server = StdioServer::start(&heap_dir).await?;
 
-    // Just start and stop the server - should not panic or hang
-    server.stop().await;
+        server.stop().await;
 
     common::cleanup_heap_dir(&heap_dir);
     Ok(())

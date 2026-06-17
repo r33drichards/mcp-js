@@ -12,7 +12,7 @@
 
   outputs = { self, nixpkgs, flake-utils, rust-overlay, ... }:
     let
-      # NixOS module – importable by any NixOS configuration
+      
       nixosModules.mcp-js = import ./nix/module.nix;
     in
     (flake-utils.lib.eachDefaultSystem (system:
@@ -22,14 +22,14 @@
           overlays = [ rust-overlay.overlays.default ];
         };
 
-        # Single Rust toolchain used for both building and development.
-        # Using stable latest ensures all deps (including SWC) compile,
-        # while rust-overlay keeps it consistent across nix build & nix develop.
+        
+        
+        
         rustToolchain = pkgs.rust-bin.stable.latest.default.override {
           extensions = [ "rust-src" "rustfmt" "clippy" ];
         };
 
-        # Nightly toolchain for cargo-fuzz (requires -Z flags)
+        
         rustNightly = pkgs.rust-bin.nightly.latest.default.override {
           extensions = [ "rust-src" "rustfmt" "clippy" ];
         };
@@ -43,8 +43,8 @@
           cargo = rustToolchain;
         } {
           src = ./server;
-          # Vendor hash for server's cargo deps; refreshed when deps changed
-          # (added fastcdc/zstd/blake3/bincode/diffy for fs snapshots).
+          
+          
           hash = "sha256-6ABMFpKIlIZU1+HDt4gG7exjRTbMQY/JpN9X4d8oBLM=";
         });
 
@@ -61,10 +61,10 @@
           "--bin" "generate-mcp-tools-markdown"
         ];
 
-        # Patched replace-workspace-values that handles the 'version' key
-        # in workspace-inherited dependencies.  Upstream nixpkgs script
-        # does not handle this, causing builds to fail for crates (like
-        # rmcp) that specify  version = "X"  alongside  workspace = true.
+        
+        
+        
+        
         patchedReplaceWorkspaceValues = pkgs.writers.writePython3Bin
           "replace-workspace-values"
           {
@@ -73,11 +73,11 @@
           }
           (builtins.readFile ./nix/replace-workspace-values.py);
 
-        # Pre-fetched rusty_v8 static library.
-        # The v8 crate's build.rs tries to download this at build time,
-        # which fails inside the Nix sandbox and on network-restricted
-        # CI runners.  Pre-fetching and setting RUSTY_V8_ARCHIVE avoids
-        # any network access during build.
+        
+        
+        
+        
+        
         rustyV8Version = "145.0.0";
         rustyV8Target = {
           "x86_64-linux"   = "x86_64-unknown-linux-gnu";
@@ -162,7 +162,7 @@
         devShells.default = import ./shell.nix { inherit pkgs rustToolchain rustyV8Archive; };
         devShells.fuzz = import ./shell.nix { inherit pkgs rustyV8Archive; rustToolchain = rustNightly; };
 
-        # SQLite compiled to WASM via Emscripten — used by the sqlite-wasm example.
+        
         packages.sqlite-wasm = import ./nix/sqlite-wasm.nix { inherit pkgs; };
         packages.docs-tools = docsTools;
         packages.widdershins = widdershins;
@@ -172,8 +172,8 @@
           version = "0.1.0";
           src = ./server;
 
-          # Use a local copy of fetchCargoVendor so the staging helper fetches
-          # crates from the registry CDN instead of the crates.io API endpoint.
+          
+          
           cargoDeps = serverCargoDeps;
 
           nativeBuildInputs = with pkgs; [
@@ -189,14 +189,14 @@
 
           LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
 
-          # Point v8 build.rs to the pre-fetched static library so it
-          # doesn't try to download during the sandboxed build.
+          
+          
           RUSTY_V8_ARCHIVE = "${rustyV8Archive}";
 
-          # Integration/e2e tests start servers and make HTTP requests,
-          # which does not work inside the Nix build sandbox.  The NixOS
-          # VM test (checks.x86_64-linux.cluster-test) covers integration
-          # testing instead.
+          
+          
+          
+          
           doCheck = false;
 
           meta.mainProgram = "server";
@@ -235,8 +235,8 @@
     )) // {
       inherit nixosModules;
 
-      # NixOS integration test – run with:
-      #   nix build .#checks.x86_64-linux.cluster-test
+      
+      
       checks.x86_64-linux =
         let
           pkgs = import nixpkgs {

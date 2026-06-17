@@ -51,18 +51,15 @@ async fn wait_for_leader(node: &Arc<ClusterNode>, timeout: Duration) -> bool {
     false
 }
 
-#[tokio::test]
+
 async fn learner_replicates_but_does_not_break_quorum() {
     let p1 = 47011;
     let p2 = 47012;
     let addr2 = format!("127.0.0.1:{}", p2);
 
-    // node1: the sole voter. Starts with no peers, so it elects itself (a
-    // one-voter majority) and becomes the stable leader / "main writer".
-    let node1 = ClusterNode::new(base_config("node1", p1), temp_sled("voter"));
+            let node1 = ClusterNode::new(base_config("node1", p1), temp_sled("voter"));
 
-    // node2: a learner that knows the leader and runs in learner mode.
-    let mut cfg2 = base_config("node2", p2);
+        let mut cfg2 = base_config("node2", p2);
     cfg2.peers = vec![format!("127.0.0.1:{}", p1)];
     cfg2.peer_addrs
         .insert("node1".to_string(), format!("127.0.0.1:{}", p1));
@@ -77,21 +74,17 @@ async fn learner_replicates_but_does_not_break_quorum() {
         "the sole voter should become leader"
     );
 
-    // Register the learner with the leader.
-    node1
+        node1
         .add_peer("node2".to_string(), addr2.clone(), true)
         .await
         .expect("leader adds learner");
 
-    // A write commits via the voter quorum (just the leader) and replicates
-    // to the learner.
-    node1
+            node1
         .put("k1".to_string(), "v1".to_string())
         .await
         .expect("write commits with a single voter");
 
-    // The learner should receive the replicated entry within a few heartbeats.
-    let mut replicated = false;
+        let mut replicated = false;
     for _ in 0..40 {
         if node2.get("k1").await.unwrap().as_deref() == Some("v1") {
             replicated = true;
@@ -101,16 +94,11 @@ async fn learner_replicates_but_does_not_break_quorum() {
     }
     assert!(replicated, "learner should replicate committed entries");
 
-    // The learner must never win leadership.
-    let st2 = node2.status().await;
+        let st2 = node2.status().await;
     assert_eq!(st2.role, Role::Follower, "a learner stays a follower");
     assert!(st2.is_learner, "node2 reports itself as a learner");
 
-    // The decisive check: kill the learner, then write again. With the learner
-    // excluded from the commit quorum, the leader still commits. (If the
-    // learner were a voter, losing it would break the 2-node majority and this
-    // write would time out.)
-    node2.shutdown();
+                    node2.shutdown();
     sleep(Duration::from_millis(200)).await;
 
     node1

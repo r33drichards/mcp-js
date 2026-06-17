@@ -1,9 +1,9 @@
 { pkgs, mcp-js, ... }:
 
 let
-  # ── TLS certificate generation ────────────────────────────────────────
-  # Following the etcd NixOS test pattern: generate a CA + per-node certs
-  # with openssl so that cluster traffic is authenticated.
+  
+  
+  
 
   runWithOpenSSL =
     file: cmd:
@@ -82,7 +82,7 @@ let
     extendedKeyUsage = clientAuth
   '';
 
-  # ── Peer list ─────────────────────────────────────────────────────────
+  
 
   allPeerAddrs = [
     "node1@node1:4000"
@@ -96,7 +96,7 @@ let
     nodeId:
     builtins.filter (p: !(pkgs.lib.hasPrefix "${nodeId}@" p)) allPeerAddrs;
 
-  # ── Shared node configuration ─────────────────────────────────────────
+  
 
   nodeConfig =
     nodeId:
@@ -117,7 +117,7 @@ let
         caFile = ca_pem;
       };
 
-      # Certificates available in the environment for CLI tools
+      
       environment.variables = {
         MCP_JS_CERT_FILE = "${client_cert}";
         MCP_JS_KEY_FILE = "${client_key}";

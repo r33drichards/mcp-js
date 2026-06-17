@@ -14,7 +14,6 @@ use std::process::Stdio;
 use tokio::process::Command;
 use tokio::time::{sleep, Duration};
 
-// ── Server helper ────────────────────────────────────────────────────────
 
 struct HttpServer {
     child: Option<tokio::process::Child>,
@@ -98,10 +97,9 @@ async fn run_to_output(base_url: &str, client: &Client, execution_id: &str) -> S
     page["data"].as_str().unwrap_or("").to_string()
 }
 
-// ── Tests ──────────────────────────────────────────────────────────────────
 
 /// A raw-body upload with a non-JSON Content-Type runs the body as the script.
-#[tokio::test]
+
 async fn test_exec_raw_upload_runs_code() {
     let mut server = HttpServer::start().await.expect("server start");
     let client = Client::new();
@@ -125,7 +123,7 @@ async fn test_exec_raw_upload_runs_code() {
 }
 
 /// Optional parameters ride along a raw upload as query-string params.
-#[tokio::test]
+
 async fn test_exec_raw_upload_with_query_params() {
     let mut server = HttpServer::start().await.expect("server start");
     let client = Client::new();
@@ -155,7 +153,7 @@ async fn test_exec_raw_upload_with_query_params() {
 }
 
 /// multipart/form-data is explicitly unsupported and returns 415 with guidance.
-#[tokio::test]
+
 async fn test_exec_multipart_is_415() {
     let mut server = HttpServer::start().await.expect("server start");
     let client = Client::new();
@@ -180,7 +178,7 @@ async fn test_exec_multipart_is_415() {
 }
 
 /// The JSON encoding still works (regression).
-#[tokio::test]
+
 async fn test_exec_json_still_works() {
     let mut server = HttpServer::start().await.expect("server start");
     let client = Client::new();

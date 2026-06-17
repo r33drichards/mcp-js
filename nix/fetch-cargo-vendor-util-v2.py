@@ -56,8 +56,8 @@ def get_download_url_for_tarball(pkg: dict[str, Any]) -> str:
     if pkg["source"] != "registry+https://github.com/rust-lang/crates.io-index":
         raise Exception("Only the default crates.io registry is supported.")
 
-    # Use the registry CDN advertised in index.crates.io/config.json instead of
-    # the crates.io API redirect endpoint, which now returns policy 403s in CI.
+    
+    
     return f'https://static.crates.io/crates/{pkg["name"]}/{pkg["version"]}/download'
 
 

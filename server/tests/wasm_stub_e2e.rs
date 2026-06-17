@@ -26,9 +26,7 @@ impl WasmServer {
     /// `extra_args` lets a test pass flags like `--wasm-stubs false` or
     /// `--wasm-stub-prefix rj_`.
     async fn start_with_args(
-        // WASM is incompatible with heap persistence (heap snapshots disable
-        // WebAssembly), so this server runs heap-off; the dir is unused.
-        _heap: &str,
+                        _heap: &str,
         extra_args: &[&str],
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let server_bin = env!("CARGO_BIN_EXE_server");
@@ -114,7 +112,7 @@ fn tool_names(list_response: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-#[tokio::test]
+
 async fn server_advertises_wasm_module_as_stub() -> Result<(), Box<dyn std::error::Error>> {
     let heap = common::create_temp_heap_dir() + "-wasm-stub1";
     std::fs::create_dir_all(&heap).ok();
@@ -139,8 +137,7 @@ async fn server_advertises_wasm_module_as_stub() -> Result<(), Box<dyn std::erro
         names,
     );
 
-    // The stub description should hint at run_js usage and the __wasm_ global.
-    let stub = list["result"]["tools"]
+        let stub = list["result"]["tools"]
         .as_array()
         .unwrap()
         .iter()
@@ -149,15 +146,14 @@ async fn server_advertises_wasm_module_as_stub() -> Result<(), Box<dyn std::erro
     let desc = stub["description"].as_str().unwrap_or_default();
     assert!(desc.contains("run_js"), "description: {}", desc);
     assert!(desc.contains("__wasm_math"), "description: {}", desc);
-    // add.wasm exports `add`.
-    assert!(desc.contains("add"), "description should list exports: {}", desc);
+        assert!(desc.contains("add"), "description should list exports: {}", desc);
 
     server.stop().await;
     common::cleanup_heap_dir(&heap);
     Ok(())
 }
 
-#[tokio::test]
+
 async fn calling_wasm_stub_returns_run_js_instructions() -> Result<(), Box<dyn std::error::Error>> {
     let heap = common::create_temp_heap_dir() + "-wasm-stub2";
     std::fs::create_dir_all(&heap).ok();
@@ -190,7 +186,7 @@ async fn calling_wasm_stub_returns_run_js_instructions() -> Result<(), Box<dyn s
     Ok(())
 }
 
-#[tokio::test]
+
 async fn wasm_stub_description_flag_sets_tool_description() -> Result<(), Box<dyn std::error::Error>> {
     let heap = common::create_temp_heap_dir() + "-wasm-stub-desc";
     std::fs::create_dir_all(&heap).ok();
@@ -223,15 +219,14 @@ async fn wasm_stub_description_flag_sets_tool_description() -> Result<(), Box<dy
         "custom description should appear: {}",
         desc,
     );
-    // Auto-generated usage hint still present.
-    assert!(desc.contains("__wasm_math"), "description: {}", desc);
+        assert!(desc.contains("__wasm_math"), "description: {}", desc);
 
     server.stop().await;
     common::cleanup_heap_dir(&heap);
     Ok(())
 }
 
-#[tokio::test]
+
 async fn wasm_stub_prefix_flag_overrides_default() -> Result<(), Box<dyn std::error::Error>> {
     let heap = common::create_temp_heap_dir() + "-wasm-stub3";
     std::fs::create_dir_all(&heap).ok();
@@ -264,7 +259,7 @@ async fn wasm_stub_prefix_flag_overrides_default() -> Result<(), Box<dyn std::er
     Ok(())
 }
 
-#[tokio::test]
+
 async fn wasm_stubs_disabled_flag_hides_stubs() -> Result<(), Box<dyn std::error::Error>> {
     let heap = common::create_temp_heap_dir() + "-wasm-stub4";
     std::fs::create_dir_all(&heap).ok();
@@ -288,9 +283,7 @@ async fn wasm_stubs_disabled_flag_hides_stubs() -> Result<(), Box<dyn std::error
         names,
     );
 
-    // Calling the stub-shaped name now falls through to the normal dispatcher,
-    // which does not return stub instructions.
-    let resp = server
+            let resp = server
         .send(json!({
             "jsonrpc": "2.0",
             "id": 3,

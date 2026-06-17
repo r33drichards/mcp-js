@@ -23,9 +23,7 @@ fn normalize(text: &str) -> String {
 }
 
 fn render_default(arg: &clap::Arg, long: &str) -> Option<String> {
-    // Some Clap defaults are computed at runtime from the host environment.
-    // Omitting those values keeps the generated reference deterministic.
-    if long == "max-concurrent-executions" {
+            if long == "max-concurrent-executions" {
         return None;
     }
 

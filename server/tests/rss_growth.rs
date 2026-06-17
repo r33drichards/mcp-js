@@ -33,8 +33,7 @@ fn get_rss_kb() -> usize {
 /// Measure RSS growth over N iterations of a closure.
 /// Returns (initial_rss_kb, final_rss_kb, per_iter_growth_kb).
 fn measure_rss_growth<F: FnMut()>(label: &str, iterations: usize, mut f: F) -> (usize, usize, f64) {
-    // Warm up: run a few iterations to stabilize V8 internal state.
-    for _ in 0..5 {
+        for _ in 0..5 {
         f();
     }
 
@@ -64,7 +63,7 @@ fn measure_rss_growth<F: FnMut()>(label: &str, iterations: usize, mut f: F) -> (
     (rss_before, rss_after, per_iter)
 }
 
-#[test]
+
 fn test_rss_growth_stateless_no_wasm() {
     ensure_v8();
     let iterations = 500;
@@ -82,7 +81,7 @@ fn test_rss_growth_stateless_no_wasm() {
     eprintln!("Per-iteration RSS growth: {:.1} KB", per_iter_kb);
 }
 
-#[test]
+
 fn test_rss_growth_stateless_with_invalid_wasm() {
     ensure_v8();
     let iterations = 500;
@@ -106,7 +105,7 @@ fn test_rss_growth_stateless_with_invalid_wasm() {
     eprintln!("Per-iteration RSS growth: {:.1} KB", per_iter_kb);
 }
 
-#[test]
+
 fn test_rss_growth_stateful_no_wasm() {
     ensure_v8();
     let iterations = 500;
@@ -124,7 +123,7 @@ fn test_rss_growth_stateful_no_wasm() {
     eprintln!("Per-iteration RSS growth: {:.1} KB", per_iter_kb);
 }
 
-#[test]
+
 fn test_rss_growth_stateless_syntax_error() {
     ensure_v8();
     let iterations = 500;

@@ -30,10 +30,9 @@ use serde::Serialize;
 
 use super::opa::PolicyChain;
 
-// ── Configuration ────────────────────────────────────────────────────────
 
 /// Configuration for subprocess execution. Stored in deno_core's `OpState`.
-#[derive(Clone, Debug)]
+
 pub struct SubprocessConfig {
     pub policy_chain: Arc<PolicyChain>,
 }
@@ -44,9 +43,8 @@ impl SubprocessConfig {
     }
 }
 
-// ── Policy input ─────────────────────────────────────────────────────────
 
-#[derive(Serialize)]
+
 struct SubprocessPolicyInput {
     /// The type of operation: "command_output", "command_spawn", or "exec".
     operation: String,
@@ -55,25 +53,24 @@ struct SubprocessPolicyInput {
     /// Arguments to the command.
     args: Vec<String>,
     /// Working directory (if specified).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    "Option::is_none"
     cwd: Option<String>,
     /// Environment variables (if specified).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    "Option::is_none"
     env: Option<HashMap<String, String>>,
 }
 
-// ── Async deno_core ops ──────────────────────────────────────────────────
 
 /// Async op: Run a command to completion (Deno.Command.output() equivalent).
 /// Called from JS via `Deno.core.ops.op_subprocess_output(command, args_json, options_json)`.
 /// Returns a JSON string with {code, stdout, stderr}.
-#[op2(async)]
-#[string]
+
+
 async fn op_subprocess_output(
     state: Rc<RefCell<OpState>>,
-    #[string] command: String,
-    #[string] args_json: String,
-    #[string] options_json: String,
+     command: String,
+     args_json: String,
+     options_json: String,
 ) -> Result<String, JsErrorBox> {
     let policy_chain = extract_chain(&state)?;
 
@@ -118,12 +115,12 @@ async fn op_subprocess_output(
 /// Async op: Execute a shell command (Node.js child_process.exec equivalent).
 /// Called from JS via `Deno.core.ops.op_subprocess_exec(command, options_json)`.
 /// Returns a JSON string with {code, stdout, stderr}.
-#[op2(async)]
-#[string]
+
+
 async fn op_subprocess_exec(
     state: Rc<RefCell<OpState>>,
-    #[string] command: String,
-    #[string] options_json: String,
+     command: String,
+     options_json: String,
 ) -> Result<String, JsErrorBox> {
     let policy_chain = extract_chain(&state)?;
 
@@ -131,9 +128,7 @@ async fn op_subprocess_exec(
         let options: SubprocessOptions = serde_json::from_str(&options_json)
             .map_err(|e| format!("subprocess.exec: invalid options JSON: {}", e))?;
 
-        // For exec(), the command is run via shell. We pass it as a single
-        // string to the shell, so args in the policy input is the full command.
-        let shell = if cfg!(target_os = "windows") { "cmd" } else { "/bin/sh" };
+                        let shell = if cfg!(target_os = "windows") { "cmd" } else { "/bin/sh" };
         let shell_arg = if cfg!(target_os = "windows") { "/C" } else { "-c" };
 
         check_policy(
@@ -182,7 +177,6 @@ async fn op_subprocess_exec(
     .map_err(|e: String| JsErrorBox::generic(e))
 }
 
-// ── Extension registration ──────────────────────────────────────────────
 
 deno_core::extension!(
     subprocess_ext,
@@ -193,7 +187,6 @@ pub fn create_extension() -> deno_core::Extension {
     subprocess_ext::init()
 }
 
-// ── Inject subprocess JS wrappers into the global scope ─────────────────
 
 pub fn inject_subprocess(runtime: &mut JsRuntime) -> Result<(), String> {
     runtime
@@ -330,18 +323,17 @@ const SUBPROCESS_JS_WRAPPER: &str = r#"
 })();
 "#;
 
-// ── Helpers ──────────────────────────────────────────────────────────────
 
-#[derive(serde::Deserialize)]
+
 struct SubprocessOptions {
-    #[serde(default)]
+    
     cwd: Option<String>,
-    #[serde(default)]
+    
     env: Option<HashMap<String, String>>,
-    #[serde(default)]
+    
     encoding: Option<String>,
-    #[allow(dead_code)]
-    #[serde(default)]
+    
+    
     timeout: Option<u64>,
 }
 
@@ -410,11 +402,11 @@ fn base64_encode(data: &[u8]) -> String {
     result
 }
 
-#[cfg(test)]
+
 mod tests {
     use super::*;
 
-    #[test]
+    
     fn test_subprocess_policy_input_serialization() {
         let input = SubprocessPolicyInput {
             operation: "command_output".to_string(),
@@ -431,7 +423,7 @@ mod tests {
         assert!(!json.contains("\"env\""));
     }
 
-    #[test]
+    
     fn test_subprocess_policy_input_with_env() {
         let mut env = HashMap::new();
         env.insert("PATH".to_string(), "/usr/bin".to_string());
@@ -447,7 +439,7 @@ mod tests {
         assert!(!json.contains("\"cwd\""));
     }
 
-    #[test]
+    
     fn test_base64_encode() {
         assert_eq!(base64_encode(b"hello"), "aGVsbG8=");
         assert_eq!(base64_encode(b""), "");
@@ -457,7 +449,7 @@ mod tests {
         assert_eq!(base64_encode(b"Hello, World!"), "SGVsbG8sIFdvcmxkIQ==");
     }
 
-    #[test]
+    
     fn test_subprocess_options_deserialize() {
         let json = r#"{"cwd": "/tmp", "env": {"KEY": "val"}, "encoding": "utf8"}"#;
         let opts: SubprocessOptions = serde_json::from_str(json).unwrap();
@@ -466,7 +458,7 @@ mod tests {
         assert_eq!(opts.encoding.as_deref(), Some("utf8"));
     }
 
-    #[test]
+    
     fn test_subprocess_options_defaults() {
         let json = r#"{}"#;
         let opts: SubprocessOptions = serde_json::from_str(json).unwrap();

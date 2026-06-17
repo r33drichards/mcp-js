@@ -44,10 +44,9 @@ async fn run_and_wait(engine: &Engine, code: &str) -> Result<String, String> {
     Err("Execution did not complete within timeout".to_string())
 }
 
-// ── Timeout tests (async, using Engine::run_js) ─────────────────────────
 
 /// An infinite loop with a short timeout should return a descriptive timeout error.
-#[tokio::test]
+
 async fn test_timeout_produces_descriptive_error() {
     ensure_v8();
 
@@ -64,7 +63,7 @@ async fn test_timeout_produces_descriptive_error() {
 }
 
 /// Timeout should also work correctly in stateful mode.
-#[tokio::test]
+
 async fn test_timeout_stateful_produces_descriptive_error() {
     ensure_v8();
 
@@ -83,10 +82,9 @@ async fn test_timeout_stateful_produces_descriptive_error() {
     );
 }
 
-// ── OOM tests (direct V8 calls) ─────────────────────────────────────────
 
 /// Allocating a huge array with a small heap should return a descriptive OOM error.
-#[test]
+
 fn test_oom_produces_descriptive_error_not_crash() {
     ensure_v8();
 
@@ -97,8 +95,7 @@ fn test_oom_produces_descriptive_error_not_crash() {
         }
         arr.length;
     "#;
-    let heap_bytes = 16 * 1024 * 1024; // 16MB
-
+    let heap_bytes = 16 * 1024 * 1024; 
     let (result, _oom) = server::engine::execute_stateless(code, ExecutionConfig::new(heap_bytes));
 
     assert!(result.is_err(), "Huge allocation with small heap should fail, got: {:?}", result);
@@ -110,7 +107,7 @@ fn test_oom_produces_descriptive_error_not_crash() {
 }
 
 /// OOM in stateful mode should also produce a descriptive error.
-#[test]
+
 fn test_oom_stateful_produces_descriptive_error_not_crash() {
     ensure_v8();
 
@@ -121,8 +118,7 @@ fn test_oom_stateful_produces_descriptive_error_not_crash() {
         }
         arr.length;
     "#;
-    let heap_bytes = 16 * 1024 * 1024; // 16MB
-
+    let heap_bytes = 16 * 1024 * 1024; 
     let (result, _oom) = server::engine::execute_stateful(code, None, ExecutionConfig::new(heap_bytes));
 
     assert!(result.is_err(), "Huge allocation with small heap should fail, got: {:?}", result);
@@ -133,10 +129,9 @@ fn test_oom_stateful_produces_descriptive_error_not_crash() {
     );
 }
 
-// ── Sanity checks ────────────────────────────────────────────────────────
 
 /// A fast computation with generous limits should succeed.
-#[test]
+
 fn test_fast_computation_succeeds() {
     ensure_v8();
 
@@ -153,7 +148,7 @@ fn test_fast_computation_succeeds() {
 }
 
 /// Bare call with no special params should work fine.
-#[test]
+
 fn test_bare_call_default_params() {
     ensure_v8();
 

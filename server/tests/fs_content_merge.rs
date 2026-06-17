@@ -8,7 +8,7 @@ fn merge(base: Option<&[u8]>, ours: &[u8], theirs: &[u8]) -> ContentMergeResult 
     merge_content(&default_mergers(), base, ours, theirs)
 }
 
-#[test]
+
 fn detects_text_binary_and_sqlite() {
     assert_eq!(detect_kind(b"hello\nworld\n"), ContentKind::Text);
     assert_eq!(detect_kind(b""), ContentKind::Text);
@@ -16,12 +16,10 @@ fn detects_text_binary_and_sqlite() {
     assert_eq!(detect_kind(b"SQLite format 3\0rest..."), ContentKind::Sqlite);
 }
 
-#[test]
+
 fn text_edits_to_different_lines_merge_cleanly() {
     let base = b"line1\nline2\nline3\n";
-    let ours = b"OURS\nline2\nline3\n"; // changed line 1
-    let theirs = b"line1\nline2\nTHEIRS\n"; // changed line 3
-    match merge(Some(base), ours, theirs) {
+    let ours = b"OURS\nline2\nline3\n";     let theirs = b"line1\nline2\nTHEIRS\n";     match merge(Some(base), ours, theirs) {
         ContentMergeResult::Clean(bytes) => {
             let s = String::from_utf8(bytes).unwrap();
             assert_eq!(s, "OURS\nline2\nTHEIRS\n");
@@ -30,7 +28,7 @@ fn text_edits_to_different_lines_merge_cleanly() {
     }
 }
 
-#[test]
+
 fn text_edits_to_same_line_conflict_with_markers_and_diffs() {
     let base = b"line1\nline2\nline3\n";
     let ours = b"line1\nOURS\nline3\n";
@@ -48,7 +46,7 @@ fn text_edits_to_same_line_conflict_with_markers_and_diffs() {
     }
 }
 
-#[test]
+
 fn binary_content_is_not_auto_merged() {
     let base: &[u8] = &[0u8, 1, 2, 3];
     let ours: &[u8] = &[0u8, 9, 9, 9];
@@ -62,7 +60,7 @@ fn binary_content_is_not_auto_merged() {
     }
 }
 
-#[test]
+
 fn sqlite_is_detected_but_left_as_conflict_extension_point() {
     let mut ours = b"SQLite format 3\0".to_vec();
     ours.extend_from_slice(&[1, 2, 3]);

@@ -6,13 +6,13 @@ use crate::cluster::ClusterNode;
 
 const HT_PREFIX: &str = "ht:";
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+
 pub struct HeapTagEntry {
     pub heap: String,
     pub tags: HashMap<String, String>,
 }
 
-#[derive(Clone)]
+
 pub struct HeapTagStore {
     db: sled::Db,
     cluster_node: Option<Arc<ClusterNode>>,
@@ -72,8 +72,7 @@ impl HeapTagStore {
 
         if let Some(ref cluster) = self.cluster_node {
             let pairs = cluster.scan_prefix(&key)?;
-            // Exact match: only the entry whose key equals our key
-            for (k, v) in pairs {
+                        for (k, v) in pairs {
                 if k == key {
                     let tags: HashMap<String, String> = serde_json::from_str(&v)
                         .map_err(|e| format!("Failed to deserialize tags: {}", e))?;
@@ -109,11 +108,7 @@ impl HeapTagStore {
         let key = Self::make_key(heap);
 
         if let Some(ref cluster) = self.cluster_node {
-            // In cluster mode, read-modify-write through the cluster.
-            // The Raft log serializes writes, but two concurrent merge_tags
-            // may read stale data. This is a known limitation — last writer wins
-            // for same-key conflicts, but different keys may be lost.
-            let existing = self.get_tags(heap).await?;
+                                                            let existing = self.get_tags(heap).await?;
             let mut merged = existing;
             merged.extend(tags);
             let value = serde_json::to_string(&merged)
@@ -150,12 +145,10 @@ impl HeapTagStore {
     ) -> Result<(), String> {
         match keys {
             None => {
-                // Delete all tags — write empty map as tombstone
-                self.set_tags(heap, HashMap::new()).await
+                                self.set_tags(heap, HashMap::new()).await
             }
             Some(keys_to_remove) => {
-                // Read-modify-write: remove specific keys
-                let mut tags = self.get_tags(heap).await?;
+                                let mut tags = self.get_tags(heap).await?;
                 for k in &keys_to_remove {
                     tags.remove(k);
                 }

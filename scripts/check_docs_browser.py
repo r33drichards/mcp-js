@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+
 """Serve a built MkDocs site and verify key pages render in headless Chrome."""
 
 from __future__ import annotations

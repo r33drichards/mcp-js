@@ -1,13 +1,9 @@
-#!/usr/bin/env bash
-# generate-report.sh — Combine individual k6 JSON results into a
-# markdown comparison table with text-based charts and a single JSON summary.
 set -euo pipefail
 
 RESULTS_DIR="${1:-.}"
 OUTPUT_MD="${RESULTS_DIR}/benchmark-report.md"
 OUTPUT_JSON="${RESULTS_DIR}/benchmark-summary.json"
 
-# Collect all result files
 shopt -s nullglob
 FILES=("${RESULTS_DIR}"/results-*.json)
 shopt -u nullglob
@@ -17,7 +13,6 @@ if [ ${#FILES[@]} -eq 0 ]; then
   exit 1
 fi
 
-# ── JSON summary ─────────────────────────────────────────────────────────
 echo "[" > "$OUTPUT_JSON"
 first=true
 for f in "${FILES[@]}"; do
@@ -26,19 +21,15 @@ for f in "${FILES[@]}"; do
 done
 echo "]" >> "$OUTPUT_JSON"
 
-# ── Build sorted data index ──────────────────────────────────────────────
-# Collect all unique rates (sorted numerically) and topologies (sorted alpha).
 RATES=()
 TOPOLOGIES=()
 for f in "${FILES[@]}"; do
   RATES+=($(jq -r '.target_rate' "$f"))
   TOPOLOGIES+=($(jq -r '.topology' "$f"))
 done
-# Deduplicate and sort
 RATES=($(printf '%s\n' "${RATES[@]}" | sort -un))
 TOPOLOGIES=($(printf '%s\n' "${TOPOLOGIES[@]}" | sort -u))
 
-# Lookup helper: find file matching topology + rate
 find_file() {
   local topo="$1" rate="$2"
   for f in "${FILES[@]}"; do
@@ -51,7 +42,6 @@ find_file() {
   done
 }
 
-# ── Markdown report ──────────────────────────────────────────────────────
 cat > "$OUTPUT_MD" << 'HEADER'
 # MCP-V8 Load Test Benchmark Report
 
@@ -78,26 +68,21 @@ for f in "${FILES[@]}"; do
   echo "| ${topology} | ${target}/s | ${iters} | ${http_rps} | ${avg} | ${p95} | ${p99} | ${success}% | ${dropped} | ${vus} |" >> "$OUTPUT_MD"
 done
 
-# ── Text-based visual charts ─────────────────────────────────────────────
-# Unicode bar charts that render in any markdown viewer (GitHub, terminals, etc.)
 if [ ${#FILES[@]} -gt 1 ]; then
 
-  # Log-scale bar: width proportional to log(value)/log(max)
-  draw_bar_log() {
+    draw_bar_log() {
     local val="$1" max_val="$2" max_width=30
     if [ "$max_val" -le 1 ] || [ "$val" -le 0 ]; then
       [ "$val" -gt 0 ] && echo "█" || echo ""
       return
     fi
-    # Use awk for floating-point log math
-    local width
+        local width
     width=$(awk -v v="$val" -v m="$max_val" -v w="$max_width" \
       'BEGIN { if(v<=0||m<=1){print 1}else{r=log(v)/log(m)*w; if(r<1)r=1; printf "%d",r+0.5} }')
     printf '%0.s█' $(seq 1 "$width")
   }
 
-  # ── Chart: P95 Latency (log scale) ──────────────────────────────────
-  echo "" >> "$OUTPUT_MD"
+    echo "" >> "$OUTPUT_MD"
   echo "## P95 Latency" >> "$OUTPUT_MD"
   echo "" >> "$OUTPUT_MD"
   echo "| Topology | Rate | P95 (ms) | |" >> "$OUTPUT_MD"
@@ -123,7 +108,6 @@ if [ ${#FILES[@]} -gt 1 ]; then
 
 fi
 
-# ── Notes ────────────────────────────────────────────────────────────────
 cat >> "$OUTPUT_MD" << 'FOOTER'
 
 ## Notes

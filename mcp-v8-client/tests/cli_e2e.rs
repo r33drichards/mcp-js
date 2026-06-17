@@ -37,13 +37,10 @@ use std::{
     time::Duration,
 };
 
-// ── Binary paths ─────────────────────────────────────────────────────────────
 
 /// Path to the CLI binary under test (auto-resolved by Cargo test runner).
 fn cli_bin() -> String {
-    // CARGO_BIN_EXE_mcp-v8-cli is injected by Cargo for binaries in the same
-    // package (mcp-v8-client).
-    env!("CARGO_BIN_EXE_mcp-v8-cli").to_string()
+            env!("CARGO_BIN_EXE_mcp-v8-cli").to_string()
 }
 
 /// Path to the server binary.
@@ -55,8 +52,7 @@ fn server_bin() -> String {
     if let Ok(bin) = env::var("SERVER_BIN") {
         return bin;
     }
-    // Walk up from the manifest dir to find the workspace root.
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let workspace_root = std::path::Path::new(manifest_dir)
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."));
@@ -67,11 +63,9 @@ fn server_bin() -> String {
     if candidate.exists() {
         return candidate.to_string_lossy().to_string();
     }
-    // Fallback: assume tests run from workspace root
-    "target/release/server".to_string()
+        "target/release/server".to_string()
 }
 
-// ── Server lifecycle ──────────────────────────────────────────────────────────
 
 struct TestServer {
     child: Child,
@@ -94,8 +88,7 @@ impl TestServer {
 
         let base_url = format!("http://127.0.0.1:{}", port);
 
-        // Poll until the server accepts requests (up to 15 s).
-        let client = Client::builder()
+                let client = Client::builder()
             .timeout(Duration::from_millis(200))
             .build()?;
         let health = format!("{}/api/executions", base_url);
@@ -126,7 +119,6 @@ fn free_port() -> u16 {
         .port()
 }
 
-// ── CLI helpers ───────────────────────────────────────────────────────────────
 
 /// Run the CLI with the given arguments and return (exit_code, stdout, stderr).
 fn run_cli(base_url: &str, args: &[&str]) -> (i32, String, String) {
@@ -151,8 +143,7 @@ fn extract_uuid(text: &str) -> Option<String> {
 }
 
 fn regex_simple(text: &str) -> Option<String> {
-    // Simple hand-rolled UUID extractor — avoids adding the `regex` dep.
-    for word in text.split_whitespace() {
+        for word in text.split_whitespace() {
         let w = word.trim_matches(|c: char| !c.is_alphanumeric() && c != '-');
         let parts: Vec<&str> = w.split('-').collect();
         if parts.len() == 5
@@ -192,10 +183,9 @@ fn poll_until_terminal(base_url: &str, id: &str, max_secs: u64) -> Value {
     }
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
 
 /// Test 1 — `exec`: submits code, captures execution_id.
-#[test]
+
 fn test_exec_captures_execution_id() {
     let server = TestServer::start().expect("Failed to start server");
 
@@ -207,12 +197,11 @@ fn test_exec_captures_execution_id() {
 }
 
 /// Test 2 — `executions list`: exits 0 and produces output.
-#[test]
+
 fn test_executions_list() {
     let server = TestServer::start().expect("Failed to start server");
 
-    // Submit something first so the list is never empty.
-    run_cli(&server.base_url, &["exec", "1+1"]);
+        run_cli(&server.base_url, &["exec", "1+1"]);
 
     let (code, stdout, _) = run_cli(&server.base_url, &["executions", "list"]);
     assert_eq!(code, 0, "executions list should exit 0");
@@ -220,7 +209,7 @@ fn test_executions_list() {
 }
 
 /// Test 3 — `executions get`: status field is present in the output.
-#[test]
+
 fn test_executions_get_has_status() {
     let server = TestServer::start().expect("Failed to start server");
 
@@ -237,15 +226,14 @@ fn test_executions_get_has_status() {
 }
 
 /// Test 4 — `executions output`: output of `console.log(42)` contains "42".
-#[test]
+
 fn test_executions_output_contains_expected_value() {
     let server = TestServer::start().expect("Failed to start server");
 
     let (_, submit_out, _) = run_cli(&server.base_url, &["exec", "console.log(42)"]);
     let id = extract_uuid(&submit_out).expect("Should get execution_id from exec");
 
-    // Wait for completion before reading output.
-    poll_until_terminal(&server.base_url, &id, 30);
+        poll_until_terminal(&server.base_url, &id, 30);
 
     let (code, stdout, _) = run_cli(&server.base_url, &["executions", "output", &id]);
     assert_eq!(code, 0, "executions output should exit 0");
@@ -257,7 +245,7 @@ fn test_executions_output_contains_expected_value() {
 }
 
 /// Test 5 — exec + poll loop: `2+2` completes and output contains "4".
-#[test]
+
 fn test_exec_poll_until_completed() {
     let server = TestServer::start().expect("Failed to start server");
 
@@ -278,7 +266,7 @@ fn test_exec_poll_until_completed() {
 }
 
 /// Test 6 — `--json` flag: `exec --json` produces valid JSON.
-#[test]
+
 fn test_exec_json_flag_produces_valid_json() {
     let server = TestServer::start().expect("Failed to start server");
 
@@ -295,15 +283,14 @@ fn test_exec_json_flag_produces_valid_json() {
 }
 
 /// Test 7 — `executions cancel`: submit infinite loop, cancel it, assert exit 0.
-#[test]
+
 fn test_executions_cancel() {
     let server = TestServer::start().expect("Failed to start server");
 
     let (_, submit_out, _) = run_cli(&server.base_url, &["exec", "while(true){}"]);
     let id = extract_uuid(&submit_out).expect("Should get execution_id from exec");
 
-    // Cancel immediately — don't wait for the execution to finish.
-    let (cancel_code, _stdout, _stderr) =
+        let (cancel_code, _stdout, _stderr) =
         run_cli(&server.base_url, &["executions", "cancel", &id]);
     assert_eq!(cancel_code, 0, "executions cancel should exit 0");
 }

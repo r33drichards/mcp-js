@@ -22,7 +22,7 @@ enum Write {
 }
 
 /// Metadata returned by [`SessionMount::stat`].
-#[derive(Clone, Debug, PartialEq, Eq)]
+
 pub struct Stat {
     pub mode: u32,
     pub size: u64,
@@ -32,14 +32,11 @@ pub struct Stat {
 
 pub struct SessionMount {
     store: FsStore,
-    base_id: Option<Hash>,          // pinned root hash at pull() time
-    upper: HashMap<PathBuf, Write>, // the only mutable state
-}
+    base_id: Option<Hash>,              upper: HashMap<PathBuf, Write>, }
 
 impl SessionMount {
     pub async fn pull(store: FsStore, id: Hash) -> anyhow::Result<Self> {
-        // Lazy: only pin the root hash. The tree is walked on demand.
-        Ok(Self {
+                Ok(Self {
             store,
             base_id: Some(id),
             upper: HashMap::new(),
@@ -162,8 +159,7 @@ impl SessionMount {
         let comps = components_of(p);
         let key = path_of(&comps);
         if self.effective(&comps, &key).await?.is_some() {
-            // Plain file.
-            self.upper.insert(key, Write::Whiteout);
+                        self.upper.insert(key, Write::Whiteout);
             return Ok(());
         }
         let descendants = self.live_descendants(&comps, &key).await?;
@@ -190,8 +186,7 @@ impl SessionMount {
                 symlink: e.symlink.clone(),
             });
         }
-        // Directories are implicit: a path is a directory if anything lives under it.
-        if self.is_implicit_dir(&comps, &key).await? {
+                if self.is_implicit_dir(&comps, &key).await? {
             return Ok(Stat {
                 mode: 0o755,
                 size: 0,
@@ -216,15 +211,12 @@ impl SessionMount {
         if from_k == to_k {
             return Ok(());
         }
-        // Plain file: move the single entry.
-        if let Some(entry) = self.effective(&from_c, &from_k).await? {
+                if let Some(entry) = self.effective(&from_c, &from_k).await? {
             self.upper.insert(to_k, Write::Data(entry));
             self.upper.insert(from_k, Write::Whiteout);
             return Ok(());
         }
-        // Directory (implicit): move every descendant, rewriting its path prefix
-        // from `from/...` to `to/...`. Mirrors the host-backed recursive rename.
-        if child_suffix(&from_k, &to_k).is_some() {
+                        if child_suffix(&from_k, &to_k).is_some() {
             anyhow::bail!("EINVAL: cannot rename {} into its own subtree", from_k.display());
         }
         let srcs = self.live_descendants(&from_c, &from_k).await?;
@@ -253,8 +245,7 @@ impl SessionMount {
         let dir_k = path_of(&dir_c);
         let mut names: BTreeSet<String> = BTreeSet::new();
 
-        // Base immediate children, each kept only if it still has something live.
-        if let Some(node) = self.store.dir_node_at(self.base_root(), &dir_c).await? {
+                if let Some(node) = self.store.dir_node_at(self.base_root(), &dir_c).await? {
             for name in node.children.keys() {
                 let mut child_c = dir_c.clone();
                 child_c.push(name.clone());
@@ -267,8 +258,7 @@ impl SessionMount {
             }
         }
 
-        // Upper additions.
-        for (k, w) in &self.upper {
+                for (k, w) in &self.upper {
             if let Write::Data(_) = w {
                 if let Some(rest) = child_suffix(&dir_k, k) {
                     if let Some(first) = rest.components().next() {
@@ -280,8 +270,7 @@ impl SessionMount {
 
         if names.is_empty() {
             if dir_c.is_empty() {
-                return Ok(Vec::new()); // the root always exists, possibly empty
-            }
+                return Ok(Vec::new());             }
             anyhow::bail!("ENOENT: {}", dir_k.display());
         }
         Ok(names.into_iter().collect())
@@ -371,8 +360,7 @@ fn child_suffix(dir: &Path, path: &Path) -> Option<PathBuf> {
     }
     path.strip_prefix(dir).ok().and_then(|rest| {
         if rest.as_os_str().is_empty() {
-            None // `path == dir`: not a child of itself
-        } else {
+            None         } else {
             Some(rest.to_path_buf())
         }
     })

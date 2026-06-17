@@ -2,13 +2,13 @@ import http from "k6/http";
 import { check, sleep } from "k6";
 import { Counter, Rate, Trend } from "k6/metrics";
 
-// ── Custom metrics ──────────────────────────────────────────────────────
+
 const jsExecDuration = new Trend("js_exec_duration", true);
 const jsExecSuccess = new Rate("js_exec_success");
 const jsExecCount = new Counter("js_exec_count");
 
-// ── Configuration from environment ──────────────────────────────────────
-// TARGET_URLS: comma-separated list of base URLs (for cluster round-robin)
+
+
 const TARGET_URLS = (__ENV.TARGET_URLS || __ENV.TARGET_URL || "http://localhost:3001")
   .split(",")
   .map((u) => u.trim());
@@ -16,9 +16,9 @@ const TARGET_RATE = parseInt(__ENV.TARGET_RATE || "1000");
 const DURATION = __ENV.DURATION || "60s";
 const TOPOLOGY = __ENV.TOPOLOGY || "unknown";
 
-// ── Scenario configuration ──────────────────────────────────────────────
-// constant-arrival-rate attempts exactly TARGET_RATE iterations/sec
-// regardless of response time.
+
+
+
 export const options = {
   scenarios: {
     mcp_load: {
@@ -41,7 +41,7 @@ export const options = {
   },
 };
 
-// Lightweight JS snippets — rotate to avoid caching effects.
+
 const JS_SNIPPETS = [
   "1 + 1",
   "Math.sqrt(144)",
@@ -55,7 +55,7 @@ const JS_SNIPPETS = [
 
 const HEADERS = { "Content-Type": "application/json" };
 
-// Simple round-robin counter for distributing across cluster nodes.
+
 let rrCounter = 0;
 
 function pickUrl() {
@@ -64,9 +64,9 @@ function pickUrl() {
   return url;
 }
 
-// ── Main test function ──────────────────────────────────────────────────
-// Each iteration: POST /api/exec (returns 202 + execution_id), then poll
-// GET /api/executions/{id} until completion.
+
+
+
 export default function () {
   const baseUrl = pickUrl();
   const snippet = JS_SNIPPETS[Math.floor(Math.random() * JS_SNIPPETS.length)];
@@ -95,7 +95,7 @@ export default function () {
     return;
   }
 
-  // Poll for completion (up to 10 seconds)
+  
   const startTime = Date.now();
   let ok = false;
   for (let i = 0; i < 100; i++) {
@@ -118,7 +118,7 @@ export default function () {
         break;
       }
     }
-    sleep(0.05); // 50ms between polls
+    sleep(0.05); 
     if (Date.now() - startTime > 10000) break;
   }
 
@@ -133,7 +133,7 @@ export default function () {
   jsExecSuccess.add(passed);
 }
 
-// ── Summary ─────────────────────────────────────────────────────────────
+
 
 export function handleSummary(data) {
   const summary = {

@@ -1,8 +1,8 @@
-#!/usr/bin/env python3
-# /// script
-# requires-python = ">=3.11"
-# dependencies = []
-# ///
+
+
+
+
+
 """
 Benchmark runner: executes all three approaches N times via subprocess and reports averages.
 
@@ -83,7 +83,7 @@ def main():
             else:
                 print()
 
-    # Compute averages
+    
     def avg(runs: list[dict], field: str) -> float:
         return sum(r[field] for r in runs) / len(runs) if runs else 0
 
@@ -129,7 +129,7 @@ def main():
 
     print(f"{'='*78}")
 
-    # Dump raw data
+    
     raw = {}
     for key in ["A", "B", "C"]:
         raw[key] = {"label": LABELS[key], "runs": results[key], "avg": avgs[key]}

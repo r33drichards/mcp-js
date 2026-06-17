@@ -1,15 +1,15 @@
 version: "3.8"
 
-# 3-node MCP-JS cluster in STATELESS mode with nginx load balancer.
-# Used for load testing — no heap persistence overhead.
-#
-# Usage:
-#   docker compose -f docker-compose.cluster-stateless.yml up --build
-#
-# The load balancer is accessible at http://localhost:8080/mcp
+
+
+
+
+
+
+
 
 services:
-  # ── Nginx load balancer ──────────────────────────────────────────────
+  
   lb:
     image: nginx:alpine
     ports:
@@ -21,7 +21,7 @@ services:
       - node2
       - node3
 
-  # ── MCP-JS cluster nodes (stateless for benchmarking) ──────────────
+  
   node1:
     build: .
     command:

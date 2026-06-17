@@ -27,7 +27,7 @@ fn msg(i: usize) -> Option<String> {
 /// Drive a long sequential history with a message on every move, then assert the
 /// reflog is fully intact and a full scan stays correct. This is the hot path the
 /// message field touches: append on every push, scan over the whole history.
-#[tokio::test]
+
 async fn sequential_pushes_with_messages_scale_linearly() {
     const N: usize = 10_000;
     let s = LabelStore::in_memory();
@@ -46,22 +46,17 @@ async fn sequential_pushes_with_messages_scale_linearly() {
     }
     let push_elapsed = start.elapsed();
 
-    // One full-reflog scan, the O(history) read that gains the message bytes.
-    let scan_start = Instant::now();
+        let scan_start = Instant::now();
     let log = s.log("main").await.unwrap();
     let scan_elapsed = scan_start.elapsed();
 
     assert_eq!(log.len(), N, "every move must be recorded exactly once");
     assert_eq!(s.resolve("main").await.unwrap(), Some(head));
-    // Spot-check that messages survived round-tripping through sled at scale.
-    assert_eq!(log[0].message, msg(0));
+        assert_eq!(log[0].message, msg(0));
     assert_eq!(log[N - 1].message, msg(N - 1));
-    // The reflog is append-ordered, so the i-th entry points at the i-th head.
-    assert_eq!(log[N / 2].to, caid((N / 2) as u64));
+        assert_eq!(log[N / 2].to, caid((N / 2) as u64));
 
-    // A bounded read over the same long history returns just the tail without
-    // loading every entry — the mitigation for very long histories.
-    let tail_start = Instant::now();
+            let tail_start = Instant::now();
     let tail = s.log_recent("main", 50).await.unwrap();
     let tail_elapsed = tail_start.elapsed();
     assert_eq!(tail.len(), 50);
@@ -80,7 +75,7 @@ async fn sequential_pushes_with_messages_scale_linearly() {
 /// CAS must serialize them so exactly one wins per generation, and the message
 /// is recorded only for the move that actually landed — no torn or duplicated
 /// reflog entries under contention.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+"multi_thread"
 async fn concurrent_cas_contention_records_one_message_per_generation() {
     const WRITERS: usize = 32;
     const GENERATIONS: usize = 200;
@@ -95,11 +90,7 @@ async fn concurrent_cas_contention_records_one_message_per_generation() {
         for w in 0..WRITERS {
             let store = s.clone();
             let wins = wins.clone();
-            // Each writer proposes a distinct new head, tagged with its identity.
-            // The +1 offsets keep every proposal non-zero and distinct from the
-            // genesis head and every prior winner, so a win always *moves* the
-            // pointer (never a no-op CAS that two writers could both satisfy).
-            let next = caid(((generation as u64) + 1) << 8 | (w as u64 + 1));
+                                                            let next = caid(((generation as u64) + 1) << 8 | (w as u64 + 1));
             handles.push(tokio::spawn(async move {
                 let message = Some(format!("gen {generation} writer {w}"));
                 if store
@@ -126,13 +117,10 @@ async fn concurrent_cas_contention_records_one_message_per_generation() {
         head = winner.expect("some writer must win each generation");
     }
 
-    // History length is genesis + one accepted move per generation; every losing
-    // CAS left no trace. This is the invariant a message field must not break.
-    let log = s.log("main").await.unwrap();
+            let log = s.log("main").await.unwrap();
     assert_eq!(log.len(), GENERATIONS + 1);
     assert_eq!(s.resolve("main").await.unwrap(), Some(head));
-    // Each surviving entry carries exactly the winning writer's message.
-    for entry in log.iter().skip(1) {
+        for entry in log.iter().skip(1) {
         let m = entry.message.as_deref().unwrap_or("");
         assert!(m.starts_with("gen "), "unexpected reflog message: {m:?}");
     }

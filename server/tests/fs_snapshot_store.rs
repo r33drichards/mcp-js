@@ -14,7 +14,7 @@ fn pseudo_random(len: usize, seed: u64) -> Vec<u8> {
         .collect()
 }
 
-#[test]
+
 fn small_file_is_stored_inline_not_chunked() {
     let data = b"hello world";
     match chunk_bytes(data) {
@@ -23,13 +23,13 @@ fn small_file_is_stored_inline_not_chunked() {
     }
 }
 
-#[test]
+
 fn boundary_file_at_threshold_is_inlined() {
     let data = vec![7u8; SMALL_FILE_MAX];
     assert!(matches!(chunk_bytes(&data), Chunked::Inline(_)));
 }
 
-#[test]
+
 fn large_file_chunks_are_deterministic() {
     let data = pseudo_random(4 * 1024 * 1024, 0x31);
     let a = chunk_bytes(&data);
@@ -38,15 +38,14 @@ fn large_file_chunks_are_deterministic() {
     assert!(matches!(a, Chunked::Chunks(_)));
 }
 
-#[test]
+
 fn single_byte_edit_changes_few_chunks() {
     let mut data = pseudo_random(8 * 1024 * 1024, 0x17);
     let before = match chunk_bytes(&data) {
         Chunked::Chunks(c) => c,
         _ => panic!(),
     };
-    data[4 * 1024 * 1024] ^= 0xFF; // flip one byte in the middle
-    let after = match chunk_bytes(&data) {
+    data[4 * 1024 * 1024] ^= 0xFF;     let after = match chunk_bytes(&data) {
         Chunked::Chunks(c) => c,
         _ => panic!(),
     };
@@ -61,7 +60,7 @@ fn single_byte_edit_changes_few_chunks() {
 use server::engine::fs_store::{Content, Entry, FsStore, Manifest};
 use std::collections::BTreeMap;
 
-#[tokio::test]
+
 async fn identical_trees_produce_identical_manifest_ids() {
     let store = FsStore::in_memory();
     let mut a = Manifest {
@@ -87,7 +86,7 @@ async fn identical_trees_produce_identical_manifest_ids() {
     );
 }
 
-#[tokio::test]
+
 async fn manifest_round_trips_and_reads_file_content() {
     let store = FsStore::in_memory();
     let mut m = Manifest {
@@ -102,7 +101,7 @@ async fn manifest_round_trips_and_reads_file_content() {
     assert_eq!(store.read_file(entry).await.unwrap(), b"payload");
 }
 
-#[tokio::test]
+
 async fn large_file_round_trips_through_chunk_store() {
     let store = FsStore::in_memory();
     let data: Vec<u8> = {
@@ -122,7 +121,7 @@ async fn large_file_round_trips_through_chunk_store() {
     assert_eq!(store.read_file(&entry).await.unwrap(), data);
 }
 
-#[tokio::test]
+
 async fn tiny_file_is_inline_entry() {
     let store = FsStore::in_memory();
     let entry: Entry = store.put_file(b"small").await.unwrap();

@@ -1,10 +1,10 @@
-#!/usr/bin/env python3
-# /// script
-# requires-python = ">=3.11"
-# dependencies = [
-#     "pydantic-ai",
-# ]
-# ///
+
+
+
+
+
+
+
 """
 Approach C: PydanticAI agent with a single gh CLI tool.
 
@@ -45,7 +45,7 @@ def run_gh(command: str) -> str:
         )
         if result.returncode != 0:
             return f"ERROR (exit {result.returncode}): {result.stderr[:500]}"
-        return result.stdout[:4000]  # cap output to avoid token bloat
+        return result.stdout[:4000]  
     except subprocess.TimeoutExpired:
         return "ERROR: command timed out after 30s"
     except Exception as e:

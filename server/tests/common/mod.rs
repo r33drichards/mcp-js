@@ -12,8 +12,7 @@ pub async fn start_server(port: u16, heap_dir: &str) -> Result<tokio::process::C
         .stderr(std::process::Stdio::null())
         .spawn()?;
 
-    // Give server time to start
-    sleep(Duration::from_millis(500)).await;
+        sleep(Duration::from_millis(500)).await;
 
     Ok(child)
 }
@@ -26,8 +25,7 @@ pub async fn start_sse_server(port: u16, heap_dir: &str) -> Result<tokio::proces
         .stderr(std::process::Stdio::null())
         .spawn()?;
 
-    // Give server time to start
-    sleep(Duration::from_millis(500)).await;
+        sleep(Duration::from_millis(500)).await;
 
     Ok(child)
 }

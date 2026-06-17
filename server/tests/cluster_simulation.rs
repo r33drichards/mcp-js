@@ -98,17 +98,12 @@ async fn wait_for_key(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Main simulation test
-// ---------------------------------------------------------------------------
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+"multi_thread"
 async fn test_5_node_cluster_crash_and_recovery() {
-    // Use a high port range unlikely to collide with other tests
-    let ports = cluster_ports(19100);
+        let ports = cluster_ports(19100);
 
-    // ── Phase 1: Start 5 nodes ─────────────────────────────────────────
-    println!("=== Phase 1: Starting 5-node cluster ===");
+        println!("=== Phase 1: Starting 5-node cluster ===");
 
     let mut nodes: Vec<Arc<ClusterNode>> = Vec::new();
     for i in 0..5 {
@@ -119,8 +114,7 @@ async fn test_5_node_cluster_crash_and_recovery() {
         nodes.push(node);
     }
 
-    // ── Phase 2: Wait for leader election ──────────────────────────────
-    println!("=== Phase 2: Waiting for leader election ===");
+        println!("=== Phase 2: Waiting for leader election ===");
 
     let leader_idx = wait_for_leader(&nodes, Duration::from_secs(15))
         .await
@@ -132,8 +126,7 @@ async fn test_5_node_cluster_crash_and_recovery() {
         leader_status.node_id, leader_status.term
     );
 
-    // ── Phase 3: Write data through the leader ─────────────────────────
-    println!("=== Phase 3: Writing data ===");
+        println!("=== Phase 3: Writing data ===");
 
     nodes[leader_idx]
         .put("key1".to_string(), "value1".to_string())
@@ -152,8 +145,7 @@ async fn test_5_node_cluster_crash_and_recovery() {
 
     println!("3 key-value pairs written through leader");
 
-    // ── Phase 4: Verify replication to all nodes ───────────────────────
-    println!("=== Phase 4: Verifying replication ===");
+        println!("=== Phase 4: Verifying replication ===");
 
     for (i, node) in nodes.iter().enumerate() {
         assert!(
@@ -174,11 +166,9 @@ async fn test_5_node_cluster_crash_and_recovery() {
     }
     println!("All 5 nodes have consistent data");
 
-    // ── Phase 5: Crash leader + one random follower ────────────────────
-    println!("=== Phase 5: Crashing leader + one follower ===");
+        println!("=== Phase 5: Crashing leader + one follower ===");
 
-    // Pick a follower that isn't the leader
-    let follower_idx = (leader_idx + 2) % 5;
+        let follower_idx = (leader_idx + 2) % 5;
 
     println!(
         "Crashing node{} (leader) and node{} (follower)",
@@ -189,11 +179,9 @@ async fn test_5_node_cluster_crash_and_recovery() {
     nodes[leader_idx].shutdown();
     nodes[follower_idx].shutdown();
 
-    // Allow time for shutdown to take effect
-    sleep(Duration::from_millis(500)).await;
+        sleep(Duration::from_millis(500)).await;
 
-    // Collect surviving node indices
-    let surviving_indices: Vec<usize> = (0..5)
+        let surviving_indices: Vec<usize> = (0..5)
         .filter(|i| *i != leader_idx && *i != follower_idx)
         .collect();
     let surviving: Vec<Arc<ClusterNode>> =
@@ -201,8 +189,7 @@ async fn test_5_node_cluster_crash_and_recovery() {
 
     assert_eq!(surviving.len(), 3, "Should have 3 surviving nodes");
 
-    // ── Phase 6: Wait for new leader among survivors ───────────────────
-    println!("=== Phase 6: Waiting for new leader election ===");
+        println!("=== Phase 6: Waiting for new leader election ===");
 
     let new_leader_local_idx = wait_for_leader(&surviving, Duration::from_secs(15))
         .await
@@ -215,8 +202,7 @@ async fn test_5_node_cluster_crash_and_recovery() {
         new_status.node_id, new_status.term
     );
 
-    // ── Phase 7: Assert no data lost ───────────────────────────────────
-    println!("=== Phase 7: Verifying no data lost ===");
+        println!("=== Phase 7: Verifying no data lost ===");
 
     for (local_i, global_i) in surviving_indices.iter().enumerate() {
         let node = &surviving[local_i];
@@ -238,8 +224,7 @@ async fn test_5_node_cluster_crash_and_recovery() {
     }
     println!("All committed data intact on surviving nodes");
 
-    // ── Phase 8: Write new data on degraded cluster ────────────────────
-    println!("=== Phase 8: Writing to degraded cluster ===");
+        println!("=== Phase 8: Writing to degraded cluster ===");
 
     new_leader
         .put("post-crash".to_string(), "still-alive".to_string())
@@ -254,14 +239,9 @@ async fn test_5_node_cluster_crash_and_recovery() {
     }
     println!("Degraded cluster (3/5 nodes) still accepts writes");
 
-    // ── Phase 9: Restart crashed nodes ─────────────────────────────────
-    println!("=== Phase 9: Restarting crashed nodes ===");
+        println!("=== Phase 9: Restarting crashed nodes ===");
 
-    // Create fresh nodes with the same config but new sled databases.
-    // In a real deployment the nodes would reload from their persistent
-    // sled stores, but for the simulation we test that new nodes can join
-    // and the cluster does not deadlock.
-    let restart_node = |idx: usize| {
+                    let restart_node = |idx: usize| {
         let config = make_config(idx, &ports);
         let db = temp_sled(&format!("node{}-restart", idx + 1));
         let node = ClusterNode::new(config, db);
@@ -273,16 +253,13 @@ async fn test_5_node_cluster_crash_and_recovery() {
     restarted_leader.start().await;
     restarted_follower.start().await;
 
-    // Replace the crashed node references
-    let mut all_nodes_v2 = nodes.clone();
+        let mut all_nodes_v2 = nodes.clone();
     all_nodes_v2[leader_idx] = restarted_leader;
     all_nodes_v2[follower_idx] = restarted_follower;
 
-    // ── Phase 10: Verify cluster converges without deadlock ────────────
-    println!("=== Phase 10: Verifying full cluster convergence ===");
+        println!("=== Phase 10: Verifying full cluster convergence ===");
 
-    // Wait for a stable leader among all 5 nodes
-    let final_leader_idx = wait_for_leader(&all_nodes_v2, Duration::from_secs(15))
+        let final_leader_idx = wait_for_leader(&all_nodes_v2, Duration::from_secs(15))
         .await
         .expect("Cluster failed to converge after restart (possible deadlock)");
 
@@ -292,8 +269,7 @@ async fn test_5_node_cluster_crash_and_recovery() {
         final_status.node_id, final_status.term
     );
 
-    // Verify exactly one leader
-    let mut leader_count = 0;
+        let mut leader_count = 0;
     for node in &all_nodes_v2 {
         let st = node.status().await;
         if st.role == Role::Leader {
@@ -302,17 +278,14 @@ async fn test_5_node_cluster_crash_and_recovery() {
     }
     assert_eq!(leader_count, 1, "Expected exactly 1 leader, found {}", leader_count);
 
-    // The original data should still be readable from the surviving nodes
-    // (restarted nodes start with fresh state in this simulation)
-    for &i in &surviving_indices {
+            for &i in &surviving_indices {
         let val = all_nodes_v2[i].get("key1").await.expect("get failed");
         assert_eq!(val.as_deref(), Some("value1"), "node{}: key1 lost after restart phase", i + 1);
     }
 
     println!("=== All assertions passed! ===");
 
-    // Cleanup
-    for node in &all_nodes_v2 {
+        for node in &all_nodes_v2 {
         node.shutdown();
     }
     sleep(Duration::from_millis(200)).await;
@@ -320,12 +293,11 @@ async fn test_5_node_cluster_crash_and_recovery() {
 
 /// Smaller test: verify that a 5-node cluster survives all nodes crashing
 /// and restarting simultaneously without deadlocking.
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+"multi_thread"
 async fn test_full_cluster_crash_and_restart() {
     let ports = cluster_ports(19200);
 
-    // Start 5 nodes
-    let mut nodes: Vec<Arc<ClusterNode>> = Vec::new();
+        let mut nodes: Vec<Arc<ClusterNode>> = Vec::new();
     for i in 0..5 {
         let config = make_config(i, &ports);
         let db = temp_sled(&format!("full-crash-node{}", i + 1));
@@ -334,8 +306,7 @@ async fn test_full_cluster_crash_and_restart() {
         nodes.push(node);
     }
 
-    // Wait for leader and write data
-    let leader_idx = wait_for_leader(&nodes, Duration::from_secs(15))
+        let leader_idx = wait_for_leader(&nodes, Duration::from_secs(15))
         .await
         .expect("No leader elected");
 
@@ -344,20 +315,17 @@ async fn test_full_cluster_crash_and_restart() {
         .await
         .expect("Failed to put data");
 
-    // Verify replication
-    for node in &nodes {
+        for node in &nodes {
         assert!(wait_for_key(node, "survive", "total-crash", Duration::from_secs(5)).await);
     }
 
-    // Crash ALL nodes simultaneously
-    println!("Crashing all 5 nodes simultaneously");
+        println!("Crashing all 5 nodes simultaneously");
     for node in &nodes {
         node.shutdown();
     }
     sleep(Duration::from_millis(500)).await;
 
-    // Restart all nodes with fresh state
-    println!("Restarting all 5 nodes");
+        println!("Restarting all 5 nodes");
     let mut new_nodes: Vec<Arc<ClusterNode>> = Vec::new();
     for i in 0..5 {
         let config = make_config(i, &ports);
@@ -367,8 +335,7 @@ async fn test_full_cluster_crash_and_restart() {
         new_nodes.push(node);
     }
 
-    // Verify the cluster elects a new leader (no deadlock)
-    let new_leader_idx = wait_for_leader(&new_nodes, Duration::from_secs(15))
+        let new_leader_idx = wait_for_leader(&new_nodes, Duration::from_secs(15))
         .await
         .expect("Cluster deadlocked after full restart — no leader elected");
 
@@ -378,8 +345,7 @@ async fn test_full_cluster_crash_and_restart() {
         st.node_id, st.term
     );
 
-    // Verify the cluster is functional (can accept writes)
-    new_nodes[new_leader_idx]
+        new_nodes[new_leader_idx]
         .put("after-total-crash".to_string(), "recovered".to_string())
         .await
         .expect("Cluster not functional after total crash");
@@ -400,7 +366,7 @@ async fn test_full_cluster_crash_and_restart() {
 }
 
 /// Test that leader election happens within a reasonable time bound.
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+"multi_thread"
 async fn test_election_timing() {
     let ports = cluster_ports(19300);
 

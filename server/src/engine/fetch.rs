@@ -28,11 +28,10 @@ use serde::Serialize;
 use super::fetch_auth::{OAuthClientCredentialsTokenSource, OAuthTokenSourceConfig};
 use super::opa::PolicyChain;
 
-// ── Configuration ────────────────────────────────────────────────────────
 
 /// Configuration for the fetch() function, including policy settings.
 /// Stored in deno_core's `OpState` for access from async ops.
-#[derive(Clone, Debug)]
+
 pub struct FetchConfig {
     pub policy_chain: Arc<PolicyChain>,
     pub http_client: reqwest::Client,
@@ -60,7 +59,7 @@ pub fn default_refresh_buffer_secs() -> u64 {
     30
 }
 
-#[derive(Clone, PartialEq, Eq)]
+
 pub struct OAuthClientCredentialsConfig {
     pub header_name: String,
     pub token_url: String,
@@ -83,7 +82,7 @@ impl std::fmt::Debug for OAuthClientCredentialsConfig {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+
 pub enum HeaderInjection {
     Static {
         headers: HashMap<String, String>,
@@ -92,7 +91,7 @@ pub enum HeaderInjection {
 }
 
 /// A rule for injecting headers into outgoing fetch requests.
-#[derive(Clone, Debug)]
+
 pub struct HeaderRule {
     /// Host to match (exact match or leading-wildcard like "*.github.com"). Case-insensitive.
     pub host: String,
@@ -173,8 +172,7 @@ impl HeaderRule {
         let host = request_host.to_lowercase();
 
         if let Some(suffix) = pattern.strip_prefix('*') {
-            // "*.github.com" matches "api.github.com" and "github.com"
-            host == pattern[2..] || host.ends_with(suffix)
+                        host == pattern[2..] || host.ends_with(suffix)
         } else {
             host == pattern
         }
@@ -331,9 +329,8 @@ pub async fn apply_header_rules(
     Ok(())
 }
 
-// ── OPA policy input ─────────────────────────────────────────────────────
 
-#[derive(Serialize)]
+
 struct FetchPolicyInput {
     operation: &'static str,
     url: String,
@@ -342,7 +339,7 @@ struct FetchPolicyInput {
     url_parsed: UrlParsed,
 }
 
-#[derive(Serialize)]
+
 struct UrlParsed {
     scheme: String,
     host: String,
@@ -351,22 +348,20 @@ struct UrlParsed {
     query: String,
 }
 
-// ── Async deno_core op ──────────────────────────────────────────────────
 
 /// Async op: performs an OPA-gated HTTP fetch. Called from JS via
 /// `Deno.core.ops.op_fetch(url, method, headersJson, body)`.
 /// Returns a JSON string with {status, statusText, url, headers, body}.
-#[op2(async)]
-#[string]
+
+
 async fn op_fetch(
     state: Rc<RefCell<OpState>>,
-    #[string] url: String,
-    #[string] method: String,
-    #[string] headers_json: String,
-    #[string] body: String,
+     url: String,
+     method: String,
+     headers_json: String,
+     body: String,
 ) -> Result<String, JsErrorBox> {
-    // Clone config from OpState before any .await (Rc is !Send).
-    let (policy_chain, http_client, header_rules) = {
+        let (policy_chain, http_client, header_rules) = {
         let state = state.borrow();
         let config = state.try_borrow::<FetchConfig>()
             .ok_or_else(|| JsErrorBox::generic("fetch: internal error — no fetch config available"))?;
@@ -377,15 +372,9 @@ async fn op_fetch(
         )
     };
 
-    // Convert empty string (from JS null body) to None.
-    let body = if body.is_empty() { None } else { Some(body) };
+        let body = if body.is_empty() { None } else { Some(body) };
 
-    // Spawn on a separate tokio task so deno_core's op driver only sees a
-    // simple JoinHandle future. Without this, the deeply nested async state
-    // machine from PolicyChain → PolicyEvaluatorKind → reqwest triggers a
-    // RefCell re-entrancy panic in deno_core's FuturesUnorderedDriver on
-    // some Rust toolchains (observed with stable, not nightly).
-    tokio::spawn(async move {
+                        tokio::spawn(async move {
         do_fetch(url, method, headers_json, body, policy_chain, http_client, header_rules).await
     })
     .await
@@ -393,7 +382,6 @@ async fn op_fetch(
     .map_err(|e| JsErrorBox::generic(e))
 }
 
-// ── Extension registration ──────────────────────────────────────────────
 
 deno_core::extension!(
     fetch_ext,
@@ -405,7 +393,6 @@ pub fn create_extension() -> deno_core::Extension {
     fetch_ext::init()
 }
 
-// ── Inject fetch() JS wrapper into the global scope ─────────────────────
 
 /// Inject the `globalThis.fetch` JS wrapper. Must be called after the
 /// runtime is created (with the fetch extension) but before user code runs.
@@ -540,7 +527,6 @@ const FETCH_JS_WRAPPER: &str = r#"
 })();
 "#;
 
-// ── Pure-Rust fetch implementation (no V8 types) ─────────────────────────
 
 /// Execute a policy-gated HTTP fetch. All V8 interaction happens in the caller.
 async fn do_fetch(
@@ -555,14 +541,12 @@ async fn do_fetch(
     let mut headers: HashMap<String, String> = serde_json::from_str(&headers_json)
         .map_err(|e| format!("fetch: invalid headers JSON: {}", e))?;
 
-    // Parse URL into components for policy input
-    let parsed_url = url::Url::parse(&url_str)
+        let parsed_url = url::Url::parse(&url_str)
         .map_err(|e| format!("fetch: invalid URL '{}': {}", url_str, e))?;
 
     let url_host = parsed_url.host_str().unwrap_or("").to_string();
 
-    // Apply header injection rules. User-provided headers take precedence.
-    apply_header_rules(&header_rules, &url_host, &method, &mut headers)
+        apply_header_rules(&header_rules, &url_host, &method, &mut headers)
         .await
         .map_err(|e| format!("fetch: credential injection failed for host '{}': {}", url_host, e))?;
 
@@ -582,8 +566,7 @@ async fn do_fetch(
         url_parsed,
     };
 
-    // Evaluate policy chain.
-    let input_value = serde_json::to_value(&policy_input)
+        let input_value = serde_json::to_value(&policy_input)
         .map_err(|e| format!("fetch: failed to serialize policy input: {}", e))?;
     let allowed = policy_chain.evaluate(&input_value).await?;
     if !allowed {
@@ -593,8 +576,7 @@ async fn do_fetch(
         ));
     }
 
-    // Execute the HTTP request
-    let mut req_builder = http_client.request(
+        let mut req_builder = http_client.request(
         method
             .parse::<reqwest::Method>()
             .map_err(|e| format!("fetch: invalid method '{}': {}", method, e))?,
@@ -650,7 +632,7 @@ async fn do_fetch(
     Ok(result.to_string())
 }
 
-#[cfg(test)]
+
 mod tests {
     use super::*;
     use std::collections::VecDeque;
@@ -666,7 +648,7 @@ mod tests {
 
     use crate::engine::opa::{EvalMode, LocalPolicyEvaluator, PolicyEvaluatorKind};
 
-    #[derive(Clone)]
+    
     struct TestTokenServer {
         base_url: String,
         state: TestTokenServerState,
@@ -682,13 +664,13 @@ mod tests {
         }
     }
 
-    #[derive(Clone)]
+    
     struct TestTokenServerState {
         responses: Arc<tokio::sync::Mutex<VecDeque<TestTokenResponse>>>,
         requests: Arc<tokio::sync::Mutex<Vec<TestTokenRequest>>>,
     }
 
-    #[derive(Clone, Debug, PartialEq, Eq)]
+    
     struct TestTokenResponse {
         status: StatusCode,
         body: Value,
@@ -707,7 +689,7 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Debug, Default, PartialEq, Eq)]
+    
     struct TestTokenRequest {
         grant_type: String,
     }
@@ -758,7 +740,7 @@ mod tests {
         }
     }
 
-    #[derive(Clone)]
+    
     struct EchoServer {
         url: String,
         state: EchoServerState,
@@ -770,12 +752,12 @@ mod tests {
         }
     }
 
-    #[derive(Clone)]
+    
     struct EchoServerState {
         requests: Arc<tokio::sync::Mutex<Vec<EchoRequestRecord>>>,
     }
 
-    #[derive(Clone, Debug, Default, PartialEq, Eq)]
+    
     struct EchoRequestRecord {
         authorization: Option<String>,
     }
@@ -860,12 +842,12 @@ allow if {{
         ))
     }
 
-    #[derive(Debug, Deserialize)]
+    
     struct FetchResponseBody {
         ok: bool,
     }
 
-    #[test]
+    
     fn test_header_rule_new_rejects_empty_host() {
         let err = HeaderRule::new(
             "   ".to_string(),
@@ -879,7 +861,7 @@ allow if {{
         assert!(err.to_string().contains("'host' cannot be empty"));
     }
 
-    #[test]
+    
     fn test_header_rule_static_header_rejects_empty_name() {
         let err = HeaderRule::static_header(
             "example.com".to_string(),
@@ -892,7 +874,7 @@ allow if {{
         assert!(err.to_string().contains("'header' cannot be empty"));
     }
 
-    #[test]
+    
     fn test_header_rule_oauth_client_credentials_rejects_blank_required_fields() {
         let err = HeaderRule::oauth_client_credentials(
             "example.com".to_string(),
@@ -911,7 +893,7 @@ allow if {{
         assert!(err.to_string().contains("'token_url' cannot be empty"));
     }
 
-    #[test]
+    
     fn test_header_rule_new_rejects_empty_static_headers_map() {
         let err = HeaderRule::new(
             "example.com".to_string(),
@@ -925,7 +907,7 @@ allow if {{
         assert!(err.to_string().contains("static headers cannot be empty"));
     }
 
-    #[test]
+    
     fn test_header_rule_new_rejects_blank_static_header_value() {
         let err = HeaderRule::new(
             "example.com".to_string(),
@@ -939,7 +921,7 @@ allow if {{
         assert!(err.to_string().contains("'value' cannot be empty"));
     }
 
-    #[test]
+    
     fn test_header_rule_new_rejects_case_variant_duplicate_static_headers() {
         let err = HeaderRule::new(
             "example.com".to_string(),
@@ -956,7 +938,7 @@ allow if {{
         assert!(err.to_string().contains("duplicate static header name"));
     }
 
-    #[test]
+    
     fn test_header_rule_oauth_client_credentials_trims_required_fields() {
         let rule = HeaderRule::oauth_client_credentials(
             " example.com ".to_string(),
@@ -981,7 +963,7 @@ allow if {{
         assert_eq!(auth.client_secret, "xyz");
     }
 
-    #[test]
+    
     fn test_header_rule_exact_host_match() {
         let rule = HeaderRule::new(
             "api.github.com".to_string(),
@@ -997,7 +979,7 @@ allow if {{
         assert!(!rule.matches("github.com", "GET"));
     }
 
-    #[test]
+    
     fn test_header_rule_wildcard_host_match() {
         let rule = HeaderRule::new(
             "*.github.com".to_string(),
@@ -1013,7 +995,7 @@ allow if {{
         assert!(!rule.matches("github.org", "GET"));
     }
 
-    #[test]
+    
     fn test_header_rule_case_insensitive_host() {
         let rule = HeaderRule::new(
             "API.GitHub.COM".to_string(),
@@ -1027,7 +1009,7 @@ allow if {{
         assert!(rule.matches("API.GITHUB.COM", "GET"));
     }
 
-    #[test]
+    
     fn test_header_rule_method_filter() {
         let rule = HeaderRule::new(
             "example.com".to_string(),
@@ -1042,7 +1024,7 @@ allow if {{
         assert!(!rule.matches("example.com", "DELETE"));
     }
 
-    #[test]
+    
     fn test_header_rule_empty_methods_matches_all() {
         let rule = HeaderRule::new(
             "example.com".to_string(),
@@ -1058,7 +1040,7 @@ allow if {{
         assert!(rule.matches("example.com", "PATCH"));
     }
 
-    #[tokio::test]
+    
     async fn test_apply_header_rules_injects_when_absent() {
         let rules = vec![HeaderRule::new(
             "example.com".to_string(),
@@ -1075,7 +1057,7 @@ allow if {{
         assert_eq!(headers["authorization"], "Bearer injected");
     }
 
-    #[tokio::test]
+    
     async fn test_apply_header_rules_user_headers_take_precedence() {
         let rules = vec![HeaderRule::new(
             "example.com".to_string(),
@@ -1093,7 +1075,7 @@ allow if {{
         assert_eq!(headers["authorization"], "Bearer user-provided");
     }
 
-    #[tokio::test]
+    
     async fn test_apply_header_rules_no_match() {
         let rules = vec![HeaderRule::new(
             "example.com".to_string(),
@@ -1105,20 +1087,18 @@ allow if {{
         .expect("rule should be valid")];
         let mut headers = HashMap::new();
 
-        // Host mismatch
-        apply_header_rules(&rules, "other.com", "POST", &mut headers)
+                apply_header_rules(&rules, "other.com", "POST", &mut headers)
             .await
             .expect("host mismatch should not fail");
         assert!(headers.is_empty());
 
-        // Method mismatch
-        apply_header_rules(&rules, "example.com", "GET", &mut headers)
+                apply_header_rules(&rules, "example.com", "GET", &mut headers)
             .await
             .expect("method mismatch should not fail");
         assert!(headers.is_empty());
     }
 
-    #[tokio::test]
+    
     async fn test_apply_header_rules_multiple_headers() {
         let rules = vec![HeaderRule::new(
             "example.com".to_string(),
@@ -1139,7 +1119,7 @@ allow if {{
         assert_eq!(headers["x-custom"], "custom-value");
     }
 
-    #[tokio::test]
+    
     async fn test_apply_header_rules_injects_dynamic_auth_when_absent() {
         let token_server = start_token_server(vec![TestTokenResponse::success(json!({
             "access_token": "dynamic-token",
@@ -1163,7 +1143,7 @@ allow if {{
         );
     }
 
-    #[tokio::test]
+    
     async fn test_apply_header_rules_skips_dynamic_injection_when_user_header_exists() {
         let token_server = start_token_server(vec![TestTokenResponse::success(json!({
             "access_token": "dynamic-token",
@@ -1185,7 +1165,7 @@ allow if {{
         assert!(token_server.requests().await.is_empty());
     }
 
-    #[tokio::test]
+    
     async fn test_do_fetch_applies_dynamic_auth_before_policy_evaluation() {
         let token_server = start_token_server(vec![TestTokenResponse::success(json!({
             "access_token": "policy-token",
@@ -1225,7 +1205,7 @@ allow if {{
         );
     }
 
-    #[tokio::test]
+    
     async fn test_do_fetch_reports_host_when_dynamic_auth_fails() {
         let token_server = start_token_server(vec![TestTokenResponse::failure(
             StatusCode::BAD_REQUEST,
@@ -1266,9 +1246,9 @@ allow if {{
         );
     }
 
-    #[tokio::test]
+    
     async fn test_do_fetch_sends_multipart_body() {
-        #[derive(Clone)]
+        
         struct MultipartState {
             requests: Arc<tokio::sync::Mutex<Vec<(String, String)>>>,
         }

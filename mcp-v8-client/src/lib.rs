@@ -29,7 +29,7 @@
 //! }
 //! ```
 
-#![allow(clippy::all)]
-#![allow(unused_imports, dead_code)]
+
+
 
 include!(concat!(env!("OUT_DIR"), "/codegen.rs"));

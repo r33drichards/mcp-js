@@ -13,7 +13,6 @@ use crate::engine::heap_tags::HeapTagEntry;
 use crate::engine::mcp_client::McpClientManager;
 use crate::session::SessionVerifier;
 
-// ── Embedded documentation resources ───────────────────────────────────
 
 /// llms.txt content — machine-readable agent guide (https://llmstxt.org/)
 const LLMS_TXT: &str = include_str!("llms_txt.md");
@@ -21,7 +20,7 @@ const LLMS_TXT: &str = include_str!("llms_txt.md");
 /// Full README
 const README_MD: &str = include_str!("../README.md");
 
-#[derive(Debug, Clone, Serialize)]
+
 pub struct ToolDoc {
     pub name: String,
     pub description: Option<String>,
@@ -38,7 +37,7 @@ impl ToolDoc {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+
 pub struct ToolCatalog {
     pub mode: &'static str,
     pub tools: Vec<ToolDoc>,
@@ -77,13 +76,7 @@ fn doc_resources(heap: bool, fs: bool) -> Vec<Resource> {
     let openapi_json = serde_json::to_string(&ApiDoc::openapi()).unwrap_or_default();
     let tools_json = serde_json::to_string(&built_in_tool_catalog(heap, fs)).unwrap_or_default();
 
-    // Store the generated JSON in thread-local statics to extend the lifetime
-    // to 'static so we can use them in ResourceContents::text().
-    // We use once_cell-style initialisation via OnceLock boxes on the heap.
-    // Actually, we use owned Strings, not &'static str, so we return the
-    // ResourceContents by value — that's fine.
-    let _ = (openapi_json, tools_json); // suppress unused warning before use below
-
+                        let _ = (openapi_json, tools_json); 
     vec![
         Annotated::new(
             RawResource {
@@ -164,9 +157,8 @@ fn read_doc_resource(uri: &str, heap: bool, fs: bool) -> Option<ReadResourceResu
     Some(ReadResourceResult { contents })
 }
 
-// ── MCP response types ──────────────────────────────────────────────────
 
-#[derive(Debug, Clone)]
+
 pub struct RunJsResponse {
     pub execution_id: String,
 }
@@ -181,7 +173,7 @@ impl IntoContents for RunJsResponse {
 }
 
 /// Generic JSON response for the `fs_*` tools.
-#[derive(Debug, Clone)]
+
 pub struct FsResponse {
     pub value: serde_json::Value,
 }
@@ -206,7 +198,7 @@ impl IntoContents for FsResponse {
     }
 }
 
-#[derive(Debug, Clone)]
+
 pub struct ExecutionStatusResponse {
     pub value: serde_json::Value,
 }
@@ -220,7 +212,7 @@ impl IntoContents for ExecutionStatusResponse {
     }
 }
 
-#[derive(Debug, Clone)]
+
 pub struct ConsoleOutputResponse {
     pub value: serde_json::Value,
 }
@@ -234,7 +226,7 @@ impl IntoContents for ConsoleOutputResponse {
     }
 }
 
-#[derive(Debug, Clone)]
+
 pub struct ListExecutionsResponse {
     pub value: serde_json::Value,
 }
@@ -248,7 +240,7 @@ impl IntoContents for ListExecutionsResponse {
     }
 }
 
-#[derive(Debug, Clone)]
+
 pub struct ListSessionsResponse {
     pub sessions: Vec<String>,
 }
@@ -262,7 +254,7 @@ impl IntoContents for ListSessionsResponse {
     }
 }
 
-#[derive(Debug, Clone)]
+
 pub struct ListSessionSnapshotsResponse {
     pub entries: Vec<serde_json::Value>,
 }
@@ -276,7 +268,7 @@ impl IntoContents for ListSessionSnapshotsResponse {
     }
 }
 
-#[derive(Debug, Clone)]
+
 pub struct GetHeapTagsResponse {
     pub tags: HashMap<String, String>,
 }
@@ -290,7 +282,7 @@ impl IntoContents for GetHeapTagsResponse {
     }
 }
 
-#[derive(Debug, Clone)]
+
 pub struct OkResponse {
     pub ok: bool,
     pub error: Option<String>,
@@ -309,7 +301,7 @@ impl IntoContents for OkResponse {
     }
 }
 
-#[derive(Debug, Clone)]
+
 pub struct QueryHeapTagsResponse {
     pub results: Vec<HeapTagEntry>,
 }
@@ -387,9 +379,8 @@ fn filter_tools_by_capability(tools: &mut Vec<Tool>, heap: bool, fs: bool) {
     }
 }
 
-// ── McpService ──────────────────────────────────────────────────────────
 
-#[derive(Clone)]
+
 pub struct McpService {
     engine: Engine,
     verifier: Option<Arc<SessionVerifier>>,
@@ -416,31 +407,31 @@ impl McpService {
     }
 }
 
-#[tool(tool_box)]
+
 impl McpService {
-    #[tool(description = include_str!("run_js_tool_description.md"))]
+    "run_js_tool_description.md"
     pub async fn run_js(
         &self,
-        #[tool(param)]
-        #[serde(default)]
+        
+        
         code: Option<String>,
-        #[tool(param)]
-        #[serde(default)]
+        
+        
         file: Option<String>,
-        #[tool(param)]
-        #[serde(default)]
+        
+        
         heap: Option<String>,
-        #[tool(param)]
-        #[serde(default)]
+        
+        
         fs: Option<String>,
-        #[tool(param)]
-        #[serde(default)]
+        
+        
         heap_memory_max_mb: Option<usize>,
-        #[tool(param)]
-        #[serde(default)]
+        
+        
         execution_timeout_secs: Option<u64>,
-        #[tool(param)]
-        #[serde(default)]
+        
+        
         tags: Option<HashMap<String, String>>,
     ) -> RunJsResponse {
         let mut req = self.engine.run_js(code.unwrap_or_default());
@@ -460,10 +451,10 @@ impl McpService {
         }
     }
 
-    #[tool(description = "Get the status and result of an execution. Returns execution_id, status (running/completed/failed/cancelled/timed_out), result (if completed), heap (if stateful), fs (resulting filesystem snapshot CA id, if a mount was attached), error (if failed), started_at, and completed_at.")]
+    "Get the status and result of an execution. Returns execution_id, status (running/completed/failed/cancelled/timed_out), result (if completed), heap (if stateful), fs (resulting filesystem snapshot CA id, if a mount was attached), error (if failed), started_at, and completed_at."
     pub async fn get_execution(
         &self,
-        #[tool(param)] execution_id: String,
+         execution_id: String,
     ) -> ExecutionStatusResponse {
         match self.engine.get_execution(&execution_id) {
             Ok(info) => ExecutionStatusResponse {
@@ -484,21 +475,21 @@ impl McpService {
         }
     }
 
-    #[tool(description = "Get paginated console output for an execution. Supports two modes: line-based (line_offset + line_limit) or byte-based (byte_offset + byte_limit). If byte_offset is provided, byte mode takes precedence. Response includes both line and byte coordinates for cross-referencing. Use next_line_offset or next_byte_offset from a previous response to resume reading.")]
+    "Get paginated console output for an execution. Supports two modes: line-based (line_offset + line_limit) or byte-based (byte_offset + byte_limit). If byte_offset is provided, byte mode takes precedence. Response includes both line and byte coordinates for cross-referencing. Use next_line_offset or next_byte_offset from a previous response to resume reading."
     pub async fn get_execution_output(
         &self,
-        #[tool(param)] execution_id: String,
-        #[tool(param)]
-        #[serde(default)]
+         execution_id: String,
+        
+        
         line_offset: Option<u64>,
-        #[tool(param)]
-        #[serde(default)]
+        
+        
         line_limit: Option<u64>,
-        #[tool(param)]
-        #[serde(default)]
+        
+        
         byte_offset: Option<u64>,
-        #[tool(param)]
-        #[serde(default)]
+        
+        
         byte_limit: Option<u64>,
     ) -> ConsoleOutputResponse {
         let status = self.engine.get_execution(&execution_id)
@@ -528,10 +519,10 @@ impl McpService {
         }
     }
 
-    #[tool(description = "Cancel a running execution. Terminates the V8 isolate.")]
+    "Cancel a running execution. Terminates the V8 isolate."
     pub async fn cancel_execution(
         &self,
-        #[tool(param)] execution_id: String,
+         execution_id: String,
     ) -> OkResponse {
         match self.engine.cancel_execution(&execution_id) {
             Ok(()) => OkResponse { ok: true, error: None },
@@ -539,7 +530,7 @@ impl McpService {
         }
     }
 
-    #[tool(description = "List all executions with their status.")]
+    "List all executions with their status."
     pub async fn list_executions(&self) -> ListExecutionsResponse {
         match self.engine.list_executions() {
             Ok(executions) => ListExecutionsResponse {
@@ -551,7 +542,7 @@ impl McpService {
         }
     }
 
-    #[tool(description = "List all named sessions (stateful mode only). Returns an array of session names that have been used via REST session fields or the X-MCP-Session-Id header.")]
+    "List all named sessions (stateful mode only). Returns an array of session names that have been used via REST session fields or the X-MCP-Session-Id header."
     pub async fn list_sessions(&self) -> ListSessionsResponse {
         match self.engine.list_sessions().await {
             Ok(sessions) => ListSessionsResponse { sessions },
@@ -561,11 +552,11 @@ impl McpService {
         }
     }
 
-    #[tool(description = "List all log entries for the current session (stateful mode only). Each entry contains the input heap hash, output heap hash, code executed, and timestamp. Use the fields parameter to select specific fields (comma-separated: index,input_heap,output_heap,code,timestamp).")]
+    "List all log entries for the current session (stateful mode only). Each entry contains the input heap hash, output heap hash, code executed, and timestamp. Use the fields parameter to select specific fields (comma-separated: index,input_heap,output_heap,code,timestamp)."
     pub async fn list_session_snapshots(
         &self,
-        #[tool(param)]
-        #[serde(default)]
+        
+        
         fields: Option<String>,
     ) -> ListSessionSnapshotsResponse {
         let session = match self.session_id.get() {
@@ -585,10 +576,10 @@ impl McpService {
         }
     }
 
-    #[tool(description = "Get tags for a heap snapshot (stateful mode only). Returns a map of key-value tags associated with the given heap content hash.")]
+    "Get tags for a heap snapshot (stateful mode only). Returns a map of key-value tags associated with the given heap content hash."
     pub async fn get_heap_tags(
         &self,
-        #[tool(param)] heap: String,
+         heap: String,
     ) -> GetHeapTagsResponse {
         match self.engine.get_heap_tags(heap).await {
             Ok(tags) => GetHeapTagsResponse { tags },
@@ -602,11 +593,11 @@ impl McpService {
         }
     }
 
-    #[tool(description = "Set or replace tags on a heap snapshot (stateful mode only). Provide a map of key-value string pairs. This replaces all existing tags for the heap.")]
+    "Set or replace tags on a heap snapshot (stateful mode only). Provide a map of key-value string pairs. This replaces all existing tags for the heap."
     pub async fn set_heap_tags(
         &self,
-        #[tool(param)] heap: String,
-        #[tool(param)] tags: HashMap<String, String>,
+         heap: String,
+         tags: HashMap<String, String>,
     ) -> OkResponse {
         match self.engine.set_heap_tags(heap, tags).await {
             Ok(()) => OkResponse { ok: true, error: None },
@@ -614,12 +605,12 @@ impl McpService {
         }
     }
 
-    #[tool(description = "Delete tags from a heap snapshot (stateful mode only). If keys is provided (comma-separated), only those tag keys are removed. If keys is omitted, all tags are deleted.")]
+    "Delete tags from a heap snapshot (stateful mode only). If keys is provided (comma-separated), only those tag keys are removed. If keys is omitted, all tags are deleted."
     pub async fn delete_heap_tags(
         &self,
-        #[tool(param)] heap: String,
-        #[tool(param)]
-        #[serde(default)]
+         heap: String,
+        
+        
         keys: Option<String>,
     ) -> OkResponse {
         let parsed_keys = keys.map(|k| {
@@ -631,10 +622,10 @@ impl McpService {
         }
     }
 
-    #[tool(description = "Query heap snapshots by tags (stateful mode only). Provide a map of key-value pairs to match. Returns all heaps whose tags contain all the specified key-value pairs.")]
+    "Query heap snapshots by tags (stateful mode only). Provide a map of key-value pairs to match. Returns all heaps whose tags contain all the specified key-value pairs."
     pub async fn query_heaps_by_tags(
         &self,
-        #[tool(param)] tags: HashMap<String, String>,
+         tags: HashMap<String, String>,
     ) -> QueryHeapTagsResponse {
         match self.engine.query_heaps_by_tags(tags).await {
             Ok(results) => QueryHeapTagsResponse { results },
@@ -651,9 +642,8 @@ impl McpService {
         }
     }
 
-    // ── fs snapshot tools ────────────────────────────────────────────────
-
-    #[tool(description = "List filesystem snapshot labels. Returns each label name and its current head CA id (hex).")]
+    
+    "List filesystem snapshot labels. Returns each label name and its current head CA id (hex)."
     pub async fn fs_ls(&self) -> FsResponse {
         match self.engine.fs_list_labels().await {
             Ok(labels) => FsResponse::ok(json!({ "labels": labels })),
@@ -661,8 +651,8 @@ impl McpService {
         }
     }
 
-    #[tool(description = "Resolve a filesystem snapshot label to its current head CA id (hex). Use this as the `fs` argument to run_js to mount it.")]
-    pub async fn fs_pull(&self, #[tool(param)] label: String) -> FsResponse {
+    "Resolve a filesystem snapshot label to its current head CA id (hex). Use this as the `fs` argument to run_js to mount it."
+    pub async fn fs_pull(&self,  label: String) -> FsResponse {
         match self.engine.fs_resolve_label(&label).await {
             Ok(Some(ca_id)) => FsResponse::ok(json!({ "label": label, "ca_id": ca_id })),
             Ok(None) => FsResponse::err(format!("unknown label: {label}")),
@@ -670,13 +660,13 @@ impl McpService {
         }
     }
 
-    #[tool(description = "Create or repoint a filesystem snapshot label to a CA id (hex). Pass an optional `message` (a commit-style note) to record on the reflog entry.")]
+    "Create or repoint a filesystem snapshot label to a CA id (hex). Pass an optional `message` (a commit-style note) to record on the reflog entry."
     pub async fn fs_label(
         &self,
-        #[tool(param)] name: String,
-        #[tool(param)] ca_id: String,
-        #[tool(param)]
-        #[serde(default)]
+         name: String,
+         ca_id: String,
+        
+        
         message: Option<String>,
     ) -> FsResponse {
         match self.engine.fs_set_label(&name, &ca_id, message).await {
@@ -685,12 +675,12 @@ impl McpService {
         }
     }
 
-    #[tool(description = "Show the reflog (move history) for a filesystem snapshot label, oldest first. Each entry has at, from, to (CA ids), op (create/push/reset/force), and an optional message. Use a `to` value as the ca_id for fs_reset. Pass `limit` to return only the most recent N entries (bounding the scan over long histories).")]
+    "Show the reflog (move history) for a filesystem snapshot label, oldest first. Each entry has at, from, to (CA ids), op (create/push/reset/force), and an optional message. Use a `to` value as the ca_id for fs_reset. Pass `limit` to return only the most recent N entries (bounding the scan over long histories)."
     pub async fn fs_log(
         &self,
-        #[tool(param)] label: String,
-        #[tool(param)]
-        #[serde(default)]
+         label: String,
+        
+        
         limit: Option<usize>,
     ) -> FsResponse {
         match self.engine.fs_label_log(&label, limit).await {
@@ -699,24 +689,24 @@ impl McpService {
         }
     }
 
-    #[tool(description = "Advance a filesystem snapshot label to a CA id (typically the `fs` value returned by a completed run_js execution). Default is reject-and-rebase: pass `expected` (the head you pulled) and the push fails if the label moved since. Set force=true to override, or detach=true to just return the CA id without touching the label. Pass an optional `message` (a commit-style note, max 4096 bytes) to record on the reflog entry.")]
+    "Advance a filesystem snapshot label to a CA id (typically the `fs` value returned by a completed run_js execution). Default is reject-and-rebase: pass `expected` (the head you pulled) and the push fails if the label moved since. Set force=true to override, or detach=true to just return the CA id without touching the label. Pass an optional `message` (a commit-style note, max 4096 bytes) to record on the reflog entry."
     pub async fn fs_push(
         &self,
-        #[tool(param)] ca_id: String,
-        #[tool(param)]
-        #[serde(default)]
+         ca_id: String,
+        
+        
         label: Option<String>,
-        #[tool(param)]
-        #[serde(default)]
+        
+        
         expected: Option<String>,
-        #[tool(param)]
-        #[serde(default)]
+        
+        
         force: Option<bool>,
-        #[tool(param)]
-        #[serde(default)]
+        
+        
         detach: Option<bool>,
-        #[tool(param)]
-        #[serde(default)]
+        
+        
         message: Option<String>,
     ) -> FsResponse {
         if detach.unwrap_or(false) {
@@ -740,16 +730,16 @@ impl McpService {
         }
     }
 
-    #[tool(description = "Reset a filesystem snapshot label to an earlier CA id from its reflog (rollback). The CA id must appear in the label's reflog (see fs_log) unless allow_unlogged=true. Pass an optional `message` (a commit-style note) to record on the reflog entry.")]
+    "Reset a filesystem snapshot label to an earlier CA id from its reflog (rollback). The CA id must appear in the label's reflog (see fs_log) unless allow_unlogged=true. Pass an optional `message` (a commit-style note) to record on the reflog entry."
     pub async fn fs_reset(
         &self,
-        #[tool(param)] label: String,
-        #[tool(param)] ca_id: String,
-        #[tool(param)]
-        #[serde(default)]
+         label: String,
+         ca_id: String,
+        
+        
         allow_unlogged: Option<bool>,
-        #[tool(param)]
-        #[serde(default)]
+        
+        
         message: Option<String>,
     ) -> FsResponse {
         match self
@@ -762,16 +752,16 @@ impl McpService {
         }
     }
 
-    #[tool(description = "Three-way merge two filesystem snapshots (CA ids) into a new snapshot. Pass `base` — the snapshot both sides diverged from (e.g. the label head you mounted before two runs) — so only paths BOTH sides changed conflict; omit it for a 2-way merge. Text files are merged at line level: edits to different lines of the same file auto-merge cleanly. On success returns the merged snapshot's ca_id (push it to a label separately). On conflict returns status=conflict with, per path: each side's content id (null = absent), kind (text/binary/sqlite/modify-delete), and for text the diff3 conflict `markers` plus unified `diff_ours`/`diff_theirs` so you can resolve at line level (edit the markers, write the file back, push). Set prefer=ours|theirs to auto-resolve remaining conflicts to that side.")]
+    "Three-way merge two filesystem snapshots (CA ids) into a new snapshot. Pass `base` — the snapshot both sides diverged from (e.g. the label head you mounted before two runs) — so only paths BOTH sides changed conflict; omit it for a 2-way merge. Text files are merged at line level: edits to different lines of the same file auto-merge cleanly. On success returns the merged snapshot's ca_id (push it to a label separately). On conflict returns status=conflict with, per path: each side's content id (null = absent), kind (text/binary/sqlite/modify-delete), and for text the diff3 conflict `markers` plus unified `diff_ours`/`diff_theirs` so you can resolve at line level (edit the markers, write the file back, push). Set prefer=ours|theirs to auto-resolve remaining conflicts to that side."
     pub async fn fs_merge(
         &self,
-        #[tool(param)] ours: String,
-        #[tool(param)] theirs: String,
-        #[tool(param)]
-        #[serde(default)]
+         ours: String,
+         theirs: String,
+        
+        
         base: Option<String>,
-        #[tool(param)]
-        #[serde(default)]
+        
+        
         prefer: Option<String>,
     ) -> FsResponse {
         let prefer = match crate::engine::fs_merge::Prefer::parse(prefer.as_deref()) {
@@ -844,15 +834,12 @@ impl ServerHandler for McpService {
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
         let mut tools = Self::tool_box().list();
-        // Restrict the surface to the engine's enabled capabilities (heap/fs)
-        // before applying any operator description override.
-        filter_tools_by_capability(&mut tools, self.engine.heap_enabled(), self.engine.fs_enabled());
+                        filter_tools_by_capability(&mut tools, self.engine.heap_enabled(), self.engine.fs_enabled());
         apply_run_js_description_override(&mut tools, self.engine.run_js_description_override());
         if let Some(client) = &self.mcp_client {
             tools.extend(client.stub_tools());
         }
-        // Advertise pre-loaded WASM modules as stubs for discovery.
-        tools.extend(self.engine.wasm_stub_tools());
+                tools.extend(self.engine.wasm_stub_tools());
         Ok(ListToolsResult { next_cursor: None, tools })
     }
 
@@ -866,8 +853,7 @@ impl ServerHandler for McpService {
                 return Ok(result);
             }
         }
-        // WASM module stubs return run_js usage instructions instead of dispatching.
-        if let Some(result) = self.engine.wasm_stub_call_response(&request.name, request.arguments.as_ref()) {
+                if let Some(result) = self.engine.wasm_stub_call_response(&request.name, request.arguments.as_ref()) {
             return Ok(result);
         }
         let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
@@ -884,8 +870,7 @@ impl ServerHandler for McpService {
             let initialize_uri = &http_request_part.uri;
             tracing::info!(?initialize_headers, %initialize_uri, "initialize from http server");
 
-            // JWT verification (if --jwks-url was provided)
-            if let Some(ref verifier) = self.verifier {
+                        if let Some(ref verifier) = self.verifier {
                 let token = http_request_part.headers
                     .get("authorization")
                     .and_then(|v| v.to_str().ok())
@@ -907,8 +892,7 @@ impl ServerHandler for McpService {
                 }
             }
 
-            // Read X-MCP-* headers (always, regardless of JWT)
-            let mut mcp_header_map = serde_json::Map::new();
+                        let mut mcp_header_map = serde_json::Map::new();
             for (name, value) in initialize_headers.iter() {
                 if let Some(key) = name.as_str().strip_prefix("x-mcp-") {
                     if let Ok(v) = value.to_str() {
@@ -917,8 +901,7 @@ impl ServerHandler for McpService {
                 }
             }
 
-            // Extract session_id from X-MCP-Session-Id header
-            if let Some(serde_json::Value::String(sid)) = mcp_header_map.get("session-id") {
+                        if let Some(serde_json::Value::String(sid)) = mcp_header_map.get("session-id") {
                 tracing::info!(session_id = sid.as_str(), "Session ID from X-MCP-Session-Id header");
                 let _ = self.session_id.set(sid.clone());
             }
@@ -932,13 +915,8 @@ impl ServerHandler for McpService {
     }
 }
 
-// ── StatelessMcpService ─────────────────────────────────────────────────
-//
-// Stateless shell mode: single `run_js` tool that executes code and returns
-// console output directly. No execution IDs are exposed to callers — session
-// isolation is automatic.
 
-#[derive(Debug, Clone)]
+
 pub struct StatelessRunJsResponse {
     pub value: serde_json::Value,
 }
@@ -952,7 +930,7 @@ impl IntoContents for StatelessRunJsResponse {
     }
 }
 
-#[derive(Clone)]
+
 pub struct StatelessMcpService {
     engine: Engine,
     verifier: Option<Arc<SessionVerifier>>,
@@ -973,26 +951,25 @@ impl StatelessMcpService {
     }
 }
 
-#[tool(tool_box)]
+
 impl StatelessMcpService {
-    #[tool(description = include_str!("run_js_tool_stateless.md"))]
+    "run_js_tool_stateless.md"
     pub async fn run_js(
         &self,
-        #[tool(param)]
-        #[serde(default)]
+        
+        
         code: Option<String>,
-        #[tool(param)]
-        #[serde(default)]
+        
+        
         file: Option<String>,
-        #[tool(param)]
-        #[serde(default)]
+        
+        
         heap_memory_max_mb: Option<usize>,
-        #[tool(param)]
-        #[serde(default)]
+        
+        
         execution_timeout_secs: Option<u64>,
     ) -> StatelessRunJsResponse {
-        // 1. Submit to engine (fire-and-forget internally)
-        let mut req = self.engine.run_js(code.unwrap_or_default());
+                let mut req = self.engine.run_js(code.unwrap_or_default());
         req = req.maybe_file(file);
         if let Some(mb) = heap_memory_max_mb { req = req.heap_memory_max_mb(mb); }
         if let Some(secs) = execution_timeout_secs { req = req.execution_timeout_secs(secs); }
@@ -1004,10 +981,8 @@ impl StatelessMcpService {
             },
         };
 
-        // 2. Poll until terminal state
-        let poll_interval = tokio::time::Duration::from_millis(50);
-        let max_polls = 6000; // 5 minutes at 50ms intervals
-        let mut status = String::new();
+                let poll_interval = tokio::time::Duration::from_millis(50);
+        let max_polls = 6000;         let mut status = String::new();
         let mut error_msg: Option<String> = None;
 
         for _ in 0..max_polls {
@@ -1032,14 +1007,12 @@ impl StatelessMcpService {
             };
         }
 
-        // 3. Collect all console output
-        let output = match self.engine.get_execution_output(&exec_id, None, Some(u64::MAX), None, None) {
+                let output = match self.engine.get_execution_output(&exec_id, None, Some(u64::MAX), None, None) {
             Ok(page) => page.data,
             Err(_) => String::new(),
         };
 
-        // 4. Return console output (and error if execution failed)
-        match status.as_str() {
+                match status.as_str() {
             "completed" => StatelessRunJsResponse {
                 value: json!({ "output": output }),
             },
@@ -1099,15 +1072,12 @@ impl ServerHandler for StatelessMcpService {
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
         let mut tools = Self::tool_box().list();
-        // Restrict the surface to the engine's enabled capabilities (heap/fs)
-        // before applying any operator description override.
-        filter_tools_by_capability(&mut tools, self.engine.heap_enabled(), self.engine.fs_enabled());
+                        filter_tools_by_capability(&mut tools, self.engine.heap_enabled(), self.engine.fs_enabled());
         apply_run_js_description_override(&mut tools, self.engine.run_js_description_override());
         if let Some(client) = &self.mcp_client {
             tools.extend(client.stub_tools());
         }
-        // Advertise pre-loaded WASM modules as stubs for discovery.
-        tools.extend(self.engine.wasm_stub_tools());
+                tools.extend(self.engine.wasm_stub_tools());
         Ok(ListToolsResult { next_cursor: None, tools })
     }
 
@@ -1121,8 +1091,7 @@ impl ServerHandler for StatelessMcpService {
                 return Ok(result);
             }
         }
-        // WASM module stubs return run_js usage instructions instead of dispatching.
-        if let Some(result) = self.engine.wasm_stub_call_response(&request.name, request.arguments.as_ref()) {
+                if let Some(result) = self.engine.wasm_stub_call_response(&request.name, request.arguments.as_ref()) {
             return Ok(result);
         }
         let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
@@ -1139,8 +1108,7 @@ impl ServerHandler for StatelessMcpService {
             let initialize_uri = &http_request_part.uri;
             tracing::info!(?initialize_headers, %initialize_uri, "initialize from http server");
 
-            // JWT verification (if --jwks-url was provided)
-            if let Some(ref verifier) = self.verifier {
+                        if let Some(ref verifier) = self.verifier {
                 let token = http_request_part.headers
                     .get("authorization")
                     .and_then(|v| v.to_str().ok())
@@ -1162,8 +1130,7 @@ impl ServerHandler for StatelessMcpService {
                 }
             }
 
-            // Read X-MCP-* headers (always, regardless of JWT)
-            let mut mcp_header_map = serde_json::Map::new();
+                        let mut mcp_header_map = serde_json::Map::new();
             for (name, value) in initialize_headers.iter() {
                 if let Some(key) = name.as_str().strip_prefix("x-mcp-") {
                     if let Ok(v) = value.to_str() {
@@ -1181,7 +1148,7 @@ impl ServerHandler for StatelessMcpService {
     }
 }
 
-#[cfg(test)]
+
 mod tests {
     use super::apply_run_js_description_override;
     use rmcp::model::Tool;
@@ -1196,17 +1163,16 @@ mod tests {
         }
     }
 
-    #[test]
+    
     fn override_replaces_only_run_js_description() {
         let mut tools = vec![tool("run_js", "original"), tool("get_execution", "other")];
         apply_run_js_description_override(&mut tools, Some(Arc::from("custom description")));
 
         assert_eq!(tools[0].description.as_deref(), Some("custom description"));
-        // Non-run_js tools are untouched.
-        assert_eq!(tools[1].description.as_deref(), Some("other"));
+                assert_eq!(tools[1].description.as_deref(), Some("other"));
     }
 
-    #[test]
+    
     fn no_override_leaves_descriptions_unchanged() {
         let mut tools = vec![tool("run_js", "original")];
         apply_run_js_description_override(&mut tools, None);
@@ -1256,28 +1222,25 @@ mod tests {
             .unwrap_or_default()
     }
 
-    #[test]
+    
     fn fs_only_hides_heap_tools_and_params() {
         let mut tools = full_surface();
         filter_tools_by_capability(&mut tools, false, true);
         let n = names(&tools);
         assert!(n.contains(&"run_js".to_string()));
         assert!(n.contains(&"fs_ls".to_string()));
-        // Heap-tag tools gone.
-        assert!(!n.contains(&"get_heap_tags".to_string()));
+                assert!(!n.contains(&"get_heap_tags".to_string()));
         assert!(!n.contains(&"query_heaps_by_tags".to_string()));
-        // run_js loses heap/tags params but keeps code/fs.
-        let props = run_js_props(&tools);
+                let props = run_js_props(&tools);
         assert!(props.contains(&"code".to_string()));
         assert!(props.contains(&"fs".to_string()));
         assert!(!props.contains(&"heap".to_string()));
         assert!(!props.contains(&"tags".to_string()));
-        // Description must not promise globals persist.
-        let rj = tools.iter().find(|t| t.name.as_ref() == "run_js").unwrap();
+                let rj = tools.iter().find(|t| t.name.as_ref() == "run_js").unwrap();
         assert!(rj.description.as_deref().unwrap().contains("globals"));
     }
 
-    #[test]
+    
     fn heap_only_hides_fs_tools_keeps_heap_params() {
         let mut tools = full_surface();
         filter_tools_by_capability(&mut tools, true, false);
@@ -1285,11 +1248,10 @@ mod tests {
         assert!(n.contains(&"get_heap_tags".to_string()));
         assert!(!n.contains(&"fs_ls".to_string()));
         assert!(!n.contains(&"fs_push".to_string()));
-        // heap param retained when heap is on.
-        assert!(run_js_props(&tools).contains(&"heap".to_string()));
+                assert!(run_js_props(&tools).contains(&"heap".to_string()));
     }
 
-    #[test]
+    
     fn both_keeps_everything() {
         let mut tools = full_surface();
         filter_tools_by_capability(&mut tools, true, true);

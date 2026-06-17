@@ -1,13 +1,13 @@
 name: Publish mcp-v8-client
 
-# Mirrors the pattern from ip-allocator-webserver/publish-rust-sdk.yml.
-#
-# On every push to main that touches the server API or client crate:
-#   - Verifies the client builds cleanly against the committed openapi.json
-#   - Publishes to crates.io (continues on error — handles "already published")
-#
-# On pull_requests: builds and comments with install instructions.
-# On workflow_dispatch: optionally publish with a custom version.
+
+
+
+
+
+
+
+
 
 on:
   push:

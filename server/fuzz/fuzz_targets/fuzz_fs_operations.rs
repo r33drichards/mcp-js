@@ -1,4 +1,4 @@
-#![no_main]
+
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use server::engine::ExecutionConfig;
@@ -8,15 +8,13 @@ static INIT: Once = Once::new();
 
 fn ensure_v8() {
     INIT.call_once(|| {
-        // Disable V8 background threads to prevent cumulative memory exhaustion
-        deno_core::v8::V8::set_flags_from_string("--single-threaded");
+                deno_core::v8::V8::set_flags_from_string("--single-threaded");
         server::engine::initialize_v8();
-        // Override libfuzzer's abort-on-panic hook for graceful panic handling
-        std::panic::set_hook(Box::new(|_| {}));
+                std::panic::set_hook(Box::new(|_| {}));
     });
 }
 
-#[derive(Arbitrary, Debug)]
+
 struct FsOperationInput {
     /// Which filesystem operation to test
     operation: FsOperation,
@@ -30,7 +28,7 @@ struct FsOperationInput {
     recursive: bool,
 }
 
-#[derive(Arbitrary, Debug, Clone, Copy)]
+
 enum FsOperation {
     ReadFileText,
     ReadFileBuffer,
@@ -46,26 +44,14 @@ enum FsOperation {
     Exists,
 }
 
-// Fuzz filesystem operation inputs with edge cases:
-// - Empty paths, paths with "..", "..", null bytes, unicode characters
-// - Very long paths and file names
-// - Large file data (up to Vec limits)
-// - Various flag combinations (recursive, encoding)
-//
-// This exercises the policy input serialization and filesystem code paths
-// without depending on actual filesystem operations (most will fail gracefully).
 fuzz_target!(|input: FsOperationInput| {
     ensure_v8();
 
-    // Cap data size to avoid excessive memory usage
-    let mut file_data = input.file_data;
+        let mut file_data = input.file_data;
     if let Some(ref mut data) = file_data {
-        data.truncate(1024 * 1024); // 1MB max
-    }
+        data.truncate(1024 * 1024);     }
 
-    // Build JavaScript code that attempts various filesystem operations
-    // Wrap in try-catch since most paths will be invalid or denied by policy
-    let js_code = match input.operation {
+            let js_code = match input.operation {
         FsOperation::ReadFileText => {
             format!(
                 "try {{ await fs.readFile('{}'); }} catch(e) {{ }}",
@@ -180,8 +166,7 @@ fuzz_target!(|input: FsOperationInput| {
         }
     };
 
-    // Execute stateless — we don't care about the result, only that it doesn't crash
-    let max_bytes = 8 * 1024 * 1024;
+        let max_bytes = 8 * 1024 * 1024;
     let handle = Arc::new(Mutex::new(None));
     let _ = server::engine::execute_stateless(&js_code, ExecutionConfig::new(max_bytes)
         .isolate_handle(handle));

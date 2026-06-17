@@ -92,16 +92,12 @@ async fn wait_for_key(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Test 1: Followers forward writes to the leader
-// ---------------------------------------------------------------------------
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+"multi_thread"
 async fn test_follower_write_forwarding() {
     let ports = cluster_ports_3(19400);
 
-    // Start 3 nodes
-    let mut nodes: Vec<Arc<ClusterNode>> = Vec::new();
+        let mut nodes: Vec<Arc<ClusterNode>> = Vec::new();
     for i in 0..3 {
         let config = make_config_3(i, &ports);
         let db = temp_sled(&format!("fwd-node{}", i + 1));
@@ -110,23 +106,18 @@ async fn test_follower_write_forwarding() {
         nodes.push(node);
     }
 
-    // Wait for leader
-    let leader_idx = wait_for_leader(&nodes, Duration::from_secs(15))
+        let leader_idx = wait_for_leader(&nodes, Duration::from_secs(15))
         .await
         .expect("No leader elected");
 
     println!("Leader is node{}", leader_idx + 1);
 
-    // Find a follower
-    let follower_idx = (leader_idx + 1) % 3;
+        let follower_idx = (leader_idx + 1) % 3;
     let follower = &nodes[follower_idx];
 
     println!("Writing through follower node{}", follower_idx + 1);
 
-    // Write through the follower using put_or_forward.
-    // The follower may not yet know the leader (hasn't received a heartbeat),
-    // so retry for a short while.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         match follower
             .put_or_forward("forwarded-key".to_string(), "forwarded-value".to_string())
@@ -141,8 +132,7 @@ async fn test_follower_write_forwarding() {
         }
     }
 
-    // Verify the data is replicated to all nodes
-    for (i, node) in nodes.iter().enumerate() {
+        for (i, node) in nodes.iter().enumerate() {
         assert!(
             wait_for_key(node, "forwarded-key", "forwarded-value", Duration::from_secs(5)).await,
             "node{}: forwarded key not replicated",
@@ -158,12 +148,8 @@ async fn test_follower_write_forwarding() {
     sleep(Duration::from_millis(200)).await;
 }
 
-// ---------------------------------------------------------------------------
-// Test 2: Writes fail when leader is down (no quorum for re-election with
-//         only 1 of 3 nodes alive)
-// ---------------------------------------------------------------------------
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+"multi_thread"
 async fn test_writes_fail_when_leader_down() {
     let ports = cluster_ports_3(19500);
 
@@ -180,14 +166,12 @@ async fn test_writes_fail_when_leader_down() {
         .await
         .expect("No leader elected");
 
-    // Write some data to confirm the cluster works
-    nodes[leader_idx]
+        nodes[leader_idx]
         .put("before-crash".to_string(), "ok".to_string())
         .await
         .expect("Initial write should succeed");
 
-    // Crash the leader and one follower (only 1 node alive = no quorum)
-    let follower_to_crash = (leader_idx + 1) % 3;
+        let follower_to_crash = (leader_idx + 1) % 3;
     println!(
         "Crashing leader node{} and follower node{}",
         leader_idx + 1,
@@ -198,14 +182,10 @@ async fn test_writes_fail_when_leader_down() {
 
     sleep(Duration::from_millis(500)).await;
 
-    // The surviving node should not be able to write (no quorum)
-    let survivor_idx = (leader_idx + 2) % 3;
+        let survivor_idx = (leader_idx + 2) % 3;
     let survivor = &nodes[survivor_idx];
 
-    // Try writing through the survivor – should fail
-    // It might try to forward but leader is dead, or it might try to become
-    // leader but can't get quorum.
-    let result = survivor
+                let result = survivor
         .put_or_forward("should-fail".to_string(), "nope".to_string())
         .await;
 
@@ -217,18 +197,14 @@ async fn test_writes_fail_when_leader_down() {
 
     println!("Writes correctly fail when leader is down and no quorum: PASSED");
 
-    // Cleanup
-    for node in &nodes {
+        for node in &nodes {
         node.shutdown();
     }
     sleep(Duration::from_millis(200)).await;
 }
 
-// ---------------------------------------------------------------------------
-// Test 3: After re-election, writes succeed again
-// ---------------------------------------------------------------------------
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+"multi_thread"
 async fn test_writes_resume_after_reelection() {
     let ports = cluster_ports_3(19600);
 
@@ -245,8 +221,7 @@ async fn test_writes_resume_after_reelection() {
         .await
         .expect("No leader elected");
 
-    // Write initial data
-    nodes[leader_idx]
+        nodes[leader_idx]
         .put("pre-crash".to_string(), "value1".to_string())
         .await
         .expect("Pre-crash write should succeed");
@@ -255,8 +230,7 @@ async fn test_writes_resume_after_reelection() {
     nodes[leader_idx].shutdown();
     sleep(Duration::from_millis(500)).await;
 
-    // The remaining 2 nodes should elect a new leader (2/3 = quorum)
-    let survivors: Vec<Arc<ClusterNode>> = (0..3)
+        let survivors: Vec<Arc<ClusterNode>> = (0..3)
         .filter(|i| *i != leader_idx)
         .map(|i| nodes[i].clone())
         .collect();
@@ -269,14 +243,12 @@ async fn test_writes_resume_after_reelection() {
     let status = new_leader.status().await;
     println!("New leader: {} (term {})", status.node_id, status.term);
 
-    // Write through the new leader
-    new_leader
+        new_leader
         .put("post-crash".to_string(), "value2".to_string())
         .await
         .expect("Post-crash write through new leader should succeed");
 
-    // Write through a follower using put_or_forward
-    let new_follower_local = if new_leader_local == 0 { 1 } else { 0 };
+        let new_follower_local = if new_leader_local == 0 { 1 } else { 0 };
     let new_follower = &survivors[new_follower_local];
 
     new_follower
@@ -284,8 +256,7 @@ async fn test_writes_resume_after_reelection() {
         .await
         .expect("put_or_forward after re-election should succeed");
 
-    // Verify all data on surviving nodes
-    for node in &survivors {
+        for node in &survivors {
         assert!(
             wait_for_key(node, "pre-crash", "value1", Duration::from_secs(5)).await,
             "pre-crash data lost"
@@ -308,11 +279,8 @@ async fn test_writes_resume_after_reelection() {
     sleep(Duration::from_millis(200)).await;
 }
 
-// ---------------------------------------------------------------------------
-// Test 4: Session log entries are replicated through Raft
-// ---------------------------------------------------------------------------
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+"multi_thread"
 async fn test_session_log_replication_through_raft() {
     use server::engine::session_log::{SessionLog, SessionLogEntry};
 
@@ -331,8 +299,7 @@ async fn test_session_log_replication_through_raft() {
         .await
         .expect("No leader elected");
 
-    // Create a SessionLog backed by the leader's cluster node
-    let local_db = temp_sled("sesslog-local");
+        let local_db = temp_sled("sesslog-local");
     let session_log = SessionLog::from_config(
         sled::Config::new()
             .path(std::env::temp_dir().join(format!(
@@ -345,8 +312,7 @@ async fn test_session_log_replication_through_raft() {
     .unwrap()
     .with_cluster(nodes[leader_idx].clone());
 
-    // Append a session log entry
-    let entry = SessionLogEntry {
+        let entry = SessionLogEntry {
         input_heap: None,
         output_heap: "abc123".to_string(),
         output_fs: None,
@@ -359,11 +325,9 @@ async fn test_session_log_replication_through_raft() {
         .await
         .expect("Session log append should succeed");
 
-    // Wait for replication
-    sleep(Duration::from_secs(2)).await;
+        sleep(Duration::from_secs(2)).await;
 
-    // Verify session data is in the Raft data tree on all nodes
-    for (i, node) in nodes.iter().enumerate() {
+        for (i, node) in nodes.iter().enumerate() {
         let sessions = node.scan_prefix("sl:s:").unwrap();
         assert!(
             !sessions.is_empty(),
@@ -379,8 +343,7 @@ async fn test_session_log_replication_through_raft() {
         );
     }
 
-    // Read sessions through the session log (connected to a follower)
-    let follower_idx = (leader_idx + 1) % 3;
+        let follower_idx = (leader_idx + 1) % 3;
     let follower_log = SessionLog::from_config(
         sled::Config::new()
             .path(std::env::temp_dir().join(format!(
@@ -418,19 +381,14 @@ async fn test_session_log_replication_through_raft() {
     sleep(Duration::from_millis(200)).await;
 }
 
-// ---------------------------------------------------------------------------
-// Test 5: Dynamic peer join
-// ---------------------------------------------------------------------------
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+"multi_thread"
 async fn test_dynamic_peer_join() {
     use server::cluster::JoinRequest;
 
-    // Start a 2-node cluster, then dynamically add a 3rd node.
-    let ports: [u16; 3] = [19800, 19801, 19802];
+        let ports: [u16; 3] = [19800, 19801, 19802];
 
-    // Initially only start node1 and node2
-    let config1 = {
+        let config1 = {
         let mut pa = HashMap::new();
         pa.insert("node2".to_string(), format!("127.0.0.1:{}", ports[1]));
         ClusterConfig {
@@ -471,25 +429,21 @@ async fn test_dynamic_peer_join() {
 
     let initial_nodes = vec![node1.clone(), node2.clone()];
 
-    // Wait for leader among the initial 2 nodes
-    let leader_idx = wait_for_leader(&initial_nodes, Duration::from_secs(15))
+        let leader_idx = wait_for_leader(&initial_nodes, Duration::from_secs(15))
         .await
         .expect("No leader elected in initial 2-node cluster");
     let leader = &initial_nodes[leader_idx];
 
     println!("Initial leader: node{}", leader_idx + 1);
 
-    // Write some data before node3 joins
-    leader
+        leader
         .put("before-join".to_string(), "initial".to_string())
         .await
         .expect("Initial write should succeed");
 
-    // Now start node3 with no seed peers, and have it join via the leader
-    let config3 = ClusterConfig {
+        let config3 = ClusterConfig {
         node_id: "node3".to_string(),
-        peers: vec![], // no seed peers
-        peer_addrs: HashMap::new(),
+        peers: vec![],         peer_addrs: HashMap::new(),
         cluster_port: ports[2],
         advertise_addr: Some(format!("127.0.0.1:{}", ports[2])),
         heartbeat_interval: Duration::from_millis(80),
@@ -501,8 +455,7 @@ async fn test_dynamic_peer_join() {
     let node3 = ClusterNode::new(config3, db3);
     node3.start().await;
 
-    // Send join request to the leader
-    leader
+        leader
         .handle_join(JoinRequest {
             node_id: "node3".to_string(),
             addr: format!("127.0.0.1:{}", ports[2]),
@@ -511,8 +464,7 @@ async fn test_dynamic_peer_join() {
         .await
         .expect("Join should succeed on leader");
 
-    // Also tell node3 about the existing peers so it can participate
-    {
+        {
         let mut state = node3.state.write().await;
         state.peers.push(format!("127.0.0.1:{}", ports[0]));
         state.peers.push(format!("127.0.0.1:{}", ports[1]));
@@ -520,14 +472,12 @@ async fn test_dynamic_peer_join() {
         state.peer_addrs.insert("node2".to_string(), format!("127.0.0.1:{}", ports[1]));
     }
 
-    // Wait for data to replicate to node3
-    assert!(
+        assert!(
         wait_for_key(&node3, "before-join", "initial", Duration::from_secs(10)).await,
         "node3: pre-join data not replicated after joining"
     );
 
-    // Write new data and verify it reaches node3
-    leader
+        leader
         .put("after-join".to_string(), "new-data".to_string())
         .await
         .expect("Post-join write should succeed");
@@ -537,11 +487,9 @@ async fn test_dynamic_peer_join() {
         "node3: post-join data not replicated"
     );
 
-    // Wait a bit for node3 to learn leader_id via heartbeats
-    sleep(Duration::from_secs(2)).await;
+        sleep(Duration::from_secs(2)).await;
 
-    // Verify node3 can forward writes back through the cluster
-    node3
+        node3
         .put_or_forward("from-node3".to_string(), "hello".to_string())
         .await
         .expect("put_or_forward from dynamically joined node3 should succeed");
@@ -561,11 +509,8 @@ async fn test_dynamic_peer_join() {
     sleep(Duration::from_millis(200)).await;
 }
 
-// ---------------------------------------------------------------------------
-// Test 6: Dynamic peer leave
-// ---------------------------------------------------------------------------
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+"multi_thread"
 async fn test_dynamic_peer_leave() {
     use server::cluster::LeaveRequest;
 
@@ -587,14 +532,12 @@ async fn test_dynamic_peer_leave() {
     let leader = &nodes[leader_idx];
     println!("Leader: node{}", leader_idx + 1);
 
-    // Write data with all 3 nodes
-    leader
+        leader
         .put("pre-leave".to_string(), "ok".to_string())
         .await
         .expect("Pre-leave write should succeed");
 
-    // Remove a follower from the cluster
-    let leaving_idx = (leader_idx + 1) % 3;
+        let leaving_idx = (leader_idx + 1) % 3;
     let leaving_id = format!("node{}", leaving_idx + 1);
 
     leader
@@ -606,18 +549,15 @@ async fn test_dynamic_peer_leave() {
 
     println!("Removed {} from cluster", leaving_id);
 
-    // Shut down the leaving node
-    nodes[leaving_idx].shutdown();
+        nodes[leaving_idx].shutdown();
     sleep(Duration::from_millis(500)).await;
 
-    // The remaining 2 nodes should still be able to write (quorum = 2/2)
-    leader
+        leader
         .put("post-leave".to_string(), "still-working".to_string())
         .await
         .expect("Post-leave write should succeed with 2-node cluster");
 
-    // Verify on the other surviving node
-    let other_idx = (leader_idx + 2) % 3;
+        let other_idx = (leader_idx + 2) % 3;
     assert!(
         wait_for_key(
             &nodes[other_idx],
@@ -629,8 +569,7 @@ async fn test_dynamic_peer_leave() {
         "Post-leave data not replicated"
     );
 
-    // Verify the leader's peer set no longer contains the leaving node
-    let status = leader.status().await;
+        let status = leader.status().await;
     assert!(
         !status.peer_addrs.contains_key(&leaving_id),
         "leaving node should not be in peer_addrs: {:?}",

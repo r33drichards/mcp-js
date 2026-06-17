@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+
 """Generate MkDocs-friendly HTTP API reference Markdown from openapi.json."""
 
 from __future__ import annotations

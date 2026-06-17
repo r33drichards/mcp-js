@@ -68,19 +68,10 @@ pub const DEFAULT_WASM_MAX_BYTES: usize = 16 * 1024 * 1024;
 /// values cause `FatalProcessOutOfMemory` → `abort()`.
 pub const MIN_HEAP_MEMORY_MB: usize = 8;
 
-// ── V8 initialization ───────────────────────────────────────────────────
 
 pub fn initialize_v8() {
-    // deno_core initializes V8 automatically on first JsRuntime creation.
-    // Kept for backward compatibility with callers (main.rs, tests, fuzz).
-    //
-    // Note: V8 145 (bundled with deno_core 0.381) does not support
-    // --no-harmony-sharedarraybuffer or --regexp-backtrace-limit flags.
-    // SharedArrayBuffer is removed via JS in the hardening step instead.
-    // ReDoS is mitigated by the per-execution timeout.
-}
+                            }
 
-// ── Snapshot envelope ───────────────────────────────────────────────────
 
 /// Snapshot envelope: magic header + SHA-256 checksum + minimum size.
 ///
@@ -102,9 +93,7 @@ pub fn initialize_v8() {
 ///      anything smaller. This also prevents libfuzzer from synthesizing
 ///      valid envelopes.
 const SNAPSHOT_MAGIC: &[u8] = b"MCPV8SNAP\x00";
-const SNAPSHOT_HEADER_LEN: usize = 10 + 32; // magic (10) + SHA-256 checksum (32)
-const MIN_SNAPSHOT_PAYLOAD: usize = 100 * 1024; // 100KB — smallest valid V8 snapshot
-
+const SNAPSHOT_HEADER_LEN: usize = 10 + 32; const MIN_SNAPSHOT_PAYLOAD: usize = 100 * 1024; 
 fn sha256_hash(data: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(data);
@@ -149,24 +138,13 @@ pub fn unwrap_snapshot(data: &[u8]) -> Result<Vec<u8>, String> {
     Ok(payload.to_vec())
 }
 
-// ── Bounded ArrayBuffer allocator ────────────────────────────────────────
-//
-// Typed arrays (Uint8Array, etc.) allocate backing stores through V8's
-// ArrayBuffer::Allocator, which lives outside the managed JS heap. The
-// default allocator uses malloc/calloc and has no size limit — when the
-// system runs out of memory V8 calls FatalProcessOutOfMemory → abort().
-//
-// This custom allocator tracks total allocated bytes and returns null when
-// the limit is exceeded. V8 treats a null return as an allocation failure
-// and throws a JS-level RangeError instead of aborting the process.
 
 struct BoundedAllocatorState {
     allocated: AtomicUsize,
     limit: usize,
 }
 
-const ARRAY_BUF_ALIGN: usize = 16; // match platform malloc alignment
-
+const ARRAY_BUF_ALIGN: usize = 16; 
 unsafe extern "C" fn bounded_allocate(
     state: &BoundedAllocatorState,
     len: usize,
@@ -174,8 +152,7 @@ unsafe extern "C" fn bounded_allocate(
     if len == 0 {
         return std::ptr::null_mut();
     }
-    // Atomically reserve space; undo if over limit.
-    let prev = state.allocated.fetch_add(len, Ordering::SeqCst);
+        let prev = state.allocated.fetch_add(len, Ordering::SeqCst);
     if prev.saturating_add(len) > state.limit {
         state.allocated.fetch_sub(len, Ordering::SeqCst);
         return std::ptr::null_mut();
@@ -251,20 +228,6 @@ fn create_bounded_allocator(limit: usize) -> v8::UniqueRef<v8::Allocator> {
     unsafe { v8::new_rust_allocator(Box::into_raw(state), &BOUNDED_VTABLE) }
 }
 
-// ── V8 fatal OOM handler ─────────────────────────────────────────────────
-//
-// When V8 encounters an allocation that exceeds its internal limits (e.g.
-// `new Array(1e9)` exceeds FixedArray::kMaxLength), it calls
-// `FatalProcessOutOfMemory` which invokes this handler. This is NOT a
-// recoverable condition — V8 may hold internal locks and have global state
-// in an inconsistent state. Approaches like setjmp/longjmp or panic
-// corrupt V8's global state and cause SIGSEGV in subsequent V8 operations.
-//
-// We log a descriptive message and abort. In production, the process
-// manager should restart the server. The MIN_HEAP_MEMORY_MB floor and
-// near_heap_limit_callback handle the vast majority of OOM scenarios
-// gracefully — this handler only fires for pathological allocations that
-// exceed V8's internal structural limits.
 
 unsafe extern "C" fn oom_error_handler(
     location: *const std::ffi::c_char,
@@ -285,7 +248,6 @@ unsafe extern "C" fn oom_error_handler(
     std::process::abort();
 }
 
-// ── V8 heap / timeout helpers ───────────────────────────────────────────
 
 fn create_params_with_heap_limit(heap_memory_max_bytes: usize) -> v8::CreateParams {
     let min_bytes = MIN_HEAP_MEMORY_MB * 1024 * 1024;
@@ -333,9 +295,7 @@ fn install_heap_limit_callback(
     isolate: &mut v8::Isolate,
     oom_flag: Arc<AtomicBool>,
 ) -> *mut HeapLimitCallbackData {
-    // Install the OOM error handler to convert fatal V8 OOM (which
-    // normally calls abort()) into a Rust panic that catch_unwind catches.
-    isolate.set_oom_error_handler(oom_error_handler);
+            isolate.set_oom_error_handler(oom_error_handler);
 
     let data = Box::new(HeapLimitCallbackData {
         isolate_ptr: isolate as *mut v8::Isolate,
@@ -363,12 +323,6 @@ fn classify_termination_error(
     }
 }
 
-// ── TypeScript type stripping ────────────────────────────────────────────
-//
-// Uses SWC to strip TypeScript type annotations from the input code,
-// producing plain JavaScript that V8 can execute. This is type *removal*
-// only — no type checking is performed. Plain JavaScript passes through
-// unchanged.
 
 /// Parse a 64-char lowercase/uppercase hex string into a 32-byte CA id.
 /// Returns `None` for anything that is not exactly a 32-byte hex blob (e.g. a
@@ -394,27 +348,27 @@ fn refop_str(op: fs_labels::RefOp) -> &'static str {
 }
 
 /// A label and its current head CA id (hex), for API/CLI responses.
-#[derive(Debug, Clone, serde::Serialize)]
+
 pub struct FsLabelView {
     pub name: String,
     pub ca_id: String,
 }
 
 /// One reflog entry, hex-rendered, for API/CLI responses.
-#[derive(Debug, Clone, serde::Serialize)]
+
 pub struct FsRefLogView {
     pub at: i64,
     pub from: Option<String>,
     pub to: String,
     pub op: String,
     /// Optional human note recorded with the move (omitted when absent).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    "Option::is_none"
     pub message: Option<String>,
 }
 
 /// Outcome of an [`Engine::fs_push`].
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(tag = "status", rename_all = "lowercase")]
+
+"status""lowercase"
 pub enum FsPushOutcome {
     /// The label now points at `ca_id`.
     Advanced { label: String, ca_id: String },
@@ -426,8 +380,8 @@ pub enum FsPushOutcome {
 }
 
 /// Result of an [`Engine::fs_merge`].
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(tag = "status", rename_all = "lowercase")]
+
+"status""lowercase"
 pub enum FsMergeResult {
     /// A clean merge; the new snapshot has this CA id.
     Merged { ca_id: String },
@@ -439,7 +393,7 @@ pub enum FsMergeResult {
 /// file is present on that side, or `null` when it is absent (delete). For text
 /// files the response also carries diff3 conflict markers and unified diffs so
 /// the caller can review and resolve at line level.
-#[derive(Debug, Clone, serde::Serialize)]
+
 pub struct FsMergeConflictView {
     pub path: String,
     pub base: Option<String>,
@@ -448,13 +402,13 @@ pub struct FsMergeConflictView {
     /// Detected content type: `text`, `binary`, `sqlite`, or `modify/delete`.
     pub kind: String,
     /// diff3-marked text to edit and write back (text conflicts only).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    "Option::is_none"
     pub markers: Option<String>,
     /// Unified diff base -> ours (text conflicts only).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    "Option::is_none"
     pub diff_ours: Option<String>,
     /// Unified diff base -> theirs (text conflicts only).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    "Option::is_none"
     pub diff_theirs: Option<String>,
 }
 
@@ -485,11 +439,7 @@ pub fn strip_typescript_types(code: &str) -> Result<String, String> {
     let comments = SingleThreadedComments::default();
 
     let lexer = Lexer::new(
-        // JSX/TSX is intentionally disabled: the pipeline only strips TypeScript
-        // types and does not transform JSX, so accepting JSX would emit code that
-        // V8 rejects at runtime. Disabling tsx also re-enables `<T>value` type
-        // assertions, which are ambiguous with JSX when tsx is on.
-        Syntax::Typescript(TsSyntax {
+                                        Syntax::Typescript(TsSyntax {
             tsx: false,
             ..Default::default()
         }),
@@ -504,8 +454,7 @@ pub fn strip_typescript_types(code: &str) -> Result<String, String> {
         .parse_program()
         .map_err(|e| format!("TypeScript parse error: {:?}", e))?;
 
-    // Report non-fatal parse errors but don't fail on them
-    for e in parser.take_errors() {
+        for e in parser.take_errors() {
         eprintln!("TypeScript parse warning: {:?}", e);
     }
 
@@ -514,17 +463,13 @@ pub fn strip_typescript_types(code: &str) -> Result<String, String> {
         let unresolved_mark = Mark::new();
         let top_level_mark = Mark::new();
 
-        // Conduct identifier scope analysis
-        resolver(unresolved_mark, top_level_mark, true).process(&mut program);
+                resolver(unresolved_mark, top_level_mark, true).process(&mut program);
 
-        // Remove typescript types
-        strip(unresolved_mark, top_level_mark).process(&mut program);
+                strip(unresolved_mark, top_level_mark).process(&mut program);
 
-        // Fix up any identifiers with the same name, but different contexts
-        hygiene().process(&mut program);
+                hygiene().process(&mut program);
 
-        // Ensure that we have enough parenthesis
-        fixer(Some(&comments)).process(&mut program);
+                fixer(Some(&comments)).process(&mut program);
 
         let mut buf = vec![];
         {
@@ -611,8 +556,7 @@ fn validate_wasm_resources(name: &str, bytes: &[u8], max_memory_bytes: usize) ->
                     }
                 }
             }
-            Err(_) => break, // Structural errors caught by Validator
-            _ => {}
+            Err(_) => break,             _ => {}
         }
     }
     Ok(())
@@ -653,8 +597,7 @@ pub fn inject_wasm_modules(
     deno_core::scope!(scope, runtime);
     let global = scope.get_current_context().global(scope);
 
-    // Look up WebAssembly.Instance constructor once.
-    let wa_key = v8::String::new(scope, "WebAssembly")
+        let wa_key = v8::String::new(scope, "WebAssembly")
         .ok_or("Failed to create 'WebAssembly' string")?;
     let wa_obj = global
         .get(scope, wa_key.into())
@@ -674,44 +617,30 @@ pub fn inject_wasm_modules(
         .ok_or("Failed to create 'exports' string")?;
 
     for m in modules {
-        // Pre-validate WASM bytes with wasmparser before handing them to V8.
-        // V8's WASM compiler allocates native (non-heap) memory that isn't bounded
-        // by our JS heap limits, so malformed modules can OOM the process.
-        // wasmparser is a lightweight, safe validator that rejects invalid modules
-        // before V8 gets a chance to allocate unbounded memory.
-        Validator::new().validate_all(&m.bytes)
+                                                Validator::new().validate_all(&m.bytes)
             .map_err(|e| format!("Invalid WASM module '{}': {}", m.name, e))?;
 
-        // Reject modules declaring resources that exceed the per-module budget.
-        let limit = m.max_memory_bytes.unwrap_or(wasm_default_max_bytes);
+                let limit = m.max_memory_bytes.unwrap_or(wasm_default_max_bytes);
         validate_wasm_resources(&m.name, &m.bytes, limit)?;
 
-        // Compile WASM bytes directly via V8's native API — no JS string generation.
-        let module_obj = v8::WasmModuleObject::compile(scope, &m.bytes)
+                let module_obj = v8::WasmModuleObject::compile(scope, &m.bytes)
             .ok_or_else(|| format!("Failed to compile WASM module '{}'", m.name))?;
 
         let has_imports = wasm_has_imports(&m.bytes);
         let module_val: v8::Local<v8::Value> = module_obj.into();
 
-        // Always expose the compiled WebAssembly.Module as __wasm_<name>.
-        // This lets JS code instantiate modules that need an imports object:
-        //   var instance = new WebAssembly.Instance(__wasm_sqlite, { ... });
-        let module_global_name = format!("__wasm_{}", m.name);
+                                let module_global_name = format!("__wasm_{}", m.name);
         let module_key = v8::String::new(scope, &module_global_name)
             .ok_or_else(|| format!("Failed to create module global name for '{}'", m.name))?;
         global.set(scope, module_key.into(), module_val);
 
         if has_imports {
-            // Module requires imports — skip auto-instantiation.
-            // The compiled WebAssembly.Module is available as __wasm_<name>
-            // for manual instantiation in JavaScript.
-            eprintln!(
+                                                eprintln!(
                 "WASM module '{}' has imports — available as '{}' for manual instantiation in JS",
                 m.name, module_global_name
             );
         } else {
-            // No imports needed — auto-instantiate and expose exports as <name>.
-            let instance = instance_ctor
+                        let instance = instance_ctor
                 .new_instance(scope, &[module_val])
                 .ok_or_else(|| format!("Failed to instantiate WASM module '{}'", m.name))?;
 
@@ -728,12 +657,6 @@ pub fn inject_wasm_modules(
     Ok(())
 }
 
-// ── Stateless / stateful execution via deno_core ─────────────────────────
-//
-// deno_core's JsRuntime wraps V8 Isolate + Context + event loop.
-// An IsolateHandle is published for external cancellation (used by
-// `run_js` for async timeout via `tokio::select!`).
-// Tests and fuzz targets pass a no-op handle.
 
 /// Global counter for unique module URLs, avoiding conflicts when restoring
 /// from a V8 heap snapshot that already has a registered module.
@@ -741,19 +664,6 @@ static MODULE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 /// Execute code as an ES module. All code is always executed as a module,
 /// which supports `import` declarations, `export`, and top-level `await`.
-// Build the dedicated current-thread runtime each isolate runs on.
-//
-// V8/deno_core is single-threaded and deno_core's async op driver dispatches ops
-// through `deno_unsync`, which requires a `RuntimeFlavor::CurrentThread` runtime
-// (on a multi-thread runtime it panics in debug and deadlocks fs ops in
-// release). We are called from `spawn_blocking` (a blocking task), so building
-// and driving a fresh current-thread runtime here is allowed — no dedicated OS
-// thread needed.
-//
-// Ops that need the server's multi-thread runtime don't run their I/O here: the
-// S3 client (heap + fs blobs) captures that runtime's Handle at construction and
-// bridges via `handle.spawn(...).await`, and cross-worker fs blobs are pre-staged
-// into the local cache by `build_fs_mount` before the isolate runs.
 fn isolate_runtime() -> Result<tokio::runtime::Runtime, String> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -770,13 +680,7 @@ fn execute_module(
     let main_url = ModuleSpecifier::parse(&format!("file:///main_{}.js", id))
         .map_err(|e| format!("internal specifier error: {}", e))?;
 
-    // CRITICAL: run the load, module evaluation, AND event loop inside ONE
-    // `block_on`. `mod_evaluate` runs the module's top-level synchronous code
-    // immediately (up to the first await), which submits async ops — so it must
-    // execute under this current-thread runtime's context too, not between
-    // `block_on` calls (where the ambient multi-thread runtime is current and
-    // deno_unsync's op spawn would panic/deadlock).
-    rt.block_on(async move {
+                            rt.block_on(async move {
         let mod_id = runtime
             .load_side_es_module_from_code(&main_url, code.to_string())
             .await
@@ -868,7 +772,7 @@ impl<'a> ExecutionConfig<'a> {
         self
     }
 
-    #[allow(dead_code)]
+    
     pub fn fetch_config(mut self, config: &'a fetch::FetchConfig) -> Self {
         self.fetch_config = Some(config);
         self
@@ -950,8 +854,7 @@ pub fn execute_stateless(
         }
         extensions.push(timers::create_extension());
 
-        // Always create a module loader — all code runs as ES modules.
-        let module_loader: Rc<dyn deno_core::ModuleLoader> = match module_loader_config {
+                let module_loader: Rc<dyn deno_core::ModuleLoader> = match module_loader_config {
             Some(config) => Rc::new(module_loader::NetworkModuleLoader::with_config(config.clone())),
             None => Rc::new(module_loader::NetworkModuleLoader::new()),
         };
@@ -963,44 +866,34 @@ pub fn execute_stateless(
             ..Default::default()
         });
 
-        // Current-thread runtime that drives this isolate's async ops (see
-        // `execute_module` / `isolate_runtime`).
-        let rt = isolate_runtime()?;
+                        let rt = isolate_runtime()?;
 
-        // Put console log state in OpState.
-        if let Some(tree) = console_tree {
+                if let Some(tree) = console_tree {
             runtime.op_state().borrow_mut().put(ConsoleLogState::new(tree));
         }
 
-        // Put fetch config in OpState if OPA is configured.
-        if let Some(fc) = fetch_config {
+                if let Some(fc) = fetch_config {
             runtime.op_state().borrow_mut().put(fc.clone());
         }
 
-        // Put fs config in OpState if filesystem policies are configured.
-        if let Some(fsc) = fs_config {
+                if let Some(fsc) = fs_config {
             let fsc = fsc.clone().with_mcp_headers(mcp_headers.clone());
             runtime.op_state().borrow_mut().put(fsc);
 
-            // Attach the session's overlay mount, if any, so fs ops operate on
-            // the virtual filesystem (behind the same policy gate).
-            if let Some(mount) = fs_mount.clone() {
+                                    if let Some(mount) = fs_mount.clone() {
                 runtime.op_state().borrow_mut().put(mount);
             }
 
-            // Put subprocess config in OpState if subprocess policies are configured.
-            if let Some(sc) = subprocess_config {
+                        if let Some(sc) = subprocess_config {
                 runtime.op_state().borrow_mut().put(sc.clone());
             }
         }
 
-        // Put MCP config in OpState if MCP servers are configured.
-        if let Some(mc) = mcp_config {
+                if let Some(mc) = mcp_config {
             runtime.op_state().borrow_mut().put(mc.clone());
         }
 
-        // Publish handle immediately so caller can terminate us.
-        *isolate_handle.lock().unwrap() = Some(
+                *isolate_handle.lock().unwrap() = Some(
             runtime.v8_isolate().thread_safe_handle()
         );
 
@@ -1009,65 +902,52 @@ pub fn execute_stateless(
         );
         let _heap_guard = HeapLimitGuard { ptr: cb_data_ptr };
 
-        // Inject WASM modules as globals via V8 native API.
-        let eval_result = match inject_wasm_modules(&mut runtime, wasm_modules, wasm_default_max_bytes) {
+                let eval_result = match inject_wasm_modules(&mut runtime, wasm_modules, wasm_default_max_bytes) {
             Err(e) => Err(e),
             Ok(()) => {
-                // Inject console JS wrapper.
-                if let Err(e) = console::inject_console(&mut runtime) {
+                                if let Err(e) = console::inject_console(&mut runtime) {
                     return Err(e);
                 }
-                // Neutralize dangerous built-in ops (op_panic, print).
-                if let Err(e) = console::neutralize_dangerous_ops(&mut runtime) {
+                                if let Err(e) = console::neutralize_dangerous_ops(&mut runtime) {
                     return Err(e);
                 }
-                // Inject atob/btoa (always available).
-                if let Err(e) = console::inject_base64(&mut runtime) {
+                                if let Err(e) = console::inject_base64(&mut runtime) {
                     return Err(e);
                 }
-                // Inject Blob/File/FormData (always available).
-                if let Err(e) = console::inject_web_apis(&mut runtime) {
+                                if let Err(e) = console::inject_web_apis(&mut runtime) {
                     return Err(e);
                 }
-                // Inject fetch() JS wrapper if OPA is configured.
-                if fetch_config.is_some() {
+                                if fetch_config.is_some() {
                     if let Err(e) = fetch::inject_fetch(&mut runtime) {
                         return Err(e);
                     }
-                // Inject subprocess JS wrapper if subprocess policies are configured.
-                if subprocess_config.is_some() {
+                                if subprocess_config.is_some() {
                     if let Err(e) = subprocess::inject_subprocess(&mut runtime) {
                         return Err(e);
                     }
                 }
                 }
-                // Inject fs JS wrapper if filesystem policies are configured.
-                if fs_config.is_some() {
+                                if fs_config.is_some() {
                     if let Err(e) = fs::inject_fs(&mut runtime) {
                         return Err(e);
                     }
                 }
-                // Inject mcp JS wrapper if MCP servers are configured.
-                if mcp_config.is_some() {
+                                if mcp_config.is_some() {
                     if let Err(e) = mcp_client::inject_mcp(&mut runtime) {
                         return Err(e);
                     }
                 }
-                // Inject setTimeout/clearTimeout (always available).
-                if let Err(e) = timers::inject_timers(&mut runtime) {
+                                if let Err(e) = timers::inject_timers(&mut runtime) {
                     return Err(e);
                 }
-                // Harden sandbox: freeze ops, neutralize introspection, remove __bootstrap.
-                // Must run after all inject_* calls and before user code.
-                if let Err(e) = console::harden_runtime(&mut runtime, hardening) {
+                                                if let Err(e) = console::harden_runtime(&mut runtime, hardening) {
                     return Err(e);
                 }
                 execute_module(&rt, &mut runtime, code)
             }
         };
 
-        // Flush any remaining console output before runtime is dropped.
-        console::flush_console(&mut runtime);
+                console::flush_console(&mut runtime);
 
         *isolate_handle.lock().unwrap() = None;
 
@@ -1115,9 +995,7 @@ pub fn execute_stateful(
     let result = catch_unwind(AssertUnwindSafe(|| {
         let params = create_params_with_heap_limit(heap_memory_max_bytes);
 
-        // Box::leak to get &'static [u8] required by RuntimeOptions::startup_snapshot.
-        // We reclaim the memory after the runtime is consumed by snapshot().
-        let leaked_snapshot: Option<(*mut [u8], &'static [u8])> = raw_snapshot
+                        let leaked_snapshot: Option<(*mut [u8], &'static [u8])> = raw_snapshot
             .filter(|d| !d.is_empty())
             .map(|data| {
                 eprintln!("creating isolate from snapshot...");
@@ -1150,8 +1028,7 @@ pub fn execute_stateful(
         }
         extensions.push(timers::create_extension());
 
-        // Always create a module loader — all code runs as ES modules.
-        let module_loader: Rc<dyn deno_core::ModuleLoader> = match module_loader_config {
+                let module_loader: Rc<dyn deno_core::ModuleLoader> = match module_loader_config {
             Some(config) => Rc::new(module_loader::NetworkModuleLoader::with_config(config.clone())),
             None => Rc::new(module_loader::NetworkModuleLoader::new()),
         };
@@ -1164,44 +1041,34 @@ pub fn execute_stateful(
             ..Default::default()
         });
 
-        // Current-thread runtime that drives this isolate's async ops (see
-        // `execute_module` / `isolate_runtime`).
-        let rt = isolate_runtime()?;
+                        let rt = isolate_runtime()?;
 
-        // Put console log state in OpState.
-        if let Some(tree) = console_tree {
+                if let Some(tree) = console_tree {
             runtime.op_state().borrow_mut().put(ConsoleLogState::new(tree));
         }
 
-        // Put fetch config in OpState if OPA is configured.
-        if let Some(fc) = fetch_config {
+                if let Some(fc) = fetch_config {
             runtime.op_state().borrow_mut().put(fc.clone());
         }
 
-        // Put fs config in OpState if filesystem policies are configured.
-        if let Some(fsc) = fs_config {
+                if let Some(fsc) = fs_config {
             let fsc = fsc.clone().with_mcp_headers(mcp_headers.clone());
             runtime.op_state().borrow_mut().put(fsc);
 
-            // Attach the session's overlay mount, if any, so fs ops operate on
-            // the virtual filesystem (behind the same policy gate).
-            if let Some(mount) = fs_mount.clone() {
+                                    if let Some(mount) = fs_mount.clone() {
                 runtime.op_state().borrow_mut().put(mount);
             }
 
-            // Put subprocess config in OpState if subprocess policies are configured.
-            if let Some(sc) = subprocess_config {
+                        if let Some(sc) = subprocess_config {
                 runtime.op_state().borrow_mut().put(sc.clone());
             }
         }
 
-        // Put MCP config in OpState if MCP servers are configured.
-        if let Some(mc) = mcp_config {
+                if let Some(mc) = mcp_config {
             runtime.op_state().borrow_mut().put(mc.clone());
         }
 
-        // Publish handle immediately so caller can terminate us.
-        *isolate_handle.lock().unwrap() = Some(
+                *isolate_handle.lock().unwrap() = Some(
             runtime.v8_isolate().thread_safe_handle()
         );
 
@@ -1210,67 +1077,50 @@ pub fn execute_stateful(
         );
         let _heap_guard = HeapLimitGuard { ptr: cb_data_ptr };
 
-        // When restoring from a snapshot, the JS-level setup (console wrappers,
-        // sandbox hardening, WASM globals) is already baked in. Re-running these
-        // scripts would fail because the sandbox is locked down (Deno.core is
-        // non-configurable, Deno.core.ops is frozen). Only inject on fresh runtimes.
-        let has_snapshot = leaked_snapshot.is_some();
+                                        let has_snapshot = leaked_snapshot.is_some();
 
         let output_result = if has_snapshot {
             execute_module(&rt, &mut runtime, code)
         } else {
-            // Inject WASM modules as globals via V8 native API.
-            // Do NOT early-return here — snapshot() must be called below.
-            match inject_wasm_modules(&mut runtime, wasm_modules, wasm_default_max_bytes) {
+                                    match inject_wasm_modules(&mut runtime, wasm_modules, wasm_default_max_bytes) {
                 Err(e) => Err(e),
                 Ok(()) => {
-                    // Inject console JS wrapper.
-                    if let Err(e) = console::inject_console_snapshot(&mut runtime) {
+                                        if let Err(e) = console::inject_console_snapshot(&mut runtime) {
                         return Err(e);
                     }
-                    // Neutralize dangerous built-in ops (op_panic, print).
-                    if let Err(e) = console::neutralize_dangerous_ops(&mut runtime) {
+                                        if let Err(e) = console::neutralize_dangerous_ops(&mut runtime) {
                         return Err(e);
                     }
-                    // Inject atob/btoa (always available).
-                    if let Err(e) = console::inject_base64_snapshot(&mut runtime) {
+                                        if let Err(e) = console::inject_base64_snapshot(&mut runtime) {
                         return Err(e);
                     }
-                    // Inject Blob/File/FormData (always available).
-                    if let Err(e) = console::inject_web_apis_snapshot(&mut runtime) {
+                                        if let Err(e) = console::inject_web_apis_snapshot(&mut runtime) {
                         return Err(e);
                     }
-                    // Inject fetch() JS wrapper if OPA is configured.
-                    if fetch_config.is_some() {
+                                        if fetch_config.is_some() {
                         if let Err(e) = fetch::inject_fetch(&mut runtime) {
                             return Err(e);
                         }
-                // Inject subprocess JS wrapper if subprocess policies are configured.
-                if subprocess_config.is_some() {
+                                if subprocess_config.is_some() {
                     if let Err(e) = subprocess::inject_subprocess(&mut runtime) {
                         return Err(e);
                     }
                 }
                     }
-                    // Inject fs JS wrapper if filesystem policies are configured.
-                    if fs_config.is_some() {
+                                        if fs_config.is_some() {
                         if let Err(e) = fs::inject_fs(&mut runtime) {
                             return Err(e);
                         }
                     }
-                    // Inject mcp JS wrapper if MCP servers are configured.
-                    if mcp_config.is_some() {
+                                        if mcp_config.is_some() {
                         if let Err(e) = mcp_client::inject_mcp(&mut runtime) {
                             return Err(e);
                         }
                     }
-                    // Inject setTimeout/clearTimeout (always available).
-                    if let Err(e) = timers::inject_timers(&mut runtime) {
+                                        if let Err(e) = timers::inject_timers(&mut runtime) {
                         return Err(e);
                     }
-                    // Harden sandbox: freeze ops, neutralize introspection, remove __bootstrap.
-                    // Must run after all inject_* calls and before user code.
-                    if let Err(e) = console::harden_runtime(&mut runtime, hardening) {
+                                                            if let Err(e) = console::harden_runtime(&mut runtime, hardening) {
                         return Err(e);
                     }
                     execute_module(&rt, &mut runtime, code)
@@ -1278,16 +1128,13 @@ pub fn execute_stateful(
             }
         };
 
-        // Flush any remaining console output before snapshot.
-        console::flush_console_snapshot(&mut runtime);
+                console::flush_console_snapshot(&mut runtime);
 
         *isolate_handle.lock().unwrap() = None;
 
-        // Consume runtime to create snapshot (replaces snapshot_creator.create_blob).
-        let snapshot_data = runtime.snapshot();
+                let snapshot_data = runtime.snapshot();
 
-        // Reclaim leaked snapshot input memory (safe: runtime is consumed).
-        if let Some((ptr, _)) = leaked_snapshot {
+                if let Some((ptr, _)) = leaked_snapshot {
             unsafe { let _ = Box::from_raw(ptr); }
         }
 
@@ -1313,16 +1160,15 @@ pub fn execute_stateful(
     }
 }
 
-// ── Engine ──────────────────────────────────────────────────────────────
 
-#[derive(Debug)]
+
 pub struct JsResult {
     pub output: String,
     pub heap: Option<String>,
 }
 
 /// A pre-loaded WASM module: human-readable name + raw `.wasm` bytes.
-#[derive(Clone, Debug)]
+
 pub struct WasmModule {
     pub name: String,
     pub bytes: Vec<u8>,
@@ -1335,7 +1181,7 @@ pub struct WasmModule {
     pub description: Option<String>,
 }
 
-#[derive(Clone)]
+
 pub struct Engine {
     heap_storage: Option<AnyHeapStorage>,
     session_log: Option<SessionLog>,
@@ -1794,9 +1640,7 @@ impl Engine {
             .as_ref()
             .ok_or_else(|| "fs snapshots are not configured on this server".to_string())?;
 
-        // A 64-char hex string is treated as a detached CA id; anything else is
-        // a label resolved to its current head.
-        let mount = if let Some(id) = parse_ca_hex(handle) {
+                        let mount = if let Some(id) = parse_ca_hex(handle) {
             let hash = blake3::Hash::from_bytes(id);
             fs_mount::SessionMount::pull((**store).clone(), hash)
                 .await
@@ -1813,18 +1657,11 @@ impl Engine {
                         .await
                         .map_err(|e| format!("fs mount: pull label {handle}: {e}"))?
                 }
-                // Unknown label → start from an empty overlay so the first push
-                // can create it.
-                None => fs_mount::SessionMount::empty((**store).clone()),
+                                                None => fs_mount::SessionMount::empty((**store).clone()),
             }
         };
 
-        // Pre-stage the mounted tree's blobs into the node-local cache now, on
-        // this (main) runtime. The isolate runs on its own current-thread
-        // runtime and its fs ops cannot await the blob backend's remote I/O, so
-        // a lazy in-op fetch from S3 would deadlock; warming here makes those
-        // reads pure local-cache hits.
-        mount
+                                                mount
             .warm()
             .await
             .map_err(|e| format!("fs mount: warm {handle}: {e}"))?;
@@ -1867,7 +1704,7 @@ impl Engine {
     }
 
     /// Internal: actually submit the run_js request.
-    #[allow(clippy::too_many_arguments)]
+    
     async fn run_js_inner(
         &self,
         code: String,
@@ -1883,9 +1720,7 @@ impl Engine {
         let registry = self.execution_registry.as_ref()
             .ok_or_else(|| "Execution registry not configured".to_string())?;
 
-        // Resolve a file-path source (policy-gated) when provided; otherwise
-        // use the inline code. Supplying both is an error to avoid ambiguity.
-        let code = match file {
+                        let code = match file {
             Some(path) => {
                 if !code.trim().is_empty() {
                     return Err(
@@ -1897,18 +1732,12 @@ impl Engine {
             None => code,
         };
 
-        // Strip TypeScript types before V8 execution (no-op for plain JS)
-        let code = strip_typescript_types(&code)?;
+                let code = strip_typescript_types(&code)?;
 
         let id = uuid::Uuid::new_v4().to_string();
         let console_tree = registry.register(&id)?;
 
-        // Resolve which heap snapshot to restore. An explicit `heap` always
-        // wins. Otherwise, when a `session` is given, fall back to that
-        // session's most-recent output heap so `session` acts as a stable,
-        // unchanging label for accumulated state (callers can persist just the
-        // session name and never have to track the content-addressed heap key).
-        let heap = match &heap {
+                                                let heap = match &heap {
             Some(h) if !h.is_empty() => heap,
             _ => match (session.as_ref(), self.session_log.as_ref()) {
                 (Some(session_name), Some(log)) => match log.get_latest(session_name).await {
@@ -1927,16 +1756,7 @@ impl Engine {
             },
         };
 
-        // Resolve which fs snapshot to mount, mirroring the heap logic above so
-        // the content-addressed filesystem persists per `session` exactly like
-        // the heap. An explicit `fs` (label or CA id) always wins. Otherwise,
-        // when fs snapshots are configured and a `session` is given, mount that
-        // session's most-recent output fs; on the first run there is none yet,
-        // so fall back to the session name as the handle — `build_fs_mount`
-        // treats an unknown label as an empty overlay, which is exactly the
-        // desired starting state. The post-run output fs is recorded in the
-        // session log, so the next run picks it up with no label management.
-        let fs = match &fs {
+                                                                                let fs = match &fs {
             Some(f) if !f.is_empty() => fs,
             _ if self.fs_store.is_some() => {
                 match (session.as_ref(), self.session_log.as_ref()) {
@@ -1960,8 +1780,7 @@ impl Engine {
             _ => None,
         };
 
-        // For stateful mode, unwrap snapshot before spawning background task.
-        let raw_snapshot = if let Some(storage) = &self.heap_storage {
+                let raw_snapshot = if let Some(storage) = &self.heap_storage {
             let snapshot = match &heap {
                 Some(h) if !h.is_empty() => storage.get(h).await.ok(),
                 _ => None,
@@ -1988,10 +1807,7 @@ impl Engine {
         Ok(id)
     }
 
-    // ── fs snapshot label operations ─────────────────────────────────────
-    // Thin orchestration over the LabelStore; the MCP tools, HTTP API, and CLI
-    // all route through these so behavior stays identical across surfaces.
-
+            
     fn labels_or_err(&self) -> Result<&Arc<fs_labels::LabelStore>, String> {
         self.label_store
             .as_ref()
@@ -2029,19 +1845,13 @@ impl Engine {
             None => None,
         };
 
-        // Structural per-path 3-way merge over the trees: equal subtrees are
-        // pruned by hash (never loaded), clean parts land in the merged tree,
-        // divergent paths come back as conflicts.
-        let structural =
+                                let structural =
             fs_merge::merge_trees(store, base_root, Some(load(ours)?), Some(load(theirs)?), prefer)
                 .await
                 .map_err(|e| format!("fs_merge: {e}"))?;
         let merged_root = structural.root;
 
-        // Content-merge pass: give a type-aware merger a shot at each conflict
-        // before reporting it. Clean text merges resolve silently and are patched
-        // back into the merged tree; the rest are surfaced with diffs/markers.
-        let mergers = fs_content_merge::default_mergers();
+                                let mergers = fs_content_merge::default_mergers();
         let mut conflict_views = Vec::new();
         let mut resolved: Vec<(Vec<String>, Option<fs_store::Entry>)> = Vec::new();
         for c in structural.conflicts {
@@ -2073,8 +1883,7 @@ impl Engine {
                                 .await
                                 .map_err(|e| format!("fs_merge: store merged {}: {e}", c.path.display()))?;
                             resolved.push((fs_tree::components_of(&c.path), Some(entry)));
-                            continue; // resolved — not a conflict
-                        }
+                            continue;                         }
                         fs_content_merge::ContentMergeResult::Conflict(cc) => FsMergeConflictView {
                             path: c.path.to_string_lossy().to_string(),
                             base: c.base.as_ref().map(entry_content_id),
@@ -2087,8 +1896,7 @@ impl Engine {
                         },
                     }
                 }
-                // A modify/delete (or add on one side): no content to reconcile.
-                _ => FsMergeConflictView {
+                                _ => FsMergeConflictView {
                     path: c.path.to_string_lossy().to_string(),
                     base: c.base.as_ref().map(entry_content_id),
                     ours: c.ours.as_ref().map(entry_content_id),
@@ -2103,9 +1911,7 @@ impl Engine {
         }
 
         if conflict_views.is_empty() {
-            // Patch the content-merge resolutions onto the structurally-merged
-            // tree (writing only the touched spine).
-            let final_root = if resolved.is_empty() {
+                                    let final_root = if resolved.is_empty() {
                 merged_root
             } else {
                 store
@@ -2282,7 +2088,7 @@ impl Engine {
     }
 
     /// Background execution task — runs V8 on the blocking pool with timeout.
-    #[allow(clippy::too_many_arguments)]
+    
     async fn execute_in_background(
         &self,
         id: ExecutionId,
@@ -2302,8 +2108,7 @@ impl Engine {
             None => return,
         };
 
-        // Resolve and attach the fs overlay mount (independent of the heap).
-        let fs_mount = match self.build_fs_mount(&fs).await {
+                let fs_mount = match self.build_fs_mount(&fs).await {
             Ok(m) => m,
             Err(e) => {
                 registry.fail(&id, e);
@@ -2317,8 +2122,7 @@ impl Engine {
         let timeout = execution_timeout_secs.unwrap_or(self.execution_timeout_secs);
         let timeout_dur = Duration::from_secs(timeout);
 
-        // Bound concurrent V8 executions to avoid OS thread exhaustion.
-        let permit = match self.v8_semaphore.acquire().await {
+                let permit = match self.v8_semaphore.acquire().await {
             Ok(p) => p,
             Err(_) => {
                 registry.fail(&id, "V8 semaphore closed".to_string());
@@ -2330,8 +2134,7 @@ impl Engine {
 
         match &self.heap_storage {
             None => {
-                // Stateless mode
-                let ih = isolate_handle.clone();
+                                let ih = isolate_handle.clone();
                 let wasm = self.wasm_modules.clone();
                 let wasm_default = self.wasm_default_max_bytes;
                 let hardening = self.hardening;
@@ -2343,9 +2146,7 @@ impl Engine {
                 let mlc = self.module_loader_config.clone();
                 let mc = self.mcp_client_manager.as_ref().map(|m| mcp_client::McpConfig { client_manager: (**m).clone(), policy_chain: self.mcp_tools_policy_chain.clone() });
                 let fm = fs_mount.clone();
-                // Cloned for the post-run session-log entry, since `code` is
-                // moved into the spawn_blocking closure below.
-                let code_for_log = code.clone();
+                                                let code_for_log = code.clone();
                 let mut join_handle = tokio::task::spawn_blocking(move || {
                     execute_stateless(&code, ExecutionConfig::new(max_bytes)
                         .isolate_handle(ih)
@@ -2362,13 +2163,11 @@ impl Engine {
                         .maybe_mcp_config(mc.as_ref()))
                 });
 
-                // Publish isolate handle for cancellation once it's available.
-                let ih_clone = isolate_handle.clone();
+                                let ih_clone = isolate_handle.clone();
                 let reg_clone = registry.clone();
                 let id_clone = id.clone();
                 tokio::spawn(async move {
-                    // Poll briefly for handle to become available.
-                    for _ in 0..100 {
+                                        for _ in 0..100 {
                         tokio::time::sleep(Duration::from_millis(5)).await;
                         if let Some(h) = ih_clone.lock().unwrap().as_ref() {
                             reg_clone.set_isolate_handle(&id_clone, h.clone());
@@ -2397,18 +2196,10 @@ impl Engine {
 
                 match result {
                     Ok(js_result) => {
-                        // Flush and publish the fs snapshot id *before* marking
-                        // the run complete, so a client that stops polling on the
-                        // first terminal status cannot miss it. A flush failure
-                        // fails the run rather than reporting lost fs changes.
-                        match self.push_mount(&fs_mount).await {
+                                                                                                                        match self.push_mount(&fs_mount).await {
                             Ok(output_fs) => {
                                 registry.set_fs(&id, output_fs.clone());
-                                // Record the resulting fs snapshot per session so a
-                                // later run in the same session resumes it. This is
-                                // what gives fs-only (heap-off) engines per-session
-                                // filesystem persistence; no heap fields are set.
-                                if let (Some(session_name), Some(log)) =
+                                                                                                                                                                if let (Some(session_name), Some(log)) =
                                     (&session, &self.session_log)
                                 {
                                     let entry = SessionLogEntry {
@@ -2432,8 +2223,7 @@ impl Engine {
                 }
             }
             Some(storage) => {
-                // Stateful mode
-                let code_for_log = code.clone();
+                                let code_for_log = code.clone();
                 let ih = isolate_handle.clone();
                 let wasm = self.wasm_modules.clone();
                 let wasm_default = self.wasm_default_max_bytes;
@@ -2465,8 +2255,7 @@ impl Engine {
                         .maybe_mcp_config(mc.as_ref()))
                 });
 
-                // Publish isolate handle for cancellation.
-                let ih_clone = isolate_handle.clone();
+                                let ih_clone = isolate_handle.clone();
                 let reg_clone = registry.clone();
                 let id_clone = id.clone();
                 tokio::spawn(async move {
@@ -2503,11 +2292,7 @@ impl Engine {
                             return;
                         }
 
-                        // Record the resulting fs snapshot CA id independently of
-                        // the heap. Does not advance any label. A flush failure
-                        // on an attached mount fails the run rather than reporting
-                        // it complete with the filesystem changes lost.
-                        let output_fs = match self.push_mount(&fs_mount).await {
+                                                                                                                        let output_fs = match self.push_mount(&fs_mount).await {
                             Ok(v) => v,
                             Err(e) => {
                                 registry.fail(&id, e);
@@ -2546,8 +2331,7 @@ impl Engine {
         drop(permit);
     }
 
-    // ── Query / cancel methods ───────────────────────────────────────────
-
+    
     /// Get execution status and result.
     pub fn get_execution(&self, id: &str) -> Result<ExecutionInfo, String> {
         let registry = self.execution_registry.as_ref()

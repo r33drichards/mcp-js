@@ -55,8 +55,7 @@ async fn stream_and_verify(total: usize, seed: u64, tag: &str) {
     let dir = temp_dir(tag);
     let store = FsStore::new(Arc::new(FileHeapStorage::new(&dir)));
 
-    // ── Write: generate + feed in bounded blocks; never hold the whole file. ──
-    let mut writer = FileWriter::new(store.clone());
+        let mut writer = FileWriter::new(store.clone());
     let mut source = ByteGen::new(seed);
     let mut block = vec![0u8; 1024 * 1024];
     let mut remaining = total;
@@ -74,8 +73,7 @@ async fn stream_and_verify(total: usize, seed: u64, tag: &str) {
     };
     assert!(hashes.len() > 1, "a large file should span many chunks");
 
-    // ── Verify: regenerate the canonical stream and compare chunk by chunk. ──
-    let mut vgen = ByteGen::new(seed);
+        let mut vgen = ByteGen::new(seed);
     let mut expected = vec![0u8; MAX as usize];
     let mut seen = 0usize;
     for h in &hashes {
@@ -89,28 +87,25 @@ async fn stream_and_verify(total: usize, seed: u64, tag: &str) {
     }
     assert_eq!(seen, total, "chunks must cover the whole file exactly");
 
-    // The store really spilled to disk (it is a FileHeapStorage), so the bytes
-    // never lived solely in memory.
-    assert!(store.blobs().list().await.unwrap().len() >= hashes.len());
+            assert!(store.blobs().list().await.unwrap().len() >= hashes.len());
 
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+"multi_thread"
 async fn large_file_streams_to_disk_and_round_trips() {
     stream_and_verify(48 * 1024 * 1024, 0xA5A5_1234, "48m").await;
 }
 
 /// A large file written then mounted and re-read through the overlay (push/pull)
 /// — the snapshot path end to end, still disk-backed.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+"multi_thread"
 async fn large_file_pushes_and_pulls_through_a_mount() {
     let dir = temp_dir("mount");
     let store = FsStore::new(Arc::new(FileHeapStorage::new(&dir)));
     let total = 24 * 1024 * 1024;
 
-    // Build the file by streaming into a FileWriter, then install it in a mount.
-    let mut writer = FileWriter::new(store.clone());
+        let mut writer = FileWriter::new(store.clone());
     let mut source = ByteGen::new(0x77);
     let mut block = vec![0u8; 1024 * 1024];
     let mut remaining = total;
@@ -126,9 +121,7 @@ async fn large_file_pushes_and_pulls_through_a_mount() {
     mount.put_entry("big/file.bin".as_ref(), entry);
     let root = mount.push().await.unwrap();
 
-    // Re-mount the pushed snapshot and read the file back; compare to a fresh
-    // regeneration of the same stream.
-    let m2 = SessionMount::pull(store.clone(), root).await.unwrap();
+            let m2 = SessionMount::pull(store.clone(), root).await.unwrap();
     let got = m2.read("big/file.bin".as_ref()).await.unwrap();
     assert_eq!(got.len(), total);
     let mut vgen = ByteGen::new(0x77);
@@ -139,12 +132,11 @@ async fn large_file_pushes_and_pulls_through_a_mount() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "multi-GB/slow; run with --ignored (size via MCP_FS_LARGE_BYTES)"]
+"multi_thread"
+"multi-GB/slow; run with --ignored (size via MCP_FS_LARGE_BYTES)"
 async fn huge_file_streams_with_bounded_memory() {
     let total: usize = std::env::var("MCP_FS_LARGE_BYTES")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(1024 * 1024 * 1024); // 1 GiB default
-    stream_and_verify(total, 0xC0FFEE, "huge").await;
+        .unwrap_or(1024 * 1024 * 1024);     stream_and_verify(total, 0xC0FFEE, "huge").await;
 }

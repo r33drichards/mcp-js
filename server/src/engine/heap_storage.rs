@@ -7,7 +7,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 
-#[async_trait]
+
 pub trait HeapStorage: Send + Sync + 'static {
     async fn put(&self, name: &str, data: &[u8]) -> Result<(), String>;
     async fn get(&self, name: &str) -> Result<Vec<u8>, String>;
@@ -44,7 +44,7 @@ pub trait HeapStorage: Send + Sync + 'static {
 /// In-memory blob backend. Primarily for tests and the `FsStore::in_memory`
 /// constructor, but kept in the normal build so integration test crates (which
 /// compile the lib without `--cfg test`) can use it.
-#[derive(Clone, Default)]
+
 pub struct MemoryHeapStorage {
     map: Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>>,
 }
@@ -55,7 +55,7 @@ impl MemoryHeapStorage {
     }
 }
 
-#[async_trait]
+
 impl HeapStorage for MemoryHeapStorage {
     async fn put(&self, name: &str, data: &[u8]) -> Result<(), String> {
         self.map
@@ -83,11 +83,10 @@ impl HeapStorage for MemoryHeapStorage {
         Ok(self.map.lock().unwrap().contains_key(name))
     }
     async fn warm(&self, _name: &str) -> Result<(), String> {
-        Ok(()) // already local
-    }
+        Ok(())     }
 }
 
-#[derive(Clone)]
+
 pub struct FileHeapStorage {
     dir: PathBuf,
 }
@@ -101,7 +100,7 @@ impl FileHeapStorage {
     }
 }
 
-#[async_trait]
+
 impl HeapStorage for FileHeapStorage {
     async fn put(&self, name: &str, data: &[u8]) -> Result<(), String> {
         let path = self.dir.join(name);
@@ -115,8 +114,7 @@ impl HeapStorage for FileHeapStorage {
         let mut out = Vec::new();
         let entries = match std::fs::read_dir(&self.dir) {
             Ok(e) => e,
-            // A backend dir that was never written to has nothing to list.
-            Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+                        Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
             Err(e) => return Err(e.to_string()),
         };
         for entry in entries {
@@ -141,20 +139,14 @@ impl HeapStorage for FileHeapStorage {
         Ok(self.dir.join(name).exists())
     }
     async fn warm(&self, _name: &str) -> Result<(), String> {
-        Ok(()) // this backend IS the local layer
-    }
+        Ok(())     }
 }
 
-#[derive(Clone)]
+
 pub struct S3HeapStorage {
     bucket: String,
     client: Arc<S3Client>,
-    // The runtime the S3 client (and its hyper connection pool / IO reactor)
-    // was created on. S3 calls are dispatched here even when invoked from
-    // another runtime — e.g. the isolate's current-thread runtime during an
-    // fs-snapshot blob fetch. Awaiting the aws future directly on a different
-    // runtime hangs because the connection's IO reactor lives on this one.
-    runtime: tokio::runtime::Handle,
+                        runtime: tokio::runtime::Handle,
 }
 
 impl S3HeapStorage {
@@ -164,19 +156,13 @@ impl S3HeapStorage {
             .await;
         let mut s3_builder = aws_sdk_s3::config::Builder::from(&config);
 
-        // Point at an S3-compatible store (MinIO, etc.) when a custom endpoint
-        // is configured. The modern SDK also honors AWS_ENDPOINT_URL on its own,
-        // but set it explicitly so behavior is independent of loader specifics.
-        if let Ok(endpoint) = std::env::var("AWS_ENDPOINT_URL") {
+                                if let Ok(endpoint) = std::env::var("AWS_ENDPOINT_URL") {
             if !endpoint.is_empty() {
                 s3_builder = s3_builder.endpoint_url(endpoint);
             }
         }
 
-        // Path-style addressing — required by most S3-compatible stores
-        // (MinIO and friends serve `host/bucket/key`, not `bucket.host/key`).
-        // Real AWS uses virtual-hosted style, so this stays off unless asked.
-        let force_path_style = std::env::var("AWS_S3_FORCE_PATH_STYLE")
+                                let force_path_style = std::env::var("AWS_S3_FORCE_PATH_STYLE")
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
         if force_path_style {
@@ -196,9 +182,7 @@ impl S3HeapStorage {
         let bucket = self.bucket.clone();
         let name = name.to_string();
         let data = data.to_vec();
-        // Run on the S3 client's own runtime (see `runtime` field), awaiting the
-        // JoinHandle — which is safe to poll from any runtime.
-        self.runtime
+                        self.runtime
             .spawn(async move {
                 client
                     .put_object()
@@ -235,7 +219,7 @@ impl S3HeapStorage {
     }
 }
 
-#[async_trait]
+
 impl HeapStorage for S3HeapStorage {
     async fn put(&self, name: &str, data: &[u8]) -> Result<(), String> {
         self.put_blocking(name, data).await
@@ -254,7 +238,7 @@ pub const DEFAULT_CACHE_CAPACITY_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 /// FIFO by insertion (a simple, allocation-free approximation of LRU); the
 /// primary remains the source of truth, so an evicted blob is simply re-fetched
 /// and re-cached on the next `get`.
-#[derive(Default)]
+
 struct CacheBound {
     sizes: HashMap<String, u64>,
     order: VecDeque<String>,
@@ -275,8 +259,7 @@ impl CacheBound {
 
         let mut evicted = Vec::new();
         while self.total > self.cap {
-            // Never evict the entry we just recorded (it is at the back).
-            if self.order.len() <= 1 {
+                        if self.order.len() <= 1 {
                 break;
             }
             let Some(victim) = self.order.pop_front() else { break };
@@ -304,7 +287,7 @@ impl CacheBound {
 /// On get: checks the FS cache first; falls back to the primary and caches the
 /// result locally. When the cache exceeds its capacity, the oldest entries are
 /// evicted from local disk (the primary is untouched, so reads still succeed).
-#[derive(Clone)]
+
 pub struct WriteThroughCacheHeapStorage<P: HeapStorage + Clone> {
     primary: P,
     cache: FileHeapStorage,
@@ -338,24 +321,20 @@ impl<P: HeapStorage + Clone> WriteThroughCacheHeapStorage<P> {
     }
 }
 
-#[async_trait]
+
 impl<P: HeapStorage + Clone> HeapStorage for WriteThroughCacheHeapStorage<P> {
     async fn put(&self, name: &str, data: &[u8]) -> Result<(), String> {
-        // Write-through: write to both FS cache and primary
-        self.cache.put(name, data).await?;
+                self.cache.put(name, data).await?;
         self.primary.put(name, data).await?;
         self.note_cached(name, data.len() as u64).await;
         Ok(())
     }
     async fn get(&self, name: &str) -> Result<Vec<u8>, String> {
-        // Check FS cache first
-        if let Ok(data) = self.cache.get(name).await {
+                if let Ok(data) = self.cache.get(name).await {
             return Ok(data);
         }
-        // Cache miss: fetch from primary and populate cache
-        let data = self.primary.get(name).await?;
-        // Best-effort cache population; don't fail if local write fails
-        if let Err(e) = self.cache.put(name, &data).await {
+                let data = self.primary.get(name).await?;
+                if let Err(e) = self.cache.put(name, &data).await {
             tracing::warn!("Failed to populate FS cache for {}: {}", name, e);
         } else {
             self.note_cached(name, data.len() as u64).await;
@@ -366,8 +345,7 @@ impl<P: HeapStorage + Clone> HeapStorage for WriteThroughCacheHeapStorage<P> {
         self.primary.list().await
     }
     async fn delete(&self, name: &str) -> Result<(), String> {
-        // Remove from both layers; the cache delete is best-effort.
-        self.bound.lock().unwrap().forget(name);
+                self.bound.lock().unwrap().forget(name);
         let _ = self.cache.delete(name).await;
         self.primary.delete(name).await
     }
@@ -375,13 +353,10 @@ impl<P: HeapStorage + Clone> HeapStorage for WriteThroughCacheHeapStorage<P> {
         self.cache.contains(name).await
     }
     async fn warm(&self, name: &str) -> Result<(), String> {
-        // Already cached locally — nothing to fetch.
-        if self.cache.contains(name).await.unwrap_or(false) {
+                if self.cache.contains(name).await.unwrap_or(false) {
             return Ok(());
         }
-        // Pull from the primary (e.g. S3) and populate the local cache, so a
-        // later get() served from the cache never crosses to a remote backend.
-        let data = self.primary.get(name).await?;
+                        let data = self.primary.get(name).await?;
         if let Err(e) = self.cache.put(name, &data).await {
             tracing::warn!("Failed to warm FS cache for {}: {}", name, e);
         } else {
@@ -394,7 +369,7 @@ impl<P: HeapStorage + Clone> HeapStorage for WriteThroughCacheHeapStorage<P> {
 /// S3 with local filesystem write-through cache.
 pub type S3WithFsCacheHeapStorage = WriteThroughCacheHeapStorage<S3HeapStorage>;
 
-#[derive(Clone)]
+
 pub enum AnyHeapStorage {
     File(FileHeapStorage),
     S3(S3HeapStorage),
@@ -404,7 +379,7 @@ pub enum AnyHeapStorage {
 
 
 
-#[async_trait::async_trait]
+
 impl HeapStorage for AnyHeapStorage {
     async fn put(&self, name: &str, data: &[u8]) -> Result<(), String> {
         match self {

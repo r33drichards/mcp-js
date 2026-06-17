@@ -12,26 +12,25 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
-// ── Remote (OPA REST API) evaluator ──────────────────────────────────────
 
 /// Async OPA client that queries a remote OPA server via its REST API.
-#[derive(Clone, Debug)]
+
 pub struct OpaClient {
     base_url: String,
     client: reqwest::Client,
 }
 
-#[derive(Serialize)]
+
 struct OpaRequest<T: Serialize> {
     input: T,
 }
 
-#[derive(Deserialize)]
+
 struct OpaResponse {
     result: Option<OpaResultBody>,
 }
 
-#[derive(Deserialize)]
+
 struct OpaResultBody {
     allow: Option<bool>,
 }
@@ -79,7 +78,7 @@ impl OpaClient {
 }
 
 /// Wraps an [`OpaClient`] + policy path for remote policy evaluation.
-#[derive(Debug)]
+
 pub struct RemotePolicyEvaluator {
     client: OpaClient,
     policy_path: String,
@@ -98,11 +97,10 @@ impl RemotePolicyEvaluator {
     }
 }
 
-// ── Local (regorus) evaluator ────────────────────────────────────────────
 
 /// Evaluates Rego policies from local files using the `regorus` engine.
 /// The engine is wrapped in a `Mutex` because `regorus::Engine` is `!Sync`.
-#[derive(Debug)]
+
 pub struct LocalPolicyEvaluator {
     engine: Mutex<regorus::Engine>,
     eval_rule: String,
@@ -160,9 +158,7 @@ impl LocalPolicyEvaluator {
         let input_clone = input.clone();
         let eval_rule = self.eval_rule.clone();
 
-        // regorus::Engine is !Send, so we must evaluate under the lock
-        // synchronously. The regorus evaluation is CPU-bound and fast.
-        let mut engine = self.engine.lock().map_err(|e| format!("Policy engine lock poisoned: {}", e))?;
+                        let mut engine = self.engine.lock().map_err(|e| format!("Policy engine lock poisoned: {}", e))?;
 
         let regorus_input = regorus::Value::from(input_clone);
         engine.set_input(regorus_input);
@@ -177,11 +173,10 @@ impl LocalPolicyEvaluator {
     }
 }
 
-// ── PolicyEvaluatorKind ──────────────────────────────────────────────────
 
 /// Enum dispatch for policy evaluators, avoiding `async_trait` boxing which
 /// can conflict with deno_core's op driver `RefCell` polling internals.
-#[derive(Debug)]
+
 pub enum PolicyEvaluatorKind {
     Remote(RemotePolicyEvaluator),
     Local(LocalPolicyEvaluator),
@@ -196,11 +191,10 @@ impl PolicyEvaluatorKind {
     }
 }
 
-// ── PolicyChain ──────────────────────────────────────────────────────────
 
 /// How multiple policy evaluators are composed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
+
+"lowercase"
 pub enum EvalMode {
     /// All evaluators must return `true` (AND logic). Default.
     All,
@@ -215,7 +209,7 @@ impl Default for EvalMode {
 }
 
 /// An ordered list of policy evaluators with a configurable [`EvalMode`].
-#[derive(Debug)]
+
 pub struct PolicyChain {
     evaluators: Vec<PolicyEvaluatorKind>,
     mode: EvalMode,
@@ -254,10 +248,9 @@ impl PolicyChain {
     }
 }
 
-// ── JSON configuration types ─────────────────────────────────────────────
 
 /// Top-level `--policies-json` configuration. Keys are operation names.
-#[derive(Debug, Clone, Deserialize)]
+
 pub struct PoliciesConfig {
     /// Policy chain for `fetch()` operations.
     pub fetch: Option<OperationPolicies>,
@@ -279,17 +272,17 @@ pub struct PoliciesConfig {
 }
 
 /// Per-operation policy configuration.
-#[derive(Debug, Clone, Deserialize)]
+
 pub struct OperationPolicies {
     /// Evaluation mode: `"all"` (default) or `"any"`.
-    #[serde(default)]
+    
     pub mode: EvalMode,
     /// Ordered list of policy sources.
     pub policies: Vec<PolicySource>,
 }
 
 /// A single policy source — either a remote OPA server or a local Rego file/directory.
-#[derive(Debug, Clone, Deserialize)]
+
 pub struct PolicySource {
     /// URL of the policy source:
     /// - `http://` / `https://` → remote OPA REST API
@@ -351,9 +344,8 @@ pub fn build_policy_chain(
     Ok(PolicyChain::new(evaluators, op_policies.mode))
 }
 
-// ── Tests ────────────────────────────────────────────────────────────────
 
-#[cfg(test)]
+
 mod tests {
     use super::*;
     use std::io::Write;
@@ -391,9 +383,8 @@ allow if {
         path
     }
 
-    // ── LocalPolicyEvaluator tests ───────────────────────────────────────
-
-    #[tokio::test]
+    
+    
     async fn test_local_evaluator_allow() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_rego_file(dir.path(), "allow.rego", allow_rego());
@@ -403,7 +394,7 @@ allow if {
         assert!(eval.evaluate_policy(&input).unwrap());
     }
 
-    #[tokio::test]
+    
     async fn test_local_evaluator_deny() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_rego_file(dir.path(), "deny.rego", deny_rego());
@@ -413,7 +404,7 @@ allow if {
         assert!(!eval.evaluate_policy(&input).unwrap());
     }
 
-    #[tokio::test]
+    
     async fn test_local_evaluator_conditional() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_rego_file(dir.path(), "cond.rego", conditional_rego());
@@ -427,11 +418,10 @@ allow if {
         assert!(!eval.evaluate_policy(&post_input).unwrap());
     }
 
-    #[tokio::test]
+    
     async fn test_local_evaluator_from_directory() {
         let dir = tempfile::tempdir().unwrap();
-        // Two policies in the same package — rules combine.
-        write_rego_file(dir.path(), "a_base.rego", r#"
+                write_rego_file(dir.path(), "a_base.rego", r#"
 package mcp.test
 default allow = false
 allow if { input.ok == true }
@@ -440,8 +430,7 @@ allow if { input.ok == true }
 package mcp.test
 allow if { input.admin == true }
 "#);
-        // Non-rego file should be ignored.
-        write_rego_file(dir.path(), "notes.txt", "not a policy");
+                write_rego_file(dir.path(), "notes.txt", "not a policy");
 
         let eval = LocalPolicyEvaluator::from_directory(dir.path(), "data.mcp.test.allow".to_string()).unwrap();
 
@@ -455,7 +444,7 @@ allow if { input.admin == true }
         assert!(!eval.evaluate_policy(&denied_input).unwrap());
     }
 
-    #[tokio::test]
+    
     async fn test_local_evaluator_empty_dir_errors() {
         let dir = tempfile::tempdir().unwrap();
         let result = LocalPolicyEvaluator::from_directory(dir.path(), "data.mcp.test.allow".to_string());
@@ -463,9 +452,8 @@ allow if { input.admin == true }
         assert!(result.unwrap_err().contains("No .rego files"));
     }
 
-    // ── PolicyChain tests ────────────────────────────────────────────────
-
-    #[tokio::test]
+    
+    
     async fn test_chain_all_mode_all_allow() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_rego_file(dir.path(), "allow.rego", allow_rego());
@@ -478,7 +466,7 @@ allow if { input.admin == true }
         assert!(chain.evaluate(&serde_json::json!({})).await.unwrap());
     }
 
-    #[tokio::test]
+    
     async fn test_chain_all_mode_one_denies() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_rego_file(dir.path(), "deny.rego", deny_rego());
@@ -491,7 +479,7 @@ allow if { input.admin == true }
         assert!(!chain.evaluate(&serde_json::json!({})).await.unwrap());
     }
 
-    #[tokio::test]
+    
     async fn test_chain_any_mode() {
         let dir = tempfile::tempdir().unwrap();
         let allow_path = write_rego_file(dir.path(), "allow.rego", allow_rego());
@@ -506,7 +494,7 @@ allow if { input.admin == true }
         assert!(chain.evaluate(&serde_json::json!({})).await.unwrap());
     }
 
-    #[tokio::test]
+    
     async fn test_chain_any_mode_all_deny() {
         let dir = tempfile::tempdir().unwrap();
         let path1 = write_rego_file(dir.path(), "deny1.rego", deny_rego());
@@ -521,7 +509,7 @@ allow if { input.admin == true }
         assert!(!chain.evaluate(&serde_json::json!({})).await.unwrap());
     }
 
-    #[tokio::test]
+    
     async fn test_chain_empty_allows() {
         let chain = PolicyChain::new(vec![], EvalMode::All);
         assert!(chain.evaluate(&serde_json::json!({})).await.unwrap());
@@ -530,9 +518,8 @@ allow if { input.admin == true }
         assert!(chain.evaluate(&serde_json::json!({})).await.unwrap());
     }
 
-    // ── build_policy_chain tests ─────────────────────────────────────────
-
-    #[test]
+    
+    
     fn test_build_chain_file_url() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_rego_file(dir.path(), "test.rego", allow_rego());
@@ -549,7 +536,7 @@ allow if { input.admin == true }
         assert_eq!(chain.evaluators.len(), 1);
     }
 
-    #[test]
+    
     fn test_build_chain_directory_url() {
         let dir = tempfile::tempdir().unwrap();
         write_rego_file(dir.path(), "policy.rego", allow_rego());
@@ -566,7 +553,7 @@ allow if { input.admin == true }
         assert_eq!(chain.evaluators.len(), 1);
     }
 
-    #[test]
+    
     fn test_build_chain_remote_url() {
         let op = OperationPolicies {
             mode: EvalMode::Any,
@@ -581,7 +568,7 @@ allow if { input.admin == true }
         assert_eq!(chain.mode, EvalMode::Any);
     }
 
-    #[test]
+    
     fn test_build_chain_invalid_scheme() {
         let op = OperationPolicies {
             mode: EvalMode::All,
@@ -596,9 +583,8 @@ allow if { input.admin == true }
         assert!(result.unwrap_err().contains("Unsupported policy URL scheme"));
     }
 
-    // ── PoliciesConfig deserialization ────────────────────────────────────
-
-    #[test]
+    
+    
     fn test_policies_config_deserialize() {
         let json = r#"{
             "fetch": {
@@ -628,7 +614,7 @@ allow if { input.admin == true }
         assert_eq!(modules.policies[0].rule.as_deref(), Some("data.mcp.modules.allow"));
     }
 
-    #[test]
+    
     fn test_policies_config_defaults() {
         let json = r#"{
             "fetch": {
@@ -637,12 +623,11 @@ allow if { input.admin == true }
         }"#;
         let config: PoliciesConfig = serde_json::from_str(json).unwrap();
         let fetch = config.fetch.unwrap();
-        assert_eq!(fetch.mode, EvalMode::All); // default
-        assert!(config.modules.is_none());
+        assert_eq!(fetch.mode, EvalMode::All);         assert!(config.modules.is_none());
         assert!(config.mcp_tools.is_none());
     }
 
-    #[test]
+    
     fn test_policies_config_mcp_tools() {
         let json = r#"{
             "mcp_tools": {
@@ -662,9 +647,8 @@ allow if { input.admin == true }
         assert_eq!(mcp_tools.policies[0].rule.as_deref(), Some("data.mcp.tools.allow"));
     }
 
-    // ── Integration: local rego through build_policy_chain + evaluate ────
-
-    #[tokio::test]
+    
+    
     async fn test_local_chain_end_to_end() {
         let dir = tempfile::tempdir().unwrap();
         write_rego_file(dir.path(), "fetch.rego", conditional_rego());
@@ -674,8 +658,7 @@ allow if { input.admin == true }
             policies: vec![PolicySource {
                 url: format!("file://{}", dir.path().join("fetch.rego").display()),
                 policy_path: None,
-                rule: None, // will use default
-            }],
+                rule: None,             }],
         };
         let chain = build_policy_chain(&op, "mcp/fetch", "data.mcp.fetch.allow").unwrap();
 
@@ -686,8 +669,7 @@ allow if { input.admin == true }
         assert!(!chain.evaluate(&post_input).await.unwrap());
     }
 
-    // ── MCP tools policy tests ────────────────────────────────────────────
-
+    
     fn mcp_tools_rego() -> &'static str {
         r#"
 package mcp.tools
@@ -705,7 +687,7 @@ allow if {
 "#
     }
 
-    #[tokio::test]
+    
     async fn test_mcp_tools_policy_allow() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_rego_file(dir.path(), "mcp_tools.rego", mcp_tools_rego());
@@ -720,8 +702,7 @@ allow if {
         };
         let chain = build_policy_chain(&op, "mcp/tools", "data.mcp.tools.allow").unwrap();
 
-        // Allowed: math.add
-        let input = serde_json::json!({
+                let input = serde_json::json!({
             "operation": "mcp_call_tool",
             "server": "math",
             "tool": "add",
@@ -729,8 +710,7 @@ allow if {
         });
         assert!(chain.evaluate(&input).await.unwrap());
 
-        // Allowed: any tool on "utils" server
-        let input = serde_json::json!({
+                let input = serde_json::json!({
             "operation": "mcp_call_tool",
             "server": "utils",
             "tool": "anything",
@@ -739,7 +719,7 @@ allow if {
         assert!(chain.evaluate(&input).await.unwrap());
     }
 
-    #[tokio::test]
+    
     async fn test_mcp_tools_policy_deny() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_rego_file(dir.path(), "mcp_tools.rego", mcp_tools_rego());
@@ -754,8 +734,7 @@ allow if {
         };
         let chain = build_policy_chain(&op, "mcp/tools", "data.mcp.tools.allow").unwrap();
 
-        // Denied: math.subtract (only math.add is allowed)
-        let input = serde_json::json!({
+                let input = serde_json::json!({
             "operation": "mcp_call_tool",
             "server": "math",
             "tool": "subtract",
@@ -763,8 +742,7 @@ allow if {
         });
         assert!(!chain.evaluate(&input).await.unwrap());
 
-        // Denied: unknown server
-        let input = serde_json::json!({
+                let input = serde_json::json!({
             "operation": "mcp_call_tool",
             "server": "secret",
             "tool": "get_password",
@@ -773,10 +751,9 @@ allow if {
         assert!(!chain.evaluate(&input).await.unwrap());
     }
 
-    #[tokio::test]
+    
     async fn test_mcp_tools_policy_no_chain_allows_all() {
-        // Empty chain should allow all calls (permissive default).
-        let chain = PolicyChain::new(vec![], EvalMode::All);
+                let chain = PolicyChain::new(vec![], EvalMode::All);
         let input = serde_json::json!({
             "operation": "mcp_call_tool",
             "server": "anything",
@@ -785,7 +762,7 @@ allow if {
         });
         assert!(chain.evaluate(&input).await.unwrap());
     }
-    #[test]
+    
     fn test_policies_config_subprocess() {
         let json = r#"{
             "subprocess": {
@@ -806,7 +783,7 @@ allow if {
         assert_eq!(subprocess.policies[0].rule.as_deref(), Some("data.mcp.subprocess.allow"));
     }
 
-    #[test]
+    
     fn test_policies_config_run_js_file() {
         let json = r#"{
             "run_js_file": {
@@ -828,8 +805,7 @@ allow if {
         assert_eq!(run_js_file.policies[0].rule.as_deref(), Some("data.mcp.run_js_file.allow"));
     }
 
-    // ── Subprocess policy tests ──────────────────────────────────────────
-
+    
     fn subprocess_rego() -> &'static str {
         r#"
 package mcp.subprocess
@@ -848,7 +824,7 @@ allow if {
 "#
     }
 
-    #[tokio::test]
+    
     async fn test_subprocess_policy_allow() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_rego_file(dir.path(), "subprocess.rego", subprocess_rego());
@@ -863,16 +839,14 @@ allow if {
         };
         let chain = build_policy_chain(&op, "mcp/subprocess", "data.mcp.subprocess.allow").unwrap();
 
-        // Allowed: command_output for "echo"
-        let input = serde_json::json!({
+                let input = serde_json::json!({
             "operation": "command_output",
             "command": "echo",
             "args": ["hello"]
         });
         assert!(chain.evaluate(&input).await.unwrap());
 
-        // Allowed: exec with "echo hello"
-        let input = serde_json::json!({
+                let input = serde_json::json!({
             "operation": "exec",
             "command": "/bin/sh",
             "args": ["-c", "echo hello"]
@@ -880,7 +854,7 @@ allow if {
         assert!(chain.evaluate(&input).await.unwrap());
     }
 
-    #[tokio::test]
+    
     async fn test_subprocess_policy_deny() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_rego_file(dir.path(), "subprocess.rego", subprocess_rego());
@@ -895,16 +869,14 @@ allow if {
         };
         let chain = build_policy_chain(&op, "mcp/subprocess", "data.mcp.subprocess.allow").unwrap();
 
-        // Denied: command_output for "rm"
-        let input = serde_json::json!({
+                let input = serde_json::json!({
             "operation": "command_output",
             "command": "rm",
             "args": ["-rf", "/"]
         });
         assert!(!chain.evaluate(&input).await.unwrap());
 
-        // Denied: exec with "rm -rf /"
-        let input = serde_json::json!({
+                let input = serde_json::json!({
             "operation": "exec",
             "command": "/bin/sh",
             "args": ["-c", "rm -rf /"]

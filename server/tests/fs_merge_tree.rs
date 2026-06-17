@@ -29,21 +29,17 @@ async fn root_of(store: &FsStore, m: &Manifest) -> [u8; 32] {
     *store.put_manifest(m).await.unwrap().as_bytes()
 }
 
-#[tokio::test]
+
 async fn tree_merge_matches_flat_merge_for_random_inputs() {
     let store = FsStore::in_memory();
-    // Leaf paths spanning several directories (some nested) so the merge has
-    // real subtrees to prune or descend.
-    let paths = [
+            let paths = [
         "a/x", "a/y", "a/sub/p", "a/sub/q", "b/x", "b/y", "c", "d/deep/leaf",
     ];
-    // A small content alphabet, so "same content on both sides" happens often.
-    let contents: [&[u8]; 4] = [b"AAA", b"BBB", b"CCC", b"DDD"];
+        let contents: [&[u8]; 4] = [b"AAA", b"BBB", b"CCC", b"DDD"];
 
     let mut rng = Rng(0xDEADBEEFCAFEF00D);
 
-    // Pre-make the Entry for each (content) once.
-    let mut entry_for: BTreeMap<&[u8], Entry> = BTreeMap::new();
+        let mut entry_for: BTreeMap<&[u8], Entry> = BTreeMap::new();
     for c in contents {
         entry_for.insert(c, store.put_file(c).await.unwrap());
     }
@@ -51,8 +47,7 @@ async fn tree_merge_matches_flat_merge_for_random_inputs() {
     let make_manifest = |rng: &mut Rng, entry_for: &BTreeMap<&[u8], Entry>| -> Manifest {
         let mut m = Manifest::default();
         for p in paths {
-            // 0 => absent, else one of the contents
-            let pick = rng.next() % (contents.len() as u64 + 1);
+                        let pick = rng.next() % (contents.len() as u64 + 1);
             if pick > 0 {
                 let c = contents[(pick - 1) as usize];
                 m.entries.insert(PathBuf::from(p), entry_for[c].clone());
@@ -90,15 +85,13 @@ async fn tree_merge_matches_flat_merge_for_random_inputs() {
         .await
         .unwrap();
 
-        // Same conflicts (paths + each side's entry).
-        assert_eq!(
+                assert_eq!(
             sorted(outcome.conflicts.clone()),
             sorted(flat.conflicts.clone()),
             "conflicts diverged"
         );
 
-        // Same structurally-merged result: flatten the merged tree and compare.
-        let tree_merged = store
+                let tree_merged = store
             .get_manifest(&blake3::Hash::from_bytes(outcome.root))
             .await
             .unwrap();
@@ -108,15 +101,14 @@ async fn tree_merge_matches_flat_merge_for_random_inputs() {
 
 /// A merge that only touches one subtree must reuse the unchanged subtree's node
 /// verbatim — proof it was pruned, not rebuilt.
-#[tokio::test]
+
 async fn tree_merge_shares_unchanged_subtrees() {
     let store = FsStore::in_memory();
 
     let mk = |paths: &[(&str, &[u8])]| {
         let mut m = Manifest::default();
         for (p, c) in paths {
-            // Inline entry built inline to keep the helper sync-free below.
-            m.entries.insert(
+                        m.entries.insert(
                 PathBuf::from(*p),
                 Entry {
                     mode: 0o644,
@@ -148,8 +140,7 @@ async fn tree_merge_shares_unchanged_subtrees() {
     .unwrap();
     assert!(outcome.conflicts.is_empty(), "should merge cleanly");
 
-    // The untouched `b` subtree is the same node in base and in the merged tree.
-    let dir_hash = |root: [u8; 32], name: &str| {
+        let dir_hash = |root: [u8; 32], name: &str| {
         let store = store.clone();
         let name = name.to_string();
         async move {
@@ -166,8 +157,7 @@ async fn tree_merge_shares_unchanged_subtrees() {
         "unchanged subtree must be shared through the merge"
     );
 
-    // And the merge is correct: a/x from ours, a/y added from theirs.
-    let merged = store
+        let merged = store
         .get_manifest(&blake3::Hash::from_bytes(outcome.root))
         .await
         .unwrap();

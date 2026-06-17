@@ -37,7 +37,6 @@ fn check_message(message: Option<String>) -> Result<Option<String>, String> {
 const HEAD_TREE: &str = "fs_label_heads";
 const LOG_TREE: &str = "fs_label_log";
 
-// Replicated-KV key prefixes used in cluster mode (mirrors heap_tags style).
 const CL_HEAD_PREFIX: &str = "fl:head:";
 const CL_LOG_PREFIX: &str = "fl:log:";
 
@@ -61,7 +60,7 @@ fn from_hex(s: &str) -> Result<CaId, String> {
     Ok(out)
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+
 pub enum RefOp {
     Create,
     Push,
@@ -69,7 +68,7 @@ pub enum RefOp {
     Force,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+
 pub struct RefLogEntry {
     /// Unix timestamp (millis) when the move happened.
     pub at: i64,
@@ -79,11 +78,11 @@ pub struct RefLogEntry {
     /// Optional human note recorded with the move, like a commit message.
     /// `#[serde(default)]` keeps reflog entries written before this field
     /// existed deserializable.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    "Option::is_none"
     pub message: Option<String>,
 }
 
-#[derive(Clone)]
+
 pub struct LabelStore {
     db: sled::Db,
     /// Serializes read-compare-write across in-process callers so CAS is atomic.
@@ -202,10 +201,7 @@ impl LabelStore {
     ) -> Result<(), String> {
         let message = check_message(message)?;
         if let Some(cluster) = &self.cluster_node {
-            // CAS from "absent" (expected None) creates exclusively cluster-wide.
-            // The reflog entry rides along as an atomic companion write so the
-            // head and reflog can never diverge across a leader change.
-            let entry =
+                                                let entry =
                 RefLogEntry { at: Self::now(), from: None, to: head, op: RefOp::Create, message };
             let applied = cluster
                 .cas_with_or_forward(
@@ -262,9 +258,7 @@ impl LabelStore {
     ) -> Result<bool, String> {
         let message = check_message(message)?;
         if let Some(cluster) = &self.cluster_node {
-            // The reflog append is an atomic companion of the head CAS: it is
-            // committed in the same replicated entry iff the compare matches.
-            let entry =
+                                    let entry =
                 RefLogEntry { at: Self::now(), from: expect, to: new, op: RefOp::Push, message };
             let applied = cluster
                 .cas_with_or_forward(
@@ -309,10 +303,7 @@ impl LabelStore {
         let message = check_message(message)?;
         if let Some(cluster) = &self.cluster_node {
             let current = self.resolve(label).await?;
-            // Unconditional move: a blind put forwarded to the leader, with the
-            // reflog entry as an atomic companion write so the move is always
-            // recorded.
-            let entry = RefLogEntry {
+                                                let entry = RefLogEntry {
                 at: Self::now(),
                 from: current,
                 to: target,
@@ -349,8 +340,7 @@ impl LabelStore {
     pub async fn log(&self, label: &str) -> Result<Vec<RefLogEntry>, String> {
         if let Some(cluster) = &self.cluster_node {
             let mut out = Vec::new();
-            // scan_prefix returns entries sorted by key, i.e. by timestamp.
-            for (_k, v) in cluster.scan_prefix(&Self::cl_log_prefix(label))? {
+                        for (_k, v) in cluster.scan_prefix(&Self::cl_log_prefix(label))? {
                 out.push(serde_json::from_str(&v).map_err(|e| e.to_string())?);
             }
             return Ok(out);
@@ -379,9 +369,7 @@ impl LabelStore {
             return Ok(Vec::new());
         }
         if let Some(cluster) = &self.cluster_node {
-            // The replicated KV materializes the whole prefix scan; keep the
-            // tail so the result still honours `limit`.
-            let all = cluster.scan_prefix(&Self::cl_log_prefix(label))?;
+                                    let all = cluster.scan_prefix(&Self::cl_log_prefix(label))?;
             let start = all.len().saturating_sub(limit);
             let mut out = Vec::with_capacity(all.len() - start);
             for (_k, v) in &all[start..] {
@@ -391,9 +379,7 @@ impl LabelStore {
         }
         let logs = self.logs()?;
         let prefix = log_prefix(label);
-        // scan_prefix is double-ended: take the newest `limit` entries, then
-        // flip back to oldest-first to match `log`'s ordering.
-        let mut out = Vec::with_capacity(limit);
+                        let mut out = Vec::with_capacity(limit);
         for item in logs.scan_prefix(&prefix).rev() {
             let (_k, v) = item.map_err(|e| e.to_string())?;
             out.push(serde_json::from_slice(&v).map_err(|e| e.to_string())?);

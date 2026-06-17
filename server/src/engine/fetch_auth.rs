@@ -8,7 +8,7 @@ use reqwest::Client;
 use serde::Deserialize;
 use tokio::sync::Mutex;
 
-#[derive(Clone, PartialEq, Eq)]
+
 pub struct OAuthTokenSourceConfig {
     pub header: String,
     pub token_url: String,
@@ -31,7 +31,7 @@ impl std::fmt::Debug for OAuthTokenSourceConfig {
     }
 }
 
-#[derive(Clone)]
+
 pub struct OAuthClientCredentialsTokenSource {
     client: Client,
     config: OAuthTokenSourceConfig,
@@ -51,7 +51,7 @@ impl std::fmt::Debug for OAuthClientCredentialsTokenSource {
     }
 }
 
-#[derive(Clone, Debug)]
+
 struct CachedToken {
     access_token: String,
     token_type: String,
@@ -75,7 +75,7 @@ impl CachedToken {
     }
 }
 
-#[derive(Default)]
+
 struct TokenSourceState {
     cached_token: Option<CachedToken>,
     in_flight: Option<InFlightRequest>,
@@ -83,31 +83,31 @@ struct TokenSourceState {
     recent_failures: VecDeque<CompletedFailure>,
 }
 
-#[derive(Debug, Deserialize)]
+
 struct TokenEndpointResponse {
     access_token: String,
-    #[serde(default)]
+    
     token_type: Option<String>,
-    #[serde(default)]
+    
     expires_in: Option<u64>,
-    #[serde(default)]
+    
     refresh_token: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+
 struct JwtExpiryClaims {
     exp: u64,
 }
 
 type SharedTokenFuture = Shared<BoxFuture<'static, Result<CachedToken, String>>>;
 
-#[derive(Clone)]
+
 struct InFlightRequest {
     generation: u64,
     future: SharedTokenFuture,
 }
 
-#[derive(Clone)]
+
 struct CompletedFailure {
     generation: u64,
     error: String,
@@ -316,7 +316,7 @@ fn remember_failure(state: &mut TokenSourceState, generation: u64, error: String
         .push_back(CompletedFailure { generation, error });
 }
 
-#[derive(Clone, Debug)]
+
 enum TokenGrant {
     ClientCredentials,
     RefreshToken { refresh_token: String },
@@ -380,7 +380,7 @@ fn derive_expiry(access_token: &str, expires_in: Option<u64>) -> Result<SystemTi
         .ok_or_else(|| "token JWT exp overflowed system clock".to_string())
 }
 
-#[cfg(test)]
+
 mod tests {
     use super::*;
     use std::collections::{HashMap, VecDeque};
@@ -399,7 +399,7 @@ mod tests {
     use serde_json::{Value, json};
     use tokio::sync::Mutex;
 
-    #[derive(Clone, Debug, PartialEq, Eq)]
+    
     struct TokenRequestRecord {
         grant_type: String,
         client_id: String,
@@ -408,7 +408,7 @@ mod tests {
         scope: Option<String>,
     }
 
-    #[derive(Clone, Debug)]
+    
     struct TokenResponseSpec {
         status: StatusCode,
         body: Value,
@@ -438,7 +438,7 @@ mod tests {
         }
     }
 
-    #[derive(Clone)]
+    
     struct TokenServerState {
         responses: Arc<Mutex<VecDeque<TokenResponseSpec>>>,
         requests: Arc<Mutex<Vec<TokenRequestRecord>>>,
@@ -522,7 +522,7 @@ mod tests {
         }
     }
 
-    #[derive(Serialize)]
+    
     struct JwtClaims {
         exp: u64,
         sub: &'static str,
@@ -544,7 +544,7 @@ mod tests {
         .unwrap()
     }
 
-    #[tokio::test]
+    
     async fn authorization_header_value_reuses_cached_token_before_expiry() {
         let server = start_token_server(vec![TokenResponseSpec::success(json!({
             "access_token": "first-token",
@@ -570,7 +570,7 @@ mod tests {
         assert_eq!(requests[0].scope.as_deref(), Some("read:all"));
     }
 
-    #[tokio::test]
+    
     async fn authorization_header_value_uses_refresh_token_after_expiry() {
         let server = start_token_server(vec![
             TokenResponseSpec::success(json!({
@@ -611,7 +611,7 @@ mod tests {
         assert_eq!(requests[1].refresh_token.as_deref(), Some("refresh-1"));
     }
 
-    #[tokio::test]
+    
     async fn authorization_header_value_preserves_refresh_token_when_refresh_response_omits_it() {
         let server = start_token_server(vec![
             TokenResponseSpec::success(json!({
@@ -664,7 +664,7 @@ mod tests {
         assert_eq!(requests[2].refresh_token.as_deref(), Some("refresh-1"));
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    "multi_thread"
     async fn authorization_header_value_replays_shared_failure_without_retry_fan_out() {
         let server = start_token_server(vec![
             TokenResponseSpec::success(json!({
@@ -712,7 +712,7 @@ mod tests {
         assert_eq!(requests.len(), 2);
     }
 
-    #[tokio::test]
+    
     async fn authorization_header_value_reacquires_after_refresh_failure() {
         let server = start_token_server(vec![
             TokenResponseSpec::success(json!({
@@ -756,7 +756,7 @@ mod tests {
         assert_eq!(requests[2].grant_type, "client_credentials");
     }
 
-    #[tokio::test]
+    
     async fn authorization_header_value_uses_jwt_exp_when_expires_in_is_missing() {
         let jwt = jwt_with_exp(2);
         let server = start_token_server(vec![
@@ -789,7 +789,7 @@ mod tests {
         assert_eq!(requests[1].grant_type, "client_credentials");
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    "multi_thread"
     async fn authorization_header_value_coalesces_concurrent_reacquire_requests() {
         let server = start_token_server(vec![
             TokenResponseSpec::success(json!({
@@ -835,7 +835,7 @@ mod tests {
         assert_eq!(requests.len(), 2);
     }
 
-    #[tokio::test]
+    
     async fn stale_waiter_from_old_future_observes_newer_state_before_returning() {
         let source = OAuthClientCredentialsTokenSource::new(
             Client::new(),
@@ -901,7 +901,7 @@ mod tests {
         assert!(state.in_flight.is_some(), "newer in-flight future should remain");
     }
 
-    #[test]
+    
     fn oauth_token_source_debug_redacts_client_secret() {
         let config = OAuthTokenSourceConfig {
             header: "Authorization".to_string(),

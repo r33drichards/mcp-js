@@ -47,16 +47,15 @@ async fn run_and_wait(engine: &Engine, code: &str) -> Result<String, String> {
     Err("Execution did not complete within timeout".to_string())
 }
 
-// ── strip_typescript_types unit tests ────────────────────────────────────
 
-#[test]
+
 fn test_strip_plain_javascript_passthrough() {
     let js = "const x = 1 + 2; x;";
     let result = strip_typescript_types(js).unwrap();
     assert!(result.contains("1 + 2"), "Plain JS should pass through, got: {}", result);
 }
 
-#[test]
+
 fn test_strip_type_annotation() {
     let ts = "const x: number = 42; x;";
     let result = strip_typescript_types(ts).unwrap();
@@ -64,7 +63,7 @@ fn test_strip_type_annotation() {
     assert!(result.contains("42"), "Value should remain, got: {}", result);
 }
 
-#[test]
+
 fn test_strip_interface() {
     let ts = r#"interface Foo { bar: string; } const f: Foo = { bar: "hello" }; JSON.stringify(f);"#;
     let result = strip_typescript_types(ts).unwrap();
@@ -73,7 +72,7 @@ fn test_strip_interface() {
     assert!(result.contains("bar"), "Property name should remain, got: {}", result);
 }
 
-#[test]
+
 fn test_strip_function_parameter_types() {
     let ts = "function add(a: number, b: number): number { return a + b; }";
     let result = strip_typescript_types(ts).unwrap();
@@ -81,7 +80,7 @@ fn test_strip_function_parameter_types() {
     assert!(result.contains("return a + b"), "Function body should remain, got: {}", result);
 }
 
-#[test]
+
 fn test_strip_generics() {
     let ts = "function identity<T>(x: T): T { return x; }";
     let result = strip_typescript_types(ts).unwrap();
@@ -89,14 +88,14 @@ fn test_strip_generics() {
     assert!(result.contains("return x"), "Body should remain, got: {}", result);
 }
 
-#[test]
+
 fn test_strip_type_alias() {
     let ts = "type ID = string | number; const id: ID = 'abc'; id;";
     let result = strip_typescript_types(ts).unwrap();
     assert!(!result.contains("type ID"), "Type alias should be stripped, got: {}", result);
 }
 
-#[test]
+
 fn test_strip_as_expression() {
     let ts = "const x = (42 as number); x;";
     let result = strip_typescript_types(ts).unwrap();
@@ -104,22 +103,21 @@ fn test_strip_as_expression() {
     assert!(result.contains("42"), "Value should remain, got: {}", result);
 }
 
-#[test]
+
 fn test_strip_empty_input() {
     let result = strip_typescript_types("").unwrap();
     assert!(result.trim().is_empty(), "Empty input should produce empty output, got: {:?}", result);
 }
 
-#[test]
+
 fn test_strip_parse_error() {
     let bad = "function(";
     let result = strip_typescript_types(bad);
     assert!(result.is_err(), "Invalid syntax should return an error");
 }
 
-// ── Full pipeline tests (SWC strip → V8 execution) ──────────────────────
 
-#[tokio::test]
+
 async fn test_typescript_basic_types() {
     ensure_v8();
     let engine = create_test_engine();
@@ -127,7 +125,7 @@ async fn test_typescript_basic_types() {
     assert!(result.is_ok(), "Typed variable should execute, got: {:?}", result);
 }
 
-#[tokio::test]
+
 async fn test_typescript_function_with_types() {
     ensure_v8();
     let engine = create_test_engine();
@@ -135,7 +133,7 @@ async fn test_typescript_function_with_types() {
     assert!(result.is_ok(), "Typed function should execute, got: {:?}", result);
 }
 
-#[tokio::test]
+
 async fn test_typescript_arrow_function_with_types() {
     ensure_v8();
     let engine = create_test_engine();
@@ -143,7 +141,7 @@ async fn test_typescript_arrow_function_with_types() {
     assert!(result.is_ok(), "Typed arrow function should execute, got: {:?}", result);
 }
 
-#[tokio::test]
+
 async fn test_typescript_interface_and_object() {
     ensure_v8();
     let engine = create_test_engine();
@@ -161,7 +159,7 @@ async fn test_typescript_interface_and_object() {
     assert!(result.is_ok(), "Interface + typed object should execute, got: {:?}", result);
 }
 
-#[tokio::test]
+
 async fn test_typescript_generics_execution() {
     ensure_v8();
     let engine = create_test_engine();
@@ -175,7 +173,7 @@ async fn test_typescript_generics_execution() {
     assert!(result.is_ok(), "Generic function should execute, got: {:?}", result);
 }
 
-#[tokio::test]
+
 async fn test_typescript_type_alias_execution() {
     ensure_v8();
     let engine = create_test_engine();
@@ -190,7 +188,7 @@ async fn test_typescript_type_alias_execution() {
     assert!(result.is_ok(), "Type alias should execute, got: {:?}", result);
 }
 
-#[tokio::test]
+
 async fn test_typescript_enum_execution() {
     ensure_v8();
     let engine = create_test_engine();
@@ -209,7 +207,7 @@ async fn test_typescript_enum_execution() {
     assert!(result.is_ok(), "Enum should execute, got: {:?}", result);
 }
 
-#[tokio::test]
+
 async fn test_typescript_class_with_types() {
     ensure_v8();
     let engine = create_test_engine();
@@ -239,7 +237,7 @@ async fn test_typescript_class_with_types() {
     assert!(result.is_ok(), "Typed class should execute, got: {:?}", result);
 }
 
-#[tokio::test]
+
 async fn test_typescript_as_cast() {
     ensure_v8();
     let engine = create_test_engine();
@@ -247,7 +245,7 @@ async fn test_typescript_as_cast() {
     assert!(result.is_ok(), "'as' cast should execute, got: {:?}", result);
 }
 
-#[tokio::test]
+
 async fn test_plain_javascript_still_works() {
     ensure_v8();
     let engine = create_test_engine();

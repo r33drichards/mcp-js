@@ -1,10 +1,10 @@
 { pkgs, mcp-js, ... }:
 
 let
-  # ── Rego policy ──────────────────────────────────────────────────────
-  #
-  # Allow only GET requests to localhost:8080 under /allowed/.
-  # Everything else is denied.
+  
+  
+  
+  
 
   regoPolicy = pkgs.writeText "policy.rego" ''
     package mcp.fetch
@@ -19,7 +19,7 @@ let
     }
   '';
 
-  # ── Static JSON served by nginx ──────────────────────────────────────
+  
 
   staticFiles = pkgs.runCommand "test-static" {} ''
     mkdir -p $out/allowed $out/denied
@@ -35,7 +35,7 @@ in
     machine = { ... }: {
       imports = [ ../../nix/module.nix ];
 
-      # ── mcp-js server (stateless, with OPA) ──────────────────────────
+      
       services.mcp-js = {
         enable = true;
         package = mcp-js;
@@ -52,7 +52,7 @@ in
         };
       };
 
-      # ── OPA server ───────────────────────────────────────────────────
+      
       systemd.services.opa = {
         description = "Open Policy Agent";
         after = [ "network.target" ];
@@ -64,7 +64,7 @@ in
         };
       };
 
-      # ── nginx target server (port 8080) ──────────────────────────────
+      
       services.nginx = {
         enable = true;
         virtualHosts.target = {

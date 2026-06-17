@@ -29,7 +29,6 @@ fn ensure_v8() {
     });
 }
 
-// ── Mock echo server ─────────────────────────────────────────────────────
 
 /// Start a mock target server that echoes request info as JSON.
 async fn start_echo_mock() -> String {
@@ -64,7 +63,6 @@ async fn start_echo_mock() -> String {
     format!("http://127.0.0.1:{}", port)
 }
 
-// ── Helpers ──────────────────────────────────────────────────────────────
 
 fn write_rego(dir: &std::path::Path, name: &str, content: &str) -> std::path::PathBuf {
     let path = dir.join(name);
@@ -121,9 +119,8 @@ async fn run_fetch(engine: &Engine, url: &str, method: &str) -> Result<String, S
     Err("timeout waiting for execution".to_string())
 }
 
-// ── Tests ────────────────────────────────────────────────────────────────
 
-#[tokio::test]
+
 async fn test_local_rego_allows_get() {
     ensure_v8();
     let echo_url = start_echo_mock().await;
@@ -155,7 +152,7 @@ allow if {
     assert!(result.is_ok(), "GET should be allowed. Got: {:?}", result);
 }
 
-#[tokio::test]
+
 async fn test_local_rego_denies_post() {
     ensure_v8();
     let echo_url = start_echo_mock().await;
@@ -191,15 +188,12 @@ allow if {
     );
 }
 
-#[tokio::test]
+
 async fn test_local_rego_uses_existing_policy_file() {
-    // Uses the real policies/fetch.rego that ships with the project.
-    ensure_v8();
+        ensure_v8();
     let echo_url = start_echo_mock().await;
 
-    // The project's fetch.rego allows GET to certain domains, but
-    // 127.0.0.1 is NOT in the allowlist — so this should be denied.
-    let policy_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            let policy_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../policies/fetch.rego");
 
     if !policy_path.exists() {
@@ -220,33 +214,29 @@ async fn test_local_rego_uses_existing_policy_file() {
     );
     let engine = build_engine_with_chain(chain);
 
-    // 127.0.0.1 is not in the allowlist → denied
-    let result = run_fetch(&engine, &echo_url, "GET").await;
+        let result = run_fetch(&engine, &echo_url, "GET").await;
     assert!(result.is_err(), "127.0.0.1 should be denied by the real policy. Got: {:?}", result);
 }
 
-#[tokio::test]
+
 async fn test_policy_chain_all_mode_both_must_allow() {
     ensure_v8();
     let echo_url = start_echo_mock().await;
 
     let dir = tempfile::tempdir().unwrap();
-    // Policy 1: allows GET
-    write_rego(dir.path(), "get_only.rego", r#"
+        write_rego(dir.path(), "get_only.rego", r#"
 package mcp.fetch
 default allow = false
 allow if { input.method == "GET" }
 "#);
-    // Policy 2: denies everything (default allow = false, no rules)
-    let dir2 = tempfile::tempdir().unwrap();
+        let dir2 = tempfile::tempdir().unwrap();
     write_rego(dir2.path(), "deny_all.rego", r#"
 package mcp.fetch
 default allow = false
 "#);
 
     let op = OperationPolicies {
-        mode: EvalMode::All, // BOTH must allow
-        policies: vec![
+        mode: EvalMode::All,         policies: vec![
             PolicySource {
                 url: format!("file://{}", dir.path().join("get_only.rego").display()),
                 policy_path: None,
@@ -264,24 +254,21 @@ default allow = false
     );
     let engine = build_engine_with_chain(chain);
 
-    // First allows GET, second denies everything → denied
-    let result = run_fetch(&engine, &echo_url, "GET").await;
+        let result = run_fetch(&engine, &echo_url, "GET").await;
     assert!(result.is_err(), "ALL mode: should deny when second policy denies. Got: {:?}", result);
 }
 
-#[tokio::test]
+
 async fn test_policy_chain_any_mode_one_suffices() {
     ensure_v8();
     let echo_url = start_echo_mock().await;
 
     let dir = tempfile::tempdir().unwrap();
-    // Policy 1: denies everything
-    write_rego(dir.path(), "deny_all.rego", r#"
+        write_rego(dir.path(), "deny_all.rego", r#"
 package mcp.fetch
 default allow = false
 "#);
-    // Policy 2: allows GET
-    let dir2 = tempfile::tempdir().unwrap();
+        let dir2 = tempfile::tempdir().unwrap();
     write_rego(dir2.path(), "allow_get.rego", r#"
 package mcp.fetch
 default allow = false
@@ -289,8 +276,7 @@ allow if { input.method == "GET" }
 "#);
 
     let op = OperationPolicies {
-        mode: EvalMode::Any, // ANY can allow
-        policies: vec![
+        mode: EvalMode::Any,         policies: vec![
             PolicySource {
                 url: format!("file://{}", dir.path().join("deny_all.rego").display()),
                 policy_path: None,
@@ -308,23 +294,20 @@ allow if { input.method == "GET" }
     );
     let engine = build_engine_with_chain(chain);
 
-    // First denies, second allows GET → allowed (Any mode)
-    let result = run_fetch(&engine, &echo_url, "GET").await;
+        let result = run_fetch(&engine, &echo_url, "GET").await;
     assert!(result.is_ok(), "ANY mode: should allow when second policy allows. Got: {:?}", result);
 
-    // Both deny POST → denied
-    let result = run_fetch(&engine, &echo_url, "POST").await;
+        let result = run_fetch(&engine, &echo_url, "POST").await;
     assert!(result.is_err(), "ANY mode: should deny when all policies deny. Got: {:?}", result);
 }
 
-#[tokio::test]
+
 async fn test_directory_of_rego_files() {
     ensure_v8();
     let echo_url = start_echo_mock().await;
 
     let dir = tempfile::tempdir().unwrap();
-    // Two files in same package — rules combine (OR within same package)
-    write_rego(dir.path(), "a_get.rego", r#"
+        write_rego(dir.path(), "a_get.rego", r#"
 package mcp.fetch
 default allow = false
 allow if { input.method == "GET" }
@@ -347,11 +330,9 @@ allow if { input.method == "HEAD" }
     );
     let engine = build_engine_with_chain(chain);
 
-    // GET is allowed by a_get.rego
-    let result = run_fetch(&engine, &echo_url, "GET").await;
+        let result = run_fetch(&engine, &echo_url, "GET").await;
     assert!(result.is_ok(), "GET should be allowed by directory policy. Got: {:?}", result);
 
-    // POST is not allowed by either file
-    let result = run_fetch(&engine, &echo_url, "POST").await;
+        let result = run_fetch(&engine, &echo_url, "POST").await;
     assert!(result.is_err(), "POST should be denied by directory policy. Got: {:?}", result);
 }

@@ -17,7 +17,7 @@ use crate::engine::fs_store::{chunk_key, Content, FsStore};
 use crate::engine::fs_tree::tree_key;
 
 /// Which reflog entries count as GC roots.
-#[derive(Clone, Copy, Debug)]
+
 pub enum ReflogRetention {
     /// Every reflog entry is a root (nothing rolls out of reach).
     KeepAll,
@@ -26,7 +26,7 @@ pub enum ReflogRetention {
     KeepLast(usize),
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+
 pub struct GcStats {
     pub roots: usize,
     pub marked: usize,
@@ -41,8 +41,7 @@ pub async fn collect(
     labels: &LabelStore,
     retention: ReflogRetention,
 ) -> Result<GcStats, String> {
-    // ── Roots ────────────────────────────────────────────────────────────
-    let mut roots: HashSet<CaId> = HashSet::new();
+        let mut roots: HashSet<CaId> = HashSet::new();
     for (name, head) in labels.list().await? {
         roots.insert(head);
         let log = labels.log(&name).await?;
@@ -53,26 +52,20 @@ pub async fn collect(
                 &log[start..]
             }
         };
-        // Root on each retained entry's resulting snapshot (`to`). An entry's
-        // `from` is always some earlier entry's `to`, so including it would
-        // defeat retention pruning (a rolled-past id would never age out).
-        for entry in kept {
+                                for entry in kept {
             roots.insert(entry.to);
         }
     }
 
-    // ── Mark ─────────────────────────────────────────────────────────────
-    let mut marked: HashSet<String> = HashSet::new();
+        let mut marked: HashSet<String> = HashSet::new();
     for root in &roots {
         mark_tree(store, root, &mut marked).await?;
     }
 
-    // ── Sweep ────────────────────────────────────────────────────────────
-    let mut deleted = 0usize;
+        let mut deleted = 0usize;
     for key in store.blobs().list().await? {
         if !is_fs_blob(&key) {
-            continue; // never touch non-fs blobs in a shared backend
-        }
+            continue;         }
         if !marked.contains(&key) {
             store
                 .blobs()
@@ -103,8 +96,7 @@ async fn mark_tree(
     let mut stack: Vec<[u8; 32]> = vec![*id];
     while let Some(node_id) = stack.pop() {
         if !marked.insert(tree_key(&node_id)) {
-            continue; // already visited this (possibly shared) subtree
-        }
+            continue;         }
         let node = match store.get_node(&node_id).await {
             Ok(n) => n,
             Err(_) => continue,

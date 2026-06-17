@@ -16,7 +16,6 @@ use std::process::Stdio;
 use tokio::process::Command;
 use tokio::time::{sleep, timeout, Duration};
 
-// ── Server helper ────────────────────────────────────────────────────────
 
 struct HttpServer {
     child: Option<tokio::process::Child>,
@@ -68,10 +67,9 @@ fn find_available_port() -> u16 {
         .port()
 }
 
-// ── /api/version ─────────────────────────────────────────────────────────
 
 /// GET /api/version returns a JSON object with a non-empty version string.
-#[tokio::test]
+
 async fn test_version_returns_version_string() {
     let mut server = HttpServer::start().await.expect("server start");
     let client = Client::new();
@@ -88,14 +86,13 @@ async fn test_version_returns_version_string() {
     let version = body["version"].as_str().expect("version field missing");
     assert!(!version.is_empty(), "version should not be empty");
 
-    // Must be semver-ish: at least one dot
-    assert!(version.contains('.'), "version '{version}' does not look like semver");
+        assert!(version.contains('.'), "version '{version}' does not look like semver");
 
     server.stop().await;
 }
 
 /// The version returned by /api/version matches CARGO_PKG_VERSION.
-#[tokio::test]
+
 async fn test_version_matches_cargo_pkg_version() {
     let mut server = HttpServer::start().await.expect("server start");
     let client = Client::new();
@@ -116,10 +113,9 @@ async fn test_version_matches_cargo_pkg_version() {
     server.stop().await;
 }
 
-// ── /api/cli (index) ──────────────────────────────────────────────────────
 
 /// GET /api/cli returns a JSON object with version and an assets array.
-#[tokio::test]
+
 async fn test_cli_index_shape() {
     let mut server = HttpServer::start().await.expect("server start");
     let client = Client::new();
@@ -134,15 +130,13 @@ async fn test_cli_index_shape() {
 
     let body: serde_json::Value = resp.json().await.expect("parse JSON");
 
-    // Top-level shape
-    assert!(body["version"].is_string(), "missing version");
+        assert!(body["version"].is_string(), "missing version");
     assert!(body["assets"].is_array(), "missing assets");
 
     let assets = body["assets"].as_array().unwrap();
     assert!(!assets.is_empty(), "assets should not be empty");
 
-    // Every asset must have platform, url, and available fields
-    for asset in assets {
+        for asset in assets {
         let platform = asset["platform"].as_str().expect("asset missing platform");
         assert!(!platform.is_empty());
         assert!(asset["url"].is_string(), "asset {platform} missing url");
@@ -153,7 +147,7 @@ async fn test_cli_index_shape() {
 }
 
 /// The index covers all four expected platforms.
-#[tokio::test]
+
 async fn test_cli_index_covers_all_platforms() {
     let mut server = HttpServer::start().await.expect("server start");
     let client = Client::new();
@@ -182,7 +176,7 @@ async fn test_cli_index_covers_all_platforms() {
 }
 
 /// The version in /api/cli matches /api/version.
-#[tokio::test]
+
 async fn test_cli_index_version_matches_version_endpoint() {
     let mut server = HttpServer::start().await.expect("server start");
     let client = Client::new();
@@ -215,7 +209,7 @@ async fn test_cli_index_version_matches_version_endpoint() {
 }
 
 /// The url field in each asset points back to this server's /api/cli/{platform}.
-#[tokio::test]
+
 async fn test_cli_index_urls_point_to_this_server() {
     let mut server = HttpServer::start().await.expect("server start");
     let client = Client::new();
@@ -245,10 +239,9 @@ async fn test_cli_index_urls_point_to_this_server() {
     server.stop().await;
 }
 
-// ── /api/cli/{platform} ───────────────────────────────────────────────────
 
 /// GET /api/cli/{unknown-platform} returns 404 with an error JSON body.
-#[tokio::test]
+
 async fn test_cli_download_unknown_platform_returns_404() {
     let mut server = HttpServer::start().await.expect("server start");
     let client = Client::new();
@@ -267,8 +260,7 @@ async fn test_cli_download_unknown_platform_returns_404() {
         error.contains("windows-x86_64"),
         "error should mention the requested platform"
     );
-    // Should list valid platforms
-    assert!(error.contains("linux-x86_64"), "error should list valid platforms");
+        assert!(error.contains("linux-x86_64"), "error should list valid platforms");
 
     server.stop().await;
 }
@@ -277,7 +269,7 @@ async fn test_cli_download_unknown_platform_returns_404() {
 ///   - returns 200 with binary content (release builds with embedded CLI), or
 ///   - returns 404 with a helpful "not embedded" message (dev builds).
 /// Either outcome is acceptable; we assert the correct shape for each case.
-#[tokio::test]
+
 async fn test_cli_download_known_platform_returns_binary_or_helpful_404() {
     let mut server = HttpServer::start().await.expect("server start");
     let client = Client::new();
@@ -290,8 +282,7 @@ async fn test_cli_download_known_platform_returns_binary_or_helpful_404() {
 
     match resp.status().as_u16() {
         200 => {
-            // Release build: should be a real binary
-            let ct = resp
+                        let ct = resp
                 .headers()
                 .get("content-type")
                 .and_then(|v| v.to_str().ok())
@@ -314,12 +305,10 @@ async fn test_cli_download_known_platform_returns_binary_or_helpful_404() {
             let bytes = resp.bytes().await.expect("read body");
             assert!(!bytes.is_empty(), "binary should not be empty");
 
-            // ELF magic bytes for Linux binary: 0x7f 'E' 'L' 'F'
-            assert_eq!(&bytes[..4], b"\x7fELF", "expected ELF binary");
+                        assert_eq!(&bytes[..4], b"\x7fELF", "expected ELF binary");
         }
         404 => {
-            // Dev build: embedded binary not present
-            let body: serde_json::Value = resp.json().await.expect("parse 404 JSON");
+                        let body: serde_json::Value = resp.json().await.expect("parse 404 JSON");
             let error = body["error"].as_str().expect("error field");
             assert!(
                 error.contains("not embedded") || error.contains("MCP_V8_CLI"),
@@ -333,7 +322,7 @@ async fn test_cli_download_known_platform_returns_binary_or_helpful_404() {
 }
 
 /// The available flag in the index is consistent with the download endpoint.
-#[tokio::test]
+
 async fn test_cli_available_flag_consistent_with_download() {
     let mut server = HttpServer::start().await.expect("server start");
     let client = Client::new();
@@ -375,7 +364,6 @@ async fn test_cli_available_flag_consistent_with_download() {
     server.stop().await;
 }
 
-// ── Full E2E: download CLI from API, run it, check output ─────────────────
 
 /// Download the CLI binary from /api/cli/linux-x86_64, write it to a temp
 /// file, make it executable, then run:
@@ -389,21 +377,19 @@ async fn test_cli_available_flag_consistent_with_download() {
 /// embedded in the server build (dev/local builds). It is the definitive
 /// end-to-end test for the feature: the same binary that ships in the server
 /// is the one used to drive it.
-#[tokio::test]
+
 async fn test_downloaded_cli_exec_console_log_outputs_2() {
     let mut server = HttpServer::start().await.expect("server start");
     let client = Client::new();
 
-    // ── Step 1: download the CLI from the server ──────────────────────
-    let resp = client
+        let resp = client
         .get(format!("{}/api/cli/linux-x86_64", server.base_url))
         .send()
         .await
         .expect("GET /api/cli/linux-x86_64");
 
     if resp.status() == 404 {
-        // Dev build — binary not embedded; skip gracefully.
-        eprintln!(
+                eprintln!(
             "[SKIP] test_downloaded_cli_exec_console_log_outputs_2: \
              CLI not embedded in this build (set MCP_V8_CLI_LINUX_X86_64 at build time)"
         );
@@ -416,22 +402,20 @@ async fn test_downloaded_cli_exec_console_log_outputs_2() {
     let cli_bytes = resp.bytes().await.expect("read CLI binary");
     assert!(!cli_bytes.is_empty(), "downloaded CLI is empty");
 
-    // ── Step 2: write to a temp file and make executable ─────────────
-    let cli_path = std::env::temp_dir().join(format!(
+        let cli_path = std::env::temp_dir().join(format!(
         "mcp-v8-cli-e2e-{}",
         std::process::id()
     ));
     std::fs::write(&cli_path, &cli_bytes).expect("write CLI binary");
 
-    #[cfg(unix)]
+    
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&cli_path, std::fs::Permissions::from_mode(0o755))
             .expect("chmod +x");
     }
 
-    // ── Step 3: submit 'console.log(1+1)' via the downloaded CLI ─────
-    let output = timeout(
+        let output = timeout(
         Duration::from_secs(30),
         Command::new(&cli_path)
             .args([
@@ -460,8 +444,7 @@ async fn test_downloaded_cli_exec_console_log_outputs_2() {
         .as_str()
         .expect("execution_id missing from CLI output");
 
-    // ── Step 4: poll via the downloaded CLI until completed ───────────
-    let mut status = String::new();
+        let mut status = String::new();
     for _ in 0..60 {
         let poll = Command::new(&cli_path)
             .args([
@@ -487,8 +470,7 @@ async fn test_downloaded_cli_exec_console_log_outputs_2() {
 
     assert_eq!(status, "completed", "execution did not complete: status={status}");
 
-    // ── Step 5: read console output via the downloaded CLI ────────────
-    let output_cmd = Command::new(&cli_path)
+        let output_cmd = Command::new(&cli_path)
         .args([
             "--url", &server.base_url,
             "executions", "output", exec_id,
@@ -505,7 +487,6 @@ async fn test_downloaded_cli_exec_console_log_outputs_2() {
         "expected output to contain '2', got: {stdout:?}"
     );
 
-    // ── Cleanup ───────────────────────────────────────────────────────
-    let _ = std::fs::remove_file(&cli_path);
+        let _ = std::fs::remove_file(&cli_path);
     server.stop().await;
 }

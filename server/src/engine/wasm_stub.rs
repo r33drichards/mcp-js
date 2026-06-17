@@ -26,7 +26,6 @@ use std::sync::Arc;
 
 use super::WasmModule;
 
-// ── Configuration ────────────────────────────────────────────────────────
 
 /// Default prefix for WASM stub tool names. Shared with the MCP tool stubs:
 /// `runjs__` signals to a calling agent that the capability executes through
@@ -40,7 +39,7 @@ const WASM_INFIX: &str = "wasm__";
 /// Configuration for the auto-generated WASM module stubs MCPJS exposes to its
 /// own clients. The default prefix `runjs__` makes it obvious that these tools
 /// execute indirectly through the JavaScript runtime (`run_js`).
-#[derive(Debug, Clone)]
+
 pub struct WasmStubConfig {
     pub prefix: String,
     pub enabled: bool,
@@ -55,7 +54,6 @@ impl Default for WasmStubConfig {
     }
 }
 
-// ── Stub name helpers ────────────────────────────────────────────────────
 
 /// Build the stub tool name for a WASM module under the given `prefix`.
 pub fn wasm_stub_tool_name(prefix: &str, module: &str) -> String {
@@ -78,7 +76,6 @@ pub fn parse_wasm_stub_tool_name(prefix: &str, name: &str) -> Option<String> {
     Some(module.to_string())
 }
 
-// ── Module introspection ─────────────────────────────────────────────────
 
 /// Lightweight summary of a WASM module's surface, parsed from its bytes.
 struct ModuleSurface {
@@ -115,7 +112,6 @@ fn module_surface(bytes: &[u8]) -> ModuleSurface {
     }
 }
 
-// ── Stub tool / response construction ────────────────────────────────────
 
 /// Build a stub `Tool` describing a loaded WASM module. Calling the tool only
 /// returns usage instructions; it does not execute the module.
@@ -124,10 +120,7 @@ pub fn make_wasm_stub_tool(prefix: &str, module: &WasmModule) -> Tool {
     let surface = module_surface(&module.bytes);
     let description = stub_description(&module.name, &surface, module.description.as_deref());
 
-    // WASM exports have no MCP-level argument schema, so the stub advertises an
-    // empty object schema. Arguments passed to the stub are echoed back into
-    // the run_js instructions, but the agent drives the module from JS.
-    let input_schema = json!({
+                let input_schema = json!({
         "type": "object",
         "properties": {},
     });
@@ -142,9 +135,7 @@ pub fn make_wasm_stub_tool(prefix: &str, module: &WasmModule) -> Tool {
         name: stub_name.into(),
         description: Some(description.into()),
         input_schema,
-        // Stubs are discovery mechanisms, not executable tools, so they carry
-        // no behavioral annotations (mirrors the MCP tool stubs).
-        annotations: None,
+                        annotations: None,
     }
 }
 
@@ -252,7 +243,6 @@ pub fn wasm_stub_instructions(
     text
 }
 
-// ── Collection-level helpers ─────────────────────────────────────────────
 
 /// Generate stub `Tool` definitions for every loaded WASM module. Returns an
 /// empty vec when stub exposure is disabled in the config.
@@ -286,9 +276,8 @@ pub fn stub_call_response(
     )]))
 }
 
-// ── Tests ────────────────────────────────────────────────────────────────
 
-#[cfg(test)]
+
 mod tests {
     use super::*;
     use serde_json::json;
@@ -297,29 +286,16 @@ mod tests {
     /// bytes (same style as `server/tests/wasm.rs`) so tests need no extra deps.
     fn module_with_export() -> Vec<u8> {
         vec![
-            0x00, 0x61, 0x73, 0x6d, // magic
-            0x01, 0x00, 0x00, 0x00, // version
-            0x01, 0x07, 0x01, 0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f, // type: (i32,i32)->i32
-            0x03, 0x02, 0x01, 0x00, // function section
-            0x07, 0x07, 0x01, 0x03, 0x61, 0x64, 0x64, 0x00, 0x00, // export "add"
-            0x0a, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x20, 0x01, 0x6a, 0x0b, // body
-        ]
+            0x00, 0x61, 0x73, 0x6d,             0x01, 0x00, 0x00, 0x00,             0x01, 0x07, 0x01, 0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f,             0x03, 0x02, 0x01, 0x00,             0x07, 0x07, 0x01, 0x03, 0x61, 0x64, 0x64, 0x00, 0x00,             0x0a, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x20, 0x01, 0x6a, 0x0b,         ]
     }
 
     /// Module importing `env.log(i32)` and exporting `run(i32)` — requires an
     /// imports object, so it exercises the `has_imports` branch.
     fn module_with_import() -> Vec<u8> {
         vec![
-            0x00, 0x61, 0x73, 0x6d, // magic
-            0x01, 0x00, 0x00, 0x00, // version
-            0x01, 0x05, 0x01, 0x60, 0x01, 0x7f, 0x00, // type: (i32)->()
-            // import section: env.log : func type 0
-            0x02, 0x0b, 0x01, 0x03, 0x65, 0x6e, 0x76, 0x03, 0x6c, 0x6f, 0x67, 0x00, 0x00,
-            0x03, 0x02, 0x01, 0x00, // function section: one func of type 0
-            // export "run" -> func index 1
-            0x07, 0x07, 0x01, 0x03, 0x72, 0x75, 0x6e, 0x00, 0x01,
-            // code: local.get 0; call 0; end
-            0x0a, 0x08, 0x01, 0x06, 0x00, 0x20, 0x00, 0x10, 0x00, 0x0b,
+            0x00, 0x61, 0x73, 0x6d,             0x01, 0x00, 0x00, 0x00,             0x01, 0x05, 0x01, 0x60, 0x01, 0x7f, 0x00,                         0x02, 0x0b, 0x01, 0x03, 0x65, 0x6e, 0x76, 0x03, 0x6c, 0x6f, 0x67, 0x00, 0x00,
+            0x03, 0x02, 0x01, 0x00,                         0x07, 0x07, 0x01, 0x03, 0x72, 0x75, 0x6e, 0x00, 0x01,
+                        0x0a, 0x08, 0x01, 0x06, 0x00, 0x20, 0x00, 0x10, 0x00, 0x0b,
         ]
     }
 
@@ -332,14 +308,14 @@ mod tests {
         }
     }
 
-    #[test]
+    
     fn default_prefix_is_runjs() {
         assert_eq!(WasmStubConfig::default().prefix, "runjs__");
         assert_eq!(DEFAULT_WASM_STUB_PREFIX, "runjs__");
         assert!(WasmStubConfig::default().enabled);
     }
 
-    #[test]
+    
     fn stub_name_round_trips() {
         let n = wasm_stub_tool_name("runjs__", "sqlite");
         assert_eq!(n, "runjs__wasm__sqlite");
@@ -349,45 +325,40 @@ mod tests {
         );
     }
 
-    #[test]
+    
     fn stub_name_round_trips_with_custom_prefix() {
         let n = wasm_stub_tool_name("rj_", "math");
         assert_eq!(n, "rj_wasm__math");
         assert_eq!(parse_wasm_stub_tool_name("rj_", &n), Some("math".to_string()));
-        // Default prefix does not match a custom-prefixed name.
-        assert_eq!(parse_wasm_stub_tool_name("runjs__", &n), None);
+                assert_eq!(parse_wasm_stub_tool_name("runjs__", &n), None);
     }
 
-    #[test]
+    
     fn parse_rejects_non_stub_names() {
-        // Native MCPJS tools.
-        assert_eq!(parse_wasm_stub_tool_name("runjs__", "run_js"), None);
-        // MCP server stubs (no `wasm__` infix).
-        assert_eq!(
+                assert_eq!(parse_wasm_stub_tool_name("runjs__", "run_js"), None);
+                assert_eq!(
             parse_wasm_stub_tool_name("runjs__", "runjs__github__create_issue"),
             None
         );
-        // Right prefix + infix but empty module segment.
-        assert_eq!(parse_wasm_stub_tool_name("runjs__", "runjs__wasm__"), None);
-        // Empty prefix means "no recognition".
-        assert_eq!(parse_wasm_stub_tool_name("", "wasm__math"), None);
+                assert_eq!(parse_wasm_stub_tool_name("runjs__", "runjs__wasm__"), None);
+                assert_eq!(parse_wasm_stub_tool_name("", "wasm__math"), None);
     }
 
-    #[test]
+    
     fn module_surface_detects_exports_and_no_imports() {
         let surface = module_surface(&module_with_export());
         assert!(!surface.has_imports);
         assert_eq!(surface.exports, vec!["add".to_string()]);
     }
 
-    #[test]
+    
     fn module_surface_detects_imports() {
         let surface = module_surface(&module_with_import());
         assert!(surface.has_imports);
         assert_eq!(surface.exports, vec!["run".to_string()]);
     }
 
-    #[test]
+    
     fn make_stub_tool_for_import_free_module() {
         let m = module("math", module_with_export());
         let stub = make_wasm_stub_tool("runjs__", &m);
@@ -395,33 +366,29 @@ mod tests {
         let desc = stub.description.unwrap();
         assert!(desc.contains("__wasm_math"), "desc: {}", desc);
         assert!(desc.contains("run_js"), "desc: {}", desc);
-        // Import-free modules mention the auto-bound global and exports.
-        assert!(desc.contains("auto-instantiated"), "desc: {}", desc);
+                assert!(desc.contains("auto-instantiated"), "desc: {}", desc);
         assert!(desc.contains("add"), "desc should list exports: {}", desc);
-        // Empty object schema.
-        let schema = serde_json::to_value(stub.input_schema.as_ref()).unwrap();
+                let schema = serde_json::to_value(stub.input_schema.as_ref()).unwrap();
         assert_eq!(schema["type"], json!("object"));
     }
 
-    #[test]
+    
     fn make_stub_tool_includes_custom_description() {
         let mut m = module("math", module_with_export());
         m.description = Some("Fast fixed-point arithmetic helpers.".to_string());
         let stub = make_wasm_stub_tool("runjs__", &m);
         let desc = stub.description.unwrap();
-        // Operator description appears prominently...
-        assert!(
+                assert!(
             desc.contains("Fast fixed-point arithmetic helpers."),
             "desc: {}",
             desc
         );
-        // ...but the auto-generated usage hint is still present.
-        assert!(desc.contains("__wasm_math"), "desc: {}", desc);
+                assert!(desc.contains("__wasm_math"), "desc: {}", desc);
         assert!(desc.contains("run_js"), "desc: {}", desc);
         assert!(desc.contains("add"), "desc: {}", desc);
     }
 
-    #[test]
+    
     fn make_stub_tool_for_importing_module() {
         let m = module("logger", module_with_import());
         let stub = make_wasm_stub_tool("runjs__", &m);
@@ -430,7 +397,7 @@ mod tests {
         assert!(desc.contains("WebAssembly.Instance"), "desc: {}", desc);
     }
 
-    #[test]
+    
     fn stub_tools_lists_every_module() {
         let modules = vec![
             module("math", module_with_export()),
@@ -450,7 +417,7 @@ mod tests {
         );
     }
 
-    #[test]
+    
     fn stub_tools_empty_when_disabled() {
         let modules = vec![module("math", module_with_export())];
         let config = WasmStubConfig {
@@ -461,7 +428,7 @@ mod tests {
         assert!(stub_call_response(&modules, &config, "runjs__wasm__math", None).is_none());
     }
 
-    #[test]
+    
     fn stub_call_response_matches_known_module() {
         let modules = vec![module("math", module_with_export())];
         let config = WasmStubConfig::default();
@@ -478,21 +445,18 @@ mod tests {
         assert!(text.contains("\"x\""), "text should echo args: {}", text);
     }
 
-    #[test]
+    
     fn stub_call_response_returns_none_for_unknowns() {
         let modules = vec![module("math", module_with_export())];
         let config = WasmStubConfig::default();
-        // Native tool name.
-        assert!(stub_call_response(&modules, &config, "run_js", None).is_none());
-        // Stub-shaped but unknown module.
-        assert!(stub_call_response(&modules, &config, "runjs__wasm__other", None).is_none());
-        // MCP server stub shape (no wasm__ infix).
-        assert!(
+                assert!(stub_call_response(&modules, &config, "run_js", None).is_none());
+                assert!(stub_call_response(&modules, &config, "runjs__wasm__other", None).is_none());
+                assert!(
             stub_call_response(&modules, &config, "runjs__github__create_issue", None).is_none()
         );
     }
 
-    #[test]
+    
     fn stub_call_response_honours_custom_prefix() {
         let modules = vec![module("math", module_with_export())];
         let config = WasmStubConfig {
@@ -500,7 +464,6 @@ mod tests {
             enabled: true,
         };
         assert!(stub_call_response(&modules, &config, "rj_wasm__math", None).is_some());
-        // Default-prefix name no longer recognised.
-        assert!(stub_call_response(&modules, &config, "runjs__wasm__math", None).is_none());
+                assert!(stub_call_response(&modules, &config, "runjs__wasm__math", None).is_none());
     }
 }

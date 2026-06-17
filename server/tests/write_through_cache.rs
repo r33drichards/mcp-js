@@ -21,7 +21,7 @@ fn cleanup(dir: &PathBuf) {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-#[tokio::test]
+
 async fn test_put_writes_to_both_cache_and_primary() {
     let primary_dir = temp_dir("primary-put");
     let cache_dir = temp_dir("cache-put");
@@ -32,8 +32,7 @@ async fn test_put_writes_to_both_cache_and_primary() {
     let data = b"hello world";
     cached.put("key1", data).await.unwrap();
 
-    // Verify data exists in both the cache and primary directories
-    let cached_data = std::fs::read(cache_dir.join("key1")).unwrap();
+        let cached_data = std::fs::read(cache_dir.join("key1")).unwrap();
     assert_eq!(cached_data, data);
 
     let primary_data = std::fs::read(primary_dir.join("key1")).unwrap();
@@ -43,7 +42,7 @@ async fn test_put_writes_to_both_cache_and_primary() {
     cleanup(&cache_dir);
 }
 
-#[tokio::test]
+
 async fn test_get_returns_from_cache_on_hit() {
     let primary_dir = temp_dir("primary-cache-hit");
     let cache_dir = temp_dir("cache-cache-hit");
@@ -51,11 +50,9 @@ async fn test_get_returns_from_cache_on_hit() {
     let primary = FileHeapStorage::new(&primary_dir);
     let cached = WriteThroughCacheHeapStorage::new(primary, &cache_dir);
 
-    // Write data via the cache (populates both)
-    cached.put("key1", b"original").await.unwrap();
+        cached.put("key1", b"original").await.unwrap();
 
-    // Now change the primary directly to prove the cache is used, not the primary
-    std::fs::write(primary_dir.join("key1"), b"modified-in-primary").unwrap();
+        std::fs::write(primary_dir.join("key1"), b"modified-in-primary").unwrap();
 
     let result = cached.get("key1").await.unwrap();
     assert_eq!(result, b"original", "Should return cached data, not primary");
@@ -64,7 +61,7 @@ async fn test_get_returns_from_cache_on_hit() {
     cleanup(&cache_dir);
 }
 
-#[tokio::test]
+
 async fn test_get_falls_back_to_primary_on_cache_miss() {
     let primary_dir = temp_dir("primary-miss");
     let cache_dir = temp_dir("cache-miss");
@@ -72,8 +69,7 @@ async fn test_get_falls_back_to_primary_on_cache_miss() {
     let primary = FileHeapStorage::new(&primary_dir);
     let cached = WriteThroughCacheHeapStorage::new(primary, &cache_dir);
 
-    // Write data only to the primary directory (simulating data in S3 but not cached)
-    std::fs::write(primary_dir.join("key1"), b"from-primary").unwrap();
+        std::fs::write(primary_dir.join("key1"), b"from-primary").unwrap();
 
     let result = cached.get("key1").await.unwrap();
     assert_eq!(result, b"from-primary", "Should fall back to primary on cache miss");
@@ -82,7 +78,7 @@ async fn test_get_falls_back_to_primary_on_cache_miss() {
     cleanup(&cache_dir);
 }
 
-#[tokio::test]
+
 async fn test_get_populates_cache_after_primary_fetch() {
     let primary_dir = temp_dir("primary-populate");
     let cache_dir = temp_dir("cache-populate");
@@ -90,19 +86,15 @@ async fn test_get_populates_cache_after_primary_fetch() {
     let primary = FileHeapStorage::new(&primary_dir);
     let cached = WriteThroughCacheHeapStorage::new(primary, &cache_dir);
 
-    // Write data only to the primary (cache miss scenario)
-    std::fs::write(primary_dir.join("key1"), b"from-primary").unwrap();
+        std::fs::write(primary_dir.join("key1"), b"from-primary").unwrap();
 
-    // First get: cache miss, fetches from primary
-    let result = cached.get("key1").await.unwrap();
+        let result = cached.get("key1").await.unwrap();
     assert_eq!(result, b"from-primary");
 
-    // Verify the cache was populated
-    let cache_data = std::fs::read(cache_dir.join("key1")).unwrap();
+        let cache_data = std::fs::read(cache_dir.join("key1")).unwrap();
     assert_eq!(cache_data, b"from-primary", "Cache should be populated after miss");
 
-    // Second get: should now come from cache even if primary is changed
-    std::fs::write(primary_dir.join("key1"), b"modified-in-primary").unwrap();
+        std::fs::write(primary_dir.join("key1"), b"modified-in-primary").unwrap();
     let result2 = cached.get("key1").await.unwrap();
     assert_eq!(result2, b"from-primary", "Second get should use cached copy");
 
@@ -110,7 +102,7 @@ async fn test_get_populates_cache_after_primary_fetch() {
     cleanup(&cache_dir);
 }
 
-#[tokio::test]
+
 async fn test_get_returns_error_when_both_miss() {
     let primary_dir = temp_dir("primary-both-miss");
     let cache_dir = temp_dir("cache-both-miss");
@@ -125,7 +117,7 @@ async fn test_get_returns_error_when_both_miss() {
     cleanup(&cache_dir);
 }
 
-#[tokio::test]
+
 async fn test_multiple_keys_isolated() {
     let primary_dir = temp_dir("primary-multi");
     let cache_dir = temp_dir("cache-multi");
@@ -139,14 +131,13 @@ async fn test_multiple_keys_isolated() {
     assert_eq!(cached.get("key1").await.unwrap(), b"value1");
     assert_eq!(cached.get("key2").await.unwrap(), b"value2");
 
-    // Keys don't interfere with each other
-    assert_ne!(cached.get("key1").await.unwrap(), cached.get("key2").await.unwrap());
+        assert_ne!(cached.get("key1").await.unwrap(), cached.get("key2").await.unwrap());
 
     cleanup(&primary_dir);
     cleanup(&cache_dir);
 }
 
-#[tokio::test]
+
 async fn test_put_overwrites_existing_data() {
     let primary_dir = temp_dir("primary-overwrite");
     let cache_dir = temp_dir("cache-overwrite");
@@ -160,15 +151,14 @@ async fn test_put_overwrites_existing_data() {
     cached.put("key1", b"second").await.unwrap();
     assert_eq!(cached.get("key1").await.unwrap(), b"second");
 
-    // Both locations updated
-    assert_eq!(std::fs::read(cache_dir.join("key1")).unwrap(), b"second");
+        assert_eq!(std::fs::read(cache_dir.join("key1")).unwrap(), b"second");
     assert_eq!(std::fs::read(primary_dir.join("key1")).unwrap(), b"second");
 
     cleanup(&primary_dir);
     cleanup(&cache_dir);
 }
 
-#[tokio::test]
+
 async fn test_large_binary_data() {
     let primary_dir = temp_dir("primary-large");
     let cache_dir = temp_dir("cache-large");
@@ -176,8 +166,7 @@ async fn test_large_binary_data() {
     let primary = FileHeapStorage::new(&primary_dir);
     let cached = WriteThroughCacheHeapStorage::new(primary, &cache_dir);
 
-    // Simulate a realistic heap snapshot size (512KB)
-    let data: Vec<u8> = (0..512 * 1024).map(|i| (i % 256) as u8).collect();
+        let data: Vec<u8> = (0..512 * 1024).map(|i| (i % 256) as u8).collect();
 
     cached.put("big-heap", &data).await.unwrap();
 
@@ -188,21 +177,18 @@ async fn test_large_binary_data() {
     cleanup(&cache_dir);
 }
 
-#[tokio::test]
+
 async fn test_capacity_bound_evicts_oldest_but_reads_still_succeed() {
     let primary_dir = temp_dir("primary-evict");
     let cache_dir = temp_dir("cache-evict");
 
     let primary = FileHeapStorage::new(&primary_dir);
-    // Cap at 100 bytes: two 60-byte blobs cannot both stay resident.
-    let cached =
+        let cached =
         WriteThroughCacheHeapStorage::with_capacity_bytes(primary, &cache_dir, 100);
 
     cached.put("a", &[1u8; 60]).await.unwrap();
-    cached.put("b", &[2u8; 60]).await.unwrap(); // pushes total to 120 -> evict "a"
-
-    // "a" was evicted from the *local cache* only…
-    let direct_cache = FileHeapStorage::new(&cache_dir);
+    cached.put("b", &[2u8; 60]).await.unwrap(); 
+        let direct_cache = FileHeapStorage::new(&cache_dir);
     assert!(
         direct_cache.get("a").await.is_err(),
         "oldest entry should be evicted from local cache"
@@ -212,9 +198,7 @@ async fn test_capacity_bound_evicts_oldest_but_reads_still_succeed() {
         "most-recent entry should remain cached"
     );
 
-    // …but it is still readable through the wrapper via the primary fallback,
-    // and that re-caches it (evicting "b" in turn).
-    assert_eq!(cached.get("a").await.unwrap(), vec![1u8; 60]);
+            assert_eq!(cached.get("a").await.unwrap(), vec![1u8; 60]);
     assert_eq!(cached.get("b").await.unwrap(), vec![2u8; 60]);
 
     cleanup(&primary_dir);

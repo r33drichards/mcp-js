@@ -1,10 +1,10 @@
-#!/usr/bin/env python3
-# /// script
-# requires-python = ">=3.11"
-# dependencies = [
-#     "pydantic-ai[mcp]",
-# ]
-# ///
+
+
+
+
+
+
+
 """
 Approach B: PydanticAI agent connected to mcp-js via Streamable HTTP.
 

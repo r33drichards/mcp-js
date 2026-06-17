@@ -1,12 +1,12 @@
 { pkgs, mcp-js, ... }:
 
 let
-  # ── Rego policy ──────────────────────────────────────────────────────
-  #
-  # Allow read/write/stat/exists/readdir operations only under /tmp/allowed/.
-  # mkdir is allowed under /tmp/allowed/ (recursive or not).
-  # rm, rename, copyFile, appendFile are allowed under /tmp/allowed/.
-  # Everything else is denied.
+  
+  
+  
+  
+  
+  
 
   regoPolicy = pkgs.writeText "fs-policy.rego" ''
     package mcp.filesystem
@@ -32,7 +32,7 @@ in
     machine = { ... }: {
       imports = [ ../../nix/module.nix ];
 
-      # ── mcp-js server (stateless, with filesystem policy) ────────────
+      
       services.mcp-js = {
         enable = true;
         package = mcp-js;

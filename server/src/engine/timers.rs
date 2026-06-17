@@ -7,18 +7,16 @@
 use deno_core::{JsRuntime, op2};
 use deno_error::JsErrorBox;
 
-// ── Async deno_core op ──────────────────────────────────────────────────
 
 /// Async op: sleeps for `delay_ms` milliseconds. Called from JS via
 /// `Deno.core.ops.op_timer_sleep(delay_ms)`.
 /// Returns a Promise that resolves after the delay.
-#[op2(async)]
-async fn op_timer_sleep(#[number] delay_ms: u64) -> Result<(), JsErrorBox> {
+
+async fn op_timer_sleep( delay_ms: u64) -> Result<(), JsErrorBox> {
     tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
     Ok(())
 }
 
-// ── Extension registration ──────────────────────────────────────────────
 
 deno_core::extension!(
     timers_ext,
@@ -30,7 +28,6 @@ pub fn create_extension() -> deno_core::Extension {
     timers_ext::init()
 }
 
-// ── Inject timer JS wrappers into the global scope ──────────────────────
 
 /// Inject `globalThis.setTimeout` and `globalThis.clearTimeout` JS wrappers.
 /// Must be called after the runtime is created (with the timers extension)

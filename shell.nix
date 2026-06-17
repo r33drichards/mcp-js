@@ -8,10 +8,10 @@
       cacert
       openssl
       pkg-config
-      # Provides libstdc++.so.6 needed by ASAN-instrumented fuzz targets
+      
       stdenv.cc.cc.lib
     ];
-    # https://github.com/rust-lang/rust-bindgen#environment-variables
+    
     LIBCLANG_PATH = pkgs.lib.makeLibraryPath [ pkgs.llvmPackages_latest.libclang.lib ];
     shellHook = ''
       export PATH=$PATH:''${CARGO_HOME:-~/.cargo}/bin
@@ -23,9 +23,9 @@
       # Point v8 build.rs to the pre-fetched static library
       export RUSTY_V8_ARCHIVE=${rustyV8Archive}
     '';
-    # Add precompiled library to rustc search path
+    
     RUSTFLAGS = (builtins.map (a: ''-L ${a}/lib'') [
-      # add libraries here (e.g. pkgs.libvmi)
+      
     ]);
 
 

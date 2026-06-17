@@ -65,8 +65,8 @@ jobs:
           bash tests/cli-e2e.sh
 
       - name: Run Rust CLI integration tests
-        # Each test starts its own server, so no external server is needed here.
-        # SERVER_BIN points to the pre-built release binary built above.
+        
+        
         run: |
           nix develop --command bash -c "
             SERVER_BIN=\$(pwd)/server-bin \
