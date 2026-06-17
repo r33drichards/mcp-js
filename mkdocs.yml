@@ -3,89 +3,23 @@ site_description: JavaScript MCP server, transports, policies, and operational g
 site_url: https://r33drichards.github.io/mcp-js/
 repo_url: https://github.com/r33drichards/mcp-js
 repo_name: r33drichards/mcp-js
-edit_uri_template: edit/main/site-docs/{path}
-docs_dir: site-docs
+edit_uri_template: edit/main/docs/{path}
+docs_dir: docs
 site_dir: site
 theme:
-    name: mkdocs
+    name: material
 plugins:
   - search
-  # The vendored mermaid library is loaded via extra_javascript (below), not
-  # the plugin's `javascript:` option. The pinned mkdocs-mermaid2-plugin
-  # (v1.1.0) emits the library <script src> using the configured path
-  # verbatim, so a relative path like `js/mermaid.min.js` resolves against the
-  # current page and 404s on every sub-page (e.g. /concepts/...), leaving
-  # diagrams unrendered. Listing the library under extra_javascript lets mkdocs
-  # compute the correct per-page URL; the plugin then skips its own injection
-  # because the filename contains "mermaid". This is version-independent and
-  # also works under newer plugin releases.
-  - mermaid2
 nav:
   - Home: index.md
-
-  - Install:
-      - Overview: install/overview.md
-
   - Tutorials:
-      - Overview: tutorials/overview.md
-      - Run SQLite in WebAssembly: tutorials/sqlite-wasm.md
-
-  - How-to:
-      - Overview: how-to/overview.md
-      - Running JavaScript & TypeScript: how-to/js-execution.md
-      - Stateful sessions & heap snapshots: how-to/sessions-and-heaps.md
-      - Heap storage backends: how-to/storage-backends.md
-      - Asynchronous execution & output: how-to/async-execution.md
-      - Transports (stdio, HTTP, SSE): how-to/transports.md
-      - Network access with fetch: how-to/fetch.md
-      - Filesystem access: how-to/filesystem.md
-      - Filesystem snapshots: how-to/fs-snapshots.md
-      - Subprocess execution: how-to/subprocess.md
-      - WebAssembly modules: how-to/wasm-modules.md
-      - ES module imports: how-to/module-imports.md
-      - Calling upstream MCP servers: how-to/mcp-client.md
-      - Security policies (OPA/Rego): how-to/policies.md
-      - Authentication (JWT/JWKS): how-to/authentication.md
-      - Clustering & replication (Raft): how-to/clustering.md
-      - Customize prompt & tool descriptions: how-to/customize-mcp-surface.md
-
-  - Concepts:
-      - Overview: concepts/overview.md
-      - Running JavaScript & TypeScript: concepts/js-execution.md
-      - Stateful sessions & heap snapshots: concepts/sessions-and-heaps.md
-      - Heap storage backends: concepts/storage-backends.md
-      - Asynchronous execution & output: concepts/async-execution.md
-      - Transports (stdio, HTTP, SSE): concepts/transports.md
-      - Network access with fetch: concepts/fetch.md
-      - Filesystem access: concepts/filesystem.md
-      - Filesystem snapshots: concepts/fs-snapshots.md
-      - Subprocess execution: concepts/subprocess.md
-      - WebAssembly modules: concepts/wasm-modules.md
-      - ES module imports: concepts/module-imports.md
-      - Calling upstream MCP servers: concepts/mcp-client.md
-      - Security policies (OPA/Rego): concepts/policies.md
-      - Authentication (JWT/JWKS): concepts/authentication.md
-      - Clustering & replication (Raft): concepts/clustering.md
-
+      - Getting Started: tutorials/getting-started.md
+  - How-to Guides:
+      - Run JavaScript: how-to/run-javascript.md
+  - Explanation:
+      - Architecture: explanation/architecture.md
   - Reference:
-      - Overview: reference/overview.md
-      - CLI Flags: reference/cli-flags.md
-      - HTTP API: reference/http-api.md
-      - MCP Tools: reference/mcp-tools.md
-      - Running JavaScript & TypeScript: reference/js-execution.md
-      - Stateful sessions & heap snapshots: reference/sessions-and-heaps.md
-      - Heap storage backends: reference/storage-backends.md
-      - Asynchronous execution & output: reference/async-execution.md
-      - Transports (stdio, HTTP, SSE): reference/transports.md
-      - Network access with fetch: reference/fetch.md
-      - Filesystem access: reference/filesystem.md
-      - Subprocess execution: reference/subprocess.md
-      - WebAssembly modules: reference/wasm-modules.md
-      - ES module imports: reference/module-imports.md
-      - Calling upstream MCP servers: reference/mcp-client.md
-      - Security policies (OPA/Rego): reference/policies.md
-      - Authentication (JWT/JWKS): reference/authentication.md
-      - Clustering & replication (Raft): reference/clustering.md
+      - API: reference/api.md
 markdown_extensions:
   - tables
   - toc:
@@ -94,4 +28,3 @@ extra_css:
     - stylesheets/footer-nav.css
 extra_javascript:
     - js/footer-nav.js
-    - js/mermaid.min.js
