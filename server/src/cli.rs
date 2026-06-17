@@ -141,6 +141,33 @@ pub struct Cli {
     #[arg(long = "fs-passthrough", env = "MCP_V8_FS_PASSTHROUGH", default_value = "false", help_heading = "Filesystem")]
     pub fs_passthrough: bool,
 
+    // ── Sandbox hardening (all opt-in; OFF by default → unhardened) ───────────
+    /// Freeze `Deno.core.ops` so user code cannot replace/intercept any op
+    /// (e.g. a persistent trojan op surviving in stateful/snapshot mode).
+    #[arg(long = "harden-freeze-ops", env = "MCP_V8_HARDEN_FREEZE_OPS", default_value = "false", help_heading = "Sandbox")]
+    pub harden_freeze_ops: bool,
+
+    /// Neutralize `op_get_proxy_details` (otherwise it bypasses `Proxy` handlers
+    /// and can read a proxied target).
+    #[arg(long = "harden-neutralize-proxy-details", env = "MCP_V8_HARDEN_NEUTRALIZE_PROXY_DETAILS", default_value = "false", help_heading = "Sandbox")]
+    pub harden_neutralize_proxy_details: bool,
+
+    /// Neutralize `op_memory_usage` + `op_is_terminal` (host info leaks).
+    #[arg(long = "harden-neutralize-introspection", env = "MCP_V8_HARDEN_NEUTRALIZE_INTROSPECTION", default_value = "false", help_heading = "Sandbox")]
+    pub harden_neutralize_introspection: bool,
+
+    /// Remove `globalThis.__bootstrap` (event-loop hooks, primordials such as a
+    /// pristine `Function` constructor, and internal registries).
+    #[arg(long = "harden-remove-bootstrap", env = "MCP_V8_HARDEN_REMOVE_BOOTSTRAP", default_value = "false", help_heading = "Sandbox")]
+    pub harden_remove_bootstrap: bool,
+
+    /// Remove `globalThis.SharedArrayBuffer` + `globalThis.Atomics` — the
+    /// high-resolution Spectre-timer prerequisite. NOTE: these are also the
+    /// shared-memory primitives emscripten wasm-threads require, so leave this
+    /// OFF to run pthreads-based WASM modules.
+    #[arg(long = "harden-remove-shared-memory", env = "MCP_V8_HARDEN_REMOVE_SHARED_MEMORY", default_value = "false", help_heading = "Sandbox")]
+    pub harden_remove_shared_memory: bool,
+
     // ── Shared S3 backend (used by heap-store=s3 and/or fs-store=s3) ──────────
     /// S3 bucket backing whichever axes select `s3`. Required when
     /// `--heap-store s3` or `--fs-store s3` is set.

@@ -239,6 +239,14 @@ async fn main() -> Result<()> {
     };
 
     let engine = engine.with_wasm_default_max_bytes(wasm_default_max_bytes);
+    // Sandbox hardening: all mitigations are opt-in (OFF by default → unhardened).
+    let engine = engine.with_hardening(engine::HardeningConfig {
+        freeze_ops: cli.harden_freeze_ops,
+        neutralize_proxy_details: cli.harden_neutralize_proxy_details,
+        neutralize_introspection: cli.harden_neutralize_introspection,
+        remove_bootstrap: cli.harden_remove_bootstrap,
+        remove_shared_memory: cli.harden_remove_shared_memory,
+    });
     let has_wasm_modules = !wasm_modules.is_empty();
     let engine = if has_wasm_modules { engine.with_wasm_modules(wasm_modules) } else { engine };
     let engine = if has_wasm_modules {

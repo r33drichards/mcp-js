@@ -17,6 +17,7 @@ using the same help headings exposed by the CLI itself.
 - [Policy](#policy)
 - [Prompt](#prompt)
 - [Run JS File](#run-js-file)
+- [Sandbox](#sandbox)
 - [Storage (S3)](#storage-s3)
 - [WASM](#wasm)
 
@@ -292,6 +293,43 @@ Override the description advertised for the `run_js` tool in `tools/list`. The v
 Allow the `run_js` tool to read its code from a file on the server's own filesystem (the `file` parameter). OFF by default. When set, ANY path the server process can read is allowed — this is the easy "allow all" switch. For finer control, leave this off and configure a `run_js_file` policy in --policies-json instead (a Rego/OPA chain decides which paths are allowed); the policy input is `{ "operation": "read", "path": "<canonical path>" }`. This flag takes precedence over a configured run_js_file policy
 
 - Environment: `MCP_V8_ALLOW_RUN_JS_FILE`
+- Default: `false`
+
+## Sandbox
+
+### `--harden-freeze-ops`
+
+Freeze `Deno.core.ops` so user code cannot replace/intercept any op (e.g. a persistent trojan op surviving in stateful/snapshot mode)
+
+- Environment: `MCP_V8_HARDEN_FREEZE_OPS`
+- Default: `false`
+
+### `--harden-neutralize-proxy-details`
+
+Neutralize `op_get_proxy_details` (otherwise it bypasses `Proxy` handlers and can read a proxied target)
+
+- Environment: `MCP_V8_HARDEN_NEUTRALIZE_PROXY_DETAILS`
+- Default: `false`
+
+### `--harden-neutralize-introspection`
+
+Neutralize `op_memory_usage` + `op_is_terminal` (host info leaks)
+
+- Environment: `MCP_V8_HARDEN_NEUTRALIZE_INTROSPECTION`
+- Default: `false`
+
+### `--harden-remove-bootstrap`
+
+Remove `globalThis.__bootstrap` (event-loop hooks, primordials such as a pristine `Function` constructor, and internal registries)
+
+- Environment: `MCP_V8_HARDEN_REMOVE_BOOTSTRAP`
+- Default: `false`
+
+### `--harden-remove-shared-memory`
+
+Remove `globalThis.SharedArrayBuffer` + `globalThis.Atomics` — the high-resolution Spectre-timer prerequisite. NOTE: these are also the shared-memory primitives emscripten wasm-threads require, so leave this OFF to run pthreads-based WASM modules
+
+- Environment: `MCP_V8_HARDEN_REMOVE_SHARED_MEMORY`
 - Default: `false`
 
 ## Storage (S3)

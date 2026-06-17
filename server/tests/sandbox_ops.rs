@@ -7,7 +7,7 @@
 /// console.log() to capture output via sled and assert on the captured content.
 
 use std::sync::Once;
-use server::engine::ExecutionConfig;
+use server::engine::{ExecutionConfig, HardeningConfig};
 
 static INIT: Once = Once::new();
 
@@ -285,7 +285,9 @@ fn test_ops_are_frozen() {
     ensure_v8();
     let heap_bytes = 8 * 1024 * 1024;
     let (tree, tmp) = console_tree();
-    let config = ExecutionConfig::new(heap_bytes).console_tree(tree.clone());
+    let config = ExecutionConfig::new(heap_bytes)
+        .console_tree(tree.clone())
+        .hardening(HardeningConfig::all());
     let (result, _oom) = server::engine::execute_stateless(
         r#"console.log("frozen=" + Object.isFrozen(Deno.core.ops));"#,
         config,
@@ -305,7 +307,9 @@ fn test_bootstrap_not_accessible() {
     ensure_v8();
     let heap_bytes = 8 * 1024 * 1024;
     let (tree, tmp) = console_tree();
-    let config = ExecutionConfig::new(heap_bytes).console_tree(tree.clone());
+    let config = ExecutionConfig::new(heap_bytes)
+        .console_tree(tree.clone())
+        .hardening(HardeningConfig::all());
     let (result, _oom) = server::engine::execute_stateless(
         r#"console.log("bootstrap=" + typeof globalThis.__bootstrap);"#,
         config,
@@ -325,7 +329,9 @@ fn test_proxy_details_neutralized() {
     ensure_v8();
     let heap_bytes = 8 * 1024 * 1024;
     let (tree, tmp) = console_tree();
-    let config = ExecutionConfig::new(heap_bytes).console_tree(tree.clone());
+    let config = ExecutionConfig::new(heap_bytes)
+        .console_tree(tree.clone())
+        .hardening(HardeningConfig::all());
     let (result, _oom) = server::engine::execute_stateless(
         r#"
         const secret = { password: "hunter2" };
@@ -350,7 +356,9 @@ fn test_ops_not_replaceable() {
     ensure_v8();
     let heap_bytes = 8 * 1024 * 1024;
     let (tree, tmp) = console_tree();
-    let config = ExecutionConfig::new(heap_bytes).console_tree(tree.clone());
+    let config = ExecutionConfig::new(heap_bytes)
+        .console_tree(tree.clone())
+        .hardening(HardeningConfig::all());
     let (result, _oom) = server::engine::execute_stateless(
         // ES modules run in strict mode — assigning to a frozen property throws
         r#"
@@ -378,7 +386,9 @@ fn test_shared_array_buffer_disabled() {
     ensure_v8();
     let heap_bytes = 8 * 1024 * 1024;
     let (tree, tmp) = console_tree();
-    let config = ExecutionConfig::new(heap_bytes).console_tree(tree.clone());
+    let config = ExecutionConfig::new(heap_bytes)
+        .console_tree(tree.clone())
+        .hardening(HardeningConfig::all());
     let (result, _oom) = server::engine::execute_stateless(
         r#"
         try {
@@ -395,6 +405,88 @@ fn test_shared_array_buffer_disabled() {
     assert!(
         output.contains("sab=disabled"),
         "SharedArrayBuffer should be disabled, got: {}",
+        output,
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+// ── Opt-in defaults: with no HardeningConfig, mitigations are OFF ────────────
+// These lock in the opt-in posture: a default ExecutionConfig leaves the
+// runtime unhardened, so each primitive is present until a `--harden-*` flag
+// (HardeningConfig field) enables its removal.
+
+#[test]
+fn test_shared_array_buffer_available_by_default() {
+    ensure_v8();
+    let heap_bytes = 8 * 1024 * 1024;
+    let (tree, tmp) = console_tree();
+    // No .hardening(...) — default is all-off.
+    let config = ExecutionConfig::new(heap_bytes).console_tree(tree.clone());
+    let (result, _oom) = server::engine::execute_stateless(
+        r#"
+        try {
+            const sab = new SharedArrayBuffer(8);
+            console.log("sab=available");
+        } catch (e) {
+            console.log("sab=disabled");
+        }
+        "#,
+        config,
+    );
+    assert!(result.is_ok(), "Should succeed, got: {:?}", result);
+    let output = read_console(&tree);
+    assert!(
+        output.contains("sab=available"),
+        "SharedArrayBuffer should be available when hardening is off, got: {}",
+        output,
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn test_ops_not_frozen_by_default() {
+    ensure_v8();
+    let heap_bytes = 8 * 1024 * 1024;
+    let (tree, tmp) = console_tree();
+    let config = ExecutionConfig::new(heap_bytes).console_tree(tree.clone());
+    let (result, _oom) = server::engine::execute_stateless(
+        r#"console.log("frozen=" + Object.isFrozen(Deno.core.ops));"#,
+        config,
+    );
+    assert!(result.is_ok(), "Should succeed, got: {:?}", result);
+    let output = read_console(&tree);
+    assert!(
+        output.contains("frozen=false"),
+        "Deno.core.ops should not be frozen when hardening is off, got: {}",
+        output,
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn test_only_requested_mitigation_applies() {
+    ensure_v8();
+    let heap_bytes = 8 * 1024 * 1024;
+    let (tree, tmp) = console_tree();
+    // Enable ONLY remove_shared_memory: SAB goes away but ops stay unfrozen.
+    let config = ExecutionConfig::new(heap_bytes)
+        .console_tree(tree.clone())
+        .hardening(HardeningConfig {
+            remove_shared_memory: true,
+            ..HardeningConfig::default()
+        });
+    let (result, _oom) = server::engine::execute_stateless(
+        r#"
+        console.log("sab=" + (typeof SharedArrayBuffer === "undefined" ? "disabled" : "available"));
+        console.log("frozen=" + Object.isFrozen(Deno.core.ops));
+        "#,
+        config,
+    );
+    assert!(result.is_ok(), "Should succeed, got: {:?}", result);
+    let output = read_console(&tree);
+    assert!(
+        output.contains("sab=disabled") && output.contains("frozen=false"),
+        "Only the requested mitigation should apply, got: {}",
         output,
     );
     let _ = std::fs::remove_dir_all(&tmp);

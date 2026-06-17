@@ -22,6 +22,8 @@ pub mod subprocess;
 pub mod timers;
 pub mod wasm_stub;
 
+pub use console::HardeningConfig;
+
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -812,6 +814,8 @@ pub struct ExecutionConfig<'a> {
     pub console_tree: Option<sled::Tree>,
     pub module_loader_config: Option<&'a module_loader::ModuleLoaderConfig>,
     pub mcp_config: Option<&'a mcp_client::McpConfig>,
+    /// Per-mitigation sandbox hardening. Default is all-off (unhardened).
+    pub hardening: console::HardeningConfig,
 }
 
 impl<'a> ExecutionConfig<'a> {
@@ -829,7 +833,14 @@ impl<'a> ExecutionConfig<'a> {
             console_tree: None,
             module_loader_config: None,
             mcp_config: None,
+            hardening: console::HardeningConfig::default(),
         }
+    }
+
+    /// Set the per-mitigation sandbox hardening configuration.
+    pub fn hardening(mut self, hardening: console::HardeningConfig) -> Self {
+        self.hardening = hardening;
+        self
     }
 
     pub fn mcp_headers(mut self, mcp_headers: Option<serde_json::Value>) -> Self {
@@ -915,6 +926,7 @@ pub fn execute_stateless(
         console_tree,
         module_loader_config,
         mcp_config,
+        hardening,
     } = config;
     let oom_flag = Arc::new(AtomicBool::new(false));
 
@@ -1047,7 +1059,7 @@ pub fn execute_stateless(
                 }
                 // Harden sandbox: freeze ops, neutralize introspection, remove __bootstrap.
                 // Must run after all inject_* calls and before user code.
-                if let Err(e) = console::harden_runtime(&mut runtime) {
+                if let Err(e) = console::harden_runtime(&mut runtime, hardening) {
                     return Err(e);
                 }
                 execute_module(&rt, &mut runtime, code)
@@ -1096,6 +1108,7 @@ pub fn execute_stateful(
         console_tree,
         module_loader_config,
         mcp_config,
+        hardening,
     } = config;
     let oom_flag = Arc::new(AtomicBool::new(false));
 
@@ -1257,7 +1270,7 @@ pub fn execute_stateful(
                     }
                     // Harden sandbox: freeze ops, neutralize introspection, remove __bootstrap.
                     // Must run after all inject_* calls and before user code.
-                    if let Err(e) = console::harden_runtime(&mut runtime) {
+                    if let Err(e) = console::harden_runtime(&mut runtime, hardening) {
                         return Err(e);
                     }
                     execute_module(&rt, &mut runtime, code)
@@ -1374,6 +1387,9 @@ pub struct Engine {
     label_store: Option<Arc<fs_labels::LabelStore>>,
     /// Policy chain gating fs snapshot pointer moves (pull/push/reset/label).
     fs_snapshot_policy_chain: Option<Arc<opa::PolicyChain>>,
+    /// Per-mitigation sandbox hardening. Default is all-off (unhardened); each
+    /// mitigation is opt-in via the `--harden-*` CLI flags.
+    hardening: console::HardeningConfig,
 }
 
 /// Builder for `Engine::run_js()`. Only `code` is required; everything else
@@ -1542,6 +1558,7 @@ impl Engine {
             fs_store: None,
             label_store: None,
             fs_snapshot_policy_chain: None,
+            hardening: console::HardeningConfig::default(),
         }
     }
 
@@ -1580,12 +1597,20 @@ impl Engine {
             fs_store: None,
             label_store: None,
             fs_snapshot_policy_chain: None,
+            hardening: console::HardeningConfig::default(),
         }
     }
 
     /// Set the default max native memory for WASM modules without a per-module limit.
     pub fn with_wasm_default_max_bytes(mut self, bytes: usize) -> Self {
         self.wasm_default_max_bytes = bytes;
+        self
+    }
+
+    /// Set the per-mitigation sandbox hardening configuration. Defaults to
+    /// all-off; mitigations are opt-in via the `--harden-*` CLI flags.
+    pub fn with_hardening(mut self, hardening: console::HardeningConfig) -> Self {
+        self.hardening = hardening;
         self
     }
 
@@ -2309,6 +2334,7 @@ impl Engine {
                 let ih = isolate_handle.clone();
                 let wasm = self.wasm_modules.clone();
                 let wasm_default = self.wasm_default_max_bytes;
+                let hardening = self.hardening;
                 let fc = self.fetch_config.clone();
                 let fsc = self.fs_config.clone();
                 let mh = mcp_headers.clone();
@@ -2326,6 +2352,7 @@ impl Engine {
                         .maybe_fs_mount(fm)
                         .wasm_modules(&wasm)
                         .wasm_default_max_bytes(wasm_default)
+                        .hardening(hardening)
                         .maybe_fetch_config(fc.as_deref())
                         .maybe_fs_config(fsc.as_deref())
                         .mcp_headers(mh)
@@ -2410,6 +2437,7 @@ impl Engine {
                 let ih = isolate_handle.clone();
                 let wasm = self.wasm_modules.clone();
                 let wasm_default = self.wasm_default_max_bytes;
+                let hardening = self.hardening;
                 let fc = self.fetch_config.clone();
                 let fsc = self.fs_config.clone();
                 let mh = mcp_headers.clone();
@@ -2427,6 +2455,7 @@ impl Engine {
                         .maybe_fs_mount(fm)
                         .wasm_modules(&wasm)
                         .wasm_default_max_bytes(wasm_default)
+                        .hardening(hardening)
                         .maybe_fetch_config(fc.as_deref())
                         .maybe_fs_config(fsc.as_deref())
                         .mcp_headers(mh)
