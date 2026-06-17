@@ -28,7 +28,8 @@ services:
       - JWKS_URL=http://keycloak:8080/realms/mcp/protocol/openid-connect/certs
     command:
       - --http-port=3000
-      - --directory-path=/data/heaps
+      - --heap-store=dir
+      - --heap-dir=/data/heaps
       - --session-db-path=/data/sessions
       - --policies-json={"fetch":{"policies":[{"url":"http://opa:8181"}]},"filesystem":{"policies":[{"url":"http://opa:8181"}]}}
       - --fetch-header=host=host.docker.internal,header=Authorization,token_url=http://keycloak:8080/realms/mcp/protocol/openid-connect/token,client_id=mcp-client,client_secret=mcp-client-secret

@@ -38,8 +38,9 @@ jobs:
           echo "WASM: $WASM_PATH"
           echo "Server: $SERVER_BIN"
 
-          # Start server in HTTP mode with the SQLite WASM module
-          $SERVER_BIN --stateless --http-port 8080 \
+          # Start server in HTTP mode with the SQLite WASM module (stateless is
+          # the default; WASM is incompatible with heap persistence anyway)
+          $SERVER_BIN --http-port 8080 \
             --wasm-module sqlite="$WASM_PATH" \
             --heap-memory-max 64 &
           SERVER_PID=$!
