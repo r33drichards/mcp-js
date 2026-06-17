@@ -24,6 +24,5 @@ services:
     build: .
     command:
       - --http-port=3000
-      - --stateless
     expose:
       - "3000"

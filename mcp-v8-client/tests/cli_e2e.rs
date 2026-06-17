@@ -85,7 +85,7 @@ impl TestServer {
         let bin = server_bin();
 
         let child = Command::new(&bin)
-            .args(["--stateless", "--http-port", &port.to_string()])
+            .args(["--http-port", &port.to_string()])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())

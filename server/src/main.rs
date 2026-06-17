@@ -16,7 +16,7 @@ mod api;
 mod cluster;
 mod cli;
 mod session;
-use cli::Cli;
+use cli::{Cli, StoreKind};
 use engine::{initialize_v8, Engine, WasmModule};
 use engine::fetch::FetchConfig;
 use engine::fs::FsConfig;
@@ -133,33 +133,70 @@ async fn main() -> Result<()> {
             wasm_modules.iter().map(|m| m.name.as_str()).collect::<Vec<_>>().join(", "));
     }
 
+    let heap_enabled = cli.heap_enabled();
+    let fs_enabled = cli.fs_enabled();
+
+    // Heap snapshots run in a V8 SnapshotCreator isolate, which disables
+    // WebAssembly. Reject heap + WASM at startup rather than failing at the
+    // first execution with "WebAssembly is not an object".
+    if heap_enabled && !wasm_modules.is_empty() {
+        use clap::CommandFactory;
+        Cli::command()
+            .error(
+                clap::error::ErrorKind::ArgumentConflict,
+                "--wasm-module/--wasm-config is incompatible with heap persistence \
+                 (--heap-store other than 'none'). V8 heap snapshots require a \
+                 SnapshotCreator isolate that disables WebAssembly. Use filesystem \
+                 persistence (--fs-store) instead, or drop the WASM modules.",
+            )
+            .exit();
+    }
+
     // Captured before the engine build consumes them, so fs snapshots can reuse
-    // the same shared storage backend (see the fs-snapshots block below).
+    // the same shared S3 backend (see the fs-snapshots block below).
     let fs_s3_bucket = cli.s3_bucket.clone();
     let fs_cache_dir = cli.cache_dir.clone();
 
     // ── Build Engine ────────────────────────────────────────────────────
-    let engine = if cli.stateless {
-        tracing::info!("Creating stateless engine");
-        Engine::new_stateless(heap_memory_max_bytes, execution_timeout_secs, cli.max_concurrent_executions)
-    } else {
-        let heap_storage = if let Some(bucket) = cli.s3_bucket {
-            if let Some(cache_dir) = cli.cache_dir {
-                tracing::info!("Using S3 storage with FS write-through cache at {}", cache_dir);
-                AnyHeapStorage::S3WithFsCache(WriteThroughCacheHeapStorage::new(
-                    S3HeapStorage::new(bucket).await,
-                    cache_dir,
-                ))
-            } else {
-                AnyHeapStorage::S3(S3HeapStorage::new(bucket).await)
+    // Heap and filesystem persistence are independent axes (see cli::StoreKind).
+    // The base engine carries the heap axis; the session log + fs are attached
+    // by builders so any combination (neither/heap-only/fs-only/both) is valid.
+    let engine = if heap_enabled {
+        let heap_storage = match cli.heap_store {
+            StoreKind::S3 => {
+                let bucket = cli
+                    .s3_bucket
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("--heap-store s3 requires --s3-bucket"))?;
+                if let Some(cache_dir) = cli.cache_dir.clone() {
+                    tracing::info!("Heap: S3 bucket '{}' with write-through cache at {}", bucket, cache_dir);
+                    AnyHeapStorage::S3WithFsCache(WriteThroughCacheHeapStorage::new(
+                        S3HeapStorage::new(bucket).await,
+                        cache_dir,
+                    ))
+                } else {
+                    tracing::info!("Heap: S3 bucket '{}'", bucket);
+                    AnyHeapStorage::S3(S3HeapStorage::new(bucket).await)
+                }
             }
-        } else if let Some(dir) = cli.directory_path {
-            AnyHeapStorage::File(FileHeapStorage::new(dir))
-        } else {
-            AnyHeapStorage::File(FileHeapStorage::new("/tmp/mcp-v8-heaps"))
+            StoreKind::Dir => {
+                let dir = cli.heap_dir.clone().unwrap_or_else(|| "/tmp/mcp-v8-heaps".to_string());
+                tracing::info!("Heap: directory store at {}", dir);
+                AnyHeapStorage::File(FileHeapStorage::new(dir))
+            }
+            StoreKind::None => unreachable!("heap_enabled implies heap_store != none"),
         };
+        tracing::info!("Heap persistence: ENABLED");
+        Engine::new_stateful(heap_storage, None, None, heap_memory_max_bytes, execution_timeout_secs, cli.max_concurrent_executions)
+    } else {
+        tracing::info!("Heap persistence: disabled");
+        Engine::new_stateless(heap_memory_max_bytes, execution_timeout_secs, cli.max_concurrent_executions)
+    };
 
-        let session_log = match SessionLog::new(&cli.session_db_path) {
+    // Session log: keys per-session state for EITHER axis (heap resume and/or
+    // fs resume), so create it whenever heap or fs persistence is enabled.
+    let engine = if heap_enabled || fs_enabled {
+        match SessionLog::new(&cli.session_db_path) {
             Ok(log) => {
                 tracing::info!("Session log opened at {}", cli.session_db_path);
                 let log = if let Some(ref cn) = cluster_node {
@@ -168,16 +205,21 @@ async fn main() -> Result<()> {
                 } else {
                     log
                 };
-                Some(log)
+                engine.with_session_log(log)
             }
             Err(e) => {
                 tracing::warn!("Failed to open session log at {}: {}. Session logging disabled.", cli.session_db_path, e);
-                None
+                engine
             }
-        };
+        }
+    } else {
+        engine
+    };
 
+    // Heap-tag store: heap axis only.
+    let engine = if heap_enabled {
         let heap_tag_db_path = format!("{}/heap-tags", cli.session_db_path);
-        let heap_tag_store = match HeapTagStore::new(&heap_tag_db_path) {
+        match HeapTagStore::new(&heap_tag_db_path) {
             Ok(store) => {
                 tracing::info!("Heap tag store opened at {}", heap_tag_db_path);
                 let store = if let Some(ref cn) = cluster_node {
@@ -185,16 +227,15 @@ async fn main() -> Result<()> {
                 } else {
                     store
                 };
-                Some(store)
+                engine.with_heap_tag_store(store)
             }
             Err(e) => {
                 tracing::warn!("Failed to open heap tag store at {}: {}. Heap tagging disabled.", heap_tag_db_path, e);
-                None
+                engine
             }
-        };
-
-        tracing::info!("Creating stateful engine");
-        Engine::new_stateful(heap_storage, session_log, heap_tag_store, heap_memory_max_bytes, execution_timeout_secs, cli.max_concurrent_executions)
+        }
+    } else {
+        engine
     };
 
     let engine = engine.with_wasm_default_max_bytes(wasm_default_max_bytes);
@@ -343,16 +384,16 @@ async fn main() -> Result<()> {
     // no fs policy was supplied, default to an allow-all policy chain.
     let engine = if let Some(chain) = fs_policy_chain {
         engine.with_fs_config(FsConfig::new(chain))
-    } else if cli.enable_fs_snapshots {
+    } else if fs_enabled {
         engine.with_fs_config(FsConfig::new(Arc::new(PolicyChain::new(vec![], EvalMode::All))))
     } else {
         engine
     };
 
     // ── Filesystem snapshots (content-addressed store + label/reflog) ─────
-    let engine = if cli.enable_fs_snapshots {
+    let engine = if fs_enabled {
         let store_dir = cli
-            .fs_store_dir
+            .fs_dir
             .clone()
             .unwrap_or_else(|| format!("{}/fs-blobs", cli.session_db_path));
         let labels_db = cli
@@ -360,26 +401,37 @@ async fn main() -> Result<()> {
             .clone()
             .unwrap_or_else(|| format!("{}/fs-labels", cli.session_db_path));
 
+        let fs_on_s3 = cli.fs_store == StoreKind::S3;
+
         // Labels replicate cluster-wide, but blobs/manifests are only shared if
         // they sit on shared storage. Node-local file blobs are single-node
         // only: in a cluster a label advanced on one node would resolve on
         // another to a manifest that node is missing. Refuse that combination up
         // front rather than failing later after a rebalance.
-        if cluster_node.is_some() && fs_s3_bucket.is_none() {
+        if cluster_node.is_some() && !fs_on_s3 {
             Cli::command()
                 .error(
                     clap::error::ErrorKind::ArgumentConflict,
-                    "--enable-fs-snapshots in cluster mode requires shared blob storage: \
-                     pass --s3-bucket (optionally with --cache-dir for a write-through \
-                     cache). Node-local fs snapshot blobs are single-node only.",
+                    "--fs-store s3 (with --s3-bucket) is required in cluster mode: \
+                     fs snapshot blobs must live on shared storage. Node-local \
+                     (--fs-store dir) blobs are single-node only.",
                 )
                 .exit();
         }
 
-        // Back the blob store with shared S3 (matching the heap backend) when a
-        // bucket is configured, so mounts resolve on any node; otherwise use
-        // node-local files (single-node).
-        let backend: Arc<dyn HeapStorage> = if let Some(bucket) = &fs_s3_bucket {
+        // Back the blob store with shared S3 when --fs-store s3, so mounts
+        // resolve on any node; otherwise use node-local files (single-node).
+        let backend: Arc<dyn HeapStorage> = if fs_on_s3 {
+            let bucket = fs_s3_bucket
+                .clone()
+                .unwrap_or_else(|| {
+                    Cli::command()
+                        .error(
+                            clap::error::ErrorKind::MissingRequiredArgument,
+                            "--fs-store s3 requires --s3-bucket.",
+                        )
+                        .exit()
+                });
             if let Some(cache_dir) = &fs_cache_dir {
                 tracing::info!(
                     "FS snapshots: shared S3 blob storage (bucket {}) with write-through cache at {}",
@@ -544,27 +596,30 @@ async fn main() -> Result<()> {
     };
 
     // ── Start transport ─────────────────────────────────────────────────
+    // McpService (session-capable) is used whenever any per-session state axis
+    // is on (heap and/or fs); StatelessMcpService only when neither is.
+    let bind_host = cli.bind_host.clone();
     if let Some(port) = cli.http_port {
         tracing::info!("Starting Streamable HTTP transport on port {}", port);
-        if engine.is_stateful() {
+        if engine.session_capable() {
             let verifier = session_verifier.clone();
-            start_streamable_http(engine, port, move |e| McpService::new(e, verifier.clone())).await?;
+            start_streamable_http(engine, bind_host, port, move |e| McpService::new(e, verifier.clone())).await?;
         } else {
             let verifier = session_verifier.clone();
-            start_streamable_http(engine, port, move |e| StatelessMcpService::new(e, verifier.clone())).await?;
+            start_streamable_http(engine, bind_host, port, move |e| StatelessMcpService::new(e, verifier.clone())).await?;
         }
     } else if let Some(port) = cli.sse_port {
         tracing::info!("Starting SSE transport on port {}", port);
-        if engine.is_stateful() {
+        if engine.session_capable() {
             let verifier = session_verifier.clone();
-            start_sse_server(engine, port, move |e| McpService::new(e, verifier.clone())).await?;
+            start_sse_server(engine, bind_host, port, move |e| McpService::new(e, verifier.clone())).await?;
         } else {
             let verifier = session_verifier.clone();
-            start_sse_server(engine, port, move |e| StatelessMcpService::new(e, verifier.clone())).await?;
+            start_sse_server(engine, bind_host, port, move |e| StatelessMcpService::new(e, verifier.clone())).await?;
         }
     } else {
         tracing::info!("Starting stdio transport");
-        if engine.is_stateful() {
+        if engine.session_capable() {
             let service = McpService::new(engine, None)
                 .serve(stdio())
                 .await
@@ -586,27 +641,25 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-// Resolve the listen address for the HTTP transports. Defaults to all IPv4
-// interfaces (0.0.0.0) so existing deployments are unchanged, but honours
-// MCP_V8_BIND_HOST so an operator can bind a dual-stack IPv6 address ("::"),
-// which is required to be reachable over private networks (e.g. Railway) that
-// resolve service hostnames to IPv6.
-fn resolve_bind_addr(port: u16) -> Result<std::net::SocketAddr> {
-    let host = std::env::var("MCP_V8_BIND_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
+// Resolve the listen address for the HTTP transports from `--bind-host`
+// (env MCP_V8_BIND_HOST). Defaults to all IPv4 interfaces (0.0.0.0); set "::"
+// for a dual-stack IPv6 listener, required to be reachable over private
+// networks (e.g. Railway) that resolve service hostnames to IPv6.
+fn resolve_bind_addr(host: &str, port: u16) -> Result<std::net::SocketAddr> {
     let ip: std::net::IpAddr = host
         .parse()
-        .map_err(|e| anyhow::anyhow!("invalid MCP_V8_BIND_HOST '{host}': {e}"))?;
+        .map_err(|e| anyhow::anyhow!("invalid --bind-host '{host}': {e}"))?;
     Ok(std::net::SocketAddr::new(ip, port))
 }
 
 // ── Streamable HTTP transport (--http-port) ─────────────────────────────
 
-async fn start_streamable_http<S, F>(engine: Engine, port: u16, make_service: F) -> Result<()>
+async fn start_streamable_http<S, F>(engine: Engine, host: String, port: u16, make_service: F) -> Result<()>
 where
     S: ServerHandler + Send + Sync + 'static,
     F: Fn(Engine) -> S + Send + Sync + Clone + 'static,
 {
-    let bind: std::net::SocketAddr = resolve_bind_addr(port)?;
+    let bind: std::net::SocketAddr = resolve_bind_addr(&host, port)?;
     let ct = CancellationToken::new();
 
     let config = StreamableHttpServerConfig {
@@ -662,12 +715,12 @@ where
 
 // ── SSE transport (--sse-port) ──────────────────────────────────────────
 
-async fn start_sse_server<S, F>(engine: Engine, port: u16, make_service: F) -> Result<()>
+async fn start_sse_server<S, F>(engine: Engine, host: String, port: u16, make_service: F) -> Result<()>
 where
     S: ServerHandler + Send + Sync + 'static,
     F: Fn(Engine) -> S + Send + Sync + Clone + 'static,
 {
-    let addr = resolve_bind_addr(port)?;
+    let addr = resolve_bind_addr(&host, port)?;
 
     let config = SseServerConfig {
         bind: addr,

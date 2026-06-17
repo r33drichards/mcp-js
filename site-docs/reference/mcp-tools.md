@@ -11,33 +11,33 @@ configuration.
 - [Stateful mode](#stateful-mode)
 - [Stateless mode](#stateless-mode)
 
-## Stateful mode
+## Heap+fs mode
 
-These tools keep execution records and heap state available across calls.
+These tools execute in isolated runs and return output directly.
 
 ### Tools
 
-- [`cancel_execution`](#stateful-cancel-execution)
-- [`delete_heap_tags`](#stateful-delete-heap-tags)
-- [`fs_label`](#stateful-fs-label)
-- [`fs_log`](#stateful-fs-log)
-- [`fs_ls`](#stateful-fs-ls)
-- [`fs_merge`](#stateful-fs-merge)
-- [`fs_pull`](#stateful-fs-pull)
-- [`fs_push`](#stateful-fs-push)
-- [`fs_reset`](#stateful-fs-reset)
-- [`get_execution`](#stateful-get-execution)
-- [`get_execution_output`](#stateful-get-execution-output)
-- [`get_heap_tags`](#stateful-get-heap-tags)
-- [`list_executions`](#stateful-list-executions)
-- [`list_session_snapshots`](#stateful-list-session-snapshots)
-- [`list_sessions`](#stateful-list-sessions)
-- [`query_heaps_by_tags`](#stateful-query-heaps-by-tags)
-- [`run_js`](#stateful-run-js)
-- [`set_heap_tags`](#stateful-set-heap-tags)
+- [`cancel_execution`](#heap+fs-cancel-execution)
+- [`delete_heap_tags`](#heap+fs-delete-heap-tags)
+- [`fs_label`](#heap+fs-fs-label)
+- [`fs_log`](#heap+fs-fs-log)
+- [`fs_ls`](#heap+fs-fs-ls)
+- [`fs_merge`](#heap+fs-fs-merge)
+- [`fs_pull`](#heap+fs-fs-pull)
+- [`fs_push`](#heap+fs-fs-push)
+- [`fs_reset`](#heap+fs-fs-reset)
+- [`get_execution`](#heap+fs-get-execution)
+- [`get_execution_output`](#heap+fs-get-execution-output)
+- [`get_heap_tags`](#heap+fs-get-heap-tags)
+- [`list_executions`](#heap+fs-list-executions)
+- [`list_session_snapshots`](#heap+fs-list-session-snapshots)
+- [`list_sessions`](#heap+fs-list-sessions)
+- [`query_heaps_by_tags`](#heap+fs-query-heaps-by-tags)
+- [`run_js`](#heap+fs-run-js)
+- [`set_heap_tags`](#heap+fs-set-heap-tags)
 
 ### `cancel_execution`
-<a id="stateful-cancel-execution"></a>
+<a id="heap+fs-cancel-execution"></a>
 
 Cancel a running execution. Terminates the V8 isolate.
 
@@ -48,7 +48,7 @@ Parameters:
 | `execution_id` | `string` | yes | - |
 
 ### `delete_heap_tags`
-<a id="stateful-delete-heap-tags"></a>
+<a id="heap+fs-delete-heap-tags"></a>
 
 Delete tags from a heap snapshot (stateful mode only). If keys is provided (comma-separated), only those tag keys are removed. If keys is omitted, all tags are deleted.
 
@@ -60,7 +60,7 @@ Parameters:
 | `keys` | `string | null` | no | - |
 
 ### `fs_label`
-<a id="stateful-fs-label"></a>
+<a id="heap+fs-fs-label"></a>
 
 Create or repoint a filesystem snapshot label to a CA id (hex). Pass an optional `message` (a commit-style note) to record on the reflog entry.
 
@@ -73,7 +73,7 @@ Parameters:
 | `name` | `string` | yes | - |
 
 ### `fs_log`
-<a id="stateful-fs-log"></a>
+<a id="heap+fs-fs-log"></a>
 
 Show the reflog (move history) for a filesystem snapshot label, oldest first. Each entry has at, from, to (CA ids), op (create/push/reset/force), and an optional message. Use a `to` value as the ca_id for fs_reset. Pass `limit` to return only the most recent N entries (bounding the scan over long histories).
 
@@ -85,14 +85,14 @@ Parameters:
 | `limit` | `integer | null` | no | - |
 
 ### `fs_ls`
-<a id="stateful-fs-ls"></a>
+<a id="heap+fs-fs-ls"></a>
 
 List filesystem snapshot labels. Returns each label name and its current head CA id (hex).
 
 This tool does not take structured parameters.
 
 ### `fs_merge`
-<a id="stateful-fs-merge"></a>
+<a id="heap+fs-fs-merge"></a>
 
 Three-way merge two filesystem snapshots (CA ids) into a new snapshot. Pass `base` — the snapshot both sides diverged from (e.g. the label head you mounted before two runs) — so only paths BOTH sides changed conflict; omit it for a 2-way merge. Text files are merged at line level: edits to different lines of the same file auto-merge cleanly. On success returns the merged snapshot's ca_id (push it to a label separately). On conflict returns status=conflict with, per path: each side's content id (null = absent), kind (text/binary/sqlite/modify-delete), and for text the diff3 conflict `markers` plus unified `diff_ours`/`diff_theirs` so you can resolve at line level (edit the markers, write the file back, push). Set prefer=ours|theirs to auto-resolve remaining conflicts to that side.
 
@@ -106,7 +106,7 @@ Parameters:
 | `theirs` | `string` | yes | - |
 
 ### `fs_pull`
-<a id="stateful-fs-pull"></a>
+<a id="heap+fs-fs-pull"></a>
 
 Resolve a filesystem snapshot label to its current head CA id (hex). Use this as the `fs` argument to run_js to mount it.
 
@@ -117,7 +117,7 @@ Parameters:
 | `label` | `string` | yes | - |
 
 ### `fs_push`
-<a id="stateful-fs-push"></a>
+<a id="heap+fs-fs-push"></a>
 
 Advance a filesystem snapshot label to a CA id (typically the `fs` value returned by a completed run_js execution). Default is reject-and-rebase: pass `expected` (the head you pulled) and the push fails if the label moved since. Set force=true to override, or detach=true to just return the CA id without touching the label. Pass an optional `message` (a commit-style note, max 4096 bytes) to record on the reflog entry.
 
@@ -133,7 +133,7 @@ Parameters:
 | `message` | `string | null` | no | - |
 
 ### `fs_reset`
-<a id="stateful-fs-reset"></a>
+<a id="heap+fs-fs-reset"></a>
 
 Reset a filesystem snapshot label to an earlier CA id from its reflog (rollback). The CA id must appear in the label's reflog (see fs_log) unless allow_unlogged=true. Pass an optional `message` (a commit-style note) to record on the reflog entry.
 
@@ -147,7 +147,7 @@ Parameters:
 | `message` | `string | null` | no | - |
 
 ### `get_execution`
-<a id="stateful-get-execution"></a>
+<a id="heap+fs-get-execution"></a>
 
 Get the status and result of an execution. Returns execution_id, status (running/completed/failed/cancelled/timed_out), result (if completed), heap (if stateful), fs (resulting filesystem snapshot CA id, if a mount was attached), error (if failed), started_at, and completed_at.
 
@@ -158,7 +158,7 @@ Parameters:
 | `execution_id` | `string` | yes | - |
 
 ### `get_execution_output`
-<a id="stateful-get-execution-output"></a>
+<a id="heap+fs-get-execution-output"></a>
 
 Get paginated console output for an execution. Supports two modes: line-based (line_offset + line_limit) or byte-based (byte_offset + byte_limit). If byte_offset is provided, byte mode takes precedence. Response includes both line and byte coordinates for cross-referencing. Use next_line_offset or next_byte_offset from a previous response to resume reading.
 
@@ -173,7 +173,7 @@ Parameters:
 | `line_offset` | `integer | null` | no | - |
 
 ### `get_heap_tags`
-<a id="stateful-get-heap-tags"></a>
+<a id="heap+fs-get-heap-tags"></a>
 
 Get tags for a heap snapshot (stateful mode only). Returns a map of key-value tags associated with the given heap content hash.
 
@@ -184,14 +184,14 @@ Parameters:
 | `heap` | `string` | yes | - |
 
 ### `list_executions`
-<a id="stateful-list-executions"></a>
+<a id="heap+fs-list-executions"></a>
 
 List all executions with their status.
 
 This tool does not take structured parameters.
 
 ### `list_session_snapshots`
-<a id="stateful-list-session-snapshots"></a>
+<a id="heap+fs-list-session-snapshots"></a>
 
 List all log entries for the current session (stateful mode only). Each entry contains the input heap hash, output heap hash, code executed, and timestamp. Use the fields parameter to select specific fields (comma-separated: index,input_heap,output_heap,code,timestamp).
 
@@ -202,14 +202,14 @@ Parameters:
 | `fields` | `string | null` | no | - |
 
 ### `list_sessions`
-<a id="stateful-list-sessions"></a>
+<a id="heap+fs-list-sessions"></a>
 
 List all named sessions (stateful mode only). Returns an array of session names that have been used via REST session fields or the X-MCP-Session-Id header.
 
 This tool does not take structured parameters.
 
 ### `query_heaps_by_tags`
-<a id="stateful-query-heaps-by-tags"></a>
+<a id="heap+fs-query-heaps-by-tags"></a>
 
 Query heap snapshots by tags (stateful mode only). Provide a map of key-value pairs to match. Returns all heaps whose tags contain all the specified key-value pairs.
 
@@ -220,7 +220,7 @@ Parameters:
 | `tags` | `object<string, string>` | yes | - |
 
 ### `run_js`
-<a id="stateful-run-js"></a>
+<a id="heap+fs-run-js"></a>
 
 run javascript or typescript code in v8
 
@@ -339,7 +339,7 @@ Parameters:
 | `tags` | `object | null` | no | - |
 
 ### `set_heap_tags`
-<a id="stateful-set-heap-tags"></a>
+<a id="heap+fs-set-heap-tags"></a>
 
 Set or replace tags on a heap snapshot (stateful mode only). Provide a map of key-value string pairs. This replaces all existing tags for the heap.
 

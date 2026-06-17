@@ -11,7 +11,8 @@ services:
     build: .
     command:
       - --http-port=3000
-      - --directory-path=/data/heaps
+      - --heap-store=dir
+      - --heap-dir=/data/heaps
       - --session-db-path=/data/sessions
       - --policies-json={"fetch":{"policies":[{"url":"http://opa:8181"}]}}
       - --fetch-header=host=api.github.com,header=Authorization,value=Bearer ${GITHUB_TOKEN}

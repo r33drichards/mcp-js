@@ -32,8 +32,8 @@ jobs:
 
       - name: Run bash CLI E2E tests
         run: |
-          # Start the server in HTTP stateless mode
-          ./server-bin --stateless --http-port 3000 &
+          # Start the server in HTTP stateless mode (the default: no heap/fs)
+          ./server-bin --http-port 3000 &
           SERVER_PID=$!
 
           cleanup() { kill $SERVER_PID 2>/dev/null || true; }

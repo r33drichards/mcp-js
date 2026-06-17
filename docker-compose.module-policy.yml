@@ -18,7 +18,8 @@ services:
     build: .
     command:
       - --http-port=3000
-      - --directory-path=/data/heaps
+      - --heap-store=dir
+      - --heap-dir=/data/heaps
       - --session-db-path=/data/sessions
     tmpfs:
       - /data:uid=1000,gid=1000
@@ -29,7 +30,8 @@ services:
     build: .
     command:
       - --http-port=3000
-      - --directory-path=/data/heaps
+      - --heap-store=dir
+      - --heap-dir=/data/heaps
       - --session-db-path=/data/sessions
       - --allow-external-modules
       - --policies-json={"modules":{"policies":[{"url":"http://opa:8181","policy_path":"mcp/modules"}]}}

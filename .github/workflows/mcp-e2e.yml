@@ -34,9 +34,10 @@ jobs:
 
           # Start the HTTP server with an MCP server connection.
           # The MCP server is another mcp-js instance running in stateless
-          # stdio MCP mode, providing the "run_js" tool.
-          $SERVER_BIN --stateless --http-port 8080 \
-            --mcp-server "tools=stdio:${SERVER_BIN}:--stateless" &
+          # stdio MCP mode (the default: no heap/fs persistence), providing
+          # the "run_js" tool.
+          $SERVER_BIN --http-port 8080 \
+            --mcp-server "tools=stdio:${SERVER_BIN}" &
           SERVER_PID=$!
 
           cleanup() { kill $SERVER_PID 2>/dev/null || true; }

@@ -166,12 +166,35 @@ println!("execution_id: {}", resp.into_inner().execution_id);
 
 ### Storage Options
 
-- `--s3-bucket <bucket>`: Use AWS S3 for heap snapshots. Specify the S3 bucket name. (Conflicts with `--stateless`)
-- `--cache-dir <path>`: Local filesystem cache directory for S3 write-through caching. Reduces latency by caching snapshots locally. (Requires `--s3-bucket`)
-- `--directory-path <path>`: Use a local directory for heap snapshots. Specify the directory path. (Conflicts with `--stateless`)
-- `--stateless`: Run in stateless mode - no heap snapshots are saved or loaded. Each JavaScript execution starts with a fresh V8 isolate. (Conflicts with `--s3-bucket` and `--directory-path`)
+Heap persistence (V8 heap snapshots) and filesystem persistence (the
+content-addressed `/work` filesystem) are **two independent, opt-in axes**. Each
+is selected with a `*-store` flag (`none` | `dir` | `s3`); both default to
+`none`. Any combination is valid: neither, heap-only, fs-only, or both.
 
-**Note:** For heap storage, if neither `--s3-bucket`, `--directory-path`, nor `--stateless` is provided, the server defaults to using `/tmp/mcp-v8-heaps` as the local directory.
+- `--heap-store <none|dir|s3>`: V8 heap-snapshot backend (default `none`). `dir`
+  uses `--heap-dir` (default `/tmp/mcp-v8-heaps`); `s3` uses the shared
+  `--s3-bucket`. Heap snapshots run in a V8 SnapshotCreator isolate that
+  **disables WebAssembly**, so `--heap-store` (other than `none`) is mutually
+  exclusive with `--wasm-module`/`--wasm-config` (rejected at startup).
+- `--heap-dir <path>`: directory for `--heap-store dir`.
+- `--fs-store <none|dir|s3>`: `/work` filesystem backend (default `none`). `dir`
+  uses `--fs-dir` (default `<session-db>/fs-blobs`); `s3` uses `--s3-bucket`.
+  Works with any isolate (compatible with WASM). When on, the `fs` parameter of
+  `run_js` and the `fs_*` tools / `/api/fs/...` endpoints become functional.
+- `--fs-dir <path>`: directory for `--fs-store dir`.
+- `--fs-labels-db <path>`: fs label/reflog sled db (default `<session-db>/fs-labels`).
+- `--s3-bucket <bucket>`: shared S3 bucket backing whichever axes use `s3`.
+- `--cache-dir <path>`: local write-through cache for the S3 backend. (Requires `--s3-bucket`)
+
+Every flag is also settable via an `MCP_V8_*` environment variable (precedence:
+CLI flag > env var > default), e.g. `MCP_V8_FS_STORE=dir`, `MCP_V8_S3_BUCKET=...`.
+
+> **Migration from ≤ v0.15:** `--stateless` is removed — the default is now
+> `--heap-store none` (no heap). `--directory-path X` → `--heap-store dir
+> --heap-dir X`. `--s3-bucket B` (for heaps) → `--heap-store s3 --s3-bucket B`.
+> `--enable-fs-snapshots` (+ `--fs-store-dir X`) → `--fs-store dir` (+ `--fs-dir
+> X`) or `--fs-store s3`. New capability: `--fs-store dir --wasm-module …` with
+> no heap (fs + WASM, previously impossible).
 
 ### Transport Options
 
@@ -186,7 +209,7 @@ println!("execution_id: {}", resp.into_inner().execution_id);
 
 ### Session Logging
 
-- `--session-db-path <path>`: Path to the sled database used for session logging (default: `/tmp/mcp-v8-sessions`). Only applies in stateful mode. (Conflicts with `--stateless`)
+- `--session-db-path <path>`: Path to the sled database used for the session log (per-session heap+fs history) and execution registry (default: `/tmp/mcp-v8-sessions`). Used whenever heap or fs persistence is enabled.
 
 ### Cluster Options
 

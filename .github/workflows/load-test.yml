@@ -81,9 +81,9 @@ jobs:
           if [ "${{ matrix.topology }}" = "single" ]; then
             # ── Single node ─────────────────────────────────
             if [ "${{ matrix.mode }}" = "stateful" ]; then
-              ARGS="--http-port=3001 --directory-path=/tmp/loadtest/node1/heaps --session-db-path=/tmp/loadtest/node1/sessions"
+              ARGS="--http-port=3001 --heap-store=dir --heap-dir=/tmp/loadtest/node1/heaps --session-db-path=/tmp/loadtest/node1/sessions"
             else
-              ARGS="--http-port=3001 --stateless --session-db-path=/tmp/loadtest/node1/sessions"
+              ARGS="--http-port=3001 --session-db-path=/tmp/loadtest/node1/sessions"
             fi
 
             echo "Starting single node on port 3001..."
@@ -110,9 +110,9 @@ jobs:
               done
 
               if [ "${{ matrix.mode }}" = "stateful" ]; then
-                MODE_ARGS="--directory-path=/tmp/loadtest/${NODE_ID}/heaps --session-db-path=/tmp/loadtest/${NODE_ID}/sessions"
+                MODE_ARGS="--heap-store=dir --heap-dir=/tmp/loadtest/${NODE_ID}/heaps --session-db-path=/tmp/loadtest/${NODE_ID}/sessions"
               else
-                MODE_ARGS="--stateless --session-db-path=/tmp/loadtest/${NODE_ID}/sessions"
+                MODE_ARGS="--session-db-path=/tmp/loadtest/${NODE_ID}/sessions"
               fi
 
               echo "Starting ${NODE_ID} on HTTP ${HTTP_PORT}, cluster ${CLUSTER_PORT}..."

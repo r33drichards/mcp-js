@@ -44,18 +44,25 @@ pub struct ToolCatalog {
     pub tools: Vec<ToolDoc>,
 }
 
-fn built_in_tools(stateful: bool) -> Vec<Tool> {
-    if stateful {
-        McpService::tool_box().list()
+fn built_in_tools(heap: bool, fs: bool) -> Vec<Tool> {
+    if heap || fs {
+        let mut tools = McpService::tool_box().list();
+        filter_tools_by_capability(&mut tools, heap, fs);
+        tools
     } else {
         StatelessMcpService::tool_box().list()
     }
 }
 
-pub fn built_in_tool_catalog(stateful: bool) -> ToolCatalog {
+pub fn built_in_tool_catalog(heap: bool, fs: bool) -> ToolCatalog {
     ToolCatalog {
-        mode: if stateful { "stateful" } else { "stateless" },
-        tools: built_in_tools(stateful)
+        mode: match (heap, fs) {
+            (true, true) => "heap+fs",
+            (true, false) => "heap",
+            (false, true) => "fs",
+            (false, false) => "stateless",
+        },
+        tools: built_in_tools(heap, fs)
             .into_iter()
             .map(ToolDoc::from_tool)
             .collect(),
@@ -63,12 +70,12 @@ pub fn built_in_tool_catalog(stateful: bool) -> ToolCatalog {
 }
 
 /// Build the list of static documentation resources exposed via MCP.
-fn doc_resources(stateful: bool) -> Vec<Resource> {
+fn doc_resources(heap: bool, fs: bool) -> Vec<Resource> {
     use crate::api::ApiDoc;
     use utoipa::OpenApi as _;
 
     let openapi_json = serde_json::to_string(&ApiDoc::openapi()).unwrap_or_default();
-    let tools_json = serde_json::to_string(&built_in_tool_catalog(stateful)).unwrap_or_default();
+    let tools_json = serde_json::to_string(&built_in_tool_catalog(heap, fs)).unwrap_or_default();
 
     // Store the generated JSON in thread-local statics to extend the lifetime
     // to 'static so we can use them in ResourceContents::text().
@@ -123,12 +130,12 @@ fn doc_resources(stateful: bool) -> Vec<Resource> {
 
 /// Read a single documentation resource by URI.
 /// Returns `None` when the URI is not recognised.
-fn read_doc_resource(uri: &str, stateful: bool) -> Option<ReadResourceResult> {
+fn read_doc_resource(uri: &str, heap: bool, fs: bool) -> Option<ReadResourceResult> {
     use crate::api::ApiDoc;
     use utoipa::OpenApi as _;
 
     let openapi_json = serde_json::to_string_pretty(&ApiDoc::openapi()).unwrap_or_default();
-    let tools_json = serde_json::to_string_pretty(&built_in_tool_catalog(stateful)).unwrap_or_default();
+    let tools_json = serde_json::to_string_pretty(&built_in_tool_catalog(heap, fs)).unwrap_or_default();
 
     let contents = match uri {
         "docs://readme" => vec![ResourceContents::TextResourceContents {
@@ -327,6 +334,54 @@ fn apply_run_js_description_override(tools: &mut [Tool], override_desc: Option<A
         for tool in tools.iter_mut() {
             if tool.name.as_ref() == "run_js" {
                 tool.description = Some(desc.to_string().into());
+            }
+        }
+    }
+}
+
+/// `run_js` description for a session-capable server WITHOUT heap persistence
+/// (fs-only): it must not claim JS globals persist between calls.
+const RUN_JS_FS_ONLY_DESC: &str = include_str!("run_js_tool_fs_only.md");
+
+/// Heap-only tools (heap-tag management). Hidden when heap persistence is off.
+const HEAP_ONLY_TOOLS: &[&str] =
+    &["get_heap_tags", "set_heap_tags", "delete_heap_tags", "query_heaps_by_tags"];
+
+/// Filesystem snapshot tools. Hidden when fs persistence is off.
+const FS_TOOLS: &[&str] =
+    &["fs_ls", "fs_pull", "fs_label", "fs_log", "fs_push", "fs_reset", "fs_merge"];
+
+/// True if `name` is a tool that requires a capability the engine doesn't have.
+fn tool_requires_missing_capability(name: &str, heap: bool, fs: bool) -> bool {
+    (!heap && HEAP_ONLY_TOOLS.contains(&name)) || (!fs && FS_TOOLS.contains(&name))
+}
+
+/// Strip heap-specific `run_js` parameters (`heap`, `tags`) from a tool's input
+/// schema when heap persistence is off, so the surface matches the capabilities.
+fn strip_run_js_heap_params(tool: &mut Tool) {
+    let schema = Arc::make_mut(&mut tool.input_schema);
+    if let Some(props) = schema.get_mut("properties").and_then(|v| v.as_object_mut()) {
+        props.remove("heap");
+        props.remove("tags");
+    }
+    if let Some(required) = schema.get_mut("required").and_then(|v| v.as_array_mut()) {
+        required.retain(|v| v.as_str() != Some("heap") && v.as_str() != Some("tags"));
+    }
+}
+
+/// Restrict the McpService tool surface to the engine's enabled capabilities:
+/// drop heap-only tools when heap is off and fs tools when fs is off, and pick a
+/// `run_js` description / schema that matches (no "globals persist" when heap is
+/// off). `run_js`, execution, and session tools are always kept.
+fn filter_tools_by_capability(tools: &mut Vec<Tool>, heap: bool, fs: bool) {
+    tools.retain(|t| !tool_requires_missing_capability(t.name.as_ref(), heap, fs));
+    if !heap {
+        for tool in tools.iter_mut() {
+            if tool.name.as_ref() == "run_js" {
+                if fs {
+                    tool.description = Some(RUN_JS_FS_ONLY_DESC.into());
+                }
+                strip_run_js_heap_params(tool);
             }
         }
     }
@@ -738,10 +793,17 @@ impl ServerHandler for McpService {
         let instructions = self.engine.instructions_override()
             .map(|s| s.to_string())
             .unwrap_or_else(|| {
-                "JavaScript execution service (stateful mode - with heap persistence). \
-                 Use resources/list and resources/read to explore docs://readme, \
-                 docs://llms-txt, docs://openapi, and docs://tools before calling tools."
-                .to_string()
+                let mode = match (self.engine.heap_enabled(), self.engine.fs_enabled()) {
+                    (true, true) => "with per-session V8 heap persistence (globals persist across calls) and a per-session content-addressed filesystem at /work",
+                    (true, false) => "with per-session V8 heap persistence (globals persist across calls)",
+                    (false, true) => "with a per-session content-addressed filesystem at /work (files persist across calls; JS globals do NOT)",
+                    (false, false) => "stateless (no state persists between calls)",
+                };
+                format!(
+                    "JavaScript execution service {mode}. \
+                     Use resources/list and resources/read to explore docs://readme, \
+                     docs://llms-txt, docs://openapi, and docs://tools before calling tools."
+                )
             });
         ServerInfo {
             instructions: Some(instructions),
@@ -760,7 +822,7 @@ impl ServerHandler for McpService {
     ) -> Result<ListResourcesResult, McpError> {
         Ok(ListResourcesResult {
             next_cursor: None,
-            resources: doc_resources(true),
+            resources: doc_resources(self.engine.heap_enabled(), self.engine.fs_enabled()),
         })
     }
 
@@ -769,7 +831,7 @@ impl ServerHandler for McpService {
         request: ReadResourceRequestParam,
         _context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResult, McpError> {
-        read_doc_resource(&request.uri, true)
+        read_doc_resource(&request.uri, self.engine.heap_enabled(), self.engine.fs_enabled())
             .ok_or_else(|| McpError::resource_not_found(
                 format!("Unknown resource URI: {}", request.uri),
                 None,
@@ -782,6 +844,9 @@ impl ServerHandler for McpService {
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
         let mut tools = Self::tool_box().list();
+        // Restrict the surface to the engine's enabled capabilities (heap/fs)
+        // before applying any operator description override.
+        filter_tools_by_capability(&mut tools, self.engine.heap_enabled(), self.engine.fs_enabled());
         apply_run_js_description_override(&mut tools, self.engine.run_js_description_override());
         if let Some(client) = &self.mcp_client {
             tools.extend(client.stub_tools());
@@ -1012,7 +1077,7 @@ impl ServerHandler for StatelessMcpService {
     ) -> Result<ListResourcesResult, McpError> {
         Ok(ListResourcesResult {
             next_cursor: None,
-            resources: doc_resources(false),
+            resources: doc_resources(false, false),
         })
     }
 
@@ -1021,7 +1086,7 @@ impl ServerHandler for StatelessMcpService {
         request: ReadResourceRequestParam,
         _context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResult, McpError> {
-        read_doc_resource(&request.uri, false)
+        read_doc_resource(&request.uri, false, false)
             .ok_or_else(|| McpError::resource_not_found(
                 format!("Unknown resource URI: {}", request.uri),
                 None,
@@ -1034,6 +1099,9 @@ impl ServerHandler for StatelessMcpService {
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
         let mut tools = Self::tool_box().list();
+        // Restrict the surface to the engine's enabled capabilities (heap/fs)
+        // before applying any operator description override.
+        filter_tools_by_capability(&mut tools, self.engine.heap_enabled(), self.engine.fs_enabled());
         apply_run_js_description_override(&mut tools, self.engine.run_js_description_override());
         if let Some(client) = &self.mcp_client {
             tools.extend(client.stub_tools());
@@ -1143,5 +1211,91 @@ mod tests {
         let mut tools = vec![tool("run_js", "original")];
         apply_run_js_description_override(&mut tools, None);
         assert_eq!(tools[0].description.as_deref(), Some("original"));
+    }
+
+    use super::filter_tools_by_capability;
+
+    fn run_js_with_heap_param() -> Tool {
+        let mut schema = serde_json::Map::new();
+        let mut props = serde_json::Map::new();
+        props.insert("code".to_string(), serde_json::json!({"type": "string"}));
+        props.insert("heap".to_string(), serde_json::json!({"type": "string"}));
+        props.insert("fs".to_string(), serde_json::json!({"type": "string"}));
+        props.insert("tags".to_string(), serde_json::json!({"type": "object"}));
+        schema.insert("properties".to_string(), serde_json::Value::Object(props));
+        Tool {
+            name: "run_js".into(),
+            description: Some("heapy".into()),
+            input_schema: Arc::new(schema),
+            annotations: None,
+        }
+    }
+
+    fn names(tools: &[Tool]) -> Vec<String> {
+        tools.iter().map(|t| t.name.to_string()).collect()
+    }
+
+    fn full_surface() -> Vec<Tool> {
+        vec![
+            run_js_with_heap_param(),
+            tool("get_execution", "x"),
+            tool("get_heap_tags", "x"),
+            tool("set_heap_tags", "x"),
+            tool("query_heaps_by_tags", "x"),
+            tool("fs_ls", "x"),
+            tool("fs_push", "x"),
+        ]
+    }
+
+    fn run_js_props(tools: &[Tool]) -> Vec<String> {
+        let rj = tools.iter().find(|t| t.name.as_ref() == "run_js").unwrap();
+        rj.input_schema
+            .get("properties")
+            .and_then(|v| v.as_object())
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn fs_only_hides_heap_tools_and_params() {
+        let mut tools = full_surface();
+        filter_tools_by_capability(&mut tools, false, true);
+        let n = names(&tools);
+        assert!(n.contains(&"run_js".to_string()));
+        assert!(n.contains(&"fs_ls".to_string()));
+        // Heap-tag tools gone.
+        assert!(!n.contains(&"get_heap_tags".to_string()));
+        assert!(!n.contains(&"query_heaps_by_tags".to_string()));
+        // run_js loses heap/tags params but keeps code/fs.
+        let props = run_js_props(&tools);
+        assert!(props.contains(&"code".to_string()));
+        assert!(props.contains(&"fs".to_string()));
+        assert!(!props.contains(&"heap".to_string()));
+        assert!(!props.contains(&"tags".to_string()));
+        // Description must not promise globals persist.
+        let rj = tools.iter().find(|t| t.name.as_ref() == "run_js").unwrap();
+        assert!(rj.description.as_deref().unwrap().contains("globals"));
+    }
+
+    #[test]
+    fn heap_only_hides_fs_tools_keeps_heap_params() {
+        let mut tools = full_surface();
+        filter_tools_by_capability(&mut tools, true, false);
+        let n = names(&tools);
+        assert!(n.contains(&"get_heap_tags".to_string()));
+        assert!(!n.contains(&"fs_ls".to_string()));
+        assert!(!n.contains(&"fs_push".to_string()));
+        // heap param retained when heap is on.
+        assert!(run_js_props(&tools).contains(&"heap".to_string()));
+    }
+
+    #[test]
+    fn both_keeps_everything() {
+        let mut tools = full_surface();
+        filter_tools_by_capability(&mut tools, true, true);
+        let n = names(&tools);
+        assert!(n.contains(&"get_heap_tags".to_string()));
+        assert!(n.contains(&"fs_ls".to_string()));
+        assert!(run_js_props(&tools).contains(&"heap".to_string()));
     }
 }

@@ -49,10 +49,10 @@ EXPOSE 8080
 
 # Use ENTRYPOINT for the binary so CMD provides default arguments.
 # This allows Docker MCP Registry and other orchestrators to override
-# just the arguments (e.g. --stateless for stdio) without repeating the binary name.
+# just the arguments without repeating the binary name.
 ENTRYPOINT ["mcp-v8"]
 
-# Default: run SSE server on port 8080 in stateless mode.
-# Override with: docker run <image> --stateless (stdio), --http-port 8080 --stateless, etc.
-CMD ["--sse-port", "8080", "--stateless"]
+# Default: run SSE server on port 8080, stateless (no heap/fs persistence).
+# Override args, e.g.: docker run <image> --http-port 8080 --fs-store dir --fs-dir /data/fs
+CMD ["--sse-port", "8080"]
 

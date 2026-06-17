@@ -739,48 +739,58 @@ static MODULE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 /// Execute code as an ES module. All code is always executed as a module,
 /// which supports `import` declarations, `export`, and top-level `await`.
-fn execute_module(runtime: &mut JsRuntime, code: &str) -> Result<(), String> {
+// Build the dedicated current-thread runtime each isolate runs on.
+//
+// V8/deno_core is single-threaded and deno_core's async op driver dispatches ops
+// through `deno_unsync`, which requires a `RuntimeFlavor::CurrentThread` runtime
+// (on a multi-thread runtime it panics in debug and deadlocks fs ops in
+// release). We are called from `spawn_blocking` (a blocking task), so building
+// and driving a fresh current-thread runtime here is allowed — no dedicated OS
+// thread needed.
+//
+// Ops that need the server's multi-thread runtime don't run their I/O here: the
+// S3 client (heap + fs blobs) captures that runtime's Handle at construction and
+// bridges via `handle.spawn(...).await`, and cross-worker fs blobs are pre-staged
+// into the local cache by `build_fs_mount` before the isolate runs.
+fn isolate_runtime() -> Result<tokio::runtime::Runtime, String> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("Failed to create current-thread runtime: {}", e))
+}
+
+fn execute_module(
+    rt: &tokio::runtime::Runtime,
+    runtime: &mut JsRuntime,
+    code: &str,
+) -> Result<(), String> {
     let id = MODULE_COUNTER.fetch_add(1, Ordering::Relaxed);
     let main_url = ModuleSpecifier::parse(&format!("file:///main_{}.js", id))
         .map_err(|e| format!("internal specifier error: {}", e))?;
 
-    // Use the current tokio runtime handle if available, otherwise create a
-    // temporary one. Direct callers (tests, fuzz targets) may not have a
-    // tokio runtime on the current thread.
-    //
-    // NOTE: the isolate runs on the ambient (multi-thread) server runtime on
-    // purpose. Async ops that await resources bound to that runtime — the child
-    // MCP clients (mcp.callTool) and the S3 client — only make progress there.
-    // Cross-worker fs-snapshot blobs are pre-staged into the local cache by
-    // `build_fs_mount` (on this runtime) before the isolate runs, so in-op fs
-    // reads are local and never await remote I/O from inside the isolate.
-    let owned_rt;
-    let handle = match tokio::runtime::Handle::try_current() {
-        Ok(h) => h,
-        Err(_) => {
-            owned_rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|e| format!("Failed to create tokio runtime: {}", e))?;
-            owned_rt.handle().clone()
-        }
-    };
+    // CRITICAL: run the load, module evaluation, AND event loop inside ONE
+    // `block_on`. `mod_evaluate` runs the module's top-level synchronous code
+    // immediately (up to the first await), which submits async ops — so it must
+    // execute under this current-thread runtime's context too, not between
+    // `block_on` calls (where the ambient multi-thread runtime is current and
+    // deno_unsync's op spawn would panic/deadlock).
+    rt.block_on(async move {
+        let mod_id = runtime
+            .load_side_es_module_from_code(&main_url, code.to_string())
+            .await
+            .map_err(|e| format!("{}", e))?;
 
-    let _guard = handle.enter();
+        let eval_future = runtime.mod_evaluate(mod_id);
 
-    let mod_id = handle
-        .block_on(runtime.load_side_es_module_from_code(&main_url, code.to_string()))
-        .map_err(|e| format!("{}", e))?;
+        runtime
+            .run_event_loop(Default::default())
+            .await
+            .map_err(|e| format!("{}", e))?;
 
-    let eval_future = runtime.mod_evaluate(mod_id);
+        eval_future.await.map_err(|e| format!("{}", e))?;
 
-    handle
-        .block_on(runtime.run_event_loop(Default::default()))
-        .map_err(|e| format!("{}", e))?;
-
-    handle.block_on(eval_future).map_err(|e| format!("{}", e))?;
-
-    Ok(())
+        Ok(())
+    })
 }
 
 /// Configuration bundle for `execute_stateless` / `execute_stateful`.
@@ -941,6 +951,10 @@ pub fn execute_stateless(
             ..Default::default()
         });
 
+        // Current-thread runtime that drives this isolate's async ops (see
+        // `execute_module` / `isolate_runtime`).
+        let rt = isolate_runtime()?;
+
         // Put console log state in OpState.
         if let Some(tree) = console_tree {
             runtime.op_state().borrow_mut().put(ConsoleLogState::new(tree));
@@ -1036,7 +1050,7 @@ pub fn execute_stateless(
                 if let Err(e) = console::harden_runtime(&mut runtime) {
                     return Err(e);
                 }
-                execute_module(&mut runtime, code)
+                execute_module(&rt, &mut runtime, code)
             }
         };
 
@@ -1137,6 +1151,10 @@ pub fn execute_stateful(
             ..Default::default()
         });
 
+        // Current-thread runtime that drives this isolate's async ops (see
+        // `execute_module` / `isolate_runtime`).
+        let rt = isolate_runtime()?;
+
         // Put console log state in OpState.
         if let Some(tree) = console_tree {
             runtime.op_state().borrow_mut().put(ConsoleLogState::new(tree));
@@ -1186,7 +1204,7 @@ pub fn execute_stateful(
         let has_snapshot = leaked_snapshot.is_some();
 
         let output_result = if has_snapshot {
-            execute_module(&mut runtime, code)
+            execute_module(&rt, &mut runtime, code)
         } else {
             // Inject WASM modules as globals via V8 native API.
             // Do NOT early-return here — snapshot() must be called below.
@@ -1242,7 +1260,7 @@ pub fn execute_stateful(
                     if let Err(e) = console::harden_runtime(&mut runtime) {
                         return Err(e);
                     }
-                    execute_module(&mut runtime, code)
+                    execute_module(&rt, &mut runtime, code)
                 }
             }
         };
@@ -1462,6 +1480,38 @@ impl<'a> RunJsRequest<'a> {
 impl Engine {
     pub fn is_stateful(&self) -> bool {
         self.heap_storage.is_some()
+    }
+
+    /// Heap persistence (V8 heap snapshots) is configured. Alias of
+    /// `is_stateful`, kept for readability now that heap and fs are independent.
+    pub fn heap_enabled(&self) -> bool {
+        self.heap_storage.is_some()
+    }
+
+    /// Filesystem persistence (content-addressed `/work` snapshots) is configured.
+    pub fn fs_enabled(&self) -> bool {
+        self.fs_store.is_some()
+    }
+
+    /// True when the engine carries any per-session state (heap and/or fs), and
+    /// therefore needs the session-capable MCP surface and a session log.
+    pub fn session_capable(&self) -> bool {
+        self.heap_enabled() || self.fs_enabled()
+    }
+
+    /// Attach a session log to an existing engine. Required for per-session
+    /// state resolution on either axis (heap or fs); the stateful constructor
+    /// passes one inline, but a stateless (heap-off) engine with fs persistence
+    /// needs one too.
+    pub fn with_session_log(mut self, log: SessionLog) -> Self {
+        self.session_log = Some(log);
+        self
+    }
+
+    /// Attach a heap-tag store to an existing engine (heap persistence only).
+    pub fn with_heap_tag_store(mut self, store: HeapTagStore) -> Self {
+        self.heap_tag_store = Some(store);
+        self
     }
 
     pub fn new_stateless(heap_memory_max_bytes: usize, execution_timeout_secs: u64, max_concurrent: usize) -> Self {
@@ -2267,6 +2317,9 @@ impl Engine {
                 let mlc = self.module_loader_config.clone();
                 let mc = self.mcp_client_manager.as_ref().map(|m| mcp_client::McpConfig { client_manager: (**m).clone(), policy_chain: self.mcp_tools_policy_chain.clone() });
                 let fm = fs_mount.clone();
+                // Cloned for the post-run session-log entry, since `code` is
+                // moved into the spawn_blocking closure below.
+                let code_for_log = code.clone();
                 let mut join_handle = tokio::task::spawn_blocking(move || {
                     execute_stateless(&code, ExecutionConfig::new(max_bytes)
                         .isolate_handle(ih)
@@ -2323,7 +2376,25 @@ impl Engine {
                         // fails the run rather than reporting lost fs changes.
                         match self.push_mount(&fs_mount).await {
                             Ok(output_fs) => {
-                                registry.set_fs(&id, output_fs);
+                                registry.set_fs(&id, output_fs.clone());
+                                // Record the resulting fs snapshot per session so a
+                                // later run in the same session resumes it. This is
+                                // what gives fs-only (heap-off) engines per-session
+                                // filesystem persistence; no heap fields are set.
+                                if let (Some(session_name), Some(log)) =
+                                    (&session, &self.session_log)
+                                {
+                                    let entry = SessionLogEntry {
+                                        input_heap: None,
+                                        output_heap: String::new(),
+                                        output_fs: output_fs.clone(),
+                                        code: code_for_log,
+                                        timestamp: chrono::Utc::now().to_rfc3339(),
+                                    };
+                                    if let Err(e) = log.append(session_name, entry).await {
+                                        tracing::warn!("Failed to log session entry: {}", e);
+                                    }
+                                }
                                 registry.complete(&id, js_result.output, None);
                             }
                             Err(e) => registry.fail(&id, e),

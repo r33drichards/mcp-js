@@ -30,7 +30,7 @@ impl HttpServer {
         let port = find_available_port();
 
         let child = Command::new(env!("CARGO_BIN_EXE_server"))
-            .args(&["--stateless", "--http-port", &port.to_string()])
+            .args(&["--http-port", &port.to_string()])
             .stdin(Stdio::null())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())

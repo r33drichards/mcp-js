@@ -149,7 +149,7 @@ impl SseServer {
         let port = find_available_port();
 
         let child = Command::new(env!("CARGO_BIN_EXE_server"))
-            .args(&["--directory-path", heap_dir, "--sse-port", &port.to_string()])
+            .args(&["--heap-store", "dir", "--heap-dir", heap_dir, "--sse-port", &port.to_string()])
             .stdin(Stdio::null())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
