@@ -1,12 +1,18 @@
 use rmcp::{
-    model::{ServerCapabilities, ServerInfo},
-    Error as McpError, RoleServer, ServerHandler, model::*,
-    service::RequestContext, tool,
+    ErrorData as McpError, RoleServer, ServerHandler,
+    handler::server::{router::tool::ToolRouter, tool::ToolCallContext, wrapper::Parameters},
+    model::*,
+    schemars,
+    service::RequestContext,
+    task_handler,
+    task_manager::OperationProcessor,
+    tool, tool_router,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
+use tokio::sync::Mutex;
 
 use crate::engine::Engine;
 use crate::engine::heap_tags::HeapTagEntry;
@@ -46,11 +52,11 @@ pub struct ToolCatalog {
 
 fn built_in_tools(heap: bool, fs: bool) -> Vec<Tool> {
     if heap || fs {
-        let mut tools = McpService::tool_box().list();
+        let mut tools = McpService::tool_router().list_all();
         filter_tools_by_capability(&mut tools, heap, fs);
         tools
     } else {
-        StatelessMcpService::tool_box().list()
+        StatelessMcpService::tool_router().list_all()
     }
 }
 
@@ -70,59 +76,32 @@ pub fn built_in_tool_catalog(heap: bool, fs: bool) -> ToolCatalog {
 }
 
 /// Build the list of static documentation resources exposed via MCP.
-fn doc_resources(heap: bool, fs: bool) -> Vec<Resource> {
-    use crate::api::ApiDoc;
-    use utoipa::OpenApi as _;
-
-    let openapi_json = serde_json::to_string(&ApiDoc::openapi()).unwrap_or_default();
-    let tools_json = serde_json::to_string(&built_in_tool_catalog(heap, fs)).unwrap_or_default();
-
-    // Store the generated JSON in thread-local statics to extend the lifetime
-    // to 'static so we can use them in ResourceContents::text().
-    // We use once_cell-style initialisation via OnceLock boxes on the heap.
-    // Actually, we use owned Strings, not &'static str, so we return the
-    // ResourceContents by value — that's fine.
-    let _ = (openapi_json, tools_json); // suppress unused warning before use below
-
+fn doc_resources(_heap: bool, _fs: bool) -> Vec<Resource> {
     vec![
         Annotated::new(
-            RawResource {
-                uri: "docs://readme".into(),
-                name: "README".into(),
-                description: Some("Full mcp-v8 README with usage, CLI flags, and examples (Markdown)".into()),
-                mime_type: Some("text/markdown".into()),
-                size: Some(README_MD.len() as u32),
-            },
+            RawResource::new("docs://readme", "README")
+                .with_description("Full mcp-v8 README with usage, CLI flags, and examples (Markdown)")
+                .with_mime_type("text/markdown")
+                .with_size(README_MD.len() as u32),
             None,
         ),
         Annotated::new(
-            RawResource {
-                uri: "docs://llms-txt".into(),
-                name: "llms.txt".into(),
-                description: Some("Machine-readable agent guide: connection options, tools, REST API (Markdown)".into()),
-                mime_type: Some("text/markdown".into()),
-                size: Some(LLMS_TXT.len() as u32),
-            },
+            RawResource::new("docs://llms-txt", "llms.txt")
+                .with_description("Machine-readable agent guide: connection options, tools, REST API (Markdown)")
+                .with_mime_type("text/markdown")
+                .with_size(LLMS_TXT.len() as u32),
             None,
         ),
         Annotated::new(
-            RawResource {
-                uri: "docs://openapi".into(),
-                name: "OpenAPI spec".into(),
-                description: Some("OpenAPI 3.0 JSON spec for the REST API (/api/exec, /api/executions/*, etc.)".into()),
-                mime_type: Some("application/json".into()),
-                size: None,
-            },
+            RawResource::new("docs://openapi", "OpenAPI spec")
+                .with_description("OpenAPI 3.0 JSON spec for the REST API (/api/exec, /api/executions/*, etc.)")
+                .with_mime_type("application/json"),
             None,
         ),
         Annotated::new(
-            RawResource {
-                uri: "docs://tools".into(),
-                name: "MCP tool list".into(),
-                description: Some("JSON list of available MCP tools with descriptions, mode-aware".into()),
-                mime_type: Some("application/json".into()),
-                size: None,
-            },
+            RawResource::new("docs://tools", "MCP tool list")
+                .with_description("JSON list of available MCP tools with descriptions, mode-aware")
+                .with_mime_type("application/json"),
             None,
         ),
     ]
@@ -137,193 +116,166 @@ fn read_doc_resource(uri: &str, heap: bool, fs: bool) -> Option<ReadResourceResu
     let openapi_json = serde_json::to_string_pretty(&ApiDoc::openapi()).unwrap_or_default();
     let tools_json = serde_json::to_string_pretty(&built_in_tool_catalog(heap, fs)).unwrap_or_default();
 
-    let contents = match uri {
-        "docs://readme" => vec![ResourceContents::TextResourceContents {
-            uri: uri.to_string(),
-            mime_type: Some("text/markdown".into()),
-            text: README_MD.to_string(),
-        }],
-        "docs://llms-txt" => vec![ResourceContents::TextResourceContents {
-            uri: uri.to_string(),
-            mime_type: Some("text/markdown".into()),
-            text: LLMS_TXT.to_string(),
-        }],
-        "docs://openapi" => vec![ResourceContents::TextResourceContents {
-            uri: uri.to_string(),
-            mime_type: Some("application/json".into()),
-            text: openapi_json,
-        }],
-        "docs://tools" => vec![ResourceContents::TextResourceContents {
-            uri: uri.to_string(),
-            mime_type: Some("application/json".into()),
-            text: tools_json,
-        }],
+    let text = match uri {
+        "docs://readme" => (README_MD.to_string(), "text/markdown"),
+        "docs://llms-txt" => (LLMS_TXT.to_string(), "text/markdown"),
+        "docs://openapi" => (openapi_json, "application/json"),
+        "docs://tools" => (tools_json, "application/json"),
         _ => return None,
     };
 
-    Some(ReadResourceResult { contents })
+    Some(ReadResourceResult::new(vec![ResourceContents::TextResourceContents {
+        uri: uri.to_string(),
+        mime_type: Some(text.1.into()),
+        text: text.0,
+        meta: None,
+    }]))
 }
 
-// ── MCP response types ──────────────────────────────────────────────────
+// ── Tool result helper ──────────────────────────────────────────────────
 
-#[derive(Debug, Clone)]
-pub struct RunJsResponse {
+/// Wrap a JSON value as a successful `CallToolResult` (single JSON content).
+fn json_result(value: serde_json::Value) -> Result<CallToolResult, McpError> {
+    match Content::json(value) {
+        Ok(content) => Ok(CallToolResult::success(vec![content])),
+        Err(e) => Ok(CallToolResult::success(vec![Content::text(format!(
+            "Failed to serialize response: {e}"
+        ))])),
+    }
+}
+
+// ── Tool argument structs ─────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct RunJsArgs {
+    #[serde(default)]
+    pub code: Option<String>,
+    #[serde(default)]
+    pub file: Option<String>,
+    #[serde(default)]
+    pub heap: Option<String>,
+    #[serde(default)]
+    pub fs: Option<String>,
+    #[serde(default)]
+    pub heap_memory_max_mb: Option<usize>,
+    #[serde(default)]
+    pub execution_timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub tags: Option<HashMap<String, String>>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct StatelessRunJsArgs {
+    #[serde(default)]
+    pub code: Option<String>,
+    #[serde(default)]
+    pub file: Option<String>,
+    #[serde(default)]
+    pub heap_memory_max_mb: Option<usize>,
+    #[serde(default)]
+    pub execution_timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ExecutionIdArg {
     pub execution_id: String,
 }
 
-impl IntoContents for RunJsResponse {
-    fn into_contents(self) -> Vec<Content> {
-        match Content::json(json!({ "execution_id": self.execution_id })) {
-            Ok(content) => vec![content],
-            Err(e) => vec![Content::text(format!("Failed to convert run_js response: {}", e))],
-        }
-    }
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GetExecutionOutputArgs {
+    pub execution_id: String,
+    #[serde(default)]
+    pub line_offset: Option<u64>,
+    #[serde(default)]
+    pub line_limit: Option<u64>,
+    #[serde(default)]
+    pub byte_offset: Option<u64>,
+    #[serde(default)]
+    pub byte_limit: Option<u64>,
 }
 
-/// Generic JSON response for the `fs_*` tools.
-#[derive(Debug, Clone)]
-pub struct FsResponse {
-    pub value: serde_json::Value,
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ListSessionSnapshotsArgs {
+    #[serde(default)]
+    pub fields: Option<String>,
 }
 
-impl FsResponse {
-    fn ok(value: serde_json::Value) -> Self {
-        Self { value }
-    }
-    fn err(error: impl Into<String>) -> Self {
-        Self {
-            value: json!({ "error": error.into() }),
-        }
-    }
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct HeapArg {
+    pub heap: String,
 }
 
-impl IntoContents for FsResponse {
-    fn into_contents(self) -> Vec<Content> {
-        match Content::json(self.value) {
-            Ok(content) => vec![content],
-            Err(e) => vec![Content::text(format!("Failed to convert fs response: {}", e))],
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct ExecutionStatusResponse {
-    pub value: serde_json::Value,
-}
-
-impl IntoContents for ExecutionStatusResponse {
-    fn into_contents(self) -> Vec<Content> {
-        match Content::json(self.value) {
-            Ok(content) => vec![content],
-            Err(e) => vec![Content::text(format!("Failed to convert execution status response: {}", e))],
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct ConsoleOutputResponse {
-    pub value: serde_json::Value,
-}
-
-impl IntoContents for ConsoleOutputResponse {
-    fn into_contents(self) -> Vec<Content> {
-        match Content::json(self.value) {
-            Ok(content) => vec![content],
-            Err(e) => vec![Content::text(format!("Failed to convert console output response: {}", e))],
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct ListExecutionsResponse {
-    pub value: serde_json::Value,
-}
-
-impl IntoContents for ListExecutionsResponse {
-    fn into_contents(self) -> Vec<Content> {
-        match Content::json(self.value) {
-            Ok(content) => vec![content],
-            Err(e) => vec![Content::text(format!("Failed to convert list executions response: {}", e))],
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct ListSessionsResponse {
-    pub sessions: Vec<String>,
-}
-
-impl IntoContents for ListSessionsResponse {
-    fn into_contents(self) -> Vec<Content> {
-        match Content::json(json!({ "sessions": self.sessions })) {
-            Ok(content) => vec![content],
-            Err(e) => vec![Content::text(format!("Failed to convert list_sessions response: {}", e))],
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct ListSessionSnapshotsResponse {
-    pub entries: Vec<serde_json::Value>,
-}
-
-impl IntoContents for ListSessionSnapshotsResponse {
-    fn into_contents(self) -> Vec<Content> {
-        match Content::json(json!({ "entries": self.entries })) {
-            Ok(content) => vec![content],
-            Err(e) => vec![Content::text(format!("Failed to convert list_session_snapshots response: {}", e))],
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct GetHeapTagsResponse {
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SetHeapTagsArgs {
+    pub heap: String,
     pub tags: HashMap<String, String>,
 }
 
-impl IntoContents for GetHeapTagsResponse {
-    fn into_contents(self) -> Vec<Content> {
-        match Content::json(json!({ "tags": self.tags })) {
-            Ok(content) => vec![content],
-            Err(e) => vec![Content::text(format!("Failed to convert get_heap_tags response: {}", e))],
-        }
-    }
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DeleteHeapTagsArgs {
+    pub heap: String,
+    #[serde(default)]
+    pub keys: Option<String>,
 }
 
-#[derive(Debug, Clone)]
-pub struct OkResponse {
-    pub ok: bool,
-    pub error: Option<String>,
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct TagsArg {
+    pub tags: HashMap<String, String>,
 }
 
-impl IntoContents for OkResponse {
-    fn into_contents(self) -> Vec<Content> {
-        let value = match self.error {
-            Some(e) => json!({ "ok": self.ok, "error": e }),
-            None => json!({ "ok": self.ok }),
-        };
-        match Content::json(value) {
-            Ok(content) => vec![content],
-            Err(e) => vec![Content::text(format!("Failed to convert response: {}", e))],
-        }
-    }
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct FsPullArgs {
+    pub label: String,
 }
 
-#[derive(Debug, Clone)]
-pub struct QueryHeapTagsResponse {
-    pub results: Vec<HeapTagEntry>,
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct FsLabelArgs {
+    pub name: String,
+    pub ca_id: String,
+    #[serde(default)]
+    pub message: Option<String>,
 }
 
-impl IntoContents for QueryHeapTagsResponse {
-    fn into_contents(self) -> Vec<Content> {
-        let entries: Vec<serde_json::Value> = self.results.into_iter().map(|e| {
-            json!({ "heap": e.heap, "tags": e.tags })
-        }).collect();
-        match Content::json(json!({ "results": entries })) {
-            Ok(content) => vec![content],
-            Err(e) => vec![Content::text(format!("Failed to convert query_heaps_by_tags response: {}", e))],
-        }
-    }
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct FsLogArgs {
+    pub label: String,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct FsPushArgs {
+    pub ca_id: String,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub expected: Option<String>,
+    #[serde(default)]
+    pub force: Option<bool>,
+    #[serde(default)]
+    pub detach: Option<bool>,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct FsResetArgs {
+    pub label: String,
+    pub ca_id: String,
+    #[serde(default)]
+    pub allow_unlogged: Option<bool>,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct FsMergeArgs {
+    pub ours: String,
+    pub theirs: String,
+    #[serde(default)]
+    pub base: Option<String>,
+    #[serde(default)]
+    pub prefer: Option<String>,
 }
 
 /// Replace the `run_js` tool's description with an operator-provided override,
@@ -401,8 +353,13 @@ pub struct McpService {
     session_id: Arc<OnceLock<String>>,
     /// X-MCP-* headers from the initialize request, available for policy evaluation.
     mcp_headers: Arc<OnceLock<serde_json::Value>>,
+    /// Tool registry generated by `#[tool_router]`.
+    tool_router: ToolRouter<McpService>,
+    /// Backing store for asynchronous task execution (`#[task_handler]`).
+    processor: Arc<Mutex<OperationProcessor>>,
 }
 
+#[tool_router]
 impl McpService {
     pub fn new(engine: Engine, verifier: Option<Arc<SessionVerifier>>) -> Self {
         let mcp_client = engine.mcp_client_manager();
@@ -412,320 +369,271 @@ impl McpService {
             mcp_client,
             session_id: Arc::new(OnceLock::new()),
             mcp_headers: Arc::new(OnceLock::new()),
+            tool_router: Self::tool_router(),
+            processor: Arc::new(Mutex::new(OperationProcessor::new())),
         }
     }
-}
 
-#[tool(tool_box)]
-impl McpService {
-    #[tool(description = include_str!("run_js_tool_description.md"))]
+    #[doc = include_str!("run_js_tool_description.md")]
+    #[tool(execution(task_support = "optional"))]
     pub async fn run_js(
         &self,
-        #[tool(param)]
-        #[serde(default)]
-        code: Option<String>,
-        #[tool(param)]
-        #[serde(default)]
-        file: Option<String>,
-        #[tool(param)]
-        #[serde(default)]
-        heap: Option<String>,
-        #[tool(param)]
-        #[serde(default)]
-        fs: Option<String>,
-        #[tool(param)]
-        #[serde(default)]
-        heap_memory_max_mb: Option<usize>,
-        #[tool(param)]
-        #[serde(default)]
-        execution_timeout_secs: Option<u64>,
-        #[tool(param)]
-        #[serde(default)]
-        tags: Option<HashMap<String, String>>,
-    ) -> RunJsResponse {
+        Parameters(args): Parameters<RunJsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let RunJsArgs {
+            code,
+            file,
+            heap,
+            fs,
+            heap_memory_max_mb,
+            execution_timeout_secs,
+            tags,
+        } = args;
         let mut req = self.engine.run_js(code.unwrap_or_default());
         req = req.maybe_file(file);
-        if let Some(h) = heap { req = req.heap(h); }
-        req = req.maybe_fs(fs);
-        if let Some(s) = self.session_id.get() { req = req.session(s.clone()); }
-        if let Some(mb) = heap_memory_max_mb { req = req.heap_memory_max_mb(mb); }
-        if let Some(secs) = execution_timeout_secs { req = req.execution_timeout_secs(secs); }
-        if let Some(t) = tags { req = req.tags(t); }
-        req = req.maybe_mcp_headers(self.mcp_headers.get().cloned());
-        match req.execute().await {
-            Ok(execution_id) => RunJsResponse { execution_id },
-            Err(e) => RunJsResponse {
-                execution_id: format!("error: {}", e),
-            },
+        if let Some(h) = heap {
+            req = req.heap(h);
         }
+        req = req.maybe_fs(fs);
+        if let Some(s) = self.session_id.get() {
+            req = req.session(s.clone());
+        }
+        if let Some(mb) = heap_memory_max_mb {
+            req = req.heap_memory_max_mb(mb);
+        }
+        if let Some(secs) = execution_timeout_secs {
+            req = req.execution_timeout_secs(secs);
+        }
+        if let Some(t) = tags {
+            req = req.tags(t);
+        }
+        req = req.maybe_mcp_headers(self.mcp_headers.get().cloned());
+        let execution_id = match req.execute().await {
+            Ok(execution_id) => execution_id,
+            Err(e) => format!("error: {}", e),
+        };
+        json_result(json!({ "execution_id": execution_id }))
     }
 
     #[tool(description = "Get the status and result of an execution. Returns execution_id, status (running/completed/failed/cancelled/timed_out), result (if completed), heap (if stateful), fs (resulting filesystem snapshot CA id, if a mount was attached), error (if failed), started_at, and completed_at.")]
     pub async fn get_execution(
         &self,
-        #[tool(param)] execution_id: String,
-    ) -> ExecutionStatusResponse {
+        Parameters(ExecutionIdArg { execution_id }): Parameters<ExecutionIdArg>,
+    ) -> Result<CallToolResult, McpError> {
         match self.engine.get_execution(&execution_id) {
-            Ok(info) => ExecutionStatusResponse {
-                value: json!({
-                    "execution_id": info.id,
-                    "status": info.status,
-                    "result": info.result,
-                    "heap": info.heap,
-                    "fs": info.fs,
-                    "error": info.error,
-                    "started_at": info.started_at,
-                    "completed_at": info.completed_at,
-                }),
-            },
-            Err(e) => ExecutionStatusResponse {
-                value: json!({ "error": e }),
-            },
+            Ok(info) => json_result(json!({
+                "execution_id": info.id,
+                "status": info.status,
+                "result": info.result,
+                "heap": info.heap,
+                "fs": info.fs,
+                "error": info.error,
+                "started_at": info.started_at,
+                "completed_at": info.completed_at,
+            })),
+            Err(e) => json_result(json!({ "error": e })),
         }
     }
 
     #[tool(description = "Get paginated console output for an execution. Supports two modes: line-based (line_offset + line_limit) or byte-based (byte_offset + byte_limit). If byte_offset is provided, byte mode takes precedence. Response includes both line and byte coordinates for cross-referencing. Use next_line_offset or next_byte_offset from a previous response to resume reading.")]
     pub async fn get_execution_output(
         &self,
-        #[tool(param)] execution_id: String,
-        #[tool(param)]
-        #[serde(default)]
-        line_offset: Option<u64>,
-        #[tool(param)]
-        #[serde(default)]
-        line_limit: Option<u64>,
-        #[tool(param)]
-        #[serde(default)]
-        byte_offset: Option<u64>,
-        #[tool(param)]
-        #[serde(default)]
-        byte_limit: Option<u64>,
-    ) -> ConsoleOutputResponse {
-        let status = self.engine.get_execution(&execution_id)
+        Parameters(args): Parameters<GetExecutionOutputArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let GetExecutionOutputArgs {
+            execution_id,
+            line_offset,
+            line_limit,
+            byte_offset,
+            byte_limit,
+        } = args;
+        let status = self
+            .engine
+            .get_execution(&execution_id)
             .map(|info| info.status)
             .unwrap_or_else(|_| "unknown".to_string());
 
-        match self.engine.get_execution_output(&execution_id, line_offset, line_limit, byte_offset, byte_limit) {
-            Ok(page) => ConsoleOutputResponse {
-                value: json!({
-                    "execution_id": execution_id,
-                    "data": page.data,
-                    "start_line": page.start_line,
-                    "end_line": page.end_line,
-                    "next_line_offset": page.next_line_offset,
-                    "total_lines": page.total_lines,
-                    "start_byte": page.start_byte,
-                    "end_byte": page.end_byte,
-                    "next_byte_offset": page.next_byte_offset,
-                    "total_bytes": page.total_bytes,
-                    "has_more": page.has_more,
-                    "status": status,
-                }),
-            },
-            Err(e) => ConsoleOutputResponse {
-                value: json!({ "error": e }),
-            },
+        match self
+            .engine
+            .get_execution_output(&execution_id, line_offset, line_limit, byte_offset, byte_limit)
+        {
+            Ok(page) => json_result(json!({
+                "execution_id": execution_id,
+                "data": page.data,
+                "start_line": page.start_line,
+                "end_line": page.end_line,
+                "next_line_offset": page.next_line_offset,
+                "total_lines": page.total_lines,
+                "start_byte": page.start_byte,
+                "end_byte": page.end_byte,
+                "next_byte_offset": page.next_byte_offset,
+                "total_bytes": page.total_bytes,
+                "has_more": page.has_more,
+                "status": status,
+            })),
+            Err(e) => json_result(json!({ "error": e })),
         }
     }
 
     #[tool(description = "Cancel a running execution. Terminates the V8 isolate.")]
     pub async fn cancel_execution(
         &self,
-        #[tool(param)] execution_id: String,
-    ) -> OkResponse {
+        Parameters(ExecutionIdArg { execution_id }): Parameters<ExecutionIdArg>,
+    ) -> Result<CallToolResult, McpError> {
         match self.engine.cancel_execution(&execution_id) {
-            Ok(()) => OkResponse { ok: true, error: None },
-            Err(e) => OkResponse { ok: false, error: Some(e) },
+            Ok(()) => json_result(json!({ "ok": true })),
+            Err(e) => json_result(json!({ "ok": false, "error": e })),
         }
     }
 
     #[tool(description = "List all executions with their status.")]
-    pub async fn list_executions(&self) -> ListExecutionsResponse {
+    pub async fn list_executions(&self) -> Result<CallToolResult, McpError> {
         match self.engine.list_executions() {
-            Ok(executions) => ListExecutionsResponse {
-                value: json!({ "executions": executions }),
-            },
-            Err(e) => ListExecutionsResponse {
-                value: json!({ "error": e }),
-            },
+            Ok(executions) => json_result(json!({ "executions": executions })),
+            Err(e) => json_result(json!({ "error": e })),
         }
     }
 
     #[tool(description = "List all named sessions (stateful mode only). Returns an array of session names that have been used via REST session fields or the X-MCP-Session-Id header.")]
-    pub async fn list_sessions(&self) -> ListSessionsResponse {
+    pub async fn list_sessions(&self) -> Result<CallToolResult, McpError> {
         match self.engine.list_sessions().await {
-            Ok(sessions) => ListSessionsResponse { sessions },
-            Err(e) => ListSessionsResponse {
-                sessions: vec![format!("Error: {}", e)],
-            },
+            Ok(sessions) => json_result(json!({ "sessions": sessions })),
+            Err(e) => json_result(json!({ "sessions": [format!("Error: {}", e)] })),
         }
     }
 
     #[tool(description = "List all log entries for the current session (stateful mode only). Each entry contains the input heap hash, output heap hash, code executed, and timestamp. Use the fields parameter to select specific fields (comma-separated: index,input_heap,output_heap,code,timestamp).")]
     pub async fn list_session_snapshots(
         &self,
-        #[tool(param)]
-        #[serde(default)]
-        fields: Option<String>,
-    ) -> ListSessionSnapshotsResponse {
+        Parameters(ListSessionSnapshotsArgs { fields }): Parameters<ListSessionSnapshotsArgs>,
+    ) -> Result<CallToolResult, McpError> {
         let session = match self.session_id.get() {
             Some(id) => id.clone(),
-            None => return ListSessionSnapshotsResponse {
-                entries: vec![serde_json::json!({"error": "no session ID available (send X-MCP-Session-Id header)"})],
-            },
+            None => {
+                return json_result(json!({
+                    "entries": [{"error": "no session ID available (send X-MCP-Session-Id header)"}]
+                }))
+            }
         };
         let parsed_fields = fields.map(|f| {
             f.split(',').map(|s| s.trim().to_string()).collect::<Vec<_>>()
         });
         match self.engine.list_session_snapshots(session, parsed_fields).await {
-            Ok(entries) => ListSessionSnapshotsResponse { entries },
-            Err(e) => ListSessionSnapshotsResponse {
-                entries: vec![serde_json::json!({"error": e})],
-            },
+            Ok(entries) => json_result(json!({ "entries": entries })),
+            Err(e) => json_result(json!({ "entries": [{"error": e}] })),
         }
     }
 
     #[tool(description = "Get tags for a heap snapshot (stateful mode only). Returns a map of key-value tags associated with the given heap content hash.")]
     pub async fn get_heap_tags(
         &self,
-        #[tool(param)] heap: String,
-    ) -> GetHeapTagsResponse {
+        Parameters(HeapArg { heap }): Parameters<HeapArg>,
+    ) -> Result<CallToolResult, McpError> {
         match self.engine.get_heap_tags(heap).await {
-            Ok(tags) => GetHeapTagsResponse { tags },
-            Err(e) => GetHeapTagsResponse {
-                tags: {
-                    let mut m = HashMap::new();
-                    m.insert("error".to_string(), e);
-                    m
-                },
-            },
+            Ok(tags) => json_result(json!({ "tags": tags })),
+            Err(e) => json_result(json!({ "tags": { "error": e } })),
         }
     }
 
     #[tool(description = "Set or replace tags on a heap snapshot (stateful mode only). Provide a map of key-value string pairs. This replaces all existing tags for the heap.")]
     pub async fn set_heap_tags(
         &self,
-        #[tool(param)] heap: String,
-        #[tool(param)] tags: HashMap<String, String>,
-    ) -> OkResponse {
+        Parameters(SetHeapTagsArgs { heap, tags }): Parameters<SetHeapTagsArgs>,
+    ) -> Result<CallToolResult, McpError> {
         match self.engine.set_heap_tags(heap, tags).await {
-            Ok(()) => OkResponse { ok: true, error: None },
-            Err(e) => OkResponse { ok: false, error: Some(e) },
+            Ok(()) => json_result(json!({ "ok": true })),
+            Err(e) => json_result(json!({ "ok": false, "error": e })),
         }
     }
 
     #[tool(description = "Delete tags from a heap snapshot (stateful mode only). If keys is provided (comma-separated), only those tag keys are removed. If keys is omitted, all tags are deleted.")]
     pub async fn delete_heap_tags(
         &self,
-        #[tool(param)] heap: String,
-        #[tool(param)]
-        #[serde(default)]
-        keys: Option<String>,
-    ) -> OkResponse {
+        Parameters(DeleteHeapTagsArgs { heap, keys }): Parameters<DeleteHeapTagsArgs>,
+    ) -> Result<CallToolResult, McpError> {
         let parsed_keys = keys.map(|k| {
             k.split(',').map(|s| s.trim().to_string()).collect::<Vec<_>>()
         });
         match self.engine.delete_heap_tags(heap, parsed_keys).await {
-            Ok(()) => OkResponse { ok: true, error: None },
-            Err(e) => OkResponse { ok: false, error: Some(e) },
+            Ok(()) => json_result(json!({ "ok": true })),
+            Err(e) => json_result(json!({ "ok": false, "error": e })),
         }
     }
 
     #[tool(description = "Query heap snapshots by tags (stateful mode only). Provide a map of key-value pairs to match. Returns all heaps whose tags contain all the specified key-value pairs.")]
     pub async fn query_heaps_by_tags(
         &self,
-        #[tool(param)] tags: HashMap<String, String>,
-    ) -> QueryHeapTagsResponse {
+        Parameters(TagsArg { tags }): Parameters<TagsArg>,
+    ) -> Result<CallToolResult, McpError> {
         match self.engine.query_heaps_by_tags(tags).await {
-            Ok(results) => QueryHeapTagsResponse { results },
-            Err(e) => QueryHeapTagsResponse {
-                results: vec![HeapTagEntry {
-                    heap: "error".to_string(),
-                    tags: {
-                        let mut m = HashMap::new();
-                        m.insert("error".to_string(), e);
-                        m
-                    },
-                }],
-            },
+            Ok(results) => {
+                let entries: Vec<serde_json::Value> = results
+                    .into_iter()
+                    .map(|e: HeapTagEntry| json!({ "heap": e.heap, "tags": e.tags }))
+                    .collect();
+                json_result(json!({ "results": entries }))
+            }
+            Err(e) => json_result(json!({ "results": [{ "heap": "error", "tags": { "error": e } }] })),
         }
     }
 
     // ── fs snapshot tools ────────────────────────────────────────────────
 
     #[tool(description = "List filesystem snapshot labels. Returns each label name and its current head CA id (hex).")]
-    pub async fn fs_ls(&self) -> FsResponse {
+    pub async fn fs_ls(&self) -> Result<CallToolResult, McpError> {
         match self.engine.fs_list_labels().await {
-            Ok(labels) => FsResponse::ok(json!({ "labels": labels })),
-            Err(e) => FsResponse::err(e),
+            Ok(labels) => json_result(json!({ "labels": labels })),
+            Err(e) => json_result(json!({ "error": e })),
         }
     }
 
     #[tool(description = "Resolve a filesystem snapshot label to its current head CA id (hex). Use this as the `fs` argument to run_js to mount it.")]
-    pub async fn fs_pull(&self, #[tool(param)] label: String) -> FsResponse {
+    pub async fn fs_pull(
+        &self,
+        Parameters(FsPullArgs { label }): Parameters<FsPullArgs>,
+    ) -> Result<CallToolResult, McpError> {
         match self.engine.fs_resolve_label(&label).await {
-            Ok(Some(ca_id)) => FsResponse::ok(json!({ "label": label, "ca_id": ca_id })),
-            Ok(None) => FsResponse::err(format!("unknown label: {label}")),
-            Err(e) => FsResponse::err(e),
+            Ok(Some(ca_id)) => json_result(json!({ "label": label, "ca_id": ca_id })),
+            Ok(None) => json_result(json!({ "error": format!("unknown label: {label}") })),
+            Err(e) => json_result(json!({ "error": e })),
         }
     }
 
     #[tool(description = "Create or repoint a filesystem snapshot label to a CA id (hex). Pass an optional `message` (a commit-style note) to record on the reflog entry.")]
     pub async fn fs_label(
         &self,
-        #[tool(param)] name: String,
-        #[tool(param)] ca_id: String,
-        #[tool(param)]
-        #[serde(default)]
-        message: Option<String>,
-    ) -> FsResponse {
+        Parameters(FsLabelArgs { name, ca_id, message }): Parameters<FsLabelArgs>,
+    ) -> Result<CallToolResult, McpError> {
         match self.engine.fs_set_label(&name, &ca_id, message).await {
-            Ok(()) => FsResponse::ok(json!({ "label": name, "ca_id": ca_id })),
-            Err(e) => FsResponse::err(e),
+            Ok(()) => json_result(json!({ "label": name, "ca_id": ca_id })),
+            Err(e) => json_result(json!({ "error": e })),
         }
     }
 
     #[tool(description = "Show the reflog (move history) for a filesystem snapshot label, oldest first. Each entry has at, from, to (CA ids), op (create/push/reset/force), and an optional message. Use a `to` value as the ca_id for fs_reset. Pass `limit` to return only the most recent N entries (bounding the scan over long histories).")]
     pub async fn fs_log(
         &self,
-        #[tool(param)] label: String,
-        #[tool(param)]
-        #[serde(default)]
-        limit: Option<usize>,
-    ) -> FsResponse {
+        Parameters(FsLogArgs { label, limit }): Parameters<FsLogArgs>,
+    ) -> Result<CallToolResult, McpError> {
         match self.engine.fs_label_log(&label, limit).await {
-            Ok(entries) => FsResponse::ok(json!({ "label": label, "log": entries })),
-            Err(e) => FsResponse::err(e),
+            Ok(entries) => json_result(json!({ "label": label, "log": entries })),
+            Err(e) => json_result(json!({ "error": e })),
         }
     }
 
     #[tool(description = "Advance a filesystem snapshot label to a CA id (typically the `fs` value returned by a completed run_js execution). Default is reject-and-rebase: pass `expected` (the head you pulled) and the push fails if the label moved since. Set force=true to override, or detach=true to just return the CA id without touching the label. Pass an optional `message` (a commit-style note, max 4096 bytes) to record on the reflog entry.")]
     pub async fn fs_push(
         &self,
-        #[tool(param)] ca_id: String,
-        #[tool(param)]
-        #[serde(default)]
-        label: Option<String>,
-        #[tool(param)]
-        #[serde(default)]
-        expected: Option<String>,
-        #[tool(param)]
-        #[serde(default)]
-        force: Option<bool>,
-        #[tool(param)]
-        #[serde(default)]
-        detach: Option<bool>,
-        #[tool(param)]
-        #[serde(default)]
-        message: Option<String>,
-    ) -> FsResponse {
+        Parameters(args): Parameters<FsPushArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let FsPushArgs { ca_id, label, expected, force, detach, message } = args;
         if detach.unwrap_or(false) {
-            return FsResponse::ok(json!({ "status": "detached", "ca_id": ca_id }));
+            return json_result(json!({ "status": "detached", "ca_id": ca_id }));
         }
         let Some(label) = label else {
-            return FsResponse::err(
-                "fs_push requires a `label` unless detach=true".to_string(),
-            );
+            return json_result(json!({
+                "error": "fs_push requires a `label` unless detach=true"
+            }));
         };
         match self
             .engine
@@ -733,61 +641,65 @@ impl McpService {
             .await
         {
             Ok(outcome) => match serde_json::to_value(&outcome) {
-                Ok(v) => FsResponse::ok(v),
-                Err(e) => FsResponse::err(e.to_string()),
+                Ok(v) => json_result(v),
+                Err(e) => json_result(json!({ "error": e.to_string() })),
             },
-            Err(e) => FsResponse::err(e),
+            Err(e) => json_result(json!({ "error": e })),
         }
     }
 
     #[tool(description = "Reset a filesystem snapshot label to an earlier CA id from its reflog (rollback). The CA id must appear in the label's reflog (see fs_log) unless allow_unlogged=true. Pass an optional `message` (a commit-style note) to record on the reflog entry.")]
     pub async fn fs_reset(
         &self,
-        #[tool(param)] label: String,
-        #[tool(param)] ca_id: String,
-        #[tool(param)]
-        #[serde(default)]
-        allow_unlogged: Option<bool>,
-        #[tool(param)]
-        #[serde(default)]
-        message: Option<String>,
-    ) -> FsResponse {
+        Parameters(args): Parameters<FsResetArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let FsResetArgs { label, ca_id, allow_unlogged, message } = args;
         match self
             .engine
             .fs_reset(&label, &ca_id, allow_unlogged.unwrap_or(false), message)
             .await
         {
-            Ok(()) => FsResponse::ok(json!({ "label": label, "ca_id": ca_id })),
-            Err(e) => FsResponse::err(e),
+            Ok(()) => json_result(json!({ "label": label, "ca_id": ca_id })),
+            Err(e) => json_result(json!({ "error": e })),
         }
     }
 
     #[tool(description = "Three-way merge two filesystem snapshots (CA ids) into a new snapshot. Pass `base` — the snapshot both sides diverged from (e.g. the label head you mounted before two runs) — so only paths BOTH sides changed conflict; omit it for a 2-way merge. Text files are merged at line level: edits to different lines of the same file auto-merge cleanly. On success returns the merged snapshot's ca_id (push it to a label separately). On conflict returns status=conflict with, per path: each side's content id (null = absent), kind (text/binary/sqlite/modify-delete), and for text the diff3 conflict `markers` plus unified `diff_ours`/`diff_theirs` so you can resolve at line level (edit the markers, write the file back, push). Set prefer=ours|theirs to auto-resolve remaining conflicts to that side.")]
     pub async fn fs_merge(
         &self,
-        #[tool(param)] ours: String,
-        #[tool(param)] theirs: String,
-        #[tool(param)]
-        #[serde(default)]
-        base: Option<String>,
-        #[tool(param)]
-        #[serde(default)]
-        prefer: Option<String>,
-    ) -> FsResponse {
+        Parameters(FsMergeArgs { ours, theirs, base, prefer }): Parameters<FsMergeArgs>,
+    ) -> Result<CallToolResult, McpError> {
         let prefer = match crate::engine::fs_merge::Prefer::parse(prefer.as_deref()) {
             Ok(p) => p,
-            Err(e) => return FsResponse::err(e),
+            Err(e) => return json_result(json!({ "error": e })),
         };
         match self.engine.fs_merge(&ours, &theirs, base, prefer).await {
             Ok(result) => match serde_json::to_value(&result) {
-                Ok(v) => FsResponse::ok(v),
-                Err(e) => FsResponse::err(e.to_string()),
+                Ok(v) => json_result(v),
+                Err(e) => json_result(json!({ "error": e.to_string() })),
             },
-            Err(e) => FsResponse::err(e),
+            Err(e) => json_result(json!({ "error": e })),
         }
     }
 }
 
+/// Build the capability-filtered, override-applied, stub-augmented tool list.
+fn list_tools_for<S: Send + Sync + 'static>(
+    router: &ToolRouter<S>,
+    engine: &Engine,
+    mcp_client: &Option<Arc<McpClientManager>>,
+) -> Vec<Tool> {
+    let mut tools = router.list_all();
+    filter_tools_by_capability(&mut tools, engine.heap_enabled(), engine.fs_enabled());
+    apply_run_js_description_override(&mut tools, engine.run_js_description_override());
+    if let Some(client) = mcp_client {
+        tools.extend(client.stub_tools());
+    }
+    tools.extend(engine.wasm_stub_tools());
+    tools
+}
+
+#[task_handler]
 impl ServerHandler for McpService {
     fn get_info(&self) -> ServerInfo {
         let instructions = self.engine.instructions_override()
@@ -805,30 +717,31 @@ impl ServerHandler for McpService {
                      docs://llms-txt, docs://openapi, and docs://tools before calling tools."
                 )
             });
-        ServerInfo {
-            instructions: Some(instructions),
-            capabilities: ServerCapabilities::builder()
-                .enable_tools()
-                .enable_resources()
-                .build(),
-            ..Default::default()
-        }
+        let mut info = ServerInfo::default();
+        info.instructions = Some(instructions);
+        info.capabilities = ServerCapabilities::builder()
+            .enable_tools()
+            .enable_resources()
+            .enable_tasks()
+            .build();
+        info
     }
 
     async fn list_resources(
         &self,
-        _request: Option<PaginatedRequestParam>,
+        _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
         Ok(ListResourcesResult {
             next_cursor: None,
             resources: doc_resources(self.engine.heap_enabled(), self.engine.fs_enabled()),
+            meta: None,
         })
     }
 
     async fn read_resource(
         &self,
-        request: ReadResourceRequestParam,
+        request: ReadResourceRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResult, McpError> {
         read_doc_resource(&request.uri, self.engine.heap_enabled(), self.engine.fs_enabled())
@@ -840,25 +753,23 @@ impl ServerHandler for McpService {
 
     async fn list_tools(
         &self,
-        _request: Option<PaginatedRequestParam>,
+        _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        let mut tools = Self::tool_box().list();
-        // Restrict the surface to the engine's enabled capabilities (heap/fs)
-        // before applying any operator description override.
-        filter_tools_by_capability(&mut tools, self.engine.heap_enabled(), self.engine.fs_enabled());
-        apply_run_js_description_override(&mut tools, self.engine.run_js_description_override());
-        if let Some(client) = &self.mcp_client {
-            tools.extend(client.stub_tools());
-        }
-        // Advertise pre-loaded WASM modules as stubs for discovery.
-        tools.extend(self.engine.wasm_stub_tools());
-        Ok(ListToolsResult { next_cursor: None, tools })
+        Ok(ListToolsResult {
+            next_cursor: None,
+            tools: list_tools_for(&self.tool_router, &self.engine, &self.mcp_client),
+            meta: None,
+        })
+    }
+
+    fn get_tool(&self, name: &str) -> Option<Tool> {
+        self.tool_router.get(name).cloned()
     }
 
     async fn call_tool(
         &self,
-        request: CallToolRequestParam,
+        request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         if let Some(client) = &self.mcp_client {
@@ -870,64 +781,15 @@ impl ServerHandler for McpService {
         if let Some(result) = self.engine.wasm_stub_call_response(&request.name, request.arguments.as_ref()) {
             return Ok(result);
         }
-        let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
-        Self::tool_box().call(tcc).await
+        self.tool_router.call(ToolCallContext::new(self, request, context)).await
     }
 
     async fn initialize(
         &self,
-        _request: InitializeRequestParam,
+        _request: InitializeRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<InitializeResult, McpError> {
-        if let Some(http_request_part) = context.extensions.get::<axum::http::request::Parts>() {
-            let initialize_headers = &http_request_part.headers;
-            let initialize_uri = &http_request_part.uri;
-            tracing::info!(?initialize_headers, %initialize_uri, "initialize from http server");
-
-            // JWT verification (if --jwks-url was provided)
-            if let Some(ref verifier) = self.verifier {
-                let token = http_request_part.headers
-                    .get("authorization")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|v| v.strip_prefix("Bearer "))
-                    .or_else(|| {
-                        http_request_part.headers
-                            .get("agent-session")
-                            .and_then(|v| v.to_str().ok())
-                    });
-                match token {
-                    Some(token) => if verifier.verify(token).await {
-                        tracing::info!("JWT verified");
-                    } else {
-                        tracing::warn!("JWT present but failed verification");
-                    },
-                    None => {
-                        tracing::debug!("No Authorization/AgentSession header in initialize request");
-                    }
-                }
-            }
-
-            // Read X-MCP-* headers (always, regardless of JWT)
-            let mut mcp_header_map = serde_json::Map::new();
-            for (name, value) in initialize_headers.iter() {
-                if let Some(key) = name.as_str().strip_prefix("x-mcp-") {
-                    if let Ok(v) = value.to_str() {
-                        mcp_header_map.insert(key.to_string(), serde_json::Value::String(v.to_string()));
-                    }
-                }
-            }
-
-            // Extract session_id from X-MCP-Session-Id header
-            if let Some(serde_json::Value::String(sid)) = mcp_header_map.get("session-id") {
-                tracing::info!(session_id = sid.as_str(), "Session ID from X-MCP-Session-Id header");
-                let _ = self.session_id.set(sid.clone());
-            }
-
-            if !mcp_header_map.is_empty() {
-                tracing::info!(?mcp_header_map, "X-MCP-* headers captured");
-                let _ = self.mcp_headers.set(serde_json::Value::Object(mcp_header_map));
-            }
-        }
+        capture_mcp_headers(&context, Some(&self.session_id), &self.mcp_headers, self.verifier.as_ref()).await;
         Ok(self.get_info())
     }
 }
@@ -938,20 +800,6 @@ impl ServerHandler for McpService {
 // console output directly. No execution IDs are exposed to callers — session
 // isolation is automatic.
 
-#[derive(Debug, Clone)]
-pub struct StatelessRunJsResponse {
-    pub value: serde_json::Value,
-}
-
-impl IntoContents for StatelessRunJsResponse {
-    fn into_contents(self) -> Vec<Content> {
-        match Content::json(self.value) {
-            Ok(content) => vec![content],
-            Err(e) => vec![Content::text(format!("Failed to convert response: {}", e))],
-        }
-    }
-}
-
 #[derive(Clone)]
 pub struct StatelessMcpService {
     engine: Engine,
@@ -959,8 +807,11 @@ pub struct StatelessMcpService {
     mcp_client: Option<Arc<McpClientManager>>,
     /// X-MCP-* headers from the initialize request, available for policy evaluation.
     mcp_headers: Arc<OnceLock<serde_json::Value>>,
+    tool_router: ToolRouter<StatelessMcpService>,
+    processor: Arc<Mutex<OperationProcessor>>,
 }
 
+#[tool_router]
 impl StatelessMcpService {
     pub fn new(engine: Engine, verifier: Option<Arc<SessionVerifier>>) -> Self {
         let mcp_client = engine.mcp_client_manager();
@@ -969,39 +820,31 @@ impl StatelessMcpService {
             verifier,
             mcp_client,
             mcp_headers: Arc::new(OnceLock::new()),
+            tool_router: Self::tool_router(),
+            processor: Arc::new(Mutex::new(OperationProcessor::new())),
         }
     }
-}
 
-#[tool(tool_box)]
-impl StatelessMcpService {
-    #[tool(description = include_str!("run_js_tool_stateless.md"))]
+    #[doc = include_str!("run_js_tool_stateless.md")]
+    #[tool(execution(task_support = "optional"))]
     pub async fn run_js(
         &self,
-        #[tool(param)]
-        #[serde(default)]
-        code: Option<String>,
-        #[tool(param)]
-        #[serde(default)]
-        file: Option<String>,
-        #[tool(param)]
-        #[serde(default)]
-        heap_memory_max_mb: Option<usize>,
-        #[tool(param)]
-        #[serde(default)]
-        execution_timeout_secs: Option<u64>,
-    ) -> StatelessRunJsResponse {
+        Parameters(args): Parameters<StatelessRunJsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let StatelessRunJsArgs { code, file, heap_memory_max_mb, execution_timeout_secs } = args;
         // 1. Submit to engine (fire-and-forget internally)
         let mut req = self.engine.run_js(code.unwrap_or_default());
         req = req.maybe_file(file);
-        if let Some(mb) = heap_memory_max_mb { req = req.heap_memory_max_mb(mb); }
-        if let Some(secs) = execution_timeout_secs { req = req.execution_timeout_secs(secs); }
+        if let Some(mb) = heap_memory_max_mb {
+            req = req.heap_memory_max_mb(mb);
+        }
+        if let Some(secs) = execution_timeout_secs {
+            req = req.execution_timeout_secs(secs);
+        }
         req = req.maybe_mcp_headers(self.mcp_headers.get().cloned());
         let exec_id = match req.execute().await {
             Ok(id) => id,
-            Err(e) => return StatelessRunJsResponse {
-                value: json!({ "error": e }),
-            },
+            Err(e) => return json_result(json!({ "error": e })),
         };
 
         // 2. Poll until terminal state
@@ -1013,23 +856,19 @@ impl StatelessMcpService {
         for _ in 0..max_polls {
             tokio::time::sleep(poll_interval).await;
             match self.engine.get_execution(&exec_id) {
-                Ok(info) => {
-                    match info.status.as_str() {
-                        "completed" => { status = info.status; break; }
-                        "failed" => { status = info.status; error_msg = info.error; break; }
-                        "timed_out" => { status = info.status; error_msg = info.error; break; }
-                        "cancelled" => { status = info.status; error_msg = info.error; break; }
-                        _ => continue,
-                    }
-                }
+                Ok(info) => match info.status.as_str() {
+                    "completed" => { status = info.status; break; }
+                    "failed" => { status = info.status; error_msg = info.error; break; }
+                    "timed_out" => { status = info.status; error_msg = info.error; break; }
+                    "cancelled" => { status = info.status; error_msg = info.error; break; }
+                    _ => continue,
+                },
                 Err(_) => continue,
             }
         }
 
         if status.is_empty() {
-            return StatelessRunJsResponse {
-                value: json!({ "error": "Execution did not complete within polling timeout" }),
-            };
+            return json_result(json!({ "error": "Execution did not complete within polling timeout" }));
         }
 
         // 3. Collect all console output
@@ -1040,16 +879,13 @@ impl StatelessMcpService {
 
         // 4. Return console output (and error if execution failed)
         match status.as_str() {
-            "completed" => StatelessRunJsResponse {
-                value: json!({ "output": output }),
-            },
-            _ => StatelessRunJsResponse {
-                value: json!({ "output": output, "error": error_msg }),
-            },
+            "completed" => json_result(json!({ "output": output })),
+            _ => json_result(json!({ "output": output, "error": error_msg })),
         }
     }
 }
 
+#[task_handler]
 impl ServerHandler for StatelessMcpService {
     fn get_info(&self) -> ServerInfo {
         let instructions = self.engine.instructions_override()
@@ -1060,30 +896,31 @@ impl ServerHandler for StatelessMcpService {
                  docs://llms-txt, docs://openapi, and docs://tools before calling tools."
                 .to_string()
             });
-        ServerInfo {
-            instructions: Some(instructions),
-            capabilities: ServerCapabilities::builder()
-                .enable_tools()
-                .enable_resources()
-                .build(),
-            ..Default::default()
-        }
+        let mut info = ServerInfo::default();
+        info.instructions = Some(instructions);
+        info.capabilities = ServerCapabilities::builder()
+            .enable_tools()
+            .enable_resources()
+            .enable_tasks()
+            .build();
+        info
     }
 
     async fn list_resources(
         &self,
-        _request: Option<PaginatedRequestParam>,
+        _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
         Ok(ListResourcesResult {
             next_cursor: None,
             resources: doc_resources(false, false),
+            meta: None,
         })
     }
 
     async fn read_resource(
         &self,
-        request: ReadResourceRequestParam,
+        request: ReadResourceRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResult, McpError> {
         read_doc_resource(&request.uri, false, false)
@@ -1095,25 +932,23 @@ impl ServerHandler for StatelessMcpService {
 
     async fn list_tools(
         &self,
-        _request: Option<PaginatedRequestParam>,
+        _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        let mut tools = Self::tool_box().list();
-        // Restrict the surface to the engine's enabled capabilities (heap/fs)
-        // before applying any operator description override.
-        filter_tools_by_capability(&mut tools, self.engine.heap_enabled(), self.engine.fs_enabled());
-        apply_run_js_description_override(&mut tools, self.engine.run_js_description_override());
-        if let Some(client) = &self.mcp_client {
-            tools.extend(client.stub_tools());
-        }
-        // Advertise pre-loaded WASM modules as stubs for discovery.
-        tools.extend(self.engine.wasm_stub_tools());
-        Ok(ListToolsResult { next_cursor: None, tools })
+        Ok(ListToolsResult {
+            next_cursor: None,
+            tools: list_tools_for(&self.tool_router, &self.engine, &self.mcp_client),
+            meta: None,
+        })
+    }
+
+    fn get_tool(&self, name: &str) -> Option<Tool> {
+        self.tool_router.get(name).cloned()
     }
 
     async fn call_tool(
         &self,
-        request: CallToolRequestParam,
+        request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         if let Some(client) = &self.mcp_client {
@@ -1121,63 +956,76 @@ impl ServerHandler for StatelessMcpService {
                 return Ok(result);
             }
         }
-        // WASM module stubs return run_js usage instructions instead of dispatching.
         if let Some(result) = self.engine.wasm_stub_call_response(&request.name, request.arguments.as_ref()) {
             return Ok(result);
         }
-        let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
-        Self::tool_box().call(tcc).await
+        self.tool_router.call(ToolCallContext::new(self, request, context)).await
     }
 
     async fn initialize(
         &self,
-        _request: InitializeRequestParam,
+        _request: InitializeRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<InitializeResult, McpError> {
-        if let Some(http_request_part) = context.extensions.get::<axum::http::request::Parts>() {
-            let initialize_headers = &http_request_part.headers;
-            let initialize_uri = &http_request_part.uri;
-            tracing::info!(?initialize_headers, %initialize_uri, "initialize from http server");
+        capture_mcp_headers(&context, None, &self.mcp_headers, self.verifier.as_ref()).await;
+        Ok(self.get_info())
+    }
+}
 
-            // JWT verification (if --jwks-url was provided)
-            if let Some(ref verifier) = self.verifier {
-                let token = http_request_part.headers
-                    .get("authorization")
+/// Shared initialize-time header handling: JWT verification (if configured),
+/// capturing X-MCP-* headers, and (optionally) the session id.
+async fn capture_mcp_headers(
+    context: &RequestContext<RoleServer>,
+    session_id: Option<&Arc<OnceLock<String>>>,
+    mcp_headers: &Arc<OnceLock<serde_json::Value>>,
+    verifier: Option<&Arc<SessionVerifier>>,
+) {
+    let Some(http_request_part) = context.extensions.get::<axum::http::request::Parts>() else {
+        return;
+    };
+    let initialize_headers = &http_request_part.headers;
+    let initialize_uri = &http_request_part.uri;
+    tracing::info!(?initialize_headers, %initialize_uri, "initialize from http server");
+
+    if let Some(verifier) = verifier {
+        let token = http_request_part.headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .or_else(|| {
+                http_request_part.headers
+                    .get("agent-session")
                     .and_then(|v| v.to_str().ok())
-                    .and_then(|v| v.strip_prefix("Bearer "))
-                    .or_else(|| {
-                        http_request_part.headers
-                            .get("agent-session")
-                            .and_then(|v| v.to_str().ok())
-                    });
-                match token {
-                    Some(token) => if verifier.verify(token).await {
-                        tracing::info!("JWT verified in stateless mode");
-                    } else {
-                        tracing::warn!("JWT present but failed verification");
-                    },
-                    None => {
-                        tracing::debug!("No Authorization/AgentSession header in initialize request");
-                    }
-                }
-            }
+            });
+        match token {
+            Some(token) => if verifier.verify(token).await {
+                tracing::info!("JWT verified");
+            } else {
+                tracing::warn!("JWT present but failed verification");
+            },
+            None => tracing::debug!("No Authorization/AgentSession header in initialize request"),
+        }
+    }
 
-            // Read X-MCP-* headers (always, regardless of JWT)
-            let mut mcp_header_map = serde_json::Map::new();
-            for (name, value) in initialize_headers.iter() {
-                if let Some(key) = name.as_str().strip_prefix("x-mcp-") {
-                    if let Ok(v) = value.to_str() {
-                        mcp_header_map.insert(key.to_string(), serde_json::Value::String(v.to_string()));
-                    }
-                }
-            }
-
-            if !mcp_header_map.is_empty() {
-                tracing::info!(?mcp_header_map, "X-MCP-* headers captured");
-                let _ = self.mcp_headers.set(serde_json::Value::Object(mcp_header_map));
+    let mut mcp_header_map = serde_json::Map::new();
+    for (name, value) in initialize_headers.iter() {
+        if let Some(key) = name.as_str().strip_prefix("x-mcp-") {
+            if let Ok(v) = value.to_str() {
+                mcp_header_map.insert(key.to_string(), serde_json::Value::String(v.to_string()));
             }
         }
-        Ok(self.get_info())
+    }
+
+    if let Some(session_id) = session_id {
+        if let Some(serde_json::Value::String(sid)) = mcp_header_map.get("session-id") {
+            tracing::info!(session_id = sid.as_str(), "Session ID from X-MCP-Session-Id header");
+            let _ = session_id.set(sid.clone());
+        }
+    }
+
+    if !mcp_header_map.is_empty() {
+        tracing::info!(?mcp_header_map, "X-MCP-* headers captured");
+        let _ = mcp_headers.set(serde_json::Value::Object(mcp_header_map));
     }
 }
 
@@ -1188,12 +1036,7 @@ mod tests {
     use std::sync::Arc;
 
     fn tool(name: &'static str, desc: &'static str) -> Tool {
-        Tool {
-            name: name.into(),
-            description: Some(desc.into()),
-            input_schema: Arc::new(serde_json::Map::new()),
-            annotations: None,
-        }
+        Tool::new(name, desc, Arc::new(serde_json::Map::new()))
     }
 
     #[test]
@@ -1223,12 +1066,7 @@ mod tests {
         props.insert("fs".to_string(), serde_json::json!({"type": "string"}));
         props.insert("tags".to_string(), serde_json::json!({"type": "object"}));
         schema.insert("properties".to_string(), serde_json::Value::Object(props));
-        Tool {
-            name: "run_js".into(),
-            description: Some("heapy".into()),
-            input_schema: Arc::new(schema),
-            annotations: None,
-        }
+        Tool::new("run_js", "heapy", Arc::new(schema))
     }
 
     fn names(tools: &[Tool]) -> Vec<String> {

@@ -12,7 +12,7 @@ mcp-v8 exposes a V8 JavaScript runtime as MCP tools. Agents can run JS/TS code, 
 ## Connecting to this server
 
 - MCP (Streamable HTTP): `POST /mcp`
-- MCP (SSE): `GET /sse` + `POST /message`
+- MCP (stdio): run the binary without `--http-port`
 - REST API: `POST /api/exec`, `GET /api/executions/{id}`, etc.
 - OpenAPI spec: `GET /api-doc/openapi.json`
 - Full docs: `GET /docs`
@@ -38,14 +38,14 @@ mcp-v8 exposes a V8 JavaScript runtime as MCP tools. Agents can run JS/TS code, 
 
 ## MCP Tasks (long-running tool calls)
 
-Over the Streamable HTTP transport (`POST /mcp`), this server supports the MCP
-**tasks** utility (spec `2025-11-25`). Task-enabled clients see a `tasks`
-capability in the `initialize` result and may run any `tools/call` as a task by
-adding a `task` object to `params`:
+This server natively supports the MCP **tasks** utility (spec `2025-11-25` /
+SEP-1319) via rmcp. Task-enabled clients see a `tasks` capability in the
+`initialize` result; `run_js` is task-augmentable, so a client may run it as a
+task by adding a `task` object to the request `params`:
 
 ```
 1. tools/call { name: "run_js", arguments: {...}, task: { ttl: 300000 } }
-   → result.task = { taskId, status: "working", createdAt, ttl, pollInterval }
+   → result.task = { taskId, status: "working", ... }
 
 2. tasks/get { taskId }      → current Task (status working→completed/failed/cancelled)
 3. tasks/result { taskId }   → blocks until terminal, then returns the tool's
@@ -55,11 +55,9 @@ adding a `task` object to `params`:
 ```
 
 This is ideal for long-running `run_js` calls: the client gets an immediate
-`taskId` instead of a blocked connection, then polls. Unknown `taskId`s return
-JSON-RPC error `-32602`. Tasks are retained for their `ttl` (default 5 minutes)
-after completion. A `tools/call` without a `task` field behaves exactly as
-before. (Tasks are only offered on Streamable HTTP, not stdio or the legacy SSE
-transport.)
+`taskId` instead of a blocked connection, then polls. A `tools/call` without a
+`task` field behaves exactly as before (synchronous result). Tasks work over
+both the Streamable HTTP and stdio transports.
 
 ## Typical agent workflow
 

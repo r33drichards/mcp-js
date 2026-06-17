@@ -138,14 +138,9 @@ pub fn make_wasm_stub_tool(prefix: &str, module: &WasmModule) -> Tool {
             .expect("object literal is an object"),
     );
 
-    Tool {
-        name: stub_name.into(),
-        description: Some(description.into()),
-        input_schema,
-        // Stubs are discovery mechanisms, not executable tools, so they carry
-        // no behavioral annotations (mirrors the MCP tool stubs).
-        annotations: None,
-    }
+    // Stubs are discovery mechanisms, not executable tools, so they carry no
+    // behavioral annotations (Tool::new defaults annotations to None).
+    Tool::new(stub_name, description, input_schema)
 }
 
 /// Human-readable description placed on the stub tool, explaining how to use

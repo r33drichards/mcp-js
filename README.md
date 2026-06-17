@@ -22,7 +22,7 @@ MCP servers) are all **off by default** and unlocked only by explicit
 - **One tool, unbounded capability.** The agent runs a program, not a fixed menu of tools.
 - **Durable state.** Heap snapshots persist variables and objects across calls.
 - **Secure by default.** `fetch`, filesystem, subprocess, and external imports are denied until you grant them via policy.
-- **Production-ready.** stdio / Streamable HTTP / SSE transports, a REST sidecar, async execution with pagination, JWKS auth, and Raft-replicated clustering.
+- **Production-ready.** stdio / Streamable HTTP transports, a REST sidecar, async execution with pagination, JWKS auth, and Raft-replicated clustering.
 
 ## Documentation
 
@@ -96,8 +96,8 @@ See the [Quick Start tutorials](https://r33drichards.github.io/mcp-js/) and the
 - **Compose other MCP servers** — connect upstream MCP servers and call them from JS via `mcp.callTool()` / `mcp.listTools()`.
 - **Customizable surface** — override the server `instructions` and the `run_js` description (`--instructions`, `--run-js-description`).
 - **Auth & clustering** — JWKS-based JWT verification, and optional Raft clustering with replicated session metadata and horizontal scaling.
-- **Multiple transports** — stdio, Streamable HTTP (MCP 2025-03-26+), and SSE, with a REST sidecar and OpenAPI spec.
-- **Tasks** — task-enabled clients can run any `tools/call` as a [task](https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/tasks) over Streamable HTTP (`tasks/get`, `tasks/result`, `tasks/list`, `tasks/cancel`), ideal for long-running `run_js` calls.
+- **Multiple transports** — stdio and Streamable HTTP (MCP 2025-03-26+), with a REST sidecar and OpenAPI spec.
+- **Tasks** — native MCP [tasks](https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/tasks) (SEP-1319): task-enabled clients can run `run_js` as a task (`tasks/get`, `tasks/result`, `tasks/list`, `tasks/cancel`), ideal for long-running calls.
 
 ## What the agent's code can do
 
@@ -131,10 +131,11 @@ Full parameters: [MCP tools reference](https://r33drichards.github.io/mcp-js/ref
 
 ### Long-running calls as tasks
 
-Over Streamable HTTP (`POST /mcp`), the server implements the MCP **tasks**
-utility (spec `2025-11-25`). The `initialize` result advertises a `tasks`
-capability, and a client may run any tool call as a task by adding a `task`
-object to the request params:
+The server natively implements the MCP **tasks** utility (spec `2025-11-25` /
+SEP-1319) via rmcp, over both the Streamable HTTP and stdio transports. The
+`initialize` result advertises a `tasks` capability, and a client may run the
+task-augmentable `run_js` tool as a task by adding a `task` object to the
+request params:
 
 ```jsonc
 // → returns immediately with a task instead of blocking

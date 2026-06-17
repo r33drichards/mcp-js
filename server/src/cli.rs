@@ -52,7 +52,9 @@ pub struct Cli {
     #[arg(long, env = "MCP_V8_HTTP_PORT", conflicts_with = "sse_port", help_heading = "Core")]
     pub http_port: Option<u16>,
 
-    /// SSE port using the older HTTP+SSE transport
+    /// [REMOVED] The legacy HTTP+SSE transport was dropped in the rmcp 1.x
+    /// upgrade; this flag now errors at startup. Use --http-port (Streamable
+    /// HTTP carries SSE streams on /mcp).
     #[arg(long, env = "MCP_V8_SSE_PORT", conflicts_with = "http_port", help_heading = "Core")]
     pub sse_port: Option<u16>,
 
