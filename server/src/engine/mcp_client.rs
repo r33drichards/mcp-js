@@ -188,6 +188,12 @@ pub struct McpClientManager {
     tools_by_server: Arc<HashMap<String, Vec<Tool>>>,
     servers: Arc<HashMap<String, Arc<ServerConn>>>,
     stub_config: StubConfig,
+    /// The runtime that owns the server connections (captured at `connect()`,
+    /// i.e. the multi-thread server runtime). `call_tool` bridges onto it: the
+    /// peers' transport I/O lives here, so awaiting a call from the isolate's
+    /// per-execution current-thread runtime would otherwise stall. Mirrors
+    /// `S3HeapStorage`'s `runtime` handle. `None` for test-only constructors.
+    runtime: Option<tokio::runtime::Handle>,
 }
 
 impl McpClientManager {
@@ -232,6 +238,7 @@ impl McpClientManager {
             tools_by_server: Arc::new(tools_by_server),
             servers: Arc::new(servers),
             stub_config: StubConfig::default(),
+            runtime: Some(tokio::runtime::Handle::current()),
         })
     }
 
@@ -256,6 +263,7 @@ impl McpClientManager {
             tools_by_server: Arc::new(tools_by_server),
             servers: Arc::new(HashMap::new()),
             stub_config: StubConfig::default(),
+            runtime: None,
         }
     }
 
@@ -337,66 +345,87 @@ impl McpClientManager {
         tool_name: &str,
         arguments: Option<serde_json::Map<String, serde_json::Value>>,
     ) -> Result<serde_json::Value, String> {
-        let server = self.servers.get(server_name).ok_or_else(|| {
-            format!(
-                "MCP server '{}' not found. Available: {:?}",
-                server_name,
-                self.server_names()
-            )
-        })?;
-
-        let make_req = || CallToolRequestParam {
-            name: tool_name.to_string().into(),
-            arguments: arguments.clone(),
-        };
-
-        let peer = { server.live.read().await.peer.clone() };
-        let result = match peer.call_tool(make_req()).await {
-            Ok(r) => r,
-            Err(e) => {
-                // A call can fail because the tool errored OR because the
-                // downstream connection died (e.g. the server restarted). Probe
-                // to tell them apart: if the connection is still healthy the
-                // error is genuine; otherwise reconnect and retry once so a
-                // restarted downstream heals transparently.
-                if is_healthy(&peer).await {
-                    return Err(format!("mcp.callTool({}.{}): {}", server_name, tool_name, e));
-                }
-                tracing::warn!(
-                    "MCP server '{}' looks disconnected ({}); reconnecting and retrying",
+        let server = self
+            .servers
+            .get(server_name)
+            .ok_or_else(|| {
+                format!(
+                    "MCP server '{}' not found. Available: {:?}",
                     server_name,
-                    e
-                );
-                reconnect(server).await.map_err(|re| {
-                    format!(
-                        "mcp.callTool({}.{}): reconnect failed: {}",
-                        server_name, tool_name, re
-                    )
-                })?;
-                let peer = { server.live.read().await.peer.clone() };
-                peer.call_tool(make_req()).await.map_err(|e| {
-                    format!(
-                        "mcp.callTool({}.{}): {} (after reconnect)",
-                        server_name, tool_name, e
-                    )
-                })?
-            }
+                    self.server_names()
+                )
+            })?
+            .clone();
+        let server_name = server_name.to_string();
+        let tool_name = tool_name.to_string();
+
+        // The downstream peer's transport I/O lives on the runtime that owns the
+        // connection (captured at `connect()`). run_js ops run on a per-execution
+        // current-thread runtime, from which awaiting the peer would stall, so run
+        // the whole call on the connection's runtime and await the JoinHandle
+        // (safe to poll from any runtime) — mirrors S3HeapStorage::*_blocking.
+        let call = async move {
+            let make_req = || CallToolRequestParam {
+                name: tool_name.clone().into(),
+                arguments: arguments.clone(),
+            };
+
+            let peer = { server.live.read().await.peer.clone() };
+            let result = match peer.call_tool(make_req()).await {
+                Ok(r) => r,
+                Err(e) => {
+                    // A call can fail because the tool errored OR because the
+                    // downstream connection died (e.g. the server restarted).
+                    // Probe to tell them apart: if the connection is still
+                    // healthy the error is genuine; otherwise reconnect and retry
+                    // once so a restarted downstream heals transparently.
+                    if is_healthy(&peer).await {
+                        return Err(format!("mcp.callTool({}.{}): {}", server_name, tool_name, e));
+                    }
+                    tracing::warn!(
+                        "MCP server '{}' looks disconnected ({}); reconnecting and retrying",
+                        server_name,
+                        e
+                    );
+                    reconnect(&server).await.map_err(|re| {
+                        format!(
+                            "mcp.callTool({}.{}): reconnect failed: {}",
+                            server_name, tool_name, re
+                        )
+                    })?;
+                    let peer = { server.live.read().await.peer.clone() };
+                    peer.call_tool(make_req()).await.map_err(|e| {
+                        format!(
+                            "mcp.callTool({}.{}): {} (after reconnect)",
+                            server_name, tool_name, e
+                        )
+                    })?
+                }
+            };
+
+            // Serialize content to JSON for JS consumption.
+            let content_json: Vec<serde_json::Value> = result
+                .content
+                .iter()
+                .map(|c| {
+                    serde_json::to_value(c)
+                        .unwrap_or(serde_json::json!({"error": "serialization failed"}))
+                })
+                .collect();
+
+            Ok(serde_json::json!({
+                "content": content_json,
+                "isError": result.is_error.unwrap_or(false),
+            }))
         };
 
-        // Serialize content to JSON for JS consumption.
-        let content_json: Vec<serde_json::Value> = result
-            .content
-            .iter()
-            .map(|c| {
-                serde_json::to_value(c)
-                    .unwrap_or(serde_json::json!({"error": "serialization failed"}))
-            })
-            .collect();
-
-        Ok(serde_json::json!({
-            "content": content_json,
-            "isError": result.is_error.unwrap_or(false),
-        }))
+        match &self.runtime {
+            Some(rt) => rt
+                .spawn(call)
+                .await
+                .map_err(|e| format!("mcp.callTool: task join error: {e}"))?,
+            None => call.await,
+        }
     }
 }
 
