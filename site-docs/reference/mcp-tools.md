@@ -8,7 +8,7 @@ configuration.
 
 ## Modes
 
-- [Stateful mode](#stateful-mode)
+- [Heap+fs mode](#heapfs-mode)
 - [Stateless mode](#stateless-mode)
 
 ## Heap+fs mode
