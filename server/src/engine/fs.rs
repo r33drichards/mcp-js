@@ -57,15 +57,26 @@ impl FsMountHandle {
 pub struct FsConfig {
     pub policy_chain: Arc<PolicyChain>,
     pub mcp_headers: Option<serde_json::Value>,
+    /// When a per-session overlay mount is attached, controls what happens on an
+    /// overlay miss: `false` (default) = overlay-only (the overlay is the whole
+    /// fs view; a miss is ENOENT). `true` = overlayfs-style — fall through to the
+    /// real filesystem as a read-only lower layer (still policy-gated), so
+    /// bundled paths like `/opt/languages` resolve while `/work` stays per-session.
+    pub passthrough: bool,
 }
 
 impl FsConfig {
     pub fn new(chain: Arc<PolicyChain>) -> Self {
-        Self { policy_chain: chain, mcp_headers: None }
+        Self { policy_chain: chain, mcp_headers: None, passthrough: false }
     }
 
     pub fn with_mcp_headers(mut self, mcp_headers: Option<serde_json::Value>) -> Self {
         self.mcp_headers = mcp_headers;
+        self
+    }
+
+    pub fn with_passthrough(mut self, passthrough: bool) -> Self {
+        self.passthrough = passthrough;
         self
     }
 }
@@ -131,7 +142,21 @@ async fn op_fs_read_file_text(
         check_policy(&config.policy_chain, "readFile", &path, None, None, Some("utf8"), config.mcp_headers.as_ref())
             .await
             .map_err(JsErrorBox::generic)?;
-        let content = m.0.lock().await.read(Path::new(&path)).await
+        if let Some(content) = m.0.lock().await.read_opt(Path::new(&path)).await
+            .map_err(|e| JsErrorBox::generic(format!("fs.readFile: {}: {}", path, e)))?
+        {
+            return String::from_utf8(content)
+                .map_err(|e| JsErrorBox::generic(format!("fs.readFile: invalid UTF-8 in {}: {}", path, e)));
+        }
+        // Overlay miss. With passthrough off (default) the overlay is the whole
+        // fs view, so this is ENOENT. With passthrough on, fall through to the
+        // real filesystem as a read-only lower layer (already policy-gated above)
+        // so bundled paths like /opt/languages resolve while /work stays the
+        // per-session overlay.
+        if !config.passthrough {
+            return Err(JsErrorBox::generic(format!("fs.readFile: {}: ENOENT", path)));
+        }
+        let content = std::fs::read(&path)
             .map_err(|e| JsErrorBox::generic(format!("fs.readFile: {}: {}", path, e)))?;
         return String::from_utf8(content)
             .map_err(|e| JsErrorBox::generic(format!("fs.readFile: invalid UTF-8 in {}: {}", path, e)));
@@ -166,7 +191,18 @@ async fn op_fs_read_file_buffer(
         check_policy(&config.policy_chain, "readFile", &path, None, None, Some("buffer"), config.mcp_headers.as_ref())
             .await
             .map_err(JsErrorBox::generic)?;
-        return m.0.lock().await.read(Path::new(&path)).await
+        if let Some(content) = m.0.lock().await.read_opt(Path::new(&path)).await
+            .map_err(|e| JsErrorBox::generic(format!("fs.readFile: {}: {}", path, e)))?
+        {
+            return Ok(content);
+        }
+        // Overlay miss: ENOENT unless passthrough is on, in which case fall
+        // through to the real filesystem (policy-gated above) so bundled
+        // read-only paths (e.g. /opt/languages) resolve.
+        if !config.passthrough {
+            return Err(JsErrorBox::generic(format!("fs.readFile: {}: ENOENT", path)));
+        }
+        return std::fs::read(&path)
             .map_err(|e| JsErrorBox::generic(format!("fs.readFile: {}: {}", path, e)));
     }
 
