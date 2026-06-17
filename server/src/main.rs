@@ -12,6 +12,7 @@ use utoipa::OpenApi as _;
 use std::fmt;
 mod engine;
 mod mcp;
+mod mcp_tasks;
 mod api;
 mod cluster;
 mod cli;
@@ -673,14 +674,21 @@ where
     let bind: std::net::SocketAddr = resolve_bind_addr(&host, port)?;
     let ct = CancellationToken::new();
 
+    let mcp_path = "/mcp".to_string();
     let config = StreamableHttpServerConfig {
         bind,
-        path: "/mcp".to_string(),
+        path: mcp_path.clone(),
         ct: ct.clone(),
         sse_keep_alive: Some(std::time::Duration::from_secs(15)),
     };
 
     let (server, mcp_router) = StreamableHttpServer::new(config);
+
+    // Layer MCP `tasks/*` support (spec 2025-11-25) over the `/mcp` route.
+    // Task-augmented run_js calls and the tasks/* methods are handled here
+    // (backed by the engine's execution registry); everything else is
+    // forwarded to rmcp unchanged.
+    let mcp_router = mcp_tasks::wrap(&mcp_path, mcp_router, engine.clone());
 
     // Serve OpenAPI JSON spec at /api-doc/openapi.json
     let openapi_spec = api::ApiDoc::openapi();

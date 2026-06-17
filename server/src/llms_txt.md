@@ -36,6 +36,31 @@ mcp-v8 exposes a V8 JavaScript runtime as MCP tools. Agents can run JS/TS code, 
 - `delete_heap_tags(heap, keys)` — Delete tag keys from a heap snapshot.
 - `query_heaps_by_tags(tags)` — Find heap snapshots matching tag criteria.
 
+## MCP Tasks (long-running tool calls)
+
+Over the Streamable HTTP transport (`POST /mcp`), this server supports the MCP
+**tasks** utility (spec `2025-11-25`). Task-enabled clients see a `tasks`
+capability in the `initialize` result and may run any `tools/call` as a task by
+adding a `task` object to `params`:
+
+```
+1. tools/call { name: "run_js", arguments: {...}, task: { ttl: 300000 } }
+   → result.task = { taskId, status: "working", createdAt, ttl, pollInterval }
+
+2. tasks/get { taskId }      → current Task (status working→completed/failed/cancelled)
+3. tasks/result { taskId }   → blocks until terminal, then returns the tool's
+                               result exactly as a normal tools/call would
+4. tasks/list                → all known tasks
+5. tasks/cancel { taskId }   → transitions a running task to cancelled
+```
+
+This is ideal for long-running `run_js` calls: the client gets an immediate
+`taskId` instead of a blocked connection, then polls. Unknown `taskId`s return
+JSON-RPC error `-32602`. Tasks are retained for their `ttl` (default 5 minutes)
+after completion. A `tools/call` without a `task` field behaves exactly as
+before. (Tasks are only offered on Streamable HTTP, not stdio or the legacy SSE
+transport.)
+
 ## Typical agent workflow
 
 ```

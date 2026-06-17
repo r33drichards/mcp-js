@@ -97,6 +97,7 @@ See the [Quick Start tutorials](https://r33drichards.github.io/mcp-js/) and the
 - **Customizable surface** — override the server `instructions` and the `run_js` description (`--instructions`, `--run-js-description`).
 - **Auth & clustering** — JWKS-based JWT verification, and optional Raft clustering with replicated session metadata and horizontal scaling.
 - **Multiple transports** — stdio, Streamable HTTP (MCP 2025-03-26+), and SSE, with a REST sidecar and OpenAPI spec.
+- **Tasks** — task-enabled clients can run any `tools/call` as a [task](https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/tasks) over Streamable HTTP (`tasks/get`, `tasks/result`, `tasks/list`, `tasks/cancel`), ideal for long-running `run_js` calls.
 
 ## What the agent's code can do
 
@@ -127,6 +128,24 @@ See [Concepts → Security policies](https://r33drichards.github.io/mcp-js/conce
 | `get_heap_tags`, `set_heap_tags`, `delete_heap_tags`, `query_heaps_by_tags` | stateful | Tag and search heap snapshots. |
 
 Full parameters: [MCP tools reference](https://r33drichards.github.io/mcp-js/reference/mcp-tools/).
+
+### Long-running calls as tasks
+
+Over Streamable HTTP (`POST /mcp`), the server implements the MCP **tasks**
+utility (spec `2025-11-25`). The `initialize` result advertises a `tasks`
+capability, and a client may run any tool call as a task by adding a `task`
+object to the request params:
+
+```jsonc
+// → returns immediately with a task instead of blocking
+{ "method": "tools/call",
+  "params": { "name": "run_js", "arguments": { "code": "…" }, "task": { "ttl": 300000 } } }
+```
+
+The client then polls `tasks/get`, fetches the eventual tool result with
+`tasks/result` (which returns exactly what the call would have returned),
+enumerates work with `tasks/list`, and stops a run with `tasks/cancel`. A
+`tools/call` without a `task` field is unaffected.
 
 ## Configuration
 
