@@ -143,7 +143,7 @@ in
     with subtest("should allow stat in /tmp/allowed/"):
         result = exec_js("""
             const info = await fs.stat("/tmp/allowed/test.txt");
-            console.log(JSON.stringify({isFile: info.isFile, size: info.size}));
+            console.log(JSON.stringify({isFile: info.isFile(), size: info.size}));
         """)
         print("Stat result: " + str(result))
         body = json.loads(result["output"])
