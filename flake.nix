@@ -43,9 +43,11 @@
           cargo = rustToolchain;
         } {
           src = ./server;
-          # Vendor hash for server's cargo deps; refreshed when deps changed
-          # (added fastcdc/zstd/blake3/bincode/diffy for fs snapshots).
-          hash = "sha256-6ABMFpKIlIZU1+HDt4gG7exjRTbMQY/JpN9X4d8oBLM=";
+          # Vendor hash for server's cargo deps; refreshed when deps changed.
+          # Bumped for the rmcp 1.7 (crates.io) + rmcp 0.1.5 (git, renamed
+          # rmcp_legacy for the SSE transport) dependency set.
+          # PLACEHOLDER — CI build will report the correct hash to substitute.
+          hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
         });
 
         docsPython = pkgs.python3.withPackages (
