@@ -24,6 +24,8 @@ jobs:
             check: fetch-opa-test
           - name: Filesystem OPA Integration Test
             check: fs-opa-test
+          - name: Isomorphic-Git Integration Test
+            check: isomorphic-git-test
 
     steps:
       - name: Checkout code

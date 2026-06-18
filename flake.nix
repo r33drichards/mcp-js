@@ -270,6 +270,10 @@
             inherit pkgs;
             mcp-js = self.packages.x86_64-linux.default;
           });
+          isomorphic-git-test = pkgs.nixosTest (import ./tests/nixos/isomorphic-git.nix {
+            inherit pkgs;
+            mcp-js = self.packages.x86_64-linux.default;
+          });
           docs-generated-check = pkgs.stdenvNoCC.mkDerivation {
             pname = "mcp-js-docs-generated-check";
             version = "0.1.0";

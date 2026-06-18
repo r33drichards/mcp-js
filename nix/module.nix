@@ -47,6 +47,12 @@ in
       description = "Run in stateless mode (no heap persistence).";
     };
 
+    allowExternalModules = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = "Allow external module imports (npm:/jsr:/URL). Adds --allow-external-modules.";
+    };
+
     heartbeatInterval = lib.mkOption {
       type = lib.types.int;
       default = 200;
@@ -151,12 +157,14 @@ in
               cfg.join
             ];
 
+            externalModulesArgs = lib.optionals cfg.allowExternalModules [ "--allow-external-modules" ];
+
             policiesArgs = lib.optionals (cfg.policiesJson != null) [
               "--policies-json"
               "'${cfg.policiesJson}'"
             ];
           in
-          lib.concatStringsSep " " (baseArgs ++ storageArgs ++ peerArgs ++ advertiseArgs ++ joinArgs ++ policiesArgs);
+          lib.concatStringsSep " " (baseArgs ++ storageArgs ++ peerArgs ++ advertiseArgs ++ joinArgs ++ externalModulesArgs ++ policiesArgs);
 
         Restart = "on-failure";
         RestartSec = "2s";
