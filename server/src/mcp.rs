@@ -15,7 +15,6 @@ use std::sync::{Arc, OnceLock};
 use tokio::sync::Mutex;
 
 use crate::engine::Engine;
-use crate::engine::heap_tags::HeapTagEntry;
 use crate::engine::mcp_client::McpClientManager;
 use crate::session::SessionVerifier;
 
@@ -73,6 +72,22 @@ pub fn built_in_tool_catalog(heap: bool, fs: bool) -> ToolCatalog {
             .map(ToolDoc::from_tool)
             .collect(),
     }
+}
+
+/// The capability-filtered core tool list for the engine's current mode, used
+/// by the legacy SSE handler (`mcp_sse.rs`). Excludes the upstream-MCP / WASM
+/// discovery stubs (a Streamable-HTTP convenience); SSE clients drive modules
+/// from `run_js` directly.
+pub fn mode_tool_list(engine: &Engine) -> Vec<Tool> {
+    let mut tools = if engine.session_capable() {
+        let mut tools = McpService::tool_router().list_all();
+        filter_tools_by_capability(&mut tools, engine.heap_enabled(), engine.fs_enabled());
+        tools
+    } else {
+        StatelessMcpService::tool_router().list_all()
+    };
+    apply_run_js_description_override(&mut tools, engine.run_js_description_override());
+    tools
 }
 
 /// Build the list of static documentation resources exposed via MCP.
@@ -145,8 +160,12 @@ fn json_result(value: serde_json::Value) -> Result<CallToolResult, McpError> {
 }
 
 // ── Tool argument structs ─────────────────────────────────────────────────
+//
+// These exist for the rmcp tool macros' input-schema generation. The actual
+// tool logic lives in `mcp_dispatch` (shared with the legacy SSE handler), so
+// the tool methods just forward their (serialized) arguments there.
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct RunJsArgs {
     #[serde(default)]
     pub code: Option<String>,
@@ -164,7 +183,7 @@ pub struct RunJsArgs {
     pub tags: Option<HashMap<String, String>>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct StatelessRunJsArgs {
     #[serde(default)]
     pub code: Option<String>,
@@ -176,12 +195,12 @@ pub struct StatelessRunJsArgs {
     pub execution_timeout_secs: Option<u64>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct ExecutionIdArg {
     pub execution_id: String,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct GetExecutionOutputArgs {
     pub execution_id: String,
     #[serde(default)]
@@ -194,41 +213,41 @@ pub struct GetExecutionOutputArgs {
     pub byte_limit: Option<u64>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct ListSessionSnapshotsArgs {
     #[serde(default)]
     pub fields: Option<String>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct HeapArg {
     pub heap: String,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct SetHeapTagsArgs {
     pub heap: String,
     pub tags: HashMap<String, String>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct DeleteHeapTagsArgs {
     pub heap: String,
     #[serde(default)]
     pub keys: Option<String>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct TagsArg {
     pub tags: HashMap<String, String>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct FsPullArgs {
     pub label: String,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct FsLabelArgs {
     pub name: String,
     pub ca_id: String,
@@ -236,14 +255,14 @@ pub struct FsLabelArgs {
     pub message: Option<String>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct FsLogArgs {
     pub label: String,
     #[serde(default)]
     pub limit: Option<usize>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct FsPushArgs {
     pub ca_id: String,
     #[serde(default)]
@@ -258,7 +277,7 @@ pub struct FsPushArgs {
     pub message: Option<String>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct FsResetArgs {
     pub label: String,
     pub ca_id: String,
@@ -268,7 +287,7 @@ pub struct FsResetArgs {
     pub message: Option<String>,
 }
 
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct FsMergeArgs {
     pub ours: String,
     pub theirs: String,
@@ -359,6 +378,23 @@ pub struct McpService {
     processor: Arc<Mutex<OperationProcessor>>,
 }
 
+impl McpService {
+    /// Forward a tool call to the transport-agnostic dispatcher and wrap the
+    /// result as a `CallToolResult`.
+    async fn dispatch<T: Serialize>(&self, name: &str, args: &T) -> Result<CallToolResult, McpError> {
+        let value = serde_json::to_value(args).unwrap_or_else(|_| json!({}));
+        let result = crate::mcp_dispatch::call_tool(
+            &self.engine,
+            self.session_id.get().map(String::as_str),
+            self.mcp_headers.get(),
+            name,
+            &value,
+        )
+        .await;
+        json_result(result)
+    }
+}
+
 #[tool_router]
 impl McpService {
     pub fn new(engine: Engine, verifier: Option<Arc<SessionVerifier>>) -> Self {
@@ -380,59 +416,15 @@ impl McpService {
         &self,
         Parameters(args): Parameters<RunJsArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let RunJsArgs {
-            code,
-            file,
-            heap,
-            fs,
-            heap_memory_max_mb,
-            execution_timeout_secs,
-            tags,
-        } = args;
-        let mut req = self.engine.run_js(code.unwrap_or_default());
-        req = req.maybe_file(file);
-        if let Some(h) = heap {
-            req = req.heap(h);
-        }
-        req = req.maybe_fs(fs);
-        if let Some(s) = self.session_id.get() {
-            req = req.session(s.clone());
-        }
-        if let Some(mb) = heap_memory_max_mb {
-            req = req.heap_memory_max_mb(mb);
-        }
-        if let Some(secs) = execution_timeout_secs {
-            req = req.execution_timeout_secs(secs);
-        }
-        if let Some(t) = tags {
-            req = req.tags(t);
-        }
-        req = req.maybe_mcp_headers(self.mcp_headers.get().cloned());
-        let execution_id = match req.execute().await {
-            Ok(execution_id) => execution_id,
-            Err(e) => format!("error: {}", e),
-        };
-        json_result(json!({ "execution_id": execution_id }))
+        self.dispatch("run_js", &args).await
     }
 
     #[tool(description = "Get the status and result of an execution. Returns execution_id, status (running/completed/failed/cancelled/timed_out), result (if completed), heap (if stateful), fs (resulting filesystem snapshot CA id, if a mount was attached), error (if failed), started_at, and completed_at.")]
     pub async fn get_execution(
         &self,
-        Parameters(ExecutionIdArg { execution_id }): Parameters<ExecutionIdArg>,
+        Parameters(args): Parameters<ExecutionIdArg>,
     ) -> Result<CallToolResult, McpError> {
-        match self.engine.get_execution(&execution_id) {
-            Ok(info) => json_result(json!({
-                "execution_id": info.id,
-                "status": info.status,
-                "result": info.result,
-                "heap": info.heap,
-                "fs": info.fs,
-                "error": info.error,
-                "started_at": info.started_at,
-                "completed_at": info.completed_at,
-            })),
-            Err(e) => json_result(json!({ "error": e })),
-        }
+        self.dispatch("get_execution", &args).await
     }
 
     #[tool(description = "Get paginated console output for an execution. Supports two modes: line-based (line_offset + line_limit) or byte-based (byte_offset + byte_limit). If byte_offset is provided, byte mode takes precedence. Response includes both line and byte coordinates for cross-referencing. Use next_line_offset or next_byte_offset from a previous response to resume reading.")]
@@ -440,185 +432,96 @@ impl McpService {
         &self,
         Parameters(args): Parameters<GetExecutionOutputArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let GetExecutionOutputArgs {
-            execution_id,
-            line_offset,
-            line_limit,
-            byte_offset,
-            byte_limit,
-        } = args;
-        let status = self
-            .engine
-            .get_execution(&execution_id)
-            .map(|info| info.status)
-            .unwrap_or_else(|_| "unknown".to_string());
-
-        match self
-            .engine
-            .get_execution_output(&execution_id, line_offset, line_limit, byte_offset, byte_limit)
-        {
-            Ok(page) => json_result(json!({
-                "execution_id": execution_id,
-                "data": page.data,
-                "start_line": page.start_line,
-                "end_line": page.end_line,
-                "next_line_offset": page.next_line_offset,
-                "total_lines": page.total_lines,
-                "start_byte": page.start_byte,
-                "end_byte": page.end_byte,
-                "next_byte_offset": page.next_byte_offset,
-                "total_bytes": page.total_bytes,
-                "has_more": page.has_more,
-                "status": status,
-            })),
-            Err(e) => json_result(json!({ "error": e })),
-        }
+        self.dispatch("get_execution_output", &args).await
     }
 
     #[tool(description = "Cancel a running execution. Terminates the V8 isolate.")]
     pub async fn cancel_execution(
         &self,
-        Parameters(ExecutionIdArg { execution_id }): Parameters<ExecutionIdArg>,
+        Parameters(args): Parameters<ExecutionIdArg>,
     ) -> Result<CallToolResult, McpError> {
-        match self.engine.cancel_execution(&execution_id) {
-            Ok(()) => json_result(json!({ "ok": true })),
-            Err(e) => json_result(json!({ "ok": false, "error": e })),
-        }
+        self.dispatch("cancel_execution", &args).await
     }
 
     #[tool(description = "List all executions with their status.")]
     pub async fn list_executions(&self) -> Result<CallToolResult, McpError> {
-        match self.engine.list_executions() {
-            Ok(executions) => json_result(json!({ "executions": executions })),
-            Err(e) => json_result(json!({ "error": e })),
-        }
+        self.dispatch("list_executions", &json!({})).await
     }
 
     #[tool(description = "List all named sessions (stateful mode only). Returns an array of session names that have been used via REST session fields or the X-MCP-Session-Id header.")]
     pub async fn list_sessions(&self) -> Result<CallToolResult, McpError> {
-        match self.engine.list_sessions().await {
-            Ok(sessions) => json_result(json!({ "sessions": sessions })),
-            Err(e) => json_result(json!({ "sessions": [format!("Error: {}", e)] })),
-        }
+        self.dispatch("list_sessions", &json!({})).await
     }
 
     #[tool(description = "List all log entries for the current session (stateful mode only). Each entry contains the input heap hash, output heap hash, code executed, and timestamp. Use the fields parameter to select specific fields (comma-separated: index,input_heap,output_heap,code,timestamp).")]
     pub async fn list_session_snapshots(
         &self,
-        Parameters(ListSessionSnapshotsArgs { fields }): Parameters<ListSessionSnapshotsArgs>,
+        Parameters(args): Parameters<ListSessionSnapshotsArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let session = match self.session_id.get() {
-            Some(id) => id.clone(),
-            None => {
-                return json_result(json!({
-                    "entries": [{"error": "no session ID available (send X-MCP-Session-Id header)"}]
-                }))
-            }
-        };
-        let parsed_fields = fields.map(|f| {
-            f.split(',').map(|s| s.trim().to_string()).collect::<Vec<_>>()
-        });
-        match self.engine.list_session_snapshots(session, parsed_fields).await {
-            Ok(entries) => json_result(json!({ "entries": entries })),
-            Err(e) => json_result(json!({ "entries": [{"error": e}] })),
-        }
+        self.dispatch("list_session_snapshots", &args).await
     }
 
     #[tool(description = "Get tags for a heap snapshot (stateful mode only). Returns a map of key-value tags associated with the given heap content hash.")]
     pub async fn get_heap_tags(
         &self,
-        Parameters(HeapArg { heap }): Parameters<HeapArg>,
+        Parameters(args): Parameters<HeapArg>,
     ) -> Result<CallToolResult, McpError> {
-        match self.engine.get_heap_tags(heap).await {
-            Ok(tags) => json_result(json!({ "tags": tags })),
-            Err(e) => json_result(json!({ "tags": { "error": e } })),
-        }
+        self.dispatch("get_heap_tags", &args).await
     }
 
     #[tool(description = "Set or replace tags on a heap snapshot (stateful mode only). Provide a map of key-value string pairs. This replaces all existing tags for the heap.")]
     pub async fn set_heap_tags(
         &self,
-        Parameters(SetHeapTagsArgs { heap, tags }): Parameters<SetHeapTagsArgs>,
+        Parameters(args): Parameters<SetHeapTagsArgs>,
     ) -> Result<CallToolResult, McpError> {
-        match self.engine.set_heap_tags(heap, tags).await {
-            Ok(()) => json_result(json!({ "ok": true })),
-            Err(e) => json_result(json!({ "ok": false, "error": e })),
-        }
+        self.dispatch("set_heap_tags", &args).await
     }
 
     #[tool(description = "Delete tags from a heap snapshot (stateful mode only). If keys is provided (comma-separated), only those tag keys are removed. If keys is omitted, all tags are deleted.")]
     pub async fn delete_heap_tags(
         &self,
-        Parameters(DeleteHeapTagsArgs { heap, keys }): Parameters<DeleteHeapTagsArgs>,
+        Parameters(args): Parameters<DeleteHeapTagsArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let parsed_keys = keys.map(|k| {
-            k.split(',').map(|s| s.trim().to_string()).collect::<Vec<_>>()
-        });
-        match self.engine.delete_heap_tags(heap, parsed_keys).await {
-            Ok(()) => json_result(json!({ "ok": true })),
-            Err(e) => json_result(json!({ "ok": false, "error": e })),
-        }
+        self.dispatch("delete_heap_tags", &args).await
     }
 
     #[tool(description = "Query heap snapshots by tags (stateful mode only). Provide a map of key-value pairs to match. Returns all heaps whose tags contain all the specified key-value pairs.")]
     pub async fn query_heaps_by_tags(
         &self,
-        Parameters(TagsArg { tags }): Parameters<TagsArg>,
+        Parameters(args): Parameters<TagsArg>,
     ) -> Result<CallToolResult, McpError> {
-        match self.engine.query_heaps_by_tags(tags).await {
-            Ok(results) => {
-                let entries: Vec<serde_json::Value> = results
-                    .into_iter()
-                    .map(|e: HeapTagEntry| json!({ "heap": e.heap, "tags": e.tags }))
-                    .collect();
-                json_result(json!({ "results": entries }))
-            }
-            Err(e) => json_result(json!({ "results": [{ "heap": "error", "tags": { "error": e } }] })),
-        }
+        self.dispatch("query_heaps_by_tags", &args).await
     }
 
     // ── fs snapshot tools ────────────────────────────────────────────────
 
     #[tool(description = "List filesystem snapshot labels. Returns each label name and its current head CA id (hex).")]
     pub async fn fs_ls(&self) -> Result<CallToolResult, McpError> {
-        match self.engine.fs_list_labels().await {
-            Ok(labels) => json_result(json!({ "labels": labels })),
-            Err(e) => json_result(json!({ "error": e })),
-        }
+        self.dispatch("fs_ls", &json!({})).await
     }
 
     #[tool(description = "Resolve a filesystem snapshot label to its current head CA id (hex). Use this as the `fs` argument to run_js to mount it.")]
     pub async fn fs_pull(
         &self,
-        Parameters(FsPullArgs { label }): Parameters<FsPullArgs>,
+        Parameters(args): Parameters<FsPullArgs>,
     ) -> Result<CallToolResult, McpError> {
-        match self.engine.fs_resolve_label(&label).await {
-            Ok(Some(ca_id)) => json_result(json!({ "label": label, "ca_id": ca_id })),
-            Ok(None) => json_result(json!({ "error": format!("unknown label: {label}") })),
-            Err(e) => json_result(json!({ "error": e })),
-        }
+        self.dispatch("fs_pull", &args).await
     }
 
     #[tool(description = "Create or repoint a filesystem snapshot label to a CA id (hex). Pass an optional `message` (a commit-style note) to record on the reflog entry.")]
     pub async fn fs_label(
         &self,
-        Parameters(FsLabelArgs { name, ca_id, message }): Parameters<FsLabelArgs>,
+        Parameters(args): Parameters<FsLabelArgs>,
     ) -> Result<CallToolResult, McpError> {
-        match self.engine.fs_set_label(&name, &ca_id, message).await {
-            Ok(()) => json_result(json!({ "label": name, "ca_id": ca_id })),
-            Err(e) => json_result(json!({ "error": e })),
-        }
+        self.dispatch("fs_label", &args).await
     }
 
     #[tool(description = "Show the reflog (move history) for a filesystem snapshot label, oldest first. Each entry has at, from, to (CA ids), op (create/push/reset/force), and an optional message. Use a `to` value as the ca_id for fs_reset. Pass `limit` to return only the most recent N entries (bounding the scan over long histories).")]
     pub async fn fs_log(
         &self,
-        Parameters(FsLogArgs { label, limit }): Parameters<FsLogArgs>,
+        Parameters(args): Parameters<FsLogArgs>,
     ) -> Result<CallToolResult, McpError> {
-        match self.engine.fs_label_log(&label, limit).await {
-            Ok(entries) => json_result(json!({ "label": label, "log": entries })),
-            Err(e) => json_result(json!({ "error": e })),
-        }
+        self.dispatch("fs_log", &args).await
     }
 
     #[tool(description = "Advance a filesystem snapshot label to a CA id (typically the `fs` value returned by a completed run_js execution). Default is reject-and-rebase: pass `expected` (the head you pulled) and the push fails if the label moved since. Set force=true to override, or detach=true to just return the CA id without touching the label. Pass an optional `message` (a commit-style note, max 4096 bytes) to record on the reflog entry.")]
@@ -626,26 +529,7 @@ impl McpService {
         &self,
         Parameters(args): Parameters<FsPushArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let FsPushArgs { ca_id, label, expected, force, detach, message } = args;
-        if detach.unwrap_or(false) {
-            return json_result(json!({ "status": "detached", "ca_id": ca_id }));
-        }
-        let Some(label) = label else {
-            return json_result(json!({
-                "error": "fs_push requires a `label` unless detach=true"
-            }));
-        };
-        match self
-            .engine
-            .fs_push(&label, &ca_id, expected, force.unwrap_or(false), message)
-            .await
-        {
-            Ok(outcome) => match serde_json::to_value(&outcome) {
-                Ok(v) => json_result(v),
-                Err(e) => json_result(json!({ "error": e.to_string() })),
-            },
-            Err(e) => json_result(json!({ "error": e })),
-        }
+        self.dispatch("fs_push", &args).await
     }
 
     #[tool(description = "Reset a filesystem snapshot label to an earlier CA id from its reflog (rollback). The CA id must appear in the label's reflog (see fs_log) unless allow_unlogged=true. Pass an optional `message` (a commit-style note) to record on the reflog entry.")]
@@ -653,33 +537,15 @@ impl McpService {
         &self,
         Parameters(args): Parameters<FsResetArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let FsResetArgs { label, ca_id, allow_unlogged, message } = args;
-        match self
-            .engine
-            .fs_reset(&label, &ca_id, allow_unlogged.unwrap_or(false), message)
-            .await
-        {
-            Ok(()) => json_result(json!({ "label": label, "ca_id": ca_id })),
-            Err(e) => json_result(json!({ "error": e })),
-        }
+        self.dispatch("fs_reset", &args).await
     }
 
     #[tool(description = "Three-way merge two filesystem snapshots (CA ids) into a new snapshot. Pass `base` — the snapshot both sides diverged from (e.g. the label head you mounted before two runs) — so only paths BOTH sides changed conflict; omit it for a 2-way merge. Text files are merged at line level: edits to different lines of the same file auto-merge cleanly. On success returns the merged snapshot's ca_id (push it to a label separately). On conflict returns status=conflict with, per path: each side's content id (null = absent), kind (text/binary/sqlite/modify-delete), and for text the diff3 conflict `markers` plus unified `diff_ours`/`diff_theirs` so you can resolve at line level (edit the markers, write the file back, push). Set prefer=ours|theirs to auto-resolve remaining conflicts to that side.")]
     pub async fn fs_merge(
         &self,
-        Parameters(FsMergeArgs { ours, theirs, base, prefer }): Parameters<FsMergeArgs>,
+        Parameters(args): Parameters<FsMergeArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let prefer = match crate::engine::fs_merge::Prefer::parse(prefer.as_deref()) {
-            Ok(p) => p,
-            Err(e) => return json_result(json!({ "error": e })),
-        };
-        match self.engine.fs_merge(&ours, &theirs, base, prefer).await {
-            Ok(result) => match serde_json::to_value(&result) {
-                Ok(v) => json_result(v),
-                Err(e) => json_result(json!({ "error": e.to_string() })),
-            },
-            Err(e) => json_result(json!({ "error": e })),
-        }
+        self.dispatch("fs_merge", &args).await
     }
 }
 
@@ -831,57 +697,10 @@ impl StatelessMcpService {
         &self,
         Parameters(args): Parameters<StatelessRunJsArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let StatelessRunJsArgs { code, file, heap_memory_max_mb, execution_timeout_secs } = args;
-        // 1. Submit to engine (fire-and-forget internally)
-        let mut req = self.engine.run_js(code.unwrap_or_default());
-        req = req.maybe_file(file);
-        if let Some(mb) = heap_memory_max_mb {
-            req = req.heap_memory_max_mb(mb);
-        }
-        if let Some(secs) = execution_timeout_secs {
-            req = req.execution_timeout_secs(secs);
-        }
-        req = req.maybe_mcp_headers(self.mcp_headers.get().cloned());
-        let exec_id = match req.execute().await {
-            Ok(id) => id,
-            Err(e) => return json_result(json!({ "error": e })),
-        };
-
-        // 2. Poll until terminal state
-        let poll_interval = tokio::time::Duration::from_millis(50);
-        let max_polls = 6000; // 5 minutes at 50ms intervals
-        let mut status = String::new();
-        let mut error_msg: Option<String> = None;
-
-        for _ in 0..max_polls {
-            tokio::time::sleep(poll_interval).await;
-            match self.engine.get_execution(&exec_id) {
-                Ok(info) => match info.status.as_str() {
-                    "completed" => { status = info.status; break; }
-                    "failed" => { status = info.status; error_msg = info.error; break; }
-                    "timed_out" => { status = info.status; error_msg = info.error; break; }
-                    "cancelled" => { status = info.status; error_msg = info.error; break; }
-                    _ => continue,
-                },
-                Err(_) => continue,
-            }
-        }
-
-        if status.is_empty() {
-            return json_result(json!({ "error": "Execution did not complete within polling timeout" }));
-        }
-
-        // 3. Collect all console output
-        let output = match self.engine.get_execution_output(&exec_id, None, Some(u64::MAX), None, None) {
-            Ok(page) => page.data,
-            Err(_) => String::new(),
-        };
-
-        // 4. Return console output (and error if execution failed)
-        match status.as_str() {
-            "completed" => json_result(json!({ "output": output })),
-            _ => json_result(json!({ "output": output, "error": error_msg })),
-        }
+        let value = serde_json::to_value(&args).unwrap_or_else(|_| json!({}));
+        let result =
+            crate::mcp_dispatch::run_js_blocking(&self.engine, self.mcp_headers.get(), &value).await;
+        json_result(result)
     }
 }
 
@@ -974,7 +793,7 @@ impl ServerHandler for StatelessMcpService {
 
 /// Shared initialize-time header handling: JWT verification (if configured),
 /// capturing X-MCP-* headers, and (optionally) the session id.
-async fn capture_mcp_headers(
+pub(crate) async fn capture_mcp_headers(
     context: &RequestContext<RoleServer>,
     session_id: Option<&Arc<OnceLock<String>>>,
     mcp_headers: &Arc<OnceLock<serde_json::Value>>,

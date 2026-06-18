@@ -11,7 +11,8 @@ mcp-v8 exposes a V8 JavaScript runtime as MCP tools. Agents can run JS/TS code, 
 
 ## Connecting to this server
 
-- MCP (Streamable HTTP): `POST /mcp`
+- MCP (Streamable HTTP): `POST /mcp` (supports MCP tasks)
+- MCP (SSE, legacy): `GET /sse` + `POST /message` (via `--sse-port`; no tasks)
 - MCP (stdio): run the binary without `--http-port`
 - REST API: `POST /api/exec`, `GET /api/executions/{id}`, etc.
 - OpenAPI spec: `GET /api-doc/openapi.json`

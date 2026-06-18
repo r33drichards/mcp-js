@@ -22,7 +22,7 @@ MCP servers) are all **off by default** and unlocked only by explicit
 - **One tool, unbounded capability.** The agent runs a program, not a fixed menu of tools.
 - **Durable state.** Heap snapshots persist variables and objects across calls.
 - **Secure by default.** `fetch`, filesystem, subprocess, and external imports are denied until you grant them via policy.
-- **Production-ready.** stdio / Streamable HTTP transports, a REST sidecar, async execution with pagination, JWKS auth, and Raft-replicated clustering.
+- **Production-ready.** stdio / Streamable HTTP / SSE transports, a REST sidecar, async execution with pagination, JWKS auth, and Raft-replicated clustering.
 
 ## Documentation
 
@@ -96,8 +96,8 @@ See the [Quick Start tutorials](https://r33drichards.github.io/mcp-js/) and the
 - **Compose other MCP servers** — connect upstream MCP servers and call them from JS via `mcp.callTool()` / `mcp.listTools()`.
 - **Customizable surface** — override the server `instructions` and the `run_js` description (`--instructions`, `--run-js-description`).
 - **Auth & clustering** — JWKS-based JWT verification, and optional Raft clustering with replicated session metadata and horizontal scaling.
-- **Multiple transports** — stdio and Streamable HTTP (MCP 2025-03-26+), with a REST sidecar and OpenAPI spec.
-- **Tasks** — native MCP [tasks](https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/tasks) (SEP-1319): task-enabled clients can run `run_js` as a task (`tasks/get`, `tasks/result`, `tasks/list`, `tasks/cancel`), ideal for long-running calls.
+- **Multiple transports** — stdio, Streamable HTTP (MCP 2025-03-26+), and a legacy HTTP+SSE transport (`--sse-port`, served by a vendored rmcp 0.1.5), with a REST sidecar and OpenAPI spec.
+- **Tasks** — native MCP [tasks](https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/tasks) (SEP-1319) over Streamable HTTP / stdio: task-enabled clients can run `run_js` as a task (`tasks/get`, `tasks/result`, `tasks/list`, `tasks/cancel`), ideal for long-running calls. (The legacy SSE transport does not offer tasks.)
 
 ## What the agent's code can do
 
