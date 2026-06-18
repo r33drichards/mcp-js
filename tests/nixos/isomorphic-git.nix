@@ -152,6 +152,9 @@ in
 
       networking.firewall.allowedTCPPorts = [ 3000 ];
 
+      # git on the machine PATH so the test script can inspect the bare remote.
+      environment.systemPackages = [ pkgs.git ];
+
       # isomorphic-git runs with a 512 MB V8 heap; give the VM headroom on top
       # of that plus the OS and the two helper servers.
       virtualisation.memorySize = 2048;
