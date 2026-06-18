@@ -3,7 +3,6 @@
 use std::sync::{Arc, Once};
 use server::engine::{initialize_v8, Engine};
 use server::engine::execution::ExecutionRegistry;
-use server::mcp::StatelessMcpService;
 
 static INIT: Once = Once::new();
 
@@ -25,10 +24,25 @@ fn create_test_engine() -> Engine {
         .with_execution_registry(Arc::new(registry))
 }
 
-use server::mcp::StatelessRunJsResponse;
+/// Run stateless run_js via the shared dispatcher and return its JSON body
+/// (`{output, error?}`), matching the old `StatelessMcpService::run_js` shape.
+async fn run_js(
+    engine: &Engine,
+    code: Option<String>,
+    file: Option<String>,
+    max_mb: Option<usize>,
+    timeout: Option<u64>,
+) -> serde_json::Value {
+    let mut args = serde_json::Map::new();
+    if let Some(c) = code { args.insert("code".into(), serde_json::Value::String(c)); }
+    if let Some(f) = file { args.insert("file".into(), serde_json::Value::String(f)); }
+    if let Some(m) = max_mb { args.insert("heap_memory_max_mb".into(), serde_json::json!(m)); }
+    if let Some(t) = timeout { args.insert("execution_timeout_secs".into(), serde_json::json!(t)); }
+    server::mcp_dispatch::run_js_blocking(engine, None, &serde_json::Value::Object(args)).await
+}
 
-fn parse_response(resp: StatelessRunJsResponse) -> serde_json::Value {
-    resp.value
+fn parse_response(resp: serde_json::Value) -> serde_json::Value {
+    resp
 }
 
 fn assert_output_contains(value: &serde_json::Value, expected: &str) {
@@ -43,9 +57,7 @@ fn assert_output_contains(value: &serde_json::Value, expected: &str) {
 async fn test_btoa_basic() {
     ensure_v8();
     let engine = create_test_engine();
-    let service = StatelessMcpService::new(engine, None);
-
-    let resp = service.run_js(Some("console.log(btoa('hello'))".to_string()), None, None, None).await;
+    let resp = run_js(&engine,Some("console.log(btoa('hello'))".to_string()), None, None, None).await;
     let value = parse_response(resp);
     assert_output_contains(&value, "aGVsbG8=");
 }
@@ -54,9 +66,7 @@ async fn test_btoa_basic() {
 async fn test_btoa_empty() {
     ensure_v8();
     let engine = create_test_engine();
-    let service = StatelessMcpService::new(engine, None);
-
-    let resp = service.run_js(Some("console.log(btoa(''))".to_string()), None, None, None).await;
+    let resp = run_js(&engine,Some("console.log(btoa(''))".to_string()), None, None, None).await;
     let value = parse_response(resp);
     let output = value["output"].as_str().unwrap();
     assert!(output.trim().is_empty() || output.contains(""), "btoa('') should return empty string");
@@ -66,10 +76,9 @@ async fn test_btoa_empty() {
 async fn test_btoa_binary_chars() {
     ensure_v8();
     let engine = create_test_engine();
-    let service = StatelessMcpService::new(engine, None);
 
     // Test with bytes 0-255 (Latin1 range)
-    let resp = service.run_js(Some(r#"console.log(btoa('\x00\x01\xff'))"#.to_string()), None, None, None).await;
+    let resp = run_js(&engine, Some(r#"console.log(btoa('\x00\x01\xff'))"#.to_string()), None, None, None).await;
     let value = parse_response(resp);
     assert_output_contains(&value, "AAH/");
 }
@@ -78,9 +87,7 @@ async fn test_btoa_binary_chars() {
 async fn test_btoa_rejects_non_latin1() {
     ensure_v8();
     let engine = create_test_engine();
-    let service = StatelessMcpService::new(engine, None);
-
-    let resp = service.run_js(Some(r#"
+    let resp = run_js(&engine,Some(r#"
         try { btoa('Ā'); console.log('NO ERROR'); }
         catch(e) { console.log('CAUGHT: ' + e.name + ': ' + e.message); }
     "#.to_string()), None, None, None).await;
@@ -95,9 +102,7 @@ async fn test_btoa_rejects_non_latin1() {
 async fn test_atob_basic() {
     ensure_v8();
     let engine = create_test_engine();
-    let service = StatelessMcpService::new(engine, None);
-
-    let resp = service.run_js(Some("console.log(atob('aGVsbG8='))".to_string()), None, None, None).await;
+    let resp = run_js(&engine,Some("console.log(atob('aGVsbG8='))".to_string()), None, None, None).await;
     let value = parse_response(resp);
     assert_output_contains(&value, "hello");
 }
@@ -106,9 +111,7 @@ async fn test_atob_basic() {
 async fn test_atob_no_padding() {
     ensure_v8();
     let engine = create_test_engine();
-    let service = StatelessMcpService::new(engine, None);
-
-    let resp = service.run_js(Some("console.log(atob('aGVsbG8'))".to_string()), None, None, None).await;
+    let resp = run_js(&engine,Some("console.log(atob('aGVsbG8'))".to_string()), None, None, None).await;
     let value = parse_response(resp);
     assert_output_contains(&value, "hello");
 }
@@ -117,9 +120,7 @@ async fn test_atob_no_padding() {
 async fn test_atob_rejects_invalid() {
     ensure_v8();
     let engine = create_test_engine();
-    let service = StatelessMcpService::new(engine, None);
-
-    let resp = service.run_js(Some(r#"
+    let resp = run_js(&engine,Some(r#"
         try { atob('!!!!'); console.log('NO ERROR'); }
         catch(e) { console.log('CAUGHT: ' + e.message); }
     "#.to_string()), None, None, None).await;
@@ -131,9 +132,7 @@ async fn test_atob_rejects_invalid() {
 async fn test_btoa_atob_roundtrip() {
     ensure_v8();
     let engine = create_test_engine();
-    let service = StatelessMcpService::new(engine, None);
-
-    let resp = service.run_js(Some(r#"
+    let resp = run_js(&engine,Some(r#"
         var original = 'The quick brown fox jumps over the lazy dog';
         var encoded = btoa(original);
         var decoded = atob(encoded);
@@ -149,9 +148,7 @@ async fn test_btoa_atob_roundtrip() {
 async fn test_blob_basic() {
     ensure_v8();
     let engine = create_test_engine();
-    let service = StatelessMcpService::new(engine, None);
-
-    let resp = service.run_js(Some(r#"
+    let resp = run_js(&engine,Some(r#"
         var b = new Blob(['hello ', 'world'], { type: 'text/plain' });
         console.log(b.size + '|' + b.type);
     "#.to_string()), None, None, None).await;
@@ -163,9 +160,7 @@ async fn test_blob_basic() {
 async fn test_blob_text() {
     ensure_v8();
     let engine = create_test_engine();
-    let service = StatelessMcpService::new(engine, None);
-
-    let resp = service.run_js(Some(r#"
+    let resp = run_js(&engine,Some(r#"
         (async () => {
             var b = new Blob(['abc', 'def']);
             console.log(await b.text());
@@ -179,9 +174,7 @@ async fn test_blob_text() {
 async fn test_blob_slice() {
     ensure_v8();
     let engine = create_test_engine();
-    let service = StatelessMcpService::new(engine, None);
-
-    let resp = service.run_js(Some(r#"
+    let resp = run_js(&engine,Some(r#"
         (async () => {
             var b = new Blob(['hello world']);
             var sliced = b.slice(0, 5);
@@ -198,9 +191,7 @@ async fn test_blob_slice() {
 async fn test_file_basic() {
     ensure_v8();
     let engine = create_test_engine();
-    let service = StatelessMcpService::new(engine, None);
-
-    let resp = service.run_js(Some(r#"
+    let resp = run_js(&engine,Some(r#"
         var f = new File(['content'], 'test.txt', { type: 'text/plain' });
         console.log(f.name + '|' + f.size + '|' + f.type + '|' + (f instanceof Blob));
     "#.to_string()), None, None, None).await;
@@ -214,9 +205,7 @@ async fn test_file_basic() {
 async fn test_formdata_append_get() {
     ensure_v8();
     let engine = create_test_engine();
-    let service = StatelessMcpService::new(engine, None);
-
-    let resp = service.run_js(Some(r#"
+    let resp = run_js(&engine,Some(r#"
         var fd = new FormData();
         fd.append('name', 'alice');
         fd.append('name', 'bob');
@@ -230,9 +219,7 @@ async fn test_formdata_append_get() {
 async fn test_formdata_set_replaces() {
     ensure_v8();
     let engine = create_test_engine();
-    let service = StatelessMcpService::new(engine, None);
-
-    let resp = service.run_js(Some(r#"
+    let resp = run_js(&engine,Some(r#"
         var fd = new FormData();
         fd.append('x', '1');
         fd.append('x', '2');
@@ -247,9 +234,7 @@ async fn test_formdata_set_replaces() {
 async fn test_formdata_has_delete() {
     ensure_v8();
     let engine = create_test_engine();
-    let service = StatelessMcpService::new(engine, None);
-
-    let resp = service.run_js(Some(r#"
+    let resp = run_js(&engine,Some(r#"
         var fd = new FormData();
         fd.append('key', 'val');
         var before = fd.has('key');
@@ -265,9 +250,7 @@ async fn test_formdata_has_delete() {
 async fn test_formdata_serialize_text() {
     ensure_v8();
     let engine = create_test_engine();
-    let service = StatelessMcpService::new(engine, None);
-
-    let resp = service.run_js(Some(r#"
+    let resp = run_js(&engine,Some(r#"
         var fd = new FormData();
         fd.append('field', 'value');
         var s = fd._serialize();
@@ -284,9 +267,7 @@ async fn test_formdata_serialize_text() {
 async fn test_formdata_serialize_blob_with_filename() {
     ensure_v8();
     let engine = create_test_engine();
-    let service = StatelessMcpService::new(engine, None);
-
-    let resp = service.run_js(Some(r#"
+    let resp = run_js(&engine,Some(r#"
         var fd = new FormData();
         fd.append('f', new Blob(['file data'], { type: 'text/plain' }), 'upload.txt');
         var s = fd._serialize();
@@ -303,9 +284,7 @@ async fn test_formdata_serialize_blob_with_filename() {
 async fn test_formdata_serialize_file() {
     ensure_v8();
     let engine = create_test_engine();
-    let service = StatelessMcpService::new(engine, None);
-
-    let resp = service.run_js(Some(r#"
+    let resp = run_js(&engine,Some(r#"
         var fd = new FormData();
         fd.append('doc', new File(['csv,data'], 'data.csv', { type: 'text/csv' }));
         var s = fd._serialize();
