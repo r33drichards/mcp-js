@@ -18,10 +18,9 @@ interface — such as [`isomorphic-git`](https://isomorphic-git.org/) — consum
 sandbox `fs` object directly. See [`fs.promises`](#fspromises) and
 [Error codes](#error-codes) below.
 
-> `fs.promises.readFile` follows Node semantics — it returns a `Uint8Array` by
-> default and a string only when a text encoding is given. The top-level
-> `fs.readFile` keeps its original contract (text by default, bytes when called
-> with `"buffer"`).
+> Both `fs.readFile` and `fs.promises.readFile` follow Node semantics — they
+> return a `Uint8Array` by default and a string only when a text encoding (e.g.
+> `"utf8"`) is given.
 
 ---
 
@@ -32,9 +31,9 @@ Read the entire contents of a file.
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `path` | `string` | yes | Absolute or relative path to the file |
-| `encoding` | `string` | no | Pass `"buffer"` to receive raw bytes; omit for UTF-8 text |
+| `encoding` | `string` | no | Pass a text encoding (e.g. `"utf8"`) to receive a string; omit for raw bytes |
 
-**Returns:** `Promise<string>` when `encoding` is omitted or any value other than `"buffer"`. `Promise<Uint8Array>` when `encoding === "buffer"`.
+**Returns:** `Promise<Uint8Array>` when `encoding` is omitted or `"buffer"` (the Node-style default). `Promise<string>` when a text encoding such as `"utf8"` is given.
 
 **Errors:**
 - `TypeError: fs.readFile: path must be a string` — `path` argument is not a string.

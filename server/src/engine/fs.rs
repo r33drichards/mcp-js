@@ -9,8 +9,8 @@
 //!
 //! Available operations (all return Promises):
 //! ```js
-//! const data = await fs.readFile("/tmp/data.txt");          // string (utf-8)
-//! const data = await fs.readFile("/tmp/data.bin", "buffer"); // Uint8Array
+//! const data = await fs.readFile("/tmp/data.bin");          // Uint8Array (Node default)
+//! const text = await fs.readFile("/tmp/data.txt", "utf8");  // string
 //! await fs.writeFile("/tmp/out.txt", "hello");              // string data
 //! await fs.writeFile("/tmp/out.bin", uint8array);           // binary data
 //! await fs.appendFile("/tmp/out.txt", " world");
@@ -957,17 +957,12 @@ const FS_JS_WRAPPER: &str = r#"
         return await call('op_fs_read_file_buffer', path);
     }
 
-    // Top-level fs.readFile keeps mcp-v8's historical contract: UTF-8 text by
-    // default, raw bytes only when the encoding is the literal "buffer".
-    async function readFile(path, encoding) {
-        if (encoding === 'buffer') return await readFileBuffer(path);
-        return await readFileText(path);
-    }
-
-    // Node's fs.promises.readFile contract: a Uint8Array by default, a string
-    // when a text encoding is supplied. This is what Node-style consumers (e.g.
-    // isomorphic-git reading binary git objects) expect.
-    async function readFilePromises(path, options) {
+    // Node's readFile contract: a Uint8Array by default, a string when a text
+    // encoding ('utf8', 'utf-8', …) is supplied. fs.readFile and
+    // fs.promises.readFile share this single behavior, so binary reads (e.g.
+    // isomorphic-git git objects) are lossless and text reads opt in via an
+    // encoding argument — exactly as Node behaves.
+    async function readFile(path, options) {
         const enc = readEncoding(options);
         if (enc && enc !== 'buffer') return await readFileText(path);
         return await readFileBuffer(path);
@@ -1085,7 +1080,7 @@ const FS_JS_WRAPPER: &str = r#"
     // isomorphic-git among them — detect this enumerable property and bind its
     // methods, so every method they look up must exist.
     const promises = {
-        readFile: readFilePromises,
+        readFile,
         writeFile, appendFile, readdir, stat, lstat, mkdir, rm, rmdir,
         unlink, rename, copyFile, readlink, symlink, exists,
     };

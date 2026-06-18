@@ -120,15 +120,15 @@ Set `"mode": "all"` (the default) to require every evaluator to return `true`, o
 ### Read a text file
 
 ```js
-const text = await fs.readFile("/var/mcp-workspace/config.json");
+const text = await fs.readFile("/var/mcp-workspace/config.json", "utf8");
 const config = JSON.parse(text);
 ```
 
 ### Read a binary file
 
 ```js
-const bytes = await fs.readFile("/var/mcp-workspace/image.png", "buffer");
-// bytes is a Uint8Array
+const bytes = await fs.readFile("/var/mcp-workspace/image.png");
+// bytes is a Uint8Array (the Node-style default when no encoding is given)
 ```
 
 ### Write a text file (overwrites)

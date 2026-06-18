@@ -112,7 +112,7 @@ async fn mount_write_push_then_read_back_by_ca_id() {
     let ca2 = run(
         &h.engine,
         r#"(async () => {
-            const c = await fs.readFile("/data/note.txt");
+            const c = await fs.readFile("/data/note.txt", "utf8");
             if (c !== "hello snapshot") throw new Error("readback mismatch: " + c);
             await fs.writeFile("/data/extra.txt", "more");
         })()"#,

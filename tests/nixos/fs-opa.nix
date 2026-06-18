@@ -106,7 +106,7 @@ in
     with subtest("should allow writeFile and readFile in /tmp/allowed/"):
         result = exec_js("""
             await fs.writeFile("/tmp/allowed/test.txt", "hello world");
-            const data = await fs.readFile("/tmp/allowed/test.txt");
+            const data = await fs.readFile("/tmp/allowed/test.txt", "utf8");
             console.log(data);
         """)
         print("Write+Read result: " + str(result))
@@ -184,7 +184,7 @@ in
         result = exec_js("""
             await fs.writeFile("/tmp/allowed/append.txt", "hello");
             await fs.appendFile("/tmp/allowed/append.txt", " world");
-            console.log(await fs.readFile("/tmp/allowed/append.txt"));
+            console.log(await fs.readFile("/tmp/allowed/append.txt", "utf8"));
         """)
         print("appendFile result: " + str(result))
         assert result["output"] == "hello world", "Expected 'hello world', got: " + str(result)
@@ -195,7 +195,7 @@ in
         result = exec_js("""
             await fs.writeFile("/tmp/allowed/old.txt", "renamed");
             await fs.rename("/tmp/allowed/old.txt", "/tmp/allowed/new.txt");
-            console.log(await fs.readFile("/tmp/allowed/new.txt"));
+            console.log(await fs.readFile("/tmp/allowed/new.txt", "utf8"));
         """)
         print("Rename result: " + str(result))
         assert result["output"] == "renamed", "Expected 'renamed', got: " + str(result)
@@ -206,7 +206,7 @@ in
         result = exec_js("""
             await fs.writeFile("/tmp/allowed/src.txt", "copied");
             await fs.copyFile("/tmp/allowed/src.txt", "/tmp/allowed/dst.txt");
-            console.log(await fs.readFile("/tmp/allowed/dst.txt"));
+            console.log(await fs.readFile("/tmp/allowed/dst.txt", "utf8"));
         """)
         print("CopyFile result: " + str(result))
         assert result["output"] == "copied", "Expected 'copied', got: " + str(result)

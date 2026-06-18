@@ -875,8 +875,8 @@ When the server is started with a Rego policy configuration, JavaScript code can
 The `fs` module supports the following operations:
 
 ```javascript
-const data = await fs.readFile("/tmp/data.txt");          // string (utf-8)
-const data = await fs.readFile("/tmp/data.bin", "buffer"); // Uint8Array
+const data = await fs.readFile("/tmp/data.bin");          // Uint8Array (Node default)
+const text = await fs.readFile("/tmp/data.txt", "utf8");  // string
 await fs.writeFile("/tmp/out.txt", "hello");              // string data
 await fs.writeFile("/tmp/out.bin", uint8array);           // binary data
 await fs.appendFile("/tmp/out.txt", " world");
@@ -951,8 +951,8 @@ The `policies.json` file should contain policy configuration objects. See the [P
 All `fs` operations return Promises and can be used with `await`:
 
 ```javascript
-// Read a file
-const content = await fs.readFile("/tmp/data.txt");
+// Read a file as text
+const content = await fs.readFile("/tmp/data.txt", "utf8");
 console.log(content);
 
 // Write a file
@@ -990,10 +990,10 @@ If a policy denies an operation, the Promise returned by the `fs` operation is r
 
 **Binary Data**
 
-When reading binary files, specify `"buffer"` as the encoding parameter:
+`fs.readFile` returns a `Uint8Array` by default (Node semantics), so binary files need no special argument:
 
 ```javascript
-const buffer = await fs.readFile("/tmp/image.png", "buffer");
+const buffer = await fs.readFile("/tmp/image.png");
 // buffer is a Uint8Array
 
 // Write binary data
