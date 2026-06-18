@@ -89,7 +89,10 @@ Parameters:
 
 List filesystem snapshot labels. Returns each label name and its current head CA id (hex).
 
-This tool does not take structured parameters.
+Parameters:
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
 
 ### `fs_merge`
 <a id="heap+fs-fs-merge"></a>
@@ -188,7 +191,10 @@ Parameters:
 
 List all executions with their status.
 
-This tool does not take structured parameters.
+Parameters:
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
 
 ### `list_session_snapshots`
 <a id="heap+fs-list-session-snapshots"></a>
@@ -206,7 +212,10 @@ Parameters:
 
 List all named sessions (stateful mode only). Returns an array of session names that have been used via REST session fields or the X-MCP-Session-Id header.
 
-This tool does not take structured parameters.
+Parameters:
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
 
 ### `query_heaps_by_tags`
 <a id="heap+fs-query-heaps-by-tags"></a>

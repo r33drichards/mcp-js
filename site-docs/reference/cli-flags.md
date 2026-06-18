@@ -113,7 +113,7 @@ HTTP port using Streamable HTTP transport (MCP 2025-03-26+, load-balanceable)
 
 ### `--sse-port`
 
-SSE port using the older HTTP+SSE transport
+SSE port using the legacy HTTP+SSE transport (served by a vendored rmcp 0.1.5; no MCP tasks support — use --http-port for tasks)
 
 - Environment: `MCP_V8_SSE_PORT`
 - Value: `SSE_PORT`
