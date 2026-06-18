@@ -237,7 +237,9 @@ in
         assert body["errors"] is None, "push reported errors: " + out
 
     with subtest("the bare remote received the commit"):
-        remote_log = machine.succeed("git -C " + shlex.quote("${gitRoot}/repo.git") + " log --oneline -1").strip()
+        # %H is the full hash so the 8-char commit_oid prefix matches (--oneline
+        # would abbreviate to 7 chars and miss).
+        remote_log = machine.succeed("git -C " + shlex.quote("${gitRoot}/repo.git") + " log -1 --format='%H %s'").strip()
         print("remote log: " + remote_log)
         assert commit_oid in remote_log, f"remote missing commit {commit_oid}: {remote_log}"
         assert "initial commit" in remote_log, "remote missing commit message: " + remote_log
