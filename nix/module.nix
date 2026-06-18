@@ -120,7 +120,9 @@ in
             ];
 
             storageArgs = lib.optionals (!cfg.stateless) [
-              "--directory-path"
+              "--heap-store"
+              "dir"
+              "--heap-dir"
               cfg.dataDir
               "--session-db-path"
               "${cfg.dataDir}/sessions"
@@ -139,8 +141,6 @@ in
               (lib.concatStringsSep "," cfg.peers)
             ];
 
-            statelessArgs = lib.optionals cfg.stateless [ "--stateless" ];
-
             advertiseArgs = lib.optionals (cfg.advertiseAddr != null) [
               "--advertise-addr"
               cfg.advertiseAddr
@@ -156,7 +156,7 @@ in
               "'${cfg.policiesJson}'"
             ];
           in
-          lib.concatStringsSep " " (baseArgs ++ storageArgs ++ peerArgs ++ statelessArgs ++ advertiseArgs ++ joinArgs ++ policiesArgs);
+          lib.concatStringsSep " " (baseArgs ++ storageArgs ++ peerArgs ++ advertiseArgs ++ joinArgs ++ policiesArgs);
 
         Restart = "on-failure";
         RestartSec = "2s";

@@ -82,8 +82,8 @@ def main() -> int:
     chrome = find_chrome(args.chrome)
 
     checks = [
-        ("/", ["mcp-v8", "Quick Start"]),
-        ("/quick-start/overview/", ["Quick Start Overview"]),
+        ("/", ["mcp-v8", "Install"]),
+        ("/install/overview/", ["Install"]),
         ("/reference/http-api/", ["HTTP API"]),
         ("/reference/mcp-tools/", ["MCP Tools"]),
     ]
