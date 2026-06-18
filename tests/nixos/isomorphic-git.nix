@@ -151,6 +151,10 @@ in
       };
 
       networking.firewall.allowedTCPPorts = [ 3000 ];
+
+      # isomorphic-git runs with a 512 MB V8 heap; give the VM headroom on top
+      # of that plus the OS and the two helper servers.
+      virtualisation.memorySize = 2048;
     };
   };
 
@@ -200,7 +204,7 @@ in
             const dir = '/tmp/work/repo';
             await fs.mkdir(dir, {{ recursive: true }});
             await git.init({{ fs, dir, defaultBranch: 'main' }});
-            await fs.writeFile(dir + '/README.md', '# hello from isomorphic-git\\n');
+            await fs.writeFile(dir + '/README.md', '# hello from isomorphic-git');
             await git.add({{ fs, dir, filepath: 'README.md' }});
             const oid = await git.commit({{
                 fs, dir, message: 'initial commit',
@@ -230,9 +234,9 @@ in
         assert body["errors"] is None, "push reported errors: " + out
 
     with subtest("the bare remote received the commit"):
-        log = machine.succeed("git -C " + shlex.quote("${gitRoot}/repo.git") + " log --oneline -1").strip()
-        print("remote log: " + log)
-        assert commit_oid in log, f"remote missing commit {commit_oid}: {log}"
-        assert "initial commit" in log, "remote missing commit message: " + log
+        remote_log = machine.succeed("git -C " + shlex.quote("${gitRoot}/repo.git") + " log --oneline -1").strip()
+        print("remote log: " + remote_log)
+        assert commit_oid in remote_log, f"remote missing commit {commit_oid}: {remote_log}"
+        assert "initial commit" in remote_log, "remote missing commit message: " + remote_log
   '';
 }

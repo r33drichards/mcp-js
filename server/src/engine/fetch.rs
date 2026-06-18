@@ -1295,13 +1295,17 @@ allow if {{
         .await
         .expect("fetch should succeed when policy sees injected auth");
 
+        // The response body is base64-encoded (binary-safe op boundary); decode
+        // it before parsing the echo server's JSON.
+        let response_value: serde_json::Value =
+            serde_json::from_str(&response).expect("response JSON should parse");
+        let body_b64 = response_value
+            .get("body")
+            .and_then(Value::as_str)
+            .expect("response body should exist");
+        let body_bytes = super::b64_decode(body_b64).expect("response body should base64-decode");
         let payload: FetchResponseBody =
-            serde_json::from_str::<serde_json::Value>(&response)
-                .expect("response JSON should parse")
-                .get("body")
-                .and_then(Value::as_str)
-                .map(|body| serde_json::from_str(body).expect("response body JSON should parse"))
-                .expect("response body should exist");
+            serde_json::from_slice(&body_bytes).expect("response body JSON should parse");
 
         assert!(payload.ok);
         assert_eq!(
@@ -1399,7 +1403,8 @@ allow if {{
             url,
             "POST".to_string(),
             headers_json,
-            Some(body.clone()),
+            // do_fetch expects the request body base64-encoded (binary-safe).
+            Some(super::b64_encode(body.as_bytes())),
             Arc::new(PolicyChain::new(vec![], EvalMode::All)),
             reqwest::Client::new(),
             vec![],
@@ -1416,5 +1421,25 @@ allow if {{
         assert!(reqs[0].1.contains("hello world"));
         assert!(reqs[0].1.contains("name=\"f\""));
         assert!(reqs[0].1.contains("filename=\"test.txt\""));
+    }
+
+    #[test]
+    fn test_b64_round_trips_binary() {
+        // Every byte value must survive the base64 round-trip used to carry
+        // fetch request/response bodies across the op boundary.
+        let all_bytes: Vec<u8> = (0u16..=255).map(|b| b as u8).collect();
+        assert_eq!(
+            super::b64_decode(&super::b64_encode(&all_bytes)).expect("decode"),
+            all_bytes
+        );
+        // Exercise every padding case (len % 3 == 0/1/2) and empty input.
+        for n in [0usize, 1, 2, 3, 4, 5, 100, 255] {
+            let d: Vec<u8> = (0..n).map(|i| (i * 31 + 7) as u8).collect();
+            assert_eq!(
+                super::b64_decode(&super::b64_encode(&d)).unwrap(),
+                d,
+                "round-trip failed for len {n}"
+            );
+        }
     }
 }
