@@ -96,7 +96,8 @@ See the [Quick Start tutorials](https://r33drichards.github.io/mcp-js/) and the
 - **Compose other MCP servers** — connect upstream MCP servers and call them from JS via `mcp.callTool()` / `mcp.listTools()`.
 - **Customizable surface** — override the server `instructions` and the `run_js` description (`--instructions`, `--run-js-description`).
 - **Auth & clustering** — JWKS-based JWT verification, and optional Raft clustering with replicated session metadata and horizontal scaling.
-- **Multiple transports** — stdio, Streamable HTTP (MCP 2025-03-26+), and SSE, with a REST sidecar and OpenAPI spec.
+- **Multiple transports** — stdio, Streamable HTTP (MCP 2025-03-26+), and a legacy HTTP+SSE transport (`--sse-port`, served by a vendored rmcp 0.1.5), with a REST sidecar and OpenAPI spec.
+- **Tasks** — native MCP [tasks](https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/tasks) (SEP-1319) over Streamable HTTP / stdio: task-enabled clients can run `run_js` as a task (`tasks/get`, `tasks/result`, `tasks/list`, `tasks/cancel`), ideal for long-running calls. (The legacy SSE transport does not offer tasks.)
 
 ## What the agent's code can do
 
@@ -127,6 +128,25 @@ See [Concepts → Security policies](https://r33drichards.github.io/mcp-js/conce
 | `get_heap_tags`, `set_heap_tags`, `delete_heap_tags`, `query_heaps_by_tags` | stateful | Tag and search heap snapshots. |
 
 Full parameters: [MCP tools reference](https://r33drichards.github.io/mcp-js/reference/mcp-tools/).
+
+### Long-running calls as tasks
+
+The server natively implements the MCP **tasks** utility (spec `2025-11-25` /
+SEP-1319) via rmcp, over both the Streamable HTTP and stdio transports. The
+`initialize` result advertises a `tasks` capability, and a client may run the
+task-augmentable `run_js` tool as a task by adding a `task` object to the
+request params:
+
+```jsonc
+// → returns immediately with a task instead of blocking
+{ "method": "tools/call",
+  "params": { "name": "run_js", "arguments": { "code": "…" }, "task": { "ttl": 300000 } } }
+```
+
+The client then polls `tasks/get`, fetches the eventual tool result with
+`tasks/result` (which returns exactly what the call would have returned),
+enumerates work with `tasks/list`, and stops a run with `tasks/cancel`. A
+`tools/call` without a `task` field is unaffected.
 
 ## Configuration
 

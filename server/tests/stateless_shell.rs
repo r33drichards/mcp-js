@@ -5,7 +5,6 @@ use std::sync::{Arc, Once};
 use server::engine::{initialize_v8, Engine};
 use server::engine::execution::ExecutionRegistry;
 use server::engine::run_js_file::RunJsFilePolicy;
-use server::mcp::StatelessMcpService;
 
 static INIT: Once = Once::new();
 
@@ -34,20 +33,32 @@ fn create_test_engine_allow_file() -> Engine {
     create_test_engine().with_run_js_file_policy(RunJsFilePolicy::AllowAll)
 }
 
-use server::mcp::StatelessRunJsResponse;
+/// Run stateless run_js via the shared dispatcher and return its JSON body
+/// (`{output, error?}`), matching the old `StatelessMcpService::run_js` shape.
+async fn run_js(
+    engine: &Engine,
+    code: Option<String>,
+    file: Option<String>,
+    max_mb: Option<usize>,
+    timeout: Option<u64>,
+) -> serde_json::Value {
+    let mut args = serde_json::Map::new();
+    if let Some(c) = code { args.insert("code".into(), serde_json::Value::String(c)); }
+    if let Some(f) = file { args.insert("file".into(), serde_json::Value::String(f)); }
+    if let Some(m) = max_mb { args.insert("heap_memory_max_mb".into(), serde_json::json!(m)); }
+    if let Some(t) = timeout { args.insert("execution_timeout_secs".into(), serde_json::json!(t)); }
+    server::mcp_dispatch::run_js_blocking(engine, None, &serde_json::Value::Object(args)).await
+}
 
-/// Extract the JSON value from a StatelessRunJsResponse.
-fn parse_response(resp: StatelessRunJsResponse) -> serde_json::Value {
-    resp.value
+fn parse_response(resp: serde_json::Value) -> serde_json::Value {
+    resp
 }
 
 #[tokio::test]
 async fn test_stateless_shell_console_log() {
     ensure_v8();
     let engine = create_test_engine();
-    let service = StatelessMcpService::new(engine, None);
-
-    let resp = service.run_js(Some("console.log('hello world')".to_string()), None, None, None).await;
+    let resp = run_js(&engine,Some("console.log('hello world')".to_string()), None, None, None).await;
     let value = parse_response(resp);
 
     assert!(value["error"].is_null(), "Should not have error: {:?}", value);
@@ -59,15 +70,13 @@ async fn test_stateless_shell_console_log() {
 async fn test_stateless_shell_multiple_console_logs() {
     ensure_v8();
     let engine = create_test_engine();
-    let service = StatelessMcpService::new(engine, None);
-
     let code = r#"
         console.log("line 1");
         console.log("line 2");
         console.log("line 3");
     "#;
 
-    let resp = service.run_js(Some(code.to_string()), None, None, None).await;
+    let resp = run_js(&engine, Some(code.to_string()), None, None, None).await;
     let value = parse_response(resp);
 
     let output = value["output"].as_str().expect("Should have output");
@@ -80,9 +89,7 @@ async fn test_stateless_shell_multiple_console_logs() {
 async fn test_stateless_shell_error_handling() {
     ensure_v8();
     let engine = create_test_engine();
-    let service = StatelessMcpService::new(engine, None);
-
-    let resp = service.run_js(Some("throw new Error('boom')".to_string()), None, None, None).await;
+    let resp = run_js(&engine,Some("throw new Error('boom')".to_string()), None, None, None).await;
     let value = parse_response(resp);
 
     assert!(!value["error"].is_null(), "Should have error field: {:?}", value);
@@ -94,9 +101,7 @@ async fn test_stateless_shell_error_handling() {
 async fn test_stateless_shell_no_execution_id_exposed() {
     ensure_v8();
     let engine = create_test_engine();
-    let service = StatelessMcpService::new(engine, None);
-
-    let resp = service.run_js(Some("console.log('test')".to_string()), None, None, None).await;
+    let resp = run_js(&engine,Some("console.log('test')".to_string()), None, None, None).await;
     let value = parse_response(resp);
 
     assert!(value["execution_id"].is_null(), "Should not expose execution_id: {:?}", value);
@@ -106,14 +111,12 @@ async fn test_stateless_shell_no_execution_id_exposed() {
 async fn test_stateless_shell_computation_with_output() {
     ensure_v8();
     let engine = create_test_engine();
-    let service = StatelessMcpService::new(engine, None);
-
     let code = r#"
         const sum = [1, 2, 3, 4, 5].reduce((a, b) => a + b, 0);
         console.log("sum is", sum);
     "#;
 
-    let resp = service.run_js(Some(code.to_string()), None, None, None).await;
+    let resp = run_js(&engine, Some(code.to_string()), None, None, None).await;
     let value = parse_response(resp);
 
     let output = value["output"].as_str().expect("Should have output");
@@ -124,14 +127,12 @@ async fn test_stateless_shell_computation_with_output() {
 async fn test_stateless_shell_top_level_await() {
     ensure_v8();
     let engine = create_test_engine();
-    let service = StatelessMcpService::new(engine, None);
-
     let code = r#"
         const result = await Promise.resolve(42);
         console.log("result is", result);
     "#;
 
-    let resp = service.run_js(Some(code.to_string()), None, None, None).await;
+    let resp = run_js(&engine, Some(code.to_string()), None, None, None).await;
     let value = parse_response(resp);
 
     assert!(value["error"].is_null(), "Top-level await should not error: {:?}", value);
@@ -143,15 +144,13 @@ async fn test_stateless_shell_top_level_await() {
 async fn test_stateless_shell_top_level_await_async_chain() {
     ensure_v8();
     let engine = create_test_engine();
-    let service = StatelessMcpService::new(engine, None);
-
     let code = r#"
         const a = await Promise.resolve(10);
         const b = await Promise.resolve(20);
         console.log(a + b);
     "#;
 
-    let resp = service.run_js(Some(code.to_string()), None, None, None).await;
+    let resp = run_js(&engine, Some(code.to_string()), None, None, None).await;
     let value = parse_response(resp);
 
     assert!(value["error"].is_null(), "Chained top-level await should not error: {:?}", value);
@@ -168,12 +167,10 @@ async fn test_run_js_file_allow_all_reads_and_runs() {
     let script = dir.path().join("script.js");
     std::fs::write(&script, "console.log('from a file', 6 * 7);").unwrap();
 
-    let service = StatelessMcpService::new(create_test_engine_allow_file(), None);
+    let engine = create_test_engine_allow_file();
 
     // code omitted; file provided.
-    let resp = service
-        .run_js(None, Some(script.to_str().unwrap().to_string()), None, None)
-        .await;
+    let resp = run_js(&engine, None, Some(script.to_str().unwrap().to_string()), None, None).await;
     let value = parse_response(resp);
 
     assert!(value["error"].is_null(), "file read should not error: {:?}", value);
@@ -189,11 +186,9 @@ async fn test_run_js_file_disabled_by_default_errors() {
     std::fs::write(&script, "console.log('nope');").unwrap();
 
     // Default engine has no run_js_file policy → file reads are disabled.
-    let service = StatelessMcpService::new(create_test_engine(), None);
+    let engine = create_test_engine();
 
-    let resp = service
-        .run_js(None, Some(script.to_str().unwrap().to_string()), None, None)
-        .await;
+    let resp = run_js(&engine, None, Some(script.to_str().unwrap().to_string()), None, None).await;
     let value = parse_response(resp);
 
     let error = value["error"].as_str().unwrap_or("");
@@ -207,17 +202,17 @@ async fn test_run_js_file_and_code_conflict_errors() {
     let script = dir.path().join("script.js");
     std::fs::write(&script, "console.log('file');").unwrap();
 
-    let service = StatelessMcpService::new(create_test_engine_allow_file(), None);
+    let engine = create_test_engine_allow_file();
 
     // Both code and file supplied → error.
-    let resp = service
-        .run_js(
-            Some("console.log('inline')".to_string()),
-            Some(script.to_str().unwrap().to_string()),
-            None,
-            None,
-        )
-        .await;
+    let resp = run_js(
+        &engine,
+        Some("console.log('inline')".to_string()),
+        Some(script.to_str().unwrap().to_string()),
+        None,
+        None,
+    )
+    .await;
     let value = parse_response(resp);
 
     let error = value["error"].as_str().unwrap_or("");

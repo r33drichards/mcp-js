@@ -52,7 +52,8 @@ pub struct Cli {
     #[arg(long, env = "MCP_V8_HTTP_PORT", conflicts_with = "sse_port", help_heading = "Core")]
     pub http_port: Option<u16>,
 
-    /// SSE port using the older HTTP+SSE transport
+    /// SSE port using the legacy HTTP+SSE transport (served by a vendored rmcp
+    /// 0.1.5; no MCP tasks support — use --http-port for tasks).
     #[arg(long, env = "MCP_V8_SSE_PORT", conflicts_with = "http_port", help_heading = "Core")]
     pub sse_port: Option<u16>,
 

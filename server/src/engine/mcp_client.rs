@@ -24,7 +24,7 @@ use deno_core::{JsRuntime, OpState, op2};
 use deno_error::JsErrorBox;
 use serde::{Deserialize, Serialize};
 
-use rmcp::model::{CallToolRequestParam, CallToolResult, Content, Tool};
+use rmcp::model::{CallToolRequestParams, CallToolResult, Content, Tool};
 use rmcp::service::Peer;
 use rmcp::RoleClient;
 
@@ -365,9 +365,11 @@ impl McpClientManager {
         // the whole call on the connection's runtime and await the JoinHandle
         // (safe to poll from any runtime) — mirrors S3HeapStorage::*_blocking.
         let call = async move {
-            let make_req = || CallToolRequestParam {
-                name: tool_name.clone().into(),
-                arguments: arguments.clone(),
+            let make_req = || {
+                let mut req = CallToolRequestParams::default();
+                req.name = tool_name.clone().into();
+                req.arguments = arguments.clone();
+                req
             };
 
             let peer = { server.live.read().await.peer.clone() };
@@ -493,12 +495,7 @@ pub fn make_stub_tool(prefix: &str, server: &str, tool: &Tool) -> Tool {
     // Since stubs are discovery mechanisms (they return instructions, not
     // results), upstream annotations about behavior are misleading anyway.
     // Setting annotations to None omits the field entirely from the JSON.
-    Tool {
-        name: stub_name.into(),
-        description: Some(new_desc.into()),
-        input_schema: tool.input_schema.clone(),
-        annotations: None,
-    }
+    Tool::new(stub_name, new_desc, tool.input_schema.clone())
 }
 
 /// Render the instructional text returned when an external client calls a
@@ -535,7 +532,7 @@ async fn connect_one(config: &McpServerConfig) -> Result<ConnectedMcpServer, Str
             for (k, v) in env {
                 cmd.env(k, v);
             }
-            let transport = rmcp::transport::TokioChildProcess::new(&mut cmd)
+            let transport = rmcp::transport::TokioChildProcess::new(cmd)
                 .map_err(|e| format!("Failed to spawn '{}': {}", command, e))?;
 
             let service: rmcp::service::RunningService<RoleClient, ()> =
@@ -560,14 +557,10 @@ async fn connect_one(config: &McpServerConfig) -> Result<ConnectedMcpServer, Str
             })
         }
         McpServerTransport::Sse { url } => {
-            let transport = rmcp::transport::SseTransport::start(url)
-                .await
-                .map_err(|e| {
-                    format!(
-                        "Failed to connect to SSE endpoint '{}' for '{}': {}",
-                        url, config.name, e
-                    )
-                })?;
+            // The standalone SSE client transport was removed in rmcp 1.x; the
+            // Streamable HTTP client transport is its replacement and speaks to
+            // the same `/mcp`-style endpoints modern MCP servers expose.
+            let transport = rmcp::transport::StreamableHttpClientTransport::from_uri(url.clone());
 
             let service: rmcp::service::RunningService<RoleClient, ()> =
                 ().serve(transport)
@@ -825,12 +818,7 @@ mod tests {
     }
 
     fn tool(name: &'static str, desc: &'static str) -> Tool {
-        Tool {
-            name: name.into(),
-            description: Some(desc.into()),
-            input_schema: schema(json!({"x": {"type": "number"}})),
-            annotations: None,
-        }
+        Tool::new(name, desc, schema(json!({"x": {"type": "number"}})))
     }
 
     #[test]
@@ -907,12 +895,7 @@ mod tests {
 
     #[test]
     fn make_stub_handles_missing_description() {
-        let upstream = Tool {
-            name: "ping".into(),
-            description: None,
-            input_schema: schema(json!({})),
-            annotations: None,
-        };
+        let upstream = Tool::new_with_raw("ping", None, schema(json!({})));
         let stub = make_stub_tool("runjs__", "infra", &upstream);
         let desc = stub.description.unwrap();
         assert!(desc.contains("run_js"));
@@ -1046,18 +1029,14 @@ mod tests {
 
         // Simulate GitHub MCP server: hints with None values that would
         // serialize as JSON null and break Claude Code SDK's Zod validator.
-        let upstream = Tool {
-            name: "create_issue".into(),
-            description: Some("Create issue".into()),
-            input_schema: schema(json!({"title": {"type": "string"}})),
-            annotations: Some(ToolAnnotations {
-                title: Some("Create a GitHub issue".into()),
-                read_only_hint: None,
-                destructive_hint: None,
-                idempotent_hint: None,
-                open_world_hint: None,
-            }),
-        };
+        let mut annotations = ToolAnnotations::default();
+        annotations.title = Some("Create a GitHub issue".into());
+        let mut upstream = Tool::new(
+            "create_issue",
+            "Create issue",
+            schema(json!({"title": {"type": "string"}})),
+        );
+        upstream.annotations = Some(annotations);
         let stub = make_stub_tool("runjs__", "github", &upstream);
 
         // Stubs should never carry upstream annotations — they are discovery
@@ -1072,18 +1051,18 @@ mod tests {
         use rmcp::model::ToolAnnotations;
 
         // Even fully valid annotations are dropped — stubs don't execute.
-        let upstream = Tool {
-            name: "get_file".into(),
-            description: Some("Get file contents".into()),
-            input_schema: schema(json!({"path": {"type": "string"}})),
-            annotations: Some(ToolAnnotations {
-                title: Some("Get file".into()),
-                read_only_hint: Some(true),
-                destructive_hint: Some(false),
-                idempotent_hint: Some(true),
-                open_world_hint: Some(false),
-            }),
-        };
+        let mut annotations = ToolAnnotations::default();
+        annotations.title = Some("Get file".into());
+        annotations.read_only_hint = Some(true);
+        annotations.destructive_hint = Some(false);
+        annotations.idempotent_hint = Some(true);
+        annotations.open_world_hint = Some(false);
+        let mut upstream = Tool::new(
+            "get_file",
+            "Get file contents",
+            schema(json!({"path": {"type": "string"}})),
+        );
+        upstream.annotations = Some(annotations);
         let stub = make_stub_tool("runjs__", "github", &upstream);
 
         let json = serde_json::to_value(&stub).unwrap();

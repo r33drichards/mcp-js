@@ -11,8 +11,9 @@ mcp-v8 exposes a V8 JavaScript runtime as MCP tools. Agents can run JS/TS code, 
 
 ## Connecting to this server
 
-- MCP (Streamable HTTP): `POST /mcp`
-- MCP (SSE): `GET /sse` + `POST /message`
+- MCP (Streamable HTTP): `POST /mcp` (supports MCP tasks)
+- MCP (SSE, legacy): `GET /sse` + `POST /message` (via `--sse-port`; no tasks)
+- MCP (stdio): run the binary without `--http-port`
 - REST API: `POST /api/exec`, `GET /api/executions/{id}`, etc.
 - OpenAPI spec: `GET /api-doc/openapi.json`
 - Full docs: `GET /docs`
@@ -35,6 +36,29 @@ mcp-v8 exposes a V8 JavaScript runtime as MCP tools. Agents can run JS/TS code, 
 - `set_heap_tags(heap, tags)` — Set tags on a heap snapshot.
 - `delete_heap_tags(heap, keys)` — Delete tag keys from a heap snapshot.
 - `query_heaps_by_tags(tags)` — Find heap snapshots matching tag criteria.
+
+## MCP Tasks (long-running tool calls)
+
+This server natively supports the MCP **tasks** utility (spec `2025-11-25` /
+SEP-1319) via rmcp. Task-enabled clients see a `tasks` capability in the
+`initialize` result; `run_js` is task-augmentable, so a client may run it as a
+task by adding a `task` object to the request `params`:
+
+```
+1. tools/call { name: "run_js", arguments: {...}, task: { ttl: 300000 } }
+   → result.task = { taskId, status: "working", ... }
+
+2. tasks/get { taskId }      → current Task (status working→completed/failed/cancelled)
+3. tasks/result { taskId }   → blocks until terminal, then returns the tool's
+                               result exactly as a normal tools/call would
+4. tasks/list                → all known tasks
+5. tasks/cancel { taskId }   → transitions a running task to cancelled
+```
+
+This is ideal for long-running `run_js` calls: the client gets an immediate
+`taskId` instead of a blocked connection, then polls. A `tools/call` without a
+`task` field behaves exactly as before (synchronous result). Tasks work over
+both the Streamable HTTP and stdio transports.
 
 ## Typical agent workflow
 

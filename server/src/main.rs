@@ -2,9 +2,11 @@ use anyhow::Result;
 use rmcp::{ServerHandler, ServiceExt, transport::stdio};
 use tracing_subscriber::{self};
 use clap::{Parser, CommandFactory};
-use rmcp::transport::sse_server::{SseServer, SseServerConfig};
-use rmcp::transport::StreamableHttpServer;
-use rmcp::transport::streamable_http_server::axum::StreamableHttpServerConfig;
+use rmcp::transport::streamable_http_server::{
+    StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
+};
+// Legacy HTTP+SSE server transport, vendored from rmcp 0.1.5 (dropped in 1.x).
+use rmcp_legacy::transport::sse_server::{SseServer, SseServerConfig};
 use serde::{Deserialize, de::{self, MapAccess, Visitor}};
 use tokio_util::sync::CancellationToken;
 use std::sync::Arc;
@@ -12,6 +14,8 @@ use utoipa::OpenApi as _;
 use std::fmt;
 mod engine;
 mod mcp;
+mod mcp_dispatch;
+mod mcp_sse;
 mod api;
 mod cluster;
 mod cli;
@@ -620,14 +624,11 @@ async fn main() -> Result<()> {
             start_streamable_http(engine, bind_host, port, move |e| StatelessMcpService::new(e, verifier.clone())).await?;
         }
     } else if let Some(port) = cli.sse_port {
-        tracing::info!("Starting SSE transport on port {}", port);
-        if engine.session_capable() {
-            let verifier = session_verifier.clone();
-            start_sse_server(engine, bind_host, port, move |e| McpService::new(e, verifier.clone())).await?;
-        } else {
-            let verifier = session_verifier.clone();
-            start_sse_server(engine, bind_host, port, move |e| StatelessMcpService::new(e, verifier.clone())).await?;
-        }
+        // Legacy HTTP+SSE transport, served by the vendored rmcp 0.1.5 SSE
+        // server. No MCP tasks support here — use --http-port for tasks.
+        tracing::info!("Starting legacy HTTP+SSE transport on port {} (no MCP tasks; use --http-port for tasks)", port);
+        let verifier = session_verifier.clone();
+        start_sse_server(engine, bind_host, port, verifier).await?;
     } else {
         tracing::info!("Starting stdio transport");
         if engine.session_capable() {
@@ -673,14 +674,16 @@ where
     let bind: std::net::SocketAddr = resolve_bind_addr(&host, port)?;
     let ct = CancellationToken::new();
 
-    let config = StreamableHttpServerConfig {
-        bind,
-        path: "/mcp".to_string(),
-        ct: ct.clone(),
-        sse_keep_alive: Some(std::time::Duration::from_secs(15)),
-    };
-
-    let (server, mcp_router) = StreamableHttpServer::new(config);
+    // The Streamable HTTP transport (rmcp 1.x) is a tower service mounted at
+    // /mcp. It natively serves the MCP `tasks/*` utility (SEP-1319) for tools
+    // marked `execution(task_support = ...)` — here, `run_js`. A fresh service
+    // (and thus a fresh per-connection session id) is created per session.
+    let factory_engine = engine.clone();
+    let mcp_service = StreamableHttpService::new(
+        move || Ok(make_service(factory_engine.clone())),
+        LocalSessionManager::default().into(),
+        StreamableHttpServerConfig::default(),
+    );
 
     // Serve OpenAPI JSON spec at /api-doc/openapi.json
     let openapi_spec = api::ApiDoc::openapi();
@@ -696,41 +699,39 @@ where
             }
         }));
 
-    // Merge MCP router with plain HTTP API router and openapi route
-    let app = mcp_router
+    // Mount the MCP service at /mcp alongside the plain HTTP API and openapi route.
+    let app = axum::Router::new()
+        .nest_service("/mcp", mcp_service)
         .merge(api::api_router(engine.clone()))
         .merge(openapi_route);
 
     let listener = tokio::net::TcpListener::bind(bind).await?;
     tracing::info!("Streamable HTTP server listening on {}", bind);
 
-    let ct_shutdown = ct.child_token();
-    let axum_server = axum::serve(listener, app).with_graceful_shutdown(async move {
-        ct_shutdown.cancelled().await;
-        tracing::info!("Streamable HTTP server shutting down");
-    });
-    tokio::spawn(async move {
-        if let Err(e) = axum_server.await {
-            tracing::error!("Streamable HTTP server error: {:?}", e);
-        }
-    });
-
-    server.with_service(move || make_service(engine.clone()));
-
-    tokio::signal::ctrl_c().await?;
-    tracing::info!("Received Ctrl+C, shutting down");
-    ct.cancel();
+    let ct_shutdown = ct.clone();
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            let _ = tokio::signal::ctrl_c().await;
+            tracing::info!("Received Ctrl+C, shutting down");
+            ct_shutdown.cancel();
+        })
+        .await?;
 
     Ok(())
 }
 
-// ── SSE transport (--sse-port) ──────────────────────────────────────────
+// ── Legacy HTTP+SSE transport (--sse-port) ──────────────────────────────
+//
+// Served by the vendored rmcp 0.1.5 SSE server, which rmcp 1.x removed. One
+// `SseService` handles both stateful and stateless modes; it does not advertise
+// MCP tasks (use the Streamable HTTP transport for those).
 
-async fn start_sse_server<S, F>(engine: Engine, host: String, port: u16, make_service: F) -> Result<()>
-where
-    S: ServerHandler + Send + Sync + 'static,
-    F: Fn(Engine) -> S + Send + Sync + Clone + 'static,
-{
+async fn start_sse_server(
+    engine: Engine,
+    host: String,
+    port: u16,
+    verifier: Option<Arc<SessionVerifier>>,
+) -> Result<()> {
     let addr = resolve_bind_addr(&host, port)?;
 
     let config = SseServerConfig {
@@ -744,11 +745,10 @@ where
     let (sse_server, sse_router) = SseServer::new(config);
 
     // Serve OpenAPI JSON spec at /api-doc/openapi.json
-    let openapi_spec2 = api::ApiDoc::openapi();
-    let openapi_json2 = serde_json::to_string(&openapi_spec2).unwrap_or_default();
-    let openapi_route2 = axum::Router::new()
+    let openapi_json = serde_json::to_string(&api::ApiDoc::openapi()).unwrap_or_default();
+    let openapi_route = axum::Router::new()
         .route("/api-doc/openapi.json", axum::routing::get(move || {
-            let json = openapi_json2.clone();
+            let json = openapi_json.clone();
             async move {
                 axum::response::Response::builder()
                     .header("Content-Type", "application/json")
@@ -757,23 +757,21 @@ where
             }
         }));
 
-    // Merge SSE router with plain HTTP API router and openapi route
     let app = sse_router
         .merge(api::api_router(engine.clone()))
-        .merge(openapi_route2);
+        .merge(openapi_route);
 
     let listener = tokio::net::TcpListener::bind(sse_server.config.bind).await?;
     tracing::info!("SSE server listening on {}", sse_server.config.bind);
 
     let ct = sse_server.config.ct.clone();
     let ct_shutdown = ct.child_token();
-
     let server = axum::serve(listener, app).with_graceful_shutdown(async move {
         ct_shutdown.cancelled().await;
         tracing::info!("SSE server shutting down");
     });
 
-    sse_server.with_service(move || make_service(engine.clone()));
+    sse_server.with_service(move || mcp_sse::SseService::new(engine.clone(), verifier.clone()));
 
     tokio::spawn(async move {
         if let Err(e) = server.await {
