@@ -112,7 +112,7 @@ async fn mount_write_push_then_read_back_by_ca_id() {
     let ca2 = run(
         &h.engine,
         r#"(async () => {
-            const c = await fs.readFile("/data/note.txt");
+            const c = await fs.readFile("/data/note.txt", "utf8");
             if (c !== "hello snapshot") throw new Error("readback mismatch: " + c);
             await fs.writeFile("/data/extra.txt", "more");
         })()"#,
@@ -173,6 +173,54 @@ async fn run_without_fs_handle_has_no_fs_ca_id() {
     let h = build_harness();
     let fs = run(&h.engine, r#"(async () => { 1 + 1; })()"#, None).await;
     assert!(fs.is_none(), "no mount → no fs CA id");
+}
+
+#[tokio::test]
+async fn overlay_symlink_lstat_readlink_and_node_compat() {
+    ensure_v8();
+    let h = build_harness();
+
+    // Exercises the overlay (mount) branch of the Node-compatibility surface:
+    // fs.promises, symlink/lstat/readlink, Stats predicate methods, and the
+    // ENOENT code on a miss. The script throws on any mismatch, so a clean
+    // completion (a returned fs CA id) is the assertion.
+    let ca = run(
+        &h.engine,
+        r#"(async () => {
+            // fs.promises must be an enumerable own property so libraries detect it.
+            const d = Object.getOwnPropertyDescriptor(fs, "promises");
+            if (!(d && d.enumerable)) throw new Error("fs.promises must be enumerable");
+
+            await fs.promises.writeFile("/repo/target.txt", "T");
+            // Node signature: symlink(target, path).
+            await fs.promises.symlink("/repo/target.txt", "/repo/link.txt");
+
+            const ls = await fs.promises.lstat("/repo/link.txt");
+            if (!ls.isSymbolicLink()) throw new Error("lstat should report a symlink");
+            if (ls.isFile()) throw new Error("a symlink must not report isFile()");
+
+            const tgt = await fs.promises.readlink("/repo/link.txt");
+            if (tgt !== "/repo/target.txt") throw new Error("readlink mismatch: " + tgt);
+
+            const st = await fs.promises.stat("/repo/target.txt");
+            if (!st.isFile()) throw new Error("target should be a file");
+            if (st.isDirectory()) throw new Error("target should not be a directory");
+
+            let code = null;
+            try { await fs.promises.readFile("/repo/missing.txt"); }
+            catch (e) { code = e.code; }
+            if (code !== "ENOENT") throw new Error("expected ENOENT, got " + code);
+        })()"#,
+        Some("main"),
+    )
+    .await
+    .expect("overlay node-compat flow should yield an fs CA id");
+
+    // The symlink persists in the pushed snapshot and reads back as its target.
+    let id = blake3::Hash::from_bytes(parse_ca_hex(&ca).expect("valid ca hex"));
+    let mount = SessionMount::pull(h.store.as_ref().clone(), id).await.unwrap();
+    let target = mount.readlink("/repo/link.txt".as_ref()).await.unwrap();
+    assert_eq!(target, std::path::PathBuf::from("/repo/target.txt"));
 }
 
 #[tokio::test]

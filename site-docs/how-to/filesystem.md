@@ -79,9 +79,9 @@ allow if {
 }
 ```
 
-Operation names match exactly what the JS wrapper passes: `readFile`, `writeFile`, `appendFile`, `readdir`, `stat`, `mkdir`, `rm`, `rename`, `copyFile`, `exists`.
+Operation names match exactly what the JS wrapper passes: `readFile`, `writeFile`, `appendFile`, `readdir`, `stat`, `lstat`, `mkdir`, `rm`, `rename`, `copyFile`, `symlink`, `readlink`, `exists`.
 
-Note: `fs.unlink` reuses the `rm` op internally, so its policy operation is `"rm"`.
+Note: `fs.unlink` and `fs.rmdir` reuse the `rm` op internally, so their policy operation is `"rm"`.
 
 ## Use a remote OPA server
 
@@ -120,15 +120,15 @@ Set `"mode": "all"` (the default) to require every evaluator to return `true`, o
 ### Read a text file
 
 ```js
-const text = await fs.readFile("/var/mcp-workspace/config.json");
+const text = await fs.readFile("/var/mcp-workspace/config.json", "utf8");
 const config = JSON.parse(text);
 ```
 
 ### Read a binary file
 
 ```js
-const bytes = await fs.readFile("/var/mcp-workspace/image.png", "buffer");
-// bytes is a Uint8Array
+const bytes = await fs.readFile("/var/mcp-workspace/image.png");
+// bytes is a Uint8Array (the Node-style default when no encoding is given)
 ```
 
 ### Write a text file (overwrites)
@@ -163,7 +163,8 @@ const names = await fs.readdir("/var/mcp-workspace");
 
 ```js
 const info = await fs.stat("/var/mcp-workspace/config.json");
-// { size, isFile, isDirectory, isSymlink, readonly, mtimeMs, atimeMs, birthtimeMs }
+// Node fs.Stats-like: info.isFile(), info.isDirectory(), info.isSymbolicLink(),
+// plus info.size, info.mode, info.mtimeMs, info.mtime (Date), ...
 ```
 
 ### Create a directory

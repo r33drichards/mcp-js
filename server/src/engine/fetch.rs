@@ -488,15 +488,42 @@ const FETCH_JS_WRAPPER: &str = r#"
             }
         }
 
-        let body;
-        if (typeof FormData !== 'undefined' && opts.body instanceof FormData) {
-            const serialized = opts.body._serialize();
-            body = serialized.body;
-            if (!('content-type' in normalizedHeaders)) {
-                normalizedHeaders['content-type'] = 'multipart/form-data; boundary=' + serialized.boundary;
+        // Request/response bodies cross the op boundary base64-encoded so binary
+        // payloads (e.g. git smart-HTTP packfiles) are preserved.
+        function _b64FromBytes(bytes) {
+            let bin = '';
+            const CHUNK = 0x8000;
+            for (let i = 0; i < bytes.length; i += CHUNK) {
+                bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
             }
-        } else {
-            body = opts.body !== undefined ? String(opts.body) : "";
+            return btoa(bin);
+        }
+        function _bytesFromB64(b64) {
+            const bin = atob(b64 || '');
+            const out = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i) & 0xff;
+            return out;
+        }
+
+        let body = "";
+        if (opts.body !== undefined && opts.body !== null) {
+            let bytes;
+            if (typeof FormData !== 'undefined' && opts.body instanceof FormData) {
+                const serialized = opts.body._serialize();
+                bytes = new TextEncoder().encode(serialized.body);
+                if (!('content-type' in normalizedHeaders)) {
+                    normalizedHeaders['content-type'] = 'multipart/form-data; boundary=' + serialized.boundary;
+                }
+            } else if (opts.body instanceof Uint8Array) {
+                bytes = opts.body;
+            } else if (ArrayBuffer.isView(opts.body)) {
+                bytes = new Uint8Array(opts.body.buffer, opts.body.byteOffset, opts.body.byteLength);
+            } else if (opts.body instanceof ArrayBuffer) {
+                bytes = new Uint8Array(opts.body);
+            } else {
+                bytes = new TextEncoder().encode(String(opts.body));
+            }
+            body = _b64FromBytes(bytes);
         }
 
         const headersJson = JSON.stringify(normalizedHeaders);
@@ -505,40 +532,93 @@ const FETCH_JS_WRAPPER: &str = r#"
         const rawResult = await Deno.core.ops.op_fetch(resource, method, headersJson, body);
         const result = JSON.parse(rawResult);
 
-        const responseBody = result.body;
+        // result.body is base64 (bodyEncoding: "base64"); decode once to bytes.
+        const responseBytes = _bytesFromB64(result.body);
         const responseHeaders = new Headers(result.headers);
-
-        return {
-            ok: result.status >= 200 && result.status < 300,
-            status: result.status,
-            statusText: result.statusText,
-            url: result.url,
-            headers: responseHeaders,
-            redirected: result.redirected || false,
-            type: 'basic',
-            bodyUsed: false,
-            text: function() { return Promise.resolve(responseBody); },
-            json: function() { return Promise.resolve(JSON.parse(responseBody)); },
-            blob: function() { return Promise.resolve(new Blob([responseBody], { type: responseHeaders.get('content-type') || '' })); },
-            clone: function() {
-                return {
-                    ok: this.ok,
-                    status: this.status,
-                    statusText: this.statusText,
-                    url: this.url,
-                    headers: this.headers,
-                    redirected: this.redirected,
-                    type: this.type,
-                    bodyUsed: false,
-                    text: function() { return Promise.resolve(responseBody); },
-                    json: function() { return Promise.resolve(JSON.parse(responseBody)); },
-                    blob: function() { return Promise.resolve(new Blob([responseBody], { type: responseHeaders.get('content-type') || '' })); },
-                };
-            }
+        const decodeText = function() { return new TextDecoder().decode(responseBytes); };
+        const toArrayBuffer = function() {
+            return responseBytes.buffer.slice(
+                responseBytes.byteOffset,
+                responseBytes.byteOffset + responseBytes.byteLength
+            );
         };
+        const mkResponse = function() {
+            return {
+                ok: result.status >= 200 && result.status < 300,
+                status: result.status,
+                statusText: result.statusText,
+                url: result.url,
+                headers: responseHeaders,
+                redirected: result.redirected || false,
+                type: 'basic',
+                bodyUsed: false,
+                text: function() { return Promise.resolve(decodeText()); },
+                json: function() { return Promise.resolve(JSON.parse(decodeText())); },
+                arrayBuffer: function() { return Promise.resolve(toArrayBuffer()); },
+                bytes: function() { return Promise.resolve(new Uint8Array(responseBytes)); },
+                blob: function() { return Promise.resolve(new Blob([decodeText()], { type: responseHeaders.get('content-type') || '' })); },
+                clone: function() { return mkResponse(); },
+            };
+        };
+        return mkResponse();
     };
 })();
 "#;
+
+// ── base64 (binary-safe body transfer over the op boundary) ─────────────
+//
+// Request and response bodies cross the JS↔Rust op boundary as base64 so that
+// binary payloads (e.g. git's smart-HTTP packfiles) survive intact — a plain
+// String body would be mangled by UTF-8 (de)coding. Standard RFC 4648 alphabet
+// with padding; the JS side uses btoa/atob, which match.
+
+const B64_TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+fn b64_encode(data: &[u8]) -> String {
+    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(B64_TABLE[((n >> 18) & 63) as usize] as char);
+        out.push(B64_TABLE[((n >> 12) & 63) as usize] as char);
+        out.push(if chunk.len() > 1 { B64_TABLE[((n >> 6) & 63) as usize] as char } else { '=' });
+        out.push(if chunk.len() > 2 { B64_TABLE[(n & 63) as usize] as char } else { '=' });
+    }
+    out
+}
+
+fn b64_decode(s: &str) -> Result<Vec<u8>, String> {
+    fn val(c: u8) -> Option<u32> {
+        match c {
+            b'A'..=b'Z' => Some((c - b'A') as u32),
+            b'a'..=b'z' => Some((c - b'a' + 26) as u32),
+            b'0'..=b'9' => Some((c - b'0' + 52) as u32),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+    let mut buf = 0u32;
+    let mut bits = 0u32;
+    let mut out = Vec::with_capacity(s.len() / 4 * 3);
+    for &c in s.as_bytes() {
+        match c {
+            b'=' => break,
+            b'\n' | b'\r' | b' ' | b'\t' => continue,
+            _ => {}
+        }
+        let v = val(c).ok_or_else(|| "fetch: invalid base64 in body".to_string())?;
+        buf = (buf << 6) | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buf >> bits) as u8);
+        }
+    }
+    Ok(out)
+}
 
 // ── Pure-Rust fetch implementation (no V8 types) ─────────────────────────
 
@@ -606,7 +686,10 @@ async fn do_fetch(
     }
 
     if let Some(body) = body {
-        req_builder = req_builder.body(body);
+        // The JS wrapper sends the request body base64-encoded so binary
+        // payloads (git packfiles, etc.) are preserved.
+        let body_bytes = b64_decode(&body)?;
+        req_builder = req_builder.body(body_bytes);
     }
 
     let resp = req_builder
@@ -633,10 +716,13 @@ async fn do_fetch(
         })
         .collect();
 
-    let resp_body = resp
-        .text()
+    // Read the response body as raw bytes and hand it back base64-encoded, so
+    // binary responses (git smart-HTTP, images, …) survive the op boundary.
+    let resp_bytes = resp
+        .bytes()
         .await
         .map_err(|e| format!("fetch: failed to read response body: {}", e))?;
+    let resp_body = b64_encode(&resp_bytes);
 
     let result = serde_json::json!({
         "status": status,
@@ -644,6 +730,7 @@ async fn do_fetch(
         "url": final_url,
         "headers": resp_headers,
         "body": resp_body,
+        "bodyEncoding": "base64",
         "redirected": final_url != url_str,
     });
 
@@ -1208,13 +1295,17 @@ allow if {{
         .await
         .expect("fetch should succeed when policy sees injected auth");
 
+        // The response body is base64-encoded (binary-safe op boundary); decode
+        // it before parsing the echo server's JSON.
+        let response_value: serde_json::Value =
+            serde_json::from_str(&response).expect("response JSON should parse");
+        let body_b64 = response_value
+            .get("body")
+            .and_then(Value::as_str)
+            .expect("response body should exist");
+        let body_bytes = super::b64_decode(body_b64).expect("response body should base64-decode");
         let payload: FetchResponseBody =
-            serde_json::from_str::<serde_json::Value>(&response)
-                .expect("response JSON should parse")
-                .get("body")
-                .and_then(Value::as_str)
-                .map(|body| serde_json::from_str(body).expect("response body JSON should parse"))
-                .expect("response body should exist");
+            serde_json::from_slice(&body_bytes).expect("response body JSON should parse");
 
         assert!(payload.ok);
         assert_eq!(
@@ -1312,7 +1403,8 @@ allow if {{
             url,
             "POST".to_string(),
             headers_json,
-            Some(body.clone()),
+            // do_fetch expects the request body base64-encoded (binary-safe).
+            Some(super::b64_encode(body.as_bytes())),
             Arc::new(PolicyChain::new(vec![], EvalMode::All)),
             reqwest::Client::new(),
             vec![],
@@ -1329,5 +1421,25 @@ allow if {{
         assert!(reqs[0].1.contains("hello world"));
         assert!(reqs[0].1.contains("name=\"f\""));
         assert!(reqs[0].1.contains("filename=\"test.txt\""));
+    }
+
+    #[test]
+    fn test_b64_round_trips_binary() {
+        // Every byte value must survive the base64 round-trip used to carry
+        // fetch request/response bodies across the op boundary.
+        let all_bytes: Vec<u8> = (0u16..=255).map(|b| b as u8).collect();
+        assert_eq!(
+            super::b64_decode(&super::b64_encode(&all_bytes)).expect("decode"),
+            all_bytes
+        );
+        // Exercise every padding case (len % 3 == 0/1/2) and empty input.
+        for n in [0usize, 1, 2, 3, 4, 5, 100, 255] {
+            let d: Vec<u8> = (0..n).map(|i| (i * 31 + 7) as u8).collect();
+            assert_eq!(
+                super::b64_decode(&super::b64_encode(&d)).unwrap(),
+                d,
+                "round-trip failed for len {n}"
+            );
+        }
     }
 }

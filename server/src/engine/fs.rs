@@ -9,20 +9,32 @@
 //!
 //! Available operations (all return Promises):
 //! ```js
-//! const data = await fs.readFile("/tmp/data.txt");          // string (utf-8)
-//! const data = await fs.readFile("/tmp/data.bin", "buffer"); // Uint8Array
+//! const data = await fs.readFile("/tmp/data.bin");          // Uint8Array (Node default)
+//! const text = await fs.readFile("/tmp/data.txt", "utf8");  // string
 //! await fs.writeFile("/tmp/out.txt", "hello");              // string data
 //! await fs.writeFile("/tmp/out.bin", uint8array);           // binary data
 //! await fs.appendFile("/tmp/out.txt", " world");
 //! const entries = await fs.readdir("/tmp");                  // string[]
-//! const info = await fs.stat("/tmp/data.txt");               // {size,isFile,isDirectory,...}
+//! const info = await fs.stat("/tmp/data.txt");               // Stats: {size,isFile(),isDirectory(),...}
+//! const info = await fs.lstat("/tmp/link");                  // Stats without following symlinks
 //! await fs.mkdir("/tmp/newdir", { recursive: true });
 //! await fs.rm("/tmp/data.txt");
 //! await fs.rm("/tmp/newdir", { recursive: true });
 //! await fs.rename("/tmp/old.txt", "/tmp/new.txt");
 //! await fs.copyFile("/tmp/a.txt", "/tmp/b.txt");
+//! await fs.symlink("/tmp/data.txt", "/tmp/link");            // symlink(target, path)
+//! const target = await fs.readlink("/tmp/link");
 //! const bool = await fs.exists("/tmp/data.txt");
 //! ```
+//!
+//! ## Node-style compatibility
+//!
+//! The same methods are also exposed under `fs.promises`, and `fs.stat`/
+//! `fs.lstat` return a Node `fs.Stats`-like object with `isFile()`,
+//! `isDirectory()`, and `isSymbolicLink()` predicate methods. Errors carry a
+//! Node-style `code` (e.g. `ENOENT`, `EEXIST`). Together these let libraries
+//! that expect a Node `fs`/`fs.promises` interface — such as `isomorphic-git` —
+//! consume the sandbox `fs` object directly.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -157,7 +169,7 @@ async fn op_fs_read_file_text(
             return Err(JsErrorBox::generic(format!("fs.readFile: {}: ENOENT", path)));
         }
         let content = std::fs::read(&path)
-            .map_err(|e| JsErrorBox::generic(format!("fs.readFile: {}: {}", path, e)))?;
+            .map_err(|e| JsErrorBox::generic(io_err("readFile", &path, &e)))?;
         return String::from_utf8(content)
             .map_err(|e| JsErrorBox::generic(format!("fs.readFile: invalid UTF-8 in {}: {}", path, e)));
     }
@@ -166,7 +178,7 @@ async fn op_fs_read_file_text(
         check_policy(&config.policy_chain, "readFile", &path, None, None, Some("utf8"), config.mcp_headers.as_ref()).await?;
 
         let content = tokio::fs::read(&path).await
-            .map_err(|e| format!("fs.readFile: {}: {}", path, e))?;
+            .map_err(|e| io_err("readFile", &path, &e))?;
 
         String::from_utf8(content)
             .map_err(|e| format!("fs.readFile: invalid UTF-8 in {}: {}", path, e))
@@ -203,14 +215,14 @@ async fn op_fs_read_file_buffer(
             return Err(JsErrorBox::generic(format!("fs.readFile: {}: ENOENT", path)));
         }
         return std::fs::read(&path)
-            .map_err(|e| JsErrorBox::generic(format!("fs.readFile: {}: {}", path, e)));
+            .map_err(|e| JsErrorBox::generic(io_err("readFile", &path, &e)));
     }
 
     tokio::spawn(async move {
         check_policy(&config.policy_chain, "readFile", &path, None, None, Some("buffer"), config.mcp_headers.as_ref()).await?;
 
         tokio::fs::read(&path).await
-            .map_err(|e| format!("fs.readFile: {}: {}", path, e))
+            .map_err(|e| io_err("readFile", &path, &e))
     })
     .await
     .map_err(|e| JsErrorBox::generic(format!("fs task join error: {}", e)))?
@@ -244,7 +256,7 @@ async fn op_fs_write_file_text(
         check_policy(&config.policy_chain, "writeFile", &path, None, None, None, config.mcp_headers.as_ref()).await?;
 
         tokio::fs::write(&path, data.as_bytes()).await
-            .map_err(|e| format!("fs.writeFile: {}: {}", path, e))?;
+            .map_err(|e| io_err("writeFile", &path, &e))?;
 
         Ok("{}".to_string())
     })
@@ -278,7 +290,7 @@ async fn op_fs_write_file_buffer(
         check_policy(&config.policy_chain, "writeFile", &path, None, None, None, config.mcp_headers.as_ref()).await?;
 
         tokio::fs::write(&path, &data).await
-            .map_err(|e| format!("fs.writeFile: {}: {}", path, e))?;
+            .map_err(|e| io_err("writeFile", &path, &e))?;
 
         Ok("{}".to_string())
     })
@@ -320,10 +332,10 @@ async fn op_fs_append_file(
             .append(true)
             .open(&path)
             .await
-            .map_err(|e| format!("fs.appendFile: {}: {}", path, e))?;
+            .map_err(|e| io_err("appendFile", &path, &e))?;
 
         file.write_all(data.as_bytes()).await
-            .map_err(|e| format!("fs.appendFile: {}: {}", path, e))?;
+            .map_err(|e| io_err("appendFile", &path, &e))?;
 
         Ok("{}".to_string())
     })
@@ -357,10 +369,10 @@ async fn op_fs_readdir(
 
         let mut entries = Vec::new();
         let mut dir = tokio::fs::read_dir(&path).await
-            .map_err(|e| format!("fs.readdir: {}: {}", path, e))?;
+            .map_err(|e| io_err("readdir", &path, &e))?;
 
         while let Some(entry) = dir.next_entry().await
-            .map_err(|e| format!("fs.readdir: {}: {}", path, e))? {
+            .map_err(|e| io_err("readdir", &path, &e))? {
             if let Some(name) = entry.file_name().to_str() {
                 entries.push(name.to_string());
             }
@@ -398,34 +410,128 @@ async fn op_fs_stat(
         check_policy(&config.policy_chain, "stat", &path, None, None, None, config.mcp_headers.as_ref()).await?;
 
         let metadata = tokio::fs::metadata(&path).await
-            .map_err(|e| format!("fs.stat: {}: {}", path, e))?;
+            .map_err(|e| io_err("stat", &path, &e))?;
 
-        let modified = metadata.modified().ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_millis() as f64);
-        let accessed = metadata.accessed().ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_millis() as f64);
-        let created = metadata.created().ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_millis() as f64);
-
-        let result = deno_core::serde_json::json!({
-            "size": metadata.len(),
-            "isFile": metadata.is_file(),
-            "isDirectory": metadata.is_dir(),
-            "isSymlink": metadata.file_type().is_symlink(),
-            "readonly": metadata.permissions().readonly(),
-            "mtimeMs": modified,
-            "atimeMs": accessed,
-            "birthtimeMs": created,
-        });
-
-        Ok(result.to_string())
+        Ok(metadata_stat_json(&metadata))
     })
     .await
     .map_err(|e| JsErrorBox::generic(format!("fs task join error: {}", e)))?
     .map_err(|e: String| JsErrorBox::generic(e))
+}
+
+/// Stat a path **without** following a final symlink (Node `fs.lstat`).
+#[op2(async)]
+#[string]
+async fn op_fs_lstat(
+    state: Rc<RefCell<OpState>>,
+    #[string] path: String,
+) -> Result<String, JsErrorBox> {
+    let config = extract_config(&state)?;
+    let mount = extract_mount(&state);
+
+    // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
+    // The overlay never follows symlinks, so its stat already has lstat semantics.
+    if let Some(m) = mount {
+        check_policy(&config.policy_chain, "lstat", &path, None, None, None, config.mcp_headers.as_ref())
+            .await
+            .map_err(JsErrorBox::generic)?;
+        let s = m.0.lock().await.stat(Path::new(&path)).await
+            .map_err(|e| JsErrorBox::generic(format!("fs.lstat: {}: {}", path, e)))?;
+        return Ok(mount_stat_json(&s));
+    }
+
+    tokio::spawn(async move {
+        check_policy(&config.policy_chain, "lstat", &path, None, None, None, config.mcp_headers.as_ref()).await?;
+
+        let metadata = tokio::fs::symlink_metadata(&path).await
+            .map_err(|e| io_err("lstat", &path, &e))?;
+
+        Ok(metadata_stat_json(&metadata))
+    })
+    .await
+    .map_err(|e| JsErrorBox::generic(format!("fs task join error: {}", e)))?
+    .map_err(|e: String| JsErrorBox::generic(e))
+}
+
+/// Read a symlink's target, returned as a string.
+#[op2(async)]
+#[string]
+async fn op_fs_readlink(
+    state: Rc<RefCell<OpState>>,
+    #[string] path: String,
+) -> Result<String, JsErrorBox> {
+    let config = extract_config(&state)?;
+    let mount = extract_mount(&state);
+
+    // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
+    if let Some(m) = mount {
+        check_policy(&config.policy_chain, "readlink", &path, None, None, None, config.mcp_headers.as_ref())
+            .await
+            .map_err(JsErrorBox::generic)?;
+        let target = m.0.lock().await.readlink(Path::new(&path)).await
+            .map_err(|e| JsErrorBox::generic(format!("fs.readlink: {}: {}", path, e)))?;
+        return Ok(target.to_string_lossy().into_owned());
+    }
+
+    tokio::spawn(async move {
+        check_policy(&config.policy_chain, "readlink", &path, None, None, None, config.mcp_headers.as_ref()).await?;
+
+        let target = tokio::fs::read_link(&path).await
+            .map_err(|e| io_err("readlink", &path, &e))?;
+
+        Ok(target.to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(|e| JsErrorBox::generic(format!("fs task join error: {}", e)))?
+    .map_err(|e: String| JsErrorBox::generic(e))
+}
+
+/// Create a symlink at `link` pointing to `target` (Node `fs.symlink(target, path)`).
+#[op2(async)]
+#[string]
+async fn op_fs_symlink(
+    state: Rc<RefCell<OpState>>,
+    #[string] target: String,
+    #[string] link: String,
+) -> Result<String, JsErrorBox> {
+    let config = extract_config(&state)?;
+    let mount = extract_mount(&state);
+
+    // The policy gates on the link path being created; the target is carried as
+    // the destination so a policy can constrain both sides.
+    if let Some(m) = mount {
+        check_policy(&config.policy_chain, "symlink", &link, Some(&target), None, None, config.mcp_headers.as_ref())
+            .await
+            .map_err(JsErrorBox::generic)?;
+        m.0.lock().await.symlink(Path::new(&target), Path::new(&link)).await
+            .map_err(|e| JsErrorBox::generic(format!("fs.symlink: {} -> {}: {}", link, target, e)))?;
+        return Ok("{}".to_string());
+    }
+
+    tokio::spawn(async move {
+        check_policy(&config.policy_chain, "symlink", &link, Some(&target), None, None, config.mcp_headers.as_ref()).await?;
+
+        symlink_impl(&target, &link).await
+            .map_err(|e| io_err2("symlink", &link, &target, &e))?;
+
+        Ok("{}".to_string())
+    })
+    .await
+    .map_err(|e| JsErrorBox::generic(format!("fs task join error: {}", e)))?
+    .map_err(|e: String| JsErrorBox::generic(e))
+}
+
+#[cfg(unix)]
+async fn symlink_impl(target: &str, link: &str) -> std::io::Result<()> {
+    tokio::fs::symlink(target, link).await
+}
+
+#[cfg(not(unix))]
+async fn symlink_impl(_target: &str, _link: &str) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "symlinks are not supported on this platform",
+    ))
 }
 
 /// Create a directory.
@@ -457,7 +563,7 @@ async fn op_fs_mkdir(
             tokio::fs::create_dir_all(&path).await
         } else {
             tokio::fs::create_dir(&path).await
-        }.map_err(|e| format!("fs.mkdir: {}: {}", path, e))?;
+        }.map_err(|e| io_err("mkdir", &path, &e))?;
 
         Ok("{}".to_string())
     })
@@ -492,7 +598,7 @@ async fn op_fs_rm(
         check_policy(&config.policy_chain, "rm", &path, None, Some(recursive), None, config.mcp_headers.as_ref()).await?;
 
         let metadata = tokio::fs::metadata(&path).await
-            .map_err(|e| format!("fs.rm: {}: {}", path, e))?;
+            .map_err(|e| io_err("rm", &path, &e))?;
 
         if metadata.is_dir() {
             if recursive {
@@ -502,7 +608,7 @@ async fn op_fs_rm(
             }
         } else {
             tokio::fs::remove_file(&path).await
-        }.map_err(|e| format!("fs.rm: {}: {}", path, e))?;
+        }.map_err(|e| io_err("rm", &path, &e))?;
 
         Ok("{}".to_string())
     })
@@ -536,7 +642,7 @@ async fn op_fs_rename(
         check_policy(&config.policy_chain, "rename", &from, Some(&to), None, None, config.mcp_headers.as_ref()).await?;
 
         tokio::fs::rename(&from, &to).await
-            .map_err(|e| format!("fs.rename: {} -> {}: {}", from, to, e))?;
+            .map_err(|e| io_err2("rename", &from, &to, &e))?;
 
         Ok("{}".to_string())
     })
@@ -571,7 +677,7 @@ async fn op_fs_copy_file(
         check_policy(&config.policy_chain, "copyFile", &from, Some(&to), None, None, config.mcp_headers.as_ref()).await?;
 
         tokio::fs::copy(&from, &to).await
-            .map_err(|e| format!("fs.copyFile: {} -> {}: {}", from, to, e))?;
+            .map_err(|e| io_err2("copyFile", &from, &to, &e))?;
 
         Ok("{}".to_string())
     })
@@ -643,7 +749,7 @@ async fn op_fs_write_stream_open(
         check_policy(&config.policy_chain, "writeFile", &path, None, None, None, config.mcp_headers.as_ref()).await?;
 
         let f = tokio::fs::File::create(&path).await
-            .map_err(|e| format!("fs.createWriteStream: {}: {}", path, e))?;
+            .map_err(|e| io_err("createWriteStream", &path, &e))?;
         let ow = OpenWrite::Real(f);
         let mut g = writers.0.lock().await;
         let id = g.next;
@@ -751,6 +857,9 @@ deno_core::extension!(
         op_fs_append_file,
         op_fs_readdir,
         op_fs_stat,
+        op_fs_lstat,
+        op_fs_readlink,
+        op_fs_symlink,
         op_fs_mkdir,
         op_fs_rm,
         op_fs_rename,
@@ -781,99 +890,205 @@ pub fn inject_fs(runtime: &mut JsRuntime) -> Result<(), String> {
 
 const FS_JS_WRAPPER: &str = r#"
 (function() {
+    const ops = Deno.core.ops;
+
+    // Known Node.js filesystem error codes. The Rust ops embed the matching
+    // token in their error message; we surface it as `err.code` so callers that
+    // branch on it (isomorphic-git, graceful-fs, …) behave as they do on Node.
+    const FS_CODES = /\b(ENOENT|EEXIST|EACCES|EPERM|ENOTDIR|EISDIR|ENOTEMPTY|EROFS|ELOOP|EINVAL|EXDEV|ENOSPC|EMFILE|ENFILE|EBADF|ENOSYS)\b/;
+    function tagError(e) {
+        try {
+            if (e && typeof e === 'object' && (e.code === undefined || e.code === null)) {
+                const msg = typeof e.message === 'string' ? e.message : String(e);
+                const m = msg.match(FS_CODES);
+                if (m) e.code = m[1];
+            }
+        } catch (_) { /* never let tagging mask the original error */ }
+        return e;
+    }
+    async function call(name, ...args) {
+        try {
+            return await ops[name](...args);
+        } catch (e) {
+            throw tagError(e);
+        }
+    }
+
+    // A Node `fs.Stats`-like object: the data fields plus the is*() predicate
+    // methods consumers call. Built from the JSON the stat/lstat ops return.
+    function makeStats(o) {
+        const n = (v) => (typeof v === 'number' ? v : 0);
+        const size = n(o.size);
+        const stats = {
+            dev: n(o.dev), ino: n(o.ino), mode: n(o.mode), nlink: n(o.nlink) || 1,
+            uid: n(o.uid), gid: n(o.gid), rdev: 0,
+            size: size, blksize: 4096, blocks: Math.ceil(size / 512),
+            atimeMs: n(o.atimeMs), mtimeMs: n(o.mtimeMs),
+            ctimeMs: n(o.ctimeMs), birthtimeMs: n(o.birthtimeMs),
+            atime: new Date(n(o.atimeMs)), mtime: new Date(n(o.mtimeMs)),
+            ctime: new Date(n(o.ctimeMs)), birthtime: new Date(n(o.birthtimeMs)),
+            readonly: !!o.readonly,
+        };
+        const isFile = !!o.isFile, isDirectory = !!o.isDirectory, isSymbolicLink = !!o.isSymlink;
+        stats.isFile = function() { return isFile; };
+        stats.isDirectory = function() { return isDirectory; };
+        stats.isSymbolicLink = function() { return isSymbolicLink; };
+        stats.isBlockDevice = function() { return false; };
+        stats.isCharacterDevice = function() { return false; };
+        stats.isFIFO = function() { return false; };
+        stats.isSocket = function() { return false; };
+        return stats;
+    }
+
+    // Node's readFile encoding argument: a string ('utf8') or an options object
+    // ({ encoding }). Returns null for "no encoding given".
+    function readEncoding(opt) {
+        if (typeof opt === 'string') return opt;
+        if (opt && typeof opt === 'object' && opt.encoding) return opt.encoding;
+        return null;
+    }
+
+    async function readFileText(path) {
+        if (typeof path !== 'string') throw new TypeError('fs.readFile: path must be a string');
+        return await call('op_fs_read_file_text', path);
+    }
+    async function readFileBuffer(path) {
+        if (typeof path !== 'string') throw new TypeError('fs.readFile: path must be a string');
+        return await call('op_fs_read_file_buffer', path);
+    }
+
+    // Node's readFile contract: a Uint8Array by default, a string when a text
+    // encoding ('utf8', 'utf-8', …) is supplied. fs.readFile and
+    // fs.promises.readFile share this single behavior, so binary reads (e.g.
+    // isomorphic-git git objects) are lossless and text reads opt in via an
+    // encoding argument — exactly as Node behaves.
+    async function readFile(path, options) {
+        const enc = readEncoding(options);
+        if (enc && enc !== 'buffer') return await readFileText(path);
+        return await readFileBuffer(path);
+    }
+
+    async function writeFile(path, data) {
+        if (typeof path !== 'string') throw new TypeError('fs.writeFile: path must be a string');
+        if (data instanceof Uint8Array) {
+            await call('op_fs_write_file_buffer', path, data);
+        } else if (ArrayBuffer.isView(data)) {
+            await call('op_fs_write_file_buffer', path, new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+        } else if (data instanceof ArrayBuffer) {
+            await call('op_fs_write_file_buffer', path, new Uint8Array(data));
+        } else {
+            await call('op_fs_write_file_text', path, String(data));
+        }
+    }
+
+    async function appendFile(path, data) {
+        if (typeof path !== 'string') throw new TypeError('fs.appendFile: path must be a string');
+        await call('op_fs_append_file', path, String(data));
+    }
+
+    async function readdir(path) {
+        if (typeof path !== 'string') throw new TypeError('fs.readdir: path must be a string');
+        return JSON.parse(await call('op_fs_readdir', path));
+    }
+
+    async function stat(path) {
+        if (typeof path !== 'string') throw new TypeError('fs.stat: path must be a string');
+        return makeStats(JSON.parse(await call('op_fs_stat', path)));
+    }
+
+    async function lstat(path) {
+        if (typeof path !== 'string') throw new TypeError('fs.lstat: path must be a string');
+        return makeStats(JSON.parse(await call('op_fs_lstat', path)));
+    }
+
+    async function mkdir(path, options) {
+        if (typeof path !== 'string') throw new TypeError('fs.mkdir: path must be a string');
+        await call('op_fs_mkdir', path, (options && options.recursive) ? 1 : 0);
+    }
+
+    async function rm(path, options) {
+        if (typeof path !== 'string') throw new TypeError('fs.rm: path must be a string');
+        await call('op_fs_rm', path, (options && options.recursive) ? 1 : 0);
+    }
+
+    // Node's fs.rmdir; recursive removal of a directory tree when requested.
+    async function rmdir(path, options) {
+        if (typeof path !== 'string') throw new TypeError('fs.rmdir: path must be a string');
+        await call('op_fs_rm', path, (options && options.recursive) ? 1 : 0);
+    }
+
+    async function unlink(path) {
+        if (typeof path !== 'string') throw new TypeError('fs.unlink: path must be a string');
+        await call('op_fs_rm', path, 0);
+    }
+
+    async function rename(oldPath, newPath) {
+        if (typeof oldPath !== 'string') throw new TypeError('fs.rename: oldPath must be a string');
+        if (typeof newPath !== 'string') throw new TypeError('fs.rename: newPath must be a string');
+        await call('op_fs_rename', oldPath, newPath);
+    }
+
+    async function copyFile(src, dest) {
+        if (typeof src !== 'string') throw new TypeError('fs.copyFile: src must be a string');
+        if (typeof dest !== 'string') throw new TypeError('fs.copyFile: dest must be a string');
+        await call('op_fs_copy_file', src, dest);
+    }
+
+    async function readlink(path) {
+        if (typeof path !== 'string') throw new TypeError('fs.readlink: path must be a string');
+        return await call('op_fs_readlink', path);
+    }
+
+    // Node signature: symlink(target, path) creates a link at `path` -> `target`.
+    async function symlink(target, path) {
+        if (typeof target !== 'string') throw new TypeError('fs.symlink: target must be a string');
+        if (typeof path !== 'string') throw new TypeError('fs.symlink: path must be a string');
+        await call('op_fs_symlink', target, path);
+    }
+
+    async function exists(path) {
+        if (typeof path !== 'string') throw new TypeError('fs.exists: path must be a string');
+        return (await call('op_fs_exists', path)) === 'true';
+    }
+
+    // Streaming write handle: feed a large file in pieces so neither JS nor the
+    // runtime ever holds the whole thing. The file becomes visible only after
+    // close().
+    async function createWriteStream(path) {
+        if (typeof path !== 'string') throw new TypeError('fs.createWriteStream: path must be a string');
+        const id = await call('op_fs_write_stream_open', path);
+        let closed = false;
+        return {
+            write: async function(chunk) {
+                if (closed) throw new Error('fs.createWriteStream: write after close');
+                if (chunk instanceof Uint8Array) {
+                    await call('op_fs_write_stream_chunk_buffer', id, chunk);
+                } else {
+                    await call('op_fs_write_stream_chunk_text', id, String(chunk));
+                }
+            },
+            close: async function() {
+                if (closed) return;
+                closed = true;
+                await call('op_fs_write_stream_close', id);
+            },
+        };
+    }
+
+    // The promise-based surface mirroring Node's `fs.promises`. readFile follows
+    // Node semantics here (bytes by default). Libraries that wrap a filesystem —
+    // isomorphic-git among them — detect this enumerable property and bind its
+    // methods, so every method they look up must exist.
+    const promises = {
+        readFile,
+        writeFile, appendFile, readdir, stat, lstat, mkdir, rm, rmdir,
+        unlink, rename, copyFile, readlink, symlink, exists,
+    };
+
     globalThis.fs = {
-        readFile: async function(path, encoding) {
-            if (typeof path !== 'string') throw new TypeError('fs.readFile: path must be a string');
-            if (encoding === 'buffer') {
-                return await Deno.core.ops.op_fs_read_file_buffer(path);
-            }
-            return await Deno.core.ops.op_fs_read_file_text(path);
-        },
-
-        writeFile: async function(path, data) {
-            if (typeof path !== 'string') throw new TypeError('fs.writeFile: path must be a string');
-            if (data instanceof Uint8Array) {
-                await Deno.core.ops.op_fs_write_file_buffer(path, data);
-            } else {
-                await Deno.core.ops.op_fs_write_file_text(path, String(data));
-            }
-        },
-
-        appendFile: async function(path, data) {
-            if (typeof path !== 'string') throw new TypeError('fs.appendFile: path must be a string');
-            await Deno.core.ops.op_fs_append_file(path, String(data));
-        },
-
-        readdir: async function(path) {
-            if (typeof path !== 'string') throw new TypeError('fs.readdir: path must be a string');
-            const raw = await Deno.core.ops.op_fs_readdir(path);
-            return JSON.parse(raw);
-        },
-
-        stat: async function(path) {
-            if (typeof path !== 'string') throw new TypeError('fs.stat: path must be a string');
-            const raw = await Deno.core.ops.op_fs_stat(path);
-            return JSON.parse(raw);
-        },
-
-        mkdir: async function(path, options) {
-            if (typeof path !== 'string') throw new TypeError('fs.mkdir: path must be a string');
-            const recursive = (options && options.recursive) ? 1 : 0;
-            await Deno.core.ops.op_fs_mkdir(path, recursive);
-        },
-
-        rm: async function(path, options) {
-            if (typeof path !== 'string') throw new TypeError('fs.rm: path must be a string');
-            const recursive = (options && options.recursive) ? 1 : 0;
-            await Deno.core.ops.op_fs_rm(path, recursive);
-        },
-
-        unlink: async function(path) {
-            if (typeof path !== 'string') throw new TypeError('fs.unlink: path must be a string');
-            await Deno.core.ops.op_fs_rm(path, 0);
-        },
-
-        rename: async function(oldPath, newPath) {
-            if (typeof oldPath !== 'string') throw new TypeError('fs.rename: oldPath must be a string');
-            if (typeof newPath !== 'string') throw new TypeError('fs.rename: newPath must be a string');
-            await Deno.core.ops.op_fs_rename(oldPath, newPath);
-        },
-
-        copyFile: async function(src, dest) {
-            if (typeof src !== 'string') throw new TypeError('fs.copyFile: src must be a string');
-            if (typeof dest !== 'string') throw new TypeError('fs.copyFile: dest must be a string');
-            await Deno.core.ops.op_fs_copy_file(src, dest);
-        },
-
-        exists: async function(path) {
-            if (typeof path !== 'string') throw new TypeError('fs.exists: path must be a string');
-            const raw = await Deno.core.ops.op_fs_exists(path);
-            return raw === 'true';
-        },
-
-        // Streaming write handle: feed a large file in pieces so neither JS nor
-        // the runtime ever holds the whole thing. The file becomes visible only
-        // after close().
-        createWriteStream: async function(path) {
-            if (typeof path !== 'string') throw new TypeError('fs.createWriteStream: path must be a string');
-            const id = await Deno.core.ops.op_fs_write_stream_open(path);
-            let closed = false;
-            return {
-                write: async function(chunk) {
-                    if (closed) throw new Error('fs.createWriteStream: write after close');
-                    if (chunk instanceof Uint8Array) {
-                        await Deno.core.ops.op_fs_write_stream_chunk_buffer(id, chunk);
-                    } else {
-                        await Deno.core.ops.op_fs_write_stream_chunk_text(id, String(chunk));
-                    }
-                },
-                close: async function() {
-                    if (closed) return;
-                    closed = true;
-                    await Deno.core.ops.op_fs_write_stream_close(id);
-                },
-            };
-        },
+        readFile, writeFile, appendFile, readdir, stat, lstat, mkdir, rm, rmdir,
+        unlink, rename, copyFile, readlink, symlink, exists, createWriteStream,
+        promises,
     };
 })();
 "#;
@@ -903,16 +1118,131 @@ fn extract_writers(state: &Rc<RefCell<OpState>>) -> Result<FsWriters, JsErrorBox
         .ok_or_else(|| JsErrorBox::generic("fs: internal error — no write-stream registry"))
 }
 
+/// Map a `std::io::Error` to a Node.js-style error code (`ENOENT`, `EEXIST`,
+/// …). Returns `None` for kinds without a well-known POSIX name. The JS wrapper
+/// surfaces this token as `err.code` so callers that branch on it (isomorphic-git,
+/// etc.) behave the same as on Node.
+fn io_code(e: &std::io::Error) -> Option<&'static str> {
+    use std::io::ErrorKind::*;
+    Some(match e.kind() {
+        NotFound => "ENOENT",
+        PermissionDenied => "EACCES",
+        AlreadyExists => "EEXIST",
+        NotADirectory => "ENOTDIR",
+        IsADirectory => "EISDIR",
+        DirectoryNotEmpty => "ENOTEMPTY",
+        ReadOnlyFilesystem => "EROFS",
+        Unsupported => "ENOSYS",
+        _ => return None,
+    })
+}
+
+/// Format a single-path fs io error with the Node-style code embedded as a
+/// token the JS wrapper can extract: `fs.<op>: <path>: <CODE>: <message>` (the
+/// `<CODE>:` segment is omitted when the kind is unmapped).
+fn io_err(op: &str, path: &str, e: &std::io::Error) -> String {
+    match io_code(e) {
+        Some(code) => format!("fs.{op}: {path}: {code}: {e}"),
+        None => format!("fs.{op}: {path}: {e}"),
+    }
+}
+
+/// Like [`io_err`] but for two-path operations (`rename`, `copyFile`, `symlink`).
+fn io_err2(op: &str, from: &str, to: &str, e: &std::io::Error) -> String {
+    match io_code(e) {
+        Some(code) => format!("fs.{op}: {from} -> {to}: {code}: {e}"),
+        None => format!("fs.{op}: {from} -> {to}: {e}"),
+    }
+}
+
+/// Build the JSON stat blob fs.stat / fs.lstat return, from host metadata. The
+/// JS wrapper turns this into a Node `fs.Stats`-like object (with `isFile()` etc.).
+fn metadata_stat_json(metadata: &std::fs::Metadata) -> String {
+    let to_ms = |t: std::io::Result<std::time::SystemTime>| {
+        t.ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as f64)
+    };
+    let modified = to_ms(metadata.modified());
+    let accessed = to_ms(metadata.accessed());
+    let created = to_ms(metadata.created());
+
+    // Unix metadata carries the fields Node consumers read (mode/ino/uid/…);
+    // elsewhere synthesize a plausible mode from the file type so callers that
+    // derive type from `mode` still classify the entry correctly.
+    #[cfg(unix)]
+    let (mode, ino, dev, nlink, uid, gid, ctime_ms) = {
+        use std::os::unix::fs::MetadataExt;
+        let ctime_ms = metadata.ctime() as f64 * 1000.0 + metadata.ctime_nsec() as f64 / 1.0e6;
+        (
+            metadata.mode(),
+            metadata.ino(),
+            metadata.dev(),
+            metadata.nlink(),
+            metadata.uid(),
+            metadata.gid(),
+            Some(ctime_ms),
+        )
+    };
+    #[cfg(not(unix))]
+    let (mode, ino, dev, nlink, uid, gid, ctime_ms): (u32, u64, u64, u64, u32, u32, Option<f64>) = {
+        let mode = if metadata.is_dir() {
+            0o040755
+        } else if metadata.file_type().is_symlink() {
+            0o120777
+        } else {
+            0o100644
+        };
+        (mode, 0, 0, 1, 0, 0, modified)
+    };
+
+    deno_core::serde_json::json!({
+        "size": metadata.len(),
+        "isFile": metadata.is_file(),
+        "isDirectory": metadata.is_dir(),
+        "isSymlink": metadata.file_type().is_symlink(),
+        "readonly": metadata.permissions().readonly(),
+        "mode": mode,
+        "ino": ino,
+        "dev": dev,
+        "nlink": nlink,
+        "uid": uid,
+        "gid": gid,
+        "mtimeMs": modified,
+        "atimeMs": accessed,
+        "ctimeMs": ctime_ms,
+        "birthtimeMs": created,
+    })
+    .to_string()
+}
+
 /// Build the JSON stat blob fs.stat returns, from overlay metadata.
 fn mount_stat_json(s: &super::fs_mount::Stat) -> String {
+    let is_symlink = s.symlink.is_some();
+    // Synthesize a mode with the file-type bits set so consumers that derive
+    // type from `mode` (e.g. git tree builders) classify it correctly.
+    let mode = if s.is_dir {
+        0o040000 | (s.mode & 0o777)
+    } else if is_symlink {
+        0o120000 | (s.mode & 0o777)
+    } else {
+        0o100000 | (s.mode & 0o777)
+    };
     deno_core::serde_json::json!({
         "size": s.size,
-        "isFile": !s.is_dir,
+        "isFile": !s.is_dir && !is_symlink,
         "isDirectory": s.is_dir,
-        "isSymlink": s.symlink.is_some(),
+        "isSymlink": is_symlink,
         "readonly": false,
+        "mode": mode,
+        "ino": 0,
+        "dev": 0,
+        "nlink": 1,
+        "uid": 0,
+        "gid": 0,
         "mtimeMs": null,
         "atimeMs": null,
+        "ctimeMs": null,
         "birthtimeMs": null,
     })
     .to_string()

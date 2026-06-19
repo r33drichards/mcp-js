@@ -57,7 +57,7 @@ sequenceDiagram
 
 **`fs.unlink` shares the `rm` policy operation.** Internally `fs.unlink(path)` delegates to the same Rust op as `fs.rm(path)` with `recursive = false`. Policies see `operation = "rm"` for both, not `"unlink"`.
 
-**UTF-8 enforcement.** `fs.readFile` without `"buffer"` encoding validates that the file content is valid UTF-8 and throws if it is not. Reading arbitrary binary files requires the `"buffer"` argument.
+**Encoding.** Following Node semantics, `fs.readFile` returns a `Uint8Array` by default; pass a text encoding (e.g. `"utf8"`) to get a string instead. In text mode the content is validated as UTF-8 and the read throws if it is not valid UTF-8.
 
 **MCP session headers.** When the server is configured to forward MCP session headers, the header map is included as `mcp_headers` in the policy input. This lets a policy tie filesystem access to the authenticated session identity — for example, confining each session to its own directory subtree (see `policies/filesystem.rego`).
 

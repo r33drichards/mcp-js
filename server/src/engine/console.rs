@@ -429,6 +429,83 @@ pub fn inject_web_apis_snapshot(runtime: &mut deno_core::JsRuntimeForSnapshot) -
 
 const WEB_APIS_JS: &str = r#"
 (function() {
+    // ── TextEncoder / TextDecoder (UTF-8) ───────────────────────────────
+    // deno_core's bare runtime does not ship deno_web, so these standard
+    // globals are absent. Many libraries (isomorphic-git, etc.) assume they
+    // exist; provide a compact, correct UTF-8 implementation.
+    if (typeof globalThis.TextEncoder === 'undefined') {
+        globalThis.TextEncoder = class TextEncoder {
+            get encoding() { return 'utf-8'; }
+            encode(input) {
+                const str = String(input === undefined ? '' : input);
+                const out = [];
+                for (let i = 0; i < str.length; i++) {
+                    let code = str.charCodeAt(i);
+                    if (code >= 0xD800 && code <= 0xDBFF && i + 1 < str.length) {
+                        const next = str.charCodeAt(i + 1);
+                        if (next >= 0xDC00 && next <= 0xDFFF) {
+                            code = 0x10000 + ((code - 0xD800) << 10) + (next - 0xDC00);
+                            i++;
+                        }
+                    }
+                    if (code < 0x80) {
+                        out.push(code);
+                    } else if (code < 0x800) {
+                        out.push(0xC0 | (code >> 6), 0x80 | (code & 0x3F));
+                    } else if (code < 0x10000) {
+                        out.push(0xE0 | (code >> 12), 0x80 | ((code >> 6) & 0x3F), 0x80 | (code & 0x3F));
+                    } else {
+                        out.push(0xF0 | (code >> 18), 0x80 | ((code >> 12) & 0x3F), 0x80 | ((code >> 6) & 0x3F), 0x80 | (code & 0x3F));
+                    }
+                }
+                return new Uint8Array(out);
+            }
+            encodeInto(str, dest) {
+                const enc = this.encode(str);
+                const n = Math.min(enc.length, dest.length);
+                dest.set(enc.subarray(0, n));
+                return { read: str.length, written: n };
+            }
+        };
+    }
+    if (typeof globalThis.TextDecoder === 'undefined') {
+        globalThis.TextDecoder = class TextDecoder {
+            constructor(label, options) {
+                this.encoding = (label ? String(label) : 'utf-8').toLowerCase();
+                this.fatal = !!(options && options.fatal);
+                this.ignoreBOM = !!(options && options.ignoreBOM);
+            }
+            decode(input) {
+                if (input === undefined || input === null) return '';
+                let bytes;
+                if (input instanceof Uint8Array) bytes = input;
+                else if (input instanceof ArrayBuffer) bytes = new Uint8Array(input);
+                else if (ArrayBuffer.isView(input)) bytes = new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
+                else bytes = new Uint8Array(input);
+                let out = '';
+                let i = 0;
+                const n = bytes.length;
+                while (i < n) {
+                    const c = bytes[i++];
+                    if (c < 0x80) {
+                        out += String.fromCharCode(c);
+                    } else if (c >= 0xC0 && c < 0xE0) {
+                        out += String.fromCharCode(((c & 0x1F) << 6) | (bytes[i++] & 0x3F));
+                    } else if (c >= 0xE0 && c < 0xF0) {
+                        out += String.fromCharCode(((c & 0x0F) << 12) | ((bytes[i++] & 0x3F) << 6) | (bytes[i++] & 0x3F));
+                    } else if (c >= 0xF0) {
+                        let cp = ((c & 0x07) << 18) | ((bytes[i++] & 0x3F) << 12) | ((bytes[i++] & 0x3F) << 6) | (bytes[i++] & 0x3F);
+                        cp -= 0x10000;
+                        out += String.fromCharCode(0xD800 + (cp >> 10), 0xDC00 + (cp & 0x3FF));
+                    }
+                    // Lone continuation bytes are skipped (lenient, non-fatal).
+                }
+                if (this.ignoreBOM === false && out.charCodeAt(0) === 0xFEFF) out = out.slice(1);
+                return out;
+            }
+        };
+    }
+
     globalThis.Blob = function Blob(parts, options) {
         const opt = options || {};
         this.type = opt.type || '';

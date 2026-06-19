@@ -51,7 +51,7 @@ Always pin versions for reproducible results. Dynamic `import()` is also support
 When the server is configured with policies, JavaScript code can use an `fs` module providing Node.js-compatible file operations. Every operation is evaluated against a Rego policy before execution.
 
 **Available operations:**
-- `await fs.readFile(path, [encoding])` — Read file as UTF-8 string (default) or `Uint8Array` (if `encoding="buffer"`)
+- `await fs.readFile(path, [encoding])` — Read file as a `Uint8Array` (default, Node semantics) or a string (if a text encoding like `"utf8"` is given)
 - `await fs.writeFile(path, data)` — Write string or `Uint8Array` to file
 - `await fs.appendFile(path, data)` — Append data to file
 - `await fs.readdir(path)` — List directory contents
