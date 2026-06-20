@@ -205,8 +205,8 @@ pub struct Cli {
     #[arg(long, env = "MCP_V8_NODE_ID", default_value = "node1", help_heading = "Cluster")]
     pub node_id: String,
 
-    /// Comma-separated list of seed peer addresses. Format: id@host:port or host:port.
-    /// Peers can also join dynamically via POST /raft/join.
+    // Help is generated from `peers_grammar()` via `build_command` (the
+    // structured-arg registry), so it cannot drift from the parser.
     #[arg(long, env = "MCP_V8_PEERS", value_delimiter = ',', help_heading = "Cluster")]
     pub peers: Vec<String>,
 
@@ -238,13 +238,8 @@ pub struct Cli {
     #[arg(long, env = "MCP_V8_ELECTION_TIMEOUT_MAX", default_value = "500", help_heading = "Cluster")]
     pub election_timeout_max: u64,
 
-    /// Pre-load a WASM module as a global. Format: name=/path/to/module.wasm[:max_memory]
-    /// The module's exports will be available as a global variable with the given name.
-    /// Optional memory suffix caps the module's native memory (linear memory + tables).
-    /// Supported suffixes: raw bytes, k/K (KiB), m/M (MiB), g/G (GiB).
-    /// Examples: math=/path.wasm  math=/path.wasm:16m  math=/path.wasm:1048576
-    /// Can be specified multiple times for multiple modules.
-    /// NOTE: incompatible with heap persistence (`--heap-store` other than none).
+    // Help is generated from `wasm_module_grammar()` via `build_command` (the
+    // structured-arg registry), so it cannot drift from the parser.
     #[arg(long = "wasm-module", value_name = "NAME=PATH[:LIMIT]", help_heading = "WASM")]
     pub wasm_modules: Vec<String>,
 
@@ -285,20 +280,14 @@ pub struct Cli {
     )]
     pub wasm_stub_prefix: String,
 
-    /// Set the MCP stub tool description for a loaded WASM module. Format:
-    /// name=description text. The text is shown to downstream agents alongside
-    /// the auto-generated usage hint (globals, exports, instantiation), helping
-    /// them decide when to use the module. Can be specified multiple times.
-    /// Overrides a "description" set inline via --wasm-config. The named module
-    /// must be loaded with --wasm-module or --wasm-config.
+    // Help is generated from `wasm_stub_description_grammar()` via `build_command`
+    // (the structured-arg registry), so it cannot drift from the parser.
     #[arg(long = "wasm-stub-description", value_name = "NAME=TEXT", help_heading = "WASM")]
     pub wasm_stub_descriptions: Vec<String>,
 
-    /// Inject a header into fetch requests matching host/method rules (a static
-    /// value or auto-refreshed OAuth client credentials); see --help for the keys.
-    //
-    // The full key list in `--help` is generated from `FetchHeaderKey` via
-    // `build_command`, so it cannot drift from what the parser accepts.
+    // Help is generated from `fetch_header_grammar()` via `build_command` (the
+    // structured-arg registry), with the key list coming straight from
+    // `FetchHeaderKey`, so it cannot drift from the parser.
     #[arg(long = "fetch-header", value_name = "RULE", help_heading = "Fetch")]
     pub fetch_headers: Vec<String>,
 
@@ -335,11 +324,8 @@ pub struct Cli {
     #[arg(long = "policies-json", env = "MCP_V8_POLICIES_JSON", value_name = "JSON_OR_PATH", help_heading = "Policy")]
     pub policies_json: Option<String>,
 
-    /// Connect to an external MCP server as a module. JS code can call its tools
-    /// via the `mcp` global object (mcp.callTool, mcp.listTools, mcp.servers).
-    /// Format for stdio: name=stdio:command:arg1:arg2
-    /// Format for SSE:   name=sse:url
-    /// Can be specified multiple times for multiple servers.
+    // Help is generated from `mcp_server_grammar()` via `build_command` (the
+    // structured-arg registry), so it cannot drift from the parser.
     #[arg(long = "mcp-server", value_name = "NAME=TRANSPORT:...", help_heading = "MCP Server Module")]
     pub mcp_servers: Vec<String>,
 
@@ -451,30 +437,150 @@ fetch_header_keys! {
     RefreshBufferSecs = "refresh_buffer_secs": "seconds before expiry to refresh the token, default 30 (OAuth form, optional)",
 }
 
-/// Full `--fetch-header` long help, with the accepted-key list rendered straight
-/// from [`FetchHeaderKey`]. Because the key list is generated, it cannot omit or
-/// misname a key the parser accepts.
-fn fetch_header_long_help() -> String {
-    let keys = FetchHeaderKey::ALL
-        .iter()
-        .map(|key| format!("{} — {}", key.as_str(), key.description()))
-        .collect::<Vec<_>>()
-        .join("\n  ");
-    format!(
-        "Inject a header into fetch requests that match host/method rules. Each \
-         rule is a comma-separated list of key=value pairs and must use either \
-         the static value form or the OAuth client-credentials form (mutually \
-         exclusive). Can be specified multiple times.\nAccepted keys:\n  {keys}"
-    )
+/// A documented grammar for a structured CLI flag value, rendered uniformly into
+/// `--help`. Declaring the grammar once (and registering it in
+/// [`structured_args`]) means a flag's mini-language is *generated*, never
+/// hand-written prose that can drift from the parser.
+struct Grammar {
+    /// One-line summary; also the short (`-h`) help.
+    summary: &'static str,
+    /// Heading for the labelled parts (e.g. "Accepted keys", "Transports").
+    parts_label: &'static str,
+    /// `(label, description)` rows — the keys, transports, or format forms.
+    parts: Vec<(&'static str, &'static str)>,
+    /// Illustrative example values.
+    examples: &'static [&'static str],
 }
 
-/// Canonical `clap::Command` for the binary: the derived command, with the
-/// `--fetch-header` long help generated from [`FetchHeaderKey`]. The server
-/// binary ([`parse`]) and the `generate-cli-markdown` helper both build the
-/// command through here, so the live `--help` and the generated CLI reference
-/// stay identical and table-driven.
+impl Grammar {
+    fn render(&self) -> String {
+        let mut out = self.summary.to_string();
+        if !self.parts.is_empty() {
+            out.push('\n');
+            out.push_str(self.parts_label);
+            out.push(':');
+            for (label, desc) in &self.parts {
+                out.push_str(&format!("\n  {label} — {desc}"));
+            }
+        }
+        if !self.examples.is_empty() {
+            out.push_str("\nExamples:");
+            for example in self.examples {
+                out.push_str(&format!("\n  {example}"));
+            }
+        }
+        out
+    }
+}
+
+fn fetch_header_grammar() -> Grammar {
+    Grammar {
+        summary: "Inject a header into fetch requests that match host/method rules. Each \
+                  rule is a comma-separated list of key=value pairs and must use either the \
+                  static value form or the OAuth client-credentials form (mutually \
+                  exclusive). Can be specified multiple times.",
+        parts_label: "Accepted keys",
+        // Generated from the parser's own key table, so the documented keys are
+        // exactly the keys the parser accepts.
+        parts: FetchHeaderKey::ALL
+            .iter()
+            .map(|key| (key.as_str(), key.description()))
+            .collect(),
+        examples: &[],
+    }
+}
+
+fn mcp_server_grammar() -> Grammar {
+    Grammar {
+        summary: "Connect to an external MCP server as a module; JS can call its tools via \
+                  the `mcp` global (mcp.callTool, mcp.listTools, mcp.servers). Can be \
+                  specified multiple times.",
+        parts_label: "Transports",
+        parts: vec![
+            ("name=stdio:command:arg1:arg2", "spawn a stdio MCP server process"),
+            ("name=sse:url", "connect to an SSE MCP server endpoint"),
+        ],
+        examples: &["weather=stdio:python:server.py", "remote=sse:http://localhost:9000/sse"],
+    }
+}
+
+fn wasm_module_grammar() -> Grammar {
+    Grammar {
+        summary: "Pre-load a WASM module as a global named <name>; its exports become that \
+                  global. An optional :max_memory suffix caps the module's native memory \
+                  (linear memory + tables) with suffixes raw bytes, k/K (KiB), m/M (MiB), \
+                  g/G (GiB). Can be specified multiple times. Incompatible with heap \
+                  persistence (--heap-store other than none).",
+        parts_label: "Format",
+        parts: vec![(
+            "name=/path/to/module.wasm[:max_memory]",
+            "load <name> from a .wasm file, optionally capping its native memory",
+        )],
+        examples: &["math=/path.wasm", "math=/path.wasm:16m", "math=/path.wasm:1048576"],
+    }
+}
+
+fn wasm_stub_description_grammar() -> Grammar {
+    Grammar {
+        summary: "Set the MCP stub tool description for a loaded WASM module; the text is \
+                  shown to downstream agents alongside the auto-generated usage hint. \
+                  Overrides a `description` set inline via --wasm-config. The named module \
+                  must be loaded with --wasm-module or --wasm-config. Can be specified \
+                  multiple times.",
+        parts_label: "Format",
+        parts: vec![("name=description text", "set <name>'s stub tool description")],
+        examples: &["math=Adds two numbers and returns the sum"],
+    }
+}
+
+fn peers_grammar() -> Grammar {
+    Grammar {
+        summary: "Comma-separated list of seed peer addresses. Peers can also join \
+                  dynamically via POST /raft/join.",
+        parts_label: "Forms",
+        parts: vec![
+            ("id@host:port", "peer address with an explicit node id"),
+            ("host:port", "peer address only (node id learned on join)"),
+        ],
+        examples: &["node2@10.0.0.2:4000", "10.0.0.3:4000"],
+    }
+}
+
+/// Every structured-value flag, paired with the [`Grammar`] that generates its
+/// `--help`. This registry is the systematic core: [`build_command`] injects each
+/// entry's generated help with no per-flag code, and the
+/// `every_structured_arg_has_grammar_and_parses` test (main.rs) forces a matching
+/// parser round-trip for each entry. Adding a structured flag is one entry here.
+fn structured_args() -> Vec<(&'static str, Grammar)> {
+    vec![
+        ("fetch_headers", fetch_header_grammar()),
+        ("mcp_servers", mcp_server_grammar()),
+        ("wasm_modules", wasm_module_grammar()),
+        ("wasm_stub_descriptions", wasm_stub_description_grammar()),
+        ("peers", peers_grammar()),
+    ]
+}
+
+/// Arg ids of every structured flag, so the parse-check registry in main.rs can
+/// assert it covers exactly the same set. Test-only consumer, hence the allow.
+#[allow(dead_code)]
+pub fn structured_arg_ids() -> Vec<&'static str> {
+    structured_args().into_iter().map(|(id, _)| id).collect()
+}
+
+/// Canonical `clap::Command` for the binary: the derived command with every
+/// structured flag's short and long help generated from its [`Grammar`]. The
+/// server binary ([`parse`]) and `generate-cli-markdown` both build through here,
+/// so the live `--help` and the generated CLI reference stay identical and
+/// table-driven — there is no per-flag code in this function.
 pub fn build_command() -> clap::Command {
-    Cli::command().mut_arg("fetch_headers", |arg| arg.long_help(fetch_header_long_help()))
+    let mut command = Cli::command();
+    for (arg_id, grammar) in structured_args() {
+        let summary = grammar.summary;
+        let long_help = grammar.render();
+        command = command.mut_arg(arg_id, move |arg| arg.help(summary).long_help(long_help));
+    }
+    command
 }
 
 /// Parse CLI arguments through [`build_command`]. Mirrors `Cli::parse`, but with

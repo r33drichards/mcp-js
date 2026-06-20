@@ -1247,71 +1247,44 @@ mod tests {
         parse_fetch_header_cli, resolve_text_or_file,
     };
 
-    // ── Documented CLI format guards ─────────────────────────────────────
-    // Each structured flag's documented Format:/Examples: shape is round-tripped
-    // through its real parser, so the help text in cli.rs cannot drift from what
-    // the parser actually accepts (the gap that hid OAuth behind stale --help).
+    // ── Systematic structured-flag drift guard ──────────────────────────
+    // Every flag registered in `cli::structured_args()` has its --help generated
+    // from a Grammar; each must also round-trip its documented shape through the
+    // real parser below. The two registries must list the same flags, so a
+    // structured flag cannot ship generated help without a parser round-trip
+    // (or vice versa) — that mismatch fails `every_structured_arg_has_grammar_and_parses`.
 
-    #[test]
-    fn mcp_server_cli_parses_documented_transports() {
+    fn check_fetch_headers() -> anyhow::Result<()> {
+        parse_fetch_header_cli("host=api.example.com,header=Authorization,value=Bearer x")?;
+        parse_fetch_header_cli(
+            "host=api.example.com,header=Authorization,\
+             token_url=https://issuer.example.com/token,client_id=a,client_secret=b",
+        )?;
+        Ok(())
+    }
+
+    fn check_mcp_servers() -> anyhow::Result<()> {
         use crate::engine::mcp_client::McpServerTransport;
 
-        // Documented formats (--mcp-server help):
-        //   name=stdio:command:arg1:arg2   and   name=sse:url
         let configs = load_mcp_server_configs(
             &[
                 "weather=stdio:python:server.py:--verbose".to_string(),
                 "remote=sse:http://127.0.0.1:9000/sse".to_string(),
             ],
             &None,
-        )
-        .expect("documented --mcp-server forms should parse");
-
-        assert_eq!(configs.len(), 2);
-        match &configs[0].transport {
-            McpServerTransport::Stdio { command, args, .. } => {
-                assert_eq!(command, "python");
-                assert_eq!(args, &["server.py".to_string(), "--verbose".to_string()]);
-            }
-            _ => panic!("expected stdio transport for first --mcp-server entry"),
-        }
-        match &configs[1].transport {
-            McpServerTransport::Sse { url } => assert_eq!(url, "http://127.0.0.1:9000/sse"),
-            _ => panic!("expected sse transport for second --mcp-server entry"),
-        }
+        )?;
+        anyhow::ensure!(matches!(configs[0].transport, McpServerTransport::Stdio { .. }));
+        anyhow::ensure!(matches!(configs[1].transport, McpServerTransport::Sse { .. }));
+        Ok(())
     }
 
-    #[test]
-    fn mcp_server_help_documents_supported_transports() {
-        use clap::CommandFactory;
-
-        let command = crate::cli::Cli::command();
-        let arg = command
-            .get_arguments()
-            .find(|arg| arg.get_long() == Some("mcp-server"))
-            .expect("--mcp-server argument should exist");
-        let help = arg
-            .get_long_help()
-            .or_else(|| arg.get_help())
-            .map(|help| help.to_string())
-            .unwrap_or_default();
-
-        // load_mcp_server_configs only accepts these transport prefixes, so the
-        // help must document both or it is advertising/omitting reality.
-        assert!(help.contains("stdio:"), "--mcp-server help omits the stdio transport");
-        assert!(help.contains("sse:"), "--mcp-server help omits the sse transport");
-    }
-
-    #[test]
-    fn wasm_module_cli_parses_documented_examples() {
-        let dir = tempfile::tempdir().expect("tempdir should be created");
+    fn check_wasm_modules() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
         let path = dir.path().join("module.wasm");
         // load_wasm_modules only reads the bytes here; contents are not validated.
-        std::fs::write(&path, b"\0asm").expect("stub wasm file should be written");
+        std::fs::write(&path, b"\0asm")?;
         let path = path.display();
 
-        // Documented examples (--wasm-module help):
-        //   math=/path.wasm   math=/path.wasm:16m   math=/path.wasm:1048576
         let modules = load_wasm_modules(
             &[
                 format!("plain={path}"),
@@ -1320,32 +1293,71 @@ mod tests {
             ],
             &None,
             &[],
-        )
-        .expect("documented --wasm-module forms should parse");
-
-        assert_eq!(modules.len(), 3);
-        assert_eq!(modules[0].name, "plain");
-        assert_eq!(modules[0].max_memory_bytes, None);
-        assert_eq!(modules[1].max_memory_bytes, Some(16 * 1024 * 1024));
-        assert_eq!(modules[2].max_memory_bytes, Some(1_048_576));
+        )?;
+        anyhow::ensure!(modules[0].max_memory_bytes.is_none());
+        anyhow::ensure!(modules[1].max_memory_bytes == Some(16 * 1024 * 1024));
+        anyhow::ensure!(modules[2].max_memory_bytes == Some(1_048_576));
+        Ok(())
     }
 
-    #[test]
-    fn wasm_stub_description_cli_applies_documented_format() {
-        let dir = tempfile::tempdir().expect("tempdir should be created");
+    fn check_wasm_stub_descriptions() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
         let path = dir.path().join("module.wasm");
-        std::fs::write(&path, b"\0asm").expect("stub wasm file should be written");
+        std::fs::write(&path, b"\0asm")?;
 
-        // Documented format (--wasm-stub-description help): name=description text
         let modules = load_wasm_modules(
             &[format!("math={}", path.display())],
             &None,
-            &["math=Adds two numbers".to_string()],
-        )
-        .expect("documented --wasm-stub-description form should apply");
+            &["math=Adds two numbers and returns the sum".to_string()],
+        )?;
+        anyhow::ensure!(
+            modules[0].description.as_deref() == Some("Adds two numbers and returns the sum")
+        );
+        Ok(())
+    }
 
-        assert_eq!(modules.len(), 1);
-        assert_eq!(modules[0].description.as_deref(), Some("Adds two numbers"));
+    fn check_peers() -> anyhow::Result<()> {
+        let (peers, peer_addrs) = crate::cluster::ClusterConfig::parse_peers(&[
+            "node2@10.0.0.2:4000".to_string(),
+            "10.0.0.3:4000".to_string(),
+        ]);
+        anyhow::ensure!(peers == ["10.0.0.2:4000", "10.0.0.3:4000"]);
+        anyhow::ensure!(peer_addrs.get("node2").map(String::as_str) == Some("10.0.0.2:4000"));
+        Ok(())
+    }
+
+    /// Parser round-trip per structured flag. Must list the same arg ids as
+    /// `cli::structured_args()` (enforced by the test below).
+    fn structured_arg_checks() -> Vec<(&'static str, fn() -> anyhow::Result<()>)> {
+        vec![
+            ("fetch_headers", check_fetch_headers),
+            ("mcp_servers", check_mcp_servers),
+            ("wasm_modules", check_wasm_modules),
+            ("wasm_stub_descriptions", check_wasm_stub_descriptions),
+            ("peers", check_peers),
+        ]
+    }
+
+    #[test]
+    fn every_structured_arg_has_grammar_and_parses() {
+        use std::collections::BTreeSet;
+
+        let checks = structured_arg_checks();
+        let check_ids: BTreeSet<&str> = checks.iter().map(|(id, _)| *id).collect();
+        let grammar_ids: BTreeSet<&str> = crate::cli::structured_arg_ids().into_iter().collect();
+
+        // Help registry (cli.rs) and parse-check registry (here) must cover the
+        // exact same flags — so neither side can grow without the other.
+        assert_eq!(
+            check_ids, grammar_ids,
+            "structured-arg registries disagree; every flag needs BOTH a Grammar (cli.rs) and a parse-check (main.rs)"
+        );
+
+        for (arg_id, check) in checks {
+            check().unwrap_or_else(|err| {
+                panic!("documented grammar for --{} must parse: {err}", arg_id.replace('_', "-"))
+            });
+        }
     }
 
     #[test]
