@@ -613,10 +613,6 @@ async fn resolve_auth_header(
             scope,
             resource,
         }) => {
-            use rmcp::transport::auth::{
-                AuthorizationManager, ClientCredentialsConfig, InMemoryCredentialStore,
-            };
-
             let url = server_url.ok_or_else(|| {
                 format!(
                     "MCP server '{}': oauth_discovery auth requires an HTTP-based transport URL",
@@ -624,69 +620,204 @@ async fn resolve_auth_header(
                 )
             })?;
 
-            // 1. Create AuthorizationManager targeting the MCP server URL.
-            //    This triggers the RFC 9728 Protected Resource Metadata discovery
-            //    and RFC 8414 Authorization Server Metadata discovery.
-            let auth_manager = AuthorizationManager::new(url)
-                .await
-                .map_err(|e| format!(
-                    "MCP server '{}': OAuth discovery failed (could not reach '{}'): {}",
-                    server_name, url, e
-                ))?;
+            // Implements the MCP authorization spec (2025-11-25) using reqwest:
+            //   1. Probe the MCP server URL for Protected Resource Metadata (RFC 9728)
+            //   2. Discover Authorization Server Metadata (RFC 8414)
+            //   3. Exchange client_credentials at the token endpoint
 
-            auth_manager
-                .set_credential_store(InMemoryCredentialStore::new())
-                .await;
+            let http = reqwest::Client::new();
 
-            // 2. Discover authorization server metadata.
-            auth_manager.discover_metadata().await.map_err(|e| {
-                format!(
-                    "MCP server '{}': OAuth AS metadata discovery failed: {}",
-                    server_name, e
-                )
+            // ── Step 1: Discover Protected Resource Metadata ──────────────
+            // Try /.well-known/oauth-protected-resource relative to the server URL.
+            let parsed_url = url::Url::parse(url).map_err(|e| {
+                format!("MCP server '{}': invalid URL '{}': {}", server_name, url, e)
             })?;
+            let base = format!(
+                "{}://{}{}",
+                parsed_url.scheme(),
+                parsed_url.host_str().unwrap_or("localhost"),
+                parsed_url
+                    .port()
+                    .map(|p| format!(":{}", p))
+                    .unwrap_or_default()
+            );
 
-            // 3. Build client_credentials config.
-            let scopes = scope.clone().unwrap_or_default();
-            let resource_uri = resource.clone().unwrap_or_else(|| url.to_string());
-            let cc_config = ClientCredentialsConfig::ClientSecret {
-                client_id: client_id.clone(),
-                client_secret: client_secret.clone(),
-                scopes,
-                resource: Some(resource_uri),
+            // Try path-specific well-known first, then root
+            let path = parsed_url.path().trim_end_matches('/');
+            let resource_metadata_urls = if path.is_empty() || path == "/" {
+                vec![format!("{}/.well-known/oauth-protected-resource", base)]
+            } else {
+                vec![
+                    format!(
+                        "{}/.well-known/oauth-protected-resource{}",
+                        base, path
+                    ),
+                    format!("{}/.well-known/oauth-protected-resource", base),
+                ]
             };
 
-            // 4. Validate server supports this auth method.
-            auth_manager.validate_client_credentials_metadata(&cc_config).map_err(|e| {
+            let mut resource_metadata: Option<serde_json::Value> = None;
+            for rm_url in &resource_metadata_urls {
+                match http.get(rm_url).send().await {
+                    Ok(resp) if resp.status().is_success() => {
+                        if let Ok(json) = resp.json::<serde_json::Value>().await {
+                            resource_metadata = Some(json);
+                            break;
+                        }
+                    }
+                    _ => continue,
+                }
+            }
+
+            let rm = resource_metadata.ok_or_else(|| {
                 format!(
-                    "MCP server '{}': OAuth server does not support client_credentials: {}",
-                    server_name, e
+                    "MCP server '{}': could not discover Protected Resource Metadata at {:?}",
+                    server_name, resource_metadata_urls
                 )
             })?;
 
-            // 5. Configure the client.
-            auth_manager.configure_client_credentials(&cc_config).map_err(|e| {
+            // Extract authorization server URL
+            let auth_servers = rm["authorization_servers"]
+                .as_array()
+                .ok_or_else(|| {
+                    format!(
+                        "MCP server '{}': resource metadata missing 'authorization_servers'",
+                        server_name
+                    )
+                })?;
+            let as_url = auth_servers
+                .first()
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    format!(
+                        "MCP server '{}': authorization_servers array is empty",
+                        server_name
+                    )
+                })?;
+
+            // ── Step 2: Discover Authorization Server Metadata ────────────
+            let as_parsed = url::Url::parse(as_url).map_err(|e| {
                 format!(
-                    "MCP server '{}': OAuth client configuration failed: {}",
-                    server_name, e
+                    "MCP server '{}': invalid AS URL '{}': {}",
+                    server_name, as_url, e
+                )
+            })?;
+            let as_base = format!(
+                "{}://{}{}",
+                as_parsed.scheme(),
+                as_parsed.host_str().unwrap_or("localhost"),
+                as_parsed
+                    .port()
+                    .map(|p| format!(":{}", p))
+                    .unwrap_or_default()
+            );
+            let as_path = as_parsed.path().trim_end_matches('/');
+
+            // Try RFC 8414 endpoints in priority order
+            let as_metadata_urls = if as_path.is_empty() || as_path == "/" {
+                vec![
+                    format!("{}/.well-known/oauth-authorization-server", as_base),
+                    format!("{}/.well-known/openid-configuration", as_base),
+                ]
+            } else {
+                vec![
+                    format!(
+                        "{}/.well-known/oauth-authorization-server{}",
+                        as_base, as_path
+                    ),
+                    format!(
+                        "{}/.well-known/openid-configuration{}",
+                        as_base, as_path
+                    ),
+                    format!("{}{}/.well-known/openid-configuration", as_base, as_path),
+                ]
+            };
+
+            let mut as_metadata: Option<serde_json::Value> = None;
+            for am_url in &as_metadata_urls {
+                match http.get(am_url).send().await {
+                    Ok(resp) if resp.status().is_success() => {
+                        if let Ok(json) = resp.json::<serde_json::Value>().await {
+                            as_metadata = Some(json);
+                            break;
+                        }
+                    }
+                    _ => continue,
+                }
+            }
+
+            let am = as_metadata.ok_or_else(|| {
+                format!(
+                    "MCP server '{}': could not discover AS metadata at {:?}",
+                    server_name, as_metadata_urls
                 )
             })?;
 
-            // 6. Exchange credentials for an access token.
-            auth_manager.exchange_client_credentials(&cc_config).await.map_err(|e| {
-                format!(
-                    "MCP server '{}': OAuth client_credentials exchange failed: {}",
-                    server_name, e
-                )
-            })?;
+            let token_endpoint = am["token_endpoint"]
+                .as_str()
+                .ok_or_else(|| {
+                    format!(
+                        "MCP server '{}': AS metadata missing 'token_endpoint'",
+                        server_name
+                    )
+                })?;
 
-            // 7. Retrieve the access token from the manager.
-            let access_token = auth_manager.get_access_token().await.map_err(|e| {
-                format!(
-                    "MCP server '{}': failed to retrieve OAuth access token after exchange: {}",
-                    server_name, e
-                )
-            })?;
+            // ── Step 3: Exchange client_credentials ───────────────────────
+            let scope_str = scope
+                .as_ref()
+                .map(|s| s.join(" "))
+                .unwrap_or_default();
+            let resource_value = resource.clone().unwrap_or_else(|| url.to_string());
+
+            let mut form = HashMap::new();
+            form.insert("grant_type", "client_credentials".to_string());
+            form.insert("client_id", client_id.clone());
+            form.insert("client_secret", client_secret.clone());
+            if !scope_str.is_empty() {
+                form.insert("scope", scope_str);
+            }
+            form.insert("resource", resource_value);
+
+            let token_resp = http
+                .post(token_endpoint)
+                .form(&form)
+                .send()
+                .await
+                .map_err(|e| {
+                    format!(
+                        "MCP server '{}': token request to '{}' failed: {}",
+                        server_name, token_endpoint, e
+                    )
+                })?;
+
+            if !token_resp.status().is_success() {
+                let status = token_resp.status();
+                let body = token_resp
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| "<no body>".to_string());
+                return Err(format!(
+                    "MCP server '{}': token endpoint returned {}: {}",
+                    server_name, status, body
+                ));
+            }
+
+            let token_json: serde_json::Value =
+                token_resp.json().await.map_err(|e| {
+                    format!(
+                        "MCP server '{}': failed to parse token response: {}",
+                        server_name, e
+                    )
+                })?;
+
+            let access_token = token_json["access_token"]
+                .as_str()
+                .ok_or_else(|| {
+                    format!(
+                        "MCP server '{}': token response missing 'access_token'",
+                        server_name
+                    )
+                })?;
 
             Ok(Some(format!("Bearer {}", access_token)))
         }
@@ -743,13 +874,15 @@ async fn connect_one(config: &McpServerConfig) -> Result<ConnectedMcpServer, Str
             // the same `/mcp`-style endpoints modern MCP servers expose.
             let transport = match auth_header {
                 Some(header) => {
-                    use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
-                    let config = StreamableHttpClientTransportConfig {
+                    use rmcp::transport::streamable_http_client::{
+                        StreamableHttpClientTransportConfig, StreamableHttpClientWorker,
+                    };
+                    let cfg = StreamableHttpClientTransportConfig {
                         uri: url.clone().into(),
                         auth_header: Some(header),
                         ..Default::default()
                     };
-                    rmcp::transport::StreamableHttpClientTransport::from_config(config)
+                    StreamableHttpClientWorker::new(reqwest::Client::new(), cfg)
                 }
                 None => rmcp::transport::StreamableHttpClientTransport::from_uri(url.clone()),
             };
