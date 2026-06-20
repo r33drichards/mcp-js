@@ -1086,6 +1086,73 @@ fn load_fetch_header_rules(
     Ok(rules)
 }
 
+/// Every key accepted inside a `--fetch-header` rule string.
+///
+/// This is the single source of truth for the flag's grammar: the parser
+/// dispatches off it, the "unknown key" error is generated from it, and the
+/// `fetch_header_help_documents_every_accepted_key` test asserts the
+/// `--fetch-header` help text documents each one. That closes the loop so the
+/// help (in `cli.rs`) cannot silently drift from what the parser accepts here.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum FetchHeaderKey {
+    Host,
+    Methods,
+    Header,
+    Value,
+    TokenUrl,
+    ClientId,
+    ClientSecret,
+    Scope,
+    RefreshBufferSecs,
+}
+
+impl FetchHeaderKey {
+    /// Canonical list of accepted keys. Keep in sync with the variants above;
+    /// the `as_str` and dispatch matches are exhaustive, so the compiler will
+    /// flag a new variant everywhere a key is handled except this list.
+    const ALL: &'static [FetchHeaderKey] = &[
+        FetchHeaderKey::Host,
+        FetchHeaderKey::Methods,
+        FetchHeaderKey::Header,
+        FetchHeaderKey::Value,
+        FetchHeaderKey::TokenUrl,
+        FetchHeaderKey::ClientId,
+        FetchHeaderKey::ClientSecret,
+        FetchHeaderKey::Scope,
+        FetchHeaderKey::RefreshBufferSecs,
+    ];
+
+    fn as_str(self) -> &'static str {
+        match self {
+            FetchHeaderKey::Host => "host",
+            FetchHeaderKey::Methods => "methods",
+            FetchHeaderKey::Header => "header",
+            FetchHeaderKey::Value => "value",
+            FetchHeaderKey::TokenUrl => "token_url",
+            FetchHeaderKey::ClientId => "client_id",
+            FetchHeaderKey::ClientSecret => "client_secret",
+            FetchHeaderKey::Scope => "scope",
+            FetchHeaderKey::RefreshBufferSecs => "refresh_buffer_secs",
+        }
+    }
+
+    fn from_key(key: &str) -> Option<FetchHeaderKey> {
+        FetchHeaderKey::ALL
+            .iter()
+            .copied()
+            .find(|candidate| candidate.as_str() == key)
+    }
+
+    /// Comma-separated list of accepted keys, for the "unknown key" error.
+    fn expected() -> String {
+        FetchHeaderKey::ALL
+            .iter()
+            .map(|key| key.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
 /// Parse a `--fetch-header` CLI string into a `HeaderRule`.
 /// Format: host=<host>,header=<name>,value=<val>[,methods=GET;POST]
 /// Or:     host=<host>,header=<name>,token_url=<url>,client_id=<id>,client_secret=<secret>[,scope=<scope>][,methods=GET;POST][,refresh_buffer_secs=30]
@@ -1105,26 +1172,27 @@ fn parse_fetch_header_cli(s: &str) -> Result<engine::fetch::HeaderRule> {
             .ok_or_else(|| anyhow::anyhow!(
                 "Invalid --fetch-header segment '{}'. Expected key=value", part
             ))?;
-        match key.trim() {
-            "host" => host = Some(val.trim().to_string()),
-            "methods" => methods = val.split(';').map(|m| m.to_string()).collect(),
-            "header" => header_name = Some(val.trim().to_string()),
-            "value" => header_value = Some(val.to_string()),
-            "token_url" => token_url = Some(val.trim().to_string()),
-            "client_id" => client_id = Some(val.trim().to_string()),
-            "client_secret" => client_secret = Some(val.to_string()),
-            "scope" => scope = Some(val.trim().to_string()),
-            "refresh_buffer_secs" => {
+        let parsed_key = FetchHeaderKey::from_key(key.trim()).ok_or_else(|| anyhow::anyhow!(
+            "Unknown key '{}' in --fetch-header. Expected: {}",
+            key.trim(),
+            FetchHeaderKey::expected()
+        ))?;
+        match parsed_key {
+            FetchHeaderKey::Host => host = Some(val.trim().to_string()),
+            FetchHeaderKey::Methods => methods = val.split(';').map(|m| m.to_string()).collect(),
+            FetchHeaderKey::Header => header_name = Some(val.trim().to_string()),
+            FetchHeaderKey::Value => header_value = Some(val.to_string()),
+            FetchHeaderKey::TokenUrl => token_url = Some(val.trim().to_string()),
+            FetchHeaderKey::ClientId => client_id = Some(val.trim().to_string()),
+            FetchHeaderKey::ClientSecret => client_secret = Some(val.to_string()),
+            FetchHeaderKey::Scope => scope = Some(val.trim().to_string()),
+            FetchHeaderKey::RefreshBufferSecs => {
                 refresh_buffer_secs = Some(val.trim().parse::<u64>().map_err(|e| anyhow::anyhow!(
                     "Invalid 'refresh_buffer_secs' value '{}': {}",
                     val.trim(),
                     e
                 ))?)
             }
-            other => anyhow::bail!(
-                "Unknown key '{}' in --fetch-header. Expected: host, methods, header, value, token_url, client_id, client_secret, scope, refresh_buffer_secs",
-                other
-            ),
         }
     }
 
@@ -1307,6 +1375,46 @@ mod tests {
         assert_eq!(auth.scope.as_deref(), Some("read:all"));
         assert_eq!(auth.refresh_buffer_secs, 45);
         assert_eq!(rule.methods(), &["GET".to_string(), "POST".to_string()]);
+    }
+
+    #[test]
+    fn parse_fetch_header_cli_rejects_unknown_key() {
+        let err = parse_fetch_header_cli(
+            "host=api.example.com,header=Authorization,value=Bearer fixed,bogus=1",
+        )
+        .expect_err("unknown key should fail");
+
+        let message = err.to_string();
+        assert!(message.contains("Unknown key 'bogus'"));
+        // The accepted-key list in the error is generated from the canonical
+        // table, so every key the parser accepts is advertised on failure.
+        assert!(message.contains(&super::FetchHeaderKey::expected()));
+    }
+
+    #[test]
+    fn fetch_header_help_documents_every_accepted_key() {
+        use clap::CommandFactory;
+
+        let command = crate::cli::Cli::command();
+        let arg = command
+            .get_arguments()
+            .find(|arg| arg.get_long() == Some("fetch-header"))
+            .expect("--fetch-header argument should exist");
+        let help = arg
+            .get_long_help()
+            .or_else(|| arg.get_help())
+            .map(|help| help.to_string())
+            .unwrap_or_default();
+
+        // The canonical key table is the single source of truth; the help text
+        // in cli.rs must document every key the parser accepts, or this fails.
+        for key in super::FetchHeaderKey::ALL {
+            assert!(
+                help.contains(key.as_str()),
+                "--fetch-header help omits accepted key `{}`; update the doc comment in cli.rs",
+                key.as_str()
+            );
+        }
     }
 
     #[test]
