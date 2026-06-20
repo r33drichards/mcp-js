@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches, Parser};
 
 use crate::engine::DEFAULT_EXECUTION_TIMEOUT_SECS;
 
@@ -294,11 +294,11 @@ pub struct Cli {
     #[arg(long = "wasm-stub-description", value_name = "NAME=TEXT", help_heading = "WASM")]
     pub wasm_stub_descriptions: Vec<String>,
 
-    /// Inject a header into fetch requests matching host/method rules.
-    /// Static value: host=<host>,header=<name>,value=<val>[,methods=GET;POST]
-    /// OAuth client credentials (token fetched and auto-refreshed):
-    /// host=<host>,header=<name>,token_url=<url>,client_id=<id>,client_secret=<secret>[,scope=<scope>][,methods=GET;POST][,refresh_buffer_secs=30]
-    /// 'value' and the OAuth keys are mutually exclusive. Can be specified multiple times.
+    /// Inject a header into fetch requests matching host/method rules (a static
+    /// value or auto-refreshed OAuth client credentials); see --help for the keys.
+    //
+    // The full key list in `--help` is generated from `FetchHeaderKey` via
+    // `build_command`, so it cannot drift from what the parser accepts.
     #[arg(long = "fetch-header", value_name = "RULE", help_heading = "Fetch")]
     pub fetch_headers: Vec<String>,
 
@@ -382,4 +382,104 @@ impl Cli {
     pub fn fs_enabled(&self) -> bool {
         self.fs_store != StoreKind::None
     }
+}
+
+/// Declares the `--fetch-header` key vocabulary — and each key's help blurb — in
+/// exactly one place.
+///
+/// Adding, renaming, or removing a key is a single edit to the
+/// `fetch_header_keys!` invocation below. Everything downstream is generated
+/// from it: the enum, the variant<->string mapping (`as_str`), the accepted-key
+/// list (`ALL`), the "expected keys" error text (`expected`), and — via
+/// [`fetch_header_long_help`] — the flag's `--help` text. So nothing can drift
+/// (O(1) maintenance), and the help can never omit a key: there is no separate
+/// list to keep in sync and therefore no runtime test to forget. The parser's
+/// dispatch `match` (in main.rs) is exhaustive, so a newly added key is a
+/// *compile error* until it is handled there too.
+macro_rules! fetch_header_keys {
+    ( $( $variant:ident = $name:literal : $desc:literal ),+ $(,)? ) => {
+        #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+        pub enum FetchHeaderKey {
+            $( $variant, )+
+        }
+
+        impl FetchHeaderKey {
+            /// Every accepted key, generated from the declaration.
+            pub const ALL: &'static [FetchHeaderKey] = &[ $( FetchHeaderKey::$variant ),+ ];
+
+            pub fn as_str(self) -> &'static str {
+                match self {
+                    $( FetchHeaderKey::$variant => $name, )+
+                }
+            }
+
+            /// One-line help blurb for the key, rendered into `--help`.
+            fn description(self) -> &'static str {
+                match self {
+                    $( FetchHeaderKey::$variant => $desc, )+
+                }
+            }
+
+            pub fn from_key(key: &str) -> Option<FetchHeaderKey> {
+                FetchHeaderKey::ALL
+                    .iter()
+                    .copied()
+                    .find(|candidate| candidate.as_str() == key)
+            }
+
+            /// Comma-separated list of accepted keys, for the "unknown key" error.
+            pub fn expected() -> String {
+                FetchHeaderKey::ALL
+                    .iter()
+                    .map(|key| key.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+        }
+    };
+}
+
+fetch_header_keys! {
+    Host = "host": "host pattern the request URL must match (required)",
+    Methods = "methods": "semicolon-separated HTTP methods to match, e.g. GET;POST (optional)",
+    Header = "header": "name of the header to inject (required)",
+    Value = "value": "static header value (static form)",
+    TokenUrl = "token_url": "OAuth token endpoint URL (OAuth form)",
+    ClientId = "client_id": "OAuth client id (OAuth form)",
+    ClientSecret = "client_secret": "OAuth client secret (OAuth form)",
+    Scope = "scope": "OAuth scope (OAuth form, optional)",
+    RefreshBufferSecs = "refresh_buffer_secs": "seconds before expiry to refresh the token, default 30 (OAuth form, optional)",
+}
+
+/// Full `--fetch-header` long help, with the accepted-key list rendered straight
+/// from [`FetchHeaderKey`]. Because the key list is generated, it cannot omit or
+/// misname a key the parser accepts.
+fn fetch_header_long_help() -> String {
+    let keys = FetchHeaderKey::ALL
+        .iter()
+        .map(|key| format!("{} — {}", key.as_str(), key.description()))
+        .collect::<Vec<_>>()
+        .join("\n  ");
+    format!(
+        "Inject a header into fetch requests that match host/method rules. Each \
+         rule is a comma-separated list of key=value pairs and must use either \
+         the static value form or the OAuth client-credentials form (mutually \
+         exclusive). Can be specified multiple times.\nAccepted keys:\n  {keys}"
+    )
+}
+
+/// Canonical `clap::Command` for the binary: the derived command, with the
+/// `--fetch-header` long help generated from [`FetchHeaderKey`]. The server
+/// binary ([`parse`]) and the `generate-cli-markdown` helper both build the
+/// command through here, so the live `--help` and the generated CLI reference
+/// stay identical and table-driven.
+pub fn build_command() -> clap::Command {
+    Cli::command().mut_arg("fetch_headers", |arg| arg.long_help(fetch_header_long_help()))
+}
+
+/// Parse CLI arguments through [`build_command`]. Mirrors `Cli::parse`, but with
+/// the generated `--fetch-header` help wired in.
+pub fn parse() -> Cli {
+    let mut matches = build_command().get_matches();
+    Cli::from_arg_matches_mut(&mut matches).unwrap_or_else(|err| err.exit())
 }

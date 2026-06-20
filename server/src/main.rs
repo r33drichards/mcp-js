@@ -1,7 +1,7 @@
 use anyhow::Result;
 use rmcp::{ServerHandler, ServiceExt, transport::stdio};
 use tracing_subscriber::{self};
-use clap::{Parser, CommandFactory};
+use clap::CommandFactory;
 use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
 };
@@ -20,7 +20,7 @@ mod api;
 mod cluster;
 mod cli;
 mod session;
-use cli::{Cli, StoreKind};
+use cli::{Cli, FetchHeaderKey, StoreKind};
 use engine::{initialize_v8, Engine, WasmModule};
 use engine::fetch::FetchConfig;
 use engine::fs::FsConfig;
@@ -47,7 +47,7 @@ async fn main() -> Result<()> {
         .with_ansi(false)
         .init();
 
-    let cli = Cli::parse();
+    let cli = cli::parse();
 
     // ── --print-openapi: dump spec and exit ─────────────────────────────
     if cli.print_openapi {
@@ -1086,63 +1086,6 @@ fn load_fetch_header_rules(
     Ok(rules)
 }
 
-/// Declares the `--fetch-header` key vocabulary in exactly one place.
-///
-/// Adding, renaming, or removing a key is a single edit to the
-/// `fetch_header_keys!` invocation below: the enum, the variant<->string
-/// mapping (`as_str` / `from_key`), the accepted-key list (`ALL`), and the
-/// "expected keys" error text are all generated from it, so they cannot drift
-/// out of sync — O(1) maintenance. The parser's dispatch `match` is exhaustive,
-/// so a newly added key is a *compile error* until it is handled there too,
-/// which makes a forgotten key a build failure rather than a runtime surprise.
-macro_rules! fetch_header_keys {
-    ( $( $variant:ident = $name:literal ),+ $(,)? ) => {
-        #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-        enum FetchHeaderKey {
-            $( $variant, )+
-        }
-
-        impl FetchHeaderKey {
-            /// Every accepted key, generated from the declaration below.
-            const ALL: &'static [FetchHeaderKey] = &[ $( FetchHeaderKey::$variant ),+ ];
-
-            fn as_str(self) -> &'static str {
-                match self {
-                    $( FetchHeaderKey::$variant => $name, )+
-                }
-            }
-
-            fn from_key(key: &str) -> Option<FetchHeaderKey> {
-                FetchHeaderKey::ALL
-                    .iter()
-                    .copied()
-                    .find(|candidate| candidate.as_str() == key)
-            }
-
-            /// Comma-separated list of accepted keys, for the "unknown key" error.
-            fn expected() -> String {
-                FetchHeaderKey::ALL
-                    .iter()
-                    .map(|key| key.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            }
-        }
-    };
-}
-
-fetch_header_keys! {
-    Host = "host",
-    Methods = "methods",
-    Header = "header",
-    Value = "value",
-    TokenUrl = "token_url",
-    ClientId = "client_id",
-    ClientSecret = "client_secret",
-    Scope = "scope",
-    RefreshBufferSecs = "refresh_buffer_secs",
-}
-
 /// Parse a `--fetch-header` CLI string into a `HeaderRule`.
 /// Format: host=<host>,header=<name>,value=<val>[,methods=GET;POST]
 /// Or:     host=<host>,header=<name>,token_url=<url>,client_id=<id>,client_secret=<secret>[,scope=<scope>][,methods=GET;POST][,refresh_buffer_secs=30]
@@ -1483,32 +1426,6 @@ mod tests {
         // The accepted-key list in the error is generated from the canonical
         // table, so every key the parser accepts is advertised on failure.
         assert!(message.contains(&super::FetchHeaderKey::expected()));
-    }
-
-    #[test]
-    fn fetch_header_help_documents_every_accepted_key() {
-        use clap::CommandFactory;
-
-        let command = crate::cli::Cli::command();
-        let arg = command
-            .get_arguments()
-            .find(|arg| arg.get_long() == Some("fetch-header"))
-            .expect("--fetch-header argument should exist");
-        let help = arg
-            .get_long_help()
-            .or_else(|| arg.get_help())
-            .map(|help| help.to_string())
-            .unwrap_or_default();
-
-        // The canonical key table is the single source of truth; the help text
-        // in cli.rs must document every key the parser accepts, or this fails.
-        for key in super::FetchHeaderKey::ALL {
-            assert!(
-                help.contains(key.as_str()),
-                "--fetch-header help omits accepted key `{}`; update the doc comment in cli.rs",
-                key.as_str()
-            );
-        }
     }
 
     #[test]

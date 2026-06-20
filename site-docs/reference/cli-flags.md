@@ -159,19 +159,19 @@ Path to the sled database for the session log (per-session heap+fs history) and 
 
 ## Fetch
 
-### `--fetch-header`
-
-Inject a header into fetch requests matching host/method rules. Static value: host=<host>,header=<name>,value=<val>[,methods=GET;POST] OAuth client credentials (token fetched and auto-refreshed): host=<host>,header=<name>,token_url=<url>,client_id=<id>,client_secret=<secret>[,scope=<scope>][,methods=GET;POST][,refresh_buffer_secs=30] 'value' and the OAuth keys are mutually exclusive. Can be specified multiple times
-
-- Value: `RULE`
-- Repeatable: yes
-
 ### `--fetch-header-config`
 
 Path to a JSON file with header injection rules. Each rule sets "host" (plus optional "methods") and exactly one of "headers" or "auth". Static: [{"host": "api.github.com", "methods": ["GET","POST"], "headers": {"Authorization": "Bearer ..."}}] OAuth: [{"host": "api.example.com", "auth": {"type": "oauth_client_credentials", "header": "Authorization", "token_url": "https://issuer.example.com/token", "client_id": "abc", "client_secret": "xyz", "scope": "read:all", "refresh_buffer_secs": 30}}]
 
 - Environment: `MCP_V8_FETCH_HEADER_CONFIG`
 - Value: `PATH`
+
+### `--fetch-header`
+
+Inject a header into fetch requests that match host/method rules. Each rule is a comma-separated list of key=value pairs and must use either the static value form or the OAuth client-credentials form (mutually exclusive). Can be specified multiple times. Accepted keys: host — host pattern the request URL must match (required) methods — semicolon-separated HTTP methods to match, e.g. GET;POST (optional) header — name of the header to inject (required) value — static header value (static form) token_url — OAuth token endpoint URL (OAuth form) client_id — OAuth client id (OAuth form) client_secret — OAuth client secret (OAuth form) scope — OAuth scope (OAuth form, optional) refresh_buffer_secs — seconds before expiry to refresh the token, default 30 (OAuth form, optional)
+
+- Value: `RULE`
+- Repeatable: yes
 
 ## Filesystem
 
