@@ -874,15 +874,10 @@ async fn connect_one(config: &McpServerConfig) -> Result<ConnectedMcpServer, Str
             // the same `/mcp`-style endpoints modern MCP servers expose.
             let transport = match auth_header {
                 Some(header) => {
-                    use rmcp::transport::streamable_http_client::{
-                        StreamableHttpClientTransportConfig, StreamableHttpClientWorker,
-                    };
-                    let cfg = StreamableHttpClientTransportConfig {
-                        uri: url.clone().into(),
-                        auth_header: Some(header),
-                        ..Default::default()
-                    };
-                    StreamableHttpClientWorker::new(reqwest::Client::new(), cfg)
+                    use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+                    let cfg = StreamableHttpClientTransportConfig::with_uri(url.clone())
+                        .auth_header(header);
+                    rmcp::transport::StreamableHttpClientTransport::from_config(cfg)
                 }
                 None => rmcp::transport::StreamableHttpClientTransport::from_uri(url.clone()),
             };
