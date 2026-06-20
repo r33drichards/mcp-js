@@ -335,13 +335,20 @@ pub struct Cli {
     /// via the `mcp` global object (mcp.callTool, mcp.listTools, mcp.servers).
     /// Format for stdio: name=stdio:command:arg1:arg2
     /// Format for SSE:   name=sse:url
+    /// Format for HTTP:  name=http:url
     /// Can be specified multiple times for multiple servers.
+    /// Note: authentication requires --mcp-config JSON file (too complex for CLI).
     #[arg(long = "mcp-server", value_name = "NAME=TRANSPORT:...", help_heading = "MCP Server Module")]
     pub mcp_servers: Vec<String>,
 
-    /// Path to a JSON config file for MCP server modules.
+    /// Path to a JSON config file for MCP server modules. Supports auth.
     /// Format: [{"name": "srv", "transport": "stdio", "command": "cmd", "args": ["a"]},
-    ///          {"name": "srv2", "transport": "sse", "url": "http://..."}]
+    ///          {"name": "srv2", "transport": "sse", "url": "http://..."},
+    ///          {"name": "srv3", "transport": "http", "url": "https://mcp.example.com/mcp",
+    ///           "auth": {"type": "bearer", "token": "sk-..."}},
+    ///          {"name": "srv4", "transport": "http", "url": "https://mcp.example.com/mcp",
+    ///           "auth": {"type": "client_credentials", "token_url": "https://auth.example.com/token",
+    ///                    "client_id": "my-app", "client_secret": "secret", "scope": "mcp:read"}}]
     #[arg(long = "mcp-config", env = "MCP_V8_MCP_CONFIG", value_name = "PATH", help_heading = "MCP Server Module")]
     pub mcp_config: Option<String>,
 

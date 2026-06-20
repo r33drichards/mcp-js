@@ -30,6 +30,26 @@ use rmcp::RoleClient;
 
 // ── Configuration ────────────────────────────────────────────────────────
 
+/// Authentication configuration for HTTP-based MCP server connections.
+///
+/// Only available via `--mcp-config` JSON file (too complex for CLI flags).
+/// Ignored for stdio transports.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum McpServerAuth {
+    /// Static bearer token — sent as `Authorization: Bearer <token>` on every request.
+    Bearer { token: String },
+    /// OAuth 2.0 Client Credentials grant — acquires and auto-refreshes tokens
+    /// using the existing `OAuthClientCredentialsTokenSource` infrastructure.
+    ClientCredentials {
+        token_url: String,
+        client_id: String,
+        client_secret: String,
+        #[serde(default)]
+        scope: Option<String>,
+    },
+}
+
 /// Transport configuration for a single MCP server.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "transport", rename_all = "lowercase")]
@@ -44,6 +64,9 @@ pub enum McpServerTransport {
     Sse {
         url: String,
     },
+    Http {
+        url: String,
+    },
 }
 
 /// Configuration for a single named MCP server.
@@ -52,6 +75,11 @@ pub struct McpServerConfig {
     pub name: String,
     #[serde(flatten)]
     pub transport: McpServerTransport,
+    /// Optional authentication for HTTP-based transports (SSE, HTTP).
+    /// Ignored for stdio transports. Only available via `--mcp-config` JSON
+    /// file (too complex for CLI flags).
+    #[serde(default)]
+    pub auth: Option<McpServerAuth>,
 }
 
 // ── Tool metadata for JS ─────────────────────────────────────────────────
@@ -522,11 +550,57 @@ pub fn stub_call_instructions(
 
 // ── Connection logic ─────────────────────────────────────────────────────
 
+/// Resolve the auth configuration into an `Authorization` header value (e.g.
+/// `"Bearer <token>"`) that can be passed to the Streamable HTTP transport.
+async fn resolve_auth_header(
+    server_name: &str,
+    auth: &Option<McpServerAuth>,
+) -> Result<Option<String>, String> {
+    match auth {
+        None => Ok(None),
+        Some(McpServerAuth::Bearer { token }) => Ok(Some(format!("Bearer {}", token))),
+        Some(McpServerAuth::ClientCredentials {
+            token_url,
+            client_id,
+            client_secret,
+            scope,
+        }) => {
+            use super::fetch_auth::{OAuthClientCredentialsTokenSource, OAuthTokenSourceConfig};
+
+            let source = OAuthClientCredentialsTokenSource::new(
+                reqwest::Client::new(),
+                OAuthTokenSourceConfig {
+                    header: "Authorization".to_string(),
+                    token_url: token_url.clone(),
+                    client_id: client_id.clone(),
+                    client_secret: client_secret.clone(),
+                    scope: scope.clone(),
+                    refresh_buffer_secs: 30,
+                },
+            );
+            let header_value = source.authorization_header_value().await.map_err(|e| {
+                format!(
+                    "OAuth token acquisition for '{}' failed: {}",
+                    server_name, e
+                )
+            })?;
+            Ok(Some(header_value))
+        }
+    }
+}
+
 async fn connect_one(config: &McpServerConfig) -> Result<ConnectedMcpServer, String> {
     use rmcp::ServiceExt;
 
     match &config.transport {
         McpServerTransport::Stdio { command, args, env } => {
+            if config.auth.is_some() {
+                tracing::warn!(
+                    "MCP server '{}': auth configuration is ignored for stdio transport",
+                    config.name
+                );
+            }
+
             let mut cmd = tokio::process::Command::new(command);
             cmd.args(args);
             for (k, v) in env {
@@ -556,11 +630,25 @@ async fn connect_one(config: &McpServerConfig) -> Result<ConnectedMcpServer, Str
                 _keep_alive: keep_alive.abort_handle(),
             })
         }
-        McpServerTransport::Sse { url } => {
+        McpServerTransport::Sse { url } | McpServerTransport::Http { url } => {
+            // Resolve auth header (Bearer or OAuth client_credentials).
+            let auth_header = resolve_auth_header(&config.name, &config.auth).await?;
+
             // The standalone SSE client transport was removed in rmcp 1.x; the
             // Streamable HTTP client transport is its replacement and speaks to
             // the same `/mcp`-style endpoints modern MCP servers expose.
-            let transport = rmcp::transport::StreamableHttpClientTransport::from_uri(url.clone());
+            let transport = match auth_header {
+                Some(header) => {
+                    use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+                    let config = StreamableHttpClientTransportConfig {
+                        uri: url.clone().into(),
+                        auth_header: Some(header),
+                        ..Default::default()
+                    };
+                    rmcp::transport::StreamableHttpClientTransport::from_config(config)
+                }
+                None => rmcp::transport::StreamableHttpClientTransport::from_uri(url.clone()),
+            };
 
             let service: rmcp::service::RunningService<RoleClient, ()> =
                 ().serve(transport)
