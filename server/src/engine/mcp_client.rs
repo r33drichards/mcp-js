@@ -44,6 +44,9 @@ pub enum McpServerTransport {
     Sse {
         url: String,
     },
+    Http {
+        url: String,
+    },
 }
 
 /// Configuration for a single named MCP server.
@@ -560,6 +563,33 @@ async fn connect_one(config: &McpServerConfig) -> Result<ConnectedMcpServer, Str
             // The standalone SSE client transport was removed in rmcp 1.x; the
             // Streamable HTTP client transport is its replacement and speaks to
             // the same `/mcp`-style endpoints modern MCP servers expose.
+            let transport = rmcp::transport::StreamableHttpClientTransport::from_uri(url.clone());
+
+            let service: rmcp::service::RunningService<RoleClient, ()> =
+                ().serve(transport)
+                    .await
+                    .map_err(|e| format!("MCP client handshake with '{}' failed: {}", config.name, e))?;
+
+            let peer = service.peer().clone();
+            let tools = peer
+                .list_all_tools()
+                .await
+                .map_err(|e| format!("Failed to list tools from '{}': {}", config.name, e))?;
+
+            let keep_alive = tokio::spawn(async move {
+                let _ = service.waiting().await;
+            });
+
+            Ok(ConnectedMcpServer {
+                peer,
+                tools,
+                _keep_alive: keep_alive.abort_handle(),
+            })
+        }
+        McpServerTransport::Http { url } => {
+            // Streamable HTTP transport (MCP spec 2025-03-26+). Uses the same
+            // rmcp StreamableHttpClientTransport as the legacy `sse` variant but
+            // with a name that matches the current MCP specification terminology.
             let transport = rmcp::transport::StreamableHttpClientTransport::from_uri(url.clone());
 
             let service: rmcp::service::RunningService<RoleClient, ()> =

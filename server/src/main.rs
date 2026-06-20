@@ -1211,9 +1211,16 @@ fn load_mcp_server_configs(
                     url: url.to_string(),
                 },
             });
+        } else if let Some(url) = rest.strip_prefix("http:") {
+            configs.push(McpServerConfig {
+                name,
+                transport: McpServerTransport::Http {
+                    url: url.to_string(),
+                },
+            });
         } else {
             anyhow::bail!(
-                "Invalid --mcp-server transport for '{}': must start with 'stdio:' or 'sse:'. Got: '{}'",
+                "Invalid --mcp-server transport for '{}': must start with 'stdio:', 'sse:', or 'http:'. Got: '{}'",
                 name, rest
             );
         }
