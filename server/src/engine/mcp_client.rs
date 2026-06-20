@@ -41,12 +41,32 @@ pub enum McpServerAuth {
     Bearer { token: String },
     /// OAuth 2.0 Client Credentials grant — acquires and auto-refreshes tokens
     /// using the existing `OAuthClientCredentialsTokenSource` infrastructure.
+    /// Requires knowing the token endpoint URL upfront.
     ClientCredentials {
         token_url: String,
         client_id: String,
         client_secret: String,
         #[serde(default)]
         scope: Option<String>,
+    },
+    /// Full MCP OAuth discovery per the 2025-11-25 spec (RFC 9728 + RFC 8414).
+    ///
+    /// Flow: makes an unauthenticated request to the MCP server URL → receives 401
+    /// with `WWW-Authenticate` header containing `resource_metadata` URL (or falls
+    /// back to well-known URI) → fetches Protected Resource Metadata → discovers
+    /// Authorization Server → fetches AS metadata → performs client_credentials
+    /// grant → uses the resulting token.
+    ///
+    /// This is the spec-compliant way to connect to OAuth-protected MCP servers
+    /// without needing to know the token endpoint in advance.
+    OauthDiscovery {
+        client_id: String,
+        client_secret: String,
+        #[serde(default)]
+        scope: Option<Vec<String>>,
+        /// Optional resource indicator (RFC 8707). If omitted, uses the server URL.
+        #[serde(default)]
+        resource: Option<String>,
     },
 }
 
@@ -554,6 +574,7 @@ pub fn stub_call_instructions(
 /// `"Bearer <token>"`) that can be passed to the Streamable HTTP transport.
 async fn resolve_auth_header(
     server_name: &str,
+    server_url: Option<&str>,
     auth: &Option<McpServerAuth>,
 ) -> Result<Option<String>, String> {
     match auth {
@@ -585,6 +606,89 @@ async fn resolve_auth_header(
                 )
             })?;
             Ok(Some(header_value))
+        }
+        Some(McpServerAuth::OauthDiscovery {
+            client_id,
+            client_secret,
+            scope,
+            resource,
+        }) => {
+            use rmcp::transport::auth::{
+                AuthorizationManager, ClientCredentialsConfig, InMemoryCredentialStore,
+            };
+
+            let url = server_url.ok_or_else(|| {
+                format!(
+                    "MCP server '{}': oauth_discovery auth requires an HTTP-based transport URL",
+                    server_name
+                )
+            })?;
+
+            // 1. Create AuthorizationManager targeting the MCP server URL.
+            //    This triggers the RFC 9728 Protected Resource Metadata discovery
+            //    and RFC 8414 Authorization Server Metadata discovery.
+            let auth_manager = AuthorizationManager::new(url)
+                .await
+                .map_err(|e| format!(
+                    "MCP server '{}': OAuth discovery failed (could not reach '{}'): {}",
+                    server_name, url, e
+                ))?;
+
+            auth_manager
+                .set_credential_store(InMemoryCredentialStore::new())
+                .await;
+
+            // 2. Discover authorization server metadata.
+            auth_manager.discover_metadata().await.map_err(|e| {
+                format!(
+                    "MCP server '{}': OAuth AS metadata discovery failed: {}",
+                    server_name, e
+                )
+            })?;
+
+            // 3. Build client_credentials config.
+            let scopes = scope.clone().unwrap_or_default();
+            let resource_uri = resource.clone().unwrap_or_else(|| url.to_string());
+            let cc_config = ClientCredentialsConfig::ClientSecret {
+                client_id: client_id.clone(),
+                client_secret: client_secret.clone(),
+                scopes,
+                resource: Some(resource_uri),
+            };
+
+            // 4. Validate server supports this auth method.
+            auth_manager.validate_client_credentials_metadata(&cc_config).map_err(|e| {
+                format!(
+                    "MCP server '{}': OAuth server does not support client_credentials: {}",
+                    server_name, e
+                )
+            })?;
+
+            // 5. Configure the client.
+            auth_manager.configure_client_credentials(&cc_config).map_err(|e| {
+                format!(
+                    "MCP server '{}': OAuth client configuration failed: {}",
+                    server_name, e
+                )
+            })?;
+
+            // 6. Exchange credentials for an access token.
+            auth_manager.exchange_client_credentials(&cc_config).await.map_err(|e| {
+                format!(
+                    "MCP server '{}': OAuth client_credentials exchange failed: {}",
+                    server_name, e
+                )
+            })?;
+
+            // 7. Retrieve the access token from the manager.
+            let access_token = auth_manager.get_access_token().await.map_err(|e| {
+                format!(
+                    "MCP server '{}': failed to retrieve OAuth access token after exchange: {}",
+                    server_name, e
+                )
+            })?;
+
+            Ok(Some(format!("Bearer {}", access_token)))
         }
     }
 }
@@ -631,8 +735,8 @@ async fn connect_one(config: &McpServerConfig) -> Result<ConnectedMcpServer, Str
             })
         }
         McpServerTransport::Sse { url } | McpServerTransport::Http { url } => {
-            // Resolve auth header (Bearer or OAuth client_credentials).
-            let auth_header = resolve_auth_header(&config.name, &config.auth).await?;
+            // Resolve auth header (Bearer, OAuth client_credentials, or MCP OAuth discovery).
+            let auth_header = resolve_auth_header(&config.name, Some(url.as_str()), &config.auth).await?;
 
             // The standalone SSE client transport was removed in rmcp 1.x; the
             // Streamable HTTP client transport is its replacement and speaks to
