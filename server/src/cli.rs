@@ -294,14 +294,18 @@ pub struct Cli {
     #[arg(long = "wasm-stub-description", value_name = "NAME=TEXT", help_heading = "WASM")]
     pub wasm_stub_descriptions: Vec<String>,
 
-    /// Inject headers into fetch requests matching host/method rules.
-    /// Format: host=<host>,header=<name>,value=<val>[,methods=GET;POST]
-    /// Can be specified multiple times.
+    /// Inject a header into fetch requests matching host/method rules.
+    /// Static value: host=<host>,header=<name>,value=<val>[,methods=GET;POST]
+    /// OAuth client credentials (token fetched and auto-refreshed):
+    /// host=<host>,header=<name>,token_url=<url>,client_id=<id>,client_secret=<secret>[,scope=<scope>][,methods=GET;POST][,refresh_buffer_secs=30]
+    /// 'value' and the OAuth keys are mutually exclusive. Can be specified multiple times.
     #[arg(long = "fetch-header", value_name = "RULE", help_heading = "Fetch")]
     pub fetch_headers: Vec<String>,
 
-    /// Path to a JSON file with header injection rules.
-    /// Format: [{"host": "api.github.com", "methods": ["GET","POST"], "headers": {"Authorization": "Bearer ..."}}]
+    /// Path to a JSON file with header injection rules. Each rule sets "host"
+    /// (plus optional "methods") and exactly one of "headers" or "auth".
+    /// Static: [{"host": "api.github.com", "methods": ["GET","POST"], "headers": {"Authorization": "Bearer ..."}}]
+    /// OAuth: [{"host": "api.example.com", "auth": {"type": "oauth_client_credentials", "header": "Authorization", "token_url": "https://issuer/token", "client_id": "abc", "client_secret": "xyz", "scope": "read:all", "refresh_buffer_secs": 30}}]
     #[arg(long = "fetch-header-config", env = "MCP_V8_FETCH_HEADER_CONFIG", value_name = "PATH", help_heading = "Fetch")]
     pub fetch_header_config: Option<String>,
 
