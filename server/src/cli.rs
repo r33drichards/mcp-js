@@ -305,7 +305,7 @@ pub struct Cli {
     /// Path to a JSON file with header injection rules. Each rule sets "host"
     /// (plus optional "methods") and exactly one of "headers" or "auth".
     /// Static: [{"host": "api.github.com", "methods": ["GET","POST"], "headers": {"Authorization": "Bearer ..."}}]
-    /// OAuth: [{"host": "api.example.com", "auth": {"type": "oauth_client_credentials", "header": "Authorization", "token_url": "https://issuer/token", "client_id": "abc", "client_secret": "xyz", "scope": "read:all", "refresh_buffer_secs": 30}}]
+    /// OAuth: [{"host": "api.example.com", "auth": {"type": "oauth_client_credentials", "header": "Authorization", "token_url": "https://issuer.example.com/token", "client_id": "abc", "client_secret": "xyz", "scope": "read:all", "refresh_buffer_secs": 30}}]
     #[arg(long = "fetch-header-config", env = "MCP_V8_FETCH_HEADER_CONFIG", value_name = "PATH", help_heading = "Fetch")]
     pub fetch_header_config: Option<String>,
 

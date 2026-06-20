@@ -168,7 +168,7 @@ Inject a header into fetch requests matching host/method rules. Static value: ho
 
 ### `--fetch-header-config`
 
-Path to a JSON file with header injection rules. Each rule sets "host" (plus optional "methods") and exactly one of "headers" or "auth". Static: [{"host": "api.github.com", "methods": ["GET","POST"], "headers": {"Authorization": "Bearer ..."}}] OAuth: [{"host": "api.example.com", "auth": {"type": "oauth_client_credentials", "header": "Authorization", "token_url": "https://issuer/token", "client_id": "abc", "client_secret": "xyz", "scope": "read:all", "refresh_buffer_secs": 30}}]
+Path to a JSON file with header injection rules. Each rule sets "host" (plus optional "methods") and exactly one of "headers" or "auth". Static: [{"host": "api.github.com", "methods": ["GET","POST"], "headers": {"Authorization": "Bearer ..."}}] OAuth: [{"host": "api.example.com", "auth": {"type": "oauth_client_credentials", "header": "Authorization", "token_url": "https://issuer.example.com/token", "client_id": "abc", "client_secret": "xyz", "scope": "read:all", "refresh_buffer_secs": 30}}]
 
 - Environment: `MCP_V8_FETCH_HEADER_CONFIG`
 - Value: `PATH`
