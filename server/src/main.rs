@@ -1086,71 +1086,61 @@ fn load_fetch_header_rules(
     Ok(rules)
 }
 
-/// Every key accepted inside a `--fetch-header` rule string.
+/// Declares the `--fetch-header` key vocabulary in exactly one place.
 ///
-/// This is the single source of truth for the flag's grammar: the parser
-/// dispatches off it, the "unknown key" error is generated from it, and the
-/// `fetch_header_help_documents_every_accepted_key` test asserts the
-/// `--fetch-header` help text documents each one. That closes the loop so the
-/// help (in `cli.rs`) cannot silently drift from what the parser accepts here.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum FetchHeaderKey {
-    Host,
-    Methods,
-    Header,
-    Value,
-    TokenUrl,
-    ClientId,
-    ClientSecret,
-    Scope,
-    RefreshBufferSecs,
+/// Adding, renaming, or removing a key is a single edit to the
+/// `fetch_header_keys!` invocation below: the enum, the variant<->string
+/// mapping (`as_str` / `from_key`), the accepted-key list (`ALL`), and the
+/// "expected keys" error text are all generated from it, so they cannot drift
+/// out of sync — O(1) maintenance. The parser's dispatch `match` is exhaustive,
+/// so a newly added key is a *compile error* until it is handled there too,
+/// which makes a forgotten key a build failure rather than a runtime surprise.
+macro_rules! fetch_header_keys {
+    ( $( $variant:ident = $name:literal ),+ $(,)? ) => {
+        #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+        enum FetchHeaderKey {
+            $( $variant, )+
+        }
+
+        impl FetchHeaderKey {
+            /// Every accepted key, generated from the declaration below.
+            const ALL: &'static [FetchHeaderKey] = &[ $( FetchHeaderKey::$variant ),+ ];
+
+            fn as_str(self) -> &'static str {
+                match self {
+                    $( FetchHeaderKey::$variant => $name, )+
+                }
+            }
+
+            fn from_key(key: &str) -> Option<FetchHeaderKey> {
+                FetchHeaderKey::ALL
+                    .iter()
+                    .copied()
+                    .find(|candidate| candidate.as_str() == key)
+            }
+
+            /// Comma-separated list of accepted keys, for the "unknown key" error.
+            fn expected() -> String {
+                FetchHeaderKey::ALL
+                    .iter()
+                    .map(|key| key.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+        }
+    };
 }
 
-impl FetchHeaderKey {
-    /// Canonical list of accepted keys. Keep in sync with the variants above;
-    /// the `as_str` and dispatch matches are exhaustive, so the compiler will
-    /// flag a new variant everywhere a key is handled except this list.
-    const ALL: &'static [FetchHeaderKey] = &[
-        FetchHeaderKey::Host,
-        FetchHeaderKey::Methods,
-        FetchHeaderKey::Header,
-        FetchHeaderKey::Value,
-        FetchHeaderKey::TokenUrl,
-        FetchHeaderKey::ClientId,
-        FetchHeaderKey::ClientSecret,
-        FetchHeaderKey::Scope,
-        FetchHeaderKey::RefreshBufferSecs,
-    ];
-
-    fn as_str(self) -> &'static str {
-        match self {
-            FetchHeaderKey::Host => "host",
-            FetchHeaderKey::Methods => "methods",
-            FetchHeaderKey::Header => "header",
-            FetchHeaderKey::Value => "value",
-            FetchHeaderKey::TokenUrl => "token_url",
-            FetchHeaderKey::ClientId => "client_id",
-            FetchHeaderKey::ClientSecret => "client_secret",
-            FetchHeaderKey::Scope => "scope",
-            FetchHeaderKey::RefreshBufferSecs => "refresh_buffer_secs",
-        }
-    }
-
-    fn from_key(key: &str) -> Option<FetchHeaderKey> {
-        FetchHeaderKey::ALL
-            .iter()
-            .copied()
-            .find(|candidate| candidate.as_str() == key)
-    }
-
-    /// Comma-separated list of accepted keys, for the "unknown key" error.
-    fn expected() -> String {
-        FetchHeaderKey::ALL
-            .iter()
-            .map(|key| key.as_str())
-            .collect::<Vec<_>>()
-            .join(", ")
-    }
+fetch_header_keys! {
+    Host = "host",
+    Methods = "methods",
+    Header = "header",
+    Value = "value",
+    TokenUrl = "token_url",
+    ClientId = "client_id",
+    ClientSecret = "client_secret",
+    Scope = "scope",
+    RefreshBufferSecs = "refresh_buffer_secs",
 }
 
 /// Parse a `--fetch-header` CLI string into a `HeaderRule`.
