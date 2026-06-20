@@ -46,7 +46,7 @@
           # Vendor hash for server's cargo deps; refreshed when deps changed.
           # Bumped for the rmcp 1.7 (crates.io) + rmcp 0.1.5 (git, renamed
           # rmcp_legacy for the SSE transport) dependency set.
-          hash = "sha256-J3RhrBxq5IT2DwEVf3AjyPGpCNuQ6Del5ij+5J8fDDg=";
+          hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
         });
 
         docsPython = pkgs.python3.withPackages (
