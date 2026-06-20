@@ -1309,7 +1309,111 @@ fn load_mcp_server_configs(
 
 #[cfg(test)]
 mod tests {
-    use super::{load_fetch_header_rules, parse_fetch_header_cli, resolve_text_or_file};
+    use super::{
+        load_fetch_header_rules, load_mcp_server_configs, load_wasm_modules,
+        parse_fetch_header_cli, resolve_text_or_file,
+    };
+
+    // ── Documented CLI format guards ─────────────────────────────────────
+    // Each structured flag's documented Format:/Examples: shape is round-tripped
+    // through its real parser, so the help text in cli.rs cannot drift from what
+    // the parser actually accepts (the gap that hid OAuth behind stale --help).
+
+    #[test]
+    fn mcp_server_cli_parses_documented_transports() {
+        use crate::engine::mcp_client::McpServerTransport;
+
+        // Documented formats (--mcp-server help):
+        //   name=stdio:command:arg1:arg2   and   name=sse:url
+        let configs = load_mcp_server_configs(
+            &[
+                "weather=stdio:python:server.py:--verbose".to_string(),
+                "remote=sse:http://127.0.0.1:9000/sse".to_string(),
+            ],
+            &None,
+        )
+        .expect("documented --mcp-server forms should parse");
+
+        assert_eq!(configs.len(), 2);
+        match &configs[0].transport {
+            McpServerTransport::Stdio { command, args, .. } => {
+                assert_eq!(command, "python");
+                assert_eq!(args, &["server.py".to_string(), "--verbose".to_string()]);
+            }
+            _ => panic!("expected stdio transport for first --mcp-server entry"),
+        }
+        match &configs[1].transport {
+            McpServerTransport::Sse { url } => assert_eq!(url, "http://127.0.0.1:9000/sse"),
+            _ => panic!("expected sse transport for second --mcp-server entry"),
+        }
+    }
+
+    #[test]
+    fn mcp_server_help_documents_supported_transports() {
+        use clap::CommandFactory;
+
+        let command = crate::cli::Cli::command();
+        let arg = command
+            .get_arguments()
+            .find(|arg| arg.get_long() == Some("mcp-server"))
+            .expect("--mcp-server argument should exist");
+        let help = arg
+            .get_long_help()
+            .or_else(|| arg.get_help())
+            .map(|help| help.to_string())
+            .unwrap_or_default();
+
+        // load_mcp_server_configs only accepts these transport prefixes, so the
+        // help must document both or it is advertising/omitting reality.
+        assert!(help.contains("stdio:"), "--mcp-server help omits the stdio transport");
+        assert!(help.contains("sse:"), "--mcp-server help omits the sse transport");
+    }
+
+    #[test]
+    fn wasm_module_cli_parses_documented_examples() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let path = dir.path().join("module.wasm");
+        // load_wasm_modules only reads the bytes here; contents are not validated.
+        std::fs::write(&path, b"\0asm").expect("stub wasm file should be written");
+        let path = path.display();
+
+        // Documented examples (--wasm-module help):
+        //   math=/path.wasm   math=/path.wasm:16m   math=/path.wasm:1048576
+        let modules = load_wasm_modules(
+            &[
+                format!("plain={path}"),
+                format!("capped={path}:16m"),
+                format!("rawbytes={path}:1048576"),
+            ],
+            &None,
+            &[],
+        )
+        .expect("documented --wasm-module forms should parse");
+
+        assert_eq!(modules.len(), 3);
+        assert_eq!(modules[0].name, "plain");
+        assert_eq!(modules[0].max_memory_bytes, None);
+        assert_eq!(modules[1].max_memory_bytes, Some(16 * 1024 * 1024));
+        assert_eq!(modules[2].max_memory_bytes, Some(1_048_576));
+    }
+
+    #[test]
+    fn wasm_stub_description_cli_applies_documented_format() {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let path = dir.path().join("module.wasm");
+        std::fs::write(&path, b"\0asm").expect("stub wasm file should be written");
+
+        // Documented format (--wasm-stub-description help): name=description text
+        let modules = load_wasm_modules(
+            &[format!("math={}", path.display())],
+            &None,
+            &["math=Adds two numbers".to_string()],
+        )
+        .expect("documented --wasm-stub-description form should apply");
+
+        assert_eq!(modules.len(), 1);
+        assert_eq!(modules[0].description.as_deref(), Some("Adds two numbers"));
+    }
 
     #[test]
     fn resolve_text_or_file_returns_inline_text_verbatim() {

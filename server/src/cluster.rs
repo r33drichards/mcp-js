@@ -1616,3 +1616,28 @@ pub async fn start_cluster_server(node: Arc<ClusterNode>) -> Result<(), Box<dyn 
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_peers_handles_documented_formats() {
+        // Documented format (--peers help): "id@host:port or host:port".
+        // Round-trip both shapes through the real parser so the help text
+        // cannot promise a format the parser does not accept.
+        let (peers, peer_addrs) = ClusterConfig::parse_peers(&[
+            "node2@127.0.0.1:9001".to_string(),
+            "127.0.0.1:9002".to_string(),
+        ]);
+
+        assert_eq!(
+            peers,
+            vec!["127.0.0.1:9001".to_string(), "127.0.0.1:9002".to_string()]
+        );
+        // The "id@host:port" entry contributes an id→address mapping; the bare
+        // "host:port" entry does not.
+        assert_eq!(peer_addrs.get("node2").map(String::as_str), Some("127.0.0.1:9001"));
+        assert_eq!(peer_addrs.len(), 1);
+    }
+}
