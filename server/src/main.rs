@@ -1344,7 +1344,7 @@ mod tests {
 
         let checks = structured_arg_checks();
         let check_ids: BTreeSet<&str> = checks.iter().map(|(id, _)| *id).collect();
-        let grammar_ids: BTreeSet<&str> = crate::cli::structured_arg_ids().into_iter().collect();
+        let grammar_ids: BTreeSet<&str> = crate::cli::Cli::structured_arg_ids().into_iter().collect();
 
         // Help registry (cli.rs) and parse-check registry (here) must cover the
         // exact same flags — so neither side can grow without the other.
