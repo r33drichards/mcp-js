@@ -92,6 +92,8 @@ markdown_extensions:
       permalink: true
 extra_css:
     - stylesheets/footer-nav.css
+    - stylesheets/video.css
 extra_javascript:
     - js/footer-nav.js
+    - js/lazy-video.js
     - js/mermaid.min.js
