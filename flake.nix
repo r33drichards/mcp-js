@@ -44,9 +44,10 @@
         } {
           src = ./server;
           # Vendor hash for server's cargo deps; refreshed when deps changed.
-          # Bumped for the rmcp 1.7 (crates.io) + rmcp 0.1.5 (git, renamed
-          # rmcp_legacy for the SSE transport) dependency set.
-          hash = "sha256-J3RhrBxq5IT2DwEVf3AjyPGpCNuQ6Del5ij+5J8fDDg=";
+          # Bumped for the in-tree `cli-derive` proc-macro crate (adds a path
+          # dependency to server/Cargo.lock; no new registry crates are vendored,
+          # but the vendor-staging hash still changes with the lock contents).
+          hash = "sha256-qqFUMHD7C3iS2AEVC0vPqaxbxeEbifP6oRZIMPRs8zM=";
         });
 
         docsPython = pkgs.python3.withPackages (

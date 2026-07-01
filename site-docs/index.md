@@ -12,6 +12,16 @@ servers — each gated by **OPA/Rego policies**. The server speaks stdio, Stream
 HTTP, or SSE, can authenticate requests with JWT/JWKS, and can form a **Raft
 cluster** that replicates session metadata.
 
+<figure class="docs-video" markdown="span">
+  <video controls preload="none" playsinline
+         poster="media/zero-trust-agent-sandbox-poster.jpg"
+         data-src="media/zero-trust-agent-sandbox.webm">
+    <source data-src="media/zero-trust-agent-sandbox.webm" type="video/webm">
+    Your browser does not support the video tag.
+  </video>
+  <figcaption>Inside the zero-trust agent sandbox — a walkthrough of mcp-v8.</figcaption>
+</figure>
+
 ## Why mcp-v8
 
 - **One tool, unbounded capability.** Instead of exposing dozens of narrow tools, an

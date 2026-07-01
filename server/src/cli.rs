@@ -1,4 +1,5 @@
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches, Parser};
+use cli_derive::StructuredArgs;
 
 use crate::engine::DEFAULT_EXECUTION_TIMEOUT_SECS;
 
@@ -35,7 +36,7 @@ impl std::fmt::Display for StoreKind {
 ///
 /// Every flag is also bindable from an `MCP_V8_*` environment variable
 /// (precedence: explicit CLI flag > env var > default).
-#[derive(Parser, Debug)]
+#[derive(Parser, StructuredArgs, Debug)]
 #[command(author, version, about, long_about = None)]
 pub struct Cli {
     /// Print the OpenAPI JSON specification to stdout and exit.
@@ -205,9 +206,10 @@ pub struct Cli {
     #[arg(long, env = "MCP_V8_NODE_ID", default_value = "node1", help_heading = "Cluster")]
     pub node_id: String,
 
-    /// Comma-separated list of seed peer addresses. Format: id@host:port or host:port.
-    /// Peers can also join dynamically via POST /raft/join.
+    // Help is generated from `peers_grammar()` via `build_command` (the
+    // structured-arg registry), so it cannot drift from the parser.
     #[arg(long, env = "MCP_V8_PEERS", value_delimiter = ',', help_heading = "Cluster")]
+    #[structured(grammar = crate::cli::peers_grammar)]
     pub peers: Vec<String>,
 
     /// Join an existing cluster by contacting this seed address (host:port).
@@ -238,14 +240,10 @@ pub struct Cli {
     #[arg(long, env = "MCP_V8_ELECTION_TIMEOUT_MAX", default_value = "500", help_heading = "Cluster")]
     pub election_timeout_max: u64,
 
-    /// Pre-load a WASM module as a global. Format: name=/path/to/module.wasm[:max_memory]
-    /// The module's exports will be available as a global variable with the given name.
-    /// Optional memory suffix caps the module's native memory (linear memory + tables).
-    /// Supported suffixes: raw bytes, k/K (KiB), m/M (MiB), g/G (GiB).
-    /// Examples: math=/path.wasm  math=/path.wasm:16m  math=/path.wasm:1048576
-    /// Can be specified multiple times for multiple modules.
-    /// NOTE: incompatible with heap persistence (`--heap-store` other than none).
+    // Help is generated from `wasm_module_grammar()` via `build_command` (the
+    // structured-arg registry), so it cannot drift from the parser.
     #[arg(long = "wasm-module", value_name = "NAME=PATH[:LIMIT]", help_heading = "WASM")]
+    #[structured(grammar = crate::cli::wasm_module_grammar)]
     pub wasm_modules: Vec<String>,
 
     /// Path to a JSON config file mapping global names to .wasm file paths or objects.
@@ -285,23 +283,23 @@ pub struct Cli {
     )]
     pub wasm_stub_prefix: String,
 
-    /// Set the MCP stub tool description for a loaded WASM module. Format:
-    /// name=description text. The text is shown to downstream agents alongside
-    /// the auto-generated usage hint (globals, exports, instantiation), helping
-    /// them decide when to use the module. Can be specified multiple times.
-    /// Overrides a "description" set inline via --wasm-config. The named module
-    /// must be loaded with --wasm-module or --wasm-config.
+    // Help is generated from `wasm_stub_description_grammar()` via `build_command`
+    // (the structured-arg registry), so it cannot drift from the parser.
     #[arg(long = "wasm-stub-description", value_name = "NAME=TEXT", help_heading = "WASM")]
+    #[structured(grammar = crate::cli::wasm_stub_description_grammar)]
     pub wasm_stub_descriptions: Vec<String>,
 
-    /// Inject headers into fetch requests matching host/method rules.
-    /// Format: host=<host>,header=<name>,value=<val>[,methods=GET;POST]
-    /// Can be specified multiple times.
+    // Help is generated from `fetch_header_grammar()` via `build_command` (the
+    // structured-arg registry), with the key list coming straight from
+    // `FetchHeaderKey`, so it cannot drift from the parser.
     #[arg(long = "fetch-header", value_name = "RULE", help_heading = "Fetch")]
+    #[structured(grammar = crate::cli::fetch_header_grammar)]
     pub fetch_headers: Vec<String>,
 
-    /// Path to a JSON file with header injection rules.
-    /// Format: [{"host": "api.github.com", "methods": ["GET","POST"], "headers": {"Authorization": "Bearer ..."}}]
+    /// Path to a JSON file with header injection rules. Each rule sets "host"
+    /// (plus optional "methods") and exactly one of "headers" or "auth".
+    /// Static: [{"host": "api.github.com", "methods": ["GET","POST"], "headers": {"Authorization": "Bearer ..."}}]
+    /// OAuth: [{"host": "api.example.com", "auth": {"type": "oauth_client_credentials", "header": "Authorization", "token_url": "https://issuer.example.com/token", "client_id": "abc", "client_secret": "xyz", "scope": "read:all", "refresh_buffer_secs": 30}}]
     #[arg(long = "fetch-header-config", env = "MCP_V8_FETCH_HEADER_CONFIG", value_name = "PATH", help_heading = "Fetch")]
     pub fetch_header_config: Option<String>,
 
@@ -331,13 +329,10 @@ pub struct Cli {
     #[arg(long = "policies-json", env = "MCP_V8_POLICIES_JSON", value_name = "JSON_OR_PATH", help_heading = "Policy")]
     pub policies_json: Option<String>,
 
-    /// Connect to an external MCP server as a module. JS code can call its tools
-    /// via the `mcp` global object (mcp.callTool, mcp.listTools, mcp.servers).
-    /// Format for stdio:          name=stdio:command:arg1:arg2
-    /// Format for SSE:            name=sse:url
-    /// Format for Streamable HTTP: name=http:url
-    /// Can be specified multiple times for multiple servers.
+    // Help is generated from `mcp_server_grammar()` via `build_command` (the
+    // structured-arg registry), so it cannot drift from the parser.
     #[arg(long = "mcp-server", value_name = "NAME=TRANSPORT:...", help_heading = "MCP Server Module")]
+    #[structured(grammar = crate::cli::mcp_server_grammar)]
     pub mcp_servers: Vec<String>,
 
     /// Path to a JSON config file for MCP server modules.
@@ -380,4 +375,208 @@ impl Cli {
     pub fn fs_enabled(&self) -> bool {
         self.fs_store != StoreKind::None
     }
+}
+
+/// Declares the `--fetch-header` key vocabulary — and each key's help blurb — in
+/// exactly one place.
+///
+/// Adding, renaming, or removing a key is a single edit to the
+/// `fetch_header_keys!` invocation below. Everything downstream is generated
+/// from it: the enum, the variant<->string mapping (`as_str`), the accepted-key
+/// list (`ALL`), the "expected keys" error text (`expected`), and — via
+/// [`fetch_header_long_help`] — the flag's `--help` text. So nothing can drift
+/// (O(1) maintenance), and the help can never omit a key: there is no separate
+/// list to keep in sync and therefore no runtime test to forget. The parser's
+/// dispatch `match` (in main.rs) is exhaustive, so a newly added key is a
+/// *compile error* until it is handled there too.
+macro_rules! fetch_header_keys {
+    ( $( $variant:ident = $name:literal : $desc:literal ),+ $(,)? ) => {
+        #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+        pub enum FetchHeaderKey {
+            $( $variant, )+
+        }
+
+        impl FetchHeaderKey {
+            /// Every accepted key, generated from the declaration.
+            pub const ALL: &'static [FetchHeaderKey] = &[ $( FetchHeaderKey::$variant ),+ ];
+
+            pub fn as_str(self) -> &'static str {
+                match self {
+                    $( FetchHeaderKey::$variant => $name, )+
+                }
+            }
+
+            /// One-line help blurb for the key, rendered into `--help`.
+            fn description(self) -> &'static str {
+                match self {
+                    $( FetchHeaderKey::$variant => $desc, )+
+                }
+            }
+
+            pub fn from_key(key: &str) -> Option<FetchHeaderKey> {
+                FetchHeaderKey::ALL
+                    .iter()
+                    .copied()
+                    .find(|candidate| candidate.as_str() == key)
+            }
+
+            /// Comma-separated list of accepted keys, for the "unknown key" error.
+            pub fn expected() -> String {
+                FetchHeaderKey::ALL
+                    .iter()
+                    .map(|key| key.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+        }
+    };
+}
+
+fetch_header_keys! {
+    Host = "host": "host pattern the request URL must match (required)",
+    Methods = "methods": "semicolon-separated HTTP methods to match, e.g. GET;POST (optional)",
+    Header = "header": "name of the header to inject (required)",
+    Value = "value": "static header value (static form)",
+    TokenUrl = "token_url": "OAuth token endpoint URL (OAuth form)",
+    ClientId = "client_id": "OAuth client id (OAuth form)",
+    ClientSecret = "client_secret": "OAuth client secret (OAuth form)",
+    Scope = "scope": "OAuth scope (OAuth form, optional)",
+    RefreshBufferSecs = "refresh_buffer_secs": "seconds before expiry to refresh the token, default 30 (OAuth form, optional)",
+}
+
+/// A documented grammar for a structured CLI flag value, rendered uniformly into
+/// `--help`. Declaring the grammar once (and registering it in
+/// [`structured_args`]) means a flag's mini-language is *generated*, never
+/// hand-written prose that can drift from the parser.
+pub struct Grammar {
+    /// One-line summary; also the short (`-h`) help.
+    summary: &'static str,
+    /// Heading for the labelled parts (e.g. "Accepted keys", "Transports").
+    parts_label: &'static str,
+    /// `(label, description)` rows — the keys, transports, or format forms.
+    parts: Vec<(&'static str, &'static str)>,
+    /// Illustrative example values.
+    examples: &'static [&'static str],
+}
+
+impl Grammar {
+    fn render(&self) -> String {
+        let mut out = self.summary.to_string();
+        if !self.parts.is_empty() {
+            out.push('\n');
+            out.push_str(self.parts_label);
+            out.push(':');
+            for (label, desc) in &self.parts {
+                out.push_str(&format!("\n  {label} — {desc}"));
+            }
+        }
+        if !self.examples.is_empty() {
+            out.push_str("\nExamples:");
+            for example in self.examples {
+                out.push_str(&format!("\n  {example}"));
+            }
+        }
+        out
+    }
+}
+
+fn fetch_header_grammar() -> Grammar {
+    Grammar {
+        summary: "Inject a header into fetch requests that match host/method rules. Each \
+                  rule is a comma-separated list of key=value pairs and must use either the \
+                  static value form or the OAuth client-credentials form (mutually \
+                  exclusive). Can be specified multiple times.",
+        parts_label: "Accepted keys",
+        // Generated from the parser's own key table, so the documented keys are
+        // exactly the keys the parser accepts.
+        parts: FetchHeaderKey::ALL
+            .iter()
+            .map(|key| (key.as_str(), key.description()))
+            .collect(),
+        examples: &[],
+    }
+}
+
+fn mcp_server_grammar() -> Grammar {
+    Grammar {
+        summary: "Connect to an external MCP server as a module; JS can call its tools via \
+                  the `mcp` global (mcp.callTool, mcp.listTools, mcp.servers). Can be \
+                  specified multiple times.",
+        parts_label: "Transports",
+        parts: vec![
+            ("name=stdio:command:arg1:arg2", "spawn a stdio MCP server process"),
+            ("name=sse:url", "connect to an SSE MCP server endpoint"),
+            ("name=http:url", "connect to a Streamable HTTP MCP server (MCP spec 2025-03-26+)"),
+        ],
+        examples: &["weather=stdio:python:server.py", "remote=sse:http://localhost:9000/sse", "srv=http:https://example.com/mcp"],
+    }
+}
+
+fn wasm_module_grammar() -> Grammar {
+    Grammar {
+        summary: "Pre-load a WASM module as a global named <name>; its exports become that \
+                  global. An optional :max_memory suffix caps the module's native memory \
+                  (linear memory + tables) with suffixes raw bytes, k/K (KiB), m/M (MiB), \
+                  g/G (GiB). Can be specified multiple times. Incompatible with heap \
+                  persistence (--heap-store other than none).",
+        parts_label: "Format",
+        parts: vec![(
+            "name=/path/to/module.wasm[:max_memory]",
+            "load <name> from a .wasm file, optionally capping its native memory",
+        )],
+        examples: &["math=/path.wasm", "math=/path.wasm:16m", "math=/path.wasm:1048576"],
+    }
+}
+
+fn wasm_stub_description_grammar() -> Grammar {
+    Grammar {
+        summary: "Set the MCP stub tool description for a loaded WASM module; the text is \
+                  shown to downstream agents alongside the auto-generated usage hint. \
+                  Overrides a `description` set inline via --wasm-config. The named module \
+                  must be loaded with --wasm-module or --wasm-config. Can be specified \
+                  multiple times.",
+        parts_label: "Format",
+        parts: vec![("name=description text", "set <name>'s stub tool description")],
+        examples: &["math=Adds two numbers and returns the sum"],
+    }
+}
+
+fn peers_grammar() -> Grammar {
+    Grammar {
+        summary: "Comma-separated list of seed peer addresses. Peers can also join \
+                  dynamically via POST /raft/join.",
+        parts_label: "Forms",
+        parts: vec![
+            ("id@host:port", "peer address with an explicit node id"),
+            ("host:port", "peer address only (node id learned on join)"),
+        ],
+        examples: &["node2@10.0.0.2:4000", "10.0.0.3:4000"],
+    }
+}
+
+// `Cli::structured_args()` and `Cli::structured_arg_ids()` are generated by
+// `#[derive(StructuredArgs)]` on `Cli` (below) from the `#[structured(grammar
+// = ...)]` field attributes — so there is no hand-maintained registry list to
+// keep in sync with the fields.
+
+/// Canonical `clap::Command` for the binary: the derived command with every
+/// structured flag's short and long help generated from its [`Grammar`]. The
+/// server binary ([`parse`]) and `generate-cli-markdown` both build through here,
+/// so the live `--help` and the generated CLI reference stay identical and
+/// table-driven — there is no per-flag code in this function.
+pub fn build_command() -> clap::Command {
+    let mut command = Cli::command();
+    for (arg_id, grammar) in Cli::structured_args() {
+        let summary = grammar.summary;
+        let long_help = grammar.render();
+        command = command.mut_arg(arg_id, move |arg| arg.help(summary).long_help(long_help));
+    }
+    command
+}
+
+/// Parse CLI arguments through [`build_command`]. Mirrors `Cli::parse`, but with
+/// the generated `--fetch-header` help wired in.
+pub fn parse() -> Cli {
+    let mut matches = build_command().get_matches();
+    Cli::from_arg_matches_mut(&mut matches).unwrap_or_else(|err| err.exit())
 }

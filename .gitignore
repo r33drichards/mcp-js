@@ -8,3 +8,4 @@ snapshot.bin
 node_modules
 site/
 .worktrees/
+.claude/worktrees/

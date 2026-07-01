@@ -12,6 +12,7 @@ name = "server"
 path = "src/main.rs"
 
 [dependencies]
+cli-derive = { path = "cli-derive" }
 anyhow = "1.0.98"
 axum = "0.8.4"
 rmcp = { version = "1.7", features = ["server", "client", "macros", "schemars", "server-side-http", "transport-streamable-http-server", "transport-io", "transport-child-process", "client-side-sse", "transport-streamable-http-client-reqwest"] }
