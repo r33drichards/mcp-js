@@ -44,10 +44,10 @@
         } {
           src = ./server;
           # Vendor hash for server's cargo deps; refreshed when deps changed.
-          # Bumped for the in-tree `cli-derive` proc-macro crate (adds a path
-          # dependency to server/Cargo.lock; no new registry crates are vendored,
-          # but the vendor-staging hash still changes with the lock contents).
-          hash = "sha256-qqFUMHD7C3iS2AEVC0vPqaxbxeEbifP6oRZIMPRs8zM=";
+          # TODO: recompute after merge — combined auth-feature deps + cli-derive
+          # path dep means neither predecessor hash is valid.  Set to "" so the
+          # Nix build reports the correct hash.
+          hash = "";
         });
 
         docsPython = pkgs.python3.withPackages (
@@ -273,6 +273,10 @@
             mcp-js = self.packages.x86_64-linux.default;
           });
           isomorphic-git-test = pkgs.nixosTest (import ./tests/nixos/isomorphic-git.nix {
+            inherit pkgs;
+            mcp-js = self.packages.x86_64-linux.default;
+          });
+          mcp-server-auth-test = pkgs.nixosTest (import ./tests/nixos/mcp-server-auth.nix {
             inherit pkgs;
             mcp-js = self.packages.x86_64-linux.default;
           });

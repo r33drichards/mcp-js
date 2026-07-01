@@ -223,9 +223,17 @@ Directory for the heap-snapshot store when `--heap-store dir`. Defaults to /tmp/
 
 ## MCP Server Module
 
+### `--mcp-server`
+
+Connect to an external MCP server as a module. JS code can call its tools via the `mcp` global object (mcp.callTool, mcp.listTools, mcp.servers). Format for stdio: name=stdio:command:arg1:arg2 Format for SSE: name=sse:url Format for HTTP: name=http:url Can be specified multiple times for multiple servers. Note: authentication requires --mcp-config JSON file (too complex for CLI)
+
+- Value: `NAME=TRANSPORT:...`
+- Repeatable: yes
+
+
 ### `--mcp-config`
 
-Path to a JSON config file for MCP server modules. Format: [{"name": "srv", "transport": "stdio", "command": "cmd", "args": ["a"]}, {"name": "srv2", "transport": "sse", "url": "http://..."}]
+Path to a JSON config file for MCP server modules. Supports auth. Format: [{"name": "srv", "transport": "stdio", "command": "cmd", "args": ["a"]}, {"name": "srv2", "transport": "sse", "url": "http://..."}, {"name": "srv3", "transport": "http", "url": "https://mcp.example.com/mcp", "auth": {"type": "bearer", "token": "sk-..."}}, {"name": "srv4", "transport": "http", "url": "https://mcp.example.com/mcp", "auth": {"type": "client_credentials", "token_url": "https://auth.example.com/token", "client_id": "my-app", "client_secret": "secret", "scope": "mcp:read"}}, {"name": "srv5", "transport": "http", "url": "https://mcp.example.com/mcp", "auth": {"type": "oauth_discovery", "client_id": "my-app", "client_secret": "secret", "scope": ["mcp:read", "tools:call"]}}] Auth types: - bearer: static token, sent as Authorization: Bearer <token> - client_credentials: OAuth 2.0 client_credentials grant (you provide token_url) - oauth_discovery: full MCP OAuth flow (RFC 9728 + RFC 8414) — discovers the authorization server from the MCP server's Protected Resource Metadata, then performs client_credentials exchange. No token_url needed
 
 - Environment: `MCP_V8_MCP_CONFIG`
 - Value: `PATH`

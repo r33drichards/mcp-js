@@ -1183,7 +1183,7 @@ fn load_mcp_server_configs(
     use engine::mcp_client::{McpServerConfig, McpServerTransport};
     let mut configs = Vec::new();
 
-    // Parse CLI --mcp-server flags
+    // Parse CLI --mcp-server flags (auth not supported via CLI — use --mcp-config)
     for entry in cli_servers {
         let (name, rest) = entry.split_once('=')
             .ok_or_else(|| anyhow::anyhow!(
@@ -1204,6 +1204,7 @@ fn load_mcp_server_configs(
                     args: parts[1..].iter().map(|s| s.to_string()).collect(),
                     env: std::collections::HashMap::new(),
                 },
+                auth: None,
             });
         } else if let Some(url) = rest.strip_prefix("sse:") {
             configs.push(McpServerConfig {
@@ -1211,16 +1212,26 @@ fn load_mcp_server_configs(
                 transport: McpServerTransport::Sse {
                     url: url.to_string(),
                 },
+                auth: None,
+            });
+        } else if let Some(url) = rest.strip_prefix("http:") {
+            configs.push(McpServerConfig {
+                name,
+                transport: McpServerTransport::Http {
+                    url: url.to_string(),
+                },
+                auth: None,
             });
         } else {
             anyhow::bail!(
-                "Invalid --mcp-server transport for '{}': must start with 'stdio:' or 'sse:'. Got: '{}'",
+                "Invalid --mcp-server transport for '{}': must start with 'stdio:', 'sse:', or 'http:'. \
+                 Got: '{}'. Note: authentication requires --mcp-config JSON file.",
                 name, rest
             );
         }
     }
 
-    // Parse --mcp-config JSON file
+    // Parse --mcp-config JSON file (supports auth configuration)
     if let Some(config_path) = config_path {
         let content = std::fs::read_to_string(config_path)
             .map_err(|e| anyhow::anyhow!("Failed to read MCP config '{}': {}", config_path, e))?;

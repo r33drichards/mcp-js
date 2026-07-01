@@ -335,9 +335,23 @@ pub struct Cli {
     #[structured(grammar = crate::cli::mcp_server_grammar)]
     pub mcp_servers: Vec<String>,
 
-    /// Path to a JSON config file for MCP server modules.
+    /// Path to a JSON config file for MCP server modules. Supports auth.
     /// Format: [{"name": "srv", "transport": "stdio", "command": "cmd", "args": ["a"]},
-    ///          {"name": "srv2", "transport": "sse", "url": "http://..."}]
+    ///          {"name": "srv2", "transport": "sse", "url": "http://..."},
+    ///          {"name": "srv3", "transport": "http", "url": "https://mcp.example.com/mcp",
+    ///           "auth": {"type": "bearer", "token": "sk-..."}},
+    ///          {"name": "srv4", "transport": "http", "url": "https://mcp.example.com/mcp",
+    ///           "auth": {"type": "client_credentials", "token_url": "https://auth.example.com/token",
+    ///                    "client_id": "my-app", "client_secret": "secret", "scope": "mcp:read"}},
+    ///          {"name": "srv5", "transport": "http", "url": "https://mcp.example.com/mcp",
+    ///           "auth": {"type": "oauth_discovery", "client_id": "my-app", "client_secret": "secret",
+    ///                    "scope": ["mcp:read", "tools:call"]}}]
+    /// Auth types:
+    ///   - bearer: static token, sent as Authorization: Bearer <token>
+    ///   - client_credentials: OAuth 2.0 client_credentials grant (you provide token_url)
+    ///   - oauth_discovery: full MCP OAuth flow (RFC 9728 + RFC 8414) — discovers
+    ///     the authorization server from the MCP server's Protected Resource Metadata,
+    ///     then performs client_credentials exchange. No token_url needed.
     #[arg(long = "mcp-config", env = "MCP_V8_MCP_CONFIG", value_name = "PATH", help_heading = "MCP Server Module")]
     pub mcp_config: Option<String>,
 
@@ -500,11 +514,13 @@ fn mcp_server_grammar() -> Grammar {
     Grammar {
         summary: "Connect to an external MCP server as a module; JS can call its tools via \
                   the `mcp` global (mcp.callTool, mcp.listTools, mcp.servers). Can be \
-                  specified multiple times.",
+                  specified multiple times. Note: authentication requires --mcp-config JSON \
+                  file (too complex for CLI).",
         parts_label: "Transports",
         parts: vec![
             ("name=stdio:command:arg1:arg2", "spawn a stdio MCP server process"),
             ("name=sse:url", "connect to an SSE MCP server endpoint"),
+            ("name=http:url", "connect to a Streamable HTTP MCP server endpoint"),
         ],
         examples: &["weather=stdio:python:server.py", "remote=sse:http://localhost:9000/sse"],
     }

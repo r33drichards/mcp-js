@@ -30,6 +30,46 @@ use rmcp::RoleClient;
 
 // ── Configuration ────────────────────────────────────────────────────────
 
+/// Authentication configuration for HTTP-based MCP server connections.
+///
+/// Only available via `--mcp-config` JSON file (too complex for CLI flags).
+/// Ignored for stdio transports.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum McpServerAuth {
+    /// Static bearer token — sent as `Authorization: Bearer <token>` on every request.
+    Bearer { token: String },
+    /// OAuth 2.0 Client Credentials grant — acquires and auto-refreshes tokens
+    /// using the existing `OAuthClientCredentialsTokenSource` infrastructure.
+    /// Requires knowing the token endpoint URL upfront.
+    ClientCredentials {
+        token_url: String,
+        client_id: String,
+        client_secret: String,
+        #[serde(default)]
+        scope: Option<String>,
+    },
+    /// Full MCP OAuth discovery per the 2025-11-25 spec (RFC 9728 + RFC 8414).
+    ///
+    /// Flow: makes an unauthenticated request to the MCP server URL → receives 401
+    /// with `WWW-Authenticate` header containing `resource_metadata` URL (or falls
+    /// back to well-known URI) → fetches Protected Resource Metadata → discovers
+    /// Authorization Server → fetches AS metadata → performs client_credentials
+    /// grant → uses the resulting token.
+    ///
+    /// This is the spec-compliant way to connect to OAuth-protected MCP servers
+    /// without needing to know the token endpoint in advance.
+    OauthDiscovery {
+        client_id: String,
+        client_secret: String,
+        #[serde(default)]
+        scope: Option<Vec<String>>,
+        /// Optional resource indicator (RFC 8707). If omitted, uses the server URL.
+        #[serde(default)]
+        resource: Option<String>,
+    },
+}
+
 /// Transport configuration for a single MCP server.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "transport", rename_all = "lowercase")]
@@ -44,6 +84,9 @@ pub enum McpServerTransport {
     Sse {
         url: String,
     },
+    Http {
+        url: String,
+    },
 }
 
 /// Configuration for a single named MCP server.
@@ -52,6 +95,11 @@ pub struct McpServerConfig {
     pub name: String,
     #[serde(flatten)]
     pub transport: McpServerTransport,
+    /// Optional authentication for HTTP-based transports (SSE, HTTP).
+    /// Ignored for stdio transports. Only available via `--mcp-config` JSON
+    /// file (too complex for CLI flags).
+    #[serde(default)]
+    pub auth: Option<McpServerAuth>,
 }
 
 // ── Tool metadata for JS ─────────────────────────────────────────────────
@@ -522,11 +570,272 @@ pub fn stub_call_instructions(
 
 // ── Connection logic ─────────────────────────────────────────────────────
 
+/// Resolve the auth configuration into an `Authorization` header value (e.g.
+/// `"Bearer <token>"`) that can be passed to the Streamable HTTP transport.
+async fn resolve_auth_header(
+    server_name: &str,
+    server_url: Option<&str>,
+    auth: &Option<McpServerAuth>,
+) -> Result<Option<String>, String> {
+    match auth {
+        None => Ok(None),
+        Some(McpServerAuth::Bearer { token }) => Ok(Some(format!("Bearer {}", token))),
+        Some(McpServerAuth::ClientCredentials {
+            token_url,
+            client_id,
+            client_secret,
+            scope,
+        }) => {
+            use super::fetch_auth::{OAuthClientCredentialsTokenSource, OAuthTokenSourceConfig};
+
+            let source = OAuthClientCredentialsTokenSource::new(
+                reqwest::Client::new(),
+                OAuthTokenSourceConfig {
+                    header: "Authorization".to_string(),
+                    token_url: token_url.clone(),
+                    client_id: client_id.clone(),
+                    client_secret: client_secret.clone(),
+                    scope: scope.clone(),
+                    refresh_buffer_secs: 30,
+                },
+            );
+            let header_value = source.authorization_header_value().await.map_err(|e| {
+                format!(
+                    "OAuth token acquisition for '{}' failed: {}",
+                    server_name, e
+                )
+            })?;
+            Ok(Some(header_value))
+        }
+        Some(McpServerAuth::OauthDiscovery {
+            client_id,
+            client_secret,
+            scope,
+            resource,
+        }) => {
+            let url = server_url.ok_or_else(|| {
+                format!(
+                    "MCP server '{}': oauth_discovery auth requires an HTTP-based transport URL",
+                    server_name
+                )
+            })?;
+
+            // Implements the MCP authorization spec (2025-11-25) using reqwest:
+            //   1. Probe the MCP server URL for Protected Resource Metadata (RFC 9728)
+            //   2. Discover Authorization Server Metadata (RFC 8414)
+            //   3. Exchange client_credentials at the token endpoint
+
+            let http = reqwest::Client::new();
+
+            // ── Step 1: Discover Protected Resource Metadata ──────────────
+            // Try /.well-known/oauth-protected-resource relative to the server URL.
+            let parsed_url = url::Url::parse(url).map_err(|e| {
+                format!("MCP server '{}': invalid URL '{}': {}", server_name, url, e)
+            })?;
+            let base = format!(
+                "{}://{}{}",
+                parsed_url.scheme(),
+                parsed_url.host_str().unwrap_or("localhost"),
+                parsed_url
+                    .port()
+                    .map(|p| format!(":{}", p))
+                    .unwrap_or_default()
+            );
+
+            // Try path-specific well-known first, then root
+            let path = parsed_url.path().trim_end_matches('/');
+            let resource_metadata_urls = if path.is_empty() || path == "/" {
+                vec![format!("{}/.well-known/oauth-protected-resource", base)]
+            } else {
+                vec![
+                    format!(
+                        "{}/.well-known/oauth-protected-resource{}",
+                        base, path
+                    ),
+                    format!("{}/.well-known/oauth-protected-resource", base),
+                ]
+            };
+
+            let mut resource_metadata: Option<serde_json::Value> = None;
+            for rm_url in &resource_metadata_urls {
+                match http.get(rm_url).send().await {
+                    Ok(resp) if resp.status().is_success() => {
+                        if let Ok(json) = resp.json::<serde_json::Value>().await {
+                            resource_metadata = Some(json);
+                            break;
+                        }
+                    }
+                    _ => continue,
+                }
+            }
+
+            let rm = resource_metadata.ok_or_else(|| {
+                format!(
+                    "MCP server '{}': could not discover Protected Resource Metadata at {:?}",
+                    server_name, resource_metadata_urls
+                )
+            })?;
+
+            // Extract authorization server URL
+            let auth_servers = rm["authorization_servers"]
+                .as_array()
+                .ok_or_else(|| {
+                    format!(
+                        "MCP server '{}': resource metadata missing 'authorization_servers'",
+                        server_name
+                    )
+                })?;
+            let as_url = auth_servers
+                .first()
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    format!(
+                        "MCP server '{}': authorization_servers array is empty",
+                        server_name
+                    )
+                })?;
+
+            // ── Step 2: Discover Authorization Server Metadata ────────────
+            let as_parsed = url::Url::parse(as_url).map_err(|e| {
+                format!(
+                    "MCP server '{}': invalid AS URL '{}': {}",
+                    server_name, as_url, e
+                )
+            })?;
+            let as_base = format!(
+                "{}://{}{}",
+                as_parsed.scheme(),
+                as_parsed.host_str().unwrap_or("localhost"),
+                as_parsed
+                    .port()
+                    .map(|p| format!(":{}", p))
+                    .unwrap_or_default()
+            );
+            let as_path = as_parsed.path().trim_end_matches('/');
+
+            // Try RFC 8414 endpoints in priority order
+            let as_metadata_urls = if as_path.is_empty() || as_path == "/" {
+                vec![
+                    format!("{}/.well-known/oauth-authorization-server", as_base),
+                    format!("{}/.well-known/openid-configuration", as_base),
+                ]
+            } else {
+                vec![
+                    format!(
+                        "{}/.well-known/oauth-authorization-server{}",
+                        as_base, as_path
+                    ),
+                    format!(
+                        "{}/.well-known/openid-configuration{}",
+                        as_base, as_path
+                    ),
+                    format!("{}{}/.well-known/openid-configuration", as_base, as_path),
+                ]
+            };
+
+            let mut as_metadata: Option<serde_json::Value> = None;
+            for am_url in &as_metadata_urls {
+                match http.get(am_url).send().await {
+                    Ok(resp) if resp.status().is_success() => {
+                        if let Ok(json) = resp.json::<serde_json::Value>().await {
+                            as_metadata = Some(json);
+                            break;
+                        }
+                    }
+                    _ => continue,
+                }
+            }
+
+            let am = as_metadata.ok_or_else(|| {
+                format!(
+                    "MCP server '{}': could not discover AS metadata at {:?}",
+                    server_name, as_metadata_urls
+                )
+            })?;
+
+            let token_endpoint = am["token_endpoint"]
+                .as_str()
+                .ok_or_else(|| {
+                    format!(
+                        "MCP server '{}': AS metadata missing 'token_endpoint'",
+                        server_name
+                    )
+                })?;
+
+            // ── Step 3: Exchange client_credentials ───────────────────────
+            let scope_str = scope
+                .as_ref()
+                .map(|s| s.join(" "))
+                .unwrap_or_default();
+            let resource_value = resource.clone().unwrap_or_else(|| url.to_string());
+
+            let mut form = HashMap::new();
+            form.insert("grant_type", "client_credentials".to_string());
+            form.insert("client_id", client_id.clone());
+            form.insert("client_secret", client_secret.clone());
+            if !scope_str.is_empty() {
+                form.insert("scope", scope_str);
+            }
+            form.insert("resource", resource_value);
+
+            let token_resp = http
+                .post(token_endpoint)
+                .form(&form)
+                .send()
+                .await
+                .map_err(|e| {
+                    format!(
+                        "MCP server '{}': token request to '{}' failed: {}",
+                        server_name, token_endpoint, e
+                    )
+                })?;
+
+            if !token_resp.status().is_success() {
+                let status = token_resp.status();
+                let body = token_resp
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| "<no body>".to_string());
+                return Err(format!(
+                    "MCP server '{}': token endpoint returned {}: {}",
+                    server_name, status, body
+                ));
+            }
+
+            let token_json: serde_json::Value =
+                token_resp.json().await.map_err(|e| {
+                    format!(
+                        "MCP server '{}': failed to parse token response: {}",
+                        server_name, e
+                    )
+                })?;
+
+            let access_token = token_json["access_token"]
+                .as_str()
+                .ok_or_else(|| {
+                    format!(
+                        "MCP server '{}': token response missing 'access_token'",
+                        server_name
+                    )
+                })?;
+
+            Ok(Some(format!("Bearer {}", access_token)))
+        }
+    }
+}
+
 async fn connect_one(config: &McpServerConfig) -> Result<ConnectedMcpServer, String> {
     use rmcp::ServiceExt;
 
     match &config.transport {
         McpServerTransport::Stdio { command, args, env } => {
+            if config.auth.is_some() {
+                tracing::warn!(
+                    "MCP server '{}': auth configuration is ignored for stdio transport",
+                    config.name
+                );
+            }
+
             let mut cmd = tokio::process::Command::new(command);
             cmd.args(args);
             for (k, v) in env {
@@ -556,11 +865,22 @@ async fn connect_one(config: &McpServerConfig) -> Result<ConnectedMcpServer, Str
                 _keep_alive: keep_alive.abort_handle(),
             })
         }
-        McpServerTransport::Sse { url } => {
+        McpServerTransport::Sse { url } | McpServerTransport::Http { url } => {
+            // Resolve auth header (Bearer, OAuth client_credentials, or MCP OAuth discovery).
+            let auth_header = resolve_auth_header(&config.name, Some(url.as_str()), &config.auth).await?;
+
             // The standalone SSE client transport was removed in rmcp 1.x; the
             // Streamable HTTP client transport is its replacement and speaks to
             // the same `/mcp`-style endpoints modern MCP servers expose.
-            let transport = rmcp::transport::StreamableHttpClientTransport::from_uri(url.clone());
+            let transport = match auth_header {
+                Some(header) => {
+                    use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+                    let cfg = StreamableHttpClientTransportConfig::with_uri(url.clone())
+                        .auth_header(header);
+                    rmcp::transport::StreamableHttpClientTransport::from_config(cfg)
+                }
+                None => rmcp::transport::StreamableHttpClientTransport::from_uri(url.clone()),
+            };
 
             let service: rmcp::service::RunningService<RoleClient, ()> =
                 ().serve(transport)
