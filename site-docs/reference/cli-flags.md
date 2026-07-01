@@ -38,15 +38,6 @@ Unique node identifier within the cluster
 - Default: `node1`
 - Value: `NODE_ID`
 
-### `--peers`
-
-Comma-separated list of seed peer addresses. Format: id@host:port or host:port. Peers can also join dynamically via POST /raft/join
-
-- Environment: `MCP_V8_PEERS`
-- Value: `PEERS`
-- Delimiter: `,`
-- Repeatable: yes
-
 ### `--join`
 
 Join an existing cluster by contacting this seed address (host:port). The node will register itself with the cluster leader via /raft/join
@@ -90,6 +81,15 @@ Maximum election timeout in milliseconds
 - Environment: `MCP_V8_ELECTION_TIMEOUT_MAX`
 - Default: `500`
 - Value: `ELECTION_TIMEOUT_MAX`
+
+### `--peers`
+
+Comma-separated list of seed peer addresses. Peers can also join dynamically via POST /raft/join. Forms: id@host:port — peer address with an explicit node id host:port — peer address only (node id learned on join) Examples: node2@10.0.0.2:4000 10.0.0.3:4000
+
+- Environment: `MCP_V8_PEERS`
+- Value: `PEERS`
+- Delimiter: `,`
+- Repeatable: yes
 
 ## Core
 
@@ -159,19 +159,19 @@ Path to the sled database for the session log (per-session heap+fs history) and 
 
 ## Fetch
 
-### `--fetch-header`
-
-Inject headers into fetch requests matching host/method rules. Format: host=<host>,header=<name>,value=<val>[,methods=GET;POST] Can be specified multiple times
-
-- Value: `RULE`
-- Repeatable: yes
-
 ### `--fetch-header-config`
 
-Path to a JSON file with header injection rules. Format: [{"host": "api.github.com", "methods": ["GET","POST"], "headers": {"Authorization": "Bearer ..."}}]
+Path to a JSON file with header injection rules. Each rule sets "host" (plus optional "methods") and exactly one of "headers" or "auth". Static: [{"host": "api.github.com", "methods": ["GET","POST"], "headers": {"Authorization": "Bearer ..."}}] OAuth: [{"host": "api.example.com", "auth": {"type": "oauth_client_credentials", "header": "Authorization", "token_url": "https://issuer.example.com/token", "client_id": "abc", "client_secret": "xyz", "scope": "read:all", "refresh_buffer_secs": 30}}]
 
 - Environment: `MCP_V8_FETCH_HEADER_CONFIG`
 - Value: `PATH`
+
+### `--fetch-header`
+
+Inject a header into fetch requests that match host/method rules. Each rule is a comma-separated list of key=value pairs and must use either the static value form or the OAuth client-credentials form (mutually exclusive). Can be specified multiple times. Accepted keys: host — host pattern the request URL must match (required) methods — semicolon-separated HTTP methods to match, e.g. GET;POST (optional) header — name of the header to inject (required) value — static header value (static form) token_url — OAuth token endpoint URL (OAuth form) client_id — OAuth client id (OAuth form) client_secret — OAuth client secret (OAuth form) scope — OAuth scope (OAuth form, optional) refresh_buffer_secs — seconds before expiry to refresh the token, default 30 (OAuth form, optional)
+
+- Value: `RULE`
+- Repeatable: yes
 
 ## Filesystem
 
@@ -223,13 +223,6 @@ Directory for the heap-snapshot store when `--heap-store dir`. Defaults to /tmp/
 
 ## MCP Server Module
 
-### `--mcp-server`
-
-Connect to an external MCP server as a module. JS code can call its tools via the `mcp` global object (mcp.callTool, mcp.listTools, mcp.servers). Format for stdio: name=stdio:command:arg1:arg2 Format for SSE: name=sse:url Can be specified multiple times for multiple servers
-
-- Value: `NAME=TRANSPORT:...`
-- Repeatable: yes
-
 ### `--mcp-config`
 
 Path to a JSON config file for MCP server modules. Format: [{"name": "srv", "transport": "stdio", "command": "cmd", "args": ["a"]}, {"name": "srv2", "transport": "sse", "url": "http://..."}]
@@ -251,6 +244,13 @@ Prefix applied to stub tool names. Defaults to `runjs__` so it is obvious to a c
 - Environment: `MCP_V8_MCP_STUB_PREFIX`
 - Default: `runjs__`
 - Value: `MCP_STUB_PREFIX`
+
+### `--mcp-server`
+
+Connect to an external MCP server as a module; JS can call its tools via the `mcp` global (mcp.callTool, mcp.listTools, mcp.servers). Can be specified multiple times. Transports: name=stdio:command:arg1:arg2 — spawn a stdio MCP server process name=sse:url — connect to an SSE MCP server endpoint Examples: weather=stdio:python:server.py remote=sse:http://localhost:9000/sse
+
+- Value: `NAME=TRANSPORT:...`
+- Repeatable: yes
 
 ## Module Import
 
@@ -350,13 +350,6 @@ Local filesystem cache directory for S3 write-through caching (only used with `-
 
 ## WASM
 
-### `--wasm-module`
-
-Pre-load a WASM module as a global. Format: name=/path/to/module.wasm[:max_memory] The module's exports will be available as a global variable with the given name. Optional memory suffix caps the module's native memory (linear memory + tables). Supported suffixes: raw bytes, k/K (KiB), m/M (MiB), g/G (GiB). Examples: math=/path.wasm math=/path.wasm:16m math=/path.wasm:1048576 Can be specified multiple times for multiple modules. NOTE: incompatible with heap persistence (`--heap-store` other than none)
-
-- Value: `NAME=PATH[:LIMIT]`
-- Repeatable: yes
-
 ### `--wasm-config`
 
 Path to a JSON config file mapping global names to .wasm file paths or objects. String value: {"name": "/path/to/module.wasm"} Object value: {"name": {"path": "/path/to/module.wasm", "max_memory_bytes": 16777216, "description": "what the module does"}} The optional "description" sets the MCP stub tool's description. NOTE: incompatible with heap persistence (`--heap-store` other than none)
@@ -387,9 +380,16 @@ Prefix applied to WASM stub tool names. Defaults to `runjs__` so it is obvious t
 - Default: `runjs__`
 - Value: `WASM_STUB_PREFIX`
 
+### `--wasm-module`
+
+Pre-load a WASM module as a global named <name>; its exports become that global. An optional :max_memory suffix caps the module's native memory (linear memory + tables) with suffixes raw bytes, k/K (KiB), m/M (MiB), g/G (GiB). Can be specified multiple times. Incompatible with heap persistence (--heap-store other than none). Format: name=/path/to/module.wasm[:max_memory] — load <name> from a .wasm file, optionally capping its native memory Examples: math=/path.wasm math=/path.wasm:16m math=/path.wasm:1048576
+
+- Value: `NAME=PATH[:LIMIT]`
+- Repeatable: yes
+
 ### `--wasm-stub-description`
 
-Set the MCP stub tool description for a loaded WASM module. Format: name=description text. The text is shown to downstream agents alongside the auto-generated usage hint (globals, exports, instantiation), helping them decide when to use the module. Can be specified multiple times. Overrides a "description" set inline via --wasm-config. The named module must be loaded with --wasm-module or --wasm-config
+Set the MCP stub tool description for a loaded WASM module; the text is shown to downstream agents alongside the auto-generated usage hint. Overrides a `description` set inline via --wasm-config. The named module must be loaded with --wasm-module or --wasm-config. Can be specified multiple times. Format: name=description text — set <name>'s stub tool description Examples: math=Adds two numbers and returns the sum
 
 - Value: `NAME=TEXT`
 - Repeatable: yes

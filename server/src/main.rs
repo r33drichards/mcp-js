@@ -1,7 +1,7 @@
 use anyhow::Result;
 use rmcp::{ServerHandler, ServiceExt, transport::stdio};
 use tracing_subscriber::{self};
-use clap::{Parser, CommandFactory};
+use clap::CommandFactory;
 use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
 };
@@ -20,7 +20,7 @@ mod api;
 mod cluster;
 mod cli;
 mod session;
-use cli::{Cli, StoreKind};
+use cli::{Cli, FetchHeaderKey, StoreKind};
 use engine::{initialize_v8, Engine, WasmModule};
 use engine::fetch::FetchConfig;
 use engine::fs::FsConfig;
@@ -47,7 +47,7 @@ async fn main() -> Result<()> {
         .with_ansi(false)
         .init();
 
-    let cli = Cli::parse();
+    let cli = cli::parse();
 
     // ── --print-openapi: dump spec and exit ─────────────────────────────
     if cli.print_openapi {
@@ -1105,26 +1105,27 @@ fn parse_fetch_header_cli(s: &str) -> Result<engine::fetch::HeaderRule> {
             .ok_or_else(|| anyhow::anyhow!(
                 "Invalid --fetch-header segment '{}'. Expected key=value", part
             ))?;
-        match key.trim() {
-            "host" => host = Some(val.trim().to_string()),
-            "methods" => methods = val.split(';').map(|m| m.to_string()).collect(),
-            "header" => header_name = Some(val.trim().to_string()),
-            "value" => header_value = Some(val.to_string()),
-            "token_url" => token_url = Some(val.trim().to_string()),
-            "client_id" => client_id = Some(val.trim().to_string()),
-            "client_secret" => client_secret = Some(val.to_string()),
-            "scope" => scope = Some(val.trim().to_string()),
-            "refresh_buffer_secs" => {
+        let parsed_key = FetchHeaderKey::from_key(key.trim()).ok_or_else(|| anyhow::anyhow!(
+            "Unknown key '{}' in --fetch-header. Expected: {}",
+            key.trim(),
+            FetchHeaderKey::expected()
+        ))?;
+        match parsed_key {
+            FetchHeaderKey::Host => host = Some(val.trim().to_string()),
+            FetchHeaderKey::Methods => methods = val.split(';').map(|m| m.to_string()).collect(),
+            FetchHeaderKey::Header => header_name = Some(val.trim().to_string()),
+            FetchHeaderKey::Value => header_value = Some(val.to_string()),
+            FetchHeaderKey::TokenUrl => token_url = Some(val.trim().to_string()),
+            FetchHeaderKey::ClientId => client_id = Some(val.trim().to_string()),
+            FetchHeaderKey::ClientSecret => client_secret = Some(val.to_string()),
+            FetchHeaderKey::Scope => scope = Some(val.trim().to_string()),
+            FetchHeaderKey::RefreshBufferSecs => {
                 refresh_buffer_secs = Some(val.trim().parse::<u64>().map_err(|e| anyhow::anyhow!(
                     "Invalid 'refresh_buffer_secs' value '{}': {}",
                     val.trim(),
                     e
                 ))?)
             }
-            other => anyhow::bail!(
-                "Unknown key '{}' in --fetch-header. Expected: host, methods, header, value, token_url, client_id, client_secret, scope, refresh_buffer_secs",
-                other
-            ),
         }
     }
 
@@ -1241,7 +1242,123 @@ fn load_mcp_server_configs(
 
 #[cfg(test)]
 mod tests {
-    use super::{load_fetch_header_rules, parse_fetch_header_cli, resolve_text_or_file};
+    use super::{
+        load_fetch_header_rules, load_mcp_server_configs, load_wasm_modules,
+        parse_fetch_header_cli, resolve_text_or_file,
+    };
+
+    // ── Systematic structured-flag drift guard ──────────────────────────
+    // Every flag registered in `cli::structured_args()` has its --help generated
+    // from a Grammar; each must also round-trip its documented shape through the
+    // real parser below. The two registries must list the same flags, so a
+    // structured flag cannot ship generated help without a parser round-trip
+    // (or vice versa) — that mismatch fails `every_structured_arg_has_grammar_and_parses`.
+
+    fn check_fetch_headers() -> anyhow::Result<()> {
+        parse_fetch_header_cli("host=api.example.com,header=Authorization,value=Bearer x")?;
+        parse_fetch_header_cli(
+            "host=api.example.com,header=Authorization,\
+             token_url=https://issuer.example.com/token,client_id=a,client_secret=b",
+        )?;
+        Ok(())
+    }
+
+    fn check_mcp_servers() -> anyhow::Result<()> {
+        use crate::engine::mcp_client::McpServerTransport;
+
+        let configs = load_mcp_server_configs(
+            &[
+                "weather=stdio:python:server.py:--verbose".to_string(),
+                "remote=sse:http://127.0.0.1:9000/sse".to_string(),
+            ],
+            &None,
+        )?;
+        anyhow::ensure!(matches!(configs[0].transport, McpServerTransport::Stdio { .. }));
+        anyhow::ensure!(matches!(configs[1].transport, McpServerTransport::Sse { .. }));
+        Ok(())
+    }
+
+    fn check_wasm_modules() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("module.wasm");
+        // load_wasm_modules only reads the bytes here; contents are not validated.
+        std::fs::write(&path, b"\0asm")?;
+        let path = path.display();
+
+        let modules = load_wasm_modules(
+            &[
+                format!("plain={path}"),
+                format!("capped={path}:16m"),
+                format!("rawbytes={path}:1048576"),
+            ],
+            &None,
+            &[],
+        )?;
+        anyhow::ensure!(modules[0].max_memory_bytes.is_none());
+        anyhow::ensure!(modules[1].max_memory_bytes == Some(16 * 1024 * 1024));
+        anyhow::ensure!(modules[2].max_memory_bytes == Some(1_048_576));
+        Ok(())
+    }
+
+    fn check_wasm_stub_descriptions() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("module.wasm");
+        std::fs::write(&path, b"\0asm")?;
+
+        let modules = load_wasm_modules(
+            &[format!("math={}", path.display())],
+            &None,
+            &["math=Adds two numbers and returns the sum".to_string()],
+        )?;
+        anyhow::ensure!(
+            modules[0].description.as_deref() == Some("Adds two numbers and returns the sum")
+        );
+        Ok(())
+    }
+
+    fn check_peers() -> anyhow::Result<()> {
+        let (peers, peer_addrs) = crate::cluster::ClusterConfig::parse_peers(&[
+            "node2@10.0.0.2:4000".to_string(),
+            "10.0.0.3:4000".to_string(),
+        ]);
+        anyhow::ensure!(peers == ["10.0.0.2:4000", "10.0.0.3:4000"]);
+        anyhow::ensure!(peer_addrs.get("node2").map(String::as_str) == Some("10.0.0.2:4000"));
+        Ok(())
+    }
+
+    /// Parser round-trip per structured flag. Must list the same arg ids as
+    /// `cli::structured_args()` (enforced by the test below).
+    fn structured_arg_checks() -> Vec<(&'static str, fn() -> anyhow::Result<()>)> {
+        vec![
+            ("fetch_headers", check_fetch_headers),
+            ("mcp_servers", check_mcp_servers),
+            ("wasm_modules", check_wasm_modules),
+            ("wasm_stub_descriptions", check_wasm_stub_descriptions),
+            ("peers", check_peers),
+        ]
+    }
+
+    #[test]
+    fn every_structured_arg_has_grammar_and_parses() {
+        use std::collections::BTreeSet;
+
+        let checks = structured_arg_checks();
+        let check_ids: BTreeSet<&str> = checks.iter().map(|(id, _)| *id).collect();
+        let grammar_ids: BTreeSet<&str> = crate::cli::Cli::structured_arg_ids().into_iter().collect();
+
+        // Help registry (cli.rs) and parse-check registry (here) must cover the
+        // exact same flags — so neither side can grow without the other.
+        assert_eq!(
+            check_ids, grammar_ids,
+            "structured-arg registries disagree; every flag needs BOTH a Grammar (cli.rs) and a parse-check (main.rs)"
+        );
+
+        for (arg_id, check) in checks {
+            check().unwrap_or_else(|err| {
+                panic!("documented grammar for --{} must parse: {err}", arg_id.replace('_', "-"))
+            });
+        }
+    }
 
     #[test]
     fn resolve_text_or_file_returns_inline_text_verbatim() {
@@ -1307,6 +1424,20 @@ mod tests {
         assert_eq!(auth.scope.as_deref(), Some("read:all"));
         assert_eq!(auth.refresh_buffer_secs, 45);
         assert_eq!(rule.methods(), &["GET".to_string(), "POST".to_string()]);
+    }
+
+    #[test]
+    fn parse_fetch_header_cli_rejects_unknown_key() {
+        let err = parse_fetch_header_cli(
+            "host=api.example.com,header=Authorization,value=Bearer fixed,bogus=1",
+        )
+        .expect_err("unknown key should fail");
+
+        let message = err.to_string();
+        assert!(message.contains("Unknown key 'bogus'"));
+        // The accepted-key list in the error is generated from the canonical
+        // table, so every key the parser accepts is advertised on failure.
+        assert!(message.contains(&super::FetchHeaderKey::expected()));
     }
 
     #[test]
