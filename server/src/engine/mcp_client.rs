@@ -606,8 +606,11 @@ pub fn stub_call_instructions(
 
 // ── Connection logic ─────────────────────────────────────────────────────
 
-/// Resolve the auth configuration into an `Authorization` header value (e.g.
-/// `"Bearer <token>"`) that can be passed to the Streamable HTTP transport.
+/// Resolve the auth configuration into the RAW bearer token to hand to the
+/// Streamable HTTP transport. rmcp applies this value via reqwest's
+/// `.bearer_auth(...)`, which prepends `Authorization: Bearer ` itself — so
+/// every arm must return the bare token WITHOUT a scheme prefix (returning
+/// `"Bearer <tok>"` here produces a double-`Bearer` header and a 401).
 async fn resolve_auth_header(
     server_name: &str,
     server_url: Option<&str>,
@@ -615,7 +618,7 @@ async fn resolve_auth_header(
 ) -> Result<Option<String>, String> {
     match auth {
         None => Ok(None),
-        Some(McpServerAuth::Bearer { token }) => Ok(Some(format!("Bearer {}", token))),
+        Some(McpServerAuth::Bearer { token }) => Ok(Some(token.clone())),
         Some(McpServerAuth::ClientCredentials {
             token_url,
             client_id,
@@ -635,13 +638,19 @@ async fn resolve_auth_header(
                     refresh_buffer_secs: 30,
                 },
             );
+            // `authorization_header_value()` returns a full header value like
+            // `"Bearer <tok>"`; strip the scheme so rmcp gets the raw token.
             let header_value = source.authorization_header_value().await.map_err(|e| {
                 format!(
                     "OAuth token acquisition for '{}' failed: {}",
                     server_name, e
                 )
             })?;
-            Ok(Some(header_value))
+            let token = header_value
+                .split_once(' ')
+                .map(|(_scheme, tok)| tok.to_string())
+                .unwrap_or(header_value);
+            Ok(Some(token))
         }
         Some(McpServerAuth::OauthDiscovery {
             client_id,
@@ -855,7 +864,7 @@ async fn resolve_auth_header(
                     )
                 })?;
 
-            Ok(Some(format!("Bearer {}", access_token)))
+            Ok(Some(access_token.to_string()))
         }
         Some(McpServerAuth::OauthBrowser {
             scope,
@@ -880,7 +889,8 @@ async fn resolve_auth_header(
                 token_cache.as_deref(),
             )
             .await?;
-            Ok(Some(format!("Bearer {}", token)))
+            // `resolve_oauth_browser` already returns the raw access token.
+            Ok(Some(token))
         }
     }
 }
