@@ -1,899 +1,236 @@
-# mcp-v8: V8 JavaScript MCP Server
+# mcp-v8 — a JavaScript/TypeScript runtime for AI agents
 
-A Rust-based Model Context Protocol (MCP) server that exposes a V8 JavaScript runtime as a tool for AI agents like Claude and Cursor. Supports persistent heap snapshots via S3 or local filesystem, and is ready for integration with modern AI development environments.
+[![Docs](https://img.shields.io/badge/docs-mkdocs-blue)](https://r33drichards.github.io/mcp-js/)
+[![Release](https://img.shields.io/github/v/release/r33drichards/mcp-js)](https://github.com/r33drichards/mcp-js/releases)
+[![License: AGPL v3](https://img.shields.io/badge/license-AGPL--3.0-blue)](./LICENSE)
+
+**mcp-v8** is a [Model Context Protocol](https://modelcontextprotocol.io) server,
+written in Rust, that lets an AI agent **run JavaScript and TypeScript in a
+sandboxed V8 isolate**. Instead of wiring up dozens of narrow tools, you give the
+agent one tool — `run_js` — and it writes code: looping, branching, transforming
+data, and calling other tools, often with far fewer tokens than equivalent
+tool-call chains.
+
+In its default *stateful* mode the V8 heap is saved as a content-addressed
+snapshot, so an agent can build up state across many turns. Host capabilities
+(network, filesystem, subprocess, WebAssembly, module imports, and calls to other
+MCP servers) are all **off by default** and unlocked only by explicit
+[OPA/Rego policies](https://www.openpolicyagent.org/).
+
+## Why mcp-v8
+
+- **One tool, unbounded capability.** The agent runs a program, not a fixed menu of tools.
+- **Durable state.** Heap snapshots persist variables and objects across calls.
+- **Secure by default.** `fetch`, filesystem, subprocess, and external imports are denied until you grant them via policy.
+- **Production-ready.** stdio / Streamable HTTP / SSE transports, a REST sidecar, async execution with pagination, JWKS auth, and Raft-replicated clustering.
+
+## Documentation
+
+Full documentation lives at **<https://r33drichards.github.io/mcp-js/>** (built
+from [`site-docs/`](./site-docs)) — tutorials, how-to guides, concept
+explanations, and complete reference for the [CLI flags](https://r33drichards.github.io/mcp-js/reference/cli-flags/),
+[HTTP API](https://r33drichards.github.io/mcp-js/reference/http-api/), and
+[MCP tools](https://r33drichards.github.io/mcp-js/reference/mcp-tools/).
+
+## Quick start
+
+### Install
+
+```bash
+# Server
+curl -fsSL https://raw.githubusercontent.com/r33drichards/mcp-js/main/install.sh | sudo bash
+
+# Optional CLI client
+curl -fsSL https://raw.githubusercontent.com/r33drichards/mcp-js/main/install-cli.sh | sudo bash
+```
+
+Installs to `/usr/local/bin`. Supported platforms: Linux x86_64/arm64 and macOS
+Apple Silicon. You can also `nix run github:r33drichards/mcp-js`, use Docker (see
+the `docker-compose.*.yml` stacks), or [build from source](#build-from-source).
+
+### Connect an MCP client
+
+```bash
+# Claude Code (stdio)
+claude mcp add mcp-v8 -- mcp-v8 --directory-path /tmp/mcp-v8-heaps   # stateful
+claude mcp add mcp-v8 -- mcp-v8 --stateless                          # stateless
+```
+
+For Claude Desktop / Cursor, add to the client's `mcpServers` config:
+
+```json
+{ "mcpServers": { "js": { "command": "mcp-v8", "args": ["--stateless"] } } }
+```
+
+Then ask the agent: *"Run this JavaScript: `console.log([1,2,3].map(x => x*2))`"*.
+
+### Run over HTTP
+
+```bash
+mcp-v8 --stateless --http-port 8080
+# MCP endpoint: POST http://localhost:8080/mcp
+# REST sidecar: POST http://localhost:8080/api/exec  (JSON body, or a raw-body file upload)
+```
+
+`/api/exec` accepts either a JSON body or a raw-body file upload — send the
+script as the request body with a non-JSON `Content-Type`
+(`curl --data-binary @script.js -H 'Content-Type: application/javascript' .../api/exec`).
+The `run_js` MCP tool can also read a script from a path on the server itself
+via an optional `file` parameter — off by default, enabled with
+`--allow-run-js-file` or a `run_js_file`
+[policy](https://r33drichards.github.io/mcp-js/reference/policies/).
+
+See the [Quick Start tutorials](https://r33drichards.github.io/mcp-js/) and the
+[transports guide](https://r33drichards.github.io/mcp-js/concepts/transports/) for more.
 
 ## Features
 
-- **Async Execution Model**: `run_js` returns immediately with an execution ID. Poll status with `get_execution`, read console output with `get_execution_output`, and cancel running executions with `cancel_execution`.
-- **Console Output**: Full support for `console.log`, `console.info`, `console.warn`, and `console.error`. Output is streamed to persistent storage during execution and can be read in real-time with paginated access (line-based or byte-based).
-- **Async/Await Support**: Full support for `async`/`await` and Promises via the deno_core event loop.
-- **V8 JavaScript Execution**: Run arbitrary JavaScript code in a secure, isolated V8 engine.
-- **TypeScript Support**: Run TypeScript code directly — types are stripped before execution using [SWC](https://swc.rs/). This is type removal only, not type checking.
-- **WebAssembly Support**: Compile and run WASM modules using the standard `WebAssembly` JavaScript API (`WebAssembly.Module`, `WebAssembly.Instance`, `WebAssembly.validate`).
-- **ES Module Imports**: Import npm packages, JSR packages, and URL modules using Deno-style `import` syntax. Packages are fetched from [esm.sh](https://esm.sh) at runtime — no `npm install` needed. (e.g., `import { camelCase } from "npm:lodash-es@4.17.21"`)
-- **Content-Addressed Heap Snapshots**: Persist and restore V8 heap state between runs using content-addressed storage, supporting both S3 and local file storage.
-- **Stateless Mode**: Optional mode for fresh executions without heap persistence, ideal for serverless environments.
-- **MCP Protocol**: Implements the Model Context Protocol for seamless tool integration with Claude, Cursor, and other MCP clients.
-- **Configurable Storage**: Choose between S3, local directory, or stateless mode at runtime.
-- **Multiple Transports**: Supports stdio, Streamable HTTP (MCP 2025-03-26+), and SSE (Server-Sent Events) transport protocols.
-- **Clustering**: Optional Raft-based clustering for distributed coordination, replicated session logging, and horizontal scaling.
-- **Concurrency Control**: Configurable concurrent V8 execution limits with semaphore-based throttling.
-- **Policy-Gated Filesystem Access**: Optional `fs` module for Node.js-compatible file operations (read, write, delete, etc.), with every operation checked against a [Rego policy](https://www.openpolicyagent.org/docs/latest/policy-language/) before execution.
-- **OPA-Gated Fetch**: Optional `fetch()` function for JavaScript following the web standard Fetch API, with every HTTP request checked against an [Open Policy Agent](https://www.openpolicyagent.org/) policy before execution.
-- **Fetch Header Injection**: Automatically inject headers (e.g., auth tokens, API keys) into outgoing fetch requests based on host and method matching rules, configured via CLI flags or a JSON config file.
+- **JavaScript & TypeScript** in an isolated V8 engine (via `deno_core`); TypeScript types are stripped with [SWC](https://swc.rs/) (type removal, not type checking).
+- **Async/await & timers** — Promises and the event loop, plus `setTimeout`/`clearTimeout`.
+- **Console capture** — `console.log/info/warn/error/debug/trace`, streamed to storage and readable with line- or byte-based pagination.
+- **Async execution model** — `run_js` returns an execution ID; poll status and stream output; cancel running work.
+- **Content-addressed heap snapshots** — persist/restore V8 state across calls (local FS, S3, or S3 + write-through cache), or run **stateless**.
+- **WebAssembly** — the standard `WebAssembly` API, plus pre-loaded modules (`--wasm-module`) exposed as globals and advertised to clients as `runjs__wasm__<name>` stub tools.
+- **ES module imports** — optional `npm:`, `jsr:`, and URL imports fetched at runtime (policy-gated).
+- **Policy-gated capabilities** — `fetch`, filesystem (`fs`), and subprocess access, each checked against a Rego policy per operation; plus header/OAuth injection for `fetch`.
+- **Compose other MCP servers** — connect upstream MCP servers and call them from JS via `mcp.callTool()` / `mcp.listTools()`.
+- **Customizable surface** — override the server `instructions` and the `run_js` description (`--instructions`, `--run-js-description`).
+- **Auth & clustering** — JWKS-based JWT verification, and optional Raft clustering with replicated session metadata and horizontal scaling.
+- **Multiple transports** — stdio, Streamable HTTP (MCP 2025-03-26+), and a legacy HTTP+SSE transport (`--sse-port`, served by a vendored rmcp 0.1.5), with a REST sidecar and OpenAPI spec.
+- **Tasks** — native MCP [tasks](https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/tasks) (SEP-1319) over Streamable HTTP / stdio: task-enabled clients can run `run_js` as a task (`tasks/get`, `tasks/result`, `tasks/list`, `tasks/cancel`), ideal for long-running calls. (The legacy SSE transport does not offer tasks.)
 
-## Installation
+## What the agent's code can do
 
-Install `mcp-v8` using the provided install script:
+These globals are available inside `run_js` (capability globals require a policy):
+
+| Global | Purpose | Gated by |
+|--------|---------|----------|
+| `console`, `setTimeout` | Output & timers | — |
+| `fetch(url, opts?)` | HTTP requests (Fetch API) | `fetch` policy |
+| `fs.*` | File I/O (`readFile`, `writeFile`, …) | `filesystem` policy |
+| `child_process` / `Deno.Command` | Run subprocesses | `subprocess` policy |
+| `import` (`npm:` / `jsr:` / URL) | External ES modules | `--allow-external-modules` + `modules` policy |
+| `WebAssembly`, `__wasm_<name>` | Run/instantiate WASM | — |
+| `mcp.callTool/listTools/servers` | Call upstream MCP servers | `mcp_tools` policy |
+
+See [Concepts → Security policies](https://r33drichards.github.io/mcp-js/concepts/policies/) for the policy model.
+
+## MCP tools
+
+| Tool | Mode | Description |
+|------|------|-------------|
+| `run_js` | both | Stateful: queue execution → `{execution_id}`. Stateless: run and return `{output, error?}`. |
+| `get_execution` | stateful | Poll status/result of an execution. |
+| `get_execution_output` | stateful | Read paginated console output (line or byte). |
+| `cancel_execution` | stateful | Terminate a running execution. |
+| `list_executions` | stateful | List executions and their status. |
+| `list_sessions`, `list_session_snapshots` | stateful | Browse named sessions and history. |
+| `get_heap_tags`, `set_heap_tags`, `delete_heap_tags`, `query_heaps_by_tags` | stateful | Tag and search heap snapshots. |
+
+Full parameters: [MCP tools reference](https://r33drichards.github.io/mcp-js/reference/mcp-tools/).
+
+### Long-running calls as tasks
+
+The server natively implements the MCP **tasks** utility (spec `2025-11-25` /
+SEP-1319) via rmcp, over both the Streamable HTTP and stdio transports. The
+`initialize` result advertises a `tasks` capability, and a client may run the
+task-augmentable `run_js` tool as a task by adding a `task` object to the
+request params:
+
+```jsonc
+// → returns immediately with a task instead of blocking
+{ "method": "tools/call",
+  "params": { "name": "run_js", "arguments": { "code": "…" }, "task": { "ttl": 300000 } } }
+```
+
+The client then polls `tasks/get`, fetches the eventual tool result with
+`tasks/result` (which returns exactly what the call would have returned),
+enumerates work with `tasks/list`, and stops a run with `tasks/cancel`. A
+`tools/call` without a `task` field is unaffected.
+
+## Configuration
+
+`mcp-v8` is configured entirely through CLI flags — storage backend, transport,
+execution limits, policies, fetch-header injection, WASM modules, clustering, JWKS
+auth, and the prompt/tool-description overrides. The complete, always-current list
+is the generated [CLI flags reference](https://r33drichards.github.io/mcp-js/reference/cli-flags/).
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/r33drichards/mcp-js/main/install.sh | sudo bash
+mcp-v8 --help            # all flags
+mcp-v8 --print-openapi   # print the REST OpenAPI spec
 ```
 
-This will automatically download and install the latest release for your platform to `/usr/local/bin/mcp-v8` (you may be prompted for your password).
+## CLI client (`mcp-v8-cli`)
 
----
-
-*Advanced users: If you prefer to build from source, see the [Build from Source](#build-from-source) section at the end of this document.*
-
-## Command Line Arguments
-
-`mcp-v8` supports the following command line arguments:
-
-### Storage Options
-
-- `--s3-bucket <bucket>`: Use AWS S3 for heap snapshots. Specify the S3 bucket name. (Conflicts with `--stateless`)
-- `--cache-dir <path>`: Local filesystem cache directory for S3 write-through caching. Reduces latency by caching snapshots locally. (Requires `--s3-bucket`)
-- `--directory-path <path>`: Use a local directory for heap snapshots. Specify the directory path. (Conflicts with `--stateless`)
-- `--stateless`: Run in stateless mode - no heap snapshots are saved or loaded. Each JavaScript execution starts with a fresh V8 isolate. (Conflicts with `--s3-bucket` and `--directory-path`)
-
-**Note:** For heap storage, if neither `--s3-bucket`, `--directory-path`, nor `--stateless` is provided, the server defaults to using `/tmp/mcp-v8-heaps` as the local directory.
-
-### Transport Options
-
-- `--http-port <port>`: Enable Streamable HTTP transport (MCP 2025-03-26+) on the specified port. Serves the MCP endpoint at `/mcp` and a plain API at `/api/exec`. If not provided, the server uses stdio transport (default). (Conflicts with `--sse-port`)
-- `--sse-port <port>`: Enable SSE (Server-Sent Events) transport on the specified port. Exposes `/sse` for the event stream and `/message` for client requests. (Conflicts with `--http-port`)
-
-### Execution Limits
-
-- `--heap-memory-max <megabytes>`: Maximum V8 heap memory per isolate in megabytes (1–64, default: 8).
-- `--execution-timeout <seconds>`: Maximum execution timeout in seconds (1–300, default: 30).
-- `--max-concurrent-executions <n>`: Maximum number of concurrent V8 executions (default: CPU core count). Controls how many JavaScript executions can run in parallel.
-
-### Session Logging
-
-- `--session-db-path <path>`: Path to the sled database used for session logging (default: `/tmp/mcp-v8-sessions`). Only applies in stateful mode. (Conflicts with `--stateless`)
-
-### Cluster Options
-
-These options enable Raft-based clustering for distributed coordination and replicated session logging.
-
-- `--cluster-port <port>`: Port for the Raft cluster HTTP server. Enables cluster mode when set. (Requires `--http-port` or `--sse-port`)
-- `--node-id <id>`: Unique node identifier within the cluster (default: `node1`).
-- `--peers <peers>`: Comma-separated list of seed peer addresses. Format: `id@host:port` or `host:port`. Peers can also join dynamically via `POST /raft/join`.
-- `--join <address>`: Join an existing cluster by contacting this seed address (`host:port`). The node registers itself with the cluster leader.
-- `--advertise-addr <addr>`: Advertise address for this node (`host:port`). Used for peer discovery and write forwarding. Defaults to `<node-id>:<cluster-port>`.
-- `--heartbeat-interval <ms>`: Raft heartbeat interval in milliseconds (default: 100).
-- `--election-timeout-min <ms>`: Minimum election timeout in milliseconds (default: 300).
-- `--election-timeout-max <ms>`: Maximum election timeout in milliseconds (default: 500).
-
-### OPA / Fetch Options
-
-These options enable an OPA-gated `fetch()` function in the JavaScript runtime. When `--opa-url` is set, a `fetch(url, opts?)` global becomes available. `fetch()` follows the web standard Fetch API — it returns a Promise that resolves to a Response object. Every outbound HTTP request is first checked against an OPA policy — the request is only made if the policy returns `{"allow": true}`.
-
-- `--opa-url <URL>`: OPA server URL (e.g. `http://localhost:8181`). Enables `fetch()` in the JS runtime.
-- `--opa-fetch-policy <path>`: OPA policy path appended to `/v1/data/` (default: `mcp/fetch`). Requires `--opa-url`.
-- `--fetch-header <RULE>`: Inject headers into fetch requests matching host/method rules. Format: `host=<host>,header=<name>,value=<val>[,methods=GET;POST]`. Can be specified multiple times. Requires `--opa-url`. See [Fetch Header Injection](#fetch-header-injection) for details.
-- `--fetch-header-config <PATH>`: Path to a JSON file with header injection rules. Format: `[{"host": "...", "methods": [...], "headers": {...}}]`. Requires `--opa-url`. See [Fetch Header Injection](#fetch-header-injection) for details.
-
-**Example:**
-```bash
-mcp-v8 --stateless --http-port 3000 \
-  --opa-url http://localhost:8181 \
-  --opa-fetch-policy mcp/fetch
-```
-
-### WASM Module Options
-
-Pre-load WebAssembly modules that are available as global variables in every JavaScript execution.
-
-- `--wasm-module <name>=<path>`: Pre-load a `.wasm` file and expose its exports as a global variable with the given name. Can be specified multiple times for multiple modules.
-- `--wasm-config <path>`: Path to a JSON config file mapping global names to `.wasm` file paths. Format: `{"name": "/path/to/module.wasm", ...}`.
-
-Both options can be used together. CLI flags and config file entries are merged; duplicate names cause an error.
-
-**Example — CLI flags:**
-```bash
-mcp-v8 --stateless --wasm-module math=/path/to/math.wasm --wasm-module crypto=/path/to/crypto.wasm
-```
-
-**Example — Config file** (`wasm-modules.json`):
-```json
-{
-  "math": "/path/to/math.wasm",
-  "crypto": "/path/to/crypto.wasm"
-}
-```
-```bash
-mcp-v8 --stateless --wasm-config wasm-modules.json
-```
-
-After loading, the module exports are available directly in JavaScript:
-```javascript
-math.add(21, 21); // → 42
-```
-
-**Modules with imports** (e.g. WASI modules like SQLite) are also supported. When a module has imports, auto-instantiation is skipped and the compiled `WebAssembly.Module` is exposed as `__wasm_<name>`. Your JavaScript code can then instantiate it with the required imports:
-```javascript
-// __wasm_sqlite is the compiled WebAssembly.Module
-var instance = new WebAssembly.Instance(__wasm_sqlite, {
-    wasi_snapshot_preview1: { /* WASI stubs */ },
-});
-instance.exports.sqlite3_open(/* ... */);
-```
-
-Self-contained modules (no imports) are auto-instantiated as before — their exports are set directly on `<name>`, and the compiled Module is also available as `__wasm_<name>`.
-
-See the [SQLite WASM example](examples/sqlite-wasm/) for a complete working example.
-
-## Quick Start
-
-After installation, you can run the server directly. Choose one of the following options:
-
-### Stdio Transport (Default)
+A fully-typed client for the REST API, generated from the OpenAPI spec via
+[progenitor](https://github.com/oxidecomputer/progenitor):
 
 ```bash
-# Use S3 for heap storage (recommended for cloud/persistent use)
-mcp-v8 --s3-bucket my-bucket-name
-
-# Use local filesystem directory for heap storage (recommended for local development)
-mcp-v8 --directory-path /tmp/mcp-v8-heaps
-
-# Use stateless mode - no heap persistence (recommended for one-off computations)
-mcp-v8 --stateless
+mcp-v8 --stateless --http-port 3000 &
+mcp-v8-cli exec "console.log('hello'); 1 + 1"
+mcp-v8-cli exec --file ./script.js                # run a local file (uploaded as the code)
+mcp-v8-cli executions get <execution_id>
+mcp-v8-cli executions output <execution_id>
+export MCP_V8_URL=https://my-server.example.com   # point at a remote server
 ```
 
-### HTTP Transport (Streamable HTTP)
+## Rust client (`mcp-v8-client`)
 
-The HTTP transport uses the Streamable HTTP protocol (MCP 2025-03-26+), which supports bidirectional communication over standard HTTP. The MCP endpoint is served at `/mcp`:
+```toml
+[dependencies]
+mcp-v8-client = { git = "https://github.com/r33drichards/mcp-js" }
+```
+
+```rust
+use mcp_v8_client::Client;
+let client = Client::new("http://localhost:3000");
+let body = mcp_v8_client::types::ExecRequest {
+    code: "1 + 1".to_string(),
+    heap: None, session: None,
+    heap_memory_max_mb: None, execution_timeout_secs: None, tags: None,
+};
+let resp = client.exec_handler(&body).await?;
+println!("execution_id: {}", resp.into_inner().execution_id);
+```
+
+## TypeScript client (`@mcp-v8/client`)
+
+A fully-typed TypeScript client, also generated from the OpenAPI spec
+(`openapi-typescript` types + the `openapi-fetch` runtime). Lives in
+[`clients/typescript`](clients/typescript/README.md).
+
+```ts
+import { createMcpV8Client } from "@mcp-v8/client";
+
+const client = createMcpV8Client("http://localhost:3000");
+const { status, output, heap } = await client.runJs("console.log('hi'); 1 + 1");
+```
+
+Regenerate types after API changes with `npm run generate` (reads `openapi.json`).
+
+## Build from source
+
+The repo is a Nix flake (it wires up the prefetched V8 archive so the build stays
+offline-friendly):
 
 ```bash
-# Start HTTP server on port 8080 with local filesystem storage
-mcp-v8 --directory-path /tmp/mcp-v8-heaps --http-port 8080
-
-# Start HTTP server on port 8080 with S3 storage
-mcp-v8 --s3-bucket my-bucket-name --http-port 8080
-
-# Start HTTP server on port 8080 in stateless mode
-mcp-v8 --stateless --http-port 8080
+nix build github:r33drichards/mcp-js   # → ./result/bin/server
+# or for development:
+nix develop      # then: cargo build -p server
 ```
 
-The HTTP transport also exposes a plain HTTP API at `POST /api/exec` for direct JavaScript execution without MCP framing.
-
-The HTTP transport is useful for:
-- Network-based MCP clients
-- Load-balanced and horizontally-scaled deployments
-- Testing and debugging with tools like the MCP Inspector
-- Containerized deployments
-- Remote MCP server access
-
-### SSE Transport
-
-Server-Sent Events (SSE) transport for streaming responses:
-
-```bash
-# Start SSE server on port 8081 with local filesystem storage
-mcp-v8 --directory-path /tmp/mcp-v8-heaps --sse-port 8081
-
-# Start SSE server on port 8081 in stateless mode
-mcp-v8 --stateless --sse-port 8081
-```
-
-## MCP Tools
-
-### Execution Workflow
-
-`run_js` uses an **async execution model** — it submits code for background execution and returns an execution ID immediately. Use `get_execution` to poll for completion and retrieve the result, and `get_execution_output` to read console output.
-
-```
-1. run_js(code)           → { execution_id }
-2. get_execution(id)      → { status: "running" | "completed" | "failed" | "cancelled" | "timed_out", result, error }
-3. get_execution_output(id, line_offset, line_limit)  → paginated console output
-```
-
-**Example:**
-
-```
-Call run_js with code: "console.log('hello');"
-  → { execution_id: "abc-123" }
-
-Call get_execution with execution_id: "abc-123"
-  → { status: "completed" }
-
-Call get_execution_output with execution_id: "abc-123"
-  → { data: "hello\n", total_lines: 1 }
-```
-
-### Console Output
-
-`console.log`, `console.info`, `console.warn`, and `console.error` are fully supported. Output is streamed to persistent storage during execution and can be read in real-time using `get_execution_output`.
-
-`get_execution_output` supports two pagination modes:
-
-- **Line mode**: `line_offset` + `line_limit` — fetch N lines starting from line M
-- **Byte mode**: `byte_offset` + `byte_limit` — fetch N bytes starting from byte M
-
-Both modes return position info in both coordinate systems for cross-referencing. Use `next_line_offset` or `next_byte_offset` from a response to resume reading.
-
-### Tools (All Modes)
-
-| Tool | Description |
-|------|-------------|
-| `run_js` | Submit JavaScript/TypeScript code for async execution. Returns an `execution_id` immediately. Parameters: `code` (required), `heap_memory_max_mb` (optional, 4–64, default: 8), `execution_timeout_secs` (optional, 1–300, default: 30). |
-| `get_execution` | Poll execution status and result. Returns `execution_id`, `status`, `result` (if completed), `error` (if failed), `started_at`, `completed_at`. |
-| `get_execution_output` | Read paginated console output. Supports line-based (`line_offset` + `line_limit`) or byte-based (`byte_offset` + `byte_limit`) pagination. |
-| `cancel_execution` | Terminate a running V8 execution. |
-| `list_executions` | List all executions with their status. |
-
-### Additional Tools (Stateful Mode Only)
-
-In stateful mode, `run_js` accepts additional parameters: `heap` (SHA-256 hash to resume from) and `session` (human-readable session name for logging).
-
-| Tool | Description |
-|------|-------------|
-| `list_sessions` | List all named sessions. |
-| `list_session_snapshots` | Browse execution history for a session. Accepts `session` (required) and `fields` (optional, comma-separated: `index`, `input_heap`, `output_heap`, `code`, `timestamp`). |
-| `get_heap_tags` | Get tags for a heap snapshot. |
-| `set_heap_tags` | Set or replace tags on a heap snapshot. |
-| `delete_heap_tags` | Delete specific tag keys from a heap snapshot. |
-| `query_heaps_by_tags` | Find heap snapshots matching tag criteria. |
-
-## Stateless vs Stateful Mode
-
-### Stateless Mode (`--stateless`)
-
-Stateless mode runs each JavaScript execution in a fresh V8 isolate without any heap persistence.
-
-**Benefits:**
-- **Faster execution**: No snapshot creation/serialization overhead
-- **No storage I/O**: Doesn't read or write heap files
-- **Fresh isolates**: Every JS execution starts clean
-- **Perfect for**: One-off computations, stateless functions, serverless environments
-
-**Example use case:** Simple calculations, data transformations, or any scenario where you don't need to persist state between executions.
-
-### Stateful Mode (default)
-
-Stateful mode persists the V8 heap state between executions using content-addressed storage backed by either S3 or local filesystem.
-
-Each execution returns a `heap` content hash (a 64-character SHA-256 hex string) that identifies the snapshot. Pass this hash in the next `run_js` call to resume from that state. Omit `heap` to start a fresh session.
-
-**Benefits:**
-- **State persistence**: Variables and objects persist between runs
-- **Content-addressed**: Snapshots are keyed by their SHA-256 hash — no naming collisions, safe concurrent access, and natural deduplication
-- **Immutable snapshots**: Once written, a snapshot at a given hash never changes
-- **Perfect for**: Interactive sessions, building up complex state over time
-
-**Example use case:** Building a data structure incrementally, maintaining session state, or reusing expensive computations.
-
-#### Named Sessions
-
-You can tag executions with a human-readable **session name** by passing the `session` parameter to `run_js`. When a session name is provided, the server logs each execution (input heap, output heap, code, and timestamp) to an embedded sled database.
-
-Two additional tools are available in stateful mode for browsing session history:
-
-- **`list_sessions`** — Returns an array of all session names that have been used.
-- **`list_session_snapshots`** — Returns the log entries for a given session. Accepts a required `session` parameter and an optional `fields` parameter (comma-separated) to select specific fields: `index`, `input_heap`, `output_heap`, `code`, `timestamp`.
-
-The session database path defaults to `/tmp/mcp-v8-sessions` and can be overridden with `--session-db-path`.
-
-**Example workflow:**
-
-1. Call `run_js` with `code: "var x = 1; x;"` and `session: "my-project"` → receives `execution_id`.
-2. Call `get_execution` with the `execution_id` → receives `{ status: "completed", result: "1", heap: "ab12..." }`.
-3. Pass the returned `heap` hash and `session: "my-project"` in subsequent `run_js` calls to continue and log the session.
-4. Call `list_sessions` to see `["my-project"]`.
-5. Call `list_session_snapshots` with `session: "my-project"` to see the full execution history.
-
-## Integration
-
-### Claude for Desktop
-
-1. Install the server as above.
-2. Open Claude Desktop → Settings → Developer → Edit Config.
-3. Add your server to `claude_desktop_config.json`:
-
-**Stateful mode with S3:**
-```json
-{
-  "mcpServers": {
-    "js": {
-      "command": "mcp-v8",
-      "args": ["--s3-bucket", "my-bucket-name"]
-    }
-  }
-}
-```
-
-**Stateful mode with local filesystem:**
-```json
-{
-  "mcpServers": {
-    "js": {
-      "command": "mcp-v8",
-      "args": ["--directory-path", "/tmp/mcp-v8-heaps"]
-    }
-  }
-}
-```
-
-**Stateless mode:**
-```json
-{
-  "mcpServers": {
-    "js": {
-      "command": "mcp-v8",
-      "args": ["--stateless"]
-    }
-  }
-}
-```
-
-4. Restart Claude Desktop. The new tools will appear under the hammer icon.
-
-### Claude Code CLI
-
-Add the MCP server to Claude Code using the `claude mcp add` command:
-
-**Stdio transport (local):**
-```bash
-# Stateful mode with local filesystem
-claude mcp add mcp-v8 -- mcp-v8 --directory-path /tmp/mcp-v8-heaps
-
-# Stateless mode
-claude mcp add mcp-v8 -- mcp-v8 --stateless
-```
-
-**SSE transport (remote):**
-```bash
-claude mcp add mcp-v8 -t sse https://mcp-js-production.up.railway.app/sse
-```
-
-Then test by running `claude` and asking: "Run this JavaScript: `console.log([1,2,3].map(x => x * 2))`"
-
-### Cursor
-
-1. Install the server as above.
-2. Create or edit `.cursor/mcp.json` in your project root:
-
-**Stateful mode with local filesystem:**
-```json
-{
-  "mcpServers": {
-    "js": {
-      "command": "mcp-v8",
-      "args": ["--directory-path", "/tmp/mcp-v8-heaps"]
-    }
-  }
-}
-```
-
-**Stateless mode:**
-```json
-{
-  "mcpServers": {
-    "js": {
-      "command": "mcp-v8",
-      "args": ["--stateless"]
-    }
-  }
-}
-```
-
-3. Restart Cursor. The MCP tools will be available in the UI.
-
-### Claude (Web/Cloud) via Railway
-
-You can also use the hosted version on Railway without installing anything locally:
-
-1. Go to Claude's connectors settings page
-2. Add a new custom connector:
-   - **Name**: "mcp-v8"
-   - **URL**: `https://mcp-js-production.up.railway.app/sse`
-
-## Example Usage
-
-Ask Claude or Cursor: "Run this JavaScript: `console.log(1 + 2)`"
-
-The agent will:
-1. Call `run_js` with `code: "console.log(1 + 2)"` → receives `execution_id`
-2. Call `get_execution` with the `execution_id` → receives `{ status: "completed" }`
-3. Call `get_execution_output` with the `execution_id` → receives `{ data: "3\n", total_lines: 1 }`
-
-In stateful mode, `get_execution` also returns a `heap` content hash — pass it back in the next `run_js` call to resume from that state.
-
-### Importing Packages
-
-You can import npm packages, JSR packages, and URL modules directly in your JavaScript code using ES module `import` syntax. Packages are fetched from [esm.sh](https://esm.sh) at runtime — no `npm install` or pre-installation step is needed.
-
-#### npm Packages
-
-Use the `npm:` prefix followed by the package name and version:
-
-```javascript
-import { camelCase } from "npm:lodash-es@4.17.21";
-camelCase("hello world"); // → "helloWorld"
-```
-
-```javascript
-import dayjs from "npm:dayjs@1.11.13";
-dayjs("2025-01-15").format("MMMM D, YYYY"); // → "January 15, 2025"
-```
-
-#### JSR Packages
-
-Use the `jsr:` prefix for packages from the [JSR registry](https://jsr.io):
-
-```javascript
-import { camelCase } from "jsr:@luca/cases@1.0.0";
-camelCase("hello world"); // → "helloWorld"
-```
-
-#### URL Imports
-
-Import directly from any URL that serves ES modules:
-
-```javascript
-import { pascalCase } from "https://deno.land/x/case/mod.ts";
-pascalCase("hello world"); // → "HelloWorld"
-```
-
-#### How It Works
-
-- **`npm:` specifiers** are rewritten to `https://esm.sh/<package>` URLs
-- **`jsr:` specifiers** are rewritten to `https://esm.sh/jsr/<package>` URLs
-- **`https://` and `http://` URLs** are fetched directly
-- **Relative imports** (e.g., `./utils.js`) resolve against the parent module's URL
-- **TypeScript modules** (`.ts`, `.tsx`) fetched from URLs are automatically type-stripped before execution
-
-#### Tips
-
-- **Always pin versions** (e.g., `npm:lodash-es@4.17.21`) for reproducible results
-- Only packages that ship as **ES modules** are supported — CommonJS-only packages won't work directly, but esm.sh converts many of them automatically
-- Imports are **fetched over the network** at runtime, so the first execution may be slower while modules are downloaded
-- Top-level `await` is supported, so you can use `import()` dynamically as well:
-  ```javascript
-  const { default: _ } = await import("npm:lodash-es@4.17.21");
-  _.chunk([1, 2, 3, 4, 5], 2); // → [[1, 2], [3, 4], [5]]
-  ```
-
-### WebAssembly
-
-You can compile and run WebAssembly modules using the standard `WebAssembly` JavaScript API:
-
-```javascript
-const wasmBytes = new Uint8Array([
-  0x00,0x61,0x73,0x6d, // magic
-  0x01,0x00,0x00,0x00, // version
-  0x01,0x07,0x01,0x60,0x02,0x7f,0x7f,0x01,0x7f, // type: (i32,i32)->i32
-  0x03,0x02,0x01,0x00, // function section
-  0x07,0x07,0x01,0x03,0x61,0x64,0x64,0x00,0x00, // export "add"
-  0x0a,0x09,0x01,0x07,0x00,0x20,0x00,0x20,0x01,0x6a,0x0b // body: local.get 0, local.get 1, i32.add
-]);
-const mod = new WebAssembly.Module(wasmBytes);
-const inst = new WebAssembly.Instance(mod);
-inst.exports.add(21, 21); // → 42
-```
-
-Both synchronous (`WebAssembly.Module` / `WebAssembly.Instance`) and async (`WebAssembly.compile`, `WebAssembly.instantiate`) WebAssembly APIs are supported. The runtime resolves Promises automatically via the event loop.
-
-Alternatively, you can pre-load `.wasm` files at server startup using `--wasm-module` or `--wasm-config` so they are available as globals in every execution without inline byte arrays. See [WASM Module Options](#wasm-module-options) for details.
-
-### SQLite WASM
-
-Run a full SQLite database inside mcp-v8 using [SQLite WASM](https://github.com/sqlite/sqlite-wasm):
-
-```bash
-# Build the WASM module (requires Emscripten)
-./examples/sqlite-wasm/build.sh
-
-# Start the server with SQLite pre-loaded
-mcp-v8 --stateless --wasm-module sqlite=examples/sqlite-wasm/sqlite3.wasm
-```
-
-Then run SQL from JavaScript:
-
-```javascript
-var db = new SQLite();
-db.exec("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, age INTEGER)");
-db.exec("INSERT INTO users (name, age) VALUES ('Alice', 30)");
-var result = db.query("SELECT * FROM users");
-db.close();
-JSON.stringify(result.rows);  // → [{"id":1,"name":"Alice","age":30}]
-```
-
-See [`examples/sqlite-wasm/`](examples/sqlite-wasm/) for the full example including the SQLite wrapper code and WASI import stubs.
-
-### OPA-Gated Fetch
-
-When the server is started with `--opa-url`, JavaScript code can use a `fetch(url, opts?)` function following the web standard Fetch API. Every request is checked against an OPA policy before the HTTP call is made.
-
-**1. Write an OPA policy**
-
-Create a Rego policy that controls which requests are allowed:
-
-```rego
-package mcp.fetch
-
-default allow = false
-
-# Allow GET requests to a specific API host
-allow if {
-    input.method == "GET"
-    input.url_parsed.host == "api.example.com"
-    startswith(input.url_parsed.path, "/public/")
-}
-```
-
-The policy input includes:
-- `operation`: always `"fetch"`
-- `url`: the full URL string
-- `method`: HTTP method (e.g. `"GET"`, `"POST"`)
-- `headers`: request headers (keys normalized to lowercase)
-- `url_parsed`: parsed URL components — `scheme`, `host`, `port`, `path`, `query`
-
-**2. Start the server with OPA enabled**
-
-```bash
-mcp-v8 --stateless --http-port 3000 \
-  --opa-url http://localhost:8181 \
-  --opa-fetch-policy mcp/fetch
-```
-
-**3. Use `fetch()` in JavaScript**
-
-```javascript
-const resp = await fetch("https://api.example.com/public/data");
-resp.status;              // 200
-resp.ok;                  // true
-await resp.text();        // response body as string
-await resp.json();        // parsed JSON
-resp.headers.get("content-type"); // header value
-```
-
-The response object supports:
-- Properties: `.ok`, `.status`, `.statusText`, `.url`, `.redirected`, `.type`, `.bodyUsed`
-- Methods: `.text()`, `.json()`, `.clone()` (`.text()` and `.json()` return Promises)
-- Headers: `.headers.get(name)`, `.headers.has(name)`, `.headers.entries()`, `.headers.keys()`, `.headers.values()`, `.headers.forEach(fn)`
-
-`fetch()` also accepts an options object:
-
-```javascript
-const resp = await fetch("https://api.example.com/data", {
-  method: "POST",
-  headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({ key: "value" })
-});
-JSON.stringify(await resp.json());
-```
-
-If the OPA policy denies a request, the Promise returned by `fetch()` is rejected with an error.
-
-### Fetch Header Injection
-
-When using OPA-gated fetch, you can configure automatic header injection rules that add headers to outgoing `fetch()` requests based on the target host and HTTP method. This is useful for injecting authentication tokens, API keys, or other credentials without embedding them in JavaScript code.
-
-Header injection rules are evaluated per-request. If a rule's host pattern and method filter match, its headers are injected into the request. **User-provided headers always take precedence** — a rule will not overwrite a header that JavaScript code already set.
-
-#### CLI Flags (`--fetch-header`)
-
-Use `--fetch-header` to define rules inline. The format is:
-
-```
-host=<host>,header=<name>,value=<val>[,methods=GET;POST]
-```
-
-- `host` — Host to match (exact or wildcard, see below). **Required.**
-- `header` — Header name to inject. **Required.**
-- `value` — Header value to inject. **Required.**
-- `methods` — Semicolon-separated HTTP methods to match. **Optional.** If omitted, the rule applies to all methods.
-
-Can be specified multiple times for multiple rules:
-
-```bash
-mcp-v8 --stateless --opa-url http://localhost:8181 \
-  --fetch-header "host=api.github.com,header=Authorization,value=Bearer ghp_xxxx" \
-  --fetch-header "host=api.example.com,header=X-API-Key,value=secret123"
-```
-
-#### JSON Config File (`--fetch-header-config`)
-
-For managing many rules, use a JSON config file. Each rule can inject multiple headers at once:
-
-```json
-[
-  {
-    "host": "api.github.com",
-    "methods": ["GET", "POST"],
-    "headers": {
-      "Authorization": "Bearer ghp_xxxx",
-      "X-GitHub-Api-Version": "2022-11-28"
-    }
-  },
-  {
-    "host": "*.example.com",
-    "headers": {
-      "X-API-Key": "secret123"
-    }
-  }
-]
-```
-
-```bash
-mcp-v8 --stateless --opa-url http://localhost:8181 \
-  --fetch-header-config headers.json
-```
-
-Both `--fetch-header` and `--fetch-header-config` can be used together — their rules are merged.
-
-#### Host Matching
-
-- **Exact match**: `api.github.com` matches only `api.github.com`.
-- **Wildcard**: `*.github.com` matches `api.github.com`, `github.com`, and `sub.api.github.com`.
-- Host matching is **case-insensitive**.
-
-#### Header Precedence
-
-Headers set explicitly in JavaScript `fetch()` calls always win. Injection rules only add headers that are not already present:
-
-```javascript
-// Rule: host=api.example.com, header=Authorization, value=Bearer injected
-
-// Header is injected (not set by code):
-await fetch("https://api.example.com/data");
-// → request includes Authorization: Bearer injected
-
-// User header takes precedence:
-await fetch("https://api.example.com/data", {
-  headers: { "Authorization": "Bearer my-own-token" }
-});
-// → request includes Authorization: Bearer my-own-token (rule skipped)
-```
-
-### Policy-Gated Filesystem Access
-
-When the server is started with a Rego policy configuration, JavaScript code can use an `fs` module providing Node.js-compatible file operations. Every operation is evaluated against a Rego policy before execution.
-
-The `fs` module supports the following operations:
-
-```javascript
-const data = await fs.readFile("/tmp/data.txt");          // string (utf-8)
-const data = await fs.readFile("/tmp/data.bin", "buffer"); // Uint8Array
-await fs.writeFile("/tmp/out.txt", "hello");              // string data
-await fs.writeFile("/tmp/out.bin", uint8array);           // binary data
-await fs.appendFile("/tmp/out.txt", " world");
-const entries = await fs.readdir("/tmp");                  // string[]
-const info = await fs.stat("/tmp/data.txt");               // {size,isFile,isDirectory,...}
-await fs.mkdir("/tmp/newdir", { recursive: true });
-await fs.rm("/tmp/data.txt");
-await fs.rm("/tmp/newdir", { recursive: true });
-await fs.rename("/tmp/old.txt", "/tmp/new.txt");
-await fs.copyFile("/tmp/a.txt", "/tmp/b.txt");
-const bool = await fs.exists("/tmp/data.txt");
-```
-
-**1. Write a Rego policy**
-
-Create a Rego policy that controls which filesystem operations are allowed:
-
-```rego
-package mcp.fs
-
-default allow = false
-
-# Allow reading from /tmp
-allow if {
-    input.operation == "readFile"
-    startswith(input.path, "/tmp/")
-}
-
-# Allow writing to /tmp
-allow if {
-    input.operation == "writeFile"
-    startswith(input.path, "/tmp/")
-}
-
-# Allow other common operations
-allow if {
-    input.operation in ["readdir", "stat", "exists"]
-    startswith(input.path, "/tmp/")
-}
-```
-
-The policy input includes:
-- `operation`: the filesystem operation being performed (e.g., `"readFile"`, `"writeFile"`, `"mkdir"`, `"rm"`, `"rename"`, `"copyFile"`, `"appendFile"`, `"readdir"`, `"stat"`, `"exists"`)
-- `path`: the file or directory path being accessed
-- `destination`: (optional) the destination path for operations like `rename` and `copyFile`
-- `recursive`: (optional, boolean) whether a recursive operation was requested (for `mkdir` and `rm`)
-- `encoding`: (optional) the encoding parameter for `readFile` (either `"utf8"` or `"buffer"`)
-
-**2. Start the server with policy configuration**
-
-Use `--policies-json` to enable filesystem access with local Rego policies:
-
-```bash
-mcp-v8 --stateless --http-port 3000 \
-  --policies-json /path/to/policies.json
-```
-
-The `policies.json` file should contain policy configuration objects. See the [POLICIES section](https://github.com/r33drichards/mcp-js) for detailed configuration examples.
-
-**3. Use `fs` in JavaScript**
-
-All `fs` operations return Promises and can be used with `await`:
-
-```javascript
-// Read a file
-const content = await fs.readFile("/tmp/data.txt");
-console.log(content);
-
-// Write a file
-await fs.writeFile("/tmp/output.txt", "Hello, World!");
-
-// Check if a file exists
-const exists = await fs.exists("/tmp/output.txt");
-console.log(exists); // true
-
-// Get file metadata
-const stats = await fs.stat("/tmp/output.txt");
-console.log(stats.size); // file size in bytes
-
-// List directory contents
-const files = await fs.readdir("/tmp");
-console.log(files); // array of filenames
-
-// Create a directory
-await fs.mkdir("/tmp/mydir", { recursive: true });
-
-// Copy a file
-await fs.copyFile("/tmp/output.txt", "/tmp/backup.txt");
-
-// Rename a file
-await fs.rename("/tmp/backup.txt", "/tmp/backup_old.txt");
-
-// Delete a file
-await fs.rm("/tmp/backup_old.txt");
-
-// Delete a directory recursively
-await fs.rm("/tmp/mydir", { recursive: true });
-```
-
-If a policy denies an operation, the Promise returned by the `fs` operation is rejected with an error message indicating that the operation was denied by policy.
-
-**Binary Data**
-
-When reading binary files, specify `"buffer"` as the encoding parameter:
-
-```javascript
-const buffer = await fs.readFile("/tmp/image.png", "buffer");
-// buffer is a Uint8Array
-
-// Write binary data
-const newBuffer = new Uint8Array([72, 101, 108, 108, 111]); // "Hello"
-await fs.writeFile("/tmp/binary.bin", newBuffer);
-```
-
-### Loading `.wasm` Files
-
-Instead of embedding raw bytes in JavaScript, you can compile a `.wasm` file once and load it at server startup. The module's exports are then available as a global variable in every execution.
-
-**1. Create a WASM module**
-
-Write a WebAssembly Text Format (`.wat`) file and compile it with [`wat2wasm`](https://github.com/WebAssembly/wabt):
-
-```wat
-;; math.wat — exports add(i32, i32) -> i32
-(module
-  (func $add (param i32 i32) (result i32)
-    local.get 0
-    local.get 1
-    i32.add)
-  (export "add" (func $add)))
-```
-
-```bash
-wat2wasm math.wat -o math.wasm
-```
-
-**2. Start the server with the module**
-
-```bash
-# Single module
-mcp-v8 --stateless --wasm-module math=./math.wasm
-
-# Multiple modules
-mcp-v8 --stateless \
-  --wasm-module math=./math.wasm \
-  --wasm-module physics=./physics.wasm
-```
-
-Or use a JSON config file for many modules:
-
-```json
-{
-  "math": "./math.wasm",
-  "physics": "./physics.wasm"
-}
-```
-
-```bash
-mcp-v8 --stateless --wasm-config wasm-modules.json
-```
-
-**3. Call exports from JavaScript**
-
-The module's exports are available directly on the global variable:
-
-```javascript
-math.add(2, 3);          // → 5
-math.add(100, 200);      // → 300
-```
-
-When multiple modules are loaded, each is its own global:
-
-```javascript
-var sum = math.add(10, 5);           // 15
-var product = physics.multiply(3, 4); // 12
-sum + product;                        // → 27
-```
-
-## Heap Storage Options
-
-You can configure heap storage using the following command line arguments:
-
-- **S3**: `--s3-bucket <bucket>`
-  - Example: `mcp-v8 --s3-bucket my-bucket-name`
-  - Requires AWS credentials in your environment.
-  - Ideal for cloud deployments and sharing state across instances.
-- **S3 with write-through cache**: `--s3-bucket <bucket> --cache-dir <path>`
-  - Example: `mcp-v8 --s3-bucket my-bucket-name --cache-dir /tmp/mcp-v8-cache`
-  - Reads from local cache first, writes to both local cache and S3.
-  - Reduces latency for repeated snapshot access.
-- **Filesystem**: `--directory-path <path>`
-  - Example: `mcp-v8 --directory-path /tmp/mcp-v8-heaps`
-  - Stores heap snapshots locally on disk.
-  - Ideal for local development and testing.
-- **Stateless**: `--stateless`
-  - Example: `mcp-v8 --stateless`
-  - No heap persistence - each execution starts fresh.
-  - Ideal for one-off computations and serverless environments.
-
-**Note:** Only one storage option can be used at a time. If multiple are provided, the server will return an error.
+A plain `cargo build --release` inside `server/` also works if your toolchain can
+build `deno_core`/V8.
 
 ## Limitations
 
-- **No timers**: Functions like `setTimeout` and `setInterval` are not available.
-- **No DOM or browser APIs**: This is not a browser environment; there is no access to `window`, `document`, or other browser-specific objects.
-- **TypeScript: type removal only**: TypeScript type annotations are stripped before execution. No type checking is performed — invalid types are silently removed, not reported as errors.
+- **`setInterval` is not available** — use a loop with awaited `setTimeout`.
+- **No DOM or browser APIs** — there is no `window`/`document`.
+- **TypeScript is type-stripped, not type-checked** — invalid types are removed, not reported. JSX/TSX is not supported (it parses to a clear error).
 
----
+## License
 
-## Build from Source (Advanced)
-
-If you prefer to build from source instead of using the install script:
-
-### Prerequisites
-- Rust (nightly toolchain recommended)
-- (Optional) AWS credentials for S3 storage
-
-### Build the Server
-
-```bash
-cd server
-cargo build --release
-```
-
-The built binary will be located at `server/target/release/server`. You can use this path in the integration steps above instead of `/usr/local/bin/mcp-v8` if desired.
+[GNU AGPL-3.0](./LICENSE).
 
 <!-- load-test-report -->
 # MCP-V8 Load Test Benchmark Report v0.1.0
@@ -943,4 +280,3 @@ ran on railway gha runners on [pr](https://github.com/r33drichards/mcp-js/pull/3
 - **HTTP Req/s**: Total HTTP requests per second (1 per iteration)
 - **Dropped**: Iterations k6 couldn't schedule because VUs were exhausted (indicates server saturation)
 - **Topology**: `single` = 1 MCP-V8 node; `cluster` = 3 MCP-V8 nodes with Raft
-

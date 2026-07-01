@@ -39,6 +39,30 @@
           rustc = rustToolchain;
         };
 
+        serverCargoDeps = (pkgs.callPackage ./nix/fetch-cargo-vendor.nix {
+          cargo = rustToolchain;
+        } {
+          src = ./server;
+          # Vendor hash for server's cargo deps; refreshed when deps changed.
+          # Bumped for the in-tree `cli-derive` proc-macro crate (adds a path
+          # dependency to server/Cargo.lock; no new registry crates are vendored,
+          # but the vendor-staging hash still changes with the lock contents).
+          hash = "sha256-qqFUMHD7C3iS2AEVC0vPqaxbxeEbifP6oRZIMPRs8zM=";
+        });
+
+        docsPython = pkgs.python3.withPackages (
+          ps: with ps; [
+            mkdocs
+            mkdocs-mermaid2-plugin
+          ]
+        );
+
+        docsToolCargoFlags = [
+          "--bin" "server"
+          "--bin" "generate-cli-markdown"
+          "--bin" "generate-mcp-tools-markdown"
+        ];
+
         # Patched replace-workspace-values that handles the 'version' key
         # in workspace-inherited dependencies.  Upstream nixpkgs script
         # does not handle this, causing builds to fail for crates (like
@@ -72,30 +96,87 @@
             "aarch64-darwin" = "sha256-yHa1eydVCrfYGgrZANbzgmmf25p7ui1VMas2A7BhG6k=";
           }.${system};
         };
+
+        docsTools = rustPlatform.buildRustPackage {
+          pname = "mcp-js-docs-tools";
+          version = "0.1.0";
+          src = ./server;
+
+          cargoDeps = serverCargoDeps;
+
+          cargoBuildFlags = docsToolCargoFlags;
+          cargoInstallFlags = docsToolCargoFlags;
+
+          nativeBuildInputs = with pkgs; [
+            clang
+            git
+            llvmPackages.bintools
+            pkg-config
+          ];
+
+          buildInputs = with pkgs; [
+            openssl
+          ];
+
+          LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
+          RUSTY_V8_ARCHIVE = "${rustyV8Archive}";
+          doCheck = false;
+        };
+
+        widdershins = pkgs.buildNpmPackage {
+          pname = "widdershins";
+          version = "4.0.1";
+          src = ./tools/widdershins;
+
+          npmDeps = pkgs.importNpmLock {
+            npmRoot = ./tools/widdershins;
+          };
+          npmConfigHook = pkgs.importNpmLock.npmConfigHook;
+
+          dontNpmBuild = true;
+          nativeBuildInputs = [ pkgs.makeWrapper ];
+
+          installPhase = ''
+            runHook preInstall
+
+            mkdir -p "$out/libexec/widdershins" "$out/bin"
+            cp package.json package-lock.json "$out/libexec/widdershins/"
+            cp -R node_modules "$out/libexec/widdershins/"
+
+            makeWrapper ${pkgs.nodejs}/bin/node "$out/bin/widdershins" \
+              --add-flags "$out/libexec/widdershins/node_modules/widdershins/widdershins.js"
+
+            runHook postInstall
+          '';
+        };
+
+        docsGenerationCommands = ''
+          export HOME="$TMPDIR/home"
+          mkdir -p "$HOME"
+
+          server --print-openapi > openapi.json
+          cp openapi.json mcp-v8-client/openapi.json
+          python3 scripts/generate_http_api_reference.py
+          generate-cli-markdown > site-docs/reference/cli-flags.md
+          generate-mcp-tools-markdown > site-docs/reference/mcp-tools.md
+        '';
       in {
         devShells.default = import ./shell.nix { inherit pkgs rustToolchain rustyV8Archive; };
         devShells.fuzz = import ./shell.nix { inherit pkgs rustyV8Archive; rustToolchain = rustNightly; };
 
         # SQLite compiled to WASM via Emscripten — used by the sqlite-wasm example.
         packages.sqlite-wasm = import ./nix/sqlite-wasm.nix { inherit pkgs; };
+        packages.docs-tools = docsTools;
+        packages.widdershins = widdershins;
 
         packages.default = rustPlatform.buildRustPackage {
           pname = "mcp-js-server";
           version = "0.1.0";
           src = ./server;
 
-          # Use cargoDeps with a patched vendor step instead of cargoHash
-          # so we can inject our fixed replace-workspace-values script.
-          cargoDeps = (rustPlatform.fetchCargoVendor {
-            src = ./server;
-            hash = "sha256-ubgki0Sm0dYYFGWIu5SVnODR0SNSMAEZNRgn9t+Dorg=";
-          }).overrideAttrs (old: {
-            nativeBuildInputs = map (dep:
-              if (dep.name or "") == "replace-workspace-values"
-              then patchedReplaceWorkspaceValues
-              else dep
-            ) (old.nativeBuildInputs or []);
-          });
+          # Use a local copy of fetchCargoVendor so the staging helper fetches
+          # crates from the registry CDN instead of the crates.io API endpoint.
+          cargoDeps = serverCargoDeps;
 
           nativeBuildInputs = with pkgs; [
             clang
@@ -122,6 +203,36 @@
 
           meta.mainProgram = "server";
         };
+
+        packages.docs = pkgs.stdenvNoCC.mkDerivation {
+          pname = "mcp-js-docs";
+          version = "0.1.0";
+          src = self;
+
+          nativeBuildInputs = [
+            docsTools
+            docsPython
+            widdershins
+          ];
+
+          dontConfigure = true;
+          strictDeps = true;
+
+          buildPhase = ''
+            runHook preBuild
+
+            ${docsGenerationCommands}
+            python3 -m mkdocs build --strict
+
+            runHook postBuild
+          '';
+
+          installPhase = ''
+            runHook preInstall
+            cp -R site "$out"
+            runHook postInstall
+          '';
+        };
       }
     )) // {
       inherit nixosModules;
@@ -130,7 +241,16 @@
       #   nix build .#checks.x86_64-linux.cluster-test
       checks.x86_64-linux =
         let
-          pkgs = import nixpkgs { system = "x86_64-linux"; };
+          pkgs = import nixpkgs {
+            system = "x86_64-linux";
+            overlays = [ rust-overlay.overlays.default ];
+          };
+          docsPython = pkgs.python3.withPackages (
+            ps: with ps; [
+              mkdocs
+              mkdocs-mermaid2-plugin
+            ]
+          );
         in {
           cluster-test = pkgs.nixosTest (import ./tests/nixos/cluster.nix {
             inherit pkgs;
@@ -148,6 +268,66 @@
             inherit pkgs;
             mcp-js = self.packages.x86_64-linux.default;
           });
+          exec-opa-test = pkgs.nixosTest (import ./tests/nixos/exec-opa.nix {
+            inherit pkgs;
+            mcp-js = self.packages.x86_64-linux.default;
+          });
+          isomorphic-git-test = pkgs.nixosTest (import ./tests/nixos/isomorphic-git.nix {
+            inherit pkgs;
+            mcp-js = self.packages.x86_64-linux.default;
+          });
+          docs-generated-check = pkgs.stdenvNoCC.mkDerivation {
+            pname = "mcp-js-docs-generated-check";
+            version = "0.1.0";
+            src = self;
+
+            nativeBuildInputs = [
+              self.packages.x86_64-linux.docs-tools
+              docsPython
+              self.packages.x86_64-linux.widdershins
+            ];
+
+            dontConfigure = true;
+            strictDeps = true;
+
+            buildPhase = ''
+              runHook preBuild
+
+              cp -R --no-preserve=mode,ownership "$src"/. repo
+              chmod -R u+w repo
+              cd repo
+
+              cp openapi.json "$TMPDIR/openapi.json.orig"
+              cp mcp-v8-client/openapi.json "$TMPDIR/client-openapi.json.orig"
+              cp site-docs/reference/http-api.md "$TMPDIR/http-api.md.orig"
+              cp site-docs/reference/cli-flags.md "$TMPDIR/cli-flags.md.orig"
+              cp site-docs/reference/mcp-tools.md "$TMPDIR/mcp-tools.md.orig"
+
+              export HOME="$TMPDIR/home"
+              mkdir -p "$HOME"
+
+              server --print-openapi > openapi.json
+              cp openapi.json mcp-v8-client/openapi.json
+              python3 scripts/generate_http_api_reference.py
+              generate-cli-markdown > site-docs/reference/cli-flags.md
+              generate-mcp-tools-markdown > site-docs/reference/mcp-tools.md
+
+              diff -u "$TMPDIR/openapi.json.orig" openapi.json
+              diff -u "$TMPDIR/client-openapi.json.orig" mcp-v8-client/openapi.json
+              diff -u "$TMPDIR/http-api.md.orig" site-docs/reference/http-api.md
+              diff -u "$TMPDIR/cli-flags.md.orig" site-docs/reference/cli-flags.md
+              diff -u "$TMPDIR/mcp-tools.md.orig" site-docs/reference/mcp-tools.md
+
+              runHook postBuild
+            '';
+
+            installPhase = ''
+              runHook preInstall
+              mkdir -p "$out"
+              touch "$out/passed"
+              runHook postInstall
+            '';
+          };
         };
     };
 }

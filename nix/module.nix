@@ -47,6 +47,12 @@ in
       description = "Run in stateless mode (no heap persistence).";
     };
 
+    allowExternalModules = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = "Allow external module imports (npm:/jsr:/URL). Adds --allow-external-modules.";
+    };
+
     heartbeatInterval = lib.mkOption {
       type = lib.types.int;
       default = 200;
@@ -120,7 +126,9 @@ in
             ];
 
             storageArgs = lib.optionals (!cfg.stateless) [
-              "--directory-path"
+              "--heap-store"
+              "dir"
+              "--heap-dir"
               cfg.dataDir
               "--session-db-path"
               "${cfg.dataDir}/sessions"
@@ -139,8 +147,6 @@ in
               (lib.concatStringsSep "," cfg.peers)
             ];
 
-            statelessArgs = lib.optionals cfg.stateless [ "--stateless" ];
-
             advertiseArgs = lib.optionals (cfg.advertiseAddr != null) [
               "--advertise-addr"
               cfg.advertiseAddr
@@ -151,12 +157,14 @@ in
               cfg.join
             ];
 
+            externalModulesArgs = lib.optionals cfg.allowExternalModules [ "--allow-external-modules" ];
+
             policiesArgs = lib.optionals (cfg.policiesJson != null) [
               "--policies-json"
               "'${cfg.policiesJson}'"
             ];
           in
-          lib.concatStringsSep " " (baseArgs ++ storageArgs ++ peerArgs ++ statelessArgs ++ advertiseArgs ++ joinArgs ++ policiesArgs);
+          lib.concatStringsSep " " (baseArgs ++ storageArgs ++ peerArgs ++ advertiseArgs ++ joinArgs ++ externalModulesArgs ++ policiesArgs);
 
         Restart = "on-failure";
         RestartSec = "2s";

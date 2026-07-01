@@ -15,7 +15,7 @@ LABEL="${TOPOLOGY}-${MODE}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-BINARY="${PROJECT_DIR}/server/target/release/server"
+BINARY="${PROJECT_DIR}/target/release/server"
 DATA_DIR="/tmp/mcp-loadtest-$$"
 
 cleanup() {
@@ -42,7 +42,7 @@ fi
 
 if [ ! -x "$BINARY" ]; then
   echo "Binary not found at ${BINARY}, building..."
-  (cd "$PROJECT_DIR" && nix develop --command bash -c "cd server && cargo build --release")
+  (cd "$PROJECT_DIR" && nix develop --command bash -c "cargo build --release -p server")
 fi
 
 # ── Data dirs ──────────────────────────────────────────────────────────

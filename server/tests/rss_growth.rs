@@ -97,6 +97,7 @@ fn test_rss_growth_stateless_with_invalid_wasm() {
                 name: "m".to_string(),
                 bytes: vec![0xde, 0xad, 0xbe, 0xef],
                 max_memory_bytes: None,
+                description: None,
             }];
             let _ = execute_stateless("1", ExecutionConfig::new(heap_bytes).wasm_modules(&modules));
         },

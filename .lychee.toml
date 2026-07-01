@@ -1,0 +1,14 @@
+include_fragments = true
+max_retries = 3
+retry_wait_time = 2
+timeout = 20
+verbose = "info"
+
+exclude = [
+  "^http://localhost(:[0-9]+)?(/|$)",
+  "^http://127\\.0\\.0\\.1(:[0-9]+)?(/|$)",
+  "^http://your-host(:[0-9]+)?(/|$)",
+  "^https?://([a-z0-9-]+\\.)*example\\.com(/|$)",
+  "^file:///path/to/.*$",
+  "^http://\\.\\.\\.$",
+]

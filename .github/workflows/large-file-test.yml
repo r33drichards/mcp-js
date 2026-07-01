@@ -1,0 +1,69 @@
+name: Large File Tests
+
+# Exercises the streaming fs write path on a genuinely large file — including
+# the gigabyte test that is `#[ignore]`d by default (it needs more disk/time
+# than a normal unit run). The smaller large-file tests (48 MiB / 24 MiB) are
+# not ignored and already run in the standard `Test` workflow.
+
+on:
+  workflow_dispatch:
+    inputs:
+      size_bytes:
+        description: "Bytes for the streamed gigabyte test (MCP_FS_LARGE_BYTES)"
+        required: false
+        default: "1073741824" # 1 GiB
+  schedule:
+    - cron: "0 5 * * 1" # weekly, Mondays 05:00 UTC
+  pull_request:
+    branches: [main]
+    paths:
+      - "server/src/engine/fs_store.rs"
+      - "server/src/engine/fs_mount.rs"
+      - "server/src/engine/fs_chunker.rs"
+      - "server/src/engine/fs.rs"
+      - "server/tests/fs_large_file.rs"
+      - ".github/workflows/large-file-test.yml"
+
+concurrency:
+  group: large-file-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  large-file:
+    name: Large file streaming
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Free up disk space
+        # The gigabyte test writes its blobs to the temp dir on the root fs.
+        # Clear the big preinstalled toolchains to guarantee ample room.
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
+            /opt/hostedtoolcache/CodeQL "$AGENT_TOOLSDIRECTORY" || true
+          df -h /
+
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/flake-checker-action@main
+
+      - name: Build the large-file test
+        run: nix develop --command bash -c "cd server && cargo test --no-run --test fs_large_file"
+
+      - name: Run large-file integration tests (incl. the gigabyte test)
+        env:
+          # On workflow_dispatch this comes from the input; otherwise the test's
+          # built-in 1 GiB default applies.
+          MCP_FS_LARGE_BYTES: ${{ github.event.inputs.size_bytes || '1073741824' }}
+        run: |
+          nix develop --command bash -c "
+            cd server &&
+            cargo test --test fs_large_file -- --include-ignored --nocapture --test-threads=1
+          "
+
+      - name: Disk usage after run
+        if: always()
+        run: df -h /

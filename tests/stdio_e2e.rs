@@ -20,7 +20,7 @@ impl StdioServer {
     /// Start a new stdio MCP server for testing
     async fn start(heap_dir: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let mut child = Command::new("cargo")
-            .args(&["run", "--", "--directory-path", heap_dir])
+            .args(&["run", "--", "--heap-store", "dir", "--heap-dir", heap_dir])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null()) // Suppress server logs during tests

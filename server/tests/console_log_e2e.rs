@@ -30,7 +30,7 @@ impl HttpServer {
         let port = find_available_port();
 
         let child = Command::new(env!("CARGO_BIN_EXE_server"))
-            .args(&["--stateless", "--http-port", &port.to_string()])
+            .args(&["--http-port", &port.to_string()])
             .stdin(Stdio::null())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
@@ -299,7 +299,7 @@ async fn test_list_executions() -> Result<(), Box<dyn std::error::Error>> {
     // Both IDs should appear
     let ids: Vec<&str> = executions
         .iter()
-        .filter_map(|e| e["id"].as_str())
+        .filter_map(|e| e["execution_id"].as_str())
         .collect();
     assert!(ids.contains(&id1.as_str()), "Should contain first execution");
     assert!(ids.contains(&id2.as_str()), "Should contain second execution");

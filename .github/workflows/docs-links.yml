@@ -1,0 +1,26 @@
+name: Docs Links
+
+on:
+  pull_request:
+    branches: [ main ]
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  link-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - name: Build docs artifact
+        run: nix build .#packages.x86_64-linux.docs --print-build-logs -L
+      - name: Check docs links
+        uses: lycheeverse/lychee-action@v2
+        with:
+          args: --config .lychee.toml site-docs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

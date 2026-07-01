@@ -50,3 +50,9 @@ domain_allowed if {
     some suffix in wildcard_suffixes
     endswith(input.url_parsed.host, suffix)
 }
+
+domain_allowed if {
+    input.url_parsed.host == "host.docker.internal"
+    input.url_parsed.port == 4010
+    input.url_parsed.path == "/protected"
+}

@@ -1,23 +1,24 @@
 /// Integration tests for fetch header injection.
 ///
-/// Uses a local allow-all Rego policy and an echo target server, configures an
-/// Engine with header rules, runs JS `fetch()` calls, and asserts that injected
-/// headers arrive (or don't) on the outbound request.
+/// Uses a local allow-all Rego policy together with mock token and echo
+/// servers, configures an Engine with fetch header rules, runs JS `fetch()`
+/// calls, and asserts against the real outbound requests.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Once};
 
 use axum::{
-    Router,
-    extract::Request,
-    response::Json,
-    routing::any,
+    extract::{Form, State},
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
+    routing::{any, post},
+    Json, Router,
 };
-use serde_json::Value;
-use server::engine::{initialize_v8, Engine};
-use server::engine::fetch::{FetchConfig, HeaderRule};
+use serde_json::{Value, json};
 use server::engine::execution::ExecutionRegistry;
-use server::engine::opa::{EvalMode, PolicyChain, PolicyEvaluatorKind, LocalPolicyEvaluator};
+use server::engine::fetch::{FetchConfig, HeaderRule, OAuthClientCredentialsConfig};
+use server::engine::opa::{EvalMode, LocalPolicyEvaluator, PolicyChain, PolicyEvaluatorKind};
+use server::engine::{Engine, initialize_v8};
 
 static INIT: Once = Once::new();
 
@@ -27,222 +28,651 @@ fn ensure_v8() {
     });
 }
 
-// ── Mock servers ────────────────────────────────────────────────────────
+#[derive(Clone)]
+struct TestTokenServer {
+    base_url: String,
+    state: TestTokenServerState,
+}
 
-/// Start a mock target server that echoes back all received request headers
-/// as a JSON object. Returns the base URL.
-async fn start_echo_mock() -> String {
-    let app = Router::new().route(
-        "/",
-        any(|req: Request| async move {
-            let headers: HashMap<String, String> = req
-                .headers()
-                .iter()
-                .map(|(k, v)| {
-                    (
-                        k.as_str().to_string(),
-                        v.to_str().unwrap_or("").to_string(),
-                    )
-                })
-                .collect();
-            Json(serde_json::json!(headers))
-        }),
-    );
+impl TestTokenServer {
+    fn token_url(&self) -> String {
+        format!("{}/token", self.base_url)
+    }
+
+    async fn requests(&self) -> Vec<TestTokenRequest> {
+        self.state.requests.lock().await.clone()
+    }
+}
+
+#[derive(Clone)]
+struct TestTokenServerState {
+    responses: Arc<tokio::sync::Mutex<VecDeque<TestTokenResponse>>>,
+    requests: Arc<tokio::sync::Mutex<Vec<TestTokenRequest>>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TestTokenResponse {
+    status: StatusCode,
+    body: Value,
+}
+
+impl TestTokenResponse {
+    fn success(body: Value) -> Self {
+        Self {
+            status: StatusCode::OK,
+            body,
+        }
+    }
+
+    fn failure(status: StatusCode, body: Value) -> Self {
+        Self { status, body }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct TestTokenRequest {
+    grant_type: String,
+    refresh_token: Option<String>,
+}
+
+async fn start_token_server(responses: Vec<TestTokenResponse>) -> TestTokenServer {
+    async fn token_handler(
+        State(state): State<TestTokenServerState>,
+        Form(form): Form<HashMap<String, String>>,
+    ) -> Response {
+        state.requests.lock().await.push(TestTokenRequest {
+            grant_type: form.get("grant_type").cloned().unwrap_or_default(),
+            refresh_token: form.get("refresh_token").cloned(),
+        });
+
+        let response = state.responses.lock().await.pop_front().unwrap_or_else(|| {
+            TestTokenResponse::failure(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                json!({"error":"no_more_responses"}),
+            )
+        });
+
+        (response.status, Json(response.body)).into_response()
+    }
+
+    let state = TestTokenServerState {
+        responses: Arc::new(tokio::sync::Mutex::new(VecDeque::from(responses))),
+        requests: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+    };
+
+    let app = Router::new()
+        .route("/token", post(token_handler))
+        .with_state(state.clone());
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
+    let address = listener.local_addr().unwrap();
 
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
 
-    format!("http://127.0.0.1:{}", port)
+    TestTokenServer {
+        base_url: format!("http://{}", address),
+        state,
+    }
 }
 
-// ── Helper to build an Engine with header rules ─────────────────────────
+#[derive(Clone)]
+struct EchoServer {
+    url: String,
+    state: EchoServerState,
+}
 
-/// Create an allow-all policy chain using a local rego file.
+impl EchoServer {
+    async fn requests(&self) -> Vec<EchoRequestRecord> {
+        self.state.requests.lock().await.clone()
+    }
+}
+
+#[derive(Clone)]
+struct EchoServerState {
+    requests: Arc<tokio::sync::Mutex<Vec<EchoRequestRecord>>>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct EchoRequestRecord {
+    method: String,
+    authorization: Option<String>,
+}
+
+async fn start_echo_server() -> EchoServer {
+    async fn echo_handler(
+        State(state): State<EchoServerState>,
+        headers: HeaderMap,
+        method: axum::http::Method,
+    ) -> impl IntoResponse {
+        state.requests.lock().await.push(EchoRequestRecord {
+            method: method.as_str().to_string(),
+            authorization: headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok())
+                .map(ToOwned::to_owned),
+        });
+
+        (StatusCode::OK, Json(json!({"ok": true})))
+    }
+
+    let state = EchoServerState {
+        requests: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+    };
+
+    let app = Router::new()
+        .route("/resource", any(echo_handler))
+        .with_state(state.clone());
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    EchoServer {
+        url: format!("http://{}/resource", address),
+        state,
+    }
+}
+
 fn allow_all_chain() -> Arc<PolicyChain> {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("allow_all.rego");
     std::fs::write(&path, "package mcp.fetch\ndefault allow = true\n").unwrap();
-    // Leak the tempdir so it persists for the test lifetime.
     std::mem::forget(dir);
-    let evaluator = LocalPolicyEvaluator::from_file(&path, "data.mcp.fetch.allow".to_string()).unwrap();
-    Arc::new(PolicyChain::new(vec![PolicyEvaluatorKind::Local(evaluator)], EvalMode::All))
+
+    let evaluator =
+        LocalPolicyEvaluator::from_file(&path, "data.mcp.fetch.allow".to_string()).unwrap();
+    Arc::new(PolicyChain::new(
+        vec![PolicyEvaluatorKind::Local(evaluator)],
+        EvalMode::All,
+    ))
 }
 
 fn build_engine(header_rules: Vec<HeaderRule>) -> Engine {
-    let fetch_config = FetchConfig::new_with_chain(allow_all_chain())
-        .with_header_rules(header_rules);
-
-    let tmp = std::env::temp_dir().join(format!("mcp-fetch-test-{}-{}", std::process::id(),
-        std::time::SystemTime::now().duration_since(std::time::SystemTime::UNIX_EPOCH).unwrap().as_nanos()));
+    let fetch_config = FetchConfig::new_with_chain(allow_all_chain()).with_header_rules(header_rules);
+    let tmp = std::env::temp_dir().join(format!(
+        "mcp-fetch-test-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
     let registry = ExecutionRegistry::new(tmp.to_str().unwrap()).expect("Failed to create test registry");
+
     Engine::new_stateless(64 * 1024 * 1024, 30, 4)
         .with_fetch_config(fetch_config)
         .with_execution_registry(Arc::new(registry))
 }
 
-/// Run JS code that fetches the echo endpoint and parse the echoed headers.
-async fn fetch_and_get_echoed_headers(
-    engine: &Engine,
-    echo_url: &str,
-    js_extra: &str,
-) -> HashMap<String, String> {
-    // JS code: use top-level await to call fetch, then console.log the
-    // echoed headers as JSON. All code runs as ES modules, so top-level
-    // await is supported and the result is captured via console output
-    // (modules always evaluate to "undefined").
-    let code = format!(
-        r#"
-        const resp = await fetch("{echo_url}", {js_extra});
-        console.log(JSON.stringify(await resp.json()));
-        "#,
-        echo_url = echo_url,
-        js_extra = js_extra,
-    );
+fn oauth_rule_for_host(host: &str, methods: &[&str], token_url: String) -> HeaderRule {
+    HeaderRule::oauth_client_credentials(
+        host.to_string(),
+        methods.iter().map(|method| method.to_string()).collect(),
+        OAuthClientCredentialsConfig {
+            header_name: "Authorization".to_string(),
+            token_url,
+            client_id: "client-id".to_string(),
+            client_secret: "client-secret".to_string(),
+            scope: Some("read:all".to_string()),
+            refresh_buffer_secs: 0,
+        },
+    )
+    .expect("rule should be valid")
+}
 
+fn static_rule_for_host(
+    host: &str,
+    methods: &[&str],
+    header_name: &str,
+    header_value: &str,
+) -> HeaderRule {
+    HeaderRule::static_header(
+        host.to_string(),
+        methods.iter().map(|method| method.to_string()).collect(),
+        header_name.to_string(),
+        header_value.to_string(),
+    )
+    .expect("static rule should be valid")
+}
+
+async fn run_js(engine: &Engine, code: String) -> Result<String, String> {
     let exec_id = engine
         .run_js(code)
         .execute()
         .await
-        .expect("submit should succeed");
+        .map_err(|error| format!("submit should succeed: {error}"))?;
 
-    // Poll for completion
     for _ in 0..600 {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         if let Ok(info) = engine.get_execution(&exec_id) {
             match info.status.as_str() {
-                "completed" => break,
-                "failed" => panic!("Execution failed: {}", info.error.unwrap_or_default()),
-                "timed_out" => panic!("Execution timed out"),
+                "completed" => return Ok(info.result.unwrap_or_default()),
+                "failed" => return Err(info.error.unwrap_or_default()),
+                "timed_out" => return Err("execution timed out".to_string()),
                 _ => continue,
             }
         }
     }
 
-    // Read the console output (contains the JSON-stringified headers)
-    let console_page = engine
-        .get_execution_output(&exec_id, None, Some(u64::MAX), None, None)
-        .expect("should be able to read console output");
-    let output = console_page.data.trim().to_string();
-
-    let parsed: Value = serde_json::from_str(&output)
-        .expect("output should be valid JSON");
-
-    parsed
-        .as_object()
-        .expect("output should be a JSON object")
-        .iter()
-        .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
-        .collect()
+    Err("timeout waiting for execution".to_string())
 }
 
-// ── Tests ───────────────────────────────────────────────────────────────
-
-#[tokio::test]
-async fn test_injected_header_arrives_on_request() {
-    ensure_v8();
-
-    let echo_url = start_echo_mock().await;
-
-    let rules = vec![HeaderRule {
-        host: "127.0.0.1".to_string(),
-        methods: vec![],
-        headers: HashMap::from([
-            ("authorization".to_string(), "Bearer test-token".to_string()),
-        ]),
-    }];
-
-    let engine = build_engine(rules);
-    let echoed = fetch_and_get_echoed_headers(&engine, &echo_url, "{}").await;
-
-    assert_eq!(
-        echoed.get("authorization").map(|s| s.as_str()),
-        Some("Bearer test-token"),
-        "Injected authorization header should be present. Got headers: {:?}",
-        echoed
+async fn run_fetch(
+    engine: &Engine,
+    url: &str,
+    method: &str,
+    authorization: Option<&str>,
+) -> Result<(), String> {
+    let headers_expr = match authorization {
+        Some(value) => format!(
+            r#"{{ Authorization: {} }}"#,
+            serde_json::to_string(value).expect("authorization should serialize")
+        ),
+        None => "{}".to_string(),
+    };
+    let code = format!(
+        r#"
+        (async () => {{
+            const resp = await fetch("{url}", {{
+                method: "{method}",
+                headers: {headers_expr},
+            }});
+            if (!resp.ok) {{
+                throw new Error("unexpected status " + resp.status);
+            }}
+            return JSON.stringify(await resp.json());
+        }})()
+        "#,
+        url = url,
+        method = method,
+        headers_expr = headers_expr,
     );
+
+    run_js(engine, code).await.map(|_| ())
 }
 
 #[tokio::test]
-async fn test_user_header_overrides_injected() {
+async fn matching_request_receives_injected_bearer_token_from_mock_token_server() {
     ensure_v8();
 
-    let echo_url = start_echo_mock().await;
-
-    let rules = vec![HeaderRule {
-        host: "127.0.0.1".to_string(),
-        methods: vec![],
-        headers: HashMap::from([
-            ("authorization".to_string(), "Bearer injected".to_string()),
-        ]),
-    }];
-
-    let engine = build_engine(rules);
-
-    let echoed = fetch_and_get_echoed_headers(
-        &engine,
-        &echo_url,
-        r#"{ headers: { "Authorization": "Bearer user-provided" } }"#,
-    )
+    let token_server = start_token_server(vec![TestTokenResponse::success(json!({
+        "access_token": "dynamic-token",
+        "token_type": "Bearer",
+        "expires_in": 3600
+    }))])
     .await;
+    let echo_server = start_echo_server().await;
+    let engine = build_engine(vec![oauth_rule_for_host(
+        "127.0.0.1",
+        &[],
+        token_server.token_url(),
+    )]);
+
+    run_fetch(&engine, &echo_server.url, "GET", None)
+        .await
+        .expect("fetch should succeed");
 
     assert_eq!(
-        echoed.get("authorization").map(|s| s.as_str()),
+        echo_server.requests().await,
+        vec![EchoRequestRecord {
+            method: "GET".to_string(),
+            authorization: Some("Bearer dynamic-token".to_string()),
+        }]
+    );
+    assert_eq!(
+        token_server.requests().await,
+        vec![TestTokenRequest {
+            grant_type: "client_credentials".to_string(),
+            refresh_token: None,
+        }]
+    );
+}
+
+#[tokio::test]
+async fn matching_request_receives_static_authorization_header() {
+    ensure_v8();
+
+    let echo_server = start_echo_server().await;
+    let engine = build_engine(vec![static_rule_for_host(
+        "127.0.0.1",
+        &[],
+        "Authorization",
+        "Bearer static-token",
+    )]);
+
+    run_fetch(&engine, &echo_server.url, "GET", None)
+        .await
+        .expect("fetch should succeed");
+
+    assert_eq!(
+        echo_server.requests().await,
+        vec![EchoRequestRecord {
+            method: "GET".to_string(),
+            authorization: Some("Bearer static-token".to_string()),
+        }]
+    );
+}
+
+#[tokio::test]
+async fn user_provided_authorization_overrides_static_injection() {
+    ensure_v8();
+
+    let echo_server = start_echo_server().await;
+    let engine = build_engine(vec![static_rule_for_host(
+        "127.0.0.1",
+        &[],
+        "Authorization",
+        "Bearer static-token",
+    )]);
+
+    run_fetch(
+        &engine,
+        &echo_server.url,
+        "GET",
         Some("Bearer user-provided"),
-        "User-provided header should override injected one. Got headers: {:?}",
-        echoed
+    )
+    .await
+    .expect("user-provided authorization should win");
+
+    assert_eq!(
+        echo_server.requests().await,
+        vec![EchoRequestRecord {
+            method: "GET".to_string(),
+            authorization: Some("Bearer user-provided".to_string()),
+        }]
     );
 }
 
 #[tokio::test]
-async fn test_no_injection_on_host_mismatch() {
+async fn static_injection_skips_non_matching_host_and_method() {
     ensure_v8();
 
-    let echo_url = start_echo_mock().await;
+    let echo_server = start_echo_server().await;
+    let host_engine = build_engine(vec![static_rule_for_host(
+        "other.example.com",
+        &[],
+        "Authorization",
+        "Bearer static-token",
+    )]);
+    let method_engine = build_engine(vec![static_rule_for_host(
+        "127.0.0.1",
+        &["POST"],
+        "Authorization",
+        "Bearer static-token",
+    )]);
 
-    // Rule targets a different host than the echo server (127.0.0.1)
-    let rules = vec![HeaderRule {
-        host: "other.example.com".to_string(),
-        methods: vec![],
-        headers: HashMap::from([
-            ("x-injected".to_string(), "should-not-appear".to_string()),
-        ]),
-    }];
+    run_fetch(&host_engine, &echo_server.url, "GET", None)
+        .await
+        .expect("host-mismatch fetch should succeed");
+    run_fetch(&method_engine, &echo_server.url, "GET", None)
+        .await
+        .expect("method-mismatch fetch should succeed");
 
-    let engine = build_engine(rules);
-    let echoed = fetch_and_get_echoed_headers(&engine, &echo_url, "{}").await;
-
-    assert!(
-        !echoed.contains_key("x-injected"),
-        "Header should NOT be injected when host doesn't match. Got headers: {:?}",
-        echoed
+    assert_eq!(
+        echo_server.requests().await,
+        vec![
+            EchoRequestRecord {
+                method: "GET".to_string(),
+                authorization: None,
+            },
+            EchoRequestRecord {
+                method: "GET".to_string(),
+                authorization: None,
+            },
+        ]
     );
 }
 
 #[tokio::test]
-async fn test_no_injection_on_method_mismatch() {
+async fn repeated_requests_reuse_cached_token() {
     ensure_v8();
 
-    let echo_url = start_echo_mock().await;
+    let token_server = start_token_server(vec![TestTokenResponse::success(json!({
+        "access_token": "cached-token",
+        "token_type": "Bearer",
+        "expires_in": 3600
+    }))])
+    .await;
+    let echo_server = start_echo_server().await;
+    let engine = build_engine(vec![oauth_rule_for_host(
+        "127.0.0.1",
+        &[],
+        token_server.token_url(),
+    )]);
 
-    // Rule targets only POST, but JS will call GET (the default)
-    let rules = vec![HeaderRule {
-        host: "127.0.0.1".to_string(),
-        methods: vec!["POST".to_string()],
-        headers: HashMap::from([
-            ("x-post-only".to_string(), "should-not-appear".to_string()),
-        ]),
-    }];
+    run_fetch(&engine, &echo_server.url, "GET", None)
+        .await
+        .expect("first fetch should succeed");
+    run_fetch(&engine, &echo_server.url, "GET", None)
+        .await
+        .expect("second fetch should reuse cached token");
 
-    let engine = build_engine(rules);
-    let echoed = fetch_and_get_echoed_headers(&engine, &echo_url, "{}").await;
-
-    assert!(
-        !echoed.contains_key("x-post-only"),
-        "Header should NOT be injected when method doesn't match. Got headers: {:?}",
-        echoed
+    assert_eq!(
+        echo_server.requests().await,
+        vec![
+            EchoRequestRecord {
+                method: "GET".to_string(),
+                authorization: Some("Bearer cached-token".to_string()),
+            },
+            EchoRequestRecord {
+                method: "GET".to_string(),
+                authorization: Some("Bearer cached-token".to_string()),
+            },
+        ]
     );
+    assert_eq!(
+        token_server.requests().await,
+        vec![TestTokenRequest {
+            grant_type: "client_credentials".to_string(),
+            refresh_token: None,
+        }]
+    );
+}
+
+#[tokio::test]
+async fn post_expiry_request_uses_refresh_token_grant_when_available() {
+    ensure_v8();
+
+    let token_server = start_token_server(vec![
+        TestTokenResponse::success(json!({
+            "access_token": "expired-token",
+            "token_type": "Bearer",
+            "expires_in": 0,
+            "refresh_token": "refresh-1"
+        })),
+        TestTokenResponse::success(json!({
+            "access_token": "refreshed-token",
+            "token_type": "Bearer",
+            "expires_in": 3600,
+            "refresh_token": "refresh-2"
+        })),
+    ])
+    .await;
+    let echo_server = start_echo_server().await;
+    let engine = build_engine(vec![oauth_rule_for_host(
+        "127.0.0.1",
+        &[],
+        token_server.token_url(),
+    )]);
+
+    run_fetch(&engine, &echo_server.url, "GET", None)
+        .await
+        .expect("first fetch should succeed");
+    run_fetch(&engine, &echo_server.url, "GET", None)
+        .await
+        .expect("second fetch should refresh after expiry");
+
+    assert_eq!(
+        echo_server.requests().await,
+        vec![
+            EchoRequestRecord {
+                method: "GET".to_string(),
+                authorization: Some("Bearer expired-token".to_string()),
+            },
+            EchoRequestRecord {
+                method: "GET".to_string(),
+                authorization: Some("Bearer refreshed-token".to_string()),
+            },
+        ]
+    );
+    assert_eq!(
+        token_server.requests().await,
+        vec![
+            TestTokenRequest {
+                grant_type: "client_credentials".to_string(),
+                refresh_token: None,
+            },
+            TestTokenRequest {
+                grant_type: "refresh_token".to_string(),
+                refresh_token: Some("refresh-1".to_string()),
+            },
+        ]
+    );
+}
+
+#[tokio::test]
+async fn post_expiry_request_reacquires_with_client_credentials_without_refresh_token() {
+    ensure_v8();
+
+    let token_server = start_token_server(vec![
+        TestTokenResponse::success(json!({
+            "access_token": "expired-token",
+            "token_type": "Bearer",
+            "expires_in": 0
+        })),
+        TestTokenResponse::success(json!({
+            "access_token": "reacquired-token",
+            "token_type": "Bearer",
+            "expires_in": 3600
+        })),
+    ])
+    .await;
+    let echo_server = start_echo_server().await;
+    let engine = build_engine(vec![oauth_rule_for_host(
+        "127.0.0.1",
+        &[],
+        token_server.token_url(),
+    )]);
+
+    run_fetch(&engine, &echo_server.url, "GET", None)
+        .await
+        .expect("first fetch should succeed");
+    run_fetch(&engine, &echo_server.url, "GET", None)
+        .await
+        .expect("second fetch should reacquire after expiry");
+
+    assert_eq!(
+        echo_server.requests().await,
+        vec![
+            EchoRequestRecord {
+                method: "GET".to_string(),
+                authorization: Some("Bearer expired-token".to_string()),
+            },
+            EchoRequestRecord {
+                method: "GET".to_string(),
+                authorization: Some("Bearer reacquired-token".to_string()),
+            },
+        ]
+    );
+    assert_eq!(
+        token_server.requests().await,
+        vec![
+            TestTokenRequest {
+                grant_type: "client_credentials".to_string(),
+                refresh_token: None,
+            },
+            TestTokenRequest {
+                grant_type: "client_credentials".to_string(),
+                refresh_token: None,
+            },
+        ]
+    );
+}
+
+#[tokio::test]
+async fn user_provided_authorization_overrides_dynamic_injection() {
+    ensure_v8();
+
+    let token_server = start_token_server(Vec::new()).await;
+    let echo_server = start_echo_server().await;
+    let engine = build_engine(vec![oauth_rule_for_host(
+        "127.0.0.1",
+        &[],
+        token_server.token_url(),
+    )]);
+
+    run_fetch(
+        &engine,
+        &echo_server.url,
+        "GET",
+        Some("Bearer user-provided"),
+    )
+    .await
+    .expect("user-provided authorization should bypass token lookup");
+
+    assert_eq!(
+        echo_server.requests().await,
+        vec![EchoRequestRecord {
+            method: "GET".to_string(),
+            authorization: Some("Bearer user-provided".to_string()),
+        }]
+    );
+    assert!(token_server.requests().await.is_empty());
+}
+
+#[tokio::test]
+async fn non_matching_host_performs_no_token_lookup() {
+    ensure_v8();
+
+    let token_server = start_token_server(Vec::new()).await;
+    let echo_server = start_echo_server().await;
+    let engine = build_engine(vec![oauth_rule_for_host(
+        "other.example.com",
+        &[],
+        token_server.token_url(),
+    )]);
+
+    run_fetch(&engine, &echo_server.url, "GET", None)
+        .await
+        .expect("fetch should succeed without dynamic auth");
+
+    assert_eq!(
+        echo_server.requests().await,
+        vec![EchoRequestRecord {
+            method: "GET".to_string(),
+            authorization: None,
+        }]
+    );
+    assert!(token_server.requests().await.is_empty());
+}
+
+#[tokio::test]
+async fn non_matching_method_performs_no_token_lookup() {
+    ensure_v8();
+
+    let token_server = start_token_server(Vec::new()).await;
+    let echo_server = start_echo_server().await;
+    let engine = build_engine(vec![oauth_rule_for_host(
+        "127.0.0.1",
+        &["POST"],
+        token_server.token_url(),
+    )]);
+
+    run_fetch(&engine, &echo_server.url, "GET", None)
+        .await
+        .expect("fetch should succeed without dynamic auth");
+
+    assert_eq!(
+        echo_server.requests().await,
+        vec![EchoRequestRecord {
+            method: "GET".to_string(),
+            authorization: None,
+        }]
+    );
+    assert!(token_server.requests().await.is_empty());
 }

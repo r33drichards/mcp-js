@@ -1,19 +1,21 @@
 run javascript or typescript code in v8
 
-Submits code for **async execution** — returns an execution ID immediately. V8 runs in the background. Use `get_execution` to poll status and result, `get_execution_output` to read console output, and `cancel_execution` to stop a running execution.
+Submits code for **async execution** in stateful MCP mode — returns an execution ID immediately. V8 runs in the background. Use `get_execution` to poll status and result, `get_execution_output` to read console output, and `cancel_execution` to stop a running execution.
 
 TypeScript support is type removal only — types are stripped before execution, not checked. Invalid types will be silently removed, not reported as errors.
 
 params:
-- code: the javascript or typescript code to run
+- code (optional): the javascript or typescript code to run. Provide either `code` or `file`.
+- file (optional): path to a JavaScript/TypeScript file **on the server's own filesystem** to read and execute instead of inline `code`. Provide either `code` or `file`, not both. This is disabled by default: the server must be started with `--allow-run-js-file` (allow any path) or a `run_js_file` policy in `--policies-json` (allow specific paths/dirs), otherwise the call is rejected. The path is resolved on the server, not uploaded from the client.
 - heap (optional): content hash (SHA-256 hex string) from a previous execution to resume that session, or omit for a fresh session
-- session (optional): a human-readable session name. When provided, a log entry is written recording the input heap, output heap, executed code, and timestamp. Use list_sessions and list_session_snapshots to browse session history.
-- heap_memory_max_mb (optional): maximum V8 heap memory in megabytes (4–64, default: 8). Override the server default for this execution.
+- heap_memory_max_mb (optional): maximum V8 heap memory in megabytes (minimum: 4, default: 8). Override the server default for this execution.
 - execution_timeout_secs (optional): maximum execution time in seconds (1–300, default: 30). Override the server default for this execution.
 - tags (optional): a JSON object of key-value string pairs to associate with the resulting heap snapshot. Tags can be used to label, categorize, or annotate heaps for later retrieval. Use get_heap_tags, set_heap_tags, delete_heap_tags, and query_heaps_by_tags to manage tags independently.
 
 returns:
 - execution_id: UUID of the submitted execution. Use with get_execution, get_execution_output, and cancel_execution.
+
+Session identity for MCP history tracking comes from the `X-MCP-Session-Id` header during initialization, not from a `session` tool parameter.
 
 ## Workflow
 
@@ -75,7 +77,7 @@ Always pin versions for reproducible results. Dynamic `import()` is also support
 When the server is configured with policies, JavaScript code can use an `fs` module providing Node.js-compatible file operations. Every operation is evaluated against a Rego policy before execution.
 
 **Available operations:**
-- `await fs.readFile(path, [encoding])` — Read file as UTF-8 string (default) or `Uint8Array` (if `encoding="buffer"`)
+- `await fs.readFile(path, [encoding])` — Read file as a `Uint8Array` (default, Node semantics) or a string (if a text encoding like `"utf8"` is given)
 - `await fs.writeFile(path, data)` — Write string or `Uint8Array` to file
 - `await fs.appendFile(path, data)` — Append data to file
 - `await fs.readdir(path)` — List directory contents
@@ -84,6 +86,7 @@ When the server is configured with policies, JavaScript code can use an `fs` mod
 - `await fs.rm(path, [options])` — Delete file or directory (supports `{recursive: true}`)
 - `await fs.rename(oldPath, newPath)` — Rename or move file
 - `await fs.copyFile(src, dest)` — Copy file
+- `await fs.createWriteStream(path)` — Open a streaming write handle (`await w.write(chunk)`, `await w.close()`) for large files
 - `await fs.exists(path)` — Check if path exists
 - `await fs.unlink(path)` — Delete a file
 
@@ -91,12 +94,10 @@ All operations return Promises and are subject to Rego policy evaluation. Policy
 
 ## Limitations
 
-- **No `fetch` or network access by default**: When the server is started with `--opa-url`, a `fetch(url, opts?)` function becomes available. `fetch()` follows the web standard Fetch API — it returns a Promise that resolves to a Response object. Use `await` to get the response: `const resp = await fetch(url)`. The response object has `.ok`, `.status`, `.statusText`, `.url`, `.headers.get(name)`, `.text()`, and `.json()` methods (`.text()` and `.json()` also return Promises). Each request is checked against an OPA policy before execution. Without `--opa-url`, there is no network access.
+- **No `fetch` or network access by default**: When the server is started with fetch policies configured via `--policies-json`, a `fetch(url, opts?)` function becomes available. `fetch()` follows the web standard Fetch API — it returns a Promise that resolves to a Response object. Use `await` to get the response: `const resp = await fetch(url)`. The response object has `.ok`, `.status`, `.statusText`, `.url`, `.headers.get(name)`, `.text()`, and `.json()` methods (`.text()` and `.json()` also return Promises). Each request is checked against policy before execution. If the server is also configured with `--fetch-header` or `--fetch-header-config`, matching requests may receive static headers or dynamically acquired OAuth client-credentials bearer tokens before policy evaluation. Headers set directly in JavaScript still win. Without fetch policies, there is no network access.
 - **No file system access by default**: Filesystem access requires server configuration with policies. See "Filesystem Access" above.
 - **No environment variables**: The runtime does not provide access to environment variables.
 - **No timers**: Functions like `setTimeout` and `setInterval` are not available.
 - **No DOM or browser APIs**: This is not a browser environment; there is no access to `window`, `document`, or other browser-specific objects.
 
-Each execution starts with a fresh V8 isolate — no state is carried between calls.
-
-In stateful mode, each execution returns a SHA-256 content hash for the heap snapshot — pass it back as the `heap` parameter in the next call to resume from that state. Omit `heap` for a fresh session.
+In stateful mode, each execution returns a SHA-256 content hash for the heap snapshot — pass it back as the `heap` parameter in the next call to resume from that state. Omit `heap` for a fresh heap.

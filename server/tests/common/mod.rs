@@ -7,21 +7,7 @@ use tokio::time::sleep;
 /// Start the MCP server for testing
 pub async fn start_server(port: u16, heap_dir: &str) -> Result<tokio::process::Child, std::io::Error> {
     let child = Command::new(env!("CARGO"))
-        .args(&["run", "--", "--directory-path", heap_dir, "--http-port", &port.to_string()])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()?;
-
-    // Give server time to start
-    sleep(Duration::from_millis(500)).await;
-
-    Ok(child)
-}
-
-/// Start the MCP server with SSE transport for testing
-pub async fn start_sse_server(port: u16, heap_dir: &str) -> Result<tokio::process::Child, std::io::Error> {
-    let child = Command::new(env!("CARGO"))
-        .args(&["run", "--", "--directory-path", heap_dir, "--sse-port", &port.to_string()])
+        .args(&["run", "--", "--heap-store", "dir", "--heap-dir", heap_dir, "--http-port", &port.to_string()])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()?;

@@ -43,6 +43,8 @@ pub struct ExecutionRecord {
     pub isolate_handle: Option<v8::IsolateHandle>,
     pub result: Option<String>,
     pub heap: Option<String>,
+    /// Resulting filesystem snapshot CA id (hex), independent of the heap.
+    pub fs: Option<String>,
     pub error: Option<String>,
     pub started_at: String,
     pub completed_at: Option<String>,
@@ -51,6 +53,7 @@ pub struct ExecutionRecord {
 /// Summary returned by `list()`.
 #[derive(Debug, Clone, Serialize)]
 pub struct ExecutionSummary {
+    #[serde(rename = "execution_id")]
     pub id: ExecutionId,
     pub status: String,
     pub started_at: String,
@@ -107,6 +110,7 @@ impl ExecutionRegistry {
             isolate_handle: None,
             result: None,
             heap: None,
+            fs: None,
             error: None,
             started_at: chrono::Utc::now().to_rfc3339(),
             completed_at: None,
@@ -138,6 +142,13 @@ impl ExecutionRegistry {
             record.heap = heap;
             record.isolate_handle = None;
             record.completed_at = Some(chrono::Utc::now().to_rfc3339());
+        }
+    }
+
+    /// Record the resulting filesystem snapshot CA id (independent of the heap).
+    pub fn set_fs(&self, id: &str, fs: Option<String>) {
+        if let Some(mut record) = self.executions.get_mut(id) {
+            record.fs = fs;
         }
     }
 
@@ -191,6 +202,7 @@ impl ExecutionRegistry {
             status: r.status.to_string(),
             result: r.result.clone(),
             heap: r.heap.clone(),
+            fs: r.fs.clone(),
             error: r.error.clone(),
             started_at: r.started_at.clone(),
             completed_at: r.completed_at.clone(),
@@ -319,6 +331,8 @@ pub struct ExecutionInfo {
     pub status: String,
     pub result: Option<String>,
     pub heap: Option<String>,
+    /// Resulting filesystem snapshot CA id (hex), independent of the heap.
+    pub fs: Option<String>,
     pub error: Option<String>,
     pub started_at: String,
     pub completed_at: Option<String>,

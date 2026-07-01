@@ -9,6 +9,7 @@ fn make_entry(input: Option<&str>, output: &str, code: &str) -> SessionLogEntry 
     SessionLogEntry {
         input_heap: input.map(|s| s.to_string()),
         output_heap: output.to_string(),
+        output_fs: None,
         code: code.to_string(),
         timestamp: "2026-01-01T00:00:00Z".to_string(), // deterministic timestamp
     }

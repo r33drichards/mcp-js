@@ -39,12 +39,16 @@ fuzz_target!(|input: ParameterValidationInput| {
     let mut tags = HashMap::new();
     for (k, v) in input.tags_data.iter().take(50) {
         let key = if k.len() > 1000 {
-            k[..1000].to_string()
+            let mut end = 1000;
+            while !k.is_char_boundary(end) { end -= 1; }
+            k[..end].to_string()
         } else {
             k.clone()
         };
         let value = if v.len() > 1000 {
-            v[..1000].to_string()
+            let mut end = 1000;
+            while !v.is_char_boundary(end) { end -= 1; }
+            v[..end].to_string()
         } else {
             v.clone()
         };

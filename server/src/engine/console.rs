@@ -243,40 +243,367 @@ const CONSOLE_JS_WRAPPER: &str = r#"
 /// inject_fs, inject_mcp, and inject_timers — otherwise it will freeze ops
 /// before they are set up, breaking the runtime.
 ///
-/// 1. Neutralizes dangerous introspection ops (op_get_proxy_details, etc.)
-/// 2. Freezes Deno.core.ops to prevent interception/replacement
-/// 3. Removes __bootstrap (event loop hooks, primordials, internals)
-/// 4. Removes SharedArrayBuffer (Spectre timer prerequisite)
-pub fn harden_runtime(runtime: &mut JsRuntime) -> Result<(), String> {
+/// Each mitigation is **opt-in** and OFF by default: with a default
+/// `HardeningConfig` this is a no-op and the runtime is left unhardened. Enable
+/// mitigations individually via the `--harden-*` CLI flags. Whatever is enabled
+/// is applied in an order that keeps op-neutralization before the
+/// `Object.freeze` that would otherwise lock those ops in place.
+///
+/// Mitigations (each gated by its `HardeningConfig` field):
+/// - `neutralize_proxy_details`: `op_get_proxy_details` → `undefined` (else it bypasses `Proxy` handlers)
+/// - `neutralize_introspection`: `op_memory_usage`/`op_is_terminal` neutralized (host info leaks)
+/// - `freeze_ops`: `Object.freeze(Deno.core.ops)` (no op interception/replacement)
+/// - `remove_bootstrap`: delete `__bootstrap` (event-loop hooks, primordials, internals)
+/// - `remove_shared_memory`: delete `SharedArrayBuffer`/`Atomics` (Spectre timer prerequisite; also the primitives emscripten wasm-threads need)
+pub fn harden_runtime(runtime: &mut JsRuntime, config: HardeningConfig) -> Result<(), String> {
+    if config.is_noop() {
+        return Ok(());
+    }
+    let mut js = String::from("(function() {\n");
+    // Op neutralization must run BEFORE Object.freeze (freeze locks the ops object).
+    if config.neutralize_proxy_details {
+        js.push_str("  Deno.core.ops.op_get_proxy_details = function() { return undefined; };\n");
+    }
+    if config.neutralize_introspection {
+        js.push_str("  Deno.core.ops.op_memory_usage = function() { return {}; };\n");
+        js.push_str("  Deno.core.ops.op_is_terminal = function() { return false; };\n");
+    }
+    if config.freeze_ops {
+        js.push_str("  Object.freeze(Deno.core.ops);\n");
+    }
+    if config.remove_bootstrap {
+        // __bootstrap exposes event-loop hooks (setMacrotaskCallback,
+        // setPromiseHooks, …), primordials (pristine Function constructor), and
+        // internal registration objects. deno_core's own bootstrap has already
+        // completed, so deleting it here is safe.
+        js.push_str("  delete globalThis.__bootstrap;\n");
+    }
+    if config.remove_shared_memory {
+        // SharedArrayBuffer is the prerequisite for a high-resolution Spectre
+        // timer (and for emscripten wasm-threads). V8 flags cannot disable it
+        // (stable spec feature), so remove from JS.
+        js.push_str("  delete globalThis.SharedArrayBuffer;\n");
+        js.push_str("  delete globalThis.Atomics;\n");
+    }
+    js.push_str("})();");
     runtime
-        .execute_script("<sandbox-hardening>", HARDENING_JS.to_string())
+        .execute_script("<sandbox-hardening>", js)
         .map_err(|e| format!("Failed to harden sandbox: {}", e))?;
     Ok(())
 }
 
-const HARDENING_JS: &str = r#"
+/// Per-mitigation sandbox-hardening switches. All fields default to `false`
+/// (OFF) — mcp-v8 runs UNHARDENED unless mitigations are explicitly enabled (see
+/// the `--harden-*` CLI flags). Each field maps to one mitigation from the
+/// original combined hardening pass (commit a1d644d).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct HardeningConfig {
+    /// Freeze `Deno.core.ops` so no op can be replaced/intercepted (e.g. a
+    /// persistent trojan op surviving in stateful/snapshot mode).
+    pub freeze_ops: bool,
+    /// Neutralize `op_get_proxy_details` (otherwise it bypasses `Proxy` handlers
+    /// and can read a proxied target).
+    pub neutralize_proxy_details: bool,
+    /// Neutralize `op_memory_usage` + `op_is_terminal` (host info leaks).
+    pub neutralize_introspection: bool,
+    /// Remove `globalThis.__bootstrap` (event-loop hooks, primordials such as a
+    /// pristine `Function` constructor, and internal registries).
+    pub remove_bootstrap: bool,
+    /// Remove `globalThis.SharedArrayBuffer` + `globalThis.Atomics` — the
+    /// high-resolution Spectre-timer prerequisite (and the shared-memory
+    /// primitives emscripten wasm-threads require).
+    pub remove_shared_memory: bool,
+}
+
+impl HardeningConfig {
+    /// Every mitigation enabled (the original combined hardening behavior).
+    pub fn all() -> Self {
+        Self {
+            freeze_ops: true,
+            neutralize_proxy_details: true,
+            neutralize_introspection: true,
+            remove_bootstrap: true,
+            remove_shared_memory: true,
+        }
+    }
+
+    /// True when no mitigation is enabled — `harden_runtime` is a no-op.
+    pub fn is_noop(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+// ── Base64 globals (atob / btoa) ────────────────────────────────────────
+
+pub fn inject_base64(runtime: &mut JsRuntime) -> Result<(), String> {
+    runtime
+        .execute_script("<base64-setup>", BASE64_JS.to_string())
+        .map_err(|e| format!("Failed to install atob/btoa: {}", e))?;
+    Ok(())
+}
+
+pub fn inject_base64_snapshot(runtime: &mut deno_core::JsRuntimeForSnapshot) -> Result<(), String> {
+    runtime
+        .execute_script("<base64-setup>", BASE64_JS.to_string())
+        .map_err(|e| format!("Failed to install atob/btoa: {}", e))?;
+    Ok(())
+}
+
+const BASE64_JS: &str = r#"
 (function() {
-    // 1. Neutralize dangerous introspection/info-leak ops before freezing.
-    //    These must be replaced on the ops object before Object.freeze.
-    Deno.core.ops.op_get_proxy_details = function() { return undefined; };
-    Deno.core.ops.op_memory_usage = function() { return {}; };
-    Deno.core.ops.op_is_terminal = function() { return false; };
+    var chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 
-    // 2. Freeze ops to prevent interception/replacement of any op.
-    //    All setup (console, fetch, fs, mcp) has completed by this point.
-    Object.freeze(Deno.core.ops);
+    function InvalidCharacterError(message) {
+        this.name = 'InvalidCharacterError';
+        this.message = message;
+    }
+    InvalidCharacterError.prototype = Object.create(Error.prototype);
+    InvalidCharacterError.prototype.constructor = InvalidCharacterError;
 
-    // 3. Remove __bootstrap: exposes event-loop hooks (setMacrotaskCallback,
-    //    setPromiseHooks, addMainModuleHandler, etc.), primordials (pristine
-    //    Function constructor), and internal registration objects.
-    //    deno_core's own bootstrap has already completed, so this is safe.
-    delete globalThis.__bootstrap;
+    globalThis.btoa = function btoa(input) {
+        var str = String(input);
+        for (var i = 0; i < str.length; i++) {
+            if (str.charCodeAt(i) > 255) {
+                throw new InvalidCharacterError(
+                    "The string to be encoded contains characters outside of the Latin1 range."
+                );
+            }
+        }
+        var out = '';
+        for (var i = 0; i < str.length; i += 3) {
+            var a = str.charCodeAt(i);
+            var b = i + 1 < str.length ? str.charCodeAt(i + 1) : 0;
+            var c = i + 2 < str.length ? str.charCodeAt(i + 2) : 0;
+            out += chars[a >> 2];
+            out += chars[((a & 3) << 4) | (b >> 4)];
+            out += i + 1 < str.length ? chars[((b & 15) << 2) | (c >> 6)] : '=';
+            out += i + 2 < str.length ? chars[c & 63] : '=';
+        }
+        return out;
+    };
 
-    // 4. Remove SharedArrayBuffer: prerequisite for Spectre-style timing
-    //    attacks. Workers are not available, but defense-in-depth applies.
-    //    V8 flags cannot disable it (stable spec feature), so remove from JS.
-    delete globalThis.SharedArrayBuffer;
-    delete globalThis.Atomics;
+    globalThis.atob = function atob(input) {
+        var str = String(input).replace(/[\t\n\f\r ]/g, '');
+        if (str.length % 4 === 1) {
+            throw new InvalidCharacterError(
+                "The string to be decoded is not correctly encoded."
+            );
+        }
+        var out = '';
+        var buf = 0, bits = 0;
+        for (var i = 0; i < str.length; i++) {
+            if (str[i] === '=') break;
+            var idx = chars.indexOf(str[i]);
+            if (idx === -1) {
+                throw new InvalidCharacterError(
+                    "The string to be decoded contains invalid characters."
+                );
+            }
+            buf = (buf << 6) | idx;
+            bits += 6;
+            if (bits >= 8) {
+                bits -= 8;
+                out += String.fromCharCode((buf >> bits) & 0xff);
+            }
+        }
+        return out;
+    };
+})();
+"#;
+
+// ── Blob / File / FormData globals ──────────────────────────────────────
+
+pub fn inject_web_apis(runtime: &mut JsRuntime) -> Result<(), String> {
+    runtime
+        .execute_script("<web-apis-setup>", WEB_APIS_JS.to_string())
+        .map_err(|e| format!("Failed to install Blob/File/FormData: {}", e))?;
+    Ok(())
+}
+
+pub fn inject_web_apis_snapshot(runtime: &mut deno_core::JsRuntimeForSnapshot) -> Result<(), String> {
+    runtime
+        .execute_script("<web-apis-setup>", WEB_APIS_JS.to_string())
+        .map_err(|e| format!("Failed to install Blob/File/FormData: {}", e))?;
+    Ok(())
+}
+
+const WEB_APIS_JS: &str = r#"
+(function() {
+    // ── TextEncoder / TextDecoder (UTF-8) ───────────────────────────────
+    // deno_core's bare runtime does not ship deno_web, so these standard
+    // globals are absent. Many libraries (isomorphic-git, etc.) assume they
+    // exist; provide a compact, correct UTF-8 implementation.
+    if (typeof globalThis.TextEncoder === 'undefined') {
+        globalThis.TextEncoder = class TextEncoder {
+            get encoding() { return 'utf-8'; }
+            encode(input) {
+                const str = String(input === undefined ? '' : input);
+                const out = [];
+                for (let i = 0; i < str.length; i++) {
+                    let code = str.charCodeAt(i);
+                    if (code >= 0xD800 && code <= 0xDBFF && i + 1 < str.length) {
+                        const next = str.charCodeAt(i + 1);
+                        if (next >= 0xDC00 && next <= 0xDFFF) {
+                            code = 0x10000 + ((code - 0xD800) << 10) + (next - 0xDC00);
+                            i++;
+                        }
+                    }
+                    if (code < 0x80) {
+                        out.push(code);
+                    } else if (code < 0x800) {
+                        out.push(0xC0 | (code >> 6), 0x80 | (code & 0x3F));
+                    } else if (code < 0x10000) {
+                        out.push(0xE0 | (code >> 12), 0x80 | ((code >> 6) & 0x3F), 0x80 | (code & 0x3F));
+                    } else {
+                        out.push(0xF0 | (code >> 18), 0x80 | ((code >> 12) & 0x3F), 0x80 | ((code >> 6) & 0x3F), 0x80 | (code & 0x3F));
+                    }
+                }
+                return new Uint8Array(out);
+            }
+            encodeInto(str, dest) {
+                const enc = this.encode(str);
+                const n = Math.min(enc.length, dest.length);
+                dest.set(enc.subarray(0, n));
+                return { read: str.length, written: n };
+            }
+        };
+    }
+    if (typeof globalThis.TextDecoder === 'undefined') {
+        globalThis.TextDecoder = class TextDecoder {
+            constructor(label, options) {
+                this.encoding = (label ? String(label) : 'utf-8').toLowerCase();
+                this.fatal = !!(options && options.fatal);
+                this.ignoreBOM = !!(options && options.ignoreBOM);
+            }
+            decode(input) {
+                if (input === undefined || input === null) return '';
+                let bytes;
+                if (input instanceof Uint8Array) bytes = input;
+                else if (input instanceof ArrayBuffer) bytes = new Uint8Array(input);
+                else if (ArrayBuffer.isView(input)) bytes = new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
+                else bytes = new Uint8Array(input);
+                let out = '';
+                let i = 0;
+                const n = bytes.length;
+                while (i < n) {
+                    const c = bytes[i++];
+                    if (c < 0x80) {
+                        out += String.fromCharCode(c);
+                    } else if (c >= 0xC0 && c < 0xE0) {
+                        out += String.fromCharCode(((c & 0x1F) << 6) | (bytes[i++] & 0x3F));
+                    } else if (c >= 0xE0 && c < 0xF0) {
+                        out += String.fromCharCode(((c & 0x0F) << 12) | ((bytes[i++] & 0x3F) << 6) | (bytes[i++] & 0x3F));
+                    } else if (c >= 0xF0) {
+                        let cp = ((c & 0x07) << 18) | ((bytes[i++] & 0x3F) << 12) | ((bytes[i++] & 0x3F) << 6) | (bytes[i++] & 0x3F);
+                        cp -= 0x10000;
+                        out += String.fromCharCode(0xD800 + (cp >> 10), 0xDC00 + (cp & 0x3FF));
+                    }
+                    // Lone continuation bytes are skipped (lenient, non-fatal).
+                }
+                if (this.ignoreBOM === false && out.charCodeAt(0) === 0xFEFF) out = out.slice(1);
+                return out;
+            }
+        };
+    }
+
+    globalThis.Blob = function Blob(parts, options) {
+        const opt = options || {};
+        this.type = opt.type || '';
+        const chunks = [];
+        for (const part of (parts || [])) {
+            if (part instanceof Blob) {
+                chunks.push(part._data);
+            } else if (typeof part === 'string') {
+                chunks.push(part);
+            } else {
+                chunks.push(String(part));
+            }
+        }
+        this._data = chunks.join('');
+        this.size = this._data.length;
+    };
+    Blob.prototype.text = function() { return Promise.resolve(this._data); };
+    Blob.prototype.slice = function(start, end, contentType) {
+        const s = this._data.slice(start, end);
+        return new Blob([s], { type: contentType || this.type });
+    };
+    Blob.prototype.arrayBuffer = function() {
+        const buf = new ArrayBuffer(this._data.length);
+        const view = new Uint8Array(buf);
+        for (let i = 0; i < this._data.length; i++) view[i] = this._data.charCodeAt(i) & 0xff;
+        return Promise.resolve(buf);
+    };
+
+    globalThis.File = function File(parts, name, options) {
+        Blob.call(this, parts, options);
+        this.name = name;
+        this.lastModified = (options && options.lastModified) || Date.now();
+    };
+    File.prototype = Object.create(Blob.prototype);
+    File.prototype.constructor = File;
+
+    globalThis.FormData = function FormData() {
+        this._entries = [];
+    };
+    FormData.prototype.append = function(name, value, filename) {
+        this._entries.push({ name: String(name), value: value, filename: filename });
+    };
+    FormData.prototype.set = function(name, value, filename) {
+        const n = String(name);
+        this._entries = this._entries.filter(function(e) { return e.name !== n; });
+        this._entries.push({ name: n, value: value, filename: filename });
+    };
+    FormData.prototype.get = function(name) {
+        const n = String(name);
+        for (const e of this._entries) { if (e.name === n) return e.value; }
+        return null;
+    };
+    FormData.prototype.getAll = function(name) {
+        const n = String(name);
+        return this._entries.filter(function(e) { return e.name === n; }).map(function(e) { return e.value; });
+    };
+    FormData.prototype.has = function(name) {
+        const n = String(name);
+        return this._entries.some(function(e) { return e.name === n; });
+    };
+    FormData.prototype.delete = function(name) {
+        const n = String(name);
+        this._entries = this._entries.filter(function(e) { return e.name !== n; });
+    };
+    FormData.prototype.entries = function() { return this._entries.map(function(e) { return [e.name, e.value]; }); };
+    FormData.prototype.keys = function() { return this._entries.map(function(e) { return e.name; }); };
+    FormData.prototype.values = function() { return this._entries.map(function(e) { return e.value; }); };
+    FormData.prototype.forEach = function(cb) {
+        for (const e of this._entries) { cb(e.value, e.name, this); }
+    };
+    FormData.prototype._serialize = function() {
+        const boundary = '----FormData' + Math.random().toString(36).slice(2) + Date.now().toString(36);
+        const parts = [];
+        for (const entry of this._entries) {
+            let disposition = 'form-data; name="' + entry.name + '"';
+            let contentType = null;
+            let body;
+            if (entry.value instanceof File) {
+                const fn = entry.filename || entry.value.name || 'blob';
+                disposition += '; filename="' + fn + '"';
+                contentType = entry.value.type || 'application/octet-stream';
+                body = entry.value._data;
+            } else if (entry.value instanceof Blob) {
+                const fn = entry.filename || 'blob';
+                disposition += '; filename="' + fn + '"';
+                contentType = entry.value.type || 'application/octet-stream';
+                body = entry.value._data;
+            } else {
+                body = String(entry.value);
+            }
+            let part = '--' + boundary + '\r\nContent-Disposition: ' + disposition + '\r\n';
+            if (contentType) part += 'Content-Type: ' + contentType + '\r\n';
+            part += '\r\n' + body + '\r\n';
+            parts.push(part);
+        }
+        parts.push('--' + boundary + '--\r\n');
+        return { boundary: boundary, body: parts.join('') };
+    };
 })();
 "#;
 

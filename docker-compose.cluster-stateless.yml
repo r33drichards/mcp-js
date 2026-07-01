@@ -26,7 +26,6 @@ services:
     build: .
     command:
       - --http-port=3000
-      - --stateless
       - --cluster-port=4000
       - --node-id=node1
       - --peers=node2@node2:4000,node3@node3:4000
@@ -41,7 +40,6 @@ services:
     build: .
     command:
       - --http-port=3000
-      - --stateless
       - --cluster-port=4000
       - --node-id=node2
       - --peers=node1@node1:4000,node3@node3:4000
@@ -56,7 +54,6 @@ services:
     build: .
     command:
       - --http-port=3000
-      - --stateless
       - --cluster-port=4000
       - --node-id=node3
       - --peers=node1@node1:4000,node2@node2:4000

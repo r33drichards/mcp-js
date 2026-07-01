@@ -1,0 +1,995 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "mcp-v8",
+    "description": "HTTP API for the mcp-v8 JavaScript execution server",
+    "license": {
+      "name": ""
+    },
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/api/cli": {
+      "get": {
+        "tags": [
+          "cli"
+        ],
+        "summary": "List available CLI binary downloads for the running server version.",
+        "description": "Each `url` is a direct download from this server. `available: false` means\nthe binary was not embedded at build time (dev/local builds).",
+        "operationId": "cli_index_handler",
+        "responses": {
+          "200": {
+            "description": "CLI download index",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CliIndex"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/cli/{platform}": {
+      "get": {
+        "tags": [
+          "cli"
+        ],
+        "summary": "Download the CLI binary for a specific platform directly from this server.",
+        "description": "The binary is embedded at build time and always matches the running server\nversion. Returns 404 if the server was built without embedded binaries\n(dev/local builds).\n\nSupported platforms: `linux-x86_64`, `linux-aarch64`, `macos-aarch64`.",
+        "operationId": "cli_download_handler",
+        "parameters": [
+          {
+            "name": "platform",
+            "in": "path",
+            "description": "Target platform (linux-x86_64 | linux-aarch64 | macos-aarch64)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "CLI binary (application/octet-stream)"
+          },
+          "404": {
+            "description": "Unknown platform or binary not embedded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/exec": {
+      "post": {
+        "tags": [
+          "executions"
+        ],
+        "summary": "Submit JavaScript code for asynchronous execution.",
+        "description": "Returns immediately with an `execution_id`. Use `GET /api/executions/{id}`\nto poll status and `GET /api/executions/{id}/output` to read console output.\n\nTwo request encodings are accepted, selected by `Content-Type`:\n- `application/json` (or no `Content-Type`): a JSON `ExecRequest` body (the\nschema below).\n- any other type (e.g. `application/javascript`, `text/plain`): the raw\nrequest body is taken as the script source — i.e. a file upload (`curl\n--data-binary @script.js`). Optional `heap`, `session`,\n`heap_memory_max_mb`, and `execution_timeout_secs` may be passed as\nquery-string parameters.",
+        "operationId": "exec_handler",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExecRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Execution queued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecAccepted"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed request body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Unsupported Content-Type (e.g. multipart/form-data)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/executions": {
+      "get": {
+        "tags": [
+          "executions"
+        ],
+        "summary": "List all known executions (running and recently completed).",
+        "operationId": "list_executions_handler",
+        "responses": {
+          "200": {
+            "description": "Execution list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecutionList"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/executions/{id}": {
+      "get": {
+        "tags": [
+          "executions"
+        ],
+        "summary": "Get the status and result of an execution.",
+        "operationId": "get_execution_handler",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Execution ID returned by POST /api/exec",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Execution found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecutionInfo"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Execution not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/executions/{id}/cancel": {
+      "post": {
+        "tags": [
+          "executions"
+        ],
+        "summary": "Cancel a running execution.",
+        "operationId": "cancel_execution_handler",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Execution ID to cancel",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cancel accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CancelResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Cannot cancel (e.g. already finished)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CancelResult"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/executions/{id}/output": {
+      "get": {
+        "tags": [
+          "executions"
+        ],
+        "summary": "Read paginated console output from an execution.",
+        "description": "Supports both line-based (`line_offset` / `line_limit`) and byte-based\n(`byte_offset` / `byte_limit`) pagination.  Use `has_more` and\n`next_line_offset` / `next_byte_offset` to iterate.",
+        "operationId": "get_execution_output_handler",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Execution ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "line_offset",
+            "in": "query",
+            "description": "Return output starting at this line number (0-indexed).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "nullable": true,
+              "minimum": 0
+            }
+          },
+          {
+            "name": "line_limit",
+            "in": "query",
+            "description": "Maximum number of lines to return.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "nullable": true,
+              "minimum": 0
+            }
+          },
+          {
+            "name": "byte_offset",
+            "in": "query",
+            "description": "Return output starting at this byte offset.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "nullable": true,
+              "minimum": 0
+            }
+          },
+          {
+            "name": "byte_limit",
+            "in": "query",
+            "description": "Maximum number of bytes to return.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "nullable": true,
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Output page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExecutionOutput"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Execution not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/fs/labels": {
+      "get": {
+        "tags": [
+          "fs"
+        ],
+        "summary": "List filesystem snapshot labels.",
+        "operationId": "fs_labels_handler",
+        "responses": {
+          "200": {
+            "description": "Labels and their head CA ids"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "fs"
+        ],
+        "summary": "Create or repoint a filesystem snapshot label.",
+        "operationId": "fs_set_label_handler",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FsLabelRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Label set"
+          }
+        }
+      }
+    },
+    "/api/fs/labels/{label}": {
+      "get": {
+        "tags": [
+          "fs"
+        ],
+        "summary": "Resolve a label to its current head CA id.",
+        "operationId": "fs_resolve_handler",
+        "parameters": [
+          {
+            "name": "label",
+            "in": "path",
+            "description": "Label name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current head CA id"
+          },
+          "404": {
+            "description": "Unknown label"
+          }
+        }
+      }
+    },
+    "/api/fs/labels/{label}/log": {
+      "get": {
+        "tags": [
+          "fs"
+        ],
+        "summary": "Show the reflog for a label.",
+        "operationId": "fs_log_handler",
+        "parameters": [
+          {
+            "name": "label",
+            "in": "path",
+            "description": "Label name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Return only the most recent N reflog entries (oldest-first). Omit for the full history.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "nullable": true,
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Reflog entries, oldest first"
+          }
+        }
+      }
+    },
+    "/api/fs/merge": {
+      "post": {
+        "tags": [
+          "fs"
+        ],
+        "summary": "Three-way merge two snapshots into a new one.",
+        "operationId": "fs_merge_handler",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FsMergeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Merge ran — body has status=merged (ca_id) or status=conflict. Text files auto-merge at line level; each conflict carries kind plus, for text, diff3 markers and unified diffs."
+          },
+          "400": {
+            "description": "Invalid CA id or prefer value"
+          }
+        }
+      }
+    },
+    "/api/fs/push": {
+      "post": {
+        "tags": [
+          "fs"
+        ],
+        "summary": "Advance a label to a CA id (reject-and-rebase by default).",
+        "operationId": "fs_push_handler",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FsPushRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Push advanced the label"
+          },
+          "409": {
+            "description": "Rejected — the label moved since the caller pulled"
+          }
+        }
+      }
+    },
+    "/api/fs/reset": {
+      "post": {
+        "tags": [
+          "fs"
+        ],
+        "summary": "Reset a label to an earlier CA id from its reflog.",
+        "operationId": "fs_reset_handler",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FsResetRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Label reset"
+          },
+          "400": {
+            "description": "CA id not in reflog (and allow_unlogged not set)"
+          }
+        }
+      }
+    },
+    "/api/version": {
+      "get": {
+        "tags": [
+          "meta"
+        ],
+        "summary": "Return the running server version.",
+        "operationId": "version_handler",
+        "responses": {
+          "200": {
+            "description": "Server version"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ApiError": {
+        "type": "object",
+        "description": "Generic error body.",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "string"
+          }
+        }
+      },
+      "CancelResult": {
+        "type": "object",
+        "description": "Result of a cancel request.",
+        "required": [
+          "ok"
+        ],
+        "properties": {
+          "error": {
+            "type": "string",
+            "nullable": true
+          },
+          "ok": {
+            "type": "boolean"
+          }
+        }
+      },
+      "CliAsset": {
+        "type": "object",
+        "description": "A single entry in the CLI download index.",
+        "required": [
+          "platform",
+          "url",
+          "available"
+        ],
+        "properties": {
+          "available": {
+            "type": "boolean",
+            "description": "Whether the binary is embedded in this server build."
+          },
+          "platform": {
+            "type": "string",
+            "description": "Platform identifier (e.g. `linux-x86_64`)."
+          },
+          "url": {
+            "type": "string",
+            "description": "Download URL for this binary via the server itself."
+          }
+        }
+      },
+      "CliIndex": {
+        "type": "object",
+        "description": "Index of available CLI binary downloads for the running server version.",
+        "required": [
+          "version",
+          "assets"
+        ],
+        "properties": {
+          "assets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CliAsset"
+            },
+            "description": "Available platform binaries."
+          },
+          "version": {
+            "type": "string",
+            "description": "Server (and CLI) version string, e.g. `\"0.1.0\"`."
+          }
+        }
+      },
+      "ExecAccepted": {
+        "type": "object",
+        "description": "Accepted response containing the new execution's ID.",
+        "required": [
+          "execution_id"
+        ],
+        "properties": {
+          "execution_id": {
+            "type": "string",
+            "description": "Unique identifier for the queued execution."
+          }
+        }
+      },
+      "ExecRequest": {
+        "type": "object",
+        "description": "Request body for executing JavaScript code.",
+        "required": [
+          "code"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "JavaScript (or TypeScript) source code to execute."
+          },
+          "execution_timeout_secs": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Per-execution timeout in seconds (overrides server default).",
+            "nullable": true,
+            "minimum": 0
+          },
+          "fs": {
+            "type": "string",
+            "description": "Filesystem snapshot handle to mount: a label name or 64-hex CA id.\nIndependent of `heap`.",
+            "nullable": true
+          },
+          "heap": {
+            "type": "string",
+            "description": "Serialised heap snapshot key to restore before execution.",
+            "nullable": true
+          },
+          "heap_memory_max_mb": {
+            "type": "integer",
+            "description": "Per-execution V8 heap memory cap in megabytes.",
+            "nullable": true,
+            "minimum": 0
+          },
+          "session": {
+            "type": "string",
+            "description": "Session identifier used for tagging / logging.",
+            "nullable": true
+          },
+          "tags": {
+            "type": "object",
+            "description": "Arbitrary key/value tags attached to the resulting heap snapshot.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "nullable": true
+          }
+        }
+      },
+      "ExecutionInfo": {
+        "type": "object",
+        "description": "Detailed status of a single execution.",
+        "required": [
+          "execution_id",
+          "status",
+          "started_at"
+        ],
+        "properties": {
+          "completed_at": {
+            "type": "string",
+            "description": "ISO-8601 timestamp when execution finished (absent while running).",
+            "nullable": true
+          },
+          "error": {
+            "type": "string",
+            "description": "Error message (present when `status` is `failed`).",
+            "nullable": true
+          },
+          "execution_id": {
+            "type": "string"
+          },
+          "fs": {
+            "type": "string",
+            "description": "Filesystem snapshot CA id produced after execution (when a mount was\nattached), independent of the heap.",
+            "nullable": true
+          },
+          "heap": {
+            "type": "string",
+            "description": "Heap snapshot key produced after execution.",
+            "nullable": true
+          },
+          "result": {
+            "type": "string",
+            "description": "Final return value serialised to JSON (present when `status` is `completed`).",
+            "nullable": true
+          },
+          "started_at": {
+            "type": "string",
+            "description": "ISO-8601 timestamp when execution started."
+          },
+          "status": {
+            "type": "string",
+            "description": "Current status: `running`, `completed`, `failed`, `cancelled`, `timed_out`."
+          }
+        }
+      },
+      "ExecutionList": {
+        "type": "object",
+        "description": "List of execution summaries.",
+        "required": [
+          "executions"
+        ],
+        "properties": {
+          "executions": {
+            "type": "array",
+            "items": {}
+          }
+        }
+      },
+      "ExecutionOutput": {
+        "type": "object",
+        "description": "A page of console output from an execution.",
+        "required": [
+          "execution_id",
+          "data",
+          "start_line",
+          "end_line",
+          "next_line_offset",
+          "total_lines",
+          "start_byte",
+          "end_byte",
+          "next_byte_offset",
+          "total_bytes",
+          "has_more",
+          "status"
+        ],
+        "properties": {
+          "data": {
+            "type": "string",
+            "description": "Text content for the requested window."
+          },
+          "end_byte": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Last byte offset in this page (exclusive).",
+            "minimum": 0
+          },
+          "end_line": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Last line number in this page (exclusive).",
+            "minimum": 0
+          },
+          "execution_id": {
+            "type": "string"
+          },
+          "has_more": {
+            "type": "boolean",
+            "description": "Whether more output is available beyond this page."
+          },
+          "next_byte_offset": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Byte offset to use for the next page (pass as `byte_offset`).",
+            "minimum": 0
+          },
+          "next_line_offset": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Line offset to use for the next page (pass as `line_offset`).",
+            "minimum": 0
+          },
+          "start_byte": {
+            "type": "integer",
+            "format": "int64",
+            "description": "First byte offset in this page.",
+            "minimum": 0
+          },
+          "start_line": {
+            "type": "integer",
+            "format": "int64",
+            "description": "First line number in this page (0-indexed).",
+            "minimum": 0
+          },
+          "status": {
+            "type": "string",
+            "description": "Execution status at the time of this query."
+          },
+          "total_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Total bytes written so far.",
+            "minimum": 0
+          },
+          "total_lines": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Total lines written so far.",
+            "minimum": 0
+          }
+        }
+      },
+      "ExecutionSummary": {
+        "type": "object",
+        "description": "A brief summary of a single execution (used in list responses).",
+        "required": [
+          "execution_id",
+          "status",
+          "started_at"
+        ],
+        "properties": {
+          "completed_at": {
+            "type": "string",
+            "nullable": true
+          },
+          "execution_id": {
+            "type": "string"
+          },
+          "started_at": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        }
+      },
+      "FsLabelRequest": {
+        "type": "object",
+        "description": "Request body for `POST /api/fs/labels` (create or repoint a label).",
+        "required": [
+          "name",
+          "ca_id"
+        ],
+        "properties": {
+          "ca_id": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string",
+            "description": "Optional human note recorded on the reflog entry, like a commit message.",
+            "nullable": true
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "FsLogQuery": {
+        "type": "object",
+        "description": "Optional query parameters for a label reflog read.",
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "description": "Return only the most recent N reflog entries (oldest-first). Omit for the full history.",
+            "nullable": true,
+            "minimum": 0
+          }
+        }
+      },
+      "FsMergeRequest": {
+        "type": "object",
+        "description": "Request body for `POST /api/fs/merge`.",
+        "required": [
+          "ours",
+          "theirs"
+        ],
+        "properties": {
+          "base": {
+            "type": "string",
+            "description": "The common ancestor both sides diverged from. Omit for a 2-way merge.",
+            "nullable": true
+          },
+          "ours": {
+            "type": "string",
+            "description": "One side of the merge (CA id, e.g. an execution's `fs` result)."
+          },
+          "prefer": {
+            "type": "string",
+            "description": "`ours` or `theirs` to auto-resolve conflicts; omit to report them.",
+            "nullable": true
+          },
+          "theirs": {
+            "type": "string",
+            "description": "The other side (CA id)."
+          }
+        }
+      },
+      "FsPushRequest": {
+        "type": "object",
+        "description": "Request body for advancing a filesystem snapshot label (`POST /api/fs/push`).",
+        "required": [
+          "ca_id"
+        ],
+        "properties": {
+          "ca_id": {
+            "type": "string",
+            "description": "The CA id (hex) to point the label at — typically the `fs` value from a\ncompleted execution."
+          },
+          "detach": {
+            "type": "boolean",
+            "description": "Do not touch any label; just echo the CA id back."
+          },
+          "expected": {
+            "type": "string",
+            "description": "The head the caller pulled. The push is rejected if the label has moved\nsince (reject-and-rebase). Ignored when `force` is true.",
+            "nullable": true
+          },
+          "force": {
+            "type": "boolean",
+            "description": "Override the conflict check and move the label unconditionally."
+          },
+          "label": {
+            "type": "string",
+            "description": "Label to advance. Omit only when `detach` is true.",
+            "nullable": true
+          },
+          "message": {
+            "type": "string",
+            "description": "Optional human note recorded on the reflog entry, like a commit message.",
+            "nullable": true
+          }
+        }
+      },
+      "FsResetRequest": {
+        "type": "object",
+        "description": "Request body for `POST /api/fs/reset`.",
+        "required": [
+          "label",
+          "ca_id"
+        ],
+        "properties": {
+          "allow_unlogged": {
+            "type": "boolean",
+            "description": "Allow resetting to a CA id that is not in the label's reflog."
+          },
+          "ca_id": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string",
+            "description": "Optional human note recorded on the reflog entry, like a commit message.",
+            "nullable": true
+          }
+        }
+      },
+      "OutputQuery": {
+        "type": "object",
+        "description": "Optional pagination query parameters for console output.",
+        "properties": {
+          "byte_limit": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Maximum number of bytes to return.",
+            "nullable": true,
+            "minimum": 0
+          },
+          "byte_offset": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Return output starting at this byte offset.",
+            "nullable": true,
+            "minimum": 0
+          },
+          "line_limit": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Maximum number of lines to return.",
+            "nullable": true,
+            "minimum": 0
+          },
+          "line_offset": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Return output starting at this line number (0-indexed).",
+            "nullable": true,
+            "minimum": 0
+          }
+        }
+      }
+    }
+  }
+}

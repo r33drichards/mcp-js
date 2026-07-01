@@ -12,9 +12,14 @@ name = "server"
 path = "src/main.rs"
 
 [dependencies]
+cli-derive = { path = "cli-derive" }
 anyhow = "1.0.98"
 axum = "0.8.4"
-rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", rev = "787cc015b719773f66d4ac32e695b9a0079e12ef", features = ["transport-io", "transport-sse-server", "transport-streamable-http-server", "client", "transport-child-process", "transport-sse"] }
+rmcp = { version = "1.7", features = ["server", "client", "macros", "schemars", "server-side-http", "transport-streamable-http-server", "transport-io", "transport-child-process", "client-side-sse", "transport-streamable-http-client-reqwest"] }
+# Legacy rmcp pinned ONLY for its standalone HTTP+SSE server transport, which
+# rmcp 1.x dropped. Renamed so it coexists with the primary `rmcp` 1.x above;
+# used solely by mcp_sse.rs to keep `--sse-port` working.
+rmcp_legacy = { package = "rmcp", git = "https://github.com/modelcontextprotocol/rust-sdk", rev = "787cc015b719773f66d4ac32e695b9a0079e12ef", features = ["transport-sse-server"] }
 
 # rmcp = { version = "0.1.5", }
 serde = "=1.0.219"
@@ -24,8 +29,8 @@ tracing = "0.1.41"
 tracing-subscriber = "0.3.19"
 deno_core = "0.381"
 deno_error = "0.7"
-aws-config = "0.0.26-alpha"
-aws-sdk-s3 = "0.0.26-alpha"
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-sdk-s3 = "1"
 async-trait = "0.1"
 clap = { version = "4.5", features = ["derive", "env"] }
 sha2 = "0.10"
@@ -45,23 +50,23 @@ tokio-util = "0.7"
 rand = "0.8"
 http-body-util = "0.1"
 regorus = "0.5"
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 url = "2"
 futures = "0.3"
 wasmparser = "0.225"
 uuid = { version = "1.0", features = ["v4"] }
 dashmap = "6"
 jsonwebtoken = "9"
-
-[patch.crates-io]
-# Fixes Vec<&str> heap leak in prepare_for_snapshot: the `extensions` field
-# was not ManuallyDrop so mem::forget(self) leaked its backing buffer.
-# Upstream PR pending; using our fork until merged.
-deno_core = { git = "https://github.com/r33drichards/deno_core", rev = "1c97a0ad596fed8c258803c020194243ef4441cc" }
+utoipa = { version = "4", features = ["axum_extras"] }
+fastcdc = "3"
+zstd = "0.13"
+blake3 = "1"
+bincode = "1"
+diffy = "0.4"
 
 [dev-dependencies]
 tokio-test = "0.4"
-reqwest = { version = "0.12", features = ["json", "cookies", "stream"] }
+reqwest = { version = "0.12", features = ["json", "cookies", "stream", "rustls-tls"], default-features = false }
 uuid = { version = "1.0", features = ["v4"] }
 futures = "0.3"
 tempfile = "3"

@@ -110,7 +110,9 @@ fuzz_target!(|input: FetchOperationInput| {
 fn escape_js_string(s: &str) -> String {
     // Cap URL length to avoid excessive code size
     let s = if s.len() > 10000 {
-        &s[..10000]
+        let mut end = 10000;
+        while !s.is_char_boundary(end) { end -= 1; }
+        &s[..end]
     } else {
         s
     };
