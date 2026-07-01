@@ -1212,9 +1212,16 @@ fn load_mcp_server_configs(
                     url: url.to_string(),
                 },
             });
+        } else if let Some(url) = rest.strip_prefix("http:") {
+            configs.push(McpServerConfig {
+                name,
+                transport: McpServerTransport::Http {
+                    url: url.to_string(),
+                },
+            });
         } else {
             anyhow::bail!(
-                "Invalid --mcp-server transport for '{}': must start with 'stdio:' or 'sse:'. Got: '{}'",
+                "Invalid --mcp-server transport for '{}': must start with 'stdio:', 'sse:', or 'http:'. Got: '{}'",
                 name, rest
             );
         }
@@ -1270,11 +1277,13 @@ mod tests {
             &[
                 "weather=stdio:python:server.py:--verbose".to_string(),
                 "remote=sse:http://127.0.0.1:9000/sse".to_string(),
+                "srv=http:https://example.com/mcp".to_string(),
             ],
             &None,
         )?;
         anyhow::ensure!(matches!(configs[0].transport, McpServerTransport::Stdio { .. }));
         anyhow::ensure!(matches!(configs[1].transport, McpServerTransport::Sse { .. }));
+        anyhow::ensure!(matches!(configs[2].transport, McpServerTransport::Http { .. }));
         Ok(())
     }
 
