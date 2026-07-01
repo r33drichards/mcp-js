@@ -217,6 +217,15 @@ async fn mcp_config_deserializes_all_auth_types() -> Result<(), Box<dyn std::err
                 "scope": ["read", "write"]
             }
         }),
+        json!({
+            "name": "browser-srv",
+            "transport": "http",
+            "url": "https://mcp.supabase.com/mcp",
+            "auth": {
+                "type": "oauth_browser",
+                "scope": ["projects:read", "database:read"]
+            }
+        }),
     ];
 
     // Verify these parse as valid McpServerConfig entries
@@ -224,13 +233,93 @@ async fn mcp_config_deserializes_all_auth_types() -> Result<(), Box<dyn std::err
     let json_str = serde_json::to_string(&configs)?;
     let parsed: Vec<McpServerConfig> = serde_json::from_str(&json_str)?;
 
-    assert_eq!(parsed.len(), 3);
+    assert_eq!(parsed.len(), 4);
     assert_eq!(parsed[0].name, "bearer-srv");
     assert_eq!(parsed[1].name, "cc-srv");
     assert_eq!(parsed[2].name, "disc-srv");
+    assert_eq!(parsed[3].name, "browser-srv");
     assert!(parsed[0].auth.is_some());
     assert!(parsed[1].auth.is_some());
     assert!(parsed[2].auth.is_some());
+    assert!(parsed[3].auth.is_some());
+
+    Ok(())
+}
+
+/// Verify the minimal `oauth_browser` config (all fields optional) parses and
+/// round-trips through serde with the expected tagged representation.
+#[tokio::test]
+async fn mcp_config_oauth_browser_minimal_parses() -> Result<(), Box<dyn std::error::Error>> {
+    use server::engine::mcp_client::{McpServerAuth, McpServerConfig};
+
+    // Only `type` is required — every other oauth_browser field is optional.
+    let config: McpServerConfig = serde_json::from_value(json!({
+        "name": "supabase",
+        "transport": "http",
+        "url": "https://mcp.supabase.com/mcp",
+        "auth": {"type": "oauth_browser"}
+    }))?;
+
+    match config.auth {
+        Some(McpServerAuth::OauthBrowser {
+            scope,
+            client_id,
+            client_secret,
+            redirect_port,
+            token_cache,
+        }) => {
+            assert!(scope.is_none());
+            assert!(client_id.is_none());
+            assert!(client_secret.is_none());
+            assert!(redirect_port.is_none());
+            assert!(token_cache.is_none());
+        }
+        other => panic!("expected OauthBrowser auth, got: {:?}", other),
+    }
+
+    Ok(())
+}
+
+/// Verify a fully-specified `oauth_browser` config parses and serializes back
+/// to the `"type": "oauth_browser"` tagged form.
+#[tokio::test]
+async fn mcp_config_oauth_browser_full_round_trips() -> Result<(), Box<dyn std::error::Error>> {
+    use server::engine::mcp_client::{McpServerAuth, McpServerConfig};
+
+    let config: McpServerConfig = serde_json::from_value(json!({
+        "name": "supabase",
+        "transport": "http",
+        "url": "https://mcp.supabase.com/mcp",
+        "auth": {
+            "type": "oauth_browser",
+            "scope": ["projects:read", "database:read"],
+            "client_id": "my-client",
+            "client_secret": "shh",
+            "redirect_port": 8765,
+            "token_cache": "/tmp/mcp-js-supabase.json"
+        }
+    }))?;
+
+    match &config.auth {
+        Some(McpServerAuth::OauthBrowser {
+            scope,
+            client_id,
+            client_secret,
+            redirect_port,
+            token_cache,
+        }) => {
+            assert_eq!(scope.as_deref(), Some(&["projects:read".to_string(), "database:read".to_string()][..]));
+            assert_eq!(client_id.as_deref(), Some("my-client"));
+            assert_eq!(client_secret.as_deref(), Some("shh"));
+            assert_eq!(*redirect_port, Some(8765));
+            assert_eq!(token_cache.as_deref(), Some("/tmp/mcp-js-supabase.json"));
+        }
+        other => panic!("expected OauthBrowser auth, got: {:?}", other),
+    }
+
+    // Serialized form carries the snake_case tag.
+    let value = serde_json::to_value(&config)?;
+    assert_eq!(value["auth"]["type"], "oauth_browser");
 
     Ok(())
 }

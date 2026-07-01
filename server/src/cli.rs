@@ -345,13 +345,21 @@ pub struct Cli {
     ///                    "client_id": "my-app", "client_secret": "secret", "scope": "mcp:read"}},
     ///          {"name": "srv5", "transport": "http", "url": "https://mcp.example.com/mcp",
     ///           "auth": {"type": "oauth_discovery", "client_id": "my-app", "client_secret": "secret",
-    ///                    "scope": ["mcp:read", "tools:call"]}}]
+    ///                    "scope": ["mcp:read", "tools:call"]}},
+    ///          {"name": "supabase", "transport": "http", "url": "https://mcp.supabase.com/mcp",
+    ///           "auth": {"type": "oauth_browser", "scope": ["projects:read", "database:read"]}}]
     /// Auth types:
     ///   - bearer: static token, sent as Authorization: Bearer <token>
     ///   - client_credentials: OAuth 2.0 client_credentials grant (you provide token_url)
     ///   - oauth_discovery: full MCP OAuth flow (RFC 9728 + RFC 8414) — discovers
     ///     the authorization server from the MCP server's Protected Resource Metadata,
     ///     then performs client_credentials exchange. No token_url needed.
+    ///   - oauth_browser: interactive browser OAuth 2.1 authorization-code + PKCE flow
+    ///     with Dynamic Client Registration (RFC 7591) — for servers whose AS does NOT
+    ///     support client_credentials and requires a user sign-in (e.g. Supabase's hosted
+    ///     MCP server). Opens the default browser once, caches access + refresh tokens to
+    ///     a JSON file, and silently refreshes on later startups. Optional fields:
+    ///     scope (array), client_id, client_secret, redirect_port, token_cache (path).
     #[arg(long = "mcp-config", env = "MCP_V8_MCP_CONFIG", value_name = "PATH", help_heading = "MCP Server Module")]
     pub mcp_config: Option<String>,
 

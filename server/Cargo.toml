@@ -15,7 +15,7 @@ path = "src/main.rs"
 cli-derive = { path = "cli-derive" }
 anyhow = "1.0.98"
 axum = "0.8.4"
-rmcp = { version = "1.7", features = ["server", "client", "macros", "schemars", "server-side-http", "transport-streamable-http-server", "transport-io", "transport-child-process", "client-side-sse", "transport-streamable-http-client-reqwest", "auth"] }
+rmcp = { version = "1.7", features = ["server", "client", "macros", "schemars", "server-side-http", "transport-streamable-http-server", "transport-io", "transport-child-process", "client-side-sse", "reqwest", "transport-streamable-http-client-reqwest", "auth"] }
 # Legacy rmcp pinned ONLY for its standalone HTTP+SSE server transport, which
 # rmcp 1.x dropped. Renamed so it coexists with the primary `rmcp` 1.x above;
 # used solely by mcp_sse.rs to keep `--sse-port` working.

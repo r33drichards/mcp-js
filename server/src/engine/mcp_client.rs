@@ -68,6 +68,42 @@ pub enum McpServerAuth {
         #[serde(default)]
         resource: Option<String>,
     },
+    /// Interactive browser OAuth 2.1 authorization-code flow with PKCE and
+    /// (optional) Dynamic Client Registration — for MCP servers whose
+    /// authorization server does NOT support `client_credentials` and instead
+    /// requires a user to sign in (e.g. Supabase's hosted MCP server).
+    ///
+    /// Flow: discover Protected Resource Metadata (RFC 9728) → Authorization
+    /// Server Metadata (RFC 8414) → register a client dynamically (RFC 7591)
+    /// unless a `client_id` is supplied → open the user's browser to the
+    /// authorization endpoint (S256 PKCE) → receive the `code` on a localhost
+    /// callback → exchange it for access + refresh tokens.
+    ///
+    /// Tokens (and the dynamic client registration) are cached to a JSON file so
+    /// subsequent startups reuse the cached access token, or silently exchange
+    /// the refresh token when it has expired — the browser is only launched when
+    /// there is no usable cached or refreshable token.
+    OauthBrowser {
+        /// OAuth scopes to request. Omit to let the server apply its defaults.
+        #[serde(default)]
+        scope: Option<Vec<String>>,
+        /// Pre-registered client id. If omitted, Dynamic Client Registration is
+        /// performed against the AS registration endpoint.
+        #[serde(default)]
+        client_id: Option<String>,
+        /// Client secret for a confidential pre-registered client (optional).
+        #[serde(default)]
+        client_secret: Option<String>,
+        /// Fixed port for the localhost `/callback` listener. Defaults to an
+        /// ephemeral free port. Set this when the client's registered
+        /// redirect_uri must be stable.
+        #[serde(default)]
+        redirect_port: Option<u16>,
+        /// Path to the token-cache JSON file. Defaults to
+        /// `$XDG_CACHE_HOME/mcp-js/oauth-<server>.json` (or `~/.cache/...`).
+        #[serde(default)]
+        token_cache: Option<String>,
+    },
 }
 
 /// Transport configuration for a single MCP server.
@@ -570,8 +606,11 @@ pub fn stub_call_instructions(
 
 // ── Connection logic ─────────────────────────────────────────────────────
 
-/// Resolve the auth configuration into an `Authorization` header value (e.g.
-/// `"Bearer <token>"`) that can be passed to the Streamable HTTP transport.
+/// Resolve the auth configuration into the RAW bearer token to hand to the
+/// Streamable HTTP transport. rmcp applies this value via reqwest's
+/// `.bearer_auth(...)`, which prepends `Authorization: Bearer ` itself — so
+/// every arm must return the bare token WITHOUT a scheme prefix (returning
+/// `"Bearer <tok>"` here produces a double-`Bearer` header and a 401).
 async fn resolve_auth_header(
     server_name: &str,
     server_url: Option<&str>,
@@ -579,7 +618,7 @@ async fn resolve_auth_header(
 ) -> Result<Option<String>, String> {
     match auth {
         None => Ok(None),
-        Some(McpServerAuth::Bearer { token }) => Ok(Some(format!("Bearer {}", token))),
+        Some(McpServerAuth::Bearer { token }) => Ok(Some(token.clone())),
         Some(McpServerAuth::ClientCredentials {
             token_url,
             client_id,
@@ -599,13 +638,19 @@ async fn resolve_auth_header(
                     refresh_buffer_secs: 30,
                 },
             );
+            // `authorization_header_value()` returns a full header value like
+            // `"Bearer <tok>"`; strip the scheme so rmcp gets the raw token.
             let header_value = source.authorization_header_value().await.map_err(|e| {
                 format!(
                     "OAuth token acquisition for '{}' failed: {}",
                     server_name, e
                 )
             })?;
-            Ok(Some(header_value))
+            let token = header_value
+                .split_once(' ')
+                .map(|(_scheme, tok)| tok.to_string())
+                .unwrap_or(header_value);
+            Ok(Some(token))
         }
         Some(McpServerAuth::OauthDiscovery {
             client_id,
@@ -819,9 +864,394 @@ async fn resolve_auth_header(
                     )
                 })?;
 
-            Ok(Some(format!("Bearer {}", access_token)))
+            Ok(Some(access_token.to_string()))
+        }
+        Some(McpServerAuth::OauthBrowser {
+            scope,
+            client_id,
+            client_secret,
+            redirect_port,
+            token_cache,
+        }) => {
+            let url = server_url.ok_or_else(|| {
+                format!(
+                    "MCP server '{}': oauth_browser auth requires an HTTP-based transport URL",
+                    server_name
+                )
+            })?;
+            let token = resolve_oauth_browser(
+                server_name,
+                url,
+                scope.as_deref(),
+                client_id.as_deref(),
+                client_secret.as_deref(),
+                *redirect_port,
+                token_cache.as_deref(),
+            )
+            .await?;
+            // `resolve_oauth_browser` already returns the raw access token.
+            Ok(Some(token))
         }
     }
+}
+
+// ── Browser (authorization-code + PKCE) OAuth ────────────────────────────
+//
+// Reuses rmcp's `AuthorizationManager` for the entire OAuth state machine
+// (RFC 9728/8414 discovery, RFC 7591 Dynamic Client Registration, S256 PKCE
+// authorization-code exchange, and refresh-token grant). Only the pieces rmcp
+// deliberately leaves to the embedder are hand-rolled here: persisting tokens
+// to disk (`FileCredentialStore`), opening the user's browser, and running the
+// localhost redirect listener that captures the authorization `code`.
+
+/// How long we wait for the user to complete the browser sign-in before giving
+/// up (so a headless / abandoned launch can't hang the server forever).
+const OAUTH_BROWSER_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Credential store backed by a JSON file, so access + refresh tokens (and the
+/// dynamic client registration's client_id) survive restarts. Plugs into
+/// rmcp's `AuthorizationManager` via the `CredentialStore` trait.
+struct FileCredentialStore {
+    path: std::path::PathBuf,
+}
+
+#[async_trait::async_trait]
+impl rmcp::transport::auth::CredentialStore for FileCredentialStore {
+    async fn load(
+        &self,
+    ) -> Result<Option<rmcp::transport::auth::StoredCredentials>, rmcp::transport::auth::AuthError>
+    {
+        use rmcp::transport::auth::AuthError;
+        match tokio::fs::read(&self.path).await {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .map(Some)
+                .map_err(|e| AuthError::InternalError(format!("token cache parse error: {e}"))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(AuthError::InternalError(format!(
+                "token cache read error: {e}"
+            ))),
+        }
+    }
+
+    async fn save(
+        &self,
+        credentials: rmcp::transport::auth::StoredCredentials,
+    ) -> Result<(), rmcp::transport::auth::AuthError> {
+        use rmcp::transport::auth::AuthError;
+        if let Some(parent) = self.path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| AuthError::InternalError(format!("token cache mkdir error: {e}")))?;
+        }
+        let bytes = serde_json::to_vec_pretty(&credentials)
+            .map_err(|e| AuthError::InternalError(format!("token cache serialize error: {e}")))?;
+        tokio::fs::write(&self.path, &bytes)
+            .await
+            .map_err(|e| AuthError::InternalError(format!("token cache write error: {e}")))?;
+        // Tokens are secrets — best-effort restrict the file to the owner.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600));
+        }
+        Ok(())
+    }
+
+    async fn clear(&self) -> Result<(), rmcp::transport::auth::AuthError> {
+        use rmcp::transport::auth::AuthError;
+        match tokio::fs::remove_file(&self.path).await {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(AuthError::InternalError(format!(
+                "token cache clear error: {e}"
+            ))),
+        }
+    }
+}
+
+/// Default on-disk location for a server's token cache:
+/// `$XDG_CACHE_HOME/mcp-js/oauth-<server>.json` (falling back to
+/// `~/.cache/...`, then the system temp dir if no home is known).
+fn default_token_cache_path(server_name: &str) -> std::path::PathBuf {
+    let base = std::env::var_os("XDG_CACHE_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".cache")))
+        .unwrap_or_else(std::env::temp_dir);
+    let safe: String = server_name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    base.join("mcp-js").join(format!("oauth-{safe}.json"))
+}
+
+/// Open `url` in the user's default browser. Best-effort — the caller has
+/// already logged the URL so a headless host can copy it manually.
+fn open_browser(url: &str) -> std::io::Result<()> {
+    use std::process::Stdio;
+    #[cfg(target_os = "macos")]
+    let mut cmd = std::process::Command::new("open");
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut cmd = std::process::Command::new("xdg-open");
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/C", "start", ""]);
+        c
+    };
+    cmd.arg(url)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|_| ())
+}
+
+/// Accept connections on the localhost redirect listener until one carries the
+/// authorization `code`, validate the `state` against `expected_state`, reply
+/// with a friendly page, and return the code. Ignores stray requests (e.g.
+/// `/favicon.ico`) so the flow is robust to browser prefetching.
+async fn await_authorization_code(
+    listener: tokio::net::TcpListener,
+    expected_state: &str,
+) -> Result<String, String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    loop {
+        let (mut stream, _) = listener
+            .accept()
+            .await
+            .map_err(|e| format!("callback listener accept failed: {e}"))?;
+
+        // The request line (`GET /callback?... HTTP/1.1`) is at the very start
+        // of the stream, so a single read is enough to parse the query.
+        let mut buf = [0u8; 8192];
+        let n = stream
+            .read(&mut buf)
+            .await
+            .map_err(|e| format!("callback read failed: {e}"))?;
+        let request = String::from_utf8_lossy(&buf[..n]);
+        let target = request
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .unwrap_or("");
+
+        let (code, state, err) = parse_callback_target(target);
+
+        if let Some(err) = err {
+            let _ = write_http_response(
+                &mut stream,
+                "Authorization failed",
+                &format!("The authorization server returned an error: {err}. You can close this tab."),
+            )
+            .await;
+            return Err(format!("authorization server returned error: {err}"));
+        }
+
+        let Some(code) = code else {
+            // Not the callback we care about (favicon, health check, etc.).
+            let _ = write_http_response(&mut stream, "Waiting", "Waiting for authorization…").await;
+            continue;
+        };
+
+        if state.as_deref() != Some(expected_state) {
+            let _ = write_http_response(
+                &mut stream,
+                "Authorization failed",
+                "State parameter mismatch — possible CSRF. You can close this tab.",
+            )
+            .await;
+            return Err("callback state parameter did not match — aborting".to_string());
+        }
+
+        let _ = write_http_response(
+            &mut stream,
+            "Authorized",
+            "Authorization complete. You can close this tab and return to the terminal.",
+        )
+        .await;
+        return Ok(code);
+    }
+}
+
+/// Extract `(code, state, error)` from a redirect target like
+/// `/callback?code=abc&state=xyz`. Returns all-`None` for unrelated paths.
+fn parse_callback_target(target: &str) -> (Option<String>, Option<String>, Option<String>) {
+    // Parse against a dummy base so relative targets become a full URL.
+    let parsed = match url::Url::parse(&format!("http://localhost{target}")) {
+        Ok(u) => u,
+        Err(_) => return (None, None, None),
+    };
+    let mut code = None;
+    let mut state = None;
+    let mut error = None;
+    for (k, v) in parsed.query_pairs() {
+        match k.as_ref() {
+            "code" => code = Some(v.into_owned()),
+            "state" => state = Some(v.into_owned()),
+            "error" => error = Some(v.into_owned()),
+            _ => {}
+        }
+    }
+    (code, state, error)
+}
+
+/// Write a minimal HTML page as an HTTP/1.1 response.
+async fn write_http_response(
+    stream: &mut tokio::net::TcpStream,
+    title: &str,
+    message: &str,
+) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+    let body = format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\"><title>{title}</title></head>\
+         <body style=\"font-family:system-ui;margin:3rem;text-align:center\">\
+         <h1>{title}</h1><p>{message}</p></body></html>"
+    );
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    stream.write_all(response.as_bytes()).await?;
+    stream.flush().await
+}
+
+/// Run the browser authorization-code flow (or reuse cached/refreshable tokens)
+/// and return a valid access token. See `McpServerAuth::OauthBrowser`.
+async fn resolve_oauth_browser(
+    server_name: &str,
+    server_url: &str,
+    scope: Option<&[String]>,
+    client_id: Option<&str>,
+    client_secret: Option<&str>,
+    redirect_port: Option<u16>,
+    token_cache: Option<&str>,
+) -> Result<String, String> {
+    use rmcp::transport::auth::{AuthError, AuthorizationManager, OAuthClientConfig};
+
+    let cache_path = token_cache
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| default_token_cache_path(server_name));
+    let scopes: Vec<String> = scope.map(|s| s.to_vec()).unwrap_or_default();
+    let scope_refs: Vec<&str> = scopes.iter().map(String::as_str).collect();
+
+    let mut manager = AuthorizationManager::new(server_url).await.map_err(|e| {
+        format!("MCP server '{server_name}': failed to init OAuth manager: {e}")
+    })?;
+    manager.set_credential_store(FileCredentialStore {
+        path: cache_path.clone(),
+    });
+
+    // ── Fast path: reuse the cached token (refreshing silently if needed) ──
+    // `initialize_from_store` re-discovers metadata and configures the client
+    // from the cached client_id, so a valid or refreshable token never opens a
+    // browser.
+    if manager.initialize_from_store().await.unwrap_or(false) {
+        match manager.get_access_token().await {
+            Ok(token) => {
+                tracing::info!(
+                    "MCP server '{server_name}': using cached OAuth token from {}",
+                    cache_path.display()
+                );
+                return Ok(token);
+            }
+            Err(AuthError::AuthorizationRequired) => {
+                tracing::info!(
+                    "MCP server '{server_name}': cached OAuth token unusable; starting browser sign-in"
+                );
+            }
+            Err(e) => {
+                return Err(format!(
+                    "MCP server '{server_name}': cached OAuth token error: {e}"
+                ));
+            }
+        }
+    }
+
+    // ── Interactive path: discover, register/configure, browser sign-in ──
+    let metadata = manager.discover_metadata().await.map_err(|e| {
+        format!("MCP server '{server_name}': OAuth metadata discovery failed: {e}")
+    })?;
+    manager.set_metadata(metadata);
+
+    // Bind the redirect listener first so we know the real port before we
+    // register/configure the client (its redirect_uri must match exactly).
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", redirect_port.unwrap_or(0)))
+        .await
+        .map_err(|e| format!("MCP server '{server_name}': failed to bind callback listener: {e}"))?;
+    let port = listener
+        .local_addr()
+        .map_err(|e| format!("MCP server '{server_name}': callback listener addr error: {e}"))?
+        .port();
+    let redirect_uri = format!("http://localhost:{port}/callback");
+
+    match client_id {
+        Some(cid) => {
+            let mut config = OAuthClientConfig::new(cid, redirect_uri.clone())
+                .with_scopes(scopes.clone());
+            if let Some(secret) = client_secret {
+                config = config.with_client_secret(secret);
+            }
+            manager.configure_client(config).map_err(|e| {
+                format!("MCP server '{server_name}': OAuth client config failed: {e}")
+            })?;
+        }
+        None => {
+            // Dynamic Client Registration (RFC 7591).
+            manager
+                .register_client("mcp-js", &redirect_uri, &scope_refs)
+                .await
+                .map_err(|e| {
+                    format!("MCP server '{server_name}': dynamic client registration failed: {e}")
+                })?;
+            tracing::info!("MCP server '{server_name}': registered OAuth client dynamically");
+        }
+    }
+
+    let auth_url = manager.get_authorization_url(&scope_refs).await.map_err(|e| {
+        format!("MCP server '{server_name}': failed to build authorization URL: {e}")
+    })?;
+    // rmcp embeds the CSRF token as the `state` query parameter; pull it back
+    // out so we can validate the callback before exchanging the code.
+    let expected_state = url::Url::parse(&auth_url)
+        .ok()
+        .and_then(|u| {
+            u.query_pairs()
+                .find(|(k, _)| k == "state")
+                .map(|(_, v)| v.into_owned())
+        })
+        .ok_or_else(|| {
+            format!("MCP server '{server_name}': authorization URL missing state parameter")
+        })?;
+
+    tracing::info!(
+        "MCP server '{server_name}': open this URL to authorize (listening on {redirect_uri}):\n  {auth_url}"
+    );
+    // Also print to stdout so a headless operator can copy it even without tracing.
+    println!("[mcp-js] Authorize '{server_name}' by opening:\n  {auth_url}");
+    if let Err(e) = open_browser(&auth_url) {
+        tracing::warn!(
+            "MCP server '{server_name}': could not open a browser automatically ({e}); open the URL above manually"
+        );
+    }
+
+    let code = tokio::time::timeout(
+        OAUTH_BROWSER_TIMEOUT,
+        await_authorization_code(listener, &expected_state),
+    )
+    .await
+    .map_err(|_| {
+        format!("MCP server '{server_name}': timed out waiting for browser authorization")
+    })??;
+
+    manager
+        .exchange_code_for_token(&code, &expected_state)
+        .await
+        .map_err(|e| format!("MCP server '{server_name}': token exchange failed: {e}"))?;
+
+    manager.get_access_token().await.map_err(|e| {
+        format!("MCP server '{server_name}': failed to read access token after sign-in: {e}")
+    })
 }
 
 async fn connect_one(config: &McpServerConfig) -> Result<ConnectedMcpServer, String> {
