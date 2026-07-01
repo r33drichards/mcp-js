@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
-use clap::{ArgAction, CommandFactory};
-use server::cli::Cli;
+use clap::ArgAction;
+use server::cli::build_command;
 
 fn slug(text: &str) -> String {
     let mut out = String::new();
@@ -39,7 +39,7 @@ fn render_default(arg: &clap::Arg, long: &str) -> Option<String> {
 }
 
 fn main() {
-    let command = Cli::command();
+    let command = build_command();
     let mut sections: BTreeMap<String, Vec<String>> = BTreeMap::new();
 
     for arg in command.get_arguments() {

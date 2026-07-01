@@ -44,9 +44,10 @@
         } {
           src = ./server;
           # Vendor hash for server's cargo deps; refreshed when deps changed.
-          # Bumped for the rmcp 1.7 (crates.io) + rmcp 0.1.5 (git, renamed
-          # rmcp_legacy for the SSE transport) dependency set.
-          hash = "sha256-PDwgY03mHnp5yj6sSZCjatG9mBIWF6bAjM6yU+Ql3Hc=";
+          # TODO: recompute after merge — combined auth-feature deps + cli-derive
+          # path dep means neither predecessor hash is valid.  Set to "" so the
+          # Nix build reports the correct hash.
+          hash = "";
         });
 
         docsPython = pkgs.python3.withPackages (
