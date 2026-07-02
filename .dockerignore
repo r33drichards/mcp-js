@@ -33,3 +33,6 @@ LICENSE
 # OS files
 .DS_Store
 Thumbs.db
+
+# media 
+site-docs/media/**
