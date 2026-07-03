@@ -111,6 +111,13 @@ JWKS endpoint URL for fetching public keys (e.g., Keycloak OIDC certs URL). Enab
 - Environment: `JWKS_URL`
 - Value: `JWKS_URL`
 
+### `--session-id`
+
+Fixed session id for this process, used when no X-MCP-Session-Id header is available (i.e. the stdio transport). Keys per-session heap+fs state so a process spawned for a given logical session (e.g. one per thread) resumes that session's stateful heap+fs. Over HTTP the header still wins
+
+- Environment: `MCP_V8_SESSION_ID`
+- Value: `SESSION_ID`
+
 ### `--http-port`
 
 HTTP port using Streamable HTTP transport (MCP 2025-03-26+, load-balanceable)
