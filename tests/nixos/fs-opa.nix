@@ -36,14 +36,15 @@ in
       services.mcp-js = {
         enable = true;
         package = mcp-js;
-        nodeId = "test";
-        stateless = true;
-        httpPort = 3000;
-        policiesJson = builtins.toJSON {
-          filesystem = {
-            policies = [{
-              url = "file://${regoPolicy}";
-            }];
+        settings = {
+          node_id = "test";
+          http_port = 3000;
+          policies = {
+            filesystem = {
+              policies = [{
+                url = "file://${regoPolicy}";
+              }];
+            };
           };
         };
       };
