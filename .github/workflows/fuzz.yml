@@ -28,6 +28,11 @@ jobs:
           - fuzz_fetch_operations
           - fuzz_parameter_validation
           - fuzz_module_resolution
+          - fuzz_fs_chunker
+          - fuzz_fs_tree_codec
+          - fuzz_fs_mount
+          - fuzz_fs_merge
+          - fuzz_fs_content_merge
 
     steps:
       - name: Checkout code
