@@ -172,6 +172,13 @@ Fixed session id for this process, used when no X-MCP-Session-Id header is avail
 - CLI flag: `--session-id`
 - Environment: `MCP_V8_SESSION_ID`
 
+### `session_fork_from`
+
+Fork the new session (given by --session-id) from a previous session's latest heap+fs snapshot. The new session starts with the source session's state but is independent: subsequent snapshots are written under the new session id, leaving the source untouched (copy-on-write). Requires --session-id and heap and/or fs persistence. No-op if the target session already has history
+
+- CLI flag: `--session-fork-from`
+- Environment: `MCP_V8_SESSION_FORK_FROM`
+
 ### `http_port`
 
 HTTP port using Streamable HTTP transport (MCP 2025-03-26+, load-balanceable)

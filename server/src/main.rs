@@ -143,6 +143,14 @@ async fn main() -> Result<()> {
     let heap_enabled = cli.heap_enabled();
     let fs_enabled = cli.fs_enabled();
 
+    // Forking seeds a session from another's snapshot, which only exists when
+    // per-session state is persisted.
+    if cli.session_fork_from.is_some() && !(heap_enabled || fs_enabled) {
+        anyhow::bail!(
+            "--session-fork-from requires heap and/or fs persistence (set --heap-store and/or --fs-store)"
+        );
+    }
+
     // Heap snapshots run in a V8 SnapshotCreator isolate, which disables
     // WebAssembly. Reject heap + WASM at startup rather than failing at the
     // first execution with "WebAssembly is not an object".
@@ -212,6 +220,10 @@ async fn main() -> Result<()> {
                 } else {
                     log
                 };
+                // Fork a new session from a previous session's latest snapshot.
+                if let Some(ref from) = cli.session_fork_from {
+                    fork_session(&log, from, cli.session_id.as_deref()).await?;
+                }
                 engine.with_session_log(log)
             }
             Err(e) => {
@@ -654,6 +666,41 @@ async fn main() -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+/// Seed a new session (`to`, from `--session-id`) with a previous session's
+/// (`from`) latest heap+fs snapshot. Copies the source session's most recent
+/// log entry as the target's first entry, so the target resumes the source's
+/// state on its first execution but writes subsequent snapshots under its own
+/// id (copy-on-write; the source is untouched).
+///
+/// No-op if the target already has history (idempotent resume). Errors if
+/// `--session-id` is missing (nothing to fork into).
+async fn fork_session(
+    log: &SessionLog,
+    from: &str,
+    to: Option<&str>,
+) -> Result<()> {
+    use engine::session_log::ForkOutcome;
+    let to = to.ok_or_else(|| {
+        anyhow::anyhow!("--session-fork-from requires --session-id (the new session to create)")
+    })?;
+    if from == to {
+        anyhow::bail!("--session-fork-from '{from}' must differ from --session-id '{to}'");
+    }
+
+    match log.fork(from, to).await.map_err(|e| anyhow::anyhow!(e))? {
+        ForkOutcome::Forked { heap, fs } => {
+            tracing::info!("Forked session '{to}' from '{from}' (heap {}, fs {:?})", heap, fs);
+        }
+        ForkOutcome::TargetExists => {
+            tracing::info!("Session '{to}' already has history; not forking from '{from}'");
+        }
+        ForkOutcome::SourceEmpty => {
+            tracing::warn!("--session-fork-from '{from}' has no session history; '{to}' starts empty");
+        }
+    }
     Ok(())
 }
 
