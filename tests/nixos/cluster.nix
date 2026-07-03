@@ -1,87 +1,6 @@
 { pkgs, mcp-js, ... }:
 
 let
-  # ── TLS certificate generation ────────────────────────────────────────
-  # Following the etcd NixOS test pattern: generate a CA + per-node certs
-  # with openssl so that cluster traffic is authenticated.
-
-  runWithOpenSSL =
-    file: cmd:
-    pkgs.runCommand file {
-      buildInputs = [ pkgs.openssl ];
-    } cmd;
-
-  ca_key = runWithOpenSSL "ca-key.pem" "openssl genrsa -out $out 2048";
-  ca_pem = runWithOpenSSL "ca.pem" ''
-    openssl req \
-      -x509 -new -nodes -key ${ca_key} \
-      -days 10000 -out $out -subj "/CN=mcp-js-ca"
-  '';
-
-  node_key = runWithOpenSSL "node-key.pem" "openssl genrsa -out $out 2048";
-  node_csr = runWithOpenSSL "node.csr" ''
-    openssl req \
-      -new -key ${node_key} \
-      -out $out -subj "/CN=mcp-js-node" \
-      -config ${openssl_cnf}
-  '';
-  node_cert = runWithOpenSSL "node.pem" ''
-    cp ${ca_pem} ca.pem
-    openssl x509 \
-      -req -in ${node_csr} \
-      -CA ca.pem -CAkey ${ca_key} \
-      -CAcreateserial -out $out \
-      -days 365 -extensions v3_req \
-      -extfile ${openssl_cnf}
-  '';
-
-  client_key = runWithOpenSSL "client-key.pem" "openssl genrsa -out $out 2048";
-  client_csr = runWithOpenSSL "client.csr" ''
-    openssl req \
-      -new -key ${client_key} \
-      -out $out -subj "/CN=mcp-js-client" \
-      -config ${client_openssl_cnf}
-  '';
-  client_cert = runWithOpenSSL "client.pem" ''
-    cp ${ca_pem} ca.pem
-    openssl x509 \
-      -req -in ${client_csr} \
-      -CA ca.pem -CAkey ${ca_key} \
-      -CAcreateserial -out $out \
-      -days 365 -extensions v3_req \
-      -extfile ${client_openssl_cnf}
-  '';
-
-  openssl_cnf = pkgs.writeText "openssl.cnf" ''
-    [req]
-    req_extensions = v3_req
-    distinguished_name = req_distinguished_name
-    [req_distinguished_name]
-    [v3_req]
-    basicConstraints = CA:FALSE
-    keyUsage = digitalSignature, keyEncipherment
-    extendedKeyUsage = serverAuth, clientAuth
-    subjectAltName = @alt_names
-    [alt_names]
-    DNS.1 = node1
-    DNS.2 = node2
-    DNS.3 = node3
-    DNS.4 = node4
-    DNS.5 = node5
-    IP.1 = 127.0.0.1
-  '';
-
-  client_openssl_cnf = pkgs.writeText "client-openssl.cnf" ''
-    [req]
-    req_extensions = v3_req
-    distinguished_name = req_distinguished_name
-    [req_distinguished_name]
-    [v3_req]
-    basicConstraints = CA:FALSE
-    keyUsage = digitalSignature, keyEncipherment
-    extendedKeyUsage = clientAuth
-  '';
-
   # ── Peer list ─────────────────────────────────────────────────────────
 
   allPeerAddrs = [
@@ -106,22 +25,18 @@ let
       services.mcp-js = {
         enable = true;
         package = mcp-js;
-        inherit nodeId;
-        peers = peersFor nodeId;
-        clusterPort = 4000;
-        heartbeatInterval = 200;
-        electionTimeoutMin = 1000;
-        electionTimeoutMax = 2000;
-        certFile = node_cert;
-        keyFile = node_key;
-        caFile = ca_pem;
-      };
-
-      # Certificates available in the environment for CLI tools
-      environment.variables = {
-        MCP_JS_CERT_FILE = "${client_cert}";
-        MCP_JS_KEY_FILE = "${client_key}";
-        MCP_JS_CA_FILE = "${ca_pem}";
+        settings = {
+          node_id = nodeId;
+          http_port = 3000;
+          cluster_port = 4000;
+          heap_store = "dir";
+          heap_dir = "/var/lib/mcp-js";
+          session_db_path = "/var/lib/mcp-js/sessions";
+          peers = peersFor nodeId;
+          heartbeat_interval = 200;
+          election_timeout_min = 1000;
+          election_timeout_max = 2000;
+        };
       };
 
       networking.firewall.allowedTCPPorts = [ 4000 ];

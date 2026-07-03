@@ -61,6 +61,7 @@
           "--bin" "generate-cli-markdown"
           "--bin" "generate-config-markdown"
           "--bin" "generate-mcp-tools-markdown"
+          "--bin" "generate-nix-options"
         ];
 
         # Patched replace-workspace-values that handles the 'version' key
@@ -160,6 +161,7 @@
           generate-cli-markdown > site-docs/reference/cli-flags.md
           generate-config-markdown > site-docs/reference/config-file.md
           generate-mcp-tools-markdown > site-docs/reference/mcp-tools.md
+          generate-nix-options > nix/options.nix
         '';
       in {
         devShells.default = import ./shell.nix { inherit pkgs rustToolchain rustyV8Archive; };
@@ -304,6 +306,7 @@
               cp site-docs/reference/cli-flags.md "$TMPDIR/cli-flags.md.orig"
               cp site-docs/reference/config-file.md "$TMPDIR/config-file.md.orig"
               cp site-docs/reference/mcp-tools.md "$TMPDIR/mcp-tools.md.orig"
+              cp nix/options.nix "$TMPDIR/options.nix.orig"
 
               export HOME="$TMPDIR/home"
               mkdir -p "$HOME"
@@ -314,6 +317,7 @@
               generate-cli-markdown > site-docs/reference/cli-flags.md
               generate-config-markdown > site-docs/reference/config-file.md
               generate-mcp-tools-markdown > site-docs/reference/mcp-tools.md
+              generate-nix-options > nix/options.nix
 
               diff -u "$TMPDIR/openapi.json.orig" openapi.json
               diff -u "$TMPDIR/client-openapi.json.orig" mcp-v8-client/openapi.json
@@ -321,6 +325,7 @@
               diff -u "$TMPDIR/cli-flags.md.orig" site-docs/reference/cli-flags.md
               diff -u "$TMPDIR/config-file.md.orig" site-docs/reference/config-file.md
               diff -u "$TMPDIR/mcp-tools.md.orig" site-docs/reference/mcp-tools.md
+              diff -u "$TMPDIR/options.nix.orig" nix/options.nix
 
               runHook postBuild
             '';

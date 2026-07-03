@@ -16,8 +16,13 @@ import time
 from pathlib import Path
 
 
-class ReusableTCPServer(socketserver.TCPServer):
+class ReusableTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
+    # Serve requests concurrently: Chrome fetches page resources in parallel,
+    # and a single-threaded server deadlocks the page load (and therefore
+    # --dump-dom under --virtual-time-budget) when one large response — e.g.
+    # the landing-page video — occupies the only server thread.
     allow_reuse_address = True
+    daemon_threads = True
 
 
 def find_chrome(explicit: str | None) -> str:

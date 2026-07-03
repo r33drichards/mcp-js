@@ -39,15 +39,16 @@ in
       services.mcp-js = {
         enable = true;
         package = mcp-js;
-        nodeId = "test";
-        stateless = true;
-        httpPort = 3000;
-        policiesJson = builtins.toJSON {
-          fetch = {
-            policies = [{
-              url = "http://localhost:8181";
-              policy_path = "mcp/fetch";
-            }];
+        settings = {
+          node_id = "test";
+          http_port = 3000;
+          policies = {
+            fetch = {
+              policies = [{
+                url = "http://localhost:8181";
+                policy_path = "mcp/fetch";
+              }];
+            };
           };
         };
       };
