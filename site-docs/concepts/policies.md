@@ -91,7 +91,7 @@ Both backends can be mixed in a single chain. For example: a fast local allowlis
 
 ## Per-category input documents
 
-Each capability passes a different structured input document to the policy evaluators. Below is a summary of the key fields; the [reference page](../reference/policies.md) lists every field precisely.
+Each capability passes a different structured input document to the policy evaluators. Below is a summary of the key fields.
 
 ### `fetch`
 
@@ -180,7 +180,6 @@ The `headers` map reflects all headers sent to the upstream server, including th
 ## See also
 
 - [How-to: Security policies](../how-to/policies.md)
-- [Reference: Security policies](../reference/policies.md)
 - [Concepts: Network access with fetch](../concepts/fetch.md)
 - [Concepts: Filesystem access](../concepts/filesystem.md)
 - [Concepts: Subprocess execution](../concepts/subprocess.md)

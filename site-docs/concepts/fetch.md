@@ -141,6 +141,5 @@ request from proceeding with no credential.
 ## See also
 
 - [How-to: Network access with fetch](../how-to/fetch.md)
-- [Reference: Network access with fetch](../reference/fetch.md)
 - [Concepts: Security policies](../concepts/policies.md)
 - [Reference: CLI flags](../reference/cli-flags.md)

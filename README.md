@@ -78,7 +78,7 @@ script as the request body with a non-JSON `Content-Type`
 The `run_js` MCP tool can also read a script from a path on the server itself
 via an optional `file` parameter — off by default, enabled with
 `--allow-run-js-file` or a `run_js_file`
-[policy](https://r33drichards.github.io/mcp-js/reference/policies/).
+[policy](https://r33drichards.github.io/mcp-js/concepts/policies/).
 
 See the [Quick Start tutorials](https://r33drichards.github.io/mcp-js/) and the
 [transports guide](https://r33drichards.github.io/mcp-js/concepts/transports/) for more.

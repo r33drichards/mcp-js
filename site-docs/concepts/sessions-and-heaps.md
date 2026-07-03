@@ -94,7 +94,6 @@ Session and heap features are only available in stateful mode. In `--stateless` 
 ## See also
 
 - [How-to: sessions & heap snapshots](../how-to/sessions-and-heaps.md)
-- [Reference: sessions & heap snapshots](../reference/sessions-and-heaps.md)
 - [Storage backends](../concepts/storage-backends.md)
 - [Running JavaScript & TypeScript](../concepts/js-execution.md)
 - [Asynchronous execution & output](../concepts/async-execution.md)

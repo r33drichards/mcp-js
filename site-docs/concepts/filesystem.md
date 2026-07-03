@@ -64,6 +64,5 @@ sequenceDiagram
 ## See also
 
 - [How-to: Filesystem access](../how-to/filesystem.md)
-- [Reference: Filesystem access](../reference/filesystem.md)
 - [Concepts: Security policies](../concepts/policies.md)
 - [How-to: Subprocess execution](../how-to/subprocess.md)

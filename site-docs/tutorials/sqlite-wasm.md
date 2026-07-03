@@ -149,5 +149,4 @@ For the full source, see `examples/sqlite-wasm/example.js` and
 
 - [WebAssembly modules — how-to](../how-to/wasm-modules.md)
 - [WebAssembly modules — concepts](../concepts/wasm-modules.md)
-- [WebAssembly modules — reference](../reference/wasm-modules.md)
 - [Asynchronous execution & output](../how-to/async-execution.md)

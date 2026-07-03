@@ -107,6 +107,5 @@ If the policy returns `false`, `mcp.callTool` throws a JavaScript error and the 
 ## See also
 
 - [How-to guide](../how-to/mcp-client.md)
-- [Reference](../reference/mcp-client.md)
 - [Security policies](../concepts/policies.md)
 - [MCP tools reference](../reference/mcp-tools.md)

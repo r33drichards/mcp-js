@@ -110,7 +110,6 @@ The `url` entry delegates every module-allow decision to the remote OPA server. 
 ## See also
 
 - [Concepts: ES module imports](../concepts/module-imports.md)
-- [Reference: ES module imports](../reference/module-imports.md)
 - [How-to: Security policies](../how-to/policies.md)
 - [How-to: WebAssembly modules](../how-to/wasm-modules.md)
 - [How-to: Running JavaScript & TypeScript](../how-to/js-execution.md)

@@ -26,7 +26,7 @@ export AWS_DEFAULT_REGION=us-east-1
 mcp-v8 --http-port=8080 --s3-bucket=my-mcp-heaps
 ```
 
-The server initialises the S3 client from the environment at startup using the standard AWS SDK credential chain (see [reference](../reference/storage-backends.md) for the full list of variables). The bucket must already exist; the server does not create it.
+The server initialises the S3 client from the environment at startup using the standard AWS SDK credential chain. The bucket must already exist; the server does not create it.
 
 S3 storage lets multiple nodes share the same heap store, which is required for a horizontally-scaled or clustered deployment.
 
@@ -92,7 +92,6 @@ This flag is independent of the heap storage backend selection and applies in bo
 ## See also
 
 - [Concepts: Heap storage backends](../concepts/storage-backends.md)
-- [Reference: Heap storage backends](../reference/storage-backends.md)
 - [Concepts: Stateful sessions & heap snapshots](../concepts/sessions-and-heaps.md)
 - [Concepts: Clustering & replication (Raft)](../concepts/clustering.md)
 - [CLI flags reference](../reference/cli-flags.md)

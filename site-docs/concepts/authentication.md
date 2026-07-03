@@ -98,7 +98,6 @@ When `--jwks-url` is configured:
 ## See also
 
 - [How-to: Authentication](../how-to/authentication.md)
-- [Reference: Authentication](../reference/authentication.md)
 - [Stateful sessions & heap snapshots](../concepts/sessions-and-heaps.md)
 - [Network access with fetch](../concepts/fetch.md)
 - [Transports: stdio, HTTP, SSE](../concepts/transports.md)

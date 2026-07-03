@@ -100,7 +100,6 @@ The leader tracks which members are learners and propagates that set to follower
 ## See also
 
 - [How-to: Clustering & replication (Raft)](../how-to/clustering.md)
-- [Reference: Clustering & replication (Raft)](../reference/clustering.md)
 - [Concepts: Heap storage backends](storage-backends.md)
 - [Concepts: Transports](transports.md)
 - [Concepts: Stateful sessions & heap snapshots](sessions-and-heaps.md)

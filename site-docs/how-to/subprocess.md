@@ -176,7 +176,6 @@ The server posts the input document to OPA and checks `data.mcp.subprocess.allow
 ## See also
 
 - [Concepts: Subprocess execution](../concepts/subprocess.md)
-- [Reference: Subprocess execution](../reference/subprocess.md)
 - [Security policies (OPA/Rego)](../how-to/policies.md)
 - [Filesystem access](../how-to/filesystem.md)
 - [CLI flags reference](../reference/cli-flags.md)

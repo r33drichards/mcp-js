@@ -1,6 +1,6 @@
 # Security policies (OPA/Rego)
 
-Policies are written in [Rego](https://www.openpolicyagent.org/docs/latest/policy-language/) and are evaluated before each capability call. This guide shows focused recipes for common gating tasks. See the [reference](../reference/policies.md) for the full JSON schema and input documents.
+Policies are written in [Rego](https://www.openpolicyagent.org/docs/latest/policy-language/) and are evaluated before each capability call. This guide shows focused recipes for common gating tasks. See [Concepts: Security policies](../concepts/policies.md) for the evaluation model and the input documents each capability receives.
 
 ## Gate network access by host and method
 
@@ -229,7 +229,7 @@ Point the policy URL at a running [OPA](https://www.openpolicyagent.org/) server
 }
 ```
 
-The server posts the input document to `POST /v1/data/{policy_path}` and reads `result.allow`. The default `policy_path` for each category is listed in the [reference](../reference/policies.md). Override it with `"policy_path"` when your OPA policy lives at a different path.
+The server posts the input document to `POST /v1/data/{policy_path}` and reads `result.allow`. The default `policy_path` is `mcp/<category>` (for example `mcp/fetch`). Override it with `"policy_path"` when your OPA policy lives at a different path.
 
 The OPA server must expose the standard OPA REST API. Start one with:
 
@@ -297,7 +297,6 @@ Mix local and remote evaluators in the same chain. For example, use a fast local
 ## See also
 
 - [Concepts: Security policies](../concepts/policies.md)
-- [Reference: Security policies](../reference/policies.md)
 - [How-to: Network access with fetch](../how-to/fetch.md)
 - [How-to: Filesystem access](../how-to/filesystem.md)
 - [How-to: Subprocess execution](../how-to/subprocess.md)

@@ -101,7 +101,6 @@ Even with a policy, consider the following:
 ## See also
 
 - [How-to: ES module imports](../how-to/module-imports.md)
-- [Reference: ES module imports](../reference/module-imports.md)
 - [Concepts: Security policies](../concepts/policies.md)
 - [Concepts: WebAssembly modules](../concepts/wasm-modules.md)
 - [Concepts: Running JavaScript & TypeScript](../concepts/js-execution.md)

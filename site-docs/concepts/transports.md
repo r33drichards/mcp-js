@@ -78,7 +78,6 @@ graph LR
 ## See also
 
 - [How-to guide](../how-to/transports.md)
-- [Reference](../reference/transports.md)
 - [Concepts: async execution](../concepts/async-execution.md)
 - [Concepts: authentication](../concepts/authentication.md)
 - [Concepts: clustering](../concepts/clustering.md)
