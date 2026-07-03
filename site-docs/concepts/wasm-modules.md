@@ -138,6 +138,5 @@ identifier without quoting or escaping.
 ## See also
 
 - [How to use WebAssembly modules](../how-to/wasm-modules.md)
-- [WebAssembly modules reference](../reference/wasm-modules.md)
 - [Running JavaScript & TypeScript — concepts](../concepts/js-execution.md)
 - [ES module imports — concepts](../concepts/module-imports.md)

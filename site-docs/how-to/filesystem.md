@@ -208,6 +208,5 @@ await fs.copyFile("/var/mcp-workspace/template.txt", "/var/mcp-workspace/output.
 ## See also
 
 - [Concepts: Filesystem access](../concepts/filesystem.md)
-- [Reference: Filesystem access](../reference/filesystem.md)
 - [How-to: Security policies](../how-to/policies.md)
 - [Reference: CLI flags](../reference/cli-flags.md)

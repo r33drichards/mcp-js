@@ -54,8 +54,8 @@ Then call `run_js` with `file` instead of `code`:
 Provide either `code` or `file`, not both. The path is canonicalized before the
 policy sees it, so `../` cannot escape an allowed directory. If the feature is
 disabled, or the policy denies the path, the call fails with a descriptive
-error. See [File-path execution](../reference/js-execution.md#file-path-execution-run_js-file-parameter)
-and the [`run_js_file` policy input](../reference/policies.md#run_js_file).
+error. See the [`run_js` tool reference](../reference/mcp-tools.md#run_js) and
+the [Run JS File flags](../reference/cli-flags.md#run-js-file).
 
 ## How to upload a script file to the REST endpoint
 
@@ -232,6 +232,5 @@ Pass `tags` to attach arbitrary key-value metadata to the output snapshot, which
 ## See also
 
 - [Concepts — execution model](../concepts/js-execution.md)
-- [Reference — all parameters and return shapes](../reference/js-execution.md)
 - [Asynchronous execution & output](../how-to/async-execution.md)
 - [Stateful sessions & heap snapshots](../how-to/sessions-and-heaps.md)

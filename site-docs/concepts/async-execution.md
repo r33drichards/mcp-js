@@ -103,7 +103,6 @@ In stateless mode (`--stateless`) the `run_js` MCP tool internally submits the c
 ## See also
 
 - [How-to: Asynchronous execution & output](../how-to/async-execution.md)
-- [Reference: Asynchronous execution & output](../reference/async-execution.md)
 - [Concepts: Running JavaScript & TypeScript](js-execution.md)
 - [Concepts: Transports](transports.md)
 - [Reference: HTTP API](../reference/http-api.md)

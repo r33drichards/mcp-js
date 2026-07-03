@@ -177,7 +177,6 @@ Omit the `fields` parameter to return all fields: `index`, `input_heap`, `output
 ## See also
 
 - [Concepts: sessions & heap snapshots](../concepts/sessions-and-heaps.md)
-- [Reference: sessions & heap snapshots](../reference/sessions-and-heaps.md)
 - [Storage backends](../how-to/storage-backends.md)
 - [Running JavaScript & TypeScript](../how-to/js-execution.md)
 - [Asynchronous execution & output](../how-to/async-execution.md)
