@@ -253,45 +253,43 @@ build `deno_core`/V8.
 [GNU AGPL-3.0](./LICENSE).
 
 <!-- load-test-report -->
-# MCP-V8 Load Test Benchmark Report v0.1.0
+# MCP-V8 Load Test Benchmark Report v0.18.1
 
 Comparison of single-node vs 3-node cluster at various request rates.
 
 ## Results
 
-ran on railway gha runners on [pr](https://github.com/r33drichards/mcp-js/pull/36#issuecomment-3946074130)
-
 | Topology | Target Rate | Actual Iter/s | HTTP Req/s | Exec Avg (ms) | Exec p95 (ms) | Exec p99 (ms) | Success % | Dropped | Max VUs |
 |----------|-------------|---------------|------------|----------------|----------------|----------------|-----------|---------|---------|
-| cluster-stateful | 100/s | 99.5 | 99.5 | 44.9 | 196.88 | 416.99 | 100% | 31 | 41 |
-| cluster-stateful | 200/s | 199.6 | 199.6 | 23.22 | 79.32 | 131.13 | 100% | 13 | 33 |
-| cluster-stateless | 1000/s | 999.9 | 999.9 | 3.82 | 7.72 | 13.09 | 100% | 0 | 100 |
-| cluster-stateless | 100/s | 100 | 100 | 3.67 | 5.65 | 8.03 | 100% | 0 | 10 |
-| cluster-stateless | 200/s | 200 | 200 | 3.56 | 5.9 | 8.61 | 100% | 0 | 20 |
-| cluster-stateless | 500/s | 500 | 500 | 3.42 | 5.85 | 9.2 | 100% | 0 | 50 |
-| single-stateful | 100/s | 99.1 | 99.1 | 215.12 | 362.5 | 376.6 | 100% | 32 | 42 |
-| single-stateful | 200/s | 97.8 | 97.8 | 1948.82 | 2212.55 | 2960.96 | 100% | 5939 | 200 |
-| single-stateless | 1000/s | 977.1 | 977.1 | 60.98 | 482.98 | 602.38 | 100% | 843 | 561 |
-| single-stateless | 100/s | 100 | 100 | 3.71 | 5.73 | 8.73 | 100% | 0 | 10 |
-| single-stateless | 200/s | 200 | 200 | 3.61 | 5.43 | 7.74 | 100% | 0 | 20 |
-| single-stateless | 500/s | 500 | 500 | 4.67 | 8.49 | 27.98 | 100% | 0 | 50 |
+| cluster-stateful | 100/s | 99.9 | 301.3 | 52.42 | 53.46 | 102.44 | 100% | 1 | 11 |
+| cluster-stateful | 200/s | 134.5 | 3855.4 | 1359.67 | 4062.32 | 4119.07 | 100% | 3450 | 200 |
+| cluster-stateless | 1000/s | 602.2 | 1609.8 | 1377.83 | 5443.24 | 8890.83 | 99.9% | 22267 | 1000 |
+| cluster-stateless | 100/s | 99.9 | 299.8 | 51.49 | 52.6 | 53.34 | 100% | 0 | 10 |
+| cluster-stateless | 200/s | 199.8 | 599.5 | 51.92 | 53.43 | 55.14 | 100% | 0 | 20 |
+| cluster-stateless | 500/s | 499.6 | 1498.5 | 53.2 | 56.33 | 63.75 | 100% | 0 | 50 |
+| single-stateful | 100/s | 51.3 | 1970.1 | 1849.35 | 2081.54 | 2103.18 | 100% | 2823 | 100 |
+| single-stateful | 200/s | 46.6 | 3828.4 | 4074.71 | 4628.01 | 4673.8 | 100% | 9020 | 200 |
+| single-stateless | 1000/s | 115.4 | 430.8 | 8174.65 | 13854.8 | 16506.74 | 90% | 52654 | 1000 |
+| single-stateless | 100/s | 99.9 | 299.6 | 53.31 | 55.96 | 59.52 | 100% | 4 | 14 |
+| single-stateless | 200/s | 198.2 | 589.1 | 68.52 | 126.81 | 337.57 | 100% | 50 | 69 |
+| single-stateless | 500/s | 138.9 | 348.3 | 3460.41 | 7332.03 | 10000.8 | 99.7% | 21416 | 500 |
 
 ## P95 Latency
 
 | Topology | Rate | P95 (ms) | |
 |----------|------|----------|-|
-| cluster-stateful | 100/s | 196.88 | `█████████████████████` |
-| cluster-stateful | 200/s | 79.32 | `█████████████████` |
-| cluster-stateless | 100/s | 5.65 | `███████` |
-| cluster-stateless | 200/s | 5.9 | `███████` |
-| cluster-stateless | 500/s | 5.85 | `███████` |
-| cluster-stateless | 1000/s | 7.72 | `████████` |
-| single-stateful | 100/s | 362.5 | `███████████████████████` |
-| single-stateful | 200/s | 2212.55 | `██████████████████████████████` |
-| single-stateless | 100/s | 5.73 | `███████` |
-| single-stateless | 200/s | 5.43 | `██████` |
-| single-stateless | 500/s | 8.49 | `████████` |
-| single-stateless | 1000/s | 482.98 | `████████████████████████` |
+| cluster-stateful | 100/s | 53.46 | `████████████` |
+| cluster-stateful | 200/s | 4062.32 | `██████████████████████████` |
+| cluster-stateless | 100/s | 52.6 | `████████████` |
+| cluster-stateless | 200/s | 53.43 | `████████████` |
+| cluster-stateless | 500/s | 56.33 | `█████████████` |
+| cluster-stateless | 1000/s | 5443.24 | `███████████████████████████` |
+| single-stateful | 100/s | 2081.54 | `████████████████████████` |
+| single-stateful | 200/s | 4628.01 | `███████████████████████████` |
+| single-stateless | 100/s | 55.96 | `█████████████` |
+| single-stateless | 200/s | 126.81 | `███████████████` |
+| single-stateless | 500/s | 7332.03 | `████████████████████████████` |
+| single-stateless | 1000/s | 13854.8 | `██████████████████████████████` |
 
 ## Notes
 
