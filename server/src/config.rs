@@ -26,23 +26,35 @@ use serde_json::Value;
 /// Structured config-file sections. Each replaces a flag that accepts inline
 /// JSON (or a path to a JSON file): the section value is re-serialized to JSON
 /// and installed as that flag's value.
-struct Section {
+///
+/// Public (with [`REJECTED_KEYS`] and [`accepted_keys`]) so that
+/// `generate-config-markdown` documents exactly the tables the loader runs on.
+pub struct Section {
     /// Key in the config file.
-    key: &'static str,
+    pub key: &'static str,
     /// Arg id of the flag the section feeds (also the key of the scalar
     /// path-form twin, which therefore cannot be set in the same file).
-    target_arg: &'static str,
+    pub target_arg: &'static str,
     /// Expected JSON shape of the section value.
-    shape: Shape,
+    pub shape: Shape,
 }
 
 #[derive(Clone, Copy, PartialEq)]
-enum Shape {
+pub enum Shape {
     Object,
     Array,
 }
 
-const SECTIONS: &[Section] = &[
+impl Shape {
+    pub fn describe(self) -> &'static str {
+        match self {
+            Shape::Object => "a table/object",
+            Shape::Array => "an array",
+        }
+    }
+}
+
+pub const SECTIONS: &[Section] = &[
     Section { key: "wasm", target_arg: "wasm_config", shape: Shape::Object },
     Section { key: "mcp_servers", target_arg: "mcp_config", shape: Shape::Array },
     Section { key: "fetch_headers", target_arg: "fetch_header_config", shape: Shape::Array },
@@ -51,7 +63,7 @@ const SECTIONS: &[Section] = &[
 
 /// Flags that exist on the CLI but make no sense in (or are unsupported from)
 /// a config file, each with the hint reported to the user.
-const REJECTED_KEYS: &[(&str, &str)] = &[
+pub const REJECTED_KEYS: &[(&str, &str)] = &[
     ("config", "a config file cannot chain-load another config file"),
     ("print_openapi", "run `--print-openapi` on the command line instead"),
     ("wasm_modules", "use the `wasm` section (or a `wasm_config` path) instead"),
@@ -158,11 +170,7 @@ fn compute_overrides(
                 Shape::Array => value.is_array(),
             };
             if !shape_ok {
-                let expected = match section.shape {
-                    Shape::Object => "a table/object",
-                    Shape::Array => "an array",
-                };
-                bail!("section '{raw_key}' must be {expected}, got {}", json_type(value));
+                bail!("section '{raw_key}' must be {}, got {}", section.shape.describe(), json_type(value));
             }
             let json = serde_json::to_string(value).expect("re-serializing parsed config value cannot fail");
             (section.target_arg.to_string(), vec![json])
@@ -221,10 +229,11 @@ fn scalar_to_string(value: &Value) -> Option<String> {
     }
 }
 
-/// Every key a config file may set, for the unknown-key error: the structured
-/// sections plus each flag-backed arg id, minus the rejected keys and the
-/// grammar-string flags the sections replace.
-fn accepted_keys(command: &clap::Command) -> Vec<String> {
+/// Every key a config file may set, for the unknown-key error and the
+/// generated reference page: the structured sections plus each flag-backed
+/// arg id, minus the rejected keys and the grammar-string flags the sections
+/// replace.
+pub fn accepted_keys(command: &clap::Command) -> Vec<String> {
     let mut keys: Vec<String> = SECTIONS.iter().map(|section| section.key.to_string()).collect();
     for arg in command.get_arguments() {
         let id = arg.get_id().as_str();

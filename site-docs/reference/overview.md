@@ -9,12 +9,12 @@ and [How-to guides](../how-to/overview.md).
 These pages are generated from the source of truth and must not be edited by hand:
 
 - [CLI flags](cli-flags.md) — every command-line flag (from the Clap definition).
+- [Configuration file](config-file.md) — every `--config` file key (from the Clap definition and the config loader's tables).
 - [HTTP API](http-api.md) — the REST surface (from `openapi.json` via Widdershins).
 - [MCP tools](mcp-tools.md) — the built-in MCP tools (from the tool registry).
 
 ## Reference by feature
 
-- [Configuration file](config-file.md) — single-file TOML/JSON configuration (`--config`), key naming, precedence.
 - [Running JavaScript & TypeScript](js-execution.md) — `run_js` params, return shapes, limits.
 - [Stateful sessions & heap snapshots](sessions-and-heaps.md) — session/heap tools, log fields, key format.
 - [Heap storage backends](storage-backends.md) — storage flags, defaults, exclusivity.
