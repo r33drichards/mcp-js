@@ -9,6 +9,7 @@ and [How-to guides](../how-to/overview.md).
 These pages are generated from the source of truth and must not be edited by hand:
 
 - [CLI flags](cli-flags.md) — every command-line flag (from the Clap definition).
+- [Configuration file](config-file.md) — every `--config` file key (from the Clap definition and the config loader's tables).
 - [HTTP API](http-api.md) — the REST surface (from `openapi.json` via Widdershins).
 - [MCP tools](mcp-tools.md) — the built-in MCP tools (from the tool registry).
 

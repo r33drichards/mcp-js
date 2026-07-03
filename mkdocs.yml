@@ -70,6 +70,7 @@ nav:
   - Reference:
       - Overview: reference/overview.md
       - CLI Flags: reference/cli-flags.md
+      - Configuration file: reference/config-file.md
       - HTTP API: reference/http-api.md
       - MCP Tools: reference/mcp-tools.md
       - Running JavaScript & TypeScript: reference/js-execution.md

@@ -1,5 +1,6 @@
 pub mod cluster;
 pub mod cli;
+pub mod config;
 pub mod engine;
 pub mod mcp;
 pub mod mcp_dispatch;

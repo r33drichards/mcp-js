@@ -19,6 +19,7 @@ mod mcp_sse;
 mod api;
 mod cluster;
 mod cli;
+mod config;
 mod session;
 use cli::{Cli, FetchHeaderKey, StoreKind};
 use engine::{initialize_v8, Engine, WasmModule};
@@ -832,12 +833,17 @@ fn load_wasm_modules(
         modules.push(WasmModule { name, bytes, max_memory_bytes, description: None });
     }
 
-    // Parse --wasm-config JSON file.
+    // Parse --wasm-config: inline JSON (as injected by the `wasm` section of a
+    // --config file) or a path to a JSON file.
     // String value: {"name": "/path/to/file.wasm"}
     // Object value: {"name": {"path": "/path/to/file.wasm", "max_memory_bytes": 16777216}}
     if let Some(config_path) = config_path {
-        let config_str = std::fs::read_to_string(config_path)
-            .map_err(|e| anyhow::anyhow!("Failed to read WASM config '{}': {}", config_path, e))?;
+        let config_str = if config_path.trim_start().starts_with('{') {
+            config_path.clone()
+        } else {
+            std::fs::read_to_string(config_path)
+                .map_err(|e| anyhow::anyhow!("Failed to read WASM config '{}': {}", config_path, e))?
+        };
         let config: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&config_str)
             .map_err(|e| anyhow::anyhow!("Invalid JSON in WASM config '{}': {}", config_path, e))?;
         for (name, value) in config {
@@ -1073,9 +1079,15 @@ fn load_fetch_header_rules(
         rules.push(parse_fetch_header_cli(entry)?);
     }
 
+    // Inline JSON (as injected by the `fetch_headers` section of a --config
+    // file) or a path to a JSON file.
     if let Some(path) = config_path {
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| anyhow::anyhow!("Failed to read fetch header config '{}': {}", path, e))?;
+        let content = if path.trim_start().starts_with('[') {
+            path.clone()
+        } else {
+            std::fs::read_to_string(path)
+                .map_err(|e| anyhow::anyhow!("Failed to read fetch header config '{}': {}", path, e))?
+        };
         let file_rules: Vec<FetchHeaderConfigRule> = serde_json::from_str(&content)
             .map_err(|e| anyhow::anyhow!("Invalid JSON in fetch header config '{}': {}", path, e))?;
         for rule in file_rules {
@@ -1220,10 +1232,15 @@ fn load_mcp_server_configs(
         }
     }
 
-    // Parse --mcp-config JSON file
+    // Parse --mcp-config: inline JSON (as injected by the `mcp_servers` section
+    // of a --config file) or a path to a JSON file.
     if let Some(config_path) = config_path {
-        let content = std::fs::read_to_string(config_path)
-            .map_err(|e| anyhow::anyhow!("Failed to read MCP config '{}': {}", config_path, e))?;
+        let content = if config_path.trim_start().starts_with('[') {
+            config_path.clone()
+        } else {
+            std::fs::read_to_string(config_path)
+                .map_err(|e| anyhow::anyhow!("Failed to read MCP config '{}': {}", config_path, e))?
+        };
         let file_configs: Vec<McpServerConfig> = serde_json::from_str(&content)
             .map_err(|e| anyhow::anyhow!("Invalid JSON in MCP config '{}': {}", config_path, e))?;
         configs.extend(file_configs);
@@ -1358,6 +1375,47 @@ mod tests {
                 panic!("documented grammar for --{} must parse: {err}", arg_id.replace('_', "-"))
             });
         }
+    }
+
+    // ── Inline JSON acceptance ───────────────────────────────────────────
+    // The structured sections of a --config file (`wasm`, `mcp_servers`,
+    // `fetch_headers`) are re-serialized to JSON and routed through these
+    // loaders, so each must accept inline JSON as well as a file path.
+
+    #[test]
+    fn load_wasm_modules_accepts_inline_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("module.wasm");
+        std::fs::write(&path, b"\0asm").unwrap();
+
+        let inline = format!(
+            r#"{{"math": {{"path": "{}", "max_memory_bytes": 16777216, "description": "adds numbers"}}}}"#,
+            path.display()
+        );
+        let modules = load_wasm_modules(&[], &Some(inline), &[]).expect("inline JSON should load");
+        assert_eq!(modules[0].name, "math");
+        assert_eq!(modules[0].max_memory_bytes, Some(16 * 1024 * 1024));
+        assert_eq!(modules[0].description.as_deref(), Some("adds numbers"));
+    }
+
+    #[test]
+    fn load_mcp_server_configs_accepts_inline_json() {
+        use crate::engine::mcp_client::McpServerTransport;
+
+        let inline = r#"[{"name": "weather", "transport": "stdio", "command": "python", "args": ["server.py"]}]"#;
+        let configs =
+            load_mcp_server_configs(&[], &Some(inline.to_string())).expect("inline JSON should load");
+        assert_eq!(configs[0].name, "weather");
+        assert!(matches!(configs[0].transport, McpServerTransport::Stdio { .. }));
+    }
+
+    #[test]
+    fn load_fetch_header_rules_accepts_inline_json() {
+        let inline = r#"[{"host": "api.github.com", "headers": {"Authorization": "Bearer x"}}]"#;
+        let rules =
+            load_fetch_header_rules(&[], &Some(inline.to_string())).expect("inline JSON should load");
+        assert_eq!(rules.len(), 1);
+        assert!(rules[0].static_headers().is_some());
     }
 
     #[test]

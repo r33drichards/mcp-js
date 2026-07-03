@@ -83,6 +83,25 @@ via an optional `file` parameter — off by default, enabled with
 See the [Quick Start tutorials](https://r33drichards.github.io/mcp-js/) and the
 [transports guide](https://r33drichards.github.io/mcp-js/concepts/transports/) for more.
 
+### Configure with a single file
+
+Every flag can also live in one TOML or JSON file passed via `--config` (or
+`MCP_V8_CONFIG`), including structured sections that replace the separate
+WASM / MCP-server / fetch-header / policy JSON files:
+
+```toml
+# server.toml — run with: mcp-v8 --config server.toml
+http_port = 8080
+heap_store = "dir"
+heap_dir = "/var/lib/mcp-v8/heaps"
+
+[policies.fetch]
+policies = [{ url = "file:///etc/mcp-v8/fetch.rego" }]
+```
+
+Precedence is CLI flag > `MCP_V8_*` env var > config file > default. See the
+[configuration file reference](https://r33drichards.github.io/mcp-js/reference/config-file/).
+
 ## Features
 
 - **JavaScript & TypeScript** in an isolated V8 engine (via `deno_core`); TypeScript types are stripped with [SWC](https://swc.rs/) (type removal, not type checking).
@@ -95,6 +114,7 @@ See the [Quick Start tutorials](https://r33drichards.github.io/mcp-js/) and the
 - **Policy-gated capabilities** — `fetch`, filesystem (`fs`), and subprocess access, each checked against a Rego policy per operation; plus header/OAuth injection for `fetch`.
 - **Compose other MCP servers** — connect upstream MCP servers and call them from JS via `mcp.callTool()` / `mcp.listTools()`.
 - **Customizable surface** — override the server `instructions` and the `run_js` description (`--instructions`, `--run-js-description`).
+- **Single-file configuration** — one TOML/JSON `--config` file can set every flag (precedence: CLI flag > env var > config file > default).
 - **Auth & clustering** — JWKS-based JWT verification, and optional Raft clustering with replicated session metadata and horizontal scaling.
 - **Multiple transports** — stdio, Streamable HTTP (MCP 2025-03-26+), and a legacy HTTP+SSE transport (`--sse-port`, served by a vendored rmcp 0.1.5), with a REST sidecar and OpenAPI spec.
 - **Tasks** — native MCP [tasks](https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/tasks) (SEP-1319) over Streamable HTTP / stdio: task-enabled clients can run `run_js` as a task (`tasks/get`, `tasks/result`, `tasks/list`, `tasks/cancel`), ideal for long-running calls. (The legacy SSE transport does not offer tasks.)

@@ -24,6 +24,7 @@ rmcp_legacy = { package = "rmcp", git = "https://github.com/modelcontextprotocol
 # rmcp = { version = "0.1.5", }
 serde = "=1.0.219"
 serde_json = "1.0.140"
+toml = "0.8"
 tokio = { version = "1.45.0", features = ["rt-multi-thread", "process", "signal", "time", "sync", "macros"] }
 tracing = "0.1.41"
 tracing-subscriber = "0.3.19"
@@ -32,7 +33,9 @@ deno_error = "0.7"
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-sdk-s3 = "1"
 async-trait = "0.1"
-clap = { version = "4.5", features = ["derive", "env"] }
+# "string" enables owned (runtime-computed) builder values, used by the
+# --config loader to install config-file values as per-arg defaults.
+clap = { version = "4.5", features = ["derive", "env", "string"] }
 sha2 = "0.10"
 swc_core = { version = "17", features = [
     "common",

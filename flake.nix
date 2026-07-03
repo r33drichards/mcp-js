@@ -44,10 +44,9 @@
         } {
           src = ./server;
           # Vendor hash for server's cargo deps; refreshed when deps changed.
-          # Bumped for the in-tree `cli-derive` proc-macro crate (adds a path
-          # dependency to server/Cargo.lock; no new registry crates are vendored,
-          # but the vendor-staging hash still changes with the lock contents).
-          hash = "sha256-qqFUMHD7C3iS2AEVC0vPqaxbxeEbifP6oRZIMPRs8zM=";
+          # Bumped for the `toml` dependency of the single-file --config loader
+          # (vendors toml/toml_edit/toml_datetime/toml_write/serde_spanned/winnow).
+          hash = "sha256-TwPuDA0Ny2LRHlvNIvv7rRnQwpIgjNr4oUqo9ieAbz0=";
         });
 
         docsPython = pkgs.python3.withPackages (
@@ -60,6 +59,7 @@
         docsToolCargoFlags = [
           "--bin" "server"
           "--bin" "generate-cli-markdown"
+          "--bin" "generate-config-markdown"
           "--bin" "generate-mcp-tools-markdown"
         ];
 
@@ -158,6 +158,7 @@
           cp openapi.json mcp-v8-client/openapi.json
           python3 scripts/generate_http_api_reference.py
           generate-cli-markdown > site-docs/reference/cli-flags.md
+          generate-config-markdown > site-docs/reference/config-file.md
           generate-mcp-tools-markdown > site-docs/reference/mcp-tools.md
         '';
       in {
@@ -301,6 +302,7 @@
               cp mcp-v8-client/openapi.json "$TMPDIR/client-openapi.json.orig"
               cp site-docs/reference/http-api.md "$TMPDIR/http-api.md.orig"
               cp site-docs/reference/cli-flags.md "$TMPDIR/cli-flags.md.orig"
+              cp site-docs/reference/config-file.md "$TMPDIR/config-file.md.orig"
               cp site-docs/reference/mcp-tools.md "$TMPDIR/mcp-tools.md.orig"
 
               export HOME="$TMPDIR/home"
@@ -310,12 +312,14 @@
               cp openapi.json mcp-v8-client/openapi.json
               python3 scripts/generate_http_api_reference.py
               generate-cli-markdown > site-docs/reference/cli-flags.md
+              generate-config-markdown > site-docs/reference/config-file.md
               generate-mcp-tools-markdown > site-docs/reference/mcp-tools.md
 
               diff -u "$TMPDIR/openapi.json.orig" openapi.json
               diff -u "$TMPDIR/client-openapi.json.orig" mcp-v8-client/openapi.json
               diff -u "$TMPDIR/http-api.md.orig" site-docs/reference/http-api.md
               diff -u "$TMPDIR/cli-flags.md.orig" site-docs/reference/cli-flags.md
+              diff -u "$TMPDIR/config-file.md.orig" site-docs/reference/config-file.md
               diff -u "$TMPDIR/mcp-tools.md.orig" site-docs/reference/mcp-tools.md
 
               runHook postBuild
