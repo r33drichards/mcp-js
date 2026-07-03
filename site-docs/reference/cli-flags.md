@@ -93,6 +93,13 @@ Comma-separated list of seed peer addresses. Peers can also join dynamically via
 
 ## Core
 
+### `--config`
+
+Load configuration from a single TOML or JSON file (format chosen by extension). Every other flag is available as a key, named after the flag (dashes and underscores are interchangeable), and the structured sections `wasm`, `mcp_servers`, `fetch_headers`, and `policies` inline what is otherwise a separate JSON file. Precedence: explicit CLI flag > MCP_V8_* env var > config file > built-in default. Unknown keys are rejected at startup. See the "Configuration file" reference page
+
+- Environment: `MCP_V8_CONFIG`
+- Value: `PATH`
+
 ### `--print-openapi`
 
 Print the OpenAPI JSON specification to stdout and exit. Use this to regenerate openapi.json: `./server --print-openapi > openapi.json`
@@ -161,10 +168,10 @@ Path to the sled database for the session log (per-session heap+fs history) and 
 
 ### `--fetch-header-config`
 
-Path to a JSON file with header injection rules. Each rule sets "host" (plus optional "methods") and exactly one of "headers" or "auth". Static: [{"host": "api.github.com", "methods": ["GET","POST"], "headers": {"Authorization": "Bearer ..."}}] OAuth: [{"host": "api.example.com", "auth": {"type": "oauth_client_credentials", "header": "Authorization", "token_url": "https://issuer.example.com/token", "client_id": "abc", "client_secret": "xyz", "scope": "read:all", "refresh_buffer_secs": 30}}]
+JSON array of header injection rules (a path to a JSON file, or inline JSON — also settable as the `fetch_headers` section of a --config file). Each rule sets "host" (plus optional "methods") and exactly one of "headers" or "auth". Static: [{"host": "api.github.com", "methods": ["GET","POST"], "headers": {"Authorization": "Bearer ..."}}] OAuth: [{"host": "api.example.com", "auth": {"type": "oauth_client_credentials", "header": "Authorization", "token_url": "https://issuer.example.com/token", "client_id": "abc", "client_secret": "xyz", "scope": "read:all", "refresh_buffer_secs": 30}}]
 
 - Environment: `MCP_V8_FETCH_HEADER_CONFIG`
-- Value: `PATH`
+- Value: `PATH_OR_JSON`
 
 ### `--fetch-header`
 
@@ -225,10 +232,10 @@ Directory for the heap-snapshot store when `--heap-store dir`. Defaults to /tmp/
 
 ### `--mcp-config`
 
-Path to a JSON config file for MCP server modules. Format: [{"name": "srv", "transport": "stdio", "command": "cmd", "args": ["a"]}, {"name": "srv2", "transport": "sse", "url": "http://..."}]
+JSON config for MCP server modules (a path to a JSON file, or inline JSON — also settable as the `mcp_servers` section of a --config file). Format: [{"name": "srv", "transport": "stdio", "command": "cmd", "args": ["a"]}, {"name": "srv2", "transport": "sse", "url": "http://..."}]
 
 - Environment: `MCP_V8_MCP_CONFIG`
-- Value: `PATH`
+- Value: `PATH_OR_JSON`
 
 ### `--mcp-stubs`
 
@@ -352,10 +359,10 @@ Local filesystem cache directory for S3 write-through caching (only used with `-
 
 ### `--wasm-config`
 
-Path to a JSON config file mapping global names to .wasm file paths or objects. String value: {"name": "/path/to/module.wasm"} Object value: {"name": {"path": "/path/to/module.wasm", "max_memory_bytes": 16777216, "description": "what the module does"}} The optional "description" sets the MCP stub tool's description. NOTE: incompatible with heap persistence (`--heap-store` other than none)
+JSON config mapping global names to .wasm file paths or objects (a path to a JSON file, or inline JSON — also settable as the `wasm` section of a --config file). String value: {"name": "/path/to/module.wasm"} Object value: {"name": {"path": "/path/to/module.wasm", "max_memory_bytes": 16777216, "description": "what the module does"}} The optional "description" sets the MCP stub tool's description. NOTE: incompatible with heap persistence (`--heap-store` other than none)
 
 - Environment: `MCP_V8_WASM_CONFIG`
-- Value: `PATH`
+- Value: `PATH_OR_JSON`
 
 ### `--wasm-default-max-memory`
 

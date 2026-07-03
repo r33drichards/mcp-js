@@ -14,6 +14,7 @@ These pages are generated from the source of truth and must not be edited by han
 
 ## Reference by feature
 
+- [Configuration file](config-file.md) — single-file TOML/JSON configuration (`--config`), key naming, precedence.
 - [Running JavaScript & TypeScript](js-execution.md) — `run_js` params, return shapes, limits.
 - [Stateful sessions & heap snapshots](sessions-and-heaps.md) — session/heap tools, log fields, key format.
 - [Heap storage backends](storage-backends.md) — storage flags, defaults, exclusivity.

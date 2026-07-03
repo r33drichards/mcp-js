@@ -44,10 +44,9 @@
         } {
           src = ./server;
           # Vendor hash for server's cargo deps; refreshed when deps changed.
-          # Bumped for the in-tree `cli-derive` proc-macro crate (adds a path
-          # dependency to server/Cargo.lock; no new registry crates are vendored,
-          # but the vendor-staging hash still changes with the lock contents).
-          hash = "sha256-qqFUMHD7C3iS2AEVC0vPqaxbxeEbifP6oRZIMPRs8zM=";
+          # Bumped for the `toml` dependency of the single-file --config loader
+          # (vendors toml/toml_edit/toml_datetime/toml_write/serde_spanned/winnow).
+          hash = "sha256-TwPuDA0Ny2LRHlvNIvv7rRnQwpIgjNr4oUqo9ieAbz0=";
         });
 
         docsPython = pkgs.python3.withPackages (

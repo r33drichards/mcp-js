@@ -39,6 +39,16 @@ impl std::fmt::Display for StoreKind {
 #[derive(Parser, StructuredArgs, Debug)]
 #[command(author, version, about, long_about = None)]
 pub struct Cli {
+    /// Load configuration from a single TOML or JSON file (format chosen by
+    /// extension). Every other flag is available as a key, named after the flag
+    /// (dashes and underscores are interchangeable), and the structured
+    /// sections `wasm`, `mcp_servers`, `fetch_headers`, and `policies` inline
+    /// what is otherwise a separate JSON file. Precedence: explicit CLI flag >
+    /// MCP_V8_* env var > config file > built-in default. Unknown keys are
+    /// rejected at startup. See the "Configuration file" reference page.
+    #[arg(long, env = "MCP_V8_CONFIG", value_name = "PATH", help_heading = "Core")]
+    pub config: Option<String>,
+
     /// Print the OpenAPI JSON specification to stdout and exit.
     /// Use this to regenerate openapi.json: `./server --print-openapi > openapi.json`
     #[arg(long, help_heading = "Core")]
@@ -246,12 +256,14 @@ pub struct Cli {
     #[structured(grammar = crate::cli::wasm_module_grammar)]
     pub wasm_modules: Vec<String>,
 
-    /// Path to a JSON config file mapping global names to .wasm file paths or objects.
+    /// JSON config mapping global names to .wasm file paths or objects
+    /// (a path to a JSON file, or inline JSON — also settable as the `wasm`
+    /// section of a --config file).
     /// String value: {"name": "/path/to/module.wasm"}
     /// Object value: {"name": {"path": "/path/to/module.wasm", "max_memory_bytes": 16777216, "description": "what the module does"}}
     /// The optional "description" sets the MCP stub tool's description.
     /// NOTE: incompatible with heap persistence (`--heap-store` other than none).
-    #[arg(long = "wasm-config", env = "MCP_V8_WASM_CONFIG", value_name = "PATH", help_heading = "WASM")]
+    #[arg(long = "wasm-config", env = "MCP_V8_WASM_CONFIG", value_name = "PATH_OR_JSON", help_heading = "WASM")]
     pub wasm_config: Option<String>,
 
     /// Default max native memory for WASM modules without a per-module limit.
@@ -296,11 +308,13 @@ pub struct Cli {
     #[structured(grammar = crate::cli::fetch_header_grammar)]
     pub fetch_headers: Vec<String>,
 
-    /// Path to a JSON file with header injection rules. Each rule sets "host"
-    /// (plus optional "methods") and exactly one of "headers" or "auth".
+    /// JSON array of header injection rules (a path to a JSON file, or inline
+    /// JSON — also settable as the `fetch_headers` section of a --config file).
+    /// Each rule sets "host" (plus optional "methods") and exactly one of
+    /// "headers" or "auth".
     /// Static: [{"host": "api.github.com", "methods": ["GET","POST"], "headers": {"Authorization": "Bearer ..."}}]
     /// OAuth: [{"host": "api.example.com", "auth": {"type": "oauth_client_credentials", "header": "Authorization", "token_url": "https://issuer.example.com/token", "client_id": "abc", "client_secret": "xyz", "scope": "read:all", "refresh_buffer_secs": 30}}]
-    #[arg(long = "fetch-header-config", env = "MCP_V8_FETCH_HEADER_CONFIG", value_name = "PATH", help_heading = "Fetch")]
+    #[arg(long = "fetch-header-config", env = "MCP_V8_FETCH_HEADER_CONFIG", value_name = "PATH_OR_JSON", help_heading = "Fetch")]
     pub fetch_header_config: Option<String>,
 
     /// Allow external module imports (npm:, jsr:, and URL imports).
@@ -335,10 +349,11 @@ pub struct Cli {
     #[structured(grammar = crate::cli::mcp_server_grammar)]
     pub mcp_servers: Vec<String>,
 
-    /// Path to a JSON config file for MCP server modules.
+    /// JSON config for MCP server modules (a path to a JSON file, or inline
+    /// JSON — also settable as the `mcp_servers` section of a --config file).
     /// Format: [{"name": "srv", "transport": "stdio", "command": "cmd", "args": ["a"]},
     ///          {"name": "srv2", "transport": "sse", "url": "http://..."}]
-    #[arg(long = "mcp-config", env = "MCP_V8_MCP_CONFIG", value_name = "PATH", help_heading = "MCP Server Module")]
+    #[arg(long = "mcp-config", env = "MCP_V8_MCP_CONFIG", value_name = "PATH_OR_JSON", help_heading = "MCP Server Module")]
     pub mcp_config: Option<String>,
 
     /// Expose upstream MCP server tools on the MCPJS server itself as
@@ -572,9 +587,12 @@ pub fn build_command() -> clap::Command {
     command
 }
 
-/// Parse CLI arguments through [`build_command`]. Mirrors `Cli::parse`, but with
-/// the generated `--fetch-header` help wired in.
+/// Parse CLI arguments through [`build_command`]. Mirrors `Cli::parse`, but
+/// with the generated `--fetch-header` help wired in and any `--config` /
+/// `MCP_V8_CONFIG` file folded in as per-arg defaults (so the precedence is
+/// CLI flag > env var > config file > built-in default).
 pub fn parse() -> Cli {
-    let mut matches = build_command().get_matches();
+    let command = crate::config::apply_config_file(build_command());
+    let mut matches = command.get_matches();
     Cli::from_arg_matches_mut(&mut matches).unwrap_or_else(|err| err.exit())
 }
