@@ -1,11 +1,12 @@
 //! Generates the NixOS module's option set (nix/options.nix) from the same
-//! sources the `--config` loader runs on: the Clap `Cli` definition plus
-//! `config::SECTIONS` and `config::REJECTED_KEYS`. Every generated option maps
-//! 1:1 to a config-file key; the module renders non-null options to a TOML
-//! file passed via `--config`, so the server itself validates the result at
-//! startup. The enumeration is cross-checked against `config::accepted_keys`
-//! (the loader's own key vocabulary), so this file cannot declare an option
-//! the loader rejects or omit a key it accepts.
+//! sources the `--config` loader runs on: the Clap `Cli` definition,
+//! `config::SECTIONS`, and `config::accepted_keys` (the loader's own key
+//! vocabulary, which already excludes `REJECTED_KEYS`). Every generated
+//! option maps 1:1 to a config-file key; the module renders non-null options
+//! to a TOML file passed via `--config`, so the server itself validates the
+//! result at startup. The emitted key set is asserted equal to
+//! `accepted_keys`, so this file cannot declare an option the loader rejects
+//! or omit a key it accepts.
 
 use std::any::TypeId;
 use std::collections::BTreeSet;

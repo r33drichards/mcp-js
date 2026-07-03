@@ -48,11 +48,11 @@ in
     (lib.mkRemovedOptionModule [ "services" "mcp-js" "dataDir" ]
       "Set services.mcp-js.settings.heap_dir and services.mcp-js.settings.session_db_path instead (the service's state directory is /var/lib/mcp-js).")
     (lib.mkRemovedOptionModule [ "services" "mcp-js" "certFile" ]
-      "Set systemd.services.mcp-js.environment.MCP_JS_CERT_FILE instead.")
+      "It only set the MCP_JS_CERT_FILE environment variable, which the server never reads, so it had no effect.")
     (lib.mkRemovedOptionModule [ "services" "mcp-js" "keyFile" ]
-      "Set systemd.services.mcp-js.environment.MCP_JS_KEY_FILE instead.")
+      "It only set the MCP_JS_KEY_FILE environment variable, which the server never reads, so it had no effect.")
     (lib.mkRemovedOptionModule [ "services" "mcp-js" "caFile" ]
-      "Set systemd.services.mcp-js.environment.MCP_JS_CA_FILE instead.")
+      "It only set the MCP_JS_CA_FILE environment variable, which the server never reads, so it had no effect.")
   ];
 
   options.services.mcp-js = {
