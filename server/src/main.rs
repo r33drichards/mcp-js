@@ -65,11 +65,49 @@ async fn main() -> Result<()> {
     tracing::info!("V8 execution timeout: {} seconds", execution_timeout_secs);
     tracing::info!("Max concurrent V8 executions: {}", cli.max_concurrent_executions);
 
-    // Cluster mode requires --http-port or --sse-port.
-    if cli.cluster_port.is_some() && cli.http_port.is_none() && cli.sse_port.is_none() {
+    // Cluster mode requires --http-port or --sse-port, except in metadata-only
+    // mode where the Raft HTTP server on --cluster-port is the entire surface.
+    if cli.cluster_port.is_some()
+        && cli.http_port.is_none()
+        && cli.sse_port.is_none()
+        && !cli.metadata_only
+    {
         anyhow::bail!(
-            "Cluster mode requires --http-port or --sse-port (stdio transport is not supported in cluster mode)"
+            "Cluster mode requires --http-port or --sse-port (stdio transport is not supported in cluster mode). \
+             To run a node that only replicates metadata, pass --metadata-only."
         );
+    }
+
+    // The clap-level --metadata-only conflicts only fire for values that are
+    // "present" (command line or MCP_V8_* env var); --config file values are
+    // folded in as per-arg defaults, which clap does not count. Re-check here
+    // so the combination is rejected no matter where the setting came from.
+    if cli.metadata_only {
+        let conflicting: Vec<&str> = [
+            ("--http-port", cli.http_port.is_some()),
+            ("--sse-port", cli.sse_port.is_some()),
+            ("--jwks-url", cli.jwks_url.is_some()),
+            ("--wasm-module", !cli.wasm_modules.is_empty()),
+            ("--wasm-config", cli.wasm_config.is_some()),
+            ("--policies-json", cli.policies_json.is_some()),
+            ("--mcp-server", !cli.mcp_servers.is_empty()),
+            ("--mcp-config", cli.mcp_config.is_some()),
+            ("--allow-run-js-file", cli.allow_run_js_file),
+            ("--allow-external-modules", cli.allow_external_modules),
+            ("--instructions", cli.instructions.is_some()),
+            ("--run-js-description", cli.run_js_description.is_some()),
+        ]
+        .into_iter()
+        .filter(|(_, set)| *set)
+        .map(|(name, _)| name)
+        .collect();
+        if !conflicting.is_empty() {
+            anyhow::bail!(
+                "--metadata-only cannot be combined with {} (set on the command line, \
+                 via an MCP_V8_* environment variable, or in the --config file)",
+                conflicting.join(", ")
+            );
+        }
     }
 
     // Parse peer list (supports both "host:port" and "id@host:port" formats).
@@ -126,6 +164,26 @@ async fn main() -> Result<()> {
     } else {
         None
     };
+
+    // ── Metadata-only mode ───────────────────────────────────────────────
+    // The node is purely a leader/replica for the cluster's replicated
+    // metadata (session log, heap tags, fs labels). No V8 engine is built, no
+    // MCP transport or REST sidecar is started, and policies never apply —
+    // the Raft HTTP server on --cluster-port is the entire surface.
+    if cli.metadata_only {
+        let node = cluster_node
+            .expect("--metadata-only requires --cluster-port (enforced at parse time)");
+        tracing::info!(
+            "Metadata-only mode: node {} serves Raft replication on port {}; \
+             JS execution, policies, and MCP transports are disabled",
+            cli.node_id,
+            node.config.cluster_port
+        );
+        tokio::signal::ctrl_c().await?;
+        tracing::info!("Received Ctrl+C, shutting down metadata node");
+        node.shutdown();
+        return Ok(());
+    }
 
     // ── WASM configuration ─────────────────────────────────────────────
     let wasm_default_max_bytes = parse_memory_size(&cli.wasm_default_max_memory)

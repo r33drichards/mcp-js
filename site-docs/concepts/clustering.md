@@ -78,7 +78,7 @@ For most MCP use cases (session metadata and tag lookups) this trade-off is acce
 
 The Raft cluster port runs its own lightweight HTTP server (using `hyper`) to handle `AppendEntries`, `RequestVote`, `join`, and `leave` RPCs. This server is independent of the MCP transport, but the node's MCP transport must also be HTTP-based so it can run concurrently and share the same process.
 
-stdio transport is a blocking single-connection protocol — it does not allow the node to concurrently serve cluster traffic. If `--cluster-port` is set without `--http-port` or `--sse-port`, the server exits with an error at startup.
+stdio transport is a blocking single-connection protocol — it does not allow the node to concurrently serve cluster traffic. If `--cluster-port` is set without `--http-port` or `--sse-port`, the server exits with an error at startup — unless the node runs with `--metadata-only`, in which case the Raft HTTP server is deliberately its entire surface (see [Metadata-only nodes](#metadata-only-nodes)).
 
 ## Cluster membership and peer discovery
 
@@ -96,6 +96,14 @@ A node can join as a **non-voting learner** with `--join-as-learner`. A learner 
 This matters for **ephemeral nodes**. With ordinary voters, the majority grows with the cluster (`⌊N/2⌋ + 1`), so a node that joins and then disappears can stall writes until it is removed — a real hazard when nodes are spawned and torn down frequently (for example, one worker per session). Learners sidestep this: a cluster of one voter plus any number of learners still commits as soon as the voter has the entry, and a learner crashing or leaving never affects availability.
 
 The leader tracks which members are learners and propagates that set to followers (alongside `peer_addrs`) so every node computes the same voting membership; the classification is persisted under `raft_learners`. A learner is promoted or removed through the same dynamic-membership path as any other peer (`POST /raft/leave`, or `remove_peer` on the leader).
+
+## Metadata-only nodes
+
+A node started with `--metadata-only` participates in the cluster *only* as a metadata leader or replica. It runs the Raft HTTP server on `--cluster-port` and nothing else: no V8 engine is created, the `run_js` tool and MCP transports do not exist, the `/api` REST sidecar is not served, and no policy configuration is needed or accepted. The flag requires `--cluster-port` and is rejected at startup in combination with `--http-port`, `--sse-port`, or any JS-execution configuration — whether those come from the command line, `MCP_V8_*` environment variables, or a `--config` file.
+
+This complements learners: metadata-only nodes make good **stable voters** that anchor the quorum for session-log, heap-tag, and fs-label writes, while the JS-executing workers — whose lifecycle follows demand — join as ephemeral learners. Because a metadata node never executes user code, it can run in a smaller, more locked-down footprint than a serving node.
+
+Note that a metadata-only node replicates *metadata*, not snapshot content: heap snapshots and fs blobs still live in whichever storage backend the serving nodes share (typically S3). See [What state is NOT replicated](#what-state-is-not-replicated).
 
 ## See also
 

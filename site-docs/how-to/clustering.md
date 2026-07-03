@@ -4,7 +4,7 @@ This guide covers the common tasks for running mcp-v8 in a multi-node Raft clust
 
 ## Configure a node with cluster flags
 
-Cluster mode activates when `--cluster-port` is provided. You must also supply `--http-port` or `--sse-port`; stdio transport is not supported in cluster mode.
+Cluster mode activates when `--cluster-port` is provided. You must also supply `--http-port` or `--sse-port` (stdio transport is not supported in cluster mode) — unless the node runs with [`--metadata-only`](#run-a-metadata-only-node), which has no MCP transport at all.
 
 ```bash
 mcp-v8 \
@@ -63,6 +63,33 @@ mcp-v8 --http-port=3000 --cluster-port=4000 --node-id=node4 \
 ```
 
 At startup the node sends a `POST /raft/join` to the seed address. The leader registers the new peer and begins replicating the log to it. There is no need to restart the existing nodes.
+
+## Run a metadata-only node
+
+Pass `--metadata-only` to run a node that only participates in Raft replication of session metadata (the session log, heap tags, and fs labels). No V8 engine is created, no MCP transport or `/api` REST sidecar is started, and no policies are needed — the node cannot run JavaScript at all. Its only HTTP surface is the Raft server (`/raft/*`, `/data/*`) on `--cluster-port`:
+
+```bash
+mcp-v8 --metadata-only --cluster-port=4000 --node-id=meta1 \
+       --advertise-addr=meta1:4000 \
+       --peers=meta2@meta2:4000,meta3@meta3:4000
+```
+
+`--metadata-only` requires `--cluster-port` and rejects `--http-port`, `--sse-port`, and all JS-execution configuration (`--policies-json`, `--wasm-module`, `--mcp-server`, `--allow-run-js-file`, and so on) at startup — whether set on the command line, via `MCP_V8_*` environment variables, or in a `--config` file — so a metadata node cannot be misconfigured into executing code.
+
+A typical topology anchors the metadata quorum on a small set of stable metadata-only voters and lets the JS-executing nodes join and leave as non-voting learners, so worker churn never affects availability:
+
+```bash
+# Three stable metadata-only voters hold the quorum.
+mcp-v8 --metadata-only --cluster-port=4000 --node-id=meta1 \
+       --advertise-addr=meta1:4000 --peers=meta2@meta2:4000,meta3@meta3:4000
+
+# Ephemeral workers execute JS and replicate metadata as learners.
+mcp-v8 --http-port=3000 --heap-store=s3 --s3-bucket=my-heaps \
+       --cluster-port=4000 --node-id=worker1 --advertise-addr=worker1:4000 \
+       --join=meta1:4000 --join-as-learner
+```
+
+A metadata-only node is a full Raft member: it can be elected leader or serve as a replica, and it exposes the same `/raft/*` and `/data/*` endpoints as any other node. Remember that heap snapshot and fs blob *content* is not replicated by Raft — pair this topology with a shared storage backend (`--heap-store s3` / `--fs-store s3`) so workers can resolve the snapshots the replicated metadata refers to.
 
 ## Put a load balancer in front
 
