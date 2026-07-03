@@ -210,20 +210,41 @@ async fn full_node_joins_metadata_leader_as_learner() {
     assert!(replicated, "committed write never replicated to the learner");
 }
 
-/// Run the binary and capture its exit status and stderr (for flag-validation
-/// failures, which exit before any server starts).
-fn run_expecting_failure(args: &[&str]) -> (bool, String) {
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_server"))
+/// Run the binary and capture its exit status and stderr (for validation
+/// failures, which exit before any server starts). Bounded by a timeout so a
+/// regression that starts serving instead of failing cannot hang the suite;
+/// `kill_on_drop` reaps the child if the timeout fires.
+async fn run_expecting_failure(args: &[&str]) -> (bool, String) {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_server"))
         .args(args)
         .stdin(Stdio::null())
-        .output()
-        .expect("run server binary");
-    (output.status.success(), String::from_utf8_lossy(&output.stderr).to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("spawn server binary");
+
+    // Drain stderr concurrently so a chatty child cannot fill the pipe and
+    // deadlock before exiting.
+    let mut stderr_pipe = child.stderr.take().expect("stderr is piped");
+    let stderr_task = tokio::spawn(async move {
+        use tokio::io::AsyncReadExt;
+        let mut buf = String::new();
+        let _ = stderr_pipe.read_to_string(&mut buf).await;
+        buf
+    });
+
+    let status = tokio::time::timeout(Duration::from_secs(30), child.wait())
+        .await
+        .expect("server binary did not exit within 30s — validation should fail fast")
+        .expect("wait on server binary");
+    let stderr = stderr_task.await.expect("collect stderr");
+    (status.success(), stderr)
 }
 
-#[test]
-fn metadata_only_requires_cluster_port() {
-    let (success, stderr) = run_expecting_failure(&["--metadata-only"]);
+#[tokio::test]
+async fn metadata_only_requires_cluster_port() {
+    let (success, stderr) = run_expecting_failure(&["--metadata-only"]).await;
     assert!(!success, "--metadata-only without --cluster-port should fail");
     assert!(
         stderr.contains("--cluster-port"),
@@ -231,8 +252,8 @@ fn metadata_only_requires_cluster_port() {
     );
 }
 
-#[test]
-fn metadata_only_conflicts_with_mcp_transports_and_js_config() {
+#[tokio::test]
+async fn metadata_only_conflicts_with_mcp_transports_and_js_config() {
     for conflicting in [
         vec!["--http-port", "39901"],
         vec!["--sse-port", "39902"],
@@ -241,7 +262,7 @@ fn metadata_only_conflicts_with_mcp_transports_and_js_config() {
     ] {
         let mut args = vec!["--metadata-only", "--cluster-port", "39900"];
         args.extend(conflicting.iter().copied());
-        let (success, stderr) = run_expecting_failure(&args);
+        let (success, stderr) = run_expecting_failure(&args).await;
         assert!(
             !success,
             "--metadata-only with {conflicting:?} should be rejected"
@@ -251,4 +272,27 @@ fn metadata_only_conflicts_with_mcp_transports_and_js_config() {
             "expected a clap conflict error for {conflicting:?}, got: {stderr}"
         );
     }
+}
+
+#[tokio::test]
+async fn metadata_only_rejects_conflicting_config_file_values() {
+    // Config-file values are folded in as clap per-arg defaults, which do not
+    // trigger the declared conflicts — the runtime check in main.rs must
+    // reject them instead.
+    let dir = temp_dir("config-conflict");
+    let config_path = dir.path().join("server.toml");
+    std::fs::write(&config_path, "http_port = 39903\n").expect("write config file");
+    let config = config_path.to_string_lossy().to_string();
+
+    let (success, stderr) = run_expecting_failure(&[
+        "--metadata-only",
+        "--cluster-port", "39904",
+        "--config", &config,
+    ])
+    .await;
+    assert!(!success, "--metadata-only with http_port in --config should fail");
+    assert!(
+        stderr.contains("--metadata-only cannot be combined with --http-port"),
+        "expected the runtime conflict error, got: {stderr}"
+    );
 }

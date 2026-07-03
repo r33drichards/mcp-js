@@ -66,7 +66,7 @@ At startup the node sends a `POST /raft/join` to the seed address. The leader re
 
 ## Run a metadata-only node
 
-Pass `--metadata-only` to run a node that only participates in Raft replication of session metadata (the session log, heap tags, and fs labels). No V8 engine is created, no MCP transport or REST API is started, and no policies are needed — the node cannot run JavaScript at all. Its only surface is the Raft HTTP server on `--cluster-port`:
+Pass `--metadata-only` to run a node that only participates in Raft replication of session metadata (the session log, heap tags, and fs labels). No V8 engine is created, no MCP transport or `/api` REST sidecar is started, and no policies are needed — the node cannot run JavaScript at all. Its only HTTP surface is the Raft server (`/raft/*`, `/data/*`) on `--cluster-port`:
 
 ```bash
 mcp-v8 --metadata-only --cluster-port=4000 --node-id=meta1 \
@@ -74,7 +74,7 @@ mcp-v8 --metadata-only --cluster-port=4000 --node-id=meta1 \
        --peers=meta2@meta2:4000,meta3@meta3:4000
 ```
 
-`--metadata-only` requires `--cluster-port` and rejects `--http-port`, `--sse-port`, and all JS-execution configuration (`--policies-json`, `--wasm-module`, `--mcp-server`, `--allow-run-js-file`, and so on) at startup, so a metadata node cannot be misconfigured into executing code.
+`--metadata-only` requires `--cluster-port` and rejects `--http-port`, `--sse-port`, and all JS-execution configuration (`--policies-json`, `--wasm-module`, `--mcp-server`, `--allow-run-js-file`, and so on) at startup — whether set on the command line, via `MCP_V8_*` environment variables, or in a `--config` file — so a metadata node cannot be misconfigured into executing code.
 
 A typical topology anchors the metadata quorum on a small set of stable metadata-only voters and lets the JS-executing nodes join and leave as non-voting learners, so worker churn never affects availability:
 

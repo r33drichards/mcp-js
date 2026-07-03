@@ -78,6 +78,38 @@ async fn main() -> Result<()> {
         );
     }
 
+    // The clap-level --metadata-only conflicts only fire for values that are
+    // "present" (command line or MCP_V8_* env var); --config file values are
+    // folded in as per-arg defaults, which clap does not count. Re-check here
+    // so the combination is rejected no matter where the setting came from.
+    if cli.metadata_only {
+        let conflicting: Vec<&str> = [
+            ("--http-port", cli.http_port.is_some()),
+            ("--sse-port", cli.sse_port.is_some()),
+            ("--jwks-url", cli.jwks_url.is_some()),
+            ("--wasm-module", !cli.wasm_modules.is_empty()),
+            ("--wasm-config", cli.wasm_config.is_some()),
+            ("--policies-json", cli.policies_json.is_some()),
+            ("--mcp-server", !cli.mcp_servers.is_empty()),
+            ("--mcp-config", cli.mcp_config.is_some()),
+            ("--allow-run-js-file", cli.allow_run_js_file),
+            ("--allow-external-modules", cli.allow_external_modules),
+            ("--instructions", cli.instructions.is_some()),
+            ("--run-js-description", cli.run_js_description.is_some()),
+        ]
+        .into_iter()
+        .filter(|(_, set)| *set)
+        .map(|(name, _)| name)
+        .collect();
+        if !conflicting.is_empty() {
+            anyhow::bail!(
+                "--metadata-only cannot be combined with {} (set on the command line, \
+                 via an MCP_V8_* environment variable, or in the --config file)",
+                conflicting.join(", ")
+            );
+        }
+    }
+
     // Parse peer list (supports both "host:port" and "id@host:port" formats).
     let (peer_addrs_list, peer_addrs_map) = ClusterConfig::parse_peers(&cli.peers);
 
@@ -136,8 +168,8 @@ async fn main() -> Result<()> {
     // ── Metadata-only mode ───────────────────────────────────────────────
     // The node is purely a leader/replica for the cluster's replicated
     // metadata (session log, heap tags, fs labels). No V8 engine is built, no
-    // MCP transport or REST API is started, and policies never apply — the
-    // Raft HTTP server on --cluster-port is the entire surface.
+    // MCP transport or REST sidecar is started, and policies never apply —
+    // the Raft HTTP server on --cluster-port is the entire surface.
     if cli.metadata_only {
         let node = cluster_node
             .expect("--metadata-only requires --cluster-port (enforced at parse time)");

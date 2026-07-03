@@ -99,7 +99,7 @@ The leader tracks which members are learners and propagates that set to follower
 
 ## Metadata-only nodes
 
-A node started with `--metadata-only` participates in the cluster *only* as a metadata leader or replica. It runs the Raft HTTP server on `--cluster-port` and nothing else: no V8 engine is created, the `run_js` tool and MCP transports do not exist, the REST API is not served, and no policy configuration is needed or accepted. The flag requires `--cluster-port` and is rejected at startup in combination with `--http-port`, `--sse-port`, or any JS-execution configuration.
+A node started with `--metadata-only` participates in the cluster *only* as a metadata leader or replica. It runs the Raft HTTP server on `--cluster-port` and nothing else: no V8 engine is created, the `run_js` tool and MCP transports do not exist, the `/api` REST sidecar is not served, and no policy configuration is needed or accepted. The flag requires `--cluster-port` and is rejected at startup in combination with `--http-port`, `--sse-port`, or any JS-execution configuration — whether those come from the command line, `MCP_V8_*` environment variables, or a `--config` file.
 
 This complements learners: metadata-only nodes make good **stable voters** that anchor the quorum for session-log, heap-tag, and fs-label writes, while the JS-executing workers — whose lifecycle follows demand — join as ephemeral learners. Because a metadata node never executes user code, it can run in a smaller, more locked-down footprint than a serving node.
 
