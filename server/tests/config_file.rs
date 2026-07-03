@@ -70,11 +70,26 @@ fn base_config(dir: &tempfile::TempDir, port: u16) -> String {
 async fn toml_config_file_configures_the_server() {
     let dir = temp_dir("toml");
     let port = free_port().await;
-    // Kebab-case key and a heap axis setting exercise more than the port.
+    let rego_path = dir.path().join("fetch.rego");
+    std::fs::write(&rego_path, "package mcp.fetch\n\ndefault allow = false\n").unwrap();
+    // Beyond the port: a kebab-case key, a heap-axis setting, and the
+    // `fetch_headers` + `policies` structured sections — all parsed, routed
+    // through the inline-JSON loaders, and compiled at startup, so a break
+    // anywhere in that chain keeps the server from coming up.
     let config = format!(
-        "{}heap-store = \"dir\"\nheap_dir = \"{}\"\n",
-        base_config(&dir, port),
-        dir.path().join("heaps").display()
+        r#"{base}heap-store = "dir"
+heap_dir = "{heaps}"
+
+[[fetch_headers]]
+host = "api.example.com"
+headers = {{ Authorization = "Bearer test" }}
+
+[policies.fetch]
+policies = [{{ url = "file://{rego}" }}]
+"#,
+        base = base_config(&dir, port),
+        heaps = dir.path().join("heaps").display(),
+        rego = rego_path.display()
     );
     let config_path = write_config(&dir, "server.toml", &config);
 

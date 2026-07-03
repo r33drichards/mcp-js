@@ -49,18 +49,42 @@ instructions = "@/etc/mcp-v8/prompt.txt"   # @file works like on the CLI
 peers = ["node2@10.0.0.2:4000", "10.0.0.3:4000"]  # repeatable flags take arrays
 ```
 
-Rules enforced at startup (a violation is a fatal error, so typos cannot pass
-silently):
+Relative paths in values are resolved against the server's working directory,
+not the config file's location.
+
+## Validation
+
+Every violation below is a fatal startup error, so a bad config cannot pass
+silently:
 
 - Unknown keys are rejected, and the error lists every accepted key.
-- `http_port` and `sse_port` cannot both be set (same conflict as the flags).
+- Flags that clap declares as conflicting cannot both be set (e.g.
+  `http_port` and `sse_port`).
 - A key may appear only once (counting both spellings).
 - Keys with no config-file meaning are rejected: `config` (no chain-loading)
   and `print_openapi`, plus `wasm_modules` / `wasm_stub_descriptions`, which
   are replaced by the `wasm` section below.
+- Section values must have the right shape (see the table below), and their
+  contents are validated by the same loaders as the corresponding flags.
 
-Relative paths in values are resolved against the server's working directory,
-not the config file's location.
+## How the config file stays in sync with the CLI
+
+The config-file surface is *derived*, not duplicated, so it cannot drift from
+the flags:
+
+- **Keys** come from the live clap command at startup: a newly added flag is
+  automatically a valid key, and the accepted-key list in the unknown-key
+  error is always current.
+- **Values** are parsed by each flag's own clap value parser — there is no
+  second parsing layer with its own rules or defaults.
+- **Precedence** is clap's own resolution order (command line, then
+  environment, then defaults); config values are installed as per-flag
+  defaults, which is what yields CLI flag > env var > config file > built-in
+  default.
+- **Conflicts** are read from the flags' own `conflicts_with` declarations.
+- The only hand-written tables (the rejected keys and the four structured
+  sections) are pinned to real flag ids by unit tests, so renaming a flag
+  breaks the build's tests rather than a user's startup.
 
 ## Structured sections
 

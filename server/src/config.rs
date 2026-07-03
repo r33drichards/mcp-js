@@ -58,10 +58,6 @@ const REJECTED_KEYS: &[(&str, &str)] = &[
     ("wasm_stub_descriptions", "set `description` on entries in the `wasm` section instead"),
 ];
 
-/// Pairs that clap declares `conflicts_with`. Clap only enforces conflicts for
-/// values that are *present* (CLI or env), not for injected defaults, so a file
-/// setting both members must be rejected here.
-const CONFLICTING_KEYS: &[(&str, &str)] = &[("http_port", "sse_port")];
 
 /// Resolve the config file path the same way clap would resolve the flag:
 /// `--config <path>` / `--config=<path>` from the command line, else the
@@ -126,9 +122,19 @@ fn compute_overrides(
         .map(|arg| (arg.get_id().as_str(), arg))
         .collect();
 
-    for (left, right) in CONFLICTING_KEYS {
-        if normalized.iter().any(|(key, ..)| key == left) && normalized.iter().any(|(key, ..)| key == right) {
-            bail!("keys '{left}' and '{right}' cannot both be set");
+    // Clap only enforces `conflicts_with` for values that are *present* (CLI
+    // or env), not for injected defaults — so conflicts between config keys
+    // are checked here, against the declarations on the live command. A new
+    // `conflicts_with` on any flag is picked up automatically.
+    for (key, raw_key, _) in &normalized {
+        let Some(arg) = args.get(key.as_str()) else { continue };
+        for conflict in command.get_arg_conflicts_with(arg) {
+            let conflict_id = conflict.get_id().as_str();
+            if normalized.iter().any(|(other, ..)| other == conflict_id) {
+                bail!(
+                    "keys '{raw_key}' and '{conflict_id}' cannot both be set (same conflict as the flags)"
+                );
+            }
         }
     }
 
@@ -431,6 +437,46 @@ mod tests {
     fn duplicate_keys_across_spellings_are_rejected() {
         let err = config_error("http_port = 8080\n\"http-port\" = 9090");
         assert!(err.contains("more than once"), "got: {err}");
+    }
+
+    // ── Drift guards ─────────────────────────────────────────────────────
+    // Everything else in this module is derived from the live clap command
+    // (key vocabulary, value parsing, conflicts), but REJECTED_KEYS and
+    // SECTIONS name arg ids as strings. This pins them to the real args so a
+    // flag rename breaks the build's tests instead of a user's startup.
+
+    #[test]
+    fn rejected_keys_and_sections_name_real_args() {
+        use std::collections::BTreeSet;
+
+        let command = build_command();
+        let ids: BTreeSet<&str> = command.get_arguments().map(|arg| arg.get_id().as_str()).collect();
+
+        for (key, _) in REJECTED_KEYS {
+            assert!(
+                ids.contains(key),
+                "REJECTED_KEYS entry '{key}' is not an arg id on the command; update it alongside the flag rename"
+            );
+        }
+        for section in SECTIONS {
+            let target = command
+                .get_arguments()
+                .find(|arg| arg.get_id().as_str() == section.target_arg)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "section '{}' targets arg '{}', which is not on the command; update it alongside the flag rename",
+                        section.key, section.target_arg
+                    )
+                });
+            // The section value is serialized to JSON and installed as the
+            // target's single value, so the target must take one.
+            assert!(
+                target.get_action().takes_values(),
+                "section '{}' target '{}' must take a value",
+                section.key,
+                section.target_arg
+            );
+        }
     }
 
     #[test]
