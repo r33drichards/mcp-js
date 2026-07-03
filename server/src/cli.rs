@@ -212,6 +212,35 @@ pub struct Cli {
     #[arg(long, env = "MCP_V8_CLUSTER_PORT", help_heading = "Cluster")]
     pub cluster_port: Option<u16>,
 
+    /// Run as a metadata-only cluster node: serve Raft replication of session
+    /// metadata (session log, heap tags, fs labels) and nothing else. No V8
+    /// engine is created, no MCP transport or REST API is started, and no
+    /// policies are needed — the node acts purely as a leader or replica for
+    /// the cluster's replicated key-value store. Requires --cluster-port and
+    /// conflicts with the MCP transports and all JS-execution configuration.
+    #[arg(
+        long = "metadata-only",
+        env = "MCP_V8_METADATA_ONLY",
+        default_value = "false",
+        requires = "cluster_port",
+        conflicts_with_all = [
+            "http_port",
+            "sse_port",
+            "jwks_url",
+            "wasm_modules",
+            "wasm_config",
+            "policies_json",
+            "mcp_servers",
+            "mcp_config",
+            "allow_run_js_file",
+            "allow_external_modules",
+            "instructions",
+            "run_js_description",
+        ],
+        help_heading = "Cluster"
+    )]
+    pub metadata_only: bool,
+
     /// Unique node identifier within the cluster
     #[arg(long, env = "MCP_V8_NODE_ID", default_value = "node1", help_heading = "Cluster")]
     pub node_id: String,

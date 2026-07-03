@@ -30,6 +30,13 @@ Port for the Raft cluster HTTP server. Enables cluster mode when set
 - Environment: `MCP_V8_CLUSTER_PORT`
 - Value: `CLUSTER_PORT`
 
+### `--metadata-only`
+
+Run as a metadata-only cluster node: serve Raft replication of session metadata (session log, heap tags, fs labels) and nothing else. No V8 engine is created, no MCP transport or REST API is started, and no policies are needed — the node acts purely as a leader or replica for the cluster's replicated key-value store. Requires --cluster-port and conflicts with the MCP transports and all JS-execution configuration
+
+- Environment: `MCP_V8_METADATA_ONLY`
+- Default: `false`
+
 ### `--node-id`
 
 Unique node identifier within the cluster
