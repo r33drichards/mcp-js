@@ -163,14 +163,23 @@ async fn full_node_joins_metadata_leader_as_learner() {
     assert!(saw_learner, "leader never classified worker1 as a learner");
 
     // A write submitted to the worker forwards to the metadata leader,
-    // commits there, and replicates back to the worker.
-    let put = client
-        .post(format!("http://127.0.0.1:{worker_cluster_port}/data/put"))
-        .json(&serde_json::json!({"key": "session:xyz", "value": "heap-456"}))
-        .send()
-        .await
-        .expect("forwarded put");
-    assert!(put.status().is_success(), "forwarded put failed: {:?}", put.text().await);
+    // commits there, and replicates back to the worker. Retry until the
+    // worker has learned the leader's address from a heartbeat.
+    let mut forwarded = false;
+    for _ in 0..100 {
+        let put = client
+            .post(format!("http://127.0.0.1:{worker_cluster_port}/data/put"))
+            .json(&serde_json::json!({"key": "session:xyz", "value": "heap-456"}))
+            .send()
+            .await
+            .expect("forwarded put");
+        if put.status().is_success() {
+            forwarded = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(forwarded, "put via the learner never reached the metadata leader");
 
     let leader_get: serde_json::Value = client
         .get(format!("http://127.0.0.1:{meta_port}/data/get/session:xyz"))
