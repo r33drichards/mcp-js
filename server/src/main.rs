@@ -65,12 +65,14 @@ async fn main() -> Result<()> {
     tracing::info!("V8 execution timeout: {} seconds", execution_timeout_secs);
     tracing::info!("Max concurrent V8 executions: {}", cli.max_concurrent_executions);
 
-    // Cluster mode requires --http-port or --sse-port.
-    if cli.cluster_port.is_some() && cli.http_port.is_none() && cli.sse_port.is_none() {
-        anyhow::bail!(
-            "Cluster mode requires --http-port or --sse-port (stdio transport is not supported in cluster mode)"
-        );
-    }
+    // Cluster membership attaches to the engine (session log / heap tags / fs
+    // labels via `with_cluster`), which is independent of the MCP transport, so
+    // a stdio node can join a cluster. This enables the per-thread "learner"
+    // pattern: an orchestrator (e.g. codex) spawns one stdio mcp-v8 per thread
+    // that joins the cluster as a learner (`--join --join-as-learner`), keyed
+    // to a stable session id (`--session-id`), giving that thread a stateful,
+    // resumable heap+fs backed by shared storage (`--heap-store s3
+    // --fs-store s3`) and leader-replicated session metadata.
 
     // Parse peer list (supports both "host:port" and "id@host:port" formats).
     let (peer_addrs_list, peer_addrs_map) = ClusterConfig::parse_peers(&cli.peers);
@@ -634,6 +636,7 @@ async fn main() -> Result<()> {
         tracing::info!("Starting stdio transport");
         if engine.session_capable() {
             let service = McpService::new(engine, None)
+                .with_session_id(cli.session_id.clone())
                 .serve(stdio())
                 .await
                 .inspect_err(|e| {
