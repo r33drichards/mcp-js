@@ -23,13 +23,18 @@ let
       services.mcp-js = {
         enable = true;
         package = mcp-js;
-        inherit nodeId;
-        peers = peersFor nodeId;
-        clusterPort = 4000;
-        httpPort = 3000;
-        heartbeatInterval = 200;
-        electionTimeoutMin = 1000;
-        electionTimeoutMax = 2000;
+        settings = {
+          node_id = nodeId;
+          http_port = 3000;
+          cluster_port = 4000;
+          heap_store = "dir";
+          heap_dir = "/var/lib/mcp-js";
+          session_db_path = "/var/lib/mcp-js/sessions";
+          peers = peersFor nodeId;
+          heartbeat_interval = 200;
+          election_timeout_min = 1000;
+          election_timeout_max = 2000;
+        };
       };
 
       networking.firewall.allowedTCPPorts = [ 3000 4000 ];

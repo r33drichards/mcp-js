@@ -165,6 +165,5 @@ See the [policies concepts page](../concepts/policies.md) for the full policy co
 ## See also
 
 - [Concepts](../concepts/mcp-client.md)
-- [Reference](../reference/mcp-client.md)
 - [Security policies](../concepts/policies.md)
 - [MCP tools reference](../reference/mcp-tools.md)

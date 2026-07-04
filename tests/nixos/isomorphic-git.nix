@@ -102,14 +102,15 @@ in
       services.mcp-js = {
         enable = true;
         package = mcp-js;
-        nodeId = "test";
-        stateless = true;
-        httpPort = 3000;
-        allowExternalModules = true;
-        policiesJson = builtins.toJSON {
-          filesystem.policies = [{ url = "file://${fsPolicy}"; }];
-          modules.policies = [{ url = "file://${modPolicy}"; }];
-          fetch.policies = [{ url = "file://${fetchPolicy}"; }];
+        settings = {
+          node_id = "test";
+          http_port = 3000;
+          allow_external_modules = true;
+          policies = {
+            filesystem.policies = [{ url = "file://${fsPolicy}"; }];
+            modules.policies = [{ url = "file://${modPolicy}"; }];
+            fetch.policies = [{ url = "file://${fetchPolicy}"; }];
+          };
         };
       };
       # isomorphic-git + a git checkout need more than the 8 MB default heap.

@@ -43,8 +43,8 @@ mcp-v8 --http-port=8080 --policies-json=/path/to/policies.json
 Any `fetch()` call where the policy returns `false` raises a JS error:
 `fetch denied by policy: GET https://other.example.com/ is not allowed`.
 
-For the full policy input shape, see the
-[Reference page](../reference/fetch.md#policy-input-shape).
+For the full policy input shape, see
+[Concepts: Security policies](../concepts/policies.md#per-category-input-documents).
 
 ## Enable fetch with no per-request restrictions
 
@@ -196,6 +196,5 @@ itself. Matching is case-insensitive.
 ## See also
 
 - [Concepts: Network access with fetch](../concepts/fetch.md)
-- [Reference: Network access with fetch](../reference/fetch.md)
 - [Concepts: Security policies](../concepts/policies.md)
 - [Reference: CLI flags](../reference/cli-flags.md)

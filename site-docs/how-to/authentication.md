@@ -1,6 +1,6 @@
 # Authentication (JWT/JWKS)
 
-These recipes cover enabling JWT/JWKS verification on mcp-v8 and presenting tokens from various clients. See the [reference page](../reference/authentication.md) for the complete flag and header specification.
+These recipes cover enabling JWT/JWKS verification on mcp-v8 and presenting tokens from various clients. See the [CLI flags reference](../reference/cli-flags.md) for the complete flag specification.
 
 ## Enable JWKS verification
 
@@ -148,7 +148,6 @@ curl -s -X POST http://localhost:3000/mcp \
 ## See also
 
 - [Concepts: Authentication](../concepts/authentication.md)
-- [Reference: Authentication](../reference/authentication.md)
 - [Stateful sessions & heap snapshots](../how-to/sessions-and-heaps.md)
 - [Network access with fetch](../how-to/fetch.md)
 - [Reference: CLI flags](../reference/cli-flags.md)

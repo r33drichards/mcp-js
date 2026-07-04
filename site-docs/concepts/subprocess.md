@@ -81,7 +81,6 @@ Subprocess, filesystem, and fetch all follow the same pattern: disabled unless a
 ## See also
 
 - [How-to: Subprocess execution](../how-to/subprocess.md)
-- [Reference: Subprocess execution](../reference/subprocess.md)
 - [Security policies (OPA/Rego)](../concepts/policies.md)
 - [Filesystem access](../concepts/filesystem.md)
 - [CLI flags reference](../reference/cli-flags.md)

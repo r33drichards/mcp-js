@@ -152,6 +152,5 @@ Disable the stubs with `--wasm-stubs false`, or change the `runjs__` prefix with
 ## See also
 
 - [WebAssembly modules — concepts](../concepts/wasm-modules.md)
-- [WebAssembly modules reference](../reference/wasm-modules.md)
 - [CLI flags reference](../reference/cli-flags.md)
 - [ES module imports](../how-to/module-imports.md)
