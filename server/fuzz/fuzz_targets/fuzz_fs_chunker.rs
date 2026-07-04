@@ -34,18 +34,25 @@ fn inflate_data(data: &[u8]) -> Vec<u8> {
     pattern.iter().copied().cycle().take(320_000).collect()
 }
 
+/// Bound raw byte inputs (CI runs with -max_len=65536, but local runs may not)
+/// so compression/decompression work stays proportionate per iteration.
+const MAX_BYTES: usize = 1024 * 1024;
+
 fuzz_target!(|input: ChunkerInput| {
     match input {
-        ChunkerInput::DecodeRaw(bytes) => {
+        ChunkerInput::DecodeRaw(mut bytes) => {
+            bytes.truncate(MAX_BYTES);
             // Must not panic; Ok or Err are both acceptable.
             let _ = decompress(&bytes);
         }
-        ChunkerInput::CompressRoundTrip(bytes) => {
+        ChunkerInput::CompressRoundTrip(mut bytes) => {
+            bytes.truncate(MAX_BYTES);
             let stored = maybe_compress(&bytes);
             let back = decompress(&stored).expect("compressed chunk must decode");
             assert_eq!(back, bytes, "compress/decompress round-trip");
         }
-        ChunkerInput::ChunkInvariants { data, inflate } => {
+        ChunkerInput::ChunkInvariants { mut data, inflate } => {
+            data.truncate(MAX_BYTES);
             let data = if inflate { inflate_data(&data) } else { data };
             let refs = chunk_refs(&data);
             if data.len() <= SMALL_FILE_MAX {
@@ -79,10 +86,11 @@ fuzz_target!(|input: ChunkerInput| {
             }
         }
         ChunkerInput::StoreRoundTrip {
-            data,
+            mut data,
             inflate,
             splits,
         } => {
+            data.truncate(MAX_BYTES);
             let data = if inflate { inflate_data(&data) } else { data };
             futures::executor::block_on(async {
                 let store = FsStore::in_memory();

@@ -18,16 +18,29 @@ struct ArbEntry {
 impl ArbEntry {
     fn build(self) -> Entry {
         let content = match self.inline {
-            Some(b) => Content::Inline(b),
-            None => Content::Chunks(self.chunk_hashes),
+            Some(mut b) => {
+                b.truncate(64 * 1024);
+                Content::Inline(b)
+            }
+            None => {
+                let mut hashes = self.chunk_hashes;
+                hashes.truncate(1024);
+                Content::Chunks(hashes)
+            }
         };
         Entry {
             mode: self.mode,
             size: self.size,
             content,
-            symlink: self.symlink.map(PathBuf::from),
+            symlink: self.symlink.map(|s| PathBuf::from(bound(&s, 256))),
         }
     }
+}
+
+/// Bound an arbitrary string (char-safe) so round-trip inputs stay focused on
+/// codec correctness rather than allocation size.
+fn bound(s: &str, max_chars: usize) -> String {
+    s.chars().take(max_chars).collect()
 }
 
 #[derive(Arbitrary, Debug)]
@@ -55,22 +68,33 @@ enum CodecInput {
     KeyFormat([u8; 32]),
 }
 
+/// Bound raw decode inputs for local runs with a large -max_len (CI caps
+/// inputs at 65536 anyway). Deliberately no bincode size-limit options here:
+/// production (`FsStore::get_node`) decodes blob bytes with a plain
+/// `bincode::deserialize`, whose slice reader bounds-checks length prefixes
+/// against the remaining input before allocating — the target must exercise
+/// exactly that configuration.
+const MAX_RAW: usize = 1024 * 1024;
+
 fuzz_target!(|input: CodecInput| {
     match input {
-        CodecInput::DecodeTreeNode(bytes) => {
+        CodecInput::DecodeTreeNode(mut bytes) => {
+            bytes.truncate(MAX_RAW);
             let _ = bincode::deserialize::<TreeNode>(&bytes);
         }
-        CodecInput::DecodeEntry(bytes) => {
+        CodecInput::DecodeEntry(mut bytes) => {
+            bytes.truncate(MAX_RAW);
             let _ = bincode::deserialize::<Entry>(&bytes);
         }
-        CodecInput::DecodeManifest(bytes) => {
+        CodecInput::DecodeManifest(mut bytes) => {
+            bytes.truncate(MAX_RAW);
             let _ = bincode::deserialize::<Manifest>(&bytes);
         }
         CodecInput::RoundTripTree(children) => {
             let mut node = TreeNode::default();
             for (name, child) in children.into_iter().take(32) {
                 node.children.insert(
-                    name,
+                    bound(&name, 64),
                     TreeChild {
                         file: child.file.map(ArbEntry::build),
                         dir: child.dir,
@@ -86,7 +110,7 @@ fuzz_target!(|input: CodecInput| {
         CodecInput::RoundTripManifest(files) => {
             let mut entries = BTreeMap::new();
             for (path, entry) in files.into_iter().take(32) {
-                entries.insert(PathBuf::from(path), entry.build());
+                entries.insert(PathBuf::from(bound(&path, 256)), entry.build());
             }
             let m = Manifest { entries };
             let bytes = bincode::serialize(&m).expect("serialize manifest");
