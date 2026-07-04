@@ -193,17 +193,16 @@ fuzz_target!(|ops: Vec<Op>| {
                             .expect("file rename");
                         let f = model.remove(&from_key).unwrap();
                         model.insert(to_key, f);
-                    } else if strictly_under(&from_key, &to_key) {
-                        // Directory rename into its own subtree is rejected.
+                    } else if strictly_under(&from_key, &to_key)
+                        || strictly_under(&to_key, &from_key)
+                    {
+                        // Directory renames with overlapping subtrees are
+                        // rejected: into its own subtree (EINVAL) and onto its
+                        // own ancestor (ENOTEMPTY).
                         assert!(mount
                             .rename(Path::new(&from_raw), Path::new(&to_raw))
                             .await
                             .is_err());
-                    } else if strictly_under(&to_key, &from_key) {
-                        // Directory rename onto an ancestor: source and target
-                        // subtrees overlap, so per-descendant move order matters
-                        // and the result is unspecified. Skip.
-                        continue;
                     } else {
                         let desc = descendants(&model, &from_key);
                         let res = mount.rename(Path::new(&from_raw), Path::new(&to_raw)).await;
