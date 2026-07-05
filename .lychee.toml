@@ -11,4 +11,5 @@ exclude = [
   "^https?://([a-z0-9-]+\\.)*example\\.com(/|$)",
   "^file:///path/to/.*$",
   "^http://\\.\\.\\.$",
+  "^https?://([a-z0-9-]+\\.)*openpolicyagent\\.org(/|$)",
 ]

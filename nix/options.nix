@@ -220,6 +220,16 @@
     default = null;
     description = "Path to the sled database for the session log (per-session heap+fs history) and the execution registry. Also the default parent for the heap-tag store, fs blob store, and fs label db. Default: /tmp/mcp-v8-sessions. Config-file key for the `--session-db-path` flag. Environment variable: `MCP_V8_SESSION_DB_PATH`. Server default: `/tmp/mcp-v8-sessions`.";
   };
+  session_fork_from = lib.mkOption {
+    type = lib.types.nullOr lib.types.str;
+    default = null;
+    description = "Fork the new session (given by --session-id) from a previous session's latest heap+fs snapshot. The new session starts with the source session's state but is independent: subsequent snapshots are written under the new session id, leaving the source untouched (copy-on-write). Requires --session-id and heap and/or fs persistence. No-op if the target session already has history. Config-file key for the `--session-fork-from` flag. Environment variable: `MCP_V8_SESSION_FORK_FROM`.";
+  };
+  session_id = lib.mkOption {
+    type = lib.types.nullOr lib.types.str;
+    default = null;
+    description = "Fixed session id for this process, used when no X-MCP-Session-Id header is available (i.e. the stdio transport). Keys per-session heap+fs state so a process spawned for a given logical session (e.g. one per thread) resumes that session's stateful heap+fs. Over HTTP the header still wins. Config-file key for the `--session-id` flag. Environment variable: `MCP_V8_SESSION_ID`.";
+  };
   sse_port = lib.mkOption {
     type = lib.types.nullOr lib.types.port;
     default = null;

@@ -175,6 +175,20 @@ JWKS endpoint URL for fetching public keys (e.g., Keycloak OIDC certs URL). Enab
 - CLI flag: `--jwks-url`
 - Environment: `JWKS_URL`
 
+### `session_id`
+
+Fixed session id for this process, used when no X-MCP-Session-Id header is available (i.e. the stdio transport). Keys per-session heap+fs state so a process spawned for a given logical session (e.g. one per thread) resumes that session's stateful heap+fs. Over HTTP the header still wins
+
+- CLI flag: `--session-id`
+- Environment: `MCP_V8_SESSION_ID`
+
+### `session_fork_from`
+
+Fork the new session (given by --session-id) from a previous session's latest heap+fs snapshot. The new session starts with the source session's state but is independent: subsequent snapshots are written under the new session id, leaving the source untouched (copy-on-write). Requires --session-id and heap and/or fs persistence. No-op if the target session already has history
+
+- CLI flag: `--session-fork-from`
+- Environment: `MCP_V8_SESSION_FORK_FROM`
+
 ### `http_port`
 
 HTTP port using Streamable HTTP transport (MCP 2025-03-26+, load-balanceable)

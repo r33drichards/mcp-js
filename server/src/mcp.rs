@@ -410,6 +410,17 @@ impl McpService {
         }
     }
 
+    /// Pre-seed the session id (from `--session-id`/`MCP_V8_SESSION_ID`). Used
+    /// for the stdio transport, where there is no X-MCP-Session-Id header. Over
+    /// HTTP the header still sets the id during `initialize`; there the OnceLock
+    /// is already filled here, so an explicit id takes precedence.
+    pub fn with_session_id(self, session_id: Option<String>) -> Self {
+        if let Some(sid) = session_id {
+            let _ = self.session_id.set(sid);
+        }
+        self
+    }
+
     #[doc = include_str!("run_js_tool_description.md")]
     #[tool(execution(task_support = "optional"))]
     pub async fn run_js(

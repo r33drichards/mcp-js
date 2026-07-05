@@ -59,6 +59,22 @@ pub struct Cli {
     #[arg(long, env = "JWKS_URL", help_heading = "Core")]
     pub jwks_url: Option<String>,
 
+    /// Fixed session id for this process, used when no X-MCP-Session-Id header
+    /// is available (i.e. the stdio transport). Keys per-session heap+fs state
+    /// so a process spawned for a given logical session (e.g. one per thread)
+    /// resumes that session's stateful heap+fs. Over HTTP the header still wins.
+    #[arg(long = "session-id", env = "MCP_V8_SESSION_ID", help_heading = "Core")]
+    pub session_id: Option<String>,
+
+    /// Fork the new session (given by --session-id) from a previous session's
+    /// latest heap+fs snapshot. The new session starts with the source
+    /// session's state but is independent: subsequent snapshots are written
+    /// under the new session id, leaving the source untouched (copy-on-write).
+    /// Requires --session-id and heap and/or fs persistence. No-op if the
+    /// target session already has history.
+    #[arg(long = "session-fork-from", env = "MCP_V8_SESSION_FORK_FROM", help_heading = "Core")]
+    pub session_fork_from: Option<String>,
+
     /// HTTP port using Streamable HTTP transport (MCP 2025-03-26+, load-balanceable)
     #[arg(long, env = "MCP_V8_HTTP_PORT", conflicts_with = "sse_port", help_heading = "Core")]
     pub http_port: Option<u16>,
