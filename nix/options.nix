@@ -180,6 +180,11 @@
     default = null;
     description = "Expose upstream MCP server tools on the MCPJS server itself as `<prefix><server>__<tool>` stubs. When `true` (the default whenever at least one --mcp-server is configured), an external client of MCPJS can discover those tools via tools/list and tool search; calling a stub returns instructional text telling the caller to invoke the tool from JavaScript via run_js + mcp.callTool(...). Pass `--mcp-stubs false` to disable. Config-file key for the `--mcp-stubs` flag. Environment variable: `MCP_V8_MCP_STUBS`. Server default: `true`.";
   };
+  metadata_only = lib.mkOption {
+    type = lib.types.nullOr lib.types.bool;
+    default = null;
+    description = "Run as a metadata-only cluster node: serve Raft replication of session metadata (session log, heap tags, fs labels) and nothing else. No V8 engine is created, no MCP transport or REST sidecar is started, and no policies are needed — the node's only surface is the Raft HTTP server on --cluster-port, where it acts purely as a leader or replica for the replicated metadata store. Requires --cluster-port and conflicts with the MCP transports and all JS-execution configuration. Config-file key for the `--metadata-only` flag. Environment variable: `MCP_V8_METADATA_ONLY`. Server default: `false`.";
+  };
   node_id = lib.mkOption {
     type = lib.types.nullOr lib.types.str;
     default = null;

@@ -134,6 +134,20 @@ async fn rename_rejects_moving_a_directory_into_its_own_subtree() {
 }
 
 #[tokio::test]
+async fn rename_rejects_moving_a_directory_onto_its_own_ancestor() {
+    // Overlapping subtrees: moving `a/b/*` up into `a` would make the first
+    // move's destination (`a/b/z` <- `a/b/b/z`) the second move's source,
+    // silently losing the original `a/b/z`. The rename must be rejected whole.
+    let (store, base) = base_with(&[("a/b/z", b"one"), ("a/b/b/z", b"two")]).await;
+    let mut m = SessionMount::pull(store.clone(), base).await.unwrap();
+    let err = m.rename("a/b".as_ref(), "a".as_ref()).await.unwrap_err();
+    assert!(err.to_string().contains("ENOTEMPTY"), "got: {err}");
+    // The original tree is untouched.
+    assert_eq!(m.read("a/b/z".as_ref()).await.unwrap(), b"one");
+    assert_eq!(m.read("a/b/b/z".as_ref()).await.unwrap(), b"two");
+}
+
+#[tokio::test]
 async fn rename_of_missing_path_is_enoent() {
     let (store, base) = base_with(&[("a.txt", b"x")]).await;
     let mut m = SessionMount::pull(store.clone(), base).await.unwrap();

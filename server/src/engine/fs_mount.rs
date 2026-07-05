@@ -258,6 +258,17 @@ impl SessionMount {
         if child_suffix(&from_k, &to_k).is_some() {
             anyhow::bail!("EINVAL: cannot rename {} into its own subtree", from_k.display());
         }
+        // Renaming onto an ancestor would make some moves' destinations other
+        // moves' sources, so the outcome would depend on iteration order and
+        // could silently drop files. POSIX rejects this too (the destination is
+        // a non-empty directory).
+        if child_suffix(&to_k, &from_k).is_some() {
+            anyhow::bail!(
+                "ENOTEMPTY: cannot rename {} onto its ancestor {}",
+                from_k.display(),
+                to_k.display()
+            );
+        }
         let srcs = self.live_descendants(&from_c, &from_k).await?;
         if srcs.is_empty() {
             anyhow::bail!("ENOENT: {}", from_k.display());
