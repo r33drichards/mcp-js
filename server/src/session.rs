@@ -82,8 +82,8 @@ impl JwksKeyStore {
 
 /// Verifies JWTs against a JWKS endpoint. All token claims are returned so
 /// downstream policies (e.g. OPA filesystem policy) can enforce arbitrary
-/// claim-based rules. Session identity is determined by the X-MCP-Session-Id
-/// header, not by JWT claims.
+/// claim-based rules. Session identity is determined by the MCP transport
+/// session (Mcp-Session-Id), or an X-MCP-Session-Id override, not by JWT claims.
 pub struct SessionVerifier {
     key_store: Arc<JwksKeyStore>,
 }

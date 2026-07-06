@@ -80,7 +80,7 @@ Stateless mode:
    → { output: "2\n" }
 ```
 
-In stateful mode, pass the returned `heap` hash back to `run_js` to resume that V8 state. For MCP session history, send `X-MCP-Session-Id` instead of a `session` tool parameter.
+In stateful mode, pass the returned `heap` hash back to `run_js` to resume that V8 state. MCP session history is keyed by the transport session (`Mcp-Session-Id`) automatically — no `session` tool parameter; send an `X-MCP-Session-Id` header to override it with a stable name of your own.
 
 ## JavaScript features
 

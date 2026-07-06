@@ -16,7 +16,7 @@ params:
 returns:
 - execution_id: UUID of the submitted execution. Use with get_execution, get_execution_output, and cancel_execution. `get_execution` also returns `fs` — the resulting filesystem snapshot CA id.
 
-Session identity comes from the `X-MCP-Session-Id` header during initialization, not from a `session` tool parameter. The session's latest `/work` filesystem is mounted automatically on each run and the result is snapshotted, so files persist across calls without tracking CA ids.
+Session identity defaults to the MCP transport session (the `Mcp-Session-Id` issued by the server at initialization and echoed by the client on every request), so per-session `/work` persistence works out of the box — no custom header or `session` tool parameter needed. The session's latest `/work` filesystem is mounted automatically on each run and the result is snapshotted, so files persist across calls without tracking CA ids. To pin a stable, resumable session id yourself (e.g. to reattach after reconnecting), send the optional `X-MCP-Session-Id` header during initialization; it overrides the transport session.
 
 ## Console Output
 

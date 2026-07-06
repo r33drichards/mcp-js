@@ -111,9 +111,13 @@ Omit the `keys` parameter entirely:
 
 Returns `{ "tags": { "env": "production", "model": "v2" } }`. Returns an empty object if no tags are set.
 
+## Sessions and the transport session id
+
+By default the session is the **MCP transport session**: the `Mcp-Session-Id` the server issues at `initialize` (per the Streamable HTTP spec) and that the client echoes on every subsequent request. Every `run_js` execution on that connection is logged under that id, and the session's per-session heap and `/work` filesystem persist across calls automatically — a spec-compliant client gets persistence with no extra configuration.
+
 ## Name a session via X-MCP-Session-Id
 
-Send the header `X-MCP-Session-Id: <name>` on the MCP `initialize` request (HTTP or SSE transport only). The server reads the header value and associates every subsequent `run_js` execution with that session name, writing a log entry for each execution.
+To pin your **own** stable session name — one that is decoupled from the transport session, so you can reattach to the same heap/`/work` after reconnecting — send the header `X-MCP-Session-Id: <name>` on the MCP `initialize` request (HTTP or SSE transport only). It overrides the transport session id. The server reads the header value and associates every subsequent `run_js` execution with that session name, writing a log entry for each execution.
 
 Example using curl against the Streamable HTTP transport:
 
@@ -138,7 +142,7 @@ Returns `{ "sessions": ["my-agent-session", "other-session"] }`.
 
 ### List log entries for the current session
 
-`list_session_snapshots` returns entries for the session identified by the `X-MCP-Session-Id` header sent on `initialize`. It accepts an optional `fields` parameter (comma-separated) to limit which fields are returned:
+`list_session_snapshots` returns entries for the current session — identified by the transport `Mcp-Session-Id`, or by the `X-MCP-Session-Id` header when one was sent on `initialize`. It accepts an optional `fields` parameter (comma-separated) to limit which fields are returned:
 
 ```json
 {
@@ -168,7 +172,7 @@ Response:
 }
 ```
 
-Entries are ordered chronologically. If no `X-MCP-Session-Id` was sent during `initialize`, the tool returns an error object in the `entries` array.
+Entries are ordered chronologically. If no session id is available at all (e.g. the stdio transport with no `--session-id`), the tool returns an error object in the `entries` array.
 
 ### List all fields
 
