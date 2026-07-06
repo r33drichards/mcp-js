@@ -35,6 +35,15 @@
 //! Node-style `code` (e.g. `ENOENT`, `EEXIST`). Together these let libraries
 //! that expect a Node `fs`/`fs.promises` interface — such as `isomorphic-git` —
 //! consume the sandbox `fs` object directly.
+//!
+//! Node's synchronous variants (`readFileSync`, `writeFileSync`, `existsSync`,
+//! `readdirSync`, `statSync`, `mkdirSync`, `rmSync`, …) are provided too,
+//! backed by sync ops that share the async implementations — including the
+//! policy gate, under the same operation names (`readFileSync` is gated as
+//! `"readFile"`), so existing Rego policies apply unchanged. Reads return a
+//! `Uint8Array` (or a string with an encoding), not a Node `Buffer`. Per Node's
+//! contract, `existsSync` never throws — errors, including policy denials,
+//! read as `false`.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -145,20 +154,36 @@ async fn op_fs_read_file_text(
 ) -> Result<String, JsErrorBox> {
     let config = extract_config(&state)?;
     let mount = extract_mount(&state);
+    read_file_text_impl(config, mount, path).await.map_err(JsErrorBox::generic)
+}
 
-    // Mount-backed reads must run on the current-thread isolate runtime: the
-    // CAS overlay uses deno_unsync, which asserts a current-thread flavor.
-    // tokio::spawn would move the work onto the multi-thread runtime and abort
-    // the process. Only the real-filesystem path is offloaded via spawn.
+/// Sync twin of [`op_fs_read_file_text`] (backs `fs.readFileSync` with an encoding).
+#[op2]
+#[string]
+fn op_fs_read_file_text_sync(
+    state: &mut OpState,
+    #[string] path: String,
+) -> Result<String, JsErrorBox> {
+    let (config, mount) = sync_state(state)?;
+    run_sync(move || read_file_text_impl(config, mount, path))
+}
+
+async fn read_file_text_impl(
+    config: FsConfig,
+    mount: Option<FsMountHandle>,
+    path: String,
+) -> Result<String, String> {
+    // Mount-backed reads must run on the current-thread runtime driving this
+    // future: the CAS overlay uses deno_unsync, which asserts a current-thread
+    // flavor. tokio::spawn would move the work onto the multi-thread runtime
+    // and abort the process. Only the real-filesystem path is offloaded via spawn.
     if let Some(m) = mount {
-        check_policy(&config.policy_chain, "readFile", &path, None, None, Some("utf8"), config.mcp_headers.as_ref())
-            .await
-            .map_err(JsErrorBox::generic)?;
+        check_policy(&config.policy_chain, "readFile", &path, None, None, Some("utf8"), config.mcp_headers.as_ref()).await?;
         if let Some(content) = m.0.lock().await.read_opt(Path::new(&path)).await
-            .map_err(|e| JsErrorBox::generic(format!("fs.readFile: {}: {}", path, e)))?
+            .map_err(|e| format!("fs.readFile: {}: {}", path, e))?
         {
             return String::from_utf8(content)
-                .map_err(|e| JsErrorBox::generic(format!("fs.readFile: invalid UTF-8 in {}: {}", path, e)));
+                .map_err(|e| format!("fs.readFile: invalid UTF-8 in {}: {}", path, e));
         }
         // Overlay miss. With passthrough off (default) the overlay is the whole
         // fs view, so this is ENOENT. With passthrough on, fall through to the
@@ -166,12 +191,12 @@ async fn op_fs_read_file_text(
         // so bundled paths like /opt/languages resolve while /work stays the
         // per-session overlay.
         if !config.passthrough {
-            return Err(JsErrorBox::generic(format!("fs.readFile: {}: ENOENT", path)));
+            return Err(format!("fs.readFile: {}: ENOENT", path));
         }
         let content = std::fs::read(&path)
-            .map_err(|e| JsErrorBox::generic(io_err("readFile", &path, &e)))?;
+            .map_err(|e| io_err("readFile", &path, &e))?;
         return String::from_utf8(content)
-            .map_err(|e| JsErrorBox::generic(format!("fs.readFile: invalid UTF-8 in {}: {}", path, e)));
+            .map_err(|e| format!("fs.readFile: invalid UTF-8 in {}: {}", path, e));
     }
 
     tokio::spawn(async move {
@@ -184,8 +209,7 @@ async fn op_fs_read_file_text(
             .map_err(|e| format!("fs.readFile: invalid UTF-8 in {}: {}", path, e))
     })
     .await
-    .map_err(|e| JsErrorBox::generic(format!("fs task join error: {}", e)))?
-    .map_err(|e: String| JsErrorBox::generic(e))
+    .map_err(|e| format!("fs task join error: {}", e))?
 }
 
 /// Read a file as raw bytes, returned as a Uint8Array to JavaScript.
@@ -197,14 +221,30 @@ async fn op_fs_read_file_buffer(
 ) -> Result<Vec<u8>, JsErrorBox> {
     let config = extract_config(&state)?;
     let mount = extract_mount(&state);
+    read_file_buffer_impl(config, mount, path).await.map_err(JsErrorBox::generic)
+}
 
-    // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
+/// Sync twin of [`op_fs_read_file_buffer`] (backs `fs.readFileSync` without an encoding).
+#[op2]
+#[buffer]
+fn op_fs_read_file_buffer_sync(
+    state: &mut OpState,
+    #[string] path: String,
+) -> Result<Vec<u8>, JsErrorBox> {
+    let (config, mount) = sync_state(state)?;
+    run_sync(move || read_file_buffer_impl(config, mount, path))
+}
+
+async fn read_file_buffer_impl(
+    config: FsConfig,
+    mount: Option<FsMountHandle>,
+    path: String,
+) -> Result<Vec<u8>, String> {
+    // Mount branch runs inline (current-thread runtime; deno_unsync needs it).
     if let Some(m) = mount {
-        check_policy(&config.policy_chain, "readFile", &path, None, None, Some("buffer"), config.mcp_headers.as_ref())
-            .await
-            .map_err(JsErrorBox::generic)?;
+        check_policy(&config.policy_chain, "readFile", &path, None, None, Some("buffer"), config.mcp_headers.as_ref()).await?;
         if let Some(content) = m.0.lock().await.read_opt(Path::new(&path)).await
-            .map_err(|e| JsErrorBox::generic(format!("fs.readFile: {}: {}", path, e)))?
+            .map_err(|e| format!("fs.readFile: {}: {}", path, e))?
         {
             return Ok(content);
         }
@@ -212,10 +252,10 @@ async fn op_fs_read_file_buffer(
         // through to the real filesystem (policy-gated above) so bundled
         // read-only paths (e.g. /opt/languages) resolve.
         if !config.passthrough {
-            return Err(JsErrorBox::generic(format!("fs.readFile: {}: ENOENT", path)));
+            return Err(format!("fs.readFile: {}: ENOENT", path));
         }
         return std::fs::read(&path)
-            .map_err(|e| JsErrorBox::generic(io_err("readFile", &path, &e)));
+            .map_err(|e| io_err("readFile", &path, &e));
     }
 
     tokio::spawn(async move {
@@ -225,8 +265,7 @@ async fn op_fs_read_file_buffer(
             .map_err(|e| io_err("readFile", &path, &e))
     })
     .await
-    .map_err(|e| JsErrorBox::generic(format!("fs task join error: {}", e)))?
-    .map_err(|e: String| JsErrorBox::generic(e))
+    .map_err(|e| format!("fs task join error: {}", e))?
 }
 
 /// Write a file from a UTF-8 string.
@@ -239,50 +278,35 @@ async fn op_fs_write_file_text(
 ) -> Result<String, JsErrorBox> {
     let config = extract_config(&state)?;
     let mount = extract_mount(&state);
-
-    // Mount-backed writes must run on the current-thread isolate runtime (the
-    // CAS overlay uses deno_unsync, which asserts a current-thread flavor).
-    // tokio::spawn would move the work onto the multi-thread runtime and abort.
-    if let Some(m) = mount {
-        check_policy(&config.policy_chain, "writeFile", &path, None, None, None, config.mcp_headers.as_ref())
-            .await
-            .map_err(JsErrorBox::generic)?;
-        m.0.lock().await.write(Path::new(&path), data.as_bytes()).await
-            .map_err(|e| JsErrorBox::generic(format!("fs.writeFile: {}: {}", path, e)))?;
-        return Ok("{}".to_string());
-    }
-
-    tokio::spawn(async move {
-        check_policy(&config.policy_chain, "writeFile", &path, None, None, None, config.mcp_headers.as_ref()).await?;
-
-        tokio::fs::write(&path, data.as_bytes()).await
-            .map_err(|e| io_err("writeFile", &path, &e))?;
-
-        Ok("{}".to_string())
-    })
-    .await
-    .map_err(|e| JsErrorBox::generic(format!("fs task join error: {}", e)))?
-    .map_err(|e: String| JsErrorBox::generic(e))
+    write_file_impl(config, mount, path, data.into_bytes()).await.map_err(JsErrorBox::generic)
 }
 
-/// Write a file from raw bytes (Uint8Array from JavaScript).
-#[op2(async)]
+/// Sync twin of [`op_fs_write_file_text`] (backs `fs.writeFileSync` with string data).
+#[op2]
 #[string]
-async fn op_fs_write_file_buffer(
-    state: Rc<RefCell<OpState>>,
+fn op_fs_write_file_text_sync(
+    state: &mut OpState,
     #[string] path: String,
-    #[buffer(copy)] data: Vec<u8>,
+    #[string] data: String,
 ) -> Result<String, JsErrorBox> {
-    let config = extract_config(&state)?;
-    let mount = extract_mount(&state);
+    let (config, mount) = sync_state(state)?;
+    run_sync(move || write_file_impl(config, mount, path, data.into_bytes()))
+}
 
-    // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
+async fn write_file_impl(
+    config: FsConfig,
+    mount: Option<FsMountHandle>,
+    path: String,
+    data: Vec<u8>,
+) -> Result<String, String> {
+    // Mount-backed writes must run on the current-thread runtime driving this
+    // future (the CAS overlay uses deno_unsync, which asserts a current-thread
+    // flavor). tokio::spawn would move the work onto the multi-thread runtime
+    // and abort.
     if let Some(m) = mount {
-        check_policy(&config.policy_chain, "writeFile", &path, None, None, None, config.mcp_headers.as_ref())
-            .await
-            .map_err(JsErrorBox::generic)?;
+        check_policy(&config.policy_chain, "writeFile", &path, None, None, None, config.mcp_headers.as_ref()).await?;
         m.0.lock().await.write(Path::new(&path), &data).await
-            .map_err(|e| JsErrorBox::generic(format!("fs.writeFile: {}: {}", path, e)))?;
+            .map_err(|e| format!("fs.writeFile: {}: {}", path, e))?;
         return Ok("{}".to_string());
     }
 
@@ -295,8 +319,32 @@ async fn op_fs_write_file_buffer(
         Ok("{}".to_string())
     })
     .await
-    .map_err(|e| JsErrorBox::generic(format!("fs task join error: {}", e)))?
-    .map_err(|e: String| JsErrorBox::generic(e))
+    .map_err(|e| format!("fs task join error: {}", e))?
+}
+
+/// Write a file from raw bytes (Uint8Array from JavaScript).
+#[op2(async)]
+#[string]
+async fn op_fs_write_file_buffer(
+    state: Rc<RefCell<OpState>>,
+    #[string] path: String,
+    #[buffer(copy)] data: Vec<u8>,
+) -> Result<String, JsErrorBox> {
+    let config = extract_config(&state)?;
+    let mount = extract_mount(&state);
+    write_file_impl(config, mount, path, data).await.map_err(JsErrorBox::generic)
+}
+
+/// Sync twin of [`op_fs_write_file_buffer`] (backs `fs.writeFileSync` with binary data).
+#[op2]
+#[string]
+fn op_fs_write_file_buffer_sync(
+    state: &mut OpState,
+    #[string] path: String,
+    #[buffer(copy)] data: Vec<u8>,
+) -> Result<String, JsErrorBox> {
+    let (config, mount) = sync_state(state)?;
+    run_sync(move || write_file_impl(config, mount, path, data))
 }
 
 /// Append to a file.
@@ -309,17 +357,35 @@ async fn op_fs_append_file(
 ) -> Result<String, JsErrorBox> {
     let config = extract_config(&state)?;
     let mount = extract_mount(&state);
+    append_file_impl(config, mount, path, data).await.map_err(JsErrorBox::generic)
+}
 
-    // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
+/// Sync twin of [`op_fs_append_file`] (backs `fs.appendFileSync`).
+#[op2]
+#[string]
+fn op_fs_append_file_sync(
+    state: &mut OpState,
+    #[string] path: String,
+    #[string] data: String,
+) -> Result<String, JsErrorBox> {
+    let (config, mount) = sync_state(state)?;
+    run_sync(move || append_file_impl(config, mount, path, data))
+}
+
+async fn append_file_impl(
+    config: FsConfig,
+    mount: Option<FsMountHandle>,
+    path: String,
+    data: String,
+) -> Result<String, String> {
+    // Mount branch runs inline (current-thread runtime; deno_unsync needs it).
     if let Some(m) = mount {
-        check_policy(&config.policy_chain, "appendFile", &path, None, None, None, config.mcp_headers.as_ref())
-            .await
-            .map_err(JsErrorBox::generic)?;
+        check_policy(&config.policy_chain, "appendFile", &path, None, None, None, config.mcp_headers.as_ref()).await?;
         let mut guard = m.0.lock().await;
         let mut existing = guard.read(Path::new(&path)).await.unwrap_or_default();
         existing.extend_from_slice(data.as_bytes());
         guard.write(Path::new(&path), &existing).await
-            .map_err(|e| JsErrorBox::generic(format!("fs.appendFile: {}: {}", path, e)))?;
+            .map_err(|e| format!("fs.appendFile: {}: {}", path, e))?;
         return Ok("{}".to_string());
     }
 
@@ -340,8 +406,7 @@ async fn op_fs_append_file(
         Ok("{}".to_string())
     })
     .await
-    .map_err(|e| JsErrorBox::generic(format!("fs task join error: {}", e)))?
-    .map_err(|e: String| JsErrorBox::generic(e))
+    .map_err(|e| format!("fs task join error: {}", e))?
 }
 
 /// Read a directory. Returns JSON array of entry names.
@@ -353,14 +418,30 @@ async fn op_fs_readdir(
 ) -> Result<String, JsErrorBox> {
     let config = extract_config(&state)?;
     let mount = extract_mount(&state);
+    readdir_impl(config, mount, path).await.map_err(JsErrorBox::generic)
+}
 
-    // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
+/// Sync twin of [`op_fs_readdir`] (backs `fs.readdirSync`).
+#[op2]
+#[string]
+fn op_fs_readdir_sync(
+    state: &mut OpState,
+    #[string] path: String,
+) -> Result<String, JsErrorBox> {
+    let (config, mount) = sync_state(state)?;
+    run_sync(move || readdir_impl(config, mount, path))
+}
+
+async fn readdir_impl(
+    config: FsConfig,
+    mount: Option<FsMountHandle>,
+    path: String,
+) -> Result<String, String> {
+    // Mount branch runs inline (current-thread runtime; deno_unsync needs it).
     if let Some(m) = mount {
-        check_policy(&config.policy_chain, "readdir", &path, None, None, None, config.mcp_headers.as_ref())
-            .await
-            .map_err(JsErrorBox::generic)?;
+        check_policy(&config.policy_chain, "readdir", &path, None, None, None, config.mcp_headers.as_ref()).await?;
         let names = m.0.lock().await.readdir(Path::new(&path)).await
-            .map_err(|e| JsErrorBox::generic(format!("fs.readdir: {}: {}", path, e)))?;
+            .map_err(|e| format!("fs.readdir: {}: {}", path, e))?;
         return Ok(deno_core::serde_json::json!(names).to_string());
     }
 
@@ -382,8 +463,7 @@ async fn op_fs_readdir(
         Ok(result.to_string())
     })
     .await
-    .map_err(|e| JsErrorBox::generic(format!("fs task join error: {}", e)))?
-    .map_err(|e: String| JsErrorBox::generic(e))
+    .map_err(|e| format!("fs task join error: {}", e))?
 }
 
 /// Stat a path. Returns JSON with size, isFile, isDirectory, etc.
@@ -395,14 +475,30 @@ async fn op_fs_stat(
 ) -> Result<String, JsErrorBox> {
     let config = extract_config(&state)?;
     let mount = extract_mount(&state);
+    stat_impl(config, mount, path).await.map_err(JsErrorBox::generic)
+}
 
-    // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
+/// Sync twin of [`op_fs_stat`] (backs `fs.statSync`).
+#[op2]
+#[string]
+fn op_fs_stat_sync(
+    state: &mut OpState,
+    #[string] path: String,
+) -> Result<String, JsErrorBox> {
+    let (config, mount) = sync_state(state)?;
+    run_sync(move || stat_impl(config, mount, path))
+}
+
+async fn stat_impl(
+    config: FsConfig,
+    mount: Option<FsMountHandle>,
+    path: String,
+) -> Result<String, String> {
+    // Mount branch runs inline (current-thread runtime; deno_unsync needs it).
     if let Some(m) = mount {
-        check_policy(&config.policy_chain, "stat", &path, None, None, None, config.mcp_headers.as_ref())
-            .await
-            .map_err(JsErrorBox::generic)?;
+        check_policy(&config.policy_chain, "stat", &path, None, None, None, config.mcp_headers.as_ref()).await?;
         let s = m.0.lock().await.stat(Path::new(&path)).await
-            .map_err(|e| JsErrorBox::generic(format!("fs.stat: {}: {}", path, e)))?;
+            .map_err(|e| format!("fs.stat: {}: {}", path, e))?;
         return Ok(mount_stat_json(&s));
     }
 
@@ -415,8 +511,7 @@ async fn op_fs_stat(
         Ok(metadata_stat_json(&metadata))
     })
     .await
-    .map_err(|e| JsErrorBox::generic(format!("fs task join error: {}", e)))?
-    .map_err(|e: String| JsErrorBox::generic(e))
+    .map_err(|e| format!("fs task join error: {}", e))?
 }
 
 /// Stat a path **without** following a final symlink (Node `fs.lstat`).
@@ -428,15 +523,31 @@ async fn op_fs_lstat(
 ) -> Result<String, JsErrorBox> {
     let config = extract_config(&state)?;
     let mount = extract_mount(&state);
+    lstat_impl(config, mount, path).await.map_err(JsErrorBox::generic)
+}
 
-    // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
+/// Sync twin of [`op_fs_lstat`] (backs `fs.lstatSync`).
+#[op2]
+#[string]
+fn op_fs_lstat_sync(
+    state: &mut OpState,
+    #[string] path: String,
+) -> Result<String, JsErrorBox> {
+    let (config, mount) = sync_state(state)?;
+    run_sync(move || lstat_impl(config, mount, path))
+}
+
+async fn lstat_impl(
+    config: FsConfig,
+    mount: Option<FsMountHandle>,
+    path: String,
+) -> Result<String, String> {
+    // Mount branch runs inline (current-thread runtime; deno_unsync needs it).
     // The overlay never follows symlinks, so its stat already has lstat semantics.
     if let Some(m) = mount {
-        check_policy(&config.policy_chain, "lstat", &path, None, None, None, config.mcp_headers.as_ref())
-            .await
-            .map_err(JsErrorBox::generic)?;
+        check_policy(&config.policy_chain, "lstat", &path, None, None, None, config.mcp_headers.as_ref()).await?;
         let s = m.0.lock().await.stat(Path::new(&path)).await
-            .map_err(|e| JsErrorBox::generic(format!("fs.lstat: {}: {}", path, e)))?;
+            .map_err(|e| format!("fs.lstat: {}: {}", path, e))?;
         return Ok(mount_stat_json(&s));
     }
 
@@ -449,8 +560,7 @@ async fn op_fs_lstat(
         Ok(metadata_stat_json(&metadata))
     })
     .await
-    .map_err(|e| JsErrorBox::generic(format!("fs task join error: {}", e)))?
-    .map_err(|e: String| JsErrorBox::generic(e))
+    .map_err(|e| format!("fs task join error: {}", e))?
 }
 
 /// Read a symlink's target, returned as a string.
@@ -462,14 +572,30 @@ async fn op_fs_readlink(
 ) -> Result<String, JsErrorBox> {
     let config = extract_config(&state)?;
     let mount = extract_mount(&state);
+    readlink_impl(config, mount, path).await.map_err(JsErrorBox::generic)
+}
 
-    // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
+/// Sync twin of [`op_fs_readlink`] (backs `fs.readlinkSync`).
+#[op2]
+#[string]
+fn op_fs_readlink_sync(
+    state: &mut OpState,
+    #[string] path: String,
+) -> Result<String, JsErrorBox> {
+    let (config, mount) = sync_state(state)?;
+    run_sync(move || readlink_impl(config, mount, path))
+}
+
+async fn readlink_impl(
+    config: FsConfig,
+    mount: Option<FsMountHandle>,
+    path: String,
+) -> Result<String, String> {
+    // Mount branch runs inline (current-thread runtime; deno_unsync needs it).
     if let Some(m) = mount {
-        check_policy(&config.policy_chain, "readlink", &path, None, None, None, config.mcp_headers.as_ref())
-            .await
-            .map_err(JsErrorBox::generic)?;
+        check_policy(&config.policy_chain, "readlink", &path, None, None, None, config.mcp_headers.as_ref()).await?;
         let target = m.0.lock().await.readlink(Path::new(&path)).await
-            .map_err(|e| JsErrorBox::generic(format!("fs.readlink: {}: {}", path, e)))?;
+            .map_err(|e| format!("fs.readlink: {}: {}", path, e))?;
         return Ok(target.to_string_lossy().into_owned());
     }
 
@@ -482,8 +608,7 @@ async fn op_fs_readlink(
         Ok(target.to_string_lossy().into_owned())
     })
     .await
-    .map_err(|e| JsErrorBox::generic(format!("fs task join error: {}", e)))?
-    .map_err(|e: String| JsErrorBox::generic(e))
+    .map_err(|e| format!("fs task join error: {}", e))?
 }
 
 /// Create a symlink at `link` pointing to `target` (Node `fs.symlink(target, path)`).
@@ -496,15 +621,33 @@ async fn op_fs_symlink(
 ) -> Result<String, JsErrorBox> {
     let config = extract_config(&state)?;
     let mount = extract_mount(&state);
+    symlink_op_impl(config, mount, target, link).await.map_err(JsErrorBox::generic)
+}
 
+/// Sync twin of [`op_fs_symlink`] (backs `fs.symlinkSync`).
+#[op2]
+#[string]
+fn op_fs_symlink_sync(
+    state: &mut OpState,
+    #[string] target: String,
+    #[string] link: String,
+) -> Result<String, JsErrorBox> {
+    let (config, mount) = sync_state(state)?;
+    run_sync(move || symlink_op_impl(config, mount, target, link))
+}
+
+async fn symlink_op_impl(
+    config: FsConfig,
+    mount: Option<FsMountHandle>,
+    target: String,
+    link: String,
+) -> Result<String, String> {
     // The policy gates on the link path being created; the target is carried as
     // the destination so a policy can constrain both sides.
     if let Some(m) = mount {
-        check_policy(&config.policy_chain, "symlink", &link, Some(&target), None, None, config.mcp_headers.as_ref())
-            .await
-            .map_err(JsErrorBox::generic)?;
+        check_policy(&config.policy_chain, "symlink", &link, Some(&target), None, None, config.mcp_headers.as_ref()).await?;
         m.0.lock().await.symlink(Path::new(&target), Path::new(&link)).await
-            .map_err(|e| JsErrorBox::generic(format!("fs.symlink: {} -> {}: {}", link, target, e)))?;
+            .map_err(|e| format!("fs.symlink: {} -> {}: {}", link, target, e))?;
         return Ok("{}".to_string());
     }
 
@@ -517,8 +660,7 @@ async fn op_fs_symlink(
         Ok("{}".to_string())
     })
     .await
-    .map_err(|e| JsErrorBox::generic(format!("fs task join error: {}", e)))?
-    .map_err(|e: String| JsErrorBox::generic(e))
+    .map_err(|e| format!("fs task join error: {}", e))?
 }
 
 #[cfg(unix)]
@@ -544,15 +686,32 @@ async fn op_fs_mkdir(
 ) -> Result<String, JsErrorBox> {
     let config = extract_config(&state)?;
     let mount = extract_mount(&state);
-    let recursive = recursive != 0;
+    mkdir_impl(config, mount, path, recursive != 0).await.map_err(JsErrorBox::generic)
+}
 
-    // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
+/// Sync twin of [`op_fs_mkdir`] (backs `fs.mkdirSync`).
+#[op2]
+#[string]
+fn op_fs_mkdir_sync(
+    state: &mut OpState,
+    #[string] path: String,
+    #[smi] recursive: i32,
+) -> Result<String, JsErrorBox> {
+    let (config, mount) = sync_state(state)?;
+    run_sync(move || mkdir_impl(config, mount, path, recursive != 0))
+}
+
+async fn mkdir_impl(
+    config: FsConfig,
+    mount: Option<FsMountHandle>,
+    path: String,
+    recursive: bool,
+) -> Result<String, String> {
+    // Mount branch runs inline (current-thread runtime; deno_unsync needs it).
     if let Some(m) = mount {
-        check_policy(&config.policy_chain, "mkdir", &path, None, Some(recursive), None, config.mcp_headers.as_ref())
-            .await
-            .map_err(JsErrorBox::generic)?;
+        check_policy(&config.policy_chain, "mkdir", &path, None, Some(recursive), None, config.mcp_headers.as_ref()).await?;
         m.0.lock().await.mkdir(Path::new(&path)).await
-            .map_err(|e| JsErrorBox::generic(format!("fs.mkdir: {}: {}", path, e)))?;
+            .map_err(|e| format!("fs.mkdir: {}: {}", path, e))?;
         return Ok("{}".to_string());
     }
 
@@ -568,8 +727,7 @@ async fn op_fs_mkdir(
         Ok("{}".to_string())
     })
     .await
-    .map_err(|e| JsErrorBox::generic(format!("fs task join error: {}", e)))?
-    .map_err(|e: String| JsErrorBox::generic(e))
+    .map_err(|e| format!("fs task join error: {}", e))?
 }
 
 /// Remove a file or directory.
@@ -582,15 +740,32 @@ async fn op_fs_rm(
 ) -> Result<String, JsErrorBox> {
     let config = extract_config(&state)?;
     let mount = extract_mount(&state);
-    let recursive = recursive != 0;
+    rm_impl(config, mount, path, recursive != 0).await.map_err(JsErrorBox::generic)
+}
 
-    // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
+/// Sync twin of [`op_fs_rm`] (backs `fs.rmSync`/`fs.rmdirSync`/`fs.unlinkSync`).
+#[op2]
+#[string]
+fn op_fs_rm_sync(
+    state: &mut OpState,
+    #[string] path: String,
+    #[smi] recursive: i32,
+) -> Result<String, JsErrorBox> {
+    let (config, mount) = sync_state(state)?;
+    run_sync(move || rm_impl(config, mount, path, recursive != 0))
+}
+
+async fn rm_impl(
+    config: FsConfig,
+    mount: Option<FsMountHandle>,
+    path: String,
+    recursive: bool,
+) -> Result<String, String> {
+    // Mount branch runs inline (current-thread runtime; deno_unsync needs it).
     if let Some(m) = mount {
-        check_policy(&config.policy_chain, "rm", &path, None, Some(recursive), None, config.mcp_headers.as_ref())
-            .await
-            .map_err(JsErrorBox::generic)?;
+        check_policy(&config.policy_chain, "rm", &path, None, Some(recursive), None, config.mcp_headers.as_ref()).await?;
         m.0.lock().await.remove(Path::new(&path), recursive).await
-            .map_err(|e| JsErrorBox::generic(format!("fs.rm: {}: {}", path, e)))?;
+            .map_err(|e| format!("fs.rm: {}: {}", path, e))?;
         return Ok("{}".to_string());
     }
 
@@ -613,8 +788,7 @@ async fn op_fs_rm(
         Ok("{}".to_string())
     })
     .await
-    .map_err(|e| JsErrorBox::generic(format!("fs task join error: {}", e)))?
-    .map_err(|e: String| JsErrorBox::generic(e))
+    .map_err(|e| format!("fs task join error: {}", e))?
 }
 
 /// Rename (move) a file or directory.
@@ -627,14 +801,32 @@ async fn op_fs_rename(
 ) -> Result<String, JsErrorBox> {
     let config = extract_config(&state)?;
     let mount = extract_mount(&state);
+    rename_impl(config, mount, from, to).await.map_err(JsErrorBox::generic)
+}
 
-    // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
+/// Sync twin of [`op_fs_rename`] (backs `fs.renameSync`).
+#[op2]
+#[string]
+fn op_fs_rename_sync(
+    state: &mut OpState,
+    #[string] from: String,
+    #[string] to: String,
+) -> Result<String, JsErrorBox> {
+    let (config, mount) = sync_state(state)?;
+    run_sync(move || rename_impl(config, mount, from, to))
+}
+
+async fn rename_impl(
+    config: FsConfig,
+    mount: Option<FsMountHandle>,
+    from: String,
+    to: String,
+) -> Result<String, String> {
+    // Mount branch runs inline (current-thread runtime; deno_unsync needs it).
     if let Some(m) = mount {
-        check_policy(&config.policy_chain, "rename", &from, Some(&to), None, None, config.mcp_headers.as_ref())
-            .await
-            .map_err(JsErrorBox::generic)?;
+        check_policy(&config.policy_chain, "rename", &from, Some(&to), None, None, config.mcp_headers.as_ref()).await?;
         m.0.lock().await.rename(Path::new(&from), Path::new(&to)).await
-            .map_err(|e| JsErrorBox::generic(format!("fs.rename: {} -> {}: {}", from, to, e)))?;
+            .map_err(|e| format!("fs.rename: {} -> {}: {}", from, to, e))?;
         return Ok("{}".to_string());
     }
 
@@ -647,8 +839,7 @@ async fn op_fs_rename(
         Ok("{}".to_string())
     })
     .await
-    .map_err(|e| JsErrorBox::generic(format!("fs task join error: {}", e)))?
-    .map_err(|e: String| JsErrorBox::generic(e))
+    .map_err(|e| format!("fs task join error: {}", e))?
 }
 
 /// Copy a file.
@@ -661,15 +852,33 @@ async fn op_fs_copy_file(
 ) -> Result<String, JsErrorBox> {
     let config = extract_config(&state)?;
     let mount = extract_mount(&state);
+    copy_file_impl(config, mount, from, to).await.map_err(JsErrorBox::generic)
+}
 
-    // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
+/// Sync twin of [`op_fs_copy_file`] (backs `fs.copyFileSync`).
+#[op2]
+#[string]
+fn op_fs_copy_file_sync(
+    state: &mut OpState,
+    #[string] from: String,
+    #[string] to: String,
+) -> Result<String, JsErrorBox> {
+    let (config, mount) = sync_state(state)?;
+    run_sync(move || copy_file_impl(config, mount, from, to))
+}
+
+async fn copy_file_impl(
+    config: FsConfig,
+    mount: Option<FsMountHandle>,
+    from: String,
+    to: String,
+) -> Result<String, String> {
+    // Mount branch runs inline (current-thread runtime; deno_unsync needs it).
     if let Some(m) = mount {
-        check_policy(&config.policy_chain, "copyFile", &from, Some(&to), None, None, config.mcp_headers.as_ref())
-            .await
-            .map_err(JsErrorBox::generic)?;
+        check_policy(&config.policy_chain, "copyFile", &from, Some(&to), None, None, config.mcp_headers.as_ref()).await?;
         // Copy by reference: clones the content-addressed entry, no rechunk.
         m.0.lock().await.copy(Path::new(&from), Path::new(&to)).await
-            .map_err(|e| JsErrorBox::generic(format!("fs.copyFile: {} -> {}: {}", from, to, e)))?;
+            .map_err(|e| format!("fs.copyFile: {} -> {}: {}", from, to, e))?;
         return Ok("{}".to_string());
     }
 
@@ -682,8 +891,7 @@ async fn op_fs_copy_file(
         Ok("{}".to_string())
     })
     .await
-    .map_err(|e| JsErrorBox::generic(format!("fs task join error: {}", e)))?
-    .map_err(|e: String| JsErrorBox::generic(e))
+    .map_err(|e| format!("fs task join error: {}", e))?
 }
 
 /// Check if a path exists.
@@ -695,12 +903,28 @@ async fn op_fs_exists(
 ) -> Result<String, JsErrorBox> {
     let config = extract_config(&state)?;
     let mount = extract_mount(&state);
+    exists_impl(config, mount, path).await.map_err(JsErrorBox::generic)
+}
 
-    // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
+/// Sync twin of [`op_fs_exists`] (backs `fs.existsSync`).
+#[op2]
+#[string]
+fn op_fs_exists_sync(
+    state: &mut OpState,
+    #[string] path: String,
+) -> Result<String, JsErrorBox> {
+    let (config, mount) = sync_state(state)?;
+    run_sync(move || exists_impl(config, mount, path))
+}
+
+async fn exists_impl(
+    config: FsConfig,
+    mount: Option<FsMountHandle>,
+    path: String,
+) -> Result<String, String> {
+    // Mount branch runs inline (current-thread runtime; deno_unsync needs it).
     if let Some(m) = mount {
-        check_policy(&config.policy_chain, "exists", &path, None, None, None, config.mcp_headers.as_ref())
-            .await
-            .map_err(JsErrorBox::generic)?;
+        check_policy(&config.policy_chain, "exists", &path, None, None, None, config.mcp_headers.as_ref()).await?;
         let exists = m.0.lock().await.exists(Path::new(&path)).await;
         return Ok(if exists { "true" } else { "false" }.to_string());
     }
@@ -712,8 +936,7 @@ async fn op_fs_exists(
         Ok(if exists { "true" } else { "false" }.to_string())
     })
     .await
-    .map_err(|e| JsErrorBox::generic(format!("fs task join error: {}", e)))?
-    .map_err(|e: String| JsErrorBox::generic(e))
+    .map_err(|e| format!("fs task join error: {}", e))?
 }
 
 // ── Streaming writes ─────────────────────────────────────────────────────
@@ -865,6 +1088,21 @@ deno_core::extension!(
         op_fs_rename,
         op_fs_copy_file,
         op_fs_exists,
+        op_fs_read_file_text_sync,
+        op_fs_read_file_buffer_sync,
+        op_fs_write_file_text_sync,
+        op_fs_write_file_buffer_sync,
+        op_fs_append_file_sync,
+        op_fs_readdir_sync,
+        op_fs_stat_sync,
+        op_fs_lstat_sync,
+        op_fs_readlink_sync,
+        op_fs_symlink_sync,
+        op_fs_mkdir_sync,
+        op_fs_rm_sync,
+        op_fs_rename_sync,
+        op_fs_copy_file_sync,
+        op_fs_exists_sync,
         op_fs_write_stream_open,
         op_fs_write_stream_chunk_buffer,
         op_fs_write_stream_chunk_text,
@@ -1075,6 +1313,112 @@ const FS_JS_WRAPPER: &str = r#"
         };
     }
 
+    // ── Synchronous variants (Node fs.*Sync) ────────────────────────────
+    // Backed by sync ops that share the async ops' implementation (and thus
+    // the same policy operation names: readFileSync is gated as "readFile").
+
+    function callSync(name, ...args) {
+        try {
+            return ops[name](...args);
+        } catch (e) {
+            throw tagError(e);
+        }
+    }
+
+    function readFileSync(path, options) {
+        if (typeof path !== 'string') throw new TypeError('fs.readFileSync: path must be a string');
+        const enc = readEncoding(options);
+        if (enc && enc !== 'buffer') return callSync('op_fs_read_file_text_sync', path);
+        return callSync('op_fs_read_file_buffer_sync', path);
+    }
+
+    function writeFileSync(path, data) {
+        if (typeof path !== 'string') throw new TypeError('fs.writeFileSync: path must be a string');
+        if (data instanceof Uint8Array) {
+            callSync('op_fs_write_file_buffer_sync', path, data);
+        } else if (ArrayBuffer.isView(data)) {
+            callSync('op_fs_write_file_buffer_sync', path, new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+        } else if (data instanceof ArrayBuffer) {
+            callSync('op_fs_write_file_buffer_sync', path, new Uint8Array(data));
+        } else {
+            callSync('op_fs_write_file_text_sync', path, String(data));
+        }
+    }
+
+    function appendFileSync(path, data) {
+        if (typeof path !== 'string') throw new TypeError('fs.appendFileSync: path must be a string');
+        callSync('op_fs_append_file_sync', path, String(data));
+    }
+
+    function readdirSync(path) {
+        if (typeof path !== 'string') throw new TypeError('fs.readdirSync: path must be a string');
+        return JSON.parse(callSync('op_fs_readdir_sync', path));
+    }
+
+    function statSync(path) {
+        if (typeof path !== 'string') throw new TypeError('fs.statSync: path must be a string');
+        return makeStats(JSON.parse(callSync('op_fs_stat_sync', path)));
+    }
+
+    function lstatSync(path) {
+        if (typeof path !== 'string') throw new TypeError('fs.lstatSync: path must be a string');
+        return makeStats(JSON.parse(callSync('op_fs_lstat_sync', path)));
+    }
+
+    function mkdirSync(path, options) {
+        if (typeof path !== 'string') throw new TypeError('fs.mkdirSync: path must be a string');
+        callSync('op_fs_mkdir_sync', path, (options && options.recursive) ? 1 : 0);
+    }
+
+    function rmSync(path, options) {
+        if (typeof path !== 'string') throw new TypeError('fs.rmSync: path must be a string');
+        callSync('op_fs_rm_sync', path, (options && options.recursive) ? 1 : 0);
+    }
+
+    function rmdirSync(path, options) {
+        if (typeof path !== 'string') throw new TypeError('fs.rmdirSync: path must be a string');
+        callSync('op_fs_rm_sync', path, (options && options.recursive) ? 1 : 0);
+    }
+
+    function unlinkSync(path) {
+        if (typeof path !== 'string') throw new TypeError('fs.unlinkSync: path must be a string');
+        callSync('op_fs_rm_sync', path, 0);
+    }
+
+    function renameSync(oldPath, newPath) {
+        if (typeof oldPath !== 'string') throw new TypeError('fs.renameSync: oldPath must be a string');
+        if (typeof newPath !== 'string') throw new TypeError('fs.renameSync: newPath must be a string');
+        callSync('op_fs_rename_sync', oldPath, newPath);
+    }
+
+    function copyFileSync(src, dest) {
+        if (typeof src !== 'string') throw new TypeError('fs.copyFileSync: src must be a string');
+        if (typeof dest !== 'string') throw new TypeError('fs.copyFileSync: dest must be a string');
+        callSync('op_fs_copy_file_sync', src, dest);
+    }
+
+    function readlinkSync(path) {
+        if (typeof path !== 'string') throw new TypeError('fs.readlinkSync: path must be a string');
+        return callSync('op_fs_readlink_sync', path);
+    }
+
+    function symlinkSync(target, path) {
+        if (typeof target !== 'string') throw new TypeError('fs.symlinkSync: target must be a string');
+        if (typeof path !== 'string') throw new TypeError('fs.symlinkSync: path must be a string');
+        callSync('op_fs_symlink_sync', target, path);
+    }
+
+    // Node contract: existsSync never throws — any failure (bad argument,
+    // IO error, policy denial) reads as false.
+    function existsSync(path) {
+        try {
+            if (typeof path !== 'string') return false;
+            return callSync('op_fs_exists_sync', path) === 'true';
+        } catch (_) {
+            return false;
+        }
+    }
+
     // The promise-based surface mirroring Node's `fs.promises`. readFile follows
     // Node semantics here (bytes by default). Libraries that wrap a filesystem —
     // isomorphic-git among them — detect this enumerable property and bind its
@@ -1088,12 +1432,65 @@ const FS_JS_WRAPPER: &str = r#"
     globalThis.fs = {
         readFile, writeFile, appendFile, readdir, stat, lstat, mkdir, rm, rmdir,
         unlink, rename, copyFile, readlink, symlink, exists, createWriteStream,
+        readFileSync, writeFileSync, appendFileSync, readdirSync, statSync,
+        lstatSync, mkdirSync, rmSync, rmdirSync, unlinkSync, renameSync,
+        copyFileSync, readlinkSync, symlinkSync, existsSync,
         promises,
     };
 })();
 "#;
 
 // ── Helpers ──────────────────────────────────────────────────────────────
+
+/// Backstop timeout for sync fs ops. A sync op blocks the isolate thread, so
+/// V8's `terminate_execution` cannot interrupt it — without a bound, a hung
+/// policy server (or a mount-mutex deadlock against an in-flight async op)
+/// would wedge the execution's blocking thread forever. 300 s matches the
+/// maximum configurable execution timeout.
+const SYNC_OP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Drive an fs impl future to completion from a synchronous op.
+///
+/// Sync ops execute on the isolate thread, which already sits INSIDE its own
+/// current-thread tokio runtime's `block_on` (see `execute_module`) — blocking
+/// on that runtime again would panic. Instead the future is built and driven
+/// on a scoped helper thread with a fresh mini runtime. The mini runtime is
+/// current-thread flavored, which the CAS overlay (deno_unsync) requires, and
+/// `enable_all` gives remote-OPA policy checks their reactor and timer.
+fn run_sync<T, F, Fut>(make: F) -> Result<T, JsErrorBox>
+where
+    T: Send,
+    F: FnOnce() -> Fut + Send,
+    Fut: std::future::Future<Output = Result<T, String>>,
+{
+    std::thread::scope(|s| {
+        s.spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| format!("fs sync: failed to create runtime: {}", e))?;
+            rt.block_on(async {
+                tokio::time::timeout(SYNC_OP_TIMEOUT, make())
+                    .await
+                    .map_err(|_| "fs sync operation timed out".to_string())?
+            })
+        })
+        .join()
+        .map_err(|_| JsErrorBox::generic("fs sync: worker thread panicked"))?
+        .map_err(JsErrorBox::generic)
+    })
+}
+
+/// Extract config + mount for a sync op (`&mut OpState` instead of the
+/// `Rc<RefCell<OpState>>` async ops receive).
+fn sync_state(state: &mut OpState) -> Result<(FsConfig, Option<FsMountHandle>), JsErrorBox> {
+    let config = state
+        .try_borrow::<FsConfig>()
+        .cloned()
+        .ok_or_else(|| JsErrorBox::generic("fs: internal error — no fs config available"))?;
+    let mount = state.try_borrow::<FsMountHandle>().cloned();
+    Ok((config, mount))
+}
 
 fn extract_config(state: &Rc<RefCell<OpState>>) -> Result<FsConfig, JsErrorBox> {
     let state = state.borrow();
