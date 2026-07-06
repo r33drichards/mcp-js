@@ -72,6 +72,15 @@ You can import npm packages, JSR packages, and URL modules using ES module `impo
 
 Always pin versions for reproducible results. Dynamic `import()` is also supported with top-level `await`.
 
+## Node Built-ins via require()
+
+A CommonJS-style `require()` resolves a small set of Node built-ins — handy when reusing Node-flavored snippets:
+
+- `require('path')` (or `'node:path'`) — a POSIX implementation of Node's `path` module
+- `require('fs')` / `require('fs/promises')` — the sandbox `fs` module (see "Filesystem Access"); throws with instructions if the server has no filesystem policy
+
+Anything else throws `MODULE_NOT_FOUND`. There is no CommonJS module resolution — for packages use the ES-module `import` syntax above.
+
 ## Filesystem Access
 
 When the server is configured with policies, JavaScript code can use an `fs` module providing Node.js-compatible file operations. Every operation is evaluated against a Rego policy before execution.
@@ -92,12 +101,14 @@ When the server is configured with policies, JavaScript code can use an `fs` mod
 
 All operations return Promises and are subject to Rego policy evaluation. Policy input includes `operation`, `path`, `destination` (for rename/copy), `recursive` (for mkdir/rm), and `encoding` (for readFile).
 
+**Synchronous variants:** Node's `fs.*Sync` API is available too — `readFileSync`, `writeFileSync`, `appendFileSync`, `readdirSync`, `statSync`, `lstatSync`, `mkdirSync`, `rmSync`, `rmdirSync`, `unlinkSync`, `renameSync`, `copyFileSync`, `readlinkSync`, `symlinkSync`, `existsSync`. Sync variants are gated by the same policies under the same operation names (`readFileSync` is checked as `readFile`). Per Node's contract, `existsSync` never throws: errors and policy denials read as `false`.
+
 ## Limitations
 
 - **No `fetch` or network access by default**: When the server is started with fetch policies configured via `--policies-json`, a `fetch(url, opts?)` function becomes available. `fetch()` follows the web standard Fetch API — it returns a Promise that resolves to a Response object. Use `await` to get the response: `const resp = await fetch(url)`. The response object has `.ok`, `.status`, `.statusText`, `.url`, `.headers.get(name)`, `.text()`, and `.json()` methods (`.text()` and `.json()` also return Promises). Each request is checked against policy before execution. If the server is also configured with `--fetch-header` or `--fetch-header-config`, matching requests may receive static headers or dynamically acquired OAuth client-credentials bearer tokens before policy evaluation. Headers set directly in JavaScript still win. Without fetch policies, there is no network access.
 - **No file system access by default**: Filesystem access requires server configuration with policies. See "Filesystem Access" above.
 - **No environment variables**: The runtime does not provide access to environment variables.
-- **No timers**: Functions like `setTimeout` and `setInterval` are not available.
+- **Timers**: `setTimeout`/`clearTimeout` are available; `setInterval` is not — use a loop with an awaited `setTimeout`.
 - **No DOM or browser APIs**: This is not a browser environment; there is no access to `window`, `document`, or other browser-specific objects.
 
 In stateful mode, each execution returns a SHA-256 content hash for the heap snapshot — pass it back as the `heap` parameter in the next call to resume from that state. Omit `heap` for a fresh heap.

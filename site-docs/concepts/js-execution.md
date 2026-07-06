@@ -47,6 +47,19 @@ The captured output is read back through `get_execution_output` (MCP) or `GET /a
 
 Because code runs as an ES module inside `deno_core`'s event loop (`run_event_loop`), timer callbacks and other async continuations resolve correctly without any special configuration.
 
+## Node compatibility: `require()` and synchronous `fs`
+
+mcp-v8 is not Node.js — code runs as an ES module in a bare V8 isolate — but two shims cover the Node idioms agents habitually write:
+
+**`require()`** is installed as a global in every isolate. It resolves a small fixed set of built-ins and nothing more:
+
+- `require('path')` / `require('node:path')` — a pure-JS POSIX port of Node's `path` module (`parse` and `basename` are direct ports of Node's algorithms, quirks included; `path.posix` is a self-reference)
+- `require('fs')` / `require('node:fs')` — the sandbox `fs` global; `require('fs/promises')` — `fs.promises`
+
+The shim grants no capability of its own: `fs` resolution is checked lazily at call time, so on a server without a filesystem policy `require('fs')` throws an error explaining how to enable it. Every other specifier throws `MODULE_NOT_FOUND` naming the supported set — CommonJS file modules and `node_modules` resolution do not exist; npm packages are served by `npm:` ES-module imports instead.
+
+**Synchronous `fs` variants** (`readFileSync`, `writeFileSync`, `existsSync`, …) back the other half of pasted Node code. A synchronous op cannot block on the isolate's own current-thread runtime — the isolate thread is already inside that runtime's `block_on` — so each sync call drives the same implementation as its async twin on a short-lived helper thread with its own mini runtime, with a 300 s backstop timeout. Policy evaluation is identical to the async API, under the same operation names. See [Filesystem access](filesystem.md) for the policy model.
+
 ## Memory limits
 
 A per-isolate memory cap is enforced at two independent levels:

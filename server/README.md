@@ -900,6 +900,16 @@ return a Node `fs.Stats`-like object (`isFile()`, `isDirectory()`,
 `fs` / `fs.promises` interface — such as `isomorphic-git` — use the sandbox `fs`
 object directly.
 
+Node's synchronous variants are provided as well — `readFileSync`,
+`writeFileSync`, `appendFileSync`, `readdirSync`, `statSync`, `lstatSync`,
+`mkdirSync`, `rmSync`, `rmdirSync`, `unlinkSync`, `renameSync`, `copyFileSync`,
+`readlinkSync`, `symlinkSync`, `existsSync` — gated by the same policies under
+the same operation names (`readFileSync` is checked as `"readFile"`). Per
+Node's contract, `existsSync` never throws: errors and policy denials read as
+`false`. A CommonJS-style `require()` global resolves `fs`, `fs/promises`, and
+`path` (a POSIX port of Node's path module), so Node-flavored snippets like
+`const fs = require('fs')` run unchanged.
+
 **1. Write a Rego policy**
 
 Create a Rego policy that controls which filesystem operations are allowed:
@@ -1090,7 +1100,7 @@ You can configure heap storage using the following command line arguments:
 
 ## Limitations
 
-- **No timers**: Functions like `setTimeout` and `setInterval` are not available.
+- **Timers**: `setTimeout`/`clearTimeout` are available; `setInterval` is not — use a loop with an awaited `setTimeout`.
 - **No DOM or browser APIs**: This is not a browser environment; there is no access to `window`, `document`, or other browser-specific objects.
 - **TypeScript: type removal only**: TypeScript type annotations are stripped before execution. No type checking is performed — invalid types are silently removed, not reported as errors.
 

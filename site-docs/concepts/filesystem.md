@@ -25,6 +25,8 @@ The policy chain evaluates to `true` (allow) or `false` (deny). Denial throws a 
 
 The chain supports multiple evaluators. In `"all"` mode (the default) every evaluator must allow; in `"any"` mode a single allow is sufficient.
 
+The synchronous variants (`fs.readFileSync`, `fs.existsSync`, …) go through the same chain with the same `operation` values as their async twins — `readFileSync` is evaluated as `"readFile"` — so one policy governs both APIs. The lone semantic difference is `fs.existsSync`, which follows Node's contract of never throwing: a policy denial reads as `false` instead of an error (the async `fs.exists` still throws on denial).
+
 ## Call flow for a gated `fs.readFile`
 
 ```mermaid

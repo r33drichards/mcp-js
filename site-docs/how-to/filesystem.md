@@ -83,6 +83,8 @@ Operation names match exactly what the JS wrapper passes: `readFile`, `writeFile
 
 Note: `fs.unlink` and `fs.rmdir` reuse the `rm` op internally, so their policy operation is `"rm"`.
 
+Note: the synchronous variants (`fs.readFileSync`, `fs.writeFileSync`, …) share their async counterparts' operation names — `readFileSync` is checked as `"readFile"`, `unlinkSync` as `"rm"`, and so on — so a policy written against the names above gates both APIs. There are no separate `*Sync` operation names.
+
 ## Use a remote OPA server
 
 Replace the `file://` URL with an `http://` or `https://` URL pointing to a running OPA instance:
@@ -204,6 +206,37 @@ await fs.rename("/var/mcp-workspace/draft.txt", "/var/mcp-workspace/final.txt");
 ```js
 await fs.copyFile("/var/mcp-workspace/template.txt", "/var/mcp-workspace/output.txt");
 ```
+
+## Use the synchronous (Node `fs.*Sync`) API
+
+Every operation above also has a Node-style synchronous variant, so Node-flavored
+snippets (and `require('fs')` consumers) run unchanged:
+
+```js
+const fs = require('fs'); // or use the fs global directly
+
+if (fs.existsSync("/var/mcp-workspace/config.json")) {
+    const text = fs.readFileSync("/var/mcp-workspace/config.json", "utf8");
+    fs.writeFileSync("/var/mcp-workspace/config.bak", text);
+}
+```
+
+Available: `readFileSync`, `writeFileSync`, `appendFileSync`, `readdirSync`,
+`statSync`, `lstatSync`, `mkdirSync`, `rmSync`, `rmdirSync`, `unlinkSync`,
+`renameSync`, `copyFileSync`, `readlinkSync`, `symlinkSync`, `existsSync`.
+
+Three things to know:
+
+- **Same policy gate.** Sync variants are evaluated under the async operation
+  names (`readFileSync` → `"readFile"`), so existing policies apply unchanged.
+- **`existsSync` never throws.** Per Node's contract, IO errors *and policy
+  denials* read as `false`.
+- **Reads return `Uint8Array`** by default (a string with an encoding argument)
+  — there is no Node `Buffer` in the sandbox.
+
+Prefer the promise-based API for new code — top-level `await` makes it just as
+convenient, and a sync call blocks the isolate (and, in a mounted session, one
+sync call sequences behind any in-flight async operation on the same mount).
 
 ## See also
 
