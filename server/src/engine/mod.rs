@@ -15,6 +15,7 @@ pub mod heap_storage;
 pub mod heap_tags;
 pub mod mcp_client;
 pub mod module_loader;
+pub mod node_compat;
 pub mod opa;
 pub mod run_js_file;
 pub mod session_log;
@@ -1057,6 +1058,10 @@ pub fn execute_stateless(
                 if let Err(e) = timers::inject_timers(&mut runtime) {
                     return Err(e);
                 }
+                // Inject require() shim for Node built-ins (always available).
+                if let Err(e) = node_compat::inject_require(&mut runtime) {
+                    return Err(e);
+                }
                 // Harden sandbox: freeze ops, neutralize introspection, remove __bootstrap.
                 // Must run after all inject_* calls and before user code.
                 if let Err(e) = console::harden_runtime(&mut runtime, hardening) {
@@ -1266,6 +1271,10 @@ pub fn execute_stateful(
                     }
                     // Inject setTimeout/clearTimeout (always available).
                     if let Err(e) = timers::inject_timers(&mut runtime) {
+                        return Err(e);
+                    }
+                    // Inject require() shim for Node built-ins (always available).
+                    if let Err(e) = node_compat::inject_require(&mut runtime) {
                         return Err(e);
                     }
                     // Harden sandbox: freeze ops, neutralize introspection, remove __bootstrap.
