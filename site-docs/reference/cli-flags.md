@@ -111,6 +111,13 @@ JWKS endpoint URL for fetching public keys (e.g., Keycloak OIDC certs URL). Enab
 - Environment: `JWKS_URL`
 - Value: `JWKS_URL`
 
+### `--session-id`
+
+Fixed session id for this process, used when no X-MCP-Session-Id header is available (i.e. the stdio transport). Keys per-session heap+fs state so a process spawned for a given logical session (e.g. one per thread) resumes that session's stateful heap+fs. Over HTTP the header still wins
+
+- Environment: `MCP_V8_SESSION_ID`
+- Value: `SESSION_ID`
+
 ### `--http-port`
 
 HTTP port using Streamable HTTP transport (MCP 2025-03-26+, load-balanceable)
@@ -132,6 +139,21 @@ Host/address the HTTP and SSE transports bind to. Defaults to all IPv4 interface
 - Environment: `MCP_V8_BIND_HOST`
 - Default: `0.0.0.0`
 - Value: `BIND_HOST`
+
+### `--http-allowed-host`
+
+Additional Host / `host:port` authorities to accept for inbound Streamable-HTTP `Host` validation (rmcp DNS-rebind protection), on top of the loopback defaults (localhost, 127.0.0.1, ::1). Set this to your public domain(s) when deploying behind one. Repeatable
+
+- Environment: `MCP_V8_HTTP_ALLOWED_HOST`
+- Value: `HOST`
+- Repeatable: yes
+
+### `--http-allow-any-host`
+
+Disable inbound Host validation entirely (accept ANY Host header). For intentionally-public deployments where the rmcp DNS-rebind guard would otherwise 403 non-loopback hosts. Takes precedence over --http-allowed-host
+
+- Environment: `MCP_V8_HTTP_ALLOW_ANY_HOST`
+- Default: `false`
 
 ### `--heap-memory-max`
 

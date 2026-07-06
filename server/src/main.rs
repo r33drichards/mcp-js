@@ -621,10 +621,10 @@ async fn main() -> Result<()> {
         tracing::info!("Starting Streamable HTTP transport on port {}", port);
         if engine.session_capable() {
             let verifier = session_verifier.clone();
-            start_streamable_http(engine, bind_host, port, move |e| McpService::new(e, verifier.clone())).await?;
+            start_streamable_http(engine, bind_host, port, cli.http_allow_any_host, cli.http_allowed_hosts.clone(), move |e| McpService::new(e, verifier.clone())).await?;
         } else {
             let verifier = session_verifier.clone();
-            start_streamable_http(engine, bind_host, port, move |e| StatelessMcpService::new(e, verifier.clone())).await?;
+            start_streamable_http(engine, bind_host, port, cli.http_allow_any_host, cli.http_allowed_hosts.clone(), move |e| StatelessMcpService::new(e, verifier.clone())).await?;
         }
     } else if let Some(port) = cli.sse_port {
         // Legacy HTTP+SSE transport, served by the vendored rmcp 0.1.5 SSE
@@ -670,13 +670,33 @@ fn resolve_bind_addr(host: &str, port: u16) -> Result<std::net::SocketAddr> {
 
 // ── Streamable HTTP transport (--http-port) ─────────────────────────────
 
-async fn start_streamable_http<S, F>(engine: Engine, host: String, port: u16, make_service: F) -> Result<()>
+async fn start_streamable_http<S, F>(
+    engine: Engine,
+    host: String,
+    port: u16,
+    allow_any_host: bool,
+    extra_allowed_hosts: Vec<String>,
+    make_service: F,
+) -> Result<()>
 where
     S: ServerHandler + Send + Sync + 'static,
     F: Fn(Engine) -> S + Send + Sync + Clone + 'static,
 {
     let bind: std::net::SocketAddr = resolve_bind_addr(&host, port)?;
     let ct = CancellationToken::new();
+
+    // rmcp's DNS-rebinding guard rejects any Host header not in `allowed_hosts`
+    // (default: localhost/127.0.0.1/::1), which 403s public deployments behind a
+    // domain. Let the operator either extend the allowlist or disable it.
+    let mut http_cfg = StreamableHttpServerConfig::default();
+    if allow_any_host {
+        http_cfg = http_cfg.disable_allowed_hosts();
+    } else if !extra_allowed_hosts.is_empty() {
+        // keep the loopback defaults AND add the operator's hosts
+        let mut hosts = http_cfg.allowed_hosts.clone();
+        hosts.extend(extra_allowed_hosts.iter().cloned());
+        http_cfg = http_cfg.with_allowed_hosts(hosts);
+    }
 
     // The Streamable HTTP transport (rmcp 1.x) is a tower service mounted at
     // /mcp. It natively serves the MCP `tasks/*` utility (SEP-1319) for tools
@@ -686,7 +706,7 @@ where
     let mcp_service = StreamableHttpService::new(
         move || Ok(make_service(factory_engine.clone())),
         LocalSessionManager::default().into(),
-        StreamableHttpServerConfig::default(),
+        http_cfg,
     );
 
     // Serve OpenAPI JSON spec at /api-doc/openapi.json

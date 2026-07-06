@@ -81,6 +81,20 @@ pub struct Cli {
     #[arg(long, env = "MCP_V8_BIND_HOST", default_value = "0.0.0.0", help_heading = "Core")]
     pub bind_host: String,
 
+    /// Additional Host / `host:port` authorities to accept for inbound
+    /// Streamable-HTTP `Host` validation (rmcp DNS-rebind protection), on top of
+    /// the loopback defaults (localhost, 127.0.0.1, ::1). Set this to your public
+    /// domain(s) when deploying behind one. Repeatable.
+    #[arg(long = "http-allowed-host", env = "MCP_V8_HTTP_ALLOWED_HOST", value_name = "HOST", help_heading = "Core")]
+    pub http_allowed_hosts: Vec<String>,
+
+    /// Disable inbound Host validation entirely (accept ANY Host header). For
+    /// intentionally-public deployments where the rmcp DNS-rebind guard would
+    /// otherwise 403 non-loopback hosts. Takes precedence over
+    /// --http-allowed-host.
+    #[arg(long = "http-allow-any-host", env = "MCP_V8_HTTP_ALLOW_ANY_HOST", default_value = "false", help_heading = "Core")]
+    pub http_allow_any_host: bool,
+
     /// Maximum V8 heap memory per isolate in megabytes (default: 8)
     #[arg(
         long,
