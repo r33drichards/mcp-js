@@ -58,7 +58,7 @@ These are two distinct, complementary concepts:
 | Identity | A string name supplied by the caller | A 64-char hex SHA-256 hash derived from content |
 | Lifetime | Persists in the sled metadata DB until explicitly cleared | Persists in heap storage (local FS or S3) indefinitely |
 | Purpose | Ordered audit log of which heaps were produced | The actual V8 state bytes |
-| Created by | `X-MCP-Session-Id` header on `initialize`, or `session` field in REST `POST /api/exec` | Every stateful execution |
+| Created by | The MCP transport session (`Mcp-Session-Id`) by default; an `X-MCP-Session-Id` header on `initialize` to override it; or the `session` field in REST `POST /api/exec` | Every stateful execution |
 
 A session does not own its heaps. Multiple sessions can reference the same heap hash, and a heap hash is valid without any session association. Sessions are primarily useful for tracing the evolution of state over time and for finding which heap key to resume from.
 

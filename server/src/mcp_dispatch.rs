@@ -222,7 +222,7 @@ async fn list_session_snapshots(engine: &Engine, session_id: Option<&str>, args:
         Some(id) => id.to_string(),
         None => {
             return json!({
-                "entries": [{"error": "no session ID available (send X-MCP-Session-Id header)"}]
+                "entries": [{"error": "no session ID available (expected the transport Mcp-Session-Id, an X-MCP-Session-Id header, or --session-id)"}]
             })
         }
     };

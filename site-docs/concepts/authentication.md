@@ -78,7 +78,7 @@ Applications that require hard enforcement should add a reverse proxy or API gat
 The JWT and the session identifier are independent:
 
 - The JWT identifies **who** is connecting (authenticates the bearer).
-- The session ID (`X-MCP-Session-Id` header, also captured at `initialize`) identifies **which heap chain** to attach to.
+- The session ID identifies **which heap chain** to attach to. It defaults to the MCP transport session (`Mcp-Session-Id`); send an `X-MCP-Session-Id` header at `initialize` to override it with a stable name of your own.
 
 A single JWT can be reused across multiple session connections. The session ID is never read from the JWT payload.
 

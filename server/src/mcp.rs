@@ -368,7 +368,11 @@ pub struct McpService {
     /// tools are exposed as stubs in this service's tool list, and calls to
     /// those stubs return run_js instructions instead of dispatching.
     mcp_client: Option<Arc<McpClientManager>>,
-    /// Set once during `initialize` from X-MCP-Session-Id header.
+    /// Persistence session key. Set during `initialize` from the custom
+    /// `X-MCP-Session-Id` header (explicit override) or `--session-id` (stdio);
+    /// otherwise adopted from the standard transport `Mcp-Session-Id` on the
+    /// first tool call, so a spec-compliant MCP client gets per-session `/work`
+    /// + heap without sending a custom header (see #200).
     session_id: Arc<OnceLock<String>>,
     /// X-MCP-* headers from the initialize request, available for policy evaluation.
     mcp_headers: Arc<OnceLock<serde_json::Value>>,
@@ -459,7 +463,7 @@ impl McpService {
         self.dispatch("list_executions", &json!({})).await
     }
 
-    #[tool(description = "List all named sessions (stateful mode only). Returns an array of session names that have been used via REST session fields or the X-MCP-Session-Id header.")]
+    #[tool(description = "List all named sessions (stateful mode only). Returns an array of session ids that have been used — the MCP transport session (Mcp-Session-Id) by default, a REST session field, or an explicit X-MCP-Session-Id header.")]
     pub async fn list_sessions(&self) -> Result<CallToolResult, McpError> {
         self.dispatch("list_sessions", &json!({})).await
     }
@@ -649,6 +653,11 @@ impl ServerHandler for McpService {
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
+        // Default the persistence session key to the MCP-standard transport
+        // session (`Mcp-Session-Id`) when no explicit `X-MCP-Session-Id` /
+        // `--session-id` was given, so per-session `/work` + heap persist for a
+        // spec-compliant client without a custom header (see #200).
+        adopt_transport_session_id(&self.session_id, &context);
         if let Some(client) = &self.mcp_client {
             if let Some(result) = client.stub_call_response(&request.name, request.arguments.as_ref()) {
                 return Ok(result);
@@ -799,6 +808,38 @@ impl ServerHandler for StatelessMcpService {
     ) -> Result<InitializeResult, McpError> {
         capture_mcp_headers(&context, None, &self.mcp_headers, self.verifier.as_ref()).await;
         Ok(self.get_info())
+    }
+}
+
+/// Adopt the MCP-standard transport session (`Mcp-Session-Id`) as the
+/// persistence session key when no explicit id was set at `initialize` (from the
+/// custom `X-MCP-Session-Id` header or the `--session-id` flag).
+///
+/// The Streamable HTTP transport issues `Mcp-Session-Id` at `initialize` and the
+/// client echoes it on every subsequent request, so a spec-compliant client that
+/// only speaks the standard session header still gets a persistent per-session
+/// `/work` filesystem and heap — no custom `X-MCP-Session-Id` required (see
+/// issue #200). Called on each tool call; a no-op once the id is set (the
+/// explicit header/flag wins) or when the transport has no HTTP parts (stdio) or
+/// no session header (e.g. stateless HTTP).
+pub(crate) fn adopt_transport_session_id(
+    session_id: &OnceLock<String>,
+    context: &RequestContext<RoleServer>,
+) {
+    if session_id.get().is_some() {
+        return;
+    }
+    let Some(parts) = context.extensions.get::<axum::http::request::Parts>() else {
+        return;
+    };
+    if let Some(sid) = parts
+        .headers
+        .get("mcp-session-id")
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+    {
+        tracing::info!(session_id = sid, "Session ID from Mcp-Session-Id transport header");
+        let _ = session_id.set(sid.to_string());
     }
 }
 

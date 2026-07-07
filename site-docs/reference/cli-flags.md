@@ -120,7 +120,7 @@ JWKS endpoint URL for fetching public keys (e.g., Keycloak OIDC certs URL). Enab
 
 ### `--session-id`
 
-Fixed session id for this process, used when no X-MCP-Session-Id header is available (i.e. the stdio transport). Keys per-session heap+fs state so a process spawned for a given logical session (e.g. one per thread) resumes that session's stateful heap+fs. Over HTTP the header still wins
+Fixed session id for this process, used when no per-request session id is available (i.e. the stdio transport). Keys per-session heap+fs state so a process spawned for a given logical session (e.g. one per thread) resumes that session's stateful heap+fs. Over HTTP the session id comes from the request instead — the MCP transport session (Mcp-Session-Id) by default, or an X-MCP-Session-Id header when sent — so this flag does not apply
 
 - Environment: `MCP_V8_SESSION_ID`
 - Value: `SESSION_ID`

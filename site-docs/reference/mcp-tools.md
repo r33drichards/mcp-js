@@ -210,7 +210,7 @@ Parameters:
 ### `list_sessions`
 <a id="heap+fs-list-sessions"></a>
 
-List all named sessions (stateful mode only). Returns an array of session names that have been used via REST session fields or the X-MCP-Session-Id header.
+List all named sessions (stateful mode only). Returns an array of session ids that have been used — the MCP transport session (Mcp-Session-Id) by default, a REST session field, or an explicit X-MCP-Session-Id header.
 
 Parameters:
 
@@ -248,7 +248,7 @@ params:
 returns:
 - execution_id: UUID of the submitted execution. Use with get_execution, get_execution_output, and cancel_execution.
 
-Session identity for MCP history tracking comes from the `X-MCP-Session-Id` header during initialization, not from a `session` tool parameter.
+Session identity for MCP history tracking defaults to the MCP transport session (the `Mcp-Session-Id` issued at initialization and echoed by the client on every request), not a `session` tool parameter — so history and per-session state track automatically. To pin a stable, resumable session id yourself, send the optional `X-MCP-Session-Id` header during initialization; it overrides the transport session.
 
 #### Workflow
 

@@ -228,7 +228,7 @@
   session_id = lib.mkOption {
     type = lib.types.nullOr lib.types.str;
     default = null;
-    description = "Fixed session id for this process, used when no X-MCP-Session-Id header is available (i.e. the stdio transport). Keys per-session heap+fs state so a process spawned for a given logical session (e.g. one per thread) resumes that session's stateful heap+fs. Over HTTP the header still wins. Config-file key for the `--session-id` flag. Environment variable: `MCP_V8_SESSION_ID`.";
+    description = "Fixed session id for this process, used when no per-request session id is available (i.e. the stdio transport). Keys per-session heap+fs state so a process spawned for a given logical session (e.g. one per thread) resumes that session's stateful heap+fs. Over HTTP the session id comes from the request instead — the MCP transport session (Mcp-Session-Id) by default, or an X-MCP-Session-Id header when sent — so this flag does not apply. Config-file key for the `--session-id` flag. Environment variable: `MCP_V8_SESSION_ID`.";
   };
   sse_port = lib.mkOption {
     type = lib.types.nullOr lib.types.port;

@@ -126,7 +126,7 @@ The `ClientCredentialsProvider` fetches and caches tokens, injecting them as `Au
 
 ## Add a session ID alongside the token
 
-The JWT authenticates the connection; it is separate from the session identifier. Send `X-MCP-Session-Id` as an additional header on the same `initialize` request. Both headers are read independently:
+The JWT authenticates the connection; it is separate from the session identifier. By default the session is the MCP transport session (`Mcp-Session-Id`), so per-session state works without any extra header. To pin a stable session name of your own, send `X-MCP-Session-Id` as an additional header on the same `initialize` request — it overrides the transport session. Both headers are read independently:
 
 ```bash
 curl -s -X POST http://localhost:3000/mcp \

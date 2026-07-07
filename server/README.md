@@ -390,7 +390,7 @@ Both modes return position info in both coordinate systems for cross-referencing
 
 ### Additional Tools (Stateful Mode Only)
 
-In stateful MCP, `run_js` accepts an additional `heap` parameter (SHA-256 hash to resume a previous heap snapshot). Session identity for MCP calls comes from the `X-MCP-Session-Id` header rather than a `session` tool parameter.
+In stateful MCP, `run_js` accepts an additional `heap` parameter (SHA-256 hash to resume a previous heap snapshot). Session identity for MCP calls defaults to the MCP transport session (`Mcp-Session-Id`) rather than a `session` tool parameter; send an `X-MCP-Session-Id` header to override it with a stable name of your own.
 
 | Tool | Description |
 |------|-------------|
@@ -431,7 +431,7 @@ Each execution returns a `heap` content hash (a 64-character SHA-256 hex string)
 
 #### Named Sessions
 
-You can tag executions with a human-readable **session name** for history tracking. On the REST API, pass the `session` field in the request body. On MCP, send the `X-MCP-Session-Id` header during initialization. The server logs each execution (input heap, output heap, code, and timestamp) to an embedded sled database.
+You can group executions under a **session** for history tracking. On MCP this defaults to the transport session (`Mcp-Session-Id`), so history is tracked automatically; send the `X-MCP-Session-Id` header during initialization to pin a human-readable name of your own instead. On the REST API, pass the `session` field in the request body. The server logs each execution (input heap, output heap, code, and timestamp) to an embedded sled database.
 
 Two additional tools are available in stateful mode for browsing session history:
 
