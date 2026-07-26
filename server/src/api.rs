@@ -412,11 +412,11 @@ async fn get_execution_handler(
     State(runtime): State<Arc<McpJsLibrary>>,
     Path(id): Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    match runtime.get_execution(&id) {
+    match runtime.get_execution(id.clone()) {
         Ok(info) => (
             StatusCode::OK,
             Json(serde_json::json!({
-                "execution_id": info.id,
+                "execution_id": info.execution_id,
                 "status": info.status,
                 "result": info.result,
                 "heap": info.heap,
@@ -428,7 +428,7 @@ async fn get_execution_handler(
         ),
         Err(e) => (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": e })),
+            Json(serde_json::json!({ "error": e.to_string() })),
         ),
     }
 }
@@ -456,11 +456,11 @@ async fn get_execution_output_handler(
     Path(id): Path<String>,
     Query(query): Query<OutputQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let status = runtime.get_execution(&id)
+    let status = runtime.get_execution(id.clone())
         .map(|info| info.status)
         .unwrap_or_else(|_| "unknown".to_string());
 
-    match runtime.get_execution_output(&id, query.line_offset, query.line_limit, query.byte_offset, query.byte_limit) {
+    match runtime.get_execution_output(id.clone(), query.line_offset, query.line_limit, query.byte_offset, query.byte_limit) {
         Ok(page) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -480,7 +480,7 @@ async fn get_execution_output_handler(
         ),
         Err(e) => (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": e })),
+            Json(serde_json::json!({ "error": e.to_string() })),
         ),
     }
 }
@@ -502,14 +502,14 @@ async fn cancel_execution_handler(
     State(runtime): State<Arc<McpJsLibrary>>,
     Path(id): Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    match runtime.cancel_execution(&id) {
+    match runtime.cancel_execution(id) {
         Ok(()) => (
             StatusCode::OK,
             Json(serde_json::json!({ "ok": true })),
         ),
         Err(e) => (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "ok": false, "error": e })),
+            Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
         ),
     }
 }
@@ -534,7 +534,7 @@ async fn list_executions_handler(
         ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e })),
+            Json(serde_json::json!({ "error": e.to_string() })),
         ),
     }
 }

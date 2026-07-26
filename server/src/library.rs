@@ -1,12 +1,16 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::engine::execution::{ConsoleOutputPage, ExecutionInfo, ExecutionSummary};
+use crate::engine::execution::{
+    ConsoleOutputPage as EngineConsoleOutputPage, ExecutionInfo as EngineExecutionInfo,
+    ExecutionSummary as EngineExecutionSummary,
+};
 use crate::engine::mcp_client::McpClientManager;
 use crate::engine::{
     Engine, FsLabelView, FsMergeResult, FsPushOutcome, FsRefLogView, RunJsRequest, initialize_v8,
 };
 use crate::runtime::McpJsRuntime;
+use serde::Serialize;
 use serde_json::Value;
 
 const DEFAULT_HEAP_MEMORY_MB: u64 = 64;
@@ -47,6 +51,47 @@ pub struct ToolDefinition {
     pub input_schema_json: String,
 }
 
+#[derive(Clone, Debug, Serialize, uniffi::Record)]
+pub struct LibraryCapabilities {
+    pub heap: bool,
+    pub filesystem: bool,
+    pub sessions: bool,
+}
+
+#[derive(Clone, Debug, Serialize, uniffi::Record)]
+pub struct LibraryExecutionInfo {
+    pub execution_id: String,
+    pub status: String,
+    pub result: Option<String>,
+    pub heap: Option<String>,
+    pub fs: Option<String>,
+    pub error: Option<String>,
+    pub started_at: String,
+    pub completed_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, uniffi::Record)]
+pub struct LibraryExecutionSummary {
+    pub execution_id: String,
+    pub status: String,
+    pub started_at: String,
+    pub completed_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, uniffi::Record)]
+pub struct LibraryExecutionOutput {
+    pub data: String,
+    pub start_line: u64,
+    pub end_line: u64,
+    pub next_line_offset: u64,
+    pub total_lines: u64,
+    pub start_byte: u64,
+    pub end_byte: u64,
+    pub next_byte_offset: u64,
+    pub total_bytes: u64,
+    pub has_more: bool,
+}
+
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum LibraryError {
     #[error("invalid configuration: {message}")]
@@ -57,6 +102,8 @@ pub enum LibraryError {
     InvalidJson { field: String, message: String },
     #[error("tool call failed: {message}")]
     ToolCall { message: String },
+    #[error("operation failed: {message}")]
+    Operation { message: String },
 }
 
 #[derive(uniffi::Object)]
@@ -100,6 +147,62 @@ impl McpJsLibrary {
         } else {
             LibraryMode::Stateless
         }
+    }
+
+    pub fn capabilities(&self) -> LibraryCapabilities {
+        LibraryCapabilities {
+            heap: self.runtime.heap_enabled(),
+            filesystem: self.runtime.fs_enabled(),
+            sessions: self.runtime.session_capable(),
+        }
+    }
+
+    pub fn get_execution(
+        &self,
+        execution_id: String,
+    ) -> Result<LibraryExecutionInfo, LibraryError> {
+        self.runtime
+            .get_execution(&execution_id)
+            .map(LibraryExecutionInfo::from)
+            .map_err(operation_message)
+    }
+
+    pub fn get_execution_output(
+        &self,
+        execution_id: String,
+        line_offset: Option<u64>,
+        line_limit: Option<u64>,
+        byte_offset: Option<u64>,
+        byte_limit: Option<u64>,
+    ) -> Result<LibraryExecutionOutput, LibraryError> {
+        self.runtime
+            .get_execution_output(
+                &execution_id,
+                line_offset,
+                line_limit,
+                byte_offset,
+                byte_limit,
+            )
+            .map(LibraryExecutionOutput::from)
+            .map_err(operation_message)
+    }
+
+    pub fn cancel_execution(&self, execution_id: String) -> Result<(), LibraryError> {
+        self.runtime
+            .cancel_execution(&execution_id)
+            .map_err(operation_message)
+    }
+
+    pub fn list_executions(&self) -> Result<Vec<LibraryExecutionSummary>, LibraryError> {
+        self.runtime
+            .list_executions()
+            .map(|executions| {
+                executions
+                    .into_iter()
+                    .map(LibraryExecutionSummary::from)
+                    .collect()
+            })
+            .map_err(operation_message)
     }
 
     pub fn list_tools(&self) -> Result<Vec<ToolDefinition>, LibraryError> {
@@ -217,30 +320,6 @@ impl McpJsLibrary {
         self.runtime.run_js(code)
     }
 
-    pub fn get_execution(&self, id: &str) -> Result<ExecutionInfo, String> {
-        self.runtime.get_execution(id)
-    }
-
-    pub fn get_execution_output(
-        &self,
-        id: &str,
-        line_offset: Option<u64>,
-        line_limit: Option<u64>,
-        byte_offset: Option<u64>,
-        byte_limit: Option<u64>,
-    ) -> Result<ConsoleOutputPage, String> {
-        self.runtime
-            .get_execution_output(id, line_offset, line_limit, byte_offset, byte_limit)
-    }
-
-    pub fn cancel_execution(&self, id: &str) -> Result<(), String> {
-        self.runtime.cancel_execution(id)
-    }
-
-    pub fn list_executions(&self) -> Result<Vec<ExecutionSummary>, String> {
-        self.runtime.list_executions()
-    }
-
     pub async fn fs_list_labels(&self) -> Result<Vec<FsLabelView>, String> {
         self.runtime.fs_list_labels().await
     }
@@ -312,6 +391,53 @@ impl McpJsLibrary {
             .call_tool(session_id, mcp_headers, name, arguments)
             .await
     }
+}
+
+impl From<EngineExecutionInfo> for LibraryExecutionInfo {
+    fn from(info: EngineExecutionInfo) -> Self {
+        Self {
+            execution_id: info.id,
+            status: info.status,
+            result: info.result,
+            heap: info.heap,
+            fs: info.fs,
+            error: info.error,
+            started_at: info.started_at,
+            completed_at: info.completed_at,
+        }
+    }
+}
+
+impl From<EngineExecutionSummary> for LibraryExecutionSummary {
+    fn from(summary: EngineExecutionSummary) -> Self {
+        Self {
+            execution_id: summary.id,
+            status: summary.status,
+            started_at: summary.started_at,
+            completed_at: summary.completed_at,
+        }
+    }
+}
+
+impl From<EngineConsoleOutputPage> for LibraryExecutionOutput {
+    fn from(page: EngineConsoleOutputPage) -> Self {
+        Self {
+            data: page.data,
+            start_line: page.start_line,
+            end_line: page.end_line,
+            next_line_offset: page.next_line_offset,
+            total_lines: page.total_lines,
+            start_byte: page.start_byte,
+            end_byte: page.end_byte,
+            next_byte_offset: page.next_byte_offset,
+            total_bytes: page.total_bytes,
+            has_more: page.has_more,
+        }
+    }
+}
+
+fn operation_message(message: String) -> LibraryError {
+    LibraryError::Operation { message }
 }
 
 fn validate_config(config: &LibraryConfig) -> Result<(), LibraryError> {
@@ -468,42 +594,21 @@ mod tests {
 
         let mut completed = false;
         for _ in 0..200 {
-            let status: Value = serde_json::from_str(
-                &library
-                    .call_tool(
-                        "get_execution".to_string(),
-                        format!(r#"{{"execution_id":"{execution_id}"}}"#),
-                        None,
-                        None,
-                    )
-                    .unwrap(),
-            )
-            .unwrap();
-            if status["status"] == "completed" {
+            let status = library.get_execution(execution_id.to_string()).unwrap();
+            if status.status == "completed" {
                 completed = true;
                 break;
             }
-            if matches!(
-                status["status"].as_str(),
-                Some("failed" | "timed_out" | "cancelled")
-            ) {
-                panic!("stateful execution failed: {status}");
+            if matches!(status.status.as_str(), "failed" | "timed_out" | "cancelled") {
+                panic!("stateful execution failed: {}", status.status);
             }
             std::thread::sleep(std::time::Duration::from_millis(25));
         }
         assert!(completed, "stateful execution did not complete");
 
-        let output: Value = serde_json::from_str(
-            &library
-                .call_tool(
-                    "get_execution_output".to_string(),
-                    format!(r#"{{"execution_id":"{execution_id}"}}"#),
-                    None,
-                    None,
-                )
-                .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(output["data"], "42");
+        let output = library
+            .get_execution_output(execution_id.to_string(), None, None, None, None)
+            .unwrap();
+        assert_eq!(output.data, "42");
     }
 }
