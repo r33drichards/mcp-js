@@ -2,5 +2,6 @@
 
 pub use server::library::{
     LibraryCapabilities, LibraryConfig, LibraryError, LibraryExecutionInfo, LibraryExecutionOutput,
-    LibraryExecutionSummary, LibraryMode, McpJsLibrary, ToolDefinition, default_library_config,
+    LibraryExecutionSummary, LibraryHeapTagEntry, LibraryMode, McpJsLibrary, ToolDefinition,
+    default_library_config,
 };
