@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use tokio::sync::Mutex;
 
+use crate::library::McpJsLibrary;
 use crate::runtime::McpJsRuntime;
 use crate::engine::mcp_client::McpClientManager;
 use crate::session::SessionVerifier;
@@ -362,7 +363,7 @@ fn filter_tools_by_capability(tools: &mut Vec<Tool>, heap: bool, fs: bool) {
 
 #[derive(Clone)]
 pub struct McpService {
-    runtime: McpJsRuntime,
+    runtime: Arc<McpJsLibrary>,
     verifier: Option<Arc<SessionVerifier>>,
     /// Optional manager for upstream MCP servers. When set, those servers'
     /// tools are exposed as stubs in this service's tool list, and calls to
@@ -383,7 +384,7 @@ impl McpService {
     /// result as a `CallToolResult`.
     async fn dispatch<T: Serialize>(&self, name: &str, args: &T) -> Result<CallToolResult, McpError> {
         let value = serde_json::to_value(args).unwrap_or_else(|_| json!({}));
-        let result = self.runtime.call_tool(
+        let result = self.runtime.call_tool_async(
             self.session_id.get().map(String::as_str),
             self.mcp_headers.get(),
             name,
@@ -395,7 +396,7 @@ impl McpService {
 
 #[tool_router]
 impl McpService {
-    pub fn new(runtime: McpJsRuntime, verifier: Option<Arc<SessionVerifier>>) -> Self {
+    pub fn new(runtime: Arc<McpJsLibrary>, verifier: Option<Arc<SessionVerifier>>) -> Self {
         let mcp_client = runtime.mcp_client_manager();
         Self {
             runtime,
@@ -677,7 +678,7 @@ impl ServerHandler for McpService {
 
 #[derive(Clone)]
 pub struct StatelessMcpService {
-    runtime: McpJsRuntime,
+    runtime: Arc<McpJsLibrary>,
     verifier: Option<Arc<SessionVerifier>>,
     mcp_client: Option<Arc<McpClientManager>>,
     /// X-MCP-* headers from the initialize request, available for policy evaluation.
@@ -688,7 +689,7 @@ pub struct StatelessMcpService {
 
 #[tool_router]
 impl StatelessMcpService {
-    pub fn new(runtime: McpJsRuntime, verifier: Option<Arc<SessionVerifier>>) -> Self {
+    pub fn new(runtime: Arc<McpJsLibrary>, verifier: Option<Arc<SessionVerifier>>) -> Self {
         let mcp_client = runtime.mcp_client_manager();
         Self {
             runtime,
@@ -708,7 +709,7 @@ impl StatelessMcpService {
     ) -> Result<CallToolResult, McpError> {
         let value = serde_json::to_value(&args).unwrap_or_else(|_| json!({}));
         let result = self.runtime
-            .call_tool(None, self.mcp_headers.get(), "run_js", &value)
+            .call_tool_async(None, self.mcp_headers.get(), "run_js", &value)
             .await;
         json_result(result)
     }

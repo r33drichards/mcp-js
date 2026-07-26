@@ -25,7 +25,7 @@ use rmcp_legacy::{
 };
 use serde_json::json;
 
-use crate::runtime::McpJsRuntime;
+use crate::library::McpJsLibrary;
 use crate::session::SessionVerifier;
 
 const LLMS_TXT: &str = include_str!("llms_txt.md");
@@ -33,14 +33,14 @@ const README_MD: &str = include_str!("../README.md");
 
 #[derive(Clone)]
 pub struct SseService {
-    runtime: McpJsRuntime,
+    runtime: Arc<McpJsLibrary>,
     verifier: Option<Arc<SessionVerifier>>,
     session_id: Arc<OnceLock<String>>,
     mcp_headers: Arc<OnceLock<serde_json::Value>>,
 }
 
 impl SseService {
-    pub fn new(runtime: McpJsRuntime, verifier: Option<Arc<SessionVerifier>>) -> Self {
+    pub fn new(runtime: Arc<McpJsLibrary>, verifier: Option<Arc<SessionVerifier>>) -> Self {
         Self {
             runtime,
             verifier,
@@ -220,7 +220,7 @@ impl ServerHandler for SseService {
         let headers = self.mcp_headers.get();
 
         // Keep legacy SSE behavior aligned with the primary MCP transports.
-        let result = self.runtime.call_tool(session, headers, name, &args).await;
+        let result = self.runtime.call_tool_async(session, headers, name, &args).await;
         Ok(ok_result(result))
     }
 

@@ -2731,12 +2731,7 @@ dependencies = [
 name = "mcp-v8-uniffi"
 version = "0.1.0"
 dependencies = [
- "serde_json",
  "server",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "uniffi",
 ]
 
 [[package]]
@@ -4272,12 +4267,14 @@ dependencies = [
  "sled",
  "swc_core",
  "tempfile",
+ "thiserror 2.0.18",
  "tokio",
  "tokio-test",
  "tokio-util",
  "toml 0.8.23",
  "tracing",
  "tracing-subscriber",
+ "uniffi",
  "url",
  "utoipa",
  "uuid",

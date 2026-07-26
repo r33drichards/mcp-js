@@ -8,9 +8,4 @@ publish = false
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
-serde_json = "1.0.140"
 server = { path = "../server" }
-tempfile = "3"
-thiserror = "2"
-tokio = { version = "1.45.0", features = ["rt-multi-thread"] }
-uniffi = { version = "0.32.0", default-features = false }

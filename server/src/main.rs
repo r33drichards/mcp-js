@@ -28,6 +28,7 @@ use server::engine::opa::{EvalMode, PolicyChain};
 use server::engine::heap_tags::HeapTagStore;
 use server::engine::session_log::SessionLog;
 use server::mcp::{McpService, StatelessMcpService};
+use server::library::McpJsLibrary;
 use server::runtime::McpJsRuntime;
 use server::{api, cli, cluster, engine, mcp_sse};
 use server::session::{SessionVerifier, JwksKeyStore};
@@ -670,7 +671,7 @@ async fn main() -> Result<()> {
         None
     };
 
-    let runtime = McpJsRuntime::new(engine);
+    let runtime = McpJsLibrary::from_runtime(McpJsRuntime::new(engine));
 
     // ── Start transport ─────────────────────────────────────────────────
     // McpService (session-capable) is used whenever any per-session state axis
@@ -764,10 +765,10 @@ fn resolve_bind_addr(host: &str, port: u16) -> Result<std::net::SocketAddr> {
 
 // ── Streamable HTTP transport (--http-port) ─────────────────────────────
 
-async fn start_streamable_http<S, F>(runtime: McpJsRuntime, host: String, port: u16, make_service: F) -> Result<()>
+async fn start_streamable_http<S, F>(runtime: Arc<McpJsLibrary>, host: String, port: u16, make_service: F) -> Result<()>
 where
     S: ServerHandler + Send + Sync + 'static,
-    F: Fn(McpJsRuntime) -> S + Send + Sync + Clone + 'static,
+    F: Fn(Arc<McpJsLibrary>) -> S + Send + Sync + Clone + 'static,
 {
     let bind: std::net::SocketAddr = resolve_bind_addr(&host, port)?;
     let ct = CancellationToken::new();
@@ -825,7 +826,7 @@ where
 // MCP tasks (use the Streamable HTTP transport for those).
 
 async fn start_sse_server(
-    runtime: McpJsRuntime,
+    runtime: Arc<McpJsLibrary>,
     host: String,
     port: u16,
     verifier: Option<Arc<SessionVerifier>>,
