@@ -15,7 +15,6 @@ use std::sync::{Arc, OnceLock};
 use tokio::sync::Mutex;
 
 use crate::library::McpJsLibrary;
-use crate::runtime::McpJsRuntime;
 use crate::engine::mcp_client::McpClientManager;
 use crate::session::SessionVerifier;
 
@@ -79,7 +78,7 @@ pub fn built_in_tool_catalog(heap: bool, fs: bool) -> ToolCatalog {
 /// by the legacy SSE handler (`mcp_sse.rs`). Excludes the upstream-MCP / WASM
 /// discovery stubs (a Streamable-HTTP convenience); SSE clients drive modules
 /// from `run_js` directly.
-pub fn mode_tool_list(engine: &McpJsRuntime) -> Vec<Tool> {
+pub fn mode_tool_list(engine: &McpJsLibrary) -> Vec<Tool> {
     let mut tools = if engine.session_capable() {
         let mut tools = McpService::tool_router().list_all();
         filter_tools_by_capability(&mut tools, engine.heap_enabled(), engine.fs_enabled());
@@ -562,7 +561,7 @@ impl McpService {
 /// Build the capability-filtered, override-applied, stub-augmented tool list.
 fn list_tools_for<S: Send + Sync + 'static>(
     router: &ToolRouter<S>,
-    engine: &McpJsRuntime,
+    engine: &McpJsLibrary,
     mcp_client: &Option<Arc<McpClientManager>>,
 ) -> Vec<Tool> {
     let mut tools = router.list_all();

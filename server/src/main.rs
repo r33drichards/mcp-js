@@ -29,7 +29,6 @@ use server::engine::heap_tags::HeapTagStore;
 use server::engine::session_log::SessionLog;
 use server::mcp::{McpService, StatelessMcpService};
 use server::library::McpJsLibrary;
-use server::runtime::McpJsRuntime;
 use server::{api, cli, cluster, engine, mcp_sse};
 use server::session::{SessionVerifier, JwksKeyStore};
 use cluster::{ClusterConfig, ClusterNode};
@@ -671,7 +670,7 @@ async fn main() -> Result<()> {
         None
     };
 
-    let runtime = McpJsLibrary::from_runtime(McpJsRuntime::new(engine));
+    let runtime = McpJsLibrary::from_engine(engine);
 
     // ── Start transport ─────────────────────────────────────────────────
     // McpService (session-capable) is used whenever any per-session state axis

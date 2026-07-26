@@ -1,8 +1,11 @@
-use std::ops::Deref;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::engine::initialize_v8;
+use crate::engine::execution::{ConsoleOutputPage, ExecutionInfo, ExecutionSummary};
+use crate::engine::mcp_client::McpClientManager;
+use crate::engine::{
+    Engine, FsLabelView, FsMergeResult, FsPushOutcome, FsRefLogView, RunJsRequest, initialize_v8,
+};
 use crate::runtime::McpJsRuntime;
 use serde_json::Value;
 
@@ -166,8 +169,136 @@ impl McpJsLibrary {
         })
     }
 
-    pub fn runtime(&self) -> &McpJsRuntime {
-        &self.runtime
+    pub fn from_engine(engine: Engine) -> Arc<Self> {
+        Self::from_runtime(McpJsRuntime::new(engine))
+    }
+
+    pub fn heap_enabled(&self) -> bool {
+        self.runtime.heap_enabled()
+    }
+
+    pub fn fs_enabled(&self) -> bool {
+        self.runtime.fs_enabled()
+    }
+
+    pub fn session_capable(&self) -> bool {
+        self.runtime.session_capable()
+    }
+
+    pub fn tool_catalog(&self) -> crate::mcp::ToolCatalog {
+        self.runtime.tool_catalog()
+    }
+
+    pub fn instructions_override(&self) -> Option<Arc<str>> {
+        self.runtime.instructions_override()
+    }
+
+    pub fn run_js_description_override(&self) -> Option<Arc<str>> {
+        self.runtime.run_js_description_override()
+    }
+
+    pub fn mcp_client_manager(&self) -> Option<Arc<McpClientManager>> {
+        self.runtime.mcp_client_manager()
+    }
+
+    pub fn wasm_stub_tools(&self) -> Vec<rmcp::model::Tool> {
+        self.runtime.wasm_stub_tools()
+    }
+
+    pub fn wasm_stub_call_response(
+        &self,
+        name: &str,
+        arguments: Option<&serde_json::Map<String, Value>>,
+    ) -> Option<rmcp::model::CallToolResult> {
+        self.runtime.wasm_stub_call_response(name, arguments)
+    }
+
+    pub fn run_js(&self, code: impl Into<String>) -> RunJsRequest<'_> {
+        self.runtime.run_js(code)
+    }
+
+    pub fn get_execution(&self, id: &str) -> Result<ExecutionInfo, String> {
+        self.runtime.get_execution(id)
+    }
+
+    pub fn get_execution_output(
+        &self,
+        id: &str,
+        line_offset: Option<u64>,
+        line_limit: Option<u64>,
+        byte_offset: Option<u64>,
+        byte_limit: Option<u64>,
+    ) -> Result<ConsoleOutputPage, String> {
+        self.runtime
+            .get_execution_output(id, line_offset, line_limit, byte_offset, byte_limit)
+    }
+
+    pub fn cancel_execution(&self, id: &str) -> Result<(), String> {
+        self.runtime.cancel_execution(id)
+    }
+
+    pub fn list_executions(&self) -> Result<Vec<ExecutionSummary>, String> {
+        self.runtime.list_executions()
+    }
+
+    pub async fn fs_list_labels(&self) -> Result<Vec<FsLabelView>, String> {
+        self.runtime.fs_list_labels().await
+    }
+
+    pub async fn fs_resolve_label(&self, name: &str) -> Result<Option<String>, String> {
+        self.runtime.fs_resolve_label(name).await
+    }
+
+    pub async fn fs_set_label(
+        &self,
+        name: &str,
+        ca_id: &str,
+        message: Option<String>,
+    ) -> Result<(), String> {
+        self.runtime.fs_set_label(name, ca_id, message).await
+    }
+
+    pub async fn fs_label_log(
+        &self,
+        name: &str,
+        limit: Option<usize>,
+    ) -> Result<Vec<FsRefLogView>, String> {
+        self.runtime.fs_label_log(name, limit).await
+    }
+
+    pub async fn fs_push(
+        &self,
+        label: &str,
+        ca_id: &str,
+        expected: Option<String>,
+        force: bool,
+        message: Option<String>,
+    ) -> Result<FsPushOutcome, String> {
+        self.runtime
+            .fs_push(label, ca_id, expected, force, message)
+            .await
+    }
+
+    pub async fn fs_reset(
+        &self,
+        label: &str,
+        ca_id: &str,
+        allow_unlogged: bool,
+        message: Option<String>,
+    ) -> Result<(), String> {
+        self.runtime
+            .fs_reset(label, ca_id, allow_unlogged, message)
+            .await
+    }
+
+    pub async fn fs_merge(
+        &self,
+        ours: &str,
+        theirs: &str,
+        base: Option<String>,
+        prefer: crate::engine::fs_merge::Prefer,
+    ) -> Result<FsMergeResult, String> {
+        self.runtime.fs_merge(ours, theirs, base, prefer).await
     }
 
     pub async fn call_tool_async(
@@ -180,14 +311,6 @@ impl McpJsLibrary {
         self.runtime
             .call_tool(session_id, mcp_headers, name, arguments)
             .await
-    }
-}
-
-impl Deref for McpJsLibrary {
-    type Target = McpJsRuntime;
-
-    fn deref(&self) -> &Self::Target {
-        &self.runtime
     }
 }
 
