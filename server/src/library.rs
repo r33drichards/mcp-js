@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -90,6 +91,12 @@ pub struct LibraryExecutionOutput {
     pub next_byte_offset: u64,
     pub total_bytes: u64,
     pub has_more: bool,
+}
+
+#[derive(Clone, Debug, Serialize, uniffi::Record)]
+pub struct LibraryHeapTagEntry {
+    pub heap: String,
+    pub tags: HashMap<String, String>,
 }
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]
@@ -200,6 +207,82 @@ impl McpJsLibrary {
                 executions
                     .into_iter()
                     .map(LibraryExecutionSummary::from)
+                    .collect()
+            })
+            .map_err(operation_message)
+    }
+
+    pub async fn list_sessions(&self) -> Result<Vec<String>, LibraryError> {
+        self.runtime
+            .list_sessions()
+            .await
+            .map_err(operation_message)
+    }
+
+    pub async fn list_session_snapshots(
+        &self,
+        session: String,
+        fields: Option<Vec<String>>,
+    ) -> Result<Vec<String>, LibraryError> {
+        self.runtime
+            .list_session_snapshots(session, fields)
+            .await
+            .map_err(operation_message)?
+            .into_iter()
+            .map(|snapshot| {
+                serde_json::to_string(&snapshot).map_err(|error| LibraryError::Operation {
+                    message: format!("failed to serialize session snapshot: {error}"),
+                })
+            })
+            .collect()
+    }
+
+    pub async fn get_heap_tags(
+        &self,
+        heap: String,
+    ) -> Result<HashMap<String, String>, LibraryError> {
+        self.runtime
+            .get_heap_tags(heap)
+            .await
+            .map_err(operation_message)
+    }
+
+    pub async fn set_heap_tags(
+        &self,
+        heap: String,
+        tags: HashMap<String, String>,
+    ) -> Result<(), LibraryError> {
+        self.runtime
+            .set_heap_tags(heap, tags)
+            .await
+            .map_err(operation_message)
+    }
+
+    pub async fn delete_heap_tags(
+        &self,
+        heap: String,
+        keys: Option<Vec<String>>,
+    ) -> Result<(), LibraryError> {
+        self.runtime
+            .delete_heap_tags(heap, keys)
+            .await
+            .map_err(operation_message)
+    }
+
+    pub async fn query_heaps_by_tags(
+        &self,
+        tags: HashMap<String, String>,
+    ) -> Result<Vec<LibraryHeapTagEntry>, LibraryError> {
+        self.runtime
+            .query_heaps_by_tags(tags)
+            .await
+            .map(|entries| {
+                entries
+                    .into_iter()
+                    .map(|entry| LibraryHeapTagEntry {
+                        heap: entry.heap,
+                        tags: entry.tags,
+                    })
                     .collect()
             })
             .map_err(operation_message)
@@ -550,6 +633,60 @@ mod tests {
             ..LibraryConfig::default()
         };
         assert!(validate_config(&config).is_err());
+    }
+
+    #[test]
+    fn local_stateful_sessions_and_heap_tags_use_typed_api() {
+        let _guard = v8_test_guard();
+        let data_dir = tempfile::tempdir().unwrap();
+        let library = McpJsLibrary::new(LibraryConfig {
+            mode: LibraryMode::LocalStateful,
+            data_dir: Some(data_dir.path().to_string_lossy().into_owned()),
+            ..LibraryConfig::default()
+        })
+        .unwrap();
+        let runtime = library.tokio_runtime.as_ref().unwrap();
+
+        assert!(
+            runtime
+                .block_on(library.list_sessions())
+                .unwrap()
+                .is_empty()
+        );
+
+        let tags = HashMap::from([
+            ("environment".to_string(), "test".to_string()),
+            ("owner".to_string(), "uniffi".to_string()),
+        ]);
+        runtime
+            .block_on(library.set_heap_tags("heap-1".to_string(), tags.clone()))
+            .unwrap();
+        assert_eq!(
+            runtime
+                .block_on(library.get_heap_tags("heap-1".to_string()))
+                .unwrap(),
+            tags
+        );
+
+        let matches =
+            runtime
+                .block_on(library.query_heaps_by_tags(HashMap::from([(
+                    "owner".to_string(),
+                    "uniffi".to_string(),
+                )])))
+                .unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].heap, "heap-1");
+
+        runtime
+            .block_on(library.delete_heap_tags("heap-1".to_string(), None))
+            .unwrap();
+        assert!(
+            runtime
+                .block_on(library.get_heap_tags("heap-1".to_string()))
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
