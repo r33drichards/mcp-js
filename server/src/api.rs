@@ -14,7 +14,7 @@ use utoipa::{OpenApi, ToSchema};
 /// body and raw script uploads.
 const MAX_EXEC_BODY_BYTES: usize = 16 * 1024 * 1024;
 
-use crate::library::{LibraryFsMergePreference, McpJsLibrary};
+use crate::library::{LibraryExecutionRequest, LibraryFsMergePreference, McpJsLibrary};
 
 // ── Embedded agent-discovery content ─────────────────────────────────
 
@@ -376,21 +376,25 @@ async fn submit_exec(
     runtime: Arc<McpJsLibrary>,
     req: ExecRequest,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let mut r = runtime.run_js(req.code);
-    if let Some(h) = req.heap { r = r.heap(h); }
-    r = r.maybe_fs(req.fs);
-    if let Some(s) = req.session { r = r.session(s); }
-    if let Some(mb) = req.heap_memory_max_mb { r = r.heap_memory_max_mb(mb); }
-    if let Some(secs) = req.execution_timeout_secs { r = r.execution_timeout_secs(secs); }
-    if let Some(t) = req.tags { r = r.tags(t); }
-    match r.execute().await {
+    let request = LibraryExecutionRequest {
+        code: req.code,
+        file: None,
+        heap: req.heap,
+        fs: req.fs,
+        session: req.session,
+        heap_memory_max_mb: req.heap_memory_max_mb.map(|value| value as u64),
+        execution_timeout_secs: req.execution_timeout_secs,
+        tags: req.tags,
+        mcp_headers_json: None,
+    };
+    match runtime.submit_execution(request).await {
         Ok(execution_id) => (
             StatusCode::ACCEPTED,
             Json(serde_json::json!({ "execution_id": execution_id })),
         ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e })),
+            Json(serde_json::json!({ "error": e.to_string() })),
         ),
     }
 }

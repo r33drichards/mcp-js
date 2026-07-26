@@ -62,6 +62,19 @@ pub struct LibraryCapabilities {
     pub sessions: bool,
 }
 
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct LibraryExecutionRequest {
+    pub code: String,
+    pub file: Option<String>,
+    pub heap: Option<String>,
+    pub fs: Option<String>,
+    pub session: Option<String>,
+    pub heap_memory_max_mb: Option<u64>,
+    pub execution_timeout_secs: Option<u64>,
+    pub tags: Option<HashMap<String, String>>,
+    pub mcp_headers_json: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize, uniffi::Record)]
 pub struct LibraryExecutionInfo {
     pub execution_id: String,
@@ -213,6 +226,55 @@ impl McpJsLibrary {
             filesystem: self.runtime.fs_enabled(),
             sessions: self.runtime.session_capable(),
         }
+    }
+
+    pub async fn submit_execution(
+        &self,
+        request: LibraryExecutionRequest,
+    ) -> Result<String, LibraryError> {
+        if request.code.is_empty() && request.file.is_none() {
+            return Err(LibraryError::InvalidConfig {
+                message: "execution requires code or a file path".to_string(),
+            });
+        }
+        if !request.code.is_empty() && request.file.is_some() {
+            return Err(LibraryError::InvalidConfig {
+                message: "execution cannot specify both code and a file path".to_string(),
+            });
+        }
+        let heap_memory_max_mb = request
+            .heap_memory_max_mb
+            .map(usize::try_from)
+            .transpose()
+            .map_err(|_| LibraryError::InvalidConfig {
+                message: "heap_memory_max_mb is too large for this platform".to_string(),
+            })?;
+        let mcp_headers = request
+            .mcp_headers_json
+            .as_deref()
+            .map(|json| parse_json_object("mcp_headers_json", json))
+            .transpose()?;
+
+        let mut execution = self
+            .runtime
+            .run_js(request.code)
+            .maybe_file(request.file)
+            .maybe_fs(request.fs)
+            .maybe_session(request.session)
+            .maybe_mcp_headers(mcp_headers);
+        if let Some(heap) = request.heap {
+            execution = execution.heap(heap);
+        }
+        if let Some(heap_memory_max_mb) = heap_memory_max_mb {
+            execution = execution.heap_memory_max_mb(heap_memory_max_mb);
+        }
+        if let Some(execution_timeout_secs) = request.execution_timeout_secs {
+            execution = execution.execution_timeout_secs(execution_timeout_secs);
+        }
+        if let Some(tags) = request.tags {
+            execution = execution.tags(tags);
+        }
+        execution.execute().await.map_err(operation_message)
     }
 
     pub fn get_execution(
@@ -947,22 +1009,24 @@ mod tests {
         })
         .unwrap();
 
-        let submitted: Value = serde_json::from_str(
-            &library
-                .call_tool(
-                    "run_js".to_string(),
-                    r#"{"code":"console.log(40 + 2)"}"#.to_string(),
-                    Some("ffi-test".to_string()),
-                    None,
-                )
-                .unwrap(),
-        )
-        .unwrap();
-        let execution_id = submitted["execution_id"].as_str().unwrap();
+        let runtime = library.tokio_runtime.as_ref().unwrap();
+        let execution_id = runtime
+            .block_on(library.submit_execution(LibraryExecutionRequest {
+                code: "console.log(40 + 2)".to_string(),
+                file: None,
+                heap: None,
+                fs: None,
+                session: Some("ffi-test".to_string()),
+                heap_memory_max_mb: None,
+                execution_timeout_secs: None,
+                tags: None,
+                mcp_headers_json: None,
+            }))
+            .unwrap();
 
         let mut completed = false;
         for _ in 0..200 {
-            let status = library.get_execution(execution_id.to_string()).unwrap();
+            let status = library.get_execution(execution_id.clone()).unwrap();
             if status.status == "completed" {
                 completed = true;
                 break;
@@ -975,7 +1039,7 @@ mod tests {
         assert!(completed, "stateful execution did not complete");
 
         let output = library
-            .get_execution_output(execution_id.to_string(), None, None, None, None)
+            .get_execution_output(execution_id, None, None, None, None)
             .unwrap();
         assert_eq!(output.data, "42");
     }
