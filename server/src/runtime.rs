@@ -7,6 +7,8 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 
 use crate::engine::execution::ExecutionRegistry;
+use crate::engine::fs_labels::LabelStore;
+use crate::engine::fs_store::FsStore;
 use crate::engine::heap_storage::{AnyHeapStorage, FileHeapStorage};
 use crate::engine::heap_tags::HeapTagStore;
 use crate::engine::session_log::SessionLog;
@@ -82,6 +84,7 @@ pub struct McpJsRuntimeBuilder {
     heap_memory_max_mb: usize,
     execution_timeout_secs: u64,
     max_concurrent_executions: usize,
+    filesystem_enabled: bool,
 }
 
 impl Default for McpJsRuntimeBuilder {
@@ -91,6 +94,7 @@ impl Default for McpJsRuntimeBuilder {
             heap_memory_max_mb: DEFAULT_HEAP_MEMORY_MB,
             execution_timeout_secs: crate::engine::DEFAULT_EXECUTION_TIMEOUT_SECS,
             max_concurrent_executions: DEFAULT_MAX_CONCURRENT_EXECUTIONS,
+            filesystem_enabled: false,
         }
     }
 }
@@ -125,6 +129,11 @@ impl McpJsRuntimeBuilder {
         self
     }
 
+    pub fn filesystem_enabled(mut self, filesystem_enabled: bool) -> Self {
+        self.filesystem_enabled = filesystem_enabled;
+        self
+    }
+
     pub fn build(self) -> Result<McpJsRuntime, String> {
         self.build_engine().map(McpJsRuntime::new)
     }
@@ -143,19 +152,20 @@ impl McpJsRuntimeBuilder {
             RuntimeStorage::Stateless { data_dir } => {
                 create_data_dir(&data_dir)?;
                 let registry = execution_registry(&data_dir)?;
-                Ok(Engine::new_stateless(
+                let engine = Engine::new_stateless(
                     heap_memory_max_bytes,
                     self.execution_timeout_secs,
                     self.max_concurrent_executions,
                 )
-                .with_execution_registry(Arc::new(registry)))
+                .with_execution_registry(Arc::new(registry));
+                configure_filesystem(engine, &data_dir, self.filesystem_enabled, true)
             }
             RuntimeStorage::LocalStateful { data_dir } => {
                 create_data_dir(&data_dir)?;
                 let session_log = SessionLog::new(path_string(&data_dir.join("sessions"))?)?;
                 let heap_tags = HeapTagStore::new(path_string(&data_dir.join("heap-tags"))?)?;
                 let registry = execution_registry(&data_dir)?;
-                Ok(Engine::new_stateful(
+                let engine = Engine::new_stateful(
                     AnyHeapStorage::File(FileHeapStorage::new(data_dir.join("heaps"))),
                     Some(session_log),
                     Some(heap_tags),
@@ -163,7 +173,8 @@ impl McpJsRuntimeBuilder {
                     self.execution_timeout_secs,
                     self.max_concurrent_executions,
                 )
-                .with_execution_registry(Arc::new(registry)))
+                .with_execution_registry(Arc::new(registry));
+                configure_filesystem(engine, &data_dir, self.filesystem_enabled, false)
             }
         }
     }
@@ -182,6 +193,25 @@ impl McpJsRuntimeBuilder {
         }
         Ok(())
     }
+}
+
+fn configure_filesystem(
+    mut engine: Engine,
+    data_dir: &Path,
+    filesystem_enabled: bool,
+    needs_session_log: bool,
+) -> Result<Engine, String> {
+    if !filesystem_enabled {
+        return Ok(engine);
+    }
+    if needs_session_log {
+        engine =
+            engine.with_session_log(SessionLog::new(path_string(&data_dir.join("sessions"))?)?);
+    }
+    let backend = Arc::new(FileHeapStorage::new(data_dir.join("fs-blobs")));
+    let store = Arc::new(FsStore::new(backend));
+    let labels = Arc::new(LabelStore::new(path_string(&data_dir.join("fs-labels"))?)?);
+    Ok(engine.with_fs_snapshots(store, labels))
 }
 
 fn create_data_dir(data_dir: &Path) -> Result<(), String> {
@@ -217,6 +247,20 @@ mod tests {
 
         assert!(!runtime.session_capable());
         assert!(runtime.list_executions().is_ok());
+    }
+
+    #[test]
+    fn stateless_builder_can_enable_filesystem_snapshots() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let runtime = McpJsRuntime::builder()
+            .stateless(data_dir.path())
+            .filesystem_enabled(true)
+            .build()
+            .unwrap();
+
+        assert!(!runtime.heap_enabled());
+        assert!(runtime.fs_enabled());
+        assert!(runtime.session_capable());
     }
 
     #[test]

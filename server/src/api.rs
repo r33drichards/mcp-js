@@ -14,7 +14,7 @@ use utoipa::{OpenApi, ToSchema};
 /// body and raw script uploads.
 const MAX_EXEC_BODY_BYTES: usize = 16 * 1024 * 1024;
 
-use crate::library::McpJsLibrary;
+use crate::library::{LibraryFsMergePreference, McpJsLibrary};
 
 // ── Embedded agent-discovery content ─────────────────────────────────
 
@@ -741,7 +741,7 @@ async fn fs_labels_handler(
 ) -> (StatusCode, Json<serde_json::Value>) {
     match runtime.fs_list_labels().await {
         Ok(labels) => (StatusCode::OK, Json(serde_json::json!({ "labels": labels }))),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e.to_string() }))),
     }
 }
 
@@ -757,12 +757,12 @@ async fn fs_set_label_handler(
     State(runtime): State<Arc<McpJsLibrary>>,
     Json(req): Json<FsLabelRequest>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    match runtime.fs_set_label(&req.name, &req.ca_id, req.message).await {
+    match runtime.fs_set_label(req.name.clone(), req.ca_id.clone(), req.message).await {
         Ok(()) => (
             StatusCode::OK,
             Json(serde_json::json!({ "label": req.name, "ca_id": req.ca_id })),
         ),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e.to_string() }))),
     }
 }
 
@@ -781,7 +781,7 @@ async fn fs_resolve_handler(
     State(runtime): State<Arc<McpJsLibrary>>,
     Path(label): Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    match runtime.fs_resolve_label(&label).await {
+    match runtime.fs_resolve_label(label.clone()).await {
         Ok(Some(ca_id)) => (
             StatusCode::OK,
             Json(serde_json::json!({ "label": label, "ca_id": ca_id })),
@@ -790,7 +790,7 @@ async fn fs_resolve_handler(
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": format!("unknown label: {label}") })),
         ),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e.to_string() }))),
     }
 }
 
@@ -810,12 +810,12 @@ async fn fs_log_handler(
     Path(label): Path<String>,
     Query(query): Query<FsLogQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    match runtime.fs_label_log(&label, query.limit).await {
+    match runtime.fs_label_log(label.clone(), query.limit.map(|limit| limit as u64)).await {
         Ok(log) => (
             StatusCode::OK,
             Json(serde_json::json!({ "label": label, "log": log })),
         ),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e.to_string() }))),
     }
 }
 
@@ -846,14 +846,26 @@ async fn fs_push_handler(
             Json(serde_json::json!({ "error": "fs push requires a label unless detach is true" })),
         );
     };
-    match runtime.fs_push(&label, &req.ca_id, req.expected, req.force, req.message).await {
+    match runtime.fs_push(label, req.ca_id, req.expected, req.force, req.message).await {
         Ok(outcome) => {
-            let value = serde_json::to_value(&outcome).unwrap_or_default();
-            let is_rejected = matches!(outcome, crate::engine::FsPushOutcome::Rejected { .. });
+            let is_rejected = outcome.status == "rejected";
+            let value = if is_rejected {
+                serde_json::json!({
+                    "status": outcome.status,
+                    "label": outcome.label,
+                    "current": outcome.current,
+                })
+            } else {
+                serde_json::json!({
+                    "status": outcome.status,
+                    "label": outcome.label,
+                    "ca_id": outcome.ca_id,
+                })
+            };
             let code = if is_rejected { StatusCode::CONFLICT } else { StatusCode::OK };
             (code, Json(value))
         }
-        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e.to_string() }))),
     }
 }
 
@@ -872,12 +884,12 @@ async fn fs_reset_handler(
     State(runtime): State<Arc<McpJsLibrary>>,
     Json(req): Json<FsResetRequest>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    match runtime.fs_reset(&req.label, &req.ca_id, req.allow_unlogged, req.message).await {
+    match runtime.fs_reset(req.label.clone(), req.ca_id.clone(), req.allow_unlogged, req.message).await {
         Ok(()) => (
             StatusCode::OK,
             Json(serde_json::json!({ "label": req.label, "ca_id": req.ca_id })),
         ),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e.to_string() }))),
     }
 }
 
@@ -911,15 +923,30 @@ async fn fs_merge_handler(
     State(runtime): State<Arc<McpJsLibrary>>,
     Json(req): Json<FsMergeRequest>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let prefer = match crate::engine::fs_merge::Prefer::parse(req.prefer.as_deref()) {
-        Ok(p) => p,
-        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))),
+    let prefer = match req.prefer.as_deref() {
+        None => None,
+        Some("ours") => Some(LibraryFsMergePreference::Ours),
+        Some("theirs") => Some(LibraryFsMergePreference::Theirs),
+        Some(value) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": format!("invalid prefer value: {value}; expected ours or theirs") })),
+            )
+        }
     };
-    match runtime.fs_merge(&req.ours, &req.theirs, req.base, prefer).await {
-        // Both clean merges and conflicts are successful outcomes carrying a
-        // `status`-tagged body the caller acts on; only bad input is an error.
-        Ok(result) => (StatusCode::OK, Json(serde_json::to_value(&result).unwrap_or_default())),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))),
+    match runtime.fs_merge(req.ours, req.theirs, req.base, prefer).await {
+        Ok(result) => {
+            let value = if result.status == "merged" {
+                serde_json::json!({ "status": result.status, "ca_id": result.ca_id })
+            } else {
+                serde_json::json!({ "status": result.status, "conflicts": result.conflicts })
+            };
+            (StatusCode::OK, Json(value))
+        }
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        ),
     }
 }
 

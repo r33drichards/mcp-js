@@ -8,7 +8,8 @@ use crate::engine::execution::{
 };
 use crate::engine::mcp_client::McpClientManager;
 use crate::engine::{
-    Engine, FsLabelView, FsMergeResult, FsPushOutcome, FsRefLogView, RunJsRequest, initialize_v8,
+    Engine, FsLabelView, FsMergeConflictView, FsMergeResult, FsPushOutcome, FsRefLogView,
+    RunJsRequest, initialize_v8,
 };
 use crate::runtime::McpJsRuntime;
 use serde::Serialize;
@@ -31,6 +32,7 @@ pub struct LibraryConfig {
     pub heap_memory_max_mb: u64,
     pub execution_timeout_secs: u64,
     pub max_concurrent_executions: u32,
+    pub filesystem_enabled: bool,
 }
 
 impl Default for LibraryConfig {
@@ -41,6 +43,7 @@ impl Default for LibraryConfig {
             heap_memory_max_mb: DEFAULT_HEAP_MEMORY_MB,
             execution_timeout_secs: DEFAULT_EXECUTION_TIMEOUT_SECS,
             max_concurrent_executions: DEFAULT_MAX_CONCURRENT_EXECUTIONS,
+            filesystem_enabled: false,
         }
     }
 }
@@ -97,6 +100,54 @@ pub struct LibraryExecutionOutput {
 pub struct LibraryHeapTagEntry {
     pub heap: String,
     pub tags: HashMap<String, String>,
+}
+
+#[derive(Clone, Debug, Serialize, uniffi::Record)]
+pub struct LibraryFsLabel {
+    pub name: String,
+    pub ca_id: String,
+}
+
+#[derive(Clone, Debug, Serialize, uniffi::Record)]
+pub struct LibraryFsRefLogEntry {
+    pub at: i64,
+    pub from: Option<String>,
+    pub to: String,
+    pub op: String,
+    pub message: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, uniffi::Record)]
+pub struct LibraryFsPushResult {
+    pub status: String,
+    pub label: String,
+    pub ca_id: Option<String>,
+    pub current: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, uniffi::Record)]
+pub struct LibraryFsMergeConflict {
+    pub path: String,
+    pub base: Option<String>,
+    pub ours: Option<String>,
+    pub theirs: Option<String>,
+    pub kind: String,
+    pub markers: Option<String>,
+    pub diff_ours: Option<String>,
+    pub diff_theirs: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, uniffi::Record)]
+pub struct LibraryFsMergeResult {
+    pub status: String,
+    pub ca_id: Option<String>,
+    pub conflicts: Vec<LibraryFsMergeConflict>,
+}
+
+#[derive(Clone, Copy, Debug, uniffi::Enum)]
+pub enum LibraryFsMergePreference {
+    Ours,
+    Theirs,
 }
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]
@@ -288,6 +339,104 @@ impl McpJsLibrary {
             .map_err(operation_message)
     }
 
+    pub async fn fs_list_labels(&self) -> Result<Vec<LibraryFsLabel>, LibraryError> {
+        self.runtime
+            .fs_list_labels()
+            .await
+            .map(|labels| labels.into_iter().map(LibraryFsLabel::from).collect())
+            .map_err(operation_message)
+    }
+
+    pub async fn fs_resolve_label(&self, name: String) -> Result<Option<String>, LibraryError> {
+        self.runtime
+            .fs_resolve_label(&name)
+            .await
+            .map_err(operation_message)
+    }
+
+    pub async fn fs_set_label(
+        &self,
+        name: String,
+        ca_id: String,
+        message: Option<String>,
+    ) -> Result<(), LibraryError> {
+        self.runtime
+            .fs_set_label(&name, &ca_id, message)
+            .await
+            .map_err(operation_message)
+    }
+
+    pub async fn fs_label_log(
+        &self,
+        name: String,
+        limit: Option<u64>,
+    ) -> Result<Vec<LibraryFsRefLogEntry>, LibraryError> {
+        let limit =
+            limit
+                .map(usize::try_from)
+                .transpose()
+                .map_err(|_| LibraryError::Operation {
+                    message: "filesystem log limit is too large for this platform".to_string(),
+                })?;
+        self.runtime
+            .fs_label_log(&name, limit)
+            .await
+            .map(|entries| {
+                entries
+                    .into_iter()
+                    .map(LibraryFsRefLogEntry::from)
+                    .collect()
+            })
+            .map_err(operation_message)
+    }
+
+    pub async fn fs_push(
+        &self,
+        label: String,
+        ca_id: String,
+        expected: Option<String>,
+        force: bool,
+        message: Option<String>,
+    ) -> Result<LibraryFsPushResult, LibraryError> {
+        self.runtime
+            .fs_push(&label, &ca_id, expected, force, message)
+            .await
+            .map(LibraryFsPushResult::from)
+            .map_err(operation_message)
+    }
+
+    pub async fn fs_reset(
+        &self,
+        label: String,
+        ca_id: String,
+        allow_unlogged: bool,
+        message: Option<String>,
+    ) -> Result<(), LibraryError> {
+        self.runtime
+            .fs_reset(&label, &ca_id, allow_unlogged, message)
+            .await
+            .map_err(operation_message)
+    }
+
+    pub async fn fs_merge(
+        &self,
+        ours: String,
+        theirs: String,
+        base: Option<String>,
+        prefer: Option<LibraryFsMergePreference>,
+    ) -> Result<LibraryFsMergeResult, LibraryError> {
+        let prefer = match prefer {
+            Some(LibraryFsMergePreference::Ours) => crate::engine::fs_merge::Prefer::Ours,
+            Some(LibraryFsMergePreference::Theirs) => crate::engine::fs_merge::Prefer::Theirs,
+            None => crate::engine::fs_merge::Prefer::None,
+        };
+        self.runtime
+            .fs_merge(&ours, &theirs, base, prefer)
+            .await
+            .map(LibraryFsMergeResult::from)
+            .map_err(operation_message)
+    }
+
     pub fn list_tools(&self) -> Result<Vec<ToolDefinition>, LibraryError> {
         self.runtime
             .tool_catalog()
@@ -403,66 +552,6 @@ impl McpJsLibrary {
         self.runtime.run_js(code)
     }
 
-    pub async fn fs_list_labels(&self) -> Result<Vec<FsLabelView>, String> {
-        self.runtime.fs_list_labels().await
-    }
-
-    pub async fn fs_resolve_label(&self, name: &str) -> Result<Option<String>, String> {
-        self.runtime.fs_resolve_label(name).await
-    }
-
-    pub async fn fs_set_label(
-        &self,
-        name: &str,
-        ca_id: &str,
-        message: Option<String>,
-    ) -> Result<(), String> {
-        self.runtime.fs_set_label(name, ca_id, message).await
-    }
-
-    pub async fn fs_label_log(
-        &self,
-        name: &str,
-        limit: Option<usize>,
-    ) -> Result<Vec<FsRefLogView>, String> {
-        self.runtime.fs_label_log(name, limit).await
-    }
-
-    pub async fn fs_push(
-        &self,
-        label: &str,
-        ca_id: &str,
-        expected: Option<String>,
-        force: bool,
-        message: Option<String>,
-    ) -> Result<FsPushOutcome, String> {
-        self.runtime
-            .fs_push(label, ca_id, expected, force, message)
-            .await
-    }
-
-    pub async fn fs_reset(
-        &self,
-        label: &str,
-        ca_id: &str,
-        allow_unlogged: bool,
-        message: Option<String>,
-    ) -> Result<(), String> {
-        self.runtime
-            .fs_reset(label, ca_id, allow_unlogged, message)
-            .await
-    }
-
-    pub async fn fs_merge(
-        &self,
-        ours: &str,
-        theirs: &str,
-        base: Option<String>,
-        prefer: crate::engine::fs_merge::Prefer,
-    ) -> Result<FsMergeResult, String> {
-        self.runtime.fs_merge(ours, theirs, base, prefer).await
-    }
-
     pub async fn call_tool_async(
         &self,
         session_id: Option<&str>,
@@ -473,6 +562,81 @@ impl McpJsLibrary {
         self.runtime
             .call_tool(session_id, mcp_headers, name, arguments)
             .await
+    }
+}
+
+impl From<FsLabelView> for LibraryFsLabel {
+    fn from(label: FsLabelView) -> Self {
+        Self {
+            name: label.name,
+            ca_id: label.ca_id,
+        }
+    }
+}
+
+impl From<FsRefLogView> for LibraryFsRefLogEntry {
+    fn from(entry: FsRefLogView) -> Self {
+        Self {
+            at: entry.at,
+            from: entry.from,
+            to: entry.to,
+            op: entry.op,
+            message: entry.message,
+        }
+    }
+}
+
+impl From<FsPushOutcome> for LibraryFsPushResult {
+    fn from(outcome: FsPushOutcome) -> Self {
+        match outcome {
+            FsPushOutcome::Advanced { label, ca_id } => Self {
+                status: "advanced".to_string(),
+                label,
+                ca_id: Some(ca_id),
+                current: None,
+            },
+            FsPushOutcome::Rejected { label, current } => Self {
+                status: "rejected".to_string(),
+                label,
+                ca_id: None,
+                current,
+            },
+        }
+    }
+}
+
+impl From<FsMergeConflictView> for LibraryFsMergeConflict {
+    fn from(conflict: FsMergeConflictView) -> Self {
+        Self {
+            path: conflict.path,
+            base: conflict.base,
+            ours: conflict.ours,
+            theirs: conflict.theirs,
+            kind: conflict.kind,
+            markers: conflict.markers,
+            diff_ours: conflict.diff_ours,
+            diff_theirs: conflict.diff_theirs,
+        }
+    }
+}
+
+impl From<FsMergeResult> for LibraryFsMergeResult {
+    fn from(result: FsMergeResult) -> Self {
+        match result {
+            FsMergeResult::Merged { ca_id } => Self {
+                status: "merged".to_string(),
+                ca_id: Some(ca_id),
+                conflicts: Vec::new(),
+            },
+            FsMergeResult::Conflict { conflicts } => Self {
+                status: "conflict".to_string(),
+                ca_id: None,
+                conflicts: conflicts
+                    .into_iter()
+                    .map(LibraryFsMergeConflict::from)
+                    .collect(),
+            },
+        }
     }
 }
 
@@ -582,7 +746,8 @@ fn build_runtime(
     let builder = McpJsRuntime::builder()
         .heap_memory_max_mb(heap_memory_max_mb)
         .execution_timeout_secs(config.execution_timeout_secs)
-        .max_concurrent_executions(config.max_concurrent_executions as usize);
+        .max_concurrent_executions(config.max_concurrent_executions as usize)
+        .filesystem_enabled(config.filesystem_enabled);
     let builder = match config.mode {
         LibraryMode::Stateless => builder.stateless(data_dir),
         LibraryMode::LocalStateful => builder.local_stateful(data_dir),
@@ -633,6 +798,72 @@ mod tests {
             ..LibraryConfig::default()
         };
         assert!(validate_config(&config).is_err());
+    }
+
+    #[test]
+    fn configured_filesystem_uses_typed_label_api() {
+        let _guard = v8_test_guard();
+        let data_dir = tempfile::tempdir().unwrap();
+        let library = McpJsLibrary::new(LibraryConfig {
+            mode: LibraryMode::Stateless,
+            data_dir: Some(data_dir.path().to_string_lossy().into_owned()),
+            filesystem_enabled: true,
+            ..LibraryConfig::default()
+        })
+        .unwrap();
+        let runtime = library.tokio_runtime.as_ref().unwrap();
+        let first = "0".repeat(64);
+        let second = "1".repeat(64);
+
+        assert!(library.capabilities().filesystem);
+        runtime
+            .block_on(library.fs_set_label(
+                "main".to_string(),
+                first.clone(),
+                Some("create".to_string()),
+            ))
+            .unwrap();
+        assert_eq!(
+            runtime
+                .block_on(library.fs_resolve_label("main".to_string()))
+                .unwrap(),
+            Some(first.clone())
+        );
+        assert_eq!(runtime.block_on(library.fs_list_labels()).unwrap().len(), 1);
+
+        let pushed = runtime
+            .block_on(library.fs_push(
+                "main".to_string(),
+                second.clone(),
+                Some(first.clone()),
+                false,
+                Some("advance".to_string()),
+            ))
+            .unwrap();
+        assert_eq!(pushed.status, "advanced");
+        assert_eq!(pushed.ca_id, Some(second));
+        assert_eq!(
+            runtime
+                .block_on(library.fs_label_log("main".to_string(), None))
+                .unwrap()
+                .len(),
+            2
+        );
+
+        runtime
+            .block_on(library.fs_reset(
+                "main".to_string(),
+                first.clone(),
+                false,
+                Some("rollback".to_string()),
+            ))
+            .unwrap();
+        assert_eq!(
+            runtime
+                .block_on(library.fs_resolve_label("main".to_string()))
+                .unwrap(),
+            Some(first)
+        );
     }
 
     #[test]

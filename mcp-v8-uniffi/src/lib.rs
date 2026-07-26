@@ -2,6 +2,7 @@
 
 pub use server::library::{
     LibraryCapabilities, LibraryConfig, LibraryError, LibraryExecutionInfo, LibraryExecutionOutput,
-    LibraryExecutionSummary, LibraryHeapTagEntry, LibraryMode, McpJsLibrary, ToolDefinition,
-    default_library_config,
+    LibraryExecutionSummary, LibraryFsLabel, LibraryFsMergeConflict, LibraryFsMergePreference,
+    LibraryFsMergeResult, LibraryFsPushResult, LibraryFsRefLogEntry, LibraryHeapTagEntry,
+    LibraryMode, McpJsLibrary, ToolDefinition, default_library_config,
 };
