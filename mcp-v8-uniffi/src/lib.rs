@@ -1,12 +1,8 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde_json::Value;
-use server::engine::execution::ExecutionRegistry;
-use server::engine::heap_storage::{AnyHeapStorage, FileHeapStorage};
-use server::engine::heap_tags::HeapTagStore;
-use server::engine::session_log::SessionLog;
-use server::engine::{Engine, initialize_v8};
+use server::engine::initialize_v8;
 use server::runtime::McpJsRuntime;
 
 const DEFAULT_HEAP_MEMORY_MB: u64 = 64;
@@ -86,10 +82,10 @@ impl McpJsLibrary {
                 message: error.to_string(),
             })?;
 
-        let (engine, ephemeral_data_dir) = build_engine(&config)?;
+        let (runtime, ephemeral_data_dir) = build_runtime(&config)?;
         Ok(Arc::new(Self {
             tokio_runtime,
-            runtime: McpJsRuntime::new(engine),
+            runtime,
             _ephemeral_data_dir: ephemeral_data_dir,
         }))
     }
@@ -179,86 +175,45 @@ fn validate_config(config: &LibraryConfig) -> Result<(), LibraryError> {
     Ok(())
 }
 
-fn build_engine(
+fn build_runtime(
     config: &LibraryConfig,
-) -> Result<(Engine, Option<tempfile::TempDir>), LibraryError> {
-    let heap_memory_max_bytes = usize::try_from(config.heap_memory_max_mb)
-        .ok()
-        .and_then(|megabytes| megabytes.checked_mul(1024 * 1024))
-        .ok_or_else(|| LibraryError::InvalidConfig {
+) -> Result<(McpJsRuntime, Option<tempfile::TempDir>), LibraryError> {
+    let heap_memory_max_mb =
+        usize::try_from(config.heap_memory_max_mb).map_err(|_| LibraryError::InvalidConfig {
             message: "heap_memory_max_mb is too large for this platform".to_string(),
         })?;
-    let max_concurrent = config.max_concurrent_executions as usize;
-
-    match config.mode {
-        LibraryMode::Stateless => {
-            let ephemeral_data_dir = if config.data_dir.is_none() {
-                Some(
-                    tempfile::tempdir().map_err(|error| LibraryError::Initialization {
-                        message: format!("failed to create temporary data directory: {error}"),
-                    })?,
-                )
-            } else {
-                None
-            };
-            let data_dir = config
-                .data_dir
-                .as_deref()
-                .map(PathBuf::from)
-                .unwrap_or_else(|| {
-                    ephemeral_data_dir
-                        .as_ref()
-                        .expect("temporary directory created")
-                        .path()
-                        .to_path_buf()
-                });
-            std::fs::create_dir_all(&data_dir)
-                .map_err(|error| init_path_error(&data_dir, error))?;
-            let registry = ExecutionRegistry::new(path_string(&data_dir.join("executions"))?)
-                .map_err(init_message)?;
-            let engine = Engine::new_stateless(
-                heap_memory_max_bytes,
-                config.execution_timeout_secs,
-                max_concurrent,
+    let ephemeral_data_dir =
+        if matches!(config.mode, LibraryMode::Stateless) && config.data_dir.is_none() {
+            Some(
+                tempfile::tempdir().map_err(|error| LibraryError::Initialization {
+                    message: format!("failed to create temporary data directory: {error}"),
+                })?,
             )
-            .with_execution_registry(Arc::new(registry));
-            Ok((engine, ephemeral_data_dir))
-        }
-        LibraryMode::LocalStateful => build_local_stateful_engine(
-            config.data_dir.as_deref().expect("validated data_dir"),
-            heap_memory_max_bytes,
-            config.execution_timeout_secs,
-            max_concurrent,
-        )
-        .map(|engine| (engine, None)),
-    }
-}
+        } else {
+            None
+        };
+    let data_dir = config
+        .data_dir
+        .as_deref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            ephemeral_data_dir
+                .as_ref()
+                .expect("temporary directory created")
+                .path()
+                .to_path_buf()
+        });
 
-fn build_local_stateful_engine(
-    data_dir: &str,
-    heap_memory_max_bytes: usize,
-    execution_timeout_secs: u64,
-    max_concurrent: usize,
-) -> Result<Engine, LibraryError> {
-    let data_dir = PathBuf::from(data_dir);
-    std::fs::create_dir_all(&data_dir).map_err(|error| init_path_error(&data_dir, error))?;
-
-    let session_log =
-        SessionLog::new(path_string(&data_dir.join("sessions"))?).map_err(init_message)?;
-    let heap_tags =
-        HeapTagStore::new(path_string(&data_dir.join("heap-tags"))?).map_err(init_message)?;
-    let execution_registry =
-        ExecutionRegistry::new(path_string(&data_dir.join("executions"))?).map_err(init_message)?;
-
-    Ok(Engine::new_stateful(
-        AnyHeapStorage::File(FileHeapStorage::new(data_dir.join("heaps"))),
-        Some(session_log),
-        Some(heap_tags),
-        heap_memory_max_bytes,
-        execution_timeout_secs,
-        max_concurrent,
-    )
-    .with_execution_registry(Arc::new(execution_registry)))
+    let builder = McpJsRuntime::builder()
+        .heap_memory_max_mb(heap_memory_max_mb)
+        .execution_timeout_secs(config.execution_timeout_secs)
+        .max_concurrent_executions(config.max_concurrent_executions as usize);
+    let builder = match config.mode {
+        LibraryMode::Stateless => builder.stateless(data_dir),
+        LibraryMode::LocalStateful => builder.local_stateful(data_dir),
+    };
+    let runtime = builder.build().map_err(init_message)?;
+    Ok((runtime, ephemeral_data_dir))
 }
 
 fn parse_json_object(field: &str, json: &str) -> Result<Value, LibraryError> {
@@ -275,20 +230,8 @@ fn parse_json_object(field: &str, json: &str) -> Result<Value, LibraryError> {
     Ok(value)
 }
 
-fn path_string(path: &Path) -> Result<&str, LibraryError> {
-    path.to_str().ok_or_else(|| LibraryError::Initialization {
-        message: format!("path is not valid UTF-8: {}", path.display()),
-    })
-}
-
 fn init_message(message: String) -> LibraryError {
     LibraryError::Initialization { message }
-}
-
-fn init_path_error(path: &Path, error: std::io::Error) -> LibraryError {
-    LibraryError::Initialization {
-        message: format!("failed to create '{}': {error}", path.display()),
-    }
 }
 
 uniffi::setup_scaffolding!();

@@ -20,6 +20,24 @@ takes a tool name plus JSON arguments and returns JSON. The server CLI, HTTP API
 Streamable HTTP MCP, stdio MCP, legacy SSE MCP, and UniFFI wrapper now all hold
 the same runtime facade.
 
+## Rust embedding
+
+Rust callers use the same builder beneath the UniFFI wrapper:
+
+```rust
+use server::runtime::McpJsRuntime;
+
+let runtime = McpJsRuntime::builder()
+    .stateless("/tmp/mcp-v8-embedded")
+    .heap_memory_max_mb(64)
+    .execution_timeout_secs(30)
+    .max_concurrent_executions(4)
+    .build()?;
+```
+
+Use `local_stateful(path)` instead of `stateless(path)` to configure local heap,
+session-log, heap-tag, and execution-registry storage together.
+
 ## Generate bindings
 
 The checked-in proof of concept builds as a `staticlib` on Linux because the
