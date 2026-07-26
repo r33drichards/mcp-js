@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use tokio::sync::Mutex;
 
-use crate::engine::Engine;
+use crate::runtime::McpJsRuntime;
 use crate::engine::mcp_client::McpClientManager;
 use crate::session::SessionVerifier;
 
@@ -78,7 +78,7 @@ pub fn built_in_tool_catalog(heap: bool, fs: bool) -> ToolCatalog {
 /// by the legacy SSE handler (`mcp_sse.rs`). Excludes the upstream-MCP / WASM
 /// discovery stubs (a Streamable-HTTP convenience); SSE clients drive modules
 /// from `run_js` directly.
-pub fn mode_tool_list(engine: &Engine) -> Vec<Tool> {
+pub fn mode_tool_list(engine: &McpJsRuntime) -> Vec<Tool> {
     let mut tools = if engine.session_capable() {
         let mut tools = McpService::tool_router().list_all();
         filter_tools_by_capability(&mut tools, engine.heap_enabled(), engine.fs_enabled());
@@ -362,7 +362,7 @@ fn filter_tools_by_capability(tools: &mut Vec<Tool>, heap: bool, fs: bool) {
 
 #[derive(Clone)]
 pub struct McpService {
-    engine: Engine,
+    runtime: McpJsRuntime,
     verifier: Option<Arc<SessionVerifier>>,
     /// Optional manager for upstream MCP servers. When set, those servers'
     /// tools are exposed as stubs in this service's tool list, and calls to
@@ -383,24 +383,22 @@ impl McpService {
     /// result as a `CallToolResult`.
     async fn dispatch<T: Serialize>(&self, name: &str, args: &T) -> Result<CallToolResult, McpError> {
         let value = serde_json::to_value(args).unwrap_or_else(|_| json!({}));
-        let result = crate::mcp_dispatch::call_tool(
-            &self.engine,
+        let result = self.runtime.call_tool(
             self.session_id.get().map(String::as_str),
             self.mcp_headers.get(),
             name,
             &value,
-        )
-        .await;
+        ).await;
         json_result(result)
     }
 }
 
 #[tool_router]
 impl McpService {
-    pub fn new(engine: Engine, verifier: Option<Arc<SessionVerifier>>) -> Self {
-        let mcp_client = engine.mcp_client_manager();
+    pub fn new(runtime: McpJsRuntime, verifier: Option<Arc<SessionVerifier>>) -> Self {
+        let mcp_client = runtime.mcp_client_manager();
         Self {
-            engine,
+            runtime,
             verifier,
             mcp_client,
             session_id: Arc::new(OnceLock::new()),
@@ -563,7 +561,7 @@ impl McpService {
 /// Build the capability-filtered, override-applied, stub-augmented tool list.
 fn list_tools_for<S: Send + Sync + 'static>(
     router: &ToolRouter<S>,
-    engine: &Engine,
+    engine: &McpJsRuntime,
     mcp_client: &Option<Arc<McpClientManager>>,
 ) -> Vec<Tool> {
     let mut tools = router.list_all();
@@ -579,10 +577,10 @@ fn list_tools_for<S: Send + Sync + 'static>(
 #[task_handler]
 impl ServerHandler for McpService {
     fn get_info(&self) -> ServerInfo {
-        let instructions = self.engine.instructions_override()
+        let instructions = self.runtime.instructions_override()
             .map(|s| s.to_string())
             .unwrap_or_else(|| {
-                let mode = match (self.engine.heap_enabled(), self.engine.fs_enabled()) {
+                let mode = match (self.runtime.heap_enabled(), self.runtime.fs_enabled()) {
                     (true, true) => "with per-session V8 heap persistence (globals persist across calls) and a per-session content-addressed filesystem at /work",
                     (true, false) => "with per-session V8 heap persistence (globals persist across calls)",
                     (false, true) => "with a per-session content-addressed filesystem at /work (files persist across calls; JS globals do NOT)",
@@ -611,7 +609,7 @@ impl ServerHandler for McpService {
     ) -> Result<ListResourcesResult, McpError> {
         Ok(ListResourcesResult {
             next_cursor: None,
-            resources: doc_resources(self.engine.heap_enabled(), self.engine.fs_enabled()),
+            resources: doc_resources(self.runtime.heap_enabled(), self.runtime.fs_enabled()),
             meta: None,
         })
     }
@@ -621,7 +619,7 @@ impl ServerHandler for McpService {
         request: ReadResourceRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResult, McpError> {
-        read_doc_resource(&request.uri, self.engine.heap_enabled(), self.engine.fs_enabled())
+        read_doc_resource(&request.uri, self.runtime.heap_enabled(), self.runtime.fs_enabled())
             .ok_or_else(|| McpError::resource_not_found(
                 format!("Unknown resource URI: {}", request.uri),
                 None,
@@ -635,7 +633,7 @@ impl ServerHandler for McpService {
     ) -> Result<ListToolsResult, McpError> {
         Ok(ListToolsResult {
             next_cursor: None,
-            tools: list_tools_for(&self.tool_router, &self.engine, &self.mcp_client),
+            tools: list_tools_for(&self.tool_router, &self.runtime, &self.mcp_client),
             meta: None,
         })
     }
@@ -655,7 +653,7 @@ impl ServerHandler for McpService {
             }
         }
         // WASM module stubs return run_js usage instructions instead of dispatching.
-        if let Some(result) = self.engine.wasm_stub_call_response(&request.name, request.arguments.as_ref()) {
+        if let Some(result) = self.runtime.wasm_stub_call_response(&request.name, request.arguments.as_ref()) {
             return Ok(result);
         }
         self.tool_router.call(ToolCallContext::new(self, request, context)).await
@@ -679,7 +677,7 @@ impl ServerHandler for McpService {
 
 #[derive(Clone)]
 pub struct StatelessMcpService {
-    engine: Engine,
+    runtime: McpJsRuntime,
     verifier: Option<Arc<SessionVerifier>>,
     mcp_client: Option<Arc<McpClientManager>>,
     /// X-MCP-* headers from the initialize request, available for policy evaluation.
@@ -690,10 +688,10 @@ pub struct StatelessMcpService {
 
 #[tool_router]
 impl StatelessMcpService {
-    pub fn new(engine: Engine, verifier: Option<Arc<SessionVerifier>>) -> Self {
-        let mcp_client = engine.mcp_client_manager();
+    pub fn new(runtime: McpJsRuntime, verifier: Option<Arc<SessionVerifier>>) -> Self {
+        let mcp_client = runtime.mcp_client_manager();
         Self {
-            engine,
+            runtime,
             verifier,
             mcp_client,
             mcp_headers: Arc::new(OnceLock::new()),
@@ -709,8 +707,9 @@ impl StatelessMcpService {
         Parameters(args): Parameters<StatelessRunJsArgs>,
     ) -> Result<CallToolResult, McpError> {
         let value = serde_json::to_value(&args).unwrap_or_else(|_| json!({}));
-        let result =
-            crate::mcp_dispatch::run_js_blocking(&self.engine, self.mcp_headers.get(), &value).await;
+        let result = self.runtime
+            .call_tool(None, self.mcp_headers.get(), "run_js", &value)
+            .await;
         json_result(result)
     }
 }
@@ -718,7 +717,7 @@ impl StatelessMcpService {
 #[task_handler]
 impl ServerHandler for StatelessMcpService {
     fn get_info(&self) -> ServerInfo {
-        let instructions = self.engine.instructions_override()
+        let instructions = self.runtime.instructions_override()
             .map(|s| s.to_string())
             .unwrap_or_else(|| {
                 "JavaScript execution service (stateless mode — no heap persistence). \
@@ -767,7 +766,7 @@ impl ServerHandler for StatelessMcpService {
     ) -> Result<ListToolsResult, McpError> {
         Ok(ListToolsResult {
             next_cursor: None,
-            tools: list_tools_for(&self.tool_router, &self.engine, &self.mcp_client),
+            tools: list_tools_for(&self.tool_router, &self.runtime, &self.mcp_client),
             meta: None,
         })
     }
@@ -786,7 +785,7 @@ impl ServerHandler for StatelessMcpService {
                 return Ok(result);
             }
         }
-        if let Some(result) = self.engine.wasm_stub_call_response(&request.name, request.arguments.as_ref()) {
+        if let Some(result) = self.runtime.wasm_stub_call_response(&request.name, request.arguments.as_ref()) {
             return Ok(result);
         }
         self.tool_router.call(ToolCallContext::new(self, request, context)).await

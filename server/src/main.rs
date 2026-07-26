@@ -12,32 +12,25 @@ use tokio_util::sync::CancellationToken;
 use std::sync::Arc;
 use utoipa::OpenApi as _;
 use std::fmt;
-mod engine;
-mod mcp;
-mod mcp_dispatch;
-mod mcp_sse;
-mod api;
-mod cluster;
-mod cli;
-mod config;
-mod session;
-use cli::{Cli, FetchHeaderKey, StoreKind};
-use engine::{initialize_v8, Engine, WasmModule};
-use engine::fetch::FetchConfig;
-use engine::fs::FsConfig;
-use engine::execution::ExecutionRegistry;
-use engine::module_loader::ModuleLoaderConfig;
-use engine::subprocess::SubprocessConfig;
-use engine::run_js_file::RunJsFilePolicy;
-use engine::opa::{PoliciesConfig, build_policy_chain};
-use engine::heap_storage::{AnyHeapStorage, HeapStorage, S3HeapStorage, WriteThroughCacheHeapStorage, FileHeapStorage};
-use engine::fs_store::FsStore;
-use engine::fs_labels::LabelStore;
-use engine::opa::{EvalMode, PolicyChain};
-use engine::heap_tags::HeapTagStore;
-use engine::session_log::SessionLog;
-use mcp::{McpService, StatelessMcpService};
-use session::{SessionVerifier, JwksKeyStore};
+use server::cli::{Cli, FetchHeaderKey, StoreKind};
+use server::engine::{initialize_v8, Engine, WasmModule};
+use server::engine::fetch::FetchConfig;
+use server::engine::fs::FsConfig;
+use server::engine::execution::ExecutionRegistry;
+use server::engine::module_loader::ModuleLoaderConfig;
+use server::engine::subprocess::SubprocessConfig;
+use server::engine::run_js_file::RunJsFilePolicy;
+use server::engine::opa::{PoliciesConfig, build_policy_chain};
+use server::engine::heap_storage::{AnyHeapStorage, HeapStorage, S3HeapStorage, WriteThroughCacheHeapStorage, FileHeapStorage};
+use server::engine::fs_store::FsStore;
+use server::engine::fs_labels::LabelStore;
+use server::engine::opa::{EvalMode, PolicyChain};
+use server::engine::heap_tags::HeapTagStore;
+use server::engine::session_log::SessionLog;
+use server::mcp::{McpService, StatelessMcpService};
+use server::runtime::McpJsRuntime;
+use server::{api, cli, cluster, engine, mcp_sse};
+use server::session::{SessionVerifier, JwksKeyStore};
 use cluster::{ClusterConfig, ClusterNode};
 
 #[tokio::main]
@@ -677,29 +670,31 @@ async fn main() -> Result<()> {
         None
     };
 
+    let runtime = McpJsRuntime::new(engine);
+
     // ── Start transport ─────────────────────────────────────────────────
     // McpService (session-capable) is used whenever any per-session state axis
     // is on (heap and/or fs); StatelessMcpService only when neither is.
     let bind_host = cli.bind_host.clone();
     if let Some(port) = cli.http_port {
         tracing::info!("Starting Streamable HTTP transport on port {}", port);
-        if engine.session_capable() {
+        if runtime.session_capable() {
             let verifier = session_verifier.clone();
-            start_streamable_http(engine, bind_host, port, move |e| McpService::new(e, verifier.clone())).await?;
+            start_streamable_http(runtime, bind_host, port, move |e| McpService::new(e, verifier.clone())).await?;
         } else {
             let verifier = session_verifier.clone();
-            start_streamable_http(engine, bind_host, port, move |e| StatelessMcpService::new(e, verifier.clone())).await?;
+            start_streamable_http(runtime, bind_host, port, move |e| StatelessMcpService::new(e, verifier.clone())).await?;
         }
     } else if let Some(port) = cli.sse_port {
         // Legacy HTTP+SSE transport, served by the vendored rmcp 0.1.5 SSE
         // server. No MCP tasks support here — use --http-port for tasks.
         tracing::info!("Starting legacy HTTP+SSE transport on port {} (no MCP tasks; use --http-port for tasks)", port);
         let verifier = session_verifier.clone();
-        start_sse_server(engine, bind_host, port, verifier).await?;
+        start_sse_server(runtime, bind_host, port, verifier).await?;
     } else {
         tracing::info!("Starting stdio transport");
-        if engine.session_capable() {
-            let service = McpService::new(engine, None)
+        if runtime.session_capable() {
+            let service = McpService::new(runtime, None)
                 .with_session_id(cli.session_id.clone())
                 .serve(stdio())
                 .await
@@ -708,7 +703,7 @@ async fn main() -> Result<()> {
                 })?;
             service.waiting().await?;
         } else {
-            let service = StatelessMcpService::new(engine, None)
+            let service = StatelessMcpService::new(runtime, None)
                 .serve(stdio())
                 .await
                 .inspect_err(|e| {
@@ -769,10 +764,10 @@ fn resolve_bind_addr(host: &str, port: u16) -> Result<std::net::SocketAddr> {
 
 // ── Streamable HTTP transport (--http-port) ─────────────────────────────
 
-async fn start_streamable_http<S, F>(engine: Engine, host: String, port: u16, make_service: F) -> Result<()>
+async fn start_streamable_http<S, F>(runtime: McpJsRuntime, host: String, port: u16, make_service: F) -> Result<()>
 where
     S: ServerHandler + Send + Sync + 'static,
-    F: Fn(Engine) -> S + Send + Sync + Clone + 'static,
+    F: Fn(McpJsRuntime) -> S + Send + Sync + Clone + 'static,
 {
     let bind: std::net::SocketAddr = resolve_bind_addr(&host, port)?;
     let ct = CancellationToken::new();
@@ -781,9 +776,9 @@ where
     // /mcp. It natively serves the MCP `tasks/*` utility (SEP-1319) for tools
     // marked `execution(task_support = ...)` — here, `run_js`. A fresh service
     // (and thus a fresh per-connection session id) is created per session.
-    let factory_engine = engine.clone();
+    let factory_runtime = runtime.clone();
     let mcp_service = StreamableHttpService::new(
-        move || Ok(make_service(factory_engine.clone())),
+        move || Ok(make_service(factory_runtime.clone())),
         LocalSessionManager::default().into(),
         StreamableHttpServerConfig::default(),
     );
@@ -805,7 +800,7 @@ where
     // Mount the MCP service at /mcp alongside the plain HTTP API and openapi route.
     let app = axum::Router::new()
         .nest_service("/mcp", mcp_service)
-        .merge(api::api_router(engine.clone()))
+        .merge(api::api_router(runtime.clone()))
         .merge(openapi_route);
 
     let listener = tokio::net::TcpListener::bind(bind).await?;
@@ -830,7 +825,7 @@ where
 // MCP tasks (use the Streamable HTTP transport for those).
 
 async fn start_sse_server(
-    engine: Engine,
+    runtime: McpJsRuntime,
     host: String,
     port: u16,
     verifier: Option<Arc<SessionVerifier>>,
@@ -861,7 +856,7 @@ async fn start_sse_server(
         }));
 
     let app = sse_router
-        .merge(api::api_router(engine.clone()))
+        .merge(api::api_router(runtime.clone()))
         .merge(openapi_route);
 
     let listener = tokio::net::TcpListener::bind(sse_server.config.bind).await?;
@@ -874,7 +869,7 @@ async fn start_sse_server(
         tracing::info!("SSE server shutting down");
     });
 
-    sse_server.with_service(move || mcp_sse::SseService::new(engine.clone(), verifier.clone()));
+    sse_server.with_service(move || mcp_sse::SseService::new(runtime.clone(), verifier.clone()));
 
     tokio::spawn(async move {
         if let Err(e) = server.await {
@@ -1383,7 +1378,7 @@ mod tests {
     }
 
     fn check_mcp_servers() -> anyhow::Result<()> {
-        use crate::engine::mcp_client::McpServerTransport;
+        use server::engine::mcp_client::McpServerTransport;
 
         let configs = load_mcp_server_configs(
             &[
@@ -1436,7 +1431,7 @@ mod tests {
     }
 
     fn check_peers() -> anyhow::Result<()> {
-        let (peers, peer_addrs) = crate::cluster::ClusterConfig::parse_peers(&[
+        let (peers, peer_addrs) = server::cluster::ClusterConfig::parse_peers(&[
             "node2@10.0.0.2:4000".to_string(),
             "10.0.0.3:4000".to_string(),
         ]);
@@ -1463,7 +1458,7 @@ mod tests {
 
         let checks = structured_arg_checks();
         let check_ids: BTreeSet<&str> = checks.iter().map(|(id, _)| *id).collect();
-        let grammar_ids: BTreeSet<&str> = crate::cli::Cli::structured_arg_ids().into_iter().collect();
+        let grammar_ids: BTreeSet<&str> = server::cli::Cli::structured_arg_ids().into_iter().collect();
 
         // Help registry (cli.rs) and parse-check registry (here) must cover the
         // exact same flags — so neither side can grow without the other.
@@ -1502,7 +1497,7 @@ mod tests {
 
     #[test]
     fn load_mcp_server_configs_accepts_inline_json() {
-        use crate::engine::mcp_client::McpServerTransport;
+        use server::engine::mcp_client::McpServerTransport;
 
         let inline = r#"[{"name": "weather", "transport": "stdio", "command": "python", "args": ["server.py"]}]"#;
         let configs =

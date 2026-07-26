@@ -13,7 +13,7 @@ use utoipa::{OpenApi, ToSchema};
 /// body and raw script uploads.
 const MAX_EXEC_BODY_BYTES: usize = 16 * 1024 * 1024;
 
-use crate::engine::Engine;
+use crate::runtime::McpJsRuntime;
 
 // ── Embedded agent-discovery content ─────────────────────────────────
 
@@ -284,7 +284,7 @@ pub struct ApiDoc;
     tag = "executions"
 )]
 async fn exec_handler(
-    State(engine): State<Engine>,
+    State(runtime): State<McpJsRuntime>,
     Query(params): Query<ExecUploadParams>,
     request: Request,
 ) -> (StatusCode, Json<serde_json::Value>) {
@@ -349,7 +349,7 @@ async fn exec_handler(
         }
     };
 
-    submit_exec(engine, exec_req).await
+    submit_exec(runtime, exec_req).await
 }
 
 /// Query-string parameters accepted alongside a raw-body script upload to
@@ -372,10 +372,10 @@ struct ExecUploadParams {
 /// Queue an [`ExecRequest`] on the engine and map the result to an HTTP
 /// response. Shared by the JSON and raw-upload code paths.
 async fn submit_exec(
-    engine: Engine,
+    runtime: McpJsRuntime,
     req: ExecRequest,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let mut r = engine.run_js(req.code);
+    let mut r = runtime.run_js(req.code);
     if let Some(h) = req.heap { r = r.heap(h); }
     r = r.maybe_fs(req.fs);
     if let Some(s) = req.session { r = r.session(s); }
@@ -408,10 +408,10 @@ async fn submit_exec(
     tag = "executions"
 )]
 async fn get_execution_handler(
-    State(engine): State<Engine>,
+    State(runtime): State<McpJsRuntime>,
     Path(id): Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    match engine.get_execution(&id) {
+    match runtime.get_execution(&id) {
         Ok(info) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -451,15 +451,15 @@ async fn get_execution_handler(
     tag = "executions"
 )]
 async fn get_execution_output_handler(
-    State(engine): State<Engine>,
+    State(runtime): State<McpJsRuntime>,
     Path(id): Path<String>,
     Query(query): Query<OutputQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let status = engine.get_execution(&id)
+    let status = runtime.get_execution(&id)
         .map(|info| info.status)
         .unwrap_or_else(|_| "unknown".to_string());
 
-    match engine.get_execution_output(&id, query.line_offset, query.line_limit, query.byte_offset, query.byte_limit) {
+    match runtime.get_execution_output(&id, query.line_offset, query.line_limit, query.byte_offset, query.byte_limit) {
         Ok(page) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -498,10 +498,10 @@ async fn get_execution_output_handler(
     tag = "executions"
 )]
 async fn cancel_execution_handler(
-    State(engine): State<Engine>,
+    State(runtime): State<McpJsRuntime>,
     Path(id): Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    match engine.cancel_execution(&id) {
+    match runtime.cancel_execution(&id) {
         Ok(()) => (
             StatusCode::OK,
             Json(serde_json::json!({ "ok": true })),
@@ -524,9 +524,9 @@ async fn cancel_execution_handler(
     tag = "executions"
 )]
 async fn list_executions_handler(
-    State(engine): State<Engine>,
+    State(runtime): State<McpJsRuntime>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    match engine.list_executions() {
+    match runtime.list_executions() {
         Ok(executions) => (
             StatusCode::OK,
             Json(serde_json::json!({ "executions": executions })),
@@ -736,9 +736,9 @@ pub struct FsResetRequest {
     tag = "fs"
 )]
 async fn fs_labels_handler(
-    State(engine): State<Engine>,
+    State(runtime): State<McpJsRuntime>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    match engine.fs_list_labels().await {
+    match runtime.fs_list_labels().await {
         Ok(labels) => (StatusCode::OK, Json(serde_json::json!({ "labels": labels }))),
         Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))),
     }
@@ -753,10 +753,10 @@ async fn fs_labels_handler(
     tag = "fs"
 )]
 async fn fs_set_label_handler(
-    State(engine): State<Engine>,
+    State(runtime): State<McpJsRuntime>,
     Json(req): Json<FsLabelRequest>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    match engine.fs_set_label(&req.name, &req.ca_id, req.message).await {
+    match runtime.fs_set_label(&req.name, &req.ca_id, req.message).await {
         Ok(()) => (
             StatusCode::OK,
             Json(serde_json::json!({ "label": req.name, "ca_id": req.ca_id })),
@@ -777,10 +777,10 @@ async fn fs_set_label_handler(
     tag = "fs"
 )]
 async fn fs_resolve_handler(
-    State(engine): State<Engine>,
+    State(runtime): State<McpJsRuntime>,
     Path(label): Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    match engine.fs_resolve_label(&label).await {
+    match runtime.fs_resolve_label(&label).await {
         Ok(Some(ca_id)) => (
             StatusCode::OK,
             Json(serde_json::json!({ "label": label, "ca_id": ca_id })),
@@ -805,11 +805,11 @@ async fn fs_resolve_handler(
     tag = "fs"
 )]
 async fn fs_log_handler(
-    State(engine): State<Engine>,
+    State(runtime): State<McpJsRuntime>,
     Path(label): Path<String>,
     Query(query): Query<FsLogQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    match engine.fs_label_log(&label, query.limit).await {
+    match runtime.fs_label_log(&label, query.limit).await {
         Ok(log) => (
             StatusCode::OK,
             Json(serde_json::json!({ "label": label, "log": log })),
@@ -830,7 +830,7 @@ async fn fs_log_handler(
     tag = "fs"
 )]
 async fn fs_push_handler(
-    State(engine): State<Engine>,
+    State(runtime): State<McpJsRuntime>,
     Json(req): Json<FsPushRequest>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     if req.detach {
@@ -845,7 +845,7 @@ async fn fs_push_handler(
             Json(serde_json::json!({ "error": "fs push requires a label unless detach is true" })),
         );
     };
-    match engine.fs_push(&label, &req.ca_id, req.expected, req.force, req.message).await {
+    match runtime.fs_push(&label, &req.ca_id, req.expected, req.force, req.message).await {
         Ok(outcome) => {
             let value = serde_json::to_value(&outcome).unwrap_or_default();
             let is_rejected = matches!(outcome, crate::engine::FsPushOutcome::Rejected { .. });
@@ -868,10 +868,10 @@ async fn fs_push_handler(
     tag = "fs"
 )]
 async fn fs_reset_handler(
-    State(engine): State<Engine>,
+    State(runtime): State<McpJsRuntime>,
     Json(req): Json<FsResetRequest>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    match engine.fs_reset(&req.label, &req.ca_id, req.allow_unlogged, req.message).await {
+    match runtime.fs_reset(&req.label, &req.ca_id, req.allow_unlogged, req.message).await {
         Ok(()) => (
             StatusCode::OK,
             Json(serde_json::json!({ "label": req.label, "ca_id": req.ca_id })),
@@ -907,14 +907,14 @@ pub struct FsMergeRequest {
     tag = "fs"
 )]
 async fn fs_merge_handler(
-    State(engine): State<Engine>,
+    State(runtime): State<McpJsRuntime>,
     Json(req): Json<FsMergeRequest>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let prefer = match crate::engine::fs_merge::Prefer::parse(req.prefer.as_deref()) {
         Ok(p) => p,
         Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))),
     };
-    match engine.fs_merge(&req.ours, &req.theirs, req.base, prefer).await {
+    match runtime.fs_merge(&req.ours, &req.theirs, req.base, prefer).await {
         // Both clean merges and conflicts are successful outcomes carrying a
         // `status`-tagged body the caller acts on; only bad input is an error.
         Ok(result) => (StatusCode::OK, Json(serde_json::to_value(&result).unwrap_or_default())),
@@ -928,7 +928,7 @@ async fn fs_merge_handler(
 ///
 /// Used when running in stdio mode where no HTTP server is present, and
 /// for merging into SSE / Streamable-HTTP transport servers.
-pub fn api_router(engine: Engine) -> Router {
+pub fn api_router(runtime: McpJsRuntime) -> Router {
     Router::new()
         .route("/", get(root_redirect_handler))
         .route("/llms.txt", get(llms_txt_handler))
@@ -947,5 +947,5 @@ pub fn api_router(engine: Engine) -> Router {
         .route("/api/fs/push", post(fs_push_handler))
         .route("/api/fs/reset", post(fs_reset_handler))
         .route("/api/fs/merge", post(fs_merge_handler))
-        .with_state(engine)
+        .with_state(runtime)
 }

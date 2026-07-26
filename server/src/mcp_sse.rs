@@ -25,7 +25,7 @@ use rmcp_legacy::{
 };
 use serde_json::json;
 
-use crate::engine::Engine;
+use crate::runtime::McpJsRuntime;
 use crate::session::SessionVerifier;
 
 const LLMS_TXT: &str = include_str!("llms_txt.md");
@@ -33,16 +33,16 @@ const README_MD: &str = include_str!("../README.md");
 
 #[derive(Clone)]
 pub struct SseService {
-    engine: Engine,
+    runtime: McpJsRuntime,
     verifier: Option<Arc<SessionVerifier>>,
     session_id: Arc<OnceLock<String>>,
     mcp_headers: Arc<OnceLock<serde_json::Value>>,
 }
 
 impl SseService {
-    pub fn new(engine: Engine, verifier: Option<Arc<SessionVerifier>>) -> Self {
+    pub fn new(runtime: McpJsRuntime, verifier: Option<Arc<SessionVerifier>>) -> Self {
         Self {
-            engine,
+            runtime,
             verifier,
             session_id: Arc::new(OnceLock::new()),
             mcp_headers: Arc::new(OnceLock::new()),
@@ -144,10 +144,10 @@ fn read_doc_resource(uri: &str, heap: bool, fs: bool) -> Option<ReadResourceResu
 
 impl ServerHandler for SseService {
     fn get_info(&self) -> ServerInfo {
-        let instructions = self.engine.instructions_override()
+        let instructions = self.runtime.instructions_override()
             .map(|s| s.to_string())
             .unwrap_or_else(|| {
-                let mode = match (self.engine.heap_enabled(), self.engine.fs_enabled()) {
+                let mode = match (self.runtime.heap_enabled(), self.runtime.fs_enabled()) {
                     (true, true) => "with per-session V8 heap persistence (globals persist across calls) and a per-session content-addressed filesystem at /work",
                     (true, false) => "with per-session V8 heap persistence (globals persist across calls)",
                     (false, true) => "with a per-session content-addressed filesystem at /work (files persist across calls; JS globals do NOT)",
@@ -187,7 +187,7 @@ impl ServerHandler for SseService {
         request: ReadResourceRequestParam,
         _context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResult, McpError> {
-        read_doc_resource(&request.uri, self.engine.heap_enabled(), self.engine.fs_enabled())
+        read_doc_resource(&request.uri, self.runtime.heap_enabled(), self.runtime.fs_enabled())
             .ok_or_else(|| McpError::resource_not_found(
                 format!("Unknown resource URI: {}", request.uri),
                 None,
@@ -199,7 +199,7 @@ impl ServerHandler for SseService {
         _request: Option<PaginatedRequestParam>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        let tools = crate::mcp::mode_tool_list(&self.engine)
+        let tools = crate::mcp::mode_tool_list(&self.runtime)
             .iter()
             .map(to_legacy_tool)
             .collect();
@@ -219,16 +219,8 @@ impl ServerHandler for SseService {
         let session = self.session_id.get().map(String::as_str);
         let headers = self.mcp_headers.get();
 
-        // Mirror the two service modes: stateful exposes the full async tool
-        // surface; stateless exposes only run_js (run to completion, return
-        // output directly).
-        let result = if self.engine.session_capable() {
-            crate::mcp_dispatch::call_tool(&self.engine, session, headers, name, &args).await
-        } else if name == "run_js" {
-            crate::mcp_dispatch::run_js_blocking(&self.engine, headers, &args).await
-        } else {
-            json!({ "error": format!("unknown tool: {name}") })
-        };
+        // Keep legacy SSE behavior aligned with the primary MCP transports.
+        let result = self.runtime.call_tool(session, headers, name, &args).await;
         Ok(ok_result(result))
     }
 
