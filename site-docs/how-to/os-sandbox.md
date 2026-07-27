@@ -39,7 +39,7 @@ mcp-v8 --heap-store dir --heap-dir /var/lib/mcp-v8/heaps \
   --sandbox-manifest /etc/mcp-v8/sandbox.json
 ```
 
-The flag also accepts inline JSON, and in a [`--config` file](config-file.md)
+The flag also accepts inline JSON, and in a [`--config` file](../reference/config-file.md)
 the manifest is a structured `sandbox` section — no separate JSON file, no
 quoting:
 
