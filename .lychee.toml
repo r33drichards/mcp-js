@@ -1,4 +1,6 @@
-include_fragments = true
+# lychee ≥0.24 replaced the boolean with a mode string; "full" checks both
+# anchor fragments and text fragments (the old `true` checked anchors).
+include_fragments = "full"
 max_retries = 3
 retry_wait_time = 2
 timeout = 20
