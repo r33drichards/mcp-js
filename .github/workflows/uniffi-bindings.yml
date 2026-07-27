@@ -41,7 +41,7 @@ jobs:
 
   python-library-e2e:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@main
@@ -51,7 +51,7 @@ jobs:
             ~/.cargo/git
             ~/.cargo/registry
             target/python-uniffi
-          key: python-uniffi-v8-145-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'server/**', 'mcp-v8-uniffi-python/**') }}
+          key: python-uniffi-v8-145-shared-v2-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'server/**', 'mcp-v8-uniffi-python/**') }}
       - name: Install UniFFI bindgen
         run: nix develop --command cargo install uniffi --version 0.32.0 --locked --features cli
       - name: Build Python-loadable UniFFI library
@@ -59,7 +59,7 @@ jobs:
           nix develop --command bash -c '
             unset RUSTY_V8_ARCHIVE
             export V8_FROM_SOURCE=1
-            export GN_ARGS="v8_monolithic_for_shared_library=true"
+            export GN_ARGS="v8_monolithic=true v8_monolithic_for_shared_library=true"
             export CARGO_TARGET_DIR="$PWD/target/python-uniffi"
             cargo build -p mcp-v8-uniffi-python --release \
               --config mcp-v8-uniffi-python/cargo-config.toml
