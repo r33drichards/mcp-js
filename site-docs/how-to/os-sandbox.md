@@ -39,6 +39,37 @@ mcp-v8 --heap-store dir --heap-dir /var/lib/mcp-v8/heaps \
   --sandbox-manifest /etc/mcp-v8/sandbox.json
 ```
 
+The flag also accepts inline JSON, and in a [`--config` file](config-file.md)
+the manifest is a structured `sandbox` section — no separate JSON file, no
+quoting:
+
+```toml
+heap_store = "dir"
+heap_dir = "/var/lib/mcp-v8/heaps"
+
+[sandbox]
+version = "0.1.0"
+[sandbox.network]
+mode = "blocked"
+```
+
+The NixOS module exposes the same section as a plain attrset, so the
+manifest is ordinary Nix:
+
+```nix
+services.mcp-js.settings = {
+  heap_store = "dir";
+  heap_dir = "/var/lib/mcp-v8/heaps";
+  sandbox = {
+    version = "0.1.0";
+    filesystem.grants = [
+      { path = "/srv/scripts"; access = "read"; }
+    ];
+    network.mode = "blocked";
+  };
+};
+```
+
 At startup — before the async runtime or V8 spawn a single thread — the
 server composes the manifest with the derived baseline and asks the kernel
 to enforce it. The baseline covers:
@@ -152,7 +183,8 @@ the manifest, restart — grants cannot be widened at runtime by design.
 `RUST_LOG=info` logs the composition at startup (`OS sandbox applied
 (linux): manifest ... composed with server baseline ...`).
 
-In a `--config` file the flag is a key like any other:
+In a `--config` file, use either the structured `sandbox` section shown
+above or a `sandbox_manifest` path key (they are mutually exclusive):
 
 ```toml
 sandbox_manifest = "/etc/mcp-v8/sandbox.json"

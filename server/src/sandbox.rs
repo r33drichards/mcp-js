@@ -306,6 +306,29 @@ fn reject_supervisor_features(manifest: &nono::manifest::CapabilityManifest) -> 
     }
 }
 
+/// Load the manifest from a file path or inline JSON — the same dual form
+/// the other JSON-valued flags accept. Inline JSON is how the structured
+/// `sandbox` config-file section (and the NixOS module's attrset option)
+/// arrives: the config loader re-serializes the section and passes it as
+/// this flag's value.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn load_manifest(value: &str) -> Result<nono::manifest::CapabilityManifest> {
+    use nono::manifest::CapabilityManifest;
+
+    let json = if Path::new(value).is_file() {
+        std::fs::read_to_string(value)
+            .with_context(|| format!("--sandbox-manifest: failed to read {value}"))?
+    } else if value.trim_start().starts_with('{') {
+        value.to_string()
+    } else {
+        anyhow::bail!(
+            "--sandbox-manifest: '{value}' is neither an existing file nor inline \
+             manifest JSON"
+        );
+    };
+    CapabilityManifest::from_json(&json).map_err(|e| anyhow::anyhow!("--sandbox-manifest: {e}"))
+}
+
 /// Grant `path` (auto-detecting file vs directory) at `mode`.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn grant(
@@ -331,17 +354,20 @@ fn grant(
 /// this ordering.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn apply(cli: &Cli) -> Result<()> {
-    use nono::manifest::{CapabilityManifest, NetworkMode};
+    use nono::manifest::NetworkMode;
     use nono::{AccessMode, CapabilitySet, Sandbox};
 
-    let Some(manifest_path) = &cli.sandbox_manifest else {
+    let Some(manifest_value) = &cli.sandbox_manifest else {
         return Ok(());
     };
+    // For logs and errors: inline JSON would be noise, a path is a name.
+    let manifest_name = if Path::new(manifest_value).is_file() {
+        manifest_value.as_str()
+    } else {
+        "<inline>"
+    };
 
-    let json = std::fs::read_to_string(manifest_path)
-        .with_context(|| format!("--sandbox-manifest: failed to read {manifest_path}"))?;
-    let manifest = CapabilityManifest::from_json(&json)
-        .map_err(|e| anyhow::anyhow!("--sandbox-manifest {manifest_path}: {e}"))?;
+    let manifest = load_manifest(manifest_value)?;
     reject_supervisor_features(&manifest)?;
 
     let support = Sandbox::support_info();
@@ -356,7 +382,7 @@ pub fn apply(cli: &Cli) -> Result<()> {
 
     // Layer 1: the manifest, verbatim, through nono's own conversion.
     let mut caps = CapabilitySet::try_from(&manifest)
-        .map_err(|e| anyhow::anyhow!("--sandbox-manifest {manifest_path}: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("--sandbox-manifest {manifest_name}: {e}"))?;
 
     // Layer 2: the server baseline. Grants are additive and deduplicated by
     // nono, so composing on top of the manifest cannot narrow it.
@@ -458,7 +484,7 @@ pub fn apply(cli: &Cli) -> Result<()> {
         "OS sandbox applied ({}): manifest {} composed with server baseline \
          ({} read-write dir(s), {} read-only grant(s))",
         support.platform,
-        manifest_path,
+        manifest_name,
         plan.write_dirs.len(),
         plan.read_paths.len(),
     );
@@ -597,6 +623,21 @@ mod manifest_tests {
         ));
         reject_supervisor_features(&m).expect("in-process subset should pass");
         nono::CapabilitySet::try_from(&m).expect("nono conversion should succeed");
+    }
+
+    #[test]
+    fn load_manifest_accepts_file_and_inline_json() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("m.json");
+        std::fs::write(&file, r#"{"version":"0.1.0"}"#).unwrap();
+        load_manifest(file.to_str().unwrap()).expect("file form");
+        load_manifest(r#"{"version":"0.1.0","network":{"mode":"blocked"}}"#).expect("inline form");
+
+        let missing = dir.path().join("nope.json");
+        let err = load_manifest(missing.to_str().unwrap()).expect_err("missing file");
+        assert!(err.to_string().contains("neither an existing file nor inline"));
+        let err = load_manifest(r#"{"version": 12}"#).expect_err("schema violation");
+        assert!(err.to_string().contains("--sandbox-manifest"));
     }
 
     #[test]

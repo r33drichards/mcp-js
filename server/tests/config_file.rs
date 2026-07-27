@@ -150,6 +150,74 @@ async fn env_var_beats_config_file() {
 }
 
 #[tokio::test]
+async fn structured_sandbox_section_reaches_the_sandbox_layer() {
+    // The [sandbox] table is re-serialized to inline JSON and routed to
+    // --sandbox-manifest. Assert on the supervisor-feature rejection, which
+    // fires after manifest parsing but before any kernel-support probe, so
+    // the test proves the wiring on hosts with and without Landlock alike.
+    let dir = temp_dir("sandbox-section");
+    let config_path = write_config(
+        &dir,
+        "server.toml",
+        &format!(
+            "{}[sandbox]\nversion = \"0.1.0\"\n[sandbox.network]\nmode = \"proxy\"\n",
+            base_config(&dir, 39999)
+        ),
+    );
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_server"))
+        .args(["--config", &config_path])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("spawn server binary");
+
+    let mut stderr = String::new();
+    child.stderr.take().unwrap().read_to_string(&mut stderr).await.unwrap();
+    let status = child.wait().await.expect("server should exit on its own");
+
+    assert!(!status.success(), "proxy-mode manifest via [sandbox] must fail startup");
+    assert!(
+        stderr.contains("supervisor") && stderr.contains("network.mode: proxy"),
+        "the sandbox layer should have parsed the section as a manifest: {stderr}"
+    );
+}
+
+#[tokio::test]
+async fn sandbox_section_conflicts_with_sandbox_manifest_key() {
+    let dir = temp_dir("sandbox-conflict");
+    let config_path = write_config(
+        &dir,
+        "server.toml",
+        &format!(
+            "{}sandbox_manifest = \"/etc/mcp-v8/sandbox.json\"\n[sandbox]\nversion = \"0.1.0\"\n",
+            base_config(&dir, 39999)
+        ),
+    );
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_server"))
+        .args(["--config", &config_path])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("spawn server binary");
+
+    let mut stderr = String::new();
+    child.stderr.take().unwrap().read_to_string(&mut stderr).await.unwrap();
+    let status = child.wait().await.expect("server should exit on its own");
+
+    assert!(!status.success(), "setting both forms must fail startup");
+    assert!(
+        stderr.contains("sandbox") && stderr.contains("sandbox_manifest") && stderr.contains("both"),
+        "stderr should explain the mutual exclusion: {stderr}"
+    );
+}
+
+#[tokio::test]
 async fn unknown_config_key_fails_startup() {
     let dir = temp_dir("unknown-key");
     let config_path = write_config(&dir, "server.toml", "htpp_port = 8080\n");

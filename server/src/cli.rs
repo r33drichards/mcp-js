@@ -199,7 +199,10 @@ pub struct Cli {
     // ── OS sandbox (nono: Landlock on Linux, Seatbelt on macOS) ──────────────
     /// Confine the whole server process with an OS-enforced sandbox (nono:
     /// Landlock on Linux 5.13+, Seatbelt on macOS) described by a nono
-    /// capability manifest JSON file. nono capabilities compose additively,
+    /// capability manifest — a JSON file path or inline JSON; in a --config
+    /// file the structured `sandbox` section is the ergonomic form (and the
+    /// NixOS module exposes it as a plain attrset). nono capabilities compose
+    /// additively,
     /// so the enforced set is the manifest (verbatim, in nono's schema and
     /// semantics) unioned with a server baseline derived from this
     /// configuration: storage directories read-write, config/policy/WASM
