@@ -21,6 +21,7 @@ end-to-end, build-something-real walkthroughs, see the
 - [Security policies (OPA/Rego)](policies.md) — gate each capability with OPA or Rego.
 - [Authentication (JWT/JWKS)](authentication.md) — enable JWKS verification, use Keycloak.
 - [Clustering & replication (Raft)](clustering.md) — configure nodes, join, load-balance.
+- [Generate native UniFFI bindings](generate-uniffi-bindings.md) — build the static library and generate Swift, Kotlin, Python, or Ruby wrappers.
 
 ## See also
 

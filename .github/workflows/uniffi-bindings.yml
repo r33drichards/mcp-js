@@ -1,0 +1,34 @@
+name: UniFFI Bindings
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - "mcp-v8-uniffi/**"
+      - "server/src/library.rs"
+      - "server/src/runtime.rs"
+      - "scripts/*uniffi-bindings.sh"
+      - ".github/workflows/uniffi-bindings.yml"
+  pull_request:
+    branches: [ main ]
+    paths:
+      - "mcp-v8-uniffi/**"
+      - "server/src/library.rs"
+      - "server/src/runtime.rs"
+      - "scripts/*uniffi-bindings.sh"
+      - ".github/workflows/uniffi-bindings.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  staticlib-bindings:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - name: Install UniFFI bindgen
+        run: nix develop --command cargo install uniffi --version 0.32.0 --locked --features cli
+      - name: Generate and check language bindings
+        run: nix develop --command ./scripts/check-uniffi-bindings.sh
