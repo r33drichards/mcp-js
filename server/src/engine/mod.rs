@@ -479,7 +479,7 @@ pub fn strip_typescript_types(code: &str) -> Result<String, String> {
 
     let fm = cm.new_source_file(
         swc_core::common::FileName::Anon.into(),
-        code.into(),
+        code.to_string(),
     );
 
     let comments = SingleThreadedComments::default();

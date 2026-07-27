@@ -215,6 +215,26 @@
     default = null;
     description = "S3 bucket backing whichever axes select `s3`. Required when `--heap-store s3` or `--fs-store s3` is set. Config-file key for the `--s3-bucket` flag. Environment variable: `MCP_V8_S3_BUCKET`.";
   };
+  sandbox = lib.mkOption {
+    type = lib.types.nullOr lib.types.bool;
+    default = null;
+    description = "Confine the whole server process with an OS-enforced sandbox (nono: Landlock on Linux 5.13+, Seatbelt on macOS) before any JS runs. The filesystem capability set is derived from the rest of the configuration (heap/fs/session stores read-write; config, policy, and WASM files read-only; system paths read-only) and is irreversible once applied — there is no API to widen it at runtime. This is defense in depth *underneath* the OPA policy layer: even a V8 escape or a policy mistake cannot reach paths or sockets the OS never granted. Fails closed: if the platform cannot enforce the sandbox, startup aborts. Config-file key for the `--sandbox` flag. Environment variable: `MCP_V8_SANDBOX`. Server default: `false`.";
+  };
+  sandbox_allow_read = lib.mkOption {
+    type = lib.types.nullOr (lib.types.listOf lib.types.str);
+    default = null;
+    description = "Grant the sandboxed process read-only access to an extra path (directory grants are recursive). Repeatable. Use for paths the derivation cannot see, e.g. scripts read via run_js `file`, or module roots when external imports are enabled. Config-file key for the `--sandbox-allow-read` flag. Environment variable: `MCP_V8_SANDBOX_ALLOW_READ`.";
+  };
+  sandbox_allow_write = lib.mkOption {
+    type = lib.types.nullOr (lib.types.listOf lib.types.str);
+    default = null;
+    description = "Grant the sandboxed process read-write access to an extra path (directory grants are recursive). Repeatable. Config-file key for the `--sandbox-allow-write` flag. Environment variable: `MCP_V8_SANDBOX_ALLOW_WRITE`.";
+  };
+  sandbox_network = lib.mkOption {
+    type = lib.types.nullOr (lib.types.enum [ "auto" "allow" "block" ]);
+    default = null;
+    description = "Outbound-network posture for the OS sandbox: auto (default) blocks outbound TCP unless a configured feature needs it (S3, JWKS, cluster, fetch/module policies, SSE MCP servers, remote OPA); allow leaves the network open; block forces it closed. Configured HTTP/SSE/cluster listener ports are always bindable. Port-level exceptions need Landlock ABI v4 (Linux 6.7+); older kernels fall back to seccomp all-or-nothing and abort startup if that cannot express the policy. Config-file key for the `--sandbox-network` flag. Environment variable: `MCP_V8_SANDBOX_NETWORK`. Server default: `auto`.";
+  };
   session_db_path = lib.mkOption {
     type = lib.types.nullOr lib.types.str;
     default = null;

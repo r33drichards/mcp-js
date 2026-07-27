@@ -20,6 +20,7 @@ mod api;
 mod cluster;
 mod cli;
 mod config;
+mod sandbox;
 mod session;
 use cli::{Cli, FetchHeaderKey, StoreKind};
 use engine::{initialize_v8, Engine, WasmModule};
@@ -40,9 +41,7 @@ use mcp::{McpService, StatelessMcpService};
 use session::{SessionVerifier, JwksKeyStore};
 use cluster::{ClusterConfig, ClusterNode};
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    initialize_v8();
+fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_ansi(false)
@@ -57,6 +56,25 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // ── OS sandbox (--sandbox) ──────────────────────────────────────────
+    // Landlock confines the calling thread and everything spawned from it
+    // afterwards — threads that already exist stay unconfined. So the sandbox
+    // must be applied here, while the process is still single-threaded:
+    // before the tokio runtime builds its worker pool and before the V8
+    // platform spawns its background threads.
+    if cli.sandbox {
+        sandbox::apply(&cli)?;
+    }
+
+    initialize_v8();
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("build tokio runtime")
+        .block_on(async_main(cli))
+}
+
+async fn async_main(cli: Cli) -> Result<()> {
     tracing::info!(?cli, "Starting MCP server with CLI arguments");
 
     let heap_memory_max_bytes = (cli.heap_memory_max as usize) * 1024 * 1024;

@@ -14,6 +14,7 @@ using the same help headings exposed by the CLI itself.
 - [Heap](#heap)
 - [MCP Server Module](#mcp-server-module)
 - [Module Import](#module-import)
+- [OS Sandbox](#os-sandbox)
 - [Policy](#policy)
 - [Prompt](#prompt)
 - [Run JS File](#run-js-file)
@@ -288,6 +289,41 @@ Allow external module imports (npm:, jsr:, and URL imports). When disabled (the 
 
 - Environment: `MCP_V8_ALLOW_EXTERNAL_MODULES`
 - Default: `false`
+
+## OS Sandbox
+
+### `--sandbox`
+
+Confine the whole server process with an OS-enforced sandbox (nono: Landlock on Linux 5.13+, Seatbelt on macOS) before any JS runs. The filesystem capability set is derived from the rest of the configuration (heap/fs/session stores read-write; config, policy, and WASM files read-only; system paths read-only) and is irreversible once applied — there is no API to widen it at runtime. This is defense in depth *underneath* the OPA policy layer: even a V8 escape or a policy mistake cannot reach paths or sockets the OS never granted. Fails closed: if the platform cannot enforce the sandbox, startup aborts
+
+- Environment: `MCP_V8_SANDBOX`
+- Default: `false`
+
+### `--sandbox-allow-read`
+
+Grant the sandboxed process read-only access to an extra path (directory grants are recursive). Repeatable. Use for paths the derivation cannot see, e.g. scripts read via run_js `file`, or module roots when external imports are enabled
+
+- Environment: `MCP_V8_SANDBOX_ALLOW_READ`
+- Value: `PATH`
+- Delimiter: `,`
+- Repeatable: yes
+
+### `--sandbox-allow-write`
+
+Grant the sandboxed process read-write access to an extra path (directory grants are recursive). Repeatable
+
+- Environment: `MCP_V8_SANDBOX_ALLOW_WRITE`
+- Value: `PATH`
+- Delimiter: `,`
+- Repeatable: yes
+
+### `--sandbox-network`
+
+Outbound-network posture for the OS sandbox: auto (default) blocks outbound TCP unless a configured feature needs it (S3, JWKS, cluster, fetch/module policies, SSE MCP servers, remote OPA); allow leaves the network open; block forces it closed. Configured HTTP/SSE/cluster listener ports are always bindable. Port-level exceptions need Landlock ABI v4 (Linux 6.7+); older kernels fall back to seccomp all-or-nothing and abort startup if that cannot express the policy
+
+- Environment: `MCP_V8_SANDBOX_NETWORK`
+- Default: `auto`
+- Value: `SANDBOX_NETWORK`
 
 ## Policy
 
