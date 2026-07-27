@@ -13,23 +13,17 @@ use std::sync::Arc;
 use utoipa::OpenApi as _;
 use std::fmt;
 use server::cli::{Cli, FetchHeaderKey, StoreKind};
-use server::engine::{initialize_v8, Engine, WasmModule};
+use server::engine::{initialize_v8, WasmModule};
 use server::engine::fetch::FetchConfig;
 use server::engine::fs::FsConfig;
-use server::engine::execution::ExecutionRegistry;
 use server::engine::module_loader::ModuleLoaderConfig;
 use server::engine::subprocess::SubprocessConfig;
 use server::engine::run_js_file::RunJsFilePolicy;
 use server::engine::opa::{PoliciesConfig, build_policy_chain};
-use server::engine::heap_storage::{AnyHeapStorage, HeapStorage, S3HeapStorage, WriteThroughCacheHeapStorage, FileHeapStorage};
-use server::engine::fs_store::FsStore;
-use server::engine::fs_labels::LabelStore;
 use server::engine::opa::{EvalMode, PolicyChain};
-use server::engine::heap_tags::HeapTagStore;
-use server::engine::session_log::SessionLog;
 use server::mcp::{McpService, StatelessMcpService};
 use server::library::McpJsLibrary;
-use server::{api, cli, cluster, engine, mcp_sse};
+use server::{api, bootstrap, cli, cluster, engine, mcp_sse};
 use server::session::{SessionVerifier, JwksKeyStore};
 use cluster::{ClusterConfig, ClusterNode};
 
@@ -212,95 +206,47 @@ async fn main() -> Result<()> {
             .exit();
     }
 
-    // Captured before the engine build consumes them, so fs snapshots can reuse
-    // the same shared S3 backend (see the fs-snapshots block below).
-    let fs_s3_bucket = cli.s3_bucket.clone();
-    let fs_cache_dir = cli.cache_dir.clone();
+    if fs_enabled && cluster_node.is_some() && cli.fs_store != StoreKind::S3 {
+        Cli::command()
+            .error(
+                clap::error::ErrorKind::ArgumentConflict,
+                "--fs-store s3 (with --s3-bucket) is required in cluster mode: \
+                 fs snapshot blobs must live on shared storage. Node-local \
+                 (--fs-store dir) blobs are single-node only.",
+            )
+            .exit();
+    }
+    if cli.fs_store == StoreKind::S3 && cli.s3_bucket.is_none() {
+        Cli::command()
+            .error(
+                clap::error::ErrorKind::MissingRequiredArgument,
+                "--fs-store s3 requires --s3-bucket.",
+            )
+            .exit();
+    }
 
-    // ── Build Engine ────────────────────────────────────────────────────
-    // Heap and filesystem persistence are independent axes (see cli::StoreKind).
-    // The base engine carries the heap axis; the session log + fs are attached
-    // by builders so any combination (neither/heap-only/fs-only/both) is valid.
-    let engine = if heap_enabled {
-        let heap_storage = match cli.heap_store {
-            StoreKind::S3 => {
-                let bucket = cli
-                    .s3_bucket
-                    .clone()
-                    .ok_or_else(|| anyhow::anyhow!("--heap-store s3 requires --s3-bucket"))?;
-                if let Some(cache_dir) = cli.cache_dir.clone() {
-                    tracing::info!("Heap: S3 bucket '{}' with write-through cache at {}", bucket, cache_dir);
-                    AnyHeapStorage::S3WithFsCache(WriteThroughCacheHeapStorage::new(
-                        S3HeapStorage::new(bucket).await,
-                        cache_dir,
-                    ))
-                } else {
-                    tracing::info!("Heap: S3 bucket '{}'", bucket);
-                    AnyHeapStorage::S3(S3HeapStorage::new(bucket).await)
-                }
-            }
-            StoreKind::Dir => {
-                let dir = cli.heap_dir.clone().unwrap_or_else(|| "/tmp/mcp-v8-heaps".to_string());
-                tracing::info!("Heap: directory store at {}", dir);
-                AnyHeapStorage::File(FileHeapStorage::new(dir))
-            }
-            StoreKind::None => unreachable!("heap_enabled implies heap_store != none"),
-        };
-        tracing::info!("Heap persistence: ENABLED");
-        Engine::new_stateful(heap_storage, None, None, heap_memory_max_bytes, execution_timeout_secs, cli.max_concurrent_executions)
-    } else {
-        tracing::info!("Heap persistence: disabled");
-        Engine::new_stateless(heap_memory_max_bytes, execution_timeout_secs, cli.max_concurrent_executions)
-    };
-
-    // Session log: keys per-session state for EITHER axis (heap resume and/or
-    // fs resume), so create it whenever heap or fs persistence is enabled.
-    let engine = if heap_enabled || fs_enabled {
-        match SessionLog::new(&cli.session_db_path) {
-            Ok(log) => {
-                tracing::info!("Session log opened at {}", cli.session_db_path);
-                let log = if let Some(ref cn) = cluster_node {
-                    tracing::info!("Session log will use Raft cluster for replication");
-                    log.with_cluster(cn.clone())
-                } else {
-                    log
-                };
-                // Fork a new session from a previous session's latest snapshot.
-                if let Some(ref from) = cli.session_fork_from {
-                    fork_session(&log, from, cli.session_id.as_deref()).await?;
-                }
-                engine.with_session_log(log)
-            }
-            Err(e) => {
-                tracing::warn!("Failed to open session log at {}: {}. Session logging disabled.", cli.session_db_path, e);
-                engine
-            }
-        }
-    } else {
-        engine
-    };
-
-    // Heap-tag store: heap axis only.
-    let engine = if heap_enabled {
-        let heap_tag_db_path = format!("{}/heap-tags", cli.session_db_path);
-        match HeapTagStore::new(&heap_tag_db_path) {
-            Ok(store) => {
-                tracing::info!("Heap tag store opened at {}", heap_tag_db_path);
-                let store = if let Some(ref cn) = cluster_node {
-                    store.with_cluster(cn.clone())
-                } else {
-                    store
-                };
-                engine.with_heap_tag_store(store)
-            }
-            Err(e) => {
-                tracing::warn!("Failed to open heap tag store at {}: {}. Heap tagging disabled.", heap_tag_db_path, e);
-                engine
-            }
-        }
-    } else {
-        engine
-    };
+    // Storage, session replication/forking, heap tags, filesystem snapshots,
+    // and the execution registry are constructed by the canonical library.
+    let engine = bootstrap::build_storage_engine(
+        bootstrap::StorageBootstrapConfig {
+            heap_store: cli.heap_store,
+            heap_dir: cli.heap_dir.clone(),
+            fs_store: cli.fs_store,
+            fs_dir: cli.fs_dir.clone(),
+            fs_labels_db: cli.fs_labels_db.clone(),
+            s3_bucket: cli.s3_bucket.clone(),
+            cache_dir: cli.cache_dir.clone(),
+            session_db_path: cli.session_db_path.clone(),
+            http_port: cli.http_port,
+            heap_memory_max_bytes,
+            execution_timeout_secs,
+            max_concurrent_executions: cli.max_concurrent_executions,
+            session_id: cli.session_id.clone(),
+            session_fork_from: cli.session_fork_from.clone(),
+        },
+        cluster_node.clone(),
+    )
+    .await?;
 
     let engine = engine.with_wasm_default_max_bytes(wasm_default_max_bytes);
     // Sandbox hardening: all mitigations are opt-in (OFF by default → unhardened).
@@ -465,92 +411,11 @@ async fn main() -> Result<()> {
         engine
     };
 
-    // ── Filesystem snapshots (content-addressed store + label/reflog) ─────
-    let engine = if fs_enabled {
-        let store_dir = cli
-            .fs_dir
-            .clone()
-            .unwrap_or_else(|| format!("{}/fs-blobs", cli.session_db_path));
-        let labels_db = cli
-            .fs_labels_db
-            .clone()
-            .unwrap_or_else(|| format!("{}/fs-labels", cli.session_db_path));
-
-        let fs_on_s3 = cli.fs_store == StoreKind::S3;
-
-        // Labels replicate cluster-wide, but blobs/manifests are only shared if
-        // they sit on shared storage. Node-local file blobs are single-node
-        // only: in a cluster a label advanced on one node would resolve on
-        // another to a manifest that node is missing. Refuse that combination up
-        // front rather than failing later after a rebalance.
-        if cluster_node.is_some() && !fs_on_s3 {
-            Cli::command()
-                .error(
-                    clap::error::ErrorKind::ArgumentConflict,
-                    "--fs-store s3 (with --s3-bucket) is required in cluster mode: \
-                     fs snapshot blobs must live on shared storage. Node-local \
-                     (--fs-store dir) blobs are single-node only.",
-                )
-                .exit();
-        }
-
-        // Back the blob store with shared S3 when --fs-store s3, so mounts
-        // resolve on any node; otherwise use node-local files (single-node).
-        let backend: Arc<dyn HeapStorage> = if fs_on_s3 {
-            let bucket = fs_s3_bucket
-                .clone()
-                .unwrap_or_else(|| {
-                    Cli::command()
-                        .error(
-                            clap::error::ErrorKind::MissingRequiredArgument,
-                            "--fs-store s3 requires --s3-bucket.",
-                        )
-                        .exit()
-                });
-            if let Some(cache_dir) = &fs_cache_dir {
-                tracing::info!(
-                    "FS snapshots: shared S3 blob storage (bucket {}) with write-through cache at {}",
-                    bucket,
-                    cache_dir
-                );
-                Arc::new(WriteThroughCacheHeapStorage::new(
-                    S3HeapStorage::new(bucket.clone()).await,
-                    cache_dir.clone(),
-                ))
-            } else {
-                tracing::info!("FS snapshots: shared S3 blob storage (bucket {})", bucket);
-                Arc::new(S3HeapStorage::new(bucket.clone()).await)
-            }
-        } else {
-            Arc::new(FileHeapStorage::new(&store_dir))
-        };
-        let store = Arc::new(FsStore::new(backend));
-        match LabelStore::new(&labels_db) {
-            Ok(labels) => {
-                tracing::info!(
-                    "FS snapshots: ENABLED (blobs at {}, labels at {})",
-                    store_dir,
-                    labels_db
-                );
-                let labels = if let Some(ref cn) = cluster_node {
-                    tracing::info!("FS label writes will route through the Raft cluster leader");
-                    labels.with_cluster(cn.clone())
-                } else {
-                    labels
-                };
-                let engine = engine.with_fs_snapshots(store, Arc::new(labels));
-                if let Some(chain) = fs_snapshot_policy_chain {
-                    tracing::info!("FS snapshot pointer moves are policy-gated");
-                    engine.with_fs_snapshot_policy(chain)
-                } else {
-                    engine
-                }
-            }
-            Err(e) => {
-                tracing::error!("FS snapshots: failed to open label store at {}: {}. Disabled.", labels_db, e);
-                engine
-            }
-        }
+    // Filesystem stores are attached during canonical storage bootstrap; only
+    // the independently-built pointer-move policy remains to apply here.
+    let engine = if let Some(chain) = fs_snapshot_policy_chain {
+        tracing::info!("FS snapshot pointer moves are policy-gated");
+        engine.with_fs_snapshot_policy(chain)
     } else {
         engine
     };
@@ -595,25 +460,6 @@ async fn main() -> Result<()> {
         engine
     };
 
-
-    // ── Execution registry ──────────────────────────────────────────────
-    // Use session_db_path for both stateless and stateful modes.
-    // For stateless with http_port, add port suffix to avoid sled lock
-    // contention when multiple nodes run on the same machine.
-    let exec_db_path = match cli.http_port {
-        Some(port) => format!("{}/executions-{}", cli.session_db_path, port),
-        None => format!("{}/executions", cli.session_db_path),
-    };
-    let engine = match ExecutionRegistry::new(&exec_db_path) {
-        Ok(registry) => {
-            tracing::info!("Execution registry opened at {}", exec_db_path);
-            engine.with_execution_registry(Arc::new(registry))
-        }
-        Err(e) => {
-            tracing::warn!("Failed to open execution registry at {}: {}. Async execution disabled.", exec_db_path, e);
-            engine
-        }
-    };
 
     // ── MCP server modules ────────────────────────────────────────────────
     let mcp_server_configs = load_mcp_server_configs(&cli.mcp_servers, &cli.mcp_config)?;
@@ -713,41 +559,6 @@ async fn main() -> Result<()> {
         }
     }
 
-    Ok(())
-}
-
-/// Seed a new session (`to`, from `--session-id`) with a previous session's
-/// (`from`) latest heap+fs snapshot. Copies the source session's most recent
-/// log entry as the target's first entry, so the target resumes the source's
-/// state on its first execution but writes subsequent snapshots under its own
-/// id (copy-on-write; the source is untouched).
-///
-/// No-op if the target already has history (idempotent resume). Errors if
-/// `--session-id` is missing (nothing to fork into).
-async fn fork_session(
-    log: &SessionLog,
-    from: &str,
-    to: Option<&str>,
-) -> Result<()> {
-    use engine::session_log::ForkOutcome;
-    let to = to.ok_or_else(|| {
-        anyhow::anyhow!("--session-fork-from requires --session-id (the new session to create)")
-    })?;
-    if from == to {
-        anyhow::bail!("--session-fork-from '{from}' must differ from --session-id '{to}'");
-    }
-
-    match log.fork(from, to).await.map_err(|e| anyhow::anyhow!(e))? {
-        ForkOutcome::Forked { heap, fs } => {
-            tracing::info!("Forked session '{to}' from '{from}' (heap {}, fs {:?})", heap, fs);
-        }
-        ForkOutcome::TargetExists => {
-            tracing::info!("Session '{to}' already has history; not forking from '{from}'");
-        }
-        ForkOutcome::SourceEmpty => {
-            tracing::warn!("--session-fork-from '{from}' has no session history; '{to}' starts empty");
-        }
-    }
     Ok(())
 }
 
