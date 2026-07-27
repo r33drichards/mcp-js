@@ -42,6 +42,39 @@ pub struct LibraryShutdownResult {
     pub already_shutdown: bool,
 }
 
+#[derive(Clone, Debug, Default, uniffi::Record)]
+pub struct LibraryHardeningConfig {
+    pub freeze_ops: bool,
+    pub neutralize_proxy_details: bool,
+    pub neutralize_introspection: bool,
+    pub remove_bootstrap: bool,
+    pub remove_shared_memory: bool,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct LibraryWasmModuleConfig {
+    pub name: String,
+    pub bytes: Vec<u8>,
+    pub max_memory_bytes: Option<u64>,
+    pub description: Option<String>,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct LibraryWasmStubConfig {
+    pub prefix: String,
+    pub enabled: bool,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct LibraryFeatureConfig {
+    pub wasm_default_max_bytes: u64,
+    pub hardening: LibraryHardeningConfig,
+    pub wasm_modules: Vec<LibraryWasmModuleConfig>,
+    pub wasm_stubs: LibraryWasmStubConfig,
+    pub instructions_override: Option<String>,
+    pub run_js_description_override: Option<String>,
+}
+
 #[derive(Clone, Copy, Debug, uniffi::Enum)]
 pub enum LibraryStorageKind {
     None,
@@ -243,6 +276,21 @@ pub fn default_library_config() -> LibraryConfig {
 }
 
 #[uniffi::export]
+pub fn default_feature_config() -> LibraryFeatureConfig {
+    LibraryFeatureConfig {
+        wasm_default_max_bytes: crate::engine::DEFAULT_WASM_MAX_BYTES as u64,
+        hardening: LibraryHardeningConfig::default(),
+        wasm_modules: Vec::new(),
+        wasm_stubs: LibraryWasmStubConfig {
+            prefix: crate::engine::wasm_stub::DEFAULT_WASM_STUB_PREFIX.to_string(),
+            enabled: true,
+        },
+        instructions_override: None,
+        run_js_description_override: None,
+    }
+}
+
+#[uniffi::export]
 pub fn default_runtime_config(data_dir: String) -> LibraryRuntimeConfig {
     LibraryRuntimeConfig {
         heap_store: LibraryStorageKind::None,
@@ -264,6 +312,14 @@ pub fn default_runtime_config(data_dir: String) -> LibraryRuntimeConfig {
 
 #[uniffi::export]
 pub fn create_library(config: LibraryRuntimeConfig) -> Result<Arc<McpJsLibrary>, LibraryError> {
+    create_library_with_features(config, default_feature_config())
+}
+
+#[uniffi::export]
+pub fn create_library_with_features(
+    config: LibraryRuntimeConfig,
+    features: LibraryFeatureConfig,
+) -> Result<Arc<McpJsLibrary>, LibraryError> {
     validate_runtime_config(&config)?;
     initialize_v8();
     let worker_threads = usize::try_from(config.max_concurrent_executions).map_err(|_| {
@@ -286,7 +342,8 @@ pub fn create_library(config: LibraryRuntimeConfig) -> Result<Arc<McpJsLibrary>,
         ))
         .map_err(|error| LibraryError::Initialization {
             message: error.to_string(),
-        })?;
+        })?
+        .with_feature_config(features)?;
     Ok(bootstrap.build_with_runtime(tokio_runtime))
 }
 
@@ -1167,6 +1224,71 @@ mod tests {
         let mut config = default_runtime_config(data_dir.path().to_string_lossy().into_owned());
         config.heap_store = LibraryStorageKind::S3;
         assert!(create_library(config).is_err());
+    }
+
+    #[test]
+    fn configured_features_reject_wasm_with_heap_persistence() {
+        let _guard = v8_test_guard();
+        let data_dir = tempfile::tempdir().unwrap();
+        let mut runtime_config =
+            default_runtime_config(data_dir.path().to_string_lossy().into_owned());
+        runtime_config.heap_store = LibraryStorageKind::Directory;
+        runtime_config.heap_dir =
+            Some(data_dir.path().join("heaps").to_string_lossy().into_owned());
+        let mut features = default_feature_config();
+        features.wasm_modules.push(LibraryWasmModuleConfig {
+            name: "math".to_string(),
+            bytes: b"\0asm".to_vec(),
+            max_memory_bytes: None,
+            description: None,
+        });
+
+        let error = match create_library_with_features(runtime_config, features) {
+            Ok(_) => panic!("heap persistence with WASM should be rejected"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("incompatible with heap persistence")
+        );
+    }
+
+    #[test]
+    fn configured_features_apply_through_exported_factory() {
+        let _guard = v8_test_guard();
+        let data_dir = tempfile::tempdir().unwrap();
+        let mut features = default_feature_config();
+        features.instructions_override = Some("Custom instructions".to_string());
+        features.run_js_description_override = Some("Custom run_js".to_string());
+        features.wasm_modules.push(LibraryWasmModuleConfig {
+            name: "math".to_string(),
+            bytes: b"\0asm".to_vec(),
+            max_memory_bytes: Some(1024 * 1024),
+            description: Some("Math helpers".to_string()),
+        });
+        features.wasm_stubs.prefix = "ffi__".to_string();
+
+        let library = create_library_with_features(
+            default_runtime_config(data_dir.path().to_string_lossy().into_owned()),
+            features,
+        )
+        .unwrap();
+        assert_eq!(
+            library.instructions_override().as_deref(),
+            Some("Custom instructions")
+        );
+        assert_eq!(
+            library.run_js_description_override().as_deref(),
+            Some("Custom run_js")
+        );
+        assert!(
+            library
+                .list_tools()
+                .unwrap()
+                .iter()
+                .any(|tool| tool.name == "ffi__wasm__math")
+        );
     }
 
     #[test]

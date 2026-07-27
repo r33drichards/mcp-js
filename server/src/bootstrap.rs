@@ -15,7 +15,7 @@ use crate::engine::heap_storage::{
 };
 use crate::engine::heap_tags::HeapTagStore;
 use crate::engine::session_log::{ForkOutcome, SessionLog};
-use crate::library::McpJsLibrary;
+use crate::library::{LibraryError, LibraryFeatureConfig, McpJsLibrary};
 
 pub struct LibraryBootstrap {
     engine: Engine,
@@ -23,27 +23,80 @@ pub struct LibraryBootstrap {
 }
 
 impl LibraryBootstrap {
-    pub fn with_wasm_default_max_bytes(mut self, bytes: usize) -> Self {
-        self.engine = self.engine.with_wasm_default_max_bytes(bytes);
-        self
-    }
-
-    pub fn with_hardening(mut self, config: crate::engine::HardeningConfig) -> Self {
-        self.engine = self.engine.with_hardening(config);
-        self
-    }
-
-    pub fn with_wasm_modules(mut self, modules: Vec<crate::engine::WasmModule>) -> Self {
-        self.engine = self.engine.with_wasm_modules(modules);
-        self
-    }
-
-    pub fn with_wasm_stub_config(
+    pub fn with_feature_config(
         mut self,
-        config: crate::engine::wasm_stub::WasmStubConfig,
-    ) -> Self {
-        self.engine = self.engine.with_wasm_stub_config(config);
-        self
+        config: LibraryFeatureConfig,
+    ) -> Result<Self, LibraryError> {
+        if self.engine.heap_enabled() && !config.wasm_modules.is_empty() {
+            return Err(LibraryError::InvalidConfig {
+                message: "WASM modules are incompatible with heap persistence".to_string(),
+            });
+        }
+        let wasm_default_max_bytes =
+            usize::try_from(config.wasm_default_max_bytes).map_err(|_| {
+                LibraryError::InvalidConfig {
+                    message: "wasm_default_max_bytes is too large for this platform".to_string(),
+                }
+            })?;
+        if config.wasm_stubs.prefix.is_empty() {
+            return Err(LibraryError::InvalidConfig {
+                message: "WASM stub prefix cannot be empty".to_string(),
+            });
+        }
+
+        let mut names = std::collections::HashSet::new();
+        let mut modules = Vec::with_capacity(config.wasm_modules.len());
+        for module in config.wasm_modules {
+            validate_wasm_module_name(&module.name)?;
+            if !names.insert(module.name.clone()) {
+                return Err(LibraryError::InvalidConfig {
+                    message: format!("duplicate WASM module name: '{}'", module.name),
+                });
+            }
+            let max_memory_bytes = module
+                .max_memory_bytes
+                .map(usize::try_from)
+                .transpose()
+                .map_err(|_| LibraryError::InvalidConfig {
+                    message: format!(
+                        "max_memory_bytes for WASM module '{}' is too large for this platform",
+                        module.name
+                    ),
+                })?;
+            modules.push(crate::engine::WasmModule {
+                name: module.name,
+                bytes: module.bytes,
+                max_memory_bytes,
+                description: module.description,
+            });
+        }
+
+        self.engine = self
+            .engine
+            .with_wasm_default_max_bytes(wasm_default_max_bytes)
+            .with_hardening(crate::engine::HardeningConfig {
+                freeze_ops: config.hardening.freeze_ops,
+                neutralize_proxy_details: config.hardening.neutralize_proxy_details,
+                neutralize_introspection: config.hardening.neutralize_introspection,
+                remove_bootstrap: config.hardening.remove_bootstrap,
+                remove_shared_memory: config.hardening.remove_shared_memory,
+            });
+        if !modules.is_empty() {
+            self.engine = self
+                .engine
+                .with_wasm_modules(modules)
+                .with_wasm_stub_config(crate::engine::wasm_stub::WasmStubConfig {
+                    prefix: config.wasm_stubs.prefix,
+                    enabled: config.wasm_stubs.enabled,
+                });
+        }
+        if let Some(text) = config.instructions_override {
+            self.engine = self.engine.with_instructions_override(text);
+        }
+        if let Some(text) = config.run_js_description_override {
+            self.engine = self.engine.with_run_js_description_override(text);
+        }
+        Ok(self)
     }
 
     pub fn with_fetch_config(mut self, config: crate::engine::fetch::FetchConfig) -> Self {
@@ -101,16 +154,6 @@ impl LibraryBootstrap {
         self
     }
 
-    pub fn with_instructions_override(mut self, text: String) -> Self {
-        self.engine = self.engine.with_instructions_override(text);
-        self
-    }
-
-    pub fn with_run_js_description_override(mut self, text: String) -> Self {
-        self.engine = self.engine.with_run_js_description_override(text);
-        self
-    }
-
     pub fn build(self) -> Arc<McpJsLibrary> {
         McpJsLibrary::from_engine_with_cluster(self.engine, self.cluster_node)
     }
@@ -121,6 +164,34 @@ impl LibraryBootstrap {
     ) -> Arc<McpJsLibrary> {
         McpJsLibrary::from_engine_with_tokio_runtime(self.engine, tokio_runtime, self.cluster_node)
     }
+}
+
+fn validate_wasm_module_name(name: &str) -> Result<(), LibraryError> {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return Err(LibraryError::InvalidConfig {
+            message: "WASM module name cannot be empty".to_string(),
+        });
+    };
+    if !first.is_ascii_alphabetic() && first != '_' && first != '$' {
+        return Err(LibraryError::InvalidConfig {
+            message: format!(
+                "WASM module name '{}' must start with a letter, underscore, or dollar sign",
+                name
+            ),
+        });
+    }
+    if let Some(invalid) = chars.find(|character| {
+        !character.is_ascii_alphanumeric() && *character != '_' && *character != '$'
+    }) {
+        return Err(LibraryError::InvalidConfig {
+            message: format!(
+                "WASM module name '{}' contains invalid character '{}'",
+                name, invalid
+            ),
+        });
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug)]

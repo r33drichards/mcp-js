@@ -13,7 +13,7 @@ use std::sync::Arc;
 use utoipa::OpenApi as _;
 use std::fmt;
 use server::cli::{Cli, FetchHeaderKey, StoreKind};
-use server::engine::{initialize_v8, WasmModule};
+use server::engine::initialize_v8;
 use server::engine::fetch::FetchConfig;
 use server::engine::fs::FsConfig;
 use server::engine::module_loader::ModuleLoaderConfig;
@@ -22,7 +22,10 @@ use server::engine::run_js_file::RunJsFilePolicy;
 use server::engine::opa::{PoliciesConfig, build_policy_chain};
 use server::engine::opa::{EvalMode, PolicyChain};
 use server::mcp::{McpService, StatelessMcpService};
-use server::library::McpJsLibrary;
+use server::library::{
+    LibraryFeatureConfig, LibraryHardeningConfig, LibraryWasmModuleConfig,
+    LibraryWasmStubConfig, McpJsLibrary,
+};
 use server::{api, bootstrap, cli, cluster, engine, mcp_sse};
 use server::session::{SessionVerifier, JwksKeyStore};
 use cluster::{ClusterConfig, ClusterNode};
@@ -249,32 +252,6 @@ async fn main() -> Result<()> {
     )
     .await?;
 
-    let library_builder = library_builder.with_wasm_default_max_bytes(wasm_default_max_bytes);
-    // Sandbox hardening: all mitigations are opt-in (OFF by default → unhardened).
-    let library_builder = library_builder.with_hardening(engine::HardeningConfig {
-        freeze_ops: cli.harden_freeze_ops,
-        neutralize_proxy_details: cli.harden_neutralize_proxy_details,
-        neutralize_introspection: cli.harden_neutralize_introspection,
-        remove_bootstrap: cli.harden_remove_bootstrap,
-        remove_shared_memory: cli.harden_remove_shared_memory,
-    });
-    let has_wasm_modules = !wasm_modules.is_empty();
-    let library_builder = if has_wasm_modules { library_builder.with_wasm_modules(wasm_modules) } else { library_builder };
-    let library_builder = if has_wasm_modules {
-        let wasm_stub_config = engine::wasm_stub::WasmStubConfig {
-            prefix: cli.wasm_stub_prefix.clone(),
-            enabled: cli.wasm_stubs,
-        };
-        tracing::info!(
-            stubs = wasm_stub_config.enabled,
-            prefix = %wasm_stub_config.prefix,
-            "WASM module stubbing"
-        );
-        library_builder.with_wasm_stub_config(wasm_stub_config)
-    } else {
-        library_builder
-    };
-
     // ── Policy configuration ─────────────────────────────────────────────
     // Parse --policies-json if provided (inline JSON or file path).
     let policies_config: Option<PoliciesConfig> = if let Some(ref json_or_path) = cli.policies_json {
@@ -490,22 +467,47 @@ async fn main() -> Result<()> {
         library_builder
     };
 
-    // ── Prompt / tool description overrides ──────────────────────────────
-    // Both flags accept inline text or, with a leading `@`, a path to a file.
-    let library_builder = if let Some(ref value) = cli.instructions {
-        let text = resolve_text_or_file(value, "--instructions")?;
+    // ── Embedded runtime features ────────────────────────────────────────
+    // Resolve CLI file references before handing one typed configuration to
+    // the canonical library bootstrap.
+    let instructions_override = cli.instructions.as_deref()
+        .map(|value| resolve_text_or_file(value, "--instructions"))
+        .transpose()?;
+    if let Some(text) = &instructions_override {
         tracing::info!("Overriding MCP server instructions ({} chars)", text.len());
-        library_builder.with_instructions_override(text)
-    } else {
-        library_builder
-    };
-    let library_builder = if let Some(ref value) = cli.run_js_description {
-        let text = resolve_text_or_file(value, "--run-js-description")?;
+    }
+    let run_js_description_override = cli.run_js_description.as_deref()
+        .map(|value| resolve_text_or_file(value, "--run-js-description"))
+        .transpose()?;
+    if let Some(text) = &run_js_description_override {
         tracing::info!("Overriding run_js tool description ({} chars)", text.len());
-        library_builder.with_run_js_description_override(text)
-    } else {
-        library_builder
+    }
+    if !wasm_modules.is_empty() {
+        tracing::info!(
+            stubs = cli.wasm_stubs,
+            prefix = %cli.wasm_stub_prefix,
+            "WASM module stubbing"
+        );
+    }
+    let feature_config = LibraryFeatureConfig {
+        wasm_default_max_bytes: u64::try_from(wasm_default_max_bytes)
+            .map_err(|_| anyhow::anyhow!("WASM default memory limit is too large"))?,
+        hardening: LibraryHardeningConfig {
+            freeze_ops: cli.harden_freeze_ops,
+            neutralize_proxy_details: cli.harden_neutralize_proxy_details,
+            neutralize_introspection: cli.harden_neutralize_introspection,
+            remove_bootstrap: cli.harden_remove_bootstrap,
+            remove_shared_memory: cli.harden_remove_shared_memory,
+        },
+        wasm_modules,
+        wasm_stubs: LibraryWasmStubConfig {
+            prefix: cli.wasm_stub_prefix.clone(),
+            enabled: cli.wasm_stubs,
+        },
+        instructions_override,
+        run_js_description_override,
     };
+    let library_builder = library_builder.with_feature_config(feature_config)?;
 
     // ── Build session verifier (if --jwks-url) ─────────────────────────
     let session_verifier: Option<Arc<SessionVerifier>> = if let Some(ref jwks_url) = cli.jwks_url {
@@ -717,7 +719,7 @@ fn load_wasm_modules(
     cli_modules: &[String],
     config_path: &Option<String>,
     stub_descriptions: &[String],
-) -> Result<Vec<WasmModule>> {
+) -> Result<Vec<LibraryWasmModuleConfig>> {
     let mut modules = Vec::new();
 
     // Parse CLI --wasm-module flags (format: name=/path/to/file.wasm[:max_memory])
@@ -752,7 +754,12 @@ fn load_wasm_modules(
 
         let bytes = std::fs::read(path)
             .map_err(|e| anyhow::anyhow!("Failed to read WASM file '{}': {}", path, e))?;
-        modules.push(WasmModule { name, bytes, max_memory_bytes, description: None });
+        modules.push(LibraryWasmModuleConfig {
+            name,
+            bytes,
+            max_memory_bytes: max_memory_bytes.map(|bytes| bytes as u64),
+            description: None,
+        });
     }
 
     // Parse --wasm-config: inline JSON (as injected by the `wasm` section of a
@@ -783,7 +790,7 @@ fn load_wasm_modules(
                         "WASM config \"max_memory_bytes\" for '{}' must be a positive integer", name
                     )))
                     .transpose()?
-                    .map(|v| v as usize);
+                    ;
                 let description = obj.get("description")
                     .map(|v| v.as_str().ok_or_else(|| anyhow::anyhow!(
                         "WASM config \"description\" for '{}' must be a string", name
@@ -799,7 +806,12 @@ fn load_wasm_modules(
             validate_wasm_name(&name)?;
             let bytes = std::fs::read(&path)
                 .map_err(|e| anyhow::anyhow!("Failed to read WASM file '{}': {}", path, e))?;
-            modules.push(WasmModule { name, bytes, max_memory_bytes, description });
+            modules.push(LibraryWasmModuleConfig {
+                name,
+                bytes,
+                max_memory_bytes,
+                description,
+            });
         }
     }
 
