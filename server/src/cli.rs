@@ -199,16 +199,19 @@ pub struct Cli {
     // ── OS sandbox (nono: Landlock on Linux, Seatbelt on macOS) ──────────────
     /// Confine the whole server process with an OS-enforced sandbox (nono:
     /// Landlock on Linux 5.13+, Seatbelt on macOS) described by a nono
-    /// capability manifest JSON file. The manifest is passed to nono verbatim
-    /// — filesystem grants, network mode, and port allowlists all use nono's
-    /// schema and semantics — and must grant every path the server itself
-    /// needs (storage directories, policy/WASM files, system library paths).
-    /// Applied before the async runtime and V8 spawn any threads; irreversible
-    /// once applied. This is defense in depth *underneath* the OPA policy
-    /// layer. Fails closed: startup aborts if the platform cannot enforce the
-    /// manifest, and manifest features that need nono's CLI supervisor
-    /// (network proxy mode, credentials, rollback, fs deny rules) are
-    /// rejected rather than silently ignored.
+    /// capability manifest JSON file. nono capabilities compose additively,
+    /// so the enforced set is the manifest (verbatim, in nono's schema and
+    /// semantics) unioned with a server baseline derived from this
+    /// configuration: storage directories read-write, config/policy/WASM
+    /// inputs and system paths read-only, and bind grants for configured
+    /// listener ports. The manifest owns the network egress posture — the
+    /// baseline never opens outbound access. Applied before the async runtime
+    /// and V8 spawn any threads; irreversible once applied. This is defense
+    /// in depth *underneath* the OPA policy layer. Fails closed: startup
+    /// aborts if the platform cannot enforce the composed set, and manifest
+    /// features that need nono's CLI supervisor (network proxy mode,
+    /// credentials, rollback, fs deny rules) are rejected rather than
+    /// silently ignored.
     #[arg(long = "sandbox-manifest", env = "MCP_V8_SANDBOX_MANIFEST", value_name = "FILE", help_heading = "OS Sandbox")]
     pub sandbox_manifest: Option<String>,
 

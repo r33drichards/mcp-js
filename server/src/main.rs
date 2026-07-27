@@ -62,8 +62,8 @@ fn main() -> Result<()> {
     // must be applied here, while the process is still single-threaded:
     // before the tokio runtime builds its worker pool and before the V8
     // platform spawns its background threads.
-    if let Some(manifest_path) = &cli.sandbox_manifest {
-        sandbox::apply(manifest_path)?;
+    if cli.sandbox_manifest.is_some() {
+        sandbox::apply(&cli)?;
     }
 
     initialize_v8();

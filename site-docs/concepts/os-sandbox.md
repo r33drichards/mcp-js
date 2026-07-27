@@ -36,8 +36,14 @@ standing if the front door is bypassed.
 At startup, before the async runtime or the V8 platform spawn any threads,
 the server loads the [nono capability manifest](../how-to/os-sandbox.md)
 named by `--sandbox-manifest` — filesystem grants, network mode, port
-allowlists, all in nono's own schema and semantics — converts it with nono's
-manifest-to-capability-set conversion, and applies it:
+allowlists, all in nono's own schema and semantics, converted with nono's
+manifest-to-capability-set conversion — and **composes** it with a baseline
+derived from the server's own configuration (storage directories
+read-write; config, policy, and system paths read-only; bind grants for
+configured listeners). nono capabilities are an additive allow-list, so
+composition is a union: the manifest can only widen the baseline, never
+narrow it, and the baseline never widens the manifest's *network egress*
+posture. The composed set is then applied:
 
 - **Linux**: [Landlock](https://landlock.io/) LSM rules (kernel 5.13+;
   per-port TCP rules need ABI v4, kernel 6.7+, with a seccomp fallback for
@@ -57,10 +63,11 @@ Three properties follow:
   rejected at startup instead of being silently ignored — this server
   applies the sandbox in-process, so only kernel-expressible rules exist.
 
-Because the manifest is a verbatim passthrough, it must grant everything the
-process needs — the server's own storage directories and the system library
-paths included. There is no auto-derivation; the how-to page has a complete
-worked manifest and a feature-to-grant table.
+The split keeps each layer owning what it knows: the server contributes the
+grants that follow mechanically from its configuration, the manifest
+contributes deployment-specific grants (script roots, tool binaries) and
+the egress decision. A minimal `{"version": "0.1.0"}` manifest is valid and
+yields a confined server with baseline grants only.
 
 ## What it does not do
 

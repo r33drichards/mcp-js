@@ -29,24 +29,16 @@ fn sandbox_supported() -> bool {
     false
 }
 
-/// Write a nono capability manifest granting `readwrite` and `read` paths
-/// (skipping ones that don't exist — grants attach to real inodes) plus the
-/// system paths a confined server needs, with all network access blocked.
-fn write_manifest(dest: &Path, readwrite: &[&Path], read: &[&Path]) -> String {
-    let mut grants = Vec::new();
-    for path in readwrite {
-        grants.push(json!({"path": path.to_str().unwrap(), "access": "readwrite"}));
-    }
-    let system: &[&str] = &[
-        "/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/etc", "/opt", "/nix",
-        "/proc/self", "/dev/null", "/dev/urandom", "/dev/random",
-        "/System", "/Library", "/private/etc",
-    ];
-    for path in read.iter().map(|p| p.to_str().unwrap()).chain(system.iter().copied()) {
-        if Path::new(path).exists() {
-            grants.push(json!({"path": path, "access": "read"}));
-        }
-    }
+/// Write a nono capability manifest that grants only the given extra read
+/// paths, with all network access blocked. Everything the server itself
+/// needs (storage dirs, system paths) comes from the composed baseline, so
+/// the manifest stays this small on purpose — the tests double as proof
+/// that composition works.
+fn write_manifest(dest: &Path, read: &[&Path]) -> String {
+    let grants: Vec<_> = read
+        .iter()
+        .map(|path| json!({"path": path.to_str().unwrap(), "access": "read"}))
+        .collect();
     let manifest = json!({
         "version": "0.1.0",
         "filesystem": {"grants": grants},
@@ -69,8 +61,7 @@ async fn sandbox_fails_closed_when_unsupported() {
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let sessions = tmp.path().join("sessions");
-    std::fs::create_dir_all(&sessions).unwrap();
-    let manifest = write_manifest(tmp.path(), &[&sessions], &[]);
+    let manifest = write_manifest(tmp.path(), &[]);
     let output = Command::new(env!("CARGO_BIN_EXE_server"))
         .args([
             "--sandbox-manifest",
@@ -245,13 +236,14 @@ async fn sandboxed_server_executes_js_and_kernel_denies_ungranted_reads() {
     let sessions = tmp.path().join("sessions");
     let allowed = tmp.path().join("allowed");
     let blocked = tmp.path().join("blocked");
-    std::fs::create_dir_all(&sessions).unwrap();
     std::fs::create_dir_all(&allowed).unwrap();
     std::fs::create_dir_all(&blocked).unwrap();
     std::fs::write(allowed.join("ok.js"), "console.log('granted-file-ran');").unwrap();
     std::fs::write(blocked.join("secret.js"), "console.log('SECRET-CONTENT');").unwrap();
 
-    let manifest = write_manifest(tmp.path(), &[&sessions], &[&allowed]);
+    // The manifest grants only the script root; the session db and system
+    // paths come from the composed server baseline.
+    let manifest = write_manifest(tmp.path(), &[&allowed]);
     let mut server = StdioServer::start(&[
         "--sandbox-manifest",
         &manifest,
