@@ -17,7 +17,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 const DEFAULT_HEAP_MEMORY_MB: u64 = 64;
-const DEFAULT_EXECUTION_TIMEOUT_SECS: u64 = 30;
+pub const DEFAULT_EXECUTION_TIMEOUT_SECS: u64 = crate::engine::DEFAULT_EXECUTION_TIMEOUT_SECS;
+pub const DEFAULT_WASM_STUB_PREFIX: &str = crate::engine::wasm_stub::DEFAULT_WASM_STUB_PREFIX;
+pub const DEFAULT_MCP_STUB_PREFIX: &str = crate::engine::mcp_client::DEFAULT_STUB_PREFIX;
 const DEFAULT_MAX_CONCURRENT_EXECUTIONS: u32 = 4;
 
 #[derive(Clone, Copy, Debug, uniffi::Enum)]
@@ -466,7 +468,7 @@ pub fn default_feature_config() -> LibraryFeatureConfig {
         hardening: LibraryHardeningConfig::default(),
         wasm_modules: Vec::new(),
         wasm_stubs: LibraryWasmStubConfig {
-            prefix: crate::engine::wasm_stub::DEFAULT_WASM_STUB_PREFIX.to_string(),
+            prefix: DEFAULT_WASM_STUB_PREFIX.to_string(),
             enabled: true,
         },
         instructions_override: None,
@@ -480,6 +482,11 @@ pub fn default_policy_config() -> LibraryPolicyConfig {
 }
 
 #[uniffi::export]
+pub fn default_fetch_oauth_refresh_buffer_secs() -> u64 {
+    crate::engine::fetch::default_refresh_buffer_secs()
+}
+
+#[uniffi::export]
 pub fn default_capability_config() -> LibraryCapabilityConfig {
     LibraryCapabilityConfig::default()
 }
@@ -489,7 +496,7 @@ pub fn default_upstream_mcp_config() -> LibraryUpstreamMcpConfig {
     LibraryUpstreamMcpConfig {
         servers: Vec::new(),
         stubs: LibraryMcpStubConfig {
-            prefix: crate::engine::mcp_client::DEFAULT_STUB_PREFIX.to_string(),
+            prefix: DEFAULT_MCP_STUB_PREFIX.to_string(),
             enabled: true,
         },
     }

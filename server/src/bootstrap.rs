@@ -6,7 +6,6 @@ use anyhow::{Result, anyhow, bail};
 
 use crate::cli::StoreKind;
 use crate::cluster::ClusterNode;
-use crate::engine::Engine;
 use crate::engine::execution::ExecutionRegistry;
 use crate::engine::fs_labels::LabelStore;
 use crate::engine::fs_store::FsStore;
@@ -15,6 +14,7 @@ use crate::engine::heap_storage::{
 };
 use crate::engine::heap_tags::HeapTagStore;
 use crate::engine::session_log::{ForkOutcome, SessionLog};
+use crate::engine::{Engine, initialize_v8};
 use crate::library::{
     LibraryCapabilityConfig, LibraryError, LibraryFeatureConfig, LibraryFetchHeaderRule,
     LibraryMcpTransportKind, LibraryOperationPolicies, LibraryPolicyConfig, LibraryPolicyEvalMode,
@@ -466,6 +466,7 @@ pub async fn build_storage_engine(
     config: StorageBootstrapConfig,
     cluster_node: Option<Arc<ClusterNode>>,
 ) -> Result<LibraryBootstrap> {
+    initialize_v8();
     let heap_enabled = config.heap_enabled();
 
     let engine = if heap_enabled {

@@ -13,22 +13,20 @@ use std::sync::Arc;
 use utoipa::OpenApi as _;
 use std::fmt;
 use server::cli::{Cli, FetchHeaderKey, StoreKind};
-use server::engine::initialize_v8;
 use server::mcp::{McpService, StatelessMcpService};
 use server::library::{
     LibraryCapabilityConfig, LibraryFeatureConfig, LibraryFetchHeaderRule,
     LibraryFetchOAuthConfig, LibraryHardeningConfig, LibraryMcpServerConfig,
     LibraryMcpStubConfig, LibraryMcpTransportKind, LibraryPolicyConfig,
     LibraryRunJsFileAccess, LibraryUpstreamMcpConfig, LibraryWasmModuleConfig,
-    LibraryWasmStubConfig, McpJsLibrary,
+    LibraryWasmStubConfig, McpJsLibrary, default_fetch_oauth_refresh_buffer_secs,
 };
-use server::{api, bootstrap, cli, cluster, engine, mcp_sse};
+use server::{api, bootstrap, cli, cluster, mcp_sse};
 use server::session::{SessionVerifier, JwksKeyStore};
 use cluster::{ClusterConfig, ClusterNode};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    initialize_v8();
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_ansi(false)
@@ -819,7 +817,7 @@ struct FetchHeaderAuthConfig {
     client_secret: String,
     #[serde(default)]
     scope: Option<String>,
-    #[serde(default = "engine::fetch::default_refresh_buffer_secs")]
+    #[serde(default = "default_fetch_oauth_refresh_buffer_secs")]
     refresh_buffer_secs: u64,
 }
 
@@ -977,7 +975,7 @@ fn parse_fetch_header_cli(s: &str) -> Result<LibraryFetchHeaderRule> {
                 ))?,
                 scope,
                 refresh_buffer_secs: refresh_buffer_secs
-                    .unwrap_or_else(engine::fetch::default_refresh_buffer_secs),
+                    .unwrap_or_else(default_fetch_oauth_refresh_buffer_secs),
             }),
         },
         (None, false) => anyhow::bail!(

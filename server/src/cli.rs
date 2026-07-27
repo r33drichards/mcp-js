@@ -1,7 +1,9 @@
 use clap::{CommandFactory, FromArgMatches, Parser};
 use cli_derive::StructuredArgs;
 
-use crate::engine::DEFAULT_EXECUTION_TIMEOUT_SECS;
+use crate::library::{
+    DEFAULT_EXECUTION_TIMEOUT_SECS, DEFAULT_MCP_STUB_PREFIX, DEFAULT_WASM_STUB_PREFIX,
+};
 
 fn default_max_concurrent() -> usize {
     std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4)
@@ -336,7 +338,7 @@ pub struct Cli {
     #[arg(
         long = "wasm-stub-prefix",
         env = "MCP_V8_WASM_STUB_PREFIX",
-        default_value = crate::engine::wasm_stub::DEFAULT_WASM_STUB_PREFIX,
+        default_value = DEFAULT_WASM_STUB_PREFIX,
         help_heading = "WASM"
     )]
     pub wasm_stub_prefix: String,
@@ -419,7 +421,7 @@ pub struct Cli {
     #[arg(
         long = "mcp-stub-prefix",
         env = "MCP_V8_MCP_STUB_PREFIX",
-        default_value = crate::engine::mcp_client::DEFAULT_STUB_PREFIX,
+        default_value = DEFAULT_MCP_STUB_PREFIX,
         help_heading = "MCP Server Module"
     )]
     pub mcp_stub_prefix: String,
