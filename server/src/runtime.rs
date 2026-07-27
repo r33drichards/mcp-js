@@ -1,18 +1,23 @@
 //! Shared library facade used by embedded callers and all server transports.
 
-use std::ops::Deref;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde_json::{Value, json};
 
-use crate::engine::execution::ExecutionRegistry;
+use crate::engine::execution::{
+    ConsoleOutputPage, ExecutionInfo, ExecutionRegistry, ExecutionSummary,
+};
 use crate::engine::fs_labels::LabelStore;
 use crate::engine::fs_store::FsStore;
 use crate::engine::heap_storage::{AnyHeapStorage, FileHeapStorage};
-use crate::engine::heap_tags::HeapTagStore;
+use crate::engine::heap_tags::{HeapTagEntry, HeapTagStore};
 use crate::engine::session_log::SessionLog;
-use crate::engine::{Engine, MIN_HEAP_MEMORY_MB};
+use crate::engine::{
+    Engine, FsLabelView, FsMergeResult, FsPushOutcome, FsRefLogView, MIN_HEAP_MEMORY_MB,
+    RunJsRequest,
+};
 use crate::mcp::{ToolCatalog, built_in_tool_catalog};
 
 const DEFAULT_HEAP_MEMORY_MB: usize = 64;
@@ -32,8 +37,167 @@ impl McpJsRuntime {
         McpJsRuntimeBuilder::default()
     }
 
-    pub fn engine(&self) -> &Engine {
-        &self.engine
+    pub fn heap_enabled(&self) -> bool {
+        self.engine.heap_enabled()
+    }
+
+    pub fn fs_enabled(&self) -> bool {
+        self.engine.fs_enabled()
+    }
+
+    pub fn session_capable(&self) -> bool {
+        self.engine.session_capable()
+    }
+
+    pub fn instructions_override(&self) -> Option<Arc<str>> {
+        self.engine.instructions_override()
+    }
+
+    pub fn run_js_description_override(&self) -> Option<Arc<str>> {
+        self.engine.run_js_description_override()
+    }
+
+    pub fn mcp_client_manager(&self) -> Option<Arc<crate::engine::mcp_client::McpClientManager>> {
+        self.engine.mcp_client_manager()
+    }
+
+    pub fn wasm_stub_tools(&self) -> Vec<rmcp::model::Tool> {
+        self.engine.wasm_stub_tools()
+    }
+
+    pub fn wasm_stub_call_response(
+        &self,
+        name: &str,
+        arguments: Option<&serde_json::Map<String, Value>>,
+    ) -> Option<rmcp::model::CallToolResult> {
+        self.engine.wasm_stub_call_response(name, arguments)
+    }
+
+    pub fn run_js(&self, code: impl Into<String>) -> RunJsRequest<'_> {
+        self.engine.run_js(code)
+    }
+
+    pub fn get_execution(&self, id: &str) -> Result<ExecutionInfo, String> {
+        self.engine.get_execution(id)
+    }
+
+    pub fn get_execution_output(
+        &self,
+        id: &str,
+        line_offset: Option<u64>,
+        line_limit: Option<u64>,
+        byte_offset: Option<u64>,
+        byte_limit: Option<u64>,
+    ) -> Result<ConsoleOutputPage, String> {
+        self.engine
+            .get_execution_output(id, line_offset, line_limit, byte_offset, byte_limit)
+    }
+
+    pub fn cancel_execution(&self, id: &str) -> Result<(), String> {
+        self.engine.cancel_execution(id)
+    }
+
+    pub fn list_executions(&self) -> Result<Vec<ExecutionSummary>, String> {
+        self.engine.list_executions()
+    }
+
+    pub async fn list_sessions(&self) -> Result<Vec<String>, String> {
+        self.engine.list_sessions().await
+    }
+
+    pub async fn list_session_snapshots(
+        &self,
+        session: String,
+        fields: Option<Vec<String>>,
+    ) -> Result<Vec<Value>, String> {
+        self.engine.list_session_snapshots(session, fields).await
+    }
+
+    pub async fn get_heap_tags(&self, heap: String) -> Result<HashMap<String, String>, String> {
+        self.engine.get_heap_tags(heap).await
+    }
+
+    pub async fn set_heap_tags(
+        &self,
+        heap: String,
+        tags: HashMap<String, String>,
+    ) -> Result<(), String> {
+        self.engine.set_heap_tags(heap, tags).await
+    }
+
+    pub async fn delete_heap_tags(
+        &self,
+        heap: String,
+        keys: Option<Vec<String>>,
+    ) -> Result<(), String> {
+        self.engine.delete_heap_tags(heap, keys).await
+    }
+
+    pub async fn query_heaps_by_tags(
+        &self,
+        filter: HashMap<String, String>,
+    ) -> Result<Vec<HeapTagEntry>, String> {
+        self.engine.query_heaps_by_tags(filter).await
+    }
+
+    pub async fn fs_list_labels(&self) -> Result<Vec<FsLabelView>, String> {
+        self.engine.fs_list_labels().await
+    }
+
+    pub async fn fs_resolve_label(&self, name: &str) -> Result<Option<String>, String> {
+        self.engine.fs_resolve_label(name).await
+    }
+
+    pub async fn fs_set_label(
+        &self,
+        name: &str,
+        ca_id: &str,
+        message: Option<String>,
+    ) -> Result<(), String> {
+        self.engine.fs_set_label(name, ca_id, message).await
+    }
+
+    pub async fn fs_label_log(
+        &self,
+        name: &str,
+        limit: Option<usize>,
+    ) -> Result<Vec<FsRefLogView>, String> {
+        self.engine.fs_label_log(name, limit).await
+    }
+
+    pub async fn fs_push(
+        &self,
+        label: &str,
+        ca_id: &str,
+        expected: Option<String>,
+        force: bool,
+        message: Option<String>,
+    ) -> Result<FsPushOutcome, String> {
+        self.engine
+            .fs_push(label, ca_id, expected, force, message)
+            .await
+    }
+
+    pub async fn fs_reset(
+        &self,
+        label: &str,
+        ca_id: &str,
+        allow_unlogged: bool,
+        message: Option<String>,
+    ) -> Result<(), String> {
+        self.engine
+            .fs_reset(label, ca_id, allow_unlogged, message)
+            .await
+    }
+
+    pub async fn fs_merge(
+        &self,
+        ours: &str,
+        theirs: &str,
+        base: Option<String>,
+        prefer: crate::engine::fs_merge::Prefer,
+    ) -> Result<FsMergeResult, String> {
+        self.engine.fs_merge(ours, theirs, base, prefer).await
     }
 
     pub fn tool_catalog(&self) -> ToolCatalog {
@@ -65,14 +229,6 @@ impl McpJsRuntime {
 impl From<Engine> for McpJsRuntime {
     fn from(engine: Engine) -> Self {
         Self::new(engine)
-    }
-}
-
-impl Deref for McpJsRuntime {
-    type Target = Engine;
-
-    fn deref(&self) -> &Self::Target {
-        &self.engine
     }
 }
 
