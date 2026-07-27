@@ -25,7 +25,7 @@ use rmcp_legacy::{
 };
 use serde_json::json;
 
-use crate::library::McpJsLibrary;
+use crate::library::{LibraryError, LibraryToolCallRequest, McpJsLibrary};
 use crate::session::SessionVerifier;
 
 const LLMS_TXT: &str = include_str!("llms_txt.md");
@@ -216,11 +216,23 @@ impl ServerHandler for SseService {
             .arguments
             .map(serde_json::Value::Object)
             .unwrap_or_else(|| json!({}));
-        let session = self.session_id.get().map(String::as_str);
-        let headers = self.mcp_headers.get();
+        let request = LibraryToolCallRequest {
+            name: name.to_string(),
+            arguments_json: args.to_string(),
+            session_id: self.session_id.get().cloned(),
+            mcp_headers_json: self.mcp_headers.get().map(serde_json::Value::to_string),
+        };
 
         // Keep legacy SSE behavior aligned with the primary MCP transports.
-        let result = self.runtime.call_tool_async(session, headers, name, &args).await;
+        let result = self.runtime
+            .invoke_tool(request)
+            .await
+            .and_then(|json| {
+                serde_json::from_str(&json).map_err(|error| LibraryError::ToolCall {
+                    message: format!("failed to deserialize result: {error}"),
+                })
+            })
+            .unwrap_or_else(|error| json!({ "error": error.to_string() }));
         Ok(ok_result(result))
     }
 

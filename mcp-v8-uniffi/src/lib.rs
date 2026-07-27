@@ -4,6 +4,7 @@ pub use server::library::{
     LibraryCapabilities, LibraryConfig, LibraryError, LibraryExecutionInfo, LibraryExecutionOutput,
     LibraryExecutionRequest, LibraryExecutionSummary, LibraryFsLabel, LibraryFsMergeConflict,
     LibraryFsMergePreference, LibraryFsMergeResult, LibraryFsPushResult, LibraryFsRefLogEntry,
-    LibraryHeapTagEntry, LibraryMode, LibraryRuntimeConfig, LibraryStorageKind, McpJsLibrary,
-    ToolDefinition, create_library, default_library_config, default_runtime_config,
+    LibraryHeapTagEntry, LibraryMode, LibraryRuntimeConfig, LibraryStorageKind,
+    LibraryToolCallRequest, McpJsLibrary, ToolDefinition, create_library, default_library_config,
+    default_runtime_config,
 };

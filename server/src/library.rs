@@ -80,6 +80,14 @@ pub struct ToolDefinition {
     pub input_schema_json: String,
 }
 
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct LibraryToolCallRequest {
+    pub name: String,
+    pub arguments_json: String,
+    pub session_id: Option<String>,
+    pub mcp_headers_json: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize, uniffi::Record)]
 pub struct LibraryCapabilities {
     pub heap: bool,
@@ -601,24 +609,39 @@ impl McpJsLibrary {
         session_id: Option<String>,
         mcp_headers_json: Option<String>,
     ) -> Result<String, LibraryError> {
-        let arguments = parse_json_object("arguments_json", &arguments_json)?;
-        let mcp_headers = mcp_headers_json
-            .as_deref()
-            .map(|json| parse_json_object("mcp_headers_json", json))
-            .transpose()?;
-
         let tokio_runtime =
             self.tokio_runtime
                 .as_ref()
                 .ok_or_else(|| LibraryError::Initialization {
                     message: "synchronous tool calls require a library-created runtime".to_string(),
                 })?;
-        let result = tokio_runtime.block_on(self.runtime.call_tool(
-            session_id.as_deref(),
-            mcp_headers.as_ref(),
-            &name,
-            &arguments,
-        ));
+        tokio_runtime.block_on(self.invoke_tool(LibraryToolCallRequest {
+            name,
+            arguments_json,
+            session_id,
+            mcp_headers_json,
+        }))
+    }
+
+    pub async fn invoke_tool(
+        &self,
+        request: LibraryToolCallRequest,
+    ) -> Result<String, LibraryError> {
+        let arguments = parse_json_object("arguments_json", &request.arguments_json)?;
+        let mcp_headers = request
+            .mcp_headers_json
+            .as_deref()
+            .map(|json| parse_json_object("mcp_headers_json", json))
+            .transpose()?;
+        let result = self
+            .runtime
+            .call_tool(
+                request.session_id.as_deref(),
+                mcp_headers.as_ref(),
+                &request.name,
+                &arguments,
+            )
+            .await;
 
         serde_json::to_string(&result).map_err(|error| LibraryError::ToolCall {
             message: format!("failed to serialize result: {error}"),
@@ -707,18 +730,6 @@ impl McpJsLibrary {
 
     pub fn run_js(&self, code: impl Into<String>) -> RunJsRequest<'_> {
         self.runtime.run_js(code)
-    }
-
-    pub async fn call_tool_async(
-        &self,
-        session_id: Option<&str>,
-        mcp_headers: Option<&Value>,
-        name: &str,
-        arguments: &Value,
-    ) -> Value {
-        self.runtime
-            .call_tool(session_id, mcp_headers, name, arguments)
-            .await
     }
 }
 
@@ -1179,7 +1190,7 @@ mod tests {
     }
 
     #[test]
-    fn stateless_run_js_executes_through_dispatcher() {
+    fn stateless_run_js_executes_through_sync_and_async_library_apis() {
         let _guard = v8_test_guard();
         let library = McpJsLibrary::new(LibraryConfig::default()).unwrap();
         let result = library
@@ -1192,6 +1203,18 @@ mod tests {
             .unwrap();
         let value: Value = serde_json::from_str(&result).unwrap();
         assert_eq!(value["output"], "2");
+
+        let runtime = library.tokio_runtime.as_ref().unwrap();
+        let result = runtime
+            .block_on(library.invoke_tool(LibraryToolCallRequest {
+                name: "run_js".to_string(),
+                arguments_json: r#"{"code":"console.log(2 + 2)"}"#.to_string(),
+                session_id: None,
+                mcp_headers_json: None,
+            }))
+            .unwrap();
+        let value: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(value["output"], "4");
     }
 
     #[test]

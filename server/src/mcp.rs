@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use tokio::sync::Mutex;
 
-use crate::library::McpJsLibrary;
+use crate::library::{LibraryError, LibraryToolCallRequest, McpJsLibrary};
 use crate::engine::mcp_client::McpClientManager;
 use crate::session::SessionVerifier;
 
@@ -157,6 +157,29 @@ fn json_result(value: serde_json::Value) -> Result<CallToolResult, McpError> {
             "Failed to serialize response: {e}"
         ))])),
     }
+}
+
+async fn invoke_library_tool(
+    runtime: &McpJsLibrary,
+    name: &str,
+    arguments_json: String,
+    session_id: Option<String>,
+    mcp_headers: Option<&serde_json::Value>,
+) -> serde_json::Value {
+    runtime
+        .invoke_tool(LibraryToolCallRequest {
+            name: name.to_string(),
+            arguments_json,
+            session_id,
+            mcp_headers_json: mcp_headers.map(serde_json::Value::to_string),
+        })
+        .await
+        .and_then(|json| {
+            serde_json::from_str(&json).map_err(|error| LibraryError::ToolCall {
+                message: format!("failed to deserialize result: {error}"),
+            })
+        })
+        .unwrap_or_else(|error| json!({ "error": error.to_string() }))
 }
 
 // ── Tool argument structs ─────────────────────────────────────────────────
@@ -382,13 +405,15 @@ impl McpService {
     /// Forward a tool call to the transport-agnostic dispatcher and wrap the
     /// result as a `CallToolResult`.
     async fn dispatch<T: Serialize>(&self, name: &str, args: &T) -> Result<CallToolResult, McpError> {
-        let value = serde_json::to_value(args).unwrap_or_else(|_| json!({}));
-        let result = self.runtime.call_tool_async(
-            self.session_id.get().map(String::as_str),
-            self.mcp_headers.get(),
+        let arguments_json = serde_json::to_string(args).unwrap_or_else(|_| "{}".to_string());
+        let result = invoke_library_tool(
+            &self.runtime,
             name,
-            &value,
-        ).await;
+            arguments_json,
+            self.session_id.get().cloned(),
+            self.mcp_headers.get(),
+        )
+        .await;
         json_result(result)
     }
 }
@@ -690,10 +715,15 @@ impl StatelessMcpService {
         &self,
         Parameters(args): Parameters<StatelessRunJsArgs>,
     ) -> Result<CallToolResult, McpError> {
-        let value = serde_json::to_value(&args).unwrap_or_else(|_| json!({}));
-        let result = self.runtime
-            .call_tool_async(None, self.mcp_headers.get(), "run_js", &value)
-            .await;
+        let arguments_json = serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string());
+        let result = invoke_library_tool(
+            &self.runtime,
+            "run_js",
+            arguments_json,
+            None,
+            self.mcp_headers.get(),
+        )
+        .await;
         json_result(result)
     }
 }
