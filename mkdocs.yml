@@ -49,6 +49,7 @@ nav:
       - Authentication (JWT/JWKS): how-to/authentication.md
       - Clustering & replication (Raft): how-to/clustering.md
       - Customize prompt & tool descriptions: how-to/customize-mcp-surface.md
+      - Generate native UniFFI bindings: how-to/generate-uniffi-bindings.md
 
   - Concepts:
       - Overview: concepts/overview.md
@@ -75,6 +76,7 @@ nav:
       - Configuration file: reference/config-file.md
       - HTTP API: reference/http-api.md
       - MCP Tools: reference/mcp-tools.md
+      - Native UniFFI bindings: reference/uniffi-bindings.md
 markdown_extensions:
   - tables
   - toc:

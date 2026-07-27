@@ -7,13 +7,14 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::Arc;
 use utoipa::{OpenApi, ToSchema};
 
 /// Maximum size of an `/api/exec` request body (16 MiB), for both the JSON
 /// body and raw script uploads.
 const MAX_EXEC_BODY_BYTES: usize = 16 * 1024 * 1024;
 
-use crate::engine::Engine;
+use crate::library::{LibraryExecutionRequest, LibraryFsMergePreference, McpJsLibrary};
 
 // ── Embedded agent-discovery content ─────────────────────────────────
 
@@ -284,7 +285,7 @@ pub struct ApiDoc;
     tag = "executions"
 )]
 async fn exec_handler(
-    State(engine): State<Engine>,
+    State(runtime): State<Arc<McpJsLibrary>>,
     Query(params): Query<ExecUploadParams>,
     request: Request,
 ) -> (StatusCode, Json<serde_json::Value>) {
@@ -349,7 +350,7 @@ async fn exec_handler(
         }
     };
 
-    submit_exec(engine, exec_req).await
+    submit_exec(runtime, exec_req).await
 }
 
 /// Query-string parameters accepted alongside a raw-body script upload to
@@ -372,24 +373,28 @@ struct ExecUploadParams {
 /// Queue an [`ExecRequest`] on the engine and map the result to an HTTP
 /// response. Shared by the JSON and raw-upload code paths.
 async fn submit_exec(
-    engine: Engine,
+    runtime: Arc<McpJsLibrary>,
     req: ExecRequest,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let mut r = engine.run_js(req.code);
-    if let Some(h) = req.heap { r = r.heap(h); }
-    r = r.maybe_fs(req.fs);
-    if let Some(s) = req.session { r = r.session(s); }
-    if let Some(mb) = req.heap_memory_max_mb { r = r.heap_memory_max_mb(mb); }
-    if let Some(secs) = req.execution_timeout_secs { r = r.execution_timeout_secs(secs); }
-    if let Some(t) = req.tags { r = r.tags(t); }
-    match r.execute().await {
+    let request = LibraryExecutionRequest {
+        code: req.code,
+        file: None,
+        heap: req.heap,
+        fs: req.fs,
+        session: req.session,
+        heap_memory_max_mb: req.heap_memory_max_mb.map(|value| value as u64),
+        execution_timeout_secs: req.execution_timeout_secs,
+        tags: req.tags,
+        mcp_headers: None,
+    };
+    match runtime.submit_execution(request).await {
         Ok(execution_id) => (
             StatusCode::ACCEPTED,
             Json(serde_json::json!({ "execution_id": execution_id })),
         ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e })),
+            Json(serde_json::json!({ "error": e.to_string() })),
         ),
     }
 }
@@ -408,14 +413,14 @@ async fn submit_exec(
     tag = "executions"
 )]
 async fn get_execution_handler(
-    State(engine): State<Engine>,
+    State(runtime): State<Arc<McpJsLibrary>>,
     Path(id): Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    match engine.get_execution(&id) {
+    match runtime.get_execution(id.clone()) {
         Ok(info) => (
             StatusCode::OK,
             Json(serde_json::json!({
-                "execution_id": info.id,
+                "execution_id": info.execution_id,
                 "status": info.status,
                 "result": info.result,
                 "heap": info.heap,
@@ -427,7 +432,7 @@ async fn get_execution_handler(
         ),
         Err(e) => (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": e })),
+            Json(serde_json::json!({ "error": e.to_string() })),
         ),
     }
 }
@@ -451,15 +456,15 @@ async fn get_execution_handler(
     tag = "executions"
 )]
 async fn get_execution_output_handler(
-    State(engine): State<Engine>,
+    State(runtime): State<Arc<McpJsLibrary>>,
     Path(id): Path<String>,
     Query(query): Query<OutputQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let status = engine.get_execution(&id)
+    let status = runtime.get_execution(id.clone())
         .map(|info| info.status)
         .unwrap_or_else(|_| "unknown".to_string());
 
-    match engine.get_execution_output(&id, query.line_offset, query.line_limit, query.byte_offset, query.byte_limit) {
+    match runtime.get_execution_output(id.clone(), query.line_offset, query.line_limit, query.byte_offset, query.byte_limit) {
         Ok(page) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -479,7 +484,7 @@ async fn get_execution_output_handler(
         ),
         Err(e) => (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": e })),
+            Json(serde_json::json!({ "error": e.to_string() })),
         ),
     }
 }
@@ -498,17 +503,17 @@ async fn get_execution_output_handler(
     tag = "executions"
 )]
 async fn cancel_execution_handler(
-    State(engine): State<Engine>,
+    State(runtime): State<Arc<McpJsLibrary>>,
     Path(id): Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    match engine.cancel_execution(&id) {
+    match runtime.cancel_execution(id) {
         Ok(()) => (
             StatusCode::OK,
             Json(serde_json::json!({ "ok": true })),
         ),
         Err(e) => (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "ok": false, "error": e })),
+            Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
         ),
     }
 }
@@ -524,16 +529,16 @@ async fn cancel_execution_handler(
     tag = "executions"
 )]
 async fn list_executions_handler(
-    State(engine): State<Engine>,
+    State(runtime): State<Arc<McpJsLibrary>>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    match engine.list_executions() {
+    match runtime.list_executions() {
         Ok(executions) => (
             StatusCode::OK,
             Json(serde_json::json!({ "executions": executions })),
         ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e })),
+            Json(serde_json::json!({ "error": e.to_string() })),
         ),
     }
 }
@@ -736,11 +741,11 @@ pub struct FsResetRequest {
     tag = "fs"
 )]
 async fn fs_labels_handler(
-    State(engine): State<Engine>,
+    State(runtime): State<Arc<McpJsLibrary>>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    match engine.fs_list_labels().await {
+    match runtime.fs_list_labels().await {
         Ok(labels) => (StatusCode::OK, Json(serde_json::json!({ "labels": labels }))),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e.to_string() }))),
     }
 }
 
@@ -753,15 +758,15 @@ async fn fs_labels_handler(
     tag = "fs"
 )]
 async fn fs_set_label_handler(
-    State(engine): State<Engine>,
+    State(runtime): State<Arc<McpJsLibrary>>,
     Json(req): Json<FsLabelRequest>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    match engine.fs_set_label(&req.name, &req.ca_id, req.message).await {
+    match runtime.fs_set_label(req.name.clone(), req.ca_id.clone(), req.message).await {
         Ok(()) => (
             StatusCode::OK,
             Json(serde_json::json!({ "label": req.name, "ca_id": req.ca_id })),
         ),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e.to_string() }))),
     }
 }
 
@@ -777,10 +782,10 @@ async fn fs_set_label_handler(
     tag = "fs"
 )]
 async fn fs_resolve_handler(
-    State(engine): State<Engine>,
+    State(runtime): State<Arc<McpJsLibrary>>,
     Path(label): Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    match engine.fs_resolve_label(&label).await {
+    match runtime.fs_resolve_label(label.clone()).await {
         Ok(Some(ca_id)) => (
             StatusCode::OK,
             Json(serde_json::json!({ "label": label, "ca_id": ca_id })),
@@ -789,7 +794,7 @@ async fn fs_resolve_handler(
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": format!("unknown label: {label}") })),
         ),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e.to_string() }))),
     }
 }
 
@@ -805,16 +810,16 @@ async fn fs_resolve_handler(
     tag = "fs"
 )]
 async fn fs_log_handler(
-    State(engine): State<Engine>,
+    State(runtime): State<Arc<McpJsLibrary>>,
     Path(label): Path<String>,
     Query(query): Query<FsLogQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    match engine.fs_label_log(&label, query.limit).await {
+    match runtime.fs_label_log(label.clone(), query.limit.map(|limit| limit as u64)).await {
         Ok(log) => (
             StatusCode::OK,
             Json(serde_json::json!({ "label": label, "log": log })),
         ),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e.to_string() }))),
     }
 }
 
@@ -830,7 +835,7 @@ async fn fs_log_handler(
     tag = "fs"
 )]
 async fn fs_push_handler(
-    State(engine): State<Engine>,
+    State(runtime): State<Arc<McpJsLibrary>>,
     Json(req): Json<FsPushRequest>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     if req.detach {
@@ -845,14 +850,26 @@ async fn fs_push_handler(
             Json(serde_json::json!({ "error": "fs push requires a label unless detach is true" })),
         );
     };
-    match engine.fs_push(&label, &req.ca_id, req.expected, req.force, req.message).await {
+    match runtime.fs_push(label, req.ca_id, req.expected, req.force, req.message).await {
         Ok(outcome) => {
-            let value = serde_json::to_value(&outcome).unwrap_or_default();
-            let is_rejected = matches!(outcome, crate::engine::FsPushOutcome::Rejected { .. });
+            let is_rejected = outcome.status == "rejected";
+            let value = if is_rejected {
+                serde_json::json!({
+                    "status": outcome.status,
+                    "label": outcome.label,
+                    "current": outcome.current,
+                })
+            } else {
+                serde_json::json!({
+                    "status": outcome.status,
+                    "label": outcome.label,
+                    "ca_id": outcome.ca_id,
+                })
+            };
             let code = if is_rejected { StatusCode::CONFLICT } else { StatusCode::OK };
             (code, Json(value))
         }
-        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e.to_string() }))),
     }
 }
 
@@ -868,15 +885,15 @@ async fn fs_push_handler(
     tag = "fs"
 )]
 async fn fs_reset_handler(
-    State(engine): State<Engine>,
+    State(runtime): State<Arc<McpJsLibrary>>,
     Json(req): Json<FsResetRequest>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    match engine.fs_reset(&req.label, &req.ca_id, req.allow_unlogged, req.message).await {
+    match runtime.fs_reset(req.label.clone(), req.ca_id.clone(), req.allow_unlogged, req.message).await {
         Ok(()) => (
             StatusCode::OK,
             Json(serde_json::json!({ "label": req.label, "ca_id": req.ca_id })),
         ),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e.to_string() }))),
     }
 }
 
@@ -907,18 +924,33 @@ pub struct FsMergeRequest {
     tag = "fs"
 )]
 async fn fs_merge_handler(
-    State(engine): State<Engine>,
+    State(runtime): State<Arc<McpJsLibrary>>,
     Json(req): Json<FsMergeRequest>,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let prefer = match crate::engine::fs_merge::Prefer::parse(req.prefer.as_deref()) {
-        Ok(p) => p,
-        Err(e) => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))),
+    let prefer = match req.prefer.as_deref() {
+        None => None,
+        Some("ours") => Some(LibraryFsMergePreference::Ours),
+        Some("theirs") => Some(LibraryFsMergePreference::Theirs),
+        Some(value) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": format!("invalid prefer value: {value}; expected ours or theirs") })),
+            )
+        }
     };
-    match engine.fs_merge(&req.ours, &req.theirs, req.base, prefer).await {
-        // Both clean merges and conflicts are successful outcomes carrying a
-        // `status`-tagged body the caller acts on; only bad input is an error.
-        Ok(result) => (StatusCode::OK, Json(serde_json::to_value(&result).unwrap_or_default())),
-        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))),
+    match runtime.fs_merge(req.ours, req.theirs, req.base, prefer).await {
+        Ok(result) => {
+            let value = if result.status == "merged" {
+                serde_json::json!({ "status": result.status, "ca_id": result.ca_id })
+            } else {
+                serde_json::json!({ "status": result.status, "conflicts": result.conflicts })
+            };
+            (StatusCode::OK, Json(value))
+        }
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        ),
     }
 }
 
@@ -928,7 +960,7 @@ async fn fs_merge_handler(
 ///
 /// Used when running in stdio mode where no HTTP server is present, and
 /// for merging into SSE / Streamable-HTTP transport servers.
-pub fn api_router(engine: Engine) -> Router {
+pub fn api_router(runtime: Arc<McpJsLibrary>) -> Router {
     Router::new()
         .route("/", get(root_redirect_handler))
         .route("/llms.txt", get(llms_txt_handler))
@@ -947,5 +979,5 @@ pub fn api_router(engine: Engine) -> Router {
         .route("/api/fs/push", post(fs_push_handler))
         .route("/api/fs/reset", post(fs_reset_handler))
         .route("/api/fs/merge", post(fs_merge_handler))
-        .with_state(engine)
+        .with_state(runtime)
 }

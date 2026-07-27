@@ -2569,6 +2569,18 @@ impl Engine {
         registry.get_console_output(id, line_offset, line_limit, byte_offset, byte_limit)
     }
 
+    /// Stop background work owned by the engine.
+    pub async fn shutdown(&self) -> (u64, u64) {
+        let cancelled_executions = self.execution_registry.as_ref()
+            .map(|registry| registry.cancel_all())
+            .unwrap_or(0);
+        let closed_mcp_connections = match &self.mcp_client_manager {
+            Some(manager) => manager.shutdown().await,
+            None => 0,
+        };
+        (cancelled_executions, closed_mcp_connections)
+    }
+
     /// Cancel a running execution.
     pub fn cancel_execution(&self, id: &str) -> Result<(), String> {
         let registry = self.execution_registry.as_ref()
