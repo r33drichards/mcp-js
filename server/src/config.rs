@@ -59,6 +59,7 @@ pub const SECTIONS: &[Section] = &[
     Section { key: "mcp_servers", target_arg: "mcp_config", shape: Shape::Array },
     Section { key: "fetch_headers", target_arg: "fetch_header_config", shape: Shape::Array },
     Section { key: "policies", target_arg: "policies_json", shape: Shape::Object },
+    Section { key: "sandbox", target_arg: "sandbox_manifest", shape: Shape::Object },
 ];
 
 /// Flags that exist on the CLI but make no sense in (or are unsupported from)

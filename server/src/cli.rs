@@ -196,6 +196,28 @@ pub struct Cli {
     #[arg(long = "harden-remove-shared-memory", env = "MCP_V8_HARDEN_REMOVE_SHARED_MEMORY", default_value = "false", help_heading = "Sandbox")]
     pub harden_remove_shared_memory: bool,
 
+    // ── OS sandbox (nono: Landlock on Linux, Seatbelt on macOS) ──────────────
+    /// Confine the whole server process with an OS-enforced sandbox (nono:
+    /// Landlock on Linux 5.13+, Seatbelt on macOS) described by a nono
+    /// capability manifest — a JSON file path or inline JSON; in a --config
+    /// file the structured `sandbox` section is the ergonomic form (and the
+    /// NixOS module exposes it as a plain attrset). nono capabilities compose
+    /// additively,
+    /// so the enforced set is the manifest (verbatim, in nono's schema and
+    /// semantics) unioned with a server baseline derived from this
+    /// configuration: storage directories read-write, config/policy/WASM
+    /// inputs and system paths read-only, and bind grants for configured
+    /// listener ports. The manifest owns the network egress posture — the
+    /// baseline never opens outbound access. Applied before the async runtime
+    /// and V8 spawn any threads; irreversible once applied. This is defense
+    /// in depth *underneath* the OPA policy layer. Fails closed: startup
+    /// aborts if the platform cannot enforce the composed set, and manifest
+    /// features that need nono's CLI supervisor (network proxy mode,
+    /// credentials, rollback, fs deny rules) are rejected rather than
+    /// silently ignored.
+    #[arg(long = "sandbox-manifest", env = "MCP_V8_SANDBOX_MANIFEST", value_name = "FILE", help_heading = "OS Sandbox")]
+    pub sandbox_manifest: Option<String>,
+
     // ── Shared S3 backend (used by heap-store=s3 and/or fs-store=s3) ──────────
     /// S3 bucket backing whichever axes select `s3`. Required when
     /// `--heap-store s3` or `--fs-store s3` is set.

@@ -10,9 +10,10 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
-# Pin serde below 1.0.220 to avoid incompatibility with swc_config 2.0.0
-# (swc_config uses serde::__private which was removed in serde 1.0.220+)
-serde = ">=1.0,<1.0.220"
+# The old `<1.0.220` pin (for swc_config 2.0.0's use of the removed
+# `serde::__private` API) is gone: the server now pulls swc_common ≥18, and
+# nono's build tooling requires serde ≥1.0.228.
+serde = "1.0.228"
 # Used by the fs fuzz targets: same versions the server crate uses.
 bincode = "1"
 blake3 = "1"

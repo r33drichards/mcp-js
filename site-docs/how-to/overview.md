@@ -19,6 +19,7 @@ end-to-end, build-something-real walkthroughs, see the
 - [ES module imports](module-imports.md) — enable and gate external imports.
 - [Calling upstream MCP servers](mcp-client.md) — connect stdio/SSE servers, control stubs.
 - [Security policies (OPA/Rego)](policies.md) — gate each capability with OPA or Rego.
+- [OS sandboxing (--sandbox-manifest)](os-sandbox.md) — confine the whole process with a nono capability manifest (Landlock/Seatbelt).
 - [Authentication (JWT/JWKS)](authentication.md) — enable JWKS verification, use Keycloak.
 - [Clustering & replication (Raft)](clustering.md) — configure nodes, join, load-balance.
 

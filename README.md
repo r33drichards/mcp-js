@@ -22,6 +22,7 @@ MCP servers) are all **off by default** and unlocked only by explicit
 - **One tool, unbounded capability.** The agent runs a program, not a fixed menu of tools.
 - **Durable state.** Heap snapshots persist variables and objects across calls.
 - **Secure by default.** `fetch`, filesystem, subprocess, and external imports are denied until you grant them via policy.
+- **Kernel-enforced confinement.** Opt-in [`--sandbox-manifest`](https://r33drichards.github.io/mcp-js/concepts/os-sandbox/) confines the whole process with a [nono](https://github.com/nolabs-ai/nono) capability manifest (Landlock on Linux, Seatbelt on macOS) as defense in depth beneath the policy layer.
 - **Production-ready.** stdio / Streamable HTTP / SSE transports, a REST sidecar, async execution with pagination, JWKS auth, and Raft-replicated clustering.
 
 ## Documentation

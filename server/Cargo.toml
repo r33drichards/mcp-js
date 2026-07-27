@@ -22,7 +22,9 @@ rmcp = { version = "1.7", features = ["server", "client", "macros", "schemars", 
 rmcp_legacy = { package = "rmcp", git = "https://github.com/modelcontextprotocol/rust-sdk", rev = "787cc015b719773f66d4ac32e695b9a0079e12ef", features = ["transport-sse-server"] }
 
 # rmcp = { version = "0.1.5", }
-serde = "=1.0.219"
+# Minimum-version bound (was pinned `=1.0.219`; nono's build tooling needs
+# serde ≥1.0.228, and Cargo.lock still pins the exact resolved version).
+serde = "1.0.219"
 serde_json = "1.0.140"
 toml = "0.8"
 tokio = { version = "1.45.0", features = ["rt-multi-thread", "process", "signal", "time", "sync", "macros"] }
@@ -37,7 +39,11 @@ async-trait = "0.1"
 # --config loader to install config-file values as per-arg defaults.
 clap = { version = "4.5", features = ["derive", "env", "string"] }
 sha2 = "0.10"
-swc_core = { version = "17", features = [
+# swc_common ≥18 is required for serde ≥1.0.228 compatibility, which nono's
+# build tooling needs; 17.x pulled swc_common 8.1.1, which used the removed
+# `serde::__private` API and forced the old `=1.0.219` serde pin. 54 is the
+# newest line that still compiles on the nix-pinned stable toolchain.
+swc_core = { version = "54", features = [
     "common",
     "ecma_codegen",
     "ecma_parser",
@@ -66,6 +72,13 @@ zstd = "0.13"
 blake3 = "1"
 bincode = "1"
 diffy = "0.4"
+
+# OS-level sandboxing layer (--sandbox-manifest): Landlock on Linux, Seatbelt on macOS.
+# default-features = false drops nono's system-keyring integration, which the
+# server does not use. 0.53 is the newest release whose MSRV (1.74) fits the
+# nix-pinned stable toolchain; 0.54+ requires Rust 1.95.
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+nono = { version = "0.53", default-features = false }
 
 [dev-dependencies]
 tokio-test = "0.4"

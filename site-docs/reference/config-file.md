@@ -44,6 +44,7 @@ the wrong shape, and keys whose flags Clap declares as conflicting (e.g.
 - [Heap](#heap)
 - [MCP Server Module](#mcp-server-module)
 - [Module Import](#module-import)
+- [OS Sandbox](#os-sandbox)
 - [Policy](#policy)
 - [Prompt](#prompt)
 - [Run JS File](#run-js-file)
@@ -83,6 +84,12 @@ JSON array of header injection rules (a path to a JSON file, or inline JSON — 
 Shape: a table/object. Feeds `--policies-json` (schema below).
 
 JSON policy configuration (inline JSON or path to a JSON file). Enables fetch() and/or module policy gating via local Rego files and/or remote OPA servers. Example: --policies-json '{"fetch":{"policies":[{"url":"file:///path/to/fetch.rego"}]}}' Schema: { "fetch": { "mode": "all"|"any", "policies": [{"url": "...", "policy_path": "...", "rule": "..."}] }, "modules": { ... } }
+
+### `sandbox`
+
+Shape: a table/object. Feeds `--sandbox-manifest` (schema below).
+
+Confine the whole server process with an OS-enforced sandbox (nono: Landlock on Linux 5.13+, Seatbelt on macOS) described by a nono capability manifest — a JSON file path or inline JSON; in a --config file the structured `sandbox` section is the ergonomic form (and the NixOS module exposes it as a plain attrset). nono capabilities compose additively, so the enforced set is the manifest (verbatim, in nono's schema and semantics) unioned with a server baseline derived from this configuration: storage directories read-write, config/policy/WASM inputs and system paths read-only, and bind grants for configured listener ports. The manifest owns the network egress posture — the baseline never opens outbound access. Applied before the async runtime and V8 spawn any threads; irreversible once applied. This is defense in depth *underneath* the OPA policy layer. Fails closed: startup aborts if the platform cannot enforce the composed set, and manifest features that need nono's CLI supervisor (network proxy mode, credentials, rollback, fs deny rules) are rejected rather than silently ignored
 
 ## Cluster
 
@@ -342,6 +349,15 @@ Allow external module imports (npm:, jsr:, and URL imports). When disabled (the 
 - Default: `false`
 - Possible values: `true`, `false`
 - Type: boolean
+
+## OS Sandbox
+
+### `sandbox_manifest`
+
+Confine the whole server process with an OS-enforced sandbox (nono: Landlock on Linux 5.13+, Seatbelt on macOS) described by a nono capability manifest — a JSON file path or inline JSON; in a --config file the structured `sandbox` section is the ergonomic form (and the NixOS module exposes it as a plain attrset). nono capabilities compose additively, so the enforced set is the manifest (verbatim, in nono's schema and semantics) unioned with a server baseline derived from this configuration: storage directories read-write, config/policy/WASM inputs and system paths read-only, and bind grants for configured listener ports. The manifest owns the network egress posture — the baseline never opens outbound access. Applied before the async runtime and V8 spawn any threads; irreversible once applied. This is defense in depth *underneath* the OPA policy layer. Fails closed: startup aborts if the platform cannot enforce the composed set, and manifest features that need nono's CLI supervisor (network proxy mode, credentials, rollback, fs deny rules) are rejected rather than silently ignored
+
+- CLI flag: `--sandbox-manifest`
+- Environment: `MCP_V8_SANDBOX_MANIFEST`
 
 ## Policy
 

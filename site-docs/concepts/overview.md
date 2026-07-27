@@ -25,6 +25,7 @@ policy-gated bridges. Everything else below is a facet of that idea.
 - [ES module imports](module-imports.md) — why imports are off by default.
 - [Calling upstream MCP servers](mcp-client.md) — mcp-v8 as both server and client.
 - [Security policies (OPA/Rego)](policies.md) — the unified default-deny policy model.
+- [OS sandboxing](os-sandbox.md) — the kernel-enforced layer beneath the policy chain.
 - [Authentication (JWT/JWKS)](authentication.md) — the token verification trust model.
 - [Clustering & replication (Raft)](clustering.md) — consensus and replicated state.
 
