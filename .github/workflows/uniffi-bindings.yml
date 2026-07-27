@@ -5,17 +5,23 @@ on:
     branches: [ main ]
     paths:
       - "mcp-v8-uniffi/**"
+      - "mcp-v8-uniffi-python/**"
       - "server/src/library.rs"
       - "server/src/runtime.rs"
       - "scripts/*uniffi-bindings.sh"
+      - "scripts/python-uniffi-library-smoke.py"
+      - "scripts/test-python-uniffi-library.sh"
       - ".github/workflows/uniffi-bindings.yml"
   pull_request:
     branches: [ main ]
     paths:
       - "mcp-v8-uniffi/**"
+      - "mcp-v8-uniffi-python/**"
       - "server/src/library.rs"
       - "server/src/runtime.rs"
       - "scripts/*uniffi-bindings.sh"
+      - "scripts/python-uniffi-library-smoke.py"
+      - "scripts/test-python-uniffi-library.sh"
       - ".github/workflows/uniffi-bindings.yml"
   workflow_dispatch:
 
@@ -32,3 +38,32 @@ jobs:
         run: nix develop --command cargo install uniffi --version 0.32.0 --locked --features cli
       - name: Generate and check language bindings
         run: nix develop --command ./scripts/check-uniffi-bindings.sh
+
+  python-library-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/git
+            ~/.cargo/registry
+            target/python-uniffi
+          key: python-uniffi-v8-145-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'server/**', 'mcp-v8-uniffi-python/**') }}
+      - name: Install UniFFI bindgen
+        run: nix develop --command cargo install uniffi --version 0.32.0 --locked --features cli
+      - name: Build Python-loadable UniFFI library
+        run: |
+          nix develop --command bash -c '
+            unset RUSTY_V8_ARCHIVE
+            export V8_FROM_SOURCE=1
+            export GN_ARGS="v8_monolithic_for_shared_library=true"
+            export CARGO_TARGET_DIR="$PWD/target/python-uniffi"
+            cargo build -p mcp-v8-uniffi-python --release
+          '
+      - name: Import Python library and execute JavaScript
+        run: |
+          nix develop --command ./scripts/test-python-uniffi-library.sh \
+            target/python-uniffi/release/libmcp_v8_uniffi.so

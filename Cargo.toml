@@ -3,6 +3,7 @@ members = [
     "server",
     "mcp-v8-client",
     "mcp-v8-uniffi",
+    "mcp-v8-uniffi-python",
 ]
 resolver = "2"
 

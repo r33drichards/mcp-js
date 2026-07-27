@@ -2894,6 +2894,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "mcp-v8-uniffi-python"
+version = "0.1.0"
+dependencies = [
+ "server",
+]
+
+[[package]]
 name = "md-5"
 version = "0.10.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
