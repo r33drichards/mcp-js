@@ -199,7 +199,7 @@ impl ServerHandler for SseService {
         _request: Option<PaginatedRequestParam>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        let tools = crate::mcp::mode_tool_list(&self.runtime)
+        let tools = self.runtime.core_mcp_tools()
             .iter()
             .map(to_legacy_tool)
             .collect();

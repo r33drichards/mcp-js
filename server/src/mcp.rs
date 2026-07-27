@@ -558,22 +558,6 @@ impl McpService {
     }
 }
 
-/// Build the capability-filtered, override-applied, stub-augmented tool list.
-fn list_tools_for<S: Send + Sync + 'static>(
-    router: &ToolRouter<S>,
-    engine: &McpJsLibrary,
-    mcp_client: &Option<Arc<McpClientManager>>,
-) -> Vec<Tool> {
-    let mut tools = router.list_all();
-    filter_tools_by_capability(&mut tools, engine.heap_enabled(), engine.fs_enabled());
-    apply_run_js_description_override(&mut tools, engine.run_js_description_override());
-    if let Some(client) = mcp_client {
-        tools.extend(client.stub_tools());
-    }
-    tools.extend(engine.wasm_stub_tools());
-    tools
-}
-
 #[task_handler]
 impl ServerHandler for McpService {
     fn get_info(&self) -> ServerInfo {
@@ -633,7 +617,7 @@ impl ServerHandler for McpService {
     ) -> Result<ListToolsResult, McpError> {
         Ok(ListToolsResult {
             next_cursor: None,
-            tools: list_tools_for(&self.tool_router, &self.runtime, &self.mcp_client),
+            tools: self.runtime.mcp_tools(),
             meta: None,
         })
     }
@@ -766,7 +750,7 @@ impl ServerHandler for StatelessMcpService {
     ) -> Result<ListToolsResult, McpError> {
         Ok(ListToolsResult {
             next_cursor: None,
-            tools: list_tools_for(&self.tool_router, &self.runtime, &self.mcp_client),
+            tools: self.runtime.mcp_tools(),
             meta: None,
         })
     }

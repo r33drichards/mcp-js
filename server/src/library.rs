@@ -500,13 +500,11 @@ impl McpJsLibrary {
     }
 
     pub fn list_tools(&self) -> Result<Vec<ToolDefinition>, LibraryError> {
-        self.runtime
-            .tool_catalog()
-            .tools
+        self.mcp_tools()
             .into_iter()
             .map(|tool| {
                 let input_schema_json =
-                    serde_json::to_string(&tool.input_schema).map_err(|error| {
+                    serde_json::to_string(tool.input_schema.as_ref()).map_err(|error| {
                         LibraryError::Initialization {
                             message: format!(
                                 "failed to serialize schema for '{}': {error}",
@@ -515,8 +513,8 @@ impl McpJsLibrary {
                         }
                     })?;
                 Ok(ToolDefinition {
-                    name: tool.name,
-                    description: tool.description,
+                    name: tool.name.to_string(),
+                    description: tool.description.map(|description| description.to_string()),
                     input_schema_json,
                 })
             })
@@ -600,6 +598,19 @@ impl McpJsLibrary {
 
     pub fn wasm_stub_tools(&self) -> Vec<rmcp::model::Tool> {
         self.runtime.wasm_stub_tools()
+    }
+
+    pub fn core_mcp_tools(&self) -> Vec<rmcp::model::Tool> {
+        crate::mcp::mode_tool_list(self)
+    }
+
+    pub fn mcp_tools(&self) -> Vec<rmcp::model::Tool> {
+        let mut tools = self.core_mcp_tools();
+        if let Some(client) = self.mcp_client_manager() {
+            tools.extend(client.stub_tools());
+        }
+        tools.extend(self.wasm_stub_tools());
+        tools
     }
 
     pub fn wasm_stub_call_response(
