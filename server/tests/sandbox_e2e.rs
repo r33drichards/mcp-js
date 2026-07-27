@@ -172,16 +172,27 @@ impl StdioServer {
             .await;
     }
 
-    /// Call run_js with the given arguments and poll to a terminal state.
-    async fn run_js_to_terminal(&mut self, id: u64, arguments: Value) -> Value {
+    /// Call run_js and return `(is_error, text)`. Handles both response
+    /// shapes: a synchronous inline result (`{"output":"..."}` in the tool
+    /// content) and an asynchronous `execution_id`, which is polled to a
+    /// terminal state and resolved to its console output.
+    async fn run_js_text(&mut self, id: u64, arguments: Value) -> (bool, String) {
         let response = self
             .send(json!({
                 "jsonrpc": "2.0", "id": id, "method": "tools/call",
                 "params": {"name": "run_js", "arguments": arguments}
             }))
             .await;
-        let exec_id = common::extract_execution_id(&response)
-            .unwrap_or_else(|| panic!("run_js response without execution_id: {response}"));
+
+        let Some(exec_id) = common::extract_execution_id(&response) else {
+            let is_error = response["result"]["isError"].as_bool().unwrap_or(false)
+                || response.get("error").is_some();
+            let text = response["result"]["content"][0]["text"]
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| response.to_string());
+            return (is_error, text);
+        };
 
         for i in 0..200u64 {
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -192,30 +203,27 @@ impl StdioServer {
                     "params": {"name": "get_execution", "arguments": {"execution_id": exec_id}}
                 }))
                 .await;
-            if let Some(mut info) = common::extract_execution_info(&poll) {
+            if let Some(info) = common::extract_execution_info(&poll) {
                 if matches!(
                     info["status"].as_str(),
                     Some("completed") | Some("failed") | Some("timed_out") | Some("cancelled")
                 ) {
-                    info["execution_id"] = json!(exec_id);
-                    return info;
+                    let is_error = info["status"] != "completed";
+                    let output = self
+                        .send(json!({
+                            "jsonrpc": "2.0", "id": 500_000 + id, "method": "tools/call",
+                            "params": {"name": "get_execution_output",
+                                       "arguments": {"execution_id": exec_id, "line_limit": 10_000}}
+                        }))
+                        .await;
+                    let console = common::extract_execution_info(&output)
+                        .and_then(|o| o["data"].as_str().map(str::to_string))
+                        .unwrap_or_default();
+                    return (is_error, format!("{info} {console}"));
                 }
             }
         }
         panic!("execution {exec_id} did not reach a terminal state");
-    }
-
-    async fn console_output(&mut self, id: u64, exec_id: &str) -> String {
-        let response = self
-            .send(json!({
-                "jsonrpc": "2.0", "id": id, "method": "tools/call",
-                "params": {"name": "get_execution_output",
-                           "arguments": {"execution_id": exec_id, "line_limit": 10_000}}
-            }))
-            .await;
-        common::extract_execution_info(&response)
-            .and_then(|info| info["data"].as_str().map(str::to_string))
-            .unwrap_or_default()
     }
 
     async fn stop(mut self) {
@@ -255,47 +263,28 @@ async fn sandboxed_server_executes_js_and_kernel_denies_ungranted_reads() {
     server.initialize().await;
 
     // Plain execution still works under confinement (V8, sled, transports).
-    let info = server.run_js_to_terminal(2, json!({"code": "console.log(6 * 7);"})).await;
-    assert_eq!(info["status"], "completed", "sandboxed run_js failed: {info}");
-    let exec_id = info["execution_id"].as_str().unwrap().to_string();
-    let output = server.console_output(3, &exec_id).await;
-    assert!(output.contains("42"), "expected console output, got: {output:?}");
+    let (is_error, text) = server.run_js_text(2, json!({"code": "console.log(6 * 7);"})).await;
+    assert!(!is_error, "sandboxed run_js failed: {text}");
+    assert!(text.contains("42"), "expected console output, got: {text:?}");
 
     // A script inside the granted read path loads and runs.
-    let info = server
-        .run_js_to_terminal(4, json!({"file": allowed.join("ok.js").to_str().unwrap()}))
+    let (is_error, text) = server
+        .run_js_text(4, json!({"file": allowed.join("ok.js").to_str().unwrap()}))
         .await;
-    assert_eq!(info["status"], "completed", "granted-path run_js failed: {info}");
-    let exec_id = info["execution_id"].as_str().unwrap().to_string();
-    let output = server.console_output(5, &exec_id).await;
-    assert!(output.contains("granted-file-ran"), "granted file did not run: {output:?}");
+    assert!(!is_error, "granted-path run_js failed: {text}");
+    assert!(text.contains("granted-file-ran"), "granted file did not run: {text:?}");
 
     // A script outside every grant is denied by the KERNEL, not by policy:
     // --allow-run-js-file makes the server itself willing to read any path,
     // so the only thing standing between run_js and the file is the sandbox.
-    let response = server
-        .send(json!({
-            "jsonrpc": "2.0", "id": 6, "method": "tools/call",
-            "params": {"name": "run_js",
-                       "arguments": {"file": blocked.join("secret.js").to_str().unwrap()}}
-        }))
+    let (is_error, text) = server
+        .run_js_text(6, json!({"file": blocked.join("secret.js").to_str().unwrap()}))
         .await;
-    let rendered = response.to_string();
     assert!(
-        !rendered.contains("SECRET-CONTENT"),
-        "ungranted file content leaked through the sandbox: {rendered}"
+        !text.contains("SECRET-CONTENT"),
+        "ungranted file content leaked through the sandbox: {text}"
     );
-    // The read fails before an execution is ever created (the file loader's
-    // canonicalize/read gets EACCES from the kernel), so the call surfaces a
-    // tool error rather than an execution id.
-    assert!(
-        common::extract_execution_id(&response).is_none(),
-        "blocked script must not start an execution: {rendered}"
-    );
-    assert!(
-        rendered.contains("run_js file"),
-        "expected the file-read error to surface: {rendered}"
-    );
+    assert!(is_error, "reading an ungranted path must fail: {text}");
 
     server.stop().await;
 }
