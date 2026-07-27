@@ -56,14 +56,14 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    // ── OS sandbox (--sandbox) ──────────────────────────────────────────
+    // ── OS sandbox (--sandbox-manifest) ─────────────────────────────────
     // Landlock confines the calling thread and everything spawned from it
     // afterwards — threads that already exist stay unconfined. So the sandbox
     // must be applied here, while the process is still single-threaded:
     // before the tokio runtime builds its worker pool and before the V8
     // platform spawns its background threads.
-    if cli.sandbox {
-        sandbox::apply(&cli)?;
+    if let Some(manifest_path) = &cli.sandbox_manifest {
+        sandbox::apply(manifest_path)?;
     }
 
     initialize_v8();

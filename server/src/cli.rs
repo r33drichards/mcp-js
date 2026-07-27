@@ -31,32 +31,6 @@ impl std::fmt::Display for StoreKind {
     }
 }
 
-/// Outbound-network posture for the OS sandbox (`--sandbox-network`).
-///
-/// `auto` derives the posture from the rest of the configuration: outbound
-/// access stays open only when some configured feature needs it (S3 stores,
-/// JWKS, clustering, fetch/module policies, SSE MCP servers, remote OPA);
-/// otherwise it is blocked, with per-port bind exceptions for the configured
-/// HTTP/SSE listeners. `allow` and `block` force the posture either way
-/// (listener ports are still permitted under `block`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
-pub enum SandboxNetwork {
-    Auto,
-    Allow,
-    Block,
-}
-
-impl std::fmt::Display for SandboxNetwork {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = match self {
-            SandboxNetwork::Auto => "auto",
-            SandboxNetwork::Allow => "allow",
-            SandboxNetwork::Block => "block",
-        };
-        f.write_str(s)
-    }
-}
-
 /// Command line arguments. Heap snapshots and the content-addressed filesystem
 /// are two independent, opt-in axes of per-session state (see `StoreKind`).
 ///
@@ -224,38 +198,19 @@ pub struct Cli {
 
     // ── OS sandbox (nono: Landlock on Linux, Seatbelt on macOS) ──────────────
     /// Confine the whole server process with an OS-enforced sandbox (nono:
-    /// Landlock on Linux 5.13+, Seatbelt on macOS) before any JS runs. The
-    /// filesystem capability set is derived from the rest of the configuration
-    /// (heap/fs/session stores read-write; config, policy, and WASM files
-    /// read-only; system paths read-only) and is irreversible once applied —
-    /// there is no API to widen it at runtime. This is defense in depth
-    /// *underneath* the OPA policy layer: even a V8 escape or a policy mistake
-    /// cannot reach paths or sockets the OS never granted. Fails closed: if the
-    /// platform cannot enforce the sandbox, startup aborts.
-    #[arg(long = "sandbox", env = "MCP_V8_SANDBOX", default_value = "false", help_heading = "OS Sandbox")]
-    pub sandbox: bool,
-
-    /// Grant the sandboxed process read-only access to an extra path
-    /// (directory grants are recursive). Repeatable. Use for paths the
-    /// derivation cannot see, e.g. scripts read via run_js `file`, or
-    /// module roots when external imports are enabled.
-    #[arg(long = "sandbox-allow-read", env = "MCP_V8_SANDBOX_ALLOW_READ", value_name = "PATH", value_delimiter = ',', help_heading = "OS Sandbox")]
-    pub sandbox_allow_read: Vec<String>,
-
-    /// Grant the sandboxed process read-write access to an extra path
-    /// (directory grants are recursive). Repeatable.
-    #[arg(long = "sandbox-allow-write", env = "MCP_V8_SANDBOX_ALLOW_WRITE", value_name = "PATH", value_delimiter = ',', help_heading = "OS Sandbox")]
-    pub sandbox_allow_write: Vec<String>,
-
-    /// Outbound-network posture for the OS sandbox: auto (default) blocks
-    /// outbound TCP unless a configured feature needs it (S3, JWKS, cluster,
-    /// fetch/module policies, SSE MCP servers, remote OPA); allow leaves the
-    /// network open; block forces it closed. Configured HTTP/SSE/cluster
-    /// listener ports are always bindable. Port-level exceptions need
-    /// Landlock ABI v4 (Linux 6.7+); older kernels fall back to seccomp
-    /// all-or-nothing and abort startup if that cannot express the policy.
-    #[arg(long = "sandbox-network", env = "MCP_V8_SANDBOX_NETWORK", value_enum, default_value_t = SandboxNetwork::Auto, help_heading = "OS Sandbox")]
-    pub sandbox_network: SandboxNetwork,
+    /// Landlock on Linux 5.13+, Seatbelt on macOS) described by a nono
+    /// capability manifest JSON file. The manifest is passed to nono verbatim
+    /// — filesystem grants, network mode, and port allowlists all use nono's
+    /// schema and semantics — and must grant every path the server itself
+    /// needs (storage directories, policy/WASM files, system library paths).
+    /// Applied before the async runtime and V8 spawn any threads; irreversible
+    /// once applied. This is defense in depth *underneath* the OPA policy
+    /// layer. Fails closed: startup aborts if the platform cannot enforce the
+    /// manifest, and manifest features that need nono's CLI supervisor
+    /// (network proxy mode, credentials, rollback, fs deny rules) are
+    /// rejected rather than silently ignored.
+    #[arg(long = "sandbox-manifest", env = "MCP_V8_SANDBOX_MANIFEST", value_name = "FILE", help_heading = "OS Sandbox")]
+    pub sandbox_manifest: Option<String>,
 
     // ── Shared S3 backend (used by heap-store=s3 and/or fs-store=s3) ──────────
     /// S3 bucket backing whichever axes select `s3`. Required when

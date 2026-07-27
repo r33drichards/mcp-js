@@ -1,16 +1,17 @@
-//! End-to-end tests for the OS sandbox layer (`--sandbox`, nono:
+//! End-to-end tests for the OS sandbox layer (`--sandbox-manifest`, nono:
 //! Landlock/Seatbelt).
 //!
 //! The sandbox needs kernel support (Landlock on Linux 5.13+, Seatbelt on
 //! macOS), which CI containers may lack. Each test probes support first:
 //!
-//! - unsupported host → assert the fail-closed contract: `--sandbox` must
-//!   abort startup with a clear error instead of running unconfined.
+//! - unsupported host → assert the fail-closed contract: `--sandbox-manifest`
+//!   must abort startup with a clear error instead of running unconfined.
 //! - supported host → assert the server still executes JS while confined, and
 //!   that the kernel actually denies reads outside the granted capability set
 //!   (via `run_js`'s `file` parameter pointed at an ungranted path).
 
 use serde_json::{Value, json};
+use std::path::Path;
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
@@ -28,8 +29,37 @@ fn sandbox_supported() -> bool {
     false
 }
 
-/// On hosts that cannot enforce the sandbox, `--sandbox` must fail closed:
-/// startup aborts with an explanatory error rather than serving unconfined.
+/// Write a nono capability manifest granting `readwrite` and `read` paths
+/// (skipping ones that don't exist — grants attach to real inodes) plus the
+/// system paths a confined server needs, with all network access blocked.
+fn write_manifest(dest: &Path, readwrite: &[&Path], read: &[&Path]) -> String {
+    let mut grants = Vec::new();
+    for path in readwrite {
+        grants.push(json!({"path": path.to_str().unwrap(), "access": "readwrite"}));
+    }
+    let system: &[&str] = &[
+        "/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/etc", "/opt", "/nix",
+        "/proc/self", "/dev/null", "/dev/urandom", "/dev/random",
+        "/System", "/Library", "/private/etc",
+    ];
+    for path in read.iter().map(|p| p.to_str().unwrap()).chain(system.iter().copied()) {
+        if Path::new(path).exists() {
+            grants.push(json!({"path": path, "access": "read"}));
+        }
+    }
+    let manifest = json!({
+        "version": "0.1.0",
+        "filesystem": {"grants": grants},
+        "network": {"mode": "blocked"}
+    });
+    let file = dest.join("sandbox-manifest.json");
+    std::fs::write(&file, serde_json::to_string_pretty(&manifest).unwrap()).unwrap();
+    file.to_str().unwrap().to_string()
+}
+
+/// On hosts that cannot enforce the sandbox, `--sandbox-manifest` must fail
+/// closed: startup aborts with an explanatory error rather than serving
+/// unconfined.
 #[tokio::test]
 async fn sandbox_fails_closed_when_unsupported() {
     if sandbox_supported() {
@@ -38,11 +68,15 @@ async fn sandbox_fails_closed_when_unsupported() {
     }
 
     let tmp = tempfile::tempdir().expect("tempdir");
+    let sessions = tmp.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    let manifest = write_manifest(tmp.path(), &[&sessions], &[]);
     let output = Command::new(env!("CARGO_BIN_EXE_server"))
         .args([
-            "--sandbox",
+            "--sandbox-manifest",
+            &manifest,
             "--session-db-path",
-            tmp.path().join("sessions").to_str().unwrap(),
+            sessions.to_str().unwrap(),
         ])
         .stdin(Stdio::null())
         .output()
@@ -51,12 +85,44 @@ async fn sandbox_fails_closed_when_unsupported() {
 
     assert!(
         !output.status.success(),
-        "--sandbox must abort startup on a host that cannot enforce it"
+        "--sandbox-manifest must abort startup on a host that cannot enforce it"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("cannot enforce"),
         "error should explain the fail-closed contract, got: {stderr}"
+    );
+}
+
+/// Manifest options that only work under nono's CLI supervisor must abort
+/// startup on every host — never be silently ignored.
+#[tokio::test]
+async fn supervisor_only_manifest_options_abort_startup() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let file = tmp.path().join("proxy-manifest.json");
+    std::fs::write(
+        &file,
+        r#"{"version":"0.1.0","network":{"mode":"proxy","allow_domains":[".example.com"]}}"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_server"))
+        .args([
+            "--sandbox-manifest",
+            file.to_str().unwrap(),
+            "--session-db-path",
+            tmp.path().join("sessions").to_str().unwrap(),
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .expect("spawn server");
+
+    assert!(!output.status.success(), "proxy-mode manifest must abort startup");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("supervisor") && stderr.contains("proxy"),
+        "error should name the unsupported options, got: {stderr}"
     );
 }
 
@@ -179,17 +245,18 @@ async fn sandboxed_server_executes_js_and_kernel_denies_ungranted_reads() {
     let sessions = tmp.path().join("sessions");
     let allowed = tmp.path().join("allowed");
     let blocked = tmp.path().join("blocked");
+    std::fs::create_dir_all(&sessions).unwrap();
     std::fs::create_dir_all(&allowed).unwrap();
     std::fs::create_dir_all(&blocked).unwrap();
     std::fs::write(allowed.join("ok.js"), "console.log('granted-file-ran');").unwrap();
     std::fs::write(blocked.join("secret.js"), "console.log('SECRET-CONTENT');").unwrap();
 
+    let manifest = write_manifest(tmp.path(), &[&sessions], &[&allowed]);
     let mut server = StdioServer::start(&[
-        "--sandbox",
+        "--sandbox-manifest",
+        &manifest,
         "--session-db-path",
         sessions.to_str().unwrap(),
-        "--sandbox-allow-read",
-        allowed.to_str().unwrap(),
         "--allow-run-js-file",
     ])
     .await;

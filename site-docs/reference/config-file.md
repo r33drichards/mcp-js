@@ -346,40 +346,12 @@ Allow external module imports (npm:, jsr:, and URL imports). When disabled (the 
 
 ## OS Sandbox
 
-### `sandbox`
+### `sandbox_manifest`
 
-Confine the whole server process with an OS-enforced sandbox (nono: Landlock on Linux 5.13+, Seatbelt on macOS) before any JS runs. The filesystem capability set is derived from the rest of the configuration (heap/fs/session stores read-write; config, policy, and WASM files read-only; system paths read-only) and is irreversible once applied — there is no API to widen it at runtime. This is defense in depth *underneath* the OPA policy layer: even a V8 escape or a policy mistake cannot reach paths or sockets the OS never granted. Fails closed: if the platform cannot enforce the sandbox, startup aborts
+Confine the whole server process with an OS-enforced sandbox (nono: Landlock on Linux 5.13+, Seatbelt on macOS) described by a nono capability manifest JSON file. The manifest is passed to nono verbatim — filesystem grants, network mode, and port allowlists all use nono's schema and semantics — and must grant every path the server itself needs (storage directories, policy/WASM files, system library paths). Applied before the async runtime and V8 spawn any threads; irreversible once applied. This is defense in depth *underneath* the OPA policy layer. Fails closed: startup aborts if the platform cannot enforce the manifest, and manifest features that need nono's CLI supervisor (network proxy mode, credentials, rollback, fs deny rules) are rejected rather than silently ignored
 
-- CLI flag: `--sandbox`
-- Environment: `MCP_V8_SANDBOX`
-- Default: `false`
-- Possible values: `true`, `false`
-- Type: boolean
-
-### `sandbox_allow_read`
-
-Grant the sandboxed process read-only access to an extra path (directory grants are recursive). Repeatable. Use for paths the derivation cannot see, e.g. scripts read via run_js `file`, or module roots when external imports are enabled
-
-- CLI flag: `--sandbox-allow-read`
-- Environment: `MCP_V8_SANDBOX_ALLOW_READ`
-- Type: array (one element per flag repetition)
-
-### `sandbox_allow_write`
-
-Grant the sandboxed process read-write access to an extra path (directory grants are recursive). Repeatable
-
-- CLI flag: `--sandbox-allow-write`
-- Environment: `MCP_V8_SANDBOX_ALLOW_WRITE`
-- Type: array (one element per flag repetition)
-
-### `sandbox_network`
-
-Outbound-network posture for the OS sandbox: auto (default) blocks outbound TCP unless a configured feature needs it (S3, JWKS, cluster, fetch/module policies, SSE MCP servers, remote OPA); allow leaves the network open; block forces it closed. Configured HTTP/SSE/cluster listener ports are always bindable. Port-level exceptions need Landlock ABI v4 (Linux 6.7+); older kernels fall back to seccomp all-or-nothing and abort startup if that cannot express the policy
-
-- CLI flag: `--sandbox-network`
-- Environment: `MCP_V8_SANDBOX_NETWORK`
-- Default: `auto`
-- Possible values: `auto`, `allow`, `block`
+- CLI flag: `--sandbox-manifest`
+- Environment: `MCP_V8_SANDBOX_MANIFEST`
 
 ## Policy
 

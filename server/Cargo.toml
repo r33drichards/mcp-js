@@ -73,7 +73,7 @@ blake3 = "1"
 bincode = "1"
 diffy = "0.4"
 
-# OS-level sandboxing layer (--sandbox): Landlock on Linux, Seatbelt on macOS.
+# OS-level sandboxing layer (--sandbox-manifest): Landlock on Linux, Seatbelt on macOS.
 # default-features = false drops nono's system-keyring integration, which the
 # server does not use. 0.53 is the newest release whose MSRV (1.74) fits the
 # nix-pinned stable toolchain; 0.54+ requires Rust 1.95.

@@ -45,7 +45,7 @@ nav:
       - ES module imports: how-to/module-imports.md
       - Calling upstream MCP servers: how-to/mcp-client.md
       - Security policies (OPA/Rego): how-to/policies.md
-      - OS sandboxing (--sandbox): how-to/os-sandbox.md
+      - OS sandboxing (--sandbox-manifest): how-to/os-sandbox.md
       - Authentication (JWT/JWKS): how-to/authentication.md
       - Clustering & replication (Raft): how-to/clustering.md
       - Customize prompt & tool descriptions: how-to/customize-mcp-surface.md
