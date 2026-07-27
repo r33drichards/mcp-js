@@ -227,7 +227,7 @@ async fn main() -> Result<()> {
 
     // Storage, session replication/forking, heap tags, filesystem snapshots,
     // and the execution registry are constructed by the canonical library.
-    let engine = bootstrap::build_storage_engine(
+    let library_builder = bootstrap::build_storage_engine(
         bootstrap::StorageBootstrapConfig {
             heap_store: cli.heap_store,
             heap_dir: cli.heap_dir.clone(),
@@ -248,9 +248,9 @@ async fn main() -> Result<()> {
     )
     .await?;
 
-    let engine = engine.with_wasm_default_max_bytes(wasm_default_max_bytes);
+    let library_builder = library_builder.with_wasm_default_max_bytes(wasm_default_max_bytes);
     // Sandbox hardening: all mitigations are opt-in (OFF by default → unhardened).
-    let engine = engine.with_hardening(engine::HardeningConfig {
+    let library_builder = library_builder.with_hardening(engine::HardeningConfig {
         freeze_ops: cli.harden_freeze_ops,
         neutralize_proxy_details: cli.harden_neutralize_proxy_details,
         neutralize_introspection: cli.harden_neutralize_introspection,
@@ -258,8 +258,8 @@ async fn main() -> Result<()> {
         remove_shared_memory: cli.harden_remove_shared_memory,
     });
     let has_wasm_modules = !wasm_modules.is_empty();
-    let engine = if has_wasm_modules { engine.with_wasm_modules(wasm_modules) } else { engine };
-    let engine = if has_wasm_modules {
+    let library_builder = if has_wasm_modules { library_builder.with_wasm_modules(wasm_modules) } else { library_builder };
+    let library_builder = if has_wasm_modules {
         let wasm_stub_config = engine::wasm_stub::WasmStubConfig {
             prefix: cli.wasm_stub_prefix.clone(),
             enabled: cli.wasm_stubs,
@@ -269,9 +269,9 @@ async fn main() -> Result<()> {
             prefix = %wasm_stub_config.prefix,
             "WASM module stubbing"
         );
-        engine.with_wasm_stub_config(wasm_stub_config)
+        library_builder.with_wasm_stub_config(wasm_stub_config)
     } else {
-        engine
+        library_builder
     };
 
     // ── Policy configuration ─────────────────────────────────────────────
@@ -389,35 +389,35 @@ async fn main() -> Result<()> {
         tracing::info!("Loaded {} fetch header injection rule(s)", header_rules.len());
     }
 
-    let engine = if let Some(chain) = fetch_policy_chain {
+    let library_builder = if let Some(chain) = fetch_policy_chain {
         let fetch_config = FetchConfig::new_with_chain(chain)
             .with_header_rules(header_rules);
-        engine.with_fetch_config(fetch_config)
+        library_builder.with_fetch_config(fetch_config)
     } else {
-        engine
+        library_builder
     };
 
     // ── Filesystem policy ────────────────────────────────────────────────
     // A mount needs the fs surface present, so when snapshots are enabled but
     // no fs policy was supplied, default to an allow-all policy chain.
-    let engine = if let Some(chain) = fs_policy_chain {
-        engine.with_fs_config(FsConfig::new(chain).with_passthrough(cli.fs_passthrough))
+    let library_builder = if let Some(chain) = fs_policy_chain {
+        library_builder.with_fs_config(FsConfig::new(chain).with_passthrough(cli.fs_passthrough))
     } else if fs_enabled {
-        engine.with_fs_config(
+        library_builder.with_fs_config(
             FsConfig::new(Arc::new(PolicyChain::new(vec![], EvalMode::All)))
                 .with_passthrough(cli.fs_passthrough),
         )
     } else {
-        engine
+        library_builder
     };
 
     // Filesystem stores are attached during canonical storage bootstrap; only
     // the independently-built pointer-move policy remains to apply here.
-    let engine = if let Some(chain) = fs_snapshot_policy_chain {
+    let library_builder = if let Some(chain) = fs_snapshot_policy_chain {
         tracing::info!("FS snapshot pointer moves are policy-gated");
-        engine.with_fs_snapshot_policy(chain)
+        library_builder.with_fs_snapshot_policy(chain)
     } else {
-        engine
+        library_builder
     };
 
     // ── Module loader config ─────────────────────────────────────────────
@@ -433,37 +433,37 @@ async fn main() -> Result<()> {
     } else {
         tracing::info!("External module imports: DISABLED (use --allow-external-modules to enable)");
     }
-    let engine = engine.with_module_loader_config(module_loader_config);
+    let library_builder = library_builder.with_module_loader_config(module_loader_config);
 
     // ── Subprocess policy ──────────────────────────────────────────────
-    let engine = if let Some(chain) = subprocess_policy_chain {
-        engine.with_subprocess_config(SubprocessConfig::new(chain))
+    let library_builder = if let Some(chain) = subprocess_policy_chain {
+        library_builder.with_subprocess_config(SubprocessConfig::new(chain))
     } else {
-        engine
+        library_builder
     };
 
     // ── run_js file-path reads ─────────────────────────────────────────
     // OFF by default. `--allow-run-js-file` allows any server-readable path;
     // a `run_js_file` policy in --policies-json gates reads per path. The flag
     // wins over a configured policy (it is the explicit "allow all" switch).
-    let engine = if cli.allow_run_js_file {
+    let library_builder = if cli.allow_run_js_file {
         if run_js_file_policy_chain.is_some() {
             tracing::warn!("--allow-run-js-file overrides the configured run_js_file policy (all paths allowed)");
         }
         tracing::info!("run_js file-path reads: ENABLED (allow all server-readable paths)");
-        engine.with_run_js_file_policy(RunJsFilePolicy::AllowAll)
+        library_builder.with_run_js_file_policy(RunJsFilePolicy::AllowAll)
     } else if let Some(chain) = run_js_file_policy_chain {
         tracing::info!("run_js file-path reads: ENABLED (policy-gated)");
-        engine.with_run_js_file_policy(RunJsFilePolicy::Policy(chain))
+        library_builder.with_run_js_file_policy(RunJsFilePolicy::Policy(chain))
     } else {
         tracing::info!("run_js file-path reads: DISABLED (enable with --allow-run-js-file or a run_js_file policy)");
-        engine
+        library_builder
     };
 
 
     // ── MCP server modules ────────────────────────────────────────────────
     let mcp_server_configs = load_mcp_server_configs(&cli.mcp_servers, &cli.mcp_config)?;
-    let engine = if !mcp_server_configs.is_empty() {
+    let library_builder = if !mcp_server_configs.is_empty() {
         tracing::info!("Connecting to {} MCP server(s)...", mcp_server_configs.len());
         let stub_config = engine::mcp_client::StubConfig {
             prefix: cli.mcp_stub_prefix.clone(),
@@ -478,32 +478,32 @@ async fn main() -> Result<()> {
             .map_err(|e| anyhow::anyhow!("MCP server connection failed: {}", e))?
             .with_stub_config(stub_config);
         tracing::info!("All MCP servers connected. JS code can use mcp.callTool(), mcp.listTools(), mcp.servers");
-        let engine = engine.with_mcp_client_manager(manager);
+        let library_builder = library_builder.with_mcp_client_manager(manager);
         if let Some(chain) = mcp_tools_policy_chain {
             tracing::info!("MCP tools policy: ENABLED");
-            engine.with_mcp_tools_policy_chain(chain)
+            library_builder.with_mcp_tools_policy_chain(chain)
         } else {
-            engine
+            library_builder
         }
     } else {
-        engine
+        library_builder
     };
 
     // ── Prompt / tool description overrides ──────────────────────────────
     // Both flags accept inline text or, with a leading `@`, a path to a file.
-    let engine = if let Some(ref value) = cli.instructions {
+    let library_builder = if let Some(ref value) = cli.instructions {
         let text = resolve_text_or_file(value, "--instructions")?;
         tracing::info!("Overriding MCP server instructions ({} chars)", text.len());
-        engine.with_instructions_override(text)
+        library_builder.with_instructions_override(text)
     } else {
-        engine
+        library_builder
     };
-    let engine = if let Some(ref value) = cli.run_js_description {
+    let library_builder = if let Some(ref value) = cli.run_js_description {
         let text = resolve_text_or_file(value, "--run-js-description")?;
         tracing::info!("Overriding run_js tool description ({} chars)", text.len());
-        engine.with_run_js_description_override(text)
+        library_builder.with_run_js_description_override(text)
     } else {
-        engine
+        library_builder
     };
 
     // ── Build session verifier (if --jwks-url) ─────────────────────────
@@ -516,7 +516,7 @@ async fn main() -> Result<()> {
         None
     };
 
-    let runtime = McpJsLibrary::from_engine(engine);
+    let runtime = library_builder.build();
 
     // ── Start transport ─────────────────────────────────────────────────
     // McpService (session-capable) is used whenever any per-session state axis

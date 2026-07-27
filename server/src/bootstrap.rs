@@ -15,6 +15,105 @@ use crate::engine::heap_storage::{
 };
 use crate::engine::heap_tags::HeapTagStore;
 use crate::engine::session_log::{ForkOutcome, SessionLog};
+use crate::library::McpJsLibrary;
+
+pub struct LibraryBootstrap {
+    engine: Engine,
+}
+
+impl LibraryBootstrap {
+    pub fn with_wasm_default_max_bytes(mut self, bytes: usize) -> Self {
+        self.engine = self.engine.with_wasm_default_max_bytes(bytes);
+        self
+    }
+
+    pub fn with_hardening(mut self, config: crate::engine::HardeningConfig) -> Self {
+        self.engine = self.engine.with_hardening(config);
+        self
+    }
+
+    pub fn with_wasm_modules(mut self, modules: Vec<crate::engine::WasmModule>) -> Self {
+        self.engine = self.engine.with_wasm_modules(modules);
+        self
+    }
+
+    pub fn with_wasm_stub_config(
+        mut self,
+        config: crate::engine::wasm_stub::WasmStubConfig,
+    ) -> Self {
+        self.engine = self.engine.with_wasm_stub_config(config);
+        self
+    }
+
+    pub fn with_fetch_config(mut self, config: crate::engine::fetch::FetchConfig) -> Self {
+        self.engine = self.engine.with_fetch_config(config);
+        self
+    }
+
+    pub fn with_fs_config(mut self, config: crate::engine::fs::FsConfig) -> Self {
+        self.engine = self.engine.with_fs_config(config);
+        self
+    }
+
+    pub fn with_fs_snapshot_policy(mut self, chain: Arc<crate::engine::opa::PolicyChain>) -> Self {
+        self.engine = self.engine.with_fs_snapshot_policy(chain);
+        self
+    }
+
+    pub fn with_module_loader_config(
+        mut self,
+        config: crate::engine::module_loader::ModuleLoaderConfig,
+    ) -> Self {
+        self.engine = self.engine.with_module_loader_config(config);
+        self
+    }
+
+    pub fn with_subprocess_config(
+        mut self,
+        config: crate::engine::subprocess::SubprocessConfig,
+    ) -> Self {
+        self.engine = self.engine.with_subprocess_config(config);
+        self
+    }
+
+    pub fn with_run_js_file_policy(
+        mut self,
+        policy: crate::engine::run_js_file::RunJsFilePolicy,
+    ) -> Self {
+        self.engine = self.engine.with_run_js_file_policy(policy);
+        self
+    }
+
+    pub fn with_mcp_client_manager(
+        mut self,
+        manager: crate::engine::mcp_client::McpClientManager,
+    ) -> Self {
+        self.engine = self.engine.with_mcp_client_manager(manager);
+        self
+    }
+
+    pub fn with_mcp_tools_policy_chain(
+        mut self,
+        chain: Arc<crate::engine::opa::PolicyChain>,
+    ) -> Self {
+        self.engine = self.engine.with_mcp_tools_policy_chain(chain);
+        self
+    }
+
+    pub fn with_instructions_override(mut self, text: String) -> Self {
+        self.engine = self.engine.with_instructions_override(text);
+        self
+    }
+
+    pub fn with_run_js_description_override(mut self, text: String) -> Self {
+        self.engine = self.engine.with_run_js_description_override(text);
+        self
+    }
+
+    pub fn build(self) -> Arc<McpJsLibrary> {
+        McpJsLibrary::from_engine(self.engine)
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct StorageBootstrapConfig {
@@ -47,7 +146,7 @@ impl StorageBootstrapConfig {
 pub async fn build_storage_engine(
     config: StorageBootstrapConfig,
     cluster_node: Option<Arc<ClusterNode>>,
-) -> Result<Engine> {
+) -> Result<LibraryBootstrap> {
     let heap_enabled = config.heap_enabled();
 
     let engine = if heap_enabled {
@@ -73,7 +172,9 @@ pub async fn build_storage_engine(
     let engine = attach_session_log(engine, &config, cluster_node.as_ref()).await?;
     let engine = attach_heap_tags(engine, &config, cluster_node.as_ref());
     let engine = attach_filesystem(engine, &config, cluster_node.as_ref()).await?;
-    Ok(attach_execution_registry(engine, &config))
+    Ok(LibraryBootstrap {
+        engine: attach_execution_registry(engine, &config),
+    })
 }
 
 async fn build_heap_storage(config: &StorageBootstrapConfig) -> Result<AnyHeapStorage> {
@@ -310,11 +411,12 @@ mod tests {
     #[tokio::test]
     async fn builds_stateless_registry_without_persistence() {
         let data_dir = tempfile::tempdir().unwrap();
-        let engine = build_storage_engine(config(data_dir.path()), None)
+        let library = build_storage_engine(config(data_dir.path()), None)
             .await
-            .unwrap();
-        assert!(!engine.session_capable());
-        assert!(engine.list_executions().is_ok());
+            .unwrap()
+            .build();
+        assert!(!library.session_capable());
+        assert!(library.list_executions().is_ok());
     }
 
     #[tokio::test]
@@ -324,10 +426,10 @@ mod tests {
         config.heap_store = StoreKind::Dir;
         config.heap_dir = Some(data_dir.path().join("heaps").to_string_lossy().into_owned());
         config.fs_store = StoreKind::Dir;
-        let engine = build_storage_engine(config, None).await.unwrap();
-        assert!(engine.heap_enabled());
-        assert!(engine.fs_enabled());
-        assert!(engine.session_capable());
+        let library = build_storage_engine(config, None).await.unwrap().build();
+        assert!(library.heap_enabled());
+        assert!(library.fs_enabled());
+        assert!(library.session_capable());
     }
 
     #[tokio::test]
