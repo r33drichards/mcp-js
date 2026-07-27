@@ -137,6 +137,9 @@ impl ExecutionRegistry {
     /// Mark execution as completed with its result.
     pub fn complete(&self, id: &str, output: String, heap: Option<String>) {
         if let Some(mut record) = self.executions.get_mut(id) {
+            if !matches!(record.status, ExecutionStatus::Running) {
+                return;
+            }
             record.status = ExecutionStatus::Completed;
             record.result = Some(output);
             record.heap = heap;
@@ -155,6 +158,9 @@ impl ExecutionRegistry {
     /// Mark execution as failed.
     pub fn fail(&self, id: &str, error: String) {
         if let Some(mut record) = self.executions.get_mut(id) {
+            if !matches!(record.status, ExecutionStatus::Running) {
+                return;
+            }
             record.status = ExecutionStatus::Failed;
             record.error = Some(error);
             record.isolate_handle = None;
@@ -165,6 +171,9 @@ impl ExecutionRegistry {
     /// Mark execution as timed out.
     pub fn timed_out(&self, id: &str) {
         if let Some(mut record) = self.executions.get_mut(id) {
+            if !matches!(record.status, ExecutionStatus::Running) {
+                return;
+            }
             record.status = ExecutionStatus::TimedOut;
             record.error = Some("Execution timed out".to_string());
             record.isolate_handle = None;
@@ -193,6 +202,15 @@ impl ExecutionRegistry {
                 id, record.status
             )),
         }
+    }
+
+    /// Cancel every currently running execution. Returns the number cancelled.
+    pub fn cancel_all(&self) -> u64 {
+        let running: Vec<ExecutionId> = self.executions.iter()
+            .filter(|entry| matches!(entry.value().status, ExecutionStatus::Running))
+            .map(|entry| entry.key().clone())
+            .collect();
+        running.iter().filter(|id| self.cancel(id).is_ok()).count() as u64
     }
 
     /// Get execution status and result.
@@ -336,4 +354,26 @@ pub struct ExecutionInfo {
     pub error: Option<String>,
     pub started_at: String,
     pub completed_at: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ExecutionRegistry;
+
+    #[test]
+    fn cancel_all_only_cancels_running_executions() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = ExecutionRegistry::new(dir.path().to_str().unwrap()).unwrap();
+        registry.register("running").unwrap();
+        registry.register("completed").unwrap();
+        registry.complete("completed", "done".to_string(), None);
+
+        assert_eq!(registry.cancel_all(), 1);
+        assert_eq!(registry.get_status("running").as_deref(), Some("cancelled"));
+        assert_eq!(registry.get_status("completed").as_deref(), Some("completed"));
+        registry.fail("running", "late failure".to_string());
+        registry.complete("running", "late completion".to_string(), None);
+        assert_eq!(registry.get_status("running").as_deref(), Some("cancelled"));
+        assert_eq!(registry.cancel_all(), 0);
+    }
 }

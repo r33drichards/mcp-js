@@ -40,6 +40,10 @@ impl McpJsRuntime {
         built_in_tool_catalog(self.heap_enabled(), self.fs_enabled())
     }
 
+    pub async fn shutdown(&self) -> (u64, u64) {
+        self.engine.shutdown().await
+    }
+
     pub async fn call_tool(
         &self,
         session_id: Option<&str>,

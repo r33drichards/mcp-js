@@ -19,6 +19,7 @@ use crate::library::McpJsLibrary;
 
 pub struct LibraryBootstrap {
     engine: Engine,
+    cluster_node: Option<Arc<ClusterNode>>,
 }
 
 impl LibraryBootstrap {
@@ -111,14 +112,14 @@ impl LibraryBootstrap {
     }
 
     pub fn build(self) -> Arc<McpJsLibrary> {
-        McpJsLibrary::from_engine(self.engine)
+        McpJsLibrary::from_engine_with_cluster(self.engine, self.cluster_node)
     }
 
     pub(crate) fn build_with_runtime(
         self,
         tokio_runtime: tokio::runtime::Runtime,
     ) -> Arc<McpJsLibrary> {
-        McpJsLibrary::from_engine_with_tokio_runtime(self.engine, tokio_runtime)
+        McpJsLibrary::from_engine_with_tokio_runtime(self.engine, tokio_runtime, self.cluster_node)
     }
 }
 
@@ -182,6 +183,7 @@ pub async fn build_storage_engine(
     let engine = attach_filesystem(engine, &config, cluster_node.as_ref()).await?;
     Ok(LibraryBootstrap {
         engine: attach_execution_registry(engine, &config),
+        cluster_node,
     })
 }
 

@@ -523,42 +523,50 @@ async fn main() -> Result<()> {
     // McpService (session-capable) is used whenever any per-session state axis
     // is on (heap and/or fs); StatelessMcpService only when neither is.
     let bind_host = cli.bind_host.clone();
-    if let Some(port) = cli.http_port {
+    let transport_result: Result<()> = if let Some(port) = cli.http_port {
         tracing::info!("Starting Streamable HTTP transport on port {}", port);
         if runtime.session_capable() {
             let verifier = session_verifier.clone();
-            start_streamable_http(runtime, bind_host, port, move |e| McpService::new(e, verifier.clone())).await?;
+            start_streamable_http(runtime.clone(), bind_host, port, move |e| McpService::new(e, verifier.clone())).await
         } else {
             let verifier = session_verifier.clone();
-            start_streamable_http(runtime, bind_host, port, move |e| StatelessMcpService::new(e, verifier.clone())).await?;
+            start_streamable_http(runtime.clone(), bind_host, port, move |e| StatelessMcpService::new(e, verifier.clone())).await
         }
     } else if let Some(port) = cli.sse_port {
         // Legacy HTTP+SSE transport, served by the vendored rmcp 0.1.5 SSE
         // server. No MCP tasks support here — use --http-port for tasks.
         tracing::info!("Starting legacy HTTP+SSE transport on port {} (no MCP tasks; use --http-port for tasks)", port);
         let verifier = session_verifier.clone();
-        start_sse_server(runtime, bind_host, port, verifier).await?;
+        start_sse_server(runtime.clone(), bind_host, port, verifier).await
     } else {
         tracing::info!("Starting stdio transport");
         if runtime.session_capable() {
-            let service = McpService::new(runtime, None)
-                .with_session_id(cli.session_id.clone())
-                .serve(stdio())
-                .await
-                .inspect_err(|e| {
-                    tracing::error!("serving error: {:?}", e);
-                })?;
-            service.waiting().await?;
+            async {
+                let service = McpService::new(runtime.clone(), None)
+                    .with_session_id(cli.session_id.clone())
+                    .serve(stdio())
+                    .await
+                    .inspect_err(|e| {
+                        tracing::error!("serving error: {:?}", e);
+                    })?;
+                service.waiting().await.map(|_| ()).map_err(Into::into)
+            }
+            .await
         } else {
-            let service = StatelessMcpService::new(runtime, None)
-                .serve(stdio())
-                .await
-                .inspect_err(|e| {
-                    tracing::error!("serving error: {:?}", e);
-                })?;
-            service.waiting().await?;
+            async {
+                let service = StatelessMcpService::new(runtime.clone(), None)
+                    .serve(stdio())
+                    .await
+                    .inspect_err(|e| {
+                        tracing::error!("serving error: {:?}", e);
+                    })?;
+                service.waiting().await.map(|_| ()).map_err(Into::into)
+            }
+            .await
         }
-    }
+    };
+    runtime.shutdown().await;
+    transport_result?;
 
     Ok(())
 }
@@ -619,13 +627,14 @@ where
     tracing::info!("Streamable HTTP server listening on {}", bind);
 
     let ct_shutdown = ct.clone();
-    axum::serve(listener, app)
+    let server_result = axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             let _ = tokio::signal::ctrl_c().await;
             tracing::info!("Received Ctrl+C, shutting down");
             ct_shutdown.cancel();
         })
-        .await?;
+        .await;
+    server_result?;
 
     Ok(())
 }
@@ -681,9 +690,12 @@ async fn start_sse_server(
         tracing::info!("SSE server shutting down");
     });
 
-    sse_server.with_service(move || mcp_sse::SseService::new(runtime.clone(), verifier.clone()));
+    let service_runtime = runtime.clone();
+    sse_server.with_service(move || {
+        mcp_sse::SseService::new(service_runtime.clone(), verifier.clone())
+    });
 
-    tokio::spawn(async move {
+    let server_task = tokio::spawn(async move {
         if let Err(e) = server.await {
             tracing::error!("SSE server error: {:?}", e);
         }
@@ -692,6 +704,7 @@ async fn start_sse_server(
     tokio::signal::ctrl_c().await?;
     tracing::info!("Received Ctrl+C, shutting down SSE server");
     ct.cancel();
+    let _ = server_task.await;
 
     Ok(())
 }

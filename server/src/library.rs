@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 
+use crate::cluster::ClusterNode;
 use crate::engine::execution::{
     ConsoleOutputPage as EngineConsoleOutputPage, ExecutionInfo as EngineExecutionInfo,
     ExecutionSummary as EngineExecutionSummary,
@@ -23,6 +25,21 @@ const DEFAULT_MAX_CONCURRENT_EXECUTIONS: u32 = 4;
 pub enum LibraryMode {
     Stateless,
     LocalStateful,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum LibraryLifecycleState {
+    Running,
+    ShuttingDown,
+    Shutdown,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct LibraryShutdownResult {
+    pub cancelled_executions: u64,
+    pub closed_mcp_connections: u64,
+    pub cluster_shutdown: bool,
+    pub already_shutdown: bool,
 }
 
 #[derive(Clone, Copy, Debug, uniffi::Enum)]
@@ -214,6 +231,9 @@ pub enum LibraryError {
 pub struct McpJsLibrary {
     tokio_runtime: Option<tokio::runtime::Runtime>,
     runtime: McpJsRuntime,
+    cluster_node: Option<Arc<ClusterNode>>,
+    lifecycle: AtomicU8,
+    shutdown_lock: tokio::sync::Mutex<()>,
     _ephemeral_data_dir: Option<tempfile::TempDir>,
 }
 
@@ -286,11 +306,12 @@ impl McpJsLibrary {
             })?;
 
         let (runtime, ephemeral_data_dir) = build_runtime(&config)?;
-        Ok(Arc::new(Self {
-            tokio_runtime: Some(tokio_runtime),
+        Ok(Self::wrap(
             runtime,
-            _ephemeral_data_dir: ephemeral_data_dir,
-        }))
+            Some(tokio_runtime),
+            ephemeral_data_dir,
+            None,
+        ))
     }
 
     pub fn mode(&self) -> LibraryMode {
@@ -298,6 +319,39 @@ impl McpJsLibrary {
             LibraryMode::LocalStateful
         } else {
             LibraryMode::Stateless
+        }
+    }
+
+    pub fn lifecycle_state(&self) -> LibraryLifecycleState {
+        self.current_lifecycle_state()
+    }
+
+    pub async fn shutdown(&self) -> LibraryShutdownResult {
+        let _guard = self.shutdown_lock.lock().await;
+        if self.current_lifecycle_state() == LibraryLifecycleState::Shutdown {
+            return LibraryShutdownResult {
+                cancelled_executions: 0,
+                closed_mcp_connections: 0,
+                cluster_shutdown: false,
+                already_shutdown: true,
+            };
+        }
+
+        self.lifecycle
+            .store(LibraryLifecycleState::ShuttingDown as u8, Ordering::Release);
+        let (cancelled_executions, closed_mcp_connections) = self.runtime.shutdown().await;
+        let cluster_shutdown = self.cluster_node.as_ref().is_some_and(|node| {
+            node.shutdown();
+            true
+        });
+        self.lifecycle
+            .store(LibraryLifecycleState::Shutdown as u8, Ordering::Release);
+
+        LibraryShutdownResult {
+            cancelled_executions,
+            closed_mcp_connections,
+            cluster_shutdown,
+            already_shutdown: false,
         }
     }
 
@@ -313,6 +367,8 @@ impl McpJsLibrary {
         &self,
         request: LibraryExecutionRequest,
     ) -> Result<String, LibraryError> {
+        let _lifecycle_guard = self.shutdown_lock.lock().await;
+        self.ensure_running()?;
         if request.code.is_empty() && request.file.is_none() {
             return Err(LibraryError::InvalidConfig {
                 message: "execution requires code or a file path".to_string(),
@@ -627,6 +683,8 @@ impl McpJsLibrary {
         &self,
         request: LibraryToolCallRequest,
     ) -> Result<String, LibraryError> {
+        let _lifecycle_guard = self.shutdown_lock.lock().await;
+        self.ensure_running()?;
         let arguments = parse_json_object("arguments_json", &request.arguments_json)?;
         let mcp_headers = request
             .mcp_headers_json
@@ -652,27 +710,69 @@ impl McpJsLibrary {
 impl McpJsLibrary {
     /// Wrap a fully configured runtime for Rust transports without creating a
     /// second Tokio executor or crossing the FFI boundary.
-    pub fn from_runtime(runtime: McpJsRuntime) -> Arc<Self> {
+    fn wrap(
+        runtime: McpJsRuntime,
+        tokio_runtime: Option<tokio::runtime::Runtime>,
+        ephemeral_data_dir: Option<tempfile::TempDir>,
+        cluster_node: Option<Arc<ClusterNode>>,
+    ) -> Arc<Self> {
         Arc::new(Self {
-            tokio_runtime: None,
+            tokio_runtime,
             runtime,
-            _ephemeral_data_dir: None,
+            cluster_node,
+            lifecycle: AtomicU8::new(LibraryLifecycleState::Running as u8),
+            shutdown_lock: tokio::sync::Mutex::new(()),
+            _ephemeral_data_dir: ephemeral_data_dir,
         })
     }
 
+    fn current_lifecycle_state(&self) -> LibraryLifecycleState {
+        match self.lifecycle.load(Ordering::Acquire) {
+            value if value == LibraryLifecycleState::Running as u8 => {
+                LibraryLifecycleState::Running
+            }
+            value if value == LibraryLifecycleState::ShuttingDown as u8 => {
+                LibraryLifecycleState::ShuttingDown
+            }
+            _ => LibraryLifecycleState::Shutdown,
+        }
+    }
+
+    fn ensure_running(&self) -> Result<(), LibraryError> {
+        match self.current_lifecycle_state() {
+            LibraryLifecycleState::Running => Ok(()),
+            state => Err(LibraryError::Operation {
+                message: format!("library is {state:?}"),
+            }),
+        }
+    }
+
+    pub fn from_runtime(runtime: McpJsRuntime) -> Arc<Self> {
+        Self::wrap(runtime, None, None, None)
+    }
+
     pub fn from_engine(engine: Engine) -> Arc<Self> {
-        Self::from_runtime(McpJsRuntime::new(engine))
+        Self::from_engine_with_cluster(engine, None)
+    }
+
+    pub(crate) fn from_engine_with_cluster(
+        engine: Engine,
+        cluster_node: Option<Arc<ClusterNode>>,
+    ) -> Arc<Self> {
+        Self::wrap(McpJsRuntime::new(engine), None, None, cluster_node)
     }
 
     pub(crate) fn from_engine_with_tokio_runtime(
         engine: Engine,
         tokio_runtime: tokio::runtime::Runtime,
+        cluster_node: Option<Arc<ClusterNode>>,
     ) -> Arc<Self> {
-        Arc::new(Self {
-            tokio_runtime: Some(tokio_runtime),
-            runtime: McpJsRuntime::new(engine),
-            _ephemeral_data_dir: None,
-        })
+        Self::wrap(
+            McpJsRuntime::new(engine),
+            Some(tokio_runtime),
+            None,
+            cluster_node,
+        )
     }
 
     pub fn heap_enabled(&self) -> bool {
@@ -1215,6 +1315,30 @@ mod tests {
             .unwrap();
         let value: Value = serde_json::from_str(&result).unwrap();
         assert_eq!(value["output"], "4");
+    }
+
+    #[test]
+    fn lifecycle_shutdown_is_idempotent_and_rejects_new_work() {
+        let _guard = v8_test_guard();
+        let library = McpJsLibrary::new(LibraryConfig::default()).unwrap();
+        assert_eq!(library.lifecycle_state(), LibraryLifecycleState::Running);
+
+        let runtime = library.tokio_runtime.as_ref().unwrap();
+        let first = runtime.block_on(library.shutdown());
+        assert!(!first.already_shutdown);
+        assert_eq!(library.lifecycle_state(), LibraryLifecycleState::Shutdown);
+
+        let second = runtime.block_on(library.shutdown());
+        assert!(second.already_shutdown);
+        let error = runtime
+            .block_on(library.invoke_tool(LibraryToolCallRequest {
+                name: "run_js".to_string(),
+                arguments_json: r#"{"code":"console.log('late')"}"#.to_string(),
+                session_id: None,
+                mcp_headers_json: None,
+            }))
+            .unwrap_err();
+        assert!(error.to_string().contains("library is Shutdown"));
     }
 
     #[test]

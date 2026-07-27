@@ -19,6 +19,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 
 use deno_core::{JsRuntime, OpState, op2};
 use deno_error::JsErrorBox;
@@ -128,13 +129,19 @@ async fn reconnect(server: &ServerConn) -> Result<(), String> {
 
 /// Spawn a detached task that periodically health-checks one server and
 /// reconnects it when the probe fails.
-fn spawn_liveness(server: Arc<ServerConn>) {
+fn spawn_liveness(server: Arc<ServerConn>, shutdown: CancellationToken) {
     tokio::spawn(async move {
         loop {
-            tokio::time::sleep(LIVENESS_INTERVAL).await;
+            tokio::select! {
+                _ = shutdown.cancelled() => break,
+                _ = tokio::time::sleep(LIVENESS_INTERVAL) => {}
+            }
             let peer = { server.live.read().await.peer.clone() };
             if is_healthy(&peer).await {
                 continue;
+            }
+            if shutdown.is_cancelled() {
+                break;
             }
             tracing::warn!(
                 "MCP server '{}' failed liveness check; reconnecting...",
@@ -194,6 +201,7 @@ pub struct McpClientManager {
     /// per-execution current-thread runtime would otherwise stall. Mirrors
     /// `S3HeapStorage`'s `runtime` handle. `None` for test-only constructors.
     runtime: Option<tokio::runtime::Handle>,
+    shutdown: CancellationToken,
 }
 
 impl McpClientManager {
@@ -201,6 +209,7 @@ impl McpClientManager {
     pub async fn connect(configs: Vec<McpServerConfig>) -> Result<Self, String> {
         let mut servers = HashMap::new();
         let mut tools_by_server: HashMap<String, Vec<Tool>> = HashMap::new();
+        let shutdown = CancellationToken::new();
 
         for config in configs {
             tracing::info!("Connecting to MCP server '{}'...", config.name);
@@ -230,7 +239,7 @@ impl McpClientManager {
             // Self-heal: probe this connection periodically and reconnect if the
             // downstream server restarts (the long-lived handshake otherwise
             // stays dead until MCPJS is restarted).
-            spawn_liveness(server.clone());
+            spawn_liveness(server.clone(), shutdown.clone());
             servers.insert(name, server);
         }
 
@@ -239,6 +248,7 @@ impl McpClientManager {
             servers: Arc::new(servers),
             stub_config: StubConfig::default(),
             runtime: Some(tokio::runtime::Handle::current()),
+            shutdown,
         })
     }
 
@@ -264,7 +274,20 @@ impl McpClientManager {
             servers: Arc::new(HashMap::new()),
             stub_config: StubConfig::default(),
             runtime: None,
+            shutdown: CancellationToken::new(),
         }
+    }
+
+    /// Stop liveness probes and close every live upstream connection.
+    pub async fn shutdown(&self) -> u64 {
+        if self.shutdown.is_cancelled() {
+            return 0;
+        }
+        self.shutdown.cancel();
+        for server in self.servers.values() {
+            server.live.read().await.keep_alive.abort();
+        }
+        self.servers.len() as u64
     }
 
     /// List connected server names.
@@ -345,6 +368,9 @@ impl McpClientManager {
         tool_name: &str,
         arguments: Option<serde_json::Map<String, serde_json::Value>>,
     ) -> Result<serde_json::Value, String> {
+        if self.shutdown.is_cancelled() {
+            return Err("MCP client manager is shut down".to_string());
+        }
         let server = self
             .servers
             .get(server_name)
