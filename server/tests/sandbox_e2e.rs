@@ -185,12 +185,17 @@ impl StdioServer {
             .await;
 
         let Some(exec_id) = common::extract_execution_id(&response) else {
-            let is_error = response["result"]["isError"].as_bool().unwrap_or(false)
-                || response.get("error").is_some();
             let text = response["result"]["content"][0]["text"]
                 .as_str()
                 .map(str::to_string)
                 .unwrap_or_else(|| response.to_string());
+            // Inline failures come back as {"error":"..."} in the tool
+            // content (without isError), successes as {"output":"..."}.
+            let body_error = serde_json::from_str::<Value>(&text)
+                .is_ok_and(|body| body.get("error").is_some());
+            let is_error = response["result"]["isError"].as_bool().unwrap_or(false)
+                || response.get("error").is_some()
+                || body_error;
             return (is_error, text);
         };
 
