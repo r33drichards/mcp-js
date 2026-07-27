@@ -45,7 +45,7 @@
           src = ./server;
           # Vendor hash for server's cargo deps; refreshed when deps changed.
           # Refreshed for the combined sandbox and UniFFI dependency graph.
-          hash = pkgs.lib.fakeHash;
+          hash = "sha256-ivQcr7zUIIVLCHIQW9dzUJCn4zFXfwIBNbrSj+v5DIU=";
         });
 
         docsPython = pkgs.python3.withPackages (
