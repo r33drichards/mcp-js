@@ -179,6 +179,83 @@ pub struct LibraryCapabilityConfig {
 }
 
 #[derive(Clone, Copy, Debug, uniffi::Enum)]
+pub enum LibraryMcpTransportKind {
+    Stdio,
+    Sse,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct LibraryMcpServerConfig {
+    pub name: String,
+    pub transport: LibraryMcpTransportKind,
+    pub command: Option<String>,
+    pub args: Vec<String>,
+    pub env: HashMap<String, String>,
+    pub url: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for LibraryMcpServerConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(tag = "transport", rename_all = "lowercase")]
+        enum Transport {
+            Stdio {
+                command: String,
+                #[serde(default)]
+                args: Vec<String>,
+                #[serde(default)]
+                env: HashMap<String, String>,
+            },
+            Sse {
+                url: String,
+            },
+        }
+
+        #[derive(Deserialize)]
+        struct Config {
+            name: String,
+            #[serde(flatten)]
+            transport: Transport,
+        }
+
+        let config = Config::deserialize(deserializer)?;
+        Ok(match config.transport {
+            Transport::Stdio { command, args, env } => Self {
+                name: config.name,
+                transport: LibraryMcpTransportKind::Stdio,
+                command: Some(command),
+                args,
+                env,
+                url: None,
+            },
+            Transport::Sse { url } => Self {
+                name: config.name,
+                transport: LibraryMcpTransportKind::Sse,
+                command: None,
+                args: Vec::new(),
+                env: HashMap::new(),
+                url: Some(url),
+            },
+        })
+    }
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct LibraryMcpStubConfig {
+    pub prefix: String,
+    pub enabled: bool,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct LibraryUpstreamMcpConfig {
+    pub servers: Vec<LibraryMcpServerConfig>,
+    pub stubs: LibraryMcpStubConfig,
+}
+
+#[derive(Clone, Copy, Debug, uniffi::Enum)]
 pub enum LibraryStorageKind {
     None,
     Directory,
@@ -404,6 +481,17 @@ pub fn default_capability_config() -> LibraryCapabilityConfig {
 }
 
 #[uniffi::export]
+pub fn default_upstream_mcp_config() -> LibraryUpstreamMcpConfig {
+    LibraryUpstreamMcpConfig {
+        servers: Vec::new(),
+        stubs: LibraryMcpStubConfig {
+            prefix: crate::engine::mcp_client::DEFAULT_STUB_PREFIX.to_string(),
+            enabled: true,
+        },
+    }
+}
+
+#[uniffi::export]
 pub fn default_runtime_config(data_dir: String) -> LibraryRuntimeConfig {
     LibraryRuntimeConfig {
         heap_store: LibraryStorageKind::None,
@@ -448,6 +536,23 @@ pub fn create_library_with_configuration(
     policies: LibraryPolicyConfig,
     capabilities: LibraryCapabilityConfig,
 ) -> Result<Arc<McpJsLibrary>, LibraryError> {
+    create_library_with_upstreams(
+        config,
+        features,
+        policies,
+        capabilities,
+        default_upstream_mcp_config(),
+    )
+}
+
+#[uniffi::export]
+pub fn create_library_with_upstreams(
+    config: LibraryRuntimeConfig,
+    features: LibraryFeatureConfig,
+    policies: LibraryPolicyConfig,
+    capabilities: LibraryCapabilityConfig,
+    upstreams: LibraryUpstreamMcpConfig,
+) -> Result<Arc<McpJsLibrary>, LibraryError> {
     validate_runtime_config(&config)?;
     initialize_v8();
     let worker_threads = usize::try_from(config.max_concurrent_executions).map_err(|_| {
@@ -463,16 +568,16 @@ pub fn create_library_with_configuration(
             message: error.to_string(),
         })?;
     let bootstrap_config = runtime_bootstrap_config(config)?;
-    let bootstrap = tokio_runtime
-        .block_on(crate::bootstrap::build_storage_engine(
-            bootstrap_config,
-            None,
-        ))
-        .map_err(|error| LibraryError::Initialization {
-            message: error.to_string(),
-        })?
-        .with_feature_config(features)?
-        .with_policy_config(policies, capabilities)?;
+    let bootstrap = tokio_runtime.block_on(async {
+        let bootstrap = crate::bootstrap::build_storage_engine(bootstrap_config, None)
+            .await
+            .map_err(|error| LibraryError::Initialization {
+                message: error.to_string(),
+            })?
+            .with_feature_config(features)?
+            .with_policy_config(policies, capabilities)?;
+        bootstrap.with_upstream_mcp_config(upstreams).await
+    })?;
     Ok(bootstrap.build_with_runtime(tokio_runtime))
 }
 
@@ -1353,6 +1458,55 @@ mod tests {
         let mut config = default_runtime_config(data_dir.path().to_string_lossy().into_owned());
         config.heap_store = LibraryStorageKind::S3;
         assert!(create_library(config).is_err());
+    }
+
+    #[test]
+    fn upstream_mcp_config_deserializes_existing_json_shape() {
+        let stdio: LibraryMcpServerConfig = serde_json::from_str(
+            r#"{"name":"weather","transport":"stdio","command":"python","args":["server.py"],"env":{"TOKEN":"x"}}"#,
+        )
+        .unwrap();
+        assert!(matches!(stdio.transport, LibraryMcpTransportKind::Stdio));
+        assert_eq!(stdio.command.as_deref(), Some("python"));
+        assert_eq!(stdio.args, ["server.py"]);
+        assert_eq!(stdio.env.get("TOKEN").map(String::as_str), Some("x"));
+
+        let sse: LibraryMcpServerConfig = serde_json::from_str(
+            r#"{"name":"remote","transport":"sse","url":"http://127.0.0.1/sse"}"#,
+        )
+        .unwrap();
+        assert!(matches!(sse.transport, LibraryMcpTransportKind::Sse));
+        assert_eq!(sse.url.as_deref(), Some("http://127.0.0.1/sse"));
+    }
+
+    #[test]
+    fn upstream_mcp_config_rejects_duplicate_names_before_connecting() {
+        let _guard = v8_test_guard();
+        let data_dir = tempfile::tempdir().unwrap();
+        let server = LibraryMcpServerConfig {
+            name: "duplicate".to_string(),
+            transport: LibraryMcpTransportKind::Stdio,
+            command: Some("true".to_string()),
+            args: Vec::new(),
+            env: HashMap::new(),
+            url: None,
+        };
+        let upstreams = LibraryUpstreamMcpConfig {
+            servers: vec![server.clone(), server],
+            stubs: default_upstream_mcp_config().stubs,
+        };
+        let result = create_library_with_upstreams(
+            default_runtime_config(data_dir.path().to_string_lossy().into_owned()),
+            default_feature_config(),
+            default_policy_config(),
+            default_capability_config(),
+            upstreams,
+        );
+        let error = match result {
+            Ok(_) => panic!("duplicate upstream names should be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("duplicate MCP server name"));
     }
 
     #[test]

@@ -17,8 +17,8 @@ use crate::engine::heap_tags::HeapTagStore;
 use crate::engine::session_log::{ForkOutcome, SessionLog};
 use crate::library::{
     LibraryCapabilityConfig, LibraryError, LibraryFeatureConfig, LibraryFetchHeaderRule,
-    LibraryOperationPolicies, LibraryPolicyConfig, LibraryPolicyEvalMode, LibraryRunJsFileAccess,
-    McpJsLibrary,
+    LibraryMcpTransportKind, LibraryOperationPolicies, LibraryPolicyConfig, LibraryPolicyEvalMode,
+    LibraryRunJsFileAccess, LibraryUpstreamMcpConfig, McpJsLibrary,
 };
 
 pub struct LibraryBootstrap {
@@ -218,12 +218,75 @@ impl LibraryBootstrap {
         Ok(self)
     }
 
-    pub fn with_mcp_client_manager(
+    pub async fn with_upstream_mcp_config(
         mut self,
-        manager: crate::engine::mcp_client::McpClientManager,
-    ) -> Self {
+        config: LibraryUpstreamMcpConfig,
+    ) -> Result<Self, LibraryError> {
+        if config.servers.is_empty() {
+            return Ok(self);
+        }
+        if config.stubs.prefix.is_empty() {
+            return Err(LibraryError::InvalidConfig {
+                message: "upstream MCP stub prefix cannot be empty".to_string(),
+            });
+        }
+
+        let mut names = std::collections::HashSet::new();
+        let mut servers = Vec::with_capacity(config.servers.len());
+        for server in config.servers {
+            if !names.insert(server.name.clone()) {
+                return Err(LibraryError::InvalidConfig {
+                    message: format!("duplicate MCP server name: '{}'", server.name),
+                });
+            }
+            let transport = match server.transport {
+                LibraryMcpTransportKind::Stdio => {
+                    let command = server.command.ok_or_else(|| LibraryError::InvalidConfig {
+                        message: format!("stdio MCP server '{}' requires a command", server.name),
+                    })?;
+                    if command.is_empty() {
+                        return Err(LibraryError::InvalidConfig {
+                            message: format!(
+                                "stdio MCP server '{}' requires a command",
+                                server.name
+                            ),
+                        });
+                    }
+                    crate::engine::mcp_client::McpServerTransport::Stdio {
+                        command,
+                        args: server.args,
+                        env: server.env,
+                    }
+                }
+                LibraryMcpTransportKind::Sse => {
+                    let url = server.url.ok_or_else(|| LibraryError::InvalidConfig {
+                        message: format!("SSE MCP server '{}' requires a URL", server.name),
+                    })?;
+                    if url.is_empty() {
+                        return Err(LibraryError::InvalidConfig {
+                            message: format!("SSE MCP server '{}' requires a URL", server.name),
+                        });
+                    }
+                    crate::engine::mcp_client::McpServerTransport::Sse { url }
+                }
+            };
+            servers.push(crate::engine::mcp_client::McpServerConfig {
+                name: server.name,
+                transport,
+            });
+        }
+
+        let manager = crate::engine::mcp_client::McpClientManager::connect(servers)
+            .await
+            .map_err(|message| LibraryError::Initialization {
+                message: format!("MCP server connection failed: {message}"),
+            })?
+            .with_stub_config(crate::engine::mcp_client::StubConfig {
+                prefix: config.stubs.prefix,
+                enabled: config.stubs.enabled,
+            });
         self.engine = self.engine.with_mcp_client_manager(manager);
-        self
+        Ok(self)
     }
 
     pub fn build(self) -> Arc<McpJsLibrary> {

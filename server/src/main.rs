@@ -17,8 +17,10 @@ use server::engine::initialize_v8;
 use server::mcp::{McpService, StatelessMcpService};
 use server::library::{
     LibraryCapabilityConfig, LibraryFeatureConfig, LibraryFetchHeaderRule,
-    LibraryFetchOAuthConfig, LibraryHardeningConfig, LibraryPolicyConfig,
-    LibraryRunJsFileAccess, LibraryWasmModuleConfig, LibraryWasmStubConfig, McpJsLibrary,
+    LibraryFetchOAuthConfig, LibraryHardeningConfig, LibraryMcpServerConfig,
+    LibraryMcpStubConfig, LibraryMcpTransportKind, LibraryPolicyConfig,
+    LibraryRunJsFileAccess, LibraryUpstreamMcpConfig, LibraryWasmModuleConfig,
+    LibraryWasmStubConfig, McpJsLibrary,
 };
 use server::{api, bootstrap, cli, cluster, engine, mcp_sse};
 use server::session::{SessionVerifier, JwksKeyStore};
@@ -309,25 +311,27 @@ async fn main() -> Result<()> {
 
     // ── MCP server modules ────────────────────────────────────────────────
     let mcp_server_configs = load_mcp_server_configs(&cli.mcp_servers, &cli.mcp_config)?;
-    let library_builder = if !mcp_server_configs.is_empty() {
+    let has_upstream_mcp_servers = !mcp_server_configs.is_empty();
+    if has_upstream_mcp_servers {
         tracing::info!("Connecting to {} MCP server(s)...", mcp_server_configs.len());
-        let stub_config = engine::mcp_client::StubConfig {
-            prefix: cli.mcp_stub_prefix.clone(),
-            enabled: cli.mcp_stubs,
-        };
         tracing::info!(
-            stubs = stub_config.enabled,
-            prefix = %stub_config.prefix,
+            stubs = cli.mcp_stubs,
+            prefix = %cli.mcp_stub_prefix,
             "Upstream MCP tool stubbing"
         );
-        let manager = engine::mcp_client::McpClientManager::connect(mcp_server_configs).await
-            .map_err(|e| anyhow::anyhow!("MCP server connection failed: {}", e))?
-            .with_stub_config(stub_config);
+    }
+    let library_builder = library_builder
+        .with_upstream_mcp_config(LibraryUpstreamMcpConfig {
+            servers: mcp_server_configs,
+            stubs: LibraryMcpStubConfig {
+                prefix: cli.mcp_stub_prefix.clone(),
+                enabled: cli.mcp_stubs,
+            },
+        })
+        .await?;
+    if has_upstream_mcp_servers {
         tracing::info!("All MCP servers connected. JS code can use mcp.callTool(), mcp.listTools(), mcp.servers");
-        library_builder.with_mcp_client_manager(manager)
-    } else {
-        library_builder
-    };
+    }
 
     // ── Embedded runtime features ────────────────────────────────────────
     // Resolve CLI file references before handing one typed configuration to
@@ -991,8 +995,7 @@ fn parse_fetch_header_cli(s: &str) -> Result<LibraryFetchHeaderRule> {
 fn load_mcp_server_configs(
     cli_servers: &[String],
     config_path: &Option<String>,
-) -> Result<Vec<engine::mcp_client::McpServerConfig>> {
-    use engine::mcp_client::{McpServerConfig, McpServerTransport};
+) -> Result<Vec<LibraryMcpServerConfig>> {
     let mut configs = Vec::new();
 
     // Parse CLI --mcp-server flags
@@ -1009,20 +1012,22 @@ fn load_mcp_server_configs(
             if parts.is_empty() || parts[0].is_empty() {
                 anyhow::bail!("--mcp-server stdio transport requires a command");
             }
-            configs.push(McpServerConfig {
+            configs.push(LibraryMcpServerConfig {
                 name,
-                transport: McpServerTransport::Stdio {
-                    command: parts[0].to_string(),
-                    args: parts[1..].iter().map(|s| s.to_string()).collect(),
-                    env: std::collections::HashMap::new(),
-                },
+                transport: LibraryMcpTransportKind::Stdio,
+                command: Some(parts[0].to_string()),
+                args: parts[1..].iter().map(|s| s.to_string()).collect(),
+                env: std::collections::HashMap::new(),
+                url: None,
             });
         } else if let Some(url) = rest.strip_prefix("sse:") {
-            configs.push(McpServerConfig {
+            configs.push(LibraryMcpServerConfig {
                 name,
-                transport: McpServerTransport::Sse {
-                    url: url.to_string(),
-                },
+                transport: LibraryMcpTransportKind::Sse,
+                command: None,
+                args: Vec::new(),
+                env: std::collections::HashMap::new(),
+                url: Some(url.to_string()),
             });
         } else {
             anyhow::bail!(
@@ -1041,7 +1046,7 @@ fn load_mcp_server_configs(
             std::fs::read_to_string(config_path)
                 .map_err(|e| anyhow::anyhow!("Failed to read MCP config '{}': {}", config_path, e))?
         };
-        let file_configs: Vec<McpServerConfig> = serde_json::from_str(&content)
+        let file_configs: Vec<LibraryMcpServerConfig> = serde_json::from_str(&content)
             .map_err(|e| anyhow::anyhow!("Invalid JSON in MCP config '{}': {}", config_path, e))?;
         configs.extend(file_configs);
     }
@@ -1081,7 +1086,7 @@ mod tests {
     }
 
     fn check_mcp_servers() -> anyhow::Result<()> {
-        use server::engine::mcp_client::McpServerTransport;
+        use server::library::LibraryMcpTransportKind;
 
         let configs = load_mcp_server_configs(
             &[
@@ -1090,8 +1095,8 @@ mod tests {
             ],
             &None,
         )?;
-        anyhow::ensure!(matches!(configs[0].transport, McpServerTransport::Stdio { .. }));
-        anyhow::ensure!(matches!(configs[1].transport, McpServerTransport::Sse { .. }));
+        anyhow::ensure!(matches!(configs[0].transport, LibraryMcpTransportKind::Stdio { .. }));
+        anyhow::ensure!(matches!(configs[1].transport, LibraryMcpTransportKind::Sse { .. }));
         Ok(())
     }
 
@@ -1200,13 +1205,13 @@ mod tests {
 
     #[test]
     fn load_mcp_server_configs_accepts_inline_json() {
-        use server::engine::mcp_client::McpServerTransport;
+        use server::library::LibraryMcpTransportKind;
 
         let inline = r#"[{"name": "weather", "transport": "stdio", "command": "python", "args": ["server.py"]}]"#;
         let configs =
             load_mcp_server_configs(&[], &Some(inline.to_string())).expect("inline JSON should load");
         assert_eq!(configs[0].name, "weather");
-        assert!(matches!(configs[0].transport, McpServerTransport::Stdio { .. }));
+        assert!(matches!(configs[0].transport, LibraryMcpTransportKind::Stdio { .. }));
     }
 
     #[test]
