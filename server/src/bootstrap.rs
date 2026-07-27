@@ -15,7 +15,11 @@ use crate::engine::heap_storage::{
 };
 use crate::engine::heap_tags::HeapTagStore;
 use crate::engine::session_log::{ForkOutcome, SessionLog};
-use crate::library::{LibraryError, LibraryFeatureConfig, McpJsLibrary};
+use crate::library::{
+    LibraryCapabilityConfig, LibraryError, LibraryFeatureConfig, LibraryFetchHeaderRule,
+    LibraryOperationPolicies, LibraryPolicyConfig, LibraryPolicyEvalMode, LibraryRunJsFileAccess,
+    McpJsLibrary,
+};
 
 pub struct LibraryBootstrap {
     engine: Engine,
@@ -99,43 +103,119 @@ impl LibraryBootstrap {
         Ok(self)
     }
 
-    pub fn with_fetch_config(mut self, config: crate::engine::fetch::FetchConfig) -> Self {
-        self.engine = self.engine.with_fetch_config(config);
-        self
-    }
-
-    pub fn with_fs_config(mut self, config: crate::engine::fs::FsConfig) -> Self {
-        self.engine = self.engine.with_fs_config(config);
-        self
-    }
-
-    pub fn with_fs_snapshot_policy(mut self, chain: Arc<crate::engine::opa::PolicyChain>) -> Self {
-        self.engine = self.engine.with_fs_snapshot_policy(chain);
-        self
-    }
-
-    pub fn with_module_loader_config(
+    pub fn with_policy_config(
         mut self,
-        config: crate::engine::module_loader::ModuleLoaderConfig,
-    ) -> Self {
-        self.engine = self.engine.with_module_loader_config(config);
-        self
-    }
+        policies: LibraryPolicyConfig,
+        capabilities: LibraryCapabilityConfig,
+    ) -> Result<Self, LibraryError> {
+        let fetch_policy = build_library_policy_chain(
+            policies.fetch,
+            "mcp/fetch",
+            "data.mcp.fetch.allow",
+            "fetch",
+        )?;
+        let modules_policy = build_library_policy_chain(
+            policies.modules,
+            "mcp/modules",
+            "data.mcp.modules.allow",
+            "modules",
+        )?;
+        let filesystem_policy = build_library_policy_chain(
+            policies.filesystem,
+            "mcp/filesystem",
+            "data.mcp.filesystem.allow",
+            "filesystem",
+        )?;
+        let fs_snapshot_policy = build_library_policy_chain(
+            policies.fs_snapshot,
+            "mcp/fs_snapshot",
+            "data.mcp.fs_snapshot.allow",
+            "fs_snapshot",
+        )?;
+        let mcp_tools_policy = build_library_policy_chain(
+            policies.mcp_tools,
+            "mcp/tools",
+            "data.mcp.tools.allow",
+            "mcp_tools",
+        )?;
+        let subprocess_policy = build_library_policy_chain(
+            policies.subprocess,
+            "mcp/subprocess",
+            "data.mcp.subprocess.allow",
+            "subprocess",
+        )?;
+        let run_js_file_policy = build_library_policy_chain(
+            policies.run_js_file,
+            "mcp/run_js_file",
+            "data.mcp.run_js_file.allow",
+            "run_js_file",
+        )?;
+        let header_rules = capabilities
+            .fetch_header_rules
+            .into_iter()
+            .map(build_fetch_header_rule)
+            .collect::<Result<Vec<_>, _>>()?;
 
-    pub fn with_subprocess_config(
-        mut self,
-        config: crate::engine::subprocess::SubprocessConfig,
-    ) -> Self {
-        self.engine = self.engine.with_subprocess_config(config);
-        self
-    }
-
-    pub fn with_run_js_file_policy(
-        mut self,
-        policy: crate::engine::run_js_file::RunJsFilePolicy,
-    ) -> Self {
-        self.engine = self.engine.with_run_js_file_policy(policy);
-        self
+        if let Some(chain) = fetch_policy {
+            self.engine = self.engine.with_fetch_config(
+                crate::engine::fetch::FetchConfig::new_with_chain(chain)
+                    .with_header_rules(header_rules),
+            );
+        }
+        if let Some(chain) = filesystem_policy {
+            self.engine = self.engine.with_fs_config(
+                crate::engine::fs::FsConfig::new(chain)
+                    .with_passthrough(capabilities.filesystem_passthrough),
+            );
+        } else if self.engine.fs_enabled() {
+            self.engine = self.engine.with_fs_config(
+                crate::engine::fs::FsConfig::new(Arc::new(crate::engine::opa::PolicyChain::new(
+                    Vec::new(),
+                    crate::engine::opa::EvalMode::All,
+                )))
+                .with_passthrough(capabilities.filesystem_passthrough),
+            );
+        }
+        if let Some(chain) = fs_snapshot_policy {
+            self.engine = self.engine.with_fs_snapshot_policy(chain);
+        }
+        self.engine = self.engine.with_module_loader_config(
+            crate::engine::module_loader::ModuleLoaderConfig {
+                allow_external: capabilities.allow_external_modules,
+                policy_chain: modules_policy,
+            },
+        );
+        if let Some(chain) = subprocess_policy {
+            self.engine = self
+                .engine
+                .with_subprocess_config(crate::engine::subprocess::SubprocessConfig::new(chain));
+        }
+        match capabilities.run_js_file_access {
+            LibraryRunJsFileAccess::AllowAll => {
+                self.engine = self
+                    .engine
+                    .with_run_js_file_policy(crate::engine::run_js_file::RunJsFilePolicy::AllowAll);
+            }
+            LibraryRunJsFileAccess::Policy => {
+                let chain = run_js_file_policy.ok_or_else(|| LibraryError::InvalidConfig {
+                    message: "run_js_file_access=Policy requires a run_js_file policy".to_string(),
+                })?;
+                self.engine = self.engine.with_run_js_file_policy(
+                    crate::engine::run_js_file::RunJsFilePolicy::Policy(chain),
+                );
+            }
+            LibraryRunJsFileAccess::Disabled => {
+                if let Some(chain) = run_js_file_policy {
+                    self.engine = self.engine.with_run_js_file_policy(
+                        crate::engine::run_js_file::RunJsFilePolicy::Policy(chain),
+                    );
+                }
+            }
+        }
+        if let Some(chain) = mcp_tools_policy {
+            self.engine = self.engine.with_mcp_tools_policy_chain(chain);
+        }
+        Ok(self)
     }
 
     pub fn with_mcp_client_manager(
@@ -143,14 +223,6 @@ impl LibraryBootstrap {
         manager: crate::engine::mcp_client::McpClientManager,
     ) -> Self {
         self.engine = self.engine.with_mcp_client_manager(manager);
-        self
-    }
-
-    pub fn with_mcp_tools_policy_chain(
-        mut self,
-        chain: Arc<crate::engine::opa::PolicyChain>,
-    ) -> Self {
-        self.engine = self.engine.with_mcp_tools_policy_chain(chain);
         self
     }
 
@@ -164,6 +236,110 @@ impl LibraryBootstrap {
     ) -> Arc<McpJsLibrary> {
         McpJsLibrary::from_engine_with_tokio_runtime(self.engine, tokio_runtime, self.cluster_node)
     }
+}
+
+fn build_library_policy_chain(
+    policies: Option<LibraryOperationPolicies>,
+    default_remote_path: &str,
+    default_local_rule: &str,
+    operation: &str,
+) -> Result<Option<Arc<crate::engine::opa::PolicyChain>>, LibraryError> {
+    let Some(policies) = policies else {
+        return Ok(None);
+    };
+    let internal = crate::engine::opa::OperationPolicies {
+        mode: match policies.mode {
+            LibraryPolicyEvalMode::All => crate::engine::opa::EvalMode::All,
+            LibraryPolicyEvalMode::Any => crate::engine::opa::EvalMode::Any,
+        },
+        policies: policies
+            .policies
+            .into_iter()
+            .map(|source| crate::engine::opa::PolicySource {
+                url: source.url,
+                policy_path: source.policy_path,
+                rule: source.rule,
+            })
+            .collect(),
+    };
+    crate::engine::opa::build_policy_chain(&internal, default_remote_path, default_local_rule)
+        .map(Arc::new)
+        .map(Some)
+        .map_err(|message| LibraryError::InvalidConfig {
+            message: format!("failed to build {operation} policy chain: {message}"),
+        })
+}
+
+pub(crate) fn validate_fetch_header_rule(
+    rule: &LibraryFetchHeaderRule,
+) -> Result<(), LibraryError> {
+    build_fetch_header_rule(rule.clone()).map(|_| ())
+}
+
+pub(crate) fn normalize_fetch_header_rule(
+    rule: LibraryFetchHeaderRule,
+) -> Result<LibraryFetchHeaderRule, LibraryError> {
+    let internal = build_fetch_header_rule(rule)?;
+    let static_headers = internal.static_headers().cloned();
+    let oauth = internal
+        .dynamic_auth()
+        .map(|config| crate::library::LibraryFetchOAuthConfig {
+            header_name: config.header_name.clone(),
+            token_url: config.token_url.clone(),
+            client_id: config.client_id.clone(),
+            client_secret: config.client_secret.clone(),
+            scope: config.scope.clone(),
+            refresh_buffer_secs: config.refresh_buffer_secs,
+        });
+    Ok(LibraryFetchHeaderRule {
+        host: internal.host,
+        methods: internal.methods,
+        static_headers,
+        oauth,
+    })
+}
+
+fn build_fetch_header_rule(
+    rule: LibraryFetchHeaderRule,
+) -> Result<crate::engine::fetch::HeaderRule, LibraryError> {
+    let result = match (rule.static_headers, rule.oauth) {
+        (Some(_), Some(_)) => {
+            return Err(LibraryError::InvalidConfig {
+                message: format!(
+                    "fetch header rule for host '{}' cannot define both static_headers and oauth",
+                    rule.host
+                ),
+            });
+        }
+        (None, None) => {
+            return Err(LibraryError::InvalidConfig {
+                message: format!(
+                    "fetch header rule for host '{}' must define static_headers or oauth",
+                    rule.host
+                ),
+            });
+        }
+        (Some(headers), None) => crate::engine::fetch::HeaderRule::new(
+            rule.host,
+            rule.methods,
+            crate::engine::fetch::HeaderInjection::Static { headers },
+        ),
+        (None, Some(oauth)) => crate::engine::fetch::HeaderRule::oauth_client_credentials(
+            rule.host,
+            rule.methods,
+            crate::engine::fetch::OAuthClientCredentialsConfig {
+                header_name: oauth.header_name,
+                token_url: oauth.token_url,
+                client_id: oauth.client_id,
+                client_secret: oauth.client_secret,
+                scope: oauth.scope,
+                refresh_buffer_secs: oauth.refresh_buffer_secs,
+            },
+        ),
+    };
+    result.map_err(|error| LibraryError::InvalidConfig {
+        message: format!("invalid fetch header rule: {error}"),
+    })
 }
 
 fn validate_wasm_module_name(name: &str) -> Result<(), LibraryError> {

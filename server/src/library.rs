@@ -14,7 +14,7 @@ use crate::engine::{
     RunJsRequest, initialize_v8,
 };
 use crate::runtime::McpJsRuntime;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 const DEFAULT_HEAP_MEMORY_MB: u64 = 64;
@@ -73,6 +73,109 @@ pub struct LibraryFeatureConfig {
     pub wasm_stubs: LibraryWasmStubConfig,
     pub instructions_override: Option<String>,
     pub run_js_description_override: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, uniffi::Enum)]
+#[serde(rename_all = "lowercase")]
+pub enum LibraryPolicyEvalMode {
+    #[default]
+    All,
+    Any,
+}
+
+#[derive(Clone, Debug, Deserialize, uniffi::Record)]
+pub struct LibraryPolicySource {
+    pub url: String,
+    pub policy_path: Option<String>,
+    pub rule: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, uniffi::Record)]
+pub struct LibraryOperationPolicies {
+    #[serde(default)]
+    pub mode: LibraryPolicyEvalMode,
+    pub policies: Vec<LibraryPolicySource>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, uniffi::Record)]
+pub struct LibraryPolicyConfig {
+    pub fetch: Option<LibraryOperationPolicies>,
+    pub modules: Option<LibraryOperationPolicies>,
+    pub filesystem: Option<LibraryOperationPolicies>,
+    pub fs_snapshot: Option<LibraryOperationPolicies>,
+    pub mcp_tools: Option<LibraryOperationPolicies>,
+    pub subprocess: Option<LibraryOperationPolicies>,
+    pub run_js_file: Option<LibraryOperationPolicies>,
+}
+
+#[derive(Clone, uniffi::Record)]
+pub struct LibraryFetchOAuthConfig {
+    pub header_name: String,
+    pub token_url: String,
+    pub client_id: String,
+    pub client_secret: String,
+    pub scope: Option<String>,
+    pub refresh_buffer_secs: u64,
+}
+
+impl std::fmt::Debug for LibraryFetchOAuthConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LibraryFetchOAuthConfig")
+            .field("header_name", &self.header_name)
+            .field("token_url", &self.token_url)
+            .field("client_id", &self.client_id)
+            .field("client_secret", &"<redacted>")
+            .field("scope", &self.scope)
+            .field("refresh_buffer_secs", &self.refresh_buffer_secs)
+            .finish()
+    }
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct LibraryFetchHeaderRule {
+    pub host: String,
+    pub methods: Vec<String>,
+    pub static_headers: Option<HashMap<String, String>>,
+    pub oauth: Option<LibraryFetchOAuthConfig>,
+}
+
+impl LibraryFetchHeaderRule {
+    pub fn validate(&self) -> Result<(), LibraryError> {
+        crate::bootstrap::validate_fetch_header_rule(self)
+    }
+
+    pub fn normalized(self) -> Result<Self, LibraryError> {
+        crate::bootstrap::normalize_fetch_header_rule(self)
+    }
+
+    pub fn methods(&self) -> &[String] {
+        &self.methods
+    }
+
+    pub fn static_headers(&self) -> Option<&HashMap<String, String>> {
+        self.static_headers.as_ref()
+    }
+
+    pub fn dynamic_auth(&self) -> Option<&LibraryFetchOAuthConfig> {
+        self.oauth.as_ref()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, uniffi::Enum)]
+pub enum LibraryRunJsFileAccess {
+    #[default]
+    Disabled,
+    AllowAll,
+    Policy,
+}
+
+#[derive(Clone, Debug, Default, uniffi::Record)]
+pub struct LibraryCapabilityConfig {
+    pub fetch_header_rules: Vec<LibraryFetchHeaderRule>,
+    pub filesystem_passthrough: bool,
+    pub allow_external_modules: bool,
+    pub run_js_file_access: LibraryRunJsFileAccess,
 }
 
 #[derive(Clone, Copy, Debug, uniffi::Enum)]
@@ -291,6 +394,16 @@ pub fn default_feature_config() -> LibraryFeatureConfig {
 }
 
 #[uniffi::export]
+pub fn default_policy_config() -> LibraryPolicyConfig {
+    LibraryPolicyConfig::default()
+}
+
+#[uniffi::export]
+pub fn default_capability_config() -> LibraryCapabilityConfig {
+    LibraryCapabilityConfig::default()
+}
+
+#[uniffi::export]
 pub fn default_runtime_config(data_dir: String) -> LibraryRuntimeConfig {
     LibraryRuntimeConfig {
         heap_store: LibraryStorageKind::None,
@@ -320,6 +433,21 @@ pub fn create_library_with_features(
     config: LibraryRuntimeConfig,
     features: LibraryFeatureConfig,
 ) -> Result<Arc<McpJsLibrary>, LibraryError> {
+    create_library_with_configuration(
+        config,
+        features,
+        default_policy_config(),
+        default_capability_config(),
+    )
+}
+
+#[uniffi::export]
+pub fn create_library_with_configuration(
+    config: LibraryRuntimeConfig,
+    features: LibraryFeatureConfig,
+    policies: LibraryPolicyConfig,
+    capabilities: LibraryCapabilityConfig,
+) -> Result<Arc<McpJsLibrary>, LibraryError> {
     validate_runtime_config(&config)?;
     initialize_v8();
     let worker_threads = usize::try_from(config.max_concurrent_executions).map_err(|_| {
@@ -343,7 +471,8 @@ pub fn create_library_with_features(
         .map_err(|error| LibraryError::Initialization {
             message: error.to_string(),
         })?
-        .with_feature_config(features)?;
+        .with_feature_config(features)?
+        .with_policy_config(policies, capabilities)?;
     Ok(bootstrap.build_with_runtime(tokio_runtime))
 }
 
@@ -1224,6 +1353,64 @@ mod tests {
         let mut config = default_runtime_config(data_dir.path().to_string_lossy().into_owned());
         config.heap_store = LibraryStorageKind::S3;
         assert!(create_library(config).is_err());
+    }
+
+    #[test]
+    fn configured_capabilities_allow_run_js_file() {
+        let _guard = v8_test_guard();
+        let data_dir = tempfile::tempdir().unwrap();
+        let script = data_dir.path().join("script.js");
+        std::fs::write(&script, "console.log(6 * 7)").unwrap();
+        let capabilities = LibraryCapabilityConfig {
+            run_js_file_access: LibraryRunJsFileAccess::AllowAll,
+            ..default_capability_config()
+        };
+        let library = create_library_with_configuration(
+            default_runtime_config(data_dir.path().to_string_lossy().into_owned()),
+            default_feature_config(),
+            default_policy_config(),
+            capabilities,
+        )
+        .unwrap();
+
+        let result = library
+            .call_tool(
+                "run_js".to_string(),
+                serde_json::json!({ "file": script.to_string_lossy() }).to_string(),
+                None,
+                None,
+            )
+            .unwrap();
+        let value: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(value["output"], "42");
+    }
+
+    #[test]
+    fn configured_policies_reject_invalid_sources() {
+        let _guard = v8_test_guard();
+        let data_dir = tempfile::tempdir().unwrap();
+        let policies = LibraryPolicyConfig {
+            fetch: Some(LibraryOperationPolicies {
+                mode: LibraryPolicyEvalMode::All,
+                policies: vec![LibraryPolicySource {
+                    url: "ftp://invalid".to_string(),
+                    policy_path: None,
+                    rule: None,
+                }],
+            }),
+            ..default_policy_config()
+        };
+        let result = create_library_with_configuration(
+            default_runtime_config(data_dir.path().to_string_lossy().into_owned()),
+            default_feature_config(),
+            policies,
+            default_capability_config(),
+        );
+        let error = match result {
+            Ok(_) => panic!("invalid policy source should be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("Unsupported policy URL scheme"));
     }
 
     #[test]

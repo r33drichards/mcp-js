@@ -14,17 +14,11 @@ use utoipa::OpenApi as _;
 use std::fmt;
 use server::cli::{Cli, FetchHeaderKey, StoreKind};
 use server::engine::initialize_v8;
-use server::engine::fetch::FetchConfig;
-use server::engine::fs::FsConfig;
-use server::engine::module_loader::ModuleLoaderConfig;
-use server::engine::subprocess::SubprocessConfig;
-use server::engine::run_js_file::RunJsFilePolicy;
-use server::engine::opa::{PoliciesConfig, build_policy_chain};
-use server::engine::opa::{EvalMode, PolicyChain};
 use server::mcp::{McpService, StatelessMcpService};
 use server::library::{
-    LibraryFeatureConfig, LibraryHardeningConfig, LibraryWasmModuleConfig,
-    LibraryWasmStubConfig, McpJsLibrary,
+    LibraryCapabilityConfig, LibraryFeatureConfig, LibraryFetchHeaderRule,
+    LibraryFetchOAuthConfig, LibraryHardeningConfig, LibraryPolicyConfig,
+    LibraryRunJsFileAccess, LibraryWasmModuleConfig, LibraryWasmStubConfig, McpJsLibrary,
 };
 use server::{api, bootstrap, cli, cluster, engine, mcp_sse};
 use server::session::{SessionVerifier, JwksKeyStore};
@@ -252,192 +246,66 @@ async fn main() -> Result<()> {
     )
     .await?;
 
-    // ── Policy configuration ─────────────────────────────────────────────
-    // Parse --policies-json if provided (inline JSON or file path).
-    let policies_config: Option<PoliciesConfig> = if let Some(ref json_or_path) = cli.policies_json {
+    // ── Policy and capability configuration ──────────────────────────────
+    let policy_config: LibraryPolicyConfig = if let Some(ref json_or_path) = cli.policies_json {
         let json_str = if json_or_path.trim_start().starts_with('{') {
             json_or_path.clone()
         } else {
             std::fs::read_to_string(json_or_path)
                 .map_err(|e| anyhow::anyhow!("Failed to read policies config '{}': {}", json_or_path, e))?
         };
-        let config: PoliciesConfig = serde_json::from_str(&json_str)
+        let config = serde_json::from_str(&json_str)
             .map_err(|e| anyhow::anyhow!("Invalid policies JSON: {}", e))?;
         tracing::info!("Loaded policies configuration from --policies-json");
-        Some(config)
+        config
     } else {
-        None
+        LibraryPolicyConfig::default()
     };
 
-    // Build policy chains from the parsed config.
-    let fetch_policy_chain = if let Some(ref config) = policies_config {
-        if let Some(ref fetch_policies) = config.fetch {
-            let chain = build_policy_chain(fetch_policies, "mcp/fetch", "data.mcp.fetch.allow")
-                .map_err(|e| anyhow::anyhow!("Failed to build fetch policy chain: {}", e))?;
-            tracing::info!("Fetch policy chain: {} evaluator(s), mode={:?}", fetch_policies.policies.len(), fetch_policies.mode);
-            Some(Arc::new(chain))
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    let modules_policy_chain = if let Some(ref config) = policies_config {
-        if let Some(ref module_policies) = config.modules {
-            let chain = build_policy_chain(module_policies, "mcp/modules", "data.mcp.modules.allow")
-                .map_err(|e| anyhow::anyhow!("Failed to build modules policy chain: {}", e))?;
-            tracing::info!("Modules policy chain: {} evaluator(s), mode={:?}", module_policies.policies.len(), module_policies.mode);
-            Some(Arc::new(chain))
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    let fs_policy_chain = if let Some(ref config) = policies_config {
-        if let Some(ref fs_policies) = config.filesystem {
-            let chain = build_policy_chain(fs_policies, "mcp/filesystem", "data.mcp.filesystem.allow")
-                .map_err(|e| anyhow::anyhow!("Failed to build filesystem policy chain: {}", e))?;
-            tracing::info!("Filesystem policy chain: {} evaluator(s), mode={:?}", fs_policies.policies.len(), fs_policies.mode);
-            Some(Arc::new(chain))
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    let fs_snapshot_policy_chain = if let Some(ref config) = policies_config {
-        if let Some(ref snap_policies) = config.fs_snapshot {
-            let chain = build_policy_chain(snap_policies, "mcp/fs_snapshot", "data.mcp.fs_snapshot.allow")
-                .map_err(|e| anyhow::anyhow!("Failed to build fs_snapshot policy chain: {}", e))?;
-            tracing::info!("FS snapshot policy chain: {} evaluator(s), mode={:?}", snap_policies.policies.len(), snap_policies.mode);
-            Some(Arc::new(chain))
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    let mcp_tools_policy_chain = if let Some(ref config) = policies_config {
-        if let Some(ref mcp_tools_policies) = config.mcp_tools {
-            let chain = build_policy_chain(mcp_tools_policies, "mcp/tools", "data.mcp.tools.allow")
-                .map_err(|e| anyhow::anyhow!("Failed to build MCP tools policy chain: {}", e))?;
-            tracing::info!("MCP tools policy chain: {} evaluator(s), mode={:?}", mcp_tools_policies.policies.len(), mcp_tools_policies.mode);
-            Some(Arc::new(chain))
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    let subprocess_policy_chain = if let Some(ref config) = policies_config {
-        if let Some(ref subprocess_policies) = config.subprocess {
-            let chain = build_policy_chain(subprocess_policies, "mcp/subprocess", "data.mcp.subprocess.allow")
-                .map_err(|e| anyhow::anyhow!("Failed to build subprocess policy chain: {}", e))?;
-            tracing::info!("Subprocess policy chain: {} evaluator(s), mode={:?}", subprocess_policies.policies.len(), subprocess_policies.mode);
-            Some(Arc::new(chain))
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    let run_js_file_policy_chain = if let Some(ref config) = policies_config {
-        if let Some(ref run_js_file_policies) = config.run_js_file {
-            let chain = build_policy_chain(run_js_file_policies, "mcp/run_js_file", "data.mcp.run_js_file.allow")
-                .map_err(|e| anyhow::anyhow!("Failed to build run_js_file policy chain: {}", e))?;
-            tracing::info!("run_js file policy chain: {} evaluator(s), mode={:?}", run_js_file_policies.policies.len(), run_js_file_policies.mode);
-            Some(Arc::new(chain))
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    // ── Fetch policy ───────────────────────────────────────────────────
-    let header_rules = load_fetch_header_rules(&cli.fetch_headers, &cli.fetch_header_config)?;
-    if !header_rules.is_empty() {
-        tracing::info!("Loaded {} fetch header injection rule(s)", header_rules.len());
+    let fetch_header_rules =
+        load_fetch_header_rules(&cli.fetch_headers, &cli.fetch_header_config)?;
+    if !fetch_header_rules.is_empty() {
+        tracing::info!(
+            "Loaded {} fetch header injection rule(s)",
+            fetch_header_rules.len()
+        );
     }
-
-    let library_builder = if let Some(chain) = fetch_policy_chain {
-        let fetch_config = FetchConfig::new_with_chain(chain)
-            .with_header_rules(header_rules);
-        library_builder.with_fetch_config(fetch_config)
-    } else {
-        library_builder
-    };
-
-    // ── Filesystem policy ────────────────────────────────────────────────
-    // A mount needs the fs surface present, so when snapshots are enabled but
-    // no fs policy was supplied, default to an allow-all policy chain.
-    let library_builder = if let Some(chain) = fs_policy_chain {
-        library_builder.with_fs_config(FsConfig::new(chain).with_passthrough(cli.fs_passthrough))
-    } else if fs_enabled {
-        library_builder.with_fs_config(
-            FsConfig::new(Arc::new(PolicyChain::new(vec![], EvalMode::All)))
-                .with_passthrough(cli.fs_passthrough),
-        )
-    } else {
-        library_builder
-    };
-
-    // Filesystem stores are attached during canonical storage bootstrap; only
-    // the independently-built pointer-move policy remains to apply here.
-    let library_builder = if let Some(chain) = fs_snapshot_policy_chain {
-        tracing::info!("FS snapshot pointer moves are policy-gated");
-        library_builder.with_fs_snapshot_policy(chain)
-    } else {
-        library_builder
-    };
-
-    // ── Module loader config ─────────────────────────────────────────────
-    let module_loader_config = ModuleLoaderConfig {
-        allow_external: cli.allow_external_modules,
-        policy_chain: modules_policy_chain,
-    };
     if cli.allow_external_modules {
         tracing::info!("External module imports: ENABLED");
-        if module_loader_config.policy_chain.is_some() {
+        if policy_config.modules.is_some() {
             tracing::info!("Module policy chain: ENABLED");
         }
     } else {
-        tracing::info!("External module imports: DISABLED (use --allow-external-modules to enable)");
+        tracing::info!(
+            "External module imports: DISABLED (use --allow-external-modules to enable)"
+        );
     }
-    let library_builder = library_builder.with_module_loader_config(module_loader_config);
-
-    // ── Subprocess policy ──────────────────────────────────────────────
-    let library_builder = if let Some(chain) = subprocess_policy_chain {
-        library_builder.with_subprocess_config(SubprocessConfig::new(chain))
-    } else {
-        library_builder
-    };
-
-    // ── run_js file-path reads ─────────────────────────────────────────
-    // OFF by default. `--allow-run-js-file` allows any server-readable path;
-    // a `run_js_file` policy in --policies-json gates reads per path. The flag
-    // wins over a configured policy (it is the explicit "allow all" switch).
-    let library_builder = if cli.allow_run_js_file {
-        if run_js_file_policy_chain.is_some() {
-            tracing::warn!("--allow-run-js-file overrides the configured run_js_file policy (all paths allowed)");
+    let run_js_file_access = if cli.allow_run_js_file {
+        if policy_config.run_js_file.is_some() {
+            tracing::warn!(
+                "--allow-run-js-file overrides the configured run_js_file policy (all paths allowed)"
+            );
         }
-        tracing::info!("run_js file-path reads: ENABLED (allow all server-readable paths)");
-        library_builder.with_run_js_file_policy(RunJsFilePolicy::AllowAll)
-    } else if let Some(chain) = run_js_file_policy_chain {
+        tracing::info!(
+            "run_js file-path reads: ENABLED (allow all server-readable paths)"
+        );
+        LibraryRunJsFileAccess::AllowAll
+    } else if policy_config.run_js_file.is_some() {
         tracing::info!("run_js file-path reads: ENABLED (policy-gated)");
-        library_builder.with_run_js_file_policy(RunJsFilePolicy::Policy(chain))
+        LibraryRunJsFileAccess::Policy
     } else {
-        tracing::info!("run_js file-path reads: DISABLED (enable with --allow-run-js-file or a run_js_file policy)");
-        library_builder
+        tracing::info!(
+            "run_js file-path reads: DISABLED (enable with --allow-run-js-file or a run_js_file policy)"
+        );
+        LibraryRunJsFileAccess::Disabled
     };
-
+    let capability_config = LibraryCapabilityConfig {
+        fetch_header_rules,
+        filesystem_passthrough: cli.fs_passthrough,
+        allow_external_modules: cli.allow_external_modules,
+        run_js_file_access,
+    };
+    let library_builder = library_builder.with_policy_config(policy_config, capability_config)?;
 
     // ── MCP server modules ────────────────────────────────────────────────
     let mcp_server_configs = load_mcp_server_configs(&cli.mcp_servers, &cli.mcp_config)?;
@@ -456,13 +324,7 @@ async fn main() -> Result<()> {
             .map_err(|e| anyhow::anyhow!("MCP server connection failed: {}", e))?
             .with_stub_config(stub_config);
         tracing::info!("All MCP servers connected. JS code can use mcp.callTool(), mcp.listTools(), mcp.servers");
-        let library_builder = library_builder.with_mcp_client_manager(manager);
-        if let Some(chain) = mcp_tools_policy_chain {
-            tracing::info!("MCP tools policy: ENABLED");
-            library_builder.with_mcp_tools_policy_chain(chain)
-        } else {
-            library_builder
-        }
+        library_builder.with_mcp_client_manager(manager)
     } else {
         library_builder
     };
@@ -958,11 +820,10 @@ struct FetchHeaderAuthConfig {
 }
 
 impl FetchHeaderConfigRule {
-    fn into_runtime_rule(self) -> Result<engine::fetch::HeaderRule> {
+    fn into_library_rule(self) -> Result<LibraryFetchHeaderRule> {
         let host = self.host;
         let methods = self.methods;
-
-        match (self.headers, self.auth) {
+        let rule = match (self.headers, self.auth) {
             (Some(_), Some(_)) => anyhow::bail!(
                 "Fetch header config rule for host '{}' cannot define both 'headers' and 'auth'",
                 host
@@ -971,11 +832,12 @@ impl FetchHeaderConfigRule {
                 "Fetch header config rule for host '{}' must define either 'headers' or 'auth'",
                 host
             ),
-            (Some(headers), None) => engine::fetch::HeaderRule::new(
+            (Some(headers), None) => LibraryFetchHeaderRule {
                 host,
                 methods,
-                engine::fetch::HeaderInjection::Static { headers: headers.0 },
-            ),
+                static_headers: Some(headers.0),
+                oauth: None,
+            },
             (None, Some(auth)) => {
                 if auth.auth_type != "oauth_client_credentials" {
                     anyhow::bail!(
@@ -984,21 +846,22 @@ impl FetchHeaderConfigRule {
                         host
                     );
                 }
-
-                engine::fetch::HeaderRule::oauth_client_credentials(
+                LibraryFetchHeaderRule {
                     host,
                     methods,
-                    engine::fetch::OAuthClientCredentialsConfig {
+                    static_headers: None,
+                    oauth: Some(LibraryFetchOAuthConfig {
                         header_name: auth.header,
                         token_url: auth.token_url,
                         client_id: auth.client_id,
                         client_secret: auth.client_secret,
                         scope: auth.scope,
                         refresh_buffer_secs: auth.refresh_buffer_secs,
-                    },
-                )
+                    }),
+                }
             }
-        }
+        };
+        rule.normalized().map_err(Into::into)
     }
 }
 
@@ -1006,7 +869,7 @@ impl FetchHeaderConfigRule {
 fn load_fetch_header_rules(
     cli_rules: &[String],
     config_path: &Option<String>,
-) -> Result<Vec<engine::fetch::HeaderRule>> {
+) -> Result<Vec<LibraryFetchHeaderRule>> {
     let mut rules = Vec::new();
 
     for entry in cli_rules {
@@ -1025,7 +888,7 @@ fn load_fetch_header_rules(
         let file_rules: Vec<FetchHeaderConfigRule> = serde_json::from_str(&content)
             .map_err(|e| anyhow::anyhow!("Invalid JSON in fetch header config '{}': {}", path, e))?;
         for rule in file_rules {
-            rules.push(rule.into_runtime_rule()?);
+            rules.push(rule.into_library_rule()?);
         }
     }
 
@@ -1035,7 +898,7 @@ fn load_fetch_header_rules(
 /// Parse a `--fetch-header` CLI string into a `HeaderRule`.
 /// Format: host=<host>,header=<name>,value=<val>[,methods=GET;POST]
 /// Or:     host=<host>,header=<name>,token_url=<url>,client_id=<id>,client_secret=<secret>[,scope=<scope>][,methods=GET;POST][,refresh_buffer_secs=30]
-fn parse_fetch_header_cli(s: &str) -> Result<engine::fetch::HeaderRule> {
+fn parse_fetch_header_cli(s: &str) -> Result<LibraryFetchHeaderRule> {
     let mut host = None;
     let mut methods = Vec::new();
     let mut header_name = None;
@@ -1083,20 +946,21 @@ fn parse_fetch_header_cli(s: &str) -> Result<engine::fetch::HeaderRule> {
         || scope.is_some()
         || refresh_buffer_secs.is_some();
 
-    match (header_value, has_dynamic_keys) {
+    let rule = match (header_value, has_dynamic_keys) {
         (Some(_), true) => anyhow::bail!(
             "--fetch-header cannot mix static 'value' with dynamic oauth keys"
         ),
-        (Some(value), false) => engine::fetch::HeaderRule::static_header(
+        (Some(value), false) => LibraryFetchHeaderRule {
             host,
             methods,
-            header_name,
-            value,
-        ),
-        (None, true) => engine::fetch::HeaderRule::oauth_client_credentials(
+            static_headers: Some(std::collections::HashMap::from([(header_name, value)])),
+            oauth: None,
+        },
+        (None, true) => LibraryFetchHeaderRule {
             host,
             methods,
-            engine::fetch::OAuthClientCredentialsConfig {
+            static_headers: None,
+            oauth: Some(LibraryFetchOAuthConfig {
                 header_name,
                 token_url: token_url.ok_or_else(|| anyhow::anyhow!(
                     "--fetch-header missing 'token_url' for dynamic oauth rule"
@@ -1110,12 +974,14 @@ fn parse_fetch_header_cli(s: &str) -> Result<engine::fetch::HeaderRule> {
                 scope,
                 refresh_buffer_secs: refresh_buffer_secs
                     .unwrap_or_else(engine::fetch::default_refresh_buffer_secs),
-            },
-        ),
+            }),
+        },
         (None, false) => anyhow::bail!(
             "--fetch-header must provide either 'value' for a static rule or the full dynamic oauth key set: token_url, client_id, client_secret"
         ),
-    }
+    };
+    rule.normalized().map_err(Into::into)
+
 }
 
 // ── MCP server module loading ────────────────────────────────────────────
