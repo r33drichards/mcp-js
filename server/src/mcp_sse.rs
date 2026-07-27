@@ -11,6 +11,7 @@
 //! Tasks are NOT offered here (0.1.5 predates the tasks utility); task-enabled
 //! clients should use the Streamable HTTP transport (`--http-port`).
 
+use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
 use rmcp_legacy::{
@@ -25,7 +26,9 @@ use rmcp_legacy::{
 };
 use serde_json::json;
 
-use crate::library::{LibraryError, LibraryToolCallRequest, McpJsLibrary};
+use crate::library::{
+    LibraryError, LibraryMcpRequestHeaders, LibraryToolCallRequest, McpJsLibrary,
+};
 use crate::session::SessionVerifier;
 
 const LLMS_TXT: &str = include_str!("llms_txt.md");
@@ -36,7 +39,7 @@ pub struct SseService {
     runtime: Arc<McpJsLibrary>,
     verifier: Option<Arc<SessionVerifier>>,
     session_id: Arc<OnceLock<String>>,
-    mcp_headers: Arc<OnceLock<serde_json::Value>>,
+    mcp_headers: Arc<OnceLock<LibraryMcpRequestHeaders>>,
 }
 
 impl SseService {
@@ -220,7 +223,7 @@ impl ServerHandler for SseService {
             name: name.to_string(),
             arguments_json: args.to_string(),
             session_id: self.session_id.get().cloned(),
-            mcp_headers_json: self.mcp_headers.get().map(serde_json::Value::to_string),
+            mcp_headers: self.mcp_headers.get().cloned(),
         };
 
         // Keep legacy SSE behavior aligned with the primary MCP transports.
@@ -259,19 +262,19 @@ impl ServerHandler for SseService {
                 }
             }
 
-            let mut map = serde_json::Map::new();
+            let mut map = HashMap::new();
             for (name, value) in headers.iter() {
                 if let Some(key) = name.as_str().strip_prefix("x-mcp-") {
                     if let Ok(v) = value.to_str() {
-                        map.insert(key.to_string(), serde_json::Value::String(v.to_string()));
+                        map.insert(key.to_string(), v.to_string());
                     }
                 }
             }
-            if let Some(serde_json::Value::String(sid)) = map.get("session-id") {
+            if let Some(sid) = map.get("session-id") {
                 let _ = self.session_id.set(sid.clone());
             }
             if !map.is_empty() {
-                let _ = self.mcp_headers.set(serde_json::Value::Object(map));
+                let _ = self.mcp_headers.set(LibraryMcpRequestHeaders { values: map });
             }
         }
         Ok(self.get_info())

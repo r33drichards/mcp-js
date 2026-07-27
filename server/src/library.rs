@@ -311,11 +311,16 @@ pub struct ToolDefinition {
 }
 
 #[derive(Clone, Debug, uniffi::Record)]
+pub struct LibraryMcpRequestHeaders {
+    pub values: HashMap<String, String>,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
 pub struct LibraryToolCallRequest {
     pub name: String,
     pub arguments_json: String,
     pub session_id: Option<String>,
-    pub mcp_headers_json: Option<String>,
+    pub mcp_headers: Option<LibraryMcpRequestHeaders>,
 }
 
 #[derive(Clone, Debug, Serialize, uniffi::Record)]
@@ -335,7 +340,7 @@ pub struct LibraryExecutionRequest {
     pub heap_memory_max_mb: Option<u64>,
     pub execution_timeout_secs: Option<u64>,
     pub tags: Option<HashMap<String, String>>,
-    pub mcp_headers_json: Option<String>,
+    pub mcp_headers: Option<LibraryMcpRequestHeaders>,
 }
 
 #[derive(Clone, Debug, Serialize, uniffi::Record)]
@@ -677,11 +682,7 @@ impl McpJsLibrary {
             .map_err(|_| LibraryError::InvalidConfig {
                 message: "heap_memory_max_mb is too large for this platform".to_string(),
             })?;
-        let mcp_headers = request
-            .mcp_headers_json
-            .as_deref()
-            .map(|json| parse_json_object("mcp_headers_json", json))
-            .transpose()?;
+        let mcp_headers = request.mcp_headers.map(library_mcp_headers_value);
 
         let mut execution = self
             .runtime
@@ -954,7 +955,7 @@ impl McpJsLibrary {
         name: String,
         arguments_json: String,
         session_id: Option<String>,
-        mcp_headers_json: Option<String>,
+        mcp_headers: Option<LibraryMcpRequestHeaders>,
     ) -> Result<String, LibraryError> {
         let tokio_runtime =
             self.tokio_runtime
@@ -966,7 +967,7 @@ impl McpJsLibrary {
             name,
             arguments_json,
             session_id,
-            mcp_headers_json,
+            mcp_headers,
         }))
     }
 
@@ -977,11 +978,7 @@ impl McpJsLibrary {
         let _lifecycle_guard = self.shutdown_lock.lock().await;
         self.ensure_running()?;
         let arguments = parse_json_object("arguments_json", &request.arguments_json)?;
-        let mcp_headers = request
-            .mcp_headers_json
-            .as_deref()
-            .map(|json| parse_json_object("mcp_headers_json", json))
-            .transpose()?;
+        let mcp_headers = request.mcp_headers.map(library_mcp_headers_value);
         let result = self
             .runtime
             .call_tool(
@@ -1382,6 +1379,16 @@ fn build_runtime(
     Ok((runtime, ephemeral_data_dir))
 }
 
+fn library_mcp_headers_value(headers: LibraryMcpRequestHeaders) -> Value {
+    Value::Object(
+        headers
+            .values
+            .into_iter()
+            .map(|(name, value)| (name, Value::String(value)))
+            .collect(),
+    )
+}
+
 fn parse_json_object(field: &str, json: &str) -> Result<Value, LibraryError> {
     let value: Value = serde_json::from_str(json).map_err(|error| LibraryError::InvalidJson {
         field: field.to_string(),
@@ -1408,6 +1415,24 @@ mod tests {
     fn v8_test_guard() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
+
+    #[test]
+    fn typed_mcp_headers_convert_to_policy_json() {
+        let headers = LibraryMcpRequestHeaders {
+            values: HashMap::from([
+                ("session-id".to_string(), "session-123".to_string()),
+                ("tenant".to_string(), "acme".to_string()),
+            ]),
+        };
+
+        assert_eq!(
+            library_mcp_headers_value(headers),
+            serde_json::json!({
+                "session-id": "session-123",
+                "tenant": "acme",
+            })
+        );
     }
 
     #[test]
@@ -1773,7 +1798,7 @@ mod tests {
                 name: "run_js".to_string(),
                 arguments_json: r#"{"code":"console.log(2 + 2)"}"#.to_string(),
                 session_id: None,
-                mcp_headers_json: None,
+                mcp_headers: None,
             }))
             .unwrap();
         let value: Value = serde_json::from_str(&result).unwrap();
@@ -1798,7 +1823,7 @@ mod tests {
                 name: "run_js".to_string(),
                 arguments_json: r#"{"code":"console.log('late')"}"#.to_string(),
                 session_id: None,
-                mcp_headers_json: None,
+                mcp_headers: None,
             }))
             .unwrap_err();
         assert!(error.to_string().contains("library is Shutdown"));
@@ -1826,7 +1851,7 @@ mod tests {
                 heap_memory_max_mb: None,
                 execution_timeout_secs: None,
                 tags: None,
-                mcp_headers_json: None,
+                mcp_headers: None,
             }))
             .unwrap();
 

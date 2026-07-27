@@ -5,8 +5,8 @@ It deliberately keeps the FFI boundary small:
 
 - `McpJsLibrary` owns Tokio plus the shared `server::runtime::McpJsRuntime`.
 - `list_tools()` returns stable records with each tool's JSON Schema encoded as JSON.
-- `call_tool()` accepts and returns JSON strings, matching `mcp_dispatch` without
-  attempting to model arbitrary JSON in every target language.
+- `call_tool()` accepts and returns JSON strings for arbitrary tool payloads,
+  while MCP request headers cross the boundary as a typed string map.
 - Stateless mode exposes blocking `run_js` semantics.
 - Local stateful mode exposes the heap-backed tool set and persists data beneath
   a caller-provided directory.
@@ -71,7 +71,9 @@ val resultJson = runtime.callTool(
     name = "run_js",
     argumentsJson = """{"code":"console.log(1 + 1)"}""",
     sessionId = null,
-    mcpHeadersJson = null,
+    mcpHeaders = LibraryMcpRequestHeaders(
+        values = mapOf("tenant" to "acme"),
+    ),
 )
 ```
 

@@ -385,7 +385,7 @@ async fn submit_exec(
         heap_memory_max_mb: req.heap_memory_max_mb.map(|value| value as u64),
         execution_timeout_secs: req.execution_timeout_secs,
         tags: req.tags,
-        mcp_headers_json: None,
+        mcp_headers: None,
     };
     match runtime.submit_execution(request).await {
         Ok(execution_id) => (
