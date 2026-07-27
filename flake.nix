@@ -44,8 +44,8 @@
         } {
           src = ./server;
           # Vendor hash for server's cargo deps; refreshed when deps changed.
-          # Bumped for the UniFFI dependency and its proc-macro toolchain.
-          hash = "sha256-A8Jup4k/Zb9/ZNYHO+aH2RR6a7CA2joxsamx0xN+f3g=";
+          # Refreshed for the combined sandbox and UniFFI dependency graph.
+          hash = pkgs.lib.fakeHash;
         });
 
         docsPython = pkgs.python3.withPackages (

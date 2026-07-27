@@ -4253,7 +4253,15 @@ dependencies = [
 ]
 
 [[package]]
-<<<<<<< HEAD
+name = "serde_spanned"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "40734c41988f7306bb04f0ecf60ec0f3f1caa34290e4e8ea471dcd3346483b83"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "serde_tokenstream"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4263,14 +4271,6 @@ dependencies = [
  "quote",
  "serde",
  "syn 2.0.118",
-=======
-name = "serde_spanned"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "40734c41988f7306bb04f0ecf60ec0f3f1caa34290e4e8ea471dcd3346483b83"
-dependencies = [
- "serde",
->>>>>>> de8a98e (Refresh standalone server lockfile)
 ]
 
 [[package]]
