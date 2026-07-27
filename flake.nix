@@ -44,9 +44,8 @@
         } {
           src = ./server;
           # Vendor hash for server's cargo deps; refreshed when deps changed.
-          # Bumped for the `toml` dependency of the single-file --config loader
-          # (vendors toml/toml_edit/toml_datetime/toml_write/serde_spanned/winnow).
-          hash = pkgs.lib.fakeHash;
+          # Bumped for the UniFFI dependency and its proc-macro toolchain.
+          hash = "sha256-A8Jup4k/Zb9/ZNYHO+aH2RR6a7CA2joxsamx0xN+f3g=";
         });
 
         docsPython = pkgs.python3.withPackages (
