@@ -5,7 +5,7 @@
 //! vendored rmcp 0.1.5 SSE server (`rmcp_legacy`). It is a hand-written 0.1.5
 //! `ServerHandler` (no tool macros — the renamed crate's macros would emit
 //! `::rmcp::` paths that resolve to the 1.x crate) that delegates tool calls to
-//! the shared, transport-agnostic `mcp_dispatch`. The tool list mirrors the
+//! the shared, transport-agnostic `McpJsLibrary`. The tool list mirrors the
 //! primary handler's core surface (converted to 0.1.5 `Tool`s).
 //!
 //! Tasks are NOT offered here (0.1.5 predates the tasks utility); task-enabled

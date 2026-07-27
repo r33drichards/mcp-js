@@ -57,8 +57,21 @@ impl McpJsRuntime {
         self.engine.run_js_description_override()
     }
 
-    pub fn mcp_client_manager(&self) -> Option<Arc<crate::engine::mcp_client::McpClientManager>> {
-        self.engine.mcp_client_manager()
+    pub fn upstream_mcp_stub_tools(&self) -> Vec<rmcp::model::Tool> {
+        self.engine
+            .mcp_client_manager()
+            .map(|client| client.stub_tools())
+            .unwrap_or_default()
+    }
+
+    pub fn upstream_mcp_stub_call_response(
+        &self,
+        name: &str,
+        arguments: Option<&serde_json::Map<String, Value>>,
+    ) -> Option<rmcp::model::CallToolResult> {
+        self.engine
+            .mcp_client_manager()
+            .and_then(|client| client.stub_call_response(name, arguments))
     }
 
     pub fn wasm_stub_tools(&self) -> Vec<rmcp::model::Tool> {

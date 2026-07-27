@@ -17,7 +17,6 @@ use tokio::sync::Mutex;
 use crate::library::{
     LibraryError, LibraryMcpRequestHeaders, LibraryToolCallRequest, McpJsLibrary,
 };
-use crate::engine::mcp_client::McpClientManager;
 use crate::session::SessionVerifier;
 
 // ── Embedded documentation resources ───────────────────────────────────
@@ -187,8 +186,8 @@ async fn invoke_library_tool(
 // ── Tool argument structs ─────────────────────────────────────────────────
 //
 // These exist for the rmcp tool macros' input-schema generation. The actual
-// tool logic lives in `mcp_dispatch` (shared with the legacy SSE handler), so
-// the tool methods just forward their (serialized) arguments there.
+// Tool logic lives behind `McpJsLibrary`, so the tool methods only serialize
+// their arguments and invoke the canonical library surface.
 
 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct RunJsArgs {
@@ -389,10 +388,6 @@ fn filter_tools_by_capability(tools: &mut Vec<Tool>, heap: bool, fs: bool) {
 pub struct McpService {
     runtime: Arc<McpJsLibrary>,
     verifier: Option<Arc<SessionVerifier>>,
-    /// Optional manager for upstream MCP servers. When set, those servers'
-    /// tools are exposed as stubs in this service's tool list, and calls to
-    /// those stubs return run_js instructions instead of dispatching.
-    mcp_client: Option<Arc<McpClientManager>>,
     /// Set once during `initialize` from X-MCP-Session-Id header.
     session_id: Arc<OnceLock<String>>,
     /// X-MCP-* headers from the initialize request, available for policy evaluation.
@@ -423,11 +418,9 @@ impl McpService {
 #[tool_router]
 impl McpService {
     pub fn new(runtime: Arc<McpJsLibrary>, verifier: Option<Arc<SessionVerifier>>) -> Self {
-        let mcp_client = runtime.mcp_client_manager();
         Self {
             runtime,
             verifier,
-            mcp_client,
             session_id: Arc::new(OnceLock::new()),
             mcp_headers: Arc::new(OnceLock::new()),
             tool_router: Self::tool_router(),
@@ -658,10 +651,11 @@ impl ServerHandler for McpService {
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
-        if let Some(client) = &self.mcp_client {
-            if let Some(result) = client.stub_call_response(&request.name, request.arguments.as_ref()) {
-                return Ok(result);
-            }
+        if let Some(result) = self
+            .runtime
+            .upstream_mcp_stub_call_response(&request.name, request.arguments.as_ref())
+        {
+            return Ok(result);
         }
         // WASM module stubs return run_js usage instructions instead of dispatching.
         if let Some(result) = self.runtime.wasm_stub_call_response(&request.name, request.arguments.as_ref()) {
@@ -690,7 +684,6 @@ impl ServerHandler for McpService {
 pub struct StatelessMcpService {
     runtime: Arc<McpJsLibrary>,
     verifier: Option<Arc<SessionVerifier>>,
-    mcp_client: Option<Arc<McpClientManager>>,
     /// X-MCP-* headers from the initialize request, available for policy evaluation.
     mcp_headers: Arc<OnceLock<LibraryMcpRequestHeaders>>,
     tool_router: ToolRouter<StatelessMcpService>,
@@ -700,11 +693,9 @@ pub struct StatelessMcpService {
 #[tool_router]
 impl StatelessMcpService {
     pub fn new(runtime: Arc<McpJsLibrary>, verifier: Option<Arc<SessionVerifier>>) -> Self {
-        let mcp_client = runtime.mcp_client_manager();
         Self {
             runtime,
             verifier,
-            mcp_client,
             mcp_headers: Arc::new(OnceLock::new()),
             tool_router: Self::tool_router(),
             processor: Arc::new(Mutex::new(OperationProcessor::new())),
@@ -796,10 +787,11 @@ impl ServerHandler for StatelessMcpService {
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
-        if let Some(client) = &self.mcp_client {
-            if let Some(result) = client.stub_call_response(&request.name, request.arguments.as_ref()) {
-                return Ok(result);
-            }
+        if let Some(result) = self
+            .runtime
+            .upstream_mcp_stub_call_response(&request.name, request.arguments.as_ref())
+        {
+            return Ok(result);
         }
         if let Some(result) = self.runtime.wasm_stub_call_response(&request.name, request.arguments.as_ref()) {
             return Ok(result);

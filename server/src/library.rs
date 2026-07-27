@@ -8,7 +8,6 @@ use crate::engine::execution::{
     ConsoleOutputPage as EngineConsoleOutputPage, ExecutionInfo as EngineExecutionInfo,
     ExecutionSummary as EngineExecutionSummary,
 };
-use crate::engine::mcp_client::McpClientManager;
 use crate::engine::{
     Engine, FsLabelView, FsMergeConflictView, FsMergeResult, FsPushOutcome, FsRefLogView,
     RunJsRequest, initialize_v8,
@@ -1087,10 +1086,6 @@ impl McpJsLibrary {
         self.runtime.run_js_description_override()
     }
 
-    pub fn mcp_client_manager(&self) -> Option<Arc<McpClientManager>> {
-        self.runtime.mcp_client_manager()
-    }
-
     pub fn wasm_stub_tools(&self) -> Vec<rmcp::model::Tool> {
         self.runtime.wasm_stub_tools()
     }
@@ -1101,11 +1096,18 @@ impl McpJsLibrary {
 
     pub fn mcp_tools(&self) -> Vec<rmcp::model::Tool> {
         let mut tools = self.core_mcp_tools();
-        if let Some(client) = self.mcp_client_manager() {
-            tools.extend(client.stub_tools());
-        }
+        tools.extend(self.runtime.upstream_mcp_stub_tools());
         tools.extend(self.wasm_stub_tools());
         tools
+    }
+
+    pub fn upstream_mcp_stub_call_response(
+        &self,
+        name: &str,
+        arguments: Option<&serde_json::Map<String, Value>>,
+    ) -> Option<rmcp::model::CallToolResult> {
+        self.runtime
+            .upstream_mcp_stub_call_response(name, arguments)
     }
 
     pub fn wasm_stub_call_response(
