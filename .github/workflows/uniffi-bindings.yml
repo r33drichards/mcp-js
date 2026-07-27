@@ -10,7 +10,6 @@ on:
       - "server/src/runtime.rs"
       - "scripts/*uniffi-bindings.sh"
       - "scripts/python-uniffi-library-smoke.py"
-      - "scripts/prepare-rusty-v8-source.sh"
       - "scripts/test-python-uniffi-library.sh"
       - ".github/workflows/uniffi-bindings.yml"
   pull_request:
@@ -22,7 +21,6 @@ on:
       - "server/src/runtime.rs"
       - "scripts/*uniffi-bindings.sh"
       - "scripts/python-uniffi-library-smoke.py"
-      - "scripts/prepare-rusty-v8-source.sh"
       - "scripts/test-python-uniffi-library.sh"
       - ".github/workflows/uniffi-bindings.yml"
   workflow_dispatch:
@@ -56,8 +54,6 @@ jobs:
           key: python-uniffi-v8-145-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'server/**', 'mcp-v8-uniffi-python/**') }}
       - name: Install UniFFI bindgen
         run: nix develop --command cargo install uniffi --version 0.32.0 --locked --features cli
-      - name: Prepare rusty_v8 source tree
-        run: nix develop --command ./scripts/prepare-rusty-v8-source.sh 145.0.0
       - name: Build Python-loadable UniFFI library
         run: |
           nix develop --command bash -c '
@@ -65,7 +61,8 @@ jobs:
             export V8_FROM_SOURCE=1
             export GN_ARGS="v8_monolithic_for_shared_library=true"
             export CARGO_TARGET_DIR="$PWD/target/python-uniffi"
-            cargo build -p mcp-v8-uniffi-python --release
+            cargo build -p mcp-v8-uniffi-python --release \
+              --config mcp-v8-uniffi-python/cargo-config.toml
           '
       - name: Import Python library and execute JavaScript
         run: |
