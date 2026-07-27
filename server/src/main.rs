@@ -238,6 +238,7 @@ async fn main() -> Result<()> {
             cache_dir: cli.cache_dir.clone(),
             session_db_path: cli.session_db_path.clone(),
             http_port: cli.http_port,
+            execution_db_path: None,
             heap_memory_max_bytes,
             execution_timeout_secs,
             max_concurrent_executions: cli.max_concurrent_executions,

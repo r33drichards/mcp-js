@@ -113,6 +113,13 @@ impl LibraryBootstrap {
     pub fn build(self) -> Arc<McpJsLibrary> {
         McpJsLibrary::from_engine(self.engine)
     }
+
+    pub(crate) fn build_with_runtime(
+        self,
+        tokio_runtime: tokio::runtime::Runtime,
+    ) -> Arc<McpJsLibrary> {
+        McpJsLibrary::from_engine_with_tokio_runtime(self.engine, tokio_runtime)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -126,6 +133,7 @@ pub struct StorageBootstrapConfig {
     pub cache_dir: Option<String>,
     pub session_db_path: String,
     pub http_port: Option<u16>,
+    pub execution_db_path: Option<String>,
     pub heap_memory_max_bytes: usize,
     pub execution_timeout_secs: u64,
     pub max_concurrent_executions: usize,
@@ -338,10 +346,13 @@ async fn attach_filesystem(
 }
 
 fn attach_execution_registry(engine: Engine, config: &StorageBootstrapConfig) -> Engine {
-    let path = match config.http_port {
-        Some(port) => format!("{}/executions-{}", config.session_db_path, port),
-        None => format!("{}/executions", config.session_db_path),
-    };
+    let path = config
+        .execution_db_path
+        .clone()
+        .unwrap_or_else(|| match config.http_port {
+            Some(port) => format!("{}/executions-{}", config.session_db_path, port),
+            None => format!("{}/executions", config.session_db_path),
+        });
     match ExecutionRegistry::new(&path) {
         Ok(registry) => {
             tracing::info!("Execution registry opened at {}", path);
@@ -400,6 +411,7 @@ mod tests {
             cache_dir: None,
             session_db_path: data_dir.to_string_lossy().into_owned(),
             http_port: None,
+            execution_db_path: None,
             heap_memory_max_bytes: 8 * 1024 * 1024,
             execution_timeout_secs: 30,
             max_concurrent_executions: 1,

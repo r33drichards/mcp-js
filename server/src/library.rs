@@ -25,6 +25,31 @@ pub enum LibraryMode {
     LocalStateful,
 }
 
+#[derive(Clone, Copy, Debug, uniffi::Enum)]
+pub enum LibraryStorageKind {
+    None,
+    Directory,
+    S3,
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct LibraryRuntimeConfig {
+    pub heap_store: LibraryStorageKind,
+    pub heap_dir: Option<String>,
+    pub filesystem_store: LibraryStorageKind,
+    pub filesystem_dir: Option<String>,
+    pub filesystem_labels_db: Option<String>,
+    pub s3_bucket: Option<String>,
+    pub cache_dir: Option<String>,
+    pub session_db_path: String,
+    pub execution_db_path: Option<String>,
+    pub heap_memory_max_mb: u64,
+    pub execution_timeout_secs: u64,
+    pub max_concurrent_executions: u32,
+    pub session_id: Option<String>,
+    pub session_fork_from: Option<String>,
+}
+
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct LibraryConfig {
     pub mode: LibraryMode,
@@ -187,6 +212,54 @@ pub struct McpJsLibrary {
 #[uniffi::export]
 pub fn default_library_config() -> LibraryConfig {
     LibraryConfig::default()
+}
+
+#[uniffi::export]
+pub fn default_runtime_config(data_dir: String) -> LibraryRuntimeConfig {
+    LibraryRuntimeConfig {
+        heap_store: LibraryStorageKind::None,
+        heap_dir: None,
+        filesystem_store: LibraryStorageKind::None,
+        filesystem_dir: None,
+        filesystem_labels_db: None,
+        s3_bucket: None,
+        cache_dir: None,
+        session_db_path: data_dir,
+        execution_db_path: None,
+        heap_memory_max_mb: DEFAULT_HEAP_MEMORY_MB,
+        execution_timeout_secs: DEFAULT_EXECUTION_TIMEOUT_SECS,
+        max_concurrent_executions: DEFAULT_MAX_CONCURRENT_EXECUTIONS,
+        session_id: None,
+        session_fork_from: None,
+    }
+}
+
+#[uniffi::export]
+pub fn create_library(config: LibraryRuntimeConfig) -> Result<Arc<McpJsLibrary>, LibraryError> {
+    validate_runtime_config(&config)?;
+    initialize_v8();
+    let worker_threads = usize::try_from(config.max_concurrent_executions).map_err(|_| {
+        LibraryError::InvalidConfig {
+            message: "max_concurrent_executions is too large for this platform".to_string(),
+        }
+    })?;
+    let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .worker_threads(worker_threads)
+        .build()
+        .map_err(|error| LibraryError::Initialization {
+            message: error.to_string(),
+        })?;
+    let bootstrap_config = runtime_bootstrap_config(config)?;
+    let bootstrap = tokio_runtime
+        .block_on(crate::bootstrap::build_storage_engine(
+            bootstrap_config,
+            None,
+        ))
+        .map_err(|error| LibraryError::Initialization {
+            message: error.to_string(),
+        })?;
+    Ok(bootstrap.build_with_runtime(tokio_runtime))
 }
 
 #[uniffi::export]
@@ -568,6 +641,17 @@ impl McpJsLibrary {
         Self::from_runtime(McpJsRuntime::new(engine))
     }
 
+    pub(crate) fn from_engine_with_tokio_runtime(
+        engine: Engine,
+        tokio_runtime: tokio::runtime::Runtime,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            tokio_runtime: Some(tokio_runtime),
+            runtime: McpJsRuntime::new(engine),
+            _ephemeral_data_dir: None,
+        })
+    }
+
     pub fn heap_enabled(&self) -> bool {
         self.runtime.heap_enabled()
     }
@@ -760,6 +844,73 @@ fn operation_message(message: String) -> LibraryError {
     LibraryError::Operation { message }
 }
 
+fn validate_runtime_config(config: &LibraryRuntimeConfig) -> Result<(), LibraryError> {
+    if config.session_db_path.is_empty() {
+        return Err(LibraryError::InvalidConfig {
+            message: "session_db_path must not be empty".to_string(),
+        });
+    }
+    if config.heap_memory_max_mb < crate::engine::MIN_HEAP_MEMORY_MB as u64 {
+        return Err(LibraryError::InvalidConfig {
+            message: format!(
+                "heap_memory_max_mb must be at least {}",
+                crate::engine::MIN_HEAP_MEMORY_MB
+            ),
+        });
+    }
+    if config.execution_timeout_secs == 0 || config.max_concurrent_executions == 0 {
+        return Err(LibraryError::InvalidConfig {
+            message: "execution timeout and concurrency must be greater than zero".to_string(),
+        });
+    }
+    let uses_s3 = matches!(config.heap_store, LibraryStorageKind::S3)
+        || matches!(config.filesystem_store, LibraryStorageKind::S3);
+    if uses_s3 && config.s3_bucket.is_none() {
+        return Err(LibraryError::InvalidConfig {
+            message: "S3 storage requires s3_bucket".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn runtime_bootstrap_config(
+    config: LibraryRuntimeConfig,
+) -> Result<crate::bootstrap::StorageBootstrapConfig, LibraryError> {
+    let heap_memory_max_mb =
+        usize::try_from(config.heap_memory_max_mb).map_err(|_| LibraryError::InvalidConfig {
+            message: "heap_memory_max_mb is too large for this platform".to_string(),
+        })?;
+    Ok(crate::bootstrap::StorageBootstrapConfig {
+        heap_store: storage_kind(config.heap_store),
+        heap_dir: config.heap_dir,
+        fs_store: storage_kind(config.filesystem_store),
+        fs_dir: config.filesystem_dir,
+        fs_labels_db: config.filesystem_labels_db,
+        s3_bucket: config.s3_bucket,
+        cache_dir: config.cache_dir,
+        session_db_path: config.session_db_path,
+        http_port: None,
+        execution_db_path: config.execution_db_path,
+        heap_memory_max_bytes: heap_memory_max_mb.checked_mul(1024 * 1024).ok_or_else(|| {
+            LibraryError::InvalidConfig {
+                message: "heap_memory_max_mb is too large for this platform".to_string(),
+            }
+        })?,
+        execution_timeout_secs: config.execution_timeout_secs,
+        max_concurrent_executions: config.max_concurrent_executions as usize,
+        session_id: config.session_id,
+        session_fork_from: config.session_fork_from,
+    })
+}
+
+fn storage_kind(kind: LibraryStorageKind) -> crate::cli::StoreKind {
+    match kind {
+        LibraryStorageKind::None => crate::cli::StoreKind::None,
+        LibraryStorageKind::Directory => crate::cli::StoreKind::Dir,
+        LibraryStorageKind::S3 => crate::cli::StoreKind::S3,
+    }
+}
+
 fn validate_config(config: &LibraryConfig) -> Result<(), LibraryError> {
     if config.heap_memory_max_mb < crate::engine::MIN_HEAP_MEMORY_MB as u64 {
         return Err(LibraryError::InvalidConfig {
@@ -871,6 +1022,40 @@ mod tests {
             ..LibraryConfig::default()
         };
         assert!(validate_config(&config).is_err());
+    }
+
+    #[test]
+    fn runtime_config_builds_directory_storage_with_owned_executor() {
+        let _guard = v8_test_guard();
+        let data_dir = tempfile::tempdir().unwrap();
+        let mut config = default_runtime_config(data_dir.path().to_string_lossy().into_owned());
+        config.heap_store = LibraryStorageKind::Directory;
+        config.heap_dir = Some(data_dir.path().join("heaps").to_string_lossy().into_owned());
+        config.filesystem_store = LibraryStorageKind::Directory;
+        config.filesystem_dir = Some(
+            data_dir
+                .path()
+                .join("fs-blobs")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        let library = create_library(config).unwrap();
+
+        let capabilities = library.capabilities();
+        assert!(capabilities.heap);
+        assert!(capabilities.filesystem);
+        assert!(capabilities.sessions);
+        let tools = library.list_tools().unwrap();
+        assert!(tools.iter().any(|tool| tool.name == "get_heap_tags"));
+        assert!(tools.iter().any(|tool| tool.name == "fs_ls"));
+    }
+
+    #[test]
+    fn runtime_config_requires_bucket_for_s3() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let mut config = default_runtime_config(data_dir.path().to_string_lossy().into_owned());
+        config.heap_store = LibraryStorageKind::S3;
+        assert!(create_library(config).is_err());
     }
 
     #[test]
