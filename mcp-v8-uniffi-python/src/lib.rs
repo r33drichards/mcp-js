@@ -1,12 +1,16 @@
 //! Python-loadable shared-library packaging for the canonical UniFFI API defined by `server`.
 
+pub use server::engine::execution::{ConsoleOutputPage, ExecutionInfo, ExecutionSummary};
+pub use server::engine::fs_merge::Prefer;
+pub use server::engine::heap_tags::HeapTagEntry;
+pub use server::engine::{
+    FsLabelView, FsMergeConflictView, FsMergeResult, FsPushOutcome, FsRefLogView,
+};
 pub use server::library::{
     DEFAULT_EXECUTION_TIMEOUT_SECS, DEFAULT_MCP_STUB_PREFIX, DEFAULT_WASM_STUB_PREFIX,
     LibraryCapabilities, LibraryCapabilityConfig, LibraryConfig, LibraryError,
-    LibraryExecutionInfo, LibraryExecutionOutput, LibraryExecutionRequest, LibraryExecutionSummary,
-    LibraryFeatureConfig, LibraryFetchHeaderRule, LibraryFetchOAuthConfig, LibraryFsLabel,
-    LibraryFsMergeConflict, LibraryFsMergePreference, LibraryFsMergeResult, LibraryFsPushResult,
-    LibraryFsRefLogEntry, LibraryHardeningConfig, LibraryHeapTagEntry, LibraryLifecycleState,
+    LibraryExecutionRequest, LibraryFeatureConfig, LibraryFetchHeaderRule,
+    LibraryFetchOAuthConfig, LibraryHardeningConfig, LibraryLifecycleState,
     LibraryMcpRequestHeaders, LibraryMcpServerConfig, LibraryMcpStubConfig,
     LibraryMcpTransportKind, LibraryMode, LibraryOperationPolicies, LibraryPolicyConfig,
     LibraryPolicyEvalMode, LibraryPolicySource, LibraryRunJsFileAccess, LibraryRuntimeConfig,

@@ -14,7 +14,9 @@ use utoipa::{OpenApi, ToSchema};
 /// body and raw script uploads.
 const MAX_EXEC_BODY_BYTES: usize = 16 * 1024 * 1024;
 
-use crate::library::{LibraryExecutionRequest, LibraryFsMergePreference, McpJsLibrary};
+use crate::engine::fs_merge::Prefer;
+use crate::engine::FsPushOutcome;
+use crate::library::{LibraryExecutionRequest, McpJsLibrary};
 
 // ── Embedded agent-discovery content ─────────────────────────────────
 
@@ -420,7 +422,7 @@ async fn get_execution_handler(
         Ok(info) => (
             StatusCode::OK,
             Json(serde_json::json!({
-                "execution_id": info.execution_id,
+                "execution_id": info.id,
                 "status": info.status,
                 "result": info.result,
                 "heap": info.heap,
@@ -852,22 +854,11 @@ async fn fs_push_handler(
     };
     match runtime.fs_push(label, req.ca_id, req.expected, req.force, req.message).await {
         Ok(outcome) => {
-            let is_rejected = outcome.status == "rejected";
-            let value = if is_rejected {
-                serde_json::json!({
-                    "status": outcome.status,
-                    "label": outcome.label,
-                    "current": outcome.current,
-                })
-            } else {
-                serde_json::json!({
-                    "status": outcome.status,
-                    "label": outcome.label,
-                    "ca_id": outcome.ca_id,
-                })
+            let code = match &outcome {
+                FsPushOutcome::Advanced { .. } => StatusCode::OK,
+                FsPushOutcome::Rejected { .. } => StatusCode::CONFLICT,
             };
-            let code = if is_rejected { StatusCode::CONFLICT } else { StatusCode::OK };
-            (code, Json(value))
+            (code, Json(serde_json::json!(outcome)))
         }
         Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e.to_string() }))),
     }
@@ -928,9 +919,9 @@ async fn fs_merge_handler(
     Json(req): Json<FsMergeRequest>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let prefer = match req.prefer.as_deref() {
-        None => None,
-        Some("ours") => Some(LibraryFsMergePreference::Ours),
-        Some("theirs") => Some(LibraryFsMergePreference::Theirs),
+        None => Prefer::None,
+        Some("ours") => Prefer::Ours,
+        Some("theirs") => Prefer::Theirs,
         Some(value) => {
             return (
                 StatusCode::BAD_REQUEST,
@@ -939,14 +930,7 @@ async fn fs_merge_handler(
         }
     };
     match runtime.fs_merge(req.ours, req.theirs, req.base, prefer).await {
-        Ok(result) => {
-            let value = if result.status == "merged" {
-                serde_json::json!({ "status": result.status, "ca_id": result.ca_id })
-            } else {
-                serde_json::json!({ "status": result.status, "conflicts": result.conflicts })
-            };
-            (StatusCode::OK, Json(value))
-        }
+        Ok(result) => (StatusCode::OK, Json(serde_json::json!(result))),
         Err(e) => (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": e.to_string() })),

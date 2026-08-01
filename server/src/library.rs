@@ -4,13 +4,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use crate::cluster::ClusterNode;
-use crate::engine::execution::{
-    ConsoleOutputPage as EngineConsoleOutputPage, ExecutionInfo as EngineExecutionInfo,
-    ExecutionSummary as EngineExecutionSummary,
-};
+use crate::engine::execution::{ConsoleOutputPage, ExecutionInfo, ExecutionSummary};
+use crate::engine::fs_merge::Prefer;
+use crate::engine::heap_tags::HeapTagEntry;
 use crate::engine::{
-    Engine, FsLabelView, FsMergeConflictView, FsMergeResult, FsPushOutcome, FsRefLogView,
-    RunJsRequest, initialize_v8,
+    Engine, FsLabelView, FsMergeResult, FsPushOutcome, FsRefLogView, RunJsRequest, initialize_v8,
 };
 use crate::runtime::McpJsRuntime;
 use serde::{Deserialize, Serialize};
@@ -344,94 +342,6 @@ pub struct LibraryExecutionRequest {
     pub mcp_headers: Option<LibraryMcpRequestHeaders>,
 }
 
-#[derive(Clone, Debug, Serialize, uniffi::Record)]
-pub struct LibraryExecutionInfo {
-    pub execution_id: String,
-    pub status: String,
-    pub result: Option<String>,
-    pub heap: Option<String>,
-    pub fs: Option<String>,
-    pub error: Option<String>,
-    pub started_at: String,
-    pub completed_at: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize, uniffi::Record)]
-pub struct LibraryExecutionSummary {
-    pub execution_id: String,
-    pub status: String,
-    pub started_at: String,
-    pub completed_at: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize, uniffi::Record)]
-pub struct LibraryExecutionOutput {
-    pub data: String,
-    pub start_line: u64,
-    pub end_line: u64,
-    pub next_line_offset: u64,
-    pub total_lines: u64,
-    pub start_byte: u64,
-    pub end_byte: u64,
-    pub next_byte_offset: u64,
-    pub total_bytes: u64,
-    pub has_more: bool,
-}
-
-#[derive(Clone, Debug, Serialize, uniffi::Record)]
-pub struct LibraryHeapTagEntry {
-    pub heap: String,
-    pub tags: HashMap<String, String>,
-}
-
-#[derive(Clone, Debug, Serialize, uniffi::Record)]
-pub struct LibraryFsLabel {
-    pub name: String,
-    pub ca_id: String,
-}
-
-#[derive(Clone, Debug, Serialize, uniffi::Record)]
-pub struct LibraryFsRefLogEntry {
-    pub at: i64,
-    pub from: Option<String>,
-    pub to: String,
-    pub op: String,
-    pub message: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize, uniffi::Record)]
-pub struct LibraryFsPushResult {
-    pub status: String,
-    pub label: String,
-    pub ca_id: Option<String>,
-    pub current: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize, uniffi::Record)]
-pub struct LibraryFsMergeConflict {
-    pub path: String,
-    pub base: Option<String>,
-    pub ours: Option<String>,
-    pub theirs: Option<String>,
-    pub kind: String,
-    pub markers: Option<String>,
-    pub diff_ours: Option<String>,
-    pub diff_theirs: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize, uniffi::Record)]
-pub struct LibraryFsMergeResult {
-    pub status: String,
-    pub ca_id: Option<String>,
-    pub conflicts: Vec<LibraryFsMergeConflict>,
-}
-
-#[derive(Clone, Copy, Debug, uniffi::Enum)]
-pub enum LibraryFsMergePreference {
-    Ours,
-    Theirs,
-}
-
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum LibraryError {
     #[error("invalid configuration: {message}")]
@@ -712,13 +622,9 @@ impl McpJsLibrary {
         execution.execute().await.map_err(operation_message)
     }
 
-    pub fn get_execution(
-        &self,
-        execution_id: String,
-    ) -> Result<LibraryExecutionInfo, LibraryError> {
+    pub fn get_execution(&self, execution_id: String) -> Result<ExecutionInfo, LibraryError> {
         self.runtime
             .get_execution(&execution_id)
-            .map(LibraryExecutionInfo::from)
             .map_err(operation_message)
     }
 
@@ -729,7 +635,7 @@ impl McpJsLibrary {
         line_limit: Option<u64>,
         byte_offset: Option<u64>,
         byte_limit: Option<u64>,
-    ) -> Result<LibraryExecutionOutput, LibraryError> {
+    ) -> Result<ConsoleOutputPage, LibraryError> {
         self.runtime
             .get_execution_output(
                 &execution_id,
@@ -738,7 +644,6 @@ impl McpJsLibrary {
                 byte_offset,
                 byte_limit,
             )
-            .map(LibraryExecutionOutput::from)
             .map_err(operation_message)
     }
 
@@ -748,16 +653,8 @@ impl McpJsLibrary {
             .map_err(operation_message)
     }
 
-    pub fn list_executions(&self) -> Result<Vec<LibraryExecutionSummary>, LibraryError> {
-        self.runtime
-            .list_executions()
-            .map(|executions| {
-                executions
-                    .into_iter()
-                    .map(LibraryExecutionSummary::from)
-                    .collect()
-            })
-            .map_err(operation_message)
+    pub fn list_executions(&self) -> Result<Vec<ExecutionSummary>, LibraryError> {
+        self.runtime.list_executions().map_err(operation_message)
     }
 
     pub async fn list_sessions(&self) -> Result<Vec<String>, LibraryError> {
@@ -820,28 +717,15 @@ impl McpJsLibrary {
     pub async fn query_heaps_by_tags(
         &self,
         tags: HashMap<String, String>,
-    ) -> Result<Vec<LibraryHeapTagEntry>, LibraryError> {
+    ) -> Result<Vec<HeapTagEntry>, LibraryError> {
         self.runtime
             .query_heaps_by_tags(tags)
             .await
-            .map(|entries| {
-                entries
-                    .into_iter()
-                    .map(|entry| LibraryHeapTagEntry {
-                        heap: entry.heap,
-                        tags: entry.tags,
-                    })
-                    .collect()
-            })
             .map_err(operation_message)
     }
 
-    pub async fn fs_list_labels(&self) -> Result<Vec<LibraryFsLabel>, LibraryError> {
-        self.runtime
-            .fs_list_labels()
-            .await
-            .map(|labels| labels.into_iter().map(LibraryFsLabel::from).collect())
-            .map_err(operation_message)
+    pub async fn fs_list_labels(&self) -> Result<Vec<FsLabelView>, LibraryError> {
+        self.runtime.fs_list_labels().await.map_err(operation_message)
     }
 
     pub async fn fs_resolve_label(&self, name: String) -> Result<Option<String>, LibraryError> {
@@ -867,7 +751,7 @@ impl McpJsLibrary {
         &self,
         name: String,
         limit: Option<u64>,
-    ) -> Result<Vec<LibraryFsRefLogEntry>, LibraryError> {
+    ) -> Result<Vec<FsRefLogView>, LibraryError> {
         let limit =
             limit
                 .map(usize::try_from)
@@ -878,12 +762,6 @@ impl McpJsLibrary {
         self.runtime
             .fs_label_log(&name, limit)
             .await
-            .map(|entries| {
-                entries
-                    .into_iter()
-                    .map(LibraryFsRefLogEntry::from)
-                    .collect()
-            })
             .map_err(operation_message)
     }
 
@@ -894,11 +772,10 @@ impl McpJsLibrary {
         expected: Option<String>,
         force: bool,
         message: Option<String>,
-    ) -> Result<LibraryFsPushResult, LibraryError> {
+    ) -> Result<FsPushOutcome, LibraryError> {
         self.runtime
             .fs_push(&label, &ca_id, expected, force, message)
             .await
-            .map(LibraryFsPushResult::from)
             .map_err(operation_message)
     }
 
@@ -920,17 +797,11 @@ impl McpJsLibrary {
         ours: String,
         theirs: String,
         base: Option<String>,
-        prefer: Option<LibraryFsMergePreference>,
-    ) -> Result<LibraryFsMergeResult, LibraryError> {
-        let prefer = match prefer {
-            Some(LibraryFsMergePreference::Ours) => crate::engine::fs_merge::Prefer::Ours,
-            Some(LibraryFsMergePreference::Theirs) => crate::engine::fs_merge::Prefer::Theirs,
-            None => crate::engine::fs_merge::Prefer::None,
-        };
+        prefer: Prefer,
+    ) -> Result<FsMergeResult, LibraryError> {
         self.runtime
             .fs_merge(&ours, &theirs, base, prefer)
             .await
-            .map(LibraryFsMergeResult::from)
             .map_err(operation_message)
     }
 
@@ -1127,124 +998,6 @@ impl McpJsLibrary {
 
     pub fn run_js(&self, code: impl Into<String>) -> RunJsRequest<'_> {
         self.runtime.run_js(code)
-    }
-}
-
-impl From<FsLabelView> for LibraryFsLabel {
-    fn from(label: FsLabelView) -> Self {
-        Self {
-            name: label.name,
-            ca_id: label.ca_id,
-        }
-    }
-}
-
-impl From<FsRefLogView> for LibraryFsRefLogEntry {
-    fn from(entry: FsRefLogView) -> Self {
-        Self {
-            at: entry.at,
-            from: entry.from,
-            to: entry.to,
-            op: entry.op,
-            message: entry.message,
-        }
-    }
-}
-
-impl From<FsPushOutcome> for LibraryFsPushResult {
-    fn from(outcome: FsPushOutcome) -> Self {
-        match outcome {
-            FsPushOutcome::Advanced { label, ca_id } => Self {
-                status: "advanced".to_string(),
-                label,
-                ca_id: Some(ca_id),
-                current: None,
-            },
-            FsPushOutcome::Rejected { label, current } => Self {
-                status: "rejected".to_string(),
-                label,
-                ca_id: None,
-                current,
-            },
-        }
-    }
-}
-
-impl From<FsMergeConflictView> for LibraryFsMergeConflict {
-    fn from(conflict: FsMergeConflictView) -> Self {
-        Self {
-            path: conflict.path,
-            base: conflict.base,
-            ours: conflict.ours,
-            theirs: conflict.theirs,
-            kind: conflict.kind,
-            markers: conflict.markers,
-            diff_ours: conflict.diff_ours,
-            diff_theirs: conflict.diff_theirs,
-        }
-    }
-}
-
-impl From<FsMergeResult> for LibraryFsMergeResult {
-    fn from(result: FsMergeResult) -> Self {
-        match result {
-            FsMergeResult::Merged { ca_id } => Self {
-                status: "merged".to_string(),
-                ca_id: Some(ca_id),
-                conflicts: Vec::new(),
-            },
-            FsMergeResult::Conflict { conflicts } => Self {
-                status: "conflict".to_string(),
-                ca_id: None,
-                conflicts: conflicts
-                    .into_iter()
-                    .map(LibraryFsMergeConflict::from)
-                    .collect(),
-            },
-        }
-    }
-}
-
-impl From<EngineExecutionInfo> for LibraryExecutionInfo {
-    fn from(info: EngineExecutionInfo) -> Self {
-        Self {
-            execution_id: info.id,
-            status: info.status,
-            result: info.result,
-            heap: info.heap,
-            fs: info.fs,
-            error: info.error,
-            started_at: info.started_at,
-            completed_at: info.completed_at,
-        }
-    }
-}
-
-impl From<EngineExecutionSummary> for LibraryExecutionSummary {
-    fn from(summary: EngineExecutionSummary) -> Self {
-        Self {
-            execution_id: summary.id,
-            status: summary.status,
-            started_at: summary.started_at,
-            completed_at: summary.completed_at,
-        }
-    }
-}
-
-impl From<EngineConsoleOutputPage> for LibraryExecutionOutput {
-    fn from(page: EngineConsoleOutputPage) -> Self {
-        Self {
-            data: page.data,
-            start_line: page.start_line,
-            end_line: page.end_line,
-            next_line_offset: page.next_line_offset,
-            total_lines: page.total_lines,
-            start_byte: page.start_byte,
-            end_byte: page.end_byte,
-            next_byte_offset: page.next_byte_offset,
-            total_bytes: page.total_bytes,
-            has_more: page.has_more,
-        }
     }
 }
 
@@ -1706,8 +1459,13 @@ mod tests {
                 Some("advance".to_string()),
             ))
             .unwrap();
-        assert_eq!(pushed.status, "advanced");
-        assert_eq!(pushed.ca_id, Some(second));
+        match pushed {
+            FsPushOutcome::Advanced { label, ca_id } => {
+                assert_eq!(label, "main");
+                assert_eq!(ca_id, second);
+            }
+            other => panic!("expected an advanced push, got {other:?}"),
+        }
         assert_eq!(
             runtime
                 .block_on(library.fs_label_log("main".to_string(), None))

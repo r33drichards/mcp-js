@@ -394,14 +394,14 @@ fn refop_str(op: fs_labels::RefOp) -> &'static str {
 }
 
 /// A label and its current head CA id (hex), for API/CLI responses.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, uniffi::Record)]
 pub struct FsLabelView {
     pub name: String,
     pub ca_id: String,
 }
 
 /// One reflog entry, hex-rendered, for API/CLI responses.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, uniffi::Record)]
 pub struct FsRefLogView {
     pub at: i64,
     pub from: Option<String>,
@@ -413,7 +413,7 @@ pub struct FsRefLogView {
 }
 
 /// Outcome of an [`Engine::fs_push`].
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, uniffi::Enum)]
 #[serde(tag = "status", rename_all = "lowercase")]
 pub enum FsPushOutcome {
     /// The label now points at `ca_id`.
@@ -426,7 +426,7 @@ pub enum FsPushOutcome {
 }
 
 /// Result of an [`Engine::fs_merge`].
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, uniffi::Enum)]
 #[serde(tag = "status", rename_all = "lowercase")]
 pub enum FsMergeResult {
     /// A clean merge; the new snapshot has this CA id.
@@ -439,7 +439,7 @@ pub enum FsMergeResult {
 /// file is present on that side, or `null` when it is absent (delete). For text
 /// files the response also carries diff3 conflict markers and unified diffs so
 /// the caller can review and resolve at line level.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, uniffi::Record)]
 pub struct FsMergeConflictView {
     pub path: String,
     pub base: Option<String>,
