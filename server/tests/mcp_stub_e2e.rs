@@ -328,7 +328,11 @@ async fn proxy_namespace_end_to_end() -> Result<(), Box<dyn std::error::Error>> 
         console.log('RAW_ENVELOPE:' + ((r && r.content !== undefined && r.isError !== undefined) ? 'yes' : 'no'));
         console.log('TOOLS:' + JSON.stringify(mcp.tools('upstream').map(t => t.name)));
         console.log('HAS_RUNJS:' + ('run_js' in mcp.upstream));
-        console.log('KEYS_NONEMPTY:' + (Object.keys(mcp.upstream).length > 0));
+        console.log('KEYS_EXACT:' + Object.keys(mcp.upstream).includes('run_js'));
+        console.log('THEN_UNDEF:' + (mcp.upstream.then === undefined));
+        console.log('TOSTRING:' + String(mcp.upstream).startsWith('[mcp server upstream'));
+        const r2 = await mcp.upstream.list_executions({});
+        console.log('REPEAT_CALL:' + (typeof r2 === 'object'));
         console.log('SERVERS:' + JSON.stringify(mcp.servers));
         try { mcp.callTool('upstream', 'run_js', {}); console.log('CALLTOOL_TRAP:none'); }
         catch (e) { console.log('CALLTOOL_TRAP:' + e.message); }
@@ -355,7 +359,15 @@ async fn proxy_namespace_end_to_end() -> Result<(), Box<dyn std::error::Error>> 
     // Live catalog introspection.
     assert!(output.contains("run_js"), "tools() should list run_js: {}", output);
     assert!(output.contains("HAS_RUNJS:true"), "output: {}", output);
-    assert!(output.contains("KEYS_NONEMPTY:true"), "output: {}", output);
+    // Object.keys returns exact tool names (complete introspection: every
+    // listed key is invokable via mcp[server][key]).
+    assert!(output.contains("KEYS_EXACT:true"), "output: {}", output);
+    // `then` never resolves so the namespace is not thenable, and toString
+    // still introspects when no tool shadows it.
+    assert!(output.contains("THEN_UNDEF:true"), "output: {}", output);
+    assert!(output.contains("TOSTRING:true"), "output: {}", output);
+    // Second dispatch exercises the generation-cached catalog path.
+    assert!(output.contains("REPEAT_CALL:true"), "output: {}", output);
     assert!(output.contains("upstream"), "servers should list upstream: {}", output);
     // Migration traps.
     assert!(output.contains("CALLTOOL_TRAP:mcp.callTool() was removed"), "output: {}", output);

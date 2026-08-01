@@ -93,7 +93,66 @@ impl ToolInfo {
 /// connect, on reconnect, and when a downstream emits
 /// `notifications/tools/list_changed`; read by every listing, stub, and
 /// JS-proxy dispatch path, so the sandbox always sees the current tool set.
-type ToolCatalog = Arc<std::sync::RwLock<HashMap<String, Vec<Tool>>>>;
+///
+/// Every write bumps `generation`, which the JS wrapper polls (a cheap
+/// scalar op) to cache parsed tool lists between catalog changes instead of
+/// paying a JSON round-trip on every proxy property access.
+pub struct Catalog {
+    tools: std::sync::RwLock<HashMap<String, Vec<Tool>>>,
+    generation: std::sync::atomic::AtomicU64,
+}
+
+impl Catalog {
+    fn new(tools: HashMap<String, Vec<Tool>>) -> Self {
+        // Seed the counter from wall-clock nanos, truncated to stay exactly
+        // representable as an f64 for JS. A fixed seed (e.g. 0) would let a
+        // heap snapshot from a previous process carry a cache whose
+        // generation aliases this process's sequence; a time seed makes
+        // that practically impossible.
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0)
+            & ((1 << 50) - 1);
+        Self {
+            tools: std::sync::RwLock::new(tools),
+            generation: std::sync::atomic::AtomicU64::new(seed),
+        }
+    }
+
+    /// Replace one server's tool list and bump the generation. Recovers from
+    /// a poisoned lock (the map is only ever wholesale-inserted into, so the
+    /// data can't be left half-written) rather than dropping the update.
+    fn set(&self, server: &str, tools: Vec<Tool>) {
+        let mut guard = match self.tools.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!("MCP tool catalog lock poisoned; recovering and applying update");
+                poisoned.into_inner()
+            }
+        };
+        guard.insert(server.to_string(), tools);
+        self.generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Read access to the catalog, recovering from a poisoned lock.
+    fn read(&self) -> std::sync::RwLockReadGuard<'_, HashMap<String, Vec<Tool>>> {
+        match self.tools.read() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!("MCP tool catalog lock poisoned; recovering for read");
+                poisoned.into_inner()
+            }
+        }
+    }
+
+    fn generation(&self) -> u64 {
+        self.generation.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+type ToolCatalog = Arc<Catalog>;
 
 /// Client-side handler installed on every downstream connection. Its only job
 /// is catalog freshness: when the downstream emits
@@ -115,9 +174,7 @@ impl ClientHandler for CatalogClientHandler {
                     self.server_name,
                     tools.len()
                 );
-                if let Ok(mut catalog) = self.catalog.write() {
-                    catalog.insert(self.server_name.clone(), tools);
-                }
+                self.catalog.set(&self.server_name, tools);
             }
             Err(e) => tracing::warn!(
                 "MCP server '{}' sent tools/list_changed but re-listing failed: {} \
@@ -173,9 +230,7 @@ async fn is_healthy(peer: &Peer<RoleClient>) -> bool {
 /// have a different tool set.
 async fn reconnect(server: &ServerConn) -> Result<(), String> {
     let fresh = connect_one(&server.config, &server.catalog).await?;
-    if let Ok(mut catalog) = server.catalog.write() {
-        catalog.insert(server.config.name.clone(), fresh.tools.clone());
-    }
+    server.catalog.set(&server.config.name, fresh.tools.clone());
     let mut live = server.live.write().await;
     live.keep_alive.abort();
     live.peer = fresh.peer;
@@ -283,7 +338,7 @@ impl McpClientManager {
     pub async fn connect(configs: Vec<McpServerConfig>) -> Result<Self, String> {
         validate_server_names(&configs)?;
 
-        let catalog: ToolCatalog = Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let catalog: ToolCatalog = Arc::new(Catalog::new(HashMap::new()));
         let mut servers = HashMap::new();
 
         for config in configs {
@@ -300,10 +355,7 @@ impl McpClientManager {
             }
 
             let name = config.name.clone();
-            catalog
-                .write()
-                .expect("tool catalog lock poisoned")
-                .insert(name.clone(), connected.tools.clone());
+            catalog.set(&name, connected.tools.clone());
             let server = Arc::new(ServerConn {
                 config,
                 catalog: catalog.clone(),
@@ -345,7 +397,7 @@ impl McpClientManager {
     #[cfg(test)]
     pub fn from_tools_for_test(tools_by_server: HashMap<String, Vec<Tool>>) -> Self {
         Self {
-            tools_by_server: Arc::new(std::sync::RwLock::new(tools_by_server)),
+            tools_by_server: Arc::new(Catalog::new(tools_by_server)),
             servers: Arc::new(HashMap::new()),
             stub_config: StubConfig::default(),
             runtime: None,
@@ -356,28 +408,23 @@ impl McpClientManager {
     /// simulating a `tools/list_changed` refresh.
     #[cfg(test)]
     pub fn set_tools_for_test(&self, server: &str, tools: Vec<Tool>) {
-        self.tools_by_server
-            .write()
-            .expect("tool catalog lock poisoned")
-            .insert(server.to_string(), tools);
+        self.tools_by_server.set(server, tools);
     }
 
     /// List connected server names.
     pub fn server_names(&self) -> Vec<String> {
-        self.tools_by_server
-            .read()
-            .expect("tool catalog lock poisoned")
-            .keys()
-            .cloned()
-            .collect()
+        self.tools_by_server.read().keys().cloned().collect()
+    }
+
+    /// Current catalog generation. Bumped on every catalog write; the JS
+    /// wrapper polls this to invalidate its cached tool lists.
+    pub fn catalog_generation(&self) -> u64 {
+        self.tools_by_server.generation()
     }
 
     /// List tools, optionally filtered by server name.
     pub fn list_tools(&self, server_name: Option<&str>) -> Result<Vec<ToolInfo>, String> {
-        let catalog = self
-            .tools_by_server
-            .read()
-            .expect("tool catalog lock poisoned");
+        let catalog = self.tools_by_server.read();
         match server_name {
             Some(name) => {
                 let tools = catalog.get(name).ok_or_else(|| {
@@ -410,10 +457,7 @@ impl McpClientManager {
         if !self.stub_config.enabled {
             return Vec::new();
         }
-        let catalog = self
-            .tools_by_server
-            .read()
-            .expect("tool catalog lock poisoned");
+        let catalog = self.tools_by_server.read();
         let mut out = Vec::new();
         for (server, tools) in catalog.iter() {
             for tool in tools {
@@ -438,10 +482,7 @@ impl McpClientManager {
         }
         let (server, tool) = parse_stub_tool_name(&self.stub_config.prefix, name)?;
         {
-            let catalog = self
-                .tools_by_server
-                .read()
-                .expect("tool catalog lock poisoned");
+            let catalog = self.tools_by_server.read();
             let tools = catalog.get(&server)?;
             if !tools.iter().any(|t| t.name.as_ref() == tool) {
                 return None;
@@ -859,6 +900,17 @@ fn op_mcp_list_tools(
         .map_err(|e| JsErrorBox::generic(format!("mcp.tools: serialization error: {}", e)))
 }
 
+/// Sync op: the catalog generation counter. Bumped on every catalog write
+/// (connect, reconnect, tools/list_changed), so the JS wrapper can cache
+/// parsed tool lists and refetch only when this scalar changes.
+#[op2(fast)]
+fn op_mcp_catalog_generation(state: &mut OpState) -> f64 {
+    state
+        .try_borrow::<McpConfig>()
+        .map(|config| config.client_manager.catalog_generation() as f64)
+        .unwrap_or(0.0)
+}
+
 /// Sync op: list connected server names.
 #[op2]
 #[string]
@@ -876,7 +928,12 @@ fn op_mcp_list_servers(state: &mut OpState) -> Result<String, JsErrorBox> {
 
 deno_core::extension!(
     mcp_client_ext,
-    ops = [op_mcp_call_tool, op_mcp_list_tools, op_mcp_list_servers],
+    ops = [
+        op_mcp_call_tool,
+        op_mcp_list_tools,
+        op_mcp_list_servers,
+        op_mcp_catalog_generation
+    ],
 );
 
 /// Create the MCP client extension for use in `RuntimeOptions::extensions`.
@@ -929,9 +986,24 @@ const MCP_JS_WRAPPER: &str = r#"
         return s;
     }
 
+    // Parsed tool lists, cached per server and invalidated whenever the
+    // Rust-side catalog generation changes (reconnect, tools/list_changed).
+    // Proxy traps hit this on every property access; without the cache each
+    // hit would pay a full catalog JSON round-trip through the op layer.
+    var toolsCache = { gen: null, byServer: Object.create(null) };
+
     function listToolsFor(serverName) {
-        var raw = Deno.core.ops.op_mcp_list_tools(serverName || '');
-        return JSON.parse(raw);
+        var gen = Deno.core.ops.op_mcp_catalog_generation();
+        if (gen !== toolsCache.gen) {
+            toolsCache.gen = gen;
+            toolsCache.byServer = Object.create(null);
+        }
+        var key = serverName || '';
+        var hit = toolsCache.byServer[key];
+        if (hit) return hit;
+        var parsed = JSON.parse(Deno.core.ops.op_mcp_list_tools(key));
+        toolsCache.byServer[key] = parsed;
+        return parsed;
     }
 
     // Unwrap a raw result envelope into a plain value:
@@ -967,11 +1039,16 @@ const MCP_JS_WRAPPER: &str = r#"
         };
     }
 
-    // Property names that must never resolve to a tool invoker. `then` is
-    // load-bearing: returning a function would make the namespace thenable
-    // and break `await mcp.<server>`. Tools that share one of these names
-    // are still listed by mcp.tools() but cannot be dot-invoked.
-    var SKIP_PROPS = {
+    // Object-protocol property names that fall back to `undefined` (instead
+    // of the unknown-tool thrower) when no tool matches, so generic code —
+    // console printers, JSON.stringify, duck-type checks — behaves sanely on
+    // a namespace. A real tool with one of these names still wins: the get
+    // trap checks the catalog first. The one exception is `then`, handled
+    // separately before the catalog lookup: resolving it to a function would
+    // make the namespace thenable, and `await mcp.<server>` (or returning a
+    // namespace from an async function) would silently invoke the tool. A
+    // tool literally named "then" is reachable only via mcp.tools() metadata.
+    var PROTOCOL_PROPS = {
         then: true, catch: true, finally: true,
         constructor: true, prototype: true, __proto__: true,
         valueOf: true, inspect: true,
@@ -992,6 +1069,9 @@ const MCP_JS_WRAPPER: &str = r#"
         return new Proxy({}, {
             get: function(_t, prop) {
                 if (typeof prop !== 'string') return undefined;
+                if (prop === 'then') return undefined; // never thenable, see PROTOCOL_PROPS
+                var found = findTool(serverName, prop);
+                if (found.tool) return makeInvoker(serverName, found.tool.name);
                 if (prop === 'toString') {
                     return function() {
                         var names = listToolsFor(serverName).map(function(t) { return t.name; });
@@ -1006,9 +1086,7 @@ const MCP_JS_WRAPPER: &str = r#"
                         };
                     };
                 }
-                if (SKIP_PROPS[prop]) return undefined;
-                var found = findTool(serverName, prop);
-                if (found.tool) return makeInvoker(serverName, found.tool.name);
+                if (PROTOCOL_PROPS[prop]) return undefined;
                 if (found.ambiguous) {
                     var originals = found.ambiguous.map(function(t) { return t.name; });
                     throw new Error(
@@ -1024,14 +1102,20 @@ const MCP_JS_WRAPPER: &str = r#"
             },
             has: function(_t, prop) {
                 if (typeof prop !== 'string') return false;
+                if (prop === 'then') return false; // mirrors the get trap
                 return !!findTool(serverName, prop).tool;
             },
+            // Exact tool names, so Object.keys is complete introspection:
+            // every listed key is invokable via mcp[server][key](args).
+            // Sanitized spellings are get-trap sugar and never enumerated
+            // (two tools may sanitize to the same identifier). The seen-set
+            // guards the proxy no-duplicates invariant against a misbehaving
+            // downstream that lists one tool name twice.
             ownKeys: function(_t) {
                 var keys = [];
-                var seen = {};
+                var seen = Object.create(null);
                 listToolsFor(serverName).forEach(function(t) {
-                    var k = sanitize(t.name);
-                    if (seen[k]) k = t.name; // sanitized-name collision: keep the original spelling
+                    var k = String(t.name);
                     if (!seen[k]) { seen[k] = true; keys.push(k); }
                 });
                 return keys;
@@ -1062,7 +1146,8 @@ const MCP_JS_WRAPPER: &str = r#"
          * @returns {Array<{server: string, name: string, description: string|null, inputSchema: object}>}
          */
         tools: function(serverName) {
-            return listToolsFor(serverName);
+            // Deep-copy so callers can't mutate the shared trap-path cache.
+            return JSON.parse(JSON.stringify(listToolsFor(serverName)));
         },
 
         // Migration traps for the removed v1 API.
@@ -1433,5 +1518,22 @@ mod tests {
         // Newly appeared tool is now stub-dispatchable and advertised.
         assert!(mgr.stub_call_response("runjs__github__close_issue", None).is_some());
         assert_eq!(mgr.stub_tools().len(), 2);
+    }
+
+    #[test]
+    fn catalog_generation_bumps_on_every_write() {
+        // The JS wrapper caches parsed tool lists keyed on this counter, so
+        // any catalog write must advance it or the sandbox would serve a
+        // stale catalog forever.
+        let mut by_server = HashMap::new();
+        by_server.insert("github".to_string(), vec![tool("create_issue", "doc")]);
+        let mgr = McpClientManager::from_tools_for_test(by_server);
+
+        let g0 = mgr.catalog_generation();
+        mgr.set_tools_for_test("github", vec![tool("close_issue", "doc")]);
+        let g1 = mgr.catalog_generation();
+        assert!(g1 > g0, "write must bump generation ({} -> {})", g0, g1);
+        mgr.set_tools_for_test("github", Vec::new());
+        assert!(mgr.catalog_generation() > g1, "every write bumps, even to empty");
     }
 }
