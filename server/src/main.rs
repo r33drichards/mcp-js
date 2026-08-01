@@ -656,7 +656,7 @@ async fn async_main(cli: Cli) -> Result<()> {
         let manager = engine::mcp_client::McpClientManager::connect(mcp_server_configs).await
             .map_err(|e| anyhow::anyhow!("MCP server connection failed: {}", e))?
             .with_stub_config(stub_config);
-        tracing::info!("All MCP servers connected. JS code can use mcp.callTool(), mcp.listTools(), mcp.servers");
+        tracing::info!("All MCP servers connected. JS code can use mcp.<server>.<tool>(args), mcp.tools(), mcp.servers");
         let engine = engine.with_mcp_client_manager(manager);
         if let Some(chain) = mcp_tools_policy_chain {
             tracing::info!("MCP tools policy: ENABLED");

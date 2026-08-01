@@ -269,7 +269,7 @@ pub struct PoliciesConfig {
     /// policy input is `{ "op": "pull"|"push"|"reset"|"label", "label": "...",
     /// "ca_id": "..." }`.
     pub fs_snapshot: Option<OperationPolicies>,
-    /// Policy chain for MCP tool calls (`mcp.callTool()`).
+    /// Policy chain for MCP tool calls from JS (`mcp.<server>.<tool>()`).
     pub mcp_tools: Option<OperationPolicies>,
     /// Policy chain for subprocess execution (`Deno.Command`, `child_process.exec`).
     pub subprocess: Option<OperationPolicies>,

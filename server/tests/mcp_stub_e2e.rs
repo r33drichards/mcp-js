@@ -9,7 +9,8 @@
 //! The outer server should advertise `runjs__upstream__run_js` (and the other
 //! upstream tools) as stubs in `tools/list`. Calling one of those stubs
 //! should return an instructional text result telling the caller to invoke
-//! the tool from JavaScript via `run_js` + `mcp.callTool(...)`.
+//! the tool from JavaScript via `run_js` + `await mcp.upstream.<tool>(args)`.
+//! Also exercises the proxy namespaces end-to-end from inside the sandbox.
 
 use serde_json::{json, Value};
 use std::process::Stdio;
@@ -111,6 +112,72 @@ impl OuterServer {
         Ok(())
     }
 
+    /// Send a run_js tool call on the OUTER server and poll get_execution
+    /// until it finishes. Returns the completed execution info.
+    async fn run_js_and_wait(
+        &mut self,
+        id: u64,
+        code: &str,
+    ) -> Result<Value, Box<dyn std::error::Error>> {
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/call",
+            "params": {
+                "name": "run_js",
+                "arguments": { "code": code }
+            }
+        });
+        let response = self.send(msg).await?;
+        let exec_id = common::extract_execution_id(&response)
+            .ok_or("run_js response should contain execution_id")?;
+
+        for i in 0..200 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let poll = json!({
+                "jsonrpc": "2.0",
+                "id": 10000 + id * 1000 + i,
+                "method": "tools/call",
+                "params": {
+                    "name": "get_execution",
+                    "arguments": { "execution_id": exec_id }
+                }
+            });
+            let poll_resp = self.send(poll).await?;
+            if let Some(mut info) = common::extract_execution_info(&poll_resp) {
+                match info["status"].as_str() {
+                    Some("completed") | Some("failed") | Some("timed_out") | Some("cancelled") => {
+                        info["execution_id"] = json!(exec_id);
+                        return Ok(info);
+                    }
+                    _ => continue,
+                }
+            }
+        }
+        Err("Execution did not complete within polling timeout".into())
+    }
+
+    /// Fetch console output for a completed execution on the outer server.
+    async fn get_console_output(
+        &mut self,
+        id: u64,
+        execution_id: &str,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let msg = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/call",
+            "params": {
+                "name": "get_execution_output",
+                "arguments": { "execution_id": execution_id, "line_limit": 10000 }
+            }
+        });
+        let response = self.send(msg).await?;
+        Ok(common::extract_execution_info(&response)
+            .and_then(|info| info["data"].as_str().map(String::from))
+            .unwrap_or_default())
+    }
+
     async fn stop(mut self) {
         let _ = self.child.kill().await;
     }
@@ -176,7 +243,7 @@ async fn outer_server_advertises_upstream_tools_as_stubs() -> Result<(), Box<dyn
     );
     let desc = stub["description"].as_str().unwrap_or_default();
     assert!(desc.contains("run_js"), "description: {}", desc);
-    assert!(desc.contains("mcp.callTool"), "description: {}", desc);
+    assert!(desc.contains("await mcp.upstream.run_js"), "description: {}", desc);
 
     server.stop().await;
     common::cleanup_heap_dir(&outer_heap);
@@ -213,9 +280,7 @@ async fn calling_a_stub_returns_run_js_instructions() -> Result<(), Box<dyn std:
         .as_str()
         .unwrap_or_default()
         .to_string();
-    assert!(text.contains("mcp.callTool"), "stub call text: {}", text);
-    assert!(text.contains("upstream"), "stub call text: {}", text);
-    assert!(text.contains("run_js"), "stub call text: {}", text);
+    assert!(text.contains("await mcp.upstream.run_js("), "stub call text: {}", text);
     assert!(text.contains("return 1 + 1"), "stub call text should echo args: {}", text);
 
     // Sanity: a non-stub native tool still dispatches normally.
@@ -236,7 +301,68 @@ async fn calling_a_stub_returns_run_js_instructions() -> Result<(), Box<dyn std:
         .as_str()
         .unwrap_or_default()
         .to_string();
-    assert!(!text.contains("mcp.callTool"), "native list_executions should not return stub text: {}", text);
+    assert!(!text.contains("This tool is a stub"), "native list_executions should not return stub text: {}", text);
+
+    server.stop().await;
+    common::cleanup_heap_dir(&outer_heap);
+    common::cleanup_heap_dir(&upstream_heap);
+    Ok(())
+}
+
+#[tokio::test]
+async fn proxy_namespace_end_to_end() -> Result<(), Box<dyn std::error::Error>> {
+    let outer_heap = common::create_temp_heap_dir() + "-outer-proxy";
+    let upstream_heap = common::create_temp_heap_dir() + "-upstream-proxy";
+    std::fs::create_dir_all(&outer_heap).ok();
+    std::fs::create_dir_all(&upstream_heap).ok();
+
+    let mut server = OuterServer::start(&outer_heap, &upstream_heap).await?;
+    server.initialize().await?;
+
+    // Exercise the whole JS surface in one execution: proxy dispatch with
+    // result unwrapping, live catalog introspection, `in` / Object.keys
+    // traps, migration traps for the removed v1 API, and unknown-tool errors.
+    let code = r#"
+        const r = await mcp.upstream.list_executions({});
+        console.log('TYPE:' + (r === null ? 'null' : typeof r));
+        console.log('RAW_ENVELOPE:' + ((r && r.content !== undefined && r.isError !== undefined) ? 'yes' : 'no'));
+        console.log('TOOLS:' + JSON.stringify(mcp.tools('upstream').map(t => t.name)));
+        console.log('HAS_RUNJS:' + ('run_js' in mcp.upstream));
+        console.log('KEYS_NONEMPTY:' + (Object.keys(mcp.upstream).length > 0));
+        console.log('SERVERS:' + JSON.stringify(mcp.servers));
+        try { mcp.callTool('upstream', 'run_js', {}); console.log('CALLTOOL_TRAP:none'); }
+        catch (e) { console.log('CALLTOOL_TRAP:' + e.message); }
+        try { mcp.listTools(); console.log('LISTTOOLS_TRAP:none'); }
+        catch (e) { console.log('LISTTOOLS_TRAP:' + e.message); }
+        try { await mcp.upstream.definitely_not_a_tool({}); console.log('UNKNOWN:none'); }
+        catch (e) { console.log('UNKNOWN:' + e.message); }
+    "#;
+
+    let info = server.run_js_and_wait(2, code).await?;
+    assert_eq!(
+        info["status"].as_str(),
+        Some("completed"),
+        "execution should complete: {}",
+        serde_json::to_string_pretty(&info).unwrap_or_default(),
+    );
+    let exec_id = info["execution_id"].as_str().unwrap().to_string();
+    let output = server.get_console_output(3, &exec_id).await?;
+
+    // Unwrap ladder: list_executions returns JSON text, so the proxy call
+    // resolves to a parsed object — not the raw {content, isError} envelope.
+    assert!(output.contains("TYPE:object"), "output: {}", output);
+    assert!(output.contains("RAW_ENVELOPE:no"), "output: {}", output);
+    // Live catalog introspection.
+    assert!(output.contains("run_js"), "tools() should list run_js: {}", output);
+    assert!(output.contains("HAS_RUNJS:true"), "output: {}", output);
+    assert!(output.contains("KEYS_NONEMPTY:true"), "output: {}", output);
+    assert!(output.contains("upstream"), "servers should list upstream: {}", output);
+    // Migration traps.
+    assert!(output.contains("CALLTOOL_TRAP:mcp.callTool() was removed"), "output: {}", output);
+    assert!(output.contains("LISTTOOLS_TRAP:mcp.listTools() was replaced by mcp.tools("), "output: {}", output);
+    // Unknown-tool errors name the missing tool and list what exists.
+    assert!(output.contains("UNKNOWN:mcp.upstream has no tool \"definitely_not_a_tool\""), "output: {}", output);
+    assert!(output.contains("Available tools:"), "output: {}", output);
 
     server.stop().await;
     common::cleanup_heap_dir(&outer_heap);
@@ -339,7 +465,7 @@ async fn mcp_stubs_disabled_flag_hides_stubs() -> Result<(), Box<dyn std::error:
         .to_string();
     let err = resp["error"]["message"].as_str().unwrap_or_default().to_string();
     assert!(
-        !text.contains("mcp.callTool"),
+        !text.contains("This tool is a stub"),
         "should not return stub instructions when stubs disabled: text={} err={}",
         text,
         err,

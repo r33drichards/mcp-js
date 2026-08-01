@@ -429,7 +429,7 @@ pub struct Cli {
     /// at least one --mcp-server is configured), an external client of
     /// MCPJS can discover those tools via tools/list and tool search;
     /// calling a stub returns instructional text telling the caller to
-    /// invoke the tool from JavaScript via run_js + mcp.callTool(...).
+    /// invoke the tool from JavaScript via run_js + `await mcp.<server>.<tool>(args)`.
     /// Pass `--mcp-stubs false` to disable.
     #[arg(long = "mcp-stubs", env = "MCP_V8_MCP_STUBS", default_value = "true", num_args = 1, help_heading = "MCP Server Module")]
     pub mcp_stubs: bool,
@@ -582,7 +582,7 @@ fn fetch_header_grammar() -> Grammar {
 fn mcp_server_grammar() -> Grammar {
     Grammar {
         summary: "Connect to an external MCP server as a module; JS can call its tools via \
-                  the `mcp` global (mcp.callTool, mcp.listTools, mcp.servers). Can be \
+                  the `mcp` global (mcp.<server>.<tool>(args), mcp.tools(), mcp.servers). Can be \
                   specified multiple times.",
         parts_label: "Transports",
         parts: vec![

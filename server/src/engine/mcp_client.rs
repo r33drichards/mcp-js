@@ -6,11 +6,21 @@
 //!
 //! JS API:
 //! ```js
-//! mcp.servers                              // string[] — connected server names
-//! mcp.listTools("server")                  // [{server, name, description, inputSchema}, ...]
-//! mcp.listTools()                          // all tools from all servers
-//! await mcp.callTool("server", "tool", {}) // {content: [...], isError: false} — throws McpToolError on error
+//! mcp.servers                                   // string[] — connected server names
+//! mcp.tools("server")                           // [{server, name, description, inputSchema}, ...]
+//! mcp.tools()                                   // all tools from all servers
+//! await mcp.github.list_issues({owner: "acme"}) // unwrapped result value — throws McpToolError on error
+//! await mcp[server][tool](args)                 // dynamic form of the same call
 //! ```
+//!
+//! Each `mcp.<server>` is a Proxy backed by the live tool catalog: property
+//! access dispatches by tool name (original or identifier-sanitized spelling)
+//! through `op_mcp_call_tool`, so a namespace captured in a heap snapshot
+//! never goes stale — behavior lives in the ops, not in the JS object.
+//! Results are unwrapped: `structuredContent` when present, otherwise
+//! all-text content is joined and JSON-parsed (falling back to the string),
+//! otherwise the raw content-block array is returned. Tool errors throw
+//! `McpToolError` carrying the raw envelope on `.result`.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -25,8 +35,8 @@ use deno_error::JsErrorBox;
 use serde::{Deserialize, Serialize};
 
 use rmcp::model::{CallToolRequestParams, CallToolResult, Content, Tool};
-use rmcp::service::Peer;
-use rmcp::RoleClient;
+use rmcp::service::{NotificationContext, Peer};
+use rmcp::{ClientHandler, RoleClient};
 
 // ── Configuration ────────────────────────────────────────────────────────
 
@@ -79,6 +89,46 @@ impl ToolInfo {
 
 // ── Connected server ─────────────────────────────────────────────────────
 
+/// Shared, live-updatable catalog of tools per downstream server. Written at
+/// connect, on reconnect, and when a downstream emits
+/// `notifications/tools/list_changed`; read by every listing, stub, and
+/// JS-proxy dispatch path, so the sandbox always sees the current tool set.
+type ToolCatalog = Arc<std::sync::RwLock<HashMap<String, Vec<Tool>>>>;
+
+/// Client-side handler installed on every downstream connection. Its only job
+/// is catalog freshness: when the downstream emits
+/// `notifications/tools/list_changed`, re-list its tools and swap them into
+/// the shared catalog. A failed re-list keeps the cached (stale but usable)
+/// list and logs a warning rather than erroring.
+#[derive(Clone)]
+struct CatalogClientHandler {
+    server_name: String,
+    catalog: ToolCatalog,
+}
+
+impl ClientHandler for CatalogClientHandler {
+    async fn on_tool_list_changed(&self, context: NotificationContext<RoleClient>) {
+        match context.peer.list_all_tools().await {
+            Ok(tools) => {
+                tracing::info!(
+                    "MCP server '{}' tool list changed: now {} tool(s)",
+                    self.server_name,
+                    tools.len()
+                );
+                if let Ok(mut catalog) = self.catalog.write() {
+                    catalog.insert(self.server_name.clone(), tools);
+                }
+            }
+            Err(e) => tracing::warn!(
+                "MCP server '{}' sent tools/list_changed but re-listing failed: {} \
+                 (keeping cached tool list)",
+                self.server_name,
+                e
+            ),
+        }
+    }
+}
+
 /// The result of a single `connect_one` handshake: a live peer, its tool list,
 /// and the task that holds the underlying RunningService alive.
 struct ConnectedMcpServer {
@@ -97,11 +147,13 @@ struct LiveConn {
     keep_alive: tokio::task::AbortHandle,
 }
 
-/// A named downstream server: the config needed to reconnect, plus the current
-/// live connection behind a lock so a background liveness task (or a failed
-/// `call_tool`) can replace it in place.
+/// A named downstream server: the config needed to reconnect, the shared tool
+/// catalog to refresh on reconnect, plus the current live connection behind a
+/// lock so a background liveness task (or a failed `call_tool`) can replace
+/// it in place.
 struct ServerConn {
     config: McpServerConfig,
+    catalog: ToolCatalog,
     live: RwLock<LiveConn>,
 }
 
@@ -116,9 +168,14 @@ async fn is_healthy(peer: &Peer<RoleClient>) -> bool {
 }
 
 /// Re-run the handshake for a server and swap in the fresh peer, aborting the
-/// stale RunningService. Tools are intentionally left as first-connect values.
+/// stale RunningService. The handshake re-lists the downstream's tools, so
+/// refresh the shared catalog with them — a restarted downstream may well
+/// have a different tool set.
 async fn reconnect(server: &ServerConn) -> Result<(), String> {
-    let fresh = connect_one(&server.config).await?;
+    let fresh = connect_one(&server.config, &server.catalog).await?;
+    if let Ok(mut catalog) = server.catalog.write() {
+        catalog.insert(server.config.name.clone(), fresh.tools.clone());
+    }
     let mut live = server.live.write().await;
     live.keep_alive.abort();
     live.peer = fresh.peer;
@@ -157,7 +214,7 @@ fn spawn_liveness(server: Arc<ServerConn>) {
 /// Configuration for the auto-generated MCP tool stubs that MCPJS exposes
 /// to its own clients on behalf of upstream servers. The default prefix
 /// `runjs__` makes it obvious to a calling agent that these tools execute
-/// indirectly through the JavaScript runtime (`run_js` + `mcp.callTool(...)`),
+/// indirectly through the JavaScript runtime (`run_js` + `await mcp.<server>.<tool>(args)`),
 /// rather than through MCPJS's normal tool dispatcher.
 #[derive(Debug, Clone)]
 pub struct StubConfig {
@@ -176,16 +233,41 @@ impl Default for StubConfig {
     }
 }
 
+/// Server names that collide with fixed properties of the JS `mcp` global
+/// (`mcp.servers`, `mcp.tools()`, and the removed-API migration traps).
+/// Rejected at startup so a server namespace can never shadow them.
+pub const RESERVED_SERVER_NAMES: &[&str] = &["servers", "tools", "callTool", "listTools"];
+
+/// Validate downstream server names: no duplicates, no reserved names.
+fn validate_server_names(configs: &[McpServerConfig]) -> Result<(), String> {
+    let mut seen = std::collections::HashSet::new();
+    for config in configs {
+        if RESERVED_SERVER_NAMES.contains(&config.name.as_str()) {
+            return Err(format!(
+                "MCP server name '{}' is reserved: it would collide with a property of the \
+                 JS `mcp` global. Rename the server. Reserved names: {}",
+                config.name,
+                RESERVED_SERVER_NAMES.join(", ")
+            ));
+        }
+        if !seen.insert(config.name.clone()) {
+            return Err(format!("Duplicate MCP server name: '{}'", config.name));
+        }
+    }
+    Ok(())
+}
+
 /// Manages connections to multiple MCP servers. Thread-safe and cloneable
 /// for sharing across V8 executions (stored in deno_core OpState).
 ///
-/// `tools_by_server` is the source of truth for tool listings (and the basis
-/// for the auto-generated MCP tool stubs that MCPJS exposes to its own
-/// clients). It is populated alongside `servers` during `connect()`, and can
-/// be populated independently for tests via `from_tools_for_test()`.
+/// `tools_by_server` is the live source of truth for tool listings (and the
+/// basis for the auto-generated MCP tool stubs that MCPJS exposes to its own
+/// clients). It is populated during `connect()`, refreshed on reconnect and
+/// on `tools/list_changed` notifications, and can be populated independently
+/// for tests via `from_tools_for_test()`.
 #[derive(Clone)]
 pub struct McpClientManager {
-    tools_by_server: Arc<HashMap<String, Vec<Tool>>>,
+    tools_by_server: ToolCatalog,
     servers: Arc<HashMap<String, Arc<ServerConn>>>,
     stub_config: StubConfig,
     /// The runtime that owns the server connections (captured at `connect()`,
@@ -199,12 +281,14 @@ pub struct McpClientManager {
 impl McpClientManager {
     /// Connect to all configured MCP servers. Fails fast if any connection fails.
     pub async fn connect(configs: Vec<McpServerConfig>) -> Result<Self, String> {
+        validate_server_names(&configs)?;
+
+        let catalog: ToolCatalog = Arc::new(std::sync::RwLock::new(HashMap::new()));
         let mut servers = HashMap::new();
-        let mut tools_by_server: HashMap<String, Vec<Tool>> = HashMap::new();
 
         for config in configs {
             tracing::info!("Connecting to MCP server '{}'...", config.name);
-            let connected = connect_one(&config).await?;
+            let connected = connect_one(&config, &catalog).await?;
 
             tracing::info!(
                 "MCP server '{}': {} tool(s) available",
@@ -215,13 +299,14 @@ impl McpClientManager {
                 tracing::info!("  - {}.{}", config.name, tool.name);
             }
 
-            if servers.contains_key(&config.name) {
-                return Err(format!("Duplicate MCP server name: '{}'", config.name));
-            }
             let name = config.name.clone();
-            tools_by_server.insert(name.clone(), connected.tools.clone());
+            catalog
+                .write()
+                .expect("tool catalog lock poisoned")
+                .insert(name.clone(), connected.tools.clone());
             let server = Arc::new(ServerConn {
                 config,
+                catalog: catalog.clone(),
                 live: RwLock::new(LiveConn {
                     peer: connected.peer,
                     keep_alive: connected._keep_alive,
@@ -235,7 +320,7 @@ impl McpClientManager {
         }
 
         Ok(Self {
-            tools_by_server: Arc::new(tools_by_server),
+            tools_by_server: catalog,
             servers: Arc::new(servers),
             stub_config: StubConfig::default(),
             runtime: Some(tokio::runtime::Handle::current()),
@@ -260,34 +345,53 @@ impl McpClientManager {
     #[cfg(test)]
     pub fn from_tools_for_test(tools_by_server: HashMap<String, Vec<Tool>>) -> Self {
         Self {
-            tools_by_server: Arc::new(tools_by_server),
+            tools_by_server: Arc::new(std::sync::RwLock::new(tools_by_server)),
             servers: Arc::new(HashMap::new()),
             stub_config: StubConfig::default(),
             runtime: None,
         }
     }
 
+    /// Test-only: replace one server's tool list in the live catalog,
+    /// simulating a `tools/list_changed` refresh.
+    #[cfg(test)]
+    pub fn set_tools_for_test(&self, server: &str, tools: Vec<Tool>) {
+        self.tools_by_server
+            .write()
+            .expect("tool catalog lock poisoned")
+            .insert(server.to_string(), tools);
+    }
+
     /// List connected server names.
     pub fn server_names(&self) -> Vec<String> {
-        self.tools_by_server.keys().cloned().collect()
+        self.tools_by_server
+            .read()
+            .expect("tool catalog lock poisoned")
+            .keys()
+            .cloned()
+            .collect()
     }
 
     /// List tools, optionally filtered by server name.
     pub fn list_tools(&self, server_name: Option<&str>) -> Result<Vec<ToolInfo>, String> {
+        let catalog = self
+            .tools_by_server
+            .read()
+            .expect("tool catalog lock poisoned");
         match server_name {
             Some(name) => {
-                let tools = self.tools_by_server.get(name).ok_or_else(|| {
+                let tools = catalog.get(name).ok_or_else(|| {
                     format!(
                         "MCP server '{}' not found. Available: {:?}",
                         name,
-                        self.server_names()
+                        catalog.keys().cloned().collect::<Vec<_>>()
                     )
                 })?;
                 Ok(tools.iter().map(|t| ToolInfo::from_tool(name, t)).collect())
             }
             None => {
                 let mut all = Vec::new();
-                for (name, tools) in self.tools_by_server.as_ref() {
+                for (name, tools) in catalog.iter() {
                     for tool in tools {
                         all.push(ToolInfo::from_tool(name, tool));
                     }
@@ -300,14 +404,18 @@ impl McpClientManager {
     /// Generate stub `Tool` definitions for every upstream tool. These are
     /// intended to be served by MCPJS's own MCP server so that an external
     /// agent can discover the tool via MCP tool-list/search but invoke it
-    /// through the JavaScript runtime (`run_js` → `mcp.callTool(...)`).
+    /// through the JavaScript runtime (`run_js` → `await mcp.<server>.<tool>(args)`).
     /// Returns an empty vec when stub exposure is disabled in the config.
     pub fn stub_tools(&self) -> Vec<Tool> {
         if !self.stub_config.enabled {
             return Vec::new();
         }
+        let catalog = self
+            .tools_by_server
+            .read()
+            .expect("tool catalog lock poisoned");
         let mut out = Vec::new();
-        for (server, tools) in self.tools_by_server.as_ref() {
+        for (server, tools) in catalog.iter() {
             for tool in tools {
                 out.push(make_stub_tool(&self.stub_config.prefix, server, tool));
             }
@@ -329,9 +437,15 @@ impl McpClientManager {
             return None;
         }
         let (server, tool) = parse_stub_tool_name(&self.stub_config.prefix, name)?;
-        let tools = self.tools_by_server.get(&server)?;
-        if !tools.iter().any(|t| t.name.as_ref() == tool) {
-            return None;
+        {
+            let catalog = self
+                .tools_by_server
+                .read()
+                .expect("tool catalog lock poisoned");
+            let tools = catalog.get(&server)?;
+            if !tools.iter().any(|t| t.name.as_ref() == tool) {
+                return None;
+            }
         }
         Some(CallToolResult::success(vec![Content::text(
             stub_call_instructions(&server, &tool, arguments),
@@ -382,7 +496,7 @@ impl McpClientManager {
                     // healthy the error is genuine; otherwise reconnect and retry
                     // once so a restarted downstream heals transparently.
                     if is_healthy(&peer).await {
-                        return Err(format!("mcp.callTool({}.{}): {}", server_name, tool_name, e));
+                        return Err(format!("mcp.{}.{}: {}", server_name, tool_name, e));
                     }
                     tracing::warn!(
                         "MCP server '{}' looks disconnected ({}); reconnecting and retrying",
@@ -391,14 +505,14 @@ impl McpClientManager {
                     );
                     reconnect(&server).await.map_err(|re| {
                         format!(
-                            "mcp.callTool({}.{}): reconnect failed: {}",
+                            "mcp.{}.{}: reconnect failed: {}",
                             server_name, tool_name, re
                         )
                     })?;
                     let peer = { server.live.read().await.peer.clone() };
                     peer.call_tool(make_req()).await.map_err(|e| {
                         format!(
-                            "mcp.callTool({}.{}): {} (after reconnect)",
+                            "mcp.{}.{}: {} (after reconnect)",
                             server_name, tool_name, e
                         )
                     })?
@@ -415,17 +529,25 @@ impl McpClientManager {
                 })
                 .collect();
 
-            Ok(serde_json::json!({
+            let mut response = serde_json::json!({
                 "content": content_json,
                 "isError": result.is_error.unwrap_or(false),
-            }))
+            });
+            // Per the MCP spec, structuredContent is the authoritative result
+            // when a tool declares an outputSchema; text content mirrors it
+            // for backward compatibility. Pass it through so the JS unwrap
+            // ladder can prefer it.
+            if let Some(sc) = result.structured_content {
+                response["structuredContent"] = sc;
+            }
+            Ok(response)
         };
 
         match &self.runtime {
             Some(rt) => rt
                 .spawn(call)
                 .await
-                .map_err(|e| format!("mcp.callTool: task join error: {e}"))?,
+                .map_err(|e| format!("mcp tool call: task join error: {e}"))?,
             None => call.await,
         }
     }
@@ -467,17 +589,44 @@ pub fn parse_stub_tool_name(prefix: &str, name: &str) -> Option<(String, String)
     Some((server.to_string(), tool.to_string()))
 }
 
+/// True when `s` is a valid JS identifier (dot-access safe).
+fn is_js_ident(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' || c == '$' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+}
+
+/// Render the canonical JS accessor for a server/tool pair: dot syntax when
+/// the names are identifier-safe (`mcp.github.create_issue`), bracket syntax
+/// otherwise (`mcp["my-server"]["my.tool"]`).
+pub fn js_accessor(server: &str, tool: &str) -> String {
+    let server_part = if is_js_ident(server) {
+        format!("mcp.{}", server)
+    } else {
+        format!("mcp[{:?}]", server)
+    };
+    if is_js_ident(tool) {
+        format!("{}.{}", server_part, tool)
+    } else {
+        format!("{}[{:?}]", server_part, tool)
+    }
+}
+
 /// Build a stub `Tool` mirroring an upstream tool's schema. The description
 /// is rewritten to make it clear the tool is invoked via `run_js`.
 pub fn make_stub_tool(prefix: &str, server: &str, tool: &Tool) -> Tool {
     let stub_name = stub_tool_name(prefix, server, &tool.name);
     let original_desc = tool.description.as_deref().unwrap_or("");
     let header = format!(
-        "[stub for upstream MCP tool {server}.{tool} — invoke via run_js then \
-         `await mcp.callTool({server:?}, {tool:?}, args)`. Calling this tool \
+        "[stub for upstream MCP tool {server}.{tool} — invoke via run_js: \
+         `await {accessor}(args)`. Calling this tool \
          directly only returns instructions; it does not execute.]",
         server = server,
         tool = tool.name,
+        accessor = js_accessor(server, &tool.name),
     );
     let new_desc = if original_desc.is_empty() {
         header
@@ -512,18 +661,30 @@ pub fn stub_call_instructions(
     format!(
         "This tool is a stub. Execute it from JavaScript via the `run_js` tool, e.g.:\n\
          \n\
-         const result = await mcp.callTool({server:?}, {tool:?}, {pretty});\n\
-         console.log(JSON.stringify(result));\n",
-        server = server,
-        tool = tool,
+         const result = await {accessor}({pretty});\n\
+         console.log(JSON.stringify(result));\n\
+         \n\
+         The call resolves to the tool's unwrapped result value (structured \
+         content, or parsed JSON when the tool returns JSON text) and throws \
+         McpToolError on tool errors (raw envelope on `error.result`).\n",
+        accessor = js_accessor(server, tool),
         pretty = pretty,
     )
 }
 
 // ── Connection logic ─────────────────────────────────────────────────────
 
-async fn connect_one(config: &McpServerConfig) -> Result<ConnectedMcpServer, String> {
+async fn connect_one(
+    config: &McpServerConfig,
+    catalog: &ToolCatalog,
+) -> Result<ConnectedMcpServer, String> {
     use rmcp::ServiceExt;
+
+    // Handler that keeps the shared catalog fresh on tools/list_changed.
+    let handler = CatalogClientHandler {
+        server_name: config.name.clone(),
+        catalog: catalog.clone(),
+    };
 
     match &config.transport {
         McpServerTransport::Stdio { command, args, env } => {
@@ -535,8 +696,8 @@ async fn connect_one(config: &McpServerConfig) -> Result<ConnectedMcpServer, Str
             let transport = rmcp::transport::TokioChildProcess::new(cmd)
                 .map_err(|e| format!("Failed to spawn '{}': {}", command, e))?;
 
-            let service: rmcp::service::RunningService<RoleClient, ()> =
-                ().serve(transport)
+            let service: rmcp::service::RunningService<RoleClient, CatalogClientHandler> =
+                handler.serve(transport)
                     .await
                     .map_err(|e| format!("MCP client handshake with '{}' failed: {}", config.name, e))?;
 
@@ -562,8 +723,8 @@ async fn connect_one(config: &McpServerConfig) -> Result<ConnectedMcpServer, Str
             // the same `/mcp`-style endpoints modern MCP servers expose.
             let transport = rmcp::transport::StreamableHttpClientTransport::from_uri(url.clone());
 
-            let service: rmcp::service::RunningService<RoleClient, ()> =
-                ().serve(transport)
+            let service: rmcp::service::RunningService<RoleClient, CatalogClientHandler> =
+                handler.serve(transport)
                     .await
                     .map_err(|e| format!("MCP client handshake with '{}' failed: {}", config.name, e))?;
 
@@ -592,7 +753,7 @@ async fn connect_one(config: &McpServerConfig) -> Result<ConnectedMcpServer, Str
 #[derive(Clone)]
 pub struct McpConfig {
     pub client_manager: McpClientManager,
-    /// Optional OPA policy chain for gating `mcp.callTool()` calls.
+    /// Optional OPA policy chain for gating MCP tool calls from JS.
     pub policy_chain: Option<std::sync::Arc<super::opa::PolicyChain>>,
 }
 
@@ -631,7 +792,7 @@ async fn op_mcp_call_tool(
         } else {
             Some(
                 serde_json::from_str(&arguments_json).map_err(|e| {
-                    JsErrorBox::generic(format!("mcp.callTool: invalid arguments JSON: {}", e))
+                    JsErrorBox::generic(format!("mcp tool call: invalid arguments JSON: {}", e))
                 })?,
             )
         };
@@ -651,12 +812,12 @@ async fn op_mcp_call_tool(
                     .unwrap_or(serde_json::Value::Null),
             };
             let input_value = serde_json::to_value(&policy_input)
-                .map_err(|e| JsErrorBox::generic(format!("mcp.callTool: failed to serialize policy input: {}", e)))?;
+                .map_err(|e| JsErrorBox::generic(format!("mcp tool call: failed to serialize policy input: {}", e)))?;
             let allowed = chain.evaluate(&input_value).await
-                .map_err(|e| JsErrorBox::generic(format!("mcp.callTool: policy evaluation error: {}", e)))?;
+                .map_err(|e| JsErrorBox::generic(format!("mcp tool call: policy evaluation error: {}", e)))?;
             if !allowed {
                 return Err(JsErrorBox::generic(format!(
-                    "mcp.callTool denied by policy: {}.{} is not allowed",
+                    "mcp.{}.{} denied by policy",
                     server_name, tool_name
                 )));
             }
@@ -667,7 +828,7 @@ async fn op_mcp_call_tool(
             .await
             .map_err(|e| JsErrorBox::generic(e))?;
         serde_json::to_string(&result)
-            .map_err(|e| JsErrorBox::generic(format!("mcp.callTool: serialization error: {}", e)))
+            .map_err(|e| JsErrorBox::generic(format!("mcp tool call: serialization error: {}", e)))
     })
     .await
     .map_err(|e| JsErrorBox::generic(format!("mcp task join error: {}", e)))?
@@ -695,7 +856,7 @@ fn op_mcp_list_tools(
         .map_err(|e| JsErrorBox::generic(e))?;
 
     serde_json::to_string(&tools)
-        .map_err(|e| JsErrorBox::generic(format!("mcp.listTools: serialization error: {}", e)))
+        .map_err(|e| JsErrorBox::generic(format!("mcp.tools: serialization error: {}", e)))
 }
 
 /// Sync op: list connected server names.
@@ -735,18 +896,24 @@ pub fn inject_mcp(runtime: &mut JsRuntime) -> Result<(), String> {
 }
 
 /// JavaScript wrapper that provides the `globalThis.mcp` API.
+///
+/// Each connected server becomes a Proxy namespace (`mcp.<server>`) whose
+/// property accesses dispatch tool calls through the ops against the live
+/// catalog. The proxies carry no catalog data themselves, so instances
+/// captured in heap snapshots keep working after tool lists change.
 const MCP_JS_WRAPPER: &str = r#"
 (function() {
     /**
      * Error thrown when an MCP tool returns an error result.
-     * The original result (with content and isError) is available on the `result` property.
+     * The raw result envelope ({content, structuredContent?, isError}) is
+     * available on the `result` property.
      */
     class McpToolError extends Error {
         constructor(serverName, toolName, result) {
             var text = (result.content && result.content.length > 0 && result.content[0].text)
                 ? result.content[0].text
                 : 'Tool returned an error';
-            super('mcp.callTool ' + serverName + '.' + toolName + ' failed: ' + text);
+            super('mcp.' + serverName + '.' + toolName + ' failed: ' + text);
             this.name = 'McpToolError';
             this.result = result;
             this.serverName = serverName;
@@ -755,39 +922,129 @@ const MCP_JS_WRAPPER: &str = r#"
     }
     globalThis.McpToolError = McpToolError;
 
-    globalThis.mcp = {
-        /**
-         * Call a tool on a connected MCP server.
-         * Throws McpToolError if the tool returns an error result (isError: true).
-         * @param {string} serverName - Name of the MCP server
-         * @param {string} toolName - Name of the tool to call
-         * @param {object} [args] - Arguments to pass to the tool
-         * @returns {Promise<{content: Array, isError: boolean}>}
-         * @throws {McpToolError} When the tool returns isError: true
-         */
-        callTool: async function(serverName, toolName, args) {
-            if (typeof serverName !== 'string') throw new TypeError('mcp.callTool: serverName must be a string');
-            if (typeof toolName !== 'string') throw new TypeError('mcp.callTool: toolName must be a string');
-            var argsJson = args ? JSON.stringify(args) : '';
-            var raw = await Deno.core.ops.op_mcp_call_tool(serverName, toolName, argsJson);
+    // Map a tool name to a JS-identifier spelling (dot-access friendly).
+    function sanitize(name) {
+        var s = String(name).replace(/[^A-Za-z0-9_$]/g, '_');
+        if (/^[0-9]/.test(s)) s = '_' + s;
+        return s;
+    }
+
+    function listToolsFor(serverName) {
+        var raw = Deno.core.ops.op_mcp_list_tools(serverName || '');
+        return JSON.parse(raw);
+    }
+
+    // Unwrap a raw result envelope into a plain value:
+    //   1. structuredContent, when the tool provided it (authoritative per spec)
+    //   2. all-text content: joined, JSON.parse with fallback to the string
+    //   3. anything else (mixed/binary blocks): the raw content array
+    function unwrap(result) {
+        if (result.structuredContent !== undefined && result.structuredContent !== null) {
+            return result.structuredContent;
+        }
+        var content = result.content || [];
+        if (content.length === 0) return null;
+        var allText = content.every(function(c) { return c && c.type === 'text' && typeof c.text === 'string'; });
+        if (allText) {
+            var text = content.map(function(c) { return c.text; }).join('\n');
+            try { return JSON.parse(text); } catch (_) { return text; }
+        }
+        return content;
+    }
+
+    function makeInvoker(serverName, toolName) {
+        return async function(args) {
+            if (args === undefined || args === null) args = {};
+            if (typeof args !== 'object' || Array.isArray(args)) {
+                throw new TypeError('mcp.' + serverName + '.' + toolName + ': args must be a plain object');
+            }
+            var raw = await Deno.core.ops.op_mcp_call_tool(serverName, toolName, JSON.stringify(args));
             var result = JSON.parse(raw);
             if (result.isError) {
                 throw new McpToolError(serverName, toolName, result);
             }
-            return result;
-        },
+            return unwrap(result);
+        };
+    }
 
-        /**
-         * List available tools, optionally filtered by server name.
-         * Each tool has: server, name, description, inputSchema.
-         * @param {string} [serverName] - If provided, list only tools for this server
-         * @returns {Array<{server: string, name: string, description: string|null, inputSchema: object}>}
-         */
-        listTools: function(serverName) {
-            var raw = Deno.core.ops.op_mcp_list_tools(serverName || '');
-            return JSON.parse(raw);
-        },
+    // Property names that must never resolve to a tool invoker. `then` is
+    // load-bearing: returning a function would make the namespace thenable
+    // and break `await mcp.<server>`. Tools that share one of these names
+    // are still listed by mcp.tools() but cannot be dot-invoked.
+    var SKIP_PROPS = {
+        then: true, catch: true, finally: true,
+        constructor: true, prototype: true, __proto__: true,
+        valueOf: true, inspect: true,
+    };
 
+    function findTool(serverName, prop) {
+        var tools = listToolsFor(serverName);
+        for (var i = 0; i < tools.length; i++) {
+            if (tools[i].name === prop) return { tool: tools[i] };
+        }
+        var matches = tools.filter(function(t) { return sanitize(t.name) === prop; });
+        if (matches.length === 1) return { tool: matches[0] };
+        if (matches.length > 1) return { ambiguous: matches };
+        return { unknown: tools };
+    }
+
+    function makeServerProxy(serverName) {
+        return new Proxy({}, {
+            get: function(_t, prop) {
+                if (typeof prop !== 'string') return undefined;
+                if (prop === 'toString') {
+                    return function() {
+                        var names = listToolsFor(serverName).map(function(t) { return t.name; });
+                        return '[mcp server ' + serverName + ': ' + names.join(', ') + ']';
+                    };
+                }
+                if (prop === 'toJSON') {
+                    return function() {
+                        return {
+                            server: serverName,
+                            tools: listToolsFor(serverName).map(function(t) { return t.name; }),
+                        };
+                    };
+                }
+                if (SKIP_PROPS[prop]) return undefined;
+                var found = findTool(serverName, prop);
+                if (found.tool) return makeInvoker(serverName, found.tool.name);
+                if (found.ambiguous) {
+                    var originals = found.ambiguous.map(function(t) { return t.name; });
+                    throw new Error(
+                        'mcp.' + serverName + '.' + prop + ' is ambiguous (matches: ' + originals.join(', ') +
+                        '). Use the exact tool name, e.g. mcp[' + JSON.stringify(serverName) + '][' + JSON.stringify(originals[0]) + '](args)');
+                }
+                return function() {
+                    var names = found.unknown.map(function(t) { return t.name; });
+                    throw new Error(
+                        'mcp.' + serverName + ' has no tool ' + JSON.stringify(prop) +
+                        '. Available tools: ' + (names.length ? names.join(', ') : '(none)'));
+                };
+            },
+            has: function(_t, prop) {
+                if (typeof prop !== 'string') return false;
+                return !!findTool(serverName, prop).tool;
+            },
+            ownKeys: function(_t) {
+                var keys = [];
+                var seen = {};
+                listToolsFor(serverName).forEach(function(t) {
+                    var k = sanitize(t.name);
+                    if (seen[k]) k = t.name; // sanitized-name collision: keep the original spelling
+                    if (!seen[k]) { seen[k] = true; keys.push(k); }
+                });
+                return keys;
+            },
+            getOwnPropertyDescriptor: function(_t, prop) {
+                if (typeof prop !== 'string') return undefined;
+                if (!findTool(serverName, prop).tool) return undefined;
+                return { enumerable: true, configurable: true, writable: false, value: undefined };
+            },
+        });
+    }
+
+    var mcp = {
         /**
          * Get the list of connected MCP server names.
          * @returns {string[]}
@@ -796,7 +1053,48 @@ const MCP_JS_WRAPPER: &str = r#"
             var raw = Deno.core.ops.op_mcp_list_servers();
             return JSON.parse(raw);
         },
+
+        /**
+         * List available tools, optionally filtered by server name. Always
+         * reflects the live catalog (refreshed on reconnect/list_changed).
+         * Each tool has: server, name, description, inputSchema.
+         * @param {string} [serverName] - If provided, list only tools for this server
+         * @returns {Array<{server: string, name: string, description: string|null, inputSchema: object}>}
+         */
+        tools: function(serverName) {
+            return listToolsFor(serverName);
+        },
+
+        // Migration traps for the removed v1 API.
+        callTool: function() {
+            throw new Error(
+                'mcp.callTool() was removed: call tools directly instead, e.g. ' +
+                '`await mcp.github.list_issues({owner: "acme"})` (dynamic form: ' +
+                '`await mcp[server][tool](args)`). Calls resolve to the unwrapped ' +
+                'result value; tool errors throw McpToolError with the raw envelope ' +
+                'on `error.result`. Discover tools with mcp.tools().');
+        },
+        listTools: function() {
+            throw new Error('mcp.listTools() was replaced by mcp.tools(serverName?) — same return shape.');
+        },
     };
+
+    JSON.parse(Deno.core.ops.op_mcp_list_servers()).forEach(function(serverName) {
+        var proxy = makeServerProxy(serverName);
+        // defineProperty (not assignment) so a server named "__proto__"
+        // could never mutate the prototype chain.
+        Object.defineProperty(mcp, serverName, {
+            value: proxy, enumerable: true, configurable: true, writable: false,
+        });
+        var alias = sanitize(serverName);
+        if (alias !== serverName && !(alias in mcp)) {
+            Object.defineProperty(mcp, alias, {
+                value: proxy, enumerable: false, configurable: true, writable: false,
+            });
+        }
+    });
+
+    globalThis.mcp = mcp;
 })();
 "#;
 
@@ -889,7 +1187,11 @@ mod tests {
         // Description hints at run_js usage and includes original docs.
         let desc = stub.description.expect("description");
         assert!(desc.contains("run_js"), "description should mention run_js: {}", desc);
-        assert!(desc.contains("mcp.callTool"), "description should mention mcp.callTool: {}", desc);
+        assert!(
+            desc.contains("mcp.github.create_issue"),
+            "description should mention the proxy accessor: {}",
+            desc
+        );
         assert!(desc.contains("Create a GitHub issue."));
     }
 
@@ -908,9 +1210,7 @@ mod tests {
         let mut args = serde_json::Map::new();
         args.insert("title".into(), json!("hello"));
         let text = stub_call_instructions("github", "create_issue", Some(&args));
-        assert!(text.contains("mcp.callTool"));
-        assert!(text.contains("\"github\""));
-        assert!(text.contains("\"create_issue\""));
+        assert!(text.contains("await mcp.github.create_issue("));
         assert!(text.contains("\"title\""));
         assert!(text.contains("\"hello\""));
     }
@@ -918,7 +1218,7 @@ mod tests {
     #[test]
     fn stub_call_instructions_handles_no_args() {
         let text = stub_call_instructions("srv", "ping", None);
-        assert!(text.contains("mcp.callTool"));
+        assert!(text.contains("await mcp.srv.ping("));
         // Should render an empty object placeholder, not "null".
         assert!(text.contains("{}") || text.contains("{\n}"));
     }
@@ -1002,9 +1302,7 @@ mod tests {
         assert_eq!(resp.content.len(), 1);
         let json = serde_json::to_value(&resp.content[0]).unwrap();
         let text = json.get("text").and_then(|v| v.as_str()).unwrap_or_default();
-        assert!(text.contains("mcp.callTool"));
-        assert!(text.contains("github"));
-        assert!(text.contains("create_issue"));
+        assert!(text.contains("await mcp.github.create_issue("));
     }
 
     #[test]
@@ -1068,5 +1366,72 @@ mod tests {
         let json = serde_json::to_value(&stub).unwrap();
         assert!(json.get("annotations").is_none(),
             "stub annotations should be absent");
+    }
+
+    #[test]
+    fn js_accessor_uses_dot_syntax_for_identifiers() {
+        assert_eq!(js_accessor("github", "create_issue"), "mcp.github.create_issue");
+        assert_eq!(js_accessor("_srv", "$tool"), "mcp._srv.$tool");
+    }
+
+    #[test]
+    fn js_accessor_uses_brackets_for_non_identifiers() {
+        assert_eq!(js_accessor("my-server", "create_issue"), "mcp[\"my-server\"].create_issue");
+        assert_eq!(js_accessor("github", "my.tool"), "mcp.github[\"my.tool\"]");
+        assert_eq!(js_accessor("1srv", "2tool"), "mcp[\"1srv\"][\"2tool\"]");
+        assert_eq!(js_accessor("", ""), "mcp[\"\"][\"\"]");
+    }
+
+    #[test]
+    fn validate_rejects_reserved_server_names() {
+        for reserved in RESERVED_SERVER_NAMES {
+            let configs = vec![McpServerConfig {
+                name: reserved.to_string(),
+                transport: McpServerTransport::Sse { url: "http://localhost:1/mcp".into() },
+            }];
+            let err = validate_server_names(&configs).expect_err("reserved name must be rejected");
+            assert!(err.contains("reserved"), "error should say reserved: {}", err);
+            assert!(err.contains(reserved), "error should name the offender: {}", err);
+        }
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_server_names() {
+        let mk = |name: &str| McpServerConfig {
+            name: name.to_string(),
+            transport: McpServerTransport::Sse { url: "http://localhost:1/mcp".into() },
+        };
+        let err = validate_server_names(&[mk("github"), mk("github")])
+            .expect_err("duplicate must be rejected");
+        assert!(err.contains("Duplicate"), "error should say duplicate: {}", err);
+        assert!(validate_server_names(&[mk("github"), mk("jira")]).is_ok());
+    }
+
+    #[test]
+    fn catalog_updates_are_visible_to_listing_and_stubs() {
+        // Simulates a tools/list_changed refresh: listings and stub tools
+        // must reflect the new catalog immediately (live reads, no caching).
+        let mut by_server = HashMap::new();
+        by_server.insert("github".to_string(), vec![tool("create_issue", "doc")]);
+        let mgr = McpClientManager::from_tools_for_test(by_server);
+
+        assert_eq!(mgr.list_tools(Some("github")).unwrap().len(), 1);
+        assert!(mgr.stub_call_response("runjs__github__close_issue", None).is_none());
+
+        mgr.set_tools_for_test(
+            "github",
+            vec![tool("create_issue", "doc"), tool("close_issue", "doc")],
+        );
+
+        let names: Vec<String> = mgr
+            .list_tools(Some("github"))
+            .unwrap()
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        assert_eq!(names, vec!["create_issue".to_string(), "close_issue".to_string()]);
+        // Newly appeared tool is now stub-dispatchable and advertised.
+        assert!(mgr.stub_call_response("runjs__github__close_issue", None).is_some());
+        assert_eq!(mgr.stub_tools().len(), 2);
     }
 }

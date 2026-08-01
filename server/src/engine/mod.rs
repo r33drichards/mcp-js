@@ -1365,7 +1365,7 @@ pub struct Engine {
     module_loader_config: Arc<module_loader::ModuleLoaderConfig>,
     /// MCP client manager for programmatic tool calling from JS.
     mcp_client_manager: Option<Arc<mcp_client::McpClientManager>>,
-    /// OPA policy chain for MCP tool calls (`mcp.callTool()`).
+    /// OPA policy chain for MCP tool calls from JS (`mcp.<server>.<tool>()`).
     mcp_tools_policy_chain: Option<Arc<opa::PolicyChain>>,
     /// Policy-gated subprocess configuration. When Some, subprocess execution is injected into the JS runtime.
     subprocess_config: Option<Arc<subprocess::SubprocessConfig>>,
@@ -1681,7 +1681,7 @@ impl Engine {
         self.mcp_client_manager.clone()
     }
 
-    /// Set OPA policy chain for MCP tool calls (`mcp.callTool()`).
+    /// Set OPA policy chain for MCP tool calls from JS (`mcp.<server>.<tool>()`).
     pub fn with_mcp_tools_policy_chain(mut self, chain: Arc<opa::PolicyChain>) -> Self {
         self.mcp_tools_policy_chain = Some(chain);
         self
