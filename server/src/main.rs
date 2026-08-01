@@ -14,7 +14,7 @@ use utoipa::OpenApi as _;
 use std::fmt;
 use server::cli::{Cli, FetchHeaderKey, StoreKind};
 use server::mcp::{McpService, StatelessMcpService};
-use server::runtime::{
+use server::engine::{
     RuntimeCapabilityConfig, RuntimeFeatureConfig, RuntimeFetchHeaderRule,
     RuntimeFetchOAuthConfig, RuntimeHardeningConfig, RuntimeMcpServerConfig,
     RuntimeMcpStubConfig, RuntimeMcpTransportKind, RuntimePolicyConfig,
@@ -1096,7 +1096,7 @@ mod tests {
     }
 
     fn check_mcp_servers() -> anyhow::Result<()> {
-        use server::runtime::RuntimeMcpTransportKind;
+        use server::engine::RuntimeMcpTransportKind;
 
         let configs = load_mcp_server_configs(
             &[
@@ -1215,7 +1215,7 @@ mod tests {
 
     #[test]
     fn load_mcp_server_configs_accepts_inline_json() {
-        use server::runtime::RuntimeMcpTransportKind;
+        use server::engine::RuntimeMcpTransportKind;
 
         let inline = r#"[{"name": "weather", "transport": "stdio", "command": "python", "args": ["server.py"]}]"#;
         let configs =

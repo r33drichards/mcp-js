@@ -8,7 +8,6 @@ pub mod mcp_sse;
 pub mod api;
 pub mod bootstrap;
 pub mod session;
-pub mod runtime;
 pub mod sandbox;
 
 uniffi::setup_scaffolding!();

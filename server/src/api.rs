@@ -16,7 +16,7 @@ const MAX_EXEC_BODY_BYTES: usize = 16 * 1024 * 1024;
 
 use crate::engine::fs_merge::Prefer;
 use crate::engine::FsPushOutcome;
-use crate::runtime::{ExecutionRequest, McpJsRuntime};
+use crate::engine::{ExecutionRequest, McpJsRuntime};
 
 // ── Embedded agent-discovery content ─────────────────────────────────
 

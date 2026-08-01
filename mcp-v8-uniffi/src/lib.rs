@@ -6,7 +6,7 @@ pub use server::engine::heap_tags::HeapTagEntry;
 pub use server::engine::{
     FsLabelView, FsMergeConflictView, FsMergeResult, FsPushOutcome, FsRefLogView,
 };
-pub use server::runtime::{
+pub use server::engine::{
     DEFAULT_EXECUTION_TIMEOUT_SECS, DEFAULT_MCP_STUB_PREFIX, DEFAULT_WASM_STUB_PREFIX,
     RuntimeCapabilities, RuntimeCapabilityConfig, RuntimeOptions, RuntimeError,
     ExecutionRequest, RuntimeFeatureConfig, RuntimeFetchHeaderRule,

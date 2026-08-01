@@ -26,7 +26,7 @@ use rmcp_legacy::{
 };
 use serde_json::json;
 
-use crate::runtime::{
+use crate::engine::{
     RuntimeError, McpRequestHeaders, ToolCallRequest, McpJsRuntime,
 };
 use crate::session::SessionVerifier;

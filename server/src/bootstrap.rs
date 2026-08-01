@@ -15,7 +15,7 @@ use crate::engine::heap_storage::{
 use crate::engine::heap_tags::HeapTagStore;
 use crate::engine::session_log::{ForkOutcome, SessionLog};
 use crate::engine::{Engine, initialize_v8};
-use crate::runtime::{
+use crate::engine::{
     RuntimeCapabilityConfig, RuntimeError, RuntimeFeatureConfig, RuntimeFetchHeaderRule,
     RuntimeMcpTransportKind, RuntimeOperationPolicies, RuntimePolicyConfig, RuntimePolicyEvalMode,
     RuntimeRunJsFileAccess, RuntimeUpstreamMcpConfig, McpJsRuntime,
@@ -346,7 +346,7 @@ pub(crate) fn normalize_fetch_header_rule(
     let static_headers = internal.static_headers().cloned();
     let oauth = internal
         .dynamic_auth()
-        .map(|config| crate::runtime::RuntimeFetchOAuthConfig {
+        .map(|config| crate::engine::RuntimeFetchOAuthConfig {
             header_name: config.header_name.clone(),
             token_url: config.token_url.clone(),
             client_id: config.client_id.clone(),
