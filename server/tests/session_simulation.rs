@@ -5,6 +5,16 @@
 use server::engine::session_log::{SessionLog, SessionLogEntry};
 use std::sync::Arc;
 
+/// Serialize typed snapshot views to JSON for shape-based assertions.
+fn to_values(
+    entries: Vec<server::engine::session_log::SessionSnapshotView>,
+) -> Vec<serde_json::Value> {
+    entries
+        .iter()
+        .map(|entry| serde_json::to_value(entry).unwrap())
+        .collect()
+}
+
 fn make_entry(input: Option<&str>, output: &str, code: &str) -> SessionLogEntry {
     SessionLogEntry {
         input_heap: input.map(|s| s.to_string()),
@@ -33,7 +43,7 @@ async fn run_workload(log: &SessionLog, session: &str, count: usize) -> Vec<u64>
 
 /// Verify that a session contains the expected chain of entries.
 async fn verify_chain(log: &SessionLog, session: &str, expected_count: usize) {
-    let entries = log.list_entries(session, None).await.unwrap();
+    let entries = to_values(log.list_entries(session).await.unwrap());
     assert_eq!(
         entries.len(),
         expected_count,
@@ -138,7 +148,7 @@ async fn test_crash_recovery_partial_flush() {
     // Phase 2: reopen and verify
     {
         let log = SessionLog::new(db_path_str).unwrap();
-        let entries = log.list_entries("partial-session", None).await.unwrap();
+        let entries = to_values(log.list_entries("partial-session").await.unwrap());
 
         // At least the flushed entries must survive
         assert!(
@@ -198,7 +208,7 @@ async fn test_repeated_open_close_cycles() {
         log.flush().unwrap();
 
         // Verify total entries so far
-        let entries = log.list_entries("cycle-session", None).await.unwrap();
+        let entries = to_values(log.list_entries("cycle-session").await.unwrap());
         assert_eq!(
             entries.len(),
             (cycle + 1) * entries_per_cycle,
@@ -267,7 +277,7 @@ async fn test_concurrent_session_writers_no_duplicates() {
     );
 
     // Total entries should be 2 * num_per_writer
-    let entries = log.list_entries("shared-session", None).await.unwrap();
+    let entries = to_values(log.list_entries("shared-session").await.unwrap());
     assert_eq!(entries.len(), num_per_writer * 2);
 
     // All entries should be valid
@@ -296,8 +306,8 @@ async fn test_deterministic_workload_replay() {
     run_workload(&log1, "deterministic", count).await;
     run_workload(&log2, "deterministic", count).await;
 
-    let entries1 = log1.list_entries("deterministic", None).await.unwrap();
-    let entries2 = log2.list_entries("deterministic", None).await.unwrap();
+    let entries1 = to_values(log1.list_entries("deterministic").await.unwrap());
+    let entries2 = to_values(log2.list_entries("deterministic").await.unwrap());
 
     assert_eq!(entries1.len(), entries2.len());
 
@@ -323,7 +333,7 @@ async fn test_linearizable_session_operations() {
         .await
         .unwrap();
 
-    let entries = log.list_entries("linear", None).await.unwrap();
+    let entries = to_values(log.list_entries("linear").await.unwrap());
     assert_eq!(entries.len(), 2);
 
     log.append("linear", make_entry(Some("h1"), "h2", "c2"))
@@ -333,7 +343,7 @@ async fn test_linearizable_session_operations() {
     let latest = log.get_latest("linear").await.unwrap().unwrap();
     assert_eq!(latest.output_heap, "h2");
 
-    let entries = log.list_entries("linear", None).await.unwrap();
+    let entries = to_values(log.list_entries("linear").await.unwrap());
     assert_eq!(entries.len(), 3);
 
     // Verify full chain manually (uses h0/h1/h2 naming, not hash_N)

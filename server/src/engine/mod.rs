@@ -2618,10 +2618,9 @@ impl Engine {
     pub async fn list_session_snapshots(
         &self,
         session: String,
-        fields: Option<Vec<String>>,
-    ) -> Result<Vec<serde_json::Value>, String> {
+    ) -> Result<Vec<session_log::SessionSnapshotView>, String> {
         match &self.session_log {
-            Some(log) => log.list_entries(&session, fields).await,
+            Some(log) => log.list_entries(&session).await,
             None => Err("Session log not configured".to_string()),
         }
     }
@@ -3321,19 +3320,11 @@ impl McpJsRuntime {
     pub async fn list_session_snapshots(
         &self,
         session: String,
-        fields: Option<Vec<String>>,
-    ) -> Result<Vec<String>, RuntimeError> {
+    ) -> Result<Vec<session_log::SessionSnapshotView>, RuntimeError> {
         self.engine
-            .list_session_snapshots(session, fields)
+            .list_session_snapshots(session)
             .await
-            .map_err(operation_message)?
-            .into_iter()
-            .map(|snapshot| {
-                serde_json::to_string(&snapshot).map_err(|error| RuntimeError::Operation {
-                    message: format!("failed to serialize session snapshot: {error}"),
-                })
-            })
-            .collect()
+            .map_err(operation_message)
     }
 
     pub async fn get_heap_tags(

@@ -229,8 +229,20 @@ async fn list_session_snapshots(engine: &Engine, session_id: Option<&str>, args:
     let parsed_fields = string_arg(args, "fields").map(|f| {
         f.split(',').map(|s| s.trim().to_string()).collect::<Vec<_>>()
     });
-    match engine.list_session_snapshots(session, parsed_fields).await {
-        Ok(entries) => json!({ "entries": entries }),
+    match engine.list_session_snapshots(session).await {
+        Ok(entries) => {
+            let entries: Vec<Value> = entries
+                .iter()
+                .map(|entry| {
+                    let mut value = serde_json::to_value(entry).unwrap_or_default();
+                    if let (Some(fields), Value::Object(map)) = (&parsed_fields, &mut value) {
+                        map.retain(|key, _| fields.iter().any(|field| field == key));
+                    }
+                    value
+                })
+                .collect();
+            json!({ "entries": entries })
+        }
         Err(e) => json!({ "entries": [{"error": e}] }),
     }
 }

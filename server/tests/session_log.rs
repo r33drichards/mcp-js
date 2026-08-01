@@ -1,6 +1,16 @@
 use server::engine::session_log::{SessionLog, SessionLogEntry};
 use std::sync::Arc;
 
+/// Serialize typed snapshot views to JSON for shape-based assertions.
+fn to_values(
+    entries: Vec<server::engine::session_log::SessionSnapshotView>,
+) -> Vec<serde_json::Value> {
+    entries
+        .iter()
+        .map(|entry| serde_json::to_value(entry).unwrap())
+        .collect()
+}
+
 fn make_entry(input: Option<&str>, output: &str, code: &str) -> SessionLogEntry {
     SessionLogEntry {
         input_heap: input.map(|s| s.to_string()),
@@ -43,7 +53,7 @@ async fn test_basic_append_and_list() {
     .unwrap();
 
     // List entries
-    let entries = log.list_entries("my-session", None).await.unwrap();
+    let entries = to_values(log.list_entries("my-session").await.unwrap());
     assert_eq!(entries.len(), 2);
 
     // First entry
@@ -75,10 +85,10 @@ async fn test_multiple_sessions() {
     sessions.sort();
     assert_eq!(sessions, vec!["session-a", "session-b"]);
 
-    let a_entries = log.list_entries("session-a", None).await.unwrap();
+    let a_entries = to_values(log.list_entries("session-a").await.unwrap());
     assert_eq!(a_entries.len(), 2);
 
-    let b_entries = log.list_entries("session-b", None).await.unwrap();
+    let b_entries = to_values(log.list_entries("session-b").await.unwrap());
     assert_eq!(b_entries.len(), 1);
 }
 
@@ -99,7 +109,7 @@ async fn test_get_latest() {
 }
 
 #[tokio::test]
-async fn test_field_filtering() {
+async fn test_snapshot_views_are_typed_and_indexed() {
     let log = temp_session_log();
 
     log.append("s", make_entry(None, "h1", "code1")).await.unwrap();
@@ -107,34 +117,15 @@ async fn test_field_filtering() {
         .await
         .unwrap();
 
-    // Request only output_heap and code
-    let entries = log
-        .list_entries(
-            "s",
-            Some(vec!["output_heap".to_string(), "code".to_string()]),
-        )
-        .await
-        .unwrap();
-
+    let entries = log.list_entries("s").await.unwrap();
     assert_eq!(entries.len(), 2);
-
-    // Should have only the requested fields
-    let obj = entries[0].as_object().unwrap();
-    assert!(obj.contains_key("output_heap"));
-    assert!(obj.contains_key("code"));
-    assert!(!obj.contains_key("input_heap"));
-    assert!(!obj.contains_key("timestamp"));
-    assert!(!obj.contains_key("index"));
-
-    // Request with index
-    let entries = log
-        .list_entries("s", Some(vec!["index".to_string(), "output_heap".to_string()]))
-        .await
-        .unwrap();
-    let obj = entries[0].as_object().unwrap();
-    assert!(obj.contains_key("index"));
-    assert!(obj.contains_key("output_heap"));
-    assert!(!obj.contains_key("code"));
+    assert_eq!(entries[0].index, 0);
+    assert_eq!(entries[0].input_heap, None);
+    assert_eq!(entries[0].output_heap, "h1");
+    assert_eq!(entries[0].code, "code1");
+    assert_eq!(entries[1].index, 1);
+    assert_eq!(entries[1].input_heap.as_deref(), Some("h1"));
+    assert_eq!(entries[1].output_heap, "h2");
 }
 
 #[tokio::test]
@@ -142,7 +133,7 @@ async fn test_empty_session_entries() {
     let log = temp_session_log();
 
     // Listing entries for a non-existent session should return empty (open_tree creates it lazily)
-    let entries = log.list_entries("nonexistent", None).await.unwrap();
+    let entries = to_values(log.list_entries("nonexistent").await.unwrap());
     assert!(entries.is_empty());
 }
 
@@ -194,7 +185,7 @@ async fn test_concurrent_writes_same_session() {
     assert_eq!(seqs.len(), num_tasks);
 
     // All entries should be present
-    let entries = log.list_entries("concurrent-session", None).await.unwrap();
+    let entries = to_values(log.list_entries("concurrent-session").await.unwrap());
     assert_eq!(entries.len(), num_tasks);
 
     // Entries should be in sequence order (sled iterates by key order = big-endian u64)
@@ -236,7 +227,7 @@ async fn test_concurrent_writes_different_sessions() {
     // Each session should have exactly entries_per_session entries
     for s in 0..num_sessions {
         let entries = log
-            .list_entries(&format!("session_{}", s), None)
+            .list_entries(&format!("session_{}", s))
             .await
             .unwrap();
         assert_eq!(
@@ -283,7 +274,7 @@ async fn test_read_write_atomicity() {
         let mut max_seen = 0;
         for _ in 0..200 {
             let entries = reader_log
-                .list_entries("atomic-session", None)
+                .list_entries("atomic-session")
                 .await
                 .unwrap();
 
@@ -298,18 +289,9 @@ async fn test_read_write_atomicity() {
 
             // Each entry should be complete and valid
             for entry in &entries {
-                let obj = entry.as_object().unwrap();
-                assert!(obj.contains_key("index"));
-                assert!(obj.contains_key("input_heap"));
-                assert!(obj.contains_key("output_heap"));
-                assert!(obj.contains_key("code"));
-                assert!(obj.contains_key("timestamp"));
-
-                // output_heap and code should be non-empty strings
-                assert!(obj["output_heap"].is_string());
-                assert!(!obj["output_heap"].as_str().unwrap().is_empty());
-                assert!(obj["code"].is_string());
-                assert!(!obj["code"].as_str().unwrap().is_empty());
+                assert!(!entry.output_heap.is_empty());
+                assert!(!entry.code.is_empty());
+                assert!(!entry.timestamp.is_empty());
             }
 
             tokio::task::yield_now().await;
@@ -320,6 +302,6 @@ async fn test_read_write_atomicity() {
     reader.await.unwrap();
 
     // Final state: all entries present
-    let entries = log.list_entries("atomic-session", None).await.unwrap();
+    let entries = to_values(log.list_entries("atomic-session").await.unwrap());
     assert_eq!(entries.len(), num_writes);
 }

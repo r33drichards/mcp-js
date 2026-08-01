@@ -404,7 +404,7 @@ async fn test_session_log_replication_through_raft() {
     );
 
     let entries = follower_log
-        .list_entries("test-session", None)
+        .list_entries("test-session")
         .await
         .expect("list_entries from follower should succeed");
     assert_eq!(entries.len(), 1, "expected 1 entry, got {}", entries.len());
