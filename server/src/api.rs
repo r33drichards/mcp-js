@@ -14,7 +14,9 @@ use utoipa::{OpenApi, ToSchema};
 /// body and raw script uploads.
 const MAX_EXEC_BODY_BYTES: usize = 16 * 1024 * 1024;
 
-use crate::library::{LibraryExecutionRequest, LibraryFsMergePreference, McpJsLibrary};
+use crate::engine::fs_merge::Prefer;
+use crate::engine::FsPushOutcome;
+use crate::engine::{ExecutionRequest, McpJsRuntime};
 
 // ── Embedded agent-discovery content ─────────────────────────────────
 
@@ -285,7 +287,7 @@ pub struct ApiDoc;
     tag = "executions"
 )]
 async fn exec_handler(
-    State(runtime): State<Arc<McpJsLibrary>>,
+    State(runtime): State<Arc<McpJsRuntime>>,
     Query(params): Query<ExecUploadParams>,
     request: Request,
 ) -> (StatusCode, Json<serde_json::Value>) {
@@ -373,10 +375,10 @@ struct ExecUploadParams {
 /// Queue an [`ExecRequest`] on the engine and map the result to an HTTP
 /// response. Shared by the JSON and raw-upload code paths.
 async fn submit_exec(
-    runtime: Arc<McpJsLibrary>,
+    runtime: Arc<McpJsRuntime>,
     req: ExecRequest,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    let request = LibraryExecutionRequest {
+    let request = ExecutionRequest {
         code: req.code,
         file: None,
         heap: req.heap,
@@ -413,14 +415,14 @@ async fn submit_exec(
     tag = "executions"
 )]
 async fn get_execution_handler(
-    State(runtime): State<Arc<McpJsLibrary>>,
+    State(runtime): State<Arc<McpJsRuntime>>,
     Path(id): Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     match runtime.get_execution(id.clone()) {
         Ok(info) => (
             StatusCode::OK,
             Json(serde_json::json!({
-                "execution_id": info.execution_id,
+                "execution_id": info.id,
                 "status": info.status,
                 "result": info.result,
                 "heap": info.heap,
@@ -456,7 +458,7 @@ async fn get_execution_handler(
     tag = "executions"
 )]
 async fn get_execution_output_handler(
-    State(runtime): State<Arc<McpJsLibrary>>,
+    State(runtime): State<Arc<McpJsRuntime>>,
     Path(id): Path<String>,
     Query(query): Query<OutputQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
@@ -503,7 +505,7 @@ async fn get_execution_output_handler(
     tag = "executions"
 )]
 async fn cancel_execution_handler(
-    State(runtime): State<Arc<McpJsLibrary>>,
+    State(runtime): State<Arc<McpJsRuntime>>,
     Path(id): Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     match runtime.cancel_execution(id) {
@@ -529,7 +531,7 @@ async fn cancel_execution_handler(
     tag = "executions"
 )]
 async fn list_executions_handler(
-    State(runtime): State<Arc<McpJsLibrary>>,
+    State(runtime): State<Arc<McpJsRuntime>>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     match runtime.list_executions() {
         Ok(executions) => (
@@ -741,7 +743,7 @@ pub struct FsResetRequest {
     tag = "fs"
 )]
 async fn fs_labels_handler(
-    State(runtime): State<Arc<McpJsLibrary>>,
+    State(runtime): State<Arc<McpJsRuntime>>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     match runtime.fs_list_labels().await {
         Ok(labels) => (StatusCode::OK, Json(serde_json::json!({ "labels": labels }))),
@@ -758,7 +760,7 @@ async fn fs_labels_handler(
     tag = "fs"
 )]
 async fn fs_set_label_handler(
-    State(runtime): State<Arc<McpJsLibrary>>,
+    State(runtime): State<Arc<McpJsRuntime>>,
     Json(req): Json<FsLabelRequest>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     match runtime.fs_set_label(req.name.clone(), req.ca_id.clone(), req.message).await {
@@ -782,7 +784,7 @@ async fn fs_set_label_handler(
     tag = "fs"
 )]
 async fn fs_resolve_handler(
-    State(runtime): State<Arc<McpJsLibrary>>,
+    State(runtime): State<Arc<McpJsRuntime>>,
     Path(label): Path<String>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     match runtime.fs_resolve_label(label.clone()).await {
@@ -810,7 +812,7 @@ async fn fs_resolve_handler(
     tag = "fs"
 )]
 async fn fs_log_handler(
-    State(runtime): State<Arc<McpJsLibrary>>,
+    State(runtime): State<Arc<McpJsRuntime>>,
     Path(label): Path<String>,
     Query(query): Query<FsLogQuery>,
 ) -> (StatusCode, Json<serde_json::Value>) {
@@ -835,7 +837,7 @@ async fn fs_log_handler(
     tag = "fs"
 )]
 async fn fs_push_handler(
-    State(runtime): State<Arc<McpJsLibrary>>,
+    State(runtime): State<Arc<McpJsRuntime>>,
     Json(req): Json<FsPushRequest>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     if req.detach {
@@ -852,22 +854,11 @@ async fn fs_push_handler(
     };
     match runtime.fs_push(label, req.ca_id, req.expected, req.force, req.message).await {
         Ok(outcome) => {
-            let is_rejected = outcome.status == "rejected";
-            let value = if is_rejected {
-                serde_json::json!({
-                    "status": outcome.status,
-                    "label": outcome.label,
-                    "current": outcome.current,
-                })
-            } else {
-                serde_json::json!({
-                    "status": outcome.status,
-                    "label": outcome.label,
-                    "ca_id": outcome.ca_id,
-                })
+            let code = match &outcome {
+                FsPushOutcome::Advanced { .. } => StatusCode::OK,
+                FsPushOutcome::Rejected { .. } => StatusCode::CONFLICT,
             };
-            let code = if is_rejected { StatusCode::CONFLICT } else { StatusCode::OK };
-            (code, Json(value))
+            (code, Json(serde_json::json!(outcome)))
         }
         Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e.to_string() }))),
     }
@@ -885,7 +876,7 @@ async fn fs_push_handler(
     tag = "fs"
 )]
 async fn fs_reset_handler(
-    State(runtime): State<Arc<McpJsLibrary>>,
+    State(runtime): State<Arc<McpJsRuntime>>,
     Json(req): Json<FsResetRequest>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     match runtime.fs_reset(req.label.clone(), req.ca_id.clone(), req.allow_unlogged, req.message).await {
@@ -924,13 +915,13 @@ pub struct FsMergeRequest {
     tag = "fs"
 )]
 async fn fs_merge_handler(
-    State(runtime): State<Arc<McpJsLibrary>>,
+    State(runtime): State<Arc<McpJsRuntime>>,
     Json(req): Json<FsMergeRequest>,
 ) -> (StatusCode, Json<serde_json::Value>) {
     let prefer = match req.prefer.as_deref() {
-        None => None,
-        Some("ours") => Some(LibraryFsMergePreference::Ours),
-        Some("theirs") => Some(LibraryFsMergePreference::Theirs),
+        None => Prefer::None,
+        Some("ours") => Prefer::Ours,
+        Some("theirs") => Prefer::Theirs,
         Some(value) => {
             return (
                 StatusCode::BAD_REQUEST,
@@ -939,14 +930,7 @@ async fn fs_merge_handler(
         }
     };
     match runtime.fs_merge(req.ours, req.theirs, req.base, prefer).await {
-        Ok(result) => {
-            let value = if result.status == "merged" {
-                serde_json::json!({ "status": result.status, "ca_id": result.ca_id })
-            } else {
-                serde_json::json!({ "status": result.status, "conflicts": result.conflicts })
-            };
-            (StatusCode::OK, Json(value))
-        }
+        Ok(result) => (StatusCode::OK, Json(serde_json::json!(result))),
         Err(e) => (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": e.to_string() })),
@@ -960,7 +944,7 @@ async fn fs_merge_handler(
 ///
 /// Used when running in stdio mode where no HTTP server is present, and
 /// for merging into SSE / Streamable-HTTP transport servers.
-pub fn api_router(runtime: Arc<McpJsLibrary>) -> Router {
+pub fn api_router(runtime: Arc<McpJsRuntime>) -> Router {
     Router::new()
         .route("/", get(root_redirect_handler))
         .route("/llms.txt", get(llms_txt_handler))

@@ -5,7 +5,7 @@
 //! vendored rmcp 0.1.5 SSE server (`rmcp_legacy`). It is a hand-written 0.1.5
 //! `ServerHandler` (no tool macros — the renamed crate's macros would emit
 //! `::rmcp::` paths that resolve to the 1.x crate) that delegates tool calls to
-//! the shared, transport-agnostic `McpJsLibrary`. The tool list mirrors the
+//! the shared, transport-agnostic `McpJsRuntime`. The tool list mirrors the
 //! primary handler's core surface (converted to 0.1.5 `Tool`s).
 //!
 //! Tasks are NOT offered here (0.1.5 predates the tasks utility); task-enabled
@@ -26,8 +26,8 @@ use rmcp_legacy::{
 };
 use serde_json::json;
 
-use crate::library::{
-    LibraryError, LibraryMcpRequestHeaders, LibraryToolCallRequest, McpJsLibrary,
+use crate::engine::{
+    RuntimeError, McpRequestHeaders, ToolCallRequest, McpJsRuntime,
 };
 use crate::session::SessionVerifier;
 
@@ -36,14 +36,14 @@ const README_MD: &str = include_str!("../README.md");
 
 #[derive(Clone)]
 pub struct SseService {
-    runtime: Arc<McpJsLibrary>,
+    runtime: Arc<McpJsRuntime>,
     verifier: Option<Arc<SessionVerifier>>,
     session_id: Arc<OnceLock<String>>,
-    mcp_headers: Arc<OnceLock<LibraryMcpRequestHeaders>>,
+    mcp_headers: Arc<OnceLock<McpRequestHeaders>>,
 }
 
 impl SseService {
-    pub fn new(runtime: Arc<McpJsLibrary>, verifier: Option<Arc<SessionVerifier>>) -> Self {
+    pub fn new(runtime: Arc<McpJsRuntime>, verifier: Option<Arc<SessionVerifier>>) -> Self {
         Self {
             runtime,
             verifier,
@@ -219,7 +219,7 @@ impl ServerHandler for SseService {
             .arguments
             .map(serde_json::Value::Object)
             .unwrap_or_else(|| json!({}));
-        let request = LibraryToolCallRequest {
+        let request = ToolCallRequest {
             name: name.to_string(),
             arguments_json: args.to_string(),
             session_id: self.session_id.get().cloned(),
@@ -231,7 +231,7 @@ impl ServerHandler for SseService {
             .invoke_tool(request)
             .await
             .and_then(|json| {
-                serde_json::from_str(&json).map_err(|error| LibraryError::ToolCall {
+                serde_json::from_str(&json).map_err(|error| RuntimeError::ToolCall {
                     message: format!("failed to deserialize result: {error}"),
                 })
             })
@@ -274,7 +274,7 @@ impl ServerHandler for SseService {
                 let _ = self.session_id.set(sid.clone());
             }
             if !map.is_empty() {
-                let _ = self.mcp_headers.set(LibraryMcpRequestHeaders { values: map });
+                let _ = self.mcp_headers.set(McpRequestHeaders { values: map });
             }
         }
         Ok(self.get_info())

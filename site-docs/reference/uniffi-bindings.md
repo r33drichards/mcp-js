@@ -33,12 +33,12 @@ The generated bindings expose these stable groups:
 
 - Runtime, storage, hardening, WASM, prompt, policy, fetch-auth, capability, and
   upstream MCP configuration records.
-- `McpJsLibrary` construction, capabilities, lifecycle state, and shutdown.
+- `McpJsRuntime` construction, capabilities, lifecycle state, and shutdown.
 - Tool discovery plus synchronous and asynchronous tool invocation.
 - Asynchronous execution submission, status, output pagination, cancellation,
   and listing.
 - Session history, heap tags, filesystem labels, push, reset, and merge.
-- Typed MCP request headers through `LibraryMcpRequestHeaders`.
+- Typed MCP request headers through `McpRequestHeaders`.
 
 Arbitrary JavaScript code, tool arguments, tool results, schemas, and session
 snapshots remain JSON strings because their shapes are not fixed across tools.

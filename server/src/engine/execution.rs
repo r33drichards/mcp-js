@@ -51,7 +51,7 @@ pub struct ExecutionRecord {
 }
 
 /// Summary returned by `list()`.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, uniffi::Record)]
 pub struct ExecutionSummary {
     #[serde(rename = "execution_id")]
     pub id: ExecutionId,
@@ -61,7 +61,7 @@ pub struct ExecutionSummary {
 }
 
 /// A page of console output, including both line and byte coordinates.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, uniffi::Record)]
 pub struct ConsoleOutputPage {
     pub data: String,
 
@@ -343,7 +343,7 @@ impl ExecutionRegistry {
 }
 
 /// Execution info returned to callers.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, uniffi::Record)]
 pub struct ExecutionInfo {
     pub id: ExecutionId,
     pub status: String,

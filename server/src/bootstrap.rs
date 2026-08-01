@@ -15,35 +15,35 @@ use crate::engine::heap_storage::{
 use crate::engine::heap_tags::HeapTagStore;
 use crate::engine::session_log::{ForkOutcome, SessionLog};
 use crate::engine::{Engine, initialize_v8};
-use crate::library::{
-    LibraryCapabilityConfig, LibraryError, LibraryFeatureConfig, LibraryFetchHeaderRule,
-    LibraryMcpTransportKind, LibraryOperationPolicies, LibraryPolicyConfig, LibraryPolicyEvalMode,
-    LibraryRunJsFileAccess, LibraryUpstreamMcpConfig, McpJsLibrary,
+use crate::engine::{
+    RuntimeCapabilityConfig, RuntimeError, RuntimeFeatureConfig, RuntimeFetchHeaderRule,
+    RuntimeMcpTransportKind, RuntimeOperationPolicies, RuntimePolicyConfig, RuntimePolicyEvalMode,
+    RuntimeRunJsFileAccess, RuntimeUpstreamMcpConfig, McpJsRuntime,
 };
 
-pub struct LibraryBootstrap {
+pub struct RuntimeBootstrap {
     engine: Engine,
     cluster_node: Option<Arc<ClusterNode>>,
 }
 
-impl LibraryBootstrap {
+impl RuntimeBootstrap {
     pub fn with_feature_config(
         mut self,
-        config: LibraryFeatureConfig,
-    ) -> Result<Self, LibraryError> {
+        config: RuntimeFeatureConfig,
+    ) -> Result<Self, RuntimeError> {
         if self.engine.heap_enabled() && !config.wasm_modules.is_empty() {
-            return Err(LibraryError::InvalidConfig {
+            return Err(RuntimeError::InvalidConfig {
                 message: "WASM modules are incompatible with heap persistence".to_string(),
             });
         }
         let wasm_default_max_bytes =
             usize::try_from(config.wasm_default_max_bytes).map_err(|_| {
-                LibraryError::InvalidConfig {
+                RuntimeError::InvalidConfig {
                     message: "wasm_default_max_bytes is too large for this platform".to_string(),
                 }
             })?;
         if config.wasm_stubs.prefix.is_empty() {
-            return Err(LibraryError::InvalidConfig {
+            return Err(RuntimeError::InvalidConfig {
                 message: "WASM stub prefix cannot be empty".to_string(),
             });
         }
@@ -53,7 +53,7 @@ impl LibraryBootstrap {
         for module in config.wasm_modules {
             validate_wasm_module_name(&module.name)?;
             if !names.insert(module.name.clone()) {
-                return Err(LibraryError::InvalidConfig {
+                return Err(RuntimeError::InvalidConfig {
                     message: format!("duplicate WASM module name: '{}'", module.name),
                 });
             }
@@ -61,7 +61,7 @@ impl LibraryBootstrap {
                 .max_memory_bytes
                 .map(usize::try_from)
                 .transpose()
-                .map_err(|_| LibraryError::InvalidConfig {
+                .map_err(|_| RuntimeError::InvalidConfig {
                     message: format!(
                         "max_memory_bytes for WASM module '{}' is too large for this platform",
                         module.name
@@ -105,46 +105,46 @@ impl LibraryBootstrap {
 
     pub fn with_policy_config(
         mut self,
-        policies: LibraryPolicyConfig,
-        capabilities: LibraryCapabilityConfig,
-    ) -> Result<Self, LibraryError> {
-        let fetch_policy = build_library_policy_chain(
+        policies: RuntimePolicyConfig,
+        capabilities: RuntimeCapabilityConfig,
+    ) -> Result<Self, RuntimeError> {
+        let fetch_policy = build_policy_chain(
             policies.fetch,
             "mcp/fetch",
             "data.mcp.fetch.allow",
             "fetch",
         )?;
-        let modules_policy = build_library_policy_chain(
+        let modules_policy = build_policy_chain(
             policies.modules,
             "mcp/modules",
             "data.mcp.modules.allow",
             "modules",
         )?;
-        let filesystem_policy = build_library_policy_chain(
+        let filesystem_policy = build_policy_chain(
             policies.filesystem,
             "mcp/filesystem",
             "data.mcp.filesystem.allow",
             "filesystem",
         )?;
-        let fs_snapshot_policy = build_library_policy_chain(
+        let fs_snapshot_policy = build_policy_chain(
             policies.fs_snapshot,
             "mcp/fs_snapshot",
             "data.mcp.fs_snapshot.allow",
             "fs_snapshot",
         )?;
-        let mcp_tools_policy = build_library_policy_chain(
+        let mcp_tools_policy = build_policy_chain(
             policies.mcp_tools,
             "mcp/tools",
             "data.mcp.tools.allow",
             "mcp_tools",
         )?;
-        let subprocess_policy = build_library_policy_chain(
+        let subprocess_policy = build_policy_chain(
             policies.subprocess,
             "mcp/subprocess",
             "data.mcp.subprocess.allow",
             "subprocess",
         )?;
-        let run_js_file_policy = build_library_policy_chain(
+        let run_js_file_policy = build_policy_chain(
             policies.run_js_file,
             "mcp/run_js_file",
             "data.mcp.run_js_file.allow",
@@ -191,20 +191,20 @@ impl LibraryBootstrap {
                 .with_subprocess_config(crate::engine::subprocess::SubprocessConfig::new(chain));
         }
         match capabilities.run_js_file_access {
-            LibraryRunJsFileAccess::AllowAll => {
+            RuntimeRunJsFileAccess::AllowAll => {
                 self.engine = self
                     .engine
                     .with_run_js_file_policy(crate::engine::run_js_file::RunJsFilePolicy::AllowAll);
             }
-            LibraryRunJsFileAccess::Policy => {
-                let chain = run_js_file_policy.ok_or_else(|| LibraryError::InvalidConfig {
+            RuntimeRunJsFileAccess::Policy => {
+                let chain = run_js_file_policy.ok_or_else(|| RuntimeError::InvalidConfig {
                     message: "run_js_file_access=Policy requires a run_js_file policy".to_string(),
                 })?;
                 self.engine = self.engine.with_run_js_file_policy(
                     crate::engine::run_js_file::RunJsFilePolicy::Policy(chain),
                 );
             }
-            LibraryRunJsFileAccess::Disabled => {
+            RuntimeRunJsFileAccess::Disabled => {
                 if let Some(chain) = run_js_file_policy {
                     self.engine = self.engine.with_run_js_file_policy(
                         crate::engine::run_js_file::RunJsFilePolicy::Policy(chain),
@@ -220,13 +220,13 @@ impl LibraryBootstrap {
 
     pub async fn with_upstream_mcp_config(
         mut self,
-        config: LibraryUpstreamMcpConfig,
-    ) -> Result<Self, LibraryError> {
+        config: RuntimeUpstreamMcpConfig,
+    ) -> Result<Self, RuntimeError> {
         if config.servers.is_empty() {
             return Ok(self);
         }
         if config.stubs.prefix.is_empty() {
-            return Err(LibraryError::InvalidConfig {
+            return Err(RuntimeError::InvalidConfig {
                 message: "upstream MCP stub prefix cannot be empty".to_string(),
             });
         }
@@ -235,17 +235,17 @@ impl LibraryBootstrap {
         let mut servers = Vec::with_capacity(config.servers.len());
         for server in config.servers {
             if !names.insert(server.name.clone()) {
-                return Err(LibraryError::InvalidConfig {
+                return Err(RuntimeError::InvalidConfig {
                     message: format!("duplicate MCP server name: '{}'", server.name),
                 });
             }
             let transport = match server.transport {
-                LibraryMcpTransportKind::Stdio => {
-                    let command = server.command.ok_or_else(|| LibraryError::InvalidConfig {
+                RuntimeMcpTransportKind::Stdio => {
+                    let command = server.command.ok_or_else(|| RuntimeError::InvalidConfig {
                         message: format!("stdio MCP server '{}' requires a command", server.name),
                     })?;
                     if command.is_empty() {
-                        return Err(LibraryError::InvalidConfig {
+                        return Err(RuntimeError::InvalidConfig {
                             message: format!(
                                 "stdio MCP server '{}' requires a command",
                                 server.name
@@ -258,12 +258,12 @@ impl LibraryBootstrap {
                         env: server.env,
                     }
                 }
-                LibraryMcpTransportKind::Sse => {
-                    let url = server.url.ok_or_else(|| LibraryError::InvalidConfig {
+                RuntimeMcpTransportKind::Sse => {
+                    let url = server.url.ok_or_else(|| RuntimeError::InvalidConfig {
                         message: format!("SSE MCP server '{}' requires a URL", server.name),
                     })?;
                     if url.is_empty() {
-                        return Err(LibraryError::InvalidConfig {
+                        return Err(RuntimeError::InvalidConfig {
                             message: format!("SSE MCP server '{}' requires a URL", server.name),
                         });
                     }
@@ -278,7 +278,7 @@ impl LibraryBootstrap {
 
         let manager = crate::engine::mcp_client::McpClientManager::connect(servers)
             .await
-            .map_err(|message| LibraryError::Initialization {
+            .map_err(|message| RuntimeError::Initialization {
                 message: format!("MCP server connection failed: {message}"),
             })?
             .with_stub_config(crate::engine::mcp_client::StubConfig {
@@ -289,31 +289,31 @@ impl LibraryBootstrap {
         Ok(self)
     }
 
-    pub fn build(self) -> Arc<McpJsLibrary> {
-        McpJsLibrary::from_engine_with_cluster(self.engine, self.cluster_node)
+    pub fn build(self) -> Arc<McpJsRuntime> {
+        McpJsRuntime::from_engine_with_cluster(self.engine, self.cluster_node)
     }
 
     pub(crate) fn build_with_runtime(
         self,
         tokio_runtime: tokio::runtime::Runtime,
-    ) -> Arc<McpJsLibrary> {
-        McpJsLibrary::from_engine_with_tokio_runtime(self.engine, tokio_runtime, self.cluster_node)
+    ) -> Arc<McpJsRuntime> {
+        McpJsRuntime::from_engine_with_tokio_runtime(self.engine, tokio_runtime, self.cluster_node)
     }
 }
 
-fn build_library_policy_chain(
-    policies: Option<LibraryOperationPolicies>,
+fn build_policy_chain(
+    policies: Option<RuntimeOperationPolicies>,
     default_remote_path: &str,
     default_local_rule: &str,
     operation: &str,
-) -> Result<Option<Arc<crate::engine::opa::PolicyChain>>, LibraryError> {
+) -> Result<Option<Arc<crate::engine::opa::PolicyChain>>, RuntimeError> {
     let Some(policies) = policies else {
         return Ok(None);
     };
     let internal = crate::engine::opa::OperationPolicies {
         mode: match policies.mode {
-            LibraryPolicyEvalMode::All => crate::engine::opa::EvalMode::All,
-            LibraryPolicyEvalMode::Any => crate::engine::opa::EvalMode::Any,
+            RuntimePolicyEvalMode::All => crate::engine::opa::EvalMode::All,
+            RuntimePolicyEvalMode::Any => crate::engine::opa::EvalMode::Any,
         },
         policies: policies
             .policies
@@ -328,25 +328,25 @@ fn build_library_policy_chain(
     crate::engine::opa::build_policy_chain(&internal, default_remote_path, default_local_rule)
         .map(Arc::new)
         .map(Some)
-        .map_err(|message| LibraryError::InvalidConfig {
+        .map_err(|message| RuntimeError::InvalidConfig {
             message: format!("failed to build {operation} policy chain: {message}"),
         })
 }
 
 pub(crate) fn validate_fetch_header_rule(
-    rule: &LibraryFetchHeaderRule,
-) -> Result<(), LibraryError> {
+    rule: &RuntimeFetchHeaderRule,
+) -> Result<(), RuntimeError> {
     build_fetch_header_rule(rule.clone()).map(|_| ())
 }
 
 pub(crate) fn normalize_fetch_header_rule(
-    rule: LibraryFetchHeaderRule,
-) -> Result<LibraryFetchHeaderRule, LibraryError> {
+    rule: RuntimeFetchHeaderRule,
+) -> Result<RuntimeFetchHeaderRule, RuntimeError> {
     let internal = build_fetch_header_rule(rule)?;
     let static_headers = internal.static_headers().cloned();
     let oauth = internal
         .dynamic_auth()
-        .map(|config| crate::library::LibraryFetchOAuthConfig {
+        .map(|config| crate::engine::RuntimeFetchOAuthConfig {
             header_name: config.header_name.clone(),
             token_url: config.token_url.clone(),
             client_id: config.client_id.clone(),
@@ -354,7 +354,7 @@ pub(crate) fn normalize_fetch_header_rule(
             scope: config.scope.clone(),
             refresh_buffer_secs: config.refresh_buffer_secs,
         });
-    Ok(LibraryFetchHeaderRule {
+    Ok(RuntimeFetchHeaderRule {
         host: internal.host,
         methods: internal.methods,
         static_headers,
@@ -363,11 +363,11 @@ pub(crate) fn normalize_fetch_header_rule(
 }
 
 fn build_fetch_header_rule(
-    rule: LibraryFetchHeaderRule,
-) -> Result<crate::engine::fetch::HeaderRule, LibraryError> {
+    rule: RuntimeFetchHeaderRule,
+) -> Result<crate::engine::fetch::HeaderRule, RuntimeError> {
     let result = match (rule.static_headers, rule.oauth) {
         (Some(_), Some(_)) => {
-            return Err(LibraryError::InvalidConfig {
+            return Err(RuntimeError::InvalidConfig {
                 message: format!(
                     "fetch header rule for host '{}' cannot define both static_headers and oauth",
                     rule.host
@@ -375,7 +375,7 @@ fn build_fetch_header_rule(
             });
         }
         (None, None) => {
-            return Err(LibraryError::InvalidConfig {
+            return Err(RuntimeError::InvalidConfig {
                 message: format!(
                     "fetch header rule for host '{}' must define static_headers or oauth",
                     rule.host
@@ -400,20 +400,20 @@ fn build_fetch_header_rule(
             },
         ),
     };
-    result.map_err(|error| LibraryError::InvalidConfig {
+    result.map_err(|error| RuntimeError::InvalidConfig {
         message: format!("invalid fetch header rule: {error}"),
     })
 }
 
-fn validate_wasm_module_name(name: &str) -> Result<(), LibraryError> {
+fn validate_wasm_module_name(name: &str) -> Result<(), RuntimeError> {
     let mut chars = name.chars();
     let Some(first) = chars.next() else {
-        return Err(LibraryError::InvalidConfig {
+        return Err(RuntimeError::InvalidConfig {
             message: "WASM module name cannot be empty".to_string(),
         });
     };
     if !first.is_ascii_alphabetic() && first != '_' && first != '$' {
-        return Err(LibraryError::InvalidConfig {
+        return Err(RuntimeError::InvalidConfig {
             message: format!(
                 "WASM module name '{}' must start with a letter, underscore, or dollar sign",
                 name
@@ -423,7 +423,7 @@ fn validate_wasm_module_name(name: &str) -> Result<(), LibraryError> {
     if let Some(invalid) = chars.find(|character| {
         !character.is_ascii_alphanumeric() && *character != '_' && *character != '$'
     }) {
-        return Err(LibraryError::InvalidConfig {
+        return Err(RuntimeError::InvalidConfig {
             message: format!(
                 "WASM module name '{}' contains invalid character '{}'",
                 name, invalid
@@ -465,7 +465,7 @@ impl StorageBootstrapConfig {
 pub async fn build_storage_engine(
     config: StorageBootstrapConfig,
     cluster_node: Option<Arc<ClusterNode>>,
-) -> Result<LibraryBootstrap> {
+) -> Result<RuntimeBootstrap> {
     initialize_v8();
     let heap_enabled = config.heap_enabled();
 
@@ -492,7 +492,7 @@ pub async fn build_storage_engine(
     let engine = attach_session_log(engine, &config, cluster_node.as_ref()).await?;
     let engine = attach_heap_tags(engine, &config, cluster_node.as_ref());
     let engine = attach_filesystem(engine, &config, cluster_node.as_ref()).await?;
-    Ok(LibraryBootstrap {
+    Ok(RuntimeBootstrap {
         engine: attach_execution_registry(engine, &config),
         cluster_node,
     })

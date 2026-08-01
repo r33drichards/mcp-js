@@ -12,7 +12,7 @@ import server as mcp_v8
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="mcp-v8-python-uniffi-") as data_dir:
         config = mcp_v8.default_runtime_config(data_dir)
-        library = mcp_v8.create_library(config)
+        library = mcp_v8.create_runtime(config)
 
         tool_names = {tool.name for tool in library.list_tools()}
         assert "run_js" in tool_names

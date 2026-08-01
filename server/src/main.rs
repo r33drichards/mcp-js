@@ -14,12 +14,12 @@ use utoipa::OpenApi as _;
 use std::fmt;
 use server::cli::{Cli, FetchHeaderKey, StoreKind};
 use server::mcp::{McpService, StatelessMcpService};
-use server::library::{
-    LibraryCapabilityConfig, LibraryFeatureConfig, LibraryFetchHeaderRule,
-    LibraryFetchOAuthConfig, LibraryHardeningConfig, LibraryMcpServerConfig,
-    LibraryMcpStubConfig, LibraryMcpTransportKind, LibraryPolicyConfig,
-    LibraryRunJsFileAccess, LibraryUpstreamMcpConfig, LibraryWasmModuleConfig,
-    LibraryWasmStubConfig, McpJsLibrary, default_fetch_oauth_refresh_buffer_secs,
+use server::engine::{
+    RuntimeCapabilityConfig, RuntimeFeatureConfig, RuntimeFetchHeaderRule,
+    RuntimeFetchOAuthConfig, RuntimeHardeningConfig, RuntimeMcpServerConfig,
+    RuntimeMcpStubConfig, RuntimeMcpTransportKind, RuntimePolicyConfig,
+    RuntimeRunJsFileAccess, RuntimeUpstreamMcpConfig, RuntimeWasmModuleConfig,
+    RuntimeWasmStubConfig, McpJsRuntime, default_fetch_oauth_refresh_buffer_secs,
 };
 use server::{api, bootstrap, cli, cluster, mcp_sse, sandbox};
 use server::session::{SessionVerifier, JwksKeyStore};
@@ -236,7 +236,7 @@ async fn async_main(cli: Cli) -> Result<()> {
 
     // Storage, session replication/forking, heap tags, filesystem snapshots,
     // and the execution registry are constructed by the canonical library.
-    let library_builder = bootstrap::build_storage_engine(
+    let runtime_builder = bootstrap::build_storage_engine(
         bootstrap::StorageBootstrapConfig {
             heap_store: cli.heap_store,
             heap_dir: cli.heap_dir.clone(),
@@ -259,7 +259,7 @@ async fn async_main(cli: Cli) -> Result<()> {
     .await?;
 
     // ── Policy and capability configuration ──────────────────────────────
-    let policy_config: LibraryPolicyConfig = if let Some(ref json_or_path) = cli.policies_json {
+    let policy_config: RuntimePolicyConfig = if let Some(ref json_or_path) = cli.policies_json {
         let json_str = if json_or_path.trim_start().starts_with('{') {
             json_or_path.clone()
         } else {
@@ -271,7 +271,7 @@ async fn async_main(cli: Cli) -> Result<()> {
         tracing::info!("Loaded policies configuration from --policies-json");
         config
     } else {
-        LibraryPolicyConfig::default()
+        RuntimePolicyConfig::default()
     };
 
     let fetch_header_rules =
@@ -301,23 +301,23 @@ async fn async_main(cli: Cli) -> Result<()> {
         tracing::info!(
             "run_js file-path reads: ENABLED (allow all server-readable paths)"
         );
-        LibraryRunJsFileAccess::AllowAll
+        RuntimeRunJsFileAccess::AllowAll
     } else if policy_config.run_js_file.is_some() {
         tracing::info!("run_js file-path reads: ENABLED (policy-gated)");
-        LibraryRunJsFileAccess::Policy
+        RuntimeRunJsFileAccess::Policy
     } else {
         tracing::info!(
             "run_js file-path reads: DISABLED (enable with --allow-run-js-file or a run_js_file policy)"
         );
-        LibraryRunJsFileAccess::Disabled
+        RuntimeRunJsFileAccess::Disabled
     };
-    let capability_config = LibraryCapabilityConfig {
+    let capability_config = RuntimeCapabilityConfig {
         fetch_header_rules,
         filesystem_passthrough: cli.fs_passthrough,
         allow_external_modules: cli.allow_external_modules,
         run_js_file_access,
     };
-    let library_builder = library_builder.with_policy_config(policy_config, capability_config)?;
+    let runtime_builder = runtime_builder.with_policy_config(policy_config, capability_config)?;
 
     // ── MCP server modules ────────────────────────────────────────────────
     let mcp_server_configs = load_mcp_server_configs(&cli.mcp_servers, &cli.mcp_config)?;
@@ -330,10 +330,10 @@ async fn async_main(cli: Cli) -> Result<()> {
             "Upstream MCP tool stubbing"
         );
     }
-    let library_builder = library_builder
-        .with_upstream_mcp_config(LibraryUpstreamMcpConfig {
+    let runtime_builder = runtime_builder
+        .with_upstream_mcp_config(RuntimeUpstreamMcpConfig {
             servers: mcp_server_configs,
-            stubs: LibraryMcpStubConfig {
+            stubs: RuntimeMcpStubConfig {
                 prefix: cli.mcp_stub_prefix.clone(),
                 enabled: cli.mcp_stubs,
             },
@@ -365,10 +365,10 @@ async fn async_main(cli: Cli) -> Result<()> {
             "WASM module stubbing"
         );
     }
-    let feature_config = LibraryFeatureConfig {
+    let feature_config = RuntimeFeatureConfig {
         wasm_default_max_bytes: u64::try_from(wasm_default_max_bytes)
             .map_err(|_| anyhow::anyhow!("WASM default memory limit is too large"))?,
-        hardening: LibraryHardeningConfig {
+        hardening: RuntimeHardeningConfig {
             freeze_ops: cli.harden_freeze_ops,
             neutralize_proxy_details: cli.harden_neutralize_proxy_details,
             neutralize_introspection: cli.harden_neutralize_introspection,
@@ -376,14 +376,14 @@ async fn async_main(cli: Cli) -> Result<()> {
             remove_shared_memory: cli.harden_remove_shared_memory,
         },
         wasm_modules,
-        wasm_stubs: LibraryWasmStubConfig {
+        wasm_stubs: RuntimeWasmStubConfig {
             prefix: cli.wasm_stub_prefix.clone(),
             enabled: cli.wasm_stubs,
         },
         instructions_override,
         run_js_description_override,
     };
-    let library_builder = library_builder.with_feature_config(feature_config)?;
+    let runtime_builder = runtime_builder.with_feature_config(feature_config)?;
 
     // ── Build session verifier (if --jwks-url) ─────────────────────────
     let session_verifier: Option<Arc<SessionVerifier>> = if let Some(ref jwks_url) = cli.jwks_url {
@@ -395,7 +395,7 @@ async fn async_main(cli: Cli) -> Result<()> {
         None
     };
 
-    let runtime = library_builder.build();
+    let runtime = runtime_builder.build();
 
     // ── Start transport ─────────────────────────────────────────────────
     // McpService (session-capable) is used whenever any per-session state axis
@@ -462,10 +462,10 @@ fn resolve_bind_addr(host: &str, port: u16) -> Result<std::net::SocketAddr> {
 
 // ── Streamable HTTP transport (--http-port) ─────────────────────────────
 
-async fn start_streamable_http<S, F>(runtime: Arc<McpJsLibrary>, host: String, port: u16, make_service: F) -> Result<()>
+async fn start_streamable_http<S, F>(runtime: Arc<McpJsRuntime>, host: String, port: u16, make_service: F) -> Result<()>
 where
     S: ServerHandler + Send + Sync + 'static,
-    F: Fn(Arc<McpJsLibrary>) -> S + Send + Sync + Clone + 'static,
+    F: Fn(Arc<McpJsRuntime>) -> S + Send + Sync + Clone + 'static,
 {
     let bind: std::net::SocketAddr = resolve_bind_addr(&host, port)?;
     let ct = CancellationToken::new();
@@ -524,7 +524,7 @@ where
 // MCP tasks (use the Streamable HTTP transport for those).
 
 async fn start_sse_server(
-    runtime: Arc<McpJsLibrary>,
+    runtime: Arc<McpJsRuntime>,
     host: String,
     port: u16,
     verifier: Option<Arc<SessionVerifier>>,
@@ -595,7 +595,7 @@ fn load_wasm_modules(
     cli_modules: &[String],
     config_path: &Option<String>,
     stub_descriptions: &[String],
-) -> Result<Vec<LibraryWasmModuleConfig>> {
+) -> Result<Vec<RuntimeWasmModuleConfig>> {
     let mut modules = Vec::new();
 
     // Parse CLI --wasm-module flags (format: name=/path/to/file.wasm[:max_memory])
@@ -630,7 +630,7 @@ fn load_wasm_modules(
 
         let bytes = std::fs::read(path)
             .map_err(|e| anyhow::anyhow!("Failed to read WASM file '{}': {}", path, e))?;
-        modules.push(LibraryWasmModuleConfig {
+        modules.push(RuntimeWasmModuleConfig {
             name,
             bytes,
             max_memory_bytes: max_memory_bytes.map(|bytes| bytes as u64),
@@ -682,7 +682,7 @@ fn load_wasm_modules(
             validate_wasm_name(&name)?;
             let bytes = std::fs::read(&path)
                 .map_err(|e| anyhow::anyhow!("Failed to read WASM file '{}': {}", path, e))?;
-            modules.push(LibraryWasmModuleConfig {
+            modules.push(RuntimeWasmModuleConfig {
                 name,
                 bytes,
                 max_memory_bytes,
@@ -834,7 +834,7 @@ struct FetchHeaderAuthConfig {
 }
 
 impl FetchHeaderConfigRule {
-    fn into_library_rule(self) -> Result<LibraryFetchHeaderRule> {
+    fn into_runtime_rule(self) -> Result<RuntimeFetchHeaderRule> {
         let host = self.host;
         let methods = self.methods;
         let rule = match (self.headers, self.auth) {
@@ -846,7 +846,7 @@ impl FetchHeaderConfigRule {
                 "Fetch header config rule for host '{}' must define either 'headers' or 'auth'",
                 host
             ),
-            (Some(headers), None) => LibraryFetchHeaderRule {
+            (Some(headers), None) => RuntimeFetchHeaderRule {
                 host,
                 methods,
                 static_headers: Some(headers.0),
@@ -860,11 +860,11 @@ impl FetchHeaderConfigRule {
                         host
                     );
                 }
-                LibraryFetchHeaderRule {
+                RuntimeFetchHeaderRule {
                     host,
                     methods,
                     static_headers: None,
-                    oauth: Some(LibraryFetchOAuthConfig {
+                    oauth: Some(RuntimeFetchOAuthConfig {
                         header_name: auth.header,
                         token_url: auth.token_url,
                         client_id: auth.client_id,
@@ -883,7 +883,7 @@ impl FetchHeaderConfigRule {
 fn load_fetch_header_rules(
     cli_rules: &[String],
     config_path: &Option<String>,
-) -> Result<Vec<LibraryFetchHeaderRule>> {
+) -> Result<Vec<RuntimeFetchHeaderRule>> {
     let mut rules = Vec::new();
 
     for entry in cli_rules {
@@ -902,7 +902,7 @@ fn load_fetch_header_rules(
         let file_rules: Vec<FetchHeaderConfigRule> = serde_json::from_str(&content)
             .map_err(|e| anyhow::anyhow!("Invalid JSON in fetch header config '{}': {}", path, e))?;
         for rule in file_rules {
-            rules.push(rule.into_library_rule()?);
+            rules.push(rule.into_runtime_rule()?);
         }
     }
 
@@ -912,7 +912,7 @@ fn load_fetch_header_rules(
 /// Parse a `--fetch-header` CLI string into a `HeaderRule`.
 /// Format: host=<host>,header=<name>,value=<val>[,methods=GET;POST]
 /// Or:     host=<host>,header=<name>,token_url=<url>,client_id=<id>,client_secret=<secret>[,scope=<scope>][,methods=GET;POST][,refresh_buffer_secs=30]
-fn parse_fetch_header_cli(s: &str) -> Result<LibraryFetchHeaderRule> {
+fn parse_fetch_header_cli(s: &str) -> Result<RuntimeFetchHeaderRule> {
     let mut host = None;
     let mut methods = Vec::new();
     let mut header_name = None;
@@ -964,17 +964,17 @@ fn parse_fetch_header_cli(s: &str) -> Result<LibraryFetchHeaderRule> {
         (Some(_), true) => anyhow::bail!(
             "--fetch-header cannot mix static 'value' with dynamic oauth keys"
         ),
-        (Some(value), false) => LibraryFetchHeaderRule {
+        (Some(value), false) => RuntimeFetchHeaderRule {
             host,
             methods,
             static_headers: Some(std::collections::HashMap::from([(header_name, value)])),
             oauth: None,
         },
-        (None, true) => LibraryFetchHeaderRule {
+        (None, true) => RuntimeFetchHeaderRule {
             host,
             methods,
             static_headers: None,
-            oauth: Some(LibraryFetchOAuthConfig {
+            oauth: Some(RuntimeFetchOAuthConfig {
                 header_name,
                 token_url: token_url.ok_or_else(|| anyhow::anyhow!(
                     "--fetch-header missing 'token_url' for dynamic oauth rule"
@@ -1005,7 +1005,7 @@ fn parse_fetch_header_cli(s: &str) -> Result<LibraryFetchHeaderRule> {
 fn load_mcp_server_configs(
     cli_servers: &[String],
     config_path: &Option<String>,
-) -> Result<Vec<LibraryMcpServerConfig>> {
+) -> Result<Vec<RuntimeMcpServerConfig>> {
     let mut configs = Vec::new();
 
     // Parse CLI --mcp-server flags
@@ -1022,18 +1022,18 @@ fn load_mcp_server_configs(
             if parts.is_empty() || parts[0].is_empty() {
                 anyhow::bail!("--mcp-server stdio transport requires a command");
             }
-            configs.push(LibraryMcpServerConfig {
+            configs.push(RuntimeMcpServerConfig {
                 name,
-                transport: LibraryMcpTransportKind::Stdio,
+                transport: RuntimeMcpTransportKind::Stdio,
                 command: Some(parts[0].to_string()),
                 args: parts[1..].iter().map(|s| s.to_string()).collect(),
                 env: std::collections::HashMap::new(),
                 url: None,
             });
         } else if let Some(url) = rest.strip_prefix("sse:") {
-            configs.push(LibraryMcpServerConfig {
+            configs.push(RuntimeMcpServerConfig {
                 name,
-                transport: LibraryMcpTransportKind::Sse,
+                transport: RuntimeMcpTransportKind::Sse,
                 command: None,
                 args: Vec::new(),
                 env: std::collections::HashMap::new(),
@@ -1056,7 +1056,7 @@ fn load_mcp_server_configs(
             std::fs::read_to_string(config_path)
                 .map_err(|e| anyhow::anyhow!("Failed to read MCP config '{}': {}", config_path, e))?
         };
-        let file_configs: Vec<LibraryMcpServerConfig> = serde_json::from_str(&content)
+        let file_configs: Vec<RuntimeMcpServerConfig> = serde_json::from_str(&content)
             .map_err(|e| anyhow::anyhow!("Invalid JSON in MCP config '{}': {}", config_path, e))?;
         configs.extend(file_configs);
     }
@@ -1096,7 +1096,7 @@ mod tests {
     }
 
     fn check_mcp_servers() -> anyhow::Result<()> {
-        use server::library::LibraryMcpTransportKind;
+        use server::engine::RuntimeMcpTransportKind;
 
         let configs = load_mcp_server_configs(
             &[
@@ -1105,8 +1105,8 @@ mod tests {
             ],
             &None,
         )?;
-        anyhow::ensure!(matches!(configs[0].transport, LibraryMcpTransportKind::Stdio { .. }));
-        anyhow::ensure!(matches!(configs[1].transport, LibraryMcpTransportKind::Sse { .. }));
+        anyhow::ensure!(matches!(configs[0].transport, RuntimeMcpTransportKind::Stdio { .. }));
+        anyhow::ensure!(matches!(configs[1].transport, RuntimeMcpTransportKind::Sse { .. }));
         Ok(())
     }
 
@@ -1215,13 +1215,13 @@ mod tests {
 
     #[test]
     fn load_mcp_server_configs_accepts_inline_json() {
-        use server::library::LibraryMcpTransportKind;
+        use server::engine::RuntimeMcpTransportKind;
 
         let inline = r#"[{"name": "weather", "transport": "stdio", "command": "python", "args": ["server.py"]}]"#;
         let configs =
             load_mcp_server_configs(&[], &Some(inline.to_string())).expect("inline JSON should load");
         assert_eq!(configs[0].name, "weather");
-        assert!(matches!(configs[0].transport, LibraryMcpTransportKind::Stdio { .. }));
+        assert!(matches!(configs[0].transport, RuntimeMcpTransportKind::Stdio { .. }));
     }
 
     #[test]
