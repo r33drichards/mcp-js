@@ -15,7 +15,7 @@ use std::sync::{Arc, OnceLock};
 use tokio::sync::Mutex;
 
 use crate::engine::{
-    RuntimeError, McpRequestHeaders, ToolCallRequest, McpJsRuntime,
+    Engine, RuntimeError, McpRequestHeaders, ToolCallRequest,
 };
 use crate::session::SessionVerifier;
 
@@ -79,7 +79,7 @@ pub fn built_in_tool_catalog(heap: bool, fs: bool) -> ToolCatalog {
 /// by the legacy SSE handler (`mcp_sse.rs`). Excludes the upstream-MCP / WASM
 /// discovery stubs (a Streamable-HTTP convenience); SSE clients drive modules
 /// from `run_js` directly.
-pub fn mode_tool_list(engine: &McpJsRuntime) -> Vec<Tool> {
+pub fn mode_tool_list(engine: &Engine) -> Vec<Tool> {
     let mut tools = if engine.session_capable() {
         let mut tools = McpService::tool_router().list_all();
         filter_tools_by_capability(&mut tools, engine.heap_enabled(), engine.fs_enabled());
@@ -161,7 +161,7 @@ fn json_result(value: serde_json::Value) -> Result<CallToolResult, McpError> {
 }
 
 async fn invoke_runtime_tool(
-    runtime: &McpJsRuntime,
+    runtime: &Engine,
     name: &str,
     arguments_json: String,
     session_id: Option<String>,
@@ -186,7 +186,7 @@ async fn invoke_runtime_tool(
 // ── Tool argument structs ─────────────────────────────────────────────────
 //
 // These exist for the rmcp tool macros' input-schema generation. The actual
-// Tool logic lives behind `McpJsRuntime`, so the tool methods only serialize
+// Tool logic lives behind `Engine`, so the tool methods only serialize
 // their arguments and invoke the canonical library surface.
 
 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
@@ -386,7 +386,7 @@ fn filter_tools_by_capability(tools: &mut Vec<Tool>, heap: bool, fs: bool) {
 
 #[derive(Clone)]
 pub struct McpService {
-    runtime: Arc<McpJsRuntime>,
+    runtime: Arc<Engine>,
     verifier: Option<Arc<SessionVerifier>>,
     /// Set once during `initialize` from X-MCP-Session-Id header.
     session_id: Arc<OnceLock<String>>,
@@ -417,7 +417,7 @@ impl McpService {
 
 #[tool_router]
 impl McpService {
-    pub fn new(runtime: Arc<McpJsRuntime>, verifier: Option<Arc<SessionVerifier>>) -> Self {
+    pub fn new(runtime: Arc<Engine>, verifier: Option<Arc<SessionVerifier>>) -> Self {
         Self {
             runtime,
             verifier,
@@ -682,7 +682,7 @@ impl ServerHandler for McpService {
 
 #[derive(Clone)]
 pub struct StatelessMcpService {
-    runtime: Arc<McpJsRuntime>,
+    runtime: Arc<Engine>,
     verifier: Option<Arc<SessionVerifier>>,
     /// X-MCP-* headers from the initialize request, available for policy evaluation.
     mcp_headers: Arc<OnceLock<McpRequestHeaders>>,
@@ -692,7 +692,7 @@ pub struct StatelessMcpService {
 
 #[tool_router]
 impl StatelessMcpService {
-    pub fn new(runtime: Arc<McpJsRuntime>, verifier: Option<Arc<SessionVerifier>>) -> Self {
+    pub fn new(runtime: Arc<Engine>, verifier: Option<Arc<SessionVerifier>>) -> Self {
         Self {
             runtime,
             verifier,

@@ -10,7 +10,7 @@ use server::engine::fs_merge::Prefer;
 use server::engine::fs_mount::SessionMount;
 use server::engine::fs_store::FsStore;
 use server::engine::opa::{EvalMode, PolicyChain};
-use server::engine::{ca_to_hex, parse_ca_hex, Engine, FsMergeResult, McpJsRuntime};
+use server::engine::{ca_to_hex, parse_ca_hex, Engine, FsMergeResult};
 
 fn tmp(tag: &str) -> String {
     std::env::temp_dir()
@@ -28,7 +28,7 @@ fn tmp(tag: &str) -> String {
 }
 
 struct H {
-    engine: Arc<McpJsRuntime>,
+    engine: Arc<Engine>,
     store: Arc<FsStore>,
 }
 
@@ -38,7 +38,7 @@ fn harness() -> H {
         .with_fs_config(FsConfig::new(Arc::new(PolicyChain::new(vec![], EvalMode::All))))
         .with_execution_registry(Arc::new(ExecutionRegistry::new(&tmp("reg")).unwrap()))
         .with_fs_snapshots(store.clone(), Arc::new(LabelStore::in_memory()));
-    H { engine: McpJsRuntime::from_engine(engine), store }
+    H { engine: Engine::from_engine(engine), store }
 }
 
 /// Build a snapshot from `(path, bytes)` and return its CA id (hex).

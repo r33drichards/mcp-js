@@ -18,7 +18,7 @@ use crate::engine::{Engine, initialize_v8};
 use crate::engine::{
     RuntimeCapabilityConfig, RuntimeError, RuntimeFeatureConfig, RuntimeFetchHeaderRule,
     RuntimeMcpTransportKind, RuntimeOperationPolicies, RuntimePolicyConfig, RuntimePolicyEvalMode,
-    RuntimeRunJsFileAccess, RuntimeUpstreamMcpConfig, McpJsRuntime,
+    RuntimeRunJsFileAccess, RuntimeUpstreamMcpConfig,
 };
 
 pub struct RuntimeBootstrap {
@@ -289,15 +289,15 @@ impl RuntimeBootstrap {
         Ok(self)
     }
 
-    pub fn build(self) -> Arc<McpJsRuntime> {
-        McpJsRuntime::from_engine_with_cluster(self.engine, self.cluster_node)
+    pub fn build(self) -> Arc<Engine> {
+        Engine::from_engine_with_cluster(self.engine, self.cluster_node)
     }
 
     pub(crate) fn build_with_runtime(
         self,
         tokio_runtime: tokio::runtime::Runtime,
-    ) -> Arc<McpJsRuntime> {
-        McpJsRuntime::from_engine_with_tokio_runtime(self.engine, tokio_runtime, self.cluster_node)
+    ) -> Arc<Engine> {
+        Engine::from_engine_with_tokio_runtime(self.engine, tokio_runtime, self.cluster_node)
     }
 }
 

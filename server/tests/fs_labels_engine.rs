@@ -8,7 +8,7 @@ use server::engine::fs::FsConfig;
 use server::engine::fs_labels::LabelStore;
 use server::engine::fs_store::FsStore;
 use server::engine::opa::{EvalMode, PolicyChain};
-use server::engine::{ca_to_hex, Engine, FsPushOutcome, McpJsRuntime};
+use server::engine::{ca_to_hex, Engine, FsPushOutcome};
 
 fn tmp(tag: &str) -> String {
     std::env::temp_dir()
@@ -25,9 +25,9 @@ fn tmp(tag: &str) -> String {
         .to_string()
 }
 
-fn engine() -> Arc<McpJsRuntime> {
+fn engine() -> Arc<Engine> {
     let registry = ExecutionRegistry::new(&tmp("reg")).unwrap();
-    McpJsRuntime::from_engine(Engine::new_stateless(32 * 1024 * 1024, 30, 2)
+    Engine::from_engine(Engine::new_stateless(32 * 1024 * 1024, 30, 2)
         .with_fs_config(FsConfig::new(Arc::new(PolicyChain::new(vec![], EvalMode::All))))
         .with_execution_registry(Arc::new(registry))
         .with_fs_snapshots(
@@ -41,7 +41,7 @@ fn hexid(b: u8) -> String {
 }
 
 /// An engine whose fs-snapshot pointer moves are gated by an inline Rego policy.
-fn engine_with_policy(rego: &str) -> Arc<McpJsRuntime> {
+fn engine_with_policy(rego: &str) -> Arc<Engine> {
     use server::engine::opa::{build_policy_chain, EvalMode, OperationPolicies, PolicySource};
     let dir = std::env::temp_dir().join(format!("mcp-fssnap-rego-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -64,7 +64,7 @@ fn engine_with_policy(rego: &str) -> Arc<McpJsRuntime> {
     let chain =
         build_policy_chain(&op, "mcp/fs_snapshot", "data.mcp.fs_snapshot.allow").unwrap();
     let registry = ExecutionRegistry::new(&tmp("reg")).unwrap();
-    McpJsRuntime::from_engine(
+    Engine::from_engine(
         Engine::new_stateless(32 * 1024 * 1024, 30, 2)
             .with_fs_config(FsConfig::new(Arc::new(PolicyChain::new(vec![], EvalMode::All))))
             .with_execution_registry(Arc::new(registry))

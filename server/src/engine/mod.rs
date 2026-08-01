@@ -1348,7 +1348,7 @@ pub struct WasmModule {
     pub description: Option<String>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, uniffi::Object)]
 pub struct Engine {
     heap_storage: Option<AnyHeapStorage>,
     session_log: Option<SessionLog>,
@@ -1403,6 +1403,15 @@ pub struct Engine {
     /// Per-mitigation sandbox hardening. Default is all-off (unhardened); each
     /// mitigation is opt-in via the `--harden-*` CLI flags.
     hardening: console::HardeningConfig,
+    /// Owned Tokio executor for FFI hosts (None when a Rust host provides one).
+    tokio_runtime: Option<Arc<tokio::runtime::Runtime>>,
+    /// Cluster membership handle, shut down with the engine.
+    cluster_node: Option<Arc<ClusterNode>>,
+    /// Running / ShuttingDown / Shutdown, shared across clones.
+    lifecycle: Arc<AtomicU8>,
+    shutdown_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Keeps an ephemeral data directory alive for the engine's lifetime.
+    _ephemeral_data_dir: Option<Arc<tempfile::TempDir>>,
 }
 
 /// Builder for `Engine::run_js()`. Only `code` is required; everything else
@@ -1572,6 +1581,11 @@ impl Engine {
             label_store: None,
             fs_snapshot_policy_chain: None,
             hardening: console::HardeningConfig::default(),
+            tokio_runtime: None,
+            cluster_node: None,
+            lifecycle: Arc::new(AtomicU8::new(RuntimeLifecycleState::Running as u8)),
+            shutdown_lock: Arc::new(tokio::sync::Mutex::new(())),
+            _ephemeral_data_dir: None,
         }
     }
 
@@ -1611,6 +1625,11 @@ impl Engine {
             label_store: None,
             fs_snapshot_policy_chain: None,
             hardening: console::HardeningConfig::default(),
+            tokio_runtime: None,
+            cluster_node: None,
+            lifecycle: Arc::new(AtomicU8::new(RuntimeLifecycleState::Running as u8)),
+            shutdown_lock: Arc::new(tokio::sync::Mutex::new(())),
+            _ephemeral_data_dir: None,
         }
     }
 
@@ -2323,8 +2342,8 @@ impl Engine {
 
     /// Get execution status and result.
         /// Get paginated console output for an execution.
-        /// Stop background work owned by the engine.
-    pub async fn shutdown(&self) -> (u64, u64) {
+        /// Stop background work owned by the engine (executions + MCP clients).
+    async fn shutdown_background_tasks(&self) -> (u64, u64) {
         let cancelled_executions = self.execution_registry.as_ref()
             .map(|registry| registry.cancel_all())
             .unwrap_or(0);
@@ -2698,16 +2717,6 @@ impl RuntimeError {
     }
 }
 
-#[derive(uniffi::Object)]
-pub struct McpJsRuntime {
-    tokio_runtime: Option<tokio::runtime::Runtime>,
-    engine: Engine,
-    cluster_node: Option<Arc<ClusterNode>>,
-    lifecycle: AtomicU8,
-    shutdown_lock: tokio::sync::Mutex<()>,
-    _ephemeral_data_dir: Option<tempfile::TempDir>,
-}
-
 #[uniffi::export]
 pub fn default_runtime_options() -> RuntimeOptions {
     RuntimeOptions::default()
@@ -2775,7 +2784,7 @@ pub fn default_runtime_config(data_dir: String) -> RuntimeConfig {
 }
 
 #[uniffi::export]
-pub fn create_runtime(config: RuntimeConfig) -> Result<Arc<McpJsRuntime>, RuntimeError> {
+pub fn create_runtime(config: RuntimeConfig) -> Result<Arc<Engine>, RuntimeError> {
     create_runtime_with_features(config, default_feature_config())
 }
 
@@ -2783,7 +2792,7 @@ pub fn create_runtime(config: RuntimeConfig) -> Result<Arc<McpJsRuntime>, Runtim
 pub fn create_runtime_with_features(
     config: RuntimeConfig,
     features: RuntimeFeatureConfig,
-) -> Result<Arc<McpJsRuntime>, RuntimeError> {
+) -> Result<Arc<Engine>, RuntimeError> {
     create_runtime_with_configuration(
         config,
         features,
@@ -2798,7 +2807,7 @@ pub fn create_runtime_with_configuration(
     features: RuntimeFeatureConfig,
     policies: RuntimePolicyConfig,
     capabilities: RuntimeCapabilityConfig,
-) -> Result<Arc<McpJsRuntime>, RuntimeError> {
+) -> Result<Arc<Engine>, RuntimeError> {
     create_runtime_with_upstreams(
         config,
         features,
@@ -2815,7 +2824,7 @@ pub fn create_runtime_with_upstreams(
     policies: RuntimePolicyConfig,
     capabilities: RuntimeCapabilityConfig,
     upstreams: RuntimeUpstreamMcpConfig,
-) -> Result<Arc<McpJsRuntime>, RuntimeError> {
+) -> Result<Arc<Engine>, RuntimeError> {
     validate_runtime_config(&config)?;
     initialize_v8();
     let worker_threads = usize::try_from(config.max_concurrent_executions).map_err(|_| {
@@ -2845,7 +2854,7 @@ pub fn create_runtime_with_upstreams(
 }
 
 #[uniffi::export]
-impl McpJsRuntime {
+impl Engine {
     #[uniffi::constructor]
     pub fn new(config: RuntimeOptions) -> Result<Arc<Self>, RuntimeError> {
         validate_options(&config)?;
@@ -2869,7 +2878,7 @@ impl McpJsRuntime {
     }
 
     pub fn mode(&self) -> RuntimeMode {
-        if self.engine.session_capable() {
+        if self.session_capable() {
             RuntimeMode::LocalStateful
         } else {
             RuntimeMode::Stateless
@@ -2893,7 +2902,7 @@ impl McpJsRuntime {
 
         self.lifecycle
             .store(RuntimeLifecycleState::ShuttingDown as u8, Ordering::Release);
-        let (cancelled_executions, closed_mcp_connections) = self.engine.shutdown().await;
+        let (cancelled_executions, closed_mcp_connections) = self.shutdown_background_tasks().await;
         let cluster_shutdown = self.cluster_node.as_ref().is_some_and(|node| {
             node.shutdown();
             true
@@ -2911,9 +2920,9 @@ impl McpJsRuntime {
 
     pub fn capabilities(&self) -> RuntimeCapabilities {
         RuntimeCapabilities {
-            heap: self.engine.heap_enabled(),
-            filesystem: self.engine.fs_enabled(),
-            sessions: self.engine.session_capable(),
+            heap: self.heap_enabled(),
+            filesystem: self.fs_enabled(),
+            sessions: self.session_capable(),
         }
     }
 
@@ -2942,7 +2951,7 @@ impl McpJsRuntime {
             })?;
         let mcp_headers = request.mcp_headers.map(mcp_headers_value);
 
-        let mut execution = self.engine.run_js(request.code)
+        let mut execution = self.run_js(request.code)
             .maybe_file(request.file)
             .maybe_fs(request.fs)
             .maybe_session(request.session)
@@ -3053,7 +3062,7 @@ impl McpJsRuntime {
     /// List every label and its current head CA id (hex).
     pub async fn fs_list_labels(&self) -> Result<Vec<FsLabelView>, RuntimeError> {
         let result: Result<Vec<FsLabelView>, String> = async {
-            let labels = self.engine.labels_or_err()?;
+            let labels = self.labels_or_err()?;
             Ok(labels
                 .list()
                 .await?
@@ -3071,7 +3080,7 @@ impl McpJsRuntime {
     /// Resolve a label to its current head CA id (hex), if it exists.
     pub async fn fs_resolve_label(&self, name: String) -> Result<Option<String>, RuntimeError> {
         let result: Result<Option<String>, String> = async {
-            let labels = self.engine.labels_or_err()?;
+            let labels = self.labels_or_err()?;
             Ok(labels.resolve(&name).await?.map(|id| ca_to_hex(&id)))
         }
         .await;
@@ -3087,10 +3096,10 @@ impl McpJsRuntime {
         message: Option<String>,
     ) -> Result<(), RuntimeError> {
         let result: Result<(), String> = async {
-            self.engine
+            self
                 .check_fs_snapshot_policy("label", Some(&name), Some(&ca_id))
                 .await?;
-            let labels = self.engine.labels_or_err()?;
+            let labels = self.labels_or_err()?;
             let id = parse_ca_hex(&ca_id).ok_or_else(|| format!("invalid CA id: {ca_id}"))?;
             match labels.resolve(&name).await? {
                 Some(_) => labels.force(&name, id, message).await,
@@ -3116,7 +3125,7 @@ impl McpJsRuntime {
                     message: "filesystem log limit is too large for this platform".to_string(),
                 })?;
         let result: Result<Vec<FsRefLogView>, String> = async {
-            let labels = self.engine.labels_or_err()?;
+            let labels = self.labels_or_err()?;
             let entries = match limit {
                 Some(n) => labels.log_recent(&name, n).await?,
                 None => labels.log(&name).await?,
@@ -3148,10 +3157,10 @@ impl McpJsRuntime {
         message: Option<String>,
     ) -> Result<FsPushOutcome, RuntimeError> {
         let result: Result<FsPushOutcome, String> = async {
-            self.engine
+            self
                 .check_fs_snapshot_policy("push", Some(&label), Some(&ca_id))
                 .await?;
-            let labels = self.engine.labels_or_err()?;
+            let labels = self.labels_or_err()?;
             let new = parse_ca_hex(&ca_id).ok_or_else(|| format!("invalid CA id: {ca_id}"))?;
 
             if force {
@@ -3203,10 +3212,10 @@ impl McpJsRuntime {
         message: Option<String>,
     ) -> Result<(), RuntimeError> {
         let result: Result<(), String> = async {
-            self.engine
+            self
                 .check_fs_snapshot_policy("reset", Some(&label), Some(&ca_id))
                 .await?;
-            let labels = self.engine.labels_or_err()?;
+            let labels = self.labels_or_err()?;
             let target = parse_ca_hex(&ca_id).ok_or_else(|| format!("invalid CA id: {ca_id}"))?;
             if !allow_unlogged {
                 let in_log = labels
@@ -3238,8 +3247,8 @@ impl McpJsRuntime {
         prefer: Prefer,
     ) -> Result<FsMergeResult, RuntimeError> {
         let result: Result<FsMergeResult, String> = async {
-            self.engine.check_fs_snapshot_policy("merge", None, None).await?;
-            let store = self.engine.fs_store_or_err()?;
+            self.check_fs_snapshot_policy("merge", None, None).await?;
+            let store = self.fs_store_or_err()?;
 
             let load = |hex: &str| -> Result<[u8; 32], String> {
                 parse_ca_hex(hex).ok_or_else(|| format!("invalid CA id: {hex}"))
@@ -3410,23 +3419,19 @@ impl McpJsRuntime {
     }
 }
 
-impl McpJsRuntime {
+impl Engine {
     /// Wrap a fully configured runtime for Rust transports without creating a
     /// second Tokio executor or crossing the FFI boundary.
     fn wrap(
-        engine: Engine,
+        mut engine: Engine,
         tokio_runtime: Option<tokio::runtime::Runtime>,
         ephemeral_data_dir: Option<tempfile::TempDir>,
         cluster_node: Option<Arc<ClusterNode>>,
     ) -> Arc<Self> {
-        Arc::new(Self {
-            tokio_runtime,
-            engine,
-            cluster_node,
-            lifecycle: AtomicU8::new(RuntimeLifecycleState::Running as u8),
-            shutdown_lock: tokio::sync::Mutex::new(()),
-            _ephemeral_data_dir: ephemeral_data_dir,
-        })
+        engine.tokio_runtime = tokio_runtime.map(Arc::new);
+        engine.cluster_node = cluster_node;
+        engine._ephemeral_data_dir = ephemeral_data_dir.map(Arc::new);
+        Arc::new(engine)
     }
 
     fn current_lifecycle_state(&self) -> RuntimeLifecycleState {
@@ -3442,21 +3447,21 @@ impl McpJsRuntime {
     }
 
     fn execution_registry(&self) -> Result<&ExecutionRegistry, RuntimeError> {
-        self.engine
+        self
             .execution_registry
             .as_deref()
             .ok_or_else(|| operation_message("Execution registry not configured".to_string()))
     }
 
     fn session_log(&self) -> Result<&SessionLog, RuntimeError> {
-        self.engine
+        self
             .session_log
             .as_ref()
             .ok_or_else(|| operation_message("Session log not configured".to_string()))
     }
 
     fn heap_tag_store(&self) -> Result<&HeapTagStore, RuntimeError> {
-        self.engine
+        self
             .heap_tag_store
             .as_ref()
             .ok_or_else(|| operation_message("Heap tag store not configured".to_string()))
@@ -3471,8 +3476,8 @@ impl McpJsRuntime {
         }
     }
 
-    pub fn builder() -> McpJsRuntimeBuilder {
-        McpJsRuntimeBuilder::default()
+    pub fn builder() -> EngineBuilder {
+        EngineBuilder::default()
     }
 
     pub fn from_engine(engine: Engine) -> Arc<Self> {
@@ -3494,32 +3499,8 @@ impl McpJsRuntime {
         Self::wrap(engine, Some(tokio_runtime), None, cluster_node)
     }
 
-    pub fn heap_enabled(&self) -> bool {
-        self.engine.heap_enabled()
-    }
-
-    pub fn fs_enabled(&self) -> bool {
-        self.engine.fs_enabled()
-    }
-
-    pub fn session_capable(&self) -> bool {
-        self.engine.session_capable()
-    }
-
     pub fn tool_catalog(&self) -> ToolCatalog {
         built_in_tool_catalog(self.heap_enabled(), self.fs_enabled())
-    }
-
-    pub fn instructions_override(&self) -> Option<Arc<str>> {
-        self.engine.instructions_override()
-    }
-
-    pub fn run_js_description_override(&self) -> Option<Arc<str>> {
-        self.engine.run_js_description_override()
-    }
-
-    pub fn wasm_stub_tools(&self) -> Vec<rmcp::model::Tool> {
-        self.engine.wasm_stub_tools()
     }
 
     pub fn core_mcp_tools(&self) -> Vec<rmcp::model::Tool> {
@@ -3534,7 +3515,7 @@ impl McpJsRuntime {
     }
 
     pub fn upstream_mcp_stub_tools(&self) -> Vec<rmcp::model::Tool> {
-        self.engine
+        self
             .mcp_client_manager()
             .map(|client| client.stub_tools())
             .unwrap_or_default()
@@ -3563,22 +3544,11 @@ impl McpJsRuntime {
         name: &str,
         arguments: Option<&serde_json::Map<String, Value>>,
     ) -> Option<rmcp::model::CallToolResult> {
-        self.engine
+        self
             .mcp_client_manager()
             .and_then(|client| client.stub_call_response(name, arguments))
     }
 
-    pub fn wasm_stub_call_response(
-        &self,
-        name: &str,
-        arguments: Option<&serde_json::Map<String, Value>>,
-    ) -> Option<rmcp::model::CallToolResult> {
-        self.engine.wasm_stub_call_response(name, arguments)
-    }
-
-    pub fn run_js(&self, code: impl Into<String>) -> RunJsRequest<'_> {
-        self.engine.run_js(code)
-    }
 }
 
 fn operation_message(message: String) -> RuntimeError {
@@ -3708,7 +3678,7 @@ fn build_engine_from_options(
                 .to_path_buf()
         });
 
-    let builder = McpJsRuntime::builder()
+    let builder = Engine::builder()
         .heap_memory_max_mb(heap_memory_max_mb)
         .execution_timeout_secs(config.execution_timeout_secs)
         .max_concurrent_executions(config.max_concurrent_executions as usize)
@@ -3756,7 +3726,7 @@ enum RuntimeStorage {
 }
 
 #[derive(Clone, Debug)]
-pub struct McpJsRuntimeBuilder {
+pub struct EngineBuilder {
     storage: Option<RuntimeStorage>,
     heap_memory_max_mb: usize,
     execution_timeout_secs: u64,
@@ -3764,7 +3734,7 @@ pub struct McpJsRuntimeBuilder {
     filesystem_enabled: bool,
 }
 
-impl Default for McpJsRuntimeBuilder {
+impl Default for EngineBuilder {
     fn default() -> Self {
         Self {
             storage: None,
@@ -3776,7 +3746,7 @@ impl Default for McpJsRuntimeBuilder {
     }
 }
 
-impl McpJsRuntimeBuilder {
+impl EngineBuilder {
     pub fn stateless(mut self, data_dir: impl Into<PathBuf>) -> Self {
         self.storage = Some(RuntimeStorage::Stateless {
             data_dir: data_dir.into(),
@@ -3811,8 +3781,8 @@ impl McpJsRuntimeBuilder {
         self
     }
 
-    pub fn build(self) -> Result<std::sync::Arc<McpJsRuntime>, String> {
-        self.build_engine().map(McpJsRuntime::from_engine)
+    pub fn build(self) -> Result<std::sync::Arc<Engine>, String> {
+        self.build_engine().map(Engine::from_engine)
     }
 
     pub fn build_engine(self) -> Result<Engine, String> {
@@ -4160,7 +4130,7 @@ mod tests {
     fn configured_filesystem_uses_typed_label_api() {
         let _guard = v8_test_guard();
         let data_dir = tempfile::tempdir().unwrap();
-        let library = McpJsRuntime::new(RuntimeOptions {
+        let library = Engine::new(RuntimeOptions {
             mode: RuntimeMode::Stateless,
             data_dir: Some(data_dir.path().to_string_lossy().into_owned()),
             filesystem_enabled: true,
@@ -4231,7 +4201,7 @@ mod tests {
     fn local_stateful_sessions_and_heap_tags_use_typed_api() {
         let _guard = v8_test_guard();
         let data_dir = tempfile::tempdir().unwrap();
-        let library = McpJsRuntime::new(RuntimeOptions {
+        let library = Engine::new(RuntimeOptions {
             mode: RuntimeMode::LocalStateful,
             data_dir: Some(data_dir.path().to_string_lossy().into_owned()),
             ..RuntimeOptions::default()
@@ -4284,7 +4254,7 @@ mod tests {
     #[test]
     fn stateless_run_js_executes_through_sync_and_async_library_apis() {
         let _guard = v8_test_guard();
-        let library = McpJsRuntime::new(RuntimeOptions::default()).unwrap();
+        let library = Engine::new(RuntimeOptions::default()).unwrap();
         let result = library
             .call_tool(
                 "run_js".to_string(),
@@ -4312,7 +4282,7 @@ mod tests {
     #[test]
     fn lifecycle_shutdown_is_idempotent_and_rejects_new_work() {
         let _guard = v8_test_guard();
-        let library = McpJsRuntime::new(RuntimeOptions::default()).unwrap();
+        let library = Engine::new(RuntimeOptions::default()).unwrap();
         assert_eq!(library.lifecycle_state(), RuntimeLifecycleState::Running);
 
         let runtime = library.tokio_runtime.as_ref().unwrap();
@@ -4337,7 +4307,7 @@ mod tests {
     fn local_stateful_tools_submit_poll_and_read_output() {
         let _guard = v8_test_guard();
         let data_dir = tempfile::tempdir().unwrap();
-        let library = McpJsRuntime::new(RuntimeOptions {
+        let library = Engine::new(RuntimeOptions {
             mode: RuntimeMode::LocalStateful,
             data_dir: Some(data_dir.path().to_string_lossy().into_owned()),
             ..RuntimeOptions::default()
@@ -4386,13 +4356,13 @@ mod builder_tests {
 
     #[test]
     fn builder_requires_storage_mode() {
-        assert!(McpJsRuntime::builder().build().is_err());
+        assert!(Engine::builder().build().is_err());
     }
 
     #[test]
     fn stateless_builder_configures_execution_registry() {
         let data_dir = tempfile::tempdir().unwrap();
-        let runtime = McpJsRuntime::builder()
+        let runtime = Engine::builder()
             .stateless(data_dir.path())
             .build()
             .unwrap();
@@ -4404,7 +4374,7 @@ mod builder_tests {
     #[test]
     fn stateless_builder_can_enable_filesystem_snapshots() {
         let data_dir = tempfile::tempdir().unwrap();
-        let runtime = McpJsRuntime::builder()
+        let runtime = Engine::builder()
             .stateless(data_dir.path())
             .filesystem_enabled(true)
             .build()
@@ -4418,7 +4388,7 @@ mod builder_tests {
     #[test]
     fn local_stateful_builder_enables_heap_tools() {
         let data_dir = tempfile::tempdir().unwrap();
-        let runtime = McpJsRuntime::builder()
+        let runtime = Engine::builder()
             .local_stateful(data_dir.path())
             .build()
             .unwrap();

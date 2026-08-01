@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 use server::engine::execution::ExecutionRegistry;
 use server::engine::fetch::{FetchConfig, HeaderRule, OAuthClientCredentialsConfig};
 use server::engine::opa::{EvalMode, LocalPolicyEvaluator, PolicyChain, PolicyEvaluatorKind};
-use server::engine::{McpJsRuntime, Engine, initialize_v8};
+use server::engine::{Engine, initialize_v8};
 
 static INIT: Once = Once::new();
 
@@ -240,7 +240,7 @@ fn static_rule_for_host(
     .expect("static rule should be valid")
 }
 
-async fn run_js(engine: &McpJsRuntime, code: String) -> Result<String, String> {
+async fn run_js(engine: &Engine, code: String) -> Result<String, String> {
     let exec_id = engine
         .run_js(code)
         .execute()
@@ -263,7 +263,7 @@ async fn run_js(engine: &McpJsRuntime, code: String) -> Result<String, String> {
 }
 
 async fn run_fetch(
-    engine: &McpJsRuntime,
+    engine: &Engine,
     url: &str,
     method: &str,
     authorization: Option<&str>,
@@ -307,7 +307,7 @@ async fn matching_request_receives_injected_bearer_token_from_mock_token_server(
     }))])
     .await;
     let echo_server = start_echo_server().await;
-    let engine = McpJsRuntime::from_engine(build_engine(vec![oauth_rule_for_host(
+    let engine = Engine::from_engine(build_engine(vec![oauth_rule_for_host(
         "127.0.0.1",
         &[],
         token_server.token_url(),
@@ -338,7 +338,7 @@ async fn matching_request_receives_static_authorization_header() {
     ensure_v8();
 
     let echo_server = start_echo_server().await;
-    let engine = McpJsRuntime::from_engine(build_engine(vec![static_rule_for_host(
+    let engine = Engine::from_engine(build_engine(vec![static_rule_for_host(
         "127.0.0.1",
         &[],
         "Authorization",
@@ -363,7 +363,7 @@ async fn user_provided_authorization_overrides_static_injection() {
     ensure_v8();
 
     let echo_server = start_echo_server().await;
-    let engine = McpJsRuntime::from_engine(build_engine(vec![static_rule_for_host(
+    let engine = Engine::from_engine(build_engine(vec![static_rule_for_host(
         "127.0.0.1",
         &[],
         "Authorization",
@@ -393,13 +393,13 @@ async fn static_injection_skips_non_matching_host_and_method() {
     ensure_v8();
 
     let echo_server = start_echo_server().await;
-    let host_engine = McpJsRuntime::from_engine(build_engine(vec![static_rule_for_host(
+    let host_engine = Engine::from_engine(build_engine(vec![static_rule_for_host(
         "other.example.com",
         &[],
         "Authorization",
         "Bearer static-token",
     )]));
-    let method_engine = McpJsRuntime::from_engine(build_engine(vec![static_rule_for_host(
+    let method_engine = Engine::from_engine(build_engine(vec![static_rule_for_host(
         "127.0.0.1",
         &["POST"],
         "Authorization",
@@ -439,7 +439,7 @@ async fn repeated_requests_reuse_cached_token() {
     }))])
     .await;
     let echo_server = start_echo_server().await;
-    let engine = McpJsRuntime::from_engine(build_engine(vec![oauth_rule_for_host(
+    let engine = Engine::from_engine(build_engine(vec![oauth_rule_for_host(
         "127.0.0.1",
         &[],
         token_server.token_url(),
@@ -494,7 +494,7 @@ async fn post_expiry_request_uses_refresh_token_grant_when_available() {
     ])
     .await;
     let echo_server = start_echo_server().await;
-    let engine = McpJsRuntime::from_engine(build_engine(vec![oauth_rule_for_host(
+    let engine = Engine::from_engine(build_engine(vec![oauth_rule_for_host(
         "127.0.0.1",
         &[],
         token_server.token_url(),
@@ -553,7 +553,7 @@ async fn post_expiry_request_reacquires_with_client_credentials_without_refresh_
     ])
     .await;
     let echo_server = start_echo_server().await;
-    let engine = McpJsRuntime::from_engine(build_engine(vec![oauth_rule_for_host(
+    let engine = Engine::from_engine(build_engine(vec![oauth_rule_for_host(
         "127.0.0.1",
         &[],
         token_server.token_url(),
@@ -600,7 +600,7 @@ async fn user_provided_authorization_overrides_dynamic_injection() {
 
     let token_server = start_token_server(Vec::new()).await;
     let echo_server = start_echo_server().await;
-    let engine = McpJsRuntime::from_engine(build_engine(vec![oauth_rule_for_host(
+    let engine = Engine::from_engine(build_engine(vec![oauth_rule_for_host(
         "127.0.0.1",
         &[],
         token_server.token_url(),
@@ -631,7 +631,7 @@ async fn non_matching_host_performs_no_token_lookup() {
 
     let token_server = start_token_server(Vec::new()).await;
     let echo_server = start_echo_server().await;
-    let engine = McpJsRuntime::from_engine(build_engine(vec![oauth_rule_for_host(
+    let engine = Engine::from_engine(build_engine(vec![oauth_rule_for_host(
         "other.example.com",
         &[],
         token_server.token_url(),
@@ -657,7 +657,7 @@ async fn non_matching_method_performs_no_token_lookup() {
 
     let token_server = start_token_server(Vec::new()).await;
     let echo_server = start_echo_server().await;
-    let engine = McpJsRuntime::from_engine(build_engine(vec![oauth_rule_for_host(
+    let engine = Engine::from_engine(build_engine(vec![oauth_rule_for_host(
         "127.0.0.1",
         &["POST"],
         token_server.token_url(),

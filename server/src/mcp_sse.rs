@@ -5,7 +5,7 @@
 //! vendored rmcp 0.1.5 SSE server (`rmcp_legacy`). It is a hand-written 0.1.5
 //! `ServerHandler` (no tool macros — the renamed crate's macros would emit
 //! `::rmcp::` paths that resolve to the 1.x crate) that delegates tool calls to
-//! the shared, transport-agnostic `McpJsRuntime`. The tool list mirrors the
+//! the shared, transport-agnostic `Engine`. The tool list mirrors the
 //! primary handler's core surface (converted to 0.1.5 `Tool`s).
 //!
 //! Tasks are NOT offered here (0.1.5 predates the tasks utility); task-enabled
@@ -27,7 +27,7 @@ use rmcp_legacy::{
 use serde_json::json;
 
 use crate::engine::{
-    RuntimeError, McpRequestHeaders, ToolCallRequest, McpJsRuntime,
+    Engine, RuntimeError, McpRequestHeaders, ToolCallRequest,
 };
 use crate::session::SessionVerifier;
 
@@ -36,14 +36,14 @@ const README_MD: &str = include_str!("../README.md");
 
 #[derive(Clone)]
 pub struct SseService {
-    runtime: Arc<McpJsRuntime>,
+    runtime: Arc<Engine>,
     verifier: Option<Arc<SessionVerifier>>,
     session_id: Arc<OnceLock<String>>,
     mcp_headers: Arc<OnceLock<McpRequestHeaders>>,
 }
 
 impl SseService {
-    pub fn new(runtime: Arc<McpJsRuntime>, verifier: Option<Arc<SessionVerifier>>) -> Self {
+    pub fn new(runtime: Arc<Engine>, verifier: Option<Arc<SessionVerifier>>) -> Self {
         Self {
             runtime,
             verifier,

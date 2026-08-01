@@ -1,6 +1,6 @@
 # Generate native UniFFI bindings
 
-Use this guide to generate language wrappers for the canonical `McpJsRuntime`
+Use this guide to generate language wrappers for the canonical `Engine`
 API from a local checkout.
 
 ## Prerequisites

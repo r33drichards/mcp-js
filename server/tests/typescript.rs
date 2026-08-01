@@ -5,7 +5,7 @@
 /// SWC type stripping → V8 execution.
 
 use std::sync::{Arc, Once};
-use server::engine::{McpJsRuntime, initialize_v8, strip_typescript_types, Engine};
+use server::engine::{initialize_v8, strip_typescript_types, Engine};
 use server::engine::execution::ExecutionRegistry;
 
 static INIT: Once = Once::new();
@@ -30,7 +30,7 @@ fn rand_id() -> u64 {
 }
 
 /// Submit code and wait for the result (blocking poll).
-async fn run_and_wait(engine: &McpJsRuntime, code: &str) -> Result<String, String> {
+async fn run_and_wait(engine: &Engine, code: &str) -> Result<String, String> {
     let exec_id = engine.run_js(code).execute().await?;
     for _ in 0..600 {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -122,7 +122,7 @@ fn test_strip_parse_error() {
 #[tokio::test]
 async fn test_typescript_basic_types() {
     ensure_v8();
-    let engine = McpJsRuntime::from_engine(create_test_engine());
+    let engine = Engine::from_engine(create_test_engine());
     let result = run_and_wait(&engine, "let x: number = 42; console.log(x);").await;
     assert!(result.is_ok(), "Typed variable should execute, got: {:?}", result);
 }
@@ -130,7 +130,7 @@ async fn test_typescript_basic_types() {
 #[tokio::test]
 async fn test_typescript_function_with_types() {
     ensure_v8();
-    let engine = McpJsRuntime::from_engine(create_test_engine());
+    let engine = Engine::from_engine(create_test_engine());
     let result = run_and_wait(&engine, "function add(a: number, b: number): number { return a + b; } console.log(add(3, 4));").await;
     assert!(result.is_ok(), "Typed function should execute, got: {:?}", result);
 }
@@ -138,7 +138,7 @@ async fn test_typescript_function_with_types() {
 #[tokio::test]
 async fn test_typescript_arrow_function_with_types() {
     ensure_v8();
-    let engine = McpJsRuntime::from_engine(create_test_engine());
+    let engine = Engine::from_engine(create_test_engine());
     let result = run_and_wait(&engine, "const multiply = (a: number, b: number): number => a * b; console.log(multiply(6, 7));").await;
     assert!(result.is_ok(), "Typed arrow function should execute, got: {:?}", result);
 }
@@ -146,7 +146,7 @@ async fn test_typescript_arrow_function_with_types() {
 #[tokio::test]
 async fn test_typescript_interface_and_object() {
     ensure_v8();
-    let engine = McpJsRuntime::from_engine(create_test_engine());
+    let engine = Engine::from_engine(create_test_engine());
 
     let ts = r#"
         interface Person {
@@ -164,7 +164,7 @@ async fn test_typescript_interface_and_object() {
 #[tokio::test]
 async fn test_typescript_generics_execution() {
     ensure_v8();
-    let engine = McpJsRuntime::from_engine(create_test_engine());
+    let engine = Engine::from_engine(create_test_engine());
 
     let ts = r#"
         function identity<T>(x: T): T { return x; }
@@ -178,7 +178,7 @@ async fn test_typescript_generics_execution() {
 #[tokio::test]
 async fn test_typescript_type_alias_execution() {
     ensure_v8();
-    let engine = McpJsRuntime::from_engine(create_test_engine());
+    let engine = Engine::from_engine(create_test_engine());
 
     let ts = r#"
         type StringOrNumber = string | number;
@@ -193,7 +193,7 @@ async fn test_typescript_type_alias_execution() {
 #[tokio::test]
 async fn test_typescript_enum_execution() {
     ensure_v8();
-    let engine = McpJsRuntime::from_engine(create_test_engine());
+    let engine = Engine::from_engine(create_test_engine());
 
     let ts = r#"
         enum Direction {
@@ -212,7 +212,7 @@ async fn test_typescript_enum_execution() {
 #[tokio::test]
 async fn test_typescript_class_with_types() {
     ensure_v8();
-    let engine = McpJsRuntime::from_engine(create_test_engine());
+    let engine = Engine::from_engine(create_test_engine());
 
     let ts = r#"
         class Calculator {
@@ -242,7 +242,7 @@ async fn test_typescript_class_with_types() {
 #[tokio::test]
 async fn test_typescript_as_cast() {
     ensure_v8();
-    let engine = McpJsRuntime::from_engine(create_test_engine());
+    let engine = Engine::from_engine(create_test_engine());
     let result = run_and_wait(&engine, "const x = (42 as number); console.log(x);").await;
     assert!(result.is_ok(), "'as' cast should execute, got: {:?}", result);
 }
@@ -250,7 +250,7 @@ async fn test_typescript_as_cast() {
 #[tokio::test]
 async fn test_plain_javascript_still_works() {
     ensure_v8();
-    let engine = McpJsRuntime::from_engine(create_test_engine());
+    let engine = Engine::from_engine(create_test_engine());
     let result = run_and_wait(&engine, "var sum = 0; for (var i = 0; i < 10; i++) { sum += i; } console.log(sum);").await;
     assert!(result.is_ok(), "Plain JS should still work, got: {:?}", result);
 }

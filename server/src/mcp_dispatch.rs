@@ -14,12 +14,12 @@ use std::collections::HashMap;
 
 use serde_json::{json, Value};
 
-use crate::engine::McpJsRuntime;
+use crate::engine::Engine;
 use crate::engine::heap_tags::HeapTagEntry;
 
 /// Dispatch a tool call by name. `args` is the arguments object (may be null).
 pub async fn call_tool(
-    runtime: &McpJsRuntime,
+    runtime: &Engine,
     session_id: Option<&str>,
     mcp_headers: Option<&Value>,
     name: &str,
@@ -68,7 +68,7 @@ fn map_arg(args: &Value, key: &str) -> Option<HashMap<String, String>> {
 }
 
 pub async fn run_js(
-    runtime: &McpJsRuntime,
+    runtime: &Engine,
     session_id: Option<&str>,
     mcp_headers: Option<&Value>,
     args: &Value,
@@ -101,7 +101,7 @@ pub async fn run_js(
 
 /// Stateless run_js: submit, poll to completion, and return console output
 /// directly (used by the stateless MCP service and the stateless SSE handler).
-pub async fn run_js_blocking(runtime: &McpJsRuntime, mcp_headers: Option<&Value>, args: &Value) -> Value {
+pub async fn run_js_blocking(runtime: &Engine, mcp_headers: Option<&Value>, args: &Value) -> Value {
     let mut req = runtime.run_js(string_arg(args, "code").unwrap_or_default());
     req = req.maybe_file(string_arg(args, "file"));
     if let Some(mb) = args.get("heap_memory_max_mb").and_then(Value::as_u64) {
@@ -149,7 +149,7 @@ pub async fn run_js_blocking(runtime: &McpJsRuntime, mcp_headers: Option<&Value>
     }
 }
 
-fn get_execution(runtime: &McpJsRuntime, args: &Value) -> Value {
+fn get_execution(runtime: &Engine, args: &Value) -> Value {
     let id = string_arg(args, "execution_id").unwrap_or_default();
     match runtime.get_execution(id) {
         Ok(info) => json!({
@@ -166,7 +166,7 @@ fn get_execution(runtime: &McpJsRuntime, args: &Value) -> Value {
     }
 }
 
-fn get_execution_output(runtime: &McpJsRuntime, args: &Value) -> Value {
+fn get_execution_output(runtime: &Engine, args: &Value) -> Value {
     let id = string_arg(args, "execution_id").unwrap_or_default();
     let line_offset = args.get("line_offset").and_then(Value::as_u64);
     let line_limit = args.get("line_limit").and_then(Value::as_u64);
@@ -195,7 +195,7 @@ fn get_execution_output(runtime: &McpJsRuntime, args: &Value) -> Value {
     }
 }
 
-fn cancel_execution(runtime: &McpJsRuntime, args: &Value) -> Value {
+fn cancel_execution(runtime: &Engine, args: &Value) -> Value {
     let id = string_arg(args, "execution_id").unwrap_or_default();
     match runtime.cancel_execution(id) {
         Ok(()) => json!({ "ok": true }),
@@ -203,21 +203,21 @@ fn cancel_execution(runtime: &McpJsRuntime, args: &Value) -> Value {
     }
 }
 
-fn list_executions(runtime: &McpJsRuntime) -> Value {
+fn list_executions(runtime: &Engine) -> Value {
     match runtime.list_executions() {
         Ok(executions) => json!({ "executions": executions }),
         Err(e) => json!({ "error": e.message() }),
     }
 }
 
-async fn list_sessions(runtime: &McpJsRuntime) -> Value {
+async fn list_sessions(runtime: &Engine) -> Value {
     match runtime.list_sessions().await {
         Ok(sessions) => json!({ "sessions": sessions }),
         Err(e) => json!({ "sessions": [format!("Error: {}", e.message())] }),
     }
 }
 
-async fn list_session_snapshots(runtime: &McpJsRuntime, session_id: Option<&str>, args: &Value) -> Value {
+async fn list_session_snapshots(runtime: &Engine, session_id: Option<&str>, args: &Value) -> Value {
     let session = match session_id {
         Some(id) => id.to_string(),
         None => {
@@ -247,7 +247,7 @@ async fn list_session_snapshots(runtime: &McpJsRuntime, session_id: Option<&str>
     }
 }
 
-async fn get_heap_tags(runtime: &McpJsRuntime, args: &Value) -> Value {
+async fn get_heap_tags(runtime: &Engine, args: &Value) -> Value {
     let heap = string_arg(args, "heap").unwrap_or_default();
     match runtime.get_heap_tags(heap).await {
         Ok(tags) => json!({ "tags": tags }),
@@ -255,7 +255,7 @@ async fn get_heap_tags(runtime: &McpJsRuntime, args: &Value) -> Value {
     }
 }
 
-async fn set_heap_tags(runtime: &McpJsRuntime, args: &Value) -> Value {
+async fn set_heap_tags(runtime: &Engine, args: &Value) -> Value {
     let heap = string_arg(args, "heap").unwrap_or_default();
     let tags = map_arg(args, "tags").unwrap_or_default();
     match runtime.set_heap_tags(heap, tags).await {
@@ -264,7 +264,7 @@ async fn set_heap_tags(runtime: &McpJsRuntime, args: &Value) -> Value {
     }
 }
 
-async fn delete_heap_tags(runtime: &McpJsRuntime, args: &Value) -> Value {
+async fn delete_heap_tags(runtime: &Engine, args: &Value) -> Value {
     let heap = string_arg(args, "heap").unwrap_or_default();
     let parsed_keys = string_arg(args, "keys").map(|k| {
         k.split(',').map(|s| s.trim().to_string()).collect::<Vec<_>>()
@@ -275,7 +275,7 @@ async fn delete_heap_tags(runtime: &McpJsRuntime, args: &Value) -> Value {
     }
 }
 
-async fn query_heaps_by_tags(runtime: &McpJsRuntime, args: &Value) -> Value {
+async fn query_heaps_by_tags(runtime: &Engine, args: &Value) -> Value {
     let tags = map_arg(args, "tags").unwrap_or_default();
     match runtime.query_heaps_by_tags(tags).await {
         Ok(results) => {
@@ -289,14 +289,14 @@ async fn query_heaps_by_tags(runtime: &McpJsRuntime, args: &Value) -> Value {
     }
 }
 
-async fn fs_ls(runtime: &McpJsRuntime) -> Value {
+async fn fs_ls(runtime: &Engine) -> Value {
     match runtime.fs_list_labels().await {
         Ok(labels) => json!({ "labels": labels }),
         Err(e) => json!({ "error": e.message() }),
     }
 }
 
-async fn fs_pull(runtime: &McpJsRuntime, args: &Value) -> Value {
+async fn fs_pull(runtime: &Engine, args: &Value) -> Value {
     let label = string_arg(args, "label").unwrap_or_default();
     match runtime.fs_resolve_label(label.clone()).await {
         Ok(Some(ca_id)) => json!({ "label": label, "ca_id": ca_id }),
@@ -305,7 +305,7 @@ async fn fs_pull(runtime: &McpJsRuntime, args: &Value) -> Value {
     }
 }
 
-async fn fs_label(runtime: &McpJsRuntime, args: &Value) -> Value {
+async fn fs_label(runtime: &Engine, args: &Value) -> Value {
     let name = string_arg(args, "name").unwrap_or_default();
     let ca_id = string_arg(args, "ca_id").unwrap_or_default();
     let message = string_arg(args, "message");
@@ -315,7 +315,7 @@ async fn fs_label(runtime: &McpJsRuntime, args: &Value) -> Value {
     }
 }
 
-async fn fs_log(runtime: &McpJsRuntime, args: &Value) -> Value {
+async fn fs_log(runtime: &Engine, args: &Value) -> Value {
     let label = string_arg(args, "label").unwrap_or_default();
     let limit = args.get("limit").and_then(Value::as_u64);
     match runtime.fs_label_log(label.clone(), limit).await {
@@ -324,7 +324,7 @@ async fn fs_log(runtime: &McpJsRuntime, args: &Value) -> Value {
     }
 }
 
-async fn fs_push(runtime: &McpJsRuntime, args: &Value) -> Value {
+async fn fs_push(runtime: &Engine, args: &Value) -> Value {
     let ca_id = string_arg(args, "ca_id").unwrap_or_default();
     let detach = args.get("detach").and_then(Value::as_bool).unwrap_or(false);
     if detach {
@@ -342,7 +342,7 @@ async fn fs_push(runtime: &McpJsRuntime, args: &Value) -> Value {
     }
 }
 
-async fn fs_reset(runtime: &McpJsRuntime, args: &Value) -> Value {
+async fn fs_reset(runtime: &Engine, args: &Value) -> Value {
     let label = string_arg(args, "label").unwrap_or_default();
     let ca_id = string_arg(args, "ca_id").unwrap_or_default();
     let allow_unlogged = args.get("allow_unlogged").and_then(Value::as_bool).unwrap_or(false);
@@ -353,7 +353,7 @@ async fn fs_reset(runtime: &McpJsRuntime, args: &Value) -> Value {
     }
 }
 
-async fn fs_merge(runtime: &McpJsRuntime, args: &Value) -> Value {
+async fn fs_merge(runtime: &Engine, args: &Value) -> Value {
     let ours = string_arg(args, "ours").unwrap_or_default();
     let theirs = string_arg(args, "theirs").unwrap_or_default();
     let base = string_arg(args, "base");

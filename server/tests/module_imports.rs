@@ -6,7 +6,7 @@
 ///   cargo test --test module_imports -- --ignored
 
 use std::sync::{Arc, Once};
-use server::engine::{McpJsRuntime, initialize_v8, Engine};
+use server::engine::{initialize_v8, Engine};
 use server::engine::execution::ExecutionRegistry;
 use server::engine::module_loader::ModuleLoaderConfig;
 
@@ -151,7 +151,7 @@ fn rand_id() -> u64 {
         .as_nanos() as u64
 }
 
-async fn run_and_wait(engine: &McpJsRuntime, code: &str) -> Result<String, String> {
+async fn run_and_wait(engine: &Engine, code: &str) -> Result<String, String> {
     let exec_id = engine
         .run_js(code)
         .execution_timeout_secs(60)
@@ -179,7 +179,7 @@ async fn run_and_wait(engine: &McpJsRuntime, code: &str) -> Result<String, Strin
 #[tokio::test]
 async fn test_top_level_await_resolves() {
     ensure_v8();
-    let engine = McpJsRuntime::from_engine(create_test_engine());
+    let engine = Engine::from_engine(create_test_engine());
 
     let code = r#"
 const result = await Promise.resolve(42);
@@ -193,7 +193,7 @@ console.log("got", result);
 #[tokio::test]
 async fn test_top_level_await_with_async_iife_also_works() {
     ensure_v8();
-    let engine = McpJsRuntime::from_engine(create_test_engine());
+    let engine = Engine::from_engine(create_test_engine());
 
     // The old workaround should still work
     let code = r#"
@@ -212,7 +212,7 @@ console.log("got", result);
 #[tokio::test]
 async fn test_plain_js_unaffected_by_module_support() {
     ensure_v8();
-    let engine = McpJsRuntime::from_engine(create_test_engine());
+    let engine = Engine::from_engine(create_test_engine());
 
     let result = run_and_wait(&engine, "console.log(1 + 2);").await;
     assert!(result.is_ok(), "Plain JS should still work: {:?}", result);
@@ -221,7 +221,7 @@ async fn test_plain_js_unaffected_by_module_support() {
 #[tokio::test]
 async fn test_plain_js_with_dynamic_import_keyword() {
     ensure_v8();
-    let engine = McpJsRuntime::from_engine(create_test_engine());
+    let engine = Engine::from_engine(create_test_engine());
 
     let result = run_and_wait(&engine, r#"const x = "import foo"; console.log(x);"#).await;
     assert!(result.is_ok(), "String with 'import' should work: {:?}", result);
@@ -233,7 +233,7 @@ async fn test_plain_js_with_dynamic_import_keyword() {
 #[ignore]
 async fn test_npm_import_lodash_es() {
     ensure_v8();
-    let engine = McpJsRuntime::from_engine(create_test_engine_with_external_modules());
+    let engine = Engine::from_engine(create_test_engine_with_external_modules());
 
     let code = r#"
 import camelCase from "npm:lodash-es@4.17.21/camelCase";
@@ -255,7 +255,7 @@ console.log(camelCase("hello_world"));
 #[ignore]
 async fn test_jsr_import_cases() {
     ensure_v8();
-    let engine = McpJsRuntime::from_engine(create_test_engine_with_external_modules());
+    let engine = Engine::from_engine(create_test_engine_with_external_modules());
 
     let code = r#"
 import { camelCase } from "jsr:@luca/cases@1.0.0";
@@ -277,7 +277,7 @@ console.log(camelCase("hello_world"));
 #[ignore]
 async fn test_url_import() {
     ensure_v8();
-    let engine = McpJsRuntime::from_engine(create_test_engine_with_external_modules());
+    let engine = Engine::from_engine(create_test_engine_with_external_modules());
 
     let code = r#"
 import { camelCase } from "https://esm.sh/jsr/@luca/cases@1.0.0";
@@ -299,7 +299,7 @@ console.log(camelCase("foo_bar"));
 #[ignore]
 async fn test_module_console_log() {
     ensure_v8();
-    let engine = McpJsRuntime::from_engine(create_test_engine_with_external_modules());
+    let engine = Engine::from_engine(create_test_engine_with_external_modules());
 
     let code = r#"
 import camelCase from "npm:lodash-es@4.17.21/camelCase";
@@ -345,7 +345,7 @@ console.log("Result:", result);
 #[ignore]
 async fn test_npm_cowsay() {
     ensure_v8();
-    let engine = McpJsRuntime::from_engine(create_test_engine_with_external_modules());
+    let engine = Engine::from_engine(create_test_engine_with_external_modules());
 
     let code = r#"
 import { say } from "npm:cowsay@1.6.0";
@@ -395,7 +395,7 @@ console.log(result);
 #[ignore]
 async fn test_url_import_typescript() {
     ensure_v8();
-    let engine = McpJsRuntime::from_engine(create_test_engine_with_external_modules());
+    let engine = Engine::from_engine(create_test_engine_with_external_modules());
 
     let code = r#"
 import { pascalCase } from "https://deno.land/x/case/mod.ts";
@@ -533,7 +533,7 @@ fn test_resolve_npm_allowed_when_external_enabled() {
 #[tokio::test]
 async fn test_engine_blocks_npm_import_by_default() {
     ensure_v8();
-    let engine = McpJsRuntime::from_engine(create_test_engine_modules_blocked());
+    let engine = Engine::from_engine(create_test_engine_modules_blocked());
 
     let code = r#"import { camelCase } from "npm:lodash-es@4.17.21";
 camelCase("hello_world");"#;
@@ -551,7 +551,7 @@ camelCase("hello_world");"#;
 #[tokio::test]
 async fn test_engine_blocks_jsr_import_by_default() {
     ensure_v8();
-    let engine = McpJsRuntime::from_engine(create_test_engine_modules_blocked());
+    let engine = Engine::from_engine(create_test_engine_modules_blocked());
 
     let code = r#"import { camelCase } from "jsr:@luca/cases@1.0.0";
 camelCase("hello_world");"#;
@@ -565,7 +565,7 @@ camelCase("hello_world");"#;
 #[tokio::test]
 async fn test_engine_blocks_url_import_by_default() {
     ensure_v8();
-    let engine = McpJsRuntime::from_engine(create_test_engine_modules_blocked());
+    let engine = Engine::from_engine(create_test_engine_modules_blocked());
 
     let code = r#"import { camelCase } from "https://esm.sh/jsr/@luca/cases@1.0.0";
 camelCase("hello_world");"#;
@@ -579,7 +579,7 @@ camelCase("hello_world");"#;
 #[tokio::test]
 async fn test_engine_plain_js_works_when_modules_blocked() {
     ensure_v8();
-    let engine = McpJsRuntime::from_engine(create_test_engine_modules_blocked());
+    let engine = Engine::from_engine(create_test_engine_modules_blocked());
 
     let result = run_and_wait(&engine, "console.log(1 + 2);").await;
     assert!(result.is_ok(), "Plain JS should work when external modules blocked: {:?}", result);
@@ -588,7 +588,7 @@ async fn test_engine_plain_js_works_when_modules_blocked() {
 #[tokio::test]
 async fn test_default_engine_blocks_external_modules() {
     ensure_v8();
-    let engine = McpJsRuntime::from_engine(create_test_engine()); // uses default (blocked)
+    let engine = Engine::from_engine(create_test_engine()); // uses default (blocked)
 
     let code = r#"import { camelCase } from "npm:lodash-es@4.17.21";
 camelCase("hello_world");"#;

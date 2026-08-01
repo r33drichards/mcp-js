@@ -33,7 +33,7 @@ The generated bindings expose these stable groups:
 
 - Runtime, storage, hardening, WASM, prompt, policy, fetch-auth, capability, and
   upstream MCP configuration records.
-- `McpJsRuntime` construction, capabilities, lifecycle state, and shutdown.
+- `Engine` construction, capabilities, lifecycle state, and shutdown.
 - Tool discovery plus synchronous and asynchronous tool invocation.
 - Asynchronous execution submission, status, output pagination, cancellation,
   and listing.

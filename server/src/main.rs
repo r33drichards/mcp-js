@@ -14,12 +14,12 @@ use utoipa::OpenApi as _;
 use std::fmt;
 use server::cli::{Cli, FetchHeaderKey, StoreKind};
 use server::mcp::{McpService, StatelessMcpService};
-use server::engine::{
+use server::engine::{Engine, 
     RuntimeCapabilityConfig, RuntimeFeatureConfig, RuntimeFetchHeaderRule,
     RuntimeFetchOAuthConfig, RuntimeHardeningConfig, RuntimeMcpServerConfig,
     RuntimeMcpStubConfig, RuntimeMcpTransportKind, RuntimePolicyConfig,
     RuntimeRunJsFileAccess, RuntimeUpstreamMcpConfig, RuntimeWasmModuleConfig,
-    RuntimeWasmStubConfig, McpJsRuntime, default_fetch_oauth_refresh_buffer_secs,
+    RuntimeWasmStubConfig, default_fetch_oauth_refresh_buffer_secs,
 };
 use server::{api, bootstrap, cli, cluster, mcp_sse, sandbox};
 use server::session::{SessionVerifier, JwksKeyStore};
@@ -462,10 +462,10 @@ fn resolve_bind_addr(host: &str, port: u16) -> Result<std::net::SocketAddr> {
 
 // ── Streamable HTTP transport (--http-port) ─────────────────────────────
 
-async fn start_streamable_http<S, F>(runtime: Arc<McpJsRuntime>, host: String, port: u16, make_service: F) -> Result<()>
+async fn start_streamable_http<S, F>(runtime: Arc<Engine>, host: String, port: u16, make_service: F) -> Result<()>
 where
     S: ServerHandler + Send + Sync + 'static,
-    F: Fn(Arc<McpJsRuntime>) -> S + Send + Sync + Clone + 'static,
+    F: Fn(Arc<Engine>) -> S + Send + Sync + Clone + 'static,
 {
     let bind: std::net::SocketAddr = resolve_bind_addr(&host, port)?;
     let ct = CancellationToken::new();
@@ -524,7 +524,7 @@ where
 // MCP tasks (use the Streamable HTTP transport for those).
 
 async fn start_sse_server(
-    runtime: Arc<McpJsRuntime>,
+    runtime: Arc<Engine>,
     host: String,
     port: u16,
     verifier: Option<Arc<SessionVerifier>>,
