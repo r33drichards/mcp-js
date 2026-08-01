@@ -1,7 +1,7 @@
 use clap::{CommandFactory, FromArgMatches, Parser};
 use cli_derive::StructuredArgs;
 
-use crate::library::{
+use crate::runtime::{
     DEFAULT_EXECUTION_TIMEOUT_SECS, DEFAULT_MCP_STUB_PREFIX, DEFAULT_WASM_STUB_PREFIX,
 };
 
