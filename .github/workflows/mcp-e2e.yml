@@ -37,7 +37,7 @@ jobs:
           # stdio MCP mode (the default: no heap/fs persistence), providing
           # the "run_js" tool.
           $SERVER_BIN --http-port 8080 \
-            --mcp-server "tools=stdio:${SERVER_BIN}" &
+            --mcp-server "runner=stdio:${SERVER_BIN}" &
           SERVER_PID=$!
 
           cleanup() { kill $SERVER_PID 2>/dev/null || true; }
@@ -94,18 +94,18 @@ jobs:
           OUTPUT=$(curl -s "http://localhost:8080/api/executions/${EXEC_ID}/output" | jq -r '.data')
           echo "Output: $OUTPUT"
 
-          # Verify "tools" is in the server list
-          echo "$OUTPUT" | grep -q '"tools"'
+          # Verify "runner" is in the server list
+          echo "$OUTPUT" | grep -q '"runner"'
           if [ $? -ne 0 ]; then
-            echo "FAIL: mcp.servers does not contain 'tools'"
+            echo "FAIL: mcp.servers does not contain 'runner'"
             exit 1
           fi
-          echo "PASS: mcp.servers contains 'tools'"
+          echo "PASS: mcp.servers contains 'runner'"
 
-          # ── Test 2: mcp.listTools() returns run_js tool ─────────────────
+          # ── Test 2: mcp.tools() returns run_js tool ─────────────────────
           echo ""
-          echo "=== Test 2: mcp.listTools() ==="
-          CODE='const tools = mcp.listTools("tools"); console.log(JSON.stringify(tools.map(t => t.name)));'
+          echo "=== Test 2: mcp.tools() ==="
+          CODE='const tools = mcp.tools("runner"); console.log(JSON.stringify(tools.map(t => t.name)));'
           SUBMIT=$(curl -s -o /tmp/t2_submit.json -w '%{http_code}' \
             http://localhost:8080/api/exec \
             -H 'Content-Type: application/json' \
@@ -130,16 +130,16 @@ jobs:
 
           echo "$OUTPUT" | grep -q '"run_js"'
           if [ $? -ne 0 ]; then
-            echo "FAIL: mcp.listTools does not contain 'run_js'"
+            echo "FAIL: mcp.tools does not contain 'run_js'"
             exit 1
           fi
-          echo "PASS: mcp.listTools contains 'run_js'"
+          echo "PASS: mcp.tools contains 'run_js'"
 
-          # ── Test 3: mcp.callTool() executes JS on remote MCP server ─────
+          # ── Test 3: mcp.<server>.<tool>() executes JS on remote MCP server ─
           echo ""
-          echo "=== Test 3: mcp.callTool() ==="
+          echo "=== Test 3: mcp.runner.run_js() ==="
           # Call run_js on the MCP server: it should execute "2+3" and return output
-          CODE='const result = await mcp.callTool("tools", "run_js", { code: "console.log(JSON.stringify({sum: 2+3, greeting: \"hello from mcp\"}))" }); console.log(JSON.stringify(result));'
+          CODE='const result = await mcp.runner.run_js({ code: "console.log(JSON.stringify({sum: 2+3, greeting: \"hello from mcp\"}))" }); console.log(JSON.stringify(result));'
 
           SUBMIT=$(curl -s -o /tmp/t3_submit.json -w '%{http_code}' \
             http://localhost:8080/api/exec \
@@ -163,19 +163,19 @@ jobs:
           OUTPUT=$(curl -s "http://localhost:8080/api/executions/${EXEC_ID}/output" | jq -r '.data')
           echo "Output: $OUTPUT"
 
-          # The output is the console.log'd JSON from callTool — verify it
+          # The output is the console.log'd unwrapped result value — verify it
           # contains our expected string and is not an error
           echo "$OUTPUT" | grep -q 'hello from mcp'
           if [ $? -ne 0 ]; then
-            echo "FAIL: mcp.callTool result does not contain expected output"
+            echo "FAIL: mcp.runner.run_js result does not contain expected output"
             exit 1
           fi
-          echo "PASS: mcp.callTool successfully executed code on MCP server"
+          echo "PASS: mcp.runner.run_js successfully executed code on MCP server"
 
-          # ── Test 4: mcp.listTools() without server filter ───────────────
+          # ── Test 4: mcp.tools() without server filter ───────────────────
           echo ""
-          echo "=== Test 4: mcp.listTools() without filter ==="
-          CODE='const tools = mcp.listTools(); console.log(JSON.stringify(tools.length > 0));'
+          echo "=== Test 4: mcp.tools() without filter ==="
+          CODE='const tools = mcp.tools(); console.log(JSON.stringify(tools.length > 0));'
           SUBMIT=$(curl -s -o /tmp/t4_submit.json -w '%{http_code}' \
             http://localhost:8080/api/exec \
             -H 'Content-Type: application/json' \
@@ -200,10 +200,10 @@ jobs:
 
           echo "$OUTPUT" | grep -q 'true'
           if [ $? -ne 0 ]; then
-            echo "FAIL: mcp.listTools() returned empty list"
+            echo "FAIL: mcp.tools() returned empty list"
             exit 1
           fi
-          echo "PASS: mcp.listTools() without filter returns tools"
+          echo "PASS: mcp.tools() without filter returns tools"
 
           echo ""
           echo "All MCP programmatic tool calling E2E tests passed!"

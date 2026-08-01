@@ -24,7 +24,7 @@ mcp-v8 --http-port 8080 \
 
 ## Connect multiple servers at once
 
-Repeat `--mcp-server` for each server. Names must be unique.
+Repeat `--mcp-server` for each server. Names must be unique, and a few names are reserved because they collide with properties of the JS `mcp` global: `servers`, `tools`, `callTool`, `listTools`.
 
 ```bash
 mcp-v8 --http-port 8080 \
@@ -67,30 +67,44 @@ mcp-v8 --http-port 8080 --mcp-config mcp-servers.json
 
 ## Call an upstream tool from JavaScript
 
-Inside a `run_js` execution the global `mcp` object is always available when servers are configured.
+Inside a `run_js` execution the global `mcp` object is always available when servers are configured. Each server is a namespace: call tools as methods and get the unwrapped result value back.
 
 ```js
 // List all tools across all servers
-const all = mcp.listTools();
+const all = mcp.tools();
 
-// List tools from one server
-const tools = mcp.listTools("github");
+// List tools from one server (name, description, inputSchema per tool)
+const tools = mcp.tools("github");
 
-// Call a tool
-const result = await mcp.callTool("github", "list_issues", {
+// Call a tool — resolves to the tool's result value directly:
+// structuredContent when the tool provides it, otherwise JSON text
+// is parsed for you (plain text stays a string).
+const issues = await mcp.github.list_issues({
   owner: "acme",
   repo: "api",
 });
-console.log(result.content[0].text);
+console.log(issues.length, "open issues");
+
+// Dynamic dispatch: tool (and server) names can be computed at runtime.
+const name = "list_issues";
+await mcp.github[name]({ owner: "acme", repo: "api" });
+
+// Introspection works like a plain object.
+"list_issues" in mcp.github;   // true
+Object.keys(mcp.github);       // all tool names
 ```
+
+Tool names that are not valid JS identifiers (e.g. `my.tool`) are callable via brackets — `mcp.github["my.tool"](args)` — or via their sanitized spelling (`mcp.github.my_tool`), which mcp-v8 resolves when unambiguous.
+
+Tools returning mixed or binary content blocks (images, resources) resolve to the raw content-block array so nothing is lost.
 
 ## Handle upstream tool errors
 
-`mcp.callTool` throws a `McpToolError` when the upstream tool returns `isError: true`.
+A call throws `McpToolError` when the upstream tool returns `isError: true`. The raw result envelope (`{content, structuredContent?, isError}`) is available on `error.result`.
 
 ```js
 try {
-  await mcp.callTool("github", "create_issue", {
+  await mcp.github.create_issue({
     owner: "acme",
     repo: "api",
     title: "New bug",
@@ -112,7 +126,7 @@ By default, every upstream tool is also listed in mcp-v8's own `list_tools` resp
 mcp-v8 --mcp-server myserver=stdio:mcp-my-server --mcp-stubs false
 ```
 
-With stubs disabled, upstream tools do not appear in `list_tools` at all; they remain callable from JavaScript via `mcp.callTool`.
+With stubs disabled, upstream tools do not appear in `list_tools` at all; they remain callable from JavaScript via `mcp.<server>.<tool>(args)`.
 
 ## Change the stub prefix
 

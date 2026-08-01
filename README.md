@@ -113,7 +113,7 @@ Precedence is CLI flag > `MCP_V8_*` env var > config file > default. See the
 - **WebAssembly** — the standard `WebAssembly` API, plus pre-loaded modules (`--wasm-module`) exposed as globals and advertised to clients as `runjs__wasm__<name>` stub tools.
 - **ES module imports** — optional `npm:`, `jsr:`, and URL imports fetched at runtime (policy-gated).
 - **Policy-gated capabilities** — `fetch`, filesystem (`fs`), and subprocess access, each checked against a Rego policy per operation; plus header/OAuth injection for `fetch`.
-- **Compose other MCP servers** — connect upstream MCP servers and call them from JS via `mcp.callTool()` / `mcp.listTools()`.
+- **Compose other MCP servers** — connect upstream MCP servers and call their tools from JS as `await mcp.<server>.<tool>(args)`.
 - **Customizable surface** — override the server `instructions` and the `run_js` description (`--instructions`, `--run-js-description`).
 - **Single-file configuration** — one TOML/JSON `--config` file can set every flag (precedence: CLI flag > env var > config file > default).
 - **Auth & clustering** — JWKS-based JWT verification, and optional Raft clustering with replicated session metadata and horizontal scaling.
@@ -132,7 +132,7 @@ These globals are available inside `run_js` (capability globals require a policy
 | `child_process` / `Deno.Command` | Run subprocesses | `subprocess` policy |
 | `import` (`npm:` / `jsr:` / URL) | External ES modules | `--allow-external-modules` + `modules` policy |
 | `WebAssembly`, `__wasm_<name>` | Run/instantiate WASM | — |
-| `mcp.callTool/listTools/servers` | Call upstream MCP servers | `mcp_tools` policy |
+| `mcp.<server>.<tool>()` / `mcp.tools()` / `mcp.servers` | Call upstream MCP servers | `mcp_tools` policy |
 
 See [Concepts → Security policies](https://r33drichards.github.io/mcp-js/concepts/policies/) for the policy model.
 

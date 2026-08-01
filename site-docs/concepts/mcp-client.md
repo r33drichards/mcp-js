@@ -4,13 +4,13 @@ mcp-v8 is simultaneously an MCP server (it exposes `run_js` and related tools to
 
 ## mcp-v8 as both server and client
 
-An LLM agent calls mcp-v8's `run_js` tool to execute JavaScript. Inside that JavaScript the code can call `mcp.callTool("server", "tool", args)`, which crosses a process or network boundary to an upstream MCP server and returns the result as a JavaScript value. From the agent's perspective, a single `run_js` invocation can orchestrate arbitrarily complex sequences of upstream MCP tool calls.
+An LLM agent calls mcp-v8's `run_js` tool to execute JavaScript. Inside that JavaScript, every upstream server is a namespace on the global `mcp` object: `await mcp.github.list_issues(args)` crosses a process or network boundary to the upstream server and resolves to its result as a plain JavaScript value. From the agent's perspective, a single `run_js` invocation can orchestrate arbitrarily complex sequences of upstream MCP tool calls.
 
 ```mermaid
 graph LR
     A[LLM agent] -->|"MCP: run_js"| B[mcp-v8]
     B -->|V8 isolate| C[JS code]
-    C -->|mcp.callTool| D[McpClientManager]
+    C -->|"mcp.&lt;server&gt;.&lt;tool&gt;()"| D[McpClientManager]
     D -->|MCP stdio| E[Upstream stdio server]
     D -->|MCP SSE| F[Upstream SSE server]
     E -->|tool result| D
@@ -28,7 +28,7 @@ mcp-v8 could proxy upstream tool calls directly — receive an MCP request from 
 
 **Heap persistence.** In stateful mode the JavaScript heap is saved as a content-addressed snapshot between executions. Results of expensive upstream calls can be stored in heap variables and reused across many `run_js` calls on the same session without hitting the upstream server again.
 
-**Policy enforcement.** Every `mcp.callTool` invocation is evaluated against the `mcp_tools` OPA policy chain before the upstream server is contacted. The policy receives the server name, tool name, and arguments and can deny the call. A direct proxy would bypass this control point.
+**Policy enforcement.** Every upstream tool call is evaluated against the `mcp_tools` OPA policy chain before the upstream server is contacted. The policy receives the server name, tool name, and arguments and can deny the call. A direct proxy would bypass this control point.
 
 **Single execution model.** The agent always interacts with a single tool (`run_js`) regardless of how many upstream servers are connected. This simplifies the agent's decision space.
 
@@ -51,7 +51,7 @@ The stub tool carries the same input schema as the upstream tool, but its descri
 ```
 This tool is a stub. Execute it from JavaScript via the `run_js` tool, e.g.:
 
-const result = await mcp.callTool("github", "create_issue", { ... });
+const result = await mcp.github.create_issue({ ... });
 console.log(JSON.stringify(result));
 ```
 
@@ -67,10 +67,14 @@ Stubs can be disabled entirely with `--mcp-stubs false`. The prefix can be chang
 mcp-v8 connects to all configured upstream servers at startup and keeps those connections alive. Each server has a unique logical name (a duplicate name causes a startup error). All tools from all servers are accessible in the JavaScript global `mcp` object simultaneously:
 
 ```js
-mcp.servers           // ["github", "jira", "db"]
-mcp.listTools("github")   // tools on the github server
-mcp.listTools()           // tools across all servers
+mcp.servers            // ["github", "jira", "db"]
+mcp.tools("github")    // tools on the github server
+mcp.tools()            // tools across all servers
 ```
+
+A few server names are reserved (`servers`, `tools`, `callTool`, `listTools`) because they collide with fixed properties of the `mcp` global; using one is a startup error.
+
+Each `mcp.<server>` namespace is a proxy over the live tool catalog, not a frozen snapshot of it: the catalog is refreshed when a downstream reconnects and when it emits `notifications/tools/list_changed`, and property access resolves against the current catalog at call time. A namespace captured in a heap snapshot in stateful mode therefore never goes stale — a tool added mid-session is immediately callable, and a removed tool fails with a clear error naming the available tools.
 
 ## Composing MCP servers
 
@@ -78,20 +82,21 @@ Because JavaScript running in the isolate can call multiple upstream servers, mc
 
 ```js
 // Fetch an open GitHub issue and create a matching Jira ticket
-const issues = await mcp.callTool("github", "list_issues", { owner: "acme", repo: "api", state: "open" });
-const first = JSON.parse(issues.content[0].text)[0];
-await mcp.callTool("jira", "create_issue", {
+const issues = await mcp.github.list_issues({ owner: "acme", repo: "api", state: "open" });
+await mcp.jira.create_issue({
   project: "ACME",
-  summary: first.title,
-  description: first.body,
+  summary: issues[0].title,
+  description: issues[0].body,
 });
 ```
+
+Results arrive as plain values: `structuredContent` when the upstream tool provides it, otherwise JSON text content is parsed automatically (plain text stays a string, and mixed/binary content blocks are returned as-is). Tool errors throw `McpToolError` with the raw result envelope on `error.result`.
 
 A single `run_js` call from the agent orchestrates two upstream MCP servers, with the JavaScript code handling the data mapping between them.
 
 ## Policy and security
 
-Each `mcp.callTool` invocation is checked against the `mcp_tools` OPA policy chain (if configured) before reaching the upstream server. The policy input is:
+Each upstream tool call is checked against the `mcp_tools` OPA policy chain (if configured) before reaching the upstream server. The policy input is:
 
 ```json
 {
@@ -102,7 +107,7 @@ Each `mcp.callTool` invocation is checked against the `mcp_tools` OPA policy cha
 }
 ```
 
-If the policy returns `false`, `mcp.callTool` throws a JavaScript error and the upstream server is never contacted. This lets operators enforce per-server and per-tool access control independently of the JavaScript code the agent submits.
+If the policy returns `false`, the call throws a JavaScript error and the upstream server is never contacted. This lets operators enforce per-server and per-tool access control independently of the JavaScript code the agent submits.
 
 ## See also
 

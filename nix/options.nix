@@ -178,7 +178,7 @@
   mcp_stubs = lib.mkOption {
     type = lib.types.nullOr lib.types.bool;
     default = null;
-    description = "Expose upstream MCP server tools on the MCPJS server itself as `<prefix><server>__<tool>` stubs. When `true` (the default whenever at least one --mcp-server is configured), an external client of MCPJS can discover those tools via tools/list and tool search; calling a stub returns instructional text telling the caller to invoke the tool from JavaScript via run_js + mcp.callTool(...). Pass `--mcp-stubs false` to disable. Config-file key for the `--mcp-stubs` flag. Environment variable: `MCP_V8_MCP_STUBS`. Server default: `true`.";
+    description = "Expose upstream MCP server tools on the MCPJS server itself as `<prefix><server>__<tool>` stubs. When `true` (the default whenever at least one --mcp-server is configured), an external client of MCPJS can discover those tools via tools/list and tool search; calling a stub returns instructional text telling the caller to invoke the tool from JavaScript via run_js + `await mcp.<server>.<tool>(args)`. Pass `--mcp-stubs false` to disable. Config-file key for the `--mcp-stubs` flag. Environment variable: `MCP_V8_MCP_STUBS`. Server default: `true`.";
   };
   metadata_only = lib.mkOption {
     type = lib.types.nullOr lib.types.bool;

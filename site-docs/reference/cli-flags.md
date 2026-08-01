@@ -261,7 +261,7 @@ JSON config for MCP server modules (a path to a JSON file, or inline JSON — al
 
 ### `--mcp-stubs`
 
-Expose upstream MCP server tools on the MCPJS server itself as `<prefix><server>__<tool>` stubs. When `true` (the default whenever at least one --mcp-server is configured), an external client of MCPJS can discover those tools via tools/list and tool search; calling a stub returns instructional text telling the caller to invoke the tool from JavaScript via run_js + mcp.callTool(...). Pass `--mcp-stubs false` to disable
+Expose upstream MCP server tools on the MCPJS server itself as `<prefix><server>__<tool>` stubs. When `true` (the default whenever at least one --mcp-server is configured), an external client of MCPJS can discover those tools via tools/list and tool search; calling a stub returns instructional text telling the caller to invoke the tool from JavaScript via run_js + `await mcp.<server>.<tool>(args)`. Pass `--mcp-stubs false` to disable
 
 - Environment: `MCP_V8_MCP_STUBS`
 - Default: `true`
@@ -276,7 +276,7 @@ Prefix applied to stub tool names. Defaults to `runjs__` so it is obvious to a c
 
 ### `--mcp-server`
 
-Connect to an external MCP server as a module; JS can call its tools via the `mcp` global (mcp.callTool, mcp.listTools, mcp.servers). Can be specified multiple times. Transports: name=stdio:command:arg1:arg2 — spawn a stdio MCP server process name=sse:url — connect to an SSE MCP server endpoint Examples: weather=stdio:python:server.py remote=sse:http://localhost:9000/sse
+Connect to an external MCP server as a module; JS can call its tools via the `mcp` global (mcp.<server>.<tool>(args), mcp.tools(), mcp.servers). Can be specified multiple times. Transports: name=stdio:command:arg1:arg2 — spawn a stdio MCP server process name=sse:url — connect to an SSE MCP server endpoint Examples: weather=stdio:python:server.py remote=sse:http://localhost:9000/sse
 
 - Value: `NAME=TRANSPORT:...`
 - Repeatable: yes

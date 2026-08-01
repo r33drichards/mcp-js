@@ -41,7 +41,7 @@ result = await agent.run(prompt)
 
 ### Approach B: mcp-js Programmatic Tool Calling
 
-PydanticAI connects to mcp-js via Streamable HTTP MCP. The model sees only the tools mcp-js exposes (primarily `run_js`). Claude writes JavaScript that calls `mcp.callTool()` inside the V8 sandbox.
+PydanticAI connects to mcp-js via Streamable HTTP MCP. The model sees only the tools mcp-js exposes (primarily `run_js`). Claude writes JavaScript that calls MCP tools as `mcp.<server>.<tool>()` inside the V8 sandbox.
 
 ```python
 server = MCPServerStreamableHTTP("http://localhost:3000/mcp")
@@ -74,7 +74,7 @@ Approach B:
   Claude ←→ [1 tool: run_js] ←→ PydanticAI ←→ mcp-js ←→ GitHub MCP Server
                                                   ↑
                                           V8 sandbox with
-                                         mcp.callTool() API
+                                         mcp.<server>.<tool>() API
 
 Approach C:
   Claude ←→ [1 tool: run_gh] ←→ PydanticAI ←→ subprocess ←→ gh CLI
