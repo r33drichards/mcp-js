@@ -2024,258 +2024,20 @@ impl Engine {
     /// conflicts to one side. A clean merge yields the new snapshot's CA id;
     /// otherwise the conflicting paths are reported. The merge produces a normal
     /// pure manifest and does NOT move any label (push it explicitly).
-    pub async fn fs_merge(
-        &self,
-        ours: &str,
-        theirs: &str,
-        base: Option<String>,
-        prefer: fs_merge::Prefer,
-    ) -> Result<FsMergeResult, String> {
-        self.check_fs_snapshot_policy("merge", None, None).await?;
-        let store = self.fs_store_or_err()?;
-
-        let load = |hex: &str| -> Result<[u8; 32], String> {
-            parse_ca_hex(hex).ok_or_else(|| format!("invalid CA id: {hex}"))
-        };
-        let base_root = match &base {
-            Some(b) => Some(load(b)?),
-            None => None,
-        };
-
-        // Structural per-path 3-way merge over the trees: equal subtrees are
-        // pruned by hash (never loaded), clean parts land in the merged tree,
-        // divergent paths come back as conflicts.
-        let structural =
-            fs_merge::merge_trees(store, base_root, Some(load(ours)?), Some(load(theirs)?), prefer)
-                .await
-                .map_err(|e| format!("fs_merge: {e}"))?;
-        let merged_root = structural.root;
-
-        // Content-merge pass: give a type-aware merger a shot at each conflict
-        // before reporting it. Clean text merges resolve silently and are patched
-        // back into the merged tree; the rest are surfaced with diffs/markers.
-        let mergers = fs_content_merge::default_mergers();
-        let mut conflict_views = Vec::new();
-        let mut resolved: Vec<(Vec<String>, Option<fs_store::Entry>)> = Vec::new();
-        for c in structural.conflicts {
-            let view = match (&c.ours, &c.theirs) {
-                (Some(oe), Some(te)) => {
-                    let ours_b = store
-                        .read_file(oe)
-                        .await
-                        .map_err(|e| format!("fs_merge: read ours {}: {e}", c.path.display()))?;
-                    let theirs_b = store
-                        .read_file(te)
-                        .await
-                        .map_err(|e| format!("fs_merge: read theirs {}: {e}", c.path.display()))?;
-                    let base_b = match &c.base {
-                        Some(be) => Some(store.read_file(be).await.map_err(|e| {
-                            format!("fs_merge: read base {}: {e}", c.path.display())
-                        })?),
-                        None => None,
-                    };
-                    match fs_content_merge::merge_content(
-                        &mergers,
-                        base_b.as_deref(),
-                        &ours_b,
-                        &theirs_b,
-                    ) {
-                        fs_content_merge::ContentMergeResult::Clean(bytes) => {
-                            let entry = store
-                                .put_file(&bytes)
-                                .await
-                                .map_err(|e| format!("fs_merge: store merged {}: {e}", c.path.display()))?;
-                            resolved.push((fs_tree::components_of(&c.path), Some(entry)));
-                            continue; // resolved — not a conflict
-                        }
-                        fs_content_merge::ContentMergeResult::Conflict(cc) => FsMergeConflictView {
-                            path: c.path.to_string_lossy().to_string(),
-                            base: c.base.as_ref().map(entry_content_id),
-                            ours: c.ours.as_ref().map(entry_content_id),
-                            theirs: c.theirs.as_ref().map(entry_content_id),
-                            kind: cc.kind.as_str().to_string(),
-                            markers: cc.markers,
-                            diff_ours: cc.diff_ours,
-                            diff_theirs: cc.diff_theirs,
-                        },
-                    }
-                }
-                // A modify/delete (or add on one side): no content to reconcile.
-                _ => FsMergeConflictView {
-                    path: c.path.to_string_lossy().to_string(),
-                    base: c.base.as_ref().map(entry_content_id),
-                    ours: c.ours.as_ref().map(entry_content_id),
-                    theirs: c.theirs.as_ref().map(entry_content_id),
-                    kind: "modify/delete".to_string(),
-                    markers: None,
-                    diff_ours: None,
-                    diff_theirs: None,
-                },
-            };
-            conflict_views.push(view);
-        }
-
-        if conflict_views.is_empty() {
-            // Patch the content-merge resolutions onto the structurally-merged
-            // tree (writing only the touched spine).
-            let final_root = if resolved.is_empty() {
-                merged_root
-            } else {
-                store
-                    .build_root(Some(merged_root), resolved)
-                    .await
-                    .map_err(|e| format!("fs_merge: store result: {e}"))?
-            };
-            Ok(FsMergeResult::Merged {
-                ca_id: ca_to_hex(&final_root),
-            })
-        } else {
-            Ok(FsMergeResult::Conflict {
-                conflicts: conflict_views,
-            })
-        }
-    }
-
-    /// List every label and its current head CA id (hex).
-    pub async fn fs_list_labels(&self) -> Result<Vec<FsLabelView>, String> {
-        let labels = self.labels_or_err()?;
-        Ok(labels
-            .list()
-            .await?
-            .into_iter()
-            .map(|(name, id)| FsLabelView {
-                name,
-                ca_id: ca_to_hex(&id),
-            })
-            .collect())
-    }
-
-    /// Resolve a label to its current head CA id (hex), if it exists.
-    pub async fn fs_resolve_label(&self, name: &str) -> Result<Option<String>, String> {
-        let labels = self.labels_or_err()?;
-        Ok(labels.resolve(name).await?.map(|id| ca_to_hex(&id)))
-    }
-
-    /// Create a label, or repoint an existing one, to a CA id. `message` is an
+        /// List every label and its current head CA id (hex).
+        /// Resolve a label to its current head CA id (hex), if it exists.
+        /// Create a label, or repoint an existing one, to a CA id. `message` is an
     /// optional human note recorded on the reflog entry.
-    pub async fn fs_set_label(
-        &self,
-        name: &str,
-        ca_hex: &str,
-        message: Option<String>,
-    ) -> Result<(), String> {
-        self.check_fs_snapshot_policy("label", Some(name), Some(ca_hex)).await?;
-        let labels = self.labels_or_err()?;
-        let id = parse_ca_hex(ca_hex).ok_or_else(|| format!("invalid CA id: {ca_hex}"))?;
-        match labels.resolve(name).await? {
-            Some(_) => labels.force(name, id, message).await,
-            None => labels.create(name, id, message).await,
-        }
-    }
-
-    /// The reflog for a label (hex-rendered), oldest first. When `limit` is
+        /// The reflog for a label (hex-rendered), oldest first. When `limit` is
     /// given, only the most recent `limit` entries are read and returned —
     /// bounding the scan over very long histories.
-    pub async fn fs_label_log(
-        &self,
-        name: &str,
-        limit: Option<usize>,
-    ) -> Result<Vec<FsRefLogView>, String> {
-        let labels = self.labels_or_err()?;
-        let entries = match limit {
-            Some(n) => labels.log_recent(name, n).await?,
-            None => labels.log(name).await?,
-        };
-        Ok(entries
-            .into_iter()
-            .map(|e| FsRefLogView {
-                at: e.at,
-                from: e.from.as_ref().map(ca_to_hex),
-                to: ca_to_hex(&e.to),
-                op: refop_str(e.op).to_string(),
-                message: e.message,
-            })
-            .collect())
-    }
-
-    /// Advance a label to a CA id. Default is reject-and-rebase: the move only
+        /// Advance a label to a CA id. Default is reject-and-rebase: the move only
     /// succeeds if the label's current head equals `expected` (or the label does
     /// not yet exist and `expected` is `None`). `force` skips the check.
-    pub async fn fs_push(
-        &self,
-        label: &str,
-        ca_hex: &str,
-        expected: Option<String>,
-        force: bool,
-        message: Option<String>,
-    ) -> Result<FsPushOutcome, String> {
-        self.check_fs_snapshot_policy("push", Some(label), Some(ca_hex)).await?;
-        let labels = self.labels_or_err()?;
-        let new = parse_ca_hex(ca_hex).ok_or_else(|| format!("invalid CA id: {ca_hex}"))?;
-
-        if force {
-            labels.force(label, new, message).await?;
-            return Ok(FsPushOutcome::Advanced {
-                label: label.to_string(),
-                ca_id: ca_hex.to_string(),
-            });
-        }
-
-        let expected = match expected {
-            Some(h) => Some(parse_ca_hex(&h).ok_or_else(|| format!("invalid expected CA id: {h}"))?),
-            None => None,
-        };
-        let current = labels.resolve(label).await?;
-        let advanced = if current.is_none() && expected.is_none() {
-            labels.create(label, new, message).await?;
-            true
-        } else {
-            labels.cas(label, expected, new, message).await?
-        };
-
-        if advanced {
-            Ok(FsPushOutcome::Advanced {
-                label: label.to_string(),
-                ca_id: ca_hex.to_string(),
-            })
-        } else {
-            Ok(FsPushOutcome::Rejected {
-                label: label.to_string(),
-                current: current.as_ref().map(ca_to_hex),
-            })
-        }
-    }
-
-    /// Reset a label to an earlier CA id from its reflog (the rollback verb).
+        /// Reset a label to an earlier CA id from its reflog (the rollback verb).
     /// Unless `allow_unlogged` is set, the target must appear in the label's
     /// reflog so resets stay within recorded history.
-    pub async fn fs_reset(
-        &self,
-        label: &str,
-        ca_hex: &str,
-        allow_unlogged: bool,
-        message: Option<String>,
-    ) -> Result<(), String> {
-        self.check_fs_snapshot_policy("reset", Some(label), Some(ca_hex)).await?;
-        let labels = self.labels_or_err()?;
-        let target = parse_ca_hex(ca_hex).ok_or_else(|| format!("invalid CA id: {ca_hex}"))?;
-        if !allow_unlogged {
-            let in_log = labels
-                .log(label)
-                .await?
-                .iter()
-                .any(|e| e.to == target || e.from == Some(target));
-            if !in_log {
-                return Err(format!(
-                    "CA id {ca_hex} is not in the reflog for label '{label}'; \
-                     pass allow_unlogged to reset anyway"
-                ));
-            }
-        }
-        labels.force(label, target, message).await
-    }
-
-    /// Flush a session's overlay mount into a new pure manifest and return its
+        /// Flush a session's overlay mount into a new pure manifest and return its
     /// CA id (hex). This is the durable fs artifact recorded on completion; it
     /// does NOT advance any label (pushing a label is the explicit `fs_push`
     /// verb).
@@ -2559,30 +2321,9 @@ impl Engine {
         drop(permit);
     }
 
-    // ── Query / cancel methods ───────────────────────────────────────────
-
     /// Get execution status and result.
-    pub fn get_execution(&self, id: &str) -> Result<ExecutionInfo, String> {
-        let registry = self.execution_registry.as_ref()
-            .ok_or_else(|| "Execution registry not configured".to_string())?;
-        registry.get(id).ok_or_else(|| format!("Execution '{}' not found", id))
-    }
-
-    /// Get paginated console output for an execution.
-    pub fn get_execution_output(
-        &self,
-        id: &str,
-        line_offset: Option<u64>,
-        line_limit: Option<u64>,
-        byte_offset: Option<u64>,
-        byte_limit: Option<u64>,
-    ) -> Result<ConsoleOutputPage, String> {
-        let registry = self.execution_registry.as_ref()
-            .ok_or_else(|| "Execution registry not configured".to_string())?;
-        registry.get_console_output(id, line_offset, line_limit, byte_offset, byte_limit)
-    }
-
-    /// Stop background work owned by the engine.
+        /// Get paginated console output for an execution.
+        /// Stop background work owned by the engine.
     pub async fn shutdown(&self) -> (u64, u64) {
         let cancelled_executions = self.execution_registry.as_ref()
             .map(|registry| registry.cancel_all())
@@ -2594,75 +2335,6 @@ impl Engine {
         (cancelled_executions, closed_mcp_connections)
     }
 
-    /// Cancel a running execution.
-    pub fn cancel_execution(&self, id: &str) -> Result<(), String> {
-        let registry = self.execution_registry.as_ref()
-            .ok_or_else(|| "Execution registry not configured".to_string())?;
-        registry.cancel(id)
-    }
-
-    /// List all executions.
-    pub fn list_executions(&self) -> Result<Vec<ExecutionSummary>, String> {
-        let registry = self.execution_registry.as_ref()
-            .ok_or_else(|| "Execution registry not configured".to_string())?;
-        Ok(registry.list())
-    }
-
-    pub async fn list_sessions(&self) -> Result<Vec<String>, String> {
-        match &self.session_log {
-            Some(log) => log.list_sessions().await,
-            None => Err("Session log not configured".to_string()),
-        }
-    }
-
-    pub async fn list_session_snapshots(
-        &self,
-        session: String,
-    ) -> Result<Vec<session_log::SessionSnapshotView>, String> {
-        match &self.session_log {
-            Some(log) => log.list_entries(&session).await,
-            None => Err("Session log not configured".to_string()),
-        }
-    }
-
-    pub async fn get_heap_tags(&self, heap: String) -> Result<HashMap<String, String>, String> {
-        match &self.heap_tag_store {
-            Some(store) => store.get_tags(&heap).await,
-            None => Err("Heap tag store not configured".to_string()),
-        }
-    }
-
-    pub async fn set_heap_tags(
-        &self,
-        heap: String,
-        tags: HashMap<String, String>,
-    ) -> Result<(), String> {
-        match &self.heap_tag_store {
-            Some(store) => store.set_tags(&heap, tags).await,
-            None => Err("Heap tag store not configured".to_string()),
-        }
-    }
-
-    pub async fn delete_heap_tags(
-        &self,
-        heap: String,
-        keys: Option<Vec<String>>,
-    ) -> Result<(), String> {
-        match &self.heap_tag_store {
-            Some(store) => store.delete_tags(&heap, keys).await,
-            None => Err("Heap tag store not configured".to_string()),
-        }
-    }
-
-    pub async fn query_heaps_by_tags(
-        &self,
-        filter: HashMap<String, String>,
-    ) -> Result<Vec<HeapTagEntry>, String> {
-        match &self.heap_tag_store {
-            Some(store) => store.query_by_tags(filter).await,
-            None => Err("Heap tag store not configured".to_string()),
-        }
-    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -3011,6 +2683,21 @@ pub enum RuntimeError {
     Operation { message: String },
 }
 
+impl RuntimeError {
+    /// The bare error message, without the variant's display prefix. Transport
+    /// layers use this to keep wire-visible error strings identical to the
+    /// underlying operation error.
+    pub fn message(&self) -> &str {
+        match self {
+            Self::InvalidConfig { message }
+            | Self::Initialization { message }
+            | Self::ToolCall { message }
+            | Self::Operation { message } => message,
+            Self::InvalidJson { message, .. } => message,
+        }
+    }
+}
+
 #[derive(uniffi::Object)]
 pub struct McpJsRuntime {
     tokio_runtime: Option<tokio::runtime::Runtime>,
@@ -3275,10 +2962,10 @@ impl McpJsRuntime {
         execution.execute().await.map_err(operation_message)
     }
 
-    pub fn get_execution(&self, execution_id: String) -> Result<ExecutionInfo, RuntimeError> {
-        self.engine
-            .get_execution(&execution_id)
-            .map_err(operation_message)
+        pub fn get_execution(&self, execution_id: String) -> Result<ExecutionInfo, RuntimeError> {
+        self.execution_registry()?
+            .get(&execution_id)
+            .ok_or_else(|| operation_message(format!("Execution '{}' not found", execution_id)))
     }
 
     pub fn get_execution_output(
@@ -3289,29 +2976,23 @@ impl McpJsRuntime {
         byte_offset: Option<u64>,
         byte_limit: Option<u64>,
     ) -> Result<ConsoleOutputPage, RuntimeError> {
-        self.engine
-            .get_execution_output(
-                &execution_id,
-                line_offset,
-                line_limit,
-                byte_offset,
-                byte_limit,
-            )
+        self.execution_registry()?
+            .get_console_output(&execution_id, line_offset, line_limit, byte_offset, byte_limit)
             .map_err(operation_message)
     }
 
     pub fn cancel_execution(&self, execution_id: String) -> Result<(), RuntimeError> {
-        self.engine
-            .cancel_execution(&execution_id)
+        self.execution_registry()?
+            .cancel(&execution_id)
             .map_err(operation_message)
     }
 
     pub fn list_executions(&self) -> Result<Vec<ExecutionSummary>, RuntimeError> {
-        self.engine.list_executions().map_err(operation_message)
+        Ok(self.execution_registry()?.list())
     }
 
     pub async fn list_sessions(&self) -> Result<Vec<String>, RuntimeError> {
-        self.engine
+        self.session_log()?
             .list_sessions()
             .await
             .map_err(operation_message)
@@ -3321,8 +3002,8 @@ impl McpJsRuntime {
         &self,
         session: String,
     ) -> Result<Vec<session_log::SessionSnapshotView>, RuntimeError> {
-        self.engine
-            .list_session_snapshots(session)
+        self.session_log()?
+            .list_entries(&session)
             .await
             .map_err(operation_message)
     }
@@ -3331,8 +3012,8 @@ impl McpJsRuntime {
         &self,
         heap: String,
     ) -> Result<HashMap<String, String>, RuntimeError> {
-        self.engine
-            .get_heap_tags(heap)
+        self.heap_tag_store()?
+            .get_tags(&heap)
             .await
             .map_err(operation_message)
     }
@@ -3342,8 +3023,8 @@ impl McpJsRuntime {
         heap: String,
         tags: HashMap<String, String>,
     ) -> Result<(), RuntimeError> {
-        self.engine
-            .set_heap_tags(heap, tags)
+        self.heap_tag_store()?
+            .set_tags(&heap, tags)
             .await
             .map_err(operation_message)
     }
@@ -3353,8 +3034,8 @@ impl McpJsRuntime {
         heap: String,
         keys: Option<Vec<String>>,
     ) -> Result<(), RuntimeError> {
-        self.engine
-            .delete_heap_tags(heap, keys)
+        self.heap_tag_store()?
+            .delete_tags(&heap, keys)
             .await
             .map_err(operation_message)
     }
@@ -3363,35 +3044,65 @@ impl McpJsRuntime {
         &self,
         tags: HashMap<String, String>,
     ) -> Result<Vec<HeapTagEntry>, RuntimeError> {
-        self.engine
-            .query_heaps_by_tags(tags)
+        self.heap_tag_store()?
+            .query_by_tags(tags)
             .await
             .map_err(operation_message)
     }
 
+    /// List every label and its current head CA id (hex).
     pub async fn fs_list_labels(&self) -> Result<Vec<FsLabelView>, RuntimeError> {
-        self.engine.fs_list_labels().await.map_err(operation_message)
+        let result: Result<Vec<FsLabelView>, String> = async {
+            let labels = self.engine.labels_or_err()?;
+            Ok(labels
+                .list()
+                .await?
+                .into_iter()
+                .map(|(name, id)| FsLabelView {
+                    name,
+                    ca_id: ca_to_hex(&id),
+                })
+                .collect())
+        }
+        .await;
+        result.map_err(operation_message)
     }
 
+    /// Resolve a label to its current head CA id (hex), if it exists.
     pub async fn fs_resolve_label(&self, name: String) -> Result<Option<String>, RuntimeError> {
-        self.engine
-            .fs_resolve_label(&name)
-            .await
-            .map_err(operation_message)
+        let result: Result<Option<String>, String> = async {
+            let labels = self.engine.labels_or_err()?;
+            Ok(labels.resolve(&name).await?.map(|id| ca_to_hex(&id)))
+        }
+        .await;
+        result.map_err(operation_message)
     }
 
+    /// Create a label, or repoint an existing one, to a CA id. `message` is an
+    /// optional human note recorded on the reflog entry.
     pub async fn fs_set_label(
         &self,
         name: String,
         ca_id: String,
         message: Option<String>,
     ) -> Result<(), RuntimeError> {
-        self.engine
-            .fs_set_label(&name, &ca_id, message)
-            .await
-            .map_err(operation_message)
+        let result: Result<(), String> = async {
+            self.engine
+                .check_fs_snapshot_policy("label", Some(&name), Some(&ca_id))
+                .await?;
+            let labels = self.engine.labels_or_err()?;
+            let id = parse_ca_hex(&ca_id).ok_or_else(|| format!("invalid CA id: {ca_id}"))?;
+            match labels.resolve(&name).await? {
+                Some(_) => labels.force(&name, id, message).await,
+                None => labels.create(&name, id, message).await,
+            }
+        }
+        .await;
+        result.map_err(operation_message)
     }
 
+    /// The reflog for a label (hex-rendered), oldest first. When `limit` is
+    /// given, only the most recent `limit` entries are read and returned.
     pub async fn fs_label_log(
         &self,
         name: String,
@@ -3404,12 +3115,30 @@ impl McpJsRuntime {
                 .map_err(|_| RuntimeError::Operation {
                     message: "filesystem log limit is too large for this platform".to_string(),
                 })?;
-        self.engine
-            .fs_label_log(&name, limit)
-            .await
-            .map_err(operation_message)
+        let result: Result<Vec<FsRefLogView>, String> = async {
+            let labels = self.engine.labels_or_err()?;
+            let entries = match limit {
+                Some(n) => labels.log_recent(&name, n).await?,
+                None => labels.log(&name).await?,
+            };
+            Ok(entries
+                .into_iter()
+                .map(|e| FsRefLogView {
+                    at: e.at,
+                    from: e.from.as_ref().map(ca_to_hex),
+                    to: ca_to_hex(&e.to),
+                    op: refop_str(e.op).to_string(),
+                    message: e.message,
+                })
+                .collect())
+        }
+        .await;
+        result.map_err(operation_message)
     }
 
+    /// Advance a label to a CA id. Default is reject-and-rebase: the move only
+    /// succeeds if the label's current head equals `expected` (or the label does
+    /// not yet exist and `expected` is `None`). `force` skips the check.
     pub async fn fs_push(
         &self,
         label: String,
@@ -3418,12 +3147,54 @@ impl McpJsRuntime {
         force: bool,
         message: Option<String>,
     ) -> Result<FsPushOutcome, RuntimeError> {
-        self.engine
-            .fs_push(&label, &ca_id, expected, force, message)
-            .await
-            .map_err(operation_message)
+        let result: Result<FsPushOutcome, String> = async {
+            self.engine
+                .check_fs_snapshot_policy("push", Some(&label), Some(&ca_id))
+                .await?;
+            let labels = self.engine.labels_or_err()?;
+            let new = parse_ca_hex(&ca_id).ok_or_else(|| format!("invalid CA id: {ca_id}"))?;
+
+            if force {
+                labels.force(&label, new, message).await?;
+                return Ok(FsPushOutcome::Advanced {
+                    label: label.clone(),
+                    ca_id: ca_id.clone(),
+                });
+            }
+
+            let expected = match expected {
+                Some(h) => {
+                    Some(parse_ca_hex(&h).ok_or_else(|| format!("invalid expected CA id: {h}"))?)
+                }
+                None => None,
+            };
+            let current = labels.resolve(&label).await?;
+            let advanced = if current.is_none() && expected.is_none() {
+                labels.create(&label, new, message).await?;
+                true
+            } else {
+                labels.cas(&label, expected, new, message).await?
+            };
+
+            if advanced {
+                Ok(FsPushOutcome::Advanced {
+                    label: label.clone(),
+                    ca_id: ca_id.clone(),
+                })
+            } else {
+                Ok(FsPushOutcome::Rejected {
+                    label: label.clone(),
+                    current: current.as_ref().map(ca_to_hex),
+                })
+            }
+        }
+        .await;
+        result.map_err(operation_message)
     }
 
+    /// Reset a label to an earlier CA id from its reflog (the rollback verb).
+    /// Unless `allow_unlogged` is set, the target must appear in the label's
+    /// reflog so resets stay within recorded history.
     pub async fn fs_reset(
         &self,
         label: String,
@@ -3431,12 +3202,34 @@ impl McpJsRuntime {
         allow_unlogged: bool,
         message: Option<String>,
     ) -> Result<(), RuntimeError> {
-        self.engine
-            .fs_reset(&label, &ca_id, allow_unlogged, message)
-            .await
-            .map_err(operation_message)
+        let result: Result<(), String> = async {
+            self.engine
+                .check_fs_snapshot_policy("reset", Some(&label), Some(&ca_id))
+                .await?;
+            let labels = self.engine.labels_or_err()?;
+            let target = parse_ca_hex(&ca_id).ok_or_else(|| format!("invalid CA id: {ca_id}"))?;
+            if !allow_unlogged {
+                let in_log = labels
+                    .log(&label)
+                    .await?
+                    .iter()
+                    .any(|e| e.to == target || e.from == Some(target));
+                if !in_log {
+                    return Err(format!(
+                        "CA id {ca_id} is not in the reflog for label '{label}'; \
+                         pass allow_unlogged to reset anyway"
+                    ));
+                }
+            }
+            labels.force(&label, target, message).await
+        }
+        .await;
+        result.map_err(operation_message)
     }
 
+    /// Three-way merge two snapshots into a new one. Structural merge prunes
+    /// equal subtrees by hash; a content-merge pass resolves text conflicts
+    /// before reporting the rest with diffs/markers.
     pub async fn fs_merge(
         &self,
         ours: String,
@@ -3444,10 +3237,111 @@ impl McpJsRuntime {
         base: Option<String>,
         prefer: Prefer,
     ) -> Result<FsMergeResult, RuntimeError> {
-        self.engine
-            .fs_merge(&ours, &theirs, base, prefer)
+        let result: Result<FsMergeResult, String> = async {
+            self.engine.check_fs_snapshot_policy("merge", None, None).await?;
+            let store = self.engine.fs_store_or_err()?;
+
+            let load = |hex: &str| -> Result<[u8; 32], String> {
+                parse_ca_hex(hex).ok_or_else(|| format!("invalid CA id: {hex}"))
+            };
+            let base_root = match &base {
+                Some(b) => Some(load(b)?),
+                None => None,
+            };
+
+            let structural = fs_merge::merge_trees(
+                store,
+                base_root,
+                Some(load(&ours)?),
+                Some(load(&theirs)?),
+                prefer,
+            )
             .await
-            .map_err(operation_message)
+            .map_err(|e| format!("fs_merge: {e}"))?;
+            let merged_root = structural.root;
+
+            let mergers = fs_content_merge::default_mergers();
+            let mut conflict_views = Vec::new();
+            let mut resolved: Vec<(Vec<String>, Option<fs_store::Entry>)> = Vec::new();
+            for c in structural.conflicts {
+                let view = match (&c.ours, &c.theirs) {
+                    (Some(oe), Some(te)) => {
+                        let ours_b = store
+                            .read_file(oe)
+                            .await
+                            .map_err(|e| format!("fs_merge: read ours {}: {e}", c.path.display()))?;
+                        let theirs_b = store
+                            .read_file(te)
+                            .await
+                            .map_err(|e| format!("fs_merge: read theirs {}: {e}", c.path.display()))?;
+                        let base_b = match &c.base {
+                            Some(be) => Some(store.read_file(be).await.map_err(|e| {
+                                format!("fs_merge: read base {}: {e}", c.path.display())
+                            })?),
+                            None => None,
+                        };
+                        match fs_content_merge::merge_content(
+                            &mergers,
+                            base_b.as_deref(),
+                            &ours_b,
+                            &theirs_b,
+                        ) {
+                            fs_content_merge::ContentMergeResult::Clean(bytes) => {
+                                let entry = store.put_file(&bytes).await.map_err(|e| {
+                                    format!("fs_merge: store merged {}: {e}", c.path.display())
+                                })?;
+                                resolved.push((fs_tree::components_of(&c.path), Some(entry)));
+                                continue; // resolved — not a conflict
+                            }
+                            fs_content_merge::ContentMergeResult::Conflict(cc) => {
+                                FsMergeConflictView {
+                                    path: c.path.to_string_lossy().to_string(),
+                                    base: c.base.as_ref().map(entry_content_id),
+                                    ours: c.ours.as_ref().map(entry_content_id),
+                                    theirs: c.theirs.as_ref().map(entry_content_id),
+                                    kind: cc.kind.as_str().to_string(),
+                                    markers: cc.markers,
+                                    diff_ours: cc.diff_ours,
+                                    diff_theirs: cc.diff_theirs,
+                                }
+                            }
+                        }
+                    }
+                    // A modify/delete (or add on one side): no content to reconcile.
+                    _ => FsMergeConflictView {
+                        path: c.path.to_string_lossy().to_string(),
+                        base: c.base.as_ref().map(entry_content_id),
+                        ours: c.ours.as_ref().map(entry_content_id),
+                        theirs: c.theirs.as_ref().map(entry_content_id),
+                        kind: "modify/delete".to_string(),
+                        markers: None,
+                        diff_ours: None,
+                        diff_theirs: None,
+                    },
+                };
+                conflict_views.push(view);
+            }
+
+            if conflict_views.is_empty() {
+                let final_root = if resolved.is_empty() {
+                    merged_root
+                } else {
+                    store
+                        .build_root(Some(merged_root), resolved)
+                        .await
+                        .map_err(|e| format!("fs_merge: store result: {e}"))?
+                };
+                Ok(FsMergeResult::Merged {
+                    ca_id: ca_to_hex(&final_root),
+                })
+            } else {
+                Ok(FsMergeResult::Conflict {
+                    conflicts: conflict_views,
+                })
+            }
+        }
+        .await;
+        result.map_err(operation_message)
     }
 
     pub fn list_tools(&self) -> Result<Vec<ToolDefinition>, RuntimeError> {
@@ -3547,6 +3441,27 @@ impl McpJsRuntime {
         }
     }
 
+    fn execution_registry(&self) -> Result<&ExecutionRegistry, RuntimeError> {
+        self.engine
+            .execution_registry
+            .as_deref()
+            .ok_or_else(|| operation_message("Execution registry not configured".to_string()))
+    }
+
+    fn session_log(&self) -> Result<&SessionLog, RuntimeError> {
+        self.engine
+            .session_log
+            .as_ref()
+            .ok_or_else(|| operation_message("Session log not configured".to_string()))
+    }
+
+    fn heap_tag_store(&self) -> Result<&HeapTagStore, RuntimeError> {
+        self.engine
+            .heap_tag_store
+            .as_ref()
+            .ok_or_else(|| operation_message("Heap tag store not configured".to_string()))
+    }
+
     fn ensure_running(&self) -> Result<(), RuntimeError> {
         match self.current_lifecycle_state() {
             RuntimeLifecycleState::Running => Ok(()),
@@ -3634,10 +3549,10 @@ impl McpJsRuntime {
         arguments: &Value,
     ) -> Value {
         if self.session_capable() {
-            crate::mcp_dispatch::call_tool(&self.engine, session_id, mcp_headers, name, arguments)
+            crate::mcp_dispatch::call_tool(self, session_id, mcp_headers, name, arguments)
                 .await
         } else if name == "run_js" {
-            crate::mcp_dispatch::run_js_blocking(&self.engine, mcp_headers, arguments).await
+            crate::mcp_dispatch::run_js_blocking(self, mcp_headers, arguments).await
         } else {
             json!({ "error": format!("unknown stateless tool: {name}") })
         }

@@ -1,3 +1,4 @@
+use server::engine::McpJsRuntime;
 /// Tests for atob/btoa base64 globals and FormData/Blob/File polyfills.
 
 use std::sync::{Arc, Once};
@@ -27,7 +28,7 @@ fn create_test_engine() -> Engine {
 /// Run stateless run_js via the shared dispatcher and return its JSON body
 /// (`{output, error?}`), matching the old `StatelessMcpService::run_js` shape.
 async fn run_js(
-    engine: &Engine,
+    engine: &McpJsRuntime,
     code: Option<String>,
     file: Option<String>,
     max_mb: Option<usize>,
@@ -56,7 +57,7 @@ fn assert_output_contains(value: &serde_json::Value, expected: &str) {
 #[tokio::test]
 async fn test_btoa_basic() {
     ensure_v8();
-    let engine = create_test_engine();
+    let engine = McpJsRuntime::from_engine(create_test_engine());
     let resp = run_js(&engine,Some("console.log(btoa('hello'))".to_string()), None, None, None).await;
     let value = parse_response(resp);
     assert_output_contains(&value, "aGVsbG8=");
@@ -65,7 +66,7 @@ async fn test_btoa_basic() {
 #[tokio::test]
 async fn test_btoa_empty() {
     ensure_v8();
-    let engine = create_test_engine();
+    let engine = McpJsRuntime::from_engine(create_test_engine());
     let resp = run_js(&engine,Some("console.log(btoa(''))".to_string()), None, None, None).await;
     let value = parse_response(resp);
     let output = value["output"].as_str().unwrap();
@@ -75,7 +76,7 @@ async fn test_btoa_empty() {
 #[tokio::test]
 async fn test_btoa_binary_chars() {
     ensure_v8();
-    let engine = create_test_engine();
+    let engine = McpJsRuntime::from_engine(create_test_engine());
 
     // Test with bytes 0-255 (Latin1 range)
     let resp = run_js(&engine, Some(r#"console.log(btoa('\x00\x01\xff'))"#.to_string()), None, None, None).await;
@@ -86,7 +87,7 @@ async fn test_btoa_binary_chars() {
 #[tokio::test]
 async fn test_btoa_rejects_non_latin1() {
     ensure_v8();
-    let engine = create_test_engine();
+    let engine = McpJsRuntime::from_engine(create_test_engine());
     let resp = run_js(&engine,Some(r#"
         try { btoa('Ā'); console.log('NO ERROR'); }
         catch(e) { console.log('CAUGHT: ' + e.name + ': ' + e.message); }
@@ -101,7 +102,7 @@ async fn test_btoa_rejects_non_latin1() {
 #[tokio::test]
 async fn test_atob_basic() {
     ensure_v8();
-    let engine = create_test_engine();
+    let engine = McpJsRuntime::from_engine(create_test_engine());
     let resp = run_js(&engine,Some("console.log(atob('aGVsbG8='))".to_string()), None, None, None).await;
     let value = parse_response(resp);
     assert_output_contains(&value, "hello");
@@ -110,7 +111,7 @@ async fn test_atob_basic() {
 #[tokio::test]
 async fn test_atob_no_padding() {
     ensure_v8();
-    let engine = create_test_engine();
+    let engine = McpJsRuntime::from_engine(create_test_engine());
     let resp = run_js(&engine,Some("console.log(atob('aGVsbG8'))".to_string()), None, None, None).await;
     let value = parse_response(resp);
     assert_output_contains(&value, "hello");
@@ -119,7 +120,7 @@ async fn test_atob_no_padding() {
 #[tokio::test]
 async fn test_atob_rejects_invalid() {
     ensure_v8();
-    let engine = create_test_engine();
+    let engine = McpJsRuntime::from_engine(create_test_engine());
     let resp = run_js(&engine,Some(r#"
         try { atob('!!!!'); console.log('NO ERROR'); }
         catch(e) { console.log('CAUGHT: ' + e.message); }
@@ -131,7 +132,7 @@ async fn test_atob_rejects_invalid() {
 #[tokio::test]
 async fn test_btoa_atob_roundtrip() {
     ensure_v8();
-    let engine = create_test_engine();
+    let engine = McpJsRuntime::from_engine(create_test_engine());
     let resp = run_js(&engine,Some(r#"
         var original = 'The quick brown fox jumps over the lazy dog';
         var encoded = btoa(original);
@@ -147,7 +148,7 @@ async fn test_btoa_atob_roundtrip() {
 #[tokio::test]
 async fn test_blob_basic() {
     ensure_v8();
-    let engine = create_test_engine();
+    let engine = McpJsRuntime::from_engine(create_test_engine());
     let resp = run_js(&engine,Some(r#"
         var b = new Blob(['hello ', 'world'], { type: 'text/plain' });
         console.log(b.size + '|' + b.type);
@@ -159,7 +160,7 @@ async fn test_blob_basic() {
 #[tokio::test]
 async fn test_blob_text() {
     ensure_v8();
-    let engine = create_test_engine();
+    let engine = McpJsRuntime::from_engine(create_test_engine());
     let resp = run_js(&engine,Some(r#"
         (async () => {
             var b = new Blob(['abc', 'def']);
@@ -173,7 +174,7 @@ async fn test_blob_text() {
 #[tokio::test]
 async fn test_blob_slice() {
     ensure_v8();
-    let engine = create_test_engine();
+    let engine = McpJsRuntime::from_engine(create_test_engine());
     let resp = run_js(&engine,Some(r#"
         (async () => {
             var b = new Blob(['hello world']);
@@ -190,7 +191,7 @@ async fn test_blob_slice() {
 #[tokio::test]
 async fn test_file_basic() {
     ensure_v8();
-    let engine = create_test_engine();
+    let engine = McpJsRuntime::from_engine(create_test_engine());
     let resp = run_js(&engine,Some(r#"
         var f = new File(['content'], 'test.txt', { type: 'text/plain' });
         console.log(f.name + '|' + f.size + '|' + f.type + '|' + (f instanceof Blob));
@@ -204,7 +205,7 @@ async fn test_file_basic() {
 #[tokio::test]
 async fn test_formdata_append_get() {
     ensure_v8();
-    let engine = create_test_engine();
+    let engine = McpJsRuntime::from_engine(create_test_engine());
     let resp = run_js(&engine,Some(r#"
         var fd = new FormData();
         fd.append('name', 'alice');
@@ -218,7 +219,7 @@ async fn test_formdata_append_get() {
 #[tokio::test]
 async fn test_formdata_set_replaces() {
     ensure_v8();
-    let engine = create_test_engine();
+    let engine = McpJsRuntime::from_engine(create_test_engine());
     let resp = run_js(&engine,Some(r#"
         var fd = new FormData();
         fd.append('x', '1');
@@ -233,7 +234,7 @@ async fn test_formdata_set_replaces() {
 #[tokio::test]
 async fn test_formdata_has_delete() {
     ensure_v8();
-    let engine = create_test_engine();
+    let engine = McpJsRuntime::from_engine(create_test_engine());
     let resp = run_js(&engine,Some(r#"
         var fd = new FormData();
         fd.append('key', 'val');
@@ -249,7 +250,7 @@ async fn test_formdata_has_delete() {
 #[tokio::test]
 async fn test_formdata_serialize_text() {
     ensure_v8();
-    let engine = create_test_engine();
+    let engine = McpJsRuntime::from_engine(create_test_engine());
     let resp = run_js(&engine,Some(r#"
         var fd = new FormData();
         fd.append('field', 'value');
@@ -266,7 +267,7 @@ async fn test_formdata_serialize_text() {
 #[tokio::test]
 async fn test_formdata_serialize_blob_with_filename() {
     ensure_v8();
-    let engine = create_test_engine();
+    let engine = McpJsRuntime::from_engine(create_test_engine());
     let resp = run_js(&engine,Some(r#"
         var fd = new FormData();
         fd.append('f', new Blob(['file data'], { type: 'text/plain' }), 'upload.txt');
@@ -283,7 +284,7 @@ async fn test_formdata_serialize_blob_with_filename() {
 #[tokio::test]
 async fn test_formdata_serialize_file() {
     ensure_v8();
-    let engine = create_test_engine();
+    let engine = McpJsRuntime::from_engine(create_test_engine());
     let resp = run_js(&engine,Some(r#"
         var fd = new FormData();
         fd.append('doc', new File(['csv,data'], 'data.csv', { type: 'text/csv' }));

@@ -15,7 +15,7 @@ use server::engine::fs_labels::LabelStore;
 use server::engine::fs_mount::SessionMount;
 use server::engine::fs_store::FsStore;
 use server::engine::opa::{EvalMode, PolicyChain};
-use server::engine::{initialize_v8, parse_ca_hex, Engine};
+use server::engine::{McpJsRuntime, initialize_v8, parse_ca_hex, Engine};
 
 static INIT: Once = Once::new();
 fn ensure_v8() {
@@ -38,7 +38,7 @@ fn tmp_dir(tag: &str) -> String {
 }
 
 struct Harness {
-    engine: Engine,
+    engine: Arc<McpJsRuntime>,
     store: Arc<FsStore>,
 }
 
@@ -46,10 +46,10 @@ fn build_harness() -> Harness {
     let registry = ExecutionRegistry::new(&tmp_dir("reg")).expect("registry");
     let fs_config = FsConfig::new(Arc::new(PolicyChain::new(vec![], EvalMode::All)));
     let store = Arc::new(FsStore::in_memory());
-    let engine = Engine::new_stateless(64 * 1024 * 1024, 30, 4)
+    let engine = McpJsRuntime::from_engine(Engine::new_stateless(64 * 1024 * 1024, 30, 4)
         .with_fs_config(fs_config)
         .with_execution_registry(Arc::new(registry))
-        .with_fs_snapshots(store.clone(), Arc::new(LabelStore::in_memory()));
+        .with_fs_snapshots(store.clone(), Arc::new(LabelStore::in_memory())));
     Harness { engine, store }
 }
 
@@ -62,7 +62,7 @@ async fn read_snapshot_file(store: &FsStore, ca_hex: &str, path: &str) -> Vec<u8
 
 /// Submit code with an optional fs handle and wait for terminal status.
 /// Returns the resulting fs CA id (hex), if any.
-async fn run(engine: &Engine, code: &str, fs: Option<&str>) -> Option<String> {
+async fn run(engine: &McpJsRuntime, code: &str, fs: Option<&str>) -> Option<String> {
     let exec_id = engine
         .run_js(code.to_string())
         .maybe_fs(fs.map(|s| s.to_string()))
@@ -72,7 +72,7 @@ async fn run(engine: &Engine, code: &str, fs: Option<&str>) -> Option<String> {
 
     for _ in 0..600 {
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        if let Ok(info) = engine.get_execution(&exec_id) {
+        if let Ok(info) = engine.get_execution(exec_id.clone()) {
             match info.status.as_str() {
                 "completed" => return info.fs,
                 "failed" => panic!("execution failed: {:?}", info.error),
