@@ -1,37 +1,29 @@
-"""Load the generated UniFFI Python module and execute JavaScript through it."""
+"""Load the generated UniFFI Python module and check the exported surface.
+
+Construction now happens host-side in Rust (bootstrap); the bindings expose
+the Engine object plus its records, so this smoke test verifies the module
+imports and the expected symbols exist.
+"""
 
 from __future__ import annotations
-
-import asyncio
-import json
-import tempfile
 
 import server as mcp_v8
 
 
 def main() -> None:
-    with tempfile.TemporaryDirectory(prefix="mcp-v8-python-uniffi-") as data_dir:
-        config = mcp_v8.default_runtime_config(data_dir)
-        library = mcp_v8.create_runtime(config)
+    for symbol in (
+        "Engine",
+        "ExecutionRequest",
+        "ToolCallRequest",
+        "McpRequestHeaders",
+        "RuntimeError",
+        "SessionSnapshotView",
+        "FsPushOutcome",
+        "ExecutionInfo",
+    ):
+        assert hasattr(mcp_v8, symbol), f"missing exported symbol: {symbol}"
 
-        tool_names = {tool.name for tool in library.list_tools()}
-        assert "run_js" in tool_names
-
-        result = json.loads(
-            library.call_tool(
-                "run_js",
-                json.dumps({"code": "console.log(6 * 7)"}),
-                None,
-                None,
-            )
-        )
-        assert result["output"] == "42", result
-
-        shutdown = asyncio.run(library.shutdown())
-        assert shutdown.already_shutdown is False
-        del library
-
-    print("Python UniFFI library import and run_js smoke test passed")
+    print("Python UniFFI module import smoke test passed")
 
 
 if __name__ == "__main__":

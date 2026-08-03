@@ -14,12 +14,72 @@ use crate::engine::heap_storage::{
 };
 use crate::engine::heap_tags::HeapTagStore;
 use crate::engine::session_log::{ForkOutcome, SessionLog};
-use crate::engine::{Engine, initialize_v8};
+use std::collections::{HashMap, HashSet};
+
+use serde::Deserialize;
+
+use crate::engine::fetch::{HeaderInjection, HeaderRule, OAuthClientCredentialsConfig};
+use crate::engine::mcp_client::{McpServerConfig, McpServerTransport, StubConfig};
+use crate::engine::opa::OperationPolicies;
+use crate::engine::wasm_stub::WasmStubConfig;
 use crate::engine::{
-    RuntimeCapabilityConfig, RuntimeError, RuntimeFeatureConfig, RuntimeFetchHeaderRule,
-    RuntimeMcpTransportKind, RuntimeOperationPolicies, RuntimePolicyConfig, RuntimePolicyEvalMode,
-    RuntimeRunJsFileAccess, RuntimeUpstreamMcpConfig,
+    DEFAULT_WASM_MAX_BYTES, Engine, HardeningConfig, RuntimeError, WasmModule, initialize_v8,
 };
+
+/// Embedded-feature configuration (hardening, WASM modules, prompt overrides),
+/// expressed directly in the engine's native types.
+pub struct FeatureBootstrapConfig {
+    pub wasm_default_max_bytes: usize,
+    pub hardening: HardeningConfig,
+    pub wasm_modules: Vec<WasmModule>,
+    pub wasm_stubs: WasmStubConfig,
+    pub instructions_override: Option<String>,
+    pub run_js_description_override: Option<String>,
+}
+
+impl Default for FeatureBootstrapConfig {
+    fn default() -> Self {
+        Self {
+            wasm_default_max_bytes: DEFAULT_WASM_MAX_BYTES,
+            hardening: HardeningConfig::default(),
+            wasm_modules: Vec::new(),
+            wasm_stubs: WasmStubConfig::default(),
+            instructions_override: None,
+            run_js_description_override: None,
+        }
+    }
+}
+
+/// Per-operation OPA policy chains, in the engine's native policy types.
+/// Deserializes the same JSON shape `--policies-json` always used.
+#[derive(Default, Deserialize)]
+pub struct PolicyBootstrapConfig {
+    pub fetch: Option<OperationPolicies>,
+    pub modules: Option<OperationPolicies>,
+    pub filesystem: Option<OperationPolicies>,
+    pub fs_snapshot: Option<OperationPolicies>,
+    pub mcp_tools: Option<OperationPolicies>,
+    pub subprocess: Option<OperationPolicies>,
+    pub run_js_file: Option<OperationPolicies>,
+}
+
+/// How `run_js` may read code from server-side file paths.
+#[derive(Clone, Copy, Debug, Default)]
+pub enum RunJsFileAccess {
+    #[default]
+    Disabled,
+    AllowAll,
+    Policy,
+}
+
+/// Sandbox capabilities granted to executions.
+#[derive(Default)]
+pub struct CapabilityBootstrapConfig {
+    pub fetch_header_rules: Vec<HeaderRule>,
+    pub filesystem_passthrough: bool,
+    pub allow_external_modules: bool,
+    pub run_js_file_access: RunJsFileAccess,
+}
 
 pub struct RuntimeBootstrap {
     engine: Engine,
@@ -29,70 +89,38 @@ pub struct RuntimeBootstrap {
 impl RuntimeBootstrap {
     pub fn with_feature_config(
         mut self,
-        config: RuntimeFeatureConfig,
+        config: FeatureBootstrapConfig,
     ) -> Result<Self, RuntimeError> {
         if self.engine.heap_enabled() && !config.wasm_modules.is_empty() {
             return Err(RuntimeError::InvalidConfig {
                 message: "WASM modules are incompatible with heap persistence".to_string(),
             });
         }
-        let wasm_default_max_bytes =
-            usize::try_from(config.wasm_default_max_bytes).map_err(|_| {
-                RuntimeError::InvalidConfig {
-                    message: "wasm_default_max_bytes is too large for this platform".to_string(),
-                }
-            })?;
         if config.wasm_stubs.prefix.is_empty() {
             return Err(RuntimeError::InvalidConfig {
                 message: "WASM stub prefix cannot be empty".to_string(),
             });
         }
 
-        let mut names = std::collections::HashSet::new();
-        let mut modules = Vec::with_capacity(config.wasm_modules.len());
-        for module in config.wasm_modules {
+        let mut names = HashSet::new();
+        for module in &config.wasm_modules {
             validate_wasm_module_name(&module.name)?;
             if !names.insert(module.name.clone()) {
                 return Err(RuntimeError::InvalidConfig {
                     message: format!("duplicate WASM module name: '{}'", module.name),
                 });
             }
-            let max_memory_bytes = module
-                .max_memory_bytes
-                .map(usize::try_from)
-                .transpose()
-                .map_err(|_| RuntimeError::InvalidConfig {
-                    message: format!(
-                        "max_memory_bytes for WASM module '{}' is too large for this platform",
-                        module.name
-                    ),
-                })?;
-            modules.push(crate::engine::WasmModule {
-                name: module.name,
-                bytes: module.bytes,
-                max_memory_bytes,
-                description: module.description,
-            });
         }
 
         self.engine = self
             .engine
-            .with_wasm_default_max_bytes(wasm_default_max_bytes)
-            .with_hardening(crate::engine::HardeningConfig {
-                freeze_ops: config.hardening.freeze_ops,
-                neutralize_proxy_details: config.hardening.neutralize_proxy_details,
-                neutralize_introspection: config.hardening.neutralize_introspection,
-                remove_bootstrap: config.hardening.remove_bootstrap,
-                remove_shared_memory: config.hardening.remove_shared_memory,
-            });
-        if !modules.is_empty() {
+            .with_wasm_default_max_bytes(config.wasm_default_max_bytes)
+            .with_hardening(config.hardening);
+        if !config.wasm_modules.is_empty() {
             self.engine = self
                 .engine
-                .with_wasm_modules(modules)
-                .with_wasm_stub_config(crate::engine::wasm_stub::WasmStubConfig {
-                    prefix: config.wasm_stubs.prefix,
-                    enabled: config.wasm_stubs.enabled,
-                });
+                .with_wasm_modules(config.wasm_modules)
+                .with_wasm_stub_config(config.wasm_stubs);
         }
         if let Some(text) = config.instructions_override {
             self.engine = self.engine.with_instructions_override(text);
@@ -105,8 +133,8 @@ impl RuntimeBootstrap {
 
     pub fn with_policy_config(
         mut self,
-        policies: RuntimePolicyConfig,
-        capabilities: RuntimeCapabilityConfig,
+        policies: PolicyBootstrapConfig,
+        capabilities: CapabilityBootstrapConfig,
     ) -> Result<Self, RuntimeError> {
         let fetch_policy = build_policy_chain(
             policies.fetch,
@@ -150,11 +178,7 @@ impl RuntimeBootstrap {
             "data.mcp.run_js_file.allow",
             "run_js_file",
         )?;
-        let header_rules = capabilities
-            .fetch_header_rules
-            .into_iter()
-            .map(build_fetch_header_rule)
-            .collect::<Result<Vec<_>, _>>()?;
+        let header_rules = capabilities.fetch_header_rules;
 
         if let Some(chain) = fetch_policy {
             self.engine = self.engine.with_fetch_config(
@@ -191,12 +215,12 @@ impl RuntimeBootstrap {
                 .with_subprocess_config(crate::engine::subprocess::SubprocessConfig::new(chain));
         }
         match capabilities.run_js_file_access {
-            RuntimeRunJsFileAccess::AllowAll => {
+            RunJsFileAccess::AllowAll => {
                 self.engine = self
                     .engine
                     .with_run_js_file_policy(crate::engine::run_js_file::RunJsFilePolicy::AllowAll);
             }
-            RuntimeRunJsFileAccess::Policy => {
+            RunJsFileAccess::Policy => {
                 let chain = run_js_file_policy.ok_or_else(|| RuntimeError::InvalidConfig {
                     message: "run_js_file_access=Policy requires a run_js_file policy".to_string(),
                 })?;
@@ -204,7 +228,7 @@ impl RuntimeBootstrap {
                     crate::engine::run_js_file::RunJsFilePolicy::Policy(chain),
                 );
             }
-            RuntimeRunJsFileAccess::Disabled => {
+            RunJsFileAccess::Disabled => {
                 if let Some(chain) = run_js_file_policy {
                     self.engine = self.engine.with_run_js_file_policy(
                         crate::engine::run_js_file::RunJsFilePolicy::Policy(chain),
@@ -220,60 +244,38 @@ impl RuntimeBootstrap {
 
     pub async fn with_upstream_mcp_config(
         mut self,
-        config: RuntimeUpstreamMcpConfig,
+        servers: Vec<McpServerConfig>,
+        stubs: StubConfig,
     ) -> Result<Self, RuntimeError> {
-        if config.servers.is_empty() {
+        if servers.is_empty() {
             return Ok(self);
         }
-        if config.stubs.prefix.is_empty() {
+        if stubs.prefix.is_empty() {
             return Err(RuntimeError::InvalidConfig {
                 message: "upstream MCP stub prefix cannot be empty".to_string(),
             });
         }
 
-        let mut names = std::collections::HashSet::new();
-        let mut servers = Vec::with_capacity(config.servers.len());
-        for server in config.servers {
+        let mut names = HashSet::new();
+        for server in &servers {
             if !names.insert(server.name.clone()) {
                 return Err(RuntimeError::InvalidConfig {
                     message: format!("duplicate MCP server name: '{}'", server.name),
                 });
             }
-            let transport = match server.transport {
-                RuntimeMcpTransportKind::Stdio => {
-                    let command = server.command.ok_or_else(|| RuntimeError::InvalidConfig {
+            match &server.transport {
+                McpServerTransport::Stdio { command, .. } if command.is_empty() => {
+                    return Err(RuntimeError::InvalidConfig {
                         message: format!("stdio MCP server '{}' requires a command", server.name),
-                    })?;
-                    if command.is_empty() {
-                        return Err(RuntimeError::InvalidConfig {
-                            message: format!(
-                                "stdio MCP server '{}' requires a command",
-                                server.name
-                            ),
-                        });
-                    }
-                    crate::engine::mcp_client::McpServerTransport::Stdio {
-                        command,
-                        args: server.args,
-                        env: server.env,
-                    }
+                    });
                 }
-                RuntimeMcpTransportKind::Sse => {
-                    let url = server.url.ok_or_else(|| RuntimeError::InvalidConfig {
+                McpServerTransport::Sse { url } if url.is_empty() => {
+                    return Err(RuntimeError::InvalidConfig {
                         message: format!("SSE MCP server '{}' requires a URL", server.name),
-                    })?;
-                    if url.is_empty() {
-                        return Err(RuntimeError::InvalidConfig {
-                            message: format!("SSE MCP server '{}' requires a URL", server.name),
-                        });
-                    }
-                    crate::engine::mcp_client::McpServerTransport::Sse { url }
+                    });
                 }
-            };
-            servers.push(crate::engine::mcp_client::McpServerConfig {
-                name: server.name,
-                transport,
-            });
+                _ => {}
+            }
         }
 
         let manager = crate::engine::mcp_client::McpClientManager::connect(servers)
@@ -281,10 +283,7 @@ impl RuntimeBootstrap {
             .map_err(|message| RuntimeError::Initialization {
                 message: format!("MCP server connection failed: {message}"),
             })?
-            .with_stub_config(crate::engine::mcp_client::StubConfig {
-                prefix: config.stubs.prefix,
-                enabled: config.stubs.enabled,
-            });
+            .with_stub_config(stubs);
         self.engine = self.engine.with_mcp_client_manager(manager);
         Ok(self)
     }
@@ -302,7 +301,7 @@ impl RuntimeBootstrap {
 }
 
 fn build_policy_chain(
-    policies: Option<RuntimeOperationPolicies>,
+    policies: Option<OperationPolicies>,
     default_remote_path: &str,
     default_local_rule: &str,
     operation: &str,
@@ -310,22 +309,7 @@ fn build_policy_chain(
     let Some(policies) = policies else {
         return Ok(None);
     };
-    let internal = crate::engine::opa::OperationPolicies {
-        mode: match policies.mode {
-            RuntimePolicyEvalMode::All => crate::engine::opa::EvalMode::All,
-            RuntimePolicyEvalMode::Any => crate::engine::opa::EvalMode::Any,
-        },
-        policies: policies
-            .policies
-            .into_iter()
-            .map(|source| crate::engine::opa::PolicySource {
-                url: source.url,
-                policy_path: source.policy_path,
-                rule: source.rule,
-            })
-            .collect(),
-    };
-    crate::engine::opa::build_policy_chain(&internal, default_remote_path, default_local_rule)
+    crate::engine::opa::build_policy_chain(&policies, default_remote_path, default_local_rule)
         .map(Arc::new)
         .map(Some)
         .map_err(|message| RuntimeError::InvalidConfig {
@@ -333,72 +317,33 @@ fn build_policy_chain(
         })
 }
 
-pub(crate) fn validate_fetch_header_rule(
-    rule: &RuntimeFetchHeaderRule,
-) -> Result<(), RuntimeError> {
-    build_fetch_header_rule(rule.clone()).map(|_| ())
-}
-
-pub(crate) fn normalize_fetch_header_rule(
-    rule: RuntimeFetchHeaderRule,
-) -> Result<RuntimeFetchHeaderRule, RuntimeError> {
-    let internal = build_fetch_header_rule(rule)?;
-    let static_headers = internal.static_headers().cloned();
-    let oauth = internal
-        .dynamic_auth()
-        .map(|config| crate::engine::RuntimeFetchOAuthConfig {
-            header_name: config.header_name.clone(),
-            token_url: config.token_url.clone(),
-            client_id: config.client_id.clone(),
-            client_secret: config.client_secret.clone(),
-            scope: config.scope.clone(),
-            refresh_buffer_secs: config.refresh_buffer_secs,
-        });
-    Ok(RuntimeFetchHeaderRule {
-        host: internal.host,
-        methods: internal.methods,
-        static_headers,
-        oauth,
-    })
-}
-
-fn build_fetch_header_rule(
-    rule: RuntimeFetchHeaderRule,
-) -> Result<crate::engine::fetch::HeaderRule, RuntimeError> {
-    let result = match (rule.static_headers, rule.oauth) {
+/// Build a validated fetch header rule from its parts. Exactly one of
+/// `static_headers` or `oauth` must be provided.
+pub fn fetch_header_rule(
+    host: String,
+    methods: Vec<String>,
+    static_headers: Option<HashMap<String, String>>,
+    oauth: Option<OAuthClientCredentialsConfig>,
+) -> Result<HeaderRule, RuntimeError> {
+    let result = match (static_headers, oauth) {
         (Some(_), Some(_)) => {
             return Err(RuntimeError::InvalidConfig {
                 message: format!(
-                    "fetch header rule for host '{}' cannot define both static_headers and oauth",
-                    rule.host
+                    "fetch header rule for host '{host}' cannot define both static_headers and oauth"
                 ),
             });
         }
         (None, None) => {
             return Err(RuntimeError::InvalidConfig {
                 message: format!(
-                    "fetch header rule for host '{}' must define static_headers or oauth",
-                    rule.host
+                    "fetch header rule for host '{host}' must define static_headers or oauth"
                 ),
             });
         }
-        (Some(headers), None) => crate::engine::fetch::HeaderRule::new(
-            rule.host,
-            rule.methods,
-            crate::engine::fetch::HeaderInjection::Static { headers },
-        ),
-        (None, Some(oauth)) => crate::engine::fetch::HeaderRule::oauth_client_credentials(
-            rule.host,
-            rule.methods,
-            crate::engine::fetch::OAuthClientCredentialsConfig {
-                header_name: oauth.header_name,
-                token_url: oauth.token_url,
-                client_id: oauth.client_id,
-                client_secret: oauth.client_secret,
-                scope: oauth.scope,
-                refresh_buffer_secs: oauth.refresh_buffer_secs,
-            },
-        ),
+        (Some(headers), None) => {
+            HeaderRule::new(host, methods, HeaderInjection::Static { headers })
+        }
+        (None, Some(oauth)) => HeaderRule::oauth_client_credentials(host, methods, oauth),
     };
     result.map_err(|error| RuntimeError::InvalidConfig {
         message: format!("invalid fetch header rule: {error}"),
