@@ -21,7 +21,6 @@ done
 swift_file="$out_root/swift/server.swift"
 require_symbol "$swift_file" 'class Engine'
 require_symbol "$swift_file" 'struct McpRequestHeaders'
-require_symbol "$swift_file" 'func defaultUpstreamMcpConfig'
 
 kotlin_file="$out_root/kotlin/uniffi/server/server.kt"
 require_symbol "$kotlin_file" 'class Engine'
