@@ -844,6 +844,17 @@ struct FetchHeaderAuthConfig {
 
 impl FetchHeaderConfigRule {
     fn into_rule(self) -> Result<server::engine::fetch::HeaderRule> {
+        match (&self.headers, &self.auth) {
+            (Some(_), Some(_)) => anyhow::bail!(
+                "Fetch header config rule for host '{}' cannot define both 'headers' and 'auth'",
+                self.host
+            ),
+            (None, None) => anyhow::bail!(
+                "Fetch header config rule for host '{}' must define either 'headers' or 'auth'",
+                self.host
+            ),
+            _ => {}
+        }
         let oauth = match self.auth {
             None => None,
             Some(auth) => {
