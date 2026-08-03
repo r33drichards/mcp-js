@@ -59,17 +59,13 @@ use crate::engine::heap_tags::{HeapTagStore, HeapTagEntry};
 use crate::engine::session_log::{SessionLog, SessionLogEntry};
 use wasmparser::Validator;
 
-use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU8;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::cluster::ClusterNode;
-use crate::engine::fs_labels::LabelStore;
 use crate::engine::fs_merge::Prefer;
-use crate::engine::fs_store::FsStore;
-use crate::engine::heap_storage::FileHeapStorage;
 use crate::mcp::{ToolCatalog, built_in_tool_catalog};
 
 pub const DEFAULT_EXECUTION_TIMEOUT_SECS: u64 = 30;
