@@ -61,7 +61,7 @@ use wasmparser::Validator;
 
 use std::sync::atomic::AtomicU8;
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::cluster::ClusterNode;
