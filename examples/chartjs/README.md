@@ -51,30 +51,15 @@ script keeps resolving to the same code as the packages move on.
 
 Set `OUTPUT = "png"` at the top of [`chart.js`](chart.js). Rasterizing pulls the
 resvg WASM binary and a font over `fetch`, and writes the file through `fs`, so both
-capabilities need a policy:
-
-```rego
-# fetch.rego
-package mcp.fetch
-default allow = false
-allow if {
-  input.method == "GET"
-  input.url_parsed.host == "unpkg.com"
-}
-```
-
-```rego
-# fs.rego
-package mcp.filesystem
-default allow = false
-allow if { startswith(input.path, "/tmp/chart-out/") }
-```
+capabilities need a policy. The two minimal ones are in
+[`policies/`](policies) — [`fetch.rego`](policies/fetch.rego) allows GETs to
+`unpkg.com`, [`fs.rego`](policies/fs.rego) confines writes to `/tmp/chart-out/`:
 
 ```bash
 mkdir -p /tmp/chart-out
 mcp-v8 --http-port 3000 --allow-external-modules \
-  --policies-json '{"fetch":{"policies":[{"url":"file:///abs/path/fetch.rego"}]},
-                    "filesystem":{"policies":[{"url":"file:///abs/path/fs.rego"}]}}'
+  --policies-json "{\"fetch\":{\"policies\":[{\"url\":\"file://$PWD/examples/chartjs/policies/fetch.rego\"}]},
+                    \"filesystem\":{\"policies\":[{\"url\":\"file://$PWD/examples/chartjs/policies/fs.rego\"}]}}"
 ```
 
 The script prints the byte count and leaves the PNG at `/tmp/chart-out/output.png`
@@ -82,6 +67,10 @@ The script prints the byte count and leaves the PNG at `/tmp/chart-out/output.pn
 
 ## Notes
 
+- Both modes are exercised on every push and PR by
+  [`.github/workflows/chartjs-e2e.yml`](../../.github/workflows/chartjs-e2e.yml),
+  which asserts the SVG contains all six labels and a six-segment red line, and
+  that the PNG mode writes a real PNG.
 - Both modes run well inside the default 30s execution timeout; the first run is
   slower because the npm modules are fetched.
 - `options.animation` is disabled and `responsive` is off: there is no DOM to resize

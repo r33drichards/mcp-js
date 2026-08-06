@@ -142,7 +142,8 @@ serialized.
 Set `OUTPUT = "png"` at the top of `examples/chartjs/chart.js`. Rasterizing
 adds two capabilities: `fetch`, to pull the resvg WASM binary and a font, and
 `fs`, to write the file. Both are denied by default and need
-[policies](../how-to/policies.md).
+[policies](../how-to/policies.md). The example ships the two minimal ones in
+`examples/chartjs/policies/`:
 
 ```rego
 # fetch.rego
@@ -167,13 +168,14 @@ allow if {
 }
 ```
 
-Start the server with both policies (use absolute `file://` URLs):
+Start the server with both policies — the `url` fields must be absolute
+`file://` URLs, so from the repo root:
 
 ```bash
 mkdir -p /tmp/chart-out
 mcp-v8 --http-port 8080 --allow-external-modules \
-  --policies-json '{"fetch":{"policies":[{"url":"file:///abs/path/fetch.rego"}]},
-                    "filesystem":{"policies":[{"url":"file:///abs/path/fs.rego"}]}}'
+  --policies-json "{\"fetch\":{\"policies\":[{\"url\":\"file://$PWD/examples/chartjs/policies/fetch.rego\"}]},
+                    \"filesystem\":{\"policies\":[{\"url\":\"file://$PWD/examples/chartjs/policies/fs.rego\"}]}}"
 ```
 
 Submit the script the same way as before. resvg runs as WebAssembly inside the
