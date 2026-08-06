@@ -44,6 +44,9 @@ curl -s --data-binary @examples/chartjs/chart.js \
 Then read the SVG from the execution's console output
 (`GET /api/executions/<id>/output`).
 
+Every `npm:` specifier in the example is pinned to an exact version, so the same
+script keeps resolving to the same code as the packages move on.
+
 ### PNG output
 
 Set `OUTPUT = "png"` at the top of [`chart.js`](chart.js). Rasterizing pulls the

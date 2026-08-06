@@ -57,8 +57,10 @@ SVG output needs nothing but external imports:
 mcp-v8 --http-port 8080 --allow-external-modules
 ```
 
-`chart.js` and `svgcanvas` are fetched from `esm.sh` at import time. To pin
-exactly which packages may be imported, add a `modules` policy — see
+`chart.js` and `svgcanvas` are fetched from `esm.sh` at import time. The example
+pins both to exact versions (`npm:chart.js@4.5.1`, `npm:svgcanvas@2.6.0`) —
+always pin `npm:` specifiers so a run months from now resolves to the same code.
+To control *which* packages may be imported at all, add a `modules` policy — see
 [ES module imports](../how-to/module-imports.md).
 
 ## Step 2 — Run the example

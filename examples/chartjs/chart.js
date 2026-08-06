@@ -158,8 +158,8 @@ globalThis.DOMPoint = class DOMPoint {
 // ── the Chart.js example itself ─────────────────────────────────────────────
 
 const { Chart, CategoryScale, LinearScale, LineController, LineElement, PointElement } =
-  await import("npm:chart.js");
-const { Context } = await import("npm:svgcanvas");
+  await import("npm:chart.js@4.5.1");
+const { Context } = await import("npm:svgcanvas@2.6.0");
 
 Chart.register([CategoryScale, LineController, LineElement, LinearScale, PointElement]);
 
