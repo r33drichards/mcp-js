@@ -19,10 +19,10 @@ Chart.js itself is pure JavaScript and imports fine. It only needs an object wit
 
 | Piece | Provided by |
 |-------|-------------|
-| Canvas2D API → SVG | [`svgcanvas`](https://www.npmjs.com/package/svgcanvas) (pure JS) |
+| Canvas2D API → SVG | [`svgcanvas`](https://github.com/zenozeng/svgcanvas) (pure JS) |
 | `document`, `XMLSerializer`, `DOMMatrix`, `DOMPoint` | ~90-line shim at the top of [`chart.js`](chart.js) |
 | Text metrics | Approximated per-glyph — there is no font engine in the isolate |
-| SVG → PNG (optional) | [`@resvg/resvg-wasm`](https://www.npmjs.com/package/@resvg/resvg-wasm) via `WebAssembly`, with a TTF fetched at runtime |
+| SVG → PNG (optional) | [`@resvg/resvg-wasm`](https://github.com/yisibl/resvg-js) via `WebAssembly`, with a TTF fetched at runtime |
 
 Because there is no font engine, `measureText()` is an approximation, so label
 positions can differ from a browser render by a pixel or two.

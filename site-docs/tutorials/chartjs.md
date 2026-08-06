@@ -44,10 +44,10 @@ So the example supplies the canvas in JavaScript:
 
 | Piece | Provided by |
 |-------|-------------|
-| Canvas2D API → SVG | [`svgcanvas`](https://www.npmjs.com/package/svgcanvas), pure JS |
+| Canvas2D API → SVG | [`svgcanvas`](https://github.com/zenozeng/svgcanvas), pure JS |
 | `document`, `XMLSerializer`, `DOMMatrix`, `DOMPoint` | a ~90-line shim at the top of the example |
 | Text metrics | approximated per glyph — there is no font engine in the isolate |
-| SVG → PNG (optional) | [`@resvg/resvg-wasm`](https://www.npmjs.com/package/@resvg/resvg-wasm) through the [`WebAssembly`](../concepts/wasm-modules.md) API |
+| SVG → PNG (optional) | [`@resvg/resvg-wasm`](https://github.com/yisibl/resvg-js) through the [`WebAssembly`](../concepts/wasm-modules.md) API |
 
 ## Step 1 — Start the server with module imports enabled
 
