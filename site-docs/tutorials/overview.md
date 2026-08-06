@@ -13,5 +13,7 @@ start with [Install](../install/overview.md).
 - [Run SQLite in WebAssembly](sqlite-wasm.md) — build the bundled SQLite `.wasm`
   module, load it into the server, and query an in-memory database from
   JavaScript.
+- [Render charts with Chart.js](chartjs.md) — run Chart.js in the isolate with a
+  pure-JS canvas, and rasterize the result to PNG with WebAssembly.
 
 _More end-to-end use cases are on the way._
