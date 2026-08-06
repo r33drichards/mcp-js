@@ -1,0 +1,141 @@
+name: Chart.js Example E2E Test
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  chartjs-e2e:
+    name: Chart.js Example E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+        with:
+          extra-conf: |
+            sandbox = relaxed
+
+      - uses: DeterminateSystems/flake-checker-action@main
+
+      - name: Build mcp-v8
+        run: nix build .#default --print-build-logs -L
+
+      - name: Run Chart.js example E2E test
+        run: |
+          SERVER_BIN=$(nix build .#default --print-out-paths)/bin/server
+          echo "Server: $SERVER_BIN"
+
+          mkdir -p /tmp/chart-out
+
+          # The example imports chart.js and svgcanvas from esm.sh, and in PNG
+          # mode fetches the resvg WASM binary and a font from unpkg.com — hence
+          # --allow-external-modules plus the two policies. Stateless (no heap
+          # store) is the default.
+          POLICIES=$(cat <<EOF
+          {
+            "fetch": {"policies": [{"url": "file://$GITHUB_WORKSPACE/examples/chartjs/policies/fetch.rego"}]},
+            "filesystem": {"policies": [{"url": "file://$GITHUB_WORKSPACE/examples/chartjs/policies/fs.rego"}]}
+          }
+          EOF
+          )
+
+          $SERVER_BIN --http-port 8080 \
+            --allow-external-modules \
+            --execution-timeout 120 \
+            --heap-memory-max 256 \
+            --policies-json "$POLICIES" &
+          SERVER_PID=$!
+
+          cleanup() { kill $SERVER_PID 2>/dev/null || true; }
+          trap cleanup EXIT
+
+          # Wait for server to be ready (up to 30s)
+          for i in $(seq 1 30); do
+            HTTP_CODE=$(curl -s --max-time 10 -o /dev/null -w '%{http_code}' \
+              http://localhost:8080/api/exec \
+              -H 'Content-Type: application/json' \
+              -d '{"code": "1+1"}' 2>/dev/null || echo "000")
+            if [ "$HTTP_CODE" = "202" ] || [ "$HTTP_CODE" = "200" ]; then
+              echo "Server is ready (HTTP $HTTP_CODE)"
+              break
+            fi
+            sleep 1
+          done
+
+          # Submit a script and print its console output; fails the job if the
+          # execution does not complete.
+          run_example() {
+            local script="$1"
+            local exec_id status resp
+
+            exec_id=$(curl -s --data-binary @"$script" \
+              -H 'Content-Type: application/javascript' \
+              http://localhost:8080/api/exec | jq -r '.execution_id')
+
+            if [ -z "$exec_id" ] || [ "$exec_id" = "null" ]; then
+              echo "ERROR: submitting $script did not return an execution_id" >&2
+              return 1
+            fi
+            echo "Execution ID: $exec_id" >&2
+
+            # Poll for completion (up to 180s; the first run fetches the modules)
+            for i in $(seq 1 180); do
+              resp=$(curl -s "http://localhost:8080/api/executions/${exec_id}")
+              status=$(echo "$resp" | jq -r '.status')
+              case "$status" in
+                completed|Completed) break ;;
+                failed|Failed|TimedOut|cancelled)
+                  echo "ERROR: execution $status" >&2
+                  echo "$resp" >&2
+                  return 1
+                  ;;
+              esac
+              sleep 1
+            done
+
+            if [ "$status" != "completed" ] && [ "$status" != "Completed" ]; then
+              echo "ERROR: execution did not complete (last status: $status)" >&2
+              return 1
+            fi
+
+            curl -s "http://localhost:8080/api/executions/${exec_id}/output" | jq -r '.data'
+          }
+
+          # ── SVG mode (the committed default) ──────────────────────────────
+          echo "==> SVG mode"
+          run_example examples/chartjs/chart.js > /tmp/chart.svg
+          head -c 200 /tmp/chart.svg; echo
+
+          grep -q '<svg' /tmp/chart.svg
+          # Every category label made it through the shim's text path
+          for label in Red Blue Yellow Green Purple Orange; do
+            grep -q ">$label<" /tmp/chart.svg
+          done
+          # The dataset itself was drawn: a red polyline with six vertices
+          grep -qE 'stroke="red"[^/]*d=" M( [0-9.]+ [0-9.]+)( L [0-9.]+ [0-9.]+){6}"' /tmp/chart.svg
+
+          # ── PNG mode (resvg-wasm + fs write) ──────────────────────────────
+          echo "==> PNG mode"
+          sed 's/^const OUTPUT = "svg";/const OUTPUT = "png";/' \
+            examples/chartjs/chart.js > /tmp/chart-png.js
+          grep -q '^const OUTPUT = "png";' /tmp/chart-png.js \
+            || { echo "ERROR: could not switch the example to PNG mode"; exit 1; }
+
+          run_example /tmp/chart-png.js
+
+          test -f /tmp/chart-out/output.png
+          # PNG magic number, and a plausible size for a 400x300 chart
+          head -c 8 /tmp/chart-out/output.png | od -An -tx1 | tr -d ' \n' \
+            | grep -q '^89504e470d0a1a0a$'
+          SIZE=$(stat -c %s /tmp/chart-out/output.png)
+          echo "PNG size: $SIZE bytes"
+          [ "$SIZE" -gt 5000 ]
+
+          echo "Chart.js example E2E test passed!"

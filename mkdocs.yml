@@ -29,6 +29,7 @@ nav:
   - Tutorials:
       - Overview: tutorials/overview.md
       - Run SQLite in WebAssembly: tutorials/sqlite-wasm.md
+      - Render charts with Chart.js: tutorials/chartjs.md
 
   - How-to:
       - Overview: how-to/overview.md
