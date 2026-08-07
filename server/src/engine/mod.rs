@@ -1,4 +1,5 @@
 pub mod console;
+pub mod ffi;
 pub mod execution;
 pub mod fetch;
 pub mod fetch_auth;
@@ -34,7 +35,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ffi::c_void;
 use std::alloc::{Layout, alloc_zeroed, alloc, dealloc};
 use deno_core::v8;
-use deno_core::{JsRuntime, JsRuntimeForSnapshot, ModuleSpecifier, RuntimeOptions};
+use deno_core::{JsRuntime, JsRuntimeForSnapshot, ModuleSpecifier, RuntimeOptions as DenoRuntimeOptions};
 use sha2::{Sha256, Digest};
 
 use swc_core::common::{
@@ -57,6 +58,15 @@ use crate::engine::heap_storage::{HeapStorage, AnyHeapStorage};
 use crate::engine::heap_tags::{HeapTagStore, HeapTagEntry};
 use crate::engine::session_log::{SessionLog, SessionLogEntry};
 use wasmparser::Validator;
+
+use std::sync::atomic::AtomicU8;
+
+use serde::Serialize;
+use serde_json::{Value, json};
+
+use crate::cluster::ClusterNode;
+use crate::engine::fs_merge::Prefer;
+use crate::mcp::{ToolCatalog, built_in_tool_catalog};
 
 pub const DEFAULT_EXECUTION_TIMEOUT_SECS: u64 = 30;
 /// Default maximum native memory (bytes) a WASM module may declare when no
@@ -394,14 +404,14 @@ fn refop_str(op: fs_labels::RefOp) -> &'static str {
 }
 
 /// A label and its current head CA id (hex), for API/CLI responses.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, uniffi::Record)]
 pub struct FsLabelView {
     pub name: String,
     pub ca_id: String,
 }
 
 /// One reflog entry, hex-rendered, for API/CLI responses.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, uniffi::Record)]
 pub struct FsRefLogView {
     pub at: i64,
     pub from: Option<String>,
@@ -413,7 +423,7 @@ pub struct FsRefLogView {
 }
 
 /// Outcome of an [`Engine::fs_push`].
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, uniffi::Enum)]
 #[serde(tag = "status", rename_all = "lowercase")]
 pub enum FsPushOutcome {
     /// The label now points at `ca_id`.
@@ -426,7 +436,7 @@ pub enum FsPushOutcome {
 }
 
 /// Result of an [`Engine::fs_merge`].
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, uniffi::Enum)]
 #[serde(tag = "status", rename_all = "lowercase")]
 pub enum FsMergeResult {
     /// A clean merge; the new snapshot has this CA id.
@@ -439,7 +449,7 @@ pub enum FsMergeResult {
 /// file is present on that side, or `null` when it is absent (delete). For text
 /// files the response also carries diff3 conflict markers and unified diffs so
 /// the caller can review and resolve at line level.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, uniffi::Record)]
 pub struct FsMergeConflictView {
     pub path: String,
     pub base: Option<String>,
@@ -956,7 +966,7 @@ pub fn execute_stateless(
             None => Rc::new(module_loader::NetworkModuleLoader::new()),
         };
 
-        let mut runtime = JsRuntime::new(RuntimeOptions {
+        let mut runtime = JsRuntime::new(DenoRuntimeOptions {
             create_params: Some(params),
             extensions,
             module_loader: Some(module_loader),
@@ -1156,7 +1166,7 @@ pub fn execute_stateful(
             None => Rc::new(module_loader::NetworkModuleLoader::new()),
         };
 
-        let mut runtime = JsRuntimeForSnapshot::new(RuntimeOptions {
+        let mut runtime = JsRuntimeForSnapshot::new(DenoRuntimeOptions {
             create_params: Some(params),
             startup_snapshot,
             extensions,
@@ -1335,7 +1345,7 @@ pub struct WasmModule {
     pub description: Option<String>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, uniffi::Object)]
 pub struct Engine {
     heap_storage: Option<AnyHeapStorage>,
     session_log: Option<SessionLog>,
@@ -1390,6 +1400,15 @@ pub struct Engine {
     /// Per-mitigation sandbox hardening. Default is all-off (unhardened); each
     /// mitigation is opt-in via the `--harden-*` CLI flags.
     hardening: console::HardeningConfig,
+    /// Owned Tokio executor for FFI hosts (None when a Rust host provides one).
+    tokio_runtime: Option<Arc<tokio::runtime::Runtime>>,
+    /// Cluster membership handle, shut down with the engine.
+    cluster_node: Option<Arc<ClusterNode>>,
+    /// Running / ShuttingDown / Shutdown, shared across clones.
+    lifecycle: Arc<AtomicU8>,
+    shutdown_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Keeps an ephemeral data directory alive for the engine's lifetime.
+    _ephemeral_data_dir: Option<Arc<tempfile::TempDir>>,
 }
 
 /// Builder for `Engine::run_js()`. Only `code` is required; everything else
@@ -1559,6 +1578,11 @@ impl Engine {
             label_store: None,
             fs_snapshot_policy_chain: None,
             hardening: console::HardeningConfig::default(),
+            tokio_runtime: None,
+            cluster_node: None,
+            lifecycle: Arc::new(AtomicU8::new(RuntimeLifecycleState::Running as u8)),
+            shutdown_lock: Arc::new(tokio::sync::Mutex::new(())),
+            _ephemeral_data_dir: None,
         }
     }
 
@@ -1598,6 +1622,11 @@ impl Engine {
             label_store: None,
             fs_snapshot_policy_chain: None,
             hardening: console::HardeningConfig::default(),
+            tokio_runtime: None,
+            cluster_node: None,
+            lifecycle: Arc::new(AtomicU8::new(RuntimeLifecycleState::Running as u8)),
+            shutdown_lock: Arc::new(tokio::sync::Mutex::new(())),
+            _ephemeral_data_dir: None,
         }
     }
 
@@ -2011,258 +2040,20 @@ impl Engine {
     /// conflicts to one side. A clean merge yields the new snapshot's CA id;
     /// otherwise the conflicting paths are reported. The merge produces a normal
     /// pure manifest and does NOT move any label (push it explicitly).
-    pub async fn fs_merge(
-        &self,
-        ours: &str,
-        theirs: &str,
-        base: Option<String>,
-        prefer: fs_merge::Prefer,
-    ) -> Result<FsMergeResult, String> {
-        self.check_fs_snapshot_policy("merge", None, None).await?;
-        let store = self.fs_store_or_err()?;
-
-        let load = |hex: &str| -> Result<[u8; 32], String> {
-            parse_ca_hex(hex).ok_or_else(|| format!("invalid CA id: {hex}"))
-        };
-        let base_root = match &base {
-            Some(b) => Some(load(b)?),
-            None => None,
-        };
-
-        // Structural per-path 3-way merge over the trees: equal subtrees are
-        // pruned by hash (never loaded), clean parts land in the merged tree,
-        // divergent paths come back as conflicts.
-        let structural =
-            fs_merge::merge_trees(store, base_root, Some(load(ours)?), Some(load(theirs)?), prefer)
-                .await
-                .map_err(|e| format!("fs_merge: {e}"))?;
-        let merged_root = structural.root;
-
-        // Content-merge pass: give a type-aware merger a shot at each conflict
-        // before reporting it. Clean text merges resolve silently and are patched
-        // back into the merged tree; the rest are surfaced with diffs/markers.
-        let mergers = fs_content_merge::default_mergers();
-        let mut conflict_views = Vec::new();
-        let mut resolved: Vec<(Vec<String>, Option<fs_store::Entry>)> = Vec::new();
-        for c in structural.conflicts {
-            let view = match (&c.ours, &c.theirs) {
-                (Some(oe), Some(te)) => {
-                    let ours_b = store
-                        .read_file(oe)
-                        .await
-                        .map_err(|e| format!("fs_merge: read ours {}: {e}", c.path.display()))?;
-                    let theirs_b = store
-                        .read_file(te)
-                        .await
-                        .map_err(|e| format!("fs_merge: read theirs {}: {e}", c.path.display()))?;
-                    let base_b = match &c.base {
-                        Some(be) => Some(store.read_file(be).await.map_err(|e| {
-                            format!("fs_merge: read base {}: {e}", c.path.display())
-                        })?),
-                        None => None,
-                    };
-                    match fs_content_merge::merge_content(
-                        &mergers,
-                        base_b.as_deref(),
-                        &ours_b,
-                        &theirs_b,
-                    ) {
-                        fs_content_merge::ContentMergeResult::Clean(bytes) => {
-                            let entry = store
-                                .put_file(&bytes)
-                                .await
-                                .map_err(|e| format!("fs_merge: store merged {}: {e}", c.path.display()))?;
-                            resolved.push((fs_tree::components_of(&c.path), Some(entry)));
-                            continue; // resolved — not a conflict
-                        }
-                        fs_content_merge::ContentMergeResult::Conflict(cc) => FsMergeConflictView {
-                            path: c.path.to_string_lossy().to_string(),
-                            base: c.base.as_ref().map(entry_content_id),
-                            ours: c.ours.as_ref().map(entry_content_id),
-                            theirs: c.theirs.as_ref().map(entry_content_id),
-                            kind: cc.kind.as_str().to_string(),
-                            markers: cc.markers,
-                            diff_ours: cc.diff_ours,
-                            diff_theirs: cc.diff_theirs,
-                        },
-                    }
-                }
-                // A modify/delete (or add on one side): no content to reconcile.
-                _ => FsMergeConflictView {
-                    path: c.path.to_string_lossy().to_string(),
-                    base: c.base.as_ref().map(entry_content_id),
-                    ours: c.ours.as_ref().map(entry_content_id),
-                    theirs: c.theirs.as_ref().map(entry_content_id),
-                    kind: "modify/delete".to_string(),
-                    markers: None,
-                    diff_ours: None,
-                    diff_theirs: None,
-                },
-            };
-            conflict_views.push(view);
-        }
-
-        if conflict_views.is_empty() {
-            // Patch the content-merge resolutions onto the structurally-merged
-            // tree (writing only the touched spine).
-            let final_root = if resolved.is_empty() {
-                merged_root
-            } else {
-                store
-                    .build_root(Some(merged_root), resolved)
-                    .await
-                    .map_err(|e| format!("fs_merge: store result: {e}"))?
-            };
-            Ok(FsMergeResult::Merged {
-                ca_id: ca_to_hex(&final_root),
-            })
-        } else {
-            Ok(FsMergeResult::Conflict {
-                conflicts: conflict_views,
-            })
-        }
-    }
-
-    /// List every label and its current head CA id (hex).
-    pub async fn fs_list_labels(&self) -> Result<Vec<FsLabelView>, String> {
-        let labels = self.labels_or_err()?;
-        Ok(labels
-            .list()
-            .await?
-            .into_iter()
-            .map(|(name, id)| FsLabelView {
-                name,
-                ca_id: ca_to_hex(&id),
-            })
-            .collect())
-    }
-
-    /// Resolve a label to its current head CA id (hex), if it exists.
-    pub async fn fs_resolve_label(&self, name: &str) -> Result<Option<String>, String> {
-        let labels = self.labels_or_err()?;
-        Ok(labels.resolve(name).await?.map(|id| ca_to_hex(&id)))
-    }
-
-    /// Create a label, or repoint an existing one, to a CA id. `message` is an
+        /// List every label and its current head CA id (hex).
+        /// Resolve a label to its current head CA id (hex), if it exists.
+        /// Create a label, or repoint an existing one, to a CA id. `message` is an
     /// optional human note recorded on the reflog entry.
-    pub async fn fs_set_label(
-        &self,
-        name: &str,
-        ca_hex: &str,
-        message: Option<String>,
-    ) -> Result<(), String> {
-        self.check_fs_snapshot_policy("label", Some(name), Some(ca_hex)).await?;
-        let labels = self.labels_or_err()?;
-        let id = parse_ca_hex(ca_hex).ok_or_else(|| format!("invalid CA id: {ca_hex}"))?;
-        match labels.resolve(name).await? {
-            Some(_) => labels.force(name, id, message).await,
-            None => labels.create(name, id, message).await,
-        }
-    }
-
-    /// The reflog for a label (hex-rendered), oldest first. When `limit` is
+        /// The reflog for a label (hex-rendered), oldest first. When `limit` is
     /// given, only the most recent `limit` entries are read and returned —
     /// bounding the scan over very long histories.
-    pub async fn fs_label_log(
-        &self,
-        name: &str,
-        limit: Option<usize>,
-    ) -> Result<Vec<FsRefLogView>, String> {
-        let labels = self.labels_or_err()?;
-        let entries = match limit {
-            Some(n) => labels.log_recent(name, n).await?,
-            None => labels.log(name).await?,
-        };
-        Ok(entries
-            .into_iter()
-            .map(|e| FsRefLogView {
-                at: e.at,
-                from: e.from.as_ref().map(ca_to_hex),
-                to: ca_to_hex(&e.to),
-                op: refop_str(e.op).to_string(),
-                message: e.message,
-            })
-            .collect())
-    }
-
-    /// Advance a label to a CA id. Default is reject-and-rebase: the move only
+        /// Advance a label to a CA id. Default is reject-and-rebase: the move only
     /// succeeds if the label's current head equals `expected` (or the label does
     /// not yet exist and `expected` is `None`). `force` skips the check.
-    pub async fn fs_push(
-        &self,
-        label: &str,
-        ca_hex: &str,
-        expected: Option<String>,
-        force: bool,
-        message: Option<String>,
-    ) -> Result<FsPushOutcome, String> {
-        self.check_fs_snapshot_policy("push", Some(label), Some(ca_hex)).await?;
-        let labels = self.labels_or_err()?;
-        let new = parse_ca_hex(ca_hex).ok_or_else(|| format!("invalid CA id: {ca_hex}"))?;
-
-        if force {
-            labels.force(label, new, message).await?;
-            return Ok(FsPushOutcome::Advanced {
-                label: label.to_string(),
-                ca_id: ca_hex.to_string(),
-            });
-        }
-
-        let expected = match expected {
-            Some(h) => Some(parse_ca_hex(&h).ok_or_else(|| format!("invalid expected CA id: {h}"))?),
-            None => None,
-        };
-        let current = labels.resolve(label).await?;
-        let advanced = if current.is_none() && expected.is_none() {
-            labels.create(label, new, message).await?;
-            true
-        } else {
-            labels.cas(label, expected, new, message).await?
-        };
-
-        if advanced {
-            Ok(FsPushOutcome::Advanced {
-                label: label.to_string(),
-                ca_id: ca_hex.to_string(),
-            })
-        } else {
-            Ok(FsPushOutcome::Rejected {
-                label: label.to_string(),
-                current: current.as_ref().map(ca_to_hex),
-            })
-        }
-    }
-
-    /// Reset a label to an earlier CA id from its reflog (the rollback verb).
+        /// Reset a label to an earlier CA id from its reflog (the rollback verb).
     /// Unless `allow_unlogged` is set, the target must appear in the label's
     /// reflog so resets stay within recorded history.
-    pub async fn fs_reset(
-        &self,
-        label: &str,
-        ca_hex: &str,
-        allow_unlogged: bool,
-        message: Option<String>,
-    ) -> Result<(), String> {
-        self.check_fs_snapshot_policy("reset", Some(label), Some(ca_hex)).await?;
-        let labels = self.labels_or_err()?;
-        let target = parse_ca_hex(ca_hex).ok_or_else(|| format!("invalid CA id: {ca_hex}"))?;
-        if !allow_unlogged {
-            let in_log = labels
-                .log(label)
-                .await?
-                .iter()
-                .any(|e| e.to == target || e.from == Some(target));
-            if !in_log {
-                return Err(format!(
-                    "CA id {ca_hex} is not in the reflog for label '{label}'; \
-                     pass allow_unlogged to reset anyway"
-                ));
-            }
-        }
-        labels.force(label, target, message).await
-    }
-
-    /// Flush a session's overlay mount into a new pure manifest and return its
+        /// Flush a session's overlay mount into a new pure manifest and return its
     /// CA id (hex). This is the durable fs artifact recorded on completion; it
     /// does NOT advance any label (pushing a label is the explicit `fs_push`
     /// verb).
@@ -2546,97 +2337,20 @@ impl Engine {
         drop(permit);
     }
 
-    // ── Query / cancel methods ───────────────────────────────────────────
-
     /// Get execution status and result.
-    pub fn get_execution(&self, id: &str) -> Result<ExecutionInfo, String> {
-        let registry = self.execution_registry.as_ref()
-            .ok_or_else(|| "Execution registry not configured".to_string())?;
-        registry.get(id).ok_or_else(|| format!("Execution '{}' not found", id))
+        /// Get paginated console output for an execution.
+        /// Stop background work owned by the engine (executions + MCP clients).
+    async fn shutdown_background_tasks(&self) -> (u64, u64) {
+        let cancelled_executions = self.execution_registry.as_ref()
+            .map(|registry| registry.cancel_all())
+            .unwrap_or(0);
+        let closed_mcp_connections = match &self.mcp_client_manager {
+            Some(manager) => manager.shutdown().await,
+            None => 0,
+        };
+        (cancelled_executions, closed_mcp_connections)
     }
 
-    /// Get paginated console output for an execution.
-    pub fn get_execution_output(
-        &self,
-        id: &str,
-        line_offset: Option<u64>,
-        line_limit: Option<u64>,
-        byte_offset: Option<u64>,
-        byte_limit: Option<u64>,
-    ) -> Result<ConsoleOutputPage, String> {
-        let registry = self.execution_registry.as_ref()
-            .ok_or_else(|| "Execution registry not configured".to_string())?;
-        registry.get_console_output(id, line_offset, line_limit, byte_offset, byte_limit)
-    }
-
-    /// Cancel a running execution.
-    pub fn cancel_execution(&self, id: &str) -> Result<(), String> {
-        let registry = self.execution_registry.as_ref()
-            .ok_or_else(|| "Execution registry not configured".to_string())?;
-        registry.cancel(id)
-    }
-
-    /// List all executions.
-    pub fn list_executions(&self) -> Result<Vec<ExecutionSummary>, String> {
-        let registry = self.execution_registry.as_ref()
-            .ok_or_else(|| "Execution registry not configured".to_string())?;
-        Ok(registry.list())
-    }
-
-    pub async fn list_sessions(&self) -> Result<Vec<String>, String> {
-        match &self.session_log {
-            Some(log) => log.list_sessions().await,
-            None => Err("Session log not configured".to_string()),
-        }
-    }
-
-    pub async fn list_session_snapshots(
-        &self,
-        session: String,
-        fields: Option<Vec<String>>,
-    ) -> Result<Vec<serde_json::Value>, String> {
-        match &self.session_log {
-            Some(log) => log.list_entries(&session, fields).await,
-            None => Err("Session log not configured".to_string()),
-        }
-    }
-
-    pub async fn get_heap_tags(&self, heap: String) -> Result<HashMap<String, String>, String> {
-        match &self.heap_tag_store {
-            Some(store) => store.get_tags(&heap).await,
-            None => Err("Heap tag store not configured".to_string()),
-        }
-    }
-
-    pub async fn set_heap_tags(
-        &self,
-        heap: String,
-        tags: HashMap<String, String>,
-    ) -> Result<(), String> {
-        match &self.heap_tag_store {
-            Some(store) => store.set_tags(&heap, tags).await,
-            None => Err("Heap tag store not configured".to_string()),
-        }
-    }
-
-    pub async fn delete_heap_tags(
-        &self,
-        heap: String,
-        keys: Option<Vec<String>>,
-    ) -> Result<(), String> {
-        match &self.heap_tag_store {
-            Some(store) => store.delete_tags(&heap, keys).await,
-            None => Err("Heap tag store not configured".to_string()),
-        }
-    }
-
-    pub async fn query_heaps_by_tags(
-        &self,
-        filter: HashMap<String, String>,
-    ) -> Result<Vec<HeapTagEntry>, String> {
-        match &self.heap_tag_store {
-            Some(store) => store.query_by_tags(filter).await,
-            None => Err("Heap tag store not configured".to_string()),
-        }
-    }
 }
+
+pub use ffi::*;

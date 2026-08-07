@@ -207,3 +207,16 @@ jobs:
 
           echo ""
           echo "All MCP programmatic tool calling E2E tests passed!"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Run FastAPI and FastMCP E2E test
+        run: |
+          SERVER_BIN=$(nix build .#default --print-out-paths)/bin/server
+          uv run --no-project \
+            --with fastapi==0.140.0 \
+            --with fastmcp==2.14.7 \
+            --with httpx==0.28.1 \
+            --with uvicorn==0.51.0 \
+            python server/tests/python_framework_e2e.py "$SERVER_BIN"

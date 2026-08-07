@@ -32,7 +32,7 @@ async fn run_and_wait(engine: &Engine, code: &str) -> Result<String, String> {
     let exec_id = engine.run_js(code).execute().await?;
     for _ in 0..600 {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        if let Ok(info) = engine.get_execution(&exec_id) {
+        if let Ok(info) = engine.get_execution(exec_id.clone()) {
             match info.status.as_str() {
                 "completed" => return info.result.ok_or_else(|| "No result".to_string()),
                 "failed" => return Err(info.error.unwrap_or_else(|| "Unknown error".to_string())),
@@ -49,7 +49,7 @@ async fn run_and_wait(engine: &Engine, code: &str) -> Result<String, String> {
 #[tokio::test]
 async fn test_wasm_add_function() {
     ensure_v8();
-    let engine = create_test_engine();
+    let engine = Engine::from_engine(create_test_engine());
 
     let code = r#"
 const wasmBytes = new Uint8Array([
@@ -74,7 +74,7 @@ console.log(inst.exports.add(21, 21));
 #[tokio::test]
 async fn test_wasm_validate() {
     ensure_v8();
-    let engine = create_test_engine();
+    let engine = Engine::from_engine(create_test_engine());
 
     let code = r#"
 const wasmBytes = new Uint8Array([
@@ -97,7 +97,7 @@ console.log(WebAssembly.validate(wasmBytes));
 #[tokio::test]
 async fn test_wasm_validate_invalid() {
     ensure_v8();
-    let engine = create_test_engine();
+    let engine = Engine::from_engine(create_test_engine());
 
     let code = r#"
 const invalidBytes = new Uint8Array([0x00, 0x01, 0x02, 0x03]);
@@ -113,7 +113,7 @@ console.log(WebAssembly.validate(invalidBytes));
 #[tokio::test]
 async fn test_wasm_multiply_function() {
     ensure_v8();
-    let engine = create_test_engine();
+    let engine = Engine::from_engine(create_test_engine());
 
     // WASM module exporting a multiply(i32, i32) -> i32 function
     let code = r#"
@@ -139,7 +139,7 @@ console.log(inst.exports.multiply(6, 7));
 #[tokio::test]
 async fn test_wasm_compile_error() {
     ensure_v8();
-    let engine = create_test_engine();
+    let engine = Engine::from_engine(create_test_engine());
 
     let code = r#"
 try {
@@ -186,10 +186,10 @@ fn multiply_wasm_bytes() -> Vec<u8> {
 #[tokio::test]
 async fn test_wasm_global_module_add() {
     ensure_v8();
-    let engine = create_test_engine()
+    let engine = Engine::from_engine(create_test_engine()
         .with_wasm_modules(vec![
             WasmModule { name: "math".to_string(), bytes: add_wasm_bytes(), max_memory_bytes: None, description: None },
-        ]);
+        ]));
 
     let result = run_and_wait(&engine, "console.log(math.add(21, 21));").await;
 
@@ -200,11 +200,11 @@ async fn test_wasm_global_module_add() {
 #[tokio::test]
 async fn test_wasm_multiple_global_modules() {
     ensure_v8();
-    let engine = create_test_engine()
+    let engine = Engine::from_engine(create_test_engine()
         .with_wasm_modules(vec![
             WasmModule { name: "adder".to_string(), bytes: add_wasm_bytes(), max_memory_bytes: None, description: None },
             WasmModule { name: "multiplier".to_string(), bytes: multiply_wasm_bytes(), max_memory_bytes: None, description: None },
-        ]);
+        ]));
 
     let code = "console.log(adder.add(10, 5) + multiplier.multiply(3, 4));";
     let result = run_and_wait(&engine, code).await;
@@ -216,10 +216,10 @@ async fn test_wasm_multiple_global_modules() {
 #[tokio::test]
 async fn test_wasm_global_with_user_code() {
     ensure_v8();
-    let engine = create_test_engine()
+    let engine = Engine::from_engine(create_test_engine()
         .with_wasm_modules(vec![
             WasmModule { name: "calc".to_string(), bytes: add_wasm_bytes(), max_memory_bytes: None, description: None },
-        ]);
+        ]));
 
     let code = r#"
 var results = [];
@@ -238,7 +238,7 @@ console.log(JSON.stringify(results));
 #[tokio::test]
 async fn test_wasm_no_modules_no_preamble() {
     ensure_v8();
-    let engine = create_test_engine();
+    let engine = Engine::from_engine(create_test_engine());
 
     // typeof should be "undefined" if no WASM globals are injected
     let result = run_and_wait(&engine, "console.log(typeof math);").await;
@@ -261,10 +261,10 @@ async fn test_wasm_load_from_filepath() {
     let bytes = std::fs::read(&wasm_path)
         .unwrap_or_else(|e| panic!("Failed to read {}: {}", wasm_path.display(), e));
 
-    let engine = create_test_engine()
+    let engine = Engine::from_engine(create_test_engine()
         .with_wasm_modules(vec![
             WasmModule { name: "math".to_string(), bytes, max_memory_bytes: None, description: None },
-        ]);
+        ]));
 
     let result = run_and_wait(&engine, "console.log(math.add(21, 21));").await;
 
@@ -277,10 +277,10 @@ async fn test_wasm_load_from_filepath() {
 #[tokio::test]
 async fn test_wasm_module_global_exposed_for_no_imports() {
     ensure_v8();
-    let engine = create_test_engine()
+    let engine = Engine::from_engine(create_test_engine()
         .with_wasm_modules(vec![
             WasmModule { name: "math".to_string(), bytes: add_wasm_bytes(), max_memory_bytes: None, description: None },
-        ]);
+        ]));
 
     // __wasm_math should be a WebAssembly.Module
     let code = "console.log(__wasm_math instanceof WebAssembly.Module);";
@@ -292,10 +292,10 @@ async fn test_wasm_module_global_exposed_for_no_imports() {
 #[tokio::test]
 async fn test_wasm_module_global_manual_instantiation() {
     ensure_v8();
-    let engine = create_test_engine()
+    let engine = Engine::from_engine(create_test_engine()
         .with_wasm_modules(vec![
             WasmModule { name: "math".to_string(), bytes: add_wasm_bytes(), max_memory_bytes: None, description: None },
-        ]);
+        ]));
 
     let code = r#"
 var inst = new WebAssembly.Instance(__wasm_math);
@@ -332,10 +332,10 @@ fn wasm_with_import_bytes() -> Vec<u8> {
 #[tokio::test]
 async fn test_wasm_module_with_imports_not_auto_instantiated() {
     ensure_v8();
-    let engine = create_test_engine()
+    let engine = Engine::from_engine(create_test_engine()
         .with_wasm_modules(vec![
             WasmModule { name: "mymod".to_string(), bytes: wasm_with_import_bytes(), max_memory_bytes: None, description: None },
-        ]);
+        ]));
 
     // The auto-instantiated `mymod` should NOT exist (module has imports)
     let code = "console.log(typeof mymod);";
@@ -347,10 +347,10 @@ async fn test_wasm_module_with_imports_not_auto_instantiated() {
 #[tokio::test]
 async fn test_wasm_module_with_imports_manual_instantiation() {
     ensure_v8();
-    let engine = create_test_engine()
+    let engine = Engine::from_engine(create_test_engine()
         .with_wasm_modules(vec![
             WasmModule { name: "mymod".to_string(), bytes: wasm_with_import_bytes(), max_memory_bytes: None, description: None },
-        ]);
+        ]));
 
     // Manually instantiate with the required import
     let code = r#"

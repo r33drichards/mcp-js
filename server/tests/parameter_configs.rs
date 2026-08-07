@@ -31,7 +31,7 @@ async fn run_and_wait(engine: &Engine, code: &str) -> Result<String, String> {
     let exec_id = engine.run_js(code).execute().await?;
     for _ in 0..600 {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        if let Ok(info) = engine.get_execution(&exec_id) {
+        if let Ok(info) = engine.get_execution(exec_id.clone()) {
             match info.status.as_str() {
                 "completed" => return info.result.ok_or_else(|| "No result".to_string()),
                 "failed" => return Err(info.error.unwrap_or_else(|| "Unknown error".to_string())),
@@ -51,8 +51,8 @@ async fn run_and_wait(engine: &Engine, code: &str) -> Result<String, String> {
 async fn test_timeout_produces_descriptive_error() {
     ensure_v8();
 
-    let engine = Engine::new_stateless(64 * 1024 * 1024, 2, 4)
-        .with_execution_registry(make_registry());
+    let engine = Engine::from_engine(Engine::new_stateless(64 * 1024 * 1024, 2, 4)
+        .with_execution_registry(make_registry()));
     let result = run_and_wait(&engine, "while (true) {}").await;
 
     assert!(result.is_err(), "Infinite loop should fail, got: {:?}", result);
@@ -71,8 +71,8 @@ async fn test_timeout_stateful_produces_descriptive_error() {
     let heap_storage = server::engine::heap_storage::AnyHeapStorage::File(
         server::engine::heap_storage::FileHeapStorage::new("/tmp/mcp-v8-test-timeout-stateful"),
     );
-    let engine = Engine::new_stateful(heap_storage, None, None, 64 * 1024 * 1024, 2, 4)
-        .with_execution_registry(make_registry());
+    let engine = Engine::from_engine(Engine::new_stateful(heap_storage, None, None, 64 * 1024 * 1024, 2, 4)
+        .with_execution_registry(make_registry()));
     let result = run_and_wait(&engine, "while (true) {}").await;
 
     assert!(result.is_err(), "Infinite loop should fail, got: {:?}", result);

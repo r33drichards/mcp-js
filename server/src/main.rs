@@ -12,33 +12,17 @@ use tokio_util::sync::CancellationToken;
 use std::sync::Arc;
 use utoipa::OpenApi as _;
 use std::fmt;
-mod engine;
-mod mcp;
-mod mcp_dispatch;
-mod mcp_sse;
-mod api;
-mod cluster;
-mod cli;
-mod config;
-mod sandbox;
-mod session;
-use cli::{Cli, FetchHeaderKey, StoreKind};
-use engine::{initialize_v8, Engine, WasmModule};
-use engine::fetch::FetchConfig;
-use engine::fs::FsConfig;
-use engine::execution::ExecutionRegistry;
-use engine::module_loader::ModuleLoaderConfig;
-use engine::subprocess::SubprocessConfig;
-use engine::run_js_file::RunJsFilePolicy;
-use engine::opa::{PoliciesConfig, build_policy_chain};
-use engine::heap_storage::{AnyHeapStorage, HeapStorage, S3HeapStorage, WriteThroughCacheHeapStorage, FileHeapStorage};
-use engine::fs_store::FsStore;
-use engine::fs_labels::LabelStore;
-use engine::opa::{EvalMode, PolicyChain};
-use engine::heap_tags::HeapTagStore;
-use engine::session_log::SessionLog;
-use mcp::{McpService, StatelessMcpService};
-use session::{SessionVerifier, JwksKeyStore};
+use server::cli::{Cli, FetchHeaderKey, StoreKind};
+use server::mcp::{McpService, StatelessMcpService};
+use server::bootstrap::{
+    CapabilityBootstrapConfig, FeatureBootstrapConfig, PolicyBootstrapConfig, RunJsFileAccess,
+};
+use server::engine::fetch::OAuthClientCredentialsConfig;
+use server::engine::mcp_client::{McpServerConfig, McpServerTransport, StubConfig};
+use server::engine::wasm_stub::WasmStubConfig;
+use server::engine::{Engine, HardeningConfig, WasmModule};
+use server::{api, bootstrap, cli, cluster, mcp_sse, sandbox};
+use server::session::{SessionVerifier, JwksKeyStore};
 use cluster::{ClusterConfig, ClusterNode};
 
 fn main() -> Result<()> {
@@ -56,17 +40,11 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    // ── OS sandbox (--sandbox-manifest) ─────────────────────────────────
-    // Landlock confines the calling thread and everything spawned from it
-    // afterwards — threads that already exist stay unconfined. So the sandbox
-    // must be applied here, while the process is still single-threaded:
-    // before the tokio runtime builds its worker pool and before the V8
-    // platform spawns its background threads.
+    // The OS sandbox must be installed before Tokio or V8 spawn threads.
     if cli.sandbox_manifest.is_some() {
         sandbox::apply(&cli)?;
     }
 
-    initialize_v8();
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -237,453 +215,174 @@ async fn async_main(cli: Cli) -> Result<()> {
             .exit();
     }
 
-    // Captured before the engine build consumes them, so fs snapshots can reuse
-    // the same shared S3 backend (see the fs-snapshots block below).
-    let fs_s3_bucket = cli.s3_bucket.clone();
-    let fs_cache_dir = cli.cache_dir.clone();
+    if fs_enabled && cluster_node.is_some() && cli.fs_store != StoreKind::S3 {
+        Cli::command()
+            .error(
+                clap::error::ErrorKind::ArgumentConflict,
+                "--fs-store s3 (with --s3-bucket) is required in cluster mode: \
+                 fs snapshot blobs must live on shared storage. Node-local \
+                 (--fs-store dir) blobs are single-node only.",
+            )
+            .exit();
+    }
+    if cli.fs_store == StoreKind::S3 && cli.s3_bucket.is_none() {
+        Cli::command()
+            .error(
+                clap::error::ErrorKind::MissingRequiredArgument,
+                "--fs-store s3 requires --s3-bucket.",
+            )
+            .exit();
+    }
 
-    // ── Build Engine ────────────────────────────────────────────────────
-    // Heap and filesystem persistence are independent axes (see cli::StoreKind).
-    // The base engine carries the heap axis; the session log + fs are attached
-    // by builders so any combination (neither/heap-only/fs-only/both) is valid.
-    let engine = if heap_enabled {
-        let heap_storage = match cli.heap_store {
-            StoreKind::S3 => {
-                let bucket = cli
-                    .s3_bucket
-                    .clone()
-                    .ok_or_else(|| anyhow::anyhow!("--heap-store s3 requires --s3-bucket"))?;
-                if let Some(cache_dir) = cli.cache_dir.clone() {
-                    tracing::info!("Heap: S3 bucket '{}' with write-through cache at {}", bucket, cache_dir);
-                    AnyHeapStorage::S3WithFsCache(WriteThroughCacheHeapStorage::new(
-                        S3HeapStorage::new(bucket).await,
-                        cache_dir,
-                    ))
-                } else {
-                    tracing::info!("Heap: S3 bucket '{}'", bucket);
-                    AnyHeapStorage::S3(S3HeapStorage::new(bucket).await)
-                }
-            }
-            StoreKind::Dir => {
-                let dir = cli.heap_dir.clone().unwrap_or_else(|| "/tmp/mcp-v8-heaps".to_string());
-                tracing::info!("Heap: directory store at {}", dir);
-                AnyHeapStorage::File(FileHeapStorage::new(dir))
-            }
-            StoreKind::None => unreachable!("heap_enabled implies heap_store != none"),
-        };
-        tracing::info!("Heap persistence: ENABLED");
-        Engine::new_stateful(heap_storage, None, None, heap_memory_max_bytes, execution_timeout_secs, cli.max_concurrent_executions)
-    } else {
-        tracing::info!("Heap persistence: disabled");
-        Engine::new_stateless(heap_memory_max_bytes, execution_timeout_secs, cli.max_concurrent_executions)
-    };
+    // Storage, session replication/forking, heap tags, filesystem snapshots,
+    // and the execution registry are constructed by the canonical library.
+    let runtime_builder = bootstrap::build_storage_engine(
+        bootstrap::StorageBootstrapConfig {
+            heap_store: cli.heap_store,
+            heap_dir: cli.heap_dir.clone(),
+            fs_store: cli.fs_store,
+            fs_dir: cli.fs_dir.clone(),
+            fs_labels_db: cli.fs_labels_db.clone(),
+            s3_bucket: cli.s3_bucket.clone(),
+            cache_dir: cli.cache_dir.clone(),
+            session_db_path: cli.session_db_path.clone(),
+            http_port: cli.http_port,
+            execution_db_path: None,
+            heap_memory_max_bytes,
+            execution_timeout_secs,
+            max_concurrent_executions: cli.max_concurrent_executions,
+            session_id: cli.session_id.clone(),
+            session_fork_from: cli.session_fork_from.clone(),
+        },
+        cluster_node.clone(),
+    )
+    .await?;
 
-    // Session log: keys per-session state for EITHER axis (heap resume and/or
-    // fs resume), so create it whenever heap or fs persistence is enabled.
-    let engine = if heap_enabled || fs_enabled {
-        match SessionLog::new(&cli.session_db_path) {
-            Ok(log) => {
-                tracing::info!("Session log opened at {}", cli.session_db_path);
-                let log = if let Some(ref cn) = cluster_node {
-                    tracing::info!("Session log will use Raft cluster for replication");
-                    log.with_cluster(cn.clone())
-                } else {
-                    log
-                };
-                // Fork a new session from a previous session's latest snapshot.
-                if let Some(ref from) = cli.session_fork_from {
-                    fork_session(&log, from, cli.session_id.as_deref()).await?;
-                }
-                engine.with_session_log(log)
-            }
-            Err(e) => {
-                tracing::warn!("Failed to open session log at {}: {}. Session logging disabled.", cli.session_db_path, e);
-                engine
-            }
-        }
-    } else {
-        engine
-    };
-
-    // Heap-tag store: heap axis only.
-    let engine = if heap_enabled {
-        let heap_tag_db_path = format!("{}/heap-tags", cli.session_db_path);
-        match HeapTagStore::new(&heap_tag_db_path) {
-            Ok(store) => {
-                tracing::info!("Heap tag store opened at {}", heap_tag_db_path);
-                let store = if let Some(ref cn) = cluster_node {
-                    store.with_cluster(cn.clone())
-                } else {
-                    store
-                };
-                engine.with_heap_tag_store(store)
-            }
-            Err(e) => {
-                tracing::warn!("Failed to open heap tag store at {}: {}. Heap tagging disabled.", heap_tag_db_path, e);
-                engine
-            }
-        }
-    } else {
-        engine
-    };
-
-    let engine = engine.with_wasm_default_max_bytes(wasm_default_max_bytes);
-    // Sandbox hardening: all mitigations are opt-in (OFF by default → unhardened).
-    let engine = engine.with_hardening(engine::HardeningConfig {
-        freeze_ops: cli.harden_freeze_ops,
-        neutralize_proxy_details: cli.harden_neutralize_proxy_details,
-        neutralize_introspection: cli.harden_neutralize_introspection,
-        remove_bootstrap: cli.harden_remove_bootstrap,
-        remove_shared_memory: cli.harden_remove_shared_memory,
-    });
-    let has_wasm_modules = !wasm_modules.is_empty();
-    let engine = if has_wasm_modules { engine.with_wasm_modules(wasm_modules) } else { engine };
-    let engine = if has_wasm_modules {
-        let wasm_stub_config = engine::wasm_stub::WasmStubConfig {
-            prefix: cli.wasm_stub_prefix.clone(),
-            enabled: cli.wasm_stubs,
-        };
-        tracing::info!(
-            stubs = wasm_stub_config.enabled,
-            prefix = %wasm_stub_config.prefix,
-            "WASM module stubbing"
-        );
-        engine.with_wasm_stub_config(wasm_stub_config)
-    } else {
-        engine
-    };
-
-    // ── Policy configuration ─────────────────────────────────────────────
-    // Parse --policies-json if provided (inline JSON or file path).
-    let policies_config: Option<PoliciesConfig> = if let Some(ref json_or_path) = cli.policies_json {
+    // ── Policy and capability configuration ──────────────────────────────
+    let policy_config: PolicyBootstrapConfig = if let Some(ref json_or_path) = cli.policies_json {
         let json_str = if json_or_path.trim_start().starts_with('{') {
             json_or_path.clone()
         } else {
             std::fs::read_to_string(json_or_path)
                 .map_err(|e| anyhow::anyhow!("Failed to read policies config '{}': {}", json_or_path, e))?
         };
-        let config: PoliciesConfig = serde_json::from_str(&json_str)
+        let config = serde_json::from_str(&json_str)
             .map_err(|e| anyhow::anyhow!("Invalid policies JSON: {}", e))?;
         tracing::info!("Loaded policies configuration from --policies-json");
-        Some(config)
+        config
     } else {
-        None
+        PolicyBootstrapConfig::default()
     };
 
-    // Build policy chains from the parsed config.
-    let fetch_policy_chain = if let Some(ref config) = policies_config {
-        if let Some(ref fetch_policies) = config.fetch {
-            let chain = build_policy_chain(fetch_policies, "mcp/fetch", "data.mcp.fetch.allow")
-                .map_err(|e| anyhow::anyhow!("Failed to build fetch policy chain: {}", e))?;
-            tracing::info!("Fetch policy chain: {} evaluator(s), mode={:?}", fetch_policies.policies.len(), fetch_policies.mode);
-            Some(Arc::new(chain))
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    let modules_policy_chain = if let Some(ref config) = policies_config {
-        if let Some(ref module_policies) = config.modules {
-            let chain = build_policy_chain(module_policies, "mcp/modules", "data.mcp.modules.allow")
-                .map_err(|e| anyhow::anyhow!("Failed to build modules policy chain: {}", e))?;
-            tracing::info!("Modules policy chain: {} evaluator(s), mode={:?}", module_policies.policies.len(), module_policies.mode);
-            Some(Arc::new(chain))
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    let fs_policy_chain = if let Some(ref config) = policies_config {
-        if let Some(ref fs_policies) = config.filesystem {
-            let chain = build_policy_chain(fs_policies, "mcp/filesystem", "data.mcp.filesystem.allow")
-                .map_err(|e| anyhow::anyhow!("Failed to build filesystem policy chain: {}", e))?;
-            tracing::info!("Filesystem policy chain: {} evaluator(s), mode={:?}", fs_policies.policies.len(), fs_policies.mode);
-            Some(Arc::new(chain))
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    let fs_snapshot_policy_chain = if let Some(ref config) = policies_config {
-        if let Some(ref snap_policies) = config.fs_snapshot {
-            let chain = build_policy_chain(snap_policies, "mcp/fs_snapshot", "data.mcp.fs_snapshot.allow")
-                .map_err(|e| anyhow::anyhow!("Failed to build fs_snapshot policy chain: {}", e))?;
-            tracing::info!("FS snapshot policy chain: {} evaluator(s), mode={:?}", snap_policies.policies.len(), snap_policies.mode);
-            Some(Arc::new(chain))
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    let mcp_tools_policy_chain = if let Some(ref config) = policies_config {
-        if let Some(ref mcp_tools_policies) = config.mcp_tools {
-            let chain = build_policy_chain(mcp_tools_policies, "mcp/tools", "data.mcp.tools.allow")
-                .map_err(|e| anyhow::anyhow!("Failed to build MCP tools policy chain: {}", e))?;
-            tracing::info!("MCP tools policy chain: {} evaluator(s), mode={:?}", mcp_tools_policies.policies.len(), mcp_tools_policies.mode);
-            Some(Arc::new(chain))
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    let subprocess_policy_chain = if let Some(ref config) = policies_config {
-        if let Some(ref subprocess_policies) = config.subprocess {
-            let chain = build_policy_chain(subprocess_policies, "mcp/subprocess", "data.mcp.subprocess.allow")
-                .map_err(|e| anyhow::anyhow!("Failed to build subprocess policy chain: {}", e))?;
-            tracing::info!("Subprocess policy chain: {} evaluator(s), mode={:?}", subprocess_policies.policies.len(), subprocess_policies.mode);
-            Some(Arc::new(chain))
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    let run_js_file_policy_chain = if let Some(ref config) = policies_config {
-        if let Some(ref run_js_file_policies) = config.run_js_file {
-            let chain = build_policy_chain(run_js_file_policies, "mcp/run_js_file", "data.mcp.run_js_file.allow")
-                .map_err(|e| anyhow::anyhow!("Failed to build run_js_file policy chain: {}", e))?;
-            tracing::info!("run_js file policy chain: {} evaluator(s), mode={:?}", run_js_file_policies.policies.len(), run_js_file_policies.mode);
-            Some(Arc::new(chain))
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    // ── Fetch policy ───────────────────────────────────────────────────
-    let header_rules = load_fetch_header_rules(&cli.fetch_headers, &cli.fetch_header_config)?;
-    if !header_rules.is_empty() {
-        tracing::info!("Loaded {} fetch header injection rule(s)", header_rules.len());
+    let fetch_header_rules =
+        load_fetch_header_rules(&cli.fetch_headers, &cli.fetch_header_config)?;
+    if !fetch_header_rules.is_empty() {
+        tracing::info!(
+            "Loaded {} fetch header injection rule(s)",
+            fetch_header_rules.len()
+        );
     }
-
-    let engine = if let Some(chain) = fetch_policy_chain {
-        let fetch_config = FetchConfig::new_with_chain(chain)
-            .with_header_rules(header_rules);
-        engine.with_fetch_config(fetch_config)
-    } else {
-        engine
-    };
-
-    // ── Filesystem policy ────────────────────────────────────────────────
-    // A mount needs the fs surface present, so when snapshots are enabled but
-    // no fs policy was supplied, default to an allow-all policy chain.
-    let engine = if let Some(chain) = fs_policy_chain {
-        engine.with_fs_config(FsConfig::new(chain).with_passthrough(cli.fs_passthrough))
-    } else if fs_enabled {
-        engine.with_fs_config(
-            FsConfig::new(Arc::new(PolicyChain::new(vec![], EvalMode::All)))
-                .with_passthrough(cli.fs_passthrough),
-        )
-    } else {
-        engine
-    };
-
-    // ── Filesystem snapshots (content-addressed store + label/reflog) ─────
-    let engine = if fs_enabled {
-        let store_dir = cli
-            .fs_dir
-            .clone()
-            .unwrap_or_else(|| format!("{}/fs-blobs", cli.session_db_path));
-        let labels_db = cli
-            .fs_labels_db
-            .clone()
-            .unwrap_or_else(|| format!("{}/fs-labels", cli.session_db_path));
-
-        let fs_on_s3 = cli.fs_store == StoreKind::S3;
-
-        // Labels replicate cluster-wide, but blobs/manifests are only shared if
-        // they sit on shared storage. Node-local file blobs are single-node
-        // only: in a cluster a label advanced on one node would resolve on
-        // another to a manifest that node is missing. Refuse that combination up
-        // front rather than failing later after a rebalance.
-        if cluster_node.is_some() && !fs_on_s3 {
-            Cli::command()
-                .error(
-                    clap::error::ErrorKind::ArgumentConflict,
-                    "--fs-store s3 (with --s3-bucket) is required in cluster mode: \
-                     fs snapshot blobs must live on shared storage. Node-local \
-                     (--fs-store dir) blobs are single-node only.",
-                )
-                .exit();
-        }
-
-        // Back the blob store with shared S3 when --fs-store s3, so mounts
-        // resolve on any node; otherwise use node-local files (single-node).
-        let backend: Arc<dyn HeapStorage> = if fs_on_s3 {
-            let bucket = fs_s3_bucket
-                .clone()
-                .unwrap_or_else(|| {
-                    Cli::command()
-                        .error(
-                            clap::error::ErrorKind::MissingRequiredArgument,
-                            "--fs-store s3 requires --s3-bucket.",
-                        )
-                        .exit()
-                });
-            if let Some(cache_dir) = &fs_cache_dir {
-                tracing::info!(
-                    "FS snapshots: shared S3 blob storage (bucket {}) with write-through cache at {}",
-                    bucket,
-                    cache_dir
-                );
-                Arc::new(WriteThroughCacheHeapStorage::new(
-                    S3HeapStorage::new(bucket.clone()).await,
-                    cache_dir.clone(),
-                ))
-            } else {
-                tracing::info!("FS snapshots: shared S3 blob storage (bucket {})", bucket);
-                Arc::new(S3HeapStorage::new(bucket.clone()).await)
-            }
-        } else {
-            Arc::new(FileHeapStorage::new(&store_dir))
-        };
-        let store = Arc::new(FsStore::new(backend));
-        match LabelStore::new(&labels_db) {
-            Ok(labels) => {
-                tracing::info!(
-                    "FS snapshots: ENABLED (blobs at {}, labels at {})",
-                    store_dir,
-                    labels_db
-                );
-                let labels = if let Some(ref cn) = cluster_node {
-                    tracing::info!("FS label writes will route through the Raft cluster leader");
-                    labels.with_cluster(cn.clone())
-                } else {
-                    labels
-                };
-                let engine = engine.with_fs_snapshots(store, Arc::new(labels));
-                if let Some(chain) = fs_snapshot_policy_chain {
-                    tracing::info!("FS snapshot pointer moves are policy-gated");
-                    engine.with_fs_snapshot_policy(chain)
-                } else {
-                    engine
-                }
-            }
-            Err(e) => {
-                tracing::error!("FS snapshots: failed to open label store at {}: {}. Disabled.", labels_db, e);
-                engine
-            }
-        }
-    } else {
-        engine
-    };
-
-    // ── Module loader config ─────────────────────────────────────────────
-    let module_loader_config = ModuleLoaderConfig {
-        allow_external: cli.allow_external_modules,
-        policy_chain: modules_policy_chain,
-    };
     if cli.allow_external_modules {
         tracing::info!("External module imports: ENABLED");
-        if module_loader_config.policy_chain.is_some() {
+        if policy_config.modules.is_some() {
             tracing::info!("Module policy chain: ENABLED");
         }
     } else {
-        tracing::info!("External module imports: DISABLED (use --allow-external-modules to enable)");
+        tracing::info!(
+            "External module imports: DISABLED (use --allow-external-modules to enable)"
+        );
     }
-    let engine = engine.with_module_loader_config(module_loader_config);
-
-    // ── Subprocess policy ──────────────────────────────────────────────
-    let engine = if let Some(chain) = subprocess_policy_chain {
-        engine.with_subprocess_config(SubprocessConfig::new(chain))
-    } else {
-        engine
-    };
-
-    // ── run_js file-path reads ─────────────────────────────────────────
-    // OFF by default. `--allow-run-js-file` allows any server-readable path;
-    // a `run_js_file` policy in --policies-json gates reads per path. The flag
-    // wins over a configured policy (it is the explicit "allow all" switch).
-    let engine = if cli.allow_run_js_file {
-        if run_js_file_policy_chain.is_some() {
-            tracing::warn!("--allow-run-js-file overrides the configured run_js_file policy (all paths allowed)");
+    let run_js_file_access = if cli.allow_run_js_file {
+        if policy_config.run_js_file.is_some() {
+            tracing::warn!(
+                "--allow-run-js-file overrides the configured run_js_file policy (all paths allowed)"
+            );
         }
-        tracing::info!("run_js file-path reads: ENABLED (allow all server-readable paths)");
-        engine.with_run_js_file_policy(RunJsFilePolicy::AllowAll)
-    } else if let Some(chain) = run_js_file_policy_chain {
+        tracing::info!(
+            "run_js file-path reads: ENABLED (allow all server-readable paths)"
+        );
+        RunJsFileAccess::AllowAll
+    } else if policy_config.run_js_file.is_some() {
         tracing::info!("run_js file-path reads: ENABLED (policy-gated)");
-        engine.with_run_js_file_policy(RunJsFilePolicy::Policy(chain))
+        RunJsFileAccess::Policy
     } else {
-        tracing::info!("run_js file-path reads: DISABLED (enable with --allow-run-js-file or a run_js_file policy)");
-        engine
+        tracing::info!(
+            "run_js file-path reads: DISABLED (enable with --allow-run-js-file or a run_js_file policy)"
+        );
+        RunJsFileAccess::Disabled
     };
-
-
-    // ── Execution registry ──────────────────────────────────────────────
-    // Use session_db_path for both stateless and stateful modes.
-    // For stateless with http_port, add port suffix to avoid sled lock
-    // contention when multiple nodes run on the same machine.
-    let exec_db_path = match cli.http_port {
-        Some(port) => format!("{}/executions-{}", cli.session_db_path, port),
-        None => format!("{}/executions", cli.session_db_path),
+    let capability_config = CapabilityBootstrapConfig {
+        fetch_header_rules,
+        filesystem_passthrough: cli.fs_passthrough,
+        allow_external_modules: cli.allow_external_modules,
+        run_js_file_access,
     };
-    let engine = match ExecutionRegistry::new(&exec_db_path) {
-        Ok(registry) => {
-            tracing::info!("Execution registry opened at {}", exec_db_path);
-            engine.with_execution_registry(Arc::new(registry))
-        }
-        Err(e) => {
-            tracing::warn!("Failed to open execution registry at {}: {}. Async execution disabled.", exec_db_path, e);
-            engine
-        }
-    };
+    let runtime_builder = runtime_builder.with_policy_config(policy_config, capability_config)?;
 
     // ── MCP server modules ────────────────────────────────────────────────
     let mcp_server_configs = load_mcp_server_configs(&cli.mcp_servers, &cli.mcp_config)?;
-    let engine = if !mcp_server_configs.is_empty() {
+    let has_upstream_mcp_servers = !mcp_server_configs.is_empty();
+    if has_upstream_mcp_servers {
         tracing::info!("Connecting to {} MCP server(s)...", mcp_server_configs.len());
-        let stub_config = engine::mcp_client::StubConfig {
-            prefix: cli.mcp_stub_prefix.clone(),
-            enabled: cli.mcp_stubs,
-        };
         tracing::info!(
-            stubs = stub_config.enabled,
-            prefix = %stub_config.prefix,
+            stubs = cli.mcp_stubs,
+            prefix = %cli.mcp_stub_prefix,
             "Upstream MCP tool stubbing"
         );
-        let manager = engine::mcp_client::McpClientManager::connect(mcp_server_configs).await
-            .map_err(|e| anyhow::anyhow!("MCP server connection failed: {}", e))?
-            .with_stub_config(stub_config);
+    }
+    let runtime_builder = runtime_builder
+        .with_upstream_mcp_config(
+            mcp_server_configs,
+            StubConfig {
+                prefix: cli.mcp_stub_prefix.clone(),
+                enabled: cli.mcp_stubs,
+            },
+        )
+        .await?;
+    if has_upstream_mcp_servers {
         tracing::info!("All MCP servers connected. JS code can use mcp.callTool(), mcp.listTools(), mcp.servers");
-        let engine = engine.with_mcp_client_manager(manager);
-        if let Some(chain) = mcp_tools_policy_chain {
-            tracing::info!("MCP tools policy: ENABLED");
-            engine.with_mcp_tools_policy_chain(chain)
-        } else {
-            engine
-        }
-    } else {
-        engine
-    };
+    }
 
-    // ── Prompt / tool description overrides ──────────────────────────────
-    // Both flags accept inline text or, with a leading `@`, a path to a file.
-    let engine = if let Some(ref value) = cli.instructions {
-        let text = resolve_text_or_file(value, "--instructions")?;
+    // ── Embedded runtime features ────────────────────────────────────────
+    // Resolve CLI file references before handing one typed configuration to
+    // the canonical library bootstrap.
+    let instructions_override = cli.instructions.as_deref()
+        .map(|value| resolve_text_or_file(value, "--instructions"))
+        .transpose()?;
+    if let Some(text) = &instructions_override {
         tracing::info!("Overriding MCP server instructions ({} chars)", text.len());
-        engine.with_instructions_override(text)
-    } else {
-        engine
-    };
-    let engine = if let Some(ref value) = cli.run_js_description {
-        let text = resolve_text_or_file(value, "--run-js-description")?;
+    }
+    let run_js_description_override = cli.run_js_description.as_deref()
+        .map(|value| resolve_text_or_file(value, "--run-js-description"))
+        .transpose()?;
+    if let Some(text) = &run_js_description_override {
         tracing::info!("Overriding run_js tool description ({} chars)", text.len());
-        engine.with_run_js_description_override(text)
-    } else {
-        engine
+    }
+    if !wasm_modules.is_empty() {
+        tracing::info!(
+            stubs = cli.wasm_stubs,
+            prefix = %cli.wasm_stub_prefix,
+            "WASM module stubbing"
+        );
+    }
+    let feature_config = FeatureBootstrapConfig {
+        wasm_default_max_bytes,
+        hardening: HardeningConfig {
+            freeze_ops: cli.harden_freeze_ops,
+            neutralize_proxy_details: cli.harden_neutralize_proxy_details,
+            neutralize_introspection: cli.harden_neutralize_introspection,
+            remove_bootstrap: cli.harden_remove_bootstrap,
+            remove_shared_memory: cli.harden_remove_shared_memory,
+        },
+        wasm_modules,
+        wasm_stubs: WasmStubConfig {
+            prefix: cli.wasm_stub_prefix.clone(),
+            enabled: cli.wasm_stubs,
+        },
+        instructions_override,
+        run_js_description_override,
     };
+    let runtime_builder = runtime_builder.with_feature_config(feature_config)?;
 
     // ── Build session verifier (if --jwks-url) ─────────────────────────
     let session_verifier: Option<Arc<SessionVerifier>> = if let Some(ref jwks_url) = cli.jwks_url {
@@ -695,82 +394,57 @@ async fn async_main(cli: Cli) -> Result<()> {
         None
     };
 
+    let runtime = runtime_builder.build();
+
     // ── Start transport ─────────────────────────────────────────────────
     // McpService (session-capable) is used whenever any per-session state axis
     // is on (heap and/or fs); StatelessMcpService only when neither is.
     let bind_host = cli.bind_host.clone();
-    if let Some(port) = cli.http_port {
+    let transport_result: Result<()> = if let Some(port) = cli.http_port {
         tracing::info!("Starting Streamable HTTP transport on port {}", port);
-        if engine.session_capable() {
+        if runtime.session_capable() {
             let verifier = session_verifier.clone();
-            start_streamable_http(engine, bind_host, port, move |e| McpService::new(e, verifier.clone())).await?;
+            start_streamable_http(runtime.clone(), bind_host, port, move |e| McpService::new(e, verifier.clone())).await
         } else {
             let verifier = session_verifier.clone();
-            start_streamable_http(engine, bind_host, port, move |e| StatelessMcpService::new(e, verifier.clone())).await?;
+            start_streamable_http(runtime.clone(), bind_host, port, move |e| StatelessMcpService::new(e, verifier.clone())).await
         }
     } else if let Some(port) = cli.sse_port {
         // Legacy HTTP+SSE transport, served by the vendored rmcp 0.1.5 SSE
         // server. No MCP tasks support here — use --http-port for tasks.
         tracing::info!("Starting legacy HTTP+SSE transport on port {} (no MCP tasks; use --http-port for tasks)", port);
         let verifier = session_verifier.clone();
-        start_sse_server(engine, bind_host, port, verifier).await?;
+        start_sse_server(runtime.clone(), bind_host, port, verifier).await
     } else {
         tracing::info!("Starting stdio transport");
-        if engine.session_capable() {
-            let service = McpService::new(engine, None)
-                .with_session_id(cli.session_id.clone())
-                .serve(stdio())
-                .await
-                .inspect_err(|e| {
-                    tracing::error!("serving error: {:?}", e);
-                })?;
-            service.waiting().await?;
+        if runtime.session_capable() {
+            async {
+                let service = McpService::new(runtime.clone(), None)
+                    .with_session_id(cli.session_id.clone())
+                    .serve(stdio())
+                    .await
+                    .inspect_err(|e| {
+                        tracing::error!("serving error: {:?}", e);
+                    })?;
+                service.waiting().await.map(|_| ()).map_err(Into::into)
+            }
+            .await
         } else {
-            let service = StatelessMcpService::new(engine, None)
-                .serve(stdio())
-                .await
-                .inspect_err(|e| {
-                    tracing::error!("serving error: {:?}", e);
-                })?;
-            service.waiting().await?;
+            async {
+                let service = StatelessMcpService::new(runtime.clone(), None)
+                    .serve(stdio())
+                    .await
+                    .inspect_err(|e| {
+                        tracing::error!("serving error: {:?}", e);
+                    })?;
+                service.waiting().await.map(|_| ()).map_err(Into::into)
+            }
+            .await
         }
-    }
+    };
+    runtime.shutdown().await;
+    transport_result?;
 
-    Ok(())
-}
-
-/// Seed a new session (`to`, from `--session-id`) with a previous session's
-/// (`from`) latest heap+fs snapshot. Copies the source session's most recent
-/// log entry as the target's first entry, so the target resumes the source's
-/// state on its first execution but writes subsequent snapshots under its own
-/// id (copy-on-write; the source is untouched).
-///
-/// No-op if the target already has history (idempotent resume). Errors if
-/// `--session-id` is missing (nothing to fork into).
-async fn fork_session(
-    log: &SessionLog,
-    from: &str,
-    to: Option<&str>,
-) -> Result<()> {
-    use engine::session_log::ForkOutcome;
-    let to = to.ok_or_else(|| {
-        anyhow::anyhow!("--session-fork-from requires --session-id (the new session to create)")
-    })?;
-    if from == to {
-        anyhow::bail!("--session-fork-from '{from}' must differ from --session-id '{to}'");
-    }
-
-    match log.fork(from, to).await.map_err(|e| anyhow::anyhow!(e))? {
-        ForkOutcome::Forked { heap, fs } => {
-            tracing::info!("Forked session '{to}' from '{from}' (heap {}, fs {:?})", heap, fs);
-        }
-        ForkOutcome::TargetExists => {
-            tracing::info!("Session '{to}' already has history; not forking from '{from}'");
-        }
-        ForkOutcome::SourceEmpty => {
-            tracing::warn!("--session-fork-from '{from}' has no session history; '{to}' starts empty");
-        }
-    }
     Ok(())
 }
 
@@ -787,10 +461,10 @@ fn resolve_bind_addr(host: &str, port: u16) -> Result<std::net::SocketAddr> {
 
 // ── Streamable HTTP transport (--http-port) ─────────────────────────────
 
-async fn start_streamable_http<S, F>(engine: Engine, host: String, port: u16, make_service: F) -> Result<()>
+async fn start_streamable_http<S, F>(runtime: Arc<Engine>, host: String, port: u16, make_service: F) -> Result<()>
 where
     S: ServerHandler + Send + Sync + 'static,
-    F: Fn(Engine) -> S + Send + Sync + Clone + 'static,
+    F: Fn(Arc<Engine>) -> S + Send + Sync + Clone + 'static,
 {
     let bind: std::net::SocketAddr = resolve_bind_addr(&host, port)?;
     let ct = CancellationToken::new();
@@ -799,9 +473,9 @@ where
     // /mcp. It natively serves the MCP `tasks/*` utility (SEP-1319) for tools
     // marked `execution(task_support = ...)` — here, `run_js`. A fresh service
     // (and thus a fresh per-connection session id) is created per session.
-    let factory_engine = engine.clone();
+    let factory_runtime = runtime.clone();
     let mcp_service = StreamableHttpService::new(
-        move || Ok(make_service(factory_engine.clone())),
+        move || Ok(make_service(factory_runtime.clone())),
         LocalSessionManager::default().into(),
         StreamableHttpServerConfig::default(),
     );
@@ -823,20 +497,21 @@ where
     // Mount the MCP service at /mcp alongside the plain HTTP API and openapi route.
     let app = axum::Router::new()
         .nest_service("/mcp", mcp_service)
-        .merge(api::api_router(engine.clone()))
+        .merge(api::api_router(runtime.clone()))
         .merge(openapi_route);
 
     let listener = tokio::net::TcpListener::bind(bind).await?;
     tracing::info!("Streamable HTTP server listening on {}", bind);
 
     let ct_shutdown = ct.clone();
-    axum::serve(listener, app)
+    let server_result = axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             let _ = tokio::signal::ctrl_c().await;
             tracing::info!("Received Ctrl+C, shutting down");
             ct_shutdown.cancel();
         })
-        .await?;
+        .await;
+    server_result?;
 
     Ok(())
 }
@@ -848,7 +523,7 @@ where
 // MCP tasks (use the Streamable HTTP transport for those).
 
 async fn start_sse_server(
-    engine: Engine,
+    runtime: Arc<Engine>,
     host: String,
     port: u16,
     verifier: Option<Arc<SessionVerifier>>,
@@ -879,7 +554,7 @@ async fn start_sse_server(
         }));
 
     let app = sse_router
-        .merge(api::api_router(engine.clone()))
+        .merge(api::api_router(runtime.clone()))
         .merge(openapi_route);
 
     let listener = tokio::net::TcpListener::bind(sse_server.config.bind).await?;
@@ -892,9 +567,12 @@ async fn start_sse_server(
         tracing::info!("SSE server shutting down");
     });
 
-    sse_server.with_service(move || mcp_sse::SseService::new(engine.clone(), verifier.clone()));
+    let service_runtime = runtime.clone();
+    sse_server.with_service(move || {
+        mcp_sse::SseService::new(service_runtime.clone(), verifier.clone())
+    });
 
-    tokio::spawn(async move {
+    let server_task = tokio::spawn(async move {
         if let Err(e) = server.await {
             tracing::error!("SSE server error: {:?}", e);
         }
@@ -903,6 +581,7 @@ async fn start_sse_server(
     tokio::signal::ctrl_c().await?;
     tracing::info!("Received Ctrl+C, shutting down SSE server");
     ct.cancel();
+    let _ = server_task.await;
 
     Ok(())
 }
@@ -950,7 +629,12 @@ fn load_wasm_modules(
 
         let bytes = std::fs::read(path)
             .map_err(|e| anyhow::anyhow!("Failed to read WASM file '{}': {}", path, e))?;
-        modules.push(WasmModule { name, bytes, max_memory_bytes, description: None });
+        modules.push(WasmModule {
+            name,
+            bytes,
+            max_memory_bytes,
+            description: None,
+        });
     }
 
     // Parse --wasm-config: inline JSON (as injected by the `wasm` section of a
@@ -981,7 +665,7 @@ fn load_wasm_modules(
                         "WASM config \"max_memory_bytes\" for '{}' must be a positive integer", name
                     )))
                     .transpose()?
-                    .map(|v| v as usize);
+                    ;
                 let description = obj.get("description")
                     .map(|v| v.as_str().ok_or_else(|| anyhow::anyhow!(
                         "WASM config \"description\" for '{}' must be a string", name
@@ -997,7 +681,18 @@ fn load_wasm_modules(
             validate_wasm_name(&name)?;
             let bytes = std::fs::read(&path)
                 .map_err(|e| anyhow::anyhow!("Failed to read WASM file '{}': {}", path, e))?;
-            modules.push(WasmModule { name, bytes, max_memory_bytes, description });
+            let max_memory_bytes = max_memory_bytes
+                .map(usize::try_from)
+                .transpose()
+                .map_err(|_| anyhow::anyhow!(
+                    "WASM config \"max_memory_bytes\" for '{}' is too large", name
+                ))?;
+            modules.push(WasmModule {
+                name,
+                bytes,
+                max_memory_bytes,
+                description,
+            });
         }
     }
 
@@ -1128,6 +823,10 @@ impl<'de> Deserialize<'de> for StaticHeadersConfig {
     }
 }
 
+fn default_fetch_oauth_refresh_buffer_secs() -> u64 {
+    server::engine::fetch::default_refresh_buffer_secs()
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FetchHeaderAuthConfig {
@@ -1139,52 +838,50 @@ struct FetchHeaderAuthConfig {
     client_secret: String,
     #[serde(default)]
     scope: Option<String>,
-    #[serde(default = "engine::fetch::default_refresh_buffer_secs")]
+    #[serde(default = "default_fetch_oauth_refresh_buffer_secs")]
     refresh_buffer_secs: u64,
 }
 
 impl FetchHeaderConfigRule {
-    fn into_runtime_rule(self) -> Result<engine::fetch::HeaderRule> {
-        let host = self.host;
-        let methods = self.methods;
-
-        match (self.headers, self.auth) {
+    fn into_rule(self) -> Result<server::engine::fetch::HeaderRule> {
+        match (&self.headers, &self.auth) {
             (Some(_), Some(_)) => anyhow::bail!(
                 "Fetch header config rule for host '{}' cannot define both 'headers' and 'auth'",
-                host
+                self.host
             ),
             (None, None) => anyhow::bail!(
                 "Fetch header config rule for host '{}' must define either 'headers' or 'auth'",
-                host
+                self.host
             ),
-            (Some(headers), None) => engine::fetch::HeaderRule::new(
-                host,
-                methods,
-                engine::fetch::HeaderInjection::Static { headers: headers.0 },
-            ),
-            (None, Some(auth)) => {
+            _ => {}
+        }
+        let oauth = match self.auth {
+            None => None,
+            Some(auth) => {
                 if auth.auth_type != "oauth_client_credentials" {
                     anyhow::bail!(
                         "Unsupported fetch auth type '{}' for host '{}'",
                         auth.auth_type,
-                        host
+                        self.host
                     );
                 }
-
-                engine::fetch::HeaderRule::oauth_client_credentials(
-                    host,
-                    methods,
-                    engine::fetch::OAuthClientCredentialsConfig {
-                        header_name: auth.header,
-                        token_url: auth.token_url,
-                        client_id: auth.client_id,
-                        client_secret: auth.client_secret,
-                        scope: auth.scope,
-                        refresh_buffer_secs: auth.refresh_buffer_secs,
-                    },
-                )
+                Some(OAuthClientCredentialsConfig {
+                    header_name: auth.header,
+                    token_url: auth.token_url,
+                    client_id: auth.client_id,
+                    client_secret: auth.client_secret,
+                    scope: auth.scope,
+                    refresh_buffer_secs: auth.refresh_buffer_secs,
+                })
             }
-        }
+        };
+        server::bootstrap::fetch_header_rule(
+            self.host,
+            self.methods,
+            self.headers.map(|headers| headers.0),
+            oauth,
+        )
+        .map_err(Into::into)
     }
 }
 
@@ -1192,7 +889,7 @@ impl FetchHeaderConfigRule {
 fn load_fetch_header_rules(
     cli_rules: &[String],
     config_path: &Option<String>,
-) -> Result<Vec<engine::fetch::HeaderRule>> {
+) -> Result<Vec<server::engine::fetch::HeaderRule>> {
     let mut rules = Vec::new();
 
     for entry in cli_rules {
@@ -1211,7 +908,7 @@ fn load_fetch_header_rules(
         let file_rules: Vec<FetchHeaderConfigRule> = serde_json::from_str(&content)
             .map_err(|e| anyhow::anyhow!("Invalid JSON in fetch header config '{}': {}", path, e))?;
         for rule in file_rules {
-            rules.push(rule.into_runtime_rule()?);
+            rules.push(rule.into_rule()?);
         }
     }
 
@@ -1221,7 +918,7 @@ fn load_fetch_header_rules(
 /// Parse a `--fetch-header` CLI string into a `HeaderRule`.
 /// Format: host=<host>,header=<name>,value=<val>[,methods=GET;POST]
 /// Or:     host=<host>,header=<name>,token_url=<url>,client_id=<id>,client_secret=<secret>[,scope=<scope>][,methods=GET;POST][,refresh_buffer_secs=30]
-fn parse_fetch_header_cli(s: &str) -> Result<engine::fetch::HeaderRule> {
+fn parse_fetch_header_cli(s: &str) -> Result<server::engine::fetch::HeaderRule> {
     let mut host = None;
     let mut methods = Vec::new();
     let mut header_name = None;
@@ -1269,20 +966,17 @@ fn parse_fetch_header_cli(s: &str) -> Result<engine::fetch::HeaderRule> {
         || scope.is_some()
         || refresh_buffer_secs.is_some();
 
-    match (header_value, has_dynamic_keys) {
+    let (static_headers, oauth) = match (header_value, has_dynamic_keys) {
         (Some(_), true) => anyhow::bail!(
             "--fetch-header cannot mix static 'value' with dynamic oauth keys"
         ),
-        (Some(value), false) => engine::fetch::HeaderRule::static_header(
-            host,
-            methods,
-            header_name,
-            value,
+        (Some(value), false) => (
+            Some(std::collections::HashMap::from([(header_name, value)])),
+            None,
         ),
-        (None, true) => engine::fetch::HeaderRule::oauth_client_credentials(
-            host,
-            methods,
-            engine::fetch::OAuthClientCredentialsConfig {
+        (None, true) => (
+            None,
+            Some(OAuthClientCredentialsConfig {
                 header_name,
                 token_url: token_url.ok_or_else(|| anyhow::anyhow!(
                     "--fetch-header missing 'token_url' for dynamic oauth rule"
@@ -1295,13 +989,15 @@ fn parse_fetch_header_cli(s: &str) -> Result<engine::fetch::HeaderRule> {
                 ))?,
                 scope,
                 refresh_buffer_secs: refresh_buffer_secs
-                    .unwrap_or_else(engine::fetch::default_refresh_buffer_secs),
-            },
+                    .unwrap_or_else(default_fetch_oauth_refresh_buffer_secs),
+            }),
         ),
         (None, false) => anyhow::bail!(
             "--fetch-header must provide either 'value' for a static rule or the full dynamic oauth key set: token_url, client_id, client_secret"
         ),
-    }
+    };
+    server::bootstrap::fetch_header_rule(host, methods, static_headers, oauth).map_err(Into::into)
+
 }
 
 // ── MCP server module loading ────────────────────────────────────────────
@@ -1311,8 +1007,7 @@ fn parse_fetch_header_cli(s: &str) -> Result<engine::fetch::HeaderRule> {
 fn load_mcp_server_configs(
     cli_servers: &[String],
     config_path: &Option<String>,
-) -> Result<Vec<engine::mcp_client::McpServerConfig>> {
-    use engine::mcp_client::{McpServerConfig, McpServerTransport};
+) -> Result<Vec<McpServerConfig>> {
     let mut configs = Vec::new();
 
     // Parse CLI --mcp-server flags
@@ -1401,7 +1096,6 @@ mod tests {
     }
 
     fn check_mcp_servers() -> anyhow::Result<()> {
-        use crate::engine::mcp_client::McpServerTransport;
 
         let configs = load_mcp_server_configs(
             &[
@@ -1410,8 +1104,8 @@ mod tests {
             ],
             &None,
         )?;
-        anyhow::ensure!(matches!(configs[0].transport, McpServerTransport::Stdio { .. }));
-        anyhow::ensure!(matches!(configs[1].transport, McpServerTransport::Sse { .. }));
+        anyhow::ensure!(matches!(configs[0].transport, server::engine::mcp_client::McpServerTransport::Stdio { .. }));
+        anyhow::ensure!(matches!(configs[1].transport, server::engine::mcp_client::McpServerTransport::Sse { .. }));
         Ok(())
     }
 
@@ -1454,7 +1148,7 @@ mod tests {
     }
 
     fn check_peers() -> anyhow::Result<()> {
-        let (peers, peer_addrs) = crate::cluster::ClusterConfig::parse_peers(&[
+        let (peers, peer_addrs) = server::cluster::ClusterConfig::parse_peers(&[
             "node2@10.0.0.2:4000".to_string(),
             "10.0.0.3:4000".to_string(),
         ]);
@@ -1481,7 +1175,7 @@ mod tests {
 
         let checks = structured_arg_checks();
         let check_ids: BTreeSet<&str> = checks.iter().map(|(id, _)| *id).collect();
-        let grammar_ids: BTreeSet<&str> = crate::cli::Cli::structured_arg_ids().into_iter().collect();
+        let grammar_ids: BTreeSet<&str> = server::cli::Cli::structured_arg_ids().into_iter().collect();
 
         // Help registry (cli.rs) and parse-check registry (here) must cover the
         // exact same flags — so neither side can grow without the other.
@@ -1520,13 +1214,12 @@ mod tests {
 
     #[test]
     fn load_mcp_server_configs_accepts_inline_json() {
-        use crate::engine::mcp_client::McpServerTransport;
 
         let inline = r#"[{"name": "weather", "transport": "stdio", "command": "python", "args": ["server.py"]}]"#;
         let configs =
             load_mcp_server_configs(&[], &Some(inline.to_string())).expect("inline JSON should load");
         assert_eq!(configs[0].name, "weather");
-        assert!(matches!(configs[0].transport, McpServerTransport::Stdio { .. }));
+        assert!(matches!(configs[0].transport, server::engine::mcp_client::McpServerTransport::Stdio { .. }));
     }
 
     #[test]

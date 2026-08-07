@@ -28,7 +28,7 @@ fn tmp(tag: &str) -> String {
 }
 
 struct H {
-    engine: Engine,
+    engine: Arc<Engine>,
     store: Arc<FsStore>,
 }
 
@@ -38,7 +38,7 @@ fn harness() -> H {
         .with_fs_config(FsConfig::new(Arc::new(PolicyChain::new(vec![], EvalMode::All))))
         .with_execution_registry(Arc::new(ExecutionRegistry::new(&tmp("reg")).unwrap()))
         .with_fs_snapshots(store.clone(), Arc::new(LabelStore::in_memory()));
-    H { engine, store }
+    H { engine: Engine::from_engine(engine), store }
 }
 
 /// Build a snapshot from `(path, bytes)` and return its CA id (hex).
@@ -69,7 +69,7 @@ async fn three_way_merge_combines_non_overlapping_changes() {
 
     let merged = match h
         .engine
-        .fs_merge(&ours, &theirs, Some(base), Prefer::None)
+        .fs_merge(ours.clone(), theirs.clone(), Some(base), Prefer::None)
         .await
         .unwrap()
     {
@@ -89,7 +89,7 @@ async fn divergent_path_reports_structured_conflict() {
 
     match h
         .engine
-        .fs_merge(&ours, &theirs, Some(base), Prefer::None)
+        .fs_merge(ours.clone(), theirs.clone(), Some(base), Prefer::None)
         .await
         .unwrap()
     {
@@ -114,7 +114,7 @@ async fn prefer_ours_resolves_conflict_into_a_snapshot() {
 
     let merged = match h
         .engine
-        .fs_merge(&ours, &theirs, Some(base), Prefer::Ours)
+        .fs_merge(ours.clone(), theirs.clone(), Some(base), Prefer::Ours)
         .await
         .unwrap()
     {
@@ -131,8 +131,8 @@ async fn clean_merge_is_deterministic_and_dedups() {
     let ours = snap(&h.store, &[("a", b"a1"), ("b", b"b0")]).await;
     let theirs = snap(&h.store, &[("a", b"a0"), ("b", b"b1")]).await;
 
-    let m1 = h.engine.fs_merge(&ours, &theirs, Some(base.clone()), Prefer::None).await.unwrap();
-    let m2 = h.engine.fs_merge(&ours, &theirs, Some(base), Prefer::None).await.unwrap();
+    let m1 = h.engine.fs_merge(ours.clone(), theirs.clone(), Some(base.clone()), Prefer::None).await.unwrap();
+    let m2 = h.engine.fs_merge(ours.clone(), theirs.clone(), Some(base), Prefer::None).await.unwrap();
     let (FsMergeResult::Merged { ca_id: a }, FsMergeResult::Merged { ca_id: b }) = (m1, m2) else {
         panic!("expected two clean merges");
     };
@@ -150,7 +150,7 @@ async fn text_edits_to_different_lines_auto_merge_through_engine() {
     // 3-way resolves it with no conflict.
     let merged = match h
         .engine
-        .fs_merge(&ours, &theirs, Some(base), Prefer::None)
+        .fs_merge(ours.clone(), theirs.clone(), Some(base), Prefer::None)
         .await
         .unwrap()
     {
@@ -172,7 +172,7 @@ async fn text_same_line_conflict_reports_kind_and_markers() {
 
     match h
         .engine
-        .fs_merge(&ours, &theirs, Some(base), Prefer::None)
+        .fs_merge(ours.clone(), theirs.clone(), Some(base), Prefer::None)
         .await
         .unwrap()
     {
@@ -196,7 +196,7 @@ async fn two_way_merge_without_base_conflicts_on_divergence() {
     let theirs = snap(&h.store, &[("a", b"a2"), ("y", b"y")]).await;
 
     // No base: divergent 'a' conflicts.
-    match h.engine.fs_merge(&ours, &theirs, None, Prefer::None).await.unwrap() {
+    match h.engine.fs_merge(ours.clone(), theirs.clone(), None, Prefer::None).await.unwrap() {
         FsMergeResult::Conflict { conflicts } => {
             assert_eq!(conflicts.len(), 1);
             assert_eq!(conflicts[0].path, "a");
@@ -205,7 +205,7 @@ async fn two_way_merge_without_base_conflicts_on_divergence() {
         other => panic!("expected conflict, got {other:?}"),
     }
     // prefer=theirs keeps both disjoint additions plus theirs' 'a'.
-    let merged = match h.engine.fs_merge(&ours, &theirs, None, Prefer::Theirs).await.unwrap() {
+    let merged = match h.engine.fs_merge(ours.clone(), theirs.clone(), None, Prefer::Theirs).await.unwrap() {
         FsMergeResult::Merged { ca_id } => ca_id,
         other => panic!("expected merge, got {other:?}"),
     };

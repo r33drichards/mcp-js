@@ -25,7 +25,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 /// How to resolve a divergent path.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, uniffi::Enum)]
 pub enum Prefer {
     /// Report conflicts instead of resolving them.
     None,

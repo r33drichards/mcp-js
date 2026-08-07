@@ -249,7 +249,7 @@ async fn run_js(engine: &Engine, code: String) -> Result<String, String> {
 
     for _ in 0..600 {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        if let Ok(info) = engine.get_execution(&exec_id) {
+        if let Ok(info) = engine.get_execution(exec_id.clone()) {
             match info.status.as_str() {
                 "completed" => return Ok(info.result.unwrap_or_default()),
                 "failed" => return Err(info.error.unwrap_or_default()),
@@ -307,11 +307,11 @@ async fn matching_request_receives_injected_bearer_token_from_mock_token_server(
     }))])
     .await;
     let echo_server = start_echo_server().await;
-    let engine = build_engine(vec![oauth_rule_for_host(
+    let engine = Engine::from_engine(build_engine(vec![oauth_rule_for_host(
         "127.0.0.1",
         &[],
         token_server.token_url(),
-    )]);
+    )]));
 
     run_fetch(&engine, &echo_server.url, "GET", None)
         .await
@@ -338,12 +338,12 @@ async fn matching_request_receives_static_authorization_header() {
     ensure_v8();
 
     let echo_server = start_echo_server().await;
-    let engine = build_engine(vec![static_rule_for_host(
+    let engine = Engine::from_engine(build_engine(vec![static_rule_for_host(
         "127.0.0.1",
         &[],
         "Authorization",
         "Bearer static-token",
-    )]);
+    )]));
 
     run_fetch(&engine, &echo_server.url, "GET", None)
         .await
@@ -363,12 +363,12 @@ async fn user_provided_authorization_overrides_static_injection() {
     ensure_v8();
 
     let echo_server = start_echo_server().await;
-    let engine = build_engine(vec![static_rule_for_host(
+    let engine = Engine::from_engine(build_engine(vec![static_rule_for_host(
         "127.0.0.1",
         &[],
         "Authorization",
         "Bearer static-token",
-    )]);
+    )]));
 
     run_fetch(
         &engine,
@@ -393,18 +393,18 @@ async fn static_injection_skips_non_matching_host_and_method() {
     ensure_v8();
 
     let echo_server = start_echo_server().await;
-    let host_engine = build_engine(vec![static_rule_for_host(
+    let host_engine = Engine::from_engine(build_engine(vec![static_rule_for_host(
         "other.example.com",
         &[],
         "Authorization",
         "Bearer static-token",
-    )]);
-    let method_engine = build_engine(vec![static_rule_for_host(
+    )]));
+    let method_engine = Engine::from_engine(build_engine(vec![static_rule_for_host(
         "127.0.0.1",
         &["POST"],
         "Authorization",
         "Bearer static-token",
-    )]);
+    )]));
 
     run_fetch(&host_engine, &echo_server.url, "GET", None)
         .await
@@ -439,11 +439,11 @@ async fn repeated_requests_reuse_cached_token() {
     }))])
     .await;
     let echo_server = start_echo_server().await;
-    let engine = build_engine(vec![oauth_rule_for_host(
+    let engine = Engine::from_engine(build_engine(vec![oauth_rule_for_host(
         "127.0.0.1",
         &[],
         token_server.token_url(),
-    )]);
+    )]));
 
     run_fetch(&engine, &echo_server.url, "GET", None)
         .await
@@ -494,11 +494,11 @@ async fn post_expiry_request_uses_refresh_token_grant_when_available() {
     ])
     .await;
     let echo_server = start_echo_server().await;
-    let engine = build_engine(vec![oauth_rule_for_host(
+    let engine = Engine::from_engine(build_engine(vec![oauth_rule_for_host(
         "127.0.0.1",
         &[],
         token_server.token_url(),
-    )]);
+    )]));
 
     run_fetch(&engine, &echo_server.url, "GET", None)
         .await
@@ -553,11 +553,11 @@ async fn post_expiry_request_reacquires_with_client_credentials_without_refresh_
     ])
     .await;
     let echo_server = start_echo_server().await;
-    let engine = build_engine(vec![oauth_rule_for_host(
+    let engine = Engine::from_engine(build_engine(vec![oauth_rule_for_host(
         "127.0.0.1",
         &[],
         token_server.token_url(),
-    )]);
+    )]));
 
     run_fetch(&engine, &echo_server.url, "GET", None)
         .await
@@ -600,11 +600,11 @@ async fn user_provided_authorization_overrides_dynamic_injection() {
 
     let token_server = start_token_server(Vec::new()).await;
     let echo_server = start_echo_server().await;
-    let engine = build_engine(vec![oauth_rule_for_host(
+    let engine = Engine::from_engine(build_engine(vec![oauth_rule_for_host(
         "127.0.0.1",
         &[],
         token_server.token_url(),
-    )]);
+    )]));
 
     run_fetch(
         &engine,
@@ -631,11 +631,11 @@ async fn non_matching_host_performs_no_token_lookup() {
 
     let token_server = start_token_server(Vec::new()).await;
     let echo_server = start_echo_server().await;
-    let engine = build_engine(vec![oauth_rule_for_host(
+    let engine = Engine::from_engine(build_engine(vec![oauth_rule_for_host(
         "other.example.com",
         &[],
         token_server.token_url(),
-    )]);
+    )]));
 
     run_fetch(&engine, &echo_server.url, "GET", None)
         .await
@@ -657,11 +657,11 @@ async fn non_matching_method_performs_no_token_lookup() {
 
     let token_server = start_token_server(Vec::new()).await;
     let echo_server = start_echo_server().await;
-    let engine = build_engine(vec![oauth_rule_for_host(
+    let engine = Engine::from_engine(build_engine(vec![oauth_rule_for_host(
         "127.0.0.1",
         &["POST"],
         token_server.token_url(),
-    )]);
+    )]));
 
     run_fetch(&engine, &echo_server.url, "GET", None)
         .await
