@@ -506,6 +506,42 @@ const WEB_APIS_JS: &str = r#"
         };
     }
 
+    // A Blob's bytes live in `_data` as a latin1 byte-string: one code unit per
+    // byte, each in 0x00-0xFF. `arrayBuffer()`/`bytes()` read it back with
+    // `charCodeAt(i) & 0xff` and FormData._serialize splices it in verbatim, so
+    // every producer must hand over bytes in that form. Strings are UTF-8
+    // encoded on the way in (per the WHATWG constructor) and BufferSource parts
+    // are copied byte-for-byte — a Blob built from binary must survive intact,
+    // which is why parts are never stringified.
+    const _latin1FromBytes = function(bytes) {
+        let out = '';
+        const CHUNK = 0x8000;  // stay under String.fromCharCode's argument limit
+        for (let i = 0; i < bytes.length; i += CHUNK) {
+            out += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+        }
+        return out;
+    };
+    const _bytesFromLatin1 = function(data) {
+        const out = new Uint8Array(data.length);
+        for (let i = 0; i < data.length; i++) out[i] = data.charCodeAt(i) & 0xff;
+        return out;
+    };
+    const _latin1FromPart = function(part) {
+        if (part instanceof ArrayBuffer) return _latin1FromBytes(new Uint8Array(part));
+        if (ArrayBuffer.isView(part)) {
+            return _latin1FromBytes(new Uint8Array(part.buffer, part.byteOffset, part.byteLength));
+        }
+        return _latin1FromBytes(new TextEncoder().encode(String(part)));
+    };
+    // Build a Blob directly from bytes already in latin1 form, skipping the
+    // constructor's encoding step (which would double-encode them).
+    const _blobFromLatin1 = function(data, type) {
+        const b = new Blob([], { type: type });
+        b._data = data;
+        b.size = data.length;
+        return b;
+    };
+
     globalThis.Blob = function Blob(parts, options) {
         const opt = options || {};
         this.type = opt.type || '';
@@ -513,25 +549,25 @@ const WEB_APIS_JS: &str = r#"
         for (const part of (parts || [])) {
             if (part instanceof Blob) {
                 chunks.push(part._data);
-            } else if (typeof part === 'string') {
-                chunks.push(part);
             } else {
-                chunks.push(String(part));
+                chunks.push(_latin1FromPart(part));
             }
         }
         this._data = chunks.join('');
         this.size = this._data.length;
     };
-    Blob.prototype.text = function() { return Promise.resolve(this._data); };
+    Blob.prototype.text = function() {
+        return Promise.resolve(new TextDecoder().decode(_bytesFromLatin1(this._data)));
+    };
     Blob.prototype.slice = function(start, end, contentType) {
-        const s = this._data.slice(start, end);
-        return new Blob([s], { type: contentType || this.type });
+        // `_data` is one code unit per byte, so a string slice is a byte slice.
+        return _blobFromLatin1(this._data.slice(start, end), contentType || this.type);
     };
     Blob.prototype.arrayBuffer = function() {
-        const buf = new ArrayBuffer(this._data.length);
-        const view = new Uint8Array(buf);
-        for (let i = 0; i < this._data.length; i++) view[i] = this._data.charCodeAt(i) & 0xff;
-        return Promise.resolve(buf);
+        return Promise.resolve(_bytesFromLatin1(this._data).buffer);
+    };
+    Blob.prototype.bytes = function() {
+        return Promise.resolve(_bytesFromLatin1(this._data));
     };
 
     globalThis.File = function File(parts, name, options) {
@@ -576,6 +612,10 @@ const WEB_APIS_JS: &str = r#"
     FormData.prototype.forEach = function(cb) {
         for (const e of this._entries) { cb(e.value, e.name, this); }
     };
+    // Returns `body` as a latin1 byte-string (see the Blob comment above), not
+    // as text: file parts are spliced in from `Blob._data` byte-for-byte, so
+    // UTF-8 encoding the result would corrupt every binary upload. Callers must
+    // put it on the wire with `charCodeAt(i) & 0xff`, not a TextEncoder.
     FormData.prototype._serialize = function() {
         const boundary = '----FormData' + Math.random().toString(36).slice(2) + Date.now().toString(36);
         const parts = [];
@@ -594,12 +634,12 @@ const WEB_APIS_JS: &str = r#"
                 contentType = entry.value.type || 'application/octet-stream';
                 body = entry.value._data;
             } else {
-                body = String(entry.value);
+                body = _latin1FromPart(String(entry.value));
             }
-            let part = '--' + boundary + '\r\nContent-Disposition: ' + disposition + '\r\n';
-            if (contentType) part += 'Content-Type: ' + contentType + '\r\n';
-            part += '\r\n' + body + '\r\n';
-            parts.push(part);
+            let head = '--' + boundary + '\r\nContent-Disposition: ' + disposition + '\r\n';
+            if (contentType) head += 'Content-Type: ' + contentType + '\r\n';
+            head += '\r\n';
+            parts.push(_latin1FromPart(head) + body + '\r\n');
         }
         parts.push('--' + boundary + '--\r\n');
         return { boundary: boundary, body: parts.join('') };
