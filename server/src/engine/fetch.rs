@@ -509,8 +509,14 @@ const FETCH_JS_WRAPPER: &str = r#"
         if (opts.body !== undefined && opts.body !== null) {
             let bytes;
             if (typeof FormData !== 'undefined' && opts.body instanceof FormData) {
+                // _serialize returns a latin1 byte-string (file parts come
+                // straight from Blob._data); TextEncoder would re-encode every
+                // byte >= 0x80 and corrupt binary uploads.
                 const serialized = opts.body._serialize();
-                bytes = new TextEncoder().encode(serialized.body);
+                bytes = new Uint8Array(serialized.body.length);
+                for (let i = 0; i < serialized.body.length; i++) {
+                    bytes[i] = serialized.body.charCodeAt(i) & 0xff;
+                }
                 if (!('content-type' in normalizedHeaders)) {
                     normalizedHeaders['content-type'] = 'multipart/form-data; boundary=' + serialized.boundary;
                 }
@@ -556,7 +562,10 @@ const FETCH_JS_WRAPPER: &str = r#"
                 json: function() { return Promise.resolve(JSON.parse(decodeText())); },
                 arrayBuffer: function() { return Promise.resolve(toArrayBuffer()); },
                 bytes: function() { return Promise.resolve(new Uint8Array(responseBytes)); },
-                blob: function() { return Promise.resolve(new Blob([decodeText()], { type: responseHeaders.get('content-type') || '' })); },
+                // Built from the raw bytes, not decodeText(): a UTF-8 round-trip
+                // turns every invalid sequence into U+FFFD and silently mangles
+                // binary bodies (wasm, fonts, images).
+                blob: function() { return Promise.resolve(new Blob([responseBytes], { type: responseHeaders.get('content-type') || '' })); },
                 clone: function() { return mkResponse(); },
             };
         };
