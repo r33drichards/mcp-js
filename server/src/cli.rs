@@ -75,7 +75,13 @@ pub struct Cli {
     #[arg(long = "session-fork-from", env = "MCP_V8_SESSION_FORK_FROM", help_heading = "Core")]
     pub session_fork_from: Option<String>,
 
-    /// HTTP port using Streamable HTTP transport (MCP 2025-03-26+, load-balanceable)
+    /// HTTP port using Streamable HTTP transport (MCP 2025-03-26+,
+    /// load-balanceable). If unset, and no `--sse-port` is configured either,
+    /// the platform-conventional `PORT` environment variable is used as a
+    /// fallback — so hosted platforms that inject `PORT` (Railway, Render,
+    /// Heroku, Fly, Cloud Run, ...) serve Streamable HTTP with no argument
+    /// changes. This flag, `MCP_V8_HTTP_PORT`, and a config-file `http_port`
+    /// all take precedence over `PORT`.
     #[arg(long, env = "MCP_V8_HTTP_PORT", conflicts_with = "sse_port", help_heading = "Core")]
     pub http_port: Option<u16>,
 
@@ -662,5 +668,108 @@ pub fn build_command() -> clap::Command {
 pub fn parse() -> Cli {
     let command = crate::config::apply_config_file(build_command());
     let mut matches = command.get_matches();
-    Cli::from_arg_matches_mut(&mut matches).unwrap_or_else(|err| err.exit())
+    let mut cli = Cli::from_arg_matches_mut(&mut matches).unwrap_or_else(|err| err.exit());
+    if let Err(message) = apply_port_env(&mut cli, std::env::var("PORT").ok().as_deref()) {
+        build_command()
+            .error(clap::error::ErrorKind::InvalidValue, message)
+            .exit();
+    }
+    cli
+}
+
+/// Fold the PaaS-conventional `PORT` environment variable into `--http-port`.
+///
+/// Hosted platforms (Railway, Render, Heroku, Fly, Cloud Run, …) tell a service
+/// which port to listen on through a generic `PORT` variable rather than a
+/// project-specific one, and route their health checks to it. Honouring it lets
+/// the published image deploy on those platforms unmodified.
+///
+/// It is strictly a fallback, sitting below every other way to choose a port:
+/// an explicit `--http-port`/`--sse-port` — whether from the command line, from
+/// `MCP_V8_HTTP_PORT`/`MCP_V8_SSE_PORT`, or from a `--config` file (which clap
+/// resolves as a per-arg default before this runs) — always wins. Because
+/// `PORT` selects a *transport* and not just a number, `--metadata-only` nodes,
+/// which reject both HTTP transports, ignore it rather than failing at startup.
+///
+/// An empty or all-whitespace value counts as unset, so `-e PORT=` opts back
+/// out and returns the process to the stdio transport.
+fn apply_port_env(cli: &mut Cli, port: Option<&str>) -> Result<(), String> {
+    if cli.http_port.is_some() || cli.sse_port.is_some() || cli.metadata_only {
+        return Ok(());
+    }
+    let Some(raw) = port.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(());
+    };
+    let parsed: u16 = raw.parse().map_err(|_| {
+        format!("invalid PORT '{raw}': expected a TCP port number between 0 and 65535")
+    })?;
+    cli.http_port = Some(parsed);
+    Ok(())
+}
+
+#[cfg(test)]
+mod port_env_tests {
+    use super::*;
+
+    fn parse_argv(argv: &[&str]) -> Cli {
+        let mut matches = build_command()
+            .try_get_matches_from(std::iter::once("server").chain(argv.iter().copied()))
+            .expect("argv must parse");
+        Cli::from_arg_matches_mut(&mut matches).expect("argv must map onto Cli")
+    }
+
+    #[test]
+    fn port_env_selects_streamable_http() {
+        let mut cli = parse_argv(&[]);
+        apply_port_env(&mut cli, Some("3000")).expect("valid PORT");
+        assert_eq!(cli.http_port, Some(3000));
+        assert_eq!(cli.sse_port, None, "PORT must not touch the legacy transport");
+    }
+
+    #[test]
+    fn explicit_http_port_beats_port_env() {
+        let mut cli = parse_argv(&["--http-port", "9000"]);
+        apply_port_env(&mut cli, Some("3000")).expect("valid PORT");
+        assert_eq!(cli.http_port, Some(9000));
+    }
+
+    #[test]
+    fn explicit_sse_port_beats_port_env() {
+        let mut cli = parse_argv(&["--sse-port", "8081"]);
+        apply_port_env(&mut cli, Some("3000")).expect("valid PORT");
+        assert_eq!(cli.sse_port, Some(8081));
+        assert_eq!(cli.http_port, None, "PORT must not re-add a conflicting transport");
+    }
+
+    #[test]
+    fn metadata_only_ignores_port_env() {
+        let mut cli = parse_argv(&["--metadata-only", "--cluster-port", "4000"]);
+        apply_port_env(&mut cli, Some("3000")).expect("valid PORT");
+        assert_eq!(cli.http_port, None, "a metadata-only node serves no MCP transport");
+    }
+
+    #[test]
+    fn unset_or_empty_port_env_leaves_stdio() {
+        for value in [None, Some(""), Some("   ")] {
+            let mut cli = parse_argv(&[]);
+            apply_port_env(&mut cli, value).expect("empty PORT is not an error");
+            assert_eq!(cli.http_port, None, "PORT={value:?} must leave stdio selected");
+        }
+    }
+
+    #[test]
+    fn malformed_port_env_is_an_error() {
+        for value in ["http", "8080x", "-1", "65536", "3000.0"] {
+            let mut cli = parse_argv(&[]);
+            let err = apply_port_env(&mut cli, Some(value)).expect_err("PORT must be a u16");
+            assert!(err.contains(value), "error must quote the offending value: {err}");
+        }
+    }
+
+    #[test]
+    fn surrounding_whitespace_is_tolerated() {
+        let mut cli = parse_argv(&[]);
+        apply_port_env(&mut cli, Some(" 3000\n")).expect("valid PORT");
+        assert_eq!(cli.http_port, Some(3000));
+    }
 }

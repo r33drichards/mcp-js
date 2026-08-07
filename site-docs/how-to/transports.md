@@ -49,10 +49,39 @@ To restrict the heap size and set a custom storage directory:
 ```bash
 mcp-v8 --http-port=8080 \
         --heap-memory-max=32 \
-        --directory-path=/var/lib/mcp-v8/heaps
+        --heap-store=dir \
+        --heap-dir=/var/lib/mcp-v8/heaps
 ```
 
 `--http-port` and `--sse-port` are mutually exclusive. Passing both is an error.
+
+## Take the port from `PORT`
+
+Hosted platforms (Railway, Render, Heroku, Fly, Cloud Run, …) assign a port at
+runtime and inject it as `$PORT` rather than a project-specific variable, then
+route their health checks to it. When no port is configured any other way,
+`mcp-v8` folds `$PORT` into `--http-port`:
+
+```bash
+PORT=52341 mcp-v8   # equivalent to: mcp-v8 --http-port=52341
+```
+
+This makes the published Docker image deployable on those platforms with no
+start-command or argument overrides.
+
+`$PORT` is the lowest-precedence way to choose a port. Highest first:
+
+1. An explicit `--http-port`/`--sse-port` argument.
+2. `MCP_V8_HTTP_PORT` / `MCP_V8_SSE_PORT`.
+3. `http_port` / `sse_port` in a [config file](../reference/config-file.md).
+4. `$PORT` — always selects Streamable HTTP, never the legacy SSE transport.
+5. Nothing set — the stdio transport.
+
+An empty or whitespace-only `$PORT` counts as unset, so `PORT=` returns the
+process to stdio. A value that is not a number in `0..=65535` is rejected at
+startup rather than silently ignored. Because `$PORT` selects a transport and
+not merely a number, [`--metadata-only`](clustering.md#run-a-metadata-only-node)
+nodes — which serve no MCP transport — ignore it entirely.
 
 ## Expose SSE
 

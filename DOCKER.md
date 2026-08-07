@@ -34,20 +34,65 @@ name are passed straight to it — do not repeat the binary name.
 
 ### Custom Port
 
+Either set `$PORT` or pass the flag explicitly:
+
 ```bash
+docker run -p 3000:3000 -e PORT=3000 mcp-v8:latest
 docker run -p 3000:3000 mcp-v8:latest --http-port 3000
 ```
+
+### Deploying to a Hosted Platform
+
+Platforms such as Railway, Render, Heroku, Fly and Cloud Run assign a port at
+runtime and inject it as `$PORT`, then route their health checks to it. `mcp-v8`
+folds `$PORT` into `--http-port`, so the image deploys unmodified — no start
+command or argument overrides:
+
+```bash
+PORT=52341 mcp-v8   # equivalent to: mcp-v8 --http-port 52341
+```
+
+Precedence, highest first:
+
+1. An explicit `--http-port`/`--sse-port` argument.
+2. `MCP_V8_HTTP_PORT` / `MCP_V8_SSE_PORT`.
+3. `http_port` / `sse_port` in a `--config` file.
+4. `$PORT` (always Streamable HTTP).
+5. No port at all — the stdio transport.
+
+Because the container sets `PORT=8080` by default, use `-e PORT=` to clear it
+and get stdio:
+
+```bash
+docker run -i -e PORT= mcp-v8:latest
+```
+
+`--metadata-only` cluster nodes serve no MCP transport and ignore `$PORT`
+entirely rather than failing at startup.
 
 ### With Persistent Storage (Volume)
 
 ```bash
 docker run -p 8080:8080 -v mcp-v8-data:/data mcp-v8:latest \
-  --http-port 8080 --heap-store dir --heap-dir /data/heaps
+  --http-port 8080 \
+  --heap-store dir --heap-dir /data/heaps \
+  --session-db-path /data/sessions
 ```
 
 Persistence is opt-in: `--heap-store dir` turns on heap snapshots, and the named
 volume keeps them across container restarts. Use `--fs-store dir --fs-dir
 /data/fs` to persist the virtual filesystem the same way.
+
+Point `--session-db-path` at the volume too. It holds the session log (the
+per-session heap+fs history) and the execution registry, and is the default
+parent for the heap-tag store, fs blob store, and fs label database. It defaults
+to `/tmp/mcp-v8-sessions`, so leaving it off the volume means the heap snapshots
+survive a restart while the session history and tags pointing at them do not.
+
+Note that heap persistence is mutually exclusive with WebAssembly: heap
+snapshots require a V8 `SnapshotCreator` isolate, which disables WASM, so
+combining `--heap-store` with `--wasm-module`/`--wasm-config` is rejected at
+startup.
 
 ### With S3 Storage
 
@@ -96,6 +141,7 @@ services:
       - --http-port=8080
       - --heap-store=dir
       - --heap-dir=/data/heaps
+      - --session-db-path=/data/sessions
     ports:
       - "8080:8080"
     volumes:
