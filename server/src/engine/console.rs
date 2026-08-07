@@ -448,6 +448,11 @@ const WEB_APIS_JS: &str = r#"
                             i++;
                         }
                     }
+                    // Anything still in the surrogate range is unpaired. The
+                    // spec converts the argument to a USVString first, so those
+                    // become U+FFFD; encoding them directly would emit a 3-byte
+                    // sequence that is not valid UTF-8.
+                    if (code >= 0xD800 && code <= 0xDFFF) code = 0xFFFD;
                     if (code < 0x80) {
                         out.push(code);
                     } else if (code < 0x800) {

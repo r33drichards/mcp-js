@@ -119,10 +119,11 @@ async fn start_binary_server() -> BinaryServer {
 // ── Engine harness ──────────────────────────────────────────────────────────
 
 fn allow_all_chain() -> Arc<PolicyChain> {
+    // `from_file` reads the policy into memory up front, so the temp dir can be
+    // dropped as soon as the evaluator is built.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("allow_all.rego");
     std::fs::write(&path, "package mcp.fetch\ndefault allow = true\n").unwrap();
-    std::mem::forget(dir);
 
     let evaluator =
         LocalPolicyEvaluator::from_file(&path, "data.mcp.fetch.allow".to_string()).unwrap();
@@ -467,3 +468,50 @@ async fn formdata_uploads_binary_file_part_intact() {
     );
 }
 
+
+/// An unpaired surrogate has no UTF-8 encoding. The spec converts the
+/// constructor argument to a USVString first, so it must land as U+FFFD
+/// (`EF BF BD`) rather than as the non-conforming 3-byte encoding of the
+/// surrogate code point itself.
+#[tokio::test]
+async fn blob_replaces_lone_surrogates() {
+    ensure_v8();
+    let engine = build_engine();
+
+    let out = eval(
+        &engine,
+        r#"
+        (async () => {
+            const cases = {
+                loneHigh: '\uD800',
+                loneLow: '\uDC00',
+                highThenAscii: '\uD800a',
+                validPair: '🌍',   // U+1F30D, must survive intact
+            };
+            const hex = function(bytes) {
+                return Array.from(bytes).map(function(b) {
+                    return b.toString(16).padStart(2, '0');
+                }).join(' ');
+            };
+            const got = {};
+            for (const [name, s] of Object.entries(cases)) {
+                got[name] = hex(await new Blob([s]).bytes());
+            }
+            return JSON.stringify(got);
+        })()
+        "#
+        .to_string(),
+    )
+    .await;
+
+    assert!(out.contains(r#""loneHigh":"ef bf bd""#), "lone high surrogate: {out}");
+    assert!(out.contains(r#""loneLow":"ef bf bd""#), "lone low surrogate: {out}");
+    assert!(
+        out.contains(r#""highThenAscii":"ef bf bd 61""#),
+        "lone high surrogate followed by ASCII: {out}"
+    );
+    assert!(
+        out.contains(r#""validPair":"f0 9f 8c 8d""#),
+        "a valid surrogate pair must still encode as U+1F30D: {out}"
+    );
+}
