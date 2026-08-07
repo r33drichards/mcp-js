@@ -702,13 +702,15 @@ async fn async_main(cli: Cli) -> Result<()> {
     if let Some(port) = cli.http_port {
         tracing::info!("Starting Streamable HTTP transport on port {}", port);
         let allowed_hosts = cli::resolve_allowed_hosts(&cli.allowed_hosts, &bind_host);
-        let allowed_origins = cli.allowed_origins.clone();
+        let allowed_origins = cli::normalize_allowlist(&cli.allowed_origins);
         if allowed_hosts.is_empty() {
             tracing::info!("Host header validation disabled: accepting any Host");
         } else {
             tracing::info!("Host header allowlist: {}", allowed_hosts.join(", "));
         }
-        if !allowed_origins.is_empty() {
+        if allowed_origins.is_empty() {
+            tracing::info!("Origin header validation disabled: accepting any Origin");
+        } else {
             tracing::info!("Origin header allowlist: {}", allowed_origins.join(", "));
         }
         if engine.session_capable() {

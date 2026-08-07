@@ -724,16 +724,37 @@ pub fn parse() -> Cli {
 pub fn resolve_allowed_hosts(configured: &[String], bind_host: &str) -> Vec<String> {
     const LOOPBACK_HOSTS: [&str; 3] = ["localhost", "127.0.0.1", "::1"];
 
-    if configured.iter().any(|host| host.trim() == "*") {
+    let configured = normalize_allowlist(configured);
+    if configured.iter().any(|host| host == "*") {
         return Vec::new();
     }
     if !configured.is_empty() {
-        return configured.to_vec();
+        return configured;
     }
     if bind_is_loopback(bind_host) {
         return LOOPBACK_HOSTS.iter().map(|host| (*host).to_string()).collect();
     }
     Vec::new()
+}
+
+/// Trim each allowlist entry and drop the empty ones.
+///
+/// A list holding nothing but empty entries — `--allowed-hosts ,` or an
+/// `MCP_V8_ALLOWED_HOSTS=` that survived shell expansion — is otherwise a
+/// silent deny-all: it is non-empty, so validation stays on, but no entry
+/// parses, so every request is rejected, including from loopback. Collapsing it
+/// to an empty list makes the caller fall back to its default instead, which is
+/// what someone who passed no real hostnames meant.
+///
+/// Entries are also trimmed so a spaced list (`--allowed-hosts a.example, \
+/// b.example`) does not depend on the downstream parser normalizing for us.
+pub fn normalize_allowlist(entries: &[String]) -> Vec<String> {
+    entries
+        .iter()
+        .map(|entry| entry.trim())
+        .filter(|entry| !entry.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 /// Whether `--bind-host` names an address only reachable from this machine.
@@ -796,6 +817,43 @@ mod allowed_hosts_tests {
         assert!(
             resolve(&["example.com", "*"], "127.0.0.1").is_empty(),
             "an explicit * anywhere in the list opts out"
+        );
+    }
+
+    #[test]
+    fn entries_are_trimmed() {
+        assert_eq!(
+            resolve(&["a.example.com", " b.example.com", "c.example.com\t"], "0.0.0.0"),
+            vec!["a.example.com", "b.example.com", "c.example.com"]
+        );
+    }
+
+    #[test]
+    fn an_all_empty_list_falls_back_instead_of_denying_everything() {
+        // `--allowed-hosts ,` reaches rmcp as a non-empty list that parses to
+        // no entries, which rejects every request including from loopback.
+        for configured in [vec![""], vec!["", ""], vec!["   "]] {
+            assert!(
+                resolve(&configured, "0.0.0.0").is_empty(),
+                "{configured:?} on a routable bind must allow any host"
+            );
+            assert_eq!(
+                resolve(&configured, "127.0.0.1"),
+                vec!["localhost", "127.0.0.1", "::1"],
+                "{configured:?} on a loopback bind must fall back to the default"
+            );
+        }
+    }
+
+    #[test]
+    fn normalize_allowlist_trims_and_drops_empties() {
+        let entries: Vec<String> = ["", " https://app.example.com ", "  ", "null"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        assert_eq!(
+            normalize_allowlist(&entries),
+            vec!["https://app.example.com", "null"]
         );
     }
 
