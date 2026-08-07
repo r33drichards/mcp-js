@@ -44,7 +44,7 @@ RUN mkdir -p /data && chown mcpuser:mcpuser /data
 # Switch to non-root user
 USER mcpuser
 
-# Expose SSE port (default 8080)
+# Expose the MCP HTTP port (default 8080)
 EXPOSE 8080
 
 # Use ENTRYPOINT for the binary so CMD provides default arguments.
@@ -52,7 +52,10 @@ EXPOSE 8080
 # just the arguments without repeating the binary name.
 ENTRYPOINT ["mcp-v8"]
 
-# Default: run SSE server on port 8080, stateless (no heap/fs persistence).
+# Default: Streamable HTTP transport on port 8080, stateless (no heap/fs
+# persistence). This serves the MCP endpoint at POST /mcp, which is what MCP
+# clients and hosted-deployment health checks probe. The legacy SSE transport
+# (--sse-port) only serves /sse + /message and 404s on /mcp.
 # Override args, e.g.: docker run <image> --http-port 8080 --fs-store dir --fs-dir /data/fs
-CMD ["--sse-port", "8080"]
+CMD ["--http-port", "8080"]
 

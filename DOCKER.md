@@ -19,27 +19,35 @@ The build process:
 
 ## Running the Container
 
-### Streamable HTTP Server (Local Storage)
+### Streamable HTTP Server (Default)
 
 ```bash
 docker run -p 8080:8080 mcp-v8:latest
 ```
 
-This starts the Streamable HTTP server on port 8080 with local filesystem storage. The MCP endpoint is served at `/mcp` and a plain API at `/api/exec`.
+This starts the Streamable HTTP server on port 8080. The MCP endpoint is served
+at `/mcp` and a plain API at `/api/exec`. The default is stateless — no heap or
+filesystem persistence, so each execution starts with a fresh V8 isolate.
+
+The image's `ENTRYPOINT` is the `mcp-v8` binary, so arguments after the image
+name are passed straight to it — do not repeat the binary name.
 
 ### Custom Port
 
 ```bash
-docker run -p 3000:3000 mcp-v8:latest mcp-v8 --http-port 3000 --directory-path /tmp/mcp-v8-heaps
+docker run -p 3000:3000 mcp-v8:latest --http-port 3000
 ```
 
 ### With Persistent Storage (Volume)
 
 ```bash
-docker run -p 8080:8080 -v mcp-v8-data:/tmp/mcp-v8-heaps mcp-v8:latest
+docker run -p 8080:8080 -v mcp-v8-data:/data mcp-v8:latest \
+  --http-port 8080 --heap-store dir --heap-dir /data/heaps
 ```
 
-This creates a named volume to persist heap snapshots between container restarts.
+Persistence is opt-in: `--heap-store dir` turns on heap snapshots, and the named
+volume keeps them across container restarts. Use `--fs-store dir --fs-dir
+/data/fs` to persist the virtual filesystem the same way.
 
 ### With S3 Storage
 
@@ -49,7 +57,7 @@ docker run -p 8080:8080 \
   -e AWS_SECRET_ACCESS_KEY=your_secret_key \
   -e AWS_REGION=us-east-1 \
   mcp-v8:latest \
-  mcp-v8 --http-port 8080 --s3-bucket your-bucket-name
+  --http-port 8080 --heap-store s3 --s3-bucket your-bucket-name
 ```
 
 ### With S3 and Write-Through Cache
@@ -60,24 +68,19 @@ docker run -p 8080:8080 \
   -e AWS_SECRET_ACCESS_KEY=your_secret_key \
   -e AWS_REGION=us-east-1 \
   mcp-v8:latest \
-  mcp-v8 --http-port 8080 --s3-bucket your-bucket-name --cache-dir /tmp/mcp-v8-cache
+  --http-port 8080 --heap-store s3 --s3-bucket your-bucket-name --cache-dir /tmp/mcp-v8-cache
 ```
-
-### Stateless Mode
-
-```bash
-docker run -p 8080:8080 mcp-v8:latest mcp-v8 --http-port 8080 --stateless
-```
-
-No heap persistence — each execution starts with a fresh V8 isolate.
 
 ### SSE Transport
 
 ```bash
-docker run -p 8081:8081 mcp-v8:latest mcp-v8 --sse-port 8081 --directory-path /tmp/mcp-v8-heaps
+docker run -p 8081:8081 mcp-v8:latest --sse-port 8081
 ```
 
-Exposes `/sse` for the event stream and `/message` for client requests.
+Exposes `/sse` for the event stream and `/message` for client requests. This is
+the legacy transport and does **not** serve `/mcp`; most clients and hosted
+deployment health checks expect Streamable HTTP, so prefer the default
+`--http-port`.
 
 ## Docker Compose
 
@@ -89,10 +92,14 @@ version: '3.8'
 services:
   mcp-v8:
     build: .
+    command:
+      - --http-port=8080
+      - --heap-store=dir
+      - --heap-dir=/data/heaps
     ports:
       - "8080:8080"
     volumes:
-      - mcp-v8-data:/tmp/mcp-v8-heaps
+      - mcp-v8-data:/data
     environment:
       - RUST_LOG=info
     restart: unless-stopped
@@ -108,9 +115,9 @@ docker-compose up -d
 ```
 
 See also the pre-configured compose files in the repository root:
-- `docker-compose.single-stateful.yml` — Single node, stateful
-- `docker-compose.single-stateless.yml` — Single node, stateless
-- `docker-compose.cluster-stateful.yml` — 3-node Raft cluster, stateful
+- `docker-compose.single-node.yml` — Single node behind nginx
+- `docker-compose.single-node-stateful.yml` — Single node, stateful
+- `docker-compose.cluster.yml` — 3-node Raft cluster behind nginx
 - `docker-compose.cluster-stateless.yml` — 3-node Raft cluster, stateless
 
 ## Testing the Server
@@ -118,10 +125,16 @@ See also the pre-configured compose files in the repository root:
 Once running, test the connection:
 
 ```bash
-# Test basic connectivity (Streamable HTTP)
-curl http://localhost:8080/mcp
+# Test the MCP endpoint with an initialize handshake (Streamable HTTP).
+# A bare `curl http://localhost:8080/mcp` returns 406 — the endpoint requires
+# a POST plus the JSON and SSE Accept types.
+curl -X POST http://localhost:8080/mcp \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"curl","version":"1"}}}'
 
-# Test the plain HTTP API directly
+# Test the plain HTTP API directly. This returns an execution_id; fetch the
+# result with GET /api/executions/<id>/output.
 curl -X POST http://localhost:8080/api/exec \
   -H "Content-Type: application/json" \
   -d '{"code": "console.log(1 + 2)"}'
@@ -165,7 +178,7 @@ docker run -p 9090:8080 mcp-v8:latest
 
 Verify AWS credentials and permissions:
 ```bash
-docker run -it mcp-v8:latest bash -c "env | grep AWS"
+docker run -it --entrypoint bash mcp-v8:latest -c "env | grep AWS"
 ```
 
 ## Building for Different Architectures
