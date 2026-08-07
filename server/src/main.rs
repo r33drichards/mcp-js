@@ -701,12 +701,24 @@ async fn async_main(cli: Cli) -> Result<()> {
     let bind_host = cli.bind_host.clone();
     if let Some(port) = cli.http_port {
         tracing::info!("Starting Streamable HTTP transport on port {}", port);
+        let allowed_hosts = cli::resolve_allowed_hosts(&cli.allowed_hosts);
+        let allowed_origins = cli::normalize_allowlist(&cli.allowed_origins);
+        if allowed_hosts.is_empty() {
+            tracing::info!("Host header validation disabled: accepting any Host");
+        } else {
+            tracing::info!("Host header allowlist: {}", allowed_hosts.join(", "));
+        }
+        if allowed_origins.is_empty() {
+            tracing::info!("Origin header validation disabled: accepting any Origin");
+        } else {
+            tracing::info!("Origin header allowlist: {}", allowed_origins.join(", "));
+        }
         if engine.session_capable() {
             let verifier = session_verifier.clone();
-            start_streamable_http(engine, bind_host, port, move |e| McpService::new(e, verifier.clone())).await?;
+            start_streamable_http(engine, bind_host, port, allowed_hosts, allowed_origins, move |e| McpService::new(e, verifier.clone())).await?;
         } else {
             let verifier = session_verifier.clone();
-            start_streamable_http(engine, bind_host, port, move |e| StatelessMcpService::new(e, verifier.clone())).await?;
+            start_streamable_http(engine, bind_host, port, allowed_hosts, allowed_origins, move |e| StatelessMcpService::new(e, verifier.clone())).await?;
         }
     } else if let Some(port) = cli.sse_port {
         // Legacy HTTP+SSE transport, served by the vendored rmcp 0.1.5 SSE
@@ -787,7 +799,14 @@ fn resolve_bind_addr(host: &str, port: u16) -> Result<std::net::SocketAddr> {
 
 // ── Streamable HTTP transport (--http-port) ─────────────────────────────
 
-async fn start_streamable_http<S, F>(engine: Engine, host: String, port: u16, make_service: F) -> Result<()>
+async fn start_streamable_http<S, F>(
+    engine: Engine,
+    host: String,
+    port: u16,
+    allowed_hosts: Vec<String>,
+    allowed_origins: Vec<String>,
+    make_service: F,
+) -> Result<()>
 where
     S: ServerHandler + Send + Sync + 'static,
     F: Fn(Engine) -> S + Send + Sync + Clone + 'static,
@@ -799,11 +818,19 @@ where
     // /mcp. It natively serves the MCP `tasks/*` utility (SEP-1319) for tools
     // marked `execution(task_support = ...)` — here, `run_js`. A fresh service
     // (and thus a fresh per-connection session id) is created per session.
+    //
+    // The allowlists come from `cli::resolve_allowed_hosts` / --allowed-origins;
+    // an empty list is rmcp's encoding for "skip this check". rmcp's own default
+    // is loopback-only Host validation, which 403s every request once the server
+    // is reached by a real hostname, so the effective list is always set here
+    // rather than left at the default.
     let factory_engine = engine.clone();
     let mcp_service = StreamableHttpService::new(
         move || Ok(make_service(factory_engine.clone())),
         LocalSessionManager::default().into(),
-        StreamableHttpServerConfig::default(),
+        StreamableHttpServerConfig::default()
+            .with_allowed_hosts(allowed_hosts)
+            .with_allowed_origins(allowed_origins),
     );
 
     // Serve OpenAPI JSON spec at /api-doc/openapi.json

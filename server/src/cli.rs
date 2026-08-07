@@ -94,6 +94,38 @@ pub struct Cli {
     #[arg(long, env = "MCP_V8_BIND_HOST", default_value = "0.0.0.0", help_heading = "Core")]
     pub bind_host: String,
 
+    /// `Host` header allowlist for the Streamable HTTP transport, which rejects
+    /// unlisted hosts with 403 to blunt DNS-rebinding attacks. Entries are
+    /// hostnames or `host:port` authorities (a bare hostname matches any port);
+    /// `*` allows any host. Defaults to loopback-only (`localhost`, `127.0.0.1`,
+    /// `::1`) whatever `--bind-host` is, because a wildcard bind still answers
+    /// on loopback and so is reachable by a browser on the same machine. Set
+    /// this to the hostnames clients use when serving over a network; the Docker
+    /// image ships `MCP_V8_ALLOWED_HOSTS=*`.
+    #[arg(
+        long,
+        env = "MCP_V8_ALLOWED_HOSTS",
+        value_delimiter = ',',
+        value_name = "HOST",
+        help_heading = "Core"
+    )]
+    pub allowed_hosts: Vec<String>,
+
+    /// `Origin` header allowlist for the Streamable HTTP transport, for browser
+    /// clients. Entries must include a scheme (`https://app.example.com`);
+    /// `null` matches a sandboxed browser's `Origin: null`. Empty (the default)
+    /// skips Origin validation entirely; when non-empty, a request carrying an
+    /// unlisted Origin is rejected with 403, while one sending no Origin at all
+    /// still passes.
+    #[arg(
+        long,
+        env = "MCP_V8_ALLOWED_ORIGINS",
+        value_delimiter = ',',
+        value_name = "ORIGIN",
+        help_heading = "Core"
+    )]
+    pub allowed_origins: Vec<String>,
+
     /// Maximum V8 heap memory per isolate in megabytes (default: 8)
     #[arg(
         long,
@@ -673,6 +705,135 @@ pub fn parse() -> Cli {
             .exit();
     }
     cli
+}
+
+/// Resolve the effective `Host` allowlist for the Streamable HTTP transport.
+///
+/// rmcp defaults this to loopback-only as DNS-rebinding protection. The attack
+/// is not a page fetching `http://localhost:<port>` directly — that request
+/// carries `Host: localhost`, which the allowlist permits. It is a page served
+/// from `evil.example`, whose DNS the attacker re-points at a loopback address
+/// after the page loads: the browser still treats it as same-origin, so it
+/// sends the request to 127.0.0.1 carrying `Host: evil.example`, and the
+/// allowlist rejects it because that name is not loopback. Against a server
+/// exposing `run_js`, letting that through is arbitrary code execution.
+///
+/// The exposure therefore tracks whether a browser on the machine can reach the
+/// port, not which address was bound — `0.0.0.0`, the default, answers on
+/// 127.0.0.1 exactly as an explicit loopback bind does. So the bind address is
+/// deliberately not consulted here and the default stays loopback-only for
+/// every bind.
+///
+/// Serving clients over a network is an explicit choice instead:
+/// `--allowed-hosts` names the hostnames to accept, and `*` turns the check
+/// off. The Docker image sets `MCP_V8_ALLOWED_HOSTS=*`, since publishing a
+/// container that listens on a port is already that choice.
+///
+/// An empty return means "allow any host" — that is rmcp's own encoding for a
+/// disabled check, not an accidental empty list.
+pub fn resolve_allowed_hosts(configured: &[String]) -> Vec<String> {
+    const LOOPBACK_HOSTS: [&str; 3] = ["localhost", "127.0.0.1", "::1"];
+
+    let configured = normalize_allowlist(configured);
+    if configured.iter().any(|host| host == "*") {
+        return Vec::new();
+    }
+    if !configured.is_empty() {
+        return configured;
+    }
+    LOOPBACK_HOSTS.iter().map(|host| (*host).to_string()).collect()
+}
+
+/// Trim each allowlist entry and drop the empty ones.
+///
+/// A list holding nothing but empty entries — `--allowed-hosts ,` or an
+/// `MCP_V8_ALLOWED_HOSTS=` that survived shell expansion — is otherwise a
+/// silent deny-all: it is non-empty, so validation stays on, but no entry
+/// parses, so every request is rejected, including from loopback. Collapsing it
+/// to an empty list makes the caller fall back to its default instead, which is
+/// what someone who passed no real hostnames meant.
+///
+/// Entries are also trimmed so a spaced list (`--allowed-hosts a.example, \
+/// b.example`) does not depend on the downstream parser normalizing for us.
+pub fn normalize_allowlist(entries: &[String]) -> Vec<String> {
+    entries
+        .iter()
+        .map(|entry| entry.trim())
+        .filter(|entry| !entry.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+#[cfg(test)]
+mod allowed_hosts_tests {
+    use super::*;
+
+    fn resolve(configured: &[&str]) -> Vec<String> {
+        let configured: Vec<String> = configured.iter().map(|s| (*s).to_string()).collect();
+        resolve_allowed_hosts(&configured)
+    }
+
+    const LOOPBACK: [&str; 3] = ["localhost", "127.0.0.1", "::1"];
+
+    #[test]
+    fn the_default_is_loopback_only_regardless_of_bind_address() {
+        // A 0.0.0.0 bind still answers on 127.0.0.1, so a browser on the same
+        // machine can reach it and DNS rebinding applies exactly as it does to
+        // an explicit loopback bind. The bind address must not weaken this.
+        assert_eq!(resolve(&[]), LOOPBACK);
+    }
+
+    #[test]
+    fn explicit_hosts_replace_the_default() {
+        assert_eq!(resolve(&["example.com"]), vec!["example.com"]);
+        assert_eq!(
+            resolve(&["example.com:8443", "mcp.internal"]),
+            vec!["example.com:8443", "mcp.internal"]
+        );
+    }
+
+    #[test]
+    fn star_disables_the_check() {
+        assert!(resolve(&["*"]).is_empty());
+        assert!(
+            resolve(&["example.com", "*"]).is_empty(),
+            "an explicit * anywhere in the list opts out"
+        );
+    }
+
+    #[test]
+    fn entries_are_trimmed() {
+        assert_eq!(
+            resolve(&["a.example.com", " b.example.com", "c.example.com\t"]),
+            vec!["a.example.com", "b.example.com", "c.example.com"]
+        );
+        assert!(resolve(&[" * "]).is_empty(), "a padded * still opts out");
+    }
+
+    #[test]
+    fn an_all_empty_list_falls_back_instead_of_denying_everything() {
+        // `--allowed-hosts ,` reaches rmcp as a non-empty list that parses to
+        // no entries, which rejects every request including from loopback.
+        for configured in [vec![""], vec!["", ""], vec!["   "]] {
+            assert_eq!(
+                resolve(&configured),
+                LOOPBACK,
+                "{configured:?} must fall back to the default, not deny everything"
+            );
+        }
+    }
+
+    #[test]
+    fn normalize_allowlist_trims_and_drops_empties() {
+        let entries: Vec<String> = ["", " https://app.example.com ", "  ", "null"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        assert_eq!(
+            normalize_allowlist(&entries),
+            vec!["https://app.example.com", "null"]
+        );
+    }
 }
 
 /// Fold the PaaS-conventional `PORT` environment variable into `--http-port`.

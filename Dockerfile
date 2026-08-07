@@ -58,6 +58,18 @@ EXPOSE 8080
 # `-e PORT=` clears it to select the stdio transport.
 ENV PORT=8080
 
+# Accept any Host header. The Streamable HTTP transport otherwise allows only
+# loopback hosts, as DNS-rebinding protection for servers a browser on the same
+# machine can reach, and would 403 every request routed by a platform domain or
+# reverse proxy. Publishing a container that listens on a port is already the
+# decision to serve a network, so the opt-out belongs here rather than in the
+# binary's default.
+#
+# Narrow it back down with -e MCP_V8_ALLOWED_HOSTS=mcp.example.com (or
+# --allowed-hosts) when the hostnames clients use are known — worth doing if the
+# port is published to a developer machine rather than a deployment.
+ENV MCP_V8_ALLOWED_HOSTS=*
+
 # Use ENTRYPOINT for the binary so arguments can be appended directly.
 # This allows Docker MCP Registry and other orchestrators to override
 # just the arguments without repeating the binary name, e.g.:

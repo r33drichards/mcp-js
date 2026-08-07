@@ -25,6 +25,16 @@
     default = null;
     description = "Allow the `run_js` tool to read its code from a file on the server's own filesystem (the `file` parameter). OFF by default. When set, ANY path the server process can read is allowed — this is the easy \"allow all\" switch. For finer control, leave this off and configure a `run_js_file` policy in --policies-json instead (a Rego/OPA chain decides which paths are allowed); the policy input is `{ \"operation\": \"read\", \"path\": \"<canonical path>\" }`. This flag takes precedence over a configured run_js_file policy. Config-file key for the `--allow-run-js-file` flag. Environment variable: `MCP_V8_ALLOW_RUN_JS_FILE`. Server default: `false`.";
   };
+  allowed_hosts = lib.mkOption {
+    type = lib.types.nullOr (lib.types.listOf lib.types.str);
+    default = null;
+    description = "`Host` header allowlist for the Streamable HTTP transport, which rejects unlisted hosts with 403 to blunt DNS-rebinding attacks. Entries are hostnames or `host:port` authorities (a bare hostname matches any port); `*` allows any host. Defaults to loopback-only (`localhost`, `127.0.0.1`, `::1`) whatever `--bind-host` is, because a wildcard bind still answers on loopback and so is reachable by a browser on the same machine. Set this to the hostnames clients use when serving over a network; the Docker image ships `MCP_V8_ALLOWED_HOSTS=*`. Config-file key for the `--allowed-hosts` flag. Environment variable: `MCP_V8_ALLOWED_HOSTS`.";
+  };
+  allowed_origins = lib.mkOption {
+    type = lib.types.nullOr (lib.types.listOf lib.types.str);
+    default = null;
+    description = "`Origin` header allowlist for the Streamable HTTP transport, for browser clients. Entries must include a scheme (`https://app.example.com`); `null` matches a sandboxed browser's `Origin: null`. Empty (the default) skips Origin validation entirely; when non-empty, a request carrying an unlisted Origin is rejected with 403, while one sending no Origin at all still passes. Config-file key for the `--allowed-origins` flag. Environment variable: `MCP_V8_ALLOWED_ORIGINS`.";
+  };
   bind_host = lib.mkOption {
     type = lib.types.nullOr lib.types.str;
     default = null;

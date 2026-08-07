@@ -218,6 +218,22 @@ Host/address the HTTP and SSE transports bind to. Defaults to all IPv4 interface
 - Environment: `MCP_V8_BIND_HOST`
 - Default: `0.0.0.0`
 
+### `allowed_hosts`
+
+`Host` header allowlist for the Streamable HTTP transport, which rejects unlisted hosts with 403 to blunt DNS-rebinding attacks. Entries are hostnames or `host:port` authorities (a bare hostname matches any port); `*` allows any host. Defaults to loopback-only (`localhost`, `127.0.0.1`, `::1`) whatever `--bind-host` is, because a wildcard bind still answers on loopback and so is reachable by a browser on the same machine. Set this to the hostnames clients use when serving over a network; the Docker image ships `MCP_V8_ALLOWED_HOSTS=*`
+
+- CLI flag: `--allowed-hosts`
+- Environment: `MCP_V8_ALLOWED_HOSTS`
+- Type: array (one element per flag repetition)
+
+### `allowed_origins`
+
+`Origin` header allowlist for the Streamable HTTP transport, for browser clients. Entries must include a scheme (`https://app.example.com`); `null` matches a sandboxed browser's `Origin: null`. Empty (the default) skips Origin validation entirely; when non-empty, a request carrying an unlisted Origin is rejected with 403, while one sending no Origin at all still passes
+
+- CLI flag: `--allowed-origins`
+- Environment: `MCP_V8_ALLOWED_ORIGINS`
+- Type: array (one element per flag repetition)
+
 ### `heap_memory_max`
 
 Maximum V8 heap memory per isolate in megabytes (default: 8)
