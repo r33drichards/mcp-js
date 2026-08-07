@@ -28,7 +28,7 @@
   allowed_hosts = lib.mkOption {
     type = lib.types.nullOr (lib.types.listOf lib.types.str);
     default = null;
-    description = "`Host` header allowlist for the Streamable HTTP transport, which rejects unlisted hosts with 403 to blunt DNS-rebinding attacks. Entries are hostnames or `host:port` authorities (a bare hostname matches any port); `*` allows any host. Defaults to loopback-only when `--bind-host` is a loopback address, and to allowing any host otherwise, since binding a routable address is a deliberate choice to serve the network. Config-file key for the `--allowed-hosts` flag. Environment variable: `MCP_V8_ALLOWED_HOSTS`.";
+    description = "`Host` header allowlist for the Streamable HTTP transport, which rejects unlisted hosts with 403 to blunt DNS-rebinding attacks. Entries are hostnames or `host:port` authorities (a bare hostname matches any port); `*` allows any host. Defaults to loopback-only (`localhost`, `127.0.0.1`, `::1`) whatever `--bind-host` is, because a wildcard bind still answers on loopback and so is reachable by a browser on the same machine. Set this to the hostnames clients use when serving over a network; the Docker image ships `MCP_V8_ALLOWED_HOSTS=*`. Config-file key for the `--allowed-hosts` flag. Environment variable: `MCP_V8_ALLOWED_HOSTS`.";
   };
   allowed_origins = lib.mkOption {
     type = lib.types.nullOr (lib.types.listOf lib.types.str);

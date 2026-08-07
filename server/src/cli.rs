@@ -97,9 +97,11 @@ pub struct Cli {
     /// `Host` header allowlist for the Streamable HTTP transport, which rejects
     /// unlisted hosts with 403 to blunt DNS-rebinding attacks. Entries are
     /// hostnames or `host:port` authorities (a bare hostname matches any port);
-    /// `*` allows any host. Defaults to loopback-only when `--bind-host` is a
-    /// loopback address, and to allowing any host otherwise, since binding a
-    /// routable address is a deliberate choice to serve the network.
+    /// `*` allows any host. Defaults to loopback-only (`localhost`, `127.0.0.1`,
+    /// `::1`) whatever `--bind-host` is, because a wildcard bind still answers
+    /// on loopback and so is reachable by a browser on the same machine. Set
+    /// this to the hostnames clients use when serving over a network; the Docker
+    /// image ships `MCP_V8_ALLOWED_HOSTS=*`.
     #[arg(
         long,
         env = "MCP_V8_ALLOWED_HOSTS",
@@ -707,21 +709,29 @@ pub fn parse() -> Cli {
 
 /// Resolve the effective `Host` allowlist for the Streamable HTTP transport.
 ///
-/// rmcp defaults this to loopback-only as DNS-rebinding protection: a web page
-/// the user visits can make the browser POST to `http://localhost:<port>`, and
-/// checking `Host` stops that request from reaching a locally bound MCP server.
-/// That protection is meaningful only while the server is reachable *as*
-/// localhost. Once an operator binds a routable address, the same default just
-/// rejects every real hostname with 403 — including hosted platforms, which
-/// route by their own domain.
+/// rmcp defaults this to loopback-only as DNS-rebinding protection. The attack
+/// is not a page fetching `http://localhost:<port>` directly — that request
+/// carries `Host: localhost`, which the allowlist permits. It is a page served
+/// from `evil.example`, whose DNS the attacker re-points at a loopback address
+/// after the page loads: the browser still treats it as same-origin, so it
+/// sends the request to 127.0.0.1 carrying `Host: evil.example`, and the
+/// allowlist rejects it because that name is not loopback. Against a server
+/// exposing `run_js`, letting that through is arbitrary code execution.
 ///
-/// So the default follows the bind address: loopback binds keep the loopback
-/// allowlist, and any other bind allows any `Host`. An explicit
-/// `--allowed-hosts` always wins, and `*` opts out entirely.
+/// The exposure therefore tracks whether a browser on the machine can reach the
+/// port, not which address was bound — `0.0.0.0`, the default, answers on
+/// 127.0.0.1 exactly as an explicit loopback bind does. So the bind address is
+/// deliberately not consulted here and the default stays loopback-only for
+/// every bind.
+///
+/// Serving clients over a network is an explicit choice instead:
+/// `--allowed-hosts` names the hostnames to accept, and `*` turns the check
+/// off. The Docker image sets `MCP_V8_ALLOWED_HOSTS=*`, since publishing a
+/// container that listens on a port is already that choice.
 ///
 /// An empty return means "allow any host" — that is rmcp's own encoding for a
 /// disabled check, not an accidental empty list.
-pub fn resolve_allowed_hosts(configured: &[String], bind_host: &str) -> Vec<String> {
+pub fn resolve_allowed_hosts(configured: &[String]) -> Vec<String> {
     const LOOPBACK_HOSTS: [&str; 3] = ["localhost", "127.0.0.1", "::1"];
 
     let configured = normalize_allowlist(configured);
@@ -731,10 +741,7 @@ pub fn resolve_allowed_hosts(configured: &[String], bind_host: &str) -> Vec<Stri
     if !configured.is_empty() {
         return configured;
     }
-    if bind_is_loopback(bind_host) {
-        return LOOPBACK_HOSTS.iter().map(|host| (*host).to_string()).collect();
-    }
-    Vec::new()
+    LOOPBACK_HOSTS.iter().map(|host| (*host).to_string()).collect()
 }
 
 /// Trim each allowlist entry and drop the empty ones.
@@ -757,65 +764,39 @@ pub fn normalize_allowlist(entries: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// Whether `--bind-host` names an address only reachable from this machine.
-/// A hostname that does not parse as an IP is treated as non-loopback except
-/// for the literal "localhost".
-fn bind_is_loopback(bind_host: &str) -> bool {
-    let host = bind_host.trim().trim_matches(|c| c == '[' || c == ']');
-    if host.eq_ignore_ascii_case("localhost") {
-        return true;
-    }
-    host.parse::<std::net::IpAddr>()
-        .map(|ip| ip.is_loopback())
-        .unwrap_or(false)
-}
-
 #[cfg(test)]
 mod allowed_hosts_tests {
     use super::*;
 
-    fn resolve(configured: &[&str], bind: &str) -> Vec<String> {
+    fn resolve(configured: &[&str]) -> Vec<String> {
         let configured: Vec<String> = configured.iter().map(|s| (*s).to_string()).collect();
-        resolve_allowed_hosts(&configured, bind)
+        resolve_allowed_hosts(&configured)
+    }
+
+    const LOOPBACK: [&str; 3] = ["localhost", "127.0.0.1", "::1"];
+
+    #[test]
+    fn the_default_is_loopback_only_regardless_of_bind_address() {
+        // A 0.0.0.0 bind still answers on 127.0.0.1, so a browser on the same
+        // machine can reach it and DNS rebinding applies exactly as it does to
+        // an explicit loopback bind. The bind address must not weaken this.
+        assert_eq!(resolve(&[]), LOOPBACK);
     }
 
     #[test]
-    fn routable_binds_allow_any_host_by_default() {
-        // The deploy-breaking case: a platform routes by its own domain, so a
-        // loopback-only allowlist 403s every request.
-        for bind in ["0.0.0.0", "::", "10.0.0.5", "192.168.1.10"] {
-            assert!(
-                resolve(&[], bind).is_empty(),
-                "bind {bind} must not restrict Host by default"
-            );
-        }
-    }
-
-    #[test]
-    fn loopback_binds_keep_dns_rebinding_protection() {
-        for bind in ["127.0.0.1", "::1", "localhost", "LocalHost", "[::1]"] {
-            assert_eq!(
-                resolve(&[], bind),
-                vec!["localhost", "127.0.0.1", "::1"],
-                "bind {bind} must keep the loopback allowlist"
-            );
-        }
-    }
-
-    #[test]
-    fn explicit_hosts_win_over_the_bind_derived_default() {
-        assert_eq!(resolve(&["example.com"], "127.0.0.1"), vec!["example.com"]);
+    fn explicit_hosts_replace_the_default() {
+        assert_eq!(resolve(&["example.com"]), vec!["example.com"]);
         assert_eq!(
-            resolve(&["example.com:8443", "mcp.internal"], "0.0.0.0"),
+            resolve(&["example.com:8443", "mcp.internal"]),
             vec!["example.com:8443", "mcp.internal"]
         );
     }
 
     #[test]
-    fn star_disables_the_check_even_on_a_loopback_bind() {
-        assert!(resolve(&["*"], "127.0.0.1").is_empty());
+    fn star_disables_the_check() {
+        assert!(resolve(&["*"]).is_empty());
         assert!(
-            resolve(&["example.com", "*"], "127.0.0.1").is_empty(),
+            resolve(&["example.com", "*"]).is_empty(),
             "an explicit * anywhere in the list opts out"
         );
     }
@@ -823,9 +804,10 @@ mod allowed_hosts_tests {
     #[test]
     fn entries_are_trimmed() {
         assert_eq!(
-            resolve(&["a.example.com", " b.example.com", "c.example.com\t"], "0.0.0.0"),
+            resolve(&["a.example.com", " b.example.com", "c.example.com\t"]),
             vec!["a.example.com", "b.example.com", "c.example.com"]
         );
+        assert!(resolve(&[" * "]).is_empty(), "a padded * still opts out");
     }
 
     #[test]
@@ -833,14 +815,10 @@ mod allowed_hosts_tests {
         // `--allowed-hosts ,` reaches rmcp as a non-empty list that parses to
         // no entries, which rejects every request including from loopback.
         for configured in [vec![""], vec!["", ""], vec!["   "]] {
-            assert!(
-                resolve(&configured, "0.0.0.0").is_empty(),
-                "{configured:?} on a routable bind must allow any host"
-            );
             assert_eq!(
-                resolve(&configured, "127.0.0.1"),
-                vec!["localhost", "127.0.0.1", "::1"],
-                "{configured:?} on a loopback bind must fall back to the default"
+                resolve(&configured),
+                LOOPBACK,
+                "{configured:?} must fall back to the default, not deny everything"
             );
         }
     }
@@ -855,13 +833,6 @@ mod allowed_hosts_tests {
             normalize_allowlist(&entries),
             vec!["https://app.example.com", "null"]
         );
-    }
-
-    #[test]
-    fn unparseable_bind_host_is_treated_as_routable() {
-        // resolve_bind_addr rejects these later; do not fail closed here and
-        // turn a bad --bind-host into a confusing 403 instead of a clear error.
-        assert!(resolve(&[], "not-an-address").is_empty());
     }
 }
 

@@ -701,7 +701,7 @@ async fn async_main(cli: Cli) -> Result<()> {
     let bind_host = cli.bind_host.clone();
     if let Some(port) = cli.http_port {
         tracing::info!("Starting Streamable HTTP transport on port {}", port);
-        let allowed_hosts = cli::resolve_allowed_hosts(&cli.allowed_hosts, &bind_host);
+        let allowed_hosts = cli::resolve_allowed_hosts(&cli.allowed_hosts);
         let allowed_origins = cli::normalize_allowlist(&cli.allowed_origins);
         if allowed_hosts.is_empty() {
             tracing::info!("Host header validation disabled: accepting any Host");

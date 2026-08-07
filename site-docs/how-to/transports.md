@@ -58,30 +58,38 @@ mcp-v8 --http-port=8080 \
 ## Control `Host` and `Origin` validation
 
 The Streamable HTTP transport validates the inbound `Host` header and answers
-`403 Forbidden: Host header is not allowed` when it does not match. This is
-DNS-rebinding protection: a page the user visits can make their browser POST to
-`http://localhost:<port>`, and checking `Host` keeps that request from reaching
-a locally bound MCP server.
+`403 Forbidden: Host header is not allowed` when it does not match. By default
+only `localhost`, `127.0.0.1` and `::1` are accepted, whatever `--bind-host` is.
 
-That protection only means something while the server is reachable *as*
-localhost, so the default follows `--bind-host`:
+This is DNS-rebinding protection. The attack is not a page fetching
+`http://localhost:<port>` directly — that request carries `Host: localhost`,
+which the allowlist permits. It is a page served from `evil.example` whose DNS
+the attacker re-points at a loopback address once the page has loaded: the
+browser still treats it as same-origin, so it sends the request to `127.0.0.1`
+carrying `Host: evil.example`, and the allowlist rejects it. Against a server
+exposing `run_js`, letting that through is arbitrary code execution.
 
-| `--bind-host` | Default `Host` policy |
-|---|---|
-| loopback (`127.0.0.1`, `::1`, `localhost`) | only `localhost`, `127.0.0.1`, `::1` |
-| anything else, including the `0.0.0.0` default | any `Host` accepted |
+The default does **not** relax for a wildcard bind. `0.0.0.0` still answers on
+`127.0.0.1`, so a browser on the same machine reaches it exactly as it would an
+explicit loopback bind — the exposure follows what can reach the port, not which
+address was bound.
 
-Binding a routable address is a deliberate choice to serve the network, and
-clients there arrive with a real hostname in `Host`.
-
-Override the default with `--allowed-hosts`. Entries are hostnames or
-`host:port` authorities — a bare hostname matches any port — and `*` disables
-the check:
+Serving clients over a network is therefore an explicit choice. Name the
+hostnames clients use, or pass `*` to turn the check off. Entries are hostnames
+or `host:port` authorities, and a bare hostname matches any port:
 
 ```bash
 mcp-v8 --http-port=8080 --allowed-hosts=mcp.example.com,mcp.example.com:8443
-mcp-v8 --bind-host=127.0.0.1 --http-port=8080 --allowed-hosts='*'
+mcp-v8 --http-port=8080 --allowed-hosts='*'
 ```
+
+The Docker image ships `MCP_V8_ALLOWED_HOSTS=*`, because publishing a container
+that listens on a port is already that choice. Narrow it back down with
+`-e MCP_V8_ALLOWED_HOSTS=mcp.example.com` when the hostnames are known.
+
+Skipping this on a server reachable only over a private network is a real
+tradeoff, not a formality: rebinding works against private addresses too, so a
+browser on that network can still be aimed at the port.
 
 `--allowed-origins` gates the browser `Origin` header the same way, and is empty
 by default, which skips Origin validation. When it is non-empty a request

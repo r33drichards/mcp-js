@@ -70,12 +70,17 @@ docker run -i -e PORT= mcp-v8:latest
 `--metadata-only` cluster nodes serve no MCP transport and ignore `$PORT`
 entirely rather than failing at startup.
 
-The container binds `0.0.0.0`, so it accepts any `Host` header by default and
-works behind a platform domain or reverse proxy with no extra configuration. To
-restrict it to your own hostname, pass `--allowed-hosts`:
+The image sets `MCP_V8_ALLOWED_HOSTS=*`, so it accepts any `Host` header and
+works behind a platform domain or reverse proxy with no extra configuration. The
+binary on its own defaults to accepting loopback hosts only, as DNS-rebinding
+protection; publishing a container that listens on a port is already the
+decision to serve a network, so the image opts out.
+
+Narrow it back down once the hostnames clients use are known — worth doing when
+the port is published to a developer machine rather than a deployment:
 
 ```bash
-docker run -p 8080:8080 mcp-v8:latest --allowed-hosts mcp.example.com
+docker run -p 8080:8080 -e MCP_V8_ALLOWED_HOSTS=mcp.example.com mcp-v8:latest
 ```
 
 See [Control `Host` and `Origin` validation](site-docs/how-to/transports.md) for
