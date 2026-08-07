@@ -94,6 +94,36 @@ pub struct Cli {
     #[arg(long, env = "MCP_V8_BIND_HOST", default_value = "0.0.0.0", help_heading = "Core")]
     pub bind_host: String,
 
+    /// `Host` header allowlist for the Streamable HTTP transport, which rejects
+    /// unlisted hosts with 403 to blunt DNS-rebinding attacks. Entries are
+    /// hostnames or `host:port` authorities (a bare hostname matches any port);
+    /// `*` allows any host. Defaults to loopback-only when `--bind-host` is a
+    /// loopback address, and to allowing any host otherwise, since binding a
+    /// routable address is a deliberate choice to serve the network.
+    #[arg(
+        long,
+        env = "MCP_V8_ALLOWED_HOSTS",
+        value_delimiter = ',',
+        value_name = "HOST",
+        help_heading = "Core"
+    )]
+    pub allowed_hosts: Vec<String>,
+
+    /// `Origin` header allowlist for the Streamable HTTP transport, for browser
+    /// clients. Entries must include a scheme (`https://app.example.com`);
+    /// `null` matches a sandboxed browser's `Origin: null`. Empty (the default)
+    /// skips Origin validation entirely; when non-empty, a request carrying an
+    /// unlisted Origin is rejected with 403, while one sending no Origin at all
+    /// still passes.
+    #[arg(
+        long,
+        env = "MCP_V8_ALLOWED_ORIGINS",
+        value_delimiter = ',',
+        value_name = "ORIGIN",
+        help_heading = "Core"
+    )]
+    pub allowed_origins: Vec<String>,
+
     /// Maximum V8 heap memory per isolate in megabytes (default: 8)
     #[arg(
         long,
@@ -673,6 +703,108 @@ pub fn parse() -> Cli {
             .exit();
     }
     cli
+}
+
+/// Resolve the effective `Host` allowlist for the Streamable HTTP transport.
+///
+/// rmcp defaults this to loopback-only as DNS-rebinding protection: a web page
+/// the user visits can make the browser POST to `http://localhost:<port>`, and
+/// checking `Host` stops that request from reaching a locally bound MCP server.
+/// That protection is meaningful only while the server is reachable *as*
+/// localhost. Once an operator binds a routable address, the same default just
+/// rejects every real hostname with 403 — including hosted platforms, which
+/// route by their own domain.
+///
+/// So the default follows the bind address: loopback binds keep the loopback
+/// allowlist, and any other bind allows any `Host`. An explicit
+/// `--allowed-hosts` always wins, and `*` opts out entirely.
+///
+/// An empty return means "allow any host" — that is rmcp's own encoding for a
+/// disabled check, not an accidental empty list.
+pub fn resolve_allowed_hosts(configured: &[String], bind_host: &str) -> Vec<String> {
+    const LOOPBACK_HOSTS: [&str; 3] = ["localhost", "127.0.0.1", "::1"];
+
+    if configured.iter().any(|host| host.trim() == "*") {
+        return Vec::new();
+    }
+    if !configured.is_empty() {
+        return configured.to_vec();
+    }
+    if bind_is_loopback(bind_host) {
+        return LOOPBACK_HOSTS.iter().map(|host| (*host).to_string()).collect();
+    }
+    Vec::new()
+}
+
+/// Whether `--bind-host` names an address only reachable from this machine.
+/// A hostname that does not parse as an IP is treated as non-loopback except
+/// for the literal "localhost".
+fn bind_is_loopback(bind_host: &str) -> bool {
+    let host = bind_host.trim().trim_matches(|c| c == '[' || c == ']');
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    host.parse::<std::net::IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod allowed_hosts_tests {
+    use super::*;
+
+    fn resolve(configured: &[&str], bind: &str) -> Vec<String> {
+        let configured: Vec<String> = configured.iter().map(|s| (*s).to_string()).collect();
+        resolve_allowed_hosts(&configured, bind)
+    }
+
+    #[test]
+    fn routable_binds_allow_any_host_by_default() {
+        // The deploy-breaking case: a platform routes by its own domain, so a
+        // loopback-only allowlist 403s every request.
+        for bind in ["0.0.0.0", "::", "10.0.0.5", "192.168.1.10"] {
+            assert!(
+                resolve(&[], bind).is_empty(),
+                "bind {bind} must not restrict Host by default"
+            );
+        }
+    }
+
+    #[test]
+    fn loopback_binds_keep_dns_rebinding_protection() {
+        for bind in ["127.0.0.1", "::1", "localhost", "LocalHost", "[::1]"] {
+            assert_eq!(
+                resolve(&[], bind),
+                vec!["localhost", "127.0.0.1", "::1"],
+                "bind {bind} must keep the loopback allowlist"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_hosts_win_over_the_bind_derived_default() {
+        assert_eq!(resolve(&["example.com"], "127.0.0.1"), vec!["example.com"]);
+        assert_eq!(
+            resolve(&["example.com:8443", "mcp.internal"], "0.0.0.0"),
+            vec!["example.com:8443", "mcp.internal"]
+        );
+    }
+
+    #[test]
+    fn star_disables_the_check_even_on_a_loopback_bind() {
+        assert!(resolve(&["*"], "127.0.0.1").is_empty());
+        assert!(
+            resolve(&["example.com", "*"], "127.0.0.1").is_empty(),
+            "an explicit * anywhere in the list opts out"
+        );
+    }
+
+    #[test]
+    fn unparseable_bind_host_is_treated_as_routable() {
+        // resolve_bind_addr rejects these later; do not fail closed here and
+        // turn a bad --bind-host into a confusing 403 instead of a clear error.
+        assert!(resolve(&[], "not-an-address").is_empty());
+    }
 }
 
 /// Fold the PaaS-conventional `PORT` environment variable into `--http-port`.

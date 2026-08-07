@@ -55,6 +55,47 @@ mcp-v8 --http-port=8080 \
 
 `--http-port` and `--sse-port` are mutually exclusive. Passing both is an error.
 
+## Control `Host` and `Origin` validation
+
+The Streamable HTTP transport validates the inbound `Host` header and answers
+`403 Forbidden: Host header is not allowed` when it does not match. This is
+DNS-rebinding protection: a page the user visits can make their browser POST to
+`http://localhost:<port>`, and checking `Host` keeps that request from reaching
+a locally bound MCP server.
+
+That protection only means something while the server is reachable *as*
+localhost, so the default follows `--bind-host`:
+
+| `--bind-host` | Default `Host` policy |
+|---|---|
+| loopback (`127.0.0.1`, `::1`, `localhost`) | only `localhost`, `127.0.0.1`, `::1` |
+| anything else, including the `0.0.0.0` default | any `Host` accepted |
+
+Binding a routable address is a deliberate choice to serve the network, and
+clients there arrive with a real hostname in `Host`.
+
+Override the default with `--allowed-hosts`. Entries are hostnames or
+`host:port` authorities — a bare hostname matches any port — and `*` disables
+the check:
+
+```bash
+mcp-v8 --http-port=8080 --allowed-hosts=mcp.example.com,mcp.example.com:8443
+mcp-v8 --bind-host=127.0.0.1 --http-port=8080 --allowed-hosts='*'
+```
+
+`--allowed-origins` gates the browser `Origin` header the same way, and is empty
+by default, which skips Origin validation. When it is non-empty a request
+carrying an unlisted `Origin` is rejected, while one sending no `Origin` at all
+still passes — so setting it does not break non-browser clients:
+
+```bash
+mcp-v8 --http-port=8080 --allowed-origins=https://app.example.com
+```
+
+Both accept `MCP_V8_ALLOWED_HOSTS` / `MCP_V8_ALLOWED_ORIGINS` and the matching
+config-file keys. Neither applies to the legacy `--sse-port` transport, which
+performs no `Host` or `Origin` validation.
+
 ## Take the port from `PORT`
 
 Hosted platforms (Railway, Render, Heroku, Fly, Cloud Run, …) assign a port at
