@@ -133,7 +133,7 @@
   http_port = lib.mkOption {
     type = lib.types.nullOr lib.types.port;
     default = null;
-    description = "HTTP port using Streamable HTTP transport (MCP 2025-03-26+, load-balanceable). Config-file key for the `--http-port` flag. Environment variable: `MCP_V8_HTTP_PORT`.";
+    description = "HTTP port using Streamable HTTP transport (MCP 2025-03-26+, load-balanceable). Falls back to the `PORT` environment variable when neither this nor `--sse-port` is set anywhere, so platforms that inject `PORT` (Railway, Render, Heroku, Fly, Cloud Run) serve Streamable HTTP unmodified. Config-file key for the `--http-port` flag. Environment variable: `MCP_V8_HTTP_PORT`.";
   };
   instructions = lib.mkOption {
     type = lib.types.nullOr lib.types.str;
