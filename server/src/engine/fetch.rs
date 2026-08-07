@@ -556,7 +556,12 @@ const FETCH_JS_WRAPPER: &str = r#"
                 json: function() { return Promise.resolve(JSON.parse(decodeText())); },
                 arrayBuffer: function() { return Promise.resolve(toArrayBuffer()); },
                 bytes: function() { return Promise.resolve(new Uint8Array(responseBytes)); },
-                blob: function() { return Promise.resolve(new Blob([decodeText()], { type: responseHeaders.get('content-type') || '' })); },
+                // Build from the raw bytes, not decodeText(). Decoding to a
+                // string first replaces every non-UTF-8 sequence with U+FFFD,
+                // which silently corrupts any binary body while leaving the
+                // leading magic bytes intact -- so a fetched wasm or font still
+                // looks valid and fails later at use.
+                blob: function() { return Promise.resolve(new Blob([new Uint8Array(responseBytes)], { type: responseHeaders.get('content-type') || '' })); },
                 clone: function() { return mkResponse(); },
             };
         };

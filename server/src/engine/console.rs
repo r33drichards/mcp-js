@@ -515,6 +515,23 @@ const WEB_APIS_JS: &str = r#"
                 chunks.push(part._data);
             } else if (typeof part === 'string') {
                 chunks.push(part);
+            } else if (part instanceof ArrayBuffer || ArrayBuffer.isView(part)) {
+                // _data is a latin1 byte-string -- one char per byte, which is
+                // what arrayBuffer() below reads back with charCodeAt & 0xff.
+                // Without this branch binary parts fell through to String(part)
+                // and became the literal "[object ArrayBuffer]", so every Blob
+                // built from bytes was silently 20 bytes of ASCII.
+                const view = part instanceof ArrayBuffer
+                    ? new Uint8Array(part)
+                    : new Uint8Array(part.buffer, part.byteOffset, part.byteLength);
+                // Chunked to stay under the argument limit of String.fromCharCode
+                // on large buffers.
+                const CHUNK = 0x8000;
+                let binary = '';
+                for (let i = 0; i < view.length; i += CHUNK) {
+                    binary += String.fromCharCode.apply(null, view.subarray(i, i + CHUNK));
+                }
+                chunks.push(binary);
             } else {
                 chunks.push(String(part));
             }
