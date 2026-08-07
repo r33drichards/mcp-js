@@ -198,7 +198,7 @@ Fork the new session (given by --session-id) from a previous session's latest he
 
 ### `http_port`
 
-HTTP port using Streamable HTTP transport (MCP 2025-03-26+, load-balanceable). If unset, and no `--sse-port` is configured either, the platform-conventional `PORT` environment variable is used as a fallback — so hosted platforms that inject `PORT` (Railway, Render, Heroku, Fly, Cloud Run, ...) serve Streamable HTTP with no argument changes. This flag, `MCP_V8_HTTP_PORT`, and a config-file `http_port` all take precedence over `PORT`
+HTTP port using Streamable HTTP transport (MCP 2025-03-26+, load-balanceable). Falls back to the `PORT` environment variable when neither this nor `--sse-port` is set anywhere, so platforms that inject `PORT` (Railway, Render, Heroku, Fly, Cloud Run) serve Streamable HTTP unmodified
 
 - CLI flag: `--http-port`
 - Environment: `MCP_V8_HTTP_PORT`

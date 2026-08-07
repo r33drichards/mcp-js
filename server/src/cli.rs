@@ -76,12 +76,10 @@ pub struct Cli {
     pub session_fork_from: Option<String>,
 
     /// HTTP port using Streamable HTTP transport (MCP 2025-03-26+,
-    /// load-balanceable). If unset, and no `--sse-port` is configured either,
-    /// the platform-conventional `PORT` environment variable is used as a
-    /// fallback — so hosted platforms that inject `PORT` (Railway, Render,
-    /// Heroku, Fly, Cloud Run, ...) serve Streamable HTTP with no argument
-    /// changes. This flag, `MCP_V8_HTTP_PORT`, and a config-file `http_port`
-    /// all take precedence over `PORT`.
+    /// load-balanceable). Falls back to the `PORT` environment variable when
+    /// neither this nor `--sse-port` is set anywhere, so platforms that inject
+    /// `PORT` (Railway, Render, Heroku, Fly, Cloud Run) serve Streamable HTTP
+    /// unmodified.
     #[arg(long, env = "MCP_V8_HTTP_PORT", conflicts_with = "sse_port", help_heading = "Core")]
     pub http_port: Option<u16>,
 
