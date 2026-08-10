@@ -68,6 +68,18 @@ pub enum ArtifactContent {
     Base64(String),
 }
 
+impl ArtifactContent {
+    /// Label for JSON metadata so callers know what they're getting.
+    pub fn encoding(&self) -> &'static str {
+        match self {
+            ArtifactContent::Image { .. } => "image",
+            ArtifactContent::Audio { .. } => "audio",
+            ArtifactContent::Text(_) => "utf-8",
+            ArtifactContent::Base64(_) => "base64",
+        }
+    }
+}
+
 impl Artifact {
     /// Render the payload for an MCP tool result.
     pub fn content(&self) -> ArtifactContent {
@@ -89,14 +101,17 @@ impl Artifact {
         }
     }
 
-    /// How `content()` encodes the payload — surfaced in JSON metadata so
-    /// callers know what they're getting.
+    /// How `content()` will encode the payload, computed without rendering
+    /// (no base64 allocation — `content()` can be up to 16 MiB of encoding).
     pub fn encoding(&self) -> &'static str {
-        match self.content() {
-            ArtifactContent::Image { .. } => "image",
-            ArtifactContent::Audio { .. } => "audio",
-            ArtifactContent::Text(_) => "utf-8",
-            ArtifactContent::Base64(_) => "base64",
+        if self.meta.mime_type.starts_with("image/") {
+            "image"
+        } else if self.meta.mime_type.starts_with("audio/") {
+            "audio"
+        } else if std::str::from_utf8(&self.bytes).is_ok() {
+            "utf-8"
+        } else {
+            "base64"
         }
     }
 }
@@ -143,7 +158,13 @@ impl ArtifactStore {
                 key.len()
             ));
         }
-        if mime_type.is_empty() || !mime_type.contains('/') {
+        // Also restrict to visible ASCII: the mime type is script-controlled
+        // and is served back verbatim as an HTTP Content-Type header, so
+        // whitespace/control bytes must never reach it.
+        if mime_type.is_empty()
+            || !mime_type.contains('/')
+            || !mime_type.bytes().all(|b| (0x21..=0x7e).contains(&b))
+        {
             return Err(format!(
                 "artifact: mime must look like \"type/subtype\" (e.g. \"image/png\"), got {:?}",
                 mime_type
@@ -404,6 +425,23 @@ mod tests {
         assert!(store.put(&"k".repeat(MAX_KEY_BYTES + 1), "image/png", b"x", None).is_err());
         let big = vec![0u8; MAX_ARTIFACT_BYTES + 1];
         assert!(store.put("k", "image/png", &big, None).is_err());
+        // The mime type is served back as an HTTP header — whitespace and
+        // control bytes must be rejected (header-injection guard).
+        assert!(store.put("k", "image/png\r\nx: y", b"x", None).is_err());
+        assert!(store.put("k", "image/ png", b"x", None).is_err());
+    }
+
+    #[test]
+    fn encoding_matches_content_without_rendering() {
+        let store = temp_store();
+        store.put("i", "image/png", &[0x89], None).unwrap();
+        store.put("a", "audio/wav", &[0x00], None).unwrap();
+        store.put("t", "application/json", b"{}", None).unwrap();
+        store.put("b", "application/octet-stream", &[0xff, 0xfe], None).unwrap();
+        for key in ["i", "a", "t", "b"] {
+            let artifact = store.get(key).unwrap().unwrap();
+            assert_eq!(artifact.encoding(), artifact.content().encoding(), "key {}", key);
+        }
     }
 
     #[test]

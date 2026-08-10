@@ -246,17 +246,21 @@ fn get_execution(engine: &Engine, args: &Value) -> Value {
 pub fn get_artifact(engine: &Engine, args: &Value) -> ToolResponse {
     let key = string_arg(args, "key").unwrap_or_default();
     match engine.get_artifact(&key) {
-        Ok(artifact) => ToolResponse {
-            json: json!({
-                "key": artifact.meta.key,
-                "mime_type": artifact.meta.mime_type,
-                "size_bytes": artifact.meta.size_bytes,
-                "created_at": artifact.meta.created_at,
-                "execution_id": artifact.meta.execution_id,
-                "encoding": artifact.encoding(),
-            }),
-            artifacts: vec![artifact.content()],
-        },
+        Ok(artifact) => {
+            // Render once — content() base64-encodes media payloads.
+            let content = artifact.content();
+            ToolResponse {
+                json: json!({
+                    "key": artifact.meta.key,
+                    "mime_type": artifact.meta.mime_type,
+                    "size_bytes": artifact.meta.size_bytes,
+                    "created_at": artifact.meta.created_at,
+                    "execution_id": artifact.meta.execution_id,
+                    "encoding": content.encoding(),
+                }),
+                artifacts: vec![content],
+            }
+        }
         Err(e) => json!({ "error": e }).into(),
     }
 }

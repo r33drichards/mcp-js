@@ -507,9 +507,16 @@ async fn get_artifact_handler(
     Path(key): Path<String>,
 ) -> Response {
     match engine.get_artifact(&key) {
+        // nosniff + attachment: the payload and its Content-Type are script-
+        // controlled, so keep browsers from rendering active content (e.g.
+        // text/html) in the API's origin.
         Ok(artifact) => (
             StatusCode::OK,
-            [(header::CONTENT_TYPE, artifact.meta.mime_type)],
+            [
+                (header::CONTENT_TYPE, artifact.meta.mime_type),
+                (header::CONTENT_DISPOSITION, "attachment".to_string()),
+                (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
+            ],
             artifact.bytes,
         )
             .into_response(),
