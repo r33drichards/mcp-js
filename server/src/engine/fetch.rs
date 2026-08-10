@@ -1432,6 +1432,178 @@ allow if {{
         assert!(reqs[0].1.contains("filename=\"test.txt\""));
     }
 
+    // ── Article case #3: authorization logic gap (SQL-authorizer bypass) ────
+    //
+    // Check Point's "When Agentic Glue Melts" (2026) escalated through a SQL
+    // authorizer that "validates the tables a query references, but not the
+    // destination name of a rename" — the authorizer covered the obvious path
+    // to the protected resource but not a second path that reached the same
+    // place. mcp-v8's authorizer is the OPA/Rego `PolicyChain` gating `fetch()`.
+    //
+    // These two tests are the positive/negative pair for that class:
+    //   * a directly-denied host is blocked before any network call, and
+    //   * (currently OPEN) a redirect from an allowed host to a denied host is
+    //     followed below the policy layer, so the denied host's body comes back
+    //     without the policy ever seeing the destination — the same shape of gap.
+
+    /// Build a policy chain that allows a fetch only when its destination port
+    /// equals `port`. Passing a port no server is bound to (e.g. 0) yields an
+    /// allow-nothing (default-deny) policy.
+    fn policy_allowing_only_port(port: u16) -> Arc<PolicyChain> {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let path = dir.path().join("fetch.rego");
+        std::fs::write(
+            &path,
+            format!(
+                r#"
+package mcp.fetch
+
+default allow := false
+
+allow if {{
+  input.url_parsed.port == {port}
+}}
+"#
+            ),
+        )
+        .expect("rego policy should be written");
+        // from_file loads the policy source at construction, so the temp file
+        // is no longer needed once the evaluator exists.
+        let evaluator = LocalPolicyEvaluator::from_file(&path, "data.mcp.fetch.allow".to_string())
+            .expect("local policy evaluator should be created");
+        Arc::new(PolicyChain::new(
+            vec![PolicyEvaluatorKind::Local(evaluator)],
+            EvalMode::All,
+        ))
+    }
+
+    /// The authorizer works for the direct path: a request to a host the policy
+    /// forbids is rejected in `do_fetch` before the HTTP request is issued, so
+    /// the denied server never receives a connection.
+    #[tokio::test]
+    async fn test_do_fetch_denies_direct_request_to_disallowed_host() {
+        let echo = start_echo_server().await;
+
+        // No real port equals 0, so this policy denies every request.
+        let policy = policy_allowing_only_port(0);
+
+        let err = do_fetch(
+            echo.url.clone(),
+            "GET".to_string(),
+            "{}".to_string(),
+            None,
+            policy,
+            reqwest::Client::new(),
+            vec![],
+        )
+        .await
+        .expect_err("a policy-denied host must be rejected");
+
+        assert!(err.contains("denied by policy"), "unexpected error: {err}");
+        assert!(
+            echo.requests().await.is_empty(),
+            "a policy-denied request must never reach the network"
+        );
+    }
+
+    /// OPEN FINDING — the direct analog of the article's SQL-authorizer bypass.
+    ///
+    /// `do_fetch` evaluates the policy exactly once, on the requested URL, and
+    /// then issues the request with a client that auto-follows HTTP redirects
+    /// (both `reqwest::Client::new()` here and the production
+    /// `build_fetch_http_client()` use reqwest's default follow-up-to-10
+    /// policy). When an *allowed* host answers with a 3xx pointing at a
+    /// *policy-denied* host, reqwest follows it below the policy layer and
+    /// `do_fetch` returns the denied host's body. The policy validated the
+    /// reference but never the destination — exactly the gap Check Point
+    /// exploited via `ALTER TABLE ... RENAME`.
+    ///
+    /// The assertion below expresses the SECURE expectation, so it FAILS against
+    /// the current implementation; it is `#[ignore]`d to keep CI green while
+    /// serving as an executable reproduction. Remove `#[ignore]` once `fetch`
+    /// re-evaluates the policy on each redirect hop (or stops auto-following
+    /// redirects and re-drives them through `do_fetch`). The module loader
+    /// (`module_loader::NetworkModuleLoader::load`) has the same one-shot-check
+    /// / follow-redirects shape and should be fixed alongside it.
+    #[tokio::test]
+    #[ignore = "documents an OPEN authorization-bypass: fetch() follows redirects below the \
+                policy layer, so an allowed host can redirect to a policy-denied host and its \
+                body is returned. Analog of the CheckPoint SQL-authorizer bypass. Un-ignore \
+                once policy is re-evaluated per redirect hop."]
+    async fn test_do_fetch_redirect_to_denied_host_must_not_bypass_policy() {
+        use axum::response::Redirect;
+
+        const SECRET: &str = "TOP-SECRET-FROM-DENIED-HOST";
+
+        // Denied host: serves a secret at /secret.
+        async fn secret_handler() -> impl IntoResponse {
+            (StatusCode::OK, SECRET)
+        }
+        let denied_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let denied_addr = denied_listener.local_addr().unwrap();
+        let secret_url = format!("http://{}/secret", denied_addr);
+        tokio::spawn(async move {
+            let app = Router::new().route("/secret", get(secret_handler));
+            axum::serve(denied_listener, app).await.unwrap();
+        });
+
+        // Allowed host: 307-redirects /start to the denied host's /secret.
+        async fn redirect_handler(State(target): State<String>) -> Redirect {
+            Redirect::temporary(&target)
+        }
+        let allowed_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let allowed_addr = allowed_listener.local_addr().unwrap();
+        let start_url = format!("http://{}/start", allowed_addr);
+        {
+            let secret_url = secret_url.clone();
+            tokio::spawn(async move {
+                let app = Router::new()
+                    .route("/start", get(redirect_handler))
+                    .with_state(secret_url);
+                axum::serve(allowed_listener, app).await.unwrap();
+            });
+        }
+
+        // Allow ONLY the allowed host's port; the denied host's port is not
+        // permitted by the policy.
+        let policy = policy_allowing_only_port(allowed_addr.port());
+
+        let response = do_fetch(
+            start_url,
+            "GET".to_string(),
+            "{}".to_string(),
+            None,
+            policy,
+            reqwest::Client::new(),
+            vec![],
+        )
+        .await;
+
+        // SECURE EXPECTATION: the policy authorized a request to the allowed
+        // host only, so the denied redirect destination's body must never be
+        // disclosed — either the fetch is refused, or it does not return the
+        // target's contents.
+        match response {
+            Err(e) => assert!(
+                e.contains("denied") || e.contains("policy"),
+                "expected a policy denial, got: {e}"
+            ),
+            Ok(json) => {
+                let v: Value = serde_json::from_str(&json).expect("response JSON should parse");
+                let body_bytes =
+                    super::b64_decode(v["body"].as_str().unwrap_or("")).expect("decode body");
+                let body = String::from_utf8_lossy(&body_bytes);
+                assert!(
+                    !body.contains(SECRET),
+                    "AUTHORIZATION BYPASS: fetch followed a redirect from the allowed host to a \
+                     policy-denied host and returned its body ({}). Re-evaluate the policy on \
+                     each redirect hop.",
+                    body.trim(),
+                );
+            }
+        }
+    }
+
     #[test]
     fn test_b64_round_trips_binary() {
         // Every byte value must survive the base64 round-trip used to carry
