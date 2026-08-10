@@ -36,6 +36,19 @@ Returns `output: '{"a":1,"b":2}'`.
 
 async/await is supported. The runtime resolves top-level Promises automatically.
 
+## Artifacts (returning images and other non-text content)
+
+Console output is text-only. To return an image — or any other typed payload (audio, CSV, arbitrary binary) — store it as an artifact:
+
+```js
+const png = renderChart(); // Uint8Array of PNG bytes
+artifact("chart", "image/png", png);
+```
+
+- `artifact(key, mime, bytes)` — store an artifact under a caller-chosen key (same key overwrites). `bytes` may be a Uint8Array, TypedArray, ArrayBuffer, or string (UTF-8 encoded). Max 16 MiB per artifact.
+- Emitted artifacts are attached directly to this tool's result as content blocks: `image/*` as an MCP image block (the model can actually see the image), `audio/*` as audio, UTF-8 payloads as text, other binary as base64 text. Up to 8 MiB of payloads are attached inline; anything larger stays retrievable via the `get_artifact(key)` tool.
+- The result JSON lists each emitted artifact (`key`, `mime_type`, `size_bytes`, `inline`).
+
 ## Importing Packages
 
 You can import npm packages, JSR packages, and URL modules using ES module `import` syntax. Packages are fetched from esm.sh at runtime — no installation needed.

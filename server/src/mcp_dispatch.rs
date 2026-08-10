@@ -7,15 +7,32 @@
 //! frames the request/response.
 //!
 //! Each function takes the tool arguments as a `serde_json::Value` object and
-//! returns the tool's result body as a `Value`; the per-transport handlers wrap
-//! that into their respective `CallToolResult` types.
+//! returns the tool's result as a `ToolResponse` (a JSON body plus any
+//! rendered artifact content blocks); the per-transport handlers map that
+//! into their respective `CallToolResult` types.
 
 use std::collections::HashMap;
 
 use serde_json::{json, Value};
 
 use crate::engine::Engine;
+use crate::engine::artifacts::{ArtifactContent, ArtifactMeta};
 use crate::engine::heap_tags::HeapTagEntry;
+
+/// Transport-agnostic tool result: a JSON body plus extra content blocks
+/// (rendered artifacts) the transport appends after the JSON. Image and audio
+/// artifacts become MCP `ImageContent`/`AudioContent` blocks — the spec's way
+/// to put an image in front of the model — everything else becomes text.
+pub struct ToolResponse {
+    pub json: Value,
+    pub artifacts: Vec<ArtifactContent>,
+}
+
+impl From<Value> for ToolResponse {
+    fn from(json: Value) -> Self {
+        Self { json, artifacts: Vec::new() }
+    }
+}
 
 /// Dispatch a tool call by name. `args` is the arguments object (may be null).
 pub async fn call_tool(
@@ -24,27 +41,29 @@ pub async fn call_tool(
     mcp_headers: Option<&Value>,
     name: &str,
     args: &Value,
-) -> Value {
+) -> ToolResponse {
     match name {
-        "run_js" => run_js(engine, session_id, mcp_headers, args).await,
-        "get_execution" => get_execution(engine, args),
-        "get_execution_output" => get_execution_output(engine, args),
-        "cancel_execution" => cancel_execution(engine, args),
-        "list_executions" => list_executions(engine),
-        "list_sessions" => list_sessions(engine).await,
-        "list_session_snapshots" => list_session_snapshots(engine, session_id, args).await,
-        "get_heap_tags" => get_heap_tags(engine, args).await,
-        "set_heap_tags" => set_heap_tags(engine, args).await,
-        "delete_heap_tags" => delete_heap_tags(engine, args).await,
-        "query_heaps_by_tags" => query_heaps_by_tags(engine, args).await,
-        "fs_ls" => fs_ls(engine).await,
-        "fs_pull" => fs_pull(engine, args).await,
-        "fs_label" => fs_label(engine, args).await,
-        "fs_log" => fs_log(engine, args).await,
-        "fs_push" => fs_push(engine, args).await,
-        "fs_reset" => fs_reset(engine, args).await,
-        "fs_merge" => fs_merge(engine, args).await,
-        other => json!({ "error": format!("unknown tool: {other}") }),
+        "run_js" => run_js(engine, session_id, mcp_headers, args).await.into(),
+        "get_execution" => get_execution(engine, args).into(),
+        "get_execution_output" => get_execution_output(engine, args).into(),
+        "cancel_execution" => cancel_execution(engine, args).into(),
+        "list_executions" => list_executions(engine).into(),
+        "list_sessions" => list_sessions(engine).await.into(),
+        "list_session_snapshots" => list_session_snapshots(engine, session_id, args).await.into(),
+        "get_artifact" => get_artifact(engine, args),
+        "list_artifacts" => list_artifacts(engine).into(),
+        "get_heap_tags" => get_heap_tags(engine, args).await.into(),
+        "set_heap_tags" => set_heap_tags(engine, args).await.into(),
+        "delete_heap_tags" => delete_heap_tags(engine, args).await.into(),
+        "query_heaps_by_tags" => query_heaps_by_tags(engine, args).await.into(),
+        "fs_ls" => fs_ls(engine).await.into(),
+        "fs_pull" => fs_pull(engine, args).await.into(),
+        "fs_label" => fs_label(engine, args).await.into(),
+        "fs_log" => fs_log(engine, args).await.into(),
+        "fs_push" => fs_push(engine, args).await.into(),
+        "fs_reset" => fs_reset(engine, args).await.into(),
+        "fs_merge" => fs_merge(engine, args).await.into(),
+        other => json!({ "error": format!("unknown tool: {other}") }).into(),
     }
 }
 
@@ -99,9 +118,52 @@ pub async fn run_js(
     json!({ "execution_id": execution_id })
 }
 
+/// Cap on artifact payload bytes attached inline to a stateless `run_js`
+/// result. Artifacts beyond the cap stay retrievable via `get_artifact`.
+const MAX_INLINE_ARTIFACT_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Render an execution's emitted artifacts for inline attachment, up to
+/// `MAX_INLINE_ARTIFACT_BYTES` total. Returns the rendered content blocks and
+/// a JSON metadata list marking which artifacts were inlined.
+fn render_inline_artifacts(
+    engine: &Engine,
+    metas: &[ArtifactMeta],
+) -> (Vec<ArtifactContent>, Vec<Value>) {
+    let mut contents = Vec::new();
+    let mut meta_json = Vec::new();
+    let mut inlined_bytes: u64 = 0;
+    for meta in metas {
+        let mut entry = json!({
+            "key": meta.key,
+            "mime_type": meta.mime_type,
+            "size_bytes": meta.size_bytes,
+        });
+        let fits = inlined_bytes.saturating_add(meta.size_bytes) <= MAX_INLINE_ARTIFACT_BYTES;
+        match (fits, engine.get_artifact(&meta.key)) {
+            (true, Ok(artifact)) => {
+                inlined_bytes += meta.size_bytes;
+                contents.push(artifact.content());
+                entry["inline"] = json!(true);
+            }
+            _ => {
+                entry["inline"] = json!(false);
+                entry["note"] = json!("not attached inline; fetch with get_artifact");
+            }
+        }
+        meta_json.push(entry);
+    }
+    (contents, meta_json)
+}
+
 /// Stateless run_js: submit, poll to completion, and return console output
 /// directly (used by the stateless MCP service and the stateless SSE handler).
-pub async fn run_js_blocking(engine: &Engine, mcp_headers: Option<&Value>, args: &Value) -> Value {
+/// Artifacts emitted via `artifact(key, mime, bytes)` are attached as extra
+/// content blocks (images as ImageContent, etc.) up to an inline size cap.
+pub async fn run_js_blocking(
+    engine: &Engine,
+    mcp_headers: Option<&Value>,
+    args: &Value,
+) -> ToolResponse {
     let mut req = engine.run_js(string_arg(args, "code").unwrap_or_default());
     req = req.maybe_file(string_arg(args, "file"));
     if let Some(mb) = args.get("heap_memory_max_mb").and_then(Value::as_u64) {
@@ -113,21 +175,27 @@ pub async fn run_js_blocking(engine: &Engine, mcp_headers: Option<&Value>, args:
     req = req.maybe_mcp_headers(mcp_headers.cloned());
     let exec_id = match req.execute().await {
         Ok(id) => id,
-        Err(e) => return json!({ "error": e }),
+        Err(e) => return json!({ "error": e }).into(),
     };
 
     let poll_interval = tokio::time::Duration::from_millis(50);
     let max_polls = 6000; // 5 minutes at 50ms intervals
     let mut status = String::new();
     let mut error_msg: Option<String> = None;
+    let mut artifact_metas: Vec<ArtifactMeta> = Vec::new();
     for _ in 0..max_polls {
         tokio::time::sleep(poll_interval).await;
         match engine.get_execution(&exec_id) {
             Ok(info) => match info.status.as_str() {
-                "completed" => { status = info.status; break; }
+                "completed" => {
+                    status = info.status;
+                    artifact_metas = info.artifacts;
+                    break;
+                }
                 "failed" | "timed_out" | "cancelled" => {
                     status = info.status;
                     error_msg = info.error;
+                    artifact_metas = info.artifacts;
                     break;
                 }
                 _ => continue,
@@ -137,16 +205,22 @@ pub async fn run_js_blocking(engine: &Engine, mcp_headers: Option<&Value>, args:
     }
 
     if status.is_empty() {
-        return json!({ "error": "Execution did not complete within polling timeout" });
+        return json!({ "error": "Execution did not complete within polling timeout" }).into();
     }
     let output = engine
         .get_execution_output(&exec_id, None, Some(u64::MAX), None, None)
         .map(|page| page.data)
         .unwrap_or_default();
-    match status.as_str() {
+
+    let (contents, artifacts_json) = render_inline_artifacts(engine, &artifact_metas);
+    let mut json = match status.as_str() {
         "completed" => json!({ "output": output }),
         _ => json!({ "output": output, "error": error_msg }),
+    };
+    if !artifacts_json.is_empty() {
+        json["artifacts"] = Value::Array(artifacts_json);
     }
+    ToolResponse { json, artifacts: contents }
 }
 
 fn get_execution(engine: &Engine, args: &Value) -> Value {
@@ -161,7 +235,36 @@ fn get_execution(engine: &Engine, args: &Value) -> Value {
             "error": info.error,
             "started_at": info.started_at,
             "completed_at": info.completed_at,
+            "artifacts": info.artifacts,
         }),
+        Err(e) => json!({ "error": e }),
+    }
+}
+
+/// Fetch an artifact by key; the payload is returned as an extra content
+/// block (ImageContent for image/*, AudioContent for audio/*, text otherwise).
+pub fn get_artifact(engine: &Engine, args: &Value) -> ToolResponse {
+    let key = string_arg(args, "key").unwrap_or_default();
+    match engine.get_artifact(&key) {
+        Ok(artifact) => ToolResponse {
+            json: json!({
+                "key": artifact.meta.key,
+                "mime_type": artifact.meta.mime_type,
+                "size_bytes": artifact.meta.size_bytes,
+                "created_at": artifact.meta.created_at,
+                "execution_id": artifact.meta.execution_id,
+                "encoding": artifact.encoding(),
+            }),
+            artifacts: vec![artifact.content()],
+        },
+        Err(e) => json!({ "error": e }).into(),
+    }
+}
+
+/// List metadata for all stored artifacts.
+pub fn list_artifacts(engine: &Engine) -> Value {
+    match engine.list_artifacts() {
+        Ok(artifacts) => json!({ "artifacts": artifacts }),
         Err(e) => json!({ "error": e }),
     }
 }
