@@ -251,6 +251,12 @@ fn normalize_oauth_config(config: OAuthClientCredentialsConfig) -> Result<OAuthC
 fn build_fetch_http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
+        // Never auto-follow redirects. `do_fetch` drives redirects itself so the
+        // OPA policy is evaluated against every hop's URL — including redirect
+        // destinations. reqwest's default (follow up to 10) would fetch those
+        // destinations below the policy layer, letting an allowed host redirect
+        // to a policy-denied one and return its body.
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .expect("Failed to create fetch HTTP client")
 }
@@ -631,7 +637,33 @@ fn b64_decode(s: &str) -> Result<Vec<u8>, String> {
 
 // ── Pure-Rust fetch implementation (no V8 types) ─────────────────────────
 
+/// Maximum number of redirect hops `do_fetch` will follow. Each hop is
+/// re-evaluated against the policy chain before it is fetched. Matches
+/// reqwest's historical default of 10.
+const MAX_REDIRECTS: usize = 10;
+
+/// Sensitive request headers dropped on a cross-origin redirect so user
+/// credentials never leak to a different origin (matches browser/reqwest
+/// behavior). Keys are lowercase because the JS wrapper and `apply_header_rules`
+/// both normalize header names to lowercase.
+const SENSITIVE_HEADERS: [&str; 3] = ["authorization", "cookie", "proxy-authorization"];
+
+/// The scheme/host/port tuple that defines an "origin" for redirect purposes.
+fn origin_of(url: &url::Url) -> (String, String, Option<u16>) {
+    (
+        url.scheme().to_string(),
+        url.host_str().unwrap_or("").to_string(),
+        url.port_or_known_default(),
+    )
+}
+
 /// Execute a policy-gated HTTP fetch. All V8 interaction happens in the caller.
+///
+/// Redirects are followed manually (the client is configured not to auto-follow)
+/// so the policy chain is evaluated against **every** hop's URL, not just the
+/// originally requested one. Without this, an allowed host could redirect to a
+/// policy-denied host and its body would be returned — the authorizer would have
+/// validated the reference but not the destination.
 async fn do_fetch(
     url_str: String,
     method: String,
@@ -641,109 +673,167 @@ async fn do_fetch(
     http_client: reqwest::Client,
     header_rules: Vec<HeaderRule>,
 ) -> Result<String, String> {
-    let mut headers: HashMap<String, String> = serde_json::from_str(&headers_json)
+    // User-supplied headers (lowercase keys from the JS wrapper). Re-derived per
+    // hop so host-scoped credential injection targets the correct host.
+    let base_headers: HashMap<String, String> = serde_json::from_str(&headers_json)
         .map_err(|e| format!("fetch: invalid headers JSON: {}", e))?;
 
-    // Parse URL into components for policy input
-    let parsed_url = url::Url::parse(&url_str)
-        .map_err(|e| format!("fetch: invalid URL '{}': {}", url_str, e))?;
-
-    let url_host = parsed_url.host_str().unwrap_or("").to_string();
-
-    // Apply header injection rules. User-provided headers take precedence.
-    apply_header_rules(&header_rules, &url_host, &method, &mut headers)
-        .await
-        .map_err(|e| format!("fetch: credential injection failed for host '{}': {}", url_host, e))?;
-
-    let url_parsed = UrlParsed {
-        scheme: parsed_url.scheme().to_string(),
-        host: url_host,
-        port: parsed_url.port(),
-        path: parsed_url.path().to_string(),
-        query: parsed_url.query().unwrap_or("").to_string(),
-    };
-
-    let policy_input = FetchPolicyInput {
-        operation: "fetch",
-        url: url_str.clone(),
-        method: method.clone(),
-        headers: headers.clone(),
-        url_parsed,
-    };
-
-    // Evaluate policy chain.
-    let input_value = serde_json::to_value(&policy_input)
-        .map_err(|e| format!("fetch: failed to serialize policy input: {}", e))?;
-    let allowed = policy_chain.evaluate(&input_value).await?;
-    if !allowed {
-        return Err(format!(
-            "fetch denied by policy: {} {} is not allowed",
-            method, url_str
-        ));
-    }
-
-    // Execute the HTTP request
-    let mut req_builder = http_client.request(
-        method
-            .parse::<reqwest::Method>()
-            .map_err(|e| format!("fetch: invalid method '{}': {}", method, e))?,
-        &url_str,
-    );
-
-    for (k, v) in &headers {
-        req_builder = req_builder.header(k.as_str(), v.as_str());
-    }
-
-    if let Some(body) = body {
+    // The request body is decoded once; it is preserved across 307/308 redirects
+    // and dropped when a 301/302/303 downgrades the method to GET.
+    let mut body_bytes: Option<Vec<u8>> = match body {
         // The JS wrapper sends the request body base64-encoded so binary
         // payloads (git packfiles, etc.) are preserved.
-        let body_bytes = b64_decode(&body)?;
-        req_builder = req_builder.body(body_bytes);
+        Some(b) => Some(b64_decode(&b)?),
+        None => None,
+    };
+
+    let origin = {
+        let parsed = url::Url::parse(&url_str)
+            .map_err(|e| format!("fetch: invalid URL '{}': {}", url_str, e))?;
+        origin_of(&parsed)
+    };
+
+    let mut current_url = url_str;
+    let mut current_method = method;
+    let mut redirected = false;
+
+    // Initial request + up to MAX_REDIRECTS follow-ups.
+    for _hop in 0..=MAX_REDIRECTS {
+        let parsed_url = url::Url::parse(&current_url)
+            .map_err(|e| format!("fetch: invalid URL '{}': {}", current_url, e))?;
+        let url_host = parsed_url.host_str().unwrap_or("").to_string();
+
+        // Start from the user's headers each hop. On a cross-origin redirect,
+        // drop sensitive headers so user credentials don't follow to a new
+        // origin.
+        let mut headers = base_headers.clone();
+        if redirected && origin_of(&parsed_url) != origin {
+            for name in SENSITIVE_HEADERS {
+                headers.remove(name);
+            }
+        }
+
+        // Apply header injection rules for THIS hop's host. User-provided
+        // headers take precedence.
+        apply_header_rules(&header_rules, &url_host, &current_method, &mut headers)
+            .await
+            .map_err(|e| format!("fetch: credential injection failed for host '{}': {}", url_host, e))?;
+
+        // Evaluate the policy chain for THIS hop's URL — including redirect
+        // destinations, which is the whole point of following redirects manually.
+        let url_parsed = UrlParsed {
+            scheme: parsed_url.scheme().to_string(),
+            host: url_host.clone(),
+            port: parsed_url.port(),
+            path: parsed_url.path().to_string(),
+            query: parsed_url.query().unwrap_or("").to_string(),
+        };
+        let policy_input = FetchPolicyInput {
+            operation: "fetch",
+            url: current_url.clone(),
+            method: current_method.clone(),
+            headers: headers.clone(),
+            url_parsed,
+        };
+        let input_value = serde_json::to_value(&policy_input)
+            .map_err(|e| format!("fetch: failed to serialize policy input: {}", e))?;
+        let allowed = policy_chain.evaluate(&input_value).await?;
+        if !allowed {
+            return Err(format!(
+                "fetch denied by policy: {} {} is not allowed",
+                current_method, current_url
+            ));
+        }
+
+        // Execute the HTTP request. The client does not auto-follow redirects.
+        let mut req_builder = http_client.request(
+            current_method
+                .parse::<reqwest::Method>()
+                .map_err(|e| format!("fetch: invalid method '{}': {}", current_method, e))?,
+            &current_url,
+        );
+        for (k, v) in &headers {
+            req_builder = req_builder.header(k.as_str(), v.as_str());
+        }
+        if let Some(ref bytes) = body_bytes {
+            req_builder = req_builder.body(bytes.clone());
+        }
+
+        let resp = req_builder
+            .send()
+            .await
+            .map_err(|e| format!("fetch: request failed: {}", e))?;
+
+        // Follow redirects ourselves so the next hop goes through the policy
+        // check above.
+        let code = resp.status().as_u16();
+        if matches!(code, 301 | 302 | 303 | 307 | 308) {
+            if let Some(location) = resp.headers().get(reqwest::header::LOCATION) {
+                let location = location
+                    .to_str()
+                    .map_err(|_| "fetch: redirect Location header is not valid text".to_string())?;
+                let next_url = parsed_url
+                    .join(location)
+                    .map_err(|e| format!("fetch: invalid redirect target '{}': {}", location, e))?;
+
+                // Never follow a redirect to a non-http(s) scheme.
+                if next_url.scheme() != "http" && next_url.scheme() != "https" {
+                    return Err(format!(
+                        "fetch: refusing to follow redirect to non-http(s) URL '{}'",
+                        next_url
+                    ));
+                }
+
+                // Method/body semantics per HTTP status.
+                match code {
+                    // 301/302/303: downgrade to GET (except HEAD) and drop the body.
+                    301 | 302 | 303 => {
+                        if current_method != "GET" && current_method != "HEAD" {
+                            current_method = "GET".to_string();
+                        }
+                        body_bytes = None;
+                    }
+                    // 307/308: preserve method and body.
+                    _ => {}
+                }
+
+                current_url = next_url.to_string();
+                redirected = true;
+                continue;
+            }
+            // 3xx without a Location header: treat as a final response.
+        }
+
+        // Final response — read it and return.
+        let status_text = resp.status().canonical_reason().unwrap_or("").to_string();
+        let final_url = resp.url().to_string();
+        let resp_headers: HashMap<String, String> = resp
+            .headers()
+            .iter()
+            .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
+            .collect();
+
+        // Read the response body as raw bytes and hand it back base64-encoded, so
+        // binary responses (git smart-HTTP, images, …) survive the op boundary.
+        let resp_bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| format!("fetch: failed to read response body: {}", e))?;
+        let resp_body = b64_encode(&resp_bytes);
+
+        let result = serde_json::json!({
+            "status": code,
+            "statusText": status_text,
+            "url": final_url,
+            "headers": resp_headers,
+            "body": resp_body,
+            "bodyEncoding": "base64",
+            "redirected": redirected,
+        });
+        return Ok(result.to_string());
     }
 
-    let resp = req_builder
-        .send()
-        .await
-        .map_err(|e| format!("fetch: request failed: {}", e))?;
-
-    let status = resp.status().as_u16();
-    let status_text = resp
-        .status()
-        .canonical_reason()
-        .unwrap_or("")
-        .to_string();
-    let final_url = resp.url().to_string();
-
-    let resp_headers: HashMap<String, String> = resp
-        .headers()
-        .iter()
-        .map(|(k, v)| {
-            (
-                k.as_str().to_string(),
-                v.to_str().unwrap_or("").to_string(),
-            )
-        })
-        .collect();
-
-    // Read the response body as raw bytes and hand it back base64-encoded, so
-    // binary responses (git smart-HTTP, images, …) survive the op boundary.
-    let resp_bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| format!("fetch: failed to read response body: {}", e))?;
-    let resp_body = b64_encode(&resp_bytes);
-
-    let result = serde_json::json!({
-        "status": status,
-        "statusText": status_text,
-        "url": final_url,
-        "headers": resp_headers,
-        "body": resp_body,
-        "bodyEncoding": "base64",
-        "redirected": final_url != url_str,
-    });
-
-    Ok(result.to_string())
+    Err(format!("fetch: too many redirects (exceeded {})", MAX_REDIRECTS))
 }
 
 #[cfg(test)]
@@ -1447,26 +1537,18 @@ allow if {{
     //     without the policy ever seeing the destination — the same shape of gap.
 
     /// Build a policy chain that allows a fetch only when its destination port
-    /// equals `port`. Passing a port no server is bound to (e.g. 0) yields an
-    /// allow-nothing (default-deny) policy.
-    fn policy_allowing_only_port(port: u16) -> Arc<PolicyChain> {
+    /// is one of `ports`. Any URL to a port not in the list (e.g. a redirect
+    /// target the caller didn't authorize) is denied.
+    fn policy_allowing_ports(ports: &[u16]) -> Arc<PolicyChain> {
+        let allows: String = ports
+            .iter()
+            .map(|p| format!("\nallow if {{ input.url_parsed.port == {p} }}\n"))
+            .collect();
+        let rego = format!("package mcp.fetch\n\ndefault allow := false\n{allows}");
+
         let dir = tempfile::tempdir().expect("tempdir should be created");
         let path = dir.path().join("fetch.rego");
-        std::fs::write(
-            &path,
-            format!(
-                r#"
-package mcp.fetch
-
-default allow := false
-
-allow if {{
-  input.url_parsed.port == {port}
-}}
-"#
-            ),
-        )
-        .expect("rego policy should be written");
+        std::fs::write(&path, rego).expect("rego policy should be written");
         // from_file loads the policy source at construction, so the temp file
         // is no longer needed once the evaluator exists.
         let evaluator = LocalPolicyEvaluator::from_file(&path, "data.mcp.fetch.allow".to_string())
@@ -1475,6 +1557,12 @@ allow if {{
             vec![PolicyEvaluatorKind::Local(evaluator)],
             EvalMode::All,
         ))
+    }
+
+    /// Allow only a single port (a port no server is bound to, e.g. 0, yields a
+    /// default-deny policy).
+    fn policy_allowing_only_port(port: u16) -> Arc<PolicyChain> {
+        policy_allowing_ports(&[port])
     }
 
     /// The authorizer works for the direct path: a request to a host the policy
@@ -1506,46 +1594,39 @@ allow if {{
         );
     }
 
-    /// OPEN FINDING — the direct analog of the article's SQL-authorizer bypass.
+    /// Regression for the direct analog of the article's SQL-authorizer bypass:
+    /// a redirect from an allowed host to a policy-denied host must be blocked.
     ///
-    /// `do_fetch` evaluates the policy exactly once, on the requested URL, and
-    /// then issues the request with a client that auto-follows HTTP redirects
-    /// (both `reqwest::Client::new()` here and the production
-    /// `build_fetch_http_client()` use reqwest's default follow-up-to-10
-    /// policy). When an *allowed* host answers with a 3xx pointing at a
-    /// *policy-denied* host, reqwest follows it below the policy layer and
-    /// `do_fetch` returns the denied host's body. The policy validated the
-    /// reference but never the destination — exactly the gap Check Point
-    /// exploited via `ALTER TABLE ... RENAME`.
-    ///
-    /// The assertion below expresses the SECURE expectation, so it FAILS against
-    /// the current implementation; it is `#[ignore]`d to keep CI green while
-    /// serving as an executable reproduction. Remove `#[ignore]` once `fetch`
-    /// re-evaluates the policy on each redirect hop (or stops auto-following
-    /// redirects and re-drives them through `do_fetch`). The module loader
-    /// (`module_loader::NetworkModuleLoader::load`) has the same one-shot-check
-    /// / follow-redirects shape and should be fixed alongside it.
+    /// `do_fetch` re-evaluates the policy on every hop, so when the allowed host
+    /// answers with a 3xx pointing at a denied host, the follow-up is refused
+    /// before it is fetched — the denied host's body is never disclosed and, in
+    /// fact, the denied host is never even contacted.
     #[tokio::test]
-    #[ignore = "documents an OPEN authorization-bypass: fetch() follows redirects below the \
-                policy layer, so an allowed host can redirect to a policy-denied host and its \
-                body is returned. Analog of the CheckPoint SQL-authorizer bypass. Un-ignore \
-                once policy is re-evaluated per redirect hop."]
     async fn test_do_fetch_redirect_to_denied_host_must_not_bypass_policy() {
         use axum::response::Redirect;
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
         const SECRET: &str = "TOP-SECRET-FROM-DENIED-HOST";
 
-        // Denied host: serves a secret at /secret.
-        async fn secret_handler() -> impl IntoResponse {
+        // Denied host: serves a secret at /secret and counts how many times it
+        // is hit, so we can prove the policy stops the request before the wire.
+        let denied_hits = Arc::new(AtomicUsize::new(0));
+        async fn secret_handler(State(hits): State<Arc<AtomicUsize>>) -> impl IntoResponse {
+            hits.fetch_add(1, Ordering::SeqCst);
             (StatusCode::OK, SECRET)
         }
         let denied_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let denied_addr = denied_listener.local_addr().unwrap();
         let secret_url = format!("http://{}/secret", denied_addr);
-        tokio::spawn(async move {
-            let app = Router::new().route("/secret", get(secret_handler));
-            axum::serve(denied_listener, app).await.unwrap();
-        });
+        {
+            let hits = denied_hits.clone();
+            tokio::spawn(async move {
+                let app = Router::new()
+                    .route("/secret", get(secret_handler))
+                    .with_state(hits);
+                axum::serve(denied_listener, app).await.unwrap();
+            });
+        }
 
         // Allowed host: 307-redirects /start to the denied host's /secret.
         async fn redirect_handler(State(target): State<String>) -> Redirect {
@@ -1568,40 +1649,92 @@ allow if {{
         // permitted by the policy.
         let policy = policy_allowing_only_port(allowed_addr.port());
 
+        let err = do_fetch(
+            start_url,
+            "GET".to_string(),
+            "{}".to_string(),
+            None,
+            policy,
+            // Use the production client (no auto-follow); do_fetch drives the
+            // redirect and re-checks the policy on the destination.
+            super::build_fetch_http_client(),
+            vec![],
+        )
+        .await
+        .expect_err("a redirect to a policy-denied host must be refused");
+
+        assert!(
+            err.contains("denied by policy"),
+            "expected a policy denial on the redirect destination, got: {err}"
+        );
+        assert_eq!(
+            denied_hits.load(Ordering::SeqCst),
+            0,
+            "the policy-denied redirect destination must never be contacted"
+        );
+    }
+
+    /// The fix must not over-block: a redirect to a host the policy DOES allow
+    /// is still followed, and the final body is returned.
+    #[tokio::test]
+    async fn test_do_fetch_follows_redirect_to_allowed_host_when_policy_permits() {
+        use axum::response::Redirect;
+
+        const MARKER: &str = "FINAL-ALLOWED-BODY";
+
+        // Final host (allowed): serves the body we expect to come back.
+        async fn final_handler() -> impl IntoResponse {
+            (StatusCode::OK, MARKER)
+        }
+        let final_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let final_addr = final_listener.local_addr().unwrap();
+        let final_url = format!("http://{}/final", final_addr);
+        tokio::spawn(async move {
+            let app = Router::new().route("/final", get(final_handler));
+            axum::serve(final_listener, app).await.unwrap();
+        });
+
+        // Start host (allowed): 307-redirects /start to the final host.
+        async fn redirect_handler(State(target): State<String>) -> Redirect {
+            Redirect::temporary(&target)
+        }
+        let start_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let start_addr = start_listener.local_addr().unwrap();
+        let start_url = format!("http://{}/start", start_addr);
+        {
+            let final_url = final_url.clone();
+            tokio::spawn(async move {
+                let app = Router::new()
+                    .route("/start", get(redirect_handler))
+                    .with_state(final_url);
+                axum::serve(start_listener, app).await.unwrap();
+            });
+        }
+
+        // Allow BOTH hops' ports.
+        let policy = policy_allowing_ports(&[start_addr.port(), final_addr.port()]);
+
         let response = do_fetch(
             start_url,
             "GET".to_string(),
             "{}".to_string(),
             None,
             policy,
-            reqwest::Client::new(),
+            super::build_fetch_http_client(),
             vec![],
         )
-        .await;
+        .await
+        .expect("a redirect to an allowed host should succeed");
 
-        // SECURE EXPECTATION: the policy authorized a request to the allowed
-        // host only, so the denied redirect destination's body must never be
-        // disclosed — either the fetch is refused, or it does not return the
-        // target's contents.
-        match response {
-            Err(e) => assert!(
-                e.contains("denied") || e.contains("policy"),
-                "expected a policy denial, got: {e}"
-            ),
-            Ok(json) => {
-                let v: Value = serde_json::from_str(&json).expect("response JSON should parse");
-                let body_bytes =
-                    super::b64_decode(v["body"].as_str().unwrap_or("")).expect("decode body");
-                let body = String::from_utf8_lossy(&body_bytes);
-                assert!(
-                    !body.contains(SECRET),
-                    "AUTHORIZATION BYPASS: fetch followed a redirect from the allowed host to a \
-                     policy-denied host and returned its body ({}). Re-evaluate the policy on \
-                     each redirect hop.",
-                    body.trim(),
-                );
-            }
-        }
+        let v: Value = serde_json::from_str(&response).expect("response JSON should parse");
+        assert_eq!(v["status"], 200, "expected the final 200, got: {v}");
+        assert_eq!(v["redirected"], true, "response should be flagged as redirected");
+        let body_bytes = super::b64_decode(v["body"].as_str().unwrap_or("")).expect("decode body");
+        let body = String::from_utf8_lossy(&body_bytes);
+        assert!(
+            body.contains(MARKER),
+            "expected the final allowed host's body, got: {body}"
+        );
     }
 
     #[test]
