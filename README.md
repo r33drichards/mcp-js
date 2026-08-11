@@ -1,5 +1,7 @@
 # mcp-v8 — a JavaScript/TypeScript runtime for AI agents
 
+[![MCP Toplist](https://mcptoplist.com/badge/smithery%2Fr33drichards%2Fmcp-js.svg)](https://mcptoplist.com/server/smithery%2Fr33drichards%2Fmcp-js)
+
 [![Docs](https://img.shields.io/badge/docs-mkdocs-blue)](https://r33drichards.github.io/mcp-js/)
 [![Release](https://img.shields.io/github/v/release/r33drichards/mcp-js)](https://github.com/r33drichards/mcp-js/releases)
 [![License: AGPL v3](https://img.shields.io/badge/license-AGPL--3.0-blue)](./LICENSE)
