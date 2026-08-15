@@ -35,6 +35,7 @@ deno_error = "0.7"
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-sdk-s3 = "1"
 async-trait = "0.1"
+libc = "0.2"
 # "string" enables owned (runtime-computed) builder values, used by the
 # --config loader to install config-file values as per-arg defaults.
 clap = { version = "4.5", features = ["derive", "env", "string"] }

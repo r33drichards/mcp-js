@@ -151,3 +151,24 @@ fn permits_stdio_auth_configuration_for_legacy_compatibility() {
         .validate_for_connection()
         .expect("stdio auth remains ignored with a warning for compatibility");
 }
+
+#[test]
+fn debug_output_redacts_oauth_client_secrets() {
+    let config: McpServerConfig = serde_json::from_str(
+        r#"{
+            "name": "calendar",
+            "transport": "http",
+            "url": "https://calendar.example.com/mcp",
+            "auth": {
+                "type": "oauth_browser",
+                "client_id": "calendar-cli",
+                "client_secret": "client-secret"
+            }
+        }"#,
+    )
+    .expect("OAuth configuration should deserialize");
+
+    let debug = format!("{config:?}");
+    assert!(!debug.contains("client-secret"));
+    assert!(debug.contains("[REDACTED]"));
+}

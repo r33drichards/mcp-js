@@ -3,7 +3,11 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use sha2::{Digest, Sha256};
+
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+
 use rmcp::transport::auth::{
     AuthError, AuthorizationManager, CredentialStore, OAuthClientConfig, StoredCredentials,
 };
@@ -45,18 +49,37 @@ async fn resolve_browser_oauth_with_opener<F>(
 where
     F: FnOnce(&str) -> std::io::Result<()>,
 {
+    validate_oauth_endpoint(server_url, "protected resource URL")?;
     let cache_path = token_cache
         .map(PathBuf::from)
         .unwrap_or_else(|| default_token_cache_path(server_name));
     let scopes = scope.unwrap_or_default();
     let scope_refs: Vec<&str> = scopes.iter().map(String::as_str).collect();
+    let binding = CacheBinding::new(server_url, scope, client_id, client_secret);
 
     let mut manager = AuthorizationManager::new(server_url)
         .await
         .map_err(|_| oauth_failure(server_name, "manager initialization"))?;
-    manager.set_credential_store(FileCredentialStore::new(cache_path.clone()));
+    manager.set_credential_store(FileCredentialStore::new(cache_path, binding));
+
+    let metadata = manager
+        .discover_metadata()
+        .await
+        .map_err(|_| oauth_failure(server_name, "metadata discovery"))?;
+    validate_authorization_metadata(&metadata)?;
+    manager.set_metadata(metadata);
 
     if manager.initialize_from_store().await.unwrap_or(false) {
+        if let Some(client_id) = client_id {
+            configure_static_client(
+                &mut manager,
+                client_id,
+                client_secret,
+                "http://localhost",
+                scopes,
+            )
+            .map_err(|_| oauth_failure(server_name, "cached client configuration"))?;
+        }
         match manager.get_access_token().await {
             Ok(token) => return Ok(token),
             Err(AuthError::AuthorizationRequired) => {
@@ -65,12 +88,6 @@ where
             Err(_) => return Err(oauth_failure(server_name, "cached token retrieval")),
         }
     }
-
-    let metadata = manager
-        .discover_metadata()
-        .await
-        .map_err(|_| oauth_failure(server_name, "metadata discovery"))?;
-    manager.set_metadata(metadata);
 
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", redirect_port.unwrap_or(0)))
         .await
@@ -82,16 +99,14 @@ where
     let redirect_uri = format!("http://localhost:{port}/callback");
 
     match client_id {
-        Some(client_id) => {
-            let mut config = OAuthClientConfig::new(client_id, redirect_uri.clone())
-                .with_scopes(scopes.to_vec());
-            if let Some(client_secret) = client_secret {
-                config = config.with_client_secret(client_secret);
-            }
-            manager
-                .configure_client(config)
-                .map_err(|_| oauth_failure(server_name, "client configuration"))?;
-        }
+        Some(client_id) => configure_static_client(
+            &mut manager,
+            client_id,
+            client_secret,
+            &redirect_uri,
+            scopes,
+        )
+        .map_err(|_| oauth_failure(server_name, "client configuration"))?,
         None => {
             manager
                 .register_client("mcp-js", &redirect_uri, &scope_refs)
@@ -135,13 +150,52 @@ where
         .map_err(|_| oauth_failure(server_name, "access token retrieval"))
 }
 
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct CacheBinding {
+    version: u8,
+    fingerprint: String,
+}
+
+impl CacheBinding {
+    fn new(
+        protected_resource: &str,
+        requested_scopes: Option<&[String]>,
+        client_id: Option<&str>,
+        client_secret: Option<&str>,
+    ) -> Self {
+        let mut scopes = requested_scopes.unwrap_or_default().to_vec();
+        scopes.sort();
+        scopes.dedup();
+        let payload = serde_json::json!({
+            "version": 1,
+            "protected_resource": protected_resource,
+            "requested_scopes": scopes,
+            "client_id": client_id,
+            "client_secret": client_secret,
+        });
+        let mut hasher = Sha256::new();
+        hasher.update(serde_json::to_vec(&payload).expect("cache binding is serializable"));
+        Self {
+            version: 1,
+            fingerprint: format!("{:x}", hasher.finalize()),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct DiskTokenCache {
+    binding: CacheBinding,
+    credentials: StoredCredentials,
+}
+
 struct FileCredentialStore {
     path: PathBuf,
+    binding: CacheBinding,
 }
 
 impl FileCredentialStore {
-    fn new(path: PathBuf) -> Self {
-        Self { path }
+    fn new(path: PathBuf, binding: CacheBinding) -> Self {
+        Self { path, binding }
     }
 }
 
@@ -157,10 +211,13 @@ impl std::fmt::Debug for FileCredentialStore {
 #[async_trait]
 impl CredentialStore for FileCredentialStore {
     async fn load(&self) -> Result<Option<StoredCredentials>, AuthError> {
+        validate_cache_file(&self.path)?;
         match std::fs::read(&self.path) {
-            Ok(bytes) => serde_json::from_slice(&bytes)
-                .map(Some)
-                .map_err(|_| AuthError::InternalError("token cache parse error".to_string())),
+            Ok(bytes) => {
+                let cache: DiskTokenCache = serde_json::from_slice(&bytes)
+                    .map_err(|_| AuthError::InternalError("token cache parse error".to_string()))?;
+                Ok((cache.binding == self.binding).then_some(cache.credentials))
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(_) => Err(AuthError::InternalError(
                 "token cache read error".to_string(),
@@ -169,8 +226,11 @@ impl CredentialStore for FileCredentialStore {
     }
 
     async fn save(&self, credentials: StoredCredentials) -> Result<(), AuthError> {
-        let bytes = serde_json::to_vec_pretty(&credentials)
-            .map_err(|_| AuthError::InternalError("token cache serialization error".to_string()))?;
+        let bytes = serde_json::to_vec_pretty(&DiskTokenCache {
+            binding: self.binding.clone(),
+            credentials,
+        })
+        .map_err(|_| AuthError::InternalError("token cache serialization error".to_string()))?;
         write_private_file(&self.path, &bytes)
             .map_err(|_| AuthError::InternalError("token cache write error".to_string()))
     }
@@ -184,6 +244,78 @@ impl CredentialStore for FileCredentialStore {
             )),
         }
     }
+}
+
+fn configure_static_client(
+    manager: &mut AuthorizationManager,
+    client_id: &str,
+    client_secret: Option<&str>,
+    redirect_uri: &str,
+    scopes: &[String],
+) -> Result<(), AuthError> {
+    let mut config = OAuthClientConfig::new(client_id, redirect_uri).with_scopes(scopes.to_vec());
+    if let Some(client_secret) = client_secret {
+        config = config.with_client_secret(client_secret);
+    }
+    manager.configure_client(config)
+}
+
+fn validate_oauth_endpoint(endpoint: &str, label: &str) -> Result<(), String> {
+    let url = url::Url::parse(endpoint).map_err(|_| format!("OAuth {label} is not a valid URL"))?;
+    if url.scheme() == "https" {
+        return Ok(());
+    }
+    let loopback = matches!(url.host_str(), Some("localhost"))
+        || url
+            .host_str()
+            .and_then(|host| host.parse::<std::net::IpAddr>().ok())
+            .is_some_and(|address| address.is_loopback());
+    if url.scheme() == "http" && loopback {
+        return Ok(());
+    }
+    Err(format!(
+        "OAuth {label} must use HTTPS unless it is loopback"
+    ))
+}
+
+fn validate_authorization_metadata(
+    metadata: &rmcp::transport::auth::AuthorizationMetadata,
+) -> Result<(), String> {
+    validate_oauth_endpoint(&metadata.authorization_endpoint, "authorization endpoint")?;
+    validate_oauth_endpoint(&metadata.token_endpoint, "token endpoint")?;
+    if let Some(registration_endpoint) = &metadata.registration_endpoint {
+        validate_oauth_endpoint(registration_endpoint, "registration endpoint")?;
+    }
+    Ok(())
+}
+
+fn validate_cache_file(path: &Path) -> Result<(), AuthError> {
+    use std::io::ErrorKind;
+
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(_) => {
+            return Err(AuthError::InternalError(
+                "token cache metadata error".to_string(),
+            ));
+        }
+    };
+    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+        return Err(AuthError::InternalError(
+            "token cache is not a regular file".to_string(),
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 != 0 {
+            return Err(AuthError::InternalError(
+                "token cache permissions are insecure".to_string(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn write_private_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -288,6 +420,11 @@ async fn await_authorization_code(
             .unwrap_or("");
         let callback = parse_callback_target(target);
 
+        if callback.state.as_deref() != Some(expected_state) {
+            let _ =
+                write_callback_response(&mut stream, "Waiting", "Waiting for authorization.").await;
+            continue;
+        }
         if callback.error.is_some() {
             let _ = write_callback_response(
                 &mut stream,
@@ -302,15 +439,6 @@ async fn await_authorization_code(
                 write_callback_response(&mut stream, "Waiting", "Waiting for authorization.").await;
             continue;
         };
-        if callback.state.as_deref() != Some(expected_state) {
-            let _ = write_callback_response(
-                &mut stream,
-                "Authorization failed",
-                "State validation failed. You can close this tab.",
-            )
-            .await;
-            return Err("OAuth callback state mismatch".to_string());
-        }
 
         let _ = write_callback_response(
             &mut stream,
@@ -420,6 +548,7 @@ mod tests {
     struct TestOAuthServer {
         url: String,
         calls: Arc<Mutex<Vec<String>>>,
+        requests: Arc<Mutex<Vec<String>>>,
         task: tokio::task::JoinHandle<()>,
     }
 
@@ -428,7 +557,9 @@ mod tests {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let url = format!("http://{}", listener.local_addr().unwrap());
             let calls = Arc::new(Mutex::new(Vec::new()));
+            let requests = Arc::new(Mutex::new(Vec::new()));
             let task_calls = calls.clone();
+            let task_requests = requests.clone();
             let task_url = url.clone();
             let task = tokio::spawn(async move {
                 loop {
@@ -436,6 +567,7 @@ mod tests {
                         break;
                     };
                     let calls = task_calls.clone();
+                    let requests = task_requests.clone();
                     let url = task_url.clone();
                     tokio::spawn(async move {
                         let mut buffer = [0_u8; 8192];
@@ -443,6 +575,7 @@ mod tests {
                         let request = String::from_utf8_lossy(&buffer[..size]).to_string();
                         let line = request.lines().next().unwrap_or_default().to_string();
                         calls.lock().await.push(line.clone());
+                        requests.lock().await.push(request.clone());
                         let (status, body) = if line.contains("oauth-protected-resource") {
                             (
                                 "200 OK",
@@ -475,7 +608,12 @@ mod tests {
                     });
                 }
             });
-            Self { url, calls, task }
+            Self {
+                url,
+                calls,
+                requests,
+                task,
+            }
         }
     }
 
@@ -506,10 +644,28 @@ mod tests {
     }
 
     async fn save_cache(path: PathBuf, credentials: StoredCredentials) {
-        FileCredentialStore::new(path)
-            .save(credentials)
-            .await
-            .unwrap();
+        FileCredentialStore::new(
+            path,
+            CacheBinding::new("https://calendar.example.com/mcp", None, None, None),
+        )
+        .save(credentials)
+        .await
+        .unwrap();
+    }
+
+    async fn save_bound_cache(
+        path: PathBuf,
+        server_url: &str,
+        client_secret: Option<&str>,
+        credentials: StoredCredentials,
+    ) {
+        FileCredentialStore::new(
+            path,
+            CacheBinding::new(server_url, None, Some("client-id"), client_secret),
+        )
+        .save(credentials)
+        .await
+        .unwrap();
     }
 
     fn now() -> u64 {
@@ -551,8 +707,10 @@ mod tests {
         let server = TestOAuthServer::start(TokenMode::Refreshes).await;
         let directory = tempfile::tempdir().unwrap();
         let cache = directory.path().join("tokens.json");
-        save_cache(
+        save_bound_cache(
             cache.clone(),
+            &format!("{}/mcp", server.url),
+            None,
             credentials("cached-access", Some("refresh-secret"), 3600, now()),
         )
         .await;
@@ -583,8 +741,10 @@ mod tests {
         let server = TestOAuthServer::start(TokenMode::Refreshes).await;
         let directory = tempfile::tempdir().unwrap();
         let cache = directory.path().join("tokens.json");
-        save_cache(
+        save_bound_cache(
             cache.clone(),
+            &format!("{}/mcp", server.url),
+            None,
             credentials("expired-access", Some("refresh-secret"), 1, 0),
         )
         .await;
@@ -611,12 +771,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn expired_confidential_client_cache_refreshes_with_its_secret() {
+        let server = TestOAuthServer::start(TokenMode::Refreshes).await;
+        let directory = tempfile::tempdir().unwrap();
+        let cache = directory.path().join("tokens.json");
+        save_bound_cache(
+            cache.clone(),
+            &format!("{}/mcp", server.url),
+            Some("client-secret"),
+            credentials("expired-access", Some("refresh-secret"), 1, 0),
+        )
+        .await;
+
+        let token = resolve_browser_oauth(
+            "calendar",
+            &format!("{}/mcp", server.url),
+            None,
+            Some("client-id"),
+            Some("client-secret"),
+            None,
+            cache.to_str(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(token, "refreshed-access");
+        let requests = server.requests.lock().await;
+        assert!(
+            requests.iter().any(|request| request
+                .to_ascii_lowercase()
+                .contains("authorization: basic")),
+            "confidential refresh request did not include HTTP Basic client authentication: {requests:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn refresh_failure_falls_back_to_browser_authorization() {
         let server = TestOAuthServer::start(TokenMode::RejectsRefresh).await;
         let directory = tempfile::tempdir().unwrap();
         let cache = directory.path().join("tokens.json");
-        save_cache(
+        save_bound_cache(
             cache.clone(),
+            &format!("{}/mcp", server.url),
+            None,
             credentials("expired-access", Some("refresh-secret"), 1, 0),
         )
         .await;
@@ -635,18 +831,103 @@ mod tests {
         assert_eq!(token, "browser-access");
     }
 
+    #[test]
+    fn rejects_plaintext_non_loopback_oauth_endpoints() {
+        for endpoint in [
+            "http://calendar.example.com/mcp",
+            "http://auth.example.com/authorize",
+        ] {
+            assert!(validate_oauth_endpoint(endpoint, "test endpoint").is_err());
+        }
+        assert!(validate_oauth_endpoint("http://127.0.0.1:8080/mcp", "test endpoint").is_ok());
+        assert!(
+            validate_oauth_endpoint("https://calendar.example.com/mcp", "test endpoint").is_ok()
+        );
+    }
+
     #[tokio::test]
-    async fn rejects_a_callback_with_the_wrong_state() {
+    async fn rejects_cache_metadata_that_does_not_match_the_connection() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("tokens.json");
+        let original = CacheBinding::new(
+            "https://calendar.example.com/mcp",
+            Some(&["calendar.read".to_string()]),
+            Some("calendar-cli"),
+            Some("client-secret"),
+        );
+        FileCredentialStore::new(path.clone(), original)
+            .save(credentials(
+                "access-secret",
+                Some("refresh-secret"),
+                3600,
+                now(),
+            ))
+            .await
+            .unwrap();
+
+        let changed = CacheBinding::new(
+            "https://calendar.example.com/mcp",
+            Some(&["calendar.write".to_string()]),
+            Some("calendar-cli"),
+            Some("client-secret"),
+        );
+        assert!(
+            FileCredentialStore::new(path, changed)
+                .load()
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rejects_insecure_or_symlinked_token_caches() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("tokens.json");
+        std::fs::write(&path, "{}").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let binding = CacheBinding::new("https://calendar.example.com/mcp", None, None, None);
+        assert!(
+            FileCredentialStore::new(path.clone(), binding.clone())
+                .load()
+                .await
+                .is_err()
+        );
+
+        let target = directory.path().join("target.json");
+        std::fs::write(&target, "{}").unwrap();
+        let link = directory.path().join("tokens-link.json");
+        symlink(&target, &link).unwrap();
+        assert!(
+            FileCredentialStore::new(link, binding)
+                .load()
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn ignores_invalid_error_state_then_accepts_the_valid_callback() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         tokio::spawn(async move {
-            let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
-            stream.write_all(b"GET /callback?code=code-secret&state=wrong HTTP/1.1\r\nHost: localhost\r\n\r\n").await.unwrap();
+            for request in [
+                "GET /callback?error=access_denied&state=wrong HTTP/1.1\r\nHost: localhost\r\n\r\n",
+                "GET /callback?code=valid-code&state=expected HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            ] {
+                let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+                stream.write_all(request.as_bytes()).await.unwrap();
+            }
         });
-        let error = await_authorization_code(listener, "expected-state")
-            .await
-            .unwrap_err();
-        assert_eq!(error, "OAuth callback state mismatch");
+        assert_eq!(
+            await_authorization_code(listener, "expected")
+                .await
+                .unwrap(),
+            "valid-code"
+        );
     }
 
     #[test]
