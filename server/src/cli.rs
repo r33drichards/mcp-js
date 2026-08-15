@@ -36,7 +36,7 @@ impl std::fmt::Display for StoreKind {
 ///
 /// Every flag is also bindable from an `MCP_V8_*` environment variable
 /// (precedence: explicit CLI flag > env var > default).
-#[derive(Parser, StructuredArgs, Debug)]
+#[derive(Parser, StructuredArgs)]
 #[command(author, version, about, long_about = None)]
 pub struct Cli {
     /// Load configuration from a single TOML or JSON file (format chosen by
@@ -459,8 +459,9 @@ pub struct Cli {
     ///          {"name": "srv2", "transport": "sse", "url": "http://..."},
     ///          {"name": "srv3", "transport": "http", "url": "https://...",
     ///           "auth": {"type": "oauth_browser", "scope": ["read"]}}]
-    /// OAuth browser settings are accepted only in JSON and are ignored with a
-    /// warning until OAuth runtime support is added; stdio continues unchanged.
+    /// OAuth browser settings are accepted only in JSON. HTTP and SSE configs
+    /// fail closed until OAuth runtime support is added; stdio ignores auth with
+    /// a warning and continues unchanged.
     #[arg(long = "mcp-config", env = "MCP_V8_MCP_CONFIG", value_name = "PATH_OR_JSON", help_heading = "MCP Server Module")]
     pub mcp_config: Option<String>,
 

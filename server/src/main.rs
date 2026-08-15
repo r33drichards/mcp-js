@@ -74,8 +74,29 @@ fn main() -> Result<()> {
         .block_on(async_main(cli))
 }
 
+#[derive(Debug)]
+struct StartupLogSummary {
+    has_config_file: bool,
+    has_mcp_config: bool,
+    mcp_server_count: usize,
+}
+
+fn startup_log_summary(cli: &Cli) -> StartupLogSummary {
+    StartupLogSummary {
+        has_config_file: cli.config.is_some(),
+        has_mcp_config: cli.mcp_config.is_some(),
+        mcp_server_count: cli.mcp_servers.len(),
+    }
+}
+
 async fn async_main(cli: Cli) -> Result<()> {
-    tracing::info!(?cli, "Starting MCP server with CLI arguments");
+    let startup = startup_log_summary(&cli);
+    tracing::info!(
+        has_config_file = startup.has_config_file,
+        has_mcp_config = startup.has_mcp_config,
+        mcp_server_count = startup.mcp_server_count,
+        "Starting MCP server"
+    );
 
     let heap_memory_max_bytes = (cli.heap_memory_max as usize) * 1024 * 1024;
     let execution_timeout_secs = cli.execution_timeout;
@@ -1392,14 +1413,17 @@ fn load_mcp_server_configs(
     // Parse --mcp-config: inline JSON (as injected by the `mcp_servers` section
     // of a --config file) or a path to a JSON file.
     if let Some(config_path) = config_path {
-        let content = if config_path.trim_start().starts_with('[') {
-            config_path.clone()
+        let (content, source) = if config_path.trim_start().starts_with('[') {
+            (config_path.clone(), "inline MCP config".to_string())
         } else {
-            std::fs::read_to_string(config_path)
-                .map_err(|e| anyhow::anyhow!("Failed to read MCP config '{}': {}", config_path, e))?
+            (
+                std::fs::read_to_string(config_path)
+                    .map_err(|e| anyhow::anyhow!("Failed to read MCP config '{}': {}", config_path, e))?,
+                format!("MCP config file '{}'", config_path),
+            )
         };
         let file_configs: Vec<McpServerConfig> = serde_json::from_str(&content)
-            .map_err(|e| anyhow::anyhow!("Invalid JSON in MCP config '{}': {}", config_path, e))?;
+            .map_err(|e| anyhow::anyhow!("Invalid JSON in {}: {}", source, e))?;
         configs.extend(file_configs);
     }
 
@@ -1418,8 +1442,10 @@ fn load_mcp_server_configs(
 mod tests {
     use super::{
         load_fetch_header_rules, load_mcp_server_configs, load_wasm_modules,
-        parse_fetch_header_cli, resolve_text_or_file,
+        parse_fetch_header_cli, resolve_text_or_file, startup_log_summary,
     };
+    use clap::Parser;
+    use crate::cli::Cli;
 
     // ── Systematic structured-flag drift guard ──────────────────────────
     // Every flag registered in `cli::structured_args()` has its --help generated
@@ -1444,11 +1470,13 @@ mod tests {
             &[
                 "weather=stdio:python:server.py:--verbose".to_string(),
                 "remote=sse:http://127.0.0.1:9000/sse".to_string(),
+                "canonical=http:https://example.com/mcp".to_string(),
             ],
             &None,
         )?;
         anyhow::ensure!(matches!(configs[0].transport, McpServerTransport::Stdio { .. }));
         anyhow::ensure!(matches!(configs[1].transport, McpServerTransport::Sse { .. }));
+        anyhow::ensure!(matches!(configs[2].transport, McpServerTransport::Http { .. }));
         Ok(())
     }
 
@@ -1553,6 +1581,38 @@ mod tests {
         assert_eq!(modules[0].name, "math");
         assert_eq!(modules[0].max_memory_bytes, Some(16 * 1024 * 1024));
         assert_eq!(modules[0].description.as_deref(), Some("adds numbers"));
+    }
+
+    #[test]
+    fn startup_log_summary_redacts_mcp_config_secrets() {
+        let secret = "client-secret-must-not-be-logged";
+        let cli = Cli::try_parse_from([
+            "server",
+            "--mcp-config",
+            &format!(
+                r#"[{{"name":"protected","transport":"http","url":"https://example.com/mcp","auth":{{"type":"oauth_browser","client_secret":"{secret}"}}}}]"#
+            ),
+        ])
+        .expect("CLI arguments should parse");
+
+        let rendered = format!("{:?}", startup_log_summary(&cli));
+        assert!(!rendered.contains(secret));
+        assert!(!rendered.contains("client_secret"));
+        assert!(rendered.contains("has_mcp_config: true"));
+    }
+
+    #[test]
+    fn load_mcp_server_configs_redacts_inline_json_from_errors() {
+        let secret = "client-secret-must-not-be-logged";
+        let inline = format!(
+            r#"[{{"name":"protected","transport":"http","url":"https://example.com/mcp","auth":{{"type":"oauth_browser","client_secret":"{secret}"}}"#
+        );
+
+        let error = load_mcp_server_configs(&[], &Some(inline))
+            .expect_err("malformed inline JSON should be rejected");
+        let rendered = error.to_string();
+        assert!(!rendered.contains(secret));
+        assert!(rendered.contains("Invalid JSON in inline MCP config"));
     }
 
     #[test]

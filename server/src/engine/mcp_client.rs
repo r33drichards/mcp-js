@@ -33,8 +33,8 @@ use rmcp::RoleClient;
 /// Authentication configuration for HTTP-based MCP server connections.
 ///
 /// Only available via `--mcp-config` JSON file (too complex for CLI flags).
-/// The current transport ignores it with a warning until OAuth runtime support
-/// is added; stdio connections continue to use their existing process transport.
+/// HTTP and SSE connections fail closed until OAuth runtime support is added;
+/// stdio connections continue to use their existing process transport.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum McpServerAuth {
@@ -80,6 +80,26 @@ pub struct McpServerConfig {
     pub transport: McpServerTransport,
     #[serde(default)]
     pub auth: Option<McpServerAuth>,
+}
+
+impl McpServerConfig {
+    /// Reject auth-bearing network transports until their OAuth runtime exists.
+    pub fn validate_for_connection(&self) -> Result<(), String> {
+        if self.auth.is_none() {
+            return Ok(());
+        }
+
+        let transport = match self.transport {
+            McpServerTransport::Sse { .. } => "sse",
+            McpServerTransport::Http { .. } => "http",
+            McpServerTransport::Stdio { .. } => return Ok(()),
+        };
+
+        Err(format!(
+            "MCP server '{}' uses {} transport auth, but OAuth runtime support is not implemented",
+            self.name, transport
+        ))
+    }
 }
 
 // ── Tool metadata for JS ─────────────────────────────────────────────────
@@ -553,6 +573,8 @@ pub fn stub_call_instructions(
 async fn connect_one(config: &McpServerConfig) -> Result<ConnectedMcpServer, String> {
     use rmcp::ServiceExt;
 
+    config.validate_for_connection()?;
+
     match &config.transport {
         McpServerTransport::Stdio { command, args, env } => {
             if config.auth.is_some() {
@@ -591,12 +613,6 @@ async fn connect_one(config: &McpServerConfig) -> Result<ConnectedMcpServer, Str
             })
         }
         McpServerTransport::Sse { url } => {
-            if config.auth.is_some() {
-                tracing::warn!(
-                    server = %config.name,
-                    "Ignoring MCP auth configuration until OAuth runtime support is added"
-                );
-            }
             // The standalone SSE client transport was removed in rmcp 1.x; the
             // Streamable HTTP client transport is its replacement and speaks to
             // the same `/mcp`-style endpoints modern MCP servers expose.
@@ -624,12 +640,6 @@ async fn connect_one(config: &McpServerConfig) -> Result<ConnectedMcpServer, Str
             })
         }
         McpServerTransport::Http { url } => {
-            if config.auth.is_some() {
-                tracing::warn!(
-                    server = %config.name,
-                    "Ignoring MCP auth configuration until OAuth runtime support is added"
-                );
-            }
             let transport = rmcp::transport::StreamableHttpClientTransport::from_uri(url.clone());
 
             let service: rmcp::service::RunningService<RoleClient, ()> =

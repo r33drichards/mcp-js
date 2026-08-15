@@ -272,7 +272,7 @@ Directory for the heap-snapshot store when `--heap-store dir`. Defaults to /tmp/
 
 ### `--mcp-config`
 
-JSON config for MCP server modules (a path to a JSON file, or inline JSON — also settable as the `mcp_servers` section of a --config file). Format: [{"name": "srv", "transport": "stdio", "command": "cmd", "args": ["a"]}, {"name": "srv2", "transport": "sse", "url": "http://..."}, {"name": "srv3", "transport": "http", "url": "https://...", "auth": {"type": "oauth_browser", "scope": ["read"]}}] OAuth browser settings are accepted only in JSON and are ignored with a warning until OAuth runtime support is added; stdio continues unchanged
+JSON config for MCP server modules (a path to a JSON file, or inline JSON — also settable as the `mcp_servers` section of a --config file). Format: [{"name": "srv", "transport": "stdio", "command": "cmd", "args": ["a"]}, {"name": "srv2", "transport": "sse", "url": "http://..."}, {"name": "srv3", "transport": "http", "url": "https://...", "auth": {"type": "oauth_browser", "scope": ["read"]}}] OAuth browser settings are accepted only in JSON. HTTP and SSE configs fail closed until OAuth runtime support is added; stdio ignores auth with a warning and continues unchanged
 
 - Environment: `MCP_V8_MCP_CONFIG`
 - Value: `PATH_OR_JSON`

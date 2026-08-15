@@ -104,3 +104,41 @@ fn keeps_legacy_sse_config_working() {
     ));
     assert!(config.auth.is_none());
 }
+
+#[test]
+fn rejects_http_and_sse_auth_until_runtime_support_exists() {
+    for transport in ["http", "sse"] {
+        let config: McpServerConfig = serde_json::from_str(&format!(
+            r#"{{
+                "name": "protected-{transport}",
+                "transport": "{transport}",
+                "url": "https://protected.example.com/mcp",
+                "auth": {{ "type": "oauth_browser" }}
+            }}"#
+        ))
+        .expect("auth configuration should deserialize before connection validation");
+
+        let error = config
+            .validate_for_connection()
+            .expect_err("unimplemented HTTP auth must fail closed");
+        assert!(error.contains("OAuth runtime support is not implemented"));
+        assert!(error.contains(transport));
+    }
+}
+
+#[test]
+fn permits_stdio_auth_configuration_for_legacy_compatibility() {
+    let config: McpServerConfig = serde_json::from_str(
+        r#"{
+            "name": "legacy",
+            "transport": "stdio",
+            "command": "legacy-mcp",
+            "auth": { "type": "oauth_browser" }
+        }"#,
+    )
+    .expect("stdio auth configuration should deserialize");
+
+    config
+        .validate_for_connection()
+        .expect("stdio auth remains ignored with a warning for compatibility");
+}
