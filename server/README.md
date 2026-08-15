@@ -486,12 +486,20 @@ through `mcp.callTool()` and `mcp.listTools()`. Configure it with
   `${XDG_CACHE_HOME:-$HOME/.cache}/mcp-js/oauth-<server-name>.json`, with the
   system temporary directory as a final fallback.
 
+Protected-resource, authorization, token, and dynamic-registration endpoints
+require HTTPS unless they are loopback endpoints. This permits local OAuth test
+servers while refusing plaintext remote authorization infrastructure.
+
 The server discovers OAuth metadata before connecting. If a matching cache can
-provide an access token, it connects without showing a browser. Expired access
-tokens are refreshed with the cached refresh token when possible; browser
-authorization runs only if no usable cached credentials remain. The cache is
-bound to the protected resource URL, requested scopes, and client
-configuration, so changing any of those values requires a new authorization.
+provide an access token, it connects without showing a browser. OAuth
+credentials are resolved on each initial connection or reconnect. Expired
+access tokens are refreshed with the cached refresh token during that
+resolution when possible; browser authorization runs only if no usable cached
+credentials remain. An established transport keeps its bearer token until
+reconnect or invalidity. It does not refresh an already-established transport
+proactively. The cache is bound to the protected resource URL, requested
+scopes, and client configuration, so changing any of those values requires a
+new authorization.
 
 For an interactive flow, mcp-v8 binds the callback listener to loopback, prints
 the authorization URL, and tries to open it. On a headless machine, copy the
@@ -504,9 +512,12 @@ exchange failures, and timeout fail the MCP connection.
 The token cache contains bearer and refresh credentials. Keep it outside source
 control and do not share or edit it. On Unix, mcp-v8 creates it with `0600`
 permissions and rejects symlinks, non-regular files, files owned by another
-user, or files readable by group or others. To disconnect and revoke access,
-revoke the grant at the authorization provider and delete `token_cache` (or its
-default path). The next connection requires authorization again.
+user, or files readable by group or others. Unsafe, wrong-owner, or symlinked
+cache files are never consumed. They are treated as unusable, triggering
+reauthorization; successful authorization may replace the cache securely. To
+disconnect and revoke access, revoke the grant at the authorization provider
+and delete `token_cache` (or its default path). The next connection requires
+authorization again.
 
 ### Claude for Desktop
 

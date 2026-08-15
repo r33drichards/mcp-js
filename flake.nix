@@ -279,6 +279,31 @@
             inherit pkgs;
             mcp-js = self.packages.x86_64-linux.default;
           });
+          docs-oauth-contract-check = pkgs.stdenvNoCC.mkDerivation {
+            pname = "mcp-js-docs-oauth-contract-check";
+            version = "0.1.0";
+            src = self;
+
+            nativeBuildInputs = [ pkgs.gnugrep ];
+
+            dontUnpack = true;
+            dontConfigure = true;
+            strictDeps = true;
+
+            buildPhase = ''
+              runHook preBuild
+              ${pkgs.bash}/bin/bash "$src/scripts/check-oauth-docs.sh" "$src"
+              runHook postBuild
+            '';
+
+            installPhase = ''
+              runHook preInstall
+              mkdir -p "$out"
+              touch "$out/passed"
+              runHook postInstall
+            '';
+          };
+
           docs-generated-check = pkgs.stdenvNoCC.mkDerivation {
             pname = "mcp-js-docs-generated-check";
             version = "0.1.0";

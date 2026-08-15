@@ -209,6 +209,10 @@ All fields inside `auth` other than `type` are optional. Without `client_id`,
 the server uses OAuth dynamic client registration; otherwise it uses the
 provided registered client. `scope` is an array of requested scopes.
 
+Protected-resource, authorization, token, and dynamic-registration endpoints
+require HTTPS unless they are loopback endpoints. This permits local OAuth test
+servers while refusing plaintext remote authorization infrastructure.
+
 On first use, or when no usable cached credentials exist, `mcp-v8` starts a
 loopback callback listener and prints the authorization URL. It then attempts
 to open that URL locally. For a headless host, copy the printed URL into a
@@ -226,17 +230,22 @@ callback always binds to loopback and uses the resulting
 Credentials are cached at `token_cache`, or by default at
 `${XDG_CACHE_HOME:-$HOME/.cache}/mcp-js/oauth-<server-name>.json` (falling back
 to the system temporary directory when neither cache location is available).
-The cache is bound to the MCP URL, scopes, and client configuration. A valid
-refresh token is used to renew an expired access token without opening a
-browser; interactive authorization happens only when cached credentials cannot
-provide a token.
+The cache is bound to the MCP URL, scopes, and client configuration. OAuth
+credentials are resolved on each initial connection or reconnect. A valid
+refresh token renews an expired access token during that resolution without
+opening a browser; interactive authorization happens only when cached
+credentials cannot provide a token. An established transport keeps its bearer
+token until reconnect or invalidity. It does not refresh an already-established
+transport proactively.
 
 Treat the cache as a secret: it can contain refresh tokens. On Unix, mcp-v8
 writes it with mode `0600` and rejects symlinks, non-regular files, files owned
-by another user, and group/world-readable files. Do not commit, share, or edit
-it. To revoke local access, revoke the grant at the authorization server and
-delete the configured cache file; the next connection starts authorization
-again.
+by another user, and group/world-readable files. Unsafe, wrong-owner, or
+symlinked cache files are never consumed. They are treated as unusable, so
+reauthorization starts and successful authorization may replace the cache
+securely. Do not commit, share, or edit it. To revoke local access, revoke the
+grant at the authorization server and delete the configured cache file; the
+next connection starts authorization again.
 
 ## CLI client (`mcp-v8-cli`)
 

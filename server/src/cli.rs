@@ -462,10 +462,12 @@ pub struct Cli {
     ///                    "client_id": "...", "client_secret": "...",
     ///                    "redirect_port": 48123, "token_cache": "/path/to/cache.json"}}]
     /// `oauth_browser` is supported for HTTP only and is accepted only in JSON.
-    /// It prints an authorization URL only when no cached credential can provide
-    /// a token; cached refresh tokens renew access without opening a browser.
-    /// The callback binds to localhost on redirect_port (or an available port).
-    /// See the README for headless authorization and cache-file security.
+    /// Protected-resource and discovered OAuth endpoints require HTTPS unless
+    /// loopback. It prints an authorization URL only when no cached credential
+    /// can provide a token; cached refresh tokens renew access on connection or
+    /// reconnect without opening a browser. The callback binds to localhost on
+    /// redirect_port (or an available port). See the README for headless
+    /// authorization and cache-file security.
     #[arg(long = "mcp-config", env = "MCP_V8_MCP_CONFIG", value_name = "PATH_OR_JSON", help_heading = "MCP Server Module")]
     pub mcp_config: Option<String>,
 
