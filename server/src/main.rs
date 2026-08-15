@@ -1413,13 +1413,16 @@ fn load_mcp_server_configs(
     // Parse --mcp-config: inline JSON (as injected by the `mcp_servers` section
     // of a --config file) or a path to a JSON file.
     if let Some(config_path) = config_path {
-        let (content, source) = if config_path.trim_start().starts_with('[') {
-            (config_path.clone(), "inline MCP config".to_string())
+        let inline_json = config_path
+            .trim_start()
+            .starts_with(|character| matches!(character, '[' | '{'));
+        let (content, source) = if inline_json {
+            (config_path.clone(), "inline MCP config")
         } else {
             (
                 std::fs::read_to_string(config_path)
-                    .map_err(|e| anyhow::anyhow!("Failed to read MCP config '{}': {}", config_path, e))?,
-                format!("MCP config file '{}'", config_path),
+                    .map_err(|e| anyhow::anyhow!("Failed to read MCP config file: {}", e))?,
+                "MCP config file",
             )
         };
         let file_configs: Vec<McpServerConfig> = serde_json::from_str(&content)
@@ -1610,6 +1613,20 @@ mod tests {
 
         let error = load_mcp_server_configs(&[], &Some(inline))
             .expect_err("malformed inline JSON should be rejected");
+        let rendered = error.to_string();
+        assert!(!rendered.contains(secret));
+        assert!(rendered.contains("Invalid JSON in inline MCP config"));
+    }
+
+    #[test]
+    fn load_mcp_server_configs_redacts_object_inline_json_from_errors() {
+        let secret = "object-client-secret-must-not-be-logged";
+        let inline = format!(
+            r#"{{"name":"protected","transport":"http","url":"https://example.com/mcp","auth":{{"type":"oauth_browser","client_secret":"{secret}"}}}}"#
+        );
+
+        let error = load_mcp_server_configs(&[], &Some(inline))
+            .expect_err("object-form inline JSON should be rejected as a config list");
         let rendered = error.to_string();
         assert!(!rendered.contains(secret));
         assert!(rendered.contains("Invalid JSON in inline MCP config"));

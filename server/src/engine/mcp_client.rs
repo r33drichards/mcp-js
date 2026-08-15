@@ -570,6 +570,14 @@ pub fn stub_call_instructions(
 
 // ── Connection logic ─────────────────────────────────────────────────────
 
+const STDIO_AUTH_IGNORED_WARNING: &str = "Ignoring MCP auth configuration for stdio transport";
+
+fn emit_stdio_auth_warning(config: &McpServerConfig, emit: impl FnOnce(&'static str)) {
+    if config.auth.is_some() && matches!(config.transport, McpServerTransport::Stdio { .. }) {
+        emit(STDIO_AUTH_IGNORED_WARNING);
+    }
+}
+
 async fn connect_one(config: &McpServerConfig) -> Result<ConnectedMcpServer, String> {
     use rmcp::ServiceExt;
 
@@ -577,12 +585,9 @@ async fn connect_one(config: &McpServerConfig) -> Result<ConnectedMcpServer, Str
 
     match &config.transport {
         McpServerTransport::Stdio { command, args, env } => {
-            if config.auth.is_some() {
-                tracing::warn!(
-                    server = %config.name,
-                    "Ignoring MCP auth configuration for stdio transport"
-                );
-            }
+            emit_stdio_auth_warning(config, |message| {
+                tracing::warn!(server = %config.name, "{message}");
+            });
             let mut cmd = tokio::process::Command::new(command);
             cmd.args(args);
             for (k, v) in env {
@@ -1101,6 +1106,33 @@ mod tests {
         assert!(mgr.stub_call_response("runjs__github__delete_issue", None).is_none());
         // Default-prefix dispatcher should reject the old `mcp__` prefix.
         assert!(mgr.stub_call_response("mcp__github__create_issue", None).is_none());
+    }
+
+    #[test]
+    fn stdio_auth_warning_is_emitted_and_auth_is_ignored() {
+        let config = McpServerConfig {
+            name: "legacy".to_string(),
+            transport: McpServerTransport::Stdio {
+                command: "legacy-mcp".to_string(),
+                args: Vec::new(),
+                env: HashMap::new(),
+            },
+            auth: Some(McpServerAuth::OauthBrowser {
+                scope: None,
+                client_id: None,
+                client_secret: None,
+                redirect_port: None,
+                token_cache: None,
+            }),
+        };
+
+        config
+            .validate_for_connection()
+            .expect("stdio auth should remain compatible");
+
+        let mut warning = None;
+        emit_stdio_auth_warning(&config, |message| warning = Some(message));
+        assert_eq!(warning, Some(STDIO_AUTH_IGNORED_WARNING));
     }
 
     #[test]
