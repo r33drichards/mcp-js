@@ -281,11 +281,17 @@ fn install_headless_browser(
     let opener = bin_dir.join("xdg-open");
     std::fs::write(
         &opener,
-        "#!/bin/sh\nprintf '%s\\n' \"$1\" > \"$MCP_OAUTH_CAPTURE\"\n",
+        "#!/bin/sh\nprintf '%s\\n' \"$1\" >> \"$MCP_OAUTH_CAPTURE\"\n",
     )?;
     std::fs::set_permissions(&opener, std::fs::Permissions::from_mode(0o755))?;
     let guard = EnvironmentGuard::install(&bin_dir, &capture_path);
     Ok((capture_path, guard))
+}
+
+fn opener_invocations(path: &Path) -> usize {
+    std::fs::read_to_string(path)
+        .map(|captured| captured.lines().count())
+        .unwrap_or(0)
 }
 
 async fn wait_for_authorization_url(path: &Path) -> Result<url::Url, Box<dyn std::error::Error>> {
@@ -376,14 +382,29 @@ async fn browser_oauth_authorizes_reuses_cache_and_refreshes_headlessly()
             .get("code_challenge")
             .is_some_and(|value| !value.is_empty())
     );
-    let state = query.get("state").expect("authorization state");
-    let redirect_uri = query.get("redirect_uri").expect("redirect URI");
+    let state = query.get("state").expect("authorization state").to_string();
+    let redirect_uri = query.get("redirect_uri").expect("redirect URI").to_string();
+    assert_eq!(opener_invocations(&capture_path), 1);
 
     reqwest::get(authorization_url.clone())
         .await?
         .error_for_status()?;
-    let callback =
-        url::Url::parse_with_params(redirect_uri, [("code", "headless-code"), ("state", state)])?;
+    let rejected_callback = url::Url::parse_with_params(
+        &redirect_uri,
+        [("code", "wrong-state-code"), ("state", "wrong-state")],
+    )?;
+    reqwest::get(rejected_callback).await?.error_for_status()?;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(150), &mut first_connection)
+            .await
+            .is_err(),
+        "a callback with the wrong state must not complete OAuth"
+    );
+
+    let callback = url::Url::parse_with_params(
+        &redirect_uri,
+        [("code", "headless-code"), ("state", &state)],
+    )?;
     reqwest::get(callback).await?.error_for_status()?;
     let first = first_connection.await??;
     let tools = first.list_tools(Some("protected"))?;
@@ -406,9 +427,15 @@ async fn browser_oauth_authorizes_reuses_cache_and_refreshes_headlessly()
     );
     assert_eq!(server.state.registration_requests.load(Ordering::SeqCst), 1);
 
-    let cached = McpClientManager::connect(vec![config.clone()]).await?;
+    let cached = tokio::time::timeout(
+        Duration::from_secs(2),
+        McpClientManager::connect(vec![config.clone()]),
+    )
+    .await
+    .map_err(|_| "cache reuse unexpectedly waited for browser authorization")??;
     assert_eq!(cached.list_tools(Some("protected"))?.len(), 1);
     drop(cached);
+    assert_eq!(opener_invocations(&capture_path), 1);
     assert_eq!(
         server.state.authorization_requests.load(Ordering::SeqCst),
         1
@@ -420,8 +447,14 @@ async fn browser_oauth_authorizes_reuses_cache_and_refreshes_headlessly()
     cache["credentials"]["token_received_at"] = json!(0);
     std::fs::write(&cache_path, serde_json::to_vec(&cache)?)?;
 
-    let refreshed = McpClientManager::connect(vec![config]).await?;
+    let refreshed = tokio::time::timeout(
+        Duration::from_secs(2),
+        McpClientManager::connect(vec![config]),
+    )
+    .await
+    .map_err(|_| "token refresh unexpectedly waited for browser authorization")??;
     assert_eq!(refreshed.list_tools(Some("protected"))?.len(), 1);
+    assert_eq!(opener_invocations(&capture_path), 1);
     let grants = server.state.token_grants.lock().unwrap().clone();
     assert_eq!(grants.len(), 2);
     assert_eq!(

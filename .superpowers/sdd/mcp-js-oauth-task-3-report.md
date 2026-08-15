@@ -19,3 +19,10 @@ Implemented automated downstream browser OAuth end-to-end coverage without modif
 ## Concerns
 - The headless browser shim is Unix-only because the production opener uses `xdg-open` on Linux; the configured GitHub Actions runner is Ubuntu.
 - The broad server-suite failure is unrelated to this task and was not changed.
+
+## Review Follow-Up Verification
+- Added a wrong-state callback before the valid callback; the test asserts the OAuth connection remains pending for 150 ms before accepting the valid state.
+- The headless opener now records every invocation. Cache reuse and refresh each run under a two-second timeout and assert the opener count remains one.
+- PASS: `cargo test -p server --test mcp_oauth_browser_e2e -- --nocapture`.
+- PASS: `rustfmt --edition 2024 --check server/tests/mcp_oauth_browser_e2e.rs`.
+- PASS: `git diff --check`.
