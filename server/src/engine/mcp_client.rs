@@ -89,16 +89,14 @@ impl McpServerConfig {
             return Ok(());
         }
 
-        let transport = match self.transport {
-            McpServerTransport::Sse { .. } => "sse",
-            McpServerTransport::Http { .. } => "http",
-            McpServerTransport::Stdio { .. } => return Ok(()),
-        };
-
-        Err(format!(
-            "MCP server '{}' uses {} transport auth, but OAuth runtime support is not implemented",
-            self.name, transport
-        ))
+        match self.transport {
+            McpServerTransport::Http { .. } => Ok(()),
+            McpServerTransport::Stdio { .. } => Ok(()),
+            McpServerTransport::Sse { .. } => Err(format!(
+                "MCP server '{}' uses SSE transport auth, but OAuth runtime support is not implemented",
+                self.name
+            )),
+        }
     }
 }
 
@@ -645,7 +643,32 @@ async fn connect_one(config: &McpServerConfig) -> Result<ConnectedMcpServer, Str
             })
         }
         McpServerTransport::Http { url } => {
-            let transport = rmcp::transport::StreamableHttpClientTransport::from_uri(url.clone());
+            let token = match &config.auth {
+                Some(McpServerAuth::OauthBrowser {
+                    scope,
+                    client_id,
+                    client_secret,
+                    redirect_port,
+                    token_cache,
+                }) => Some(super::mcp_oauth::resolve_browser_oauth(
+                    &config.name,
+                    url,
+                    scope.as_deref(),
+                    client_id.as_deref(),
+                    client_secret.as_deref(),
+                    *redirect_port,
+                    token_cache.as_deref(),
+                ).await?),
+                None => None,
+            };
+            let transport = match token {
+                Some(token) => {
+                    use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+                    let config = StreamableHttpClientTransportConfig::with_uri(url.clone()).auth_header(token);
+                    rmcp::transport::StreamableHttpClientTransport::from_config(config)
+                }
+                None => rmcp::transport::StreamableHttpClientTransport::from_uri(url.clone()),
+            };
 
             let service: rmcp::service::RunningService<RoleClient, ()> =
                 ().serve(transport)

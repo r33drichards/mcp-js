@@ -106,24 +106,33 @@ fn keeps_legacy_sse_config_working() {
 }
 
 #[test]
-fn rejects_http_and_sse_auth_until_runtime_support_exists() {
-    for transport in ["http", "sse"] {
-        let config: McpServerConfig = serde_json::from_str(&format!(
-            r#"{{
-                "name": "protected-{transport}",
-                "transport": "{transport}",
-                "url": "https://protected.example.com/mcp",
-                "auth": {{ "type": "oauth_browser" }}
-            }}"#
-        ))
-        .expect("auth configuration should deserialize before connection validation");
+fn permits_http_oauth_but_keeps_sse_auth_fail_closed() {
+    let http: McpServerConfig = serde_json::from_str(
+        r#"{
+            "name": "protected-http",
+            "transport": "http",
+            "url": "https://protected.example.com/mcp",
+            "auth": { "type": "oauth_browser" }
+        }"#,
+    )
+    .expect("HTTP auth configuration should deserialize");
+    http.validate_for_connection()
+        .expect("HTTP OAuth runtime is available");
 
-        let error = config
-            .validate_for_connection()
-            .expect_err("unimplemented HTTP auth must fail closed");
-        assert!(error.contains("OAuth runtime support is not implemented"));
-        assert!(error.contains(transport));
-    }
+    let sse: McpServerConfig = serde_json::from_str(
+        r#"{
+            "name": "protected-sse",
+            "transport": "sse",
+            "url": "https://protected.example.com/mcp",
+            "auth": { "type": "oauth_browser" }
+        }"#,
+    )
+    .expect("SSE auth configuration should deserialize");
+    let error = sse
+        .validate_for_connection()
+        .expect_err("SSE auth must remain fail closed");
+    assert!(error.contains("OAuth runtime support is not implemented"));
+    assert!(error.contains("SSE"));
 }
 
 #[test]

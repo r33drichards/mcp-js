@@ -14,6 +14,7 @@ pub mod fs_tree;
 pub mod heap_storage;
 pub mod heap_tags;
 pub mod mcp_client;
+pub mod mcp_oauth;
 pub mod module_loader;
 pub mod opa;
 pub mod run_js_file;
