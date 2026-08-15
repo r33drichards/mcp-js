@@ -458,10 +458,14 @@ pub struct Cli {
     /// Format: [{"name": "srv", "transport": "stdio", "command": "cmd", "args": ["a"]},
     ///          {"name": "srv2", "transport": "sse", "url": "http://..."},
     ///          {"name": "srv3", "transport": "http", "url": "https://...",
-    ///           "auth": {"type": "oauth_browser", "scope": ["read"]}}]
-    /// OAuth browser settings are accepted only in JSON. HTTP and SSE configs
-    /// fail closed until OAuth runtime support is added; stdio ignores auth with
-    /// a warning and continues unchanged.
+    ///           "auth": {"type": "oauth_browser", "scope": ["read"],
+    ///                    "client_id": "...", "client_secret": "...",
+    ///                    "redirect_port": 48123, "token_cache": "/path/to/cache.json"}}]
+    /// `oauth_browser` is supported for HTTP only and is accepted only in JSON.
+    /// It prints an authorization URL only when no cached credential can provide
+    /// a token; cached refresh tokens renew access without opening a browser.
+    /// The callback binds to localhost on redirect_port (or an available port).
+    /// See the README for headless authorization and cache-file security.
     #[arg(long = "mcp-config", env = "MCP_V8_MCP_CONFIG", value_name = "PATH_OR_JSON", help_heading = "MCP Server Module")]
     pub mcp_config: Option<String>,
 

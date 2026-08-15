@@ -181,6 +181,63 @@ mcp-v8 --help            # all flags
 mcp-v8 --print-openapi   # print the REST OpenAPI spec
 ```
 
+### Browser OAuth for upstream MCP servers
+
+Use `--mcp-config` to connect to a protected Streamable HTTP MCP server with
+the OAuth 2.1 authorization-code flow. This setting is JSON-only; it is not
+available through the compact `--mcp-server` syntax.
+
+```json
+[
+  {
+    "name": "protected",
+    "transport": "http",
+    "url": "https://mcp.example.com/mcp",
+    "auth": {
+      "type": "oauth_browser",
+      "scope": ["tools.read", "tools.call"],
+      "client_id": "optional-registered-client-id",
+      "client_secret": "optional-client-secret",
+      "redirect_port": 48123,
+      "token_cache": "/home/alice/.cache/mcp-js/oauth-protected.json"
+    }
+  }
+]
+```
+
+All fields inside `auth` other than `type` are optional. Without `client_id`,
+the server uses OAuth dynamic client registration; otherwise it uses the
+provided registered client. `scope` is an array of requested scopes.
+
+On first use, or when no usable cached credentials exist, `mcp-v8` starts a
+loopback callback listener and prints the authorization URL. It then attempts
+to open that URL locally. For a headless host, copy the printed URL into a
+browser on another machine, complete authorization, and make sure that browser
+can reach the host's `http://localhost:<port>/callback` URL (for example,
+through an SSH port forward). Authorization waits up to five minutes. A
+callback with the wrong OAuth `state` is ignored; an authorization denial or
+timeout fails the connection.
+
+When `redirect_port` is omitted, the listener selects an available local port.
+Set it only when an identity provider requires a registered callback port. The
+callback always binds to loopback and uses the resulting
+`http://localhost:<port>/callback` redirect URI.
+
+Credentials are cached at `token_cache`, or by default at
+`${XDG_CACHE_HOME:-$HOME/.cache}/mcp-js/oauth-<server-name>.json` (falling back
+to the system temporary directory when neither cache location is available).
+The cache is bound to the MCP URL, scopes, and client configuration. A valid
+refresh token is used to renew an expired access token without opening a
+browser; interactive authorization happens only when cached credentials cannot
+provide a token.
+
+Treat the cache as a secret: it can contain refresh tokens. On Unix, mcp-v8
+writes it with mode `0600` and rejects symlinks, non-regular files, files owned
+by another user, and group/world-readable files. Do not commit, share, or edit
+it. To revoke local access, revoke the grant at the authorization server and
+delete the configured cache file; the next connection starts authorization
+again.
+
 ## CLI client (`mcp-v8-cli`)
 
 A fully-typed client for the REST API, generated from the OpenAPI spec via
