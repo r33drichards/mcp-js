@@ -272,7 +272,7 @@ Directory for the heap-snapshot store when `--heap-store dir`. Defaults to /tmp/
 
 ### `--mcp-config`
 
-JSON config for MCP server modules (a path to a JSON file, or inline JSON — also settable as the `mcp_servers` section of a --config file). Format: [{"name": "srv", "transport": "stdio", "command": "cmd", "args": ["a"]}, {"name": "srv2", "transport": "sse", "url": "http://..."}]
+JSON config for MCP server modules (a path to a JSON file, or inline JSON — also settable as the `mcp_servers` section of a --config file). Format: [{"name": "srv", "transport": "stdio", "command": "cmd", "args": ["a"]}, {"name": "srv2", "transport": "sse", "url": "http://..."}, {"name": "srv3", "transport": "http", "url": "https://...", "auth": {"type": "oauth_browser", "scope": ["read"]}}] OAuth browser settings are accepted only in JSON and are ignored with a warning until OAuth runtime support is added; stdio continues unchanged
 
 - Environment: `MCP_V8_MCP_CONFIG`
 - Value: `PATH_OR_JSON`
@@ -294,7 +294,7 @@ Prefix applied to stub tool names. Defaults to `runjs__` so it is obvious to a c
 
 ### `--mcp-server`
 
-Connect to an external MCP server as a module; JS can call its tools via the `mcp` global (mcp.callTool, mcp.listTools, mcp.servers). Can be specified multiple times. Transports: name=stdio:command:arg1:arg2 — spawn a stdio MCP server process name=sse:url — connect to an SSE MCP server endpoint Examples: weather=stdio:python:server.py remote=sse:http://localhost:9000/sse
+Connect to an external MCP server as a module; JS can call its tools via the `mcp` global (mcp.callTool, mcp.listTools, mcp.servers). Can be specified multiple times. Transports: name=stdio:command:arg1:arg2 — spawn a stdio MCP server process name=sse:url — connect to an SSE MCP server endpoint name=http:url — connect to a Streamable HTTP MCP server endpoint Examples: weather=stdio:python:server.py remote=sse:http://localhost:9000/sse remote=http:https://example.com/mcp
 
 - Value: `NAME=TRANSPORT:...`
 - Repeatable: yes

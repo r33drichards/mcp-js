@@ -456,7 +456,11 @@ pub struct Cli {
     /// JSON config for MCP server modules (a path to a JSON file, or inline
     /// JSON — also settable as the `mcp_servers` section of a --config file).
     /// Format: [{"name": "srv", "transport": "stdio", "command": "cmd", "args": ["a"]},
-    ///          {"name": "srv2", "transport": "sse", "url": "http://..."}]
+    ///          {"name": "srv2", "transport": "sse", "url": "http://..."},
+    ///          {"name": "srv3", "transport": "http", "url": "https://...",
+    ///           "auth": {"type": "oauth_browser", "scope": ["read"]}}]
+    /// OAuth browser settings are accepted only in JSON and are ignored with a
+    /// warning until OAuth runtime support is added; stdio continues unchanged.
     #[arg(long = "mcp-config", env = "MCP_V8_MCP_CONFIG", value_name = "PATH_OR_JSON", help_heading = "MCP Server Module")]
     pub mcp_config: Option<String>,
 
@@ -624,8 +628,13 @@ fn mcp_server_grammar() -> Grammar {
         parts: vec![
             ("name=stdio:command:arg1:arg2", "spawn a stdio MCP server process"),
             ("name=sse:url", "connect to an SSE MCP server endpoint"),
+            ("name=http:url", "connect to a Streamable HTTP MCP server endpoint"),
         ],
-        examples: &["weather=stdio:python:server.py", "remote=sse:http://localhost:9000/sse"],
+        examples: &[
+            "weather=stdio:python:server.py",
+            "remote=sse:http://localhost:9000/sse",
+            "remote=http:https://example.com/mcp",
+        ],
     }
 }
 

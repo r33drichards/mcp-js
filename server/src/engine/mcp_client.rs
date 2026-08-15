@@ -30,6 +30,29 @@ use rmcp::RoleClient;
 
 // ── Configuration ────────────────────────────────────────────────────────
 
+/// Authentication configuration for HTTP-based MCP server connections.
+///
+/// Only available via `--mcp-config` JSON file (too complex for CLI flags).
+/// The current transport ignores it with a warning until OAuth runtime support
+/// is added; stdio connections continue to use their existing process transport.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum McpServerAuth {
+    /// Interactive browser OAuth 2.1 authorization-code flow configuration.
+    OauthBrowser {
+        #[serde(default)]
+        scope: Option<Vec<String>>,
+        #[serde(default)]
+        client_id: Option<String>,
+        #[serde(default)]
+        client_secret: Option<String>,
+        #[serde(default)]
+        redirect_port: Option<u16>,
+        #[serde(default)]
+        token_cache: Option<String>,
+    },
+}
+
 /// Transport configuration for a single MCP server.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "transport", rename_all = "lowercase")]
@@ -44,6 +67,9 @@ pub enum McpServerTransport {
     Sse {
         url: String,
     },
+    Http {
+        url: String,
+    },
 }
 
 /// Configuration for a single named MCP server.
@@ -52,6 +78,8 @@ pub struct McpServerConfig {
     pub name: String,
     #[serde(flatten)]
     pub transport: McpServerTransport,
+    #[serde(default)]
+    pub auth: Option<McpServerAuth>,
 }
 
 // ── Tool metadata for JS ─────────────────────────────────────────────────
@@ -527,6 +555,12 @@ async fn connect_one(config: &McpServerConfig) -> Result<ConnectedMcpServer, Str
 
     match &config.transport {
         McpServerTransport::Stdio { command, args, env } => {
+            if config.auth.is_some() {
+                tracing::warn!(
+                    server = %config.name,
+                    "Ignoring MCP auth configuration for stdio transport"
+                );
+            }
             let mut cmd = tokio::process::Command::new(command);
             cmd.args(args);
             for (k, v) in env {
@@ -557,6 +591,12 @@ async fn connect_one(config: &McpServerConfig) -> Result<ConnectedMcpServer, Str
             })
         }
         McpServerTransport::Sse { url } => {
+            if config.auth.is_some() {
+                tracing::warn!(
+                    server = %config.name,
+                    "Ignoring MCP auth configuration until OAuth runtime support is added"
+                );
+            }
             // The standalone SSE client transport was removed in rmcp 1.x; the
             // Streamable HTTP client transport is its replacement and speaks to
             // the same `/mcp`-style endpoints modern MCP servers expose.
@@ -566,6 +606,36 @@ async fn connect_one(config: &McpServerConfig) -> Result<ConnectedMcpServer, Str
                 ().serve(transport)
                     .await
                     .map_err(|e| format!("MCP client handshake with '{}' failed: {}", config.name, e))?;
+
+            let peer = service.peer().clone();
+            let tools = peer
+                .list_all_tools()
+                .await
+                .map_err(|e| format!("Failed to list tools from '{}': {}", config.name, e))?;
+
+            let keep_alive = tokio::spawn(async move {
+                let _ = service.waiting().await;
+            });
+
+            Ok(ConnectedMcpServer {
+                peer,
+                tools,
+                _keep_alive: keep_alive.abort_handle(),
+            })
+        }
+        McpServerTransport::Http { url } => {
+            if config.auth.is_some() {
+                tracing::warn!(
+                    server = %config.name,
+                    "Ignoring MCP auth configuration until OAuth runtime support is added"
+                );
+            }
+            let transport = rmcp::transport::StreamableHttpClientTransport::from_uri(url.clone());
+
+            let service: rmcp::service::RunningService<RoleClient, ()> =
+                ().serve(transport)
+                    .await
+                    .map_err(|e| format!("MCP client handshake with '{}': {}", config.name, e))?;
 
             let peer = service.peer().clone();
             let tools = peer

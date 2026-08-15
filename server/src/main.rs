@@ -1363,6 +1363,7 @@ fn load_mcp_server_configs(
                     args: parts[1..].iter().map(|s| s.to_string()).collect(),
                     env: std::collections::HashMap::new(),
                 },
+                auth: None,
             });
         } else if let Some(url) = rest.strip_prefix("sse:") {
             configs.push(McpServerConfig {
@@ -1370,10 +1371,19 @@ fn load_mcp_server_configs(
                 transport: McpServerTransport::Sse {
                     url: url.to_string(),
                 },
+                auth: None,
+            });
+        } else if let Some(url) = rest.strip_prefix("http:") {
+            configs.push(McpServerConfig {
+                name,
+                transport: McpServerTransport::Http {
+                    url: url.to_string(),
+                },
+                auth: None,
             });
         } else {
             anyhow::bail!(
-                "Invalid --mcp-server transport for '{}': must start with 'stdio:' or 'sse:'. Got: '{}'",
+                "Invalid --mcp-server transport for '{}': must start with 'stdio:', 'sse:', or 'http:'. Got: '{}'",
                 name, rest
             );
         }
