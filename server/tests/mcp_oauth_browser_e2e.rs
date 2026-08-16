@@ -157,6 +157,7 @@ async fn authorization_metadata(State(state): State<MockState>) -> Json<Value> {
         "authorization_endpoint": format!("{}/authorize", state.base_url),
         "token_endpoint": format!("{}/token", state.base_url),
         "registration_endpoint": format!("{}/register", state.base_url),
+        "token_endpoint_auth_methods_supported": ["client_secret_post"],
         "response_types_supported": ["code"],
         "code_challenge_methods_supported": ["S256"]
     }))
@@ -167,9 +168,11 @@ async fn register_client(
     Json(request): Json<Value>,
 ) -> Json<Value> {
     state.registration_requests.fetch_add(1, Ordering::SeqCst);
+    assert_eq!(request["token_endpoint_auth_method"], "client_secret_post");
     Json(json!({
         "client_id": "headless-test-client",
         "client_secret": "dcr-secret",
+        "token_endpoint_auth_method": "client_secret_post",
         "client_name": request["client_name"],
         "redirect_uris": request["redirect_uris"]
     }))
@@ -198,9 +201,10 @@ async fn token(
         .lock()
         .unwrap()
         .push(authorization.clone());
-    state.token_grants.lock().unwrap().push(form);
-    if grant_type == "refresh_token"
-        && authorization.as_deref() != Some("Basic aGVhZGxlc3MtdGVzdC1jbGllbnQ6ZGNyLXNlY3JldA==")
+    state.token_grants.lock().unwrap().push(form.clone());
+    if authorization.is_some()
+        || form.get("client_id") != Some(&"headless-test-client".to_string())
+        || form.get("client_secret") != Some(&"dcr-secret".to_string())
     {
         return (
             StatusCode::UNAUTHORIZED,
@@ -441,6 +445,10 @@ async fn browser_oauth_authorizes_reuses_cache_and_refreshes_headlessly()
         Some(&"authorization_code".to_string())
     );
     assert_eq!(grants[0].get("code"), Some(&"headless-code".to_string()));
+    assert_eq!(
+        grants[0].get("client_secret"),
+        Some(&"dcr-secret".to_string())
+    );
     let verifier = grants[0].get("code_verifier").expect("PKCE verifier");
     assert_eq!(pkce_s256(verifier), *query.get("code_challenge").unwrap());
     assert_eq!(
@@ -495,9 +503,11 @@ async fn browser_oauth_authorizes_reuses_cache_and_refreshes_headlessly()
         1
     );
     assert_eq!(server.state.registration_requests.load(Ordering::SeqCst), 1);
+    let token_authorizations = server.state.token_authorizations.lock().unwrap().clone();
+    assert!(token_authorizations[0].is_none() && token_authorizations[1].is_none());
     assert_eq!(
-        server.state.token_authorizations.lock().unwrap()[1].as_deref(),
-        Some("Basic aGVhZGxlc3MtdGVzdC1jbGllbnQ6ZGNyLXNlY3JldA==")
+        grants[1].get("client_secret"),
+        Some(&"dcr-secret".to_string())
     );
     assert_eq!(
         server.state.mcp_tokens.lock().unwrap().last(),

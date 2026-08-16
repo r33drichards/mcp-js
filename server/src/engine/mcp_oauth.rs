@@ -78,12 +78,18 @@ where
     manager.set_credential_store(store.clone());
 
     let cached_client = if let Some(client_id) = client_id {
-        Some(CachedClientRegistration {
+        let registration = CachedClientRegistration {
             client_id: client_id.to_string(),
             client_secret: client_secret.map(str::to_string),
+            token_endpoint_auth_method: select_static_auth_method(
+                &discovered.metadata,
+                client_secret.is_some(),
+            )?,
             redirect_uri: "http://localhost".to_string(),
             scopes: scopes.to_vec(),
-        })
+        };
+        store.set_registration(registration.clone());
+        Some(registration)
     } else {
         None
     };
@@ -105,14 +111,21 @@ where
     let redirect_uri = format!("http://localhost:{port}/callback");
 
     match client_id {
-        Some(client_id) => configure_static_client(
-            &mut manager,
-            client_id,
-            client_secret,
-            &redirect_uri,
-            scopes,
-        )
-        .map_err(|_| oauth_failure(server_name, "client configuration"))?,
+        Some(client_id) => {
+            let registration = CachedClientRegistration {
+                client_id: client_id.to_string(),
+                client_secret: client_secret.map(str::to_string),
+                token_endpoint_auth_method: select_static_auth_method(
+                    &discovered.metadata,
+                    client_secret.is_some(),
+                )?,
+                redirect_uri: redirect_uri.clone(),
+                scopes: scopes.to_vec(),
+            };
+            configure_client_with_auth_method(&mut manager, &discovered.metadata, &registration)
+                .map_err(|_| oauth_failure(server_name, "client configuration"))?;
+            store.set_registration(registration);
+        }
         None => {
             let registration = register_dynamic_client(
                 &discovered.metadata,
@@ -123,10 +136,9 @@ where
             )
             .await
             .map_err(|_| oauth_failure(server_name, "dynamic client registration"))?;
-            manager
-                .configure_client(registration.clone())
+            configure_client_with_auth_method(&mut manager, &discovered.metadata, &registration)
                 .map_err(|_| oauth_failure(server_name, "dynamic client configuration"))?;
-            store.set_registration(CachedClientRegistration::from_oauth_config(&registration));
+            store.set_registration(registration);
         }
     }
 
@@ -345,8 +357,9 @@ async fn refresh_cached_token(
     client: &reqwest::Client,
     refresh_token: &str,
 ) -> Result<Option<String>, AuthError> {
-    let mut url = url::Url::parse(&metadata.token_endpoint)
+    let url = url::Url::parse(&metadata.token_endpoint)
         .map_err(|_| AuthError::InternalError("invalid token endpoint".to_string()))?;
+    validate_oauth_url(&url, "token endpoint").map_err(AuthError::InternalError)?;
     let mut form = vec![
         ("grant_type".to_string(), "refresh_token".to_string()),
         ("refresh_token".to_string(), refresh_token.to_string()),
@@ -354,64 +367,62 @@ async fn refresh_cached_token(
     if !credentials.granted_scopes.is_empty() {
         form.push(("scope".to_string(), credentials.granted_scopes.join(" ")));
     }
-    if client_config.client_secret.is_none() {
-        form.push(("client_id".to_string(), client_config.client_id.clone()));
+    let request = apply_client_auth(client.post(url), &mut form, client_config);
+    let response = match request.form(&form).send().await {
+        Ok(response) => response,
+        Err(_) => return Ok(None),
+    };
+    if response.status().is_redirection() || !response.status().is_success() {
+        return Ok(None);
     }
-
-    for _ in 0..=MAX_DISCOVERY_REDIRECTS {
-        validate_oauth_url(&url, "token endpoint").map_err(AuthError::InternalError)?;
-        let mut request = client.post(url.clone()).form(&form);
-        if let Some(secret) = &client_config.client_secret {
-            request = request.basic_auth(&client_config.client_id, Some(secret));
-        }
-        let response = match request.send().await {
-            Ok(response) => response,
-            Err(_) => return Ok(None),
-        };
-        if response.status().is_redirection() {
-            let Some(location) = response
-                .headers()
-                .get(LOCATION)
-                .and_then(|value| value.to_str().ok())
-            else {
-                return Ok(None);
-            };
-            url = url
-                .join(location)
-                .map_err(|_| AuthError::InternalError("invalid token redirect".to_string()))?;
-            validate_oauth_url(&url, "token endpoint").map_err(AuthError::InternalError)?;
-            continue;
-        }
-        if !response.status().is_success() {
-            return Ok(None);
-        }
-        let mut token_response = response
-            .json::<serde_json::Value>()
-            .await
-            .map_err(|_| AuthError::InternalError("invalid token response".to_string()))?;
-        if token_response
-            .get("refresh_token")
-            .and_then(serde_json::Value::as_str)
-            .is_none()
-        {
-            token_response["refresh_token"] = serde_json::json!(refresh_token);
-        }
-        let access_token = token_response
-            .get("access_token")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| AuthError::InternalError("missing access token".to_string()))?
-            .to_string();
-        let stored: StoredCredentials = serde_json::from_value(serde_json::json!({
-            "client_id": client_config.client_id,
-            "token_response": token_response,
-            "granted_scopes": credentials.granted_scopes,
-            "token_received_at": now_epoch_secs(),
-        }))
+    let mut token_response = response
+        .json::<serde_json::Value>()
+        .await
         .map_err(|_| AuthError::InternalError("invalid token response".to_string()))?;
-        store.save(stored).await?;
-        return Ok(Some(access_token));
+    if token_response
+        .get("refresh_token")
+        .and_then(serde_json::Value::as_str)
+        .is_none()
+    {
+        token_response["refresh_token"] = serde_json::json!(refresh_token);
     }
-    Ok(None)
+    let access_token = token_response
+        .get("access_token")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| AuthError::InternalError("missing access token".to_string()))?
+        .to_string();
+    let stored: StoredCredentials = serde_json::from_value(serde_json::json!({
+        "client_id": client_config.client_id,
+        "token_response": token_response,
+        "granted_scopes": credentials.granted_scopes,
+        "token_received_at": now_epoch_secs(),
+    }))
+    .map_err(|_| AuthError::InternalError("invalid token response".to_string()))?;
+    store.save(stored).await?;
+    Ok(Some(access_token))
+}
+
+fn apply_client_auth(
+    request: reqwest::RequestBuilder,
+    form: &mut Vec<(String, String)>,
+    client: &CachedClientRegistration,
+) -> reqwest::RequestBuilder {
+    match client.token_endpoint_auth_method {
+        TokenEndpointAuthMethod::ClientSecretBasic => {
+            request.basic_auth(&client.client_id, client.client_secret.as_deref())
+        }
+        TokenEndpointAuthMethod::ClientSecretPost => {
+            form.push(("client_id".to_string(), client.client_id.clone()));
+            if let Some(secret) = &client.client_secret {
+                form.push(("client_secret".to_string(), secret.clone()));
+            }
+            request
+        }
+        TokenEndpointAuthMethod::None => {
+            form.push(("client_id".to_string(), client.client_id.clone()));
+            request
+        }
+    }
 }
 
 fn now_epoch_secs() -> u64 {
@@ -426,6 +437,8 @@ struct DynamicClientRegistrationResponse {
     client_id: String,
     #[serde(default)]
     client_secret: Option<String>,
+    #[serde(default)]
+    token_endpoint_auth_method: Option<TokenEndpointAuthMethod>,
 }
 
 async fn register_dynamic_client(
@@ -434,17 +447,18 @@ async fn register_dynamic_client(
     client_name: &str,
     redirect_uri: &str,
     scopes: &[&str],
-) -> Result<OAuthClientConfig, String> {
+) -> Result<CachedClientRegistration, String> {
     let endpoint = metadata.registration_endpoint.as_deref().ok_or_else(|| {
         "OAuth authorization server does not support dynamic registration".to_string()
     })?;
     let mut url = url::Url::parse(endpoint)
         .map_err(|_| "OAuth registration endpoint is invalid".to_string())?;
+    let requested_auth_method = select_registration_auth_method(metadata)?;
     let body = serde_json::json!({
         "client_name": client_name,
         "redirect_uris": [redirect_uri],
         "grant_types": ["authorization_code", "refresh_token"],
-        "token_endpoint_auth_method": "none",
+        "token_endpoint_auth_method": requested_auth_method.as_str(),
         "response_types": ["code"],
         "scope": scopes.join(" "),
     });
@@ -475,12 +489,18 @@ async fn register_dynamic_client(
             .json::<DynamicClientRegistrationResponse>()
             .await
             .map_err(|_| "OAuth dynamic registration response is invalid".to_string())?;
-        let mut config = OAuthClientConfig::new(response.client_id, redirect_uri)
-            .with_scopes(scopes.iter().map(|scope| (*scope).to_string()).collect());
-        if let Some(secret) = response.client_secret.filter(|secret| !secret.is_empty()) {
-            config = config.with_client_secret(secret);
-        }
-        return Ok(config);
+        let client_secret = response.client_secret.filter(|secret| !secret.is_empty());
+        let token_endpoint_auth_method = response
+            .token_endpoint_auth_method
+            .unwrap_or(requested_auth_method);
+        validate_client_auth_method(token_endpoint_auth_method, client_secret.is_some())?;
+        return Ok(CachedClientRegistration {
+            client_id: response.client_id,
+            client_secret,
+            token_endpoint_auth_method,
+            redirect_uri: redirect_uri.to_string(),
+            scopes: scopes.iter().map(|scope| (*scope).to_string()).collect(),
+        });
     }
     Err("OAuth registration exceeded redirect limit".to_string())
 }
@@ -597,7 +617,7 @@ impl CacheBinding {
         scopes.sort();
         scopes.dedup();
         let payload = serde_json::json!({
-            "version": 2,
+            "version": 3,
             "protected_resource": protected_resource,
             "requested_scopes": scopes,
             "client_id": client_id,
@@ -607,12 +627,35 @@ impl CacheBinding {
             "authorization_endpoint": discovered.metadata.authorization_endpoint,
             "token_endpoint": discovered.metadata.token_endpoint,
             "registration_endpoint": discovered.metadata.registration_endpoint,
+            "token_endpoint_auth_methods_supported": discovered
+                .metadata
+                .additional_fields
+                .get("token_endpoint_auth_methods_supported"),
         });
         let mut hasher = Sha256::new();
         hasher.update(serde_json::to_vec(&payload).expect("cache binding is serializable"));
         Self {
-            version: 2,
+            version: 3,
             fingerprint: format!("{:x}", hasher.finalize()),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum TokenEndpointAuthMethod {
+    ClientSecretBasic,
+    ClientSecretPost,
+    #[default]
+    None,
+}
+
+impl TokenEndpointAuthMethod {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ClientSecretBasic => "client_secret_basic",
+            Self::ClientSecretPost => "client_secret_post",
+            Self::None => "none",
         }
     }
 }
@@ -621,19 +664,10 @@ impl CacheBinding {
 struct CachedClientRegistration {
     client_id: String,
     client_secret: Option<String>,
+    #[serde(default)]
+    token_endpoint_auth_method: TokenEndpointAuthMethod,
     redirect_uri: String,
     scopes: Vec<String>,
-}
-
-impl CachedClientRegistration {
-    fn from_oauth_config(config: &OAuthClientConfig) -> Self {
-        Self {
-            client_id: config.client_id.clone(),
-            client_secret: config.client_secret.clone(),
-            redirect_uri: config.redirect_uri.clone(),
-            scopes: config.scopes.clone(),
-        }
-    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -752,18 +786,95 @@ pub(crate) fn invalidate_cached_access_token(
     write_private_file(&path, &bytes).map_err(|_| oauth_failure(server_name, "token cache write"))
 }
 
-fn configure_static_client(
+fn configure_client_with_auth_method(
     manager: &mut AuthorizationManager,
-    client_id: &str,
-    client_secret: Option<&str>,
-    redirect_uri: &str,
-    scopes: &[String],
+    metadata: &AuthorizationMetadata,
+    client: &CachedClientRegistration,
 ) -> Result<(), AuthError> {
-    let mut config = OAuthClientConfig::new(client_id, redirect_uri).with_scopes(scopes.to_vec());
-    if let Some(client_secret) = client_secret {
-        config = config.with_client_secret(client_secret);
+    let mut client_metadata = metadata.clone();
+    client_metadata.additional_fields.insert(
+        "token_endpoint_auth_methods_supported".to_string(),
+        serde_json::json!([client.token_endpoint_auth_method.as_str()]),
+    );
+    manager.set_metadata(client_metadata);
+    let mut config = OAuthClientConfig::new(&client.client_id, &client.redirect_uri)
+        .with_scopes(client.scopes.clone());
+    if client.token_endpoint_auth_method != TokenEndpointAuthMethod::None {
+        if let Some(secret) = &client.client_secret {
+            config = config.with_client_secret(secret);
+        }
     }
     manager.configure_client(config)
+}
+
+fn supported_auth_methods(metadata: &AuthorizationMetadata) -> Option<Vec<&str>> {
+    metadata
+        .additional_fields
+        .get("token_endpoint_auth_methods_supported")
+        .and_then(serde_json::Value::as_array)
+        .map(|methods| {
+            methods
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .collect()
+        })
+}
+
+fn select_static_auth_method(
+    metadata: &AuthorizationMetadata,
+    has_secret: bool,
+) -> Result<TokenEndpointAuthMethod, String> {
+    let Some(methods) = supported_auth_methods(metadata) else {
+        return Ok(if has_secret {
+            TokenEndpointAuthMethod::ClientSecretBasic
+        } else {
+            TokenEndpointAuthMethod::None
+        });
+    };
+    let selected = if has_secret && methods.contains(&"client_secret_basic") {
+        TokenEndpointAuthMethod::ClientSecretBasic
+    } else if has_secret && methods.contains(&"client_secret_post") {
+        TokenEndpointAuthMethod::ClientSecretPost
+    } else if methods.contains(&"none") {
+        TokenEndpointAuthMethod::None
+    } else {
+        return Err("OAuth authorization server does not support the configured client authentication method".to_string());
+    };
+    Ok(selected)
+}
+
+fn select_registration_auth_method(
+    metadata: &AuthorizationMetadata,
+) -> Result<TokenEndpointAuthMethod, String> {
+    let Some(methods) = supported_auth_methods(metadata) else {
+        return Ok(TokenEndpointAuthMethod::None);
+    };
+    if methods.contains(&"client_secret_basic") {
+        Ok(TokenEndpointAuthMethod::ClientSecretBasic)
+    } else if methods.contains(&"client_secret_post") {
+        Ok(TokenEndpointAuthMethod::ClientSecretPost)
+    } else if methods.contains(&"none") {
+        Ok(TokenEndpointAuthMethod::None)
+    } else {
+        Err("OAuth authorization server has no supported client authentication method".to_string())
+    }
+}
+
+fn validate_client_auth_method(
+    method: TokenEndpointAuthMethod,
+    has_secret: bool,
+) -> Result<(), String> {
+    if matches!(
+        method,
+        TokenEndpointAuthMethod::ClientSecretBasic | TokenEndpointAuthMethod::ClientSecretPost
+    ) && !has_secret
+    {
+        return Err(
+            "OAuth registration selected confidential authentication without a client secret"
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 fn validate_oauth_endpoint(endpoint: &str, label: &str) -> Result<(), String> {
@@ -1062,6 +1173,7 @@ fn redact_oauth_error(message: &str) -> String {
 mod tests {
     use std::path::Path;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1358,6 +1470,87 @@ mod tests {
                 .contains("authorization: basic")),
             "confidential refresh request did not include HTTP Basic client authentication: {requests:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn refresh_does_not_follow_token_endpoint_redirects() {
+        let destination = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let destination_address = destination.local_addr().unwrap();
+        let contacted = Arc::new(AtomicBool::new(false));
+        let contacted_task = contacted.clone();
+        let destination_task = tokio::spawn(async move {
+            let Ok((mut stream, _)) = destination.accept().await else {
+                return;
+            };
+            contacted_task.store(true, Ordering::SeqCst);
+            let mut buffer = [0_u8; 2048];
+            let _ = stream.read(&mut buffer).await;
+            let body =
+                r#"{"access_token":"redirected-access","token_type":"Bearer","expires_in":3600}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+        });
+
+        let source = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let source_address = source.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut stream, _) = source.accept().await.unwrap();
+            let mut buffer = [0_u8; 2048];
+            let _ = stream.read(&mut buffer).await;
+            let response = format!(
+                "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://{destination_address}/token\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let directory = tempfile::tempdir().unwrap();
+        let server_url = format!("http://{source_address}/mcp");
+        let mut discovered = test_discovered(&server_url);
+        discovered.metadata = serde_json::from_value(serde_json::json!({
+            "authorization_endpoint": format!("http://{source_address}/authorize"),
+            "token_endpoint": format!("http://{source_address}/token")
+        }))
+        .unwrap();
+        let store = FileCredentialStore::new(
+            directory.path().join("tokens.json"),
+            CacheBinding::new(
+                &server_url,
+                None,
+                Some("client-id"),
+                Some("secret"),
+                &discovered,
+            ),
+        );
+        let credentials = credentials("expired", Some("refresh-secret"), 1, 0);
+        let client_config = CachedClientRegistration {
+            client_id: "client-id".to_string(),
+            client_secret: Some("secret".to_string()),
+            token_endpoint_auth_method: TokenEndpointAuthMethod::ClientSecretBasic,
+            redirect_uri: "http://localhost/callback".to_string(),
+            scopes: Vec::new(),
+        };
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+
+        let result = refresh_cached_token(
+            &store,
+            &credentials,
+            &client_config,
+            &discovered.metadata,
+            &client,
+            "refresh-secret",
+        )
+        .await
+        .unwrap();
+        assert!(result.is_none());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!contacted.load(Ordering::SeqCst));
+        destination_task.abort();
     }
 
     #[tokio::test]
