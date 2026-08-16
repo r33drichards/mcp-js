@@ -1,18 +1,23 @@
 //! Secure browser OAuth runtime for downstream HTTP MCP servers.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use async_trait::async_trait;
+use reqwest::header::{LOCATION, WWW_AUTHENTICATE};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 
-use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
-
 use rmcp::transport::auth::{
-    AuthError, AuthorizationManager, CredentialStore, OAuthClientConfig, StoredCredentials,
+    AuthError, AuthorizationManager, AuthorizationMetadata, CredentialStore, OAuthClientConfig,
+    StoredCredentials,
 };
 
 const OAUTH_BROWSER_TIMEOUT: Duration = Duration::from_secs(300);
+const CALLBACK_READ_TIMEOUT: Duration = Duration::from_secs(2);
+const MAX_DISCOVERY_REDIRECTS: usize = 5;
 
 pub(crate) async fn resolve_browser_oauth(
     server_name: &str,
@@ -50,43 +55,44 @@ where
     F: FnOnce(&str) -> std::io::Result<()>,
 {
     validate_oauth_endpoint(server_url, "protected resource URL")?;
+    let http_client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| oauth_failure(server_name, "HTTP client setup"))?;
+    let discovered = discover_authorization(server_url, &http_client)
+        .await
+        .map_err(|_| oauth_failure(server_name, "metadata discovery"))?;
     let cache_path = token_cache
         .map(PathBuf::from)
         .unwrap_or_else(|| default_token_cache_path(server_name));
     let scopes = scope.unwrap_or_default();
     let scope_refs: Vec<&str> = scopes.iter().map(String::as_str).collect();
-    let binding = CacheBinding::new(server_url, scope, client_id, client_secret);
+    let binding = CacheBinding::new(server_url, scope, client_id, client_secret, &discovered);
+    let store = FileCredentialStore::new(cache_path, binding);
 
     let mut manager = AuthorizationManager::new(server_url)
         .await
         .map_err(|_| oauth_failure(server_name, "manager initialization"))?;
-    manager.set_credential_store(FileCredentialStore::new(cache_path, binding));
+    manager.set_metadata(discovered.metadata.clone());
+    manager.set_credential_store(store.clone());
 
-    let metadata = manager
-        .discover_metadata()
-        .await
-        .map_err(|_| oauth_failure(server_name, "metadata discovery"))?;
-    validate_authorization_metadata(&metadata)?;
-    manager.set_metadata(metadata);
-
-    if manager.initialize_from_store().await.unwrap_or(false) {
-        if let Some(client_id) = client_id {
-            configure_static_client(
-                &mut manager,
-                client_id,
-                client_secret,
-                "http://localhost",
-                scopes,
-            )
-            .map_err(|_| oauth_failure(server_name, "cached client configuration"))?;
-        }
-        match manager.get_access_token().await {
-            Ok(token) => return Ok(token),
-            Err(AuthError::AuthorizationRequired) => {
-                tracing::info!(server = %server_name, "Cached OAuth credentials require browser authorization");
-            }
-            Err(_) => return Err(oauth_failure(server_name, "cached token retrieval")),
-        }
+    let cached_client = if let Some(client_id) = client_id {
+        Some(CachedClientRegistration {
+            client_id: client_id.to_string(),
+            client_secret: client_secret.map(str::to_string),
+            redirect_uri: "http://localhost".to_string(),
+            scopes: scopes.to_vec(),
+        })
+    } else {
+        None
+    };
+    if let Some(token) =
+        resolve_cached_token(&store, cached_client, &discovered.metadata, &http_client)
+            .await
+            .map_err(|_| oauth_failure(server_name, "cached token retrieval"))?
+    {
+        return Ok(token);
     }
 
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", redirect_port.unwrap_or(0)))
@@ -108,10 +114,19 @@ where
         )
         .map_err(|_| oauth_failure(server_name, "client configuration"))?,
         None => {
+            let registration = register_dynamic_client(
+                &discovered.metadata,
+                &http_client,
+                "mcp-js",
+                &redirect_uri,
+                &scope_refs,
+            )
+            .await
+            .map_err(|_| oauth_failure(server_name, "dynamic client registration"))?;
             manager
-                .register_client("mcp-js", &redirect_uri, &scope_refs)
-                .await
-                .map_err(|_| oauth_failure(server_name, "dynamic client registration"))?;
+                .configure_client(registration.clone())
+                .map_err(|_| oauth_failure(server_name, "dynamic client configuration"))?;
+            store.set_registration(CachedClientRegistration::from_oauth_config(&registration));
         }
     }
 
@@ -150,6 +165,420 @@ where
         .map_err(|_| oauth_failure(server_name, "access token retrieval"))
 }
 
+#[derive(Clone)]
+struct DiscoveredAuthorization {
+    authorization_server: String,
+    metadata: AuthorizationMetadata,
+}
+
+#[derive(Deserialize)]
+struct ResourceServerMetadata {
+    #[serde(default)]
+    authorization_server: Option<String>,
+    #[serde(default)]
+    authorization_servers: Vec<String>,
+}
+
+async fn discover_authorization(
+    protected_resource: &str,
+    client: &reqwest::Client,
+) -> Result<DiscoveredAuthorization, String> {
+    let base = url::Url::parse(protected_resource)
+        .map_err(|_| "OAuth protected resource URL is invalid".to_string())?;
+    let mut resource_metadata_url = None;
+
+    let response = safe_get(client, base.clone(), "protected resource URL").await?;
+    if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+        resource_metadata_url = response
+            .headers()
+            .get_all(WWW_AUTHENTICATE)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .find_map(|header| extract_resource_metadata_url(header, &base));
+    } else if response.status().is_success() {
+        if let Ok(metadata) = response.json::<ResourceServerMetadata>().await {
+            if let Some(found) = discover_from_resource_metadata(metadata, client).await? {
+                return Ok(found);
+            }
+        }
+    }
+
+    if let Some(resource_metadata_url) = resource_metadata_url {
+        validate_oauth_url(&resource_metadata_url, "protected-resource metadata URL")?;
+        if let Some(metadata) = fetch_json::<ResourceServerMetadata>(
+            client,
+            resource_metadata_url,
+            "protected-resource metadata URL",
+        )
+        .await?
+        {
+            if let Some(found) = discover_from_resource_metadata(metadata, client).await? {
+                return Ok(found);
+            }
+        }
+    }
+
+    for path in well_known_paths(base.path(), "oauth-protected-resource") {
+        let mut candidate = base.clone();
+        candidate.set_query(None);
+        candidate.set_fragment(None);
+        candidate.set_path(&path);
+        if let Some(metadata) = fetch_json::<ResourceServerMetadata>(
+            client,
+            candidate,
+            "protected-resource metadata URL",
+        )
+        .await?
+        {
+            if let Some(found) = discover_from_resource_metadata(metadata, client).await? {
+                return Ok(found);
+            }
+        }
+    }
+
+    discover_authorization_server(&base, client)
+        .await?
+        .ok_or_else(|| "OAuth authorization metadata was not found".to_string())
+}
+
+async fn discover_from_resource_metadata(
+    metadata: ResourceServerMetadata,
+    client: &reqwest::Client,
+) -> Result<Option<DiscoveredAuthorization>, String> {
+    let mut candidates = Vec::new();
+    if let Some(candidate) = metadata.authorization_server {
+        candidates.push(candidate);
+    }
+    candidates.extend(metadata.authorization_servers);
+    for candidate in candidates {
+        let url = url::Url::parse(&candidate)
+            .map_err(|_| "OAuth authorization server URL is invalid".to_string())?;
+        validate_oauth_url(&url, "authorization server URL")?;
+        if let Some(found) = discover_authorization_server(&url, client).await? {
+            return Ok(Some(found));
+        }
+    }
+    Ok(None)
+}
+
+async fn discover_authorization_server(
+    authorization_server: &url::Url,
+    client: &reqwest::Client,
+) -> Result<Option<DiscoveredAuthorization>, String> {
+    validate_oauth_url(authorization_server, "authorization server URL")?;
+    for candidate in authorization_discovery_urls(authorization_server) {
+        if let Some(metadata) = fetch_json::<AuthorizationMetadata>(
+            client,
+            candidate,
+            "authorization-server metadata URL",
+        )
+        .await?
+        {
+            validate_authorization_metadata(&metadata)?;
+            return Ok(Some(DiscoveredAuthorization {
+                authorization_server: authorization_server
+                    .as_str()
+                    .trim_end_matches('/')
+                    .to_string(),
+                metadata,
+            }));
+        }
+    }
+    Ok(None)
+}
+
+async fn resolve_cached_token(
+    store: &FileCredentialStore,
+    static_client: Option<CachedClientRegistration>,
+    metadata: &AuthorizationMetadata,
+    client: &reqwest::Client,
+) -> Result<Option<String>, AuthError> {
+    let Some(credentials) = store.load().await? else {
+        return Ok(None);
+    };
+    let client_config = static_client.or_else(|| store.loaded_registration());
+    let Some(client_config) = client_config else {
+        return Ok(None);
+    };
+    let token = serde_json::to_value(&credentials)
+        .map_err(|_| AuthError::InternalError("token cache serialization error".to_string()))?;
+    let Some(access_token) = token
+        .pointer("/token_response/access_token")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return Ok(None);
+    };
+    let expires_in = token
+        .pointer("/token_response/expires_in")
+        .and_then(serde_json::Value::as_u64);
+    let expired = expires_in.is_some_and(|expires_in| {
+        let received_at = credentials.token_received_at.unwrap_or(0);
+        let elapsed = now_epoch_secs().saturating_sub(received_at);
+        elapsed.saturating_add(30) >= expires_in
+    });
+    if !expired {
+        return Ok(Some(access_token.to_string()));
+    }
+    let Some(refresh_token) = token
+        .pointer("/token_response/refresh_token")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return Ok(None);
+    };
+
+    refresh_cached_token(
+        store,
+        &credentials,
+        &client_config,
+        metadata,
+        client,
+        refresh_token,
+    )
+    .await
+}
+
+async fn refresh_cached_token(
+    store: &FileCredentialStore,
+    credentials: &StoredCredentials,
+    client_config: &CachedClientRegistration,
+    metadata: &AuthorizationMetadata,
+    client: &reqwest::Client,
+    refresh_token: &str,
+) -> Result<Option<String>, AuthError> {
+    let mut url = url::Url::parse(&metadata.token_endpoint)
+        .map_err(|_| AuthError::InternalError("invalid token endpoint".to_string()))?;
+    let mut form = vec![
+        ("grant_type".to_string(), "refresh_token".to_string()),
+        ("refresh_token".to_string(), refresh_token.to_string()),
+    ];
+    if !credentials.granted_scopes.is_empty() {
+        form.push(("scope".to_string(), credentials.granted_scopes.join(" ")));
+    }
+    if client_config.client_secret.is_none() {
+        form.push(("client_id".to_string(), client_config.client_id.clone()));
+    }
+
+    for _ in 0..=MAX_DISCOVERY_REDIRECTS {
+        validate_oauth_url(&url, "token endpoint").map_err(AuthError::InternalError)?;
+        let mut request = client.post(url.clone()).form(&form);
+        if let Some(secret) = &client_config.client_secret {
+            request = request.basic_auth(&client_config.client_id, Some(secret));
+        }
+        let response = match request.send().await {
+            Ok(response) => response,
+            Err(_) => return Ok(None),
+        };
+        if response.status().is_redirection() {
+            let Some(location) = response
+                .headers()
+                .get(LOCATION)
+                .and_then(|value| value.to_str().ok())
+            else {
+                return Ok(None);
+            };
+            url = url
+                .join(location)
+                .map_err(|_| AuthError::InternalError("invalid token redirect".to_string()))?;
+            validate_oauth_url(&url, "token endpoint").map_err(AuthError::InternalError)?;
+            continue;
+        }
+        if !response.status().is_success() {
+            return Ok(None);
+        }
+        let mut token_response = response
+            .json::<serde_json::Value>()
+            .await
+            .map_err(|_| AuthError::InternalError("invalid token response".to_string()))?;
+        if token_response
+            .get("refresh_token")
+            .and_then(serde_json::Value::as_str)
+            .is_none()
+        {
+            token_response["refresh_token"] = serde_json::json!(refresh_token);
+        }
+        let access_token = token_response
+            .get("access_token")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| AuthError::InternalError("missing access token".to_string()))?
+            .to_string();
+        let stored: StoredCredentials = serde_json::from_value(serde_json::json!({
+            "client_id": client_config.client_id,
+            "token_response": token_response,
+            "granted_scopes": credentials.granted_scopes,
+            "token_received_at": now_epoch_secs(),
+        }))
+        .map_err(|_| AuthError::InternalError("invalid token response".to_string()))?;
+        store.save(stored).await?;
+        return Ok(Some(access_token));
+    }
+    Ok(None)
+}
+
+fn now_epoch_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+#[derive(Deserialize)]
+struct DynamicClientRegistrationResponse {
+    client_id: String,
+    #[serde(default)]
+    client_secret: Option<String>,
+}
+
+async fn register_dynamic_client(
+    metadata: &AuthorizationMetadata,
+    client: &reqwest::Client,
+    client_name: &str,
+    redirect_uri: &str,
+    scopes: &[&str],
+) -> Result<OAuthClientConfig, String> {
+    let endpoint = metadata.registration_endpoint.as_deref().ok_or_else(|| {
+        "OAuth authorization server does not support dynamic registration".to_string()
+    })?;
+    let mut url = url::Url::parse(endpoint)
+        .map_err(|_| "OAuth registration endpoint is invalid".to_string())?;
+    let body = serde_json::json!({
+        "client_name": client_name,
+        "redirect_uris": [redirect_uri],
+        "grant_types": ["authorization_code", "refresh_token"],
+        "token_endpoint_auth_method": "none",
+        "response_types": ["code"],
+        "scope": scopes.join(" "),
+    });
+    for _ in 0..=MAX_DISCOVERY_REDIRECTS {
+        validate_oauth_url(&url, "registration endpoint")?;
+        let response = client
+            .post(url.clone())
+            .json(&body)
+            .send()
+            .await
+            .map_err(|_| "OAuth dynamic registration request failed".to_string())?;
+        if response.status().is_redirection() {
+            let location = response
+                .headers()
+                .get(LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .ok_or_else(|| "OAuth registration redirect is missing Location".to_string())?;
+            url = url
+                .join(location)
+                .map_err(|_| "OAuth registration redirect URL is invalid".to_string())?;
+            validate_oauth_url(&url, "registration endpoint")?;
+            continue;
+        }
+        if !response.status().is_success() {
+            return Err("OAuth dynamic registration was rejected".to_string());
+        }
+        let response = response
+            .json::<DynamicClientRegistrationResponse>()
+            .await
+            .map_err(|_| "OAuth dynamic registration response is invalid".to_string())?;
+        let mut config = OAuthClientConfig::new(response.client_id, redirect_uri)
+            .with_scopes(scopes.iter().map(|scope| (*scope).to_string()).collect());
+        if let Some(secret) = response.client_secret.filter(|secret| !secret.is_empty()) {
+            config = config.with_client_secret(secret);
+        }
+        return Ok(config);
+    }
+    Err("OAuth registration exceeded redirect limit".to_string())
+}
+
+async fn fetch_json<T: DeserializeOwned>(
+    client: &reqwest::Client,
+    url: url::Url,
+    label: &str,
+) -> Result<Option<T>, String> {
+    let response = safe_get(client, url, label).await?;
+    if response.status() != reqwest::StatusCode::OK {
+        return Ok(None);
+    }
+    Ok(response.json::<T>().await.ok())
+}
+
+async fn safe_get(
+    client: &reqwest::Client,
+    mut url: url::Url,
+    label: &str,
+) -> Result<reqwest::Response, String> {
+    for _ in 0..=MAX_DISCOVERY_REDIRECTS {
+        validate_oauth_url(&url, label)?;
+        let response = client
+            .get(url.clone())
+            .header("MCP-Protocol-Version", "2024-11-05")
+            .send()
+            .await
+            .map_err(|_| format!("OAuth {label} request failed"))?;
+        if !response.status().is_redirection() {
+            return Ok(response);
+        }
+        let location = response
+            .headers()
+            .get(LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .ok_or_else(|| format!("OAuth {label} redirect is missing Location"))?;
+        url = url
+            .join(location)
+            .map_err(|_| format!("OAuth {label} redirect URL is invalid"))?;
+        validate_oauth_url(&url, label)?;
+    }
+    Err(format!("OAuth {label} exceeded redirect limit"))
+}
+
+fn extract_resource_metadata_url(header: &str, base: &url::Url) -> Option<url::Url> {
+    let lower = header.to_ascii_lowercase();
+    let start = lower.find("resource_metadata=")? + "resource_metadata=".len();
+    let remainder = header[start..].trim_start();
+    let value = if let Some(quoted) = remainder.strip_prefix('"') {
+        quoted.split('"').next()?
+    } else {
+        remainder.split([',', ' ']).next()?
+    };
+    url::Url::parse(value).or_else(|_| base.join(value)).ok()
+}
+
+fn well_known_paths(base_path: &str, resource: &str) -> Vec<String> {
+    let trimmed = base_path.trim_matches('/');
+    let canonical = format!("/.well-known/{resource}");
+    if trimmed.is_empty() {
+        vec![canonical]
+    } else {
+        vec![
+            format!("{canonical}/{trimmed}"),
+            format!("/{trimmed}/.well-known/{resource}"),
+            canonical,
+        ]
+    }
+}
+
+fn authorization_discovery_urls(base: &url::Url) -> Vec<url::Url> {
+    let trimmed = base.path().trim_matches('/');
+    let paths = if trimmed.is_empty() {
+        vec![
+            "/.well-known/oauth-authorization-server".to_string(),
+            "/.well-known/openid-configuration".to_string(),
+        ]
+    } else {
+        vec![
+            format!("/.well-known/oauth-authorization-server/{trimmed}"),
+            format!("/.well-known/openid-configuration/{trimmed}"),
+            format!("/{trimmed}/.well-known/openid-configuration"),
+            "/.well-known/oauth-authorization-server".to_string(),
+        ]
+    };
+    paths
+        .into_iter()
+        .map(|path| {
+            let mut candidate = base.clone();
+            candidate.set_query(None);
+            candidate.set_fragment(None);
+            candidate.set_path(&path);
+            candidate
+        })
+        .collect()
+}
+
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct CacheBinding {
     version: u8,
@@ -162,22 +591,47 @@ impl CacheBinding {
         requested_scopes: Option<&[String]>,
         client_id: Option<&str>,
         client_secret: Option<&str>,
+        discovered: &DiscoveredAuthorization,
     ) -> Self {
         let mut scopes = requested_scopes.unwrap_or_default().to_vec();
         scopes.sort();
         scopes.dedup();
         let payload = serde_json::json!({
-            "version": 1,
+            "version": 2,
             "protected_resource": protected_resource,
             "requested_scopes": scopes,
             "client_id": client_id,
             "client_secret": client_secret,
+            "authorization_server": discovered.authorization_server,
+            "issuer": discovered.metadata.issuer,
+            "authorization_endpoint": discovered.metadata.authorization_endpoint,
+            "token_endpoint": discovered.metadata.token_endpoint,
+            "registration_endpoint": discovered.metadata.registration_endpoint,
         });
         let mut hasher = Sha256::new();
         hasher.update(serde_json::to_vec(&payload).expect("cache binding is serializable"));
         Self {
-            version: 1,
+            version: 2,
             fingerprint: format!("{:x}", hasher.finalize()),
+        }
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct CachedClientRegistration {
+    client_id: String,
+    client_secret: Option<String>,
+    redirect_uri: String,
+    scopes: Vec<String>,
+}
+
+impl CachedClientRegistration {
+    fn from_oauth_config(config: &OAuthClientConfig) -> Self {
+        Self {
+            client_id: config.client_id.clone(),
+            client_secret: config.client_secret.clone(),
+            redirect_uri: config.redirect_uri.clone(),
+            scopes: config.scopes.clone(),
         }
     }
 }
@@ -186,16 +640,38 @@ impl CacheBinding {
 struct DiskTokenCache {
     binding: CacheBinding,
     credentials: StoredCredentials,
+    #[serde(default)]
+    client_registration: Option<CachedClientRegistration>,
 }
 
+#[derive(Clone)]
 struct FileCredentialStore {
     path: PathBuf,
     binding: CacheBinding,
+    registration: Arc<Mutex<Option<CachedClientRegistration>>>,
 }
 
 impl FileCredentialStore {
     fn new(path: PathBuf, binding: CacheBinding) -> Self {
-        Self { path, binding }
+        Self {
+            path,
+            binding,
+            registration: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    fn set_registration(&self, registration: CachedClientRegistration) {
+        *self
+            .registration
+            .lock()
+            .expect("registration lock poisoned") = Some(registration);
+    }
+
+    fn loaded_registration(&self) -> Option<CachedClientRegistration> {
+        self.registration
+            .lock()
+            .expect("registration lock poisoned")
+            .clone()
     }
 }
 
@@ -216,7 +692,14 @@ impl CredentialStore for FileCredentialStore {
             Ok(bytes) => {
                 let cache: DiskTokenCache = serde_json::from_slice(&bytes)
                     .map_err(|_| AuthError::InternalError("token cache parse error".to_string()))?;
-                Ok((cache.binding == self.binding).then_some(cache.credentials))
+                if cache.binding != self.binding {
+                    return Ok(None);
+                }
+                *self
+                    .registration
+                    .lock()
+                    .expect("registration lock poisoned") = cache.client_registration;
+                Ok(Some(cache.credentials))
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(_) => Err(AuthError::InternalError(
@@ -229,6 +712,7 @@ impl CredentialStore for FileCredentialStore {
         let bytes = serde_json::to_vec_pretty(&DiskTokenCache {
             binding: self.binding.clone(),
             credentials,
+            client_registration: self.loaded_registration(),
         })
         .map_err(|_| AuthError::InternalError("token cache serialization error".to_string()))?;
         write_private_file(&self.path, &bytes)
@@ -244,6 +728,28 @@ impl CredentialStore for FileCredentialStore {
             )),
         }
     }
+}
+
+pub(crate) fn invalidate_cached_access_token(
+    server_name: &str,
+    token_cache: Option<&str>,
+) -> Result<(), String> {
+    let path = token_cache
+        .map(PathBuf::from)
+        .unwrap_or_else(|| default_token_cache_path(server_name));
+    validate_cache_file(&path).map_err(|_| oauth_failure(server_name, "token cache validation"))?;
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err(oauth_failure(server_name, "token cache read")),
+    };
+    let mut cache: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|_| oauth_failure(server_name, "token cache parse"))?;
+    cache["credentials"]["token_received_at"] = serde_json::json!(0);
+    cache["credentials"]["token_response"]["expires_in"] = serde_json::json!(0);
+    let bytes = serde_json::to_vec_pretty(&cache)
+        .map_err(|_| oauth_failure(server_name, "token cache serialization"))?;
+    write_private_file(&path, &bytes).map_err(|_| oauth_failure(server_name, "token cache write"))
 }
 
 fn configure_static_client(
@@ -262,6 +768,10 @@ fn configure_static_client(
 
 fn validate_oauth_endpoint(endpoint: &str, label: &str) -> Result<(), String> {
     let url = url::Url::parse(endpoint).map_err(|_| format!("OAuth {label} is not a valid URL"))?;
+    validate_oauth_url(&url, label)
+}
+
+fn validate_oauth_url(url: &url::Url, label: &str) -> Result<(), String> {
     if url.scheme() == "https" {
         return Ok(());
     }
@@ -278,9 +788,10 @@ fn validate_oauth_endpoint(endpoint: &str, label: &str) -> Result<(), String> {
     ))
 }
 
-fn validate_authorization_metadata(
-    metadata: &rmcp::transport::auth::AuthorizationMetadata,
-) -> Result<(), String> {
+fn validate_authorization_metadata(metadata: &AuthorizationMetadata) -> Result<(), String> {
+    if let Some(issuer) = &metadata.issuer {
+        validate_oauth_endpoint(issuer, "issuer URL")?;
+    }
     validate_oauth_endpoint(&metadata.authorization_endpoint, "authorization endpoint")?;
     validate_oauth_endpoint(&metadata.token_endpoint, "token endpoint")?;
     if let Some(registration_endpoint) = &metadata.registration_endpoint {
@@ -290,11 +801,9 @@ fn validate_authorization_metadata(
 }
 
 fn validate_cache_file(path: &Path) -> Result<(), AuthError> {
-    use std::io::ErrorKind;
-
     let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(_) => {
             return Err(AuthError::InternalError(
                 "token cache metadata error".to_string(),
@@ -309,9 +818,14 @@ fn validate_cache_file(path: &Path) -> Result<(), AuthError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 != 0 {
+        if metadata.uid() != unsafe { libc::geteuid() } {
             return Err(AuthError::InternalError(
-                "token cache permissions are insecure".to_string(),
+                "token cache owner mismatch".to_string(),
+            ));
+        }
+        if metadata.mode() & 0o077 != 0 {
+            return Err(AuthError::InternalError(
+                "token cache permissions are too broad".to_string(),
             ));
         }
     }
@@ -319,8 +833,6 @@ fn validate_cache_file(path: &Path) -> Result<(), AuthError> {
 }
 
 fn write_private_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
-
     if let Some(parent) = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -400,54 +912,72 @@ async fn await_authorization_code(
     listener: tokio::net::TcpListener,
     expected_state: &str,
 ) -> Result<String, String> {
+    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    loop {
+        tokio::select! {
+            accepted = listener.accept() => {
+                let (stream, _) = accepted.map_err(|_| "OAuth callback listener failed".to_string())?;
+                let sender = sender.clone();
+                let expected_state = expected_state.to_string();
+                tokio::spawn(async move {
+                    if let Some(result) = handle_callback(stream, &expected_state).await {
+                        let _ = sender.send(result);
+                    }
+                });
+            }
+            result = receiver.recv() => {
+                return result.ok_or_else(|| "OAuth callback listener failed".to_string())?;
+            }
+        }
+    }
+}
+
+async fn handle_callback(
+    mut stream: tokio::net::TcpStream,
+    expected_state: &str,
+) -> Option<Result<String, String>> {
     use tokio::io::AsyncReadExt;
 
-    loop {
-        let (mut stream, _) = listener
-            .accept()
-            .await
-            .map_err(|_| "OAuth callback listener failed".to_string())?;
-        let mut buffer = [0_u8; 8192];
-        let size = stream
-            .read(&mut buffer)
-            .await
-            .map_err(|_| "OAuth callback could not be read".to_string())?;
-        let request = String::from_utf8_lossy(&buffer[..size]);
-        let target = request
-            .lines()
-            .next()
-            .and_then(|line| line.split_whitespace().nth(1))
-            .unwrap_or("");
-        let callback = parse_callback_target(target);
+    let mut buffer = [0_u8; 8192];
+    let Ok(Ok(size)) = tokio::time::timeout(CALLBACK_READ_TIMEOUT, stream.read(&mut buffer)).await
+    else {
+        return None;
+    };
+    let request = String::from_utf8_lossy(&buffer[..size]);
+    let target = request
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .unwrap_or("");
+    let callback = parse_callback_target(target);
 
-        if callback.state.as_deref() != Some(expected_state) {
-            let _ =
-                write_callback_response(&mut stream, "Waiting", "Waiting for authorization.").await;
-            continue;
-        }
-        if callback.error.is_some() {
-            let _ = write_callback_response(
-                &mut stream,
-                "Authorization failed",
-                "The authorization server rejected the request.",
-            )
-            .await;
-            return Err("OAuth authorization server returned an error".to_string());
-        }
-        let Some(code) = callback.code else {
-            let _ =
-                write_callback_response(&mut stream, "Waiting", "Waiting for authorization.").await;
-            continue;
-        };
-
+    if callback.state.as_deref() != Some(expected_state) {
+        let _ = write_callback_response(&mut stream, "Waiting", "Waiting for authorization.").await;
+        return None;
+    }
+    if callback.error.is_some() {
         let _ = write_callback_response(
             &mut stream,
-            "Authorized",
-            "Authorization complete. You can close this tab.",
+            "Authorization failed",
+            "The authorization server rejected the request.",
         )
         .await;
-        return Ok(code);
+        return Some(Err(
+            "OAuth authorization server returned an error".to_string()
+        ));
     }
+    let Some(code) = callback.code else {
+        let _ = write_callback_response(&mut stream, "Waiting", "Waiting for authorization.").await;
+        return None;
+    };
+
+    let _ = write_callback_response(
+        &mut stream,
+        "Authorized",
+        "Authorization complete. You can close this tab.",
+    )
+    .await;
+    Some(Ok(code))
 }
 
 struct CallbackParameters {
@@ -643,10 +1173,30 @@ mod tests {
         .unwrap()
     }
 
+    fn test_discovered(server_url: &str) -> DiscoveredAuthorization {
+        let authorization_server = server_url.trim_end_matches("/mcp").to_string();
+        DiscoveredAuthorization {
+            authorization_server: authorization_server.clone(),
+            metadata: serde_json::from_value(serde_json::json!({
+                "authorization_endpoint": format!("{authorization_server}/authorize"),
+                "token_endpoint": format!("{authorization_server}/token"),
+                "response_types_supported": ["code"],
+                "code_challenge_methods_supported": ["S256"]
+            }))
+            .unwrap(),
+        }
+    }
+
     async fn save_cache(path: PathBuf, credentials: StoredCredentials) {
         FileCredentialStore::new(
             path,
-            CacheBinding::new("https://calendar.example.com/mcp", None, None, None),
+            CacheBinding::new(
+                "https://calendar.example.com/mcp",
+                None,
+                None,
+                None,
+                &test_discovered("https://calendar.example.com/mcp"),
+            ),
         )
         .save(credentials)
         .await
@@ -661,7 +1211,13 @@ mod tests {
     ) {
         FileCredentialStore::new(
             path,
-            CacheBinding::new(server_url, None, Some("client-id"), client_secret),
+            CacheBinding::new(
+                server_url,
+                None,
+                Some("client-id"),
+                client_secret,
+                &test_discovered(server_url),
+            ),
         )
         .save(credentials)
         .await
@@ -831,6 +1387,149 @@ mod tests {
         assert_eq!(token, "browser-access");
     }
 
+    #[tokio::test]
+    async fn rejects_unsafe_resource_metadata_url_before_contact() {
+        let malicious = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let malicious_address = malicious.local_addr().unwrap();
+        let protected = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let protected_url = format!("http://{}/mcp", protected.local_addr().unwrap());
+        let advertised = format!("http://evil.test:{}/metadata", malicious_address.port());
+        tokio::spawn(async move {
+            let (mut stream, _) = protected.accept().await.unwrap();
+            let mut buffer = [0_u8; 2048];
+            let _ = stream.read(&mut buffer).await;
+            let response = format!(
+                "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Bearer resource_metadata=\"{advertised}\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .resolve("evil.test", malicious_address)
+            .build()
+            .unwrap();
+
+        assert!(
+            discover_authorization(&protected_url, &client)
+                .await
+                .is_err()
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(150), malicious.accept())
+                .await
+                .is_err(),
+            "unsafe protected-resource metadata URL was contacted"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_unsafe_discovery_redirect_before_contact() {
+        let malicious = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let malicious_address = malicious.local_addr().unwrap();
+        let protected = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let protected_address = protected.local_addr().unwrap();
+        let protected_url = format!("http://{protected_address}/mcp");
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = protected.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    let mut buffer = [0_u8; 2048];
+                    let size = stream.read(&mut buffer).await.unwrap_or(0);
+                    let request = String::from_utf8_lossy(&buffer[..size]);
+                    let (status, headers) = if request.contains("oauth-protected-resource") {
+                        (
+                            "302 Found",
+                            format!(
+                                "Location: http://evil.test:{}/metadata\r\n",
+                                malicious_address.port()
+                            ),
+                        )
+                    } else {
+                        ("404 Not Found", String::new())
+                    };
+                    let response = format!(
+                        "HTTP/1.1 {status}\r\n{headers}Content-Length: 0\r\nConnection: close\r\n\r\n"
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .resolve("evil.test", malicious_address)
+            .build()
+            .unwrap();
+
+        assert!(
+            discover_authorization(&protected_url, &client)
+                .await
+                .is_err()
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(150), malicious.accept())
+                .await
+                .is_err(),
+            "unsafe discovery redirect was contacted"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_unsafe_authorization_server_url_before_contact() {
+        let malicious = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let malicious_address = malicious.local_addr().unwrap();
+        let protected = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let protected_address = protected.local_addr().unwrap();
+        let protected_url = format!("http://{protected_address}/mcp");
+        let advertised = format!("http://evil.test:{}", malicious_address.port());
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = protected.accept().await else {
+                    break;
+                };
+                let advertised = advertised.clone();
+                tokio::spawn(async move {
+                    let mut buffer = [0_u8; 2048];
+                    let size = stream.read(&mut buffer).await.unwrap_or(0);
+                    let request = String::from_utf8_lossy(&buffer[..size]);
+                    let body = if request.contains("oauth-protected-resource") {
+                        format!(r#"{{"authorization_servers":["{advertised}"]}}"#)
+                    } else {
+                        "{}".to_string()
+                    };
+                    let status = if request.contains("oauth-protected-resource") {
+                        "200 OK"
+                    } else {
+                        "404 Not Found"
+                    };
+                    let response = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .resolve("evil.test", malicious_address)
+            .build()
+            .unwrap();
+
+        assert!(
+            discover_authorization(&protected_url, &client)
+                .await
+                .is_err()
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(150), malicious.accept())
+                .await
+                .is_err(),
+            "unsafe authorization-server URL was contacted"
+        );
+    }
+
     #[test]
     fn rejects_plaintext_non_loopback_oauth_endpoints() {
         for endpoint in [
@@ -854,6 +1553,7 @@ mod tests {
             Some(&["calendar.read".to_string()]),
             Some("calendar-cli"),
             Some("client-secret"),
+            &test_discovered("https://calendar.example.com/mcp"),
         );
         FileCredentialStore::new(path.clone(), original)
             .save(credentials(
@@ -867,9 +1567,19 @@ mod tests {
 
         let changed = CacheBinding::new(
             "https://calendar.example.com/mcp",
-            Some(&["calendar.write".to_string()]),
+            Some(&["calendar.read".to_string()]),
             Some("calendar-cli"),
             Some("client-secret"),
+            &DiscoveredAuthorization {
+                authorization_server: "https://login.example.com".to_string(),
+                metadata: serde_json::from_value(serde_json::json!({
+                    "issuer": "https://login.example.com",
+                    "authorization_endpoint": "https://login.example.com/authorize",
+                    "token_endpoint": "https://login.example.com/token-v2",
+                    "registration_endpoint": "https://login.example.com/register"
+                }))
+                .unwrap(),
+            },
         );
         assert!(
             FileCredentialStore::new(path, changed)
@@ -889,7 +1599,13 @@ mod tests {
         let path = directory.path().join("tokens.json");
         std::fs::write(&path, "{}").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-        let binding = CacheBinding::new("https://calendar.example.com/mcp", None, None, None);
+        let binding = CacheBinding::new(
+            "https://calendar.example.com/mcp",
+            None,
+            None,
+            None,
+            &test_discovered("https://calendar.example.com/mcp"),
+        );
         assert!(
             FileCredentialStore::new(path.clone(), binding.clone())
                 .load()
@@ -928,6 +1644,32 @@ mod tests {
                 .unwrap(),
             "valid-code"
         );
+    }
+
+    #[tokio::test]
+    async fn stalled_callback_connection_does_not_block_valid_callback() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let stalled = tokio::net::TcpStream::connect(address).await.unwrap();
+        let valid = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+            stream
+                .write_all(b"GET /callback?code=valid-code&state=expected HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                .await
+                .unwrap();
+        });
+
+        let code = tokio::time::timeout(
+            Duration::from_millis(500),
+            await_authorization_code(listener, "expected"),
+        )
+        .await
+        .expect("stalled callback starved the valid callback")
+        .unwrap();
+        drop(stalled);
+        valid.await.unwrap();
+        assert_eq!(code, "valid-code");
     }
 
     #[test]

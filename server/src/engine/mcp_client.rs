@@ -113,6 +113,18 @@ impl McpServerConfig {
             return Ok(());
         }
 
+        if let Some(McpServerAuth::OauthBrowser {
+            client_id: None,
+            client_secret: Some(_),
+            ..
+        }) = &self.auth
+        {
+            return Err(format!(
+                "MCP server '{}': OAuth client_secret requires client_id",
+                self.name
+            ));
+        }
+
         match self.transport {
             McpServerTransport::Http { .. } => Ok(()),
             McpServerTransport::Stdio { .. } => Ok(()),
@@ -670,59 +682,108 @@ async fn connect_one(config: &McpServerConfig) -> Result<ConnectedMcpServer, Str
             })
         }
         McpServerTransport::Http { url } => {
-            let token = match &config.auth {
+            let oauth = match &config.auth {
                 Some(McpServerAuth::OauthBrowser {
                     scope,
                     client_id,
                     client_secret,
                     redirect_port,
                     token_cache,
-                }) => Some(
-                    super::mcp_oauth::resolve_browser_oauth(
-                        &config.name,
-                        url,
-                        scope.as_deref(),
-                        client_id.as_deref(),
-                        client_secret.as_deref(),
-                        *redirect_port,
-                        token_cache.as_deref(),
-                    )
-                    .await?,
-                ),
+                }) => Some((
+                    scope.as_deref(),
+                    client_id.as_deref(),
+                    client_secret.as_deref(),
+                    *redirect_port,
+                    token_cache.as_deref(),
+                )),
                 None => None,
             };
-            let transport = match token {
-                Some(token) => {
-                    use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
-                    let config = StreamableHttpClientTransportConfig::with_uri(url.clone())
-                        .auth_header(token);
-                    rmcp::transport::StreamableHttpClientTransport::from_config(config)
-                }
-                None => rmcp::transport::StreamableHttpClientTransport::from_uri(url.clone()),
-            };
+            let mut retried_unauthorized = false;
 
-            let service: rmcp::service::RunningService<RoleClient, ()> = ()
-                .serve(transport)
-                .await
-                .map_err(|e| format!("MCP client handshake with '{}': {}", config.name, e))?;
+            loop {
+                let token =
+                    if let Some((scope, client_id, client_secret, redirect_port, token_cache)) =
+                        oauth
+                    {
+                        Some(
+                            super::mcp_oauth::resolve_browser_oauth(
+                                &config.name,
+                                url,
+                                scope,
+                                client_id,
+                                client_secret,
+                                redirect_port,
+                                token_cache,
+                            )
+                            .await?,
+                        )
+                    } else {
+                        None
+                    };
+                let transport = match token {
+                    Some(token) => {
+                        use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+                        let transport_config =
+                            StreamableHttpClientTransportConfig::with_uri(url.clone())
+                                .auth_header(token);
+                        rmcp::transport::StreamableHttpClientTransport::from_config(
+                            transport_config,
+                        )
+                    }
+                    None => rmcp::transport::StreamableHttpClientTransport::from_uri(url.clone()),
+                };
 
-            let peer = service.peer().clone();
-            let tools = peer
-                .list_all_tools()
-                .await
-                .map_err(|e| format!("Failed to list tools from '{}': {}", config.name, e))?;
+                let service: rmcp::service::RunningService<RoleClient, ()> =
+                    match ().serve(transport).await {
+                        Ok(service) => service,
+                        Err(error)
+                            if oauth.is_some()
+                                && !retried_unauthorized
+                                && is_oauth_unauthorized(&error) =>
+                        {
+                            let token_cache = oauth.and_then(|value| value.4);
+                            super::mcp_oauth::invalidate_cached_access_token(
+                                &config.name,
+                                token_cache,
+                            )?;
+                            retried_unauthorized = true;
+                            continue;
+                        }
+                        Err(error) => {
+                            return Err(format!(
+                                "MCP client handshake with '{}': {}",
+                                config.name, error
+                            ));
+                        }
+                    };
 
-            let keep_alive = tokio::spawn(async move {
-                let _ = service.waiting().await;
-            });
+                let peer = service.peer().clone();
+                let tools = peer.list_all_tools().await.map_err(|error| {
+                    format!("Failed to list tools from '{}': {}", config.name, error)
+                })?;
 
-            Ok(ConnectedMcpServer {
-                peer,
-                tools,
-                _keep_alive: keep_alive.abort_handle(),
-            })
+                let keep_alive = tokio::spawn(async move {
+                    let _ = service.waiting().await;
+                });
+
+                return Ok(ConnectedMcpServer {
+                    peer,
+                    tools,
+                    _keep_alive: keep_alive.abort_handle(),
+                });
+            }
         }
     }
+}
+
+fn is_oauth_unauthorized(error: &rmcp::service::ClientInitializeError) -> bool {
+    let rmcp::service::ClientInitializeError::TransportError {
+        error: transport, ..
+    } = error
+    else {
+        return false;
+    };
+    transport.error.to_string() == "Auth required"
 }
 
 // ── OpState config ───────────────────────────────────────────────────────

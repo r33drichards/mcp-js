@@ -172,3 +172,25 @@ fn debug_output_redacts_oauth_client_secrets() {
     assert!(!debug.contains("client-secret"));
     assert!(debug.contains("[REDACTED]"));
 }
+
+#[test]
+fn rejects_client_secret_without_client_id() {
+    let config: McpServerConfig = serde_json::from_str(
+        r#"{
+            "name": "calendar",
+            "transport": "http",
+            "url": "https://calendar.example.com/mcp",
+            "auth": {
+                "type": "oauth_browser",
+                "client_secret": "orphan-secret"
+            }
+        }"#,
+    )
+    .expect("configuration should deserialize before connection validation");
+
+    let error = config
+        .validate_for_connection()
+        .expect_err("client_secret without client_id must fail closed");
+    assert!(error.contains("client_secret"));
+    assert!(error.contains("client_id"));
+}

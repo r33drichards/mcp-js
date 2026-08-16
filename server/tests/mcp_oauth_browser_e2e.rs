@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use axum::extract::{Form, Query, Request, State};
-use axum::http::{HeaderValue, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::{
@@ -69,6 +69,7 @@ struct MockState {
     authorization_requests: Arc<AtomicUsize>,
     registration_requests: Arc<AtomicUsize>,
     token_grants: Arc<Mutex<Vec<HashMap<String, String>>>>,
+    token_authorizations: Arc<Mutex<Vec<Option<String>>>>,
     mcp_tokens: Arc<Mutex<Vec<String>>>,
     accepted_tokens: Arc<Mutex<HashSet<String>>>,
 }
@@ -89,6 +90,7 @@ impl MockOAuthMcpServer {
             authorization_requests: Arc::new(AtomicUsize::new(0)),
             registration_requests: Arc::new(AtomicUsize::new(0)),
             token_grants: Arc::new(Mutex::new(Vec::new())),
+            token_authorizations: Arc::new(Mutex::new(Vec::new())),
             mcp_tokens: Arc::new(Mutex::new(Vec::new())),
             accepted_tokens: Arc::new(Mutex::new(HashSet::new())),
         };
@@ -167,7 +169,7 @@ async fn register_client(
     state.registration_requests.fetch_add(1, Ordering::SeqCst);
     Json(json!({
         "client_id": "headless-test-client",
-        "client_secret": null,
+        "client_secret": "dcr-secret",
         "client_name": request["client_name"],
         "redirect_uris": request["redirect_uris"]
     }))
@@ -183,10 +185,29 @@ async fn authorize(
 
 async fn token(
     State(state): State<MockState>,
+    headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
-) -> Json<Value> {
+) -> Response {
     let grant_type = form.get("grant_type").cloned().unwrap_or_default();
+    let authorization = headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    state
+        .token_authorizations
+        .lock()
+        .unwrap()
+        .push(authorization.clone());
     state.token_grants.lock().unwrap().push(form);
+    if grant_type == "refresh_token"
+        && authorization.as_deref() != Some("Basic aGVhZGxlc3MtdGVzdC1jbGllbnQ6ZGNyLXNlY3JldA==")
+    {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": "invalid_client"})),
+        )
+            .into_response();
+    }
     let access_token = match grant_type.as_str() {
         "authorization_code" => "browser-access",
         "refresh_token" => "refreshed-access",
@@ -203,6 +224,7 @@ async fn token(
         "refresh_token": if grant_type == "authorization_code" { "browser-refresh" } else { "rotated-refresh" },
         "expires_in": 3600
     }))
+    .into_response()
 }
 
 async fn require_access_token(
@@ -443,16 +465,19 @@ async fn browser_oauth_authorizes_reuses_cache_and_refreshes_headlessly()
     assert_eq!(server.state.registration_requests.load(Ordering::SeqCst), 1);
     assert_eq!(server.state.token_grants.lock().unwrap().len(), 1);
 
-    let mut cache: Value = serde_json::from_slice(&std::fs::read(&cache_path)?)?;
-    cache["credentials"]["token_received_at"] = json!(0);
-    std::fs::write(&cache_path, serde_json::to_vec(&cache)?)?;
+    server
+        .state
+        .accepted_tokens
+        .lock()
+        .unwrap()
+        .remove("browser-access");
 
     let refreshed = tokio::time::timeout(
         Duration::from_secs(2),
-        McpClientManager::connect(vec![config]),
+        McpClientManager::connect(vec![config.clone()]),
     )
     .await
-    .map_err(|_| "token refresh unexpectedly waited for browser authorization")??;
+    .map_err(|_| "revoked cached token recovery unexpectedly waited for browser authorization")??;
     assert_eq!(refreshed.list_tools(Some("protected"))?.len(), 1);
     assert_eq!(opener_invocations(&capture_path), 1);
     let grants = server.state.token_grants.lock().unwrap().clone();
@@ -471,9 +496,19 @@ async fn browser_oauth_authorizes_reuses_cache_and_refreshes_headlessly()
     );
     assert_eq!(server.state.registration_requests.load(Ordering::SeqCst), 1);
     assert_eq!(
+        server.state.token_authorizations.lock().unwrap()[1].as_deref(),
+        Some("Basic aGVhZGxlc3MtdGVzdC1jbGllbnQ6ZGNyLXNlY3JldA==")
+    );
+    assert_eq!(
         server.state.mcp_tokens.lock().unwrap().last(),
         Some(&"refreshed-access".to_string())
     );
+
+    drop(refreshed);
+    let cache_before_network_failure = std::fs::read(&cache_path)?;
+    drop(server);
+    assert!(McpClientManager::connect(vec![config]).await.is_err());
+    assert_eq!(std::fs::read(&cache_path)?, cache_before_network_failure);
 
     Ok(())
 }
