@@ -43,10 +43,9 @@
           cargo = rustToolchain;
         } {
           src = ./server;
-          # Vendor hash for server's cargo deps; refreshed when deps changed.
-          # Bumped for the `toml` dependency of the single-file --config loader
-          # (vendors toml/toml_edit/toml_datetime/toml_write/serde_spanned/winnow).
-          hash = "sha256-sqG3400BG2TvSPwstZ17VbjW+S0J1QqHjj1uFUB2M3g=";
+          # Vendor hash for the server's current Cargo dependency set, including
+          # the single-file --config loader and its transitive TOML dependencies.
+          hash = "sha256-4mz7WKl4pvGnIQCOUl3d9WnN5BFFwjZZejNOO5/UXpc=";
         });
 
         docsPython = pkgs.python3.withPackages (
