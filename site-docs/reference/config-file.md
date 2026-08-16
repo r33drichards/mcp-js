@@ -71,7 +71,7 @@ JSON config mapping global names to .wasm file paths or objects (a path to a JSO
 
 Shape: an array. Feeds `--mcp-config` (schema below).
 
-JSON config for MCP server modules (a path to a JSON file, or inline JSON — also settable as the `mcp_servers` section of a --config file). Format: [{"name": "srv", "transport": "stdio", "command": "cmd", "args": ["a"]}, {"name": "srv2", "transport": "sse", "url": "http://..."}]
+JSON config for MCP server modules (a path to a JSON file, or inline JSON — also settable as the `mcp_servers` section of a --config file). Format: [{"name": "srv", "transport": "stdio", "command": "cmd", "args": ["a"]}, {"name": "srv2", "transport": "sse", "url": "http://..."}, {"name": "srv3", "transport": "http", "url": "https://...", "auth": {"type": "oauth_browser", "scope": ["read"], "client_id": "...", "client_secret": "...", "redirect_port": 48123, "token_cache": "/path/to/cache.json"}}] `oauth_browser` is supported for HTTP only through `--mcp-config` and structured JSON/TOML `mcp_servers` configuration; compact `--mcp-server` syntax does not support it. Protected-resource and discovered OAuth endpoints require HTTPS unless loopback. It prints an authorization URL only when no cached credential can provide a token; cached refresh tokens renew access on connection or reconnect without opening a browser. The callback binds to localhost on redirect_port (or an available port). See the README for headless authorization and cache-file security
 
 ### `fetch_headers`
 
@@ -331,7 +331,7 @@ Directory for the heap-snapshot store when `--heap-store dir`. Defaults to /tmp/
 
 ### `mcp_config`
 
-JSON config for MCP server modules (a path to a JSON file, or inline JSON — also settable as the `mcp_servers` section of a --config file). Format: [{"name": "srv", "transport": "stdio", "command": "cmd", "args": ["a"]}, {"name": "srv2", "transport": "sse", "url": "http://..."}]
+JSON config for MCP server modules (a path to a JSON file, or inline JSON — also settable as the `mcp_servers` section of a --config file). Format: [{"name": "srv", "transport": "stdio", "command": "cmd", "args": ["a"]}, {"name": "srv2", "transport": "sse", "url": "http://..."}, {"name": "srv3", "transport": "http", "url": "https://...", "auth": {"type": "oauth_browser", "scope": ["read"], "client_id": "...", "client_secret": "...", "redirect_port": 48123, "token_cache": "/path/to/cache.json"}}] `oauth_browser` is supported for HTTP only through `--mcp-config` and structured JSON/TOML `mcp_servers` configuration; compact `--mcp-server` syntax does not support it. Protected-resource and discovered OAuth endpoints require HTTPS unless loopback. It prints an authorization URL only when no cached credential can provide a token; cached refresh tokens renew access on connection or reconnect without opening a browser. The callback binds to localhost on redirect_port (or an available port). See the README for headless authorization and cache-file security
 
 - CLI flag: `--mcp-config`
 - Environment: `MCP_V8_MCP_CONFIG`

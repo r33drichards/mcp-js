@@ -43,10 +43,9 @@
           cargo = rustToolchain;
         } {
           src = ./server;
-          # Vendor hash for server's cargo deps; refreshed when deps changed.
-          # Bumped for the `toml` dependency of the single-file --config loader
-          # (vendors toml/toml_edit/toml_datetime/toml_write/serde_spanned/winnow).
-          hash = "sha256-sqG3400BG2TvSPwstZ17VbjW+S0J1QqHjj1uFUB2M3g=";
+          # Vendor hash for the server's current Cargo dependency set, including
+          # the single-file --config loader and its transitive TOML dependencies.
+          hash = "sha256-4mz7WKl4pvGnIQCOUl3d9WnN5BFFwjZZejNOO5/UXpc=";
         });
 
         docsPython = pkgs.python3.withPackages (
@@ -279,6 +278,31 @@
             inherit pkgs;
             mcp-js = self.packages.x86_64-linux.default;
           });
+          docs-oauth-contract-check = pkgs.stdenvNoCC.mkDerivation {
+            pname = "mcp-js-docs-oauth-contract-check";
+            version = "0.1.0";
+            src = self;
+
+            nativeBuildInputs = [ pkgs.gnugrep ];
+
+            dontUnpack = true;
+            dontConfigure = true;
+            strictDeps = true;
+
+            buildPhase = ''
+              runHook preBuild
+              ${pkgs.bash}/bin/bash "$src/scripts/check-oauth-docs.sh" "$src"
+              runHook postBuild
+            '';
+
+            installPhase = ''
+              runHook preInstall
+              mkdir -p "$out"
+              touch "$out/passed"
+              runHook postInstall
+            '';
+          };
+
           docs-generated-check = pkgs.stdenvNoCC.mkDerivation {
             pname = "mcp-js-docs-generated-check";
             version = "0.1.0";

@@ -24,11 +24,58 @@ use deno_core::{JsRuntime, OpState, op2};
 use deno_error::JsErrorBox;
 use serde::{Deserialize, Serialize};
 
+use rmcp::RoleClient;
 use rmcp::model::{CallToolRequestParams, CallToolResult, Content, Tool};
 use rmcp::service::Peer;
-use rmcp::RoleClient;
 
 // ── Configuration ────────────────────────────────────────────────────────
+
+/// Authentication configuration for HTTP-based MCP server connections.
+///
+/// Only available via `--mcp-config` JSON file (too complex for CLI flags).
+/// HTTP and SSE connections fail closed until OAuth runtime support is added;
+/// stdio connections continue to use their existing process transport.
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum McpServerAuth {
+    /// Interactive browser OAuth 2.1 authorization-code flow configuration.
+    OauthBrowser {
+        #[serde(default)]
+        scope: Option<Vec<String>>,
+        #[serde(default)]
+        client_id: Option<String>,
+        #[serde(default)]
+        client_secret: Option<String>,
+        #[serde(default)]
+        redirect_port: Option<u16>,
+        #[serde(default)]
+        token_cache: Option<String>,
+    },
+}
+
+impl std::fmt::Debug for McpServerAuth {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::OauthBrowser {
+                scope,
+                client_id,
+                client_secret,
+                redirect_port,
+                token_cache,
+            } => formatter
+                .debug_struct("OauthBrowser")
+                .field("scope", scope)
+                .field("client_id", client_id)
+                .field(
+                    "client_secret",
+                    &client_secret.as_ref().map(|_| "[REDACTED]"),
+                )
+                .field("redirect_port", redirect_port)
+                .field("token_cache", token_cache)
+                .finish(),
+        }
+    }
+}
 
 /// Transport configuration for a single MCP server.
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -44,6 +91,9 @@ pub enum McpServerTransport {
     Sse {
         url: String,
     },
+    Http {
+        url: String,
+    },
 }
 
 /// Configuration for a single named MCP server.
@@ -52,6 +102,38 @@ pub struct McpServerConfig {
     pub name: String,
     #[serde(flatten)]
     pub transport: McpServerTransport,
+    #[serde(default)]
+    pub auth: Option<McpServerAuth>,
+}
+
+impl McpServerConfig {
+    /// Reject auth-bearing network transports until their OAuth runtime exists.
+    pub fn validate_for_connection(&self) -> Result<(), String> {
+        if self.auth.is_none() {
+            return Ok(());
+        }
+
+        if let Some(McpServerAuth::OauthBrowser {
+            client_id: None,
+            client_secret: Some(_),
+            ..
+        }) = &self.auth
+        {
+            return Err(format!(
+                "MCP server '{}': OAuth client_secret requires client_id",
+                self.name
+            ));
+        }
+
+        match self.transport {
+            McpServerTransport::Http { .. } => Ok(()),
+            McpServerTransport::Stdio { .. } => Ok(()),
+            McpServerTransport::Sse { .. } => Err(format!(
+                "MCP server '{}' uses SSE transport auth, but OAuth runtime support is not implemented",
+                self.name
+            )),
+        }
+    }
 }
 
 // ── Tool metadata for JS ─────────────────────────────────────────────────
@@ -382,7 +464,10 @@ impl McpClientManager {
                     // healthy the error is genuine; otherwise reconnect and retry
                     // once so a restarted downstream heals transparently.
                     if is_healthy(&peer).await {
-                        return Err(format!("mcp.callTool({}.{}): {}", server_name, tool_name, e));
+                        return Err(format!(
+                            "mcp.callTool({}.{}): {}",
+                            server_name, tool_name, e
+                        ));
                     }
                     tracing::warn!(
                         "MCP server '{}' looks disconnected ({}); reconnecting and retrying",
@@ -522,11 +607,24 @@ pub fn stub_call_instructions(
 
 // ── Connection logic ─────────────────────────────────────────────────────
 
+const STDIO_AUTH_IGNORED_WARNING: &str = "Ignoring MCP auth configuration for stdio transport";
+
+fn emit_stdio_auth_warning(config: &McpServerConfig, emit: impl FnOnce(&'static str)) {
+    if config.auth.is_some() && matches!(config.transport, McpServerTransport::Stdio { .. }) {
+        emit(STDIO_AUTH_IGNORED_WARNING);
+    }
+}
+
 async fn connect_one(config: &McpServerConfig) -> Result<ConnectedMcpServer, String> {
     use rmcp::ServiceExt;
 
+    config.validate_for_connection()?;
+
     match &config.transport {
         McpServerTransport::Stdio { command, args, env } => {
+            emit_stdio_auth_warning(config, |message| {
+                tracing::warn!(server = %config.name, "{message}");
+            });
             let mut cmd = tokio::process::Command::new(command);
             cmd.args(args);
             for (k, v) in env {
@@ -536,9 +634,9 @@ async fn connect_one(config: &McpServerConfig) -> Result<ConnectedMcpServer, Str
                 .map_err(|e| format!("Failed to spawn '{}': {}", command, e))?;
 
             let service: rmcp::service::RunningService<RoleClient, ()> =
-                ().serve(transport)
-                    .await
-                    .map_err(|e| format!("MCP client handshake with '{}' failed: {}", config.name, e))?;
+                ().serve(transport).await.map_err(|e| {
+                    format!("MCP client handshake with '{}' failed: {}", config.name, e)
+                })?;
 
             let peer = service.peer().clone();
             let tools = peer
@@ -563,9 +661,9 @@ async fn connect_one(config: &McpServerConfig) -> Result<ConnectedMcpServer, Str
             let transport = rmcp::transport::StreamableHttpClientTransport::from_uri(url.clone());
 
             let service: rmcp::service::RunningService<RoleClient, ()> =
-                ().serve(transport)
-                    .await
-                    .map_err(|e| format!("MCP client handshake with '{}' failed: {}", config.name, e))?;
+                ().serve(transport).await.map_err(|e| {
+                    format!("MCP client handshake with '{}' failed: {}", config.name, e)
+                })?;
 
             let peer = service.peer().clone();
             let tools = peer
@@ -583,7 +681,109 @@ async fn connect_one(config: &McpServerConfig) -> Result<ConnectedMcpServer, Str
                 _keep_alive: keep_alive.abort_handle(),
             })
         }
+        McpServerTransport::Http { url } => {
+            let oauth = match &config.auth {
+                Some(McpServerAuth::OauthBrowser {
+                    scope,
+                    client_id,
+                    client_secret,
+                    redirect_port,
+                    token_cache,
+                }) => Some((
+                    scope.as_deref(),
+                    client_id.as_deref(),
+                    client_secret.as_deref(),
+                    *redirect_port,
+                    token_cache.as_deref(),
+                )),
+                None => None,
+            };
+            let mut retried_unauthorized = false;
+
+            loop {
+                let token =
+                    if let Some((scope, client_id, client_secret, redirect_port, token_cache)) =
+                        oauth
+                    {
+                        Some(
+                            super::mcp_oauth::resolve_browser_oauth(
+                                &config.name,
+                                url,
+                                scope,
+                                client_id,
+                                client_secret,
+                                redirect_port,
+                                token_cache,
+                            )
+                            .await?,
+                        )
+                    } else {
+                        None
+                    };
+                let transport = match token {
+                    Some(token) => {
+                        use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+                        let transport_config =
+                            StreamableHttpClientTransportConfig::with_uri(url.clone())
+                                .auth_header(token);
+                        rmcp::transport::StreamableHttpClientTransport::from_config(
+                            transport_config,
+                        )
+                    }
+                    None => rmcp::transport::StreamableHttpClientTransport::from_uri(url.clone()),
+                };
+
+                let service: rmcp::service::RunningService<RoleClient, ()> =
+                    match ().serve(transport).await {
+                        Ok(service) => service,
+                        Err(error)
+                            if oauth.is_some()
+                                && !retried_unauthorized
+                                && is_oauth_unauthorized(&error) =>
+                        {
+                            let token_cache = oauth.and_then(|value| value.4);
+                            super::mcp_oauth::invalidate_cached_access_token(
+                                &config.name,
+                                token_cache,
+                            )?;
+                            retried_unauthorized = true;
+                            continue;
+                        }
+                        Err(error) => {
+                            return Err(format!(
+                                "MCP client handshake with '{}': {}",
+                                config.name, error
+                            ));
+                        }
+                    };
+
+                let peer = service.peer().clone();
+                let tools = peer.list_all_tools().await.map_err(|error| {
+                    format!("Failed to list tools from '{}': {}", config.name, error)
+                })?;
+
+                let keep_alive = tokio::spawn(async move {
+                    let _ = service.waiting().await;
+                });
+
+                return Ok(ConnectedMcpServer {
+                    peer,
+                    tools,
+                    _keep_alive: keep_alive.abort_handle(),
+                });
+            }
+        }
     }
+}
+
+fn is_oauth_unauthorized(error: &rmcp::service::ClientInitializeError) -> bool {
+    let rmcp::service::ClientInitializeError::TransportError {
+        error: transport, ..
+    } = error
+    else {
+        return false;
+    };
+    transport.error.to_string() == "Auth required"
 }
 
 // ── OpState config ───────────────────────────────────────────────────────
@@ -625,16 +825,14 @@ async fn op_mcp_call_tool(
         (config.client_manager.clone(), config.policy_chain.clone())
     };
 
-    let arguments: Option<serde_json::Map<String, serde_json::Value>> =
-        if arguments_json.is_empty() {
-            None
-        } else {
-            Some(
-                serde_json::from_str(&arguments_json).map_err(|e| {
-                    JsErrorBox::generic(format!("mcp.callTool: invalid arguments JSON: {}", e))
-                })?,
-            )
-        };
+    let arguments: Option<serde_json::Map<String, serde_json::Value>> = if arguments_json.is_empty()
+    {
+        None
+    } else {
+        Some(serde_json::from_str(&arguments_json).map_err(|e| {
+            JsErrorBox::generic(format!("mcp.callTool: invalid arguments JSON: {}", e))
+        })?)
+    };
 
     // Spawn on separate tokio task (same pattern as fetch) to avoid
     // RefCell re-entrancy panic in deno_core's FuturesUnorderedDriver.
@@ -650,10 +848,15 @@ async fn op_mcp_call_tool(
                     .map(|a| serde_json::Value::Object(a.clone()))
                     .unwrap_or(serde_json::Value::Null),
             };
-            let input_value = serde_json::to_value(&policy_input)
-                .map_err(|e| JsErrorBox::generic(format!("mcp.callTool: failed to serialize policy input: {}", e)))?;
-            let allowed = chain.evaluate(&input_value).await
-                .map_err(|e| JsErrorBox::generic(format!("mcp.callTool: policy evaluation error: {}", e)))?;
+            let input_value = serde_json::to_value(&policy_input).map_err(|e| {
+                JsErrorBox::generic(format!(
+                    "mcp.callTool: failed to serialize policy input: {}",
+                    e
+                ))
+            })?;
+            let allowed = chain.evaluate(&input_value).await.map_err(|e| {
+                JsErrorBox::generic(format!("mcp.callTool: policy evaluation error: {}", e))
+            })?;
             if !allowed {
                 return Err(JsErrorBox::generic(format!(
                     "mcp.callTool denied by policy: {}.{} is not allowed",
@@ -888,8 +1091,16 @@ mod tests {
         assert!(StdArc::ptr_eq(&stub.input_schema, &upstream.input_schema));
         // Description hints at run_js usage and includes original docs.
         let desc = stub.description.expect("description");
-        assert!(desc.contains("run_js"), "description should mention run_js: {}", desc);
-        assert!(desc.contains("mcp.callTool"), "description should mention mcp.callTool: {}", desc);
+        assert!(
+            desc.contains("run_js"),
+            "description should mention run_js: {}",
+            desc
+        );
+        assert!(
+            desc.contains("mcp.callTool"),
+            "description should mention mcp.callTool: {}",
+            desc
+        );
         assert!(desc.contains("Create a GitHub issue."));
     }
 
@@ -953,37 +1164,45 @@ mod tests {
     fn manager_stub_tools_honours_custom_prefix() {
         let mut by_server = HashMap::new();
         by_server.insert("github".to_string(), vec![tool("create_issue", "doc")]);
-        let mgr = McpClientManager::from_tools_for_test(by_server)
-            .with_stub_config(StubConfig {
-                prefix: "rj_".to_string(),
-                enabled: true,
-            });
+        let mgr = McpClientManager::from_tools_for_test(by_server).with_stub_config(StubConfig {
+            prefix: "rj_".to_string(),
+            enabled: true,
+        });
 
-        let names: Vec<String> = mgr.stub_tools().into_iter().map(|t| t.name.to_string()).collect();
+        let names: Vec<String> = mgr
+            .stub_tools()
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .collect();
         assert_eq!(names, vec!["rj_github__create_issue".to_string()]);
 
         // And the dispatcher recognises the custom-prefixed name.
         let resp = mgr.stub_call_response("rj_github__create_issue", None);
         assert!(resp.is_some());
         // The default-prefix name is no longer recognised.
-        assert!(mgr.stub_call_response("runjs__github__create_issue", None).is_none());
+        assert!(
+            mgr.stub_call_response("runjs__github__create_issue", None)
+                .is_none()
+        );
     }
 
     #[test]
     fn manager_stub_tools_empty_when_disabled() {
         let mut by_server = HashMap::new();
         by_server.insert("github".to_string(), vec![tool("create_issue", "doc")]);
-        let mgr = McpClientManager::from_tools_for_test(by_server)
-            .with_stub_config(StubConfig {
-                prefix: "runjs__".to_string(),
-                enabled: false,
-            });
+        let mgr = McpClientManager::from_tools_for_test(by_server).with_stub_config(StubConfig {
+            prefix: "runjs__".to_string(),
+            enabled: false,
+        });
 
         // No stub tools advertised at all.
         assert!(mgr.stub_tools().is_empty());
         // And calls to stub-shaped names fall through (return None, so the
         // caller can dispatch as a normal tool / report not-found).
-        assert!(mgr.stub_call_response("runjs__github__create_issue", None).is_none());
+        assert!(
+            mgr.stub_call_response("runjs__github__create_issue", None)
+                .is_none()
+        );
     }
 
     #[test]
@@ -1001,7 +1220,10 @@ mod tests {
         assert_eq!(resp.is_error, Some(false));
         assert_eq!(resp.content.len(), 1);
         let json = serde_json::to_value(&resp.content[0]).unwrap();
-        let text = json.get("text").and_then(|v| v.as_str()).unwrap_or_default();
+        let text = json
+            .get("text")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
         assert!(text.contains("mcp.callTool"));
         assert!(text.contains("github"));
         assert!(text.contains("create_issue"));
@@ -1018,9 +1240,42 @@ mod tests {
         // Stub-shaped name but unknown server.
         assert!(mgr.stub_call_response("runjs__other__tool", None).is_none());
         // Stub-shaped name with known server but unknown tool.
-        assert!(mgr.stub_call_response("runjs__github__delete_issue", None).is_none());
+        assert!(
+            mgr.stub_call_response("runjs__github__delete_issue", None)
+                .is_none()
+        );
         // Default-prefix dispatcher should reject the old `mcp__` prefix.
-        assert!(mgr.stub_call_response("mcp__github__create_issue", None).is_none());
+        assert!(
+            mgr.stub_call_response("mcp__github__create_issue", None)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn stdio_auth_warning_is_emitted_and_auth_is_ignored() {
+        let config = McpServerConfig {
+            name: "legacy".to_string(),
+            transport: McpServerTransport::Stdio {
+                command: "legacy-mcp".to_string(),
+                args: Vec::new(),
+                env: HashMap::new(),
+            },
+            auth: Some(McpServerAuth::OauthBrowser {
+                scope: None,
+                client_id: None,
+                client_secret: None,
+                redirect_port: None,
+                token_cache: None,
+            }),
+        };
+
+        config
+            .validate_for_connection()
+            .expect("stdio auth should remain compatible");
+
+        let mut warning = None;
+        emit_stdio_auth_warning(&config, |message| warning = Some(message));
+        assert_eq!(warning, Some(STDIO_AUTH_IGNORED_WARNING));
     }
 
     #[test]
@@ -1042,8 +1297,10 @@ mod tests {
         // Stubs should never carry upstream annotations — they are discovery
         // mechanisms, not executable tools, so behavioral hints are misleading.
         let json = serde_json::to_value(&stub).unwrap();
-        assert!(json.get("annotations").is_none(),
-            "stub annotations should be absent to avoid null serialization issues");
+        assert!(
+            json.get("annotations").is_none(),
+            "stub annotations should be absent to avoid null serialization issues"
+        );
     }
 
     #[test]
@@ -1066,7 +1323,9 @@ mod tests {
         let stub = make_stub_tool("runjs__", "github", &upstream);
 
         let json = serde_json::to_value(&stub).unwrap();
-        assert!(json.get("annotations").is_none(),
-            "stub annotations should be absent");
+        assert!(
+            json.get("annotations").is_none(),
+            "stub annotations should be absent"
+        );
     }
 }
