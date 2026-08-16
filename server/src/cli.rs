@@ -630,7 +630,9 @@ pub struct Cli {
     ///           "auth": {"type": "oauth_browser", "scope": ["read"],
     ///                    "client_id": "...", "client_secret": "...",
     ///                    "redirect_port": 48123, "token_cache": "/path/to/cache.json"}}]
-    /// `oauth_browser` is supported for HTTP only and is accepted only in JSON.
+    /// `oauth_browser` is supported for HTTP only through `--mcp-config` and
+    /// structured JSON/TOML `mcp_servers` configuration; compact `--mcp-server`
+    /// syntax does not support it.
     /// Protected-resource and discovered OAuth endpoints require HTTPS unless
     /// loopback. It prints an authorization URL only when no cached credential
     /// can provide a token; cached refresh tokens renew access on connection or
