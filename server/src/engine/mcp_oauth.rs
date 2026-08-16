@@ -831,10 +831,17 @@ fn select_static_auth_method(
             TokenEndpointAuthMethod::None
         });
     };
-    let selected = if has_secret && methods.contains(&"client_secret_basic") {
-        TokenEndpointAuthMethod::ClientSecretBasic
-    } else if has_secret && methods.contains(&"client_secret_post") {
-        TokenEndpointAuthMethod::ClientSecretPost
+    let selected = if has_secret {
+        if methods.contains(&"client_secret_basic") {
+            TokenEndpointAuthMethod::ClientSecretBasic
+        } else if methods.contains(&"client_secret_post") {
+            TokenEndpointAuthMethod::ClientSecretPost
+        } else {
+            return Err(
+                "OAuth authorization server does not support a confidential client authentication method"
+                    .to_string(),
+            );
+        }
     } else if methods.contains(&"none") {
         TokenEndpointAuthMethod::None
     } else {
@@ -1341,6 +1348,19 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs()
+    }
+
+    #[test]
+    fn rejects_static_secret_when_server_only_supports_public_auth() {
+        let mut metadata = test_discovered("https://calendar.example.com/mcp").metadata;
+        metadata.additional_fields.insert(
+            "token_endpoint_auth_methods_supported".to_string(),
+            serde_json::json!(["none"]),
+        );
+
+        let error = select_static_auth_method(&metadata, true).unwrap_err();
+
+        assert!(error.contains("confidential"));
     }
 
     #[test]
