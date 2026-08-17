@@ -16,6 +16,7 @@ pub mod heap_tags;
 pub mod mcp_client;
 pub mod mcp_oauth;
 pub mod module_loader;
+pub mod node_compat;
 pub mod opa;
 pub mod run_js_file;
 pub mod session_log;

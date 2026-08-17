@@ -101,6 +101,15 @@ impl ModuleLoader for NetworkModuleLoader {
         referrer: &str,
         _kind: ResolutionKind,
     ) -> Result<ModuleSpecifier, JsErrorBox> {
+        // node:path → served from the embedded Node compat registry.
+        // Bare builtin names (e.g. "path") also resolve here, matching Node.
+        let node_name = specifier.strip_prefix("node:").unwrap_or(specifier);
+        if super::node_compat::resolve_submodule(node_name).is_some() {
+            return ModuleSpecifier::parse(&format!("node:{}", node_name)).map_err(|e| {
+                JsErrorBox::generic(format!("Bad node specifier '{}': {}", specifier, e))
+            });
+        }
+
         // npm:cowsay@1.6.0 → https://esm.sh/cowsay@1.6.0
         if let Some(rest) = specifier.strip_prefix("npm:") {
             if !self.config.allow_external {
@@ -156,6 +165,21 @@ impl ModuleLoader for NetworkModuleLoader {
         _options: ModuleLoadOptions,
     ) -> ModuleLoadResponse {
         let scheme = module_specifier.scheme();
+        if scheme == "node" {
+            let name = module_specifier.path();
+            return match super::node_compat::resolve_submodule(name) {
+                Some(source) => ModuleLoadResponse::Sync(Ok(ModuleSource::new(
+                    ModuleType::JavaScript,
+                    ModuleSourceCode::String(FastString::from(source)),
+                    module_specifier,
+                    None,
+                ))),
+                None => ModuleLoadResponse::Sync(Err(JsErrorBox::generic(format!(
+                    "Unknown node builtin module: '{}'",
+                    name
+                )))),
+            };
+        }
         if scheme != "https" && scheme != "http" {
             return ModuleLoadResponse::Sync(Err(JsErrorBox::generic(
                 format!(

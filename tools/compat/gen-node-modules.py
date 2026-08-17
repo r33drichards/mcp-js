@@ -60,6 +60,10 @@ def primordial_def(name):
     """Return the JS expression for a primordial name, or None if unknown."""
     if name in SPECIAL:
         return SPECIAL[name]
+    # Bare intrinsic names (Symbol, Boolean, Map, ...) are primordials keys
+    # too; map them to the identically-named global.
+    if re.fullmatch(GLOBALS, name) and name != "TypedArray":
+        return name
     m = re.match(r"^(%s)Prototype([A-Z].*)$" % GLOBALS, name)
     if m:
         g, method = m.group(1), m.group(2)
@@ -85,7 +89,7 @@ def primordial_def(name):
 
 def collect_primordials(source):
     used = {}
-    for name in sorted(set(re.findall(r"\b[A-Z][A-Za-z0-9_]{3,}\b", source))):
+    for name in sorted(set(re.findall(r"\b[A-Z][A-Za-z0-9_]{2,}\b", source))):
         d = primordial_def(name)
         if d is not None and name not in ("TypedArray",):
             used[name] = d
@@ -122,11 +126,11 @@ const __internalModules = {
         }
         function validateObject(value, name) {
             if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-                throw new ERR_INVALID_ARG_TYPE(name, 'Object', value);
+                throw new ERR_INVALID_ARG_TYPE(name, 'object', value);
             }
         }
         function validateFunction(value, name) {
-            if (typeof value !== 'function') throw new ERR_INVALID_ARG_TYPE(name, 'Function', value);
+            if (typeof value !== 'function') throw new ERR_INVALID_ARG_TYPE(name, 'function', value);
         }
         function validateBoolean(value, name) {
             if (typeof value !== 'boolean') throw new ERR_INVALID_ARG_TYPE(name, 'boolean', value);
@@ -163,9 +167,10 @@ const __internalModules = {
                 return value.constructor && value.constructor.name
                     ? 'an instance of ' + value.constructor.name : 'an object';
             }
-            let printed = String(value);
+            let printed = typeof value === 'string'
+                ? "'" + value + "'" : String(value);
             if (printed.length > 28) printed = printed.slice(0, 25) + '...';
-            return `type ${typeof value} (${JSON.stringify(printed)})`;
+            return `type ${typeof value} (${printed})`;
         }
         function makeCode(code, defaultBase, format) {
             const Base = defaultBase;
@@ -184,8 +189,13 @@ const __internalModules = {
         }
         const codes = {
             ERR_INVALID_ARG_TYPE: makeCode('ERR_INVALID_ARG_TYPE', TypeError, (name, expected, actual) => {
-                const expectedStr = Array.isArray(expected) ? expected.join(' or ') : String(expected);
-                return `The "${name}" argument must be of type ${expectedStr}. Received ${determineSpecificType(actual)}`;
+                const list = Array.isArray(expected) ? expected : [expected];
+                const types = list.filter((t) => /^[a-z]/.test(String(t)));
+                const instances = list.filter((t) => /^[A-Z]/.test(String(t)));
+                const parts = [];
+                if (types.length) parts.push(`of type ${types.join(' or ')}`);
+                if (instances.length) parts.push(`an instance of ${instances.join(' or ')}`);
+                return `The "${name}" argument must be ${parts.join(' or ')}. Received ${determineSpecificType(actual)}`;
             }),
             ERR_INVALID_ARG_VALUE: makeCode('ERR_INVALID_ARG_VALUE', TypeError, (name, value, reason = 'is invalid') => {
                 return `The argument '${name}' ${reason}. Received ${determineSpecificType(value)}`;
@@ -238,11 +248,27 @@ const __internalModules = {
     },
     'internal/util/inspect': function () {
         return {
-            inspect(value) {
+            inspect: function inspect(value) {
+                // A throwing [util.inspect.custom] propagates (callers like
+                // events.js catch it and fall back to String coercion).
+                if (value !== null && typeof value === 'object') {
+                    const custom = value[Symbol.for('nodejs.util.inspect.custom')];
+                    if (typeof custom === 'function') {
+                        const res = custom.call(value, 2, {});
+                        return typeof res === 'string' ? res : inspect(res);
+                    }
+                }
                 try {
-                    if (typeof value === 'string') return JSON.stringify(value);
+                    if (typeof value === 'string') {
+                        return "'" + value.replace(/\\/g, '\\\\').replace(/'/g, "\\'") + "'";
+                    }
+                    if (value === null || typeof value !== 'object') return String(value);
                     if (value instanceof Error) return value.stack || String(value);
-                    return JSON.stringify(value) ?? String(value);
+                    if (Array.isArray(value)) {
+                        return '[ ' + value.map(inspect).join(', ') + ' ]';
+                    }
+                    const props = Object.keys(value).map((k) => k + ': ' + inspect(value[k]));
+                    return props.length ? '{ ' + props.join(', ') + ' }' : '{}';
                 } catch { return String(value); }
             },
             identicalSequenceRange() { return { len: 0, offset: 0 }; },
@@ -299,7 +325,11 @@ def wrap(name, node_sources, extra_internal, header_imports, exports_js, process
     """Build one generated ESM module."""
     combined_scan = "".join(s for _, s in node_sources) + extra_internal
     prims = collect_primordials(combined_scan)
-    prim_lines = "\n".join(f"const {n} = {d};" for n, d in prims.items())
+    prim_lines = (
+        "const primordials = {\n"
+        + "\n".join(f"  {n}: {d}," for n, d in prims.items())
+        + "\n};"
+    )
 
     embedded = []
     for mod_id, src in node_sources[1:]:
@@ -397,7 +427,7 @@ fixed_queue_embed = (
     "events",
     [("events", events_src)],
     fixed_queue_embed,
-    "",
+    "import __nodeProcess from 'node:process';",
     """\
 export default __exports;
 export const EventEmitter = __exports.EventEmitter || __exports;
@@ -408,7 +438,7 @@ export const {
 } = __exports;
 export const defaultMaxListeners = __exports.defaultMaxListeners;
 """,
-    False,
+    True,
 ))
 
 print(f"generated path/querystring/events from Node {VERSION} into {OUT}")
