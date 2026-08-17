@@ -1,7 +1,7 @@
 {
   "minCommonApi": {
     "total": 54,
-    "present": 34,
+    "present": 38,
     "missing": [
       "Headers",
       "Request",
@@ -18,11 +18,7 @@
       "DecompressionStream",
       "TextEncoderStream",
       "TextDecoderStream",
-      "URLPattern",
-      "crypto",
-      "Crypto",
-      "CryptoKey",
-      "SubtleCrypto"
+      "URLPattern"
     ],
     "detail": {
       "AbortController": "function",
@@ -62,10 +58,10 @@
       "URL": "function",
       "URLSearchParams": "function",
       "URLPattern": null,
-      "crypto": null,
-      "Crypto": null,
-      "CryptoKey": null,
-      "SubtleCrypto": null,
+      "crypto": "object",
+      "Crypto": "function",
+      "CryptoKey": "function",
+      "SubtleCrypto": "function",
       "performance": "object",
       "Performance": "function",
       "WebAssembly": "object",
@@ -125,6 +121,8 @@
     "Blob": "function",
     "Boolean": "function",
     "CloseEvent": "function",
+    "Crypto": "function",
+    "CryptoKey": "function",
     "CustomEvent": "function",
     "DOMException": "function",
     "DataView": "function",
@@ -172,6 +170,7 @@
     "Set": "function",
     "SharedArrayBuffer": "function",
     "String": "function",
+    "SubtleCrypto": "function",
     "SuppressedError": "function",
     "Symbol": "function",
     "SyntaxError": "function",
@@ -197,6 +196,7 @@
     "clearInterval": "function",
     "clearTimeout": "function",
     "console": "object",
+    "crypto": "object",
     "decodeURI": "function",
     "decodeURIComponent": "function",
     "dispatchEvent": "function",

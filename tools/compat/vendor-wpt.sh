@@ -23,6 +23,7 @@ DEST="$REPO_ROOT/server/tests/wpt/vendor"
 # Harness (always required).
 FILES=(
   resources/testharness.js
+  common/sab.js
   LICENSE.md
 )
 

@@ -29,62 +29,15 @@
     ]
   },
   "console/console-tests-historical.any.js": true,
-  "encoding/api-basics.any.js": {
-    "expectedFailures": [
-      "Decode sample: utf-16",
-      "Decode sample: utf-16be",
-      "Decode sample: utf-16le"
-    ]
-  },
+  "encoding/api-basics.any.js": true,
   "encoding/api-surrogates-utf8.any.js": true,
-  "encoding/encodeInto.any.js": false,
+  "encoding/encodeInto.any.js": true,
   "encoding/textdecoder-arguments.any.js": {
     "expectedFailures": [
-      "TextDecoder decode() with array buffer detached during arg conversion",
-      "TextDecoder decode() with explicit undefined",
-      "TextDecoder decode() with undefined and options",
-      "TextDecoder decode() with undefined and undefined"
+      "TextDecoder decode() with array buffer detached during arg conversion"
     ]
   },
-  "encoding/textdecoder-fatal.any.js": {
-    "expectedFailures": [
-      "Error seen with fatal does not prevent future decodes",
-      "Fatal flag: utf-16le - truncated code unit",
-      "Fatal flag: utf-8 - > 0x10FFFF",
-      "Fatal flag: utf-8 - ends early",
-      "Fatal flag: utf-8 - ends early 2",
-      "Fatal flag: utf-8 - invalid code",
-      "Fatal flag: utf-8 - invalid trail",
-      "Fatal flag: utf-8 - invalid trail 2",
-      "Fatal flag: utf-8 - invalid trail 3",
-      "Fatal flag: utf-8 - invalid trail 4",
-      "Fatal flag: utf-8 - invalid trail 5",
-      "Fatal flag: utf-8 - invalid trail 6",
-      "Fatal flag: utf-8 - lead surrogate",
-      "Fatal flag: utf-8 - obsolete lead byte",
-      "Fatal flag: utf-8 - overlong U+0000 - 2 bytes",
-      "Fatal flag: utf-8 - overlong U+0000 - 3 bytes",
-      "Fatal flag: utf-8 - overlong U+0000 - 4 bytes",
-      "Fatal flag: utf-8 - overlong U+0000 - 5 bytes",
-      "Fatal flag: utf-8 - overlong U+0000 - 6 bytes",
-      "Fatal flag: utf-8 - overlong U+007F - 2 bytes",
-      "Fatal flag: utf-8 - overlong U+007F - 3 bytes",
-      "Fatal flag: utf-8 - overlong U+007F - 4 bytes",
-      "Fatal flag: utf-8 - overlong U+007F - 5 bytes",
-      "Fatal flag: utf-8 - overlong U+007F - 6 bytes",
-      "Fatal flag: utf-8 - overlong U+07FF - 3 bytes",
-      "Fatal flag: utf-8 - overlong U+07FF - 4 bytes",
-      "Fatal flag: utf-8 - overlong U+07FF - 5 bytes",
-      "Fatal flag: utf-8 - overlong U+07FF - 6 bytes",
-      "Fatal flag: utf-8 - overlong U+10FFFF - 5 bytes",
-      "Fatal flag: utf-8 - overlong U+10FFFF - 6 bytes",
-      "Fatal flag: utf-8 - overlong U+FFFF - 4 bytes",
-      "Fatal flag: utf-8 - overlong U+FFFF - 5 bytes",
-      "Fatal flag: utf-8 - overlong U+FFFF - 6 bytes",
-      "Fatal flag: utf-8 - surrogate pair",
-      "Fatal flag: utf-8 - trail surrogate"
-    ]
-  },
+  "encoding/textdecoder-fatal.any.js": true,
   "encoding/textencoder-constructor-non-utf.any.js": true,
   "fetch/api/headers/header-setcookie.any.js": {
     "expectedFailures": [
@@ -162,17 +115,17 @@
   "fetch/api/headers/headers-errors.any.js": {
     "expectedFailures": [
       "Check headers append with an invalid name [object Object]",
-      "Check headers append with an invalid name invalidĀ",
-      "Check headers append with an invalid value invalidĀ",
+      "Check headers append with an invalid name invalid\u0100",
+      "Check headers append with an invalid value invalid\u0100",
       "Check headers delete with an invalid name [object Object]",
-      "Check headers delete with an invalid name invalidĀ",
+      "Check headers delete with an invalid name invalid\u0100",
       "Check headers get with an invalid name [object Object]",
-      "Check headers get with an invalid name invalidĀ",
+      "Check headers get with an invalid name invalid\u0100",
       "Check headers has with an invalid name [object Object]",
-      "Check headers has with an invalid name invalidĀ",
+      "Check headers has with an invalid name invalid\u0100",
       "Check headers set with an invalid name [object Object]",
-      "Check headers set with an invalid name invalidĀ",
-      "Check headers set with an invalid value invalidĀ",
+      "Check headers set with an invalid name invalid\u0100",
+      "Check headers set with an invalid value invalid\u0100",
       "Create headers giving an array having one string as init argument",
       "Create headers giving an array having three strings as init argument",
       "Create headers giving bad header name as init argument",
@@ -211,11 +164,11 @@
       "atob() setup.",
       "btoa(\"\\ufffe\") must raise INVALID_CHARACTER_ERR",
       "btoa(\"\\uffff\") must raise INVALID_CHARACTER_ERR",
-      "btoa(\"Ā\") must raise INVALID_CHARACTER_ERR",
-      "btoa(\"ā\") must raise INVALID_CHARACTER_ERR",
-      "btoa(\"עברית\") must raise INVALID_CHARACTER_ERR",
-      "btoa(\"✐\") must raise INVALID_CHARACTER_ERR",
-      "btoa(\"𐀀\") must raise INVALID_CHARACTER_ERR"
+      "btoa(\"\u0100\") must raise INVALID_CHARACTER_ERR",
+      "btoa(\"\u0101\") must raise INVALID_CHARACTER_ERR",
+      "btoa(\"\u05e2\u05d1\u05e8\u05d9\u05ea\") must raise INVALID_CHARACTER_ERR",
+      "btoa(\"\u2710\") must raise INVALID_CHARACTER_ERR",
+      "btoa(\"\ud800\udc00\") must raise INVALID_CHARACTER_ERR"
     ]
   },
   "html/webappapis/microtask-queuing/queue-microtask.any.js": true,

@@ -58,6 +58,10 @@ hyper = { version = "1.5.2", features = ["server", "http1"] }
 hyper-util = { version = "0.1.10", features = ["tokio"] }
 tokio-util = "0.7"
 rand = "0.8"
+encoding_rs = "0.8"
+flate2 = "1"
+sha1 = "0.10"
+hmac = "0.12"
 http-body-util = "0.1"
 regorus = "0.5"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
