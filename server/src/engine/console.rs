@@ -215,22 +215,234 @@ pub fn inject_console_snapshot(runtime: &mut deno_core::JsRuntimeForSnapshot) ->
 
 /// JavaScript wrapper that overrides `globalThis.console` to route output
 /// through `op_console_write`.
+///
+/// Shaped like the Console Standard's namespace object: prototype chain is
+/// console -> (empty object) -> Object.prototype, @@toStringTag "console",
+/// and the full method set. The inspector is depth- and length-capped so
+/// logging huge arrays/typed arrays stays O(cap), not O(n).
 const CONSOLE_JS_WRAPPER: &str = r#"
 (function() {
-    function formatArgs(args) {
-        return args.map(function(a) {
-            if (typeof a === 'string') return a;
-            try { return JSON.stringify(a); } catch(e) { return String(a); }
-        }).join(' ');
+    var MAX_ITEMS = 100;      // array/map/set elements shown
+    var MAX_PROPS = 50;       // object properties shown
+    var MAX_DEPTH = 4;
+    var MAX_STRING = 10000;   // per-string cap inside structures
+
+    function inspect(value, depth, seen) {
+        switch (typeof value) {
+            case 'undefined': return 'undefined';
+            case 'boolean': return String(value);
+            case 'number':
+                return Object.is(value, -0) ? '-0' : String(value);
+            case 'bigint': return String(value) + 'n';
+            case 'symbol': return value.toString();
+            case 'function': {
+                var name = value.name ? ': ' + value.name : ' (anonymous)';
+                return '[Function' + name + ']';
+            }
+            case 'string':
+                if (depth === 0) return value;
+                return "'" + (value.length > MAX_STRING
+                    ? value.slice(0, MAX_STRING) + '...' : value) + "'";
+        }
+        if (value === null) return 'null';
+        if (seen.indexOf(value) !== -1) return '[Circular]';
+        if (depth > MAX_DEPTH) return '[Object]';
+        seen = seen.concat([value]);
+        var next = depth + 1;
+        try {
+            if (Array.isArray(value)) {
+                var out = [];
+                var n = Math.min(value.length, MAX_ITEMS);
+                for (var i = 0; i < n; i++) {
+                    out.push(i in value ? inspect(value[i], next, seen) : '<empty>');
+                }
+                if (value.length > n) out.push('... ' + (value.length - n) + ' more items');
+                return '[ ' + out.join(', ') + ' ]';
+            }
+            if (ArrayBuffer.isView(value) && !(value instanceof DataView)) {
+                var tag = value.constructor && value.constructor.name || 'TypedArray';
+                var parts = [];
+                var m = Math.min(value.length, MAX_ITEMS);
+                for (var j = 0; j < m; j++) parts.push(String(value[j]));
+                if (value.length > m) parts.push('... ' + (value.length - m) + ' more items');
+                return tag + '(' + value.length + ') [ ' + parts.join(', ') + ' ]';
+            }
+            if (value instanceof Date) return value.toISOString();
+            if (value instanceof RegExp) return value.toString();
+            if (value instanceof Error) {
+                return value.stack || (value.name + ': ' + value.message);
+            }
+            if (typeof Map === 'function' && value instanceof Map) {
+                var me = [];
+                var mi = 0;
+                for (var entry of value) {
+                    if (mi++ >= MAX_ITEMS) { me.push('...'); break; }
+                    me.push(inspect(entry[0], next, seen) + ' => ' + inspect(entry[1], next, seen));
+                }
+                return 'Map(' + value.size + ') { ' + me.join(', ') + ' }';
+            }
+            if (typeof Set === 'function' && value instanceof Set) {
+                var se = [];
+                var si = 0;
+                for (var sv of value) {
+                    if (si++ >= MAX_ITEMS) { se.push('...'); break; }
+                    se.push(inspect(sv, next, seen));
+                }
+                return 'Set(' + value.size + ') { ' + se.join(', ') + ' }';
+            }
+            if (value instanceof ArrayBuffer) {
+                return 'ArrayBuffer { byteLength: ' + value.byteLength + ' }';
+            }
+            if (typeof Promise === 'function' && value instanceof Promise) {
+                return 'Promise { }';
+            }
+            var keys = Object.keys(value);
+            var props = [];
+            var kn = Math.min(keys.length, MAX_PROPS);
+            for (var k = 0; k < kn; k++) {
+                var kv;
+                try { kv = inspect(value[keys[k]], next, seen); }
+                catch (e) { kv = '[Getter threw]'; }
+                props.push(keys[k] + ': ' + kv);
+            }
+            if (keys.length > kn) props.push('... ' + (keys.length - kn) + ' more');
+            var ctor = value.constructor && value.constructor.name;
+            var prefix = ctor && ctor !== 'Object' ? ctor + ' ' : '';
+            return prefix + '{ ' + props.join(', ') + ' }';
+        } catch (e) {
+            try { return String(value); } catch (_) { return '[Unrepresentable]'; }
+        }
     }
-    globalThis.console = {
-        log: function() { Deno.core.ops.op_console_write(formatArgs(Array.from(arguments)), 0); },
-        info: function() { Deno.core.ops.op_console_write(formatArgs(Array.from(arguments)), 1); },
-        warn: function() { Deno.core.ops.op_console_write(formatArgs(Array.from(arguments)), 2); },
-        error: function() { Deno.core.ops.op_console_write(formatArgs(Array.from(arguments)), 3); },
-        debug: function() { Deno.core.ops.op_console_write(formatArgs(Array.from(arguments)), 0); },
-        trace: function() { Deno.core.ops.op_console_write(formatArgs(Array.from(arguments)), 0); },
+
+    // Console Standard "Formatter": %s %d %i %f %o %O %c %% in a leading
+    // format string consume subsequent args.
+    function formatArgs(args) {
+        var out = [];
+        var start = 0;
+        if (args.length > 0 && typeof args[0] === 'string' && /%[sdifoOc%]/.test(args[0])) {
+            var fmt = args[0];
+            var argIndex = 1;
+            var result = '';
+            for (var i = 0; i < fmt.length; i++) {
+                if (fmt[i] === '%' && i + 1 < fmt.length) {
+                    var c = fmt[i + 1];
+                    if (c === '%') { result += '%'; i++; continue; }
+                    if ('sdifoO'.indexOf(c) !== -1 && argIndex < args.length) {
+                        var a = args[argIndex++];
+                        if (c === 's') result += typeof a === 'string' ? a : inspect(a, 0, []);
+                        else if (c === 'd' || c === 'i') {
+                            result += typeof a === 'symbol' ? 'NaN' : String(parseInt(a, 10));
+                        } else if (c === 'f') {
+                            result += typeof a === 'symbol' ? 'NaN' : String(parseFloat(a));
+                        } else result += inspect(a, 1, []);
+                        i++;
+                        continue;
+                    }
+                    if (c === 'c') { argIndex < args.length && argIndex++; i++; continue; }
+                }
+                result += fmt[i];
+            }
+            out.push(result);
+            start = argIndex;
+        }
+        for (var j = start; j < args.length; j++) {
+            out.push(inspect(args[j], 0, []));
+        }
+        return out.join(' ');
+    }
+
+    function write(level, args) {
+        Deno.core.ops.op_console_write(formatArgs(Array.from(args)), level);
+    }
+
+    var counts = new Map();
+    var timers = new Map();
+    var groupDepth = 0;
+
+    var methods = {
+        log: function log() { write(0, arguments); },
+        info: function info() { write(1, arguments); },
+        warn: function warn() { write(2, arguments); },
+        error: function error() { write(3, arguments); },
+        debug: function debug() { write(0, arguments); },
+        trace: function trace() { write(0, arguments); },
+        dir: function dir() { write(0, arguments); },
+        dirxml: function dirxml() { write(0, arguments); },
+        table: function table() { write(0, arguments); },
+        clear: function clear() {},
+        group: function group() { if (arguments.length) write(0, arguments); groupDepth++; },
+        groupCollapsed: function groupCollapsed() { if (arguments.length) write(0, arguments); groupDepth++; },
+        groupEnd: function groupEnd() { if (groupDepth > 0) groupDepth--; },
+        count: function count(label) {
+            label = arguments.length === 0 ? 'default' : String(label);
+            var n = (counts.get(label) || 0) + 1;
+            counts.set(label, n);
+            write(0, [label + ': ' + n]);
+        },
+        countReset: function countReset(label) {
+            label = arguments.length === 0 ? 'default' : String(label);
+            if (counts.has(label)) counts.set(label, 0);
+            else write(2, ["Count for '" + label + "' does not exist"]);
+        },
+        assert: function assert(condition) {
+            if (condition) return;
+            var rest = Array.prototype.slice.call(arguments, 1);
+            if (rest.length > 0 && typeof rest[0] === 'string') {
+                rest[0] = 'Assertion failed: ' + rest[0];
+            } else {
+                rest.unshift('Assertion failed');
+            }
+            write(3, rest);
+        },
+        time: function time(label) {
+            label = arguments.length === 0 ? 'default' : String(label);
+            if (timers.has(label)) {
+                write(2, ["Timer '" + label + "' already exists"]);
+                return;
+            }
+            timers.set(label, Date.now());
+        },
+        timeLog: function timeLog(label) {
+            label = arguments.length === 0 ? 'default' : String(label);
+            if (!timers.has(label)) {
+                write(2, ["Timer '" + label + "' does not exist"]);
+                return;
+            }
+            var rest = Array.prototype.slice.call(arguments, 1);
+            write(0, [label + ': ' + (Date.now() - timers.get(label)) + 'ms']
+                .concat(rest.map(function (a) { return inspect(a, 0, []); })));
+        },
+        timeEnd: function timeEnd(label) {
+            label = arguments.length === 0 ? 'default' : String(label);
+            if (!timers.has(label)) {
+                write(2, ["Timer '" + label + "' does not exist"]);
+                return;
+            }
+            write(0, [label + ': ' + (Date.now() - timers.get(label)) + 'ms']);
+            timers.delete(label);
+        },
     };
+
+    // Namespace-object shape: console -> {} -> Object.prototype, with
+    // @@toStringTag "console" so Object.prototype.toString says
+    // "[object console]".
+    var consoleProto = Object.create(Object.prototype);
+    var consoleObj = Object.create(consoleProto);
+    for (var name in methods) {
+        Object.defineProperty(consoleObj, name, {
+            value: methods[name],
+            writable: true,
+            enumerable: true,
+            configurable: true,
+        });
+    }
+    Object.defineProperty(consoleObj, Symbol.toStringTag, {
+        value: 'console',
+        writable: false,
+        enumerable: false,
+        configurable: true,
+    });
+    globalThis.console = consoleObj;
 })();
 "#;
 
@@ -353,7 +565,12 @@ const BASE64_JS: &str = r#"
 (function() {
     var chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 
+    // DOMException is installed later in the injection sequence, so look
+    // it up at throw time; fall back to a local error type if absent.
     function InvalidCharacterError(message) {
+        if (typeof globalThis.DOMException === 'function') {
+            return new globalThis.DOMException(message, 'InvalidCharacterError');
+        }
         this.name = 'InvalidCharacterError';
         this.message = message;
     }
@@ -383,7 +600,13 @@ const BASE64_JS: &str = r#"
     };
 
     globalThis.atob = function atob(input) {
+        // Forgiving-base64 decode (WHATWG Infra): strip ASCII whitespace;
+        // when the length is a multiple of four, up to two trailing '='
+        // may be removed; any other '=' or a length % 4 of 1 is an error.
         var str = String(input).replace(/[\t\n\f\r ]/g, '');
+        if (str.length % 4 === 0) {
+            str = str.replace(/={1,2}$/, '');
+        }
         if (str.length % 4 === 1) {
             throw new InvalidCharacterError(
                 "The string to be decoded is not correctly encoded."
@@ -392,7 +615,6 @@ const BASE64_JS: &str = r#"
         var out = '';
         var buf = 0, bits = 0;
         for (var i = 0; i < str.length; i++) {
-            if (str[i] === '=') break;
             var idx = chars.indexOf(str[i]);
             if (idx === -1) {
                 throw new InvalidCharacterError(
@@ -429,87 +651,9 @@ pub fn inject_web_apis_snapshot(runtime: &mut deno_core::JsRuntimeForSnapshot) -
 
 const WEB_APIS_JS: &str = r#"
 (function() {
-    // ── TextEncoder / TextDecoder (UTF-8) ───────────────────────────────
-    // deno_core's bare runtime does not ship deno_web, so these standard
-    // globals are absent. Many libraries (isomorphic-git, etc.) assume they
-    // exist; provide a compact, correct UTF-8 implementation.
-    if (typeof globalThis.TextEncoder === 'undefined') {
-        globalThis.TextEncoder = class TextEncoder {
-            get encoding() { return 'utf-8'; }
-            encode(input) {
-                const str = String(input === undefined ? '' : input);
-                const out = [];
-                for (let i = 0; i < str.length; i++) {
-                    let code = str.charCodeAt(i);
-                    if (code >= 0xD800 && code <= 0xDBFF && i + 1 < str.length) {
-                        const next = str.charCodeAt(i + 1);
-                        if (next >= 0xDC00 && next <= 0xDFFF) {
-                            code = 0x10000 + ((code - 0xD800) << 10) + (next - 0xDC00);
-                            i++;
-                        }
-                    }
-                    // Anything still in the surrogate range is unpaired. The
-                    // spec converts the argument to a USVString first, so those
-                    // become U+FFFD; encoding them directly would emit a 3-byte
-                    // sequence that is not valid UTF-8.
-                    if (code >= 0xD800 && code <= 0xDFFF) code = 0xFFFD;
-                    if (code < 0x80) {
-                        out.push(code);
-                    } else if (code < 0x800) {
-                        out.push(0xC0 | (code >> 6), 0x80 | (code & 0x3F));
-                    } else if (code < 0x10000) {
-                        out.push(0xE0 | (code >> 12), 0x80 | ((code >> 6) & 0x3F), 0x80 | (code & 0x3F));
-                    } else {
-                        out.push(0xF0 | (code >> 18), 0x80 | ((code >> 12) & 0x3F), 0x80 | ((code >> 6) & 0x3F), 0x80 | (code & 0x3F));
-                    }
-                }
-                return new Uint8Array(out);
-            }
-            encodeInto(str, dest) {
-                const enc = this.encode(str);
-                const n = Math.min(enc.length, dest.length);
-                dest.set(enc.subarray(0, n));
-                return { read: str.length, written: n };
-            }
-        };
-    }
-    if (typeof globalThis.TextDecoder === 'undefined') {
-        globalThis.TextDecoder = class TextDecoder {
-            constructor(label, options) {
-                this.encoding = (label ? String(label) : 'utf-8').toLowerCase();
-                this.fatal = !!(options && options.fatal);
-                this.ignoreBOM = !!(options && options.ignoreBOM);
-            }
-            decode(input) {
-                if (input === undefined || input === null) return '';
-                let bytes;
-                if (input instanceof Uint8Array) bytes = input;
-                else if (input instanceof ArrayBuffer) bytes = new Uint8Array(input);
-                else if (ArrayBuffer.isView(input)) bytes = new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
-                else bytes = new Uint8Array(input);
-                let out = '';
-                let i = 0;
-                const n = bytes.length;
-                while (i < n) {
-                    const c = bytes[i++];
-                    if (c < 0x80) {
-                        out += String.fromCharCode(c);
-                    } else if (c >= 0xC0 && c < 0xE0) {
-                        out += String.fromCharCode(((c & 0x1F) << 6) | (bytes[i++] & 0x3F));
-                    } else if (c >= 0xE0 && c < 0xF0) {
-                        out += String.fromCharCode(((c & 0x0F) << 12) | ((bytes[i++] & 0x3F) << 6) | (bytes[i++] & 0x3F));
-                    } else if (c >= 0xF0) {
-                        let cp = ((c & 0x07) << 18) | ((bytes[i++] & 0x3F) << 12) | ((bytes[i++] & 0x3F) << 6) | (bytes[i++] & 0x3F);
-                        cp -= 0x10000;
-                        out += String.fromCharCode(0xD800 + (cp >> 10), 0xDC00 + (cp & 0x3FF));
-                    }
-                    // Lone continuation bytes are skipped (lenient, non-fatal).
-                }
-                if (this.ignoreBOM === false && out.charCodeAt(0) === 0xFEFF) out = out.slice(1);
-                return out;
-            }
-        };
-    }
+    // TextEncoder / TextDecoder are installed by the web_compat encoding
+    // layer (src/engine/web_compat/encoding.js), which owns the full WHATWG
+    // label table via encoding_rs ops.
 
     // A Blob's bytes live in `_data` as a latin1 byte-string: one code unit per
     // byte, each in 0x00-0xFF. `arrayBuffer()`/`bytes()` read it back with

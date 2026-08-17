@@ -16,12 +16,19 @@ pub mod heap_tags;
 pub mod mcp_client;
 pub mod mcp_oauth;
 pub mod module_loader;
+pub mod node_compat;
 pub mod opa;
 pub mod run_js_file;
 pub mod session_log;
 pub mod subprocess;
+pub mod compression;
+pub mod crypto;
+pub mod encoding;
 pub mod timers;
+pub mod url_support;
+pub mod urlpattern_support;
 pub mod wasm_stub;
+pub mod web_compat;
 
 pub use console::HardeningConfig;
 
@@ -64,10 +71,13 @@ pub const DEFAULT_EXECUTION_TIMEOUT_SECS: u64 = 30;
 /// per-module limit is set. 16 MiB.
 pub const DEFAULT_WASM_MAX_BYTES: usize = 16 * 1024 * 1024;
 /// Minimum heap memory in MB. deno_core runs bootstrap JavaScript during
-/// JsRuntime creation (before our near-heap-limit callback is installed).
-/// The heap must be large enough for this bootstrap to complete — smaller
-/// values cause `FatalProcessOutOfMemory` → `abort()`.
-pub const MIN_HEAP_MEMORY_MB: usize = 8;
+/// JsRuntime creation (before our near-heap-limit callback is installed),
+/// and the web-compat layer (streams polyfill, fetch classes, URL,
+/// encoding, node: modules) adds to that baseline. The heap must be large
+/// enough for this bootstrap to complete — smaller values cause
+/// `FatalProcessOutOfMemory` → `abort()` or spurious OOM errors before
+/// user code runs.
+pub const MIN_HEAP_MEMORY_MB: usize = 16;
 
 // ── V8 initialization ───────────────────────────────────────────────────
 
@@ -960,6 +970,11 @@ pub fn execute_stateless(
             extensions.push(mcp_client::create_extension());
         }
         extensions.push(timers::create_extension());
+        extensions.push(url_support::create_extension());
+        extensions.push(encoding::create_extension());
+        extensions.push(crypto::create_extension());
+        extensions.push(compression::create_extension());
+        extensions.push(urlpattern_support::create_extension());
 
         // Always create a module loader — all code runs as ES modules.
         let module_loader: Rc<dyn deno_core::ModuleLoader> = match module_loader_config {
@@ -1070,6 +1085,23 @@ pub fn execute_stateless(
                     if let Err(e) = timers::inject_timers(&mut runtime) {
                         return Err(e);
                     }
+                    // Inject the web-platform compat layer (events, abort,
+                    // structuredClone, performance, ...). Needs timers.
+                    if let Err(e) = web_compat::inject_web_compat(&mut runtime) {
+                        return Err(e);
+                    }
+                    if let Err(e) = url_support::inject_url(&mut runtime) {
+                        return Err(e);
+                    }
+                    if let Err(e) = encoding::inject_encoding(&mut runtime) {
+                        return Err(e);
+                    }
+                    if let Err(e) = crypto::inject_crypto(&mut runtime) {
+                        return Err(e);
+                    }
+                    if let Err(e) = web_compat::inject_web_compat_extras(&mut runtime) {
+                        return Err(e);
+                    }
                     // Harden sandbox: freeze ops, neutralize introspection, remove __bootstrap.
                     // Must run after all inject_* calls and before user code.
                     if let Err(e) = console::harden_runtime(&mut runtime, hardening) {
@@ -1166,6 +1198,11 @@ pub fn execute_stateful(
             extensions.push(mcp_client::create_extension());
         }
         extensions.push(timers::create_extension());
+        extensions.push(url_support::create_extension());
+        extensions.push(encoding::create_extension());
+        extensions.push(crypto::create_extension());
+        extensions.push(compression::create_extension());
+        extensions.push(urlpattern_support::create_extension());
 
         // Always create a module loader — all code runs as ES modules.
         let module_loader: Rc<dyn deno_core::ModuleLoader> = match module_loader_config {
@@ -1284,6 +1321,23 @@ pub fn execute_stateful(
                     }
                     // Inject setTimeout/clearTimeout (always available).
                     if let Err(e) = timers::inject_timers(&mut runtime) {
+                        return Err(e);
+                    }
+                    // Inject the web-platform compat layer (events, abort,
+                    // structuredClone, performance, ...). Needs timers.
+                    if let Err(e) = web_compat::inject_web_compat_snapshot(&mut runtime) {
+                        return Err(e);
+                    }
+                    if let Err(e) = url_support::inject_url_snapshot(&mut runtime) {
+                        return Err(e);
+                    }
+                    if let Err(e) = encoding::inject_encoding_snapshot(&mut runtime) {
+                        return Err(e);
+                    }
+                    if let Err(e) = crypto::inject_crypto_snapshot(&mut runtime) {
+                        return Err(e);
+                    }
+                    if let Err(e) = web_compat::inject_web_compat_extras_snapshot(&mut runtime) {
                         return Err(e);
                     }
                     // Harden sandbox: freeze ops, neutralize introspection, remove __bootstrap.

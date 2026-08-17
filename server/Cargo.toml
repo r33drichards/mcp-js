@@ -58,6 +58,11 @@ hyper = { version = "1.5.2", features = ["server", "http1"] }
 hyper-util = { version = "0.1.10", features = ["tokio"] }
 tokio-util = "0.7"
 rand = "0.8"
+encoding_rs = "0.8"
+flate2 = "1"
+brotli = "8"
+sha1 = "0.10"
+hmac = "0.12"
 http-body-util = "0.1"
 regorus = "0.5"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
@@ -73,6 +78,7 @@ zstd = "0.13"
 blake3 = "1"
 bincode = "1"
 diffy = "0.4"
+urlpattern = "0.6.0"
 
 # OS-level sandboxing layer (--sandbox-manifest): Landlock on Linux, Seatbelt on macOS.
 # default-features = false drops nono's system-keyring integration, which the
@@ -89,3 +95,6 @@ futures = "0.3"
 tempfile = "3"
 chrono = { version = "0.4", features = ["serde"] }
 sled = "0.34"
+
+[patch.crates-io]
+url = { path = "vendor/url" }

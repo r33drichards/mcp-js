@@ -5,9 +5,17 @@ members = [
 ]
 resolver = "2"
 
+# V8-linked binaries with full debug info are ~600MB each and slow to link;
+# line tables keep usable panic backtraces at a fraction of the size.
+[profile.dev]
+debug = "line-tables-only"
+
 [patch.crates-io]
 # Fixes Vec<&str> heap leak in prepare_for_snapshot: the `extensions` field
 # was not ManuallyDrop so mem::forget(self) leaked its backing buffer.
 # Upstream PR pending; using our fork until merged.
 deno_core = { git = "https://github.com/r33drichards/deno_core", rev = "1c97a0ad596fed8c258803c020194243ef4441cc" }
+# Fork-probe for the URL-parser benchmark (see docs/url-impl-benchmark.md):
+# rust-url with the whatwg/url#963 host-retention behavior.
+url = { path = "server/vendor/url" }
 

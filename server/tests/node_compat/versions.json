@@ -1,0 +1,7 @@
+{
+  "node": {
+    "tag": "v22.14.0",
+    "repository": "https://github.com/nodejs/node",
+    "vendored_by": "tools/compat/vendor-node-tests.sh"
+  }
+}
