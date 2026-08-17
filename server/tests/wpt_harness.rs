@@ -21,6 +21,8 @@
 //!   WPT_UPDATE=1 cargo test --test wpt_harness -- --nocapture
 //!
 //! Filter to a subset of files with WPT_FILTER=<substring>.
+//! Set WPT_REPORT=/path/to/wptreport.json to also emit a wpt.fyi-style
+//! report (one {test, status, subtests} record per file).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -355,6 +357,7 @@ fn wpt_subset_matches_expectations() {
     let mut drift: Vec<String> = Vec::new();
     let mut pass_files = 0usize;
     let mut total_subtest_failures = 0usize;
+    let mut report_results: Vec<serde_json::Value> = Vec::new();
 
     let tests = collect_tests(&vendor);
     assert!(!tests.is_empty(), "no vendored tests found in {}", vendor.display());
@@ -380,6 +383,21 @@ fn wpt_subset_matches_expectations() {
         }
 
         let outcome = run_file(&vendor, rel);
+        report_results.push(match &outcome {
+            FileOutcome::Ran { failures } => serde_json::json!({
+                "test": format!("/{key}"),
+                "status": "OK",
+                "subtests": failures.iter().map(|(n, m)| serde_json::json!({
+                    "name": n, "status": "FAIL", "message": m,
+                })).collect::<Vec<_>>(),
+            }),
+            FileOutcome::Failed { reason } => serde_json::json!({
+                "test": format!("/{key}"),
+                "status": "ERROR",
+                "message": reason,
+                "subtests": [],
+            }),
+        });
         let actual = match &outcome {
             FileOutcome::Ran { failures } if failures.is_empty() => {
                 pass_files += 1;
@@ -428,6 +446,24 @@ fn wpt_subset_matches_expectations() {
         "WPT: {run_count} files run, {pass_files} fully passing, \
          {total_subtest_failures} subtest failures recorded"
     );
+
+    if let Ok(report_path) = std::env::var("WPT_REPORT") {
+        let report = serde_json::json!({
+            "run_info": {
+                "product": "mcp-v8",
+                "revision": std::fs::read_to_string(root.join("versions.json"))
+                    .ok()
+                    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                    .and_then(|v| v["wpt"]["commit"].as_str().map(String::from))
+                    .unwrap_or_default(),
+                "os": std::env::consts::OS,
+            },
+            "results": report_results,
+        });
+        std::fs::write(&report_path, serde_json::to_string_pretty(&report).unwrap())
+            .expect("write wptreport");
+        println!("wrote wpt report to {report_path}");
+    }
 
     if update {
         let path = root.join("expectations.json");
