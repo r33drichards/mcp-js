@@ -1,0 +1,81 @@
+# Web Platform Tests for the mcp-v8 engine
+
+This directory holds the runtime-compat test infrastructure proposed in
+[`docs/compat-test-suites-research.md`](../../../docs/compat-test-suites-research.md):
+a vendored subset of [web-platform-tests](https://github.com/web-platform-tests/wpt)
+run inside the engine (the same `execute_stateless` path the `run_js` tool
+uses), plus the Phase-0 global-surface baseline.
+
+## Layout
+
+| Path | What it is |
+|---|---|
+| `vendor/` | Vendored WPT files (tests + `resources/testharness.js` + helpers). BSD-3-Clause, see `vendor/LICENSE`. Never edit by hand. |
+| `versions.json` | The upstream WPT commit the vendored files came from. |
+| `runner/bootstrap.js` | Shell-environment shims (`self`, `GLOBAL`, mock `location`) loaded before testharness.js. |
+| `runner/report.js` | `testharnessreport.js` replacement — serializes results over the console channel. |
+| `expectations.json` | Recorded per-file outcome. CI fails on drift in **either** direction. |
+| `surface_baseline.json` | Recorded `globalThis` surface + WinterTC Minimum Common API coverage (Phase 0). |
+
+The runners are the integration tests `tests/wpt_harness.rs` and
+`tests/compat_surface.rs`.
+
+## Running
+
+```bash
+cd server
+cargo test --test wpt_harness -- --nocapture      # run WPT subset vs expectations
+cargo test --test compat_surface -- --nocapture   # surface scan vs baseline
+
+WPT_FILTER=encoding cargo test --test wpt_harness -- --nocapture  # one suite
+```
+
+After an intentional runtime change (new global, fixed behavior), re-record:
+
+```bash
+WPT_UPDATE=1 cargo test --test wpt_harness -- --nocapture
+COMPAT_SURFACE_UPDATE=1 cargo test --test compat_surface -- --nocapture
+```
+
+and commit the diff — the expectation delta *is* the compat changelog.
+
+## Expectation format
+
+Deno-style, keyed by vendored path:
+
+```jsonc
+{
+  "html/webappapis/atob/base64.any.js": true,          // all subtests pass
+  "fetch/api/headers/headers-basic.any.js": false,      // fails wholesale
+  "encoding/api-basics.any.js": { "expectedFailures": ["…subtest name…"] },
+  "some/flaky.any.js": { "ignore": true }               // skipped entirely
+}
+```
+
+## Updating / expanding the vendored subset
+
+```bash
+git clone --depth 1 --filter=blob:none --sparse \
+    https://github.com/web-platform-tests/wpt /tmp/wpt
+git -C /tmp/wpt sparse-checkout set resources html/webappapis console \
+    encoding fetch/api/headers wasm/jsapi
+tools/compat/vendor-wpt.sh /tmp/wpt
+WPT_UPDATE=1 cargo test --test wpt_harness -- --nocapture
+```
+
+To add a suite, extend the file list in `tools/compat/vendor-wpt.sh`. Stick to
+serverless `.any.js` tests: anything needing the WPT HTTP server (fetch
+network behavior, websockets, `wasm/webapi`), `testdriver.js`, or a DOM is out
+of scope for this runner (see the research doc for the wptserve growth path).
+
+## Known limitations
+
+- Tests run once per file in a single "shell-like" scope; the window/worker
+  scope variants WPT would generate are collapsed into one run.
+- testharness.js runs under module strict mode (all engine code is ESM).
+- No `wptserve`: `.sub.js` substitution, cross-origin, and network tests are
+  not vendored.
+- Failures in `expectations.json` are *documentation* of today's gaps (no
+  spec `Headers`, UTF-8-only `TextDecoder`, no `setInterval`/`queueMicrotask`,
+  …) — the roadmap for closing them is the WinterTC Minimum Common API list
+  in the research doc.
