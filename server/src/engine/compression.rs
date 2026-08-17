@@ -11,21 +11,86 @@ use std::io::Write;
 
 use deno_core::{OpState, Resource, op2};
 use deno_error::JsErrorBox;
-use flate2::Compression;
-use flate2::write::{
-    DeflateDecoder, DeflateEncoder, GzDecoder, GzEncoder, ZlibDecoder, ZlibEncoder,
-};
+use flate2::write::{DeflateEncoder, GzDecoder, GzEncoder, ZlibEncoder};
+use flate2::{Compression, Decompress, FlushDecompress, Status};
 
 type BrotliEnc = brotli::CompressorWriter<Vec<u8>>;
 type BrotliDec = brotli::DecompressorWriter<Vec<u8>>;
+
+/// zlib / raw-deflate decompression with explicit stream-state tracking:
+/// the write-adapter API cannot report a truncated stream, but the spec
+/// requires erroring on EOF before stream end (and on trailing junk).
+struct FlateDec {
+    inner: Decompress,
+    out: Vec<u8>,
+    finished: bool,
+}
+
+impl FlateDec {
+    fn new(zlib_header: bool) -> Self {
+        Self {
+            inner: Decompress::new(zlib_header),
+            out: Vec::new(),
+            finished: false,
+        }
+    }
+
+    /// Feed a chunk; returns true when trailing junk followed stream end.
+    fn write(&mut self, data: &[u8]) -> std::io::Result<bool> {
+        if self.finished {
+            return Ok(!data.is_empty());
+        }
+        let mut consumed = 0usize;
+        while consumed < data.len() {
+            let before_in = self.inner.total_in();
+            self.out.reserve(32 * 1024);
+            let status = self
+                .inner
+                .decompress_vec(&data[consumed..], &mut self.out, FlushDecompress::None)
+                .map_err(std::io::Error::other)?;
+            consumed += (self.inner.total_in() - before_in) as usize;
+            match status {
+                Status::StreamEnd => {
+                    self.finished = true;
+                    return Ok(consumed < data.len());
+                }
+                Status::Ok | Status::BufError => {
+                    if (self.inner.total_in() - before_in) == 0 && consumed < data.len() {
+                        // No forward progress and output space available:
+                        // avoid a spin, treat as corrupt.
+                        if self.out.capacity() - self.out.len() > 0 {
+                            return Err(std::io::Error::other("corrupt deflate stream"));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    fn finish(mut self) -> std::io::Result<Vec<u8>> {
+        if !self.finished {
+            self.out.reserve(32 * 1024);
+            let status = self
+                .inner
+                .decompress_vec(&[], &mut self.out, FlushDecompress::Finish)
+                .map_err(std::io::Error::other)?;
+            if status != Status::StreamEnd {
+                return Err(std::io::Error::other("truncated deflate stream"));
+            }
+            self.finished = true;
+        }
+        Ok(std::mem::take(&mut self.out))
+    }
+}
 
 enum Ctx {
     GzEnc(GzEncoder<Vec<u8>>),
     ZlibEnc(ZlibEncoder<Vec<u8>>),
     RawEnc(DeflateEncoder<Vec<u8>>),
     GzDec(GzDecoder<Vec<u8>>),
-    ZlibDec(ZlibDecoder<Vec<u8>>),
-    RawDec(DeflateDecoder<Vec<u8>>),
+    ZlibDec(FlateDec),
+    RawDec(FlateDec),
     BrEnc(Box<BrotliEnc>),
     BrDec(Box<BrotliDec>),
 }
@@ -57,8 +122,8 @@ impl Ctx {
             Ctx::ZlibEnc(w) => write_loop(w, data),
             Ctx::RawEnc(w) => write_loop(w, data),
             Ctx::GzDec(w) => write_loop(w, data),
-            Ctx::ZlibDec(w) => write_loop(w, data),
-            Ctx::RawDec(w) => write_loop(w, data),
+            Ctx::ZlibDec(d) => d.write(data),
+            Ctx::RawDec(d) => d.write(data),
             Ctx::BrEnc(w) => write_loop(w, data),
             Ctx::BrDec(w) => write_loop(w, data),
         }
@@ -70,8 +135,8 @@ impl Ctx {
             Ctx::ZlibEnc(w) => w.get_mut(),
             Ctx::RawEnc(w) => w.get_mut(),
             Ctx::GzDec(w) => w.get_mut(),
-            Ctx::ZlibDec(w) => w.get_mut(),
-            Ctx::RawDec(w) => w.get_mut(),
+            Ctx::ZlibDec(d) => &mut d.out,
+            Ctx::RawDec(d) => &mut d.out,
             Ctx::BrEnc(w) => w.get_mut(),
             Ctx::BrDec(w) => w.get_mut(),
         };
@@ -84,8 +149,8 @@ impl Ctx {
             Ctx::ZlibEnc(w) => w.finish(),
             Ctx::RawEnc(w) => w.finish(),
             Ctx::GzDec(w) => w.finish(),
-            Ctx::ZlibDec(w) => w.finish(),
-            Ctx::RawDec(w) => w.finish(),
+            Ctx::ZlibDec(d) => d.finish(),
+            Ctx::RawDec(d) => d.finish(),
             Ctx::BrEnc(w) => {
                 let mut w = *w;
                 w.flush()?;
@@ -132,8 +197,8 @@ fn op_compression_new(
         ("deflate", false) => Ctx::ZlibEnc(ZlibEncoder::new(Vec::new(), level)),
         ("deflate-raw", false) => Ctx::RawEnc(DeflateEncoder::new(Vec::new(), level)),
         ("gzip", true) => Ctx::GzDec(GzDecoder::new(Vec::new())),
-        ("deflate", true) => Ctx::ZlibDec(ZlibDecoder::new(Vec::new())),
-        ("deflate-raw", true) => Ctx::RawDec(DeflateDecoder::new(Vec::new())),
+        ("deflate", true) => Ctx::ZlibDec(FlateDec::new(true)),
+        ("deflate-raw", true) => Ctx::RawDec(FlateDec::new(false)),
         ("brotli", false) => Ctx::BrEnc(Box::new(brotli::CompressorWriter::new(
             Vec::new(),
             4096,

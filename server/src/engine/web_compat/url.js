@@ -406,10 +406,13 @@
                 throw new TypeError(
                     "Failed to construct 'URL': 1 argument required, but only 0 present.");
             }
+            // Argument conversion happens before parsing: a throwing
+            // toString propagates as-is, not as "Invalid URL".
+            var urlStr = String(url);
+            var baseStr = base === undefined ? undefined : String(base);
             var parts;
             try {
-                parts = parseParts(String(url),
-                    base === undefined ? undefined : String(base));
+                parts = parseParts(urlStr, baseStr);
             } catch (e) {
                 throw new TypeError(e && e.message ? e.message : 'Invalid URL');
             }
@@ -474,7 +477,11 @@
         get searchParams() {
             var d = udata(this);
             if (!d.searchParams) {
-                var params = new URLSearchParams(
+                // Parse the raw query directly: the public constructor's
+                // leading-'?' strip must not apply to a query that itself
+                // starts with '?'.
+                var params = new URLSearchParams();
+                uspData.get(params).list = parseFormUrlencoded(
                     d.parts.search.length > 0 ? d.parts.search.slice(1) : '');
                 uspData.get(params).url = this;
                 d.searchParams = params;

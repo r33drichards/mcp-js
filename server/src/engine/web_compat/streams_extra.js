@@ -7,6 +7,18 @@
         return;
     }
 
+    // The polyfill's async-iterator prototype chain ends at
+    // Object.prototype; the spec puts %AsyncIteratorPrototype% there.
+    try {
+        var AsyncIteratorPrototype = Object.getPrototypeOf(
+            Object.getPrototypeOf(async function* () {}.prototype));
+        var probeStream = new ReadableStream({ start: function (c) { c.close(); } });
+        var iterProto = Object.getPrototypeOf(probeStream.values());
+        if (Object.getPrototypeOf(iterProto) === Object.prototype) {
+            Object.setPrototypeOf(iterProto, AsyncIteratorPrototype);
+        }
+    } catch (_) { /* best effort */ }
+
     // The spec's ReadableStream.from rejects strings even though they are
     // iterable; the vendored polyfill accepts them.
     if (typeof ReadableStream === 'function' &&

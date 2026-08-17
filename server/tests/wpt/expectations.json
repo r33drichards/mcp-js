@@ -28,12 +28,7 @@
   "compression/decompression-buffersource.any.js": true,
   "compression/decompression-constructor-error.any.js": true,
   "compression/decompression-correct-input.any.js": true,
-  "compression/decompression-corrupt-input.any.js": {
-    "expectedFailures": [
-      "format 'deflate' field DATA should be error for 5",
-      "truncating the input for 'deflate' should give an error"
-    ]
-  },
+  "compression/decompression-corrupt-input.any.js": true,
   "compression/decompression-empty-input.any.js": true,
   "compression/decompression-extra-input.any.js": true,
   "compression/decompression-split-chunk.any.js": true,
@@ -82,8 +77,6 @@
       "An object whose interface is deleted from the global must still deserialize",
       "Growable SharedArrayBuffer",
       "ImageBitmap",
-      "Length-tracking DataView is transferable",
-      "Length-tracking TypedArray is transferable",
       "OffscreenCanvas"
     ]
   },
@@ -117,28 +110,14 @@
   "streams/readable-byte-streams/bad-buffers-and-views.any.js": true,
   "streams/readable-byte-streams/construct-byob-request.any.js": true,
   "streams/readable-byte-streams/enqueue-with-detached-buffer.any.js": true,
-  "streams/readable-byte-streams/general.any.js": {
-    "expectedFailures": [
-      "ReadableStream with byte source: read(view), then respondWithNewView() with a transferred ArrayBuffer",
-      "ReadableStream with byte source: respondWithNewView() with a transferred non-zero-length view (in the readable state)",
-      "ReadableStream with byte source: respondWithNewView() with a transferred zero-length view (in the closed state)"
-    ]
-  },
+  "streams/readable-byte-streams/general.any.js": true,
   "streams/readable-byte-streams/non-transferable-buffers.any.js": true,
   "streams/readable-byte-streams/patched-global.any.js": true,
-  "streams/readable-byte-streams/read-min.any.js": {
-    "expectedFailures": [
-      "ReadableStream with byte source: read({ min }), then respondWithNewView() with a transferred ArrayBuffer"
-    ]
-  },
+  "streams/readable-byte-streams/read-min.any.js": true,
   "streams/readable-byte-streams/respond-after-enqueue.any.js": true,
   "streams/readable-byte-streams/tee.any.js": true,
   "streams/readable-byte-streams/templated.any.js": true,
-  "streams/readable-streams/async-iterator.any.js": {
-    "expectedFailures": [
-      "Async iterator instances should have the correct list of properties"
-    ]
-  },
+  "streams/readable-streams/async-iterator.any.js": true,
   "streams/readable-streams/bad-strategies.any.js": true,
   "streams/readable-streams/bad-underlying-sources.any.js": true,
   "streams/readable-streams/cancel.any.js": true,
@@ -189,11 +168,7 @@
   "streams/writable-streams/reentrant-strategy.any.js": true,
   "streams/writable-streams/start.any.js": true,
   "streams/writable-streams/write.any.js": true,
-  "url/historical.any.js": {
-    "expectedFailures": [
-      "Constructor only takes strings"
-    ]
-  },
+  "url/historical.any.js": true,
   "url/url-constructor.any.js": {
     "expectedFailures": [
       "Parsing: <..> against <abc://x/y/z/C:/>",
@@ -213,7 +188,6 @@
       "Parsing: </C:/> against <file://host/>",
       "Parsing: </\\//\\/a/../> against <file:///>",
       "Parsing: </c:/foo/bar> against <file://host/path>",
-      "Parsing: <??a=b&c=d> against <http://example.org/foo/bar>",
       "Parsing: <C|\n/> against <file://host/dir/file>",
       "Parsing: <C|#> against <file://host/dir/file>",
       "Parsing: <C|/> against <file://host/>",
@@ -276,11 +250,7 @@
       "Origin parsing: <https://xn--/> without base"
     ]
   },
-  "url/url-searchparams.any.js": {
-    "expectedFailures": [
-      "URL.searchParams and URL.search setters, update propagation"
-    ]
-  },
+  "url/url-searchparams.any.js": true,
   "url/url-setters-stripping.any.js": true,
   "url/url-setters.any.js": {
     "expectedFailures": [

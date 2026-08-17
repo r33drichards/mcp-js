@@ -83,7 +83,10 @@
         }
         if (value instanceof TypedArray || value instanceof DataView) {
             // Out-of-bounds views (fixed-length views over a resizable
-            // buffer that shrank) are not serializable.
+            // buffer that shrank) are not serializable. Detached-buffer
+            // views also land here — but a view over a transfer-listed
+            // buffer is fine: the buffer is still attached (detach happens
+            // after serialization) and maps to its replacement.
             try {
                 if (value instanceof DataView) {
                     void value.byteLength; // throws when OOB
@@ -205,34 +208,72 @@
         return out;
     }
 
-    // Internal: clone with a transfer list, reporting the fresh ports so
-    // MessagePort.postMessage can deliver them on the event.
-    function structuredCloneWithTransfer(value, transfer) {
-            var transferMap = new Map();
-            var transferredPorts = [];
-            for (var i = 0; i < transfer.length; i++) {
-                var t = transfer[i];
-                if (transferMap.has(t)) {
-                    throw new DOMException(
-                        'Transfer list contains duplicate entries.', 'DataCloneError');
-                }
-                if (t instanceof ArrayBuffer) {
-                    if (t.detached === true || typeof t.transfer !== 'function') {
-                        throw cloneError(t);
-                    }
-                    transferMap.set(t, t.transfer());
-                } else if (typeof MessagePort === 'function' && t instanceof MessagePort) {
-                    var fresh = transferPort(t);
-                    transferMap.set(t, fresh);
-                    transferredPorts.push(fresh);
-                } else {
+    // Internal: clone with a transfer list. Per the spec, transferables
+    // detach only AFTER serialization — views over a transfer-listed buffer
+    // still have their geometry while the value is cloned. prepare
+    // validates and builds replacements; commit detaches the originals.
+    function prepareTransfer(transfer) {
+        var transferMap = new Map();
+        var entries = [];
+        var transferredPorts = [];
+        for (var i = 0; i < transfer.length; i++) {
+            var t = transfer[i];
+            if (transferMap.has(t)) {
+                throw new DOMException(
+                    'Transfer list contains duplicate entries.', 'DataCloneError');
+            }
+            if (t instanceof ArrayBuffer) {
+                if (t.detached === true || typeof t.transfer !== 'function') {
                     throw cloneError(t);
                 }
+                var replacement = t.resizable
+                    ? (function (src) {
+                        var ab = new ArrayBuffer(src.byteLength, { maxByteLength: src.maxByteLength });
+                        new Uint8Array(ab).set(new Uint8Array(src));
+                        return ab;
+                    })(t)
+                    : t.slice(0);
+                transferMap.set(t, replacement);
+                entries.push({ kind: 'buffer', original: t });
+            } else if (typeof MessagePort === 'function' && t instanceof MessagePort) {
+                var d = pdata(t);
+                if (d.transferred) {
+                    throw new DOMException(
+                        'MessagePort is already transferred.', 'DataCloneError');
+                }
+                allowPort = true;
+                var fresh;
+                try {
+                    fresh = new MessagePort();
+                } finally {
+                    allowPort = false;
+                }
+                transferMap.set(t, fresh);
+                transferredPorts.push(fresh);
+                entries.push({ kind: 'port', original: t, fresh: fresh });
+            } else {
+                throw cloneError(t);
             }
-            return {
-                value: cloneValue(value, new Map(), transferMap.size ? transferMap : null),
-                transferredPorts: transferredPorts,
-            };
+        }
+        return { map: transferMap, entries: entries, ports: transferredPorts };
+    }
+
+    function commitTransfer(prepared) {
+        for (var i = 0; i < prepared.entries.length; i++) {
+            var e = prepared.entries[i];
+            if (e.kind === 'buffer') {
+                e.original.transfer(); // detach; contents already copied
+            } else {
+                completePortTransfer(e.original, e.fresh);
+            }
+        }
+    }
+
+    function structuredCloneWithTransfer(value, transfer) {
+        var prepared = prepareTransfer(transfer);
+        var out = cloneValue(value, new Map(), prepared.map.size ? prepared.map : null);
+        commitTransfer(prepared);
+        return { value: out, transferredPorts: prepared.ports };
     }
 
     globalThis.structuredClone = function structuredClone(value, options) {
@@ -240,36 +281,17 @@
             throw new TypeError(
                 "Failed to execute 'structuredClone': 1 argument required, but only 0 present.");
         }
-        var transferMap = null;
+        var transfer = [];
         if (options !== undefined && options !== null) {
             if (typeof options !== 'object' && typeof options !== 'function') {
                 throw new TypeError(
                     "Failed to execute 'structuredClone': The provided value is not of type 'StructuredSerializeOptions'.");
             }
-            var transfer = options.transfer;
-            if (transfer !== undefined) {
-                var list = Array.from(transfer);
-                transferMap = new Map();
-                for (var i = 0; i < list.length; i++) {
-                    var t = list[i];
-                    if (transferMap.has(t)) {
-                        throw new DOMException(
-                            'Transfer list contains duplicate entries.', 'DataCloneError');
-                    }
-                    if (t instanceof ArrayBuffer) {
-                        if (t.detached === true || typeof t.transfer !== 'function') {
-                            throw cloneError(t);
-                        }
-                        transferMap.set(t, t.transfer());
-                    } else if (typeof MessagePort === 'function' && t instanceof MessagePort) {
-                        transferMap.set(t, transferPort(t));
-                    } else {
-                        throw cloneError(t);
-                    }
-                }
+            if (options.transfer !== undefined) {
+                transfer = Array.from(options.transfer);
             }
         }
-        return cloneValue(value, new Map(), transferMap);
+        return structuredCloneWithTransfer(value, transfer).value;
     };
 
     // ── MessageChannel / MessagePort ────────────────────────────────────
@@ -299,20 +321,10 @@
         }
     }
 
-    // Transfer a port: a fresh port takes over the entanglement and the
-    // buffered queue; the original is neutered.
-    function transferPort(port) {
+    // Complete a port transfer: the fresh port takes over the entanglement
+    // and the buffered queue; the original is neutered.
+    function completePortTransfer(port, fresh) {
         var d = pdata(port);
-        if (d.transferred) {
-            throw new DOMException('MessagePort is already transferred.', 'DataCloneError');
-        }
-        allowPort = true;
-        var fresh;
-        try {
-            fresh = new MessagePort();
-        } finally {
-            allowPort = false;
-        }
         var fd = portData.get(fresh);
         fd.entangled = d.entangled;
         fd.queue = d.queue;
@@ -324,7 +336,6 @@
         d.queue = [];
         d.closed = true;
         d.transferred = true;
-        return fresh;
     }
 
     class MessagePort extends EventTarget {

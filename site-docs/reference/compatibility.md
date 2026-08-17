@@ -70,23 +70,23 @@ subset, and a vendored subset of Node.js core tests running against the
 
 ## Web Platform Tests (wpt@0cc6a7e19)
 
-**212 / 224 vendored test files fully passing**
-(12 with recorded subtest failures — 106
+**218 / 224 vendored test files fully passing**
+(6 with recorded subtest failures — 94
 individual subtests — and 0 failing wholesale).
 
 | Suite | Fully passing | Partial | Failing |
 |---|---|---|---|
 | FileAPI | 14 | 0 | 0 |
 | WebCryptoAPI | 3 | 0 | 0 |
-| compression | 17 | 1 | 0 |
+| compression | 18 | 0 | 0 |
 | console | 6 | 0 | 0 |
 | dom | 13 | 0 | 0 |
 | encoding | 6 | 0 | 0 |
 | fetch | 8 | 0 | 0 |
 | hr-time | 2 | 0 | 0 |
 | html | 11 | 1 | 0 |
-| streams | 62 | 4 | 0 |
-| url | 16 | 5 | 0 |
+| streams | 65 | 1 | 0 |
+| url | 18 | 3 | 0 |
 | urlpattern | 3 | 0 | 0 |
 | wasm | 42 | 1 | 0 |
 | xhr | 9 | 0 | 0 |

@@ -71,14 +71,15 @@ of scope for this runner (see the research doc for the wptserve growth path).
 ## Current results (wpt@0cc6a7e)
 
 224 non-ignored files (plus 15 `.tentative.` proposal-stage files ignored):
-**212 fully passing**, 12 with recorded subtest failures (106 subtests).
-The remaining failures concentrate in three places: the url/ suite (rust-
-url tracks a slightly older URL spec — opaque-path space encoding, `|`
-drive letters, invalid-punycode leniency), urlpattern/ (polyfill
-canonicalization deltas), and the structured-clone battery (transferable
-types this runtime does not implement). Every failure is pinned by name in
-`expectations.json`; fixing one without re-recording fails CI, so the file
-is the compat changelog.
+**218 fully passing**, 6 with recorded subtest failures (94 subtests).
+The remainder is fully attributed: 87 in the url/ suite (rust-url tracks
+a slightly older URL spec — relative Windows drive letters, invalid-
+punycode leniency, edge canonicalizations), 5 in the structured-clone
+battery (ImageBitmap/OffscreenCanvas and same-realm SAB identity), one
+V8-native WebAssembly.Global setter arity, one web-streams-polyfill
+pipeTo timing detail. Every failure is pinned by name in
+`expectations.json`; fixing one without re-recording fails CI, so the
+file is the compat changelog.
 
 Companion suites: `compat_surface` locks the WinterTC Minimum Common API
 surface (54/54 present) and `node_compat` runs a vendored Node core subset
