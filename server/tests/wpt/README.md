@@ -68,6 +68,17 @@ serverless `.any.js` tests: anything needing the WPT HTTP server (fetch
 network behavior, websockets, `wasm/webapi`), `testdriver.js`, or a DOM is out
 of scope for this runner (see the research doc for the wptserve growth path).
 
+## Initial results (wpt@0cc6a7e, first recording)
+
+86 files run in ~27s: **41 fully passing** (35 of them `wasm/jsapi` —
+V8-native, as expected), 35 with recorded subtest failures, 10 failing
+wholesale. The wholesale failures are top-level references to missing APIs
+(`setInterval`, global `Headers`, `TextEncoder.prototype.encodeInto`,
+`WebAssembly.Function` type reflection). Surface scan: **13/54** WinterTC
+Minimum Common API globals present (`queueMicrotask` is present via
+deno_core; streams, URL, crypto, events, `structuredClone`, `performance`,
+`self`, `setInterval` are the big absences).
+
 ## Known limitations
 
 - Tests run once per file in a single "shell-like" scope; the window/worker
