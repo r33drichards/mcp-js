@@ -261,6 +261,9 @@ impl PolicyChain {
 pub struct PoliciesConfig {
     /// Policy chain for `fetch()` operations.
     pub fetch: Option<OperationPolicies>,
+    /// Policy chain for WebSocket connects. The policy input is
+    /// `{ "operation": "connect", "url", "protocols", "headers", "url_parsed" }`.
+    pub websocket: Option<OperationPolicies>,
     /// Policy chain for module import auditing.
     pub modules: Option<OperationPolicies>,
     /// Policy chain for filesystem operations.

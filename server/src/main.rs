@@ -39,6 +39,7 @@ use engine::heap_tags::HeapTagStore;
 use engine::module_loader::ModuleLoaderConfig;
 use engine::opa::{EvalMode, PolicyChain};
 use engine::opa::{PoliciesConfig, build_policy_chain};
+use engine::websocket::WebSocketConfig;
 use engine::run_js_file::RunJsFilePolicy;
 use engine::session_log::SessionLog;
 use engine::subprocess::SubprocessConfig;
@@ -481,6 +482,27 @@ async fn async_main(cli: Cli) -> Result<()> {
         None
     };
 
+    let websocket_policy_chain = if let Some(ref config) = policies_config {
+        if let Some(ref websocket_policies) = config.websocket {
+            let chain = build_policy_chain(
+                websocket_policies,
+                "mcp/websocket",
+                "data.mcp.websocket.allow",
+            )
+            .map_err(|e| anyhow::anyhow!("Failed to build websocket policy chain: {}", e))?;
+            tracing::info!(
+                "WebSocket policy chain: {} evaluator(s), mode={:?}",
+                websocket_policies.policies.len(),
+                websocket_policies.mode
+            );
+            Some(Arc::new(chain))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     let modules_policy_chain = if let Some(ref config) = policies_config {
         if let Some(ref module_policies) = config.modules {
             let chain =
@@ -609,8 +631,21 @@ async fn async_main(cli: Cli) -> Result<()> {
     }
 
     let engine = if let Some(chain) = fetch_policy_chain {
-        let fetch_config = FetchConfig::new_with_chain(chain).with_header_rules(header_rules);
+        let fetch_config =
+            FetchConfig::new_with_chain(chain).with_header_rules(header_rules.clone());
         engine.with_fetch_config(fetch_config)
+    } else {
+        engine
+    };
+
+    // ── WebSocket policy ─────────────────────────────────────────────────
+    // Handshake header injection reuses the fetch header rules (the JS
+    // WebSocket API cannot set or read handshake headers, so injected
+    // credentials stay outside the isolate).
+    let engine = if let Some(chain) = websocket_policy_chain {
+        let websocket_config =
+            WebSocketConfig::new_with_chain(chain).with_header_rules(header_rules);
+        engine.with_websocket_config(websocket_config)
     } else {
         engine
     };

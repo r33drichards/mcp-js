@@ -3,6 +3,11 @@
 Recipes for enabling outbound HTTP, restricting which URLs are reachable, and
 injecting authentication headers server-side.
 
+`fetch()` negotiates HTTP/2 via ALPN on `https` URLs when the server supports
+it, and falls back to HTTP/1.1 otherwise; plaintext `http` URLs always use
+HTTP/1.1 (h2c requires prior knowledge). The negotiated protocol does not
+change any JS-observable behavior.
+
 ## Enable fetch with a domain allowlist
 
 `fetch()` is available in JS only when the server is started with a
@@ -193,8 +198,12 @@ hostname and all its subdomains:
 `*.github.com` matches `api.github.com`, `raw.github.com`, and `github.com`
 itself. Matching is case-insensitive.
 
+Header-injection rules also apply to WebSocket handshakes for matching hosts —
+see [WebSocket connections](websocket.md).
+
 ## See also
 
+- [How-to: WebSocket connections](websocket.md)
 - [Concepts: Network access with fetch](../concepts/fetch.md)
 - [Concepts: Security policies](../concepts/policies.md)
 - [Reference: CLI flags](../reference/cli-flags.md)

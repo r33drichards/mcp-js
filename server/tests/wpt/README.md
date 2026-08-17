@@ -1,101 +1,44 @@
-# Web Platform Tests for the mcp-v8 engine
+# Vendored Web Platform Tests
 
-This directory holds the runtime-compat test infrastructure proposed in
-[`docs/compat-test-suites-research.md`](../../../docs/compat-test-suites-research.md):
-a vendored subset of [web-platform-tests](https://github.com/web-platform-tests/wpt)
-run inside the engine (the same `execute_stateless` path the `run_js` tool
-uses), plus the Phase-0 global-surface baseline.
+This directory vendors a curated subset of the
+[web-platform-tests](https://github.com/web-platform-tests/wpt) suite. The
+implementation is **gated** on it: `tests/wpt_websocket.rs` runs every
+`websockets/*.any.js` file inside the real Engine against a local echo server
+and compares each file's outcome to `expectations.json`.
+
+- A file that regresses (expected `pass`, now failing) fails CI.
+- A file that starts passing (expected `fail`, now passing) also fails CI, so
+  the expected-fail list cannot rot — update `expectations.json` in the same
+  change that improves the implementation.
 
 ## Layout
 
-| Path | What it is |
-|---|---|
-| `vendor/` | Vendored WPT files (tests + `resources/testharness.js` + helpers). BSD-3-Clause, see `vendor/LICENSE`. Never edit by hand. |
-| `versions.json` | The upstream WPT commit the vendored files came from. |
-| `runner/bootstrap.js` | Shell-environment shims (`self`, `GLOBAL`, mock `location`) loaded before testharness.js. |
-| `runner/report.js` | `testharnessreport.js` replacement — serializes results over the console channel. |
-| `expectations.json` | Recorded per-file outcome. CI fails on drift in **either** direction. |
-| `surface_baseline.json` | Recorded `globalThis` surface + WinterTC Minimum Common API coverage (Phase 0). |
+- `resources/testharness.js` — the upstream WPT harness, unmodified.
+- `websockets/constants.sub.js` — upstream helper; the runner substitutes the
+  `{{host}}` / `{{ports[ws][0]}}` wptserve placeholders with the local echo
+  server's address at run time.
+- `websockets/*.any.js` — upstream test files, unmodified. Only the `?default`
+  variant is exercised (no TLS, no h2 flags).
+- `expectations.json` — `{ "<file>": "pass" | "fail" }`. Files not listed are
+  expected to pass.
 
-The runners are the integration tests `tests/wpt_harness.rs` and
-`tests/compat_surface.rs`.
+## Provenance
 
-## Running
+Fetched unmodified from
+`https://raw.githubusercontent.com/web-platform-tests/wpt/master/` on
+2026-08-17. WPT is licensed under the 3-Clause BSD License (see the upstream
+repository's LICENSE.md).
 
-```bash
-cd server
-cargo test --test wpt_harness -- --nocapture      # run WPT subset vs expectations
-cargo test --test compat_surface -- --nocapture   # surface scan vs baseline
+## Refreshing / extending
 
-WPT_FILTER=encoding cargo test --test wpt_harness -- --nocapture  # one suite
-```
-
-After an intentional runtime change (new global, fixed behavior), re-record:
+To update or add files:
 
 ```bash
-WPT_UPDATE=1 cargo test --test wpt_harness -- --nocapture
-COMPAT_SURFACE_UPDATE=1 cargo test --test compat_surface -- --nocapture
+curl -O https://raw.githubusercontent.com/web-platform-tests/wpt/master/websockets/<file>.any.js
 ```
 
-and commit the diff — the expectation delta *is* the compat changelog.
-
-## Expectation format
-
-Deno-style, keyed by vendored path:
-
-```jsonc
-{
-  "html/webappapis/atob/base64.any.js": true,          // all subtests pass
-  "fetch/api/headers/headers-basic.any.js": false,      // fails wholesale
-  "encoding/api-basics.any.js": { "expectedFailures": ["…subtest name…"] },
-  "some/flaky.any.js": { "ignore": true }               // skipped entirely
-}
-```
-
-## Updating / expanding the vendored subset
-
-```bash
-git clone --depth 1 --filter=blob:none --sparse \
-    https://github.com/web-platform-tests/wpt /tmp/wpt
-git -C /tmp/wpt sparse-checkout set resources html/webappapis console \
-    encoding fetch/api/headers wasm/jsapi
-tools/compat/vendor-wpt.sh /tmp/wpt
-WPT_UPDATE=1 cargo test --test wpt_harness -- --nocapture
-```
-
-To add a suite, extend the file list in `tools/compat/vendor-wpt.sh`. Stick to
-serverless `.any.js` tests: anything needing the WPT HTTP server (fetch
-network behavior, websockets, `wasm/webapi`), `testdriver.js`, or a DOM is out
-of scope for this runner (see the research doc for the wptserve growth path).
-
-## Current results (wpt@0cc6a7e)
-
-224 non-ignored files (plus 15 `.tentative.` proposal-stage files ignored):
-**222 fully passing**, 2 with recorded subtest failures (3 subtests).
-The whole url/ family is green: the in-repo rust-url fork at
-`server/vendor/url` carries the current-spec behaviors upstream still
-lacks (see `docs/url-impl-benchmark.md`; `WPT_URL_IMPL=whatwg` cross-
-checks the suites against the bundled whatwg-url reference). The three
-remaining subtests are ImageBitmap and OffscreenCanvas in the
-structured-clone battery (canvas is a declared non-goal) and one
-web-streams-polyfill pipeTo scheduling detail. Every failure is pinned
-by name in `expectations.json`; fixing one without re-recording fails
-CI, so the file is the compat changelog.
-
-Companion suites: `compat_surface` locks the WinterTC Minimum Common API
-surface (54/54 present) and `node_compat` runs a vendored Node core subset
-(25/25 passing) against the `node:` modules. See
-`site-docs/reference/compatibility.md` (generated by
-`tools/compat/gen-compat-docs.py`).
-
-## Known limitations
-
-- Tests run once per file in a single "shell-like" scope; the window/worker
-  scope variants WPT would generate are collapsed into one run.
-- testharness.js runs under module strict mode (all engine code is ESM).
-- No `wptserve`: `.sub.js` substitution, cross-origin, and network tests are
-  not vendored.
-- Failures in `expectations.json` are *documentation* of today's gaps (no
-  spec `Headers`, UTF-8-only `TextDecoder`, no `setInterval`/`queueMicrotask`,
-  …) — the roadmap for closing them is the WinterTC Minimum Common API list
-  in the research doc.
+Keep the files byte-identical to upstream — behavioral divergence belongs in
+`expectations.json`, not in edited test files. Tests that require wptserve
+features beyond a plain `/echo` endpoint (subresource handlers, wss/TLS
+certificates, HTTP/2) are out of scope for this runner; extend
+`tests/wpt_websocket.rs` first if you want to vendor them.
