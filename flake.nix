@@ -44,8 +44,10 @@
         } {
           src = ./server;
           # Vendor hash for the server's current Cargo dependency set, including
-          # the single-file --config loader and its transitive TOML dependencies.
-          hash = "sha256-4mz7WKl4pvGnIQCOUl3d9WnN5BFFwjZZejNOO5/UXpc=";
+          # the web-compat crates (encoding_rs, flate2, brotli, urlpattern)
+          # added by the compatibility work. Regenerate by building any nix
+          # package after a Cargo.lock change and copying the printed hash.
+          hash = "sha256-+QTz9bBk6Y3QRdShdfyHJgGsgPc14uhRy6dRm/gFFo8=";
         });
 
         docsPython = pkgs.python3.withPackages (
