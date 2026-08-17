@@ -15,6 +15,21 @@ use url::quirks;
 /// Component getters, joined with '\n' (percent-encoding guarantees no
 /// component contains a newline): href, protocol, username, password,
 /// host, hostname, port, pathname, search, hash, origin.
+fn origin_of(url: &Url) -> String {
+    // The URL spec derives a blob: URL's origin from the URL parsed out of
+    // its path; rust-url returns an opaque origin instead.
+    if url.scheme() == "blob" {
+        if let Ok(inner) = Url::parse(url.path()) {
+            // Only http/https inner URLs yield a tuple origin.
+            if matches!(inner.scheme(), "http" | "https") {
+                return inner.origin().ascii_serialization();
+            }
+        }
+        return "null".to_string();
+    }
+    url.origin().ascii_serialization()
+}
+
 fn components(url: &Url) -> String {
     [
         quirks::href(url),
@@ -27,7 +42,7 @@ fn components(url: &Url) -> String {
         &quirks::pathname(url).to_string(),
         quirks::search(url),
         quirks::hash(url),
-        &url.origin().ascii_serialization(),
+        &origin_of(url),
     ]
     .join("\n")
 }

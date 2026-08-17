@@ -201,6 +201,7 @@
     "clearInterval": "function",
     "clearTimeout": "function",
     "console": "object",
+    "crossOriginIsolated": "boolean",
     "crypto": "object",
     "decodeURI": "function",
     "decodeURIComponent": "function",

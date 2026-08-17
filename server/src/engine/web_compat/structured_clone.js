@@ -17,6 +17,31 @@
 
     var TypedArray = Object.getPrototypeOf(Uint8Array);
 
+    // Interface constructors are captured on first use, so cloning keeps
+    // working after user code deletes them from the global ("an object
+    // whose interface is deleted from the global must still deserialize").
+    function makeLazyRef(name) {
+        var cached;
+        return function () {
+            if (cached === undefined) {
+                cached = typeof globalThis[name] === 'function' ? globalThis[name] : null;
+            }
+            return cached;
+        };
+    }
+    var BlobRef = makeLazyRef('Blob');
+    var FileRef = makeLazyRef('File');
+    var DOMExceptionRef = makeLazyRef('DOMException');
+    var ReadableStreamRef = makeLazyRef('ReadableStream');
+    var WritableStreamRef = makeLazyRef('WritableStream');
+    var TransformStreamRef = makeLazyRef('TransformStream');
+    var SharedArrayBufferRef = function () {
+        // Not a lazy ref: SAB objects exist (WebAssembly.Memory shared
+        // buffers) even where the global binding is absent.
+        if (typeof SharedArrayBuffer === 'function') return SharedArrayBuffer;
+        return null;
+    };
+
     function cloneError(value) {
         var desc;
         try {
@@ -76,10 +101,11 @@
             memo.set(value, out);
             return out;
         }
-        if (typeof SharedArrayBuffer === 'function' && value instanceof SharedArrayBuffer) {
-            // Same-realm clone of a SAB shares the memory block.
-            memo.set(value, value);
-            return value;
+        if (SharedArrayBufferRef() !== null && value instanceof SharedArrayBufferRef()) {
+            // Without cross-origin isolation, serializing shared memory
+            // throws (browsers behave the same; crossOriginIsolated is
+            // false in this runtime).
+            throw cloneError(value);
         }
         if (value instanceof TypedArray || value instanceof DataView) {
             // Out-of-bounds views (fixed-length views over a resizable
@@ -129,8 +155,8 @@
             });
             return out;
         }
-        if (typeof DOMException === 'function' && value instanceof DOMException) {
-            out = new DOMException(value.message, value.name);
+        if (DOMExceptionRef() !== null && value instanceof DOMExceptionRef()) {
+            out = new (DOMExceptionRef())(value.message, value.name);
             memo.set(value, out);
             return out;
         }
@@ -149,10 +175,10 @@
             } catch (_) { /* stack/cause copying is best-effort */ }
             return out;
         }
-        if (typeof Blob === 'function' && value instanceof Blob) {
-            var isFile = typeof File === 'function' && value instanceof File;
+        if (BlobRef() !== null && value instanceof BlobRef()) {
+            var isFile = FileRef() !== null && value instanceof FileRef();
             out = isFile
-                ? new File([value], value.name, { type: value.type, lastModified: value.lastModified })
+                ? new (FileRef())([value], value.name, { type: value.type, lastModified: value.lastModified })
                 : value.slice(0, value.size, value.type);
             memo.set(value, out);
             return out;
@@ -226,13 +252,15 @@
                 if (t.detached === true || typeof t.transfer !== 'function') {
                     throw cloneError(t);
                 }
-                var replacement = t.resizable
-                    ? (function (src) {
-                        var ab = new ArrayBuffer(src.byteLength, { maxByteLength: src.maxByteLength });
-                        new Uint8Array(ab).set(new Uint8Array(src));
-                        return ab;
-                    })(t)
-                    : t.slice(0);
+                // Plain-ArrayBuffer copy in both branches: slice() would
+                // consult @@species and hand back a subclass instance.
+                var replacement = (function (src) {
+                    var ab = src.resizable
+                        ? new ArrayBuffer(src.byteLength, { maxByteLength: src.maxByteLength })
+                        : new ArrayBuffer(src.byteLength);
+                    new Uint8Array(ab).set(new Uint8Array(src));
+                    return ab;
+                })(t);
                 transferMap.set(t, replacement);
                 entries.push({ kind: 'buffer', original: t });
             } else if (typeof MessagePort === 'function' && t instanceof MessagePort) {
@@ -251,6 +279,22 @@
                 transferMap.set(t, fresh);
                 transferredPorts.push(fresh);
                 entries.push({ kind: 'port', original: t, fresh: fresh });
+            } else if (ReadableStreamRef() !== null && t instanceof ReadableStreamRef()) {
+                // Same-realm stream transfer: the replacement reads what the
+                // original would produce; the original ends up locked.
+                if (t.locked) throw cloneError(t);
+                transferMap.set(t, t.pipeThrough(new (TransformStreamRef())()));
+            } else if (WritableStreamRef() !== null && t instanceof WritableStreamRef()) {
+                if (t.locked) throw cloneError(t);
+                var ts = new (TransformStreamRef())();
+                ts.readable.pipeTo(t).catch(function () { /* surfaced via writer */ });
+                transferMap.set(t, ts.writable);
+            } else if (TransformStreamRef() !== null && t instanceof TransformStreamRef()) {
+                if (t.readable.locked || t.writable.locked) throw cloneError(t);
+                var inTs = new (TransformStreamRef())();
+                var outReadable = t.readable.pipeThrough(new (TransformStreamRef())());
+                inTs.readable.pipeTo(t.writable).catch(function () { /* surfaced via writer */ });
+                transferMap.set(t, { readable: outReadable, writable: inTs.writable });
             } else {
                 throw cloneError(t);
             }

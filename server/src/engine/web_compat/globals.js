@@ -23,6 +23,13 @@
         });
     }
 
+    // ── crossOriginIsolated ─────────────────────────────────────────────
+    if (typeof globalThis.crossOriginIsolated === 'undefined') {
+        Object.defineProperty(globalThis, 'crossOriginIsolated', {
+            value: false, writable: false, enumerable: true, configurable: true,
+        });
+    }
+
     // ── navigator ───────────────────────────────────────────────────────
     var UA = typeof globalThis.__mcpV8UserAgent === 'string'
         ? globalThis.__mcpV8UserAgent

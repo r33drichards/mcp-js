@@ -70,8 +70,8 @@ subset, and a vendored subset of Node.js core tests running against the
 
 ## Web Platform Tests (wpt@0cc6a7e19)
 
-**218 / 224 vendored test files fully passing**
-(6 with recorded subtest failures — 94
+**219 / 224 vendored test files fully passing**
+(5 with recorded subtest failures — 86
 individual subtests — and 0 failing wholesale).
 
 | Suite | Fully passing | Partial | Failing |
@@ -88,7 +88,7 @@ individual subtests — and 0 failing wholesale).
 | streams | 65 | 1 | 0 |
 | url | 18 | 3 | 0 |
 | urlpattern | 3 | 0 | 0 |
-| wasm | 42 | 1 | 0 |
+| wasm | 43 | 0 | 0 |
 | xhr | 9 | 0 | 0 |
 
 Every entry is pinned in `server/tests/wpt/expectations.json`; CI fails

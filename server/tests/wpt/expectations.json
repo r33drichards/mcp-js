@@ -73,9 +73,6 @@
   "html/webappapis/microtask-queuing/queue-microtask.any.js": true,
   "html/webappapis/structured-clone/structured-clone.any.js": {
     "expectedFailures": [
-      "A subclass instance will be received as its closest transferable superclass",
-      "An object whose interface is deleted from the global must still deserialize",
-      "Growable SharedArrayBuffer",
       "ImageBitmap",
       "OffscreenCanvas"
     ]
@@ -237,10 +234,6 @@
   },
   "url/url-origin.any.js": {
     "expectedFailures": [
-      "Origin parsing: <blob:blob:https://example.org/> without base",
-      "Origin parsing: <blob:ftp://host/path> without base",
-      "Origin parsing: <blob:ws://example.org/> without base",
-      "Origin parsing: <blob:wss://example.org/> without base",
       "Origin parsing: <http://10.0.0.XN--pokxncvks> without base",
       "Origin parsing: <http://10.0.0.xN--pokxncvks> without base",
       "Origin parsing: <http://10.0.0.xn--pokxncvks> without base",
@@ -321,11 +314,7 @@
   "wasm/jsapi/global/type.tentative.any.js": {
     "ignore": true
   },
-  "wasm/jsapi/global/value-get-set.any.js": {
-    "expectedFailures": [
-      "Calling setter without argument"
-    ]
-  },
+  "wasm/jsapi/global/value-get-set.any.js": true,
   "wasm/jsapi/global/valueOf.any.js": true,
   "wasm/jsapi/instance/constructor-bad-imports.any.js": true,
   "wasm/jsapi/instance/constructor-caching.any.js": true,
