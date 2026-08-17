@@ -171,6 +171,16 @@
             }
             var init = convertDict(eventInitDict, 'Event');
             initEventData(this, type, init.bubbles, init.cancelable, init.composed);
+            // isTrusted is [LegacyUnforgeable]: an own, non-configurable
+            // accessor on every instance.
+            if (!Object.prototype.hasOwnProperty.call(this, 'isTrusted')) {
+                var self_ = this;
+                Object.defineProperty(this, 'isTrusted', {
+                    get: function isTrusted() { return edata(self_).isTrusted; },
+                    enumerable: true,
+                    configurable: false,
+                });
+            }
         }
         get type() { return edata(this).type; }
         get target() { return edata(this).target; }
@@ -194,11 +204,11 @@
         get returnValue() { return !edata(this).canceled; }
         set returnValue(v) {
             var d = edata(this);
-            if (!v && d.cancelable) d.canceled = true;
+            if (!v && d.cancelable && !d.inPassiveListener) d.canceled = true;
         }
         preventDefault() {
             var d = edata(this);
-            if (d.cancelable) d.canceled = true;
+            if (d.cancelable && !d.inPassiveListener) d.canceled = true;
         }
         get defaultPrevented() { return edata(this).canceled; }
         get composed() { return edata(this).composed; }
@@ -391,9 +401,21 @@
         };
     }
 
+    // removeEventListener only understands capture (the spec's
+    // EventListenerOptions dictionary) — reading `passive` here would be
+    // observable through getters.
+    function normalizeRemoveOptions(options) {
+        if (typeof options === 'boolean') return { capture: options };
+        if (options === undefined || options === null) return { capture: false };
+        if (typeof options !== 'object' && typeof options !== 'function') {
+            return { capture: !!options };
+        }
+        return { capture: !!options.capture };
+    }
+
     function addListener(target, type, callback, options) {
         var opts = normalizeOptions(options);
-        if (opts.signal !== undefined && opts.signal !== null) {
+        if (opts.signal !== undefined) {
             if (!(opts.signal instanceof AbortSignal)) {
                 throw new TypeError(
                     "Failed to execute 'addEventListener': member signal is not of type AbortSignal.");
@@ -428,7 +450,7 @@
             removed: false,
         };
         list.push(entry);
-        if (opts.signal !== undefined && opts.signal !== null) {
+        if (opts.signal !== undefined) {
             addListener(opts.signal, 'abort', function () {
                 removeEntry(target, type, entry);
             }, {});
@@ -444,7 +466,7 @@
     }
 
     function removeListener(target, type, callback, options) {
-        var opts = normalizeOptions(options);
+        var opts = normalizeRemoveOptions(options);
         type = String(type);
         var list = listeners(target).get(type);
         if (!list) return;
@@ -487,6 +509,7 @@
                 var entry = snapshot[i];
                 if (entry.removed) continue;
                 if (entry.once) removeEntry(target, d.type, entry);
+                if (entry.passive) d.inPassiveListener = true;
                 try {
                     if (typeof entry.callback === 'function') {
                         entry.callback.call(target, event);
@@ -496,6 +519,8 @@
                     }
                 } catch (err) {
                     reportThrown(err);
+                } finally {
+                    d.inPassiveListener = false;
                 }
                 if (d.stopImmediatePropagation) break;
             }
@@ -609,6 +634,7 @@
         // registration order.
         var toFire = [signal];
         var dependents = d.dependents;
+        void 0;
         d.dependents = [];
         for (var i = 0; i < dependents.length; i++) {
             var dd = sdata(dependents[i]);
@@ -619,7 +645,9 @@
             }
         }
         for (var j = 0; j < toFire.length; j++) {
-            dispatchInternal(toFire[j], new Event('abort'));
+            var ev = new Event('abort');
+            eventData.get(ev).isTrusted = true;
+            dispatchInternal(toFire[j], ev);
         }
     }
 

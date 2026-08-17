@@ -232,6 +232,8 @@
 
     function deliver(port, data, ports) {
         var ev = new MessageEvent('message', { data: data, ports: ports || [] });
+        var ed = internal.initEventData.get(ev);
+        if (ed) ed.isTrusted = true;
         internal.dispatchInternal(port, ev);
     }
 

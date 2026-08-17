@@ -13,25 +13,13 @@
   "FileAPI/blob/Blob-constructor.any.js": {
     "expectedFailures": [
       "Arguments should be evaluated from left to right.",
-      "Blob interface object",
-      "Changes to the blobParts array should be reflected in the returned Blob (pop).",
-      "Changes to the blobParts array should be reflected in the returned Blob (unshift).",
       "Getters and value conversions should happen in order until an exception is thrown.",
       "Passing a FrozenArray as the blobParts array should work (FrozenArray<MessagePort>)."
     ]
   },
   "FileAPI/blob/Blob-newobject.any.js": true,
   "FileAPI/blob/Blob-slice-overflow.any.js": true,
-  "FileAPI/blob/Blob-slice.any.js": {
-    "expectedFailures": [
-      "Slicing test: slice (1,1).",
-      "Slicing test: slice (1,3).",
-      "Slicing test: slice (1,5).",
-      "Slicing test: slice (1,7).",
-      "Slicing test: slice (1,8).",
-      "Slicing test: slice (1,9)."
-    ]
-  },
+  "FileAPI/blob/Blob-slice.any.js": true,
   "FileAPI/blob/Blob-stream.any.js": true,
   "FileAPI/blob/Blob-text.any.js": true,
   "FileAPI/blob/Blob-textStream.any.js": true,
@@ -39,28 +27,9 @@
   "FileAPI/file/File-constructor.any.js": true,
   "FileAPI/unicode.any.js": true,
   "WebCryptoAPI/digest/digest.https.any.js": true,
-  "WebCryptoAPI/getRandomValues.any.js": {
-    "expectedFailures": [
-      "Large length: BigInt64Array",
-      "Large length: BigUint64Array",
-      "Large length: Int16Array",
-      "Large length: Int32Array",
-      "Large length: Int8Array",
-      "Large length: Uint16Array",
-      "Large length: Uint32Array",
-      "Large length: Uint8Array",
-      "Large length: Uint8ClampedArray"
-    ]
-  },
+  "WebCryptoAPI/getRandomValues.any.js": true,
   "WebCryptoAPI/randomUUID.https.any.js": true,
-  "compression/compression-bad-chunks.any.js": {
-    "expectedFailures": [
-      "chunk of type shared Uint8Array should error the stream for brotli",
-      "chunk of type shared Uint8Array should error the stream for deflate",
-      "chunk of type shared Uint8Array should error the stream for deflate-raw",
-      "chunk of type shared Uint8Array should error the stream for gzip"
-    ]
-  },
+  "compression/compression-bad-chunks.any.js": true,
   "compression/compression-constructor-error.any.js": true,
   "compression/compression-including-empty-chunk.any.js": true,
   "compression/compression-large-flush-output.any.js": true,
@@ -76,13 +45,9 @@
   "compression/compression-stream.any.js": {
     "expectedFailures": [
       "brotli large amount data should be reinflated back to its origin",
-      "brotli small amount data should be reinflated back to its origin",
       "deflate large amount data should be reinflated back to its origin",
-      "deflate small amount data should be reinflated back to its origin",
       "deflate-raw large amount data should be reinflated back to its origin",
-      "deflate-raw small amount data should be reinflated back to its origin",
-      "gzip large amount data should be reinflated back to its origin",
-      "gzip small amount data should be reinflated back to its origin"
+      "gzip large amount data should be reinflated back to its origin"
     ]
   },
   "compression/compression-with-detach.any.js": true,
@@ -97,14 +62,7 @@
     ]
   },
   "compression/decompression-empty-input.any.js": true,
-  "compression/decompression-extra-input.any.js": {
-    "expectedFailures": [
-      "decompressing brotli input with extra pad should still give the output",
-      "decompressing deflate input with extra pad should still give the output",
-      "decompressing deflate-raw input with extra pad should still give the output",
-      "decompressing gzip input with extra pad should still give the output"
-    ]
-  },
+  "compression/decompression-extra-input.any.js": true,
   "compression/decompression-split-chunk.any.js": true,
   "compression/decompression-uint8array-output.any.js": true,
   "compression/decompression-with-detach.any.js": true,
@@ -116,27 +74,11 @@
   "console/console-tests-historical.any.js": true,
   "dom/abort/AbortSignal.any.js": true,
   "dom/abort/abort-signal-any.any.js": true,
-  "dom/abort/event.any.js": {
-    "expectedFailures": [
-      "the abort event should have the right properties"
-    ]
-  },
+  "dom/abort/event.any.js": true,
   "dom/abort/timeout.any.js": true,
   "dom/events/AddEventListenerOptions-once.any.js": true,
-  "dom/events/AddEventListenerOptions-passive.any.js": {
-    "expectedFailures": [
-      "Supports passive option on addEventListener only",
-      "passive behavior of one listener should be unaffected by the presence of other listeners",
-      "preventDefault should be ignored if-and-only-if the passive option is true",
-      "returnValue should be ignored if-and-only-if the passive option is true"
-    ]
-  },
-  "dom/events/AddEventListenerOptions-signal.any.js": {
-    "expectedFailures": [
-      "Passing null as the signal should throw",
-      "Passing null as the signal should throw (listener is also null)"
-    ]
-  },
+  "dom/events/AddEventListenerOptions-passive.any.js": true,
+  "dom/events/AddEventListenerOptions-signal.any.js": true,
   "dom/events/Event-constructors.any.js": true,
   "dom/events/Event-isTrusted.any.js": {
     "expectedFailures": [
@@ -153,30 +95,13 @@
   "encoding/textdecoder-arguments.any.js": true,
   "encoding/textdecoder-fatal.any.js": true,
   "encoding/textencoder-constructor-non-utf.any.js": true,
-  "fetch/api/headers/header-setcookie.any.js": {
-    "expectedFailures": [
-      "Set-Cookie is a forbidden response header"
-    ]
-  },
+  "fetch/api/headers/header-setcookie.any.js": true,
   "fetch/api/headers/headers-basic.any.js": true,
   "fetch/api/headers/headers-casing.any.js": true,
   "fetch/api/headers/headers-combine.any.js": true,
-  "fetch/api/headers/headers-errors.any.js": {
-    "expectedFailures": [
-      "Check headers append with an invalid value invalidĀ",
-      "Check headers set with an invalid value invalidĀ",
-      "Create headers giving bad header value as init argument"
-    ]
-  },
+  "fetch/api/headers/headers-errors.any.js": true,
   "fetch/api/headers/headers-normalize.any.js": true,
-  "fetch/api/headers/headers-record.any.js": {
-    "expectedFailures": [
-      "Basic operation with Symbol keys",
-      "Correct operation ordering with two properties one of which has an invalid name",
-      "Correct operation ordering with two properties one of which has an invalid value",
-      "Operation with non-enumerable Symbol keys"
-    ]
-  },
+  "fetch/api/headers/headers-record.any.js": true,
   "fetch/api/headers/headers-structure.any.js": true,
   "hr-time/basic.any.js": true,
   "hr-time/monotonic-clock.any.js": true,
@@ -271,28 +196,13 @@
   "streams/readable-streams/garbage-collection.any.js": true,
   "streams/readable-streams/general.any.js": true,
   "streams/readable-streams/owning-type-message-port.tentative.any.js": {
-    "expectedFailures": [
-      "Second branch of owning ReadableStream tee should end up into errors with transfer only values",
-      "Transferred MessageChannel works as expected"
-    ]
+    "ignore": true
   },
   "streams/readable-streams/owning-type-video-frame.tentative.any.js": {
-    "expectedFailures": [
-      "ReadableStream of type owning should clone JS Objects with serializables when teeing",
-      "ReadableStream of type owning should clone serializable objects when teeing",
-      "ReadableStream of type owning should close serialized chunks",
-      "ReadableStream of type owning should error when trying to enqueue not serializable values",
-      "ReadableStream of type owning should transfer JS chunks with transferred values"
-    ]
+    "ignore": true
   },
   "streams/readable-streams/owning-type.tentative.any.js": {
-    "expectedFailures": [
-      "ReadableStream can be constructed with owning type",
-      "ReadableStream of type owning should call start with a ReadableStreamDefaultController",
-      "ReadableStream of type owning should transfer enqueued chunks",
-      "ReadableStream should be able to call enqueue with an empty transfer list",
-      "ReadableStream should check transfer parameter"
-    ]
+    "ignore": true
   },
   "streams/readable-streams/patched-global.any.js": true,
   "streams/readable-streams/reentrant-strategies.any.js": true,
@@ -452,11 +362,7 @@
   "url/url-tojson.any.js": true,
   "url/urlencoded-parser.any.js": {
     "expectedFailures": [
-      "URLSearchParams constructed with: %EF%BB%BFtest=%EF%BB%BF",
-      "URLSearchParams constructed with: ﻿test=﻿",
-      "request.formData() with input: %EF%BB%BFtest=%EF%BB%BF",
       "request.formData() with input: ﻿test=﻿",
-      "response.formData() with input: %EF%BB%BFtest=%EF%BB%BF",
       "response.formData() with input: ﻿test=﻿"
     ]
   },
@@ -465,7 +371,6 @@
     "expectedFailures": [
       "Construct with 2 unpaired surrogates (no trailing)",
       "Construct with 3 unpaired surrogates (no leading)",
-      "Construct with object with NULL, non-ASCII, and surrogate keys",
       "URLSearchParams constructor, DOMException as argument"
     ]
   },
@@ -519,68 +424,30 @@
   "wasm/jsapi/constructor/validate.any.js": true,
   "wasm/jsapi/exception/basic.tentative.any.js": true,
   "wasm/jsapi/exception/constructor.tentative.any.js": {
-    "expectedFailures": [
-      "length"
-    ]
+    "ignore": true
   },
   "wasm/jsapi/exception/getArg.tentative.any.js": {
-    "expectedFailures": [
-      "Getting out-of-range argument"
-    ]
+    "ignore": true
   },
   "wasm/jsapi/exception/identity.tentative.any.js": true,
   "wasm/jsapi/exception/is.tentative.any.js": true,
   "wasm/jsapi/exception/toString.tentative.any.js": true,
   "wasm/jsapi/function/call.tentative.any.js": {
-    "expectedFailures": [
-      "test calling function",
-      "test constructing function"
-    ]
+    "ignore": true
   },
   "wasm/jsapi/function/constructor.tentative.any.js": {
-    "expectedFailures": [
-      "Calling",
-      "Too few arguments",
-      "construct with JS function",
-      "fail to construct with non-callable object",
-      "fail with missing parameters",
-      "fail with missing results",
-      "fail with non-existent parameter and result type",
-      "fail with non-function object",
-      "fail with non-string parameters & results",
-      "length",
-      "name"
-    ]
+    "ignore": true
   },
   "wasm/jsapi/function/table.tentative.any.js": {
-    "expectedFailures": [
-      "Test insertion into table"
-    ]
+    "ignore": true
   },
   "wasm/jsapi/function/type.tentative.any.js": {
-    "expectedFailures": [
-      "Check all types",
-      "Check empty results and parameters"
-    ]
+    "ignore": true
   },
   "wasm/jsapi/global/constructor.any.js": true,
   "wasm/jsapi/global/toString.any.js": true,
   "wasm/jsapi/global/type.tentative.any.js": {
-    "expectedFailures": [
-      "externref, immutable",
-      "externref, mutable",
-      "f32, immutable",
-      "f32, mutable",
-      "f64, immutable",
-      "f64, mutable",
-      "funcref, immutable",
-      "funcref, mutable",
-      "i32, immutable",
-      "i32, mutable",
-      "i64, immutable",
-      "i64, mutable",
-      "key ordering"
-    ]
+    "ignore": true
   },
   "wasm/jsapi/global/value-get-set.any.js": {
     "expectedFailures": [
@@ -597,11 +464,7 @@
   "wasm/jsapi/memory/buffer.any.js": true,
   "wasm/jsapi/memory/constructor-shared.tentative.any.js": true,
   "wasm/jsapi/memory/constructor-types.tentative.any.js": {
-    "expectedFailures": [
-      "Initializing with both initial and minimum",
-      "Non-zero minimum",
-      "Zero minimum"
-    ]
+    "ignore": true
   },
   "wasm/jsapi/memory/constructor.any.js": true,
   "wasm/jsapi/memory/grow.any.js": true,
@@ -611,14 +474,7 @@
   "wasm/jsapi/memory/to-resizable-buffer.any.js": true,
   "wasm/jsapi/memory/toString.any.js": true,
   "wasm/jsapi/memory/type.tentative.any.js": {
-    "expectedFailures": [
-      "Non-zero initial, no maximum",
-      "None-zero maximum",
-      "Zero initial, no maximum",
-      "Zero maximum",
-      "non-shared memory",
-      "shared memory"
-    ]
+    "ignore": true
   },
   "wasm/jsapi/module/constructor.any.js": true,
   "wasm/jsapi/module/customSections.any.js": true,
@@ -628,11 +484,7 @@
   "wasm/jsapi/module/toString.any.js": true,
   "wasm/jsapi/prototypes.any.js": true,
   "wasm/jsapi/table/constructor-types.tentative.any.js": {
-    "expectedFailures": [
-      "Initializing with both initial and minimum",
-      "Non-zero minimum",
-      "Zero minimum"
-    ]
+    "ignore": true
   },
   "wasm/jsapi/table/constructor.any.js": true,
   "wasm/jsapi/table/get-set.any.js": true,
@@ -640,37 +492,20 @@
   "wasm/jsapi/table/length.any.js": true,
   "wasm/jsapi/table/toString.any.js": true,
   "wasm/jsapi/table/type.tentative.any.js": {
-    "expectedFailures": [
-      "Non-zero initial, no maximum",
-      "Non-zero maximum",
-      "Zero initial, no maximum",
-      "Zero maximum"
-    ]
+    "ignore": true
   },
   "wasm/jsapi/tag/constructor.tentative.any.js": true,
   "wasm/jsapi/tag/toString.tentative.any.js": true,
   "wasm/jsapi/tag/type.tentative.any.js": {
-    "expectedFailures": [
-      "[]",
-      "[i32 i64 f32 f64]",
-      "[i32 i64]"
-    ]
+    "ignore": true
   },
   "xhr/formdata/append.any.js": true,
-  "xhr/formdata/constructor.any.js": {
-    "expectedFailures": [
-      "Constructors should throw a type error"
-    ]
-  },
+  "xhr/formdata/constructor.any.js": true,
   "xhr/formdata/delete.any.js": true,
   "xhr/formdata/foreach.any.js": true,
   "xhr/formdata/get.any.js": true,
   "xhr/formdata/has.any.js": true,
   "xhr/formdata/iteration.any.js": true,
-  "xhr/formdata/set-blob.any.js": {
-    "expectedFailures": [
-      "file with lastModified and custom name"
-    ]
-  },
+  "xhr/formdata/set-blob.any.js": true,
   "xhr/formdata/set.any.js": true
 }

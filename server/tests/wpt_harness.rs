@@ -170,6 +170,33 @@ fn assemble_source(vendor: &Path, test_rel: &Path) -> Result<String, String> {
             ));
         }
     }
+    // Small vendored assets served under their absolute WPT paths (e.g.
+    // /media/foo.vtt for the compression suite, /fetch/data-urls/resources/
+    // base64.json for the atob suite).
+    let mut map = serde_json::Map::new();
+    for dir in ["media", "fetch/data-urls/resources"] {
+        let asset_dir = vendor.join(dir);
+        if !asset_dir.is_dir() {
+            continue;
+        }
+        let mut entries: Vec<_> = std::fs::read_dir(&asset_dir)
+            .map_err(|e| format!("read {}: {e}", asset_dir.display()))?
+            .flatten()
+            .collect();
+        entries.sort_by_key(|e| e.file_name());
+        for entry in entries {
+            if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                map.insert(format!("/{dir}/{name}"), content.into());
+            }
+        }
+    }
+    if !map.is_empty() {
+        source.push_str(&format!(
+            "globalThis.__WPT_ASSETS__ = {};\n",
+            serde_json::Value::Object(map)
+        ));
+    }
     source.push_str(BOOTSTRAP_JS);
     source.push_str(&harness);
     source.push_str(REPORT_JS);

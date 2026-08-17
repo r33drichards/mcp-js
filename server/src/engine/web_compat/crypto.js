@@ -244,8 +244,7 @@
             }
             if (array.byteLength > 65536) {
                 throw new QuotaExceededError(
-                    "Failed to execute 'getRandomValues': The requested length exceeds 65536 bytes.",
-                    { requested: array.byteLength, quota: 65536 });
+                    "Failed to execute 'getRandomValues': The requested length exceeds 65536 bytes.");
             }
             var bytes = new Uint8Array(array.byteLength);
             opGetRandomValues(bytes);

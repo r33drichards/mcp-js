@@ -14,6 +14,16 @@
     var opParse = Deno.core.ops.op_url_parse;
     var opReparse = Deno.core.ops.op_url_reparse;
 
+    // USVString conversion: lone surrogates become U+FFFD.
+    function toUSV(s) {
+        return String(s).replace(
+            /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(^|[^\uD800-\uDBFF])[\uDC00-\uDFFF]/g,
+            function (m) {
+                if (m.length === 2) return m[0] + '\uFFFD';
+                return '\uFFFD';
+            });
+    }
+
     var SETTERS = {
         protocol: 0, username: 1, password: 2, host: 3, hostname: 4,
         port: 5, pathname: 6, search: 7, hash: 8,
@@ -56,7 +66,8 @@
                 }
             }
         }
-        return new TextDecoder().decode(new Uint8Array(bytes));
+        // "UTF-8 decode without BOM" per the spec.
+        return new TextDecoder('utf-8', { ignoreBOM: true }).decode(new Uint8Array(bytes));
     }
 
     function parseFormUrlencoded(input) {
@@ -143,16 +154,16 @@
                                 throw new TypeError(
                                     "Failed to construct 'URLSearchParams': Sequence initializer must only contain pair elements.");
                             }
-                            list.push([String(pair[0]), String(pair[1])]);
+                            list.push([toUSV(pair[0]), toUSV(pair[1])]);
                         }
                     } else {
                         var keys = Object.keys(init);
                         for (var j = 0; j < keys.length; j++) {
-                            list.push([String(keys[j]), String(init[keys[j]])]);
+                            list.push([toUSV(keys[j]), toUSV(init[keys[j]])]);
                         }
                     }
                 } else {
-                    var str = String(init);
+                    var str = toUSV(init);
                     if (str.length > 0 && str[0] === '?') str = str.slice(1);
                     list = parseFormUrlencoded(str);
                 }
@@ -166,7 +177,7 @@
                     arguments.length + ' present.');
             }
             var d = usp(this);
-            d.list.push([String(name), String(value)]);
+            d.list.push([toUSV(name), toUSV(value)]);
             uspUpdate(d);
         }
         delete(name, value) {
@@ -228,8 +239,8 @@
                     arguments.length + ' present.');
             }
             var d = usp(this);
-            name = String(name);
-            value = String(value);
+            name = toUSV(name);
+            value = toUSV(value);
             var found = false;
             var out = [];
             for (var i = 0; i < d.list.length; i++) {

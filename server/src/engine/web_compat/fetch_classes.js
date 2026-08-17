@@ -30,13 +30,32 @@
     // ── Headers ─────────────────────────────────────────────────────────
     var TOKEN_RE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 
+    // WebIDL ByteString: symbols throw, and every code unit must be <= 0xFF.
+    function byteString(v, context) {
+        if (typeof v === 'symbol') {
+            throw new TypeError(context + ': Cannot convert a Symbol to a ByteString.');
+        }
+        var s = String(v);
+        for (var i = 0; i < s.length; i++) {
+            if (s.charCodeAt(i) > 0xff) {
+                throw new TypeError(
+                    context + ': Cannot convert argument to a ByteString because the character at index ' +
+                    i + ' has a value of ' + s.charCodeAt(i) + ' which is greater than 255.');
+            }
+        }
+        return s;
+    }
+
+    var FORBIDDEN_RESPONSE_HEADERS = ['set-cookie', 'set-cookie2'];
+
     function normalizeValue(value) {
         // Trim leading/trailing HTTP whitespace.
-        return String(value).replace(/^[\t\n\r ]+|[\t\n\r ]+$/g, '');
+        return byteString(value, "Failed to execute 'append' on 'Headers'")
+            .replace(/^[\t\n\r ]+|[\t\n\r ]+$/g, '');
     }
 
     function validateName(name, method) {
-        name = String(name);
+        name = byteString(name, "Failed to execute '" + method + "' on 'Headers'");
         if (!TOKEN_RE.test(name)) {
             throw new TypeError(
                 "Failed to execute '" + method + "' on 'Headers': Invalid name");
@@ -82,10 +101,12 @@
             // interleaving is observable through proxies.
             var keys = Reflect.ownKeys(init);
             for (var j = 0; j < keys.length; j++) {
-                if (typeof keys[j] !== 'string') continue;
                 var desc = Reflect.getOwnPropertyDescriptor(init, keys[j]);
                 if (desc && desc.enumerable) {
-                    headers.append(keys[j], init[keys[j]]);
+                    // Key converts to ByteString before [[Get]] (symbols and
+                    // >0xFF code units throw here), then the value.
+                    var key = byteString(keys[j], "Failed to construct 'Headers'");
+                    headers.append(key, init[keys[j]]);
                 }
             }
         }
@@ -93,7 +114,7 @@
 
     class Headers {
         constructor(init) {
-            headersData.set(this, { list: [] });
+            headersData.set(this, { list: [], guard: 'none' });
             fillHeaders(this, init);
         }
         append(name, value) {
@@ -106,6 +127,9 @@
             value = normalizeValue(value);
             var lower = validateName(name, 'append');
             validateValue(value, 'append');
+            if (d.guard === 'response' && FORBIDDEN_RESPONSE_HEADERS.indexOf(lower) !== -1) {
+                return;
+            }
             d.list.push([lower, value]);
         }
         delete(name) {
@@ -160,6 +184,9 @@
             value = normalizeValue(value);
             var lower = validateName(name, 'set');
             validateValue(value, 'set');
+            if (d.guard === 'response' && FORBIDDEN_RESPONSE_HEADERS.indexOf(lower) !== -1) {
+                return;
+            }
             var replaced = false;
             var out = [];
             for (var i = 0; i < d.list.length; i++) {
@@ -271,9 +298,9 @@
                 "Failed to construct 'Blob': The provided value cannot be converted to a sequence.");
         }
         var chunks = [];
-        var arr = Array.from(parts);
-        for (var i = 0; i < arr.length; i++) {
-            var part = arr[i];
+        // Sequence conversion is lazy: each element converts to a BlobPart
+        // as the iterator yields it (observable through getters).
+        for (var part of parts) {
             if (part instanceof Blob) {
                 chunks.push(bdata(part).bytes);
             } else if (part instanceof ArrayBuffer) {
@@ -293,7 +320,7 @@
     }
 
     class Blob {
-        constructor(blobParts, options) {
+        constructor(blobParts = undefined, options = undefined) {
             var endings = 'transparent', type = '';
             if (options !== undefined && options !== null) {
                 if (typeof options !== 'object' && typeof options !== 'function') {
@@ -320,8 +347,16 @@
         slice(start, end, contentType) {
             var d = bdata(this);
             var size = d.bytes.length;
-            var s = start === undefined ? 0 : Math.trunc(Number(start) || 0);
-            var e = end === undefined ? size : Math.trunc(Number(end) || 0);
+            // WebIDL [Clamp] long long: round half to even.
+            function clampIndex(v) {
+                v = Number(v);
+                if (Number.isNaN(v)) return 0;
+                var f = Math.floor(v);
+                if (v - f === 0.5) return f % 2 === 0 ? f : f + 1;
+                return Math.round(v);
+            }
+            var s = start === undefined ? 0 : clampIndex(start);
+            var e = end === undefined ? size : clampIndex(end);
             if (s < 0) s = Math.max(size + s, 0); else s = Math.min(s, size);
             if (e < 0) e = Math.max(size + e, 0); else e = Math.min(e, size);
             var span = Math.max(e - s, 0);
@@ -410,7 +445,10 @@
             if (value instanceof File && !hasFilename) {
                 return value;
             }
-            var f = new File([value], name, { type: value.type });
+            var f = new File([value], name, {
+                type: value.type,
+                lastModified: value instanceof File ? value.lastModified : Date.now(),
+            });
             return f;
         }
         if (hasFilename) {
@@ -421,7 +459,11 @@
     }
 
     class FormData {
-        constructor() {
+        constructor(form) {
+            if (form !== undefined) {
+                throw new TypeError(
+                    "Failed to construct 'FormData': parameter 1 is not of type 'HTMLFormElement'.");
+            }
             formDataData.set(this, { list: [] });
         }
         append(name, value, filename) {
@@ -912,7 +954,9 @@
                 throw new TypeError(
                     "Failed to construct 'Response': Invalid statusText");
             }
-            var headers = new Headers(init.headers);
+            var headers = new Headers();
+            hdata(headers).guard = 'response';
+            fillHeaders(headers, init.headers);
             var state = { bytes: null, stream: null, used: false };
             if (body !== undefined && body !== null) {
                 if (status === 204 || status === 205 || status === 304) {

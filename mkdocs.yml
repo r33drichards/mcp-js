@@ -76,6 +76,7 @@ nav:
       - Configuration file: reference/config-file.md
       - HTTP API: reference/http-api.md
       - MCP Tools: reference/mcp-tools.md
+      - Web & Node.js compatibility: reference/compatibility.md
 markdown_extensions:
   - tables
   - toc:

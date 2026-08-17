@@ -31,19 +31,36 @@ enum Ctx {
 }
 
 impl Ctx {
-    fn write(&mut self, data: &[u8]) -> std::io::Result<()> {
-        // flate2's write adapters buffer ~32KB internally; without the
-        // flush, small chunks never reach the inner Vec and a reader on the
-        // transform's readable side would wait forever.
+    fn write(&mut self, data: &[u8]) -> std::io::Result<bool> {
+        // Writes go through a helper that tolerates zero-progress (a
+        // decoder that has consumed a complete stream reports 0 for
+        // trailing padding — the spec wants that input ignored, not an
+        // error), and flushes afterwards: flate2's write adapters buffer
+        // ~32KB internally; without the flush, small chunks never reach
+        // the inner Vec and a reader on the transform's readable side
+        // would wait forever.
+        fn write_loop<W: Write>(w: &mut W, mut data: &[u8]) -> std::io::Result<bool> {
+            while !data.is_empty() {
+                let n = w.write(data)?;
+                if n == 0 {
+                    // Complete stream already consumed; `data` is trailing junk.
+                    w.flush()?;
+                    return Ok(true);
+                }
+                data = &data[n..];
+            }
+            w.flush()?;
+            Ok(false)
+        }
         match self {
-            Ctx::GzEnc(w) => { w.write_all(data)?; w.flush() }
-            Ctx::ZlibEnc(w) => { w.write_all(data)?; w.flush() }
-            Ctx::RawEnc(w) => { w.write_all(data)?; w.flush() }
-            Ctx::GzDec(w) => { w.write_all(data)?; w.flush() }
-            Ctx::ZlibDec(w) => { w.write_all(data)?; w.flush() }
-            Ctx::RawDec(w) => { w.write_all(data)?; w.flush() }
-            Ctx::BrEnc(w) => { w.write_all(data)?; w.flush() }
-            Ctx::BrDec(w) => { w.write_all(data)?; w.flush() }
+            Ctx::GzEnc(w) => write_loop(w, data),
+            Ctx::ZlibEnc(w) => write_loop(w, data),
+            Ctx::RawEnc(w) => write_loop(w, data),
+            Ctx::GzDec(w) => write_loop(w, data),
+            Ctx::ZlibDec(w) => write_loop(w, data),
+            Ctx::RawDec(w) => write_loop(w, data),
+            Ctx::BrEnc(w) => write_loop(w, data),
+            Ctx::BrDec(w) => write_loop(w, data),
         }
     }
 
@@ -81,12 +98,26 @@ impl Ctx {
     }
 }
 
-struct CompressionResource(RefCell<Option<Ctx>>);
+struct CompressionResource {
+    ctx: RefCell<Option<Ctx>>,
+    /// Trailing junk after a complete compressed stream: the spec delivers
+    /// the decoded output and then errors the stream.
+    trailing_junk: std::cell::Cell<bool>,
+}
 
 impl Resource for CompressionResource {
     fn name(&self) -> std::borrow::Cow<'_, str> {
         "compressionStream".into()
     }
+}
+
+#[op2(fast)]
+fn op_compression_has_junk(state: &mut OpState, rid: u32) -> bool {
+    state
+        .resource_table
+        .get::<CompressionResource>(rid)
+        .map(|r| r.trailing_junk.get())
+        .unwrap_or(false)
 }
 
 #[op2(fast)]
@@ -120,9 +151,10 @@ fn op_compression_new(
             )));
         }
     };
-    Ok(state
-        .resource_table
-        .add(CompressionResource(RefCell::new(Some(ctx)))))
+    Ok(state.resource_table.add(CompressionResource {
+        ctx: RefCell::new(Some(ctx)),
+        trailing_junk: std::cell::Cell::new(false),
+    }))
 }
 
 #[op2]
@@ -136,12 +168,21 @@ fn op_compression_write(
         .resource_table
         .get::<CompressionResource>(rid)
         .map_err(|_| JsErrorBox::type_error("Invalid compression stream"))?;
-    let mut guard = res.0.borrow_mut();
+    if res.trailing_junk.get() {
+        return Err(JsErrorBox::type_error(
+            "Junk found after end of compressed data.".to_string(),
+        ));
+    }
+    let mut guard = res.ctx.borrow_mut();
     let ctx = guard
         .as_mut()
         .ok_or_else(|| JsErrorBox::type_error("Compression stream already finished"))?;
-    ctx.write(chunk)
+    let junk = ctx
+        .write(chunk)
         .map_err(|e| JsErrorBox::type_error(format!("Compression error: {}", e)))?;
+    if junk {
+        res.trailing_junk.set(true);
+    }
     Ok(ctx.drain())
 }
 
@@ -152,8 +193,13 @@ fn op_compression_finish(state: &mut OpState, rid: u32) -> Result<Vec<u8>, JsErr
         .resource_table
         .take::<CompressionResource>(rid)
         .map_err(|_| JsErrorBox::type_error("Invalid compression stream"))?;
+    if res.trailing_junk.get() {
+        return Err(JsErrorBox::type_error(
+            "Junk found after end of compressed data.".to_string(),
+        ));
+    }
     let ctx = res
-        .0
+        .ctx
         .borrow_mut()
         .take()
         .ok_or_else(|| JsErrorBox::type_error("Compression stream already finished"))?;
@@ -163,7 +209,12 @@ fn op_compression_finish(state: &mut OpState, rid: u32) -> Result<Vec<u8>, JsErr
 
 deno_core::extension!(
     compression_ext,
-    ops = [op_compression_new, op_compression_write, op_compression_finish],
+    ops = [
+        op_compression_new,
+        op_compression_write,
+        op_compression_finish,
+        op_compression_has_junk,
+    ],
 );
 
 pub fn create_extension() -> deno_core::Extension {

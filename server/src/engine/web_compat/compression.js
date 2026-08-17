@@ -11,6 +11,12 @@
     var opFinish = Deno.core.ops.op_compression_finish;
 
     function toBytes(chunk, what) {
+        if (typeof SharedArrayBuffer === 'function' &&
+            (chunk instanceof SharedArrayBuffer ||
+             (ArrayBuffer.isView(chunk) && chunk.buffer instanceof SharedArrayBuffer))) {
+            throw new TypeError(
+                "Failed to execute 'transform' on '" + what + "': shared buffers are not allowed.");
+        }
         if (chunk instanceof ArrayBuffer) return new Uint8Array(chunk.slice(0));
         if (ArrayBuffer.isView(chunk)) {
             return new Uint8Array(
@@ -37,11 +43,21 @@
                 }
                 var rid = opNew(format, decompress);
                 var finished = false;
+                var junkError = false;
                 var transform = new TransformStream({
                     transform: function (chunk, controller) {
+                        if (junkError) {
+                            throw new TypeError('Junk found after end of compressed data.');
+                        }
                         var bytes = toBytes(chunk, name);
                         var out = opWrite(rid, bytes);
                         if (out.length > 0) controller.enqueue(new Uint8Array(out));
+                        // Trailing junk: deliver the output above, then error
+                        // the stream (readers see the value, then a TypeError).
+                        if (Deno.core.ops.op_compression_has_junk(rid)) {
+                            junkError = true;
+                            throw new TypeError('Junk found after end of compressed data.');
+                        }
                     },
                     flush: function (controller) {
                         finished = true;

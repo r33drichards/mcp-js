@@ -70,10 +70,13 @@ pub const DEFAULT_EXECUTION_TIMEOUT_SECS: u64 = 30;
 /// per-module limit is set. 16 MiB.
 pub const DEFAULT_WASM_MAX_BYTES: usize = 16 * 1024 * 1024;
 /// Minimum heap memory in MB. deno_core runs bootstrap JavaScript during
-/// JsRuntime creation (before our near-heap-limit callback is installed).
-/// The heap must be large enough for this bootstrap to complete — smaller
-/// values cause `FatalProcessOutOfMemory` → `abort()`.
-pub const MIN_HEAP_MEMORY_MB: usize = 8;
+/// JsRuntime creation (before our near-heap-limit callback is installed),
+/// and the web-compat layer (streams polyfill, fetch classes, URL,
+/// encoding, node: modules) adds to that baseline. The heap must be large
+/// enough for this bootstrap to complete — smaller values cause
+/// `FatalProcessOutOfMemory` → `abort()` or spurious OOM errors before
+/// user code runs.
+pub const MIN_HEAP_MEMORY_MB: usize = 16;
 
 // ── V8 initialization ───────────────────────────────────────────────────
 
