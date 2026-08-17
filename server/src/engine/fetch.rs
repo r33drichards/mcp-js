@@ -251,6 +251,12 @@ fn normalize_oauth_config(config: OAuthClientCredentialsConfig) -> Result<OAuthC
 fn build_fetch_http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
+        // Never auto-follow redirects: a 3xx is returned to the caller unfollowed
+        // so every URL that is actually fetched has passed the policy check in
+        // do_fetch. reqwest's default (follow up to 10) would fetch redirect
+        // destinations below the policy layer, letting an allowed host redirect
+        // to a policy-denied one and return its body.
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .expect("Failed to create fetch HTTP client")
 }
@@ -632,6 +638,16 @@ fn b64_decode(s: &str) -> Result<Vec<u8>, String> {
 // ── Pure-Rust fetch implementation (no V8 types) ─────────────────────────
 
 /// Execute a policy-gated HTTP fetch. All V8 interaction happens in the caller.
+///
+/// The HTTP client does not auto-follow redirects (see `build_fetch_http_client`),
+/// so a 3xx response is returned to the caller as-is rather than transparently
+/// fetched. This is what keeps the policy honest: every URL that is actually
+/// requested passes through the check below, and a redirect to a policy-denied
+/// host is never fetched. An agent that wants to follow a redirect reads the
+/// `Location` header and issues a fresh `fetch()`, which gets its own policy
+/// check. (Following redirects below the policy layer was the authorization
+/// bypass this guards against — the authorizer would validate the reference but
+/// not the destination.)
 async fn do_fetch(
     url_str: String,
     method: String,
@@ -682,7 +698,8 @@ async fn do_fetch(
         ));
     }
 
-    // Execute the HTTP request
+    // Execute the HTTP request. The client is configured not to auto-follow
+    // redirects, so a 3xx comes back here unfollowed.
     let mut req_builder = http_client.request(
         method
             .parse::<reqwest::Method>()
@@ -740,7 +757,9 @@ async fn do_fetch(
         "headers": resp_headers,
         "body": resp_body,
         "bodyEncoding": "base64",
-        "redirected": final_url != url_str,
+        // Redirects are not auto-followed, so the response is never the product
+        // of a redirect this layer performed.
+        "redirected": false,
     });
 
     Ok(result.to_string())
@@ -1430,6 +1449,169 @@ allow if {{
         assert!(reqs[0].1.contains("hello world"));
         assert!(reqs[0].1.contains("name=\"f\""));
         assert!(reqs[0].1.contains("filename=\"test.txt\""));
+    }
+
+    // ── Article case #3: authorization logic gap (SQL-authorizer bypass) ────
+    //
+    // Check Point's "When Agentic Glue Melts" (2026) escalated through a SQL
+    // authorizer that "validates the tables a query references, but not the
+    // destination name of a rename" — the authorizer covered the obvious path
+    // to the protected resource but not a second path that reached the same
+    // place. mcp-v8's authorizer is the OPA/Rego `PolicyChain` gating `fetch()`.
+    //
+    // These tests cover that class for fetch():
+    //   * a directly-denied host is blocked before any network call, and
+    //   * a redirect from an allowed host to a denied host is NOT auto-followed,
+    //     so the denied destination is never fetched and its body can't leak.
+    //     The client does not follow redirects (build_fetch_http_client uses
+    //     redirect::Policy::none()); a 3xx is returned unfollowed, and an agent
+    //     that wants to follow issues a fresh, independently policy-checked
+    //     fetch().
+
+    /// Build a policy chain that allows a fetch only when its destination port
+    /// equals `port`. A port no server is bound to (e.g. 0) yields a default-deny
+    /// policy; any other URL — including a redirect target on a different port —
+    /// is denied.
+    fn policy_allowing_only_port(port: u16) -> Arc<PolicyChain> {
+        let dir = tempfile::tempdir().expect("tempdir should be created");
+        let path = dir.path().join("fetch.rego");
+        std::fs::write(
+            &path,
+            format!(
+                "package mcp.fetch\n\ndefault allow := false\n\nallow if {{ input.url_parsed.port == {port} }}\n"
+            ),
+        )
+        .expect("rego policy should be written");
+        // from_file loads the policy source at construction, so the temp file
+        // is no longer needed once the evaluator exists.
+        let evaluator = LocalPolicyEvaluator::from_file(&path, "data.mcp.fetch.allow".to_string())
+            .expect("local policy evaluator should be created");
+        Arc::new(PolicyChain::new(
+            vec![PolicyEvaluatorKind::Local(evaluator)],
+            EvalMode::All,
+        ))
+    }
+
+    /// The authorizer works for the direct path: a request to a host the policy
+    /// forbids is rejected in `do_fetch` before the HTTP request is issued, so
+    /// the denied server never receives a connection.
+    #[tokio::test]
+    async fn test_do_fetch_denies_direct_request_to_disallowed_host() {
+        let echo = start_echo_server().await;
+
+        // No real port equals 0, so this policy denies every request.
+        let policy = policy_allowing_only_port(0);
+
+        let err = do_fetch(
+            echo.url.clone(),
+            "GET".to_string(),
+            "{}".to_string(),
+            None,
+            policy,
+            reqwest::Client::new(),
+            vec![],
+        )
+        .await
+        .expect_err("a policy-denied host must be rejected");
+
+        assert!(err.contains("denied by policy"), "unexpected error: {err}");
+        assert!(
+            echo.requests().await.is_empty(),
+            "a policy-denied request must never reach the network"
+        );
+    }
+
+    /// Regression for the direct analog of the article's SQL-authorizer bypass:
+    /// a redirect from an allowed host to a policy-denied host must not disclose
+    /// the denied host's body.
+    ///
+    /// Because the fetch client never auto-follows redirects, the allowed host's
+    /// 3xx is returned to the caller unfollowed — the denied destination is never
+    /// contacted, so its body can't leak. An agent that wants to follow reads the
+    /// `Location` header and issues a fresh `fetch()`, which gets its own policy
+    /// check.
+    #[tokio::test]
+    async fn test_do_fetch_does_not_follow_redirect_to_denied_host() {
+        use axum::response::Redirect;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        const SECRET: &str = "TOP-SECRET-FROM-DENIED-HOST";
+
+        // Denied host: serves a secret at /secret and counts hits, so we can
+        // prove it is never contacted.
+        let denied_hits = Arc::new(AtomicUsize::new(0));
+        async fn secret_handler(State(hits): State<Arc<AtomicUsize>>) -> impl IntoResponse {
+            hits.fetch_add(1, Ordering::SeqCst);
+            (StatusCode::OK, SECRET)
+        }
+        let denied_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let denied_addr = denied_listener.local_addr().unwrap();
+        let secret_url = format!("http://{}/secret", denied_addr);
+        {
+            let hits = denied_hits.clone();
+            tokio::spawn(async move {
+                let app = Router::new()
+                    .route("/secret", get(secret_handler))
+                    .with_state(hits);
+                axum::serve(denied_listener, app).await.unwrap();
+            });
+        }
+
+        // Allowed host: 307-redirects /start to the denied host's /secret.
+        async fn redirect_handler(State(target): State<String>) -> Redirect {
+            Redirect::temporary(&target)
+        }
+        let allowed_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let allowed_addr = allowed_listener.local_addr().unwrap();
+        let start_url = format!("http://{}/start", allowed_addr);
+        {
+            let secret_url = secret_url.clone();
+            tokio::spawn(async move {
+                let app = Router::new()
+                    .route("/start", get(redirect_handler))
+                    .with_state(secret_url);
+                axum::serve(allowed_listener, app).await.unwrap();
+            });
+        }
+
+        // Allow only the allowed host's port.
+        let policy = policy_allowing_only_port(allowed_addr.port());
+
+        let response = do_fetch(
+            start_url,
+            "GET".to_string(),
+            "{}".to_string(),
+            None,
+            policy,
+            // Production client — does not auto-follow redirects.
+            super::build_fetch_http_client(),
+            vec![],
+        )
+        .await
+        .expect("fetching the allowed host should succeed; the redirect is returned unfollowed");
+
+        let v: Value = serde_json::from_str(&response).expect("response JSON should parse");
+
+        // The redirect comes back as-is: a 3xx, flagged not-redirected, with the
+        // Location header intact for a caller that wants to follow it manually.
+        assert_eq!(v["status"], 307, "the 3xx should be returned unfollowed, got: {v}");
+        assert_eq!(v["redirected"], false, "do_fetch must not auto-follow redirects");
+        assert_eq!(
+            v["headers"]["location"].as_str().unwrap_or(""),
+            secret_url,
+            "the Location header should be preserved for manual following"
+        );
+
+        // The denied destination's body must not be present, and it must never
+        // have been contacted.
+        let body_bytes = super::b64_decode(v["body"].as_str().unwrap_or("")).expect("decode body");
+        let body = String::from_utf8_lossy(&body_bytes);
+        assert!(!body.contains(SECRET), "denied host body must not leak, got: {body}");
+        assert_eq!(
+            denied_hits.load(Ordering::SeqCst),
+            0,
+            "the policy-denied redirect destination must never be contacted"
+        );
     }
 
     #[test]
