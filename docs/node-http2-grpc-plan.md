@@ -1,7 +1,13 @@
 # Plan: `node:http2` compat for stock gRPC clients
 
-*Status: design — WebSocket + fetch-h2 landed first; this is the next
-node-compat phase.*
+*Status: phases 1–2 landed — `node:buffer`/`node:events` were already served
+by the module loader, and the structured ops (`server/src/engine/http2.rs`) +
+`node:http2` client shim (`node_compat/http2.js`) are in, gated by
+`tests/http2_e2e.rs` (gRPC-framed unary with trailers, trailers-only,
+RST_STREAM, per-stream policy, header injection, secret non-leak). Remaining:
+the supporting shims grpc-js imports (`node:net`/`node:tls` stubs,
+`node:dns`, `node:stream`, `node:zlib`), an esm.sh target that emits `node:*`
+externals for `npm:@grpc/grpc-js`, and the official interop-suite gate.*
 *Date: 2026-08-17*
 
 ## Goal

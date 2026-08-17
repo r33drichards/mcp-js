@@ -27,6 +27,7 @@ pub mod encoding;
 pub mod timers;
 pub mod url_support;
 pub mod urlpattern_support;
+pub mod http2;
 pub mod wasm_stub;
 pub mod web_compat;
 pub mod websocket;
@@ -826,6 +827,7 @@ pub struct ExecutionConfig<'a> {
     pub wasm_default_max_bytes: usize,
     pub fetch_config: Option<&'a fetch::FetchConfig>,
     pub websocket_config: Option<&'a websocket::WebSocketConfig>,
+    pub http2_config: Option<&'a http2::Http2Config>,
     pub fs_config: Option<&'a fs::FsConfig>,
     /// Optional overlay mount. When present, the fs ops operate on this virtual
     /// filesystem instead of the host. Independent of the heap snapshot handle.
@@ -848,6 +850,7 @@ impl<'a> ExecutionConfig<'a> {
             wasm_default_max_bytes: heap_memory_max_bytes,
             fetch_config: None,
             websocket_config: None,
+            http2_config: None,
             fs_config: None,
             fs_mount: None,
             mcp_headers: None,
@@ -922,6 +925,11 @@ impl<'a> ExecutionConfig<'a> {
         self
     }
 
+    pub fn maybe_http2_config(mut self, config: Option<&'a http2::Http2Config>) -> Self {
+        self.http2_config = config;
+        self
+    }
+
     pub fn maybe_fs_config(mut self, config: Option<&'a fs::FsConfig>) -> Self {
         self.fs_config = config;
         self
@@ -952,6 +960,7 @@ pub fn execute_stateless(
         wasm_default_max_bytes,
         fetch_config,
         websocket_config,
+        http2_config,
         fs_config,
         fs_mount,
         mcp_headers,
@@ -977,6 +986,9 @@ pub fn execute_stateless(
         }
         if websocket_config.is_some() {
             extensions.push(websocket::create_extension());
+        }
+        if http2_config.is_some() {
+            extensions.push(http2::create_extension());
         }
         if fs_config.is_some() {
             extensions.push(fs::create_extension());
@@ -1026,6 +1038,11 @@ pub fn execute_stateless(
         // Put websocket config in OpState if websocket policies are configured.
         if let Some(wsc) = websocket_config {
             runtime.op_state().borrow_mut().put(wsc.clone());
+        }
+
+        // Put http2 config in OpState if http2 policies are configured.
+        if let Some(h2c) = http2_config {
+            runtime.op_state().borrow_mut().put(h2c.clone());
         }
 
         // Put fs config in OpState if filesystem policies are configured.
@@ -1130,6 +1147,13 @@ pub fn execute_stateless(
                             return Err(e);
                         }
                     }
+                    // Bind the http2 ops for the node:http2 shim if http2
+                    // policies are configured.
+                    if http2_config.is_some() {
+                        if let Err(e) = http2::inject_http2(&mut runtime) {
+                            return Err(e);
+                        }
+                    }
                     // Harden sandbox: freeze ops, neutralize introspection, remove __bootstrap.
                     // Must run after all inject_* calls and before user code.
                     if let Err(e) = console::harden_runtime(&mut runtime, hardening) {
@@ -1180,6 +1204,7 @@ pub fn execute_stateful(
         wasm_default_max_bytes,
         fetch_config,
         websocket_config,
+        http2_config,
         fs_config,
         fs_mount,
         mcp_headers,
@@ -1222,6 +1247,9 @@ pub fn execute_stateful(
         }
         if websocket_config.is_some() {
             extensions.push(websocket::create_extension());
+        }
+        if http2_config.is_some() {
+            extensions.push(http2::create_extension());
         }
         if fs_config.is_some() {
             extensions.push(fs::create_extension());
@@ -1272,6 +1300,11 @@ pub fn execute_stateful(
         // Put websocket config in OpState if websocket policies are configured.
         if let Some(wsc) = websocket_config {
             runtime.op_state().borrow_mut().put(wsc.clone());
+        }
+
+        // Put http2 config in OpState if http2 policies are configured.
+        if let Some(h2c) = http2_config {
+            runtime.op_state().borrow_mut().put(h2c.clone());
         }
 
         // Put fs config in OpState if filesystem policies are configured.
@@ -1385,6 +1418,13 @@ pub fn execute_stateful(
                             return Err(e);
                         }
                     }
+                    // Bind the http2 ops for the node:http2 shim if http2
+                    // policies are configured.
+                    if http2_config.is_some() {
+                        if let Err(e) = http2::inject_http2_snapshot(&mut runtime) {
+                            return Err(e);
+                        }
+                    }
                     // Harden sandbox: freeze ops, neutralize introspection, remove __bootstrap.
                     // Must run after all inject_* calls and before user code.
                     if let Err(e) = console::harden_runtime(&mut runtime, hardening) {
@@ -1482,6 +1522,7 @@ pub struct Engine {
     /// OPA-gated fetch configuration. When Some, `fetch()` is injected into the JS runtime.
     fetch_config: Option<Arc<fetch::FetchConfig>>,
     websocket_config: Option<Arc<websocket::WebSocketConfig>>,
+    http2_config: Option<Arc<http2::Http2Config>>,
     /// Policy-gated filesystem configuration. When Some, `fs` is injected into the JS runtime.
     fs_config: Option<Arc<fs::FsConfig>>,
     /// Execution registry for async execution tracking and console output.
@@ -1674,6 +1715,7 @@ impl Engine {
             wasm_stub_config: wasm_stub::WasmStubConfig::default(),
             fetch_config: None,
             websocket_config: None,
+            http2_config: None,
             fs_config: None,
             execution_registry: None,
             module_loader_config: Arc::new(module_loader::ModuleLoaderConfig {
@@ -1714,6 +1756,7 @@ impl Engine {
             wasm_stub_config: wasm_stub::WasmStubConfig::default(),
             fetch_config: None,
             websocket_config: None,
+            http2_config: None,
             fs_config: None,
             execution_registry: None,
             module_loader_config: Arc::new(module_loader::ModuleLoaderConfig {
@@ -1786,6 +1829,12 @@ impl Engine {
     /// Enable the policy-gated WebSocket client in the JS runtime.
     pub fn with_websocket_config(mut self, config: websocket::WebSocketConfig) -> Self {
         self.websocket_config = Some(Arc::new(config));
+        self
+    }
+
+    /// Enable the policy-gated HTTP/2 ops (node:http2 shim) in the JS runtime.
+    pub fn with_http2_config(mut self, config: http2::Http2Config) -> Self {
+        self.http2_config = Some(Arc::new(config));
         self
     }
 
@@ -2493,6 +2542,7 @@ impl Engine {
                 let hardening = self.hardening;
                 let fc = self.fetch_config.clone();
                 let wsc = self.websocket_config.clone();
+                let h2c = self.http2_config.clone();
                 let fsc = self.fs_config.clone();
                 let mh = mcp_headers.clone();
                 let sc = self.subprocess_config.clone();
@@ -2520,6 +2570,7 @@ impl Engine {
                             .hardening(hardening)
                             .maybe_fetch_config(fc.as_deref())
                             .maybe_websocket_config(wsc.as_deref())
+                            .maybe_http2_config(h2c.as_deref())
                             .maybe_fs_config(fsc.as_deref())
                             .mcp_headers(mh)
                             .maybe_subprocess_config(sc.as_deref())
@@ -2607,6 +2658,7 @@ impl Engine {
                 let hardening = self.hardening;
                 let fc = self.fetch_config.clone();
                 let wsc = self.websocket_config.clone();
+                let h2c = self.http2_config.clone();
                 let fsc = self.fs_config.clone();
                 let mh = mcp_headers.clone();
                 let sc = self.subprocess_config.clone();
@@ -2635,6 +2687,7 @@ impl Engine {
                             .hardening(hardening)
                             .maybe_fetch_config(fc.as_deref())
                             .maybe_websocket_config(wsc.as_deref())
+                            .maybe_http2_config(h2c.as_deref())
                             .maybe_fs_config(fsc.as_deref())
                             .mcp_headers(mh)
                             .maybe_subprocess_config(sc.as_deref())

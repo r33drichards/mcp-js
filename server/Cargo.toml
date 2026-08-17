@@ -71,6 +71,13 @@ reqwest = { version = "0.12", features = ["json", "rustls-tls", "http2"], defaul
 # WebSocket client for the policy-gated `WebSocket` global. rustls to match
 # reqwest's TLS stack (rustls 0.23 / tokio-rustls 0.26 already in-tree).
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+# Structured HTTP/2 session/stream ops for the node:http2 shim (gRPC support).
+# h2 is hyper's client/server HTTP/2 layer; TLS via the same rustls stack.
+h2 = "0.4"
+bytes = "1"
+http = "1"
+tokio-rustls = "0.26"
+webpki-roots = "0.26"
 url = "2"
 futures = "0.3"
 wasmparser = "0.225"

@@ -4201,6 +4201,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ef86cd5876211988985292b91c96a8f2d298df24e75989a43a3c73f2d4d8168b"
 dependencies = [
  "aws-lc-rs",
+ "log",
  "once_cell",
  "ring",
  "rustls-pki-types",
@@ -4610,6 +4611,7 @@ dependencies = [
  "bincode",
  "blake3",
  "brotli",
+ "bytes",
  "chrono",
  "clap",
  "cli-derive",
@@ -4621,7 +4623,9 @@ dependencies = [
  "fastcdc",
  "flate2",
  "futures",
+ "h2 0.4.14",
  "hmac",
+ "http 1.4.0",
  "http-body-util",
  "hyper 1.9.0",
  "hyper-util",
@@ -4641,6 +4645,7 @@ dependencies = [
  "swc_core",
  "tempfile",
  "tokio",
+ "tokio-rustls 0.26.4",
  "tokio-test",
  "tokio-tungstenite",
  "tokio-util",
@@ -4652,6 +4657,7 @@ dependencies = [
  "utoipa",
  "uuid",
  "wasmparser 0.225.0",
+ "webpki-roots 0.26.11",
  "zstd",
 ]
 
