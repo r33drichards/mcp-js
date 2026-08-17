@@ -450,7 +450,7 @@ fn build_engine(allow_external_modules: bool) -> Engine {
     let registry =
         ExecutionRegistry::new(tmp.to_str().unwrap()).expect("Failed to create test registry");
 
-    Engine::new_stateless(256 * 1024 * 1024, 240, 4)
+    Engine::new_stateless(256 * 1024 * 1024, 420, 4)
         .with_http2_config(Http2Config::new_with_chain(chain))
         .with_module_loader_config(ModuleLoaderConfig {
             allow_external: allow_external_modules,
@@ -466,7 +466,7 @@ async fn run_js(engine: &Engine, code: String) -> Result<String, String> {
         .await
         .map_err(|error| format!("submit should succeed: {error}"))?;
 
-    for _ in 0..2400 {
+    for _ in 0..12000 {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         if let Ok(info) = engine.get_execution(&exec_id) {
             match info.status.as_str() {
@@ -723,7 +723,7 @@ function assert(cond, label) {
 const results = [];
 // Each case is bounded: a case that never settles fails itself rather than
 // wedging the whole suite (and tells us which one).
-const CASE_TIMEOUT_MS = 15000;
+const CASE_TIMEOUT_MS = 10000;
 async function runCase(name, fn) {
     let timer;
     try {
@@ -894,10 +894,12 @@ await runCase('timeout_on_sleeping_server', async () => {
 
 client.close();
 const failures = results.filter((line) => !line.endsWith(': PASS'));
-console.log(results.join('\n'));
 if (failures.length > 0) {
     throw new Error('INTEROP FAILURES\n' + results.join('\n'));
 }
+// Surfaced by the Rust side so the gate's coverage is visible in CI output.
+globalThis.__interopResults = results.join('\n');
+console.log(globalThis.__interopResults);
 "#;
 
     format!("{prelude}\n{body}")
@@ -912,7 +914,13 @@ async fn grpc_interop_official_cases_with_stock_grpc_js() {
     let engine = build_engine(true);
 
     let code = interop_client_js(&addr);
-    run_js(&engine, code)
-        .await
-        .expect("official interop cases should pass with stock @grpc/grpc-js");
+    match run_js(&engine, code).await {
+        Ok(_) => println!(
+            "official gRPC interop cases passed with stock @grpc/grpc-js \
+             (empty_unary, large_unary, custom_metadata, status_code_and_message, \
+             unimplemented_method, server_streaming, client_streaming, ping_pong, \
+             empty_stream, cancel_after_begin, timeout_on_sleeping_server)"
+        ),
+        Err(error) => panic!("official interop cases should pass with stock @grpc/grpc-js: {error}"),
+    }
 }

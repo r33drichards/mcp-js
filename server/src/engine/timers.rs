@@ -59,10 +59,39 @@ pub fn inject_timers(runtime: &mut JsRuntime) -> Result<(), String> {
 const TIMERS_JS_WRAPPER: &str = r#"
 (function() {
     var _sleep = Deno.core.ops.op_timer_sleep;
+    var _unrefOp = Deno.core.unrefOpPromise;
+    var _refOp = Deno.core.refOpPromise;
     var _geval = eval; // indirect eval: runs in global scope
     var _nextId = 1;
     var _active = new Map();
     var _nestingLevel = 0;
+
+    // Node's Timeout handle. Returned by setTimeout/setInterval so packages
+    // written for Node can call .unref() — without it a library's background
+    // timer (e.g. @grpc/grpc-js's 30-minute channel idle timer) keeps the
+    // execution's event loop alive until it fires. Coerces to its numeric id
+    // so browser-style `clearTimeout(id)` and arithmetic still work.
+    function Timeout(id, timer) {
+        this._id = id;
+        this._timer = timer;
+    }
+    Timeout.prototype.unref = function unref() {
+        this._timer.refed = false;
+        if (this._timer.promise && _unrefOp) _unrefOp(this._timer.promise);
+        return this;
+    };
+    Timeout.prototype.ref = function ref() {
+        this._timer.refed = true;
+        if (this._timer.promise && _refOp) _refOp(this._timer.promise);
+        return this;
+    };
+    Timeout.prototype.hasRef = function hasRef() { return this._timer.refed; };
+    Timeout.prototype.refresh = function refresh() { return this; };
+    Timeout.prototype.valueOf = function valueOf() { return this._id; };
+    Timeout.prototype.toString = function toString() { return String(this._id); };
+    Timeout.prototype[Symbol.toPrimitive] = function (hint) {
+        return hint === 'string' ? String(this._id) : this._id;
+    };
 
     function scheduleTimer(handler, timeout, args, repeat) {
         var handlerFn, code;
@@ -78,12 +107,16 @@ const TIMERS_JS_WRAPPER: &str = r#"
         if (ms < 0) ms = 0;
 
         var id = _nextId++;
-        var timer = { cancelled: false, nesting: _nestingLevel + 1 };
+        var timer = { cancelled: false, nesting: _nestingLevel + 1, refed: true, promise: null };
         _active.set(id, timer);
 
         function run(delay) {
             if (timer.nesting > 5 && delay < 4) delay = 4;
-            _sleep(delay).then(function () {
+            var pending = _sleep(delay);
+            timer.promise = pending;
+            // An unref'd repeating timer must stay unref'd across ticks.
+            if (!timer.refed && _unrefOp) _unrefOp(pending);
+            pending.then(function () {
                 if (timer.cancelled) return;
                 var prevNesting = _nestingLevel;
                 _nestingLevel = timer.nesting;
@@ -105,7 +138,7 @@ const TIMERS_JS_WRAPPER: &str = r#"
             });
         }
         run(ms);
-        return id;
+        return new Timeout(id, timer);
     }
 
     function clearTimer(id) {
@@ -133,6 +166,7 @@ const TIMERS_JS_WRAPPER: &str = r#"
     };
 
     // The spec gives clearTimeout and clearInterval one shared ID space.
+    // Accepts a Timeout handle (coerced via valueOf) or a numeric id.
     globalThis.clearTimeout = function clearTimeout(id) { clearTimer(Number(id) | 0); };
     globalThis.clearInterval = function clearInterval(id) { clearTimer(Number(id) | 0); };
 

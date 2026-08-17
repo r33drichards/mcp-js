@@ -116,6 +116,21 @@ real client, which is exactly why the official suite was the right gate:
 4. The `response` event's second argument must carry
    `NGHTTP2_FLAG_END_STREAM`; without it grpc-js never reads the gRPC status
    off a trailers-only response (`unimplemented_method` failed).
+5. **Timers had no `unref`.** Every run wedged for almost exactly 1800
+   seconds — the signature of grpc-js's 30-minute channel idle timer. Node
+   `unref()`s such timers so they never hold the process open; our
+   `setTimeout` returned a bare id with no handle to unref, so the pending
+   sleep op kept the isolate's event loop alive for the full half hour.
+   `setTimeout`/`setInterval` now return a Node-style `Timeout` handle whose
+   `ref()`/`unref()` drive `Deno.core.refOpPromise`/`unrefOpPromise` (the
+   handle coerces to its numeric id, so browser-style `clearTimeout(id)` and
+   arithmetic are unaffected). This was never gRPC-specific: *any* npm
+   package holding a background timer would have pinned an execution open
+   until its timeout.
+6. Cancelling a stream (`cancel_after_begin`, `timeout_on_sleeping_server`)
+   removed the registry entry without waking a pending `op_h2_read`, leaving
+   an op alive forever. Fixed with a per-stream `CancellationToken` awaited
+   by both the response and read ops.
 
 ## Known gaps
 
