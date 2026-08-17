@@ -106,7 +106,20 @@ impl<'a> Host<Cow<'a, str>> {
             },
         };
 
-        let domain = idna::domain_to_ascii_from_cow(domain, idna::AsciiDenyList::URL)?;
+        let decoded_copy: Vec<u8> = domain.to_vec();
+        let domain = match idna::domain_to_ascii_from_cow(domain, idna::AsciiDenyList::URL) {
+            Ok(domain) => domain,
+            Err(err) => {
+                // UTS 46 (2023) leniency the idna crate does not implement
+                // yet: an xn-- label that fails Punycode decoding is kept
+                // as-is instead of failing the whole domain. Accept only
+                // all-ASCII domains free of forbidden host code points.
+                match lenient_ascii_domain(&decoded_copy) {
+                    Some(lower) => Cow::Owned(lower),
+                    None => return Err(err.into()),
+                }
+            }
+        };
 
         if domain.is_empty() {
             return Err(ParseError::EmptyHost);
@@ -273,6 +286,45 @@ fn longest_zero_sequence(pieces: &[u16; 8]) -> (isize, isize) {
 }
 
 /// <https://url.spec.whatwg.org/#ends-in-a-number-checker>
+/// Lowercased ASCII domain when every byte is ASCII, no forbidden host
+/// code points appear, and some label is an (undecodable) xn-- label.
+fn lenient_ascii_domain(bytes: &[u8]) -> Option<String> {
+    fn forbidden(b: u8) -> bool {
+        matches!(
+            b,
+            0 | 9
+                | 10
+                | 13
+                | b' '
+                | b'#'
+                | b'/'
+                | b':'
+                | b'<'
+                | b'>'
+                | b'?'
+                | b'@'
+                | b'['
+                | b'\\'
+                | b']'
+                | b'^'
+                | b'|'
+                | b'%'
+        )
+    }
+    if bytes.is_empty() || !bytes.iter().all(|&b| b.is_ascii() && !forbidden(b)) {
+        return None;
+    }
+    let lower: String = bytes
+        .iter()
+        .map(|&b| (b as char).to_ascii_lowercase())
+        .collect();
+    if lower.split('.').any(|label| label.starts_with("xn--")) {
+        Some(lower)
+    } else {
+        None
+    }
+}
+
 fn ends_in_a_number(input: &str) -> bool {
     let mut parts = input.rsplit('.');
     let last = parts.next().unwrap();

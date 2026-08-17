@@ -231,6 +231,7 @@ pub fn set_hostname(url: &mut Url, new_hostname: &str) -> Result<(), ()> {
             }
         }
         url.set_host_internal(host, None);
+        sync_path_marker(url, true);
         Ok(())
     } else {
         Err(())
@@ -246,6 +247,16 @@ pub fn port(url: &Url) -> &str {
 /// Setter for <https://url.spec.whatwg.org/#dom-url-port>
 #[allow(clippy::result_unit_err)]
 pub fn set_port(url: &mut Url, new_port: &str) -> Result<(), ()> {
+    // The basic URL parser strips tab and newline from setter input; when
+    // nothing remains the port state is a no-op (the old port stays).
+    let filtered: String = new_port
+        .chars()
+        .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
+        .collect();
+    if filtered.is_empty() && !new_port.is_empty() {
+        return Ok(());
+    }
+    let new_port = filtered.as_str();
     let result;
     {
         // has_host implies !cannot_be_a_base
@@ -270,7 +281,13 @@ pub fn set_port(url: &mut Url, new_port: &str) -> Result<(), ()> {
 /// Getter for <https://url.spec.whatwg.org/#dom-url-pathname>
 #[inline]
 pub fn pathname(url: &Url) -> &str {
-    url.path()
+    let path = url.path();
+    // Hide the no-authority "/." serializer marker.
+    if path.starts_with("/./") {
+        &path[2..]
+    } else {
+        path
+    }
 }
 
 /// Setter for <https://url.spec.whatwg.org/#dom-url-pathname>
@@ -278,6 +295,9 @@ pub fn set_pathname(url: &mut Url, new_pathname: &str) {
     if url.cannot_be_a_base() {
         return;
     }
+    // Captured before the path is rewritten: afterwards a path beginning
+    // with "//" makes the serialization ambiguous with an authority.
+    let had_authority = url.has_authority();
     if new_pathname.starts_with('/')
         || (SchemeType::from(url.scheme()).is_special()
             // \ is a segment delimiter for 'special' URLs"
@@ -286,13 +306,43 @@ pub fn set_pathname(url: &mut Url, new_pathname: &str) {
         url.set_path(new_pathname)
     } else if SchemeType::from(url.scheme()).is_special()
         || !new_pathname.is_empty()
-        || !url.has_host()
+        || !url.has_authority()
     {
         let mut path_to_set = String::from("/");
         path_to_set.push_str(new_pathname);
         url.set_path(&path_to_set)
     } else {
         url.set_path(new_pathname)
+    }
+    sync_path_marker(url, had_authority);
+}
+
+/// Keep the URL-serializer marker in sync: a URL with no authority whose
+/// path starts with an empty segment serializes the path with a "/."
+/// prefix, so a later parse does not read the path as an authority.
+fn sync_path_marker(url: &mut Url, has_authority: bool) {
+    // The parser's convention keeps the marker BEFORE path_start, so the
+    // path slice never includes it.
+    let ps = url.path_start as usize;
+    let has_marker = ps >= 2 && url.serialization.get(ps - 2..ps) == Some("/.");
+    let starts_double = url.serialization[ps..].starts_with("//");
+    let want = !has_authority && starts_double;
+    if want == has_marker {
+        return;
+    }
+    if want {
+        url.serialization.insert_str(ps, "/.");
+        url.path_start += 2;
+    } else {
+        url.serialization.replace_range(ps - 2..ps, "");
+        url.path_start -= 2;
+    }
+    let delta: i64 = if want { 2 } else { -2 };
+    if let Some(ref mut i) = url.query_start {
+        *i = (*i as i64 + delta) as u32;
+    }
+    if let Some(ref mut i) = url.fragment_start {
+        *i = (*i as i64 + delta) as u32;
     }
 }
 

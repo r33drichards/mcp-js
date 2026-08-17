@@ -47,7 +47,7 @@
           # the web-compat crates (encoding_rs, flate2, brotli, urlpattern)
           # added by the compatibility work. Regenerate by building any nix
           # package after a Cargo.lock change and copying the printed hash.
-          hash = "sha256-+QTz9bBk6Y3QRdShdfyHJgGsgPc14uhRy6dRm/gFFo8=";
+          hash = "sha256-GxI3lWXZiu5rM8TOZVNPdsZGs0lv+1Enn4IgghyTmTs=";
         });
 
         docsPython = pkgs.python3.withPackages (

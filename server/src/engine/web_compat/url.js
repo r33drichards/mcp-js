@@ -48,7 +48,7 @@
     // 2. In a URL with an opaque path followed by a query or fragment, a
     //    trailing space in the path serializes as %20.
     function fixupParts(parts) {
-        if (parts.protocol === 'file:' && /^\/[A-Za-z]\|/.test(parts.pathname)) {
+        if (parts.protocol === 'file:' && /^\/[A-Za-z]\|(?=\/|\?|#|$)/.test(parts.pathname)) {
             var fixed = '/' + parts.pathname[1] + ':' + parts.pathname.slice(3);
             parts.href = parts.href.replace(parts.pathname, fixed);
             parts.pathname = fixed;
