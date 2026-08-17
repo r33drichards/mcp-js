@@ -1,13 +1,9 @@
 # Plan: `node:http2` compat for stock gRPC clients
 
-*Status: phases 1–2 landed — `node:buffer`/`node:events` were already served
-by the module loader, and the structured ops (`server/src/engine/http2.rs`) +
-`node:http2` client shim (`node_compat/http2.js`) are in, gated by
-`tests/http2_e2e.rs` (gRPC-framed unary with trailers, trailers-only,
-RST_STREAM, per-stream policy, header injection, secret non-leak). Remaining:
-the supporting shims grpc-js imports (`node:net`/`node:tls` stubs,
-`node:dns`, `node:stream`, `node:zlib`), an esm.sh target that emits `node:*`
-externals for `npm:@grpc/grpc-js`, and the official interop-suite gate.*
+*Status: **complete** — stock `@grpc/grpc-js@1.12.6` runs unmodified in the
+sandbox over the structured `node:http2` ops, gated by the official gRPC
+interop cases in `server/tests/grpc_interop.rs`. See "What landed" below for
+the shipped surface and "Known gaps" for what a follow-up would add.*
 *Date: 2026-08-17*
 
 ## Goal
@@ -86,3 +82,49 @@ op or stub to the authority literal).
 2. `http2.rs` ops + minimal `node:http2` shim; gate with tonic unary test.
 3. Streaming + trailers; gate with the interop suite.
 4. Wire the Modal SDK end-to-end as the acceptance demo.
+
+## What landed
+
+- **`server/src/engine/http2.rs`** — structured session/stream ops over the
+  `h2` crate, `http2` policy category, per-stream `apply_header_rules`.
+- **`node_compat/http2.js`** — client-side `node:http2` (connect,
+  ClientHttp2Session/Stream, constants incl. the `NGHTTP2_FLAG_*` table).
+- **Supporting shims** — `node:net` (IP helpers + inert Socket), `node:tls`
+  (option plumbing; TLS terminates host-side), `node:dns` (pass-through
+  resolver + `promises.Resolver`), `node:fs` / `node:http` (import-compatible
+  stubs), `node:stream` (Readable/Writable/Duplex/Transform/PassThrough),
+  `node:zlib` (gzip/deflate over CompressionStream). `setImmediate` /
+  `clearImmediate` / `queueMicrotask` added to the timers layer.
+- **Gate** — `server/tests/grpc_interop.rs`: an in-process `h2::server`
+  implementing `grpc.testing.TestService` (hand-encoded protobuf) and the
+  official case list driven by stock grpc-js from esm.sh. Network-dependent,
+  so `#[ignore]`d per repo convention: `cargo test --test grpc_interop --
+  --ignored`. A hermetic `node_compat_shims_smoke` test runs in normal CI.
+
+### Bugs the interop gate caught
+
+Each of these passed the hand-written h2 tests and failed only against the
+real client, which is exactly why the official suite was the right gate:
+
+1. `session.socket` had to be an EventEmitter (grpc-js attaches `once`), and
+   needed `destroyed`; missing it caused an infinite transparent-retry loop
+   that OOM'd the isolate.
+2. `session.state` (window sizes) and `session.encrypted` are read on every
+   `createCall`.
+3. A `write()` after the peer concluded the stream must be discarded, not
+   raised — otherwise a trailers-only reply became a client-side INTERNAL.
+4. The `response` event's second argument must carry
+   `NGHTTP2_FLAG_END_STREAM`; without it grpc-js never reads the gRPC status
+   off a trailers-only response (`unimplemented_method` failed).
+
+## Known gaps
+
+- No `node:http2` server APIs, no push streams, no `options.createConnection`
+  (host owns the transport — that is the security model).
+- `node:stream` is a behavioral subset: no highWaterMark backpressure
+  accounting, no `readable` pull mode beyond `read()`.
+- `node:zlib` is one-shot only (no streaming classes), so gRPC per-message
+  compression beyond `identity` is untested.
+- The remaining official interop cases that need a full TestService
+  (`cancel_after_first_response`, `special_status_message`,
+  `unimplemented_service`, and the auth/oauth family) are not implemented.

@@ -64,6 +64,43 @@ arrangement). Only the client subset is implemented — `createServer` throws
 — and `options.createConnection`/custom sockets are deliberately ignored:
 the host owns the transport; that is the security model.
 
+## Run a stock gRPC client
+
+Because the transport is a real `node:http2` implementation, unmodified gRPC
+SDKs work — no proxy objects or hand-rolled channels:
+
+```js
+import grpc from 'npm:@grpc/grpc-js@1.12.6?target=node';
+import { Buffer } from 'node:buffer';
+import process from 'node:process';
+
+// Packages built for Node expect these as globals.
+globalThis.Buffer = Buffer;
+globalThis.process = process;
+
+const client = new (grpc.makeGenericClientConstructor(serviceDefinition, 'Svc'))(
+  'api.example.com:443', grpc.credentials.createSsl());
+```
+
+Note the `?target=node` on the esm.sh specifier: it selects the build that
+imports `node:*` builtins (which this runtime serves) rather than the
+browser build. Module imports must be enabled
+(`--allow-external-modules`).
+
+The supporting builtins gRPC stacks import are provided as subsets:
+`node:net` (IP helpers; sockets are inert), `node:tls` (option plumbing —
+TLS terminates host-side), `node:dns` (pass-through resolver), `node:stream`,
+`node:zlib` (one-shot gzip/deflate), and import-compatible `node:fs` /
+`node:http` stubs. Raw TCP is intentionally absent: it would put bytes on
+the wire that the policy layer cannot inspect and credentials cannot be
+injected into.
+
+Conformance is gated on the official gRPC interoperability cases
+(`empty_unary`, `large_unary`, `custom_metadata`, `status_code_and_message`,
+`unimplemented_method`, `client_streaming`, `server_streaming`, `ping_pong`,
+`empty_stream`, `cancel_after_begin`, `timeout_on_sleeping_server`) run
+against stock `@grpc/grpc-js` — see `server/tests/grpc_interop.rs`.
+
 ## Inject gRPC credentials server-side
 
 gRPC metadata is plain HTTP/2 headers, so `--fetch-header` /

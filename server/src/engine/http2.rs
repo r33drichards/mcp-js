@@ -85,6 +85,11 @@ struct H2StreamHandle {
     recv: Arc<tokio::sync::Mutex<Option<h2::RecvStream>>>,
     /// Session cancel token: a torn-down session must wake pending reads.
     cancel: CancellationToken,
+    /// Per-stream cancel token, fired by cancel/drop. A pending read holds
+    /// its own Arc clones, so removing the map entry alone would not wake
+    /// it — the op would stay pending and the execution's event loop could
+    /// never drain (a cancelled gRPC call would hang the whole run).
+    stream_cancel: CancellationToken,
 }
 
 /// Map-owned session entry. The `DropGuard` cancels the connection driver
@@ -341,6 +346,7 @@ async fn op_h2_request(
                 send: Arc::new(tokio::sync::Mutex::new(send)),
                 recv: Arc::new(tokio::sync::Mutex::new(None)),
                 cancel: session_cancel,
+                stream_cancel: CancellationToken::new(),
             },
         );
         rid
@@ -496,6 +502,9 @@ async fn op_h2_response(
             _ = stream.cancel.cancelled() => {
                 return serde_json::json!({"kind": "error", "message": "http2: session closed"});
             }
+            _ = stream.stream_cancel.cancelled() => {
+                return serde_json::json!({"kind": "error", "message": "http2: stream closed"});
+            }
             r = response_future => match r {
                 Ok(response) => response,
                 Err(e) => return h2_error_event(&e),
@@ -538,6 +547,9 @@ async fn op_h2_read(
             _ = stream.cancel.cancelled() => {
                 return serde_json::json!({"kind": "error", "message": "http2: session closed"});
             }
+            _ = stream.stream_cancel.cancelled() => {
+                return serde_json::json!({"kind": "error", "message": "http2: stream closed"});
+            }
             d = futures::future::poll_fn(|cx| recv.poll_data(cx)) => d,
         };
 
@@ -576,6 +588,8 @@ fn op_h2_cancel_stream(state: &mut OpState, #[smi] stream_rid: u32, #[smi] code:
             if let Ok(mut send) = stream.send.try_lock() {
                 send.send_reset(h2::Reason::from(code));
             }
+            // Wake any pending response/read so the event loop can drain.
+            stream.stream_cancel.cancel();
         }
     }
 }
@@ -584,7 +598,9 @@ fn op_h2_cancel_stream(state: &mut OpState, #[smi] stream_rid: u32, #[smi] code:
 #[op2(fast)]
 fn op_h2_drop_stream(state: &mut OpState, #[smi] stream_rid: u32) {
     if let Some(h2) = state.try_borrow_mut::<H2State>() {
-        h2.streams.remove(&stream_rid);
+        if let Some(stream) = h2.streams.remove(&stream_rid) {
+            stream.stream_cancel.cancel();
+        }
     }
 }
 

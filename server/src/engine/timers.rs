@@ -135,5 +135,21 @@ const TIMERS_JS_WRAPPER: &str = r#"
     // The spec gives clearTimeout and clearInterval one shared ID space.
     globalThis.clearTimeout = function clearTimeout(id) { clearTimer(Number(id) | 0); };
     globalThis.clearInterval = function clearInterval(id) { clearTimer(Number(id) | 0); };
+
+    // Node-flavored extras (used by npm packages targeting Node, e.g.
+    // @grpc/grpc-js). setImmediate shares the timer ID space; queueMicrotask
+    // is only defined when the runtime doesn't already provide it.
+    globalThis.setImmediate = function setImmediate(handler) {
+        return scheduleTimer(handler, 0, Array.prototype.slice.call(arguments, 1), false);
+    };
+    globalThis.clearImmediate = function clearImmediate(id) { clearTimer(Number(id) | 0); };
+    if (typeof globalThis.queueMicrotask !== 'function') {
+        globalThis.queueMicrotask = function queueMicrotask(callback) {
+            if (typeof callback !== 'function') {
+                throw new TypeError('queueMicrotask: callback must be a function');
+            }
+            Promise.resolve().then(function () { callback(); });
+        };
+    }
 })();
 "#;

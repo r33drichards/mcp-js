@@ -46,6 +46,13 @@ function bytesFromB64(b64) {
 export const sensitiveHeaders = Symbol('nodejs.http2.sensitiveHeaders');
 
 export const constants = Object.freeze({
+    NGHTTP2_FLAG_NONE: 0,
+    NGHTTP2_FLAG_END_STREAM: 1,
+    NGHTTP2_FLAG_ACK: 1,
+    NGHTTP2_FLAG_END_HEADERS: 4,
+    NGHTTP2_FLAG_PADDED: 8,
+    NGHTTP2_FLAG_PRIORITY: 32,
+
     NGHTTP2_NO_ERROR: 0,
     NGHTTP2_PROTOCOL_ERROR: 1,
     NGHTTP2_INTERNAL_ERROR: 2,
@@ -102,9 +109,11 @@ class ClientHttp2Stream extends EventEmitter {
             encoding = undefined;
         }
         if (this._writableEnded || this._closed) {
-            const err = new Error('write after end');
-            if (callback) callback(err); else this.emit('error', err);
-            return false;
+            // Node keeps the write side usable after the peer finishes its
+            // response (e.g. a gRPC trailers-only reply): late writes are
+            // discarded, not errors — the call's outcome comes from events.
+            if (callback) callback();
+            return true;
         }
         const bytes = toBytes(chunk, encoding);
         const self = this;
@@ -114,6 +123,10 @@ class ClientHttp2Stream extends EventEmitter {
             .then(
                 () => { if (callback) callback(); },
                 (err) => {
+                    // Same reasoning at the transport level: if the peer
+                    // already concluded the stream, the failed write is
+                    // moot; otherwise surface it.
+                    if (self._closed) { if (callback) callback(); return; }
                     if (callback) callback(err);
                     else self._fail(err);
                 });
@@ -127,20 +140,26 @@ class ClientHttp2Stream extends EventEmitter {
             if (callback) callback();
             return this;
         }
+        if (chunk !== undefined && chunk !== null) this.write(chunk, encoding);
         this._writableEnded = true;
-        const bytes = chunk === undefined ? new Uint8Array(0) : toBytes(chunk, encoding);
         const self = this;
         this._writeChain = this._writeChain
             .then(() => self._opened())
-            .then(() => ops().sendData(self._rid, b64FromBytes(bytes), true))
+            .then(() => ops().sendData(self._rid, '', true))
             .then(
                 () => { if (callback) callback(); },
-                (err) => {
-                    if (callback) callback(err);
-                    else self._fail(err);
+                (_err) => {
+                    // A failed half-close carries no user data. The common
+                    // cause is the peer completing the RPC (trailers or
+                    // reset) before our empty END_STREAM frame — the read
+                    // side delivers the call's real outcome either way, so
+                    // this must not surface as a client error.
+                    if (callback) callback();
                 });
         return this;
     }
+
+    get destroyed() { return this._closed; }
 
     pause() { this._paused = true; return this; }
 
@@ -224,7 +243,10 @@ class ClientHttp2Stream extends EventEmitter {
             }
             const headers = response.headers || {};
             headers[':status'] = response.status;
-            this.emit('response', headers, 0);
+            // The flags argument carries NGHTTP2_FLAG_END_STREAM for
+            // trailers-only responses — consumers (grpc-js) read the gRPC
+            // status from the headers when that bit is set.
+            this.emit('response', headers, response.endStream ? constants.NGHTTP2_FLAG_END_STREAM : 0);
             if (response.endStream) {
                 if (this.rstCode === undefined) this.rstCode = constants.NGHTTP2_NO_ERROR;
                 this.emit('end');
@@ -296,14 +318,24 @@ class ClientHttp2Session extends EventEmitter {
 
         const url = typeof authority === 'string' ? authority : String(authority);
         const host = url.replace(/^https?:\/\//, '').replace(/\/.*$/, '');
-        // Stub socket for channelz-style introspection; the real transport
-        // is host-side and its peer address is not exposed to the isolate.
-        this.socket = {
-            remoteAddress: host.replace(/:\d+$/, ''),
-            remotePort: Number((host.match(/:(\d+)$/) || [])[1]) || undefined,
-            localAddress: undefined,
-            localPort: undefined,
-        };
+        // Stub socket for channelz-style introspection and event attachment;
+        // the real transport is host-side and its peer address is not
+        // exposed to the isolate. It is an EventEmitter because consumers
+        // (e.g. @grpc/grpc-js) attach close/error handlers to it.
+        const socket = new EventEmitter();
+        socket.remoteAddress = host.replace(/:\d+$/, '');
+        socket.remotePort = Number((host.match(/:(\d+)$/) || [])[1]) || undefined;
+        socket.localAddress = undefined;
+        socket.localPort = undefined;
+        socket.destroyed = false;
+        socket.setNoDelay = () => socket;
+        socket.setKeepAlive = () => socket;
+        socket.setTimeout = () => socket;
+        socket.ref = () => socket;
+        socket.unref = () => socket;
+        socket.destroy = () => socket;
+        this.socket = socket;
+        this.encrypted = /^https:/.test(url);
 
         const self = this;
         this._connectPromise = (async () => {
@@ -345,6 +377,22 @@ class ClientHttp2Session extends EventEmitter {
         stream._pendingOpen.catch(() => {});
         stream._run();
         return stream;
+    }
+
+    // Flow-control introspection (consumers log these; the real windows are
+    // managed host-side by the h2 crate). Static defaults are reported.
+    get state() {
+        return {
+            effectiveLocalWindowSize: 65535,
+            effectiveRecvDataLength: 0,
+            nextStreamID: 1,
+            localWindowSize: 65535,
+            lastProcStreamID: 0,
+            remoteWindowSize: 65535,
+            outboundQueueSize: 0,
+            deflateDynamicTableSize: 4096,
+            inflateDynamicTableSize: 4096,
+        };
     }
 
     ping(payloadOrCallback, callback) {
@@ -389,6 +437,8 @@ class ClientHttp2Session extends EventEmitter {
         if (this._closed) return;
         this._closed = true;
         this.closed = true;
+        this.destroyed = true;
+        this.socket.destroyed = true;
         this.emit('close');
     }
 }

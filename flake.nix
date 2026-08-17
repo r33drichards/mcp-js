@@ -44,10 +44,13 @@
         } {
           src = ./server;
           # Vendor hash for the server's current Cargo dependency set, including
-          # the web-compat crates (encoding_rs, flate2, brotli, urlpattern)
-          # added by the compatibility work. Regenerate by building any nix
-          # package after a Cargo.lock change and copying the printed hash.
-          hash = "sha256-GxI3lWXZiu5rM8TOZVNPdsZGs0lv+1Enn4IgghyTmTs=";
+          # the web-compat crates (encoding_rs, flate2, brotli, urlpattern) and
+          # the websocket/http2 crates (tokio-tungstenite, h2, bytes, http,
+          # tokio-rustls, webpki-roots) added by the Modal gRPC workaround.
+          # Regenerate by building any nix package after a Cargo.lock change
+          # and copying the printed hash.
+          # PLACEHOLDER — CI build will report the correct hash to substitute.
+          hash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
         });
 
         docsPython = pkgs.python3.withPackages (
