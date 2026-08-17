@@ -600,7 +600,13 @@ const BASE64_JS: &str = r#"
     };
 
     globalThis.atob = function atob(input) {
+        // Forgiving-base64 decode (WHATWG Infra): strip ASCII whitespace;
+        // when the length is a multiple of four, up to two trailing '='
+        // may be removed; any other '=' or a length % 4 of 1 is an error.
         var str = String(input).replace(/[\t\n\f\r ]/g, '');
+        if (str.length % 4 === 0) {
+            str = str.replace(/={1,2}$/, '');
+        }
         if (str.length % 4 === 1) {
             throw new InvalidCharacterError(
                 "The string to be decoded is not correctly encoded."
@@ -609,7 +615,6 @@ const BASE64_JS: &str = r#"
         var out = '';
         var buf = 0, bits = 0;
         for (var i = 0; i < str.length; i++) {
-            if (str[i] === '=') break;
             var idx = chars.indexOf(str[i]);
             if (idx === -1) {
                 throw new InvalidCharacterError(

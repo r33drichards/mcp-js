@@ -50,13 +50,49 @@ globalThis.GLOBAL = {
       },
     });
   }
+  // Resolve "../x" / "./x" requests against the test's directory so the
+  // absolute-path asset map serves them too.
+  function resolveKey(key) {
+    if (key.indexOf("../") !== 0 && key.indexOf("./") !== 0) return key;
+    var base = String(globalThis.location.pathname).split("/").slice(0, -1);
+    var parts = key.split("/");
+    for (var i = 0; i < parts.length; i++) {
+      if (parts[i] === "..") base.pop();
+      else if (parts[i] !== ".") base.push(parts[i]);
+    }
+    return base.join("/");
+  }
+  // Deterministic pseudo-random bytes stand in for WPT's large media file:
+  // the compression tests only round-trip whatever bytes live at this path.
+  var LARGE_ASSET = "/media/test-av-384k-44100Hz-1ch-320x240-30fps-10kfr.webm";
+  function largeAssetBytes() {
+    // Structured (compressible) data: the output-length tests assert the
+    // compressed form is smaller than the input.
+    var out = new Uint8Array(1 << 20);
+    for (var i = 0; i < out.length; i++) {
+      out[i] = (i >> 6) & 0xff;
+    }
+    return out;
+  }
   globalThis.fetch = function fetch(input, init) {
     var key = String(input);
     if (Object.prototype.hasOwnProperty.call(resources, key)) {
       return embeddedResponse(resources[key]);
     }
-    if (Object.prototype.hasOwnProperty.call(assets, key)) {
-      return embeddedResponse(assets[key]);
+    var resolved = resolveKey(key);
+    if (Object.prototype.hasOwnProperty.call(assets, resolved)) {
+      return embeddedResponse(assets[resolved]);
+    }
+    if (resolved === LARGE_ASSET) {
+      var bytes = largeAssetBytes();
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        bytes: function () { return Promise.resolve(bytes.slice(0)); },
+        arrayBuffer: function () { return Promise.resolve(bytes.slice(0).buffer); },
+        text: function () { return Promise.resolve(new TextDecoder().decode(bytes)); },
+        json: function () { return Promise.reject(new TypeError("not json")); },
+      });
     }
     if (typeof realFetch === "function") {
       return realFetch.apply(this, arguments);

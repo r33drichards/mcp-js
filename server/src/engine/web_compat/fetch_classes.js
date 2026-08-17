@@ -291,29 +291,57 @@
         return t.toLowerCase();
     }
 
-    function processBlobParts(parts, endings) {
-        if (typeof parts !== 'object' || parts === null ||
-            typeof parts[Symbol.iterator] !== 'function') {
+    // Phase 1 of Blob construction: convert the parts sequence. WebIDL
+    // converts arguments left to right, so this runs BEFORE the options
+    // dictionary is read; each element converts as the iterator yields it
+    // (both orderings are observable through getters). Detached buffers
+    // convert to empty per get-a-copy semantics.
+    function convertBlobParts(parts) {
+        if (typeof parts !== 'object' || parts === null) {
             throw new TypeError(
                 "Failed to construct 'Blob': The provided value cannot be converted to a sequence.");
         }
-        var chunks = [];
-        // Sequence conversion is lazy: each element converts to a BlobPart
-        // as the iterator yields it (observable through getters).
-        for (var part of parts) {
+        var iterFn = parts[Symbol.iterator];
+        if (typeof iterFn !== 'function') {
+            throw new TypeError(
+                "Failed to construct 'Blob': The provided value cannot be converted to a sequence.");
+        }
+        var converted = [];
+        var iter = iterFn.call(parts);
+        for (;;) {
+            var step = iter.next();
+            if (step.done) break;
+            var part = step.value;
             if (part instanceof Blob) {
-                chunks.push(bdata(part).bytes);
-            } else if (part instanceof ArrayBuffer) {
-                chunks.push(new Uint8Array(part.slice(0)));
-            } else if (ArrayBuffer.isView(part)) {
-                chunks.push(new Uint8Array(
-                    part.buffer.slice(part.byteOffset, part.byteOffset + part.byteLength)));
-            } else {
-                var s = String(part);
-                if (endings === 'native') {
-                    s = s.replace(/\r\n|\r|\n/g, '\n');
+                converted.push(bdata(part).bytes);
+            } else if (part instanceof ArrayBuffer || ArrayBuffer.isView(part)) {
+                try {
+                    converted.push(part instanceof ArrayBuffer
+                        ? new Uint8Array(part.slice(0))
+                        : new Uint8Array(part.buffer.slice(
+                            part.byteOffset, part.byteOffset + part.byteLength)));
+                } catch (_) {
+                    converted.push(new Uint8Array(0)); // detached
                 }
-                chunks.push(utf8encode(s));
+            } else {
+                converted.push(String(part));
+            }
+        }
+        return converted;
+    }
+
+    // Phase 2: encode converted string parts with the endings option.
+    function assembleBlobParts(converted, endings) {
+        var chunks = [];
+        for (var i = 0; i < converted.length; i++) {
+            var part = converted[i];
+            if (typeof part === 'string') {
+                if (endings === 'native') {
+                    part = part.replace(/\r\n|\r|\n/g, '\n');
+                }
+                chunks.push(utf8encode(part));
+            } else {
+                chunks.push(part);
             }
         }
         return concatBytes(chunks);
@@ -321,6 +349,9 @@
 
     class Blob {
         constructor(blobParts = undefined, options = undefined) {
+            // Argument conversion order: the parts sequence first, then the
+            // options dictionary.
+            var converted = blobParts === undefined ? [] : convertBlobParts(blobParts);
             var endings = 'transparent', type = '';
             if (options !== undefined && options !== null) {
                 if (typeof options !== 'object' && typeof options !== 'function') {
@@ -337,10 +368,10 @@
                 }
                 if (options.type !== undefined) type = normalizeType(options.type);
             }
-            var bytes = blobParts === undefined
-                ? new Uint8Array(0)
-                : processBlobParts(blobParts, endings);
-            blobData.set(this, { bytes: bytes, type: type });
+            blobData.set(this, {
+                bytes: assembleBlobParts(converted, endings),
+                type: type,
+            });
         }
         get size() { return bdata(this).bytes.length; }
         get type() { return bdata(this).type; }
@@ -727,7 +758,9 @@
                     var mime = (getMime(self_) || '').toLowerCase();
                     if (mime.indexOf('application/x-www-form-urlencoded') === 0) {
                         var fd = new FormData();
-                        var params = new URLSearchParams(utf8decode(b));
+                        // The urlencoded parser works on bytes: no BOM stripping.
+                        var text = new TextDecoder('utf-8', { ignoreBOM: true }).decode(b);
+                        var params = new URLSearchParams(text);
                         params.forEach(function (v, k) { fd.append(k, v); });
                         return fd;
                     }

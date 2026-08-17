@@ -71,7 +71,7 @@ of scope for this runner (see the research doc for the wptserve growth path).
 ## Current results (wpt@0cc6a7e)
 
 224 non-ignored files (plus 15 `.tentative.` proposal-stage files ignored):
-**202 fully passing**, 22 with recorded subtest failures (149 subtests).
+**212 fully passing**, 12 with recorded subtest failures (106 subtests).
 The remaining failures concentrate in three places: the url/ suite (rust-
 url tracks a slightly older URL spec — opaque-path space encoding, `|`
 drive letters, invalid-punycode leniency), urlpattern/ (polyfill

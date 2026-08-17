@@ -33,12 +33,41 @@
         'port', 'pathname', 'search', 'hash', 'origin',
     ];
 
+    function isOpaquePath(parts) {
+        // Opaque path: no authority and the path does not start with '/'.
+        return parts.host === '' && parts.username === '' &&
+            parts.pathname.length > 0 && parts.pathname[0] !== '/';
+    }
+
+    function rebuildOpaqueHref(parts) {
+        parts.href = parts.protocol + parts.pathname + parts.search + parts.hash;
+    }
+
+    // Two spec rules rust-url does not implement yet:
+    // 1. file: URLs normalize Windows drive letters written with '|'.
+    // 2. In a URL with an opaque path followed by a query or fragment, a
+    //    trailing space in the path serializes as %20.
+    function fixupParts(parts) {
+        if (parts.protocol === 'file:' && /^\/[A-Za-z]\|/.test(parts.pathname)) {
+            var fixed = '/' + parts.pathname[1] + ':' + parts.pathname.slice(3);
+            parts.href = parts.href.replace(parts.pathname, fixed);
+            parts.pathname = fixed;
+        }
+        if (isOpaquePath(parts) && (parts.search !== '' || parts.hash !== '') &&
+            parts.pathname.length > 0 &&
+            parts.pathname[parts.pathname.length - 1] === ' ') {
+            parts.pathname = parts.pathname.slice(0, -1) + '%20';
+            rebuildOpaqueHref(parts);
+        }
+        return parts;
+    }
+
     function parseParts(input, base) {
         var joined = base === undefined ? opParse(input) : opParse(input, base);
         var values = joined.split('\n');
         var parts = {};
         for (var i = 0; i < FIELDS.length; i++) parts[FIELDS[i]] = values[i];
-        return parts;
+        return fixupParts(parts);
     }
 
     // ── application/x-www-form-urlencoded ───────────────────────────────
@@ -159,7 +188,17 @@
                     } else {
                         var keys = Object.keys(init);
                         for (var j = 0; j < keys.length; j++) {
-                            list.push([toUSV(keys[j]), toUSV(init[keys[j]])]);
+                            var rk = toUSV(keys[j]);
+                            var rv = toUSV(init[keys[j]]);
+                            var found = false;
+                            for (var m = 0; m < list.length; m++) {
+                                if (list[m][0] === rk) {
+                                    list[m][1] = rv;
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            if (!found) list.push([rk, rv]);
                         }
                     }
                 } else {
@@ -340,7 +379,16 @@
                 var values = joined.split('\n');
                 var parts = {};
                 for (var i = 0; i < FIELDS.length; i++) parts[FIELDS[i]] = values[i];
-                return parts;
+                // Removing the query/fragment of an opaque path percent-
+                // encodes a trailing space so the URL round-trips.
+                if ((field === 'search' || field === 'hash') && String(value) === '' &&
+                    parts.host === '' && parts.username === '' &&
+                    parts.pathname.length > 0 && parts.pathname[0] !== '/' &&
+                    parts.pathname[parts.pathname.length - 1] === ' ') {
+                    parts.pathname = parts.pathname.slice(0, -1) + '%20';
+                    parts.href = parts.protocol + parts.pathname + parts.search + parts.hash;
+                }
+                return fixupParts(parts);
             })();
         } catch (_) {
             return; // failed setters are silent no-ops

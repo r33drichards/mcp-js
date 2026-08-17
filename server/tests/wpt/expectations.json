@@ -1,22 +1,9 @@
 {
   "FileAPI/blob/Blob-array-buffer.any.js": true,
   "FileAPI/blob/Blob-bytes.any.js": true,
-  "FileAPI/blob/Blob-constructor-detached-buffer.any.js": {
-    "expectedFailures": [
-      "Blob from a detached ArrayBuffer should be empty",
-      "Blob from a detached ArrayBufferView mixed with string, detached part ignored",
-      "Blob from a detached ArrayBufferView should be empty",
-      "Blob from a detached ArrayBufferView with offset should be empty"
-    ]
-  },
+  "FileAPI/blob/Blob-constructor-detached-buffer.any.js": true,
   "FileAPI/blob/Blob-constructor-endings.any.js": true,
-  "FileAPI/blob/Blob-constructor.any.js": {
-    "expectedFailures": [
-      "Arguments should be evaluated from left to right.",
-      "Getters and value conversions should happen in order until an exception is thrown.",
-      "Passing a FrozenArray as the blobParts array should work (FrozenArray<MessagePort>)."
-    ]
-  },
+  "FileAPI/blob/Blob-constructor.any.js": true,
   "FileAPI/blob/Blob-newobject.any.js": true,
   "FileAPI/blob/Blob-slice-overflow.any.js": true,
   "FileAPI/blob/Blob-slice.any.js": true,
@@ -34,22 +21,8 @@
   "compression/compression-including-empty-chunk.any.js": true,
   "compression/compression-large-flush-output.any.js": true,
   "compression/compression-multiple-chunks.any.js": true,
-  "compression/compression-output-length.any.js": {
-    "expectedFailures": [
-      "the length of brotli data should be shorter than that of the original data",
-      "the length of deflate data should be shorter than that of the original data",
-      "the length of deflate-raw data should be shorter than that of the original data",
-      "the length of gzip data should be shorter than that of the original data"
-    ]
-  },
-  "compression/compression-stream.any.js": {
-    "expectedFailures": [
-      "brotli large amount data should be reinflated back to its origin",
-      "deflate large amount data should be reinflated back to its origin",
-      "deflate-raw large amount data should be reinflated back to its origin",
-      "gzip large amount data should be reinflated back to its origin"
-    ]
-  },
+  "compression/compression-output-length.any.js": true,
+  "compression/compression-stream.any.js": true,
   "compression/compression-with-detach.any.js": true,
   "compression/decompression-bad-chunks.any.js": true,
   "compression/decompression-buffersource.any.js": true,
@@ -80,11 +53,7 @@
   "dom/events/AddEventListenerOptions-passive.any.js": true,
   "dom/events/AddEventListenerOptions-signal.any.js": true,
   "dom/events/Event-constructors.any.js": true,
-  "dom/events/Event-isTrusted.any.js": {
-    "expectedFailures": [
-      "Event-isTrusted"
-    ]
-  },
+  "dom/events/Event-isTrusted.any.js": true,
   "dom/events/EventTarget-add-remove-listener.any.js": true,
   "dom/events/EventTarget-addEventListener.any.js": true,
   "dom/events/EventTarget-constructible.any.js": true,
@@ -105,29 +74,17 @@
   "fetch/api/headers/headers-structure.any.js": true,
   "hr-time/basic.any.js": true,
   "hr-time/monotonic-clock.any.js": true,
-  "html/webappapis/atob/base64.any.js": {
-    "expectedFailures": [
-      "atob() setup."
-    ]
-  },
+  "html/webappapis/atob/base64.any.js": true,
   "html/webappapis/microtask-queuing/queue-microtask.any.js": true,
   "html/webappapis/structured-clone/structured-clone.any.js": {
     "expectedFailures": [
-      "A detached ArrayBuffer cannot be transferred",
-      "A detached platform object cannot be transferred",
       "A subclass instance will be received as its closest transferable superclass",
       "An object whose interface is deleted from the global must still deserialize",
-      "An object whose interface is deleted from the global object must still be received",
       "Growable SharedArrayBuffer",
       "ImageBitmap",
       "Length-tracking DataView is transferable",
       "Length-tracking TypedArray is transferable",
-      "MessagePort",
-      "OffscreenCanvas",
-      "Serializing OOB DataView throws",
-      "Serializing OOB TypedArray throws",
-      "Transferring OOB DataView throws",
-      "Transferring OOB TypedArray throws"
+      "OffscreenCanvas"
     ]
   },
   "html/webappapis/timers/clearinterval-from-callback.any.js": true,
@@ -163,7 +120,8 @@
   "streams/readable-byte-streams/general.any.js": {
     "expectedFailures": [
       "ReadableStream with byte source: read(view), then respondWithNewView() with a transferred ArrayBuffer",
-      "ReadableStream with byte source: respondWithNewView() with a transferred non-zero-length view (in the readable state)"
+      "ReadableStream with byte source: respondWithNewView() with a transferred non-zero-length view (in the readable state)",
+      "ReadableStream with byte source: respondWithNewView() with a transferred zero-length view (in the closed state)"
     ]
   },
   "streams/readable-byte-streams/non-transferable-buffers.any.js": true,
@@ -188,11 +146,7 @@
   "streams/readable-streams/count-queuing-strategy-integration.any.js": true,
   "streams/readable-streams/default-reader.any.js": true,
   "streams/readable-streams/floating-point-total-queue-size.any.js": true,
-  "streams/readable-streams/from.any.js": {
-    "expectedFailures": [
-      "ReadableStream.from throws on invalid iterables; specifically a string"
-    ]
-  },
+  "streams/readable-streams/from.any.js": true,
   "streams/readable-streams/garbage-collection.any.js": true,
   "streams/readable-streams/general.any.js": true,
   "streams/readable-streams/owning-type-message-port.tentative.any.js": {
@@ -277,7 +231,8 @@
       "Parsing: <file:///.//> against <file:////>",
       "Parsing: <file:////foo> without base",
       "Parsing: <file:////one/two> against <file:///>",
-      "Parsing: <file:///w|/m> without base",
+      "Parsing: <file:///w|m> without base",
+      "Parsing: <file:///w||m> without base",
       "Parsing: <file://1.2.3.4/C:/> without base",
       "Parsing: <file://[1::8]/C:/> without base",
       "Parsing: <file://\\/localhost//cat> without base",
@@ -289,6 +244,7 @@
       "Parsing: <file://xn--/p> without base",
       "Parsing: <file:/C:/> against <file://host/>",
       "Parsing: <file:C:/> against <file://host/>",
+      "Parsing: <file:C||/m/> without base",
       "Parsing: <file:\\\\//> without base",
       "Parsing: <file:\\\\\\\\#guppy> without base",
       "Parsing: <file:\\\\\\\\> without base",
@@ -302,11 +258,6 @@
       "Parsing: <http://a.b.c.Xn--pokxncvks> without base",
       "Parsing: <http://a.b.c.xn--pokxncvks> without base",
       "Parsing: <https://xn--/> without base",
-      "Parsing: <non-special:opaque\t\t  \r #hi> without base",
-      "Parsing: <non-special:opaque \t\t  \t#hi> without base",
-      "Parsing: <non-special:opaque \t\t  #hi> without base",
-      "Parsing: <non-special:opaque  #hi> without base",
-      "Parsing: <non-special:opaque  ?hi> without base",
       "Parsing: <wss://host/ !\"$%&'()*+,-./:;<=>@[\\]^_`{|}~> without base"
     ]
   },
@@ -334,10 +285,6 @@
   "url/url-setters.any.js": {
     "expectedFailures": [
       "URL: Setting <a:/>.pathname = '\u0000\u0001\t\n\r\u001f !\"#$%&'()*+,-./09:;<=>?@AZ[\\]^_`az{|}~Éé' UTF-8 percent encoding with the default encode set. Tabs and newlines are removed.",
-      "URL: Setting <data:space                                                                                                                                  #fragment>.hash = '' Trailing spaces and opaque paths",
-      "URL: Setting <data:space  ?query#fragment>.hash = '' Trailing spaces and opaque paths",
-      "URL: Setting <data:space  ?query#fragment>.search = '' Trailing spaces and opaque paths",
-      "URL: Setting <data:space ?query>.search = '' Trailing spaces and opaque paths",
       "URL: Setting <file:///unicorn>.pathname = '//\\/' File URLs and (back)slashes",
       "URL: Setting <file:///unicorn>.pathname = '//monkey/..//' File URLs and (back)slashes",
       "URL: Setting <file://monkey/>.pathname = '\\\\' File URLs and (back)slashes",
@@ -350,36 +297,16 @@
       "URL: Setting <non-spec:/.//p>.hostname = 'h' Drop /. from path",
       "URL: Setting <non-spec:/>.pathname = '/..//p'",
       "URL: Setting <non-spec:/>.pathname = '/.//p' Serialize /. in path",
-      "URL: Setting <non-spec:/>.pathname = '//p'",
-      "URL: Setting <sc:space    #fragment>.hash = ''",
-      "URL: Setting <sc:space  ?query#fragment>.hash = ''",
-      "URL: Setting <sc:space  ?query#fragment>.search = ''",
-      "URL: Setting <sc:space ?query>.search = ''"
+      "URL: Setting <non-spec:/>.pathname = '//p'"
     ]
   },
   "url/url-statics-canparse.any.js": true,
   "url/url-statics-parse.any.js": true,
   "url/url-tojson.any.js": true,
-  "url/urlencoded-parser.any.js": {
-    "expectedFailures": [
-      "request.formData() with input: ﻿test=﻿",
-      "response.formData() with input: ﻿test=﻿"
-    ]
-  },
+  "url/urlencoded-parser.any.js": true,
   "url/urlsearchparams-append.any.js": true,
-  "url/urlsearchparams-constructor.any.js": {
-    "expectedFailures": [
-      "Construct with 2 unpaired surrogates (no trailing)",
-      "Construct with 3 unpaired surrogates (no leading)",
-      "URLSearchParams constructor, DOMException as argument"
-    ]
-  },
-  "url/urlsearchparams-delete.any.js": {
-    "expectedFailures": [
-      "Changing the query of a URL with an opaque path with trailing spaces",
-      "Changing the query of a URL with an opaque path with trailing spaces and a fragment"
-    ]
-  },
+  "url/urlsearchparams-constructor.any.js": true,
+  "url/urlsearchparams-delete.any.js": true,
   "url/urlsearchparams-foreach.any.js": true,
   "url/urlsearchparams-get.any.js": true,
   "url/urlsearchparams-getall.any.js": true,

@@ -82,10 +82,31 @@
             return value;
         }
         if (value instanceof TypedArray || value instanceof DataView) {
+            // Out-of-bounds views (fixed-length views over a resizable
+            // buffer that shrank) are not serializable.
+            try {
+                if (value instanceof DataView) {
+                    void value.byteLength; // throws when OOB
+                } else {
+                    value.subarray(0, 0); // ValidateTypedArray throws when OOB
+                }
+            } catch (_) {
+                throw cloneError(value);
+            }
             var buf = cloneValue(value.buffer, memo, transferMap);
-            out = value instanceof DataView
-                ? new DataView(buf, value.byteOffset, value.byteLength)
-                : new value.constructor(buf, value.byteOffset, value.length);
+            // Length-tracking views over resizable buffers keep tracking:
+            // constructed without an explicit length.
+            var tracking = value.buffer.resizable === true &&
+                value.byteOffset + value.byteLength === value.buffer.byteLength;
+            if (value instanceof DataView) {
+                out = tracking
+                    ? new DataView(buf, value.byteOffset)
+                    : new DataView(buf, value.byteOffset, value.byteLength);
+            } else {
+                out = tracking
+                    ? new value.constructor(buf, value.byteOffset)
+                    : new value.constructor(buf, value.byteOffset, value.length);
+            }
             memo.set(value, out);
             return out;
         }
@@ -184,6 +205,36 @@
         return out;
     }
 
+    // Internal: clone with a transfer list, reporting the fresh ports so
+    // MessagePort.postMessage can deliver them on the event.
+    function structuredCloneWithTransfer(value, transfer) {
+            var transferMap = new Map();
+            var transferredPorts = [];
+            for (var i = 0; i < transfer.length; i++) {
+                var t = transfer[i];
+                if (transferMap.has(t)) {
+                    throw new DOMException(
+                        'Transfer list contains duplicate entries.', 'DataCloneError');
+                }
+                if (t instanceof ArrayBuffer) {
+                    if (t.detached === true || typeof t.transfer !== 'function') {
+                        throw cloneError(t);
+                    }
+                    transferMap.set(t, t.transfer());
+                } else if (typeof MessagePort === 'function' && t instanceof MessagePort) {
+                    var fresh = transferPort(t);
+                    transferMap.set(t, fresh);
+                    transferredPorts.push(fresh);
+                } else {
+                    throw cloneError(t);
+                }
+            }
+            return {
+                value: cloneValue(value, new Map(), transferMap.size ? transferMap : null),
+                transferredPorts: transferredPorts,
+            };
+    }
+
     globalThis.structuredClone = function structuredClone(value, options) {
         if (arguments.length < 1) {
             throw new TypeError(
@@ -206,10 +257,12 @@
                             'Transfer list contains duplicate entries.', 'DataCloneError');
                     }
                     if (t instanceof ArrayBuffer) {
-                        if (typeof t.transfer !== 'function') {
+                        if (t.detached === true || typeof t.transfer !== 'function') {
                             throw cloneError(t);
                         }
                         transferMap.set(t, t.transfer());
+                    } else if (typeof MessagePort === 'function' && t instanceof MessagePort) {
+                        transferMap.set(t, transferPort(t));
                     } else {
                         throw cloneError(t);
                     }
@@ -246,6 +299,34 @@
         }
     }
 
+    // Transfer a port: a fresh port takes over the entanglement and the
+    // buffered queue; the original is neutered.
+    function transferPort(port) {
+        var d = pdata(port);
+        if (d.transferred) {
+            throw new DOMException('MessagePort is already transferred.', 'DataCloneError');
+        }
+        allowPort = true;
+        var fresh;
+        try {
+            fresh = new MessagePort();
+        } finally {
+            allowPort = false;
+        }
+        var fd = portData.get(fresh);
+        fd.entangled = d.entangled;
+        fd.queue = d.queue;
+        if (d.entangled) {
+            var od = pdata(d.entangled);
+            od.entangled = fresh;
+        }
+        d.entangled = null;
+        d.queue = [];
+        d.closed = true;
+        d.transferred = true;
+        return fresh;
+    }
+
     class MessagePort extends EventTarget {
         constructor() {
             if (!allowPort) throw new TypeError('Illegal constructor');
@@ -262,8 +343,12 @@
             } else if (transferOrOptions && typeof transferOrOptions === 'object') {
                 transfer = transferOrOptions.transfer;
             }
-            var data = globalThis.structuredClone(
-                message, transfer ? { transfer: transfer } : undefined);
+            var cloned = structuredCloneWithTransfer(
+                message, transfer ? Array.from(transfer) : []);
+            var data = cloned.value;
+            // Transferred ports surface on the event's ports array, in
+            // transfer-list order.
+            var ports = cloned.transferredPorts;
             var target = d.entangled;
             if (!target || d.closed) return;
             var td = pdata(target);
@@ -273,9 +358,9 @@
             setTimeout(function () {
                 if (td.closed) return;
                 if (td.enabled) {
-                    deliver(target, data, []);
+                    deliver(target, data, ports);
                 } else {
-                    td.queue.push({ data: data, ports: [] });
+                    td.queue.push({ data: data, ports: ports });
                 }
             }, 0);
         }

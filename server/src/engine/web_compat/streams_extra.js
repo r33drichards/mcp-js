@@ -7,6 +7,24 @@
         return;
     }
 
+    // The spec's ReadableStream.from rejects strings even though they are
+    // iterable; the vendored polyfill accepts them.
+    if (typeof ReadableStream === 'function' &&
+        typeof ReadableStream.from === 'function') {
+        var origFrom = ReadableStream.from;
+        Object.defineProperty(ReadableStream, 'from', {
+            value: function from(asyncIterable) {
+                if (typeof asyncIterable === 'string') {
+                    throw new TypeError(
+                        "Failed to execute 'from' on 'ReadableStream': a string is not a valid iterable.");
+                }
+                return origFrom.call(this, asyncIterable);
+            },
+            writable: true,
+            configurable: true,
+        });
+    }
+
     var tesData = new WeakMap();
 
     class TextEncoderStream {

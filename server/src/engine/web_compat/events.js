@@ -68,6 +68,13 @@
     Object.defineProperty(DOMException.prototype, Symbol.toStringTag, {
         value: 'DOMException', configurable: true,
     });
+    // WebIDL attributes are enumerable accessors on the prototype; branding
+    // checks in the getters are observable through record conversions.
+    ['name', 'message', 'code'].forEach(function (attr) {
+        var desc = Object.getOwnPropertyDescriptor(DOMException.prototype, attr);
+        desc.enumerable = true;
+        Object.defineProperty(DOMException.prototype, attr, desc);
+    });
     for (var constName in CONSTANTS) {
         var desc = { value: CONSTANTS[constName], enumerable: true };
         Object.defineProperty(DOMException, constName, desc);
@@ -153,6 +160,13 @@
         });
     }
 
+    function sharedIsTrustedGetter() {
+        return edata(this).isTrusted;
+    }
+    Object.defineProperty(sharedIsTrustedGetter, 'name', {
+        value: 'isTrusted', configurable: true,
+    });
+
     function convertDict(init, what) {
         if (init === undefined || init === null) return {};
         if (typeof init !== 'object' && typeof init !== 'function') {
@@ -172,11 +186,11 @@
             var init = convertDict(eventInitDict, 'Event');
             initEventData(this, type, init.bubbles, init.cancelable, init.composed);
             // isTrusted is [LegacyUnforgeable]: an own, non-configurable
-            // accessor on every instance.
+            // accessor on every instance — with ONE shared getter function
+            // across all events (observable via getOwnPropertyDescriptor).
             if (!Object.prototype.hasOwnProperty.call(this, 'isTrusted')) {
-                var self_ = this;
                 Object.defineProperty(this, 'isTrusted', {
-                    get: function isTrusted() { return edata(self_).isTrusted; },
+                    get: sharedIsTrustedGetter,
                     enumerable: true,
                     configurable: false,
                 });
