@@ -395,7 +395,7 @@ In stateful MCP, `run_js` accepts an additional `heap` parameter (SHA-256 hash t
 | Tool | Description |
 |------|-------------|
 | `list_sessions` | List all named sessions. |
-| `list_session_snapshots` | Browse execution history for a session. Accepts `session` (required) and `fields` (optional, comma-separated: `index`, `input_heap`, `output_heap`, `code`, `timestamp`). |
+| `list_session_snapshots` | Browse the current session's execution history. Accepts `fields` (optional, comma-separated: `index`, `input_heap`, `output_heap`, `output_fs`, `code`, `timestamp`). |
 | `get_heap_tags` | Get tags for a heap snapshot. |
 | `set_heap_tags` | Set or replace tags on a heap snapshot. |
 | `delete_heap_tags` | Delete specific tag keys from a heap snapshot. |
@@ -431,12 +431,17 @@ Each execution returns a `heap` content hash (a 64-character SHA-256 hex string)
 
 #### Named Sessions
 
-You can tag executions with a human-readable **session name** for history tracking. On the REST API, pass the `session` field in the request body. On MCP, send the `X-MCP-Session-Id` header during initialization. The server logs each execution (input heap, output heap, code, and timestamp) to an embedded sled database.
+You can tag executions with a human-readable **session name** for history tracking. On the REST API, pass the `session` field in the request body. On MCP, send the `X-MCP-Session-Id` header during initialization. The server logs each execution (input heap, output heap, resulting fs snapshot, code, and timestamp) to an embedded sled database. A `run_js` call with a session name (and no explicit `heap`/`fs`) automatically resumes that session's latest heap and filesystem state, so the session name alone is enough for continuity.
 
 Two additional tools are available in stateful mode for browsing session history:
 
 - **`list_sessions`** — Returns an array of all session names that have been used.
-- **`list_session_snapshots`** — Returns the log entries for a given session. Accepts a required `session` parameter and an optional `fields` parameter (comma-separated) to select specific fields: `index`, `input_heap`, `output_heap`, `code`, `timestamp`.
+- **`list_session_snapshots`** — Returns the log entries for the current session (from the `X-MCP-Session-Id` header). Accepts an optional `fields` parameter (comma-separated) to select specific fields: `index`, `input_heap`, `output_heap`, `output_fs`, `code`, `timestamp`.
+
+The same data is available over the REST API:
+
+- **`GET /api/sessions`** — List all named sessions.
+- **`GET /api/sessions/{session}/history`** — Browse a session's execution history (optional `fields` query parameter, as above).
 
 The session database path defaults to `/tmp/mcp-v8-sessions` and can be overridden with `--session-db-path`.
 

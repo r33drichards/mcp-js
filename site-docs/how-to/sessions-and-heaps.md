@@ -172,7 +172,23 @@ Entries are ordered chronologically. If no `X-MCP-Session-Id` was sent during `i
 
 ### List all fields
 
-Omit the `fields` parameter to return all fields: `index`, `input_heap`, `output_heap`, `code`, `timestamp`.
+Omit the `fields` parameter to return all fields: `index`, `input_heap`, `output_heap`, `output_fs`, `code`, `timestamp`.
+
+### Over the REST API
+
+The same data is available without an MCP connection. `POST /api/exec` accepts a per-call `session` field, and two endpoints browse the resulting sessions:
+
+```bash
+# List every named session
+curl -s http://localhost:8080/api/sessions
+# → { "sessions": ["my-agent-session", "other-session"] }
+
+# Browse one session's execution history (optional ?fields=... as above)
+curl -s http://localhost:8080/api/sessions/my-agent-session/history
+# → { "session": "my-agent-session", "entries": [ ... ] }
+```
+
+An unknown session name returns 404; a server running without heap or fs persistence has no session log and returns 400.
 
 ## See also
 

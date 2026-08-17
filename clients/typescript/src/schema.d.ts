@@ -152,6 +152,157 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/fs/labels": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List filesystem snapshot labels. */
+        get: operations["fs_labels_handler"];
+        put?: never;
+        /** Create or repoint a filesystem snapshot label. */
+        post: operations["fs_set_label_handler"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/fs/labels/{label}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Resolve a label to its current head CA id. */
+        get: operations["fs_resolve_handler"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/fs/labels/{label}/log": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Show the reflog for a label. */
+        get: operations["fs_log_handler"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/fs/merge": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Three-way merge two snapshots into a new one. */
+        post: operations["fs_merge_handler"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/fs/push": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Advance a label to a CA id (reject-and-rebase by default). */
+        post: operations["fs_push_handler"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/fs/reset": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Reset a label to an earlier CA id from its reflog. */
+        post: operations["fs_reset_handler"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/sessions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List all named sessions.
+         * @description A session is created the first time an execution runs with a `session`
+         *     name (the `session` field of `POST /api/exec`, or the `X-MCP-Session-Id`
+         *     header on MCP initialize) and persists in the session database until it
+         *     is cleared. Per-session heap and filesystem state is resumed from the
+         *     session's latest history entry, so this is the way to discover which
+         *     named sessions exist. Requires session persistence; a `--stateless`
+         *     server has no session log.
+         */
+        get: operations["list_sessions_handler"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/sessions/{session}/history": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Show the execution history for a named session.
+         * @description Entries are returned oldest first; each records the input heap, output
+         *     heap, resulting fs snapshot, code, and timestamp of one execution. The
+         *     latest entry is the state the session resumes from on its next run.
+         */
+        get: operations["session_history_handler"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/version": {
         parameters: {
             query?: never;
@@ -212,6 +363,9 @@ export interface components {
              * @description Per-execution timeout in seconds (overrides server default).
              */
             execution_timeout_secs?: number | null;
+            /** @description Filesystem snapshot handle to mount: a label name or 64-hex CA id.
+             *     Independent of `heap`. */
+            fs?: string | null;
             /** @description Serialised heap snapshot key to restore before execution. */
             heap?: string | null;
             /** @description Per-execution V8 heap memory cap in megabytes. */
@@ -230,6 +384,9 @@ export interface components {
             /** @description Error message (present when `status` is `failed`). */
             error?: string | null;
             execution_id: string;
+            /** @description Filesystem snapshot CA id produced after execution (when a mount was
+             *     attached), independent of the heap. */
+            fs?: string | null;
             /** @description Heap snapshot key produced after execution. */
             heap?: string | null;
             /** @description Final return value serialised to JSON (present when `status` is `completed`). */
@@ -300,6 +457,55 @@ export interface components {
             started_at: string;
             status: string;
         };
+        /** @description Request body for `POST /api/fs/labels` (create or repoint a label). */
+        FsLabelRequest: {
+            ca_id: string;
+            /** @description Optional human note recorded on the reflog entry, like a commit message. */
+            message?: string | null;
+            name: string;
+        };
+        /** @description Optional query parameters for a label reflog read. */
+        FsLogQuery: {
+            /** @description Return only the most recent N reflog entries (oldest-first). Omit for the full history. */
+            limit?: number | null;
+        };
+        /** @description Request body for `POST /api/fs/merge`. */
+        FsMergeRequest: {
+            /** @description The common ancestor both sides diverged from. Omit for a 2-way merge. */
+            base?: string | null;
+            /** @description One side of the merge (CA id, e.g. an execution's `fs` result). */
+            ours: string;
+            /** @description `ours` or `theirs` to auto-resolve conflicts; omit to report them. */
+            prefer?: string | null;
+            /** @description The other side (CA id). */
+            theirs: string;
+        };
+        /** @description Request body for advancing a filesystem snapshot label (`POST /api/fs/push`). */
+        FsPushRequest: {
+            /** @description The CA id (hex) to point the label at — typically the `fs` value from a
+             *     completed execution. */
+            ca_id: string;
+            /** @description Do not touch any label; just echo the CA id back. */
+            detach?: boolean;
+            /** @description The head the caller pulled. The push is rejected if the label has moved
+             *     since (reject-and-rebase). Ignored when `force` is true. */
+            expected?: string | null;
+            /** @description Override the conflict check and move the label unconditionally. */
+            force?: boolean;
+            /** @description Label to advance. Omit only when `detach` is true. */
+            label?: string | null;
+            /** @description Optional human note recorded on the reflog entry, like a commit message. */
+            message?: string | null;
+        };
+        /** @description Request body for `POST /api/fs/reset`. */
+        FsResetRequest: {
+            /** @description Allow resetting to a CA id that is not in the label's reflog. */
+            allow_unlogged?: boolean;
+            ca_id: string;
+            label: string;
+            /** @description Optional human note recorded on the reflog entry, like a commit message. */
+            message?: string | null;
+        };
         /** @description Optional pagination query parameters for console output. */
         OutputQuery: {
             /**
@@ -322,6 +528,27 @@ export interface components {
              * @description Return output starting at this line number (0-indexed).
              */
             line_offset?: number | null;
+        };
+        /** @description Execution history for one named session. */
+        SessionHistory: {
+            /** @description Log entries in execution order (oldest first). Each entry has
+             *     `index`, `input_heap`, `output_heap`, `code`, and `timestamp`
+             *     unless narrowed by the `fields` query parameter. */
+            entries: unknown[];
+            /** @description The session name. */
+            session: string;
+        };
+        /** @description Optional query parameters for a session history read. */
+        SessionHistoryQuery: {
+            /** @description Comma-separated list of fields to include per entry
+             *     (`index,input_heap,output_heap,code,timestamp`). Omit for all fields. */
+            fields?: string | null;
+        };
+        /** @description Names of all named sessions with recorded execution history. */
+        SessionList: {
+            /** @description Session names, as passed via the `session` field of `POST /api/exec`
+             *     or the `X-MCP-Session-Id` MCP header. */
+            sessions: string[];
         };
     };
     responses: never;
@@ -557,6 +784,259 @@ export interface operations {
                 };
             };
             /** @description Execution not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    fs_labels_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Labels and their head CA ids */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    fs_set_label_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FsLabelRequest"];
+            };
+        };
+        responses: {
+            /** @description Label set */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    fs_resolve_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Label name */
+                label: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Current head CA id */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Unknown label */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    fs_log_handler: {
+        parameters: {
+            query?: {
+                /** @description Return only the most recent N reflog entries (oldest-first). Omit for the full history. */
+                limit?: number | null;
+            };
+            header?: never;
+            path: {
+                /** @description Label name */
+                label: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Reflog entries, oldest first */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    fs_merge_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FsMergeRequest"];
+            };
+        };
+        responses: {
+            /** @description Merge ran — body has status=merged (ca_id) or status=conflict. Text files auto-merge at line level; each conflict carries kind plus, for text, diff3 markers and unified diffs. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Invalid CA id or prefer value */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    fs_push_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FsPushRequest"];
+            };
+        };
+        responses: {
+            /** @description Push advanced the label */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Rejected — the label moved since the caller pulled */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    fs_reset_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FsResetRequest"];
+            };
+        };
+        responses: {
+            /** @description Label reset */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description CA id not in reflog (and allow_unlogged not set) */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_sessions_handler: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description All named sessions with recorded history */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionList"];
+                };
+            };
+            /** @description Session log not configured (stateless server) */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+        };
+    };
+    session_history_handler: {
+        parameters: {
+            query?: {
+                /** @description Comma-separated list of fields to include per entry
+                 *     (`index,input_heap,output_heap,code,timestamp`). Omit for all fields. */
+                fields?: string | null;
+            };
+            header?: never;
+            path: {
+                /** @description Session name */
+                session: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description History entries, oldest first */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionHistory"];
+                };
+            };
+            /** @description Session log not configured (stateless server) */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiError"];
+                };
+            };
+            /** @description Unknown session */
             404: {
                 headers: {
                     [name: string]: unknown;

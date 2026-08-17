@@ -176,6 +176,25 @@ pub struct CliIndex {
     pub assets: Vec<CliAsset>,
 }
 
+/// Names of all named sessions with recorded execution history.
+#[derive(Serialize, ToSchema)]
+pub struct SessionList {
+    /// Session names, as passed via the `session` field of `POST /api/exec`
+    /// or the `X-MCP-Session-Id` MCP header.
+    pub sessions: Vec<String>,
+}
+
+/// Execution history for one named session.
+#[derive(Serialize, ToSchema)]
+pub struct SessionHistory {
+    /// The session name.
+    pub session: String,
+    /// Log entries in execution order (oldest first). Each entry has
+    /// `index`, `input_heap`, `output_heap`, `code`, and `timestamp`
+    /// unless narrowed by the `fields` query parameter.
+    pub entries: Vec<serde_json::Value>,
+}
+
 /// Generic error body.
 #[derive(Serialize, ToSchema)]
 pub struct ApiError {
@@ -209,6 +228,15 @@ pub struct FsLogQuery {
     pub limit: Option<usize>,
 }
 
+/// Optional query parameters for a session history read.
+#[derive(Deserialize, ToSchema, utoipa::IntoParams)]
+pub struct SessionHistoryQuery {
+    /// Comma-separated list of fields to include per entry
+    /// (`index,input_heap,output_heap,code,timestamp`). Omit for all fields.
+    #[serde(default)]
+    pub fields: Option<String>,
+}
+
 // ── OpenAPI document ─────────────────────────────────────────────────────
 
 #[derive(OpenApi)]
@@ -225,6 +253,8 @@ pub struct FsLogQuery {
         get_execution_handler,
         get_execution_output_handler,
         cancel_execution_handler,
+        list_sessions_handler,
+        session_history_handler,
         cli_index_handler,
         cli_download_handler,
         fs_labels_handler,
@@ -243,9 +273,12 @@ pub struct FsLogQuery {
         ExecutionList,
         ExecutionSummary,
         CancelResult,
+        SessionList,
+        SessionHistory,
         ApiError,
         OutputQuery,
         FsLogQuery,
+        SessionHistoryQuery,
         CliAsset,
         CliIndex,
         FsPushRequest,
@@ -535,6 +568,77 @@ async fn list_executions_handler(
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": e })),
         ),
+    }
+}
+
+// ── Session endpoints ─────────────────────────────────────────────────────
+
+/// List all named sessions.
+///
+/// A session is created the first time an execution runs with a `session`
+/// name (the `session` field of `POST /api/exec`, or the `X-MCP-Session-Id`
+/// header on MCP initialize) and persists in the session database until it
+/// is cleared. Per-session heap and filesystem state is resumed from the
+/// session's latest history entry, so this is the way to discover which
+/// named sessions exist. Requires session persistence; a `--stateless`
+/// server has no session log.
+#[utoipa::path(
+    get,
+    path = "/api/sessions",
+    responses(
+        (status = 200, description = "All named sessions with recorded history", body = SessionList),
+        (status = 400, description = "Session log not configured (stateless server)", body = ApiError),
+    ),
+    tag = "sessions"
+)]
+async fn list_sessions_handler(
+    State(engine): State<Engine>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    match engine.list_sessions().await {
+        Ok(sessions) => (StatusCode::OK, Json(serde_json::json!({ "sessions": sessions }))),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))),
+    }
+}
+
+/// Show the execution history for a named session.
+///
+/// Entries are returned oldest first; each records the input heap, output
+/// heap, resulting fs snapshot, code, and timestamp of one execution. The
+/// latest entry is the state the session resumes from on its next run.
+#[utoipa::path(
+    get,
+    path = "/api/sessions/{session}/history",
+    params(
+        ("session" = String, Path, description = "Session name"),
+        SessionHistoryQuery,
+    ),
+    responses(
+        (status = 200, description = "History entries, oldest first", body = SessionHistory),
+        (status = 404, description = "Unknown session", body = ApiError),
+        (status = 400, description = "Session log not configured (stateless server)", body = ApiError),
+    ),
+    tag = "sessions"
+)]
+async fn session_history_handler(
+    State(engine): State<Engine>,
+    Path(session): Path<String>,
+    Query(query): Query<SessionHistoryQuery>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let fields = query
+        .fields
+        .map(|f| f.split(',').map(|s| s.trim().to_string()).collect::<Vec<_>>());
+    match engine.list_session_snapshots(session.clone(), fields).await {
+        // Sessions exist only by having at least one history entry, so an
+        // empty result means the name is unknown.
+        Ok(entries) if entries.is_empty() => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": format!("unknown session: {session}") })),
+        ),
+        Ok(entries) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "session": session, "entries": entries })),
+        ),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": e }))),
     }
 }
 
@@ -939,6 +1043,8 @@ pub fn api_router(engine: Engine) -> Router {
         .route("/api/executions/{id}", get(get_execution_handler))
         .route("/api/executions/{id}/output", get(get_execution_output_handler))
         .route("/api/executions/{id}/cancel", post(cancel_execution_handler))
+        .route("/api/sessions", get(list_sessions_handler))
+        .route("/api/sessions/{session}/history", get(session_history_handler))
         .route("/api/cli", get(cli_index_handler))
         .route("/api/cli/{platform}", get(cli_download_handler))
         .route("/api/fs/labels", get(fs_labels_handler).post(fs_set_label_handler))

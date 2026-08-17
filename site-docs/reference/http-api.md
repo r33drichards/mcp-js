@@ -557,6 +557,99 @@ Authentication: none.
 Authentication: none.
 
 
+## Sessions
+
+
+### List all named sessions.
+
+
+<a id="opIdlist_sessions_handler"></a>
+
+`GET /api/sessions`
+
+A session is created the first time an execution runs with a `session`
+name (the `session` field of `POST /api/exec`, or the `X-MCP-Session-Id`
+header on MCP initialize) and persists in the session database until it
+is cleared. Per-session heap and filesystem state is resumed from the
+session's latest history entry, so this is the way to discover which
+named sessions exist. Requires session persistence; a `--stateless`
+server has no session log.
+
+> Example responses
+
+> 200 Response
+
+```json
+{
+  "sessions": [
+    "string"
+  ]
+}
+```
+
+<a id="list-all-named-sessions.-responses"></a>
+#### Responses
+
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|All named sessions with recorded history|[SessionList](#schemasessionlist)|
+|400|[Bad Request](https://tools.ietf.org/html/rfc7231#section-6.5.1)|Session log not configured (stateless server)|[ApiError](#schemaapierror)|
+
+Authentication: none.
+
+
+### Show the execution history for a named session.
+
+
+<a id="opIdsession_history_handler"></a>
+
+`GET /api/sessions/{session}/history`
+
+Entries are returned oldest first; each records the input heap, output
+heap, resulting fs snapshot, code, and timestamp of one execution. The
+latest entry is the state the session resumes from on its next run.
+
+<a id="show-the-execution-history-for-a-named-session.-parameters"></a>
+#### Parameters
+
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|session|path|string|true|Session name|
+|fields|query|string|false|Comma-separated list of fields to include per entry|
+
+#### Detailed descriptions
+
+**fields**: Comma-separated list of fields to include per entry
+(`index,input_heap,output_heap,code,timestamp`). Omit for all fields.
+
+> Example responses
+
+> 200 Response
+
+```json
+{
+  "entries": [
+    null
+  ],
+  "session": "string"
+}
+```
+
+<a id="show-the-execution-history-for-a-named-session.-responses"></a>
+#### Responses
+
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|History entries, oldest first|[SessionHistory](#schemasessionhistory)|
+|400|[Bad Request](https://tools.ietf.org/html/rfc7231#section-6.5.1)|Session log not configured (stateless server)|[ApiError](#schemaapierror)|
+|404|[Not Found](https://tools.ietf.org/html/rfc7231#section-6.5.4)|Unknown session|[ApiError](#schemaapierror)|
+
+Authentication: none.
+
+
 ## Meta
 
 
@@ -1037,3 +1130,75 @@ Optional pagination query parameters for console output.
 |byte_offset|integer(int64)¦null|false|none|Return output starting at this byte offset.|
 |line_limit|integer(int64)¦null|false|none|Maximum number of lines to return.|
 |line_offset|integer(int64)¦null|false|none|Return output starting at this line number (0-indexed).|
+
+<h2 id="tocS_SessionHistory">SessionHistory</h2>
+<!-- backwards compatibility -->
+<a id="schemasessionhistory"></a>
+<a id="schema_SessionHistory"></a>
+<a id="tocSsessionhistory"></a>
+<a id="tocssessionhistory"></a>
+
+```json
+{
+  "entries": [
+    null
+  ],
+  "session": "string"
+}
+
+```
+
+Execution history for one named session.
+
+### Properties
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|entries|[any]|true|none|Log entries in execution order (oldest first). Each entry has<br>`index`, `input_heap`, `output_heap`, `code`, and `timestamp`<br>unless narrowed by the `fields` query parameter.|
+|session|string|true|none|The session name.|
+
+<h2 id="tocS_SessionHistoryQuery">SessionHistoryQuery</h2>
+<!-- backwards compatibility -->
+<a id="schemasessionhistoryquery"></a>
+<a id="schema_SessionHistoryQuery"></a>
+<a id="tocSsessionhistoryquery"></a>
+<a id="tocssessionhistoryquery"></a>
+
+```json
+{
+  "fields": "string"
+}
+
+```
+
+Optional query parameters for a session history read.
+
+### Properties
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|fields|string¦null|false|none|Comma-separated list of fields to include per entry<br>(`index,input_heap,output_heap,code,timestamp`). Omit for all fields.|
+
+<h2 id="tocS_SessionList">SessionList</h2>
+<!-- backwards compatibility -->
+<a id="schemasessionlist"></a>
+<a id="schema_SessionList"></a>
+<a id="tocSsessionlist"></a>
+<a id="tocssessionlist"></a>
+
+```json
+{
+  "sessions": [
+    "string"
+  ]
+}
+
+```
+
+Names of all named sessions with recorded execution history.
+
+### Properties
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|sessions|[string]|true|none|Session names, as passed via the `session` field of `POST /api/exec`<br>or the `X-MCP-Session-Id` MCP header.|

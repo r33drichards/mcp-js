@@ -90,6 +90,18 @@ impl SessionLog {
         format!("{}{}:", SL_ENTRY_PREFIX, session)
     }
 
+    /// Whether a sled tree already exists for this session. Read paths must
+    /// check this before `open_tree`, which *creates* the tree as a side
+    /// effect — otherwise merely querying a session name (a `run_js` submit
+    /// that later fails, a history lookup for a typo'd name) would register
+    /// a phantom session in `list_sessions`.
+    fn tree_exists(&self, session: &str) -> bool {
+        self.db
+            .tree_names()
+            .iter()
+            .any(|name| name.as_ref() == session.as_bytes())
+    }
+
     // --------------------------------------------------------------------
     // Public API – all async to accommodate cluster round-trips.
     // --------------------------------------------------------------------
@@ -158,6 +170,15 @@ impl SessionLog {
                     Some(s)
                 }
             })
+            // Entries are append-only, so an empty tree can only be a phantom
+            // left behind by a pre-fix read that created it via `open_tree`.
+            .filter(|s| {
+                self.db
+                    .open_tree(s)
+                    .ok()
+                    .and_then(|tree| tree.first().ok().flatten())
+                    .is_some()
+            })
             .collect();
         Ok(names)
     }
@@ -181,7 +202,11 @@ impl SessionLog {
             return Ok(results);
         }
 
-        // Standalone mode.
+        // Standalone mode. An unknown session simply has no entries; don't
+        // open (and thereby create) a tree for it.
+        if !self.tree_exists(session) {
+            return Ok(Vec::new());
+        }
         let tree = self
             .db
             .open_tree(session)
@@ -224,6 +249,11 @@ impl SessionLog {
             };
         }
 
+        // An unknown session has no latest entry; don't open (and thereby
+        // create) a tree for it.
+        if !self.tree_exists(session) {
+            return Ok(None);
+        }
         let tree = self
             .db
             .open_tree(session)
@@ -314,6 +344,15 @@ impl SessionLog {
                                 serde_json::Value::String(entry.output_heap.clone()),
                             );
                         }
+                        "output_fs" => {
+                            obj.insert(
+                                "output_fs".to_string(),
+                                match &entry.output_fs {
+                                    Some(f) => serde_json::Value::String(f.clone()),
+                                    None => serde_json::Value::Null,
+                                },
+                            );
+                        }
                         "code" => {
                             obj.insert(
                                 "code".to_string(),
@@ -347,6 +386,13 @@ impl SessionLog {
                 obj.insert(
                     "output_heap".to_string(),
                     serde_json::Value::String(entry.output_heap.clone()),
+                );
+                obj.insert(
+                    "output_fs".to_string(),
+                    match &entry.output_fs {
+                        Some(f) => serde_json::Value::String(f.clone()),
+                        None => serde_json::Value::Null,
+                    },
                 );
                 obj.insert(
                     "code".to_string(),

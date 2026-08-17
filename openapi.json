@@ -516,6 +516,101 @@
         }
       }
     },
+    "/api/sessions": {
+      "get": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "List all named sessions.",
+        "description": "A session is created the first time an execution runs with a `session`\nname (the `session` field of `POST /api/exec`, or the `X-MCP-Session-Id`\nheader on MCP initialize) and persists in the session database until it\nis cleared. Per-session heap and filesystem state is resumed from the\nsession's latest history entry, so this is the way to discover which\nnamed sessions exist. Requires session persistence; a `--stateless`\nserver has no session log.",
+        "operationId": "list_sessions_handler",
+        "responses": {
+          "200": {
+            "description": "All named sessions with recorded history",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionList"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Session log not configured (stateless server)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{session}/history": {
+      "get": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Show the execution history for a named session.",
+        "description": "Entries are returned oldest first; each records the input heap, output\nheap, resulting fs snapshot, code, and timestamp of one execution. The\nlatest entry is the state the session resumes from on its next run.",
+        "operationId": "session_history_handler",
+        "parameters": [
+          {
+            "name": "session",
+            "in": "path",
+            "description": "Session name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "fields",
+            "in": "query",
+            "description": "Comma-separated list of fields to include per entry\n(`index,input_heap,output_heap,code,timestamp`). Omit for all fields.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "History entries, oldest first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionHistory"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Session log not configured (stateless server)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown session",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/version": {
       "get": {
         "tags": [
@@ -987,6 +1082,52 @@
             "description": "Return output starting at this line number (0-indexed).",
             "nullable": true,
             "minimum": 0
+          }
+        }
+      },
+      "SessionHistory": {
+        "type": "object",
+        "description": "Execution history for one named session.",
+        "required": [
+          "session",
+          "entries"
+        ],
+        "properties": {
+          "entries": {
+            "type": "array",
+            "items": {},
+            "description": "Log entries in execution order (oldest first). Each entry has\n`index`, `input_heap`, `output_heap`, `code`, and `timestamp`\nunless narrowed by the `fields` query parameter."
+          },
+          "session": {
+            "type": "string",
+            "description": "The session name."
+          }
+        }
+      },
+      "SessionHistoryQuery": {
+        "type": "object",
+        "description": "Optional query parameters for a session history read.",
+        "properties": {
+          "fields": {
+            "type": "string",
+            "description": "Comma-separated list of fields to include per entry\n(`index,input_heap,output_heap,code,timestamp`). Omit for all fields.",
+            "nullable": true
+          }
+        }
+      },
+      "SessionList": {
+        "type": "object",
+        "description": "Names of all named sessions with recorded execution history.",
+        "required": [
+          "sessions"
+        ],
+        "properties": {
+          "sessions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Session names, as passed via the `session` field of `POST /api/exec`\nor the `X-MCP-Session-Id` MCP header."
           }
         }
       }

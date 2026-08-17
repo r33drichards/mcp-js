@@ -199,7 +199,7 @@ Parameters:
 ### `list_session_snapshots`
 <a id="heap+fs-list-session-snapshots"></a>
 
-List all log entries for the current session (stateful mode only). Each entry contains the input heap hash, output heap hash, code executed, and timestamp. Use the fields parameter to select specific fields (comma-separated: index,input_heap,output_heap,code,timestamp).
+List all log entries for the current session (stateful mode only). Each entry contains the input heap hash, output heap hash, resulting fs snapshot CA id, code executed, and timestamp. Use the fields parameter to select specific fields (comma-separated: index,input_heap,output_heap,output_fs,code,timestamp).
 
 Parameters:
 

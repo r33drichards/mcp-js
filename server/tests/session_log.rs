@@ -141,9 +141,55 @@ async fn test_field_filtering() {
 async fn test_empty_session_entries() {
     let log = temp_session_log();
 
-    // Listing entries for a non-existent session should return empty (open_tree creates it lazily)
+    // Listing entries for a non-existent session should return empty
     let entries = log.list_entries("nonexistent", None).await.unwrap();
     assert!(entries.is_empty());
+}
+
+#[tokio::test]
+async fn test_reads_do_not_register_sessions() {
+    let log = temp_session_log();
+
+    // Merely querying a session name (as every run_js submit and history
+    // lookup does) must not make it appear in list_sessions.
+    assert!(log.get_latest("ghost").await.unwrap().is_none());
+    let entries = log.list_entries("phantom", None).await.unwrap();
+    assert!(entries.is_empty());
+
+    let sessions = log.list_sessions().await.unwrap();
+    assert!(
+        sessions.is_empty(),
+        "reads registered phantom sessions: {:?}",
+        sessions
+    );
+
+    // A real append still registers the session.
+    log.append("real", make_entry(None, "h1", "c1")).await.unwrap();
+    assert_eq!(log.list_sessions().await.unwrap(), vec!["real"]);
+}
+
+#[tokio::test]
+async fn test_entries_include_output_fs() {
+    let log = temp_session_log();
+
+    let mut entry = make_entry(None, "h1", "c1");
+    entry.output_fs = Some("fs-ca-id".to_string());
+    log.append("s", entry).await.unwrap();
+    log.append("s", make_entry(Some("h1"), "h2", "c2")).await.unwrap();
+
+    // Default (unfiltered) listing exposes the fs snapshot per entry.
+    let entries = log.list_entries("s", None).await.unwrap();
+    assert_eq!(entries[0]["output_fs"], "fs-ca-id");
+    assert_eq!(entries[1]["output_fs"], serde_json::Value::Null);
+
+    // output_fs is selectable via the fields filter.
+    let entries = log
+        .list_entries("s", Some(vec!["output_fs".to_string()]))
+        .await
+        .unwrap();
+    let obj = entries[0].as_object().unwrap();
+    assert!(obj.contains_key("output_fs"));
+    assert!(!obj.contains_key("output_heap"));
 }
 
 #[tokio::test]

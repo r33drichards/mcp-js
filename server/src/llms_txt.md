@@ -29,9 +29,9 @@ mcp-v8 exposes a V8 JavaScript runtime as MCP tools. Agents can run JS/TS code, 
 
 ### Additional tools (stateful mode only)
 
-- `run_js` gains extra params: `heap` (SHA-256 to resume from), `session` (human-readable session name), `tags` (key-value metadata for the heap snapshot).
+- `run_js` gains extra params: `heap` (SHA-256 to resume from) and `tags` (key-value metadata for the heap snapshot). There is no `session` tool parameter — session identity comes from the `X-MCP-Session-Id` header on MCP, or the `session` field of REST `POST /api/exec`.
 - `list_sessions()` — List all named sessions.
-- `list_session_snapshots(session, [fields])` — Browse execution history for a session.
+- `list_session_snapshots([fields])` — Browse the current session's execution history (session name from the `X-MCP-Session-Id` header).
 - `get_heap_tags(heap)` — Get tags for a heap snapshot.
 - `set_heap_tags(heap, tags)` — Set tags on a heap snapshot.
 - `delete_heap_tags(heap, keys)` — Delete tag keys from a heap snapshot.
@@ -112,6 +112,8 @@ In stateful mode, pass the returned `heap` hash back to `run_js` to resume that 
 | GET | /api/executions/{id} | Get execution status + result |
 | GET | /api/executions/{id}/output | Read paginated console output |
 | POST | /api/executions/{id}/cancel | Cancel a running execution |
+| GET | /api/sessions | List all named sessions |
+| GET | /api/sessions/{session}/history | Browse a session's execution history |
 | GET | /api-doc/openapi.json | OpenAPI 3.0 spec |
 | GET | /docs | Full documentation |
 | GET | /llms.txt | This file |

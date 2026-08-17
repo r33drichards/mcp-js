@@ -70,12 +70,13 @@ Each stateful execution that has a session name writes a `SessionLogEntry` to th
 SessionLogEntry {
     input_heap:  Option<String>,   // heap hash passed to this execution, or null
     output_heap: String,           // heap hash produced by this execution
+    output_fs:   Option<String>,   // fs snapshot CA id produced, or null
     code:        String,           // JavaScript source that was executed
     timestamp:   String,           // RFC 3339 UTC timestamp
 }
 ```
 
-Entries are appended in execution order and exposed through `list_session_snapshots`. In cluster mode, entries are replicated to all peers via Raft. The `index` field in the returned JSON reflects insertion order within the session (a monotonically increasing integer).
+Entries are appended in execution order and exposed through the `list_session_snapshots` MCP tool and `GET /api/sessions/{session}/history`; session names are enumerable via the `list_sessions` MCP tool and `GET /api/sessions`. In cluster mode, entries are replicated to all peers via Raft. The `index` field in the returned JSON reflects insertion order within the session (a monotonically increasing integer).
 
 ## Immutability and deduplication
 
