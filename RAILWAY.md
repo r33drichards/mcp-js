@@ -25,7 +25,8 @@ A single service running the mcp-v8 server over Streamable HTTP:
   network, filesystem, or subprocess ops; the variables below additionally
   confine the whole server process with the kernel-enforced
   [OS sandbox](https://r33drichards.github.io/mcp-js/how-to/os-sandbox/)
-  (Landlock), which blocks all outbound network egress
+  (Landlock), locking filesystem access down to the server's own storage
+  and config paths while leaving networking open
 
 Railway injects `PORT`; the Docker image folds it into `--http-port`
 automatically, so no start command is needed. The image also sets
@@ -49,7 +50,7 @@ service's own Railway domains.
    MCP_V8_FS_DIR=/data/fs
    MCP_V8_SESSION_DB_PATH=/data/sessions
    MCP_V8_ALLOWED_HOSTS=${{RAILWAY_PUBLIC_DOMAIN}},${{RAILWAY_PRIVATE_DOMAIN}}
-   MCP_V8_SANDBOX_MANIFEST={"version":"0.1.0","network":{"mode":"blocked"}}
+   MCP_V8_SANDBOX_MANIFEST={"version":"0.1.0","network":{"mode":"unrestricted"}}
    ```
 
 4. **Enable public networking**: Settings tab → Networking → Generate Domain
@@ -98,7 +99,7 @@ workspace's **Templates** page, click **New Template**, then:
 | `MCP_V8_FS_DIR` | `/data/fs` | Keep `/work` snapshots on the volume. |
 | `MCP_V8_SESSION_DB_PATH` | `/data/sessions` | Session log + async-execution registry on the volume (default is `/tmp`, which is wiped on redeploy). |
 | `MCP_V8_ALLOWED_HOSTS` | `${{RAILWAY_PUBLIC_DOMAIN}},${{RAILWAY_PRIVATE_DOMAIN}}` | Narrows the image's `*` Host allowlist to the domains Railway actually serves, restoring DNS-rebinding protection on `/mcp`. |
-| `MCP_V8_SANDBOX_MANIFEST` | `{"version":"0.1.0","network":{"mode":"blocked"}}` | Confines the whole server process with the kernel-enforced [OS sandbox](https://r33drichards.github.io/mcp-js/how-to/os-sandbox/) (Landlock): filesystem access is limited to the server's own storage/config paths and all outbound network egress is blocked. The listener port and the `/data` directories are granted automatically. |
+| `MCP_V8_SANDBOX_MANIFEST` | `{"version":"0.1.0","network":{"mode":"unrestricted"}}` | Confines the whole server process with the kernel-enforced [OS sandbox](https://r33drichards.github.io/mcp-js/how-to/os-sandbox/) (Landlock): filesystem access is limited to the server's own storage/config paths — the `/data` directories are granted automatically — while networking stays open so features that dial out (`JWKS_URL`, `fetch()` policies, S3 stores) keep working. |
 | `JWKS_URL` | *(optional, empty)* | Set to an OIDC JWKS endpoint (e.g. Keycloak certs URL) to require JWT bearer auth. Leave unset for an open server. |
 
 Notes:
@@ -106,17 +107,18 @@ Notes:
 - Heap persistence uses a V8 `SnapshotCreator` isolate, which disables
   WebAssembly — drop the three heap/fs variables (and the volume) for a
   stateless, WASM-capable deployment.
-- **The sandbox manifest owns outbound egress.** The default deployment dials
-  nothing out, so `"mode": "blocked"` costs nothing. Any feature that does
-  dial out — `JWKS_URL`, S3 stores, `fetch()` policies, remote OPA,
-  `--allow-external-modules`, SSE MCP servers — needs the manifest to open
-  the port, typically
+- **The manifest owns outbound egress.** The default above leaves the
+  network `unrestricted`, so `JWKS_URL`, S3 stores, `fetch()` policies,
+  remote OPA, `--allow-external-modules`, and SSE MCP servers all just work.
+  To lock egress down, switch to
+  `{"version":"0.1.0","network":{"mode":"blocked"}}` (nothing dials out) or
+  allow HTTPS only with
   `{"version":"0.1.0","network":{"mode":"blocked","ports":{"connect":[443]}}}`.
-  A blocked manifest silently wins over such a feature: the server warns at
-  startup and the feature fails at runtime.
-- **The OS sandbox fails closed.** Port-scoped Landlock rules (blocked egress
-  plus a bind grant for the listener) need Linux 6.7+ with Landlock enabled
-  in the runtime's kernel. If Railway's runtime cannot enforce the composed
+  A blocked manifest silently wins over a feature that dials out: the server
+  warns at startup and the feature fails at runtime.
+- **The OS sandbox fails closed.** The filesystem-only default needs Linux
+  5.13+ with Landlock enabled in the runtime's kernel; the port-scoped
+  variants above need 6.7+. If Railway's runtime cannot enforce the composed
   set, the deploy aborts with `Landlock not available ...` instead of running
   unconfined — check the deploy logs on a first-boot crash, and only then
   decide whether to remove `MCP_V8_SANDBOX_MANIFEST` and fall back to
@@ -125,7 +127,7 @@ Notes:
   are also available.
 - **The default template is unauthenticated.** Scripts run in a sandboxed V8
   isolate with network/filesystem/subprocess access denied by default — and
-  with the manifest above, a kernel-enforced deny-all on egress underneath
+  with the manifest above, a kernel-enforced filesystem lockdown underneath
   it — but anyone with the URL can still burn CPU. For
   anything beyond experiments, set `JWKS_URL`, front the service with an auth
   proxy, or skip the public domain and use
@@ -154,9 +156,8 @@ Ready-to-paste overview for the publish form, following Railway's
 > session database, and health-checks `/api/version`. Railway injects `PORT`
 > automatically; host-header protection is scoped to the service's Railway
 > domains. The template deploys sandboxed by default: a kernel-enforced
-> (Landlock) OS sandbox restricts the process to its own storage paths and
-> blocks outbound network egress. Optional JWT auth is one `JWKS_URL`
-> variable away.
+> (Landlock) OS sandbox restricts the process's filesystem access to its
+> own storage paths. Optional JWT auth is one `JWKS_URL` variable away.
 >
 > ## Common Use Cases
 >
