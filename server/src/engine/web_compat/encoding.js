@@ -119,13 +119,18 @@
 
     function toBytes(input, method) {
         if (input === undefined) return new Uint8Array(0);
-        if (input instanceof ArrayBuffer ||
-            (typeof SharedArrayBuffer === 'function' && input instanceof SharedArrayBuffer)) {
-            return new Uint8Array(input.slice(0));
-        }
-        if (ArrayBuffer.isView(input)) {
-            return new Uint8Array(
-                input.buffer.slice(input.byteOffset, input.byteOffset + input.byteLength));
+        // Detached buffers count as empty per WebIDL get-a-copy semantics.
+        try {
+            if (input instanceof ArrayBuffer ||
+                (typeof SharedArrayBuffer === 'function' && input instanceof SharedArrayBuffer)) {
+                return new Uint8Array(input.slice(0));
+            }
+            if (ArrayBuffer.isView(input)) {
+                return new Uint8Array(
+                    input.buffer.slice(input.byteOffset, input.byteOffset + input.byteLength));
+            }
+        } catch (_) {
+            return new Uint8Array(0);
         }
         throw new TypeError(
             "Failed to execute '" + method + "': parameter 1 is not of type 'BufferSource'.");

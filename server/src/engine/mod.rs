@@ -20,6 +20,7 @@ pub mod opa;
 pub mod run_js_file;
 pub mod session_log;
 pub mod subprocess;
+pub mod compression;
 pub mod crypto;
 pub mod encoding;
 pub mod timers;
@@ -967,6 +968,7 @@ pub fn execute_stateless(
         extensions.push(url_support::create_extension());
         extensions.push(encoding::create_extension());
         extensions.push(crypto::create_extension());
+        extensions.push(compression::create_extension());
 
         // Always create a module loader — all code runs as ES modules.
         let module_loader: Rc<dyn deno_core::ModuleLoader> = match module_loader_config {
@@ -1091,6 +1093,9 @@ pub fn execute_stateless(
                     if let Err(e) = crypto::inject_crypto(&mut runtime) {
                         return Err(e);
                     }
+                    if let Err(e) = web_compat::inject_web_compat_extras(&mut runtime) {
+                        return Err(e);
+                    }
                     // Harden sandbox: freeze ops, neutralize introspection, remove __bootstrap.
                     // Must run after all inject_* calls and before user code.
                     if let Err(e) = console::harden_runtime(&mut runtime, hardening) {
@@ -1190,6 +1195,7 @@ pub fn execute_stateful(
         extensions.push(url_support::create_extension());
         extensions.push(encoding::create_extension());
         extensions.push(crypto::create_extension());
+        extensions.push(compression::create_extension());
 
         // Always create a module loader — all code runs as ES modules.
         let module_loader: Rc<dyn deno_core::ModuleLoader> = match module_loader_config {
@@ -1322,6 +1328,9 @@ pub fn execute_stateful(
                         return Err(e);
                     }
                     if let Err(e) = crypto::inject_crypto_snapshot(&mut runtime) {
+                        return Err(e);
+                    }
+                    if let Err(e) = web_compat::inject_web_compat_extras_snapshot(&mut runtime) {
                         return Err(e);
                     }
                     // Harden sandbox: freeze ops, neutralize introspection, remove __bootstrap.

@@ -30,6 +30,65 @@ fn user_agent_prelude() -> String {
     )
 }
 
+/// Later-stage files: these depend on the encoding layer (injected by
+/// `encoding::inject_encoding`) and on each other in order — the vendored
+/// web-streams-polyfill provides TransformStream for the encoder/decoder
+/// and compression streams.
+fn extras_sources() -> Vec<(&'static str, String)> {
+    vec![
+        (
+            "<web-compat-streams>",
+            include_str!("web_compat/vendor/web-streams-polyfill.js").to_string(),
+        ),
+        (
+            "<web-compat-urlpattern>",
+            format!(
+                "(function() {{\n'use strict';\n\
+                 if (typeof globalThis.URLPattern === 'function') return;\n\
+                 var module = {{ exports: {{}} }};\nvar exports = module.exports;\n{}\n\
+                 globalThis.URLPattern = module.exports.URLPattern;\n}})();",
+                include_str!("web_compat/vendor/urlpattern-polyfill.cjs")
+            ),
+        ),
+        (
+            "<web-compat-streams-extra>",
+            include_str!("web_compat/streams_extra.js").to_string(),
+        ),
+        (
+            "<web-compat-compression>",
+            include_str!("web_compat/compression.js").to_string(),
+        ),
+        (
+            "<web-compat-fetch-classes>",
+            include_str!("web_compat/fetch_classes.js").to_string(),
+        ),
+        (
+            "<web-compat-wasm-streaming>",
+            include_str!("web_compat/wasm_streaming.js").to_string(),
+        ),
+    ]
+}
+
+pub fn inject_web_compat_extras(runtime: &mut JsRuntime) -> Result<(), String> {
+    for (name, source) in extras_sources() {
+        runtime
+            .execute_script(name, source)
+            .map_err(|e| format!("Failed to install {}: {}", name, e))?;
+    }
+    Ok(())
+}
+
+pub fn inject_web_compat_extras_snapshot(
+    runtime: &mut deno_core::JsRuntimeForSnapshot,
+) -> Result<(), String> {
+    for (name, source) in extras_sources() {
+        runtime
+            .execute_script(name, source)
+            .map_err(|e| format!("Failed to install {}: {}", name, e))?;
+    }
+    Ok(())
+}
+
 pub fn inject_web_compat(runtime: &mut JsRuntime) -> Result<(), String> {
     runtime
         .execute_script("<web-compat-ua>", user_agent_prelude())

@@ -21,10 +21,16 @@
     }
 
     function toBytes(data, method) {
-        if (data instanceof ArrayBuffer) return new Uint8Array(data.slice(0));
-        if (ArrayBuffer.isView(data)) {
-            return new Uint8Array(
-                data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength));
+        // Detached buffers (e.g. transferred during argument conversion)
+        // count as empty per WebIDL's get-a-copy semantics.
+        try {
+            if (data instanceof ArrayBuffer) return new Uint8Array(data.slice(0));
+            if (ArrayBuffer.isView(data)) {
+                return new Uint8Array(
+                    data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength));
+            }
+        } catch (_) {
+            return new Uint8Array(0);
         }
         throw new TypeError(
             "Failed to execute '" + method + "': parameter is not of type 'BufferSource'.");
@@ -237,9 +243,9 @@
                     'TypeMismatchError');
             }
             if (array.byteLength > 65536) {
-                throw new DOMException(
+                throw new QuotaExceededError(
                     "Failed to execute 'getRandomValues': The requested length exceeds 65536 bytes.",
-                    'QuotaExceededError');
+                    { requested: array.byteLength, quota: 65536 });
             }
             var bytes = new Uint8Array(array.byteLength);
             opGetRandomValues(bytes);

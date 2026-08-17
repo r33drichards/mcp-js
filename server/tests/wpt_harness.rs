@@ -144,6 +144,32 @@ fn assemble_source(vendor: &Path, test_rel: &Path) -> Result<String, String> {
         "globalThis.__WPT_TEST_PATH__ = {};\n",
         serde_json::to_string(&format!("/{}", test_rel.display())).unwrap()
     ));
+    // Embed sibling resources/*.json files so data-driven tests can
+    // `fetch("resources/x.json")` without a wptserve: the bootstrap's fetch
+    // shim serves them from this map.
+    let resources_dir = vendor.join(test_rel.parent().unwrap()).join("resources");
+    if resources_dir.is_dir() {
+        let mut map = serde_json::Map::new();
+        let mut entries: Vec<_> = std::fs::read_dir(&resources_dir)
+            .map_err(|e| format!("read {}: {e}", resources_dir.display()))?
+            .flatten()
+            .collect();
+        entries.sort_by_key(|e| e.file_name());
+        for entry in entries {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.ends_with(".json") {
+                let content = std::fs::read_to_string(entry.path())
+                    .map_err(|e| format!("read {}: {e}", entry.path().display()))?;
+                map.insert(format!("resources/{name}"), content.into());
+            }
+        }
+        if !map.is_empty() {
+            source.push_str(&format!(
+                "globalThis.__WPT_RESOURCES__ = {};\n",
+                serde_json::Value::Object(map)
+            ));
+        }
+    }
     source.push_str(BOOTSTRAP_JS);
     source.push_str(&harness);
     source.push_str(REPORT_JS);

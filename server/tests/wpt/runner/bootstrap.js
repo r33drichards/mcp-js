@@ -25,3 +25,28 @@ globalThis.GLOBAL = {
     hash: "",
   };
 })();
+
+// Serve embedded test resources (resources/*.json, injected by the Rust
+// harness as __WPT_RESOURCES__) through fetch, so data-driven tests work
+// without a wptserve. Everything else falls through to the real fetch.
+(function () {
+  var resources = globalThis.__WPT_RESOURCES__;
+  if (!resources) return;
+  var realFetch = globalThis.fetch;
+  globalThis.fetch = function fetch(input, init) {
+    var key = String(input);
+    if (Object.prototype.hasOwnProperty.call(resources, key)) {
+      var text = resources[key];
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: function () { return Promise.resolve(JSON.parse(text)); },
+        text: function () { return Promise.resolve(text); },
+      });
+    }
+    if (typeof realFetch === "function") {
+      return realFetch.apply(this, arguments);
+    }
+    return Promise.reject(new TypeError("fetch is not available"));
+  };
+})();

@@ -75,6 +75,55 @@
     }
     globalThis.DOMException = DOMException;
 
+    // QuotaExceededError graduated from a DOMException name to its own
+    // interface (with quota/requested members) in the 2025 spec.
+    var quotaData = new WeakMap();
+    class QuotaExceededError extends DOMException {
+        constructor(message, options) {
+            super(message, 'QuotaExceededError');
+            var quota = null, requested = null;
+            if (options !== undefined && options !== null) {
+                if (typeof options !== 'object' && typeof options !== 'function') {
+                    throw new TypeError(
+                        "Failed to construct 'QuotaExceededError': The provided value is not of type 'QuotaExceededErrorOptions'.");
+                }
+                if (options.quota !== undefined) {
+                    quota = Number(options.quota);
+                    if (!Number.isFinite(quota) || quota < 0) {
+                        throw new RangeError(
+                            "Failed to construct 'QuotaExceededError': quota must be a non-negative number.");
+                    }
+                }
+                if (options.requested !== undefined) {
+                    requested = Number(options.requested);
+                    if (!Number.isFinite(requested) || requested < 0) {
+                        throw new RangeError(
+                            "Failed to construct 'QuotaExceededError': requested must be a non-negative number.");
+                    }
+                }
+                if (quota !== null && requested !== null && requested < quota) {
+                    throw new RangeError(
+                        "Failed to construct 'QuotaExceededError': requested cannot be less than quota.");
+                }
+            }
+            quotaData.set(this, { quota: quota, requested: requested });
+        }
+        get quota() {
+            var d = quotaData.get(this);
+            if (!d) throw new TypeError('Illegal invocation');
+            return d.quota;
+        }
+        get requested() {
+            var d = quotaData.get(this);
+            if (!d) throw new TypeError('Illegal invocation');
+            return d.requested;
+        }
+    }
+    Object.defineProperty(QuotaExceededError.prototype, Symbol.toStringTag, {
+        value: 'QuotaExceededError', configurable: true,
+    });
+    globalThis.QuotaExceededError = QuotaExceededError;
+
     // ── Event ───────────────────────────────────────────────────────────
     // Internal state lives in a WeakMap keyed by the event object.
     var eventData = new WeakMap();
@@ -555,12 +604,22 @@
         d.reason = reason !== undefined
             ? reason
             : new DOMException('signal is aborted without reason', 'AbortError');
-        // Dependent signals abort before the event fires on this one.
-        var dependents = d.dependents.slice();
-        var ev = new Event('abort');
-        dispatchInternal(signal, ev);
+        // Per spec, every dependent signal's state flips before any abort
+        // event fires; events then fire source-first, dependents in
+        // registration order.
+        var toFire = [signal];
+        var dependents = d.dependents;
+        d.dependents = [];
         for (var i = 0; i < dependents.length; i++) {
-            signalAbort(dependents[i], d.reason);
+            var dd = sdata(dependents[i]);
+            if (!dd.aborted) {
+                dd.aborted = true;
+                dd.reason = d.reason;
+                toFire.push(dependents[i]);
+            }
+        }
+        for (var j = 0; j < toFire.length; j++) {
+            dispatchInternal(toFire[j], new Event('abort'));
         }
     }
 
@@ -601,22 +660,35 @@
                     "Failed to execute 'any': 1 argument required, but only 0 present.");
             }
             var list = Array.from(signals);
-            var result = createSignal();
             for (var i = 0; i < list.length; i++) {
                 if (!(list[i] instanceof AbortSignal)) {
                     throw new TypeError(
                         "Failed to execute 'any' on 'AbortSignal': Failed to convert value to 'AbortSignal'.");
                 }
             }
+            var result = createSignal();
+            var rd = sdata(result);
+            rd.dependent = true;
+            rd.sources = [];
             for (var j = 0; j < list.length; j++) {
                 if (list[j].aborted) {
-                    sdata(result).aborted = true;
-                    sdata(result).reason = sdata(list[j]).reason;
+                    rd.aborted = true;
+                    rd.reason = sdata(list[j]).reason;
+                    rd.sources = [];
                     return result;
                 }
             }
+            // Flatten: a dependent signal contributes its source signals, so
+            // dependents always hang off originating (non-composite) signals.
             for (var k = 0; k < list.length; k++) {
-                sdata(list[k]).dependents.push(result);
+                var sd = sdata(list[k]);
+                var sources = sd.dependent ? sd.sources : [list[k]];
+                for (var l = 0; l < sources.length; l++) {
+                    if (rd.sources.indexOf(sources[l]) === -1) {
+                        rd.sources.push(sources[l]);
+                        sdata(sources[l]).dependents.push(result);
+                    }
+                }
             }
             return result;
         }

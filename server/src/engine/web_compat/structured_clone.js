@@ -67,7 +67,12 @@
             if (typeof value.detached === 'boolean' && value.detached) {
                 throw cloneError(value);
             }
-            out = value.slice(0);
+            if (value.resizable) {
+                out = new ArrayBuffer(value.byteLength, { maxByteLength: value.maxByteLength });
+                new Uint8Array(out).set(new Uint8Array(value));
+            } else {
+                out = value.slice(0);
+            }
             memo.set(value, out);
             return out;
         }
@@ -107,7 +112,9 @@
         }
         if (value instanceof Error) {
             var Ctor = ERROR_TYPES[value.name] || Error;
-            out = new Ctor(value.message);
+            // An empty message stays a *missing* own property on the clone.
+            out = value.message === '' || value.message === undefined
+                ? new Ctor() : new Ctor(value.message);
             memo.set(value, out);
             try {
                 if ('stack' in value) out.stack = value.stack;
@@ -140,6 +147,20 @@
             (typeof WeakRef === 'function' && value instanceof WeakRef) ||
             (typeof MessagePort === 'function' && value instanceof MessagePort)) {
             throw cloneError(value);
+        }
+
+        // Platform objects (Event, EventTarget, URL, Headers, ...) are not
+        // serializable unless special-cased above. Heuristic: a prototype
+        // below Object.prototype carrying its own Symbol.toStringTag is a
+        // branded platform (or platform-like) class.
+        if (!Array.isArray(value)) {
+            var proto = Object.getPrototypeOf(value);
+            while (proto !== null && proto !== Object.prototype) {
+                if (Object.prototype.hasOwnProperty.call(proto, Symbol.toStringTag)) {
+                    throw cloneError(value);
+                }
+                proto = Object.getPrototypeOf(proto);
+            }
         }
 
         if (Array.isArray(value)) {

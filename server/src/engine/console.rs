@@ -215,22 +215,234 @@ pub fn inject_console_snapshot(runtime: &mut deno_core::JsRuntimeForSnapshot) ->
 
 /// JavaScript wrapper that overrides `globalThis.console` to route output
 /// through `op_console_write`.
+///
+/// Shaped like the Console Standard's namespace object: prototype chain is
+/// console -> (empty object) -> Object.prototype, @@toStringTag "console",
+/// and the full method set. The inspector is depth- and length-capped so
+/// logging huge arrays/typed arrays stays O(cap), not O(n).
 const CONSOLE_JS_WRAPPER: &str = r#"
 (function() {
-    function formatArgs(args) {
-        return args.map(function(a) {
-            if (typeof a === 'string') return a;
-            try { return JSON.stringify(a); } catch(e) { return String(a); }
-        }).join(' ');
+    var MAX_ITEMS = 100;      // array/map/set elements shown
+    var MAX_PROPS = 50;       // object properties shown
+    var MAX_DEPTH = 4;
+    var MAX_STRING = 10000;   // per-string cap inside structures
+
+    function inspect(value, depth, seen) {
+        switch (typeof value) {
+            case 'undefined': return 'undefined';
+            case 'boolean': return String(value);
+            case 'number':
+                return Object.is(value, -0) ? '-0' : String(value);
+            case 'bigint': return String(value) + 'n';
+            case 'symbol': return value.toString();
+            case 'function': {
+                var name = value.name ? ': ' + value.name : ' (anonymous)';
+                return '[Function' + name + ']';
+            }
+            case 'string':
+                if (depth === 0) return value;
+                return "'" + (value.length > MAX_STRING
+                    ? value.slice(0, MAX_STRING) + '...' : value) + "'";
+        }
+        if (value === null) return 'null';
+        if (seen.indexOf(value) !== -1) return '[Circular]';
+        if (depth > MAX_DEPTH) return '[Object]';
+        seen = seen.concat([value]);
+        var next = depth + 1;
+        try {
+            if (Array.isArray(value)) {
+                var out = [];
+                var n = Math.min(value.length, MAX_ITEMS);
+                for (var i = 0; i < n; i++) {
+                    out.push(i in value ? inspect(value[i], next, seen) : '<empty>');
+                }
+                if (value.length > n) out.push('... ' + (value.length - n) + ' more items');
+                return '[ ' + out.join(', ') + ' ]';
+            }
+            if (ArrayBuffer.isView(value) && !(value instanceof DataView)) {
+                var tag = value.constructor && value.constructor.name || 'TypedArray';
+                var parts = [];
+                var m = Math.min(value.length, MAX_ITEMS);
+                for (var j = 0; j < m; j++) parts.push(String(value[j]));
+                if (value.length > m) parts.push('... ' + (value.length - m) + ' more items');
+                return tag + '(' + value.length + ') [ ' + parts.join(', ') + ' ]';
+            }
+            if (value instanceof Date) return value.toISOString();
+            if (value instanceof RegExp) return value.toString();
+            if (value instanceof Error) {
+                return value.stack || (value.name + ': ' + value.message);
+            }
+            if (typeof Map === 'function' && value instanceof Map) {
+                var me = [];
+                var mi = 0;
+                for (var entry of value) {
+                    if (mi++ >= MAX_ITEMS) { me.push('...'); break; }
+                    me.push(inspect(entry[0], next, seen) + ' => ' + inspect(entry[1], next, seen));
+                }
+                return 'Map(' + value.size + ') { ' + me.join(', ') + ' }';
+            }
+            if (typeof Set === 'function' && value instanceof Set) {
+                var se = [];
+                var si = 0;
+                for (var sv of value) {
+                    if (si++ >= MAX_ITEMS) { se.push('...'); break; }
+                    se.push(inspect(sv, next, seen));
+                }
+                return 'Set(' + value.size + ') { ' + se.join(', ') + ' }';
+            }
+            if (value instanceof ArrayBuffer) {
+                return 'ArrayBuffer { byteLength: ' + value.byteLength + ' }';
+            }
+            if (typeof Promise === 'function' && value instanceof Promise) {
+                return 'Promise { }';
+            }
+            var keys = Object.keys(value);
+            var props = [];
+            var kn = Math.min(keys.length, MAX_PROPS);
+            for (var k = 0; k < kn; k++) {
+                var kv;
+                try { kv = inspect(value[keys[k]], next, seen); }
+                catch (e) { kv = '[Getter threw]'; }
+                props.push(keys[k] + ': ' + kv);
+            }
+            if (keys.length > kn) props.push('... ' + (keys.length - kn) + ' more');
+            var ctor = value.constructor && value.constructor.name;
+            var prefix = ctor && ctor !== 'Object' ? ctor + ' ' : '';
+            return prefix + '{ ' + props.join(', ') + ' }';
+        } catch (e) {
+            try { return String(value); } catch (_) { return '[Unrepresentable]'; }
+        }
     }
-    globalThis.console = {
-        log: function() { Deno.core.ops.op_console_write(formatArgs(Array.from(arguments)), 0); },
-        info: function() { Deno.core.ops.op_console_write(formatArgs(Array.from(arguments)), 1); },
-        warn: function() { Deno.core.ops.op_console_write(formatArgs(Array.from(arguments)), 2); },
-        error: function() { Deno.core.ops.op_console_write(formatArgs(Array.from(arguments)), 3); },
-        debug: function() { Deno.core.ops.op_console_write(formatArgs(Array.from(arguments)), 0); },
-        trace: function() { Deno.core.ops.op_console_write(formatArgs(Array.from(arguments)), 0); },
+
+    // Console Standard "Formatter": %s %d %i %f %o %O %c %% in a leading
+    // format string consume subsequent args.
+    function formatArgs(args) {
+        var out = [];
+        var start = 0;
+        if (args.length > 0 && typeof args[0] === 'string' && /%[sdifoOc%]/.test(args[0])) {
+            var fmt = args[0];
+            var argIndex = 1;
+            var result = '';
+            for (var i = 0; i < fmt.length; i++) {
+                if (fmt[i] === '%' && i + 1 < fmt.length) {
+                    var c = fmt[i + 1];
+                    if (c === '%') { result += '%'; i++; continue; }
+                    if ('sdifoO'.indexOf(c) !== -1 && argIndex < args.length) {
+                        var a = args[argIndex++];
+                        if (c === 's') result += typeof a === 'string' ? a : inspect(a, 0, []);
+                        else if (c === 'd' || c === 'i') {
+                            result += typeof a === 'symbol' ? 'NaN' : String(parseInt(a, 10));
+                        } else if (c === 'f') {
+                            result += typeof a === 'symbol' ? 'NaN' : String(parseFloat(a));
+                        } else result += inspect(a, 1, []);
+                        i++;
+                        continue;
+                    }
+                    if (c === 'c') { argIndex < args.length && argIndex++; i++; continue; }
+                }
+                result += fmt[i];
+            }
+            out.push(result);
+            start = argIndex;
+        }
+        for (var j = start; j < args.length; j++) {
+            out.push(inspect(args[j], 0, []));
+        }
+        return out.join(' ');
+    }
+
+    function write(level, args) {
+        Deno.core.ops.op_console_write(formatArgs(Array.from(args)), level);
+    }
+
+    var counts = new Map();
+    var timers = new Map();
+    var groupDepth = 0;
+
+    var methods = {
+        log: function log() { write(0, arguments); },
+        info: function info() { write(1, arguments); },
+        warn: function warn() { write(2, arguments); },
+        error: function error() { write(3, arguments); },
+        debug: function debug() { write(0, arguments); },
+        trace: function trace() { write(0, arguments); },
+        dir: function dir() { write(0, arguments); },
+        dirxml: function dirxml() { write(0, arguments); },
+        table: function table() { write(0, arguments); },
+        clear: function clear() {},
+        group: function group() { if (arguments.length) write(0, arguments); groupDepth++; },
+        groupCollapsed: function groupCollapsed() { if (arguments.length) write(0, arguments); groupDepth++; },
+        groupEnd: function groupEnd() { if (groupDepth > 0) groupDepth--; },
+        count: function count(label) {
+            label = arguments.length === 0 ? 'default' : String(label);
+            var n = (counts.get(label) || 0) + 1;
+            counts.set(label, n);
+            write(0, [label + ': ' + n]);
+        },
+        countReset: function countReset(label) {
+            label = arguments.length === 0 ? 'default' : String(label);
+            if (counts.has(label)) counts.set(label, 0);
+            else write(2, ["Count for '" + label + "' does not exist"]);
+        },
+        assert: function assert(condition) {
+            if (condition) return;
+            var rest = Array.prototype.slice.call(arguments, 1);
+            if (rest.length > 0 && typeof rest[0] === 'string') {
+                rest[0] = 'Assertion failed: ' + rest[0];
+            } else {
+                rest.unshift('Assertion failed');
+            }
+            write(3, rest);
+        },
+        time: function time(label) {
+            label = arguments.length === 0 ? 'default' : String(label);
+            if (timers.has(label)) {
+                write(2, ["Timer '" + label + "' already exists"]);
+                return;
+            }
+            timers.set(label, Date.now());
+        },
+        timeLog: function timeLog(label) {
+            label = arguments.length === 0 ? 'default' : String(label);
+            if (!timers.has(label)) {
+                write(2, ["Timer '" + label + "' does not exist"]);
+                return;
+            }
+            var rest = Array.prototype.slice.call(arguments, 1);
+            write(0, [label + ': ' + (Date.now() - timers.get(label)) + 'ms']
+                .concat(rest.map(function (a) { return inspect(a, 0, []); })));
+        },
+        timeEnd: function timeEnd(label) {
+            label = arguments.length === 0 ? 'default' : String(label);
+            if (!timers.has(label)) {
+                write(2, ["Timer '" + label + "' does not exist"]);
+                return;
+            }
+            write(0, [label + ': ' + (Date.now() - timers.get(label)) + 'ms']);
+            timers.delete(label);
+        },
     };
+
+    // Namespace-object shape: console -> {} -> Object.prototype, with
+    // @@toStringTag "console" so Object.prototype.toString says
+    // "[object console]".
+    var consoleProto = Object.create(Object.prototype);
+    var consoleObj = Object.create(consoleProto);
+    for (var name in methods) {
+        Object.defineProperty(consoleObj, name, {
+            value: methods[name],
+            writable: true,
+            enumerable: true,
+            configurable: true,
+        });
+    }
+    Object.defineProperty(consoleObj, Symbol.toStringTag, {
+        value: 'console',
+        writable: false,
+        enumerable: false,
+        configurable: true,
+    });
+    globalThis.console = consoleObj;
 })();
 "#;
 
@@ -353,7 +565,12 @@ const BASE64_JS: &str = r#"
 (function() {
     var chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 
+    // DOMException is installed later in the injection sequence, so look
+    // it up at throw time; fall back to a local error type if absent.
     function InvalidCharacterError(message) {
+        if (typeof globalThis.DOMException === 'function') {
+            return new globalThis.DOMException(message, 'InvalidCharacterError');
+        }
         this.name = 'InvalidCharacterError';
         this.message = message;
     }
