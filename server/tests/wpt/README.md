@@ -16,9 +16,11 @@ uses), plus the Phase-0 global-surface baseline.
 | `runner/report.js` | `testharnessreport.js` replacement — serializes results over the console channel. |
 | `expectations.json` | Recorded per-file outcome. CI fails on drift in **either** direction. |
 | `surface_baseline.json` | Recorded `globalThis` surface + WinterTC Minimum Common API coverage (Phase 0). |
+| `websockets/` | WPT `websockets/` tests, kept **outside** `vendor/` because they need a live server (see below). |
+| `websocket_expectations.json` | Recorded per-file outcome for the websockets runner. |
 
-The runners are the integration tests `tests/wpt_harness.rs` and
-`tests/compat_surface.rs`.
+The runners are the integration tests `tests/wpt_harness.rs`,
+`tests/compat_surface.rs` and `tests/wpt_websocket.rs`.
 
 ## Running
 
@@ -51,6 +53,31 @@ Deno-style, keyed by vendored path:
   "some/flaky.any.js": { "ignore": true }               // skipped entirely
 }
 ```
+
+## The websockets runner
+
+`wpt_harness.rs` walks `vendor/` and runs every file serverlessly, so the
+websockets suite — which needs a real endpoint — cannot live there. Instead
+`tests/wpt_websocket.rs` spins up an in-process axum echo server, substitutes
+the wptserve placeholders in `constants.sub.js` with its address, and runs
+`websockets/*.any.js` against it, sharing the vendored
+`vendor/resources/testharness.js`. It is a first step down the wptserve
+growth path the research doc describes.
+
+```bash
+cargo test --test wpt_websocket -- --nocapture
+```
+
+Its manifest is `websocket_expectations.json`, a `{file: "pass"|"fail"}` map;
+files not listed are expected to pass, and drift in either direction fails
+CI. All 30 vendored files currently pass, so the map is empty.
+
+Provenance: fetched unmodified from
+`https://raw.githubusercontent.com/web-platform-tests/wpt/master/websockets/`
+on 2026-08-17 (WPT master, i.e. newer than the `versions.json` pin that
+covers `vendor/`). Only the `?default` variant is exercised — no TLS, no h2
+flags. Tests needing wptserve features beyond a plain `/echo` endpoint are
+still out of scope.
 
 ## Updating / expanding the vendored subset
 

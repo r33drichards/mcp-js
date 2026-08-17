@@ -39,6 +39,8 @@ nav:
       - Asynchronous execution & output: how-to/async-execution.md
       - Transports (stdio, HTTP, SSE): how-to/transports.md
       - Network access with fetch: how-to/fetch.md
+      - WebSocket connections: how-to/websocket.md
+      - HTTP/2 sessions (node:http2): how-to/http2.md
       - Filesystem access: how-to/filesystem.md
       - Filesystem snapshots: how-to/fs-snapshots.md
       - Subprocess execution: how-to/subprocess.md

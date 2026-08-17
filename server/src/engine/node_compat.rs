@@ -11,13 +11,21 @@
 pub const NODE_MODULES: &[(&str, &str)] = &[
     ("assert", include_str!("node_compat/assert.js")),
     ("buffer", include_str!("node_compat/gen/buffer.js")),
+    ("dns", include_str!("node_compat/dns.js")),
     ("events", include_str!("node_compat/gen/events.js")),
+    ("fs", include_str!("node_compat/fs.js")),
+    ("http", include_str!("node_compat/http.js")),
+    ("http2", include_str!("node_compat/http2.js")),
+    ("net", include_str!("node_compat/net.js")),
     ("os", include_str!("node_compat/os.js")),
     ("path", include_str!("node_compat/gen/path.js")),
     ("process", include_str!("node_compat/process.js")),
     ("querystring", include_str!("node_compat/gen/querystring.js")),
+    ("stream", include_str!("node_compat/stream.js")),
+    ("tls", include_str!("node_compat/tls.js")),
     ("url", include_str!("node_compat/url.js")),
     ("util", include_str!("node_compat/util.js")),
+    ("zlib", include_str!("node_compat/zlib.js")),
 ];
 
 pub fn source_for(name: &str) -> Option<&'static str> {
