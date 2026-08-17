@@ -4,6 +4,9 @@
 [![Release](https://img.shields.io/github/v/release/r33drichards/mcp-js)](https://github.com/r33drichards/mcp-js/releases)
 [![License: AGPL v3](https://img.shields.io/badge/license-AGPL--3.0-blue)](./LICENSE)
 
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/mcp-js?referralCode=cj5P6Z&utm_medium=integration&utm_source=template&utm_campaign=generic)
+
+
 **mcp-v8** is a [Model Context Protocol](https://modelcontextprotocol.io) server,
 written in Rust, that lets an AI agent **run JavaScript and TypeScript in a
 sandboxed V8 isolate**. Instead of wiring up dozens of narrow tools, you give the
