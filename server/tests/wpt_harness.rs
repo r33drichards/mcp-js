@@ -147,11 +147,23 @@ fn assemble_source(vendor: &Path, test_rel: &Path) -> Result<String, String> {
     source.push_str(BOOTSTRAP_JS);
     source.push_str(&harness);
     source.push_str(REPORT_JS);
+    // META scripts and the test body run through one indirect eval: WPT
+    // .any.js files have classic-script semantics, where top-level `var`/
+    // `function` declarations become globals (e.g. for spec-mandated string
+    // setTimeout handlers). The assembled source itself executes as an ES
+    // module, whose top-level scope would otherwise hide them. A single
+    // eval keeps helper-script `const`/`let` declarations visible to the
+    // test body, like consecutive classic scripts sharing a script scope.
+    let mut evaled = String::new();
     for s in &scripts {
-        source.push_str(s);
-        source.push('\n');
+        evaled.push_str(s);
+        evaled.push('\n');
     }
-    source.push_str(&body);
+    evaled.push_str(&body);
+    source.push_str(&format!(
+        "(0, eval)({});\n",
+        serde_json::to_string(&evaled).unwrap()
+    ));
     Ok(source)
 }
 

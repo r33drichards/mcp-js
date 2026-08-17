@@ -21,7 +21,9 @@ pub mod run_js_file;
 pub mod session_log;
 pub mod subprocess;
 pub mod timers;
+pub mod url_support;
 pub mod wasm_stub;
+pub mod web_compat;
 
 pub use console::HardeningConfig;
 
@@ -960,6 +962,7 @@ pub fn execute_stateless(
             extensions.push(mcp_client::create_extension());
         }
         extensions.push(timers::create_extension());
+        extensions.push(url_support::create_extension());
 
         // Always create a module loader — all code runs as ES modules.
         let module_loader: Rc<dyn deno_core::ModuleLoader> = match module_loader_config {
@@ -1070,6 +1073,14 @@ pub fn execute_stateless(
                     if let Err(e) = timers::inject_timers(&mut runtime) {
                         return Err(e);
                     }
+                    // Inject the web-platform compat layer (events, abort,
+                    // structuredClone, performance, ...). Needs timers.
+                    if let Err(e) = web_compat::inject_web_compat(&mut runtime) {
+                        return Err(e);
+                    }
+                    if let Err(e) = url_support::inject_url(&mut runtime) {
+                        return Err(e);
+                    }
                     // Harden sandbox: freeze ops, neutralize introspection, remove __bootstrap.
                     // Must run after all inject_* calls and before user code.
                     if let Err(e) = console::harden_runtime(&mut runtime, hardening) {
@@ -1166,6 +1177,7 @@ pub fn execute_stateful(
             extensions.push(mcp_client::create_extension());
         }
         extensions.push(timers::create_extension());
+        extensions.push(url_support::create_extension());
 
         // Always create a module loader — all code runs as ES modules.
         let module_loader: Rc<dyn deno_core::ModuleLoader> = match module_loader_config {
@@ -1284,6 +1296,14 @@ pub fn execute_stateful(
                     }
                     // Inject setTimeout/clearTimeout (always available).
                     if let Err(e) = timers::inject_timers(&mut runtime) {
+                        return Err(e);
+                    }
+                    // Inject the web-platform compat layer (events, abort,
+                    // structuredClone, performance, ...). Needs timers.
+                    if let Err(e) = web_compat::inject_web_compat_snapshot(&mut runtime) {
+                        return Err(e);
+                    }
+                    if let Err(e) = url_support::inject_url_snapshot(&mut runtime) {
                         return Err(e);
                     }
                     // Harden sandbox: freeze ops, neutralize introspection, remove __bootstrap.

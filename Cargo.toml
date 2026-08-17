@@ -5,6 +5,11 @@ members = [
 ]
 resolver = "2"
 
+# V8-linked binaries with full debug info are ~600MB each and slow to link;
+# line tables keep usable panic backtraces at a fraction of the size.
+[profile.dev]
+debug = "line-tables-only"
+
 [patch.crates-io]
 # Fixes Vec<&str> heap leak in prepare_for_snapshot: the `extensions` field
 # was not ManuallyDrop so mem::forget(self) leaked its backing buffer.

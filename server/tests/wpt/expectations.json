@@ -219,36 +219,17 @@
     ]
   },
   "html/webappapis/microtask-queuing/queue-microtask.any.js": true,
-  "html/webappapis/timers/clearinterval-from-callback.any.js": {
-    "expectedFailures": [
-      "Clearing an interval from the callback should still clear it."
-    ]
-  },
-  "html/webappapis/timers/cleartimeout-clearinterval.any.js": {
-    "expectedFailures": [
-      "Clear interval with clearTimeout",
-      "Clear timeout with clearInterval"
-    ]
-  },
-  "html/webappapis/timers/evil-spec-example.any.js": false,
-  "html/webappapis/timers/missing-timeout-setinterval.any.js": {
-    "expectedFailures": [
-      "Calling setInterval with no interval should be the same as if called with 0 interval",
-      "Calling setInterval with undefined interval should be the same as if called with 0 interval"
-    ]
-  },
-  "html/webappapis/timers/negative-setinterval.any.js": false,
+  "html/webappapis/timers/clearinterval-from-callback.any.js": true,
+  "html/webappapis/timers/cleartimeout-clearinterval.any.js": true,
+  "html/webappapis/timers/evil-spec-example.any.js": true,
+  "html/webappapis/timers/missing-timeout-setinterval.any.js": true,
+  "html/webappapis/timers/negative-setinterval.any.js": true,
   "html/webappapis/timers/negative-settimeout.any.js": true,
-  "html/webappapis/timers/setinterval-settimeout-clamping.any.js": {
-    "expectedFailures": [
-      "setInterval(0) before setTimeout(0)",
-      "setTimeout(0) before setInterval(0)"
-    ]
-  },
-  "html/webappapis/timers/type-long-setinterval.any.js": false,
-  "html/webappapis/timers/type-long-settimeout.any.js": false,
+  "html/webappapis/timers/setinterval-settimeout-clamping.any.js": true,
+  "html/webappapis/timers/type-long-setinterval.any.js": true,
+  "html/webappapis/timers/type-long-settimeout.any.js": true,
   "wasm/jsapi/constructor/compile.any.js": true,
-  "wasm/jsapi/constructor/instantiate-bad-imports.any.js": false,
+  "wasm/jsapi/constructor/instantiate-bad-imports.any.js": true,
   "wasm/jsapi/constructor/instantiate.any.js": true,
   "wasm/jsapi/constructor/multi-value.any.js": true,
   "wasm/jsapi/constructor/toStringTag.any.js": true,
@@ -261,16 +242,11 @@
   },
   "wasm/jsapi/exception/getArg.tentative.any.js": {
     "expectedFailures": [
-      "Getting out-of-range argument",
-      "Invalid exception argument"
+      "Getting out-of-range argument"
     ]
   },
   "wasm/jsapi/exception/identity.tentative.any.js": true,
-  "wasm/jsapi/exception/is.tentative.any.js": {
-    "expectedFailures": [
-      "Invalid exception argument"
-    ]
-  },
+  "wasm/jsapi/exception/is.tentative.any.js": true,
   "wasm/jsapi/exception/toString.tentative.any.js": true,
   "wasm/jsapi/function/call.tentative.any.js": {
     "expectedFailures": [
@@ -278,7 +254,21 @@
       "test constructing function"
     ]
   },
-  "wasm/jsapi/function/constructor.tentative.any.js": false,
+  "wasm/jsapi/function/constructor.tentative.any.js": {
+    "expectedFailures": [
+      "Calling",
+      "Too few arguments",
+      "construct with JS function",
+      "fail to construct with non-callable object",
+      "fail with missing parameters",
+      "fail with missing results",
+      "fail with non-existent parameter and result type",
+      "fail with non-function object",
+      "fail with non-string parameters & results",
+      "length",
+      "name"
+    ]
+  },
   "wasm/jsapi/function/table.tentative.any.js": {
     "expectedFailures": [
       "Test insertion into table"
@@ -315,25 +305,13 @@
     ]
   },
   "wasm/jsapi/global/valueOf.any.js": true,
-  "wasm/jsapi/instance/constructor-bad-imports.any.js": false,
+  "wasm/jsapi/instance/constructor-bad-imports.any.js": true,
   "wasm/jsapi/instance/constructor-caching.any.js": true,
   "wasm/jsapi/instance/constructor.any.js": true,
-  "wasm/jsapi/instance/exports.any.js": {
-    "expectedFailures": [
-      "Setting (sloppy mode)"
-    ]
-  },
+  "wasm/jsapi/instance/exports.any.js": true,
   "wasm/jsapi/instance/toString.any.js": true,
-  "wasm/jsapi/interface.any.js": {
-    "expectedFailures": [
-      "WebAssembly: property descriptor"
-    ]
-  },
-  "wasm/jsapi/memory/buffer.any.js": {
-    "expectedFailures": [
-      "Setting (sloppy mode)"
-    ]
-  },
+  "wasm/jsapi/interface.any.js": true,
+  "wasm/jsapi/memory/buffer.any.js": true,
   "wasm/jsapi/memory/constructor-shared.tentative.any.js": true,
   "wasm/jsapi/memory/constructor-types.tentative.any.js": {
     "expectedFailures": [
@@ -376,11 +354,7 @@
   "wasm/jsapi/table/constructor.any.js": true,
   "wasm/jsapi/table/get-set.any.js": true,
   "wasm/jsapi/table/grow.any.js": true,
-  "wasm/jsapi/table/length.any.js": {
-    "expectedFailures": [
-      "Setting (sloppy mode)"
-    ]
-  },
+  "wasm/jsapi/table/length.any.js": true,
   "wasm/jsapi/table/toString.any.js": true,
   "wasm/jsapi/table/type.tentative.any.js": {
     "expectedFailures": [
