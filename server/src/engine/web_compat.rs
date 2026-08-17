@@ -42,13 +42,7 @@ fn extras_sources() -> Vec<(&'static str, String)> {
         ),
         (
             "<web-compat-urlpattern>",
-            format!(
-                "(function() {{\n'use strict';\n\
-                 if (typeof globalThis.URLPattern === 'function') return;\n\
-                 var module = {{ exports: {{}} }};\nvar exports = module.exports;\n{}\n\
-                 globalThis.URLPattern = module.exports.URLPattern;\n}})();",
-                include_str!("web_compat/vendor/urlpattern-polyfill.cjs")
-            ),
+            include_str!("web_compat/urlpattern.js").to_string(),
         ),
         (
             "<web-compat-streams-extra>",

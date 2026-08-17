@@ -399,7 +399,10 @@ async fn blob_slice_and_bytes_operate_on_bytes() {
         (async () => {
             const bytes = new Uint8Array(256);
             for (let i = 0; i < 256; i++) bytes[i] = i;
-            const sliced = new Blob([bytes], { type: 'application/octet-stream' }).slice(250, 256);
+            // Per the File API spec, slice() without a contentType argument
+            // produces a blob with the empty type; pass it explicitly.
+            const sliced = new Blob([bytes], { type: 'application/octet-stream' })
+                .slice(250, 256, 'application/octet-stream');
             if (sliced.size !== 6) return "size " + sliced.size;
             if (sliced.type !== 'application/octet-stream') return "type " + sliced.type;
             const out = await sliced.bytes();

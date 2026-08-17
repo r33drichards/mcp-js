@@ -78,6 +78,7 @@ zstd = "0.13"
 blake3 = "1"
 bincode = "1"
 diffy = "0.4"
+urlpattern = "0.6.0"
 
 # OS-level sandboxing layer (--sandbox-manifest): Landlock on Linux, Seatbelt on macOS.
 # default-features = false drops nono's system-keyring integration, which the

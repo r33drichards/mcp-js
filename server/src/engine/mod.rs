@@ -26,6 +26,7 @@ pub mod crypto;
 pub mod encoding;
 pub mod timers;
 pub mod url_support;
+pub mod urlpattern_support;
 pub mod wasm_stub;
 pub mod web_compat;
 
@@ -973,6 +974,7 @@ pub fn execute_stateless(
         extensions.push(encoding::create_extension());
         extensions.push(crypto::create_extension());
         extensions.push(compression::create_extension());
+        extensions.push(urlpattern_support::create_extension());
 
         // Always create a module loader — all code runs as ES modules.
         let module_loader: Rc<dyn deno_core::ModuleLoader> = match module_loader_config {
@@ -1200,6 +1202,7 @@ pub fn execute_stateful(
         extensions.push(encoding::create_extension());
         extensions.push(crypto::create_extension());
         extensions.push(compression::create_extension());
+        extensions.push(urlpattern_support::create_extension());
 
         // Always create a module loader — all code runs as ES modules.
         let module_loader: Rc<dyn deno_core::ModuleLoader> = match module_loader_config {
