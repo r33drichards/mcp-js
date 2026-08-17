@@ -49,6 +49,11 @@ Installs to `/usr/local/bin`. Supported platforms: Linux x86_64/arm64 and macOS
 Apple Silicon. You can also `nix run github:r33drichards/mcp-js`, use Docker (see
 the `docker-compose.*.yml` stacks), or [build from source](#build-from-source).
 
+Prefer a hosted server? [Deploy on Railway](./RAILWAY.md) — the repo's
+`railway.json` configures the build, healthcheck, and restart policy, and
+[RAILWAY.md](./RAILWAY.md) walks through the volume, variables, and one-click
+template setup.
+
 ### Connect an MCP client
 
 ```bash
