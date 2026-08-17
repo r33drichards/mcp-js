@@ -71,15 +71,16 @@ of scope for this runner (see the research doc for the wptserve growth path).
 ## Current results (wpt@0cc6a7e)
 
 224 non-ignored files (plus 15 `.tentative.` proposal-stage files ignored):
-**219 fully passing**, 5 with recorded subtest failures (86 subtests).
-The remainder is fully attributed: 83 in the url/ suite (rust-url/idna
-track a slightly older URL spec — relative Windows drive letters,
-file-URL slash handling, invalid-punycode leniency, edge
-canonicalizations — all parser-level), ImageBitmap and OffscreenCanvas
-in the structured-clone battery (canvas is a declared non-goal), and one
-web-streams-polyfill pipeTo scheduling detail. Every failure is pinned
-by name in `expectations.json`; fixing one without re-recording fails
-CI, so the file is the compat changelog.
+**219 fully passing**, 5 with recorded subtest failures (75 subtests).
+The remainder is fully attributed: 72 in the url/ suite (rust-url/idna
+track a slightly older URL spec; the in-repo fork at `server/vendor/url`
+closes these patch by patch — see `docs/url-impl-benchmark.md`),
+ImageBitmap and OffscreenCanvas in the structured-clone battery (canvas
+is a declared non-goal), and one web-streams-polyfill pipeTo scheduling
+detail. Every failure is pinned by name in `expectations.json`; fixing
+one without re-recording fails CI, so the file is the compat changelog.
+Set `WPT_URL_IMPL=whatwg` to run the url suites against the bundled
+whatwg-url reference implementation (fully green there).
 
 Companion suites: `compat_surface` locks the WinterTC Minimum Common API
 surface (54/54 present) and `node_compat` runs a vendored Node core subset

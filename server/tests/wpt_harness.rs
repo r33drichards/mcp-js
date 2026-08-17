@@ -41,6 +41,18 @@ fn ensure_v8() {
 }
 
 const BOOTSTRAP_JS: &str = include_str!("wpt/runner/bootstrap.js");
+// Alternative URL backing for A/B benchmarking (WPT_URL_IMPL=whatwg):
+// jsdom's whatwg-url bundled single-file, plus an adapter that swaps the
+// globals over.
+const WHATWG_URL_BUNDLE_JS: &str = include_str!("wpt/runner/whatwg-url-bundle.js");
+const WHATWG_URL_ADAPTER_JS: &str = r#"
+(function () {
+    'use strict';
+    if (typeof globalThis.__whatwgURL !== 'object') return;
+    globalThis.URL = globalThis.__whatwgURL.URL;
+    globalThis.URLSearchParams = globalThis.__whatwgURL.URLSearchParams;
+})();
+"#;
 const REPORT_JS: &str = include_str!("wpt/runner/report.js");
 const RESULT_SENTINEL: &str = "__WPT_RESULT__";
 /// Wall-clock cap per test file; hung isolates are terminated.
@@ -198,6 +210,10 @@ fn assemble_source(vendor: &Path, test_rel: &Path) -> Result<String, String> {
             "globalThis.__WPT_ASSETS__ = {};\n",
             serde_json::Value::Object(map)
         ));
+    }
+    if std::env::var("WPT_URL_IMPL").as_deref() == Ok("whatwg") {
+        source.push_str(WHATWG_URL_BUNDLE_JS);
+        source.push_str(WHATWG_URL_ADAPTER_JS);
     }
     source.push_str(BOOTSTRAP_JS);
     source.push_str(&harness);

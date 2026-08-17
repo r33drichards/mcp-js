@@ -71,7 +71,7 @@ subset, and a vendored subset of Node.js core tests running against the
 ## Web Platform Tests (wpt@0cc6a7e19)
 
 **219 / 224 vendored test files fully passing**
-(5 with recorded subtest failures — 86
+(5 with recorded subtest failures — 75
 individual subtests — and 0 failing wholesale).
 
 | Suite | Fully passing | Partial | Failing |
