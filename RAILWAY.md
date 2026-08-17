@@ -90,17 +90,21 @@ workspace's **Templates** page, click **New Template**, then:
 
 ### Template variables
 
-| Variable | Value | Why |
+The **Description** column is written for the person deploying the template —
+paste it into each variable's Description field in the template editor
+(Railway's marketplace checklist requires one on every variable).
+
+| Variable | Value | Description |
 | --- | --- | --- |
-| `RAILWAY_RUN_UID` | `0` | Railway mounts volumes owned by `root`; the image runs as a non-root user, so without this the server cannot write to `/data`. |
-| `MCP_V8_HEAP_STORE` | `dir` | Persist V8 heap snapshots (stateful mode) instead of the default no-persistence mode. |
-| `MCP_V8_HEAP_DIR` | `/data/heaps` | Keep heap snapshots on the volume. |
-| `MCP_V8_FS_STORE` | `dir` | Persist the content-addressed `/work` filesystem. |
-| `MCP_V8_FS_DIR` | `/data/fs` | Keep `/work` snapshots on the volume. |
-| `MCP_V8_SESSION_DB_PATH` | `/data/sessions` | Session log + async-execution registry on the volume (default is `/tmp`, which is wiped on redeploy). |
-| `MCP_V8_ALLOWED_HOSTS` | `${{RAILWAY_PUBLIC_DOMAIN}},${{RAILWAY_PRIVATE_DOMAIN}}` | Narrows the image's `*` Host allowlist to the domains Railway actually serves, restoring DNS-rebinding protection on `/mcp`. |
-| `MCP_V8_SANDBOX_MANIFEST` | `{"version":"0.1.0","network":{"mode":"unrestricted"}}` | Confines the whole server process with the kernel-enforced [OS sandbox](https://r33drichards.github.io/mcp-js/how-to/os-sandbox/) (Landlock): filesystem access is limited to the server's own storage/config paths — the `/data` directories are granted automatically — while networking stays open so features that dial out (`JWKS_URL`, `fetch()` policies, S3 stores) keep working. |
-| `JWKS_URL` | *(optional, empty)* | Set to an OIDC JWKS endpoint (e.g. Keycloak certs URL) to require JWT bearer auth. Leave unset for an open server. |
+| `RAILWAY_RUN_UID` | `0` | Runs the server as root so it can write to the Railway volume at `/data` (Railway mounts volumes owned by root; the image otherwise runs as a non-root user). Keep as `0`. |
+| `MCP_V8_HEAP_STORE` | `dir` | Storage backend for V8 heap snapshots. `dir` persists heaps to disk so agents keep state across calls (stateful mode). Remove the three heap/fs variables for a stateless, WASM-capable server. |
+| `MCP_V8_HEAP_DIR` | `/data/heaps` | Directory where V8 heap snapshots are written. Keep it on the volume so agent state survives redeploys. |
+| `MCP_V8_FS_STORE` | `dir` | Storage backend for the persistent `/work` filesystem exposed to scripts. `dir` persists content-addressed snapshots to disk. |
+| `MCP_V8_FS_DIR` | `/data/fs` | Directory where `/work` filesystem snapshots are written. Keep it on the volume so files survive redeploys. |
+| `MCP_V8_SESSION_DB_PATH` | `/data/sessions` | Path for the session log and async-execution database. Keep it on the volume — the default (`/tmp`) is wiped on every redeploy. |
+| `MCP_V8_ALLOWED_HOSTS` | `${{RAILWAY_PUBLIC_DOMAIN}},${{RAILWAY_PRIVATE_DOMAIN}}` | Host-header allowlist for the `/mcp` endpoint (DNS-rebinding protection). Defaults to this service's Railway domains; append extra hostnames comma-separated if you attach a custom domain. |
+| `MCP_V8_SANDBOX_MANIFEST` | `{"version":"0.1.0","network":{"mode":"unrestricted"}}` | Kernel-enforced (Landlock) [OS sandbox](https://r33drichards.github.io/mcp-js/how-to/os-sandbox/) manifest. The default locks the process's filesystem access down to its own storage/config paths (the `/data` directories are granted automatically) while leaving outbound networking open so `JWKS_URL`, S3 stores, and `fetch()` policies keep working. Set `network.mode` to `blocked` to also cut egress, or remove the variable to fall back to isolate-level sandboxing only. |
+| `JWKS_URL` | *(optional, empty)* | Set to an OIDC JWKS endpoint (e.g. your Keycloak realm's certs URL) to require JWT bearer auth on every request. Leave unset for an open, unauthenticated server. |
 
 Notes:
 
@@ -137,27 +141,30 @@ Notes:
 ### Marketplace overview copy
 
 Ready-to-paste overview for the publish form, following Railway's
-[template best practices](https://docs.railway.com/templates/best-practices):
+[template best practices](https://docs.railway.com/templates/best-practices).
+The headings must contain the template's name exactly as it is filed on the
+marketplace (here **MCP JS**) — Railway's publish checklist matches on them:
 
-> # Deploy and Host mcp-v8 with Railway
+> # Deploy and Host MCP JS on Railway
 >
-> mcp-v8 is a Model Context Protocol server, written in Rust, that gives AI
-> agents a sandboxed JavaScript/TypeScript runtime. Instead of dozens of
-> narrow tools, the agent gets one `run_js` tool and writes code — looping,
+> MCP JS (mcp-v8) is a Model Context Protocol server, written in Rust, that
+> gives AI agents a sandboxed JavaScript/TypeScript runtime. Instead of dozens
+> of narrow tools, the agent gets one `run_js` tool and writes code — looping,
 > branching, and transforming data — with durable V8 heap snapshots between
 > calls.
 >
-> ## About Hosting mcp-v8
+> ## About Hosting MCP JS
 >
-> Hosting mcp-v8 means running a single Rust binary that serves the MCP
+> Hosting MCP JS means running a single Rust binary that serves the MCP
 > Streamable HTTP endpoint at `/mcp` and a REST sidecar at `/api/exec`. This
 > template builds the server from source with Docker, attaches a volume at
 > `/data` for heap snapshots, the persistent `/work` filesystem, and the
 > session database, and health-checks `/api/version`. Railway injects `PORT`
 > automatically; host-header protection is scoped to the service's Railway
-> domains. The template deploys sandboxed by default: a kernel-enforced
-> (Landlock) OS sandbox restricts the process's filesystem access to its
-> own storage paths. Optional JWT auth is one `JWKS_URL` variable away.
+> domains. The template deploys sandboxed by default: scripts run in a V8
+> isolate with no network, filesystem, or subprocess access, and a
+> kernel-enforced (Landlock) OS sandbox confines the whole process beneath
+> that. Optional JWT auth is one `JWKS_URL` variable away.
 >
 > ## Common Use Cases
 >
@@ -166,7 +173,7 @@ Ready-to-paste overview for the publish form, following Railway's
 > - Durable agent state via heap snapshots that survive redeploys
 > - A REST endpoint for running untrusted JavaScript from your own backend
 >
-> ## Dependencies for mcp-v8 Hosting
+> ## Dependencies for MCP JS Hosting
 >
 > - A volume for persistent heaps, filesystem snapshots, and sessions
 > - An MCP client (Claude Code, Claude Desktop, Cursor, ...) or any HTTP client
@@ -177,12 +184,12 @@ Ready-to-paste overview for the publish form, following Railway's
 > - [Source repository](https://github.com/r33drichards/mcp-js)
 > - [Model Context Protocol](https://modelcontextprotocol.io)
 >
-> ### Why Deploy mcp-v8 on Railway?
+> ### Why Deploy MCP JS on Railway?
 >
 > Railway is a singular platform to deploy your infrastructure stack. Railway
 > will host your infrastructure so you don't have to deal with configuration,
 > while allowing you to vertically and horizontally scale it.
 >
-> By deploying mcp-v8 on Railway, you are one step closer to supporting a
+> By deploying MCP JS on Railway, you are one step closer to supporting a
 > complete full-stack application with minimal burden. Host your servers,
 > databases, AI agents, and more on Railway.
