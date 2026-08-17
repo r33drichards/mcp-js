@@ -71,7 +71,7 @@ of scope for this runner (see the research doc for the wptserve growth path).
 ## Current results (wpt@0cc6a7e)
 
 224 non-ignored files (plus 15 `.tentative.` proposal-stage files ignored):
-**221 fully passing**, 2 with recorded subtest failures (3 subtests).
+**222 fully passing**, 2 with recorded subtest failures (3 subtests).
 The whole url/ family is green: the in-repo rust-url fork at
 `server/vendor/url` carries the current-spec behaviors upstream still
 lacks (see `docs/url-impl-benchmark.md`; `WPT_URL_IMPL=whatwg` cross-

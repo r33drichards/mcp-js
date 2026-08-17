@@ -20,14 +20,19 @@ fn op_urlpattern_parse(
     #[string] base_url: Option<String>,
     ignore_case: bool,
 ) -> Result<quirks::UrlPattern, JsErrorBox> {
-    let init = quirks::process_construct_pattern_input(input, base_url.as_deref())
-        .map_err(|e| JsErrorBox::type_error(e.to_string()))?;
-    let options = UrlPatternOptions {
-        ignore_case,
-        regex_syntax: RegexSyntax::EcmaScript,
-    };
-    quirks::parse_pattern::<quirks::EcmaRegexp>(init, options)
-        .map_err(|e| JsErrorBox::type_error(e.to_string()))
+    // catch_unwind: a panic in the parser stack would otherwise abort the
+    // process (ops cannot unwind across the V8 boundary).
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let init = quirks::process_construct_pattern_input(input, base_url.as_deref())
+            .map_err(|e| JsErrorBox::type_error(e.to_string()))?;
+        let options = UrlPatternOptions {
+            ignore_case,
+            regex_syntax: RegexSyntax::EcmaScript,
+        };
+        quirks::parse_pattern::<quirks::EcmaRegexp>(init, options)
+            .map_err(|e| JsErrorBox::type_error(e.to_string()))
+    }))
+    .unwrap_or_else(|_| Err(JsErrorBox::type_error("internal error parsing pattern")))
 }
 
 #[op2]

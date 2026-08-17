@@ -53,6 +53,15 @@ fn op_url_parse(
     #[string] input: String,
     #[string] base: Option<String>,
 ) -> Result<String, JsErrorBox> {
+    // catch_unwind: a panic in the (forked) parser would otherwise abort
+    // the process — ops cannot unwind across the V8 boundary.
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        url_parse_impl(input, base)
+    }))
+    .unwrap_or_else(|_| Err(JsErrorBox::type_error("internal error parsing URL")))
+}
+
+fn url_parse_impl(input: String, base: Option<String>) -> Result<String, JsErrorBox> {
     let base_url = match base {
         Some(b) => Some(
             Url::parse(&b)
@@ -85,6 +94,13 @@ fn op_url_reparse(
     setter: u8,
     #[string] value: String,
 ) -> Result<String, JsErrorBox> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        url_reparse_impl(href, setter, value)
+    }))
+    .unwrap_or_else(|_| Err(JsErrorBox::type_error("internal error updating URL")))
+}
+
+fn url_reparse_impl(href: String, setter: u8, value: String) -> Result<String, JsErrorBox> {
     let mut url = Url::parse(&href)
         .map_err(|e| JsErrorBox::type_error(format!("Invalid URL: {}", e)))?;
     // Per the URL standard, setters that cannot apply are silent no-ops.

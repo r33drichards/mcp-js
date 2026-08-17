@@ -230,8 +230,11 @@ pub fn set_hostname(url: &mut Url, new_hostname: &str) -> Result<(), ()> {
                 }
             }
         }
+        let had_marker = path_marker_present(url);
         url.set_host_internal(host, None);
-        sync_path_marker(url, true);
+        if had_marker {
+            strip_path_marker(url);
+        }
         Ok(())
     } else {
         Err(())
@@ -320,11 +323,35 @@ pub fn set_pathname(url: &mut Url, new_pathname: &str) {
 /// Keep the URL-serializer marker in sync: a URL with no authority whose
 /// path starts with an empty segment serializes the path with a "/."
 /// prefix, so a later parse does not read the path as an authority.
+/// Whether the serialization carries the "/." no-authority marker before
+/// path_start. Only a URL whose host span is empty can carry one: with a
+/// real host the two bytes before path_start can spell "/." by
+/// coincidence (e.g. host "." serializes as "//." — treating it as a
+/// marker would splice out live serialization and corrupt offsets).
+fn path_marker_present(url: &Url) -> bool {
+    let ps = url.path_start as usize;
+    ps >= 2
+        && url.host_start == url.host_end
+        && url.serialization.get(ps - 2..ps) == Some("/.")
+}
+
+fn strip_path_marker(url: &mut Url) {
+    url.serialization
+        .replace_range(url.path_start as usize - 2..url.path_start as usize, "");
+    url.path_start -= 2;
+    if let Some(ref mut i) = url.query_start {
+        *i -= 2;
+    }
+    if let Some(ref mut i) = url.fragment_start {
+        *i -= 2;
+    }
+}
+
 fn sync_path_marker(url: &mut Url, has_authority: bool) {
     // The parser's convention keeps the marker BEFORE path_start, so the
     // path slice never includes it.
     let ps = url.path_start as usize;
-    let has_marker = ps >= 2 && url.serialization.get(ps - 2..ps) == Some("/.");
+    let has_marker = path_marker_present(url);
     let starts_double = url.serialization[ps..].starts_with("//");
     let want = !has_authority && starts_double;
     if want == has_marker {
