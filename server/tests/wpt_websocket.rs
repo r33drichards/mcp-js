@@ -3,9 +3,14 @@
 /// Runs the vendored `tests/wpt/websockets/*.any.js` files (see
 /// `tests/wpt/README.md` for provenance) inside the real Engine against a
 /// local echo server, and compares each file's outcome to
-/// `tests/wpt/expectations.json`. A newly failing file fails this test; a
-/// newly passing file also fails it, so the manifest stays honest — update
-/// the manifest in the same change that fixes the implementation.
+/// `tests/wpt/websocket_expectations.json`. A newly failing file fails this
+/// test; a newly passing file also fails it, so the manifest stays honest —
+/// update the manifest in the same change that fixes the implementation.
+///
+/// These live outside `tests/wpt/vendor/` on purpose: `wpt_harness.rs` walks
+/// that tree and runs every file serverlessly, which websockets tests cannot
+/// be. This runner supplies the echo server they need, so it keeps its own
+/// manifest while sharing the vendored `resources/testharness.js`.
 ///
 /// The WPT files are sloppy-mode scripts (undeclared-variable assignments),
 /// so they are evaluated via indirect eval in global scope rather than being
@@ -193,14 +198,15 @@ async fn wpt_websockets_match_expectations() {
     ensure_v8();
 
     let wpt_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/wpt");
-    let testharness =
-        std::fs::read_to_string(wpt_dir.join("resources/testharness.js")).expect("testharness.js");
+    let testharness = std::fs::read_to_string(wpt_dir.join("vendor/resources/testharness.js"))
+        .expect("vendored testharness.js");
     let constants = std::fs::read_to_string(wpt_dir.join("websockets/constants.sub.js"))
         .expect("constants.sub.js");
     let expectations: BTreeMap<String, String> = serde_json::from_str(
-        &std::fs::read_to_string(wpt_dir.join("expectations.json")).expect("expectations.json"),
+        &std::fs::read_to_string(wpt_dir.join("websocket_expectations.json"))
+            .expect("websocket_expectations.json"),
     )
-    .expect("expectations.json should be a {file: \"pass\"|\"fail\"} map");
+    .expect("websocket_expectations.json should be a {file: \"pass\"|\"fail\"} map");
 
     let mut test_files: Vec<String> = std::fs::read_dir(wpt_dir.join("websockets"))
         .expect("websockets dir")
@@ -239,13 +245,15 @@ async fn wpt_websockets_match_expectations() {
     // expected-fail list can't silently rot.
     for file in expectations.keys() {
         if !test_files.contains(file) {
-            mismatches.push(format!("{file}: in expectations.json but not vendored"));
+            mismatches.push(format!(
+                "{file}: in websocket_expectations.json but not vendored"
+            ));
         }
     }
 
     assert!(
         mismatches.is_empty(),
-        "WPT websockets results diverged from expectations.json:\n  {}",
+        "WPT websockets results diverged from websocket_expectations.json:\n  {}",
         mismatches.join("\n  ")
     );
 }
