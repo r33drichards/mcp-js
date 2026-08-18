@@ -582,9 +582,13 @@ impl ServerHandler for McpService {
         let instructions = self.engine.instructions_override()
             .map(|s| s.to_string())
             .unwrap_or_else(|| {
+                // Heap-enabled modes execute in a V8 SnapshotCreator isolate,
+                // which disables WebAssembly outright. Say so here: a client
+                // that does not know this reads the absent `WebAssembly` global
+                // as a missing feature and burns calls probing for it.
                 let mode = match (self.engine.heap_enabled(), self.engine.fs_enabled()) {
-                    (true, true) => "with per-session V8 heap persistence (globals persist across calls) and a per-session content-addressed filesystem at /work",
-                    (true, false) => "with per-session V8 heap persistence (globals persist across calls)",
+                    (true, true) => "with per-session V8 heap persistence (globals persist across calls) and a per-session content-addressed filesystem at /work. WebAssembly is NOT available in this mode (heap snapshots require a V8 isolate that disables it), so the `WebAssembly` global is undefined — prefer pure-JS libraries",
+                    (true, false) => "with per-session V8 heap persistence (globals persist across calls). WebAssembly is NOT available in this mode (heap snapshots require a V8 isolate that disables it), so the `WebAssembly` global is undefined — prefer pure-JS libraries",
                     (false, true) => "with a per-session content-addressed filesystem at /work (files persist across calls; JS globals do NOT)",
                     (false, false) => "stateless (no state persists between calls)",
                 };

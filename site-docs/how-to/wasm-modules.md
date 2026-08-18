@@ -90,7 +90,7 @@ The script downloads the SQLite 3.49.1 amalgamation and compiles it to
 Start mcp-v8 with the resulting module:
 
 ```bash
-mcp-v8 --stateless \
+mcp-v8 \
        --wasm-module sqlite=examples/sqlite-wasm/sqlite3.wasm
 ```
 

@@ -79,26 +79,27 @@ The default cap is 16 MiB (256 pages). The SQLite example builds with
 cap — 256 pages declared against a 256-page budget, passing the `initial > max`
 check with zero pages to spare.
 
-## Snapshot persistence in stateful mode
+## Why WASM requires a non-heap mode
 
-In stateful mode mcp-v8 persists V8 heap state across calls as a content-addressed
-snapshot. WASM module injection follows the snapshot lifecycle:
+WASM modules and V8 heap persistence are mutually exclusive. Heap snapshots are
+taken with a V8 `SnapshotCreator` isolate, and that isolate has WebAssembly
+disabled outright — the `WebAssembly` global is not merely restricted, it is
+absent. Nothing can be compiled or instantiated in it.
 
-- **First execution on a new heap (no snapshot)**: modules are injected and the
-  resulting globals are baked into the V8 heap before the snapshot is taken. The
-  snapshot captures the compiled `WebAssembly.Module` objects and any
-  auto-instantiated `exports` objects.
-- **Subsequent executions (snapshot exists)**: the snapshot is restored and
-  `inject_wasm_modules` is **not** called again. The globals are already present
-  in the restored heap.
+mcp-v8 therefore rejects the combination at startup rather than failing on the
+first execution: passing `--wasm-module`/`--wasm-config` together with any
+`--heap-store` other than `none` is an argument conflict and the server exits.
 
-This makes stateful mode efficient: WASM modules are compiled once per heap, not
-once per call. The trade-off is that existing heap snapshots are bound to the
-modules that were loaded when those heaps were first created. If you restart the
-server with different `--wasm-module` flags, only new heaps (created after the
-restart) pick up the changed modules.
+This applies to WebAssembly generally, not just pre-loaded modules. Under heap
+persistence, ordinary user JavaScript calling `new WebAssembly.Instance(...)`
+fails with `WebAssembly is not defined`, because the global does not exist in a
+SnapshotCreator isolate.
 
-In stateless mode (`--stateless`) there is no snapshot. The module bytes are
+If you need both WASM and persistence across calls, use filesystem persistence
+instead: `--fs-store dir` (or `s3`) with the default `--heap-store none`. That
+combination gives a durable `/work` filesystem while leaving WebAssembly intact.
+
+In stateless mode (`--heap-store none`, the default) there is no snapshot. The module bytes are
 re-validated and re-compiled from disk on every execution.
 
 ## Discovery: WASM stub tools

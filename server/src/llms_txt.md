@@ -88,7 +88,7 @@ In stateful mode, pass the returned `heap` hash back to `run_js` to resume that 
 - ES modules, top-level `await`
 - `console.log/info/warn/error` → readable via `get_execution_output`
 - npm/JSR/URL imports via esm.sh (requires `--allow-external-modules`)
-- WebAssembly (`WebAssembly.Module`, `WebAssembly.Instance`)
+- WebAssembly (`WebAssembly.Module`, `WebAssembly.Instance`) — stateless/fs modes only; see Limitations
 - Optional `fetch()` (OPA-gated, web-standard Fetch API)
 - Optional fetch header injection via `--fetch-header` / `--fetch-header-config` (static headers or OAuth client-credentials bearer tokens)
 - Optional `fs` module (OPA-gated, Node.js-compatible)
@@ -96,7 +96,7 @@ In stateful mode, pass the returned `heap` hash back to `run_js` to resume that 
 
 ## Limitations
 
-- No `setTimeout` / `setInterval`
+- No WebAssembly under heap persistence: heap snapshots need a V8 SnapshotCreator isolate that disables WASM, so the `WebAssembly` global is undefined in stateful mode. Use a pure-JS library there, or run stateless (optionally with `--fs-store` for persistence).
 - No DOM / browser APIs
 - No environment variable access
 - External imports disabled by default (enable with `--allow-external-modules`)

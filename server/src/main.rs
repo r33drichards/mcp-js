@@ -342,6 +342,20 @@ async fn async_main(cli: Cli) -> Result<()> {
             StoreKind::None => unreachable!("heap_enabled implies heap_store != none"),
         };
         tracing::info!("Heap persistence: ENABLED");
+        // The stateful path runs user code in a JsRuntimeForSnapshot (a V8
+        // SnapshotCreator isolate), which disables WebAssembly wholesale — the
+        // `WebAssembly` global is absent, not merely restricted. Pre-loaded
+        // modules are rejected outright above, but plain `new WebAssembly.*`
+        // in user JS fails with a bare "WebAssembly is not defined", which
+        // reads like a missing feature rather than a mode choice. Say so once
+        // at startup so the mode is visible before the first confusing failure.
+        tracing::warn!(
+            "WebAssembly is UNAVAILABLE while heap persistence is enabled: V8 heap \
+             snapshots require a SnapshotCreator isolate, which disables WASM, so \
+             `WebAssembly` is not defined in the sandbox. Run with --heap-store none \
+             (the default) to use WebAssembly; --fs-store gives persistence that is \
+             compatible with it."
+        );
         Engine::new_stateful(
             heap_storage,
             None,

@@ -103,7 +103,7 @@ curl -s http://localhost:8080/api/executions
 
 ## Use the stateless synchronous shortcut
 
-When the server is running in stateless mode (`--stateless`), `run_js` is the only available tool and it blocks until the execution completes (polling internally every 50 ms, up to 300 seconds). It returns the full console output directly — no separate `get_execution_output` call is needed.
+When the server is running in stateless mode (`--heap-store none`, the default), `run_js` is the only available tool and it blocks until the execution completes (polling internally every 50 ms, up to 300 seconds). It returns the full console output directly — no separate `get_execution_output` call is needed.
 
 ```json
 { "tool": "run_js", "arguments": { "code": "console.log(1 + 1);" } }

@@ -35,21 +35,26 @@ Key flags used during compilation:
 ### Stateless mode
 
 ```bash
-mcp-v8 --stateless --wasm-module sqlite=examples/sqlite-wasm/sqlite3.wasm
+mcp-v8 --wasm-module sqlite=examples/sqlite-wasm/sqlite3.wasm
 ```
 
-### Stateful mode (persistent sessions)
+### Persistent sessions
+
+Heap persistence is **not** available alongside WASM: V8 heap snapshots need a
+`SnapshotCreator` isolate that disables WebAssembly, so `--heap-store` (any value
+other than `none`) and `--wasm-module` are rejected together at startup.
+
+Use filesystem persistence instead and let SQLite write a database file under
+`/work`:
 
 ```bash
-mcp-v8 --directory-path /tmp/mcp-v8-heaps --wasm-module sqlite=examples/sqlite-wasm/sqlite3.wasm
+mcp-v8 --fs-store dir --fs-dir /var/lib/mcp-v8/fs-blobs --wasm-module sqlite=examples/sqlite-wasm/sqlite3.wasm
 ```
-
-In stateful mode the SQLite wrapper code is snapshotted into the V8 heap, so you only need to initialize it once and can continue using it across subsequent calls by passing the `heap` hash.
 
 ### HTTP transport
 
 ```bash
-mcp-v8 --stateless --http-port 8080 --wasm-module sqlite=examples/sqlite-wasm/sqlite3.wasm
+mcp-v8 --http-port 8080 --wasm-module sqlite=examples/sqlite-wasm/sqlite3.wasm
 ```
 
 Then test with curl:
@@ -159,7 +164,6 @@ JSON.stringify(result.rows);
     "js": {
       "command": "mcp-v8",
       "args": [
-        "--stateless",
         "--wasm-module", "sqlite=/path/to/sqlite3.wasm",
         "--heap-memory-max", "32"
       ]

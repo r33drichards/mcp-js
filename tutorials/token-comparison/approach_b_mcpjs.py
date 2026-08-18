@@ -13,7 +13,7 @@ Claude writes JavaScript that calls mcp.callTool() inside the V8 sandbox.
 
 Usage:
     # Start mcp-js with the GitHub MCP server connected:
-    mcp-v8 --stateless --http-port 3000 \
+    mcp-v8 --http-port 3000 \
         --mcp-server 'github=stdio:npx:-y:@modelcontextprotocol/server-github'
 
     export AWS_REGION=us-east-1

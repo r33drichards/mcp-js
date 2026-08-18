@@ -102,7 +102,7 @@ Commands:
 
 ```bash
 # Start the server in HTTP mode
-mcp-v8 --stateless --http-port 3000 &
+mcp-v8 --http-port 3000 &
 
 # Submit code and get an execution ID
 mcp-v8-cli exec "console.log('hello'); 1 + 1"
@@ -233,7 +233,7 @@ These options enable a policy-gated `fetch()` function in the JavaScript runtime
 
 **Example:**
 ```bash
-mcp-v8 --stateless --http-port 3000 \
+mcp-v8 --http-port 3000 \
   --policies-json '{"fetch":{"policies":[{"url":"http://localhost:8181"}]}}'
 ```
 
@@ -248,7 +248,7 @@ Both options can be used together. CLI flags and config file entries are merged;
 
 **Example — CLI flags:**
 ```bash
-mcp-v8 --stateless --wasm-module math=/path/to/math.wasm --wasm-module crypto=/path/to/crypto.wasm
+mcp-v8 --wasm-module math=/path/to/math.wasm --wasm-module crypto=/path/to/crypto.wasm
 ```
 
 **Example — Config file** (`wasm-modules.json`):
@@ -259,7 +259,7 @@ mcp-v8 --stateless --wasm-module math=/path/to/math.wasm --wasm-module crypto=/p
 }
 ```
 ```bash
-mcp-v8 --stateless --wasm-config wasm-modules.json
+mcp-v8 --wasm-config wasm-modules.json
 ```
 
 After loading, the module exports are available directly in JavaScript:
@@ -288,13 +288,13 @@ After installation, you can run the server directly. Choose one of the following
 
 ```bash
 # Use S3 for heap storage (recommended for cloud/persistent use)
-mcp-v8 --s3-bucket my-bucket-name
+mcp-v8 --heap-store s3 --s3-bucket my-bucket-name
 
 # Use local filesystem directory for heap storage (recommended for local development)
-mcp-v8 --directory-path /tmp/mcp-v8-heaps
+mcp-v8 --heap-store dir --heap-dir /tmp/mcp-v8-heaps
 
-# Use stateless mode - no heap persistence (recommended for one-off computations)
-mcp-v8 --stateless
+# Use stateless mode - no heap persistence (the default; recommended for one-off computations)
+mcp-v8
 ```
 
 ### HTTP Transport (Streamable HTTP)
@@ -303,13 +303,13 @@ The HTTP transport uses the Streamable HTTP protocol (MCP 2025-03-26+), which su
 
 ```bash
 # Start HTTP server on port 8080 with local filesystem storage
-mcp-v8 --directory-path /tmp/mcp-v8-heaps --http-port 8080
+mcp-v8 --heap-store dir --heap-dir /tmp/mcp-v8-heaps --http-port 8080
 
 # Start HTTP server on port 8080 with S3 storage
-mcp-v8 --s3-bucket my-bucket-name --http-port 8080
+mcp-v8 --heap-store s3 --s3-bucket my-bucket-name --http-port 8080
 
-# Start HTTP server on port 8080 in stateless mode
-mcp-v8 --stateless --http-port 8080
+# Start HTTP server on port 8080 in stateless mode (the default)
+mcp-v8 --http-port 8080
 ```
 
 The HTTP transport also exposes a plain HTTP API at `POST /api/exec` for direct JavaScript execution without MCP framing.
@@ -327,10 +327,10 @@ Server-Sent Events (SSE) transport for streaming responses:
 
 ```bash
 # Start SSE server on port 8081 with local filesystem storage
-mcp-v8 --directory-path /tmp/mcp-v8-heaps --sse-port 8081
+mcp-v8 --heap-store dir --heap-dir /tmp/mcp-v8-heaps --sse-port 8081
 
-# Start SSE server on port 8081 in stateless mode
-mcp-v8 --stateless --sse-port 8081
+# Start SSE server on port 8081 in stateless mode (the default)
+mcp-v8 --sse-port 8081
 ```
 
 ## MCP Tools
@@ -403,7 +403,7 @@ In stateful MCP, `run_js` accepts an additional `heap` parameter (SHA-256 hash t
 
 ## Stateless vs Stateful Mode
 
-### Stateless Mode (`--stateless`)
+### Stateless Mode (`--heap-store none`, the default)
 
 Stateless mode runs each JavaScript execution in a fresh V8 isolate without any heap persistence.
 
@@ -543,7 +543,7 @@ authorization again.
   "mcpServers": {
     "js": {
       "command": "mcp-v8",
-      "args": ["--directory-path", "/tmp/mcp-v8-heaps"]
+      "args": ["--heap-store", "dir", "--heap-dir", "/tmp/mcp-v8-heaps"]
     }
   }
 }
@@ -555,7 +555,7 @@ authorization again.
   "mcpServers": {
     "js": {
       "command": "mcp-v8",
-      "args": ["--stateless"]
+      "args": []
     }
   }
 }
@@ -570,10 +570,10 @@ Add the MCP server to Claude Code using the `claude mcp add` command:
 **Stdio transport (local):**
 ```bash
 # Stateful mode with local filesystem
-claude mcp add mcp-v8 -- mcp-v8 --directory-path /tmp/mcp-v8-heaps
+claude mcp add mcp-v8 -- mcp-v8 --heap-store dir --heap-dir /tmp/mcp-v8-heaps
 
 # Stateless mode
-claude mcp add mcp-v8 -- mcp-v8 --stateless
+claude mcp add mcp-v8 -- mcp-v8
 ```
 
 **SSE transport (remote):**
@@ -594,7 +594,7 @@ Then test by running `claude` and asking: "Run this JavaScript: `console.log([1,
   "mcpServers": {
     "js": {
       "command": "mcp-v8",
-      "args": ["--directory-path", "/tmp/mcp-v8-heaps"]
+      "args": ["--heap-store", "dir", "--heap-dir", "/tmp/mcp-v8-heaps"]
     }
   }
 }
@@ -606,7 +606,7 @@ Then test by running `claude` and asking: "Run this JavaScript: `console.log([1,
   "mcpServers": {
     "js": {
       "command": "mcp-v8",
-      "args": ["--stateless"]
+      "args": []
     }
   }
 }
@@ -720,7 +720,7 @@ Run a full SQLite database inside mcp-v8 using [SQLite WASM](https://github.com/
 ./examples/sqlite-wasm/build.sh
 
 # Start the server with SQLite pre-loaded
-mcp-v8 --stateless --wasm-module sqlite=examples/sqlite-wasm/sqlite3.wasm
+mcp-v8 --wasm-module sqlite=examples/sqlite-wasm/sqlite3.wasm
 ```
 
 Then run SQL from JavaScript:
@@ -767,7 +767,7 @@ The policy input includes:
 **2. Start the server with fetch policy enabled**
 
 ```bash
-mcp-v8 --stateless --http-port 3000 \
+mcp-v8 --http-port 3000 \
   --policies-json '{"fetch":{"policies":[{"url":"http://localhost:8181"}]}}'
 ```
 
@@ -837,13 +837,13 @@ host=<host>,header=<name>,token_url=<url>,client_id=<id>,client_secret=<secret>[
 Can be specified multiple times for multiple rules:
 
 ```bash
-mcp-v8 --stateless --policies-json '{"fetch":{"policies":[{"url":"http://localhost:8181"}]}}' \
+mcp-v8 --policies-json '{"fetch":{"policies":[{"url":"http://localhost:8181"}]}}' \
   --fetch-header "host=api.github.com,header=Authorization,value=Bearer ghp_xxxx" \
   --fetch-header "host=api.example.com,header=X-API-Key,value=secret123"
 ```
 
 ```bash
-mcp-v8 --stateless \
+mcp-v8 \
   --policies-json '{"fetch":{"policies":[{"url":"http://localhost:8181"}]}}' \
   --fetch-header "host=api.example.com,header=Authorization,token_url=https://issuer.example.com/oauth2/token,client_id=my-client,client_secret=${CLIENT_SECRET},scope=read:all,refresh_buffer_secs=45"
 ```
@@ -879,7 +879,7 @@ For managing many rules, use a JSON config file. Each rule uses either a static 
 ```
 
 ```bash
-mcp-v8 --stateless --policies-json '{"fetch":{"policies":[{"url":"http://localhost:8181"}]}}' \
+mcp-v8 --policies-json '{"fetch":{"policies":[{"url":"http://localhost:8181"}]}}' \
   --fetch-header-config headers.json
 ```
 
@@ -1009,7 +1009,7 @@ The policy input includes:
 Use `--policies-json` to enable filesystem access with local Rego policies:
 
 ```bash
-mcp-v8 --stateless --http-port 3000 \
+mcp-v8 --http-port 3000 \
   --policies-json /path/to/policies.json
 ```
 
@@ -1096,10 +1096,10 @@ wat2wasm math.wat -o math.wasm
 
 ```bash
 # Single module
-mcp-v8 --stateless --wasm-module math=./math.wasm
+mcp-v8 --wasm-module math=./math.wasm
 
 # Multiple modules
-mcp-v8 --stateless \
+mcp-v8 \
   --wasm-module math=./math.wasm \
   --wasm-module physics=./physics.wasm
 ```
@@ -1114,7 +1114,7 @@ Or use a JSON config file for many modules:
 ```
 
 ```bash
-mcp-v8 --stateless --wasm-config wasm-modules.json
+mcp-v8 --wasm-config wasm-modules.json
 ```
 
 **3. Call exports from JavaScript**
@@ -1146,20 +1146,23 @@ You can configure heap storage using the following command line arguments:
   - Example: `mcp-v8 --s3-bucket my-bucket-name --cache-dir /tmp/mcp-v8-cache`
   - Reads from local cache first, writes to both local cache and S3.
   - Reduces latency for repeated snapshot access.
-- **Filesystem**: `--directory-path <path>`
-  - Example: `mcp-v8 --directory-path /tmp/mcp-v8-heaps`
+- **Filesystem**: `--heap-store dir --heap-dir <path>`
+  - Example: `mcp-v8 --heap-store dir --heap-dir /tmp/mcp-v8-heaps`
   - Stores heap snapshots locally on disk.
   - Ideal for local development and testing.
-- **Stateless**: `--stateless`
-  - Example: `mcp-v8 --stateless`
+- **Stateless** (default): `--heap-store none`
+  - Example: `mcp-v8`
   - No heap persistence - each execution starts fresh.
   - Ideal for one-off computations and serverless environments.
 
-**Note:** Only one storage option can be used at a time. If multiple are provided, the server will return an error.
+**Note:** `--heap-store` selects exactly one heap backend. Heap and filesystem
+persistence are independent axes, so `--heap-store` and `--fs-store` may be
+combined freely — but note that any heap store other than `none` disables
+WebAssembly (see [Limitations](#limitations)).
 
 ## Limitations
 
-- **No timers**: Functions like `setTimeout` and `setInterval` are not available.
+- **No WebAssembly under heap persistence**: any `--heap-store` other than `none` runs user code in a V8 SnapshotCreator isolate, which disables WASM — the `WebAssembly` global is absent entirely. Use the default `--heap-store none` (optionally with `--fs-store` for persistence) when you need WASM.
 - **No DOM or browser APIs**: This is not a browser environment; there is no access to `window`, `document`, or other browser-specific objects.
 - **TypeScript: type removal only**: TypeScript type annotations are stripped before execution. No type checking is performed — invalid types are silently removed, not reported as errors.
 

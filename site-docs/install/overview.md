@@ -13,7 +13,7 @@ nix run github:r33drichards/mcp-js -- --help
 
 # Or build it into ./result/bin/server
 nix build github:r33drichards/mcp-js
-./result/bin/server --http-port=8080 --stateless
+./result/bin/server --http-port=8080
 ```
 
 For local development, enter the dev shell (provides the Rust toolchain and the

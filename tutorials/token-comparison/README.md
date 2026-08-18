@@ -101,7 +101,7 @@ uv run tutorials/token-comparison/approach_a_github_mcp.py
 
 ```bash
 # Start mcp-js with GitHub MCP server connected
-mcp-v8 --stateless --http-port 3000 \
+mcp-v8 --http-port 3000 \
     --mcp-server 'github=stdio:npx:-y:@modelcontextprotocol/server-github'
 
 # In another terminal

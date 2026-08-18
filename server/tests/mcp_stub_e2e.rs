@@ -4,7 +4,7 @@
 //!
 //!   * **upstream**: a plain MCPJS server (default tools).
 //!   * **outer**: another MCPJS server configured to connect to `upstream`
-//!     via `--mcp-server upstream=stdio:<server-bin>:--directory-path:...`.
+//!     via `--mcp-server upstream=stdio:<server-bin>:--heap-store:dir:--heap-dir:...`.
 //!
 //! The outer server should advertise `runjs__upstream__run_js` (and the other
 //! upstream tools) as stubs in `tools/list`. Calling one of those stubs

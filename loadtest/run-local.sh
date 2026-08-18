@@ -57,9 +57,10 @@ echo ""
 # ── Start servers ──────────────────────────────────────────────────────
 if [ "$TOPOLOGY" = "single" ]; then
   if [ "$MODE" = "stateful" ]; then
-    ARGS="--http-port=3001 --directory-path=${DATA_DIR}/node1/heaps --session-db-path=${DATA_DIR}/node1/sessions"
+    ARGS="--http-port=3001 --heap-store=dir --heap-dir=${DATA_DIR}/node1/heaps --session-db-path=${DATA_DIR}/node1/sessions"
   else
-    ARGS="--http-port=3001 --stateless"
+    # Stateless is the default (--heap-store none); no flag needed.
+    ARGS="--http-port=3001"
   fi
 
   echo "Starting single node on port 3001..."
@@ -82,9 +83,9 @@ else
     done
 
     if [ "$MODE" = "stateful" ]; then
-      MODE_ARGS="--directory-path=${DATA_DIR}/${NODE_ID}/heaps --session-db-path=${DATA_DIR}/${NODE_ID}/sessions"
+      MODE_ARGS="--heap-store=dir --heap-dir=${DATA_DIR}/${NODE_ID}/heaps --session-db-path=${DATA_DIR}/${NODE_ID}/sessions"
     else
-      MODE_ARGS="--stateless"
+      MODE_ARGS=""   # stateless is the default
     fi
 
     echo "Starting ${NODE_ID} on HTTP ${HTTP_PORT}, cluster ${CLUSTER_PORT}..."

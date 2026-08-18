@@ -517,7 +517,7 @@ mod tests {
     fn config_path_is_found_in_argv_or_env() {
         let argv = |tokens: &[&str]| tokens.iter().map(|t| t.to_string()).collect::<Vec<_>>();
         assert_eq!(
-            config_path_from(argv(&["--stateless", "--config", "a.toml"]), None).as_deref(),
+            config_path_from(argv(&["--allow-run-js-file", "--config", "a.toml"]), None).as_deref(),
             Some("a.toml")
         );
         assert_eq!(config_path_from(argv(&["--config=b.toml"]), None).as_deref(), Some("b.toml"));

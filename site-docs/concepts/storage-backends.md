@@ -14,11 +14,11 @@ At runtime one of three concrete backends is wired in as `AnyHeapStorage`. In st
 ```mermaid
 flowchart TD
     entry["run_js call"] --> mode{Mode}
-    mode -->|"--stateless"| sl["Stateless Engine<br/>No heap saved"]
-    mode -->|"Stateful default"| sel{Storage backend selected}
-    sel -->|"--directory-path DIR<br/>or default /tmp/mcp-v8-heaps"| fs["FileHeapStorage<br/>(local directory)"]
-    sel -->|"--s3-bucket NAME"| s3["S3HeapStorage<br/>(S3 bucket)"]
-    sel -->|"--s3-bucket NAME<br/>--cache-dir DIR"| wt["WriteThroughCacheHeapStorage<br/>(FS cache + S3)"]
+    mode -->|"--heap-store none (default)"| sl["Stateless Engine<br/>No heap saved"]
+    mode -->|"--heap-store dir / s3"| sel{Storage backend selected}
+    sel -->|"--heap-store dir --heap-dir DIR<br/>or default /tmp/mcp-v8-heaps"| fs["FileHeapStorage<br/>(local directory)"]
+    sel -->|"--heap-store s3<br/>--s3-bucket NAME"| s3["S3HeapStorage<br/>(S3 bucket)"]
+    sel -->|"--heap-store s3<br/>--s3-bucket NAME<br/>--cache-dir DIR"| wt["WriteThroughCacheHeapStorage<br/>(FS cache + S3)"]
     fs --> snap["Heap snapshot<br/>(content-addressed file)"]
     s3 --> snap
     wt --> snap
@@ -50,7 +50,7 @@ This backend provides near-local read latency for recently-used heaps while keep
 
 ### Stateless — no heap storage
 
-When `--stateless` is passed the engine does not create any `HeapStorage` at all. Each `run_js` call starts a cold V8 isolate, runs the code synchronously, discards the isolate, and returns the output inline. No snapshot is ever written or read. The session log and heap tag index are not opened; the execution registry sled database (at `{session-db-path}/executions`) is still opened regardless of this flag.
+With `--heap-store none` (the default) the engine does not create any `HeapStorage` at all. Each `run_js` call starts a cold V8 isolate, runs the code synchronously, discards the isolate, and returns the output inline. No snapshot is ever written or read. The session log and heap tag index are not opened; the execution registry sled database (at `{session-db-path}/executions`) is still opened regardless of this flag.
 
 ## Durability and sharing trade-offs
 
@@ -62,13 +62,13 @@ When `--stateless` is passed the engine does not create any `HeapStorage` at all
 | WriteThroughCacheHeapStorage | Yes (S3 copy) | Yes (shared via S3) | Local on cache hit |
 | Stateless | N/A | N/A | N/A — no state |
 
-For a single node with no clustering requirement, a persistent `--directory-path` on durable storage is simplest. For multi-node or clustered deployments, S3 (with or without a cache) is required so that all nodes see the same snapshots.
+For a single node with no clustering requirement, a persistent `--heap-store dir --heap-dir` on durable storage is simplest. For multi-node or clustered deployments, S3 (with or without a cache) is required so that all nodes see the same snapshots.
 
 ## The session DB vs the heap store
 
 The heap store and the sled session DB are separate components that serve different purposes:
 
-- **Heap store** (`--directory-path` / `--s3-bucket`): stores the raw binary V8 heap snapshots. Accessed only during execution. Content-addressed; the same bytes always produce the same key.
+- **Heap store** (`--heap-store dir --heap-dir` / `--heap-store s3 --s3-bucket`): stores the raw binary V8 heap snapshots. Accessed only during execution. Content-addressed; the same bytes always produce the same key.
 - **Session DB** (`--session-db-path`, default `/tmp/mcp-v8-sessions`): a sled embedded database that holds the session log, the heap tag index (at the `heap-tags` sub-path), the execution registry, and (when clustering is enabled) per-node Raft state.
 
 The session DB tracks metadata — which heaps have been tagged, which executions belong to which session — but does not store the snapshot bytes themselves. Losing the session DB means losing session history and tags, but the snapshots in the heap store are unaffected and can still be referenced directly by hash. Losing the heap store means snapshots cannot be replayed even if session metadata survives.

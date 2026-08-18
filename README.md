@@ -61,14 +61,14 @@ template setup.
 
 ```bash
 # Claude Code (stdio)
-claude mcp add mcp-v8 -- mcp-v8 --directory-path /tmp/mcp-v8-heaps   # stateful
-claude mcp add mcp-v8 -- mcp-v8 --stateless                          # stateless
+claude mcp add mcp-v8 -- mcp-v8 --heap-store dir --heap-dir /tmp/mcp-v8-heaps  # stateful
+claude mcp add mcp-v8 -- mcp-v8                                                # stateless (default)
 ```
 
 For Claude Desktop / Cursor, add to the client's `mcpServers` config:
 
 ```json
-{ "mcpServers": { "js": { "command": "mcp-v8", "args": ["--stateless"] } } }
+{ "mcpServers": { "js": { "command": "mcp-v8", "args": [] } } }
 ```
 
 Then ask the agent: *"Run this JavaScript: `console.log([1,2,3].map(x => x*2))`"*.
@@ -76,7 +76,7 @@ Then ask the agent: *"Run this JavaScript: `console.log([1,2,3].map(x => x*2))`"
 ### Run over HTTP
 
 ```bash
-mcp-v8 --stateless --http-port 8080
+mcp-v8 --http-port 8080
 # MCP endpoint: POST http://localhost:8080/mcp
 # REST sidecar: POST http://localhost:8080/api/exec  (JSON body, or a raw-body file upload)
 ```
@@ -118,7 +118,7 @@ Precedence is CLI flag > `MCP_V8_*` env var > config file > default. See the
 - **Console capture** — `console.log/info/warn/error/debug/trace`, streamed to storage and readable with line- or byte-based pagination.
 - **Async execution model** — `run_js` returns an execution ID; poll status and stream output; cancel running work.
 - **Content-addressed heap snapshots** — persist/restore V8 state across calls (local FS, S3, or S3 + write-through cache), or run **stateless**.
-- **WebAssembly** — the standard `WebAssembly` API, plus pre-loaded modules (`--wasm-module`) exposed as globals and advertised to clients as `runjs__wasm__<name>` stub tools.
+- **WebAssembly** — the standard `WebAssembly` API, plus pre-loaded modules (`--wasm-module`) exposed as globals and advertised to clients as `runjs__wasm__<name>` stub tools. Requires stateless mode: heap persistence uses a V8 SnapshotCreator isolate that disables WASM entirely.
 - **ES module imports** — optional `npm:`, `jsr:`, and URL imports fetched at runtime (policy-gated).
 - **Policy-gated capabilities** — `fetch`, filesystem (`fs`), and subprocess access, each checked against a Rego policy per operation; plus header/OAuth injection for `fetch`.
 - **Compose other MCP servers** — connect upstream MCP servers and call them from JS via `mcp.callTool()` / `mcp.listTools()`.
@@ -261,7 +261,7 @@ A fully-typed client for the REST API, generated from the OpenAPI spec via
 [progenitor](https://github.com/oxidecomputer/progenitor):
 
 ```bash
-mcp-v8 --stateless --http-port 3000 &
+mcp-v8 --http-port 3000 &
 mcp-v8-cli exec "console.log('hello'); 1 + 1"
 mcp-v8-cli exec --file ./script.js                # run a local file (uploaded as the code)
 mcp-v8-cli executions get <execution_id>

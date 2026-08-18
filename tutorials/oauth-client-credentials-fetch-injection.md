@@ -20,7 +20,7 @@ The examples below use the local Keycloak setup already included in this repo.
 Dynamic OAuth injection uses the same `--fetch-header` flag as static headers, but replaces `value=` with token-source settings:
 
 ```bash
-mcp-v8 --stateless \
+mcp-v8  \
   --policies-json '{"fetch":{"policies":[{"url":"http://localhost:8181"}]}}' \
   --fetch-header "host=api.example.com,header=Authorization,token_url=https://issuer.example.com/oauth2/token,client_id=my-client,client_secret=${CLIENT_SECRET},scope=read:all,refresh_buffer_secs=45"
 ```

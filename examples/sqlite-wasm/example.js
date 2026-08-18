@@ -3,7 +3,7 @@
 // This script is designed to run inside mcp-v8 with the SQLite WASM module
 // pre-loaded via:
 //
-//   mcp-v8 --stateless --wasm-module sqlite=examples/sqlite-wasm/sqlite3.wasm
+//   mcp-v8 --wasm-module sqlite=examples/sqlite-wasm/sqlite3.wasm
 //
 // The compiled WebAssembly.Module is available as the global `__wasm_sqlite`.
 // Because the module has WASI imports, it is NOT auto-instantiated — we

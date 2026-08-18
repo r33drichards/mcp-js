@@ -41,7 +41,7 @@ Pre-load the `.wasm` file under the global name `sqlite` with `--wasm-module`.
 Run over HTTP so we can submit the example with `curl`:
 
 ```bash
-mcp-v8 --stateless --http-port 8080 \
+mcp-v8 --http-port 8080 \
   --wasm-module sqlite=examples/sqlite-wasm/sqlite3.wasm
 ```
 
@@ -84,7 +84,7 @@ module from JavaScript via `run_js` (it's the `__wasm_sqlite` global, exactly as
 below). Add a human description so agents know what it's for:
 
 ```bash
-mcp-v8 --stateless --http-port 8080 \
+mcp-v8 --http-port 8080 \
   --wasm-module sqlite=examples/sqlite-wasm/sqlite3.wasm \
   --wasm-stub-description sqlite="In-memory SQLite database (exec/query SQL)."
 ```
@@ -119,20 +119,26 @@ db.close();
 JSON.stringify(result.rows);
 ```
 
-## Persisting the database (stateful mode)
+## Persisting the database
 
-In stateless mode the database lives only for that one execution. To carry it
-across calls, run statefully and pass the returned `heap` key to the next
-`run_js`:
+In stateless mode the database lives only for that one execution.
+
+Heap persistence cannot help here: V8 heap snapshots require a `SnapshotCreator`
+isolate that disables WebAssembly, so `--heap-store` and `--wasm-module` are
+mutually exclusive and the server rejects the combination at startup. See
+[WebAssembly modules](../concepts/wasm-modules.md).
+
+To carry data across calls, use filesystem persistence and have SQLite write a
+real database file under `/work` instead of using an in-memory database:
 
 ```bash
-mcp-v8 --directory-path /tmp/mcp-v8-heaps \
+mcp-v8 --fs-store dir --fs-dir /var/lib/mcp-v8/fs-blobs \
   --wasm-module sqlite=examples/sqlite-wasm/sqlite3.wasm
 ```
 
-The initialized SQLite runtime and its in-memory data are captured in the V8
-heap snapshot, so a later run that restores that heap continues with the same
-database. See [Stateful sessions & heap snapshots](../how-to/sessions-and-heaps.md).
+The `/work` filesystem is content-addressed and persists across calls, so a
+later run that mounts the same snapshot sees the same database file. See
+[Filesystem snapshots](../how-to/fs-snapshots.md).
 
 ## Things to keep in mind
 

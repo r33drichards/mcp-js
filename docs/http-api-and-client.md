@@ -17,7 +17,7 @@ Start the server in HTTP mode. The simplest form — no persistent heap storage:
 
 ```bash
 cargo build --release -p server
-./target/release/server --stateless --http-port 3000
+./target/release/server --http-port 3000
 ```
 
 All examples below assume the server is reachable at `http://localhost:3000`.
@@ -491,7 +491,7 @@ MCP_V8_CLI_LINUX_X86_64=$(pwd)/target/release/mcp-v8-cli \
   cargo build --release -p server
 
 # Now the server serves the CLI directly
-./target/release/server --stateless --http-port 3000 &
+./target/release/server --http-port 3000 &
 curl -fL http://localhost:3000/api/cli/linux-x86_64 -o mcp-v8-cli
 chmod +x mcp-v8-cli
 ./mcp-v8-cli --url http://localhost:3000 exec 'console.log(1+1)'

@@ -37,7 +37,7 @@ These tests are marked with `#[ignore]` and require a running HTTP MCP server.
 **Run with:**
 ```bash
 # First, start the server in one terminal:
-cargo run -- --directory-path /tmp/test-heaps --http-port 8765
+cargo run -- --heap-store dir --heap-dir /tmp/test-heaps --http-port 8765
 
 # Then, in another terminal, run the e2e tests:
 cargo test --test http_e2e -- --ignored
@@ -294,7 +294,7 @@ This will run:
 - All SSE E2E tests (`sse_e2e.rs`) - these spawn their own server process
 
 The HTTP E2E tests can be run in CI by:
-1. Starting the HTTP server in background: `cargo run -- --directory-path /tmp/test-heaps --http-port 8765 &`
+1. Starting the HTTP server in background: `cargo run -- --heap-store dir --heap-dir /tmp/test-heaps --http-port 8765 &`
 2. Running `cargo test --test http_e2e -- --ignored`
 3. Stopping the server
 

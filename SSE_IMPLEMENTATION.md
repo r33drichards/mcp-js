@@ -73,13 +73,13 @@ async fn start_sse_server(engine: Engine, port: u16) -> Result<()> {
 
 ```bash
 # With local filesystem storage
-mcp-v8 --sse-port 8000 --directory-path /tmp/mcp-v8-heaps
+mcp-v8 --sse-port 8000 --heap-store dir --heap-dir /tmp/mcp-v8-heaps
 
 # With S3 storage
 mcp-v8 --sse-port 8000 --s3-bucket my-bucket
 
 # Stateless mode
-mcp-v8 --sse-port 8000 --stateless
+mcp-v8 --sse-port 8000
 ```
 
 ### SSE Endpoints

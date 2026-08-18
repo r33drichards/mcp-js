@@ -27,10 +27,10 @@ It is **off by default**. Enable it one of two ways:
 
 ```bash
 # Easy "allow all": read any path the server process can access.
-mcp-v8 --stateless --http-port 3000 --allow-run-js-file
+mcp-v8 --http-port 3000 --allow-run-js-file
 
 # Or gate it with a policy that only permits a directory:
-mcp-v8 --stateless --http-port 3000 \
+mcp-v8 --http-port 3000 \
   --policies-json '{"run_js_file":{"policies":[{"url":"file:///etc/mcp/run_js_file.rego"}]}}'
 ```
 

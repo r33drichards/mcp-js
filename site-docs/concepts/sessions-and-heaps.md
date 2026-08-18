@@ -89,7 +89,7 @@ The SHA-256 checksum in the snapshot header provides tamper detection. A snapsho
 
 ## Stateful vs stateless mode
 
-Session and heap features are only available in stateful mode. In `--stateless` mode the engine holds no `HeapStorage`, `SessionLog`, or `HeapTagStore`; the heap-related tools are not exposed and `run_js` does not accept a `heap` parameter.
+Session and heap features are only available in stateful mode. Under `--heap-store none` (the default) the engine holds no `HeapStorage`, `SessionLog`, or `HeapTagStore`; the heap-related tools are not exposed and `run_js` does not accept a `heap` parameter.
 
 ## See also
 

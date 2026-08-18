@@ -4,13 +4,13 @@ Recipes for selecting and configuring the heap snapshot store that `mcp-v8` uses
 
 ## Use local directory storage
 
-Pass `--directory-path` to store heap snapshots in a specific local directory:
+Pass `--heap-store dir --heap-dir` to store heap snapshots in a specific local directory:
 
 ```bash
-mcp-v8 --http-port=8080 --directory-path=/var/lib/mcp-v8/heaps
+mcp-v8 --http-port=8080 --heap-store=dir --heap-dir=/var/lib/mcp-v8/heaps
 ```
 
-The directory is created automatically if it does not exist. Omitting `--directory-path` (and all other storage flags) uses the default path `/tmp/mcp-v8-heaps`.
+The directory is created automatically if it does not exist. With `--heap-store dir`, omitting `--heap-dir` uses the default path `/tmp/mcp-v8-heaps`.
 
 This backend is well-suited for single-node deployments where the heap directory lives on fast local storage (e.g. an SSD or a RAM-backed tmpfs).
 
@@ -65,17 +65,19 @@ With this configuration every `put` writes to the local cache directory first an
 
 ## Run stateless (no heap persistence)
 
-Pass `--stateless` to disable heap persistence entirely:
+Heap persistence is disabled by default, so stateless needs no flag. Pass
+`--heap-store none` explicitly if you want it stated outright:
 
 ```bash
-mcp-v8 --http-port=8080 --stateless
+mcp-v8 --http-port=8080
+mcp-v8 --http-port=8080 --heap-store none   # identical, just explicit
 ```
 
 In stateless mode each `run_js` invocation executes in a fresh V8 isolate, waits synchronously for completion, and returns `{output}` or `{output, error}` directly. No heap snapshot is ever written. The session log and heap tag index are not opened; the execution registry sled database (under `--session-db-path`) is still used.
 
 Stateless mode is appropriate for sandboxed, fire-and-forget executions where cross-call state is neither needed nor desired.
 
-`--stateless` conflicts with `--s3-bucket` and `--directory-path`; passing more than one of these three flags is a startup error.
+`--heap-store` takes exactly one value, so the backends cannot conflict. Heap and filesystem persistence are independent axes and may be combined. Note that any `--heap-store` other than `none` disables WebAssembly, and is rejected at startup alongside `--wasm-module`/`--wasm-config`.
 
 ## Change the session metadata path
 
@@ -83,7 +85,7 @@ The sled metadata database (session log, heap tags, execution registry) is store
 
 ```bash
 mcp-v8 --http-port=8080 \
-  --directory-path=/var/lib/mcp-v8/heaps \
+  --heap-store=dir --heap-dir=/var/lib/mcp-v8/heaps \
   --session-db-path=/var/lib/mcp-v8/sessions
 ```
 

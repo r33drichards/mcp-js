@@ -61,7 +61,7 @@ Both stores call `.with_cluster(node)` at startup, which routes their writes thr
 
 ## What state is NOT replicated
 
-**V8 heap snapshots** are not replicated. Each heap is a content-addressed binary blob stored in whichever heap storage backend the node is configured to use (`--directory-path`, `--s3-bucket`, or the default local filesystem). Because heaps are content-addressed by their SHA-256 hash, the same heap content will have the same address on every node — but physically each node stores only the heaps it has created locally.
+**V8 heap snapshots** are not replicated. Each heap is a content-addressed binary blob stored in whichever heap storage backend the node is configured to use (`--heap-store dir`, `--heap-store s3`, or the default local filesystem). Because heaps are content-addressed by their SHA-256 hash, the same heap content will have the same address on every node — but physically each node stores only the heaps it has created locally.
 
 In practice, heaps are replicated at the storage layer by using a shared backend (S3 is the natural choice for multi-node deployments) rather than at the Raft layer. See [Heap storage backends](storage-backends.md) for details.
 

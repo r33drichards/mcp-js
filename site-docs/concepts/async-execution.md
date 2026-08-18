@@ -98,7 +98,7 @@ The `has_more` flag is `true` when more output exists beyond the current page. T
 
 ## Stateless mode and the synchronous shortcut
 
-In stateless mode (`--stateless`) the `run_js` MCP tool internally submits the code, polls every 50 ms for up to 6000 iterations (300 seconds), collects all console output in a single pass, and returns `{ "output": "…" }` directly. This is a convenience wrapper — no separate polling or output-fetching calls are needed, but the caller blocks for the full execution duration. The async tools (`get_execution`, `get_execution_output`, `cancel_execution`, `list_executions`) are not available in stateless mode.
+In stateless mode (`--heap-store none`, the default) the `run_js` MCP tool internally submits the code, polls every 50 ms for up to 6000 iterations (300 seconds), collects all console output in a single pass, and returns `{ "output": "…" }` directly. This is a convenience wrapper — no separate polling or output-fetching calls are needed, but the caller blocks for the full execution duration. The async tools (`get_execution`, `get_execution_output`, `cancel_execution`, `list_executions`) are not available in stateless mode.
 
 ## See also
 

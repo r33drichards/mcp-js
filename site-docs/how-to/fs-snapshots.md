@@ -6,33 +6,33 @@ The HTTP and CLI examples assume a server reachable at `http://localhost:3000`; 
 
 ## Enable the feature
 
-Filesystem snapshots are off by default. Turn them on with `--enable-fs-snapshots`:
+Filesystem snapshots are off by default. Turn them on with `--fs-store=dir`:
 
 ```bash
-mcp-v8 --http-port=3000 --enable-fs-snapshots
+mcp-v8 --http-port=3000 --fs-store=dir
 ```
 
 Two stores are created. Both default under `--session-db-path` and can be overridden:
 
 | Store | Flag | Default |
 |---|---|---|
-| Blob store (chunks + manifests) | `--fs-store-dir DIR` | `<session-db-path>/fs-blobs` |
+| Blob store (chunks + manifests) | `--fs-dir DIR` | `<session-db-path>/fs-blobs` |
 | Label / reflog database (sled) | `--fs-labels-db PATH` | `<session-db-path>/fs-labels` |
 
 ```bash
-mcp-v8 --http-port=3000 --enable-fs-snapshots \
-       --fs-store-dir=/var/lib/mcp-v8/fs-blobs \
+mcp-v8 --http-port=3000 --fs-store=dir \
+       --fs-dir=/var/lib/mcp-v8/fs-blobs \
        --fs-labels-db=/var/lib/mcp-v8/fs-labels
 ```
 
 ### Cluster storage requirement
 
-The node-local blob store is **single-node only**. In a cluster, labels replicate cluster-wide but node-local blobs do not, so a label advanced on one node would resolve on another to a manifest that node is missing. The server therefore **refuses to start** with `--enable-fs-snapshots` in cluster mode unless shared blob storage is configured. Use `--s3-bucket` (optionally with `--cache-dir` for a write-through cache):
+The node-local blob store is **single-node only**. In a cluster, labels replicate cluster-wide but node-local blobs do not, so a label advanced on one node would resolve on another to a manifest that node is missing. The server therefore **refuses to start** with `--fs-store=dir` in cluster mode unless shared blob storage is configured. Use `--s3-bucket` (optionally with `--cache-dir` for a write-through cache):
 
 ```bash
 mcp-v8 --http-port=3000 --cluster-port=4000 --node-id=node1 \
        --peers=node2@node2:4000,node3@node3:4000 \
-       --enable-fs-snapshots \
+       --fs-store=dir \
        --s3-bucket=my-mcp-fs \
        --cache-dir=/var/lib/mcp-v8/fs-cache
 ```
