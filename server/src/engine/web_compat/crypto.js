@@ -7,6 +7,24 @@
 // behaves predictably.
 (function () {
     'use strict';
+    // Capture the sync ops for the node:crypto shim (a module-loader ESM,
+    // which cannot reach Deno.core after hardening freezes it — same pattern
+    // as __mcpV8Http2Ops). Runs before the web-crypto guard below so a
+    // restored heap that already has globalThis.crypto still gets the
+    // binding; try/catch because on such a heap Deno.core may be gone.
+    if (!globalThis.__mcpV8CryptoOps) {
+        try {
+            Object.defineProperty(globalThis, '__mcpV8CryptoOps', {
+                value: Object.freeze({
+                    getRandomValues: Deno.core.ops.op_crypto_get_random_values,
+                    randomUUID: Deno.core.ops.op_crypto_random_uuid,
+                    digest: Deno.core.ops.op_crypto_digest,
+                    hmacSign: Deno.core.ops.op_crypto_hmac_sign,
+                }),
+                writable: false, enumerable: false, configurable: false,
+            });
+        } catch (_) { /* node:crypto reports itself unavailable */ }
+    }
     if (typeof globalThis.crypto === 'object' && globalThis.crypto !== null &&
         typeof globalThis.SubtleCrypto === 'function') {
         return;

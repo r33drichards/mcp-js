@@ -90,10 +90,14 @@ fn assemble(test_path: &Path) -> Result<String, String> {
          \x20 if (!(e && e.__nodeTestSkip)) throw e;\n}}\n",
         serde_json::to_string(&body).unwrap()
     ));
-    // Report after timers drain; 50ms keeps the loop alive past the
-    // zero-delay timers the event tests use.
+    // Report after timers drain, via the prelude's stashed setTimeout so
+    // tests that delete the timer globals can still report. 300ms keeps the
+    // loop alive past the repeating-timer tests: the runtime implements the
+    // HTML spec's nesting clamp (a timer nested more than 5 deep gets a 4ms
+    // floor), so test-timers-non-integer-delay's 50 ticks of a ~1ms
+    // interval take ~190ms here versus ~55ms in Node.
     source.push_str(&format!(
-        "setTimeout(() => {{ console.log({:?} + globalThis.__NODE_TEST_REPORT__()); }}, 50);\n",
+        "globalThis.__NODE_TEST_SETTIMEOUT__(() => {{ console.log({:?} + globalThis.__NODE_TEST_REPORT__()); }}, 300);\n",
         RESULT_SENTINEL
     ));
     Ok(source)

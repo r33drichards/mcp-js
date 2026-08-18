@@ -2,9 +2,12 @@
 # Vendor a curated subset of Node.js core tests (test/parallel) into
 # server/tests/node_compat/vendor/. Files are fetched from the nodejs/node
 # repository at the pinned tag below (MIT license; LICENSE is vendored
-# alongside). Chosen families: path, querystring, events — the least
-# host-coupled suites, matching the node: compat modules served by the
-# engine (see src/engine/node_compat.rs).
+# alongside). Chosen families: path, querystring, events, timers, console,
+# crypto — the least host-coupled suites, matching the node: compat modules
+# served by the engine (see src/engine/node_compat.rs). Files that reach
+# into node-private surface (require('internal/...'), internalBinding,
+# process.on('exit') assertions, child_process, fixtures) don't fit the
+# harness and are not vendored.
 set -euo pipefail
 
 TAG=v22.14.0
@@ -41,6 +44,15 @@ FILES=(
   test/parallel/test-event-emitter-remove-all-listeners.js
   test/parallel/test-event-emitter-subclass.js
   test/parallel/test-events-once.js
+  test/parallel/test-timers-args.js
+  test/parallel/test-timers-api-refs.js
+  test/parallel/test-timers-clear-null-does-not-throw-error.js
+  test/parallel/test-timers-clearImmediate.js
+  test/parallel/test-timers-immediate.js
+  test/parallel/test-timers-non-integer-delay.js
+  test/parallel/test-timers-zero-timeout.js
+  test/parallel/test-console-instance.js
+  test/parallel/test-crypto-randomuuid.js
   LICENSE
 )
 

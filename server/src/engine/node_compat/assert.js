@@ -160,7 +160,9 @@ function checkExpected(actual, expected, message, fn, operator) {
         return expected.call({}, actual) === true;
     }
     if (expected instanceof RegExp) {
-        return expected.test(actual instanceof Error ? actual.message : String(actual));
+        // Node tests the stringified error ("Error: msg"), not the message
+        // alone — anchored patterns like /^Error: out$/ depend on it.
+        return expected.test(String(actual));
     }
     if (typeof expected === 'object' && expected !== null) {
         for (const k of [...Object.keys(expected), ...Object.getOwnPropertySymbols(expected)]) {

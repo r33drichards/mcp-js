@@ -85,12 +85,25 @@ pub const MIN_HEAP_MEMORY_MB: usize = 16;
 
 pub fn initialize_v8() {
     // deno_core initializes V8 automatically on first JsRuntime creation.
-    // Kept for backward compatibility with callers (main.rs, tests, fuzz).
+    // Kept as the common process-init hook for callers (main.rs, tests, fuzz).
     //
     // Note: V8 145 (bundled with deno_core 0.381) does not support
     // --no-harmony-sharedarraybuffer or --regexp-backtrace-limit flags.
     // SharedArrayBuffer is removed via JS in the hardening step instead.
     // ReDoS is mitigated by the per-execution timeout.
+
+    // Install the process-level rustls CryptoProvider. The dependency graph
+    // compiles rustls with both backends (aws-lc-rs via tokio-rustls's
+    // defaults, ring via reqwest's rustls-tls), and with both present every
+    // rustls config built without an explicit provider — node:http2 TLS
+    // connects, wss:// WebSockets — panics with "Could not automatically
+    // determine the process-level CryptoProvider". Ring matches what reqwest
+    // already uses, so the process speaks with one TLS backend. The `ring`
+    // module is reachable through tokio-rustls's re-export because reqwest's
+    // rustls-tls feature enables it crate-wide; if reqwest ever drops ring,
+    // this line fails to compile rather than silently changing behavior.
+    // Err means a provider is already installed — exactly the state we want.
+    let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
 }
 
 // ── Snapshot envelope ───────────────────────────────────────────────────
