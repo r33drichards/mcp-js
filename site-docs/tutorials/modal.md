@@ -19,6 +19,27 @@ pieces one at a time and see why each is needed.
 - A Modal account and an API token pair (a token id `ak-…` and secret `as-…`),
   created in your Modal workspace settings. Modal is a cloud platform — there is
   no offline mode; the calls really hit `api.modal.com`.
+- **A deployed Modal Function to call.** The JS SDK invokes Functions that are
+  *defined in Python* and already deployed — it does not define them. If you
+  don't have one, deploy this minimal example first (with the Python `modal`
+  CLI, `pip install modal && modal setup`):
+
+  ```python
+  # echo.py
+  import modal
+
+  app = modal.App("my-app")
+
+  @app.function()
+  def my_fn(name: str) -> str:
+      return f"hello {name}"
+  ```
+
+  ```bash
+  modal deploy echo.py
+  ```
+
+  That publishes Function `my-fn` in app `my-app` — the names Step 3 looks up.
 
 ## Why this needs four things turned on
 
@@ -27,22 +48,26 @@ default**. Turning them on one at a time makes the failure modes legible:
 
 1. **External module imports** — to `import` the `modal` package from esm.sh.
    Without it, the import throws immediately.
-2. **An `http2` policy allowing `api.modal.com`** — every gRPC connection goes
+2. **An `http2` policy allowing `*.modal.com`** — every gRPC connection goes
    through the gated HTTP/2 transport. With no policy, the connect is refused.
 3. **Header injection of your Modal token** — gRPC metadata is just HTTP/2
-   headers, so `mcp-v8` can attach the token at the transport layer. The sandbox
-   authenticates without ever holding the secret.
-4. **WebAssembly** — the SDK depends on `uuid`, which needs `node:crypto` and a
-   live `WebAssembly` global. WebAssembly is present in the normal runtime, but
-   a V8 `SnapshotCreator` isolate disables it — so **heap persistence must be
-   off** (`--heap-store none`, the default). If you need per-session state, use
+   headers, so `mcp-v8` can attach the token at the transport layer. Injection
+   overwrites the same-named header the SDK sets, so the sandbox authenticates
+   without ever holding the real secret (it passes a placeholder).
+4. **WebAssembly** — the SDK's dependency tree needs a live `WebAssembly`
+   global. WebAssembly is present in the normal runtime, but a V8
+   `SnapshotCreator` isolate disables it — so **heap persistence must be off**
+   (`--heap-store none`, the default). If you need per-session state, use
    [filesystem persistence](../how-to/fs-snapshots.md) instead, which doesn't
    disable WebAssembly.
 
 ## Step 1 — Write the policy
 
-The HTTP/2 transport asks a policy before dialing anywhere. Scope it to Modal's
-API host so the sandbox can reach Modal and nothing else. Save this as
+The HTTP/2 transport asks a policy before dialing anywhere. Scope it to Modal so
+the sandbox can reach Modal and nothing else. Match any `*.modal.com` host, not
+just `api.modal.com`: the SDK's control plane can hand back a separate
+input-plane host (also under `modal.com`) for some function calls, and a policy
+pinned to `api.modal.com` would deny that second connection. Save this as
 `http2.rego`:
 
 ```rego
@@ -50,16 +75,24 @@ package mcp.http2
 
 default allow = false
 
-# Which authorities may be dialed.
+# Which authorities may be dialed (api.modal.com plus any input-plane host).
 allow if {
     input.operation == "connect"
-    input.url_parsed.host == "api.modal.com"
+    endswith(input.url_parsed.host, ".modal.com")
+}
+allow if {
+    input.operation == "connect"
+    input.url_parsed.host == "modal.com"
 }
 
 # Which streams (per-RPC) may open on an allowed session.
 allow if {
     input.operation == "request"
-    input.authority == "api.modal.com"
+    endswith(input.authority, ".modal.com")
+}
+allow if {
+    input.operation == "request"
+    input.authority == "modal.com"
 }
 ```
 
@@ -67,30 +100,33 @@ allow if {
 
 ```bash
 mcp-v8 \
+  --http-port 8080 \
   --allow-external-modules \
   --heap-store none \
   --policies-json '{"http2":{"policies":[{"url":"file:///path/to/http2.rego"}]}}' \
-  --fetch-header "host=api.modal.com,header=x-modal-token-id,value=ak-..." \
-  --fetch-header "host=api.modal.com,header=x-modal-token-secret,value=as-..."
+  --fetch-header "host=*.modal.com,header=x-modal-token-id,value=ak-..." \
+  --fetch-header "host=*.modal.com,header=x-modal-token-secret,value=as-..."
 ```
 
-The two `--fetch-header` rules are the trick that keeps the secret out of the
-isolate: they're **host-scoped**, so the token only ever travels to
-`api.modal.com`, and there is no request-header read-back API — sandboxed code
-can authenticate but can never read the injected values.
+`--http-port 8080` is required: with no port flag mcp-v8 serves the stdio
+transport, and Step 3's `curl http://localhost:8080/...` would get connection
+refused. The two `--fetch-header` rules are the trick that keeps the secret out
+of the isolate: they're **host-scoped** to `*.modal.com` (matching the policy
+above), so the token only ever travels to Modal, and there is no request-header
+read-back API — sandboxed code can authenticate but can never read the injected
+values. Injection **overwrites** the same-named header the SDK sets, so the
+placeholder the script passes (Step 3) is replaced by the real token before the
+request leaves the host.
 
 For a container or Kubernetes deployment, the same settings are environment
-variables:
+variables (the JSON must be a single line):
 
 ```
+MCP_V8_HTTP_PORT=8080
 MCP_V8_ALLOW_EXTERNAL_MODULES=true
 MCP_V8_HEAP_STORE=none
 MCP_V8_POLICIES_JSON={"http2":{"policies":[{"url":"file:///path/to/http2.rego"}]}}
-MCP_V8_FETCH_HEADER_CONFIG=[
-  {"host":"api.modal.com","headers":{
-    "x-modal-token-id":"ak-...",
-    "x-modal-token-secret":"as-..."}}
-]
+MCP_V8_FETCH_HEADER_CONFIG=[{"host":"*.modal.com","headers":{"x-modal-token-id":"ak-...","x-modal-token-secret":"as-..."}}]
 ```
 
 ## Step 3 — Call Modal from the sandbox
@@ -113,23 +149,39 @@ const modal = new ModalClient({
   tokenSecret: 'placeholder',   // overridden server-side by header injection
 });
 
-// Call a deployed Function and print its result:
+// Call the deployed Function and print its result:
 const fn = await modal.functions.fromName('my-app', 'my-fn');
-console.log(JSON.stringify(await fn.remote(['hello'])));
+console.log(JSON.stringify(await fn.remote(['world'])));
 ```
 
 The `?target=node` suffix matters: it selects the SDK's Node build, which
 imports the `node:*` builtins `mcp-v8` serves, rather than the browser build.
 
-Run it through the sandbox:
+Run it through the sandbox. `/api/exec` is **asynchronous**: it returns `202`
+with an `execution_id`, and you read the result from the execution's output
+endpoint — there is no synchronous `.output` field.
 
 ```bash
-curl -sX POST http://localhost:8080/api/exec \
+# Save the script above as modal-call.js, then submit it.
+EXEC_ID=$(curl -sX POST http://localhost:8080/api/exec \
   -H 'Content-Type: application/javascript' \
-  --data-binary @modal-call.js | jq -r '.output'
+  --data-binary @modal-call.js | jq -r '.execution_id')
+
+# Poll until the execution reaches a terminal state.
+while :; do
+  STATUS=$(curl -s "http://localhost:8080/api/executions/$EXEC_ID" | jq -r '.status')
+  case "$STATUS" in
+    Completed) break ;;
+    Failed|TimedOut|Cancelled) echo "execution $STATUS"; break ;;
+    *) sleep 1 ;;
+  esac
+done
+
+# Read the console output (your Function's return value is here).
+curl -s "http://localhost:8080/api/executions/$EXEC_ID/output" | jq -r '.data'
 ```
 
-You should see your Function's return value. That round trip — JS in the
+You should see your Function's return value (`"hello world"`). That round trip — JS in the
 isolate → `node:http2` → gRPC → `api.modal.com` → back — is the whole point:
 an unmodified cloud SDK, talking to its backend over a protocol the sandbox
 implements through host-side ops, authenticated by a credential the isolate
@@ -167,15 +219,16 @@ in the repo documents every variable. Then apply two Modal-specific changes.
 
 First, the policy file has no place on an ephemeral container, so write it from
 the **start command** (Settings → Deploy → Custom Start Command) before the
-server launches:
+server launches. Write it to `/tmp` — the image runs as a non-root user that
+can't create files under `/`, and the OS sandbox still grants read access to a
+`file://` policy path:
 
 ```sh
-sh -c 'mkdir -p /policies && cat > /policies/http2.rego <<EOF
-package mcp.http2
+sh -c 'printf %s "package mcp.http2
 default allow = false
-allow if { input.operation == "connect"; input.url_parsed.host == "api.modal.com" }
-allow if { input.operation == "request"; input.authority == "api.modal.com" }
-EOF
+allow if { input.operation == \"connect\"; endswith(input.url_parsed.host, \".modal.com\") }
+allow if { input.operation == \"request\"; endswith(input.authority, \".modal.com\") }
+" > /tmp/http2.rego
 exec mcp-v8'
 ```
 
@@ -188,13 +241,18 @@ MCP_V8_HEAP_STORE=none
 MCP_V8_FS_STORE=dir
 MCP_V8_FS_DIR=/data/fs
 MCP_V8_ALLOW_EXTERNAL_MODULES=true
-MCP_V8_POLICIES_JSON={"http2":{"policies":[{"url":"file:///policies/http2.rego"}]}}
-MCP_V8_FETCH_HEADER_CONFIG=[{"host":"api.modal.com","headers":{"x-modal-token-id":"ak-...","x-modal-token-secret":"as-..."}}]
-MCP_V8_ALLOWED_HOSTS=${{RAILWAY_PUBLIC_DOMAIN}}
+MCP_V8_POLICIES_JSON={"http2":{"policies":[{"url":"file:///tmp/http2.rego"}]}}
+MCP_V8_FETCH_HEADER_CONFIG=[{"host":"*.modal.com","headers":{"x-modal-token-id":"ak-...","x-modal-token-secret":"as-..."}}]
+MCP_V8_ALLOWED_HOSTS=${{RAILWAY_PUBLIC_DOMAIN}},${{RAILWAY_PRIVATE_DOMAIN}}
 ```
 
-Generate a public domain (target port `8080`) and the server is reachable at
-`https://<your-domain>/mcp`. Your Modal token now lives only in a Railway
+Keep both domains in `MCP_V8_ALLOWED_HOSTS`: the public one for external agents,
+the private one so other Railway services can reach it over the internal
+network. **Generate the public domain first** (Settings → Networking → target
+port `8080`) — until it exists, `${{RAILWAY_PUBLIC_DOMAIN}}` expands empty and
+mcp-v8 falls back to loopback-only, 403-ing every request; redeploy after
+generating it if you set the variable first. The server is then reachable at
+`https://<your-domain>/mcp`, and your Modal token lives only in a Railway
 variable — never in the JavaScript an agent submits.
 
 ## Provision an identity provider (Keycloak on Railway)
@@ -206,22 +264,28 @@ realm — `keycloak/mcp-realm.json`, realm `mcp` with a confidential client
 `mcp-client` — so you can stand up an issuer in one more service instead of
 wiring an IdP by hand.
 
-Add a second Railway service from the official Keycloak image
-(`quay.io/keycloak/keycloak:26.4`). The realm is **declarative**: importing it
-on every boot recreates the client and its secret identically, so Keycloak's
-dev mode (ephemeral H2 storage) is enough here — a redeploy re-imports the same
-realm and previously issued tokens keep validating. Set the **start command** to
-pull the realm from this repo and import it:
+Add a second Railway service for Keycloak. The realm is **declarative**:
+importing it on every boot recreates the client and its secret identically, so
+Keycloak's dev mode (ephemeral H2 storage) is enough here — a redeploy re-imports
+the same realm, and while its **signing keys rotate on each redeploy** (so tokens
+must be re-minted after one), the client id and secret stay stable.
 
-```sh
-sh -c 'mkdir -p /opt/keycloak/data/import
-curl -fsSL https://raw.githubusercontent.com/r33drichards/mcp-js/main/keycloak/mcp-realm.json \
-  -o /opt/keycloak/data/import/mcp-realm.json
-exec /opt/keycloak/bin/kc.sh start-dev --import-realm --http-port=8080'
+The official Keycloak image has `curl` and package managers **removed**, so you
+can't fetch the realm from a start command. Instead deploy from a tiny
+Dockerfile that bakes the realm in at build time (Docker's `ADD` fetches the URL
+during the build, where the network is available):
+
+```dockerfile
+FROM quay.io/keycloak/keycloak:26.4
+ADD --chmod=444 \
+  https://raw.githubusercontent.com/r33drichards/mcp-js/main/keycloak/mcp-realm.json \
+  /opt/keycloak/data/import/mcp-realm.json
+CMD ["start-dev", "--import-realm", "--http-port=8080"]
 ```
 
-Set these variables so Keycloak trusts Railway's TLS-terminating proxy and can
-bootstrap an admin user:
+Put that Dockerfile in a repo (or a subdirectory) and point the Railway service
+at it. Set these variables so Keycloak trusts Railway's TLS-terminating proxy and
+can bootstrap an admin user:
 
 ```env
 KC_PROXY_HEADERS=xforwarded
@@ -251,9 +315,18 @@ service (from the [Deploy it to Railway](#deploy-it-to-railway) step):
 JWKS_URL=https://<keycloak-domain>/realms/mcp/protocol/openid-connect/certs
 ```
 
-With that set, every request to `/mcp` must carry a valid
-`Authorization: Bearer <jwt>`. Mint one with the client-credentials grant — no
-browser, no user, just the client id and secret from the realm:
+> **Bring Keycloak up first.** mcp-v8 fetches the JWKS at startup and **exits if
+> the endpoint is unreachable**, so confirm Keycloak is serving before you set
+> this. A quick check: `curl -sf https://<keycloak-domain>/realms/mcp/protocol/openid-connect/certs`
+> should return a JSON key set. Set `JWKS_URL` (and redeploy mcp-js) only after
+> that succeeds.
+
+With that set, mcp-v8 **enforces** auth: every request to `/mcp` *and* the HTTP
+API (`/api/exec`, `/api/fs/*`) must carry a valid `Authorization: Bearer <jwt>`,
+or it is rejected with `401`. (Without `JWKS_URL` the server requires no token —
+so don't expose it publicly until this is set.) Mint a token with the
+client-credentials grant — no browser, no user, just the client id and secret
+from the realm:
 
 ```bash
 TOKEN=$(curl -s \
@@ -281,9 +354,11 @@ sandbox, and the sandbox holds nothing; the Modal token is injected host-side
 and never crosses into the isolate or back to the agent.
 
 Access tokens are short-lived (five minutes by default), so a header captured
-once will expire. For an unattended agent, either raise the client's
-access-token lifespan in the Keycloak admin console or re-run `claude mcp add`
-with a fresh `${TOKEN}` when it lapses.
+once will expire — re-run `claude mcp add` with a fresh `${TOKEN}` when it
+lapses. Raising the lifespan in the Keycloak admin console **won't stick** in the
+dev-mode setup above: the next redeploy re-imports the declarative realm and
+resets it. To change it durably, set `accessTokenLifespan` in the realm JSON, or
+run Keycloak in production mode against a database.
 
 ## When something goes wrong
 
@@ -291,10 +366,12 @@ with a fresh `${TOKEN}` when it lapses.
 |---|---|
 | `Unknown node builtin module: 'crypto'` | Old build without `node:crypto`; update mcp-v8. |
 | `WebAssembly is not an object` | Heap persistence is on. Set `--heap-store none`. |
-| gRPC `connect` rejected / capability disabled | No `http2` policy, or it doesn't allow `api.modal.com`. |
-| `UNAUTHENTICATED` from Modal | Header-injection rule missing/misspelled, or token invalid. The header names must be exactly `x-modal-token-id` / `x-modal-token-secret`. |
+| gRPC `connect` rejected / capability disabled | No `http2` policy, or it doesn't allow the host. Scope it to `*.modal.com`, not just `api.modal.com` — some calls dial a separate input-plane host. |
+| A call to `api.modal.com` works but another gRPC connect is denied | The policy (and the `--fetch-header` host) is pinned to `api.modal.com`; widen both to `*.modal.com` for the input-plane host. |
+| `UNAUTHENTICATED` from Modal | Header-injection rule missing/misspelled, or token invalid. The header names must be exactly `x-modal-token-id` / `x-modal-token-secret`, and the rule host must match the request (`*.modal.com`). |
 | Import fails | `--allow-external-modules` not set, or egress to esm.sh blocked by the OS sandbox or network policy. |
-| `401`/`403` from `/mcp` | Missing or expired bearer token, or `JWKS_URL` doesn't point at the realm's `.../protocol/openid-connect/certs`. Mint a fresh token. |
+| `401`/`403` from `/mcp` or `/api/*` | Missing or expired bearer token, or `JWKS_URL` doesn't point at the realm's `.../protocol/openid-connect/certs`. Mint a fresh token. |
+| Native-module load error importing `modal` | The SDK's transitive deps include a native (N-API) addon; smoke-test the import (`console.log(typeof ModalClient)`) before a real call, and confirm esm.sh egress is allowed. |
 | Keycloak token request returns `invalid_client` | Wrong `client_id`/`client_secret`, or the realm didn't import — check the service logs for the `Imported realm mcp` line. |
 
 ## See also
