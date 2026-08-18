@@ -81,6 +81,7 @@ const TIMERS_JS_WRAPPER: &str = r#"
         return this;
     };
     Timeout.prototype.ref = function ref() {
+        if (this._timer.cancelled) return this; // a cleared timer stays unref'd
         this._timer.refed = true;
         if (this._timer.promise && _refOp) _refOp(this._timer.promise);
         return this;
@@ -145,6 +146,12 @@ const TIMERS_JS_WRAPPER: &str = r#"
         var timer = _active.get(id);
         if (timer) {
             timer.cancelled = true;
+            // The in-flight op_timer_sleep cannot be aborted, but unref'ing
+            // its promise stops it from holding the event loop open for the
+            // remainder of the delay. Without this, clearing a long timer
+            // (e.g. @ubjs/core's ~25-day keep-alive around every async Rust
+            // call) wedges run_event_loop until the sleep fires.
+            if (timer.promise && _unrefOp) _unrefOp(timer.promise);
             _active.delete(id);
         }
     }
