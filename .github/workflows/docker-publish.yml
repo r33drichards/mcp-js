@@ -9,6 +9,11 @@ on:
   pull_request:
     branches:
       - main
+    paths-ignore:
+      - 'site-docs/**'
+      - '**.md'
+      - 'mkdocs.yml'
+      - '.lychee.toml'
   workflow_dispatch:
 
 jobs:
