@@ -163,7 +163,7 @@
   jwks_url = lib.mkOption {
     type = lib.types.nullOr lib.types.str;
     default = null;
-    description = "JWKS endpoint URL for fetching public keys (e.g., Keycloak OIDC certs URL). Enables JWT verification of Authorization: Bearer tokens during initialize. Config-file key for the `--jwks-url` flag. Environment variable: `JWKS_URL`.";
+    description = "JWKS endpoint URL for fetching public keys (e.g., Keycloak OIDC certs URL). When set, the HTTP transports ENFORCE auth: every request to /mcp and the HTTP API (/api/*) must carry a valid `Authorization: Bearer <jwt>` (or `agent-session` header) verified against this JWKS, else it is rejected with 401. Leaving it unset keeps the server open (no auth). The openapi spec route and CORS preflight (OPTIONS) are exempt. Config-file key for the `--jwks-url` flag. Environment variable: `JWKS_URL`.";
   };
   max_concurrent_executions = lib.mkOption {
     type = lib.types.nullOr lib.types.ints.unsigned;
