@@ -30,6 +30,7 @@ nav:
       - Overview: tutorials/overview.md
       - Run SQLite in WebAssembly: tutorials/sqlite-wasm.md
       - Render charts with Chart.js: tutorials/chartjs.md
+      - Call Modal (serverless GPUs/sandboxes): tutorials/modal.md
 
   - How-to:
       - Overview: how-to/overview.md
@@ -41,7 +42,6 @@ nav:
       - Network access with fetch: how-to/fetch.md
       - WebSocket connections: how-to/websocket.md
       - HTTP/2 sessions (node:http2): how-to/http2.md
-      - Running the Modal SDK (gRPC): how-to/modal.md
       - Filesystem access: how-to/filesystem.md
       - Filesystem snapshots: how-to/fs-snapshots.md
       - Subprocess execution: how-to/subprocess.md
