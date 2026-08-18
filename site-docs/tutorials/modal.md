@@ -197,21 +197,75 @@ Generate a public domain (target port `8080`) and the server is reachable at
 `https://<your-domain>/mcp`. Your Modal token now lives only in a Railway
 variable — never in the JavaScript an agent submits.
 
-## Connect Claude Code, with authentication
+## Provision an identity provider (Keycloak on Railway)
 
 A public `/mcp` endpoint that runs arbitrary JavaScript **must** be
-authenticated. mcp-v8 verifies JWT bearer tokens against a JWKS endpoint; set
-`JWKS_URL` to your identity provider's key set (e.g. a Keycloak realm's certs
-URL) to require it:
+authenticated. mcp-v8 verifies JWT bearer tokens against a JWKS endpoint, so you
+need something that issues signed tokens. This repo ships a ready-made Keycloak
+realm — `keycloak/mcp-realm.json`, realm `mcp` with a confidential client
+`mcp-client` — so you can stand up an issuer in one more service instead of
+wiring an IdP by hand.
+
+Add a second Railway service from the official Keycloak image
+(`quay.io/keycloak/keycloak:26.4`). The realm is **declarative**: importing it
+on every boot recreates the client and its secret identically, so Keycloak's
+dev mode (ephemeral H2 storage) is enough here — a redeploy re-imports the same
+realm and previously issued tokens keep validating. Set the **start command** to
+pull the realm from this repo and import it:
+
+```sh
+sh -c 'mkdir -p /opt/keycloak/data/import
+curl -fsSL https://raw.githubusercontent.com/r33drichards/mcp-js/main/keycloak/mcp-realm.json \
+  -o /opt/keycloak/data/import/mcp-realm.json
+exec /opt/keycloak/bin/kc.sh start-dev --import-realm --http-port=8080'
+```
+
+Set these variables so Keycloak trusts Railway's TLS-terminating proxy and can
+bootstrap an admin user:
 
 ```env
-JWKS_URL=https://idp.example.com/realms/mcp/protocol/openid-connect/certs
+KC_PROXY_HEADERS=xforwarded
+KC_HTTP_ENABLED=true
+KC_HOSTNAME_STRICT=false
+KC_BOOTSTRAP_ADMIN_USERNAME=admin
+KC_BOOTSTRAP_ADMIN_PASSWORD=<pick-a-strong-password>
+```
+
+Generate a public domain for the service (target port `8080`). Keycloak is now
+serving the realm's JWKS at
+`https://<keycloak-domain>/realms/mcp/protocol/openid-connect/certs`.
+
+> **Not production-hardened as written.** Dev mode stores nothing durably and
+> the client secret is public in the repo. For real use, run Keycloak in
+> production mode against a Postgres database (Railway provisions one in a
+> click), rotate `mcp-client`'s secret, and lengthen or shorten the access-token
+> lifespan to taste. The declarative realm is the starting point, not the final
+> config.
+
+## Require auth on the sandbox and connect Claude Code
+
+Point mcp-v8 at Keycloak's key set by adding one variable to the **mcp-js**
+service (from the [Deploy it to Railway](#deploy-it-to-railway) step):
+
+```env
+JWKS_URL=https://<keycloak-domain>/realms/mcp/protocol/openid-connect/certs
 ```
 
 With that set, every request to `/mcp` must carry a valid
-`Authorization: Bearer <jwt>` (see [Authentication](../how-to/authentication.md)
-for minting and presenting tokens). Register the deployment with Claude Code,
-passing the token as a header:
+`Authorization: Bearer <jwt>`. Mint one with the client-credentials grant — no
+browser, no user, just the client id and secret from the realm:
+
+```bash
+TOKEN=$(curl -s \
+  -X POST https://<keycloak-domain>/realms/mcp/protocol/openid-connect/token \
+  -d grant_type=client_credentials \
+  -d client_id=mcp-client \
+  -d client_secret=mcp-client-secret \
+  | jq -r .access_token)
+```
+
+Register the deployment with Claude Code, passing that token as a header (see
+[Authentication](../how-to/authentication.md) for other ways to present it):
 
 ```bash
 claude mcp add --transport http modal-sandbox \
@@ -226,6 +280,11 @@ boundary intact end to end: the agent holds a short-lived JWT to reach the
 sandbox, and the sandbox holds nothing; the Modal token is injected host-side
 and never crosses into the isolate or back to the agent.
 
+Access tokens are short-lived (five minutes by default), so a header captured
+once will expire. For an unattended agent, either raise the client's
+access-token lifespan in the Keycloak admin console or re-run `claude mcp add`
+with a fresh `${TOKEN}` when it lapses.
+
 ## When something goes wrong
 
 | Symptom | Cause |
@@ -235,6 +294,8 @@ and never crosses into the isolate or back to the agent.
 | gRPC `connect` rejected / capability disabled | No `http2` policy, or it doesn't allow `api.modal.com`. |
 | `UNAUTHENTICATED` from Modal | Header-injection rule missing/misspelled, or token invalid. The header names must be exactly `x-modal-token-id` / `x-modal-token-secret`. |
 | Import fails | `--allow-external-modules` not set, or egress to esm.sh blocked by the OS sandbox or network policy. |
+| `401`/`403` from `/mcp` | Missing or expired bearer token, or `JWKS_URL` doesn't point at the realm's `.../protocol/openid-connect/certs`. Mint a fresh token. |
+| Keycloak token request returns `invalid_client` | Wrong `client_id`/`client_secret`, or the realm didn't import — check the service logs for the `Imported realm mcp` line. |
 
 ## See also
 
