@@ -510,3 +510,46 @@ async fn http2_shim_reports_capability_disabled_without_config() {
 
     run_js(&engine, code).await.expect("check should succeed");
 }
+
+/// Regression test for the rustls CryptoProvider panic. This dependency
+/// graph compiles rustls 0.23 with both backends (aws-lc-rs via
+/// tokio-rustls's defaults, ring via reqwest's rustls-tls), and with both
+/// present `ClientConfig::builder()` panics — "Could not automatically
+/// determine the process-level CryptoProvider" — unless a default provider
+/// was installed first. `initialize_v8()` installs ring, so an `https://`
+/// connect must get past the config builder and fail at the TLS handshake
+/// (the listener below speaks no TLS), not die in a panicked task.
+#[tokio::test]
+async fn https_connect_reaches_tls_handshake_instead_of_crypto_provider_panic() {
+    ensure_v8();
+
+    // Plain TCP listener that accepts and immediately closes: enough to get
+    // the client past TCP connect and into the rustls config builder.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else { break };
+            drop(stream);
+        }
+    });
+
+    let engine = build_engine(Http2Config::new_with_chain(allow_all_chain()));
+    let code = format!(
+        r#"
+        import http2 from 'node:http2';
+        const outcome = await new Promise((resolve) => {{
+            const session = http2.connect("https://{addr}");
+            session.on('error', (err) => resolve(String(err.message || err)));
+            session.on('connect', () => resolve("connected"));
+        }});
+        if (!outcome.includes("TLS handshake")) {{
+            throw new Error("expected a TLS handshake error, got: " + outcome);
+        }}
+        "#
+    );
+
+    run_js(&engine, code)
+        .await
+        .expect("https connect should surface a TLS handshake error");
+}

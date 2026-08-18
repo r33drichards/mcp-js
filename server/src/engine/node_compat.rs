@@ -11,6 +11,7 @@
 pub const NODE_MODULES: &[(&str, &str)] = &[
     ("assert", include_str!("node_compat/assert.js")),
     ("buffer", include_str!("node_compat/gen/buffer.js")),
+    ("crypto", include_str!("node_compat/crypto.js")),
     ("dns", include_str!("node_compat/dns.js")),
     ("events", include_str!("node_compat/gen/events.js")),
     ("fs", include_str!("node_compat/fs.js")),

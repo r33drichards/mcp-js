@@ -107,6 +107,7 @@ served by the module loader:
 | `node:events` | Node's own lib source over a primordials shim |
 | `node:buffer` | feross/buffer (the npm Buffer polyfill) |
 | `node:assert` (+`/strict`) | purpose-written subset |
+| `node:crypto` | hash/HMAC/randomness subset over the sandbox crypto ops |
 | `node:util` | purpose-written subset |
 | `node:url` | WHATWG URL + file-URL helpers |
 | `node:process` | fixed sandbox values; no host env |
@@ -122,6 +123,9 @@ Skipped tests (with reasons):
 
 - `SubtleCrypto` implements digest and raw-HMAC operations; asymmetric
   keys, AES, and key derivation reject with `NotSupportedError`.
+- `node:crypto` covers hashes (md5/sha1/sha2 family), HMAC, randomness,
+  and `timingSafeEqual`; ciphers, sign/verify, key objects, and KDFs are
+  not exported.
 - Deep IDNA conformance (WPT IdnaTestV2) tracks the Rust `idna` crate
   and is not vendored.
 - `fetch()` network behavior is governed by the engine's policy layer;

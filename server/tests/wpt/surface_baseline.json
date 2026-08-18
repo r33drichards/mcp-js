@@ -195,6 +195,7 @@
     "WritableStreamDefaultController": "function",
     "WritableStreamDefaultWriter": "function",
     "__bootstrap": "object",
+    "__mcpV8CryptoOps": "object",
     "addEventListener": "function",
     "atob": "function",
     "btoa": "function",
