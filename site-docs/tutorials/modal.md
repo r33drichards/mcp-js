@@ -156,6 +156,76 @@ are defined in Python. The
 [Modal JS examples](https://github.com/modal-labs/modal-client/tree/main/js/examples)
 cover each of these.
 
+## Deploy it to Railway
+
+Running this on [Railway](https://railway.com) gives you a hosted, always-on
+sandbox that an agent elsewhere can call. The fastest start is the one-click
+[**Deploy on Railway** template](https://railway.com/deploy/mcp-js), which
+provisions the server with a volume and the standard variables; the
+[`RAILWAY.md` guide](https://github.com/r33drichards/mcp-js/blob/main/RAILWAY.md)
+in the repo documents every variable. Then apply two Modal-specific changes.
+
+First, the policy file has no place on an ephemeral container, so write it from
+the **start command** (Settings → Deploy → Custom Start Command) before the
+server launches:
+
+```sh
+sh -c 'mkdir -p /policies && cat > /policies/http2.rego <<EOF
+package mcp.http2
+default allow = false
+allow if { input.operation == "connect"; input.url_parsed.host == "api.modal.com" }
+allow if { input.operation == "request"; input.authority == "api.modal.com" }
+EOF
+exec mcp-v8'
+```
+
+Second, set the Modal variables alongside the standard ones — and note
+`MCP_V8_HEAP_STORE=none` (WebAssembly), which replaces the `dir` value the base
+guide uses; keep `MCP_V8_FS_STORE=dir` for per-session filesystem state:
+
+```env
+MCP_V8_HEAP_STORE=none
+MCP_V8_FS_STORE=dir
+MCP_V8_FS_DIR=/data/fs
+MCP_V8_ALLOW_EXTERNAL_MODULES=true
+MCP_V8_POLICIES_JSON={"http2":{"policies":[{"url":"file:///policies/http2.rego"}]}}
+MCP_V8_FETCH_HEADER_CONFIG=[{"host":"api.modal.com","headers":{"x-modal-token-id":"ak-...","x-modal-token-secret":"as-..."}}]
+MCP_V8_ALLOWED_HOSTS=${{RAILWAY_PUBLIC_DOMAIN}}
+```
+
+Generate a public domain (target port `8080`) and the server is reachable at
+`https://<your-domain>/mcp`. Your Modal token now lives only in a Railway
+variable — never in the JavaScript an agent submits.
+
+## Connect Claude Code, with authentication
+
+A public `/mcp` endpoint that runs arbitrary JavaScript **must** be
+authenticated. mcp-v8 verifies JWT bearer tokens against a JWKS endpoint; set
+`JWKS_URL` to your identity provider's key set (e.g. a Keycloak realm's certs
+URL) to require it:
+
+```env
+JWKS_URL=https://idp.example.com/realms/mcp/protocol/openid-connect/certs
+```
+
+With that set, every request to `/mcp` must carry a valid
+`Authorization: Bearer <jwt>` (see [Authentication](../how-to/authentication.md)
+for minting and presenting tokens). Register the deployment with Claude Code,
+passing the token as a header:
+
+```bash
+claude mcp add --transport http modal-sandbox \
+  https://<your-domain>/mcp \
+  --header "Authorization: Bearer ${TOKEN}"
+```
+
+Claude Code now sees `run_js` (and any [upstream MCP tools](../how-to/mcp-client.md)
+you've bridged) as callable tools, and can drive Modal through the sandbox on
+your behalf — GPUs, Sandboxes, and deployed Functions — with the credential
+boundary intact end to end: the agent holds a short-lived JWT to reach the
+sandbox, and the sandbox holds nothing; the Modal token is injected host-side
+and never crosses into the isolate or back to the agent.
+
 ## When something goes wrong
 
 | Symptom | Cause |
