@@ -283,7 +283,89 @@ function destroyImpl(stream, err) {
 
 // ── public classes ──────────────────────────────────────────────────────
 
-export class Readable extends EventEmitter {
+// Legacy base class, function-style on purpose: Node core code (and its
+// vendored tests) still does `Stream.call(this)` plus prototype surgery,
+// which a `class` constructor would reject. The stream module's default
+// export is this constructor with the class table attached, matching
+// Node's `module.exports = Stream` shape (`new (require('stream'))()`).
+export function Stream(_options) {
+    EventEmitter.call(this);
+}
+Object.setPrototypeOf(Stream.prototype, EventEmitter.prototype);
+Object.setPrototypeOf(Stream, EventEmitter);
+
+// Node's legacy-pipe prepend helper: old emitters may have prependListener
+// deleted (nodejs/node locks the fallback in via test-event-emitter-prepend),
+// so error handlers fall back to _events surgery.
+function legacyPrepend(emitter, event, fn) {
+    if (typeof emitter.prependListener === 'function') {
+        return emitter.prependListener(event, fn);
+    }
+    if (!emitter._events || !emitter._events[event]) emitter.on(event, fn);
+    else if (Array.isArray(emitter._events[event])) emitter._events[event].unshift(fn);
+    else emitter._events[event] = [fn, emitter._events[event]];
+}
+
+// The legacy base's one behavior: an events-only pipe (the subclasses below
+// shadow it with the subset pipe from readableMethods).
+Stream.prototype.pipe = function pipe(dest, options) {
+    const source = this;
+
+    function ondata(chunk) {
+        if (dest.writable && dest.write(chunk) === false && source.pause) {
+            source.pause();
+        }
+    }
+    source.on('data', ondata);
+
+    function ondrain() {
+        if (source.readable && source.resume) source.resume();
+    }
+    dest.on('drain', ondrain);
+
+    let ended = false;
+    function onend() {
+        if (ended) return;
+        ended = true;
+        if (typeof dest.end === 'function') dest.end();
+    }
+    function onclose() {
+        if (ended) return;
+        ended = true;
+        if (typeof dest.destroy === 'function') dest.destroy();
+    }
+    if (!dest._isStdio && (!options || options.end !== false)) {
+        source.on('end', onend);
+        source.on('close', onclose);
+    }
+
+    function onerror(err) {
+        cleanup();
+        if (this.listenerCount('error') === 0) this.emit('error', err);
+    }
+    legacyPrepend(source, 'error', onerror);
+    legacyPrepend(dest, 'error', onerror);
+
+    function cleanup() {
+        source.removeListener('data', ondata);
+        dest.removeListener('drain', ondrain);
+        source.removeListener('end', onend);
+        source.removeListener('close', onclose);
+        source.removeListener('error', onerror);
+        dest.removeListener('error', onerror);
+        source.removeListener('end', cleanup);
+        source.removeListener('close', cleanup);
+        dest.removeListener('close', cleanup);
+    }
+    source.on('end', cleanup);
+    source.on('close', cleanup);
+    dest.on('close', cleanup);
+
+    dest.emit('pipe', source);
+    return dest;
+};
+
+export class Readable extends Stream {
     constructor(options) {
         super();
         this.destroyed = false;
@@ -296,7 +378,7 @@ export class Readable extends EventEmitter {
 }
 readableMethods(Readable.prototype);
 
-export class Writable extends EventEmitter {
+export class Writable extends Stream {
     constructor(options) {
         super();
         this.destroyed = false;
@@ -310,7 +392,7 @@ export class Writable extends EventEmitter {
 }
 writableMethods(Writable.prototype);
 
-export class Duplex extends EventEmitter {
+export class Duplex extends Stream {
     constructor(options) {
         super();
         this.destroyed = false;
@@ -386,13 +468,15 @@ export function pipeline(...args) {
     return current;
 }
 
-export default {
+Object.assign(Stream, {
     Readable,
     Writable,
     Duplex,
     Transform,
     PassThrough,
-    Stream: Readable,
+    Stream,
     finished,
     pipeline,
-};
+});
+
+export default Stream;

@@ -329,7 +329,20 @@ export function randomFill(buffer, offset, size, callback) {
     queueMicrotask(() => callback(null, result));
 }
 
-export function randomUUID(_options) {
+export function randomUUID(options) {
+    if (options !== undefined) {
+        if (typeof options !== 'object' || options === null) {
+            throw nodeError(TypeError, 'ERR_INVALID_ARG_TYPE',
+                'The "options" argument must be of type object');
+        }
+        // Entropy caching is a Node batching optimization; the only valid
+        // values are still enforced so feature probes behave.
+        if (options.disableEntropyCache !== undefined &&
+            typeof options.disableEntropyCache !== 'boolean') {
+            throw nodeError(TypeError, 'ERR_INVALID_ARG_TYPE',
+                'The "options.disableEntropyCache" property must be of type boolean');
+        }
+    }
     return ops().randomUUID();
 }
 

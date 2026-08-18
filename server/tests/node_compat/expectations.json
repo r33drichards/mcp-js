@@ -1,4 +1,6 @@
 {
+  "test/parallel/test-console-instance.js": true,
+  "test/parallel/test-crypto-randomuuid.js": true,
   "test/parallel/test-event-emitter-add-listeners.js": true,
   "test/parallel/test-event-emitter-emit-context.js": true,
   "test/parallel/test-event-emitter-errors.js": true,
@@ -9,10 +11,7 @@
   "test/parallel/test-event-emitter-method-names.js": true,
   "test/parallel/test-event-emitter-num-args.js": true,
   "test/parallel/test-event-emitter-once.js": true,
-  "test/parallel/test-event-emitter-prepend.js": {
-    "ignore": true,
-    "reason": "requires node:stream (not implemented)"
-  },
+  "test/parallel/test-event-emitter-prepend.js": true,
   "test/parallel/test-event-emitter-remove-all-listeners.js": true,
   "test/parallel/test-event-emitter-subclass.js": true,
   "test/parallel/test-events-once.js": {
@@ -35,5 +34,12 @@
   "test/parallel/test-path.js": true,
   "test/parallel/test-querystring-escape.js": true,
   "test/parallel/test-querystring-multichar-separator.js": true,
-  "test/parallel/test-querystring.js": true
+  "test/parallel/test-querystring.js": true,
+  "test/parallel/test-timers-api-refs.js": true,
+  "test/parallel/test-timers-args.js": true,
+  "test/parallel/test-timers-clear-null-does-not-throw-error.js": true,
+  "test/parallel/test-timers-clearImmediate.js": true,
+  "test/parallel/test-timers-immediate.js": true,
+  "test/parallel/test-timers-non-integer-delay.js": true,
+  "test/parallel/test-timers-zero-timeout.js": true
 }

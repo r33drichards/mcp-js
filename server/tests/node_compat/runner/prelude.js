@@ -8,11 +8,17 @@
 
 import assert, { strict as assertStrict } from 'node:assert';
 import buffer, { Buffer } from 'node:buffer';
+import consoleModule from 'node:console';
+import crypto from 'node:crypto';
 import events from 'node:events';
+import moduleModule from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 import querystring from 'node:querystring';
+import stream from 'node:stream';
+import timers from 'node:timers';
+import timersPromises from 'node:timers/promises';
 import url from 'node:url';
 import util from 'node:util';
 
@@ -148,11 +154,17 @@ const modules = {
     },
     'assert/strict': assertStrict,
     buffer: buffer,
+    console: consoleModule,
+    crypto: crypto,
     events: events,
+    module: moduleModule,
     os: os,
     path: path,
     process: process,
     querystring: querystring,
+    stream: stream,
+    timers: timers,
+    'timers/promises': timersPromises,
     url: url,
     util: util,
 };
@@ -175,6 +187,10 @@ globalThis.require = function require(id) {
     err.code = 'MODULE_NOT_FOUND';
     throw err;
 };
+
+// The harness schedules its drain-time report through this stash so tests
+// that delete the timer globals (test-timers-api-refs) can still report.
+globalThis.__NODE_TEST_SETTIMEOUT__ = globalThis.setTimeout;
 
 globalThis.module = { exports: {} };
 globalThis.exports = globalThis.module.exports;

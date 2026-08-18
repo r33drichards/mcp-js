@@ -97,25 +97,37 @@ changelog.
 
 ## Node.js core tests (node v22.14.0)
 
-**25 / 25 vendored tests passing.** The `node:` modules
+**35 / 35 vendored tests passing.** The `node:` modules
 served by the module loader:
 
 | Module | Implementation |
 |---|---|
-| `node:path` | Node's own lib source over a primordials shim |
-| `node:querystring` | Node's own lib source over a primordials shim |
-| `node:events` | Node's own lib source over a primordials shim |
-| `node:buffer` | feross/buffer (the npm Buffer polyfill) |
 | `node:assert` (+`/strict`) | purpose-written subset |
+| `node:buffer` | feross/buffer (the npm Buffer polyfill) |
+| `node:console` | the global console, plus a `Console` class over writable streams |
 | `node:crypto` | hash/HMAC/randomness subset over the sandbox crypto ops |
-| `node:util` | purpose-written subset |
-| `node:url` | WHATWG URL + file-URL helpers |
-| `node:process` | fixed sandbox values; no host env |
+| `node:dns` | pass-through resolver (resolution happens host-side in the transports) |
+| `node:events` | Node's own lib source over a primordials shim |
+| `node:fs` (+`/promises`) | import-compatible stubs; the real surface is the policy-gated `fs` global |
+| `node:http` | import-compatible stub; HTTP/1 is `fetch()` |
+| `node:http2` | client subset over the policy-gated http2 ops (gRPC transport) |
+| `node:https` | import-compatible stub; use `fetch()` or `node:http2` |
+| `node:module` | `createRequire`/`builtinModules` over the builtin registry |
+| `node:net` | address helpers; sockets are inert (transports are policy-gated) |
 | `node:os` | fixed sandbox values |
+| `node:path` | Node's own lib source over a primordials shim |
+| `node:process` | fixed sandbox values; no host env |
+| `node:querystring` | Node's own lib source over a primordials shim |
+| `node:stream` | purpose-written subset (legacy `Stream` base + Readable/Writable/Duplex/Transform) |
+| `node:stream/web` | the runtime's WHATWG streams globals re-exported |
+| `node:timers` (+`/promises`) | the runtime timer globals, plus promisified forms with AbortSignal |
+| `node:tls` | option plumbing; TLS terminates host-side in the transports |
+| `node:url` | WHATWG URL + file-URL helpers |
+| `node:util` | purpose-written subset |
+| `node:zlib` | one-shot gzip/deflate over CompressionStream / DecompressionStream |
 
 Skipped tests (with reasons):
 
-- `test-event-emitter-prepend.js` — requires node:stream (not implemented)
 - `test-events-once.js` — pokes node-internal module internal/event_target
 - `test-path-resolve.js` — requires child_process for cwd checks
 
