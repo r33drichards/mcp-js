@@ -12,9 +12,14 @@ A JSON Web Key Set endpoint publishes public keys. The server never holds a shar
 
 ## Where verification happens
 
-Verification is performed exactly once per MCP connection, inside the `initialize` handler. It only runs on HTTP transports (Streamable HTTP via `--http-port`, or SSE via `--sse-port`). When mcp-v8 runs in stdio mode, there is no HTTP request context and no verification is attempted even if `--jwks-url` is set.
+When `--jwks-url` is set, a bearer-auth middleware wraps the HTTP transports
+(Streamable HTTP via `--http-port` and legacy SSE via `--sse-port`) and verifies
+every request to `/mcp` and the HTTP API (`/api/*`) before it reaches a handler.
+The OpenAPI spec route and CORS preflight (`OPTIONS`) are exempt. When mcp-v8
+runs in stdio mode, there is no HTTP request context and no verification is
+attempted even if `--jwks-url` is set.
 
-The same verification logic applies to both stateful and stateless service modes.
+The same enforcement applies to both stateful and stateless service modes.
 
 ## Sequence diagram
 
@@ -28,7 +33,7 @@ sequenceDiagram
     S->>K: GET /realms/mcp/protocol/openid-connect/certs
     K-->>S: JWK Set (keys by kid)
 
-    C->>S: POST /mcp initialize<br/>(Authorization: Bearer <jwt>)
+    C->>S: POST /mcp or /api/* <br/>(Authorization: Bearer <jwt>)
     S->>S: decode JWT header → alg, kid
     alt kid in cache
         S->>S: verify signature with cached key
@@ -37,8 +42,11 @@ sequenceDiagram
         K-->>S: updated JWK Set
         S->>S: verify signature with new key
     end
-    S->>S: log result (verified / failed)
-    S-->>C: InitializeResult
+    alt token valid
+        S-->>C: request proceeds to handler
+    else missing or invalid
+        S-->>C: 401 Unauthorized
+    end
 ```
 
 ## What the verification checks
