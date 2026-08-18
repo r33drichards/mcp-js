@@ -62,7 +62,11 @@ pub struct Cli {
     pub print_openapi: bool,
 
     /// JWKS endpoint URL for fetching public keys (e.g., Keycloak OIDC certs URL).
-    /// Enables JWT verification of Authorization: Bearer tokens during initialize.
+    /// When set, the HTTP transports ENFORCE auth: every request to /mcp and the
+    /// HTTP API (/api/*) must carry a valid `Authorization: Bearer <jwt>` (or
+    /// `agent-session` header) verified against this JWKS, else it is rejected
+    /// with 401. Leaving it unset keeps the server open (no auth). The openapi
+    /// spec route and CORS preflight (OPTIONS) are exempt.
     #[arg(long, env = "JWKS_URL", help_heading = "Core")]
     pub jwks_url: Option<String>,
 

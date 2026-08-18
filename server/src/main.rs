@@ -46,7 +46,7 @@ use engine::session_log::SessionLog;
 use engine::subprocess::SubprocessConfig;
 use engine::{Engine, WasmModule, initialize_v8};
 use mcp::{McpService, StatelessMcpService};
-use session::{JwksKeyStore, SessionVerifier};
+use session::{apply_auth_enforcement, JwksKeyStore, SessionVerifier};
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -942,6 +942,7 @@ async fn async_main(cli: Cli) -> Result<()> {
                 port,
                 allowed_hosts,
                 allowed_origins,
+                session_verifier.clone(),
                 move |e| McpService::new(e, verifier.clone()),
             )
             .await?;
@@ -953,6 +954,7 @@ async fn async_main(cli: Cli) -> Result<()> {
                 port,
                 allowed_hosts,
                 allowed_origins,
+                session_verifier.clone(),
                 move |e| StatelessMcpService::new(e, verifier.clone()),
             )
             .await?;
@@ -1047,6 +1049,7 @@ async fn start_streamable_http<S, F>(
     port: u16,
     allowed_hosts: Vec<String>,
     allowed_origins: Vec<String>,
+    verifier: Option<Arc<SessionVerifier>>,
     make_service: F,
 ) -> Result<()>
 where
@@ -1091,11 +1094,13 @@ where
         }),
     );
 
-    // Mount the MCP service at /mcp alongside the plain HTTP API and openapi route.
-    let app = axum::Router::new()
+    // Mount the MCP service at /mcp alongside the plain HTTP API. Both run
+    // arbitrary JS, so when JWKS enforcement is active they sit behind the
+    // bearer-auth layer; the openapi spec route stays public.
+    let protected = axum::Router::new()
         .nest_service("/mcp", mcp_service)
-        .merge(api::api_router(engine.clone()))
-        .merge(openapi_route);
+        .merge(api::api_router(engine.clone()));
+    let app = apply_auth_enforcement(protected, &verifier).merge(openapi_route);
 
     let listener = tokio::net::TcpListener::bind(bind).await?;
     tracing::info!("Streamable HTTP server listening on {}", bind);
@@ -1151,9 +1156,8 @@ async fn start_sse_server(
         }),
     );
 
-    let app = sse_router
-        .merge(api::api_router(engine.clone()))
-        .merge(openapi_route);
+    let protected = sse_router.merge(api::api_router(engine.clone()));
+    let app = apply_auth_enforcement(protected, &verifier).merge(openapi_route);
 
     let listener = tokio::net::TcpListener::bind(sse_server.config.bind).await?;
     tracing::info!("SSE server listening on {}", sse_server.config.bind);
