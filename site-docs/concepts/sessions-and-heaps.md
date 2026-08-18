@@ -30,6 +30,8 @@ When a `run_js` call includes a `heap` parameter the engine:
 
 A call without a `heap` parameter starts a fresh isolate. In both cases the V8 state after execution is persisted and its hash is made available via `get_execution`.
 
+When the operator configures an [init script](../how-to/pre-run-scripts.md) (`--init-script`), it runs before step 4 whenever the heap lacks the `globalThis.__mcpV8InitDone` marker; on success the marker is set and captured in step 5, so every descendant of that heap — including forks — inherits it and skips the script. A heap created before the flag was set is initialized on its next run.
+
 ```mermaid
 sequenceDiagram
     participant Agent

@@ -93,6 +93,7 @@ In stateful mode, pass the returned `heap` hash back to `run_js` to resume that 
 - Optional fetch header injection via `--fetch-header` / `--fetch-header-config` (static headers or OAuth client-credentials bearer tokens)
 - Optional `fs` module (OPA-gated, Node.js-compatible)
 - Optional pre-loaded WASM globals
+- The operator may configure pre-run scripts that execute before your code: an init script that runs once per heap lineage (its `globalThis` assignments persist in the heap) and/or a pre-run script that runs before every execution
 
 ## Limitations
 

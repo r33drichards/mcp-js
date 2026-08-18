@@ -145,6 +145,11 @@
     default = null;
     description = "HTTP port using Streamable HTTP transport (MCP 2025-03-26+, load-balanceable). Falls back to the `PORT` environment variable when neither this nor `--sse-port` is set anywhere, so platforms that inject `PORT` (Railway, Render, Heroku, Fly, Cloud Run) serve Streamable HTTP unmodified. Config-file key for the `--http-port` flag. Environment variable: `MCP_V8_HTTP_PORT`.";
   };
+  init_script = lib.mkOption {
+    type = lib.types.nullOr lib.types.str;
+    default = null;
+    description = "JavaScript/TypeScript that initializes the JS environment. Runs before an execution whenever the isolate lacks the init marker (`globalThis.__mcpV8InitDone`): on fresh isolates, and on restored heaps that never ran it (including heaps created before this flag was set). On success the marker is set and, in stateful mode, baked into the resulting heap, so each heap lineage runs the script once. In stateless mode every isolate is fresh, so the script runs before every execution. Runs as an ES module (imports and top-level `await` are allowed; expose values to subsequent code via `globalThis.x = ...`). The value is used verbatim as inline code, unless it begins with `@`, in which case the remainder is treated as a path to a file whose contents are used (use `@@` for a literal leading `@`). Examples: --init-script \"globalThis.helper = () => 42\" --init-script @./init.js. Config-file key for the `--init-script` flag. Environment variable: `MCP_V8_INIT_SCRIPT`.";
+  };
   instructions = lib.mkOption {
     type = lib.types.nullOr lib.types.str;
     default = null;
@@ -214,6 +219,11 @@
     type = lib.types.nullOr lib.types.str;
     default = null;
     description = "JSON policy configuration (inline JSON or path to a JSON file). Enables fetch() and/or module policy gating via local Rego files and/or remote OPA servers. Example: --policies-json '{\"fetch\":{\"policies\":[{\"url\":\"file:///path/to/fetch.rego\"}]}}' Schema: { \"fetch\": { \"mode\": \"all\"|\"any\", \"policies\": [{\"url\": \"...\", \"policy_path\": \"...\", \"rule\": \"...\"}] }, \"modules\": { ... } }. Config-file key for the `--policies-json` flag. Environment variable: `MCP_V8_POLICIES_JSON`.";
+  };
+  pre_run_script = lib.mkOption {
+    type = lib.types.nullOr lib.types.str;
+    default = null;
+    description = "JavaScript/TypeScript that runs before every execution, right before the submitted code — including on snapshot-restored isolates. Runs after the init script when both are configured. Same value syntax and ES-module semantics as --init-script. Examples: --pre-run-script \"console.log('run')\" --pre-run-script @./pre.js. Config-file key for the `--pre-run-script` flag. Environment variable: `MCP_V8_PRE_RUN_SCRIPT`.";
   };
   run_js_description = lib.mkOption {
     type = lib.types.nullOr lib.types.str;
