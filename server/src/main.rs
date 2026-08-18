@@ -1405,6 +1405,10 @@ struct FetchHeaderConfigRule {
     headers: Option<StaticHeadersConfig>,
     #[serde(default)]
     auth: Option<FetchHeaderAuthConfig>,
+    /// Static form only: whether an injected header overwrites a same-named
+    /// header the sandbox already set. Defaults to `true` (overwrite).
+    #[serde(default, rename = "override")]
+    override_existing: Option<bool>,
 }
 
 #[derive(Debug)]
@@ -1464,6 +1468,13 @@ impl FetchHeaderConfigRule {
         let host = self.host;
         let methods = self.methods;
 
+        if self.override_existing.is_some() && self.auth.is_some() {
+            anyhow::bail!(
+                "Fetch header config rule for host '{}': 'override' only applies to 'headers', not 'auth'",
+                host
+            );
+        }
+
         match (self.headers, self.auth) {
             (Some(_), Some(_)) => anyhow::bail!(
                 "Fetch header config rule for host '{}' cannot define both 'headers' and 'auth'",
@@ -1477,7 +1488,11 @@ impl FetchHeaderConfigRule {
                 host,
                 methods,
                 engine::fetch::HeaderInjection::Static { headers: headers.0 },
-            ),
+            )
+            .map(|rule| match self.override_existing {
+                Some(v) => rule.with_override_existing(v),
+                None => rule,
+            }),
             (None, Some(auth)) => {
                 if auth.auth_type != "oauth_client_credentials" {
                     anyhow::bail!(
@@ -1550,6 +1565,7 @@ fn parse_fetch_header_cli(s: &str) -> Result<engine::fetch::HeaderRule> {
     let mut client_secret = None;
     let mut scope = None;
     let mut refresh_buffer_secs = None;
+    let mut override_existing = None;
 
     for part in s.split(',') {
         let (key, val) = part.split_once('=').ok_or_else(|| {
@@ -1583,6 +1599,14 @@ fn parse_fetch_header_cli(s: &str) -> Result<engine::fetch::HeaderRule> {
                     )
                 })?)
             }
+            FetchHeaderKey::Override => {
+                override_existing = Some(val.trim().parse::<bool>().map_err(|_| {
+                    anyhow::anyhow!(
+                        "Invalid 'override' value '{}': expected true or false",
+                        val.trim()
+                    )
+                })?)
+            }
         }
     }
 
@@ -1595,13 +1619,26 @@ fn parse_fetch_header_cli(s: &str) -> Result<engine::fetch::HeaderRule> {
         || scope.is_some()
         || refresh_buffer_secs.is_some();
 
+    if override_existing.is_some() && has_dynamic_keys {
+        anyhow::bail!(
+            "--fetch-header 'override' only applies to the static 'value' form, not dynamic oauth rules"
+        );
+    }
+
     match (header_value, has_dynamic_keys) {
         (Some(_), true) => {
             anyhow::bail!("--fetch-header cannot mix static 'value' with dynamic oauth keys")
         }
-        (Some(value), false) => {
-            engine::fetch::HeaderRule::static_header(host, methods, header_name, value)
-        }
+        (Some(value), false) => engine::fetch::HeaderRule::static_header(
+            host,
+            methods,
+            header_name,
+            value,
+        )
+        .map(|rule| match override_existing {
+            Some(v) => rule.with_override_existing(v),
+            None => rule,
+        }),
         (None, true) => engine::fetch::HeaderRule::oauth_client_credentials(
             host,
             methods,
@@ -1996,6 +2033,70 @@ mod tests {
         );
         assert!(rule.dynamic_auth().is_none());
         assert_eq!(rule.methods(), &["GET".to_string(), "POST".to_string()]);
+        // Static rules overwrite a caller-set header of the same name by default.
+        assert!(rule.override_existing);
+    }
+
+    #[test]
+    fn parse_fetch_header_cli_static_honors_override_false() {
+        let rule = parse_fetch_header_cli(
+            "host=api.example.com,header=Authorization,value=Bearer fixed,override=false",
+        )
+        .expect("static rule with override=false should parse");
+        assert!(!rule.override_existing);
+    }
+
+    #[test]
+    fn parse_fetch_header_cli_static_honors_override_true() {
+        let rule = parse_fetch_header_cli(
+            "host=api.example.com,header=Authorization,value=Bearer fixed,override=true",
+        )
+        .expect("static rule with override=true should parse");
+        assert!(rule.override_existing);
+    }
+
+    #[test]
+    fn parse_fetch_header_cli_rejects_invalid_override() {
+        let err = parse_fetch_header_cli(
+            "host=api.example.com,header=Authorization,value=Bearer fixed,override=maybe",
+        )
+        .expect_err("non-boolean override should fail");
+        assert!(err.to_string().contains("Invalid 'override' value"));
+    }
+
+    #[test]
+    fn parse_fetch_header_cli_rejects_override_on_dynamic_rule() {
+        let err = parse_fetch_header_cli(
+            "host=api.example.com,header=Authorization,token_url=https://issuer/token,client_id=abc,client_secret=xyz,override=false",
+        )
+        .expect_err("override on a dynamic rule should fail");
+        assert!(err.to_string().contains("only applies to the static"));
+    }
+
+    #[test]
+    fn load_fetch_header_rules_json_honors_override_false() {
+        let json = r#"[{"host":"api.modal.com","headers":{"x-modal-token-secret":"real"},"override":false}]"#;
+        let rules = load_fetch_header_rules(&[], &Some(json.to_string()))
+            .expect("json config with override should load");
+        assert_eq!(rules.len(), 1);
+        assert!(!rules[0].override_existing);
+    }
+
+    #[test]
+    fn load_fetch_header_rules_json_defaults_override_true() {
+        let json = r#"[{"host":"api.modal.com","headers":{"x-modal-token-secret":"real"}}]"#;
+        let rules = load_fetch_header_rules(&[], &Some(json.to_string()))
+            .expect("json config should load");
+        assert_eq!(rules.len(), 1);
+        assert!(rules[0].override_existing);
+    }
+
+    #[test]
+    fn load_fetch_header_rules_json_rejects_override_on_auth_rule() {
+        let json = r#"[{"host":"api.example.com","auth":{"type":"oauth_client_credentials","header":"Authorization","token_url":"https://issuer/token","client_id":"abc","client_secret":"xyz"},"override":false}]"#;
+        let err = load_fetch_header_rules(&[], &Some(json.to_string()))
+            .expect_err("override on an auth rule should fail");
+        assert!(err.to_string().contains("only applies to 'headers'"));
     }
 
     #[test]

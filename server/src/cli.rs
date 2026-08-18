@@ -560,8 +560,10 @@ pub struct Cli {
     /// JSON array of header injection rules (a path to a JSON file, or inline
     /// JSON — also settable as the `fetch_headers` section of a --config file).
     /// Each rule sets "host" (plus optional "methods") and exactly one of
-    /// "headers" or "auth".
-    /// Static: [{"host": "api.github.com", "methods": ["GET","POST"], "headers": {"Authorization": "Bearer ..."}}]
+    /// "headers" or "auth". A "headers" rule may also set "override" (bool,
+    /// default true): true overwrites a same-named header the sandbox already
+    /// set, false only fills it when absent.
+    /// Static: [{"host": "api.github.com", "methods": ["GET","POST"], "headers": {"Authorization": "Bearer ..."}, "override": true}]
     /// OAuth: [{"host": "api.example.com", "auth": {"type": "oauth_client_credentials", "header": "Authorization", "token_url": "https://issuer.example.com/token", "client_id": "abc", "client_secret": "xyz", "scope": "read:all", "refresh_buffer_secs": 30}}]
     #[arg(
         long = "fetch-header-config",
@@ -748,6 +750,7 @@ fetch_header_keys! {
     Methods = "methods": "semicolon-separated HTTP methods to match, e.g. GET;POST (optional)",
     Header = "header": "name of the header to inject (required)",
     Value = "value": "static header value (static form)",
+    Override = "override": "static form: true (default) overwrites a same-named header the sandbox already set; false only fills when absent",
     TokenUrl = "token_url": "OAuth token endpoint URL (OAuth form)",
     ClientId = "client_id": "OAuth client id (OAuth form)",
     ClientSecret = "client_secret": "OAuth client secret (OAuth form)",

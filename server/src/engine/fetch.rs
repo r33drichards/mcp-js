@@ -100,6 +100,13 @@ pub struct HeaderRule {
     pub methods: Vec<String>,
     /// Injection strategy for matching requests.
     pub injection: HeaderInjection,
+    /// For `Static` injection: whether an injected header overwrites a value the
+    /// caller (sandboxed JS) already set for the same name. Defaults to `true`
+    /// (the operator-declared value wins) so that server-side credential
+    /// injection cannot be defeated by an SDK that pre-sets a placeholder. Set
+    /// `false` to fall back to fill-only-if-absent. Has no effect on
+    /// `OAuthClientCredentials` injection, which is always fill-only-if-absent.
+    pub override_existing: bool,
     dynamic_auth_source: Option<Arc<OAuthClientCredentialsTokenSource>>,
 }
 
@@ -113,8 +120,16 @@ impl HeaderRule {
             host,
             methods: normalize_methods(methods),
             injection,
+            override_existing: true,
             dynamic_auth_source,
         })
+    }
+
+    /// Set whether static injection overwrites a caller-provided header of the
+    /// same name (builder form; default is `true`).
+    pub fn with_override_existing(mut self, override_existing: bool) -> Self {
+        self.override_existing = override_existing;
+        self
     }
 
     pub fn static_header(
@@ -186,6 +201,7 @@ impl PartialEq for HeaderRule {
         self.host == other.host
             && self.methods == other.methods
             && self.injection == other.injection
+            && self.override_existing == other.override_existing
     }
 }
 
@@ -297,7 +313,14 @@ fn normalize_methods(methods: Vec<String>) -> Vec<String> {
         .collect()
 }
 
-/// Apply header injection rules. User-provided headers take precedence.
+/// Apply header injection rules to an outgoing request's headers.
+///
+/// For `Static` injection the injected value overwrites a caller-provided
+/// header of the same name by default (`rule.override_existing == true`), so a
+/// server-side credential cannot be defeated by sandboxed JS that pre-sets a
+/// placeholder for the same header. A rule built with `override_existing ==
+/// false` falls back to fill-only-if-absent. `OAuthClientCredentials` injection
+/// is always fill-only-if-absent (a caller-supplied value is left untouched).
 pub async fn apply_header_rules(
     rules: &[HeaderRule],
     host: &str,
@@ -313,7 +336,11 @@ pub async fn apply_header_rules(
             HeaderInjection::Static { headers: rule_headers } => {
                 for (k, v) in rule_headers {
                     let key = k.to_ascii_lowercase();
-                    headers.entry(key).or_insert_with(|| v.clone());
+                    if rule.override_existing {
+                        headers.insert(key, v.clone());
+                    } else {
+                        headers.entry(key).or_insert_with(|| v.clone());
+                    }
                 }
             }
             HeaderInjection::OAuthClientCredentials(config) => {
@@ -1191,7 +1218,11 @@ allow if {{
     }
 
     #[tokio::test]
-    async fn test_apply_header_rules_user_headers_take_precedence() {
+    async fn test_apply_header_rules_static_overwrites_caller_value_by_default() {
+        // Default override_existing == true: the injected (operator-declared)
+        // value wins over a value the caller pre-set for the same header. This
+        // is what keeps server-side credential injection from being defeated by
+        // an SDK that sets a placeholder for the same header name.
         let rules = vec![HeaderRule::new(
             "example.com".to_string(),
             vec![],
@@ -1200,6 +1231,27 @@ allow if {{
             },
         )
         .expect("rule should be valid")];
+        let mut headers = HashMap::new();
+        headers.insert("authorization".to_string(), "Bearer placeholder".to_string());
+        apply_header_rules(&rules, "example.com", "GET", &mut headers)
+            .await
+            .expect("rule application should succeed");
+        assert_eq!(headers["authorization"], "Bearer injected");
+    }
+
+    #[tokio::test]
+    async fn test_apply_header_rules_static_preserves_caller_value_when_override_disabled() {
+        // override_existing == false restores the fill-only-if-absent behavior:
+        // a caller-provided value for the same header is left untouched.
+        let rules = vec![HeaderRule::new(
+            "example.com".to_string(),
+            vec![],
+            HeaderInjection::Static {
+                headers: HashMap::from([("authorization".into(), "Bearer injected".into())]),
+            },
+        )
+        .expect("rule should be valid")
+        .with_override_existing(false)];
         let mut headers = HashMap::new();
         headers.insert("authorization".to_string(), "Bearer user-provided".to_string());
         apply_header_rules(&rules, "example.com", "GET", &mut headers)

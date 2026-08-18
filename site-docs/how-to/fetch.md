@@ -89,8 +89,17 @@ Restrict injection to specific HTTP methods with `methods=` (semicolon-separated
 --fetch-header "host=api.example.com,methods=GET;POST,header=X-Api-Key,value=abc123"
 ```
 
-If JS code already sets the same header, the JS-provided value takes precedence
-and the injected value is skipped.
+By default a static injection **overwrites** a header of the same name that the
+JS code already set, so an SDK that pre-sets a placeholder for the injected
+header cannot defeat the operator-supplied value. To instead fill the header
+only when the caller left it unset, add `override=false`:
+
+```bash
+--fetch-header "host=api.example.com,header=Authorization,value=Bearer my-token,override=false"
+```
+
+(`override` applies to the static `value` form only; OAuth client-credentials
+injection is always fill-only-if-absent.)
 
 The flag is repeatable; each `--fetch-header` adds one rule. Rules are
 evaluated in declaration order and the first matching rule wins per header.
