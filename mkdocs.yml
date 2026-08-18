@@ -30,6 +30,7 @@ nav:
       - Overview: tutorials/overview.md
       - Run SQLite in WebAssembly: tutorials/sqlite-wasm.md
       - Render charts with Chart.js: tutorials/chartjs.md
+      - Call Modal (serverless GPUs/sandboxes): tutorials/modal.md
 
   - How-to:
       - Overview: how-to/overview.md
