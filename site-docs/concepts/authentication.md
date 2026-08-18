@@ -12,9 +12,14 @@ A JSON Web Key Set endpoint publishes public keys. The server never holds a shar
 
 ## Where verification happens
 
-Verification is performed exactly once per MCP connection, inside the `initialize` handler. It only runs on HTTP transports (Streamable HTTP via `--http-port`, or SSE via `--sse-port`). When mcp-v8 runs in stdio mode, there is no HTTP request context and no verification is attempted even if `--jwks-url` is set.
+When `--jwks-url` is set, a bearer-auth middleware wraps the HTTP transports
+(Streamable HTTP via `--http-port` and legacy SSE via `--sse-port`) and verifies
+every request to `/mcp` and the HTTP API (`/api/*`) before it reaches a handler.
+The OpenAPI spec route and CORS preflight (`OPTIONS`) are exempt. When mcp-v8
+runs in stdio mode, there is no HTTP request context and no verification is
+attempted even if `--jwks-url` is set.
 
-The same verification logic applies to both stateful and stateless service modes.
+The same enforcement applies to both stateful and stateless service modes.
 
 ## Sequence diagram
 
@@ -28,7 +33,7 @@ sequenceDiagram
     S->>K: GET /realms/mcp/protocol/openid-connect/certs
     K-->>S: JWK Set (keys by kid)
 
-    C->>S: POST /mcp initialize<br/>(Authorization: Bearer <jwt>)
+    C->>S: POST /mcp or /api/* <br/>(Authorization: Bearer <jwt>)
     S->>S: decode JWT header → alg, kid
     alt kid in cache
         S->>S: verify signature with cached key
@@ -37,8 +42,11 @@ sequenceDiagram
         K-->>S: updated JWK Set
         S->>S: verify signature with new key
     end
-    S->>S: log result (verified / failed)
-    S-->>C: InitializeResult
+    alt token valid
+        S-->>C: request proceeds to handler
+    else missing or invalid
+        S-->>C: 401 Unauthorized
+    end
 ```
 
 ## What the verification checks
@@ -61,17 +69,27 @@ The following are **not** checked:
 
 The token payload is decoded as an opaque JSON value; no application-level claims are read or enforced.
 
-## Current enforcement behavior
+## Enforcement behavior
 
-Verification is **informational in the current implementation**. The result is written to the structured log (`INFO JWT verified` or `WARN JWT present but failed verification`), but the `initialize` call returns a successful `InitializeResult` regardless of outcome. A missing token is also handled gracefully — a `DEBUG` log is emitted and the request proceeds.
+When `--jwks-url` (env `JWKS_URL`) is configured, verification is **enforced** on
+the HTTP transports. A middleware in front of the routes checks every request
+and rejects it with `401 Unauthorized` (and a `WWW-Authenticate: Bearer` header)
+unless it carries a token that verifies against the JWKS:
 
-This means:
+- A request with **no token** is rejected.
+- A token with an **invalid or unverifiable signature** is rejected.
+- A **valid** token is admitted and the request proceeds.
 
-- A token with an invalid signature does not block the connection; it produces a warning log entry.
-- A request with no token at all is allowed through when `--jwks-url` is configured.
-- Enforcement logic (rejecting connections on failed or missing tokens) is not present in the current code.
+This covers both `/mcp` (the MCP transport) and the plain HTTP API (`/api/*`),
+since both run arbitrary JavaScript. Two things are intentionally exempt: the
+OpenAPI spec route (`/api-doc/openapi.json`), which is public, and CORS
+preflight (`OPTIONS`) requests, so a browser handshake is not blocked before the
+real, authenticated request.
 
-Applications that require hard enforcement should add a reverse proxy or API gateway layer in front of mcp-v8.
+If `--jwks-url` is **not** set, no verifier is installed and the server does not
+require a token — do not expose such a deployment publicly. For defense in depth
+you may still place a reverse proxy or API gateway in front of mcp-v8, but it is
+no longer required to get hard enforcement.
 
 ## Relationship to sessions
 
@@ -93,7 +111,7 @@ When `--jwks-url` is configured:
 - mcp-v8 trusts any token whose signature can be verified by a key at that JWKS endpoint.
 - The JWKS endpoint itself is fetched over plain HTTP or HTTPS; in production, the URL should point to an HTTPS endpoint to prevent key substitution.
 - There is no issuer pinning: tokens issued by any party whose keys appear at that URL will pass signature verification.
-- Because enforcement is currently advisory, JWKS verification functions as an audit/logging mechanism rather than an access control gate.
+- Verification is an access-control gate: a request without a valid token is rejected with `401` (see [Enforcement behavior](#enforcement-behavior)).
 
 ## See also
 
