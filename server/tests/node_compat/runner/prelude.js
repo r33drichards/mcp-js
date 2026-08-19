@@ -18,6 +18,7 @@ import fsPromises from 'node:fs/promises';
 import http from 'node:http';
 import http2 from 'node:http2';
 import https from 'node:https';
+import internalEsmResolve from 'node:internal/modules/esm/resolve';
 import moduleModule from 'node:module';
 import net from 'node:net';
 import os from 'node:os';
@@ -210,6 +211,7 @@ const modules = {
     http: http,
     http2: http2,
     https: https,
+    'internal/modules/esm/resolve': internalEsmResolve,
     module: moduleModule,
     net: net,
     os: os,
@@ -231,7 +233,8 @@ const modules = {
 
 const fixtures = {
     fixturesDir: '/test/fixtures',
-    path: (...args) => ['/test/fixtures', ...args].join('/'),
+    path: (...args) => path.join('/test/fixtures', ...args),
+    fileURL: (...args) => url.pathToFileURL(path.join('/test/fixtures', ...args)),
 };
 
 globalThis.__NODE_TEST_COMMON__ = common;

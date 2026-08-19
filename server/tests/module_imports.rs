@@ -124,6 +124,7 @@ fn create_test_engine_with_external_modules() -> Engine {
             policy_chain: None,
             virtual_modules: None,
             virtual_commonjs_modules: None,
+            virtual_files: None,
         })
         .with_execution_registry(Arc::new(registry))
 }
@@ -143,6 +144,7 @@ fn create_test_engine_modules_blocked() -> Engine {
             policy_chain: None,
             virtual_modules: None,
             virtual_commonjs_modules: None,
+            virtual_files: None,
         })
         .with_execution_registry(Arc::new(registry))
 }
@@ -456,6 +458,7 @@ fn test_virtual_json_module_preserves_json_type() {
         policy_chain: None,
         virtual_modules: Some(modules),
         virtual_commonjs_modules: None,
+        virtual_files: None,
     };
     let code = r#"
         import data from './data.json' with { type: 'json' };
@@ -491,6 +494,7 @@ fn test_virtual_package_exports_import() {
         policy_chain: None,
         virtual_modules: Some(modules),
         virtual_commonjs_modules: None,
+        virtual_files: None,
     };
     let code = r#"
         import value from 'example/feature';
@@ -530,6 +534,7 @@ fn test_virtual_package_exports_reject_hidden_subpath() {
         policy_chain: None,
         virtual_modules: Some(modules),
         virtual_commonjs_modules: None,
+        virtual_files: None,
     };
     let code = r#"
         let caught;
@@ -562,6 +567,7 @@ fn test_virtual_package_exports_reject_missing_target() {
         policy_chain: None,
         virtual_modules: Some(modules),
         virtual_commonjs_modules: None,
+        virtual_files: None,
     };
     let code = r#"
         let caught;
@@ -612,6 +618,7 @@ fn test_concurrent_virtual_package_errors_reject_independently() {
         policy_chain: None,
         virtual_modules: Some(modules),
         virtual_commonjs_modules: None,
+        virtual_files: None,
     };
     let code = r#"
         const results = await Promise.allSettled([
@@ -673,6 +680,7 @@ fn test_create_require_enforces_package_exports() {
         policy_chain: None,
         virtual_modules: Some(modules),
         virtual_commonjs_modules: Some(commonjs_modules),
+        virtual_files: None,
     };
     let code = r#"
         import { createRequire } from 'node:module';
@@ -716,6 +724,7 @@ fn test_create_require_virtual_package_exports() {
         policy_chain: None,
         virtual_modules: Some(modules),
         virtual_commonjs_modules: Some(commonjs_modules),
+        virtual_files: None,
     };
     let code = r#"
         import { createRequire } from 'node:module';
@@ -732,6 +741,111 @@ fn test_create_require_virtual_package_exports() {
     assert!(result.is_ok(), "virtual package require failed: {result:?}");
 }
 
+
+#[test]
+fn test_internal_legacy_main_resolve_uses_virtual_files() {
+    use std::collections::{HashMap, HashSet};
+    use server::engine::{execute_stateless, ExecutionConfig};
+
+    ensure_v8();
+    let modules = Arc::new(HashMap::from([
+        (
+            "file:///fixture/package.json".to_string(),
+            r#"{"main":"./index-js/index"}"#.to_string(),
+        ),
+        (
+            "file:///fixture/index-json/package.json".to_string(),
+            r#"{}"#.to_string(),
+        ),
+    ]));
+    let files = Arc::new(HashSet::from([
+        "file:///fixture/package.json".to_string(),
+        "file:///fixture/index-js/index.js".to_string(),
+        "file:///fixture/index-json/package.json".to_string(),
+        "file:///fixture/index-json/index.json".to_string(),
+        "file:///fixture/index-node/index.node".to_string(),
+        "file:///folder%2525with%20percentage%23/index.js".to_string(),
+    ]));
+    let loader = ModuleLoaderConfig {
+        allow_external: false,
+        policy_chain: None,
+        virtual_modules: Some(modules),
+        virtual_commonjs_modules: Some(Arc::new(HashMap::new())),
+        virtual_files: Some(files),
+    };
+    let code = r#"
+        import { createRequire } from 'node:module';
+        const require = createRequire(import.meta.url);
+        const { legacyMainResolve } = require('node:internal/modules/esm/resolve');
+        const packageJsonUrl = new URL('file:///fixture/package.json');
+        if ('__mcpV8VirtualFiles' in globalThis) {
+            throw new Error('virtual file inventory must not be exposed globally');
+        }
+
+        const fromMain = legacyMainResolve(
+            packageJsonUrl,
+            { main: './index-js/index' },
+            '/fixture',
+        );
+        if (fromMain.href !== 'file:///fixture/index-js/index.js') {
+            throw new Error(`wrong main resolution: ${fromMain.href}`);
+        }
+
+        const fromIndex = legacyMainResolve(
+            new URL('file:///fixture/index-json/package.json'),
+            { main: undefined },
+            '/fixture',
+        );
+        if (fromIndex.href !== 'file:///fixture/index-json/index.json') {
+            throw new Error(`wrong index resolution: ${fromIndex.href}`);
+        }
+
+        const nativeAddon = legacyMainResolve(
+            packageJsonUrl,
+            { main: './index-node/index' },
+            '/fixture',
+        );
+        if (nativeAddon.href !== 'file:///fixture/index-node/index.node') {
+            throw new Error(`wrong native addon resolution: ${nativeAddon.href}`);
+        }
+
+        const special = legacyMainResolve(
+            packageJsonUrl,
+            { main: '../folder%25with percentage#/' },
+            packageJsonUrl,
+        );
+        if (special.href !== 'file:///folder%2525with%20percentage%23/index.js') {
+            throw new Error(`wrong special path resolution: ${special.href}`);
+        }
+
+        let packageConfigError;
+        try { legacyMainResolve(packageJsonUrl, undefined, packageJsonUrl); }
+        catch (caught) { packageConfigError = caught; }
+        if (!(packageConfigError instanceof TypeError) || packageConfigError.code) {
+            throw new Error(`expected native TypeError for missing packageConfig, got ${packageConfigError?.code}: ${packageConfigError}`);
+        }
+
+        for (const [invoke, code, message] of [
+            [() => legacyMainResolve('/fixture/package.json', {}, ''), 'ERR_INTERNAL_ASSERTION'],
+            [() => legacyMainResolve(packageJsonUrl, { main: './missing.node' }, packageJsonUrl), 'ERR_MODULE_NOT_FOUND', /missing\.node/],
+            [() => legacyMainResolve(packageJsonUrl, { main: null }, undefined), 'ERR_INVALID_ARG_TYPE', /"base" argument must be/],
+        ]) {
+            let error;
+            try { invoke(); } catch (caught) { error = caught; }
+            if (error?.code !== code || (message && !message.test(error.message))) {
+                throw new Error(`expected ${code}, got ${error?.code}: ${error?.message}`);
+            }
+        }
+    "#;
+    let (result, _) = execute_stateless(
+        code,
+        ExecutionConfig::new(64 * 1024 * 1024)
+            .module_loader_config(&loader)
+            .main_module_specifier("file:///app/main.mjs"),
+    );
+    assert!(result.is_ok(), "legacyMainResolve compatibility failed: {result:?}");
+}
+
 #[test]
 fn test_resolve_npm_blocked_when_external_disabled() {
     use deno_core::ResolutionKind;
@@ -743,6 +857,7 @@ fn test_resolve_npm_blocked_when_external_disabled() {
         policy_chain: None,
         virtual_modules: None,
         virtual_commonjs_modules: None,
+        virtual_files: None,
     });
     let result = loader.resolve("npm:lodash-es@4.17.21", "file:///main.js", ResolutionKind::Import);
     assert!(result.is_err(), "npm specifier should be rejected when external modules disabled");
@@ -765,6 +880,7 @@ fn test_resolve_jsr_blocked_when_external_disabled() {
         policy_chain: None,
         virtual_modules: None,
         virtual_commonjs_modules: None,
+        virtual_files: None,
     });
     let result = loader.resolve("jsr:@luca/cases@1.0.0", "file:///main.js", ResolutionKind::Import);
     assert!(result.is_err(), "jsr specifier should be rejected when external modules disabled");
@@ -783,6 +899,7 @@ fn test_resolve_url_blocked_when_external_disabled() {
         policy_chain: None,
         virtual_modules: None,
         virtual_commonjs_modules: None,
+        virtual_files: None,
     });
     let result = loader.resolve(
         "https://esm.sh/jsr/@luca/cases@1.0.0",
@@ -805,6 +922,7 @@ fn test_resolve_relative_allowed_when_external_disabled() {
         policy_chain: None,
         virtual_modules: None,
         virtual_commonjs_modules: None,
+        virtual_files: None,
     });
     let result = loader.resolve(
         "./utils.js",
@@ -825,6 +943,7 @@ fn test_resolve_npm_allowed_when_external_enabled() {
         policy_chain: None,
         virtual_modules: None,
         virtual_commonjs_modules: None,
+        virtual_files: None,
     });
     let result = loader.resolve("npm:lodash-es@4.17.21", "file:///main.js", ResolutionKind::Import);
     assert!(result.is_ok(), "npm specifier should resolve when external enabled: {:?}", result);

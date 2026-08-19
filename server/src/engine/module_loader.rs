@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -38,6 +38,8 @@ pub struct ModuleLoaderConfig {
     pub virtual_modules: Option<Arc<HashMap<String, String>>>,
     /// Raw CommonJS modules available to `createRequire()` in virtual packages.
     pub virtual_commonjs_modules: Option<Arc<HashMap<String, String>>>,
+    /// File URLs available to Node-compatible resolution without loading them.
+    pub virtual_files: Option<Arc<HashSet<String>>>,
 }
 
 /// Input sent to OPA for module import auditing.
@@ -443,6 +445,7 @@ impl NetworkModuleLoader {
                 policy_chain: None,
                 virtual_modules: None,
                 virtual_commonjs_modules: None,
+                virtual_files: None,
             },
         }
     }
@@ -471,7 +474,9 @@ impl ModuleLoader for NetworkModuleLoader {
         // node:path → served from the embedded Node compat registry.
         // Bare builtin names (e.g. "path") also resolve here, matching Node.
         let node_name = specifier.strip_prefix("node:").unwrap_or(specifier);
-        if super::node_compat::resolve_submodule(node_name).is_some() {
+        let internal_allowed =
+            !node_name.starts_with("internal/") || self.config.virtual_files.is_some();
+        if internal_allowed && super::node_compat::resolve_submodule(node_name).is_some() {
             return ModuleSpecifier::parse(&format!("node:{}", node_name)).map_err(|e| {
                 JsErrorBox::generic(format!("Bad node specifier '{}': {}", specifier, e))
             });
@@ -580,30 +585,53 @@ impl ModuleLoader for NetworkModuleLoader {
         }
         if scheme == "node" {
             let name = module_specifier.path();
+            if name.starts_with("internal/") && self.config.virtual_files.is_none() {
+                return ModuleLoadResponse::Sync(Err(JsErrorBox::generic(format!(
+                    "Unknown node builtin module: '{}'",
+                    name
+                ))));
+            }
             return match super::node_compat::resolve_submodule(name) {
                 Some(mut source) => {
                     if name == "module" {
-                        if let Some(commonjs) = self.config.virtual_commonjs_modules.as_deref() {
-                            let package_json = self
-                                .config
-                                .virtual_modules
-                                .as_deref()
-                                .map(|modules| {
-                                    modules
-                                        .iter()
-                                        .filter(|(specifier, _)| specifier.ends_with("/package.json"))
-                                        .map(|(specifier, source)| (specifier.clone(), source.clone()))
-                                        .collect::<HashMap<_, _>>()
-                                })
-                                .unwrap_or_default();
+                        if self.config.virtual_files.is_some() {
                             source = format!(
-                                "globalThis.__mcpV8VirtualCommonJsModules={};\n\
-                                 globalThis.__mcpV8VirtualPackageJson={};\n{}",
-                                serde_json::to_string(commonjs).unwrap(),
-                                serde_json::to_string(&package_json).unwrap(),
+                                "import __mcpV8InternalEsmResolve from 'node:internal/modules/esm/resolve';\n{}",
                                 source,
                             );
                         }
+                        let empty_commonjs = HashMap::new();
+                        let commonjs = self
+                            .config
+                            .virtual_commonjs_modules
+                            .as_deref()
+                            .unwrap_or(&empty_commonjs);
+                        let package_json = self
+                            .config
+                            .virtual_modules
+                            .as_deref()
+                            .map(|modules| {
+                                modules
+                                    .iter()
+                                    .filter(|(specifier, _)| specifier.ends_with("/package.json"))
+                                    .map(|(specifier, source)| (specifier.clone(), source.clone()))
+                                    .collect::<HashMap<_, _>>()
+                            })
+                            .unwrap_or_default();
+                        source = format!(
+                            "globalThis.__mcpV8VirtualCommonJsModules={};\n\
+                             globalThis.__mcpV8VirtualPackageJson={};\n{}",
+                            serde_json::to_string(commonjs).unwrap(),
+                            serde_json::to_string(&package_json).unwrap(),
+                            source,
+                        );
+                    } else if name == "internal/modules/esm/resolve" {
+                        let files = self.config.virtual_files.as_deref().unwrap();
+                        source = format!(
+                            "{}\nconst __mcpV8VirtualFiles=new Set({});",
+                            source,
+                            serde_json::to_string(files).unwrap(),
+                        );
                     }
                     ModuleLoadResponse::Sync(Ok(ModuleSource::new(
                         ModuleType::JavaScript,

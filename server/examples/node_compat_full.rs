@@ -13,7 +13,7 @@ use server::engine::{
     subprocess::SubprocessConfig,
 };
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::{self, OpenOptions},
     io::{BufWriter, Write},
     path::{Path, PathBuf},
@@ -131,6 +131,7 @@ export {{ __cjsDefault as 'module.exports' }};
 struct CorpusModules {
     esm: Arc<HashMap<String, String>>,
     commonjs: Arc<HashMap<String, String>>,
+    files: Arc<HashSet<String>>,
 }
 fn add_corpus_modules(
     root: &Path,
@@ -138,6 +139,7 @@ fn add_corpus_modules(
     inherited_modules: bool,
     modules: &mut HashMap<String, String>,
     commonjs_modules: &mut HashMap<String, String>,
+    files: &mut HashSet<String>,
 ) -> Result<(), String> {
     let directory_uses_modules = package_uses_modules(directory, inherited_modules);
     for entry in fs::read_dir(directory).map_err(|error| error.to_string())? {
@@ -149,19 +151,21 @@ fn add_corpus_modules(
                 directory_uses_modules,
                 modules,
                 commonjs_modules,
+                files,
             )?;
             continue;
         }
+        let relative = path.strip_prefix(root).map_err(|error| error.to_string())?;
+        let virtual_path = Path::new("/").join(relative);
+        let specifier = ModuleSpecifier::from_file_path(&virtual_path)
+            .map_err(|_| format!("invalid corpus file path: {}", virtual_path.display()))?;
+        files.insert(specifier.to_string());
         if !matches!(
             path.extension().and_then(|value| value.to_str()),
             Some("js" | "mjs" | "cjs" | "json")
         ) {
             continue;
         }
-        let relative = path.strip_prefix(root).map_err(|error| error.to_string())?;
-        let virtual_path = Path::new("/").join(relative);
-        let specifier = ModuleSpecifier::from_file_path(&virtual_path)
-            .map_err(|_| format!("invalid corpus module path: {}", virtual_path.display()))?;
         let source = fs::read_to_string(&path).map_err(|error| error.to_string())?;
         let extension = path.extension().and_then(|value| value.to_str());
         if path.components().any(|component| component.as_os_str() == "node_modules") {
@@ -181,12 +185,14 @@ fn add_corpus_modules(
 fn corpus_modules(corpus: &Path) -> Result<CorpusModules, String> {
     let mut modules = HashMap::new();
     let mut commonjs_modules = HashMap::new();
+    let mut files = HashSet::new();
     add_corpus_modules(
         corpus,
         &corpus.join("test"),
         false,
         &mut modules,
         &mut commonjs_modules,
+        &mut files,
     )?;
     modules.insert("node-test:prelude".into(), PRELUDE.into());
     modules.insert("node-test:common".into(), COMMON_ESM.into());
@@ -194,6 +200,7 @@ fn corpus_modules(corpus: &Path) -> Result<CorpusModules, String> {
     Ok(CorpusModules {
         esm: Arc::new(modules),
         commonjs: Arc::new(commonjs_modules),
+        files: Arc::new(files),
     })
 }
 fn find_executable(name: &str) -> Result<PathBuf, String> {
@@ -239,6 +246,7 @@ fn run(
         policy_chain: None,
         virtual_modules: Some(modules.esm.clone()),
         virtual_commonjs_modules: Some(modules.commonjs.clone()),
+        virtual_files: Some(modules.files.clone()),
     };
     let main_specifier = match test_module_specifier(path) {
         Ok(specifier) => specifier,
@@ -453,6 +461,7 @@ mod tests {
         fs::create_dir_all(root.join("test/fixtures")).unwrap();
         fs::write(root.join("test/fixtures/value.mjs"), "export default 42;\n").unwrap();
         fs::write(root.join("test/fixtures/value.js"), "module.exports = 42;\n").unwrap();
+        fs::write(root.join("test/fixtures/addon.node"), [0_u8, 1, 2]).unwrap();
         fs::create_dir_all(root.join("test/fixtures/esm")).unwrap();
         fs::write(root.join("test/fixtures/esm/package.json"), r#"{"type":"module"}"#).unwrap();
         fs::write(root.join("test/fixtures/esm/value.js"), "export default 7;\n").unwrap();
@@ -464,6 +473,7 @@ mod tests {
             Some("export default 42;\n"),
         );
         assert!(modules.esm["file:///test/fixtures/value.js"].contains("__cjsModule.exports"));
+        assert!(modules.files.contains("file:///test/fixtures/addon.node"));
         assert_eq!(
             modules.esm.get("file:///test/fixtures/esm/value.js").map(String::as_str),
             Some("export default 7;\n"),

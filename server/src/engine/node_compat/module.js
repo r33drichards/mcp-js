@@ -66,12 +66,18 @@ const builtins = new Map([
     ['zlib', zlib],
 ]);
 
+if (typeof __mcpV8InternalEsmResolve !== 'undefined') {
+    builtins.set('internal/modules/esm/resolve', __mcpV8InternalEsmResolve);
+}
+
 // Matches Node: subpath builtins are listed, alias names are not.
 export const builtinModules = Object.freeze(
-    [...builtins.keys()].filter((name) => name !== 'assert/strict'));
+    [...builtins.keys()].filter((name) =>
+        name !== 'assert/strict' && !name.startsWith('internal/')));
 
 export function isBuiltin(name) {
-    return builtins.has(String(name).replace(/^node:/, ''));
+    const normalized = String(name).replace(/^node:/, '');
+    return !normalized.startsWith('internal/') && builtins.has(normalized);
 }
 
 const virtualCommonJsModules = globalThis.__mcpV8VirtualCommonJsModules || null;

@@ -4,9 +4,13 @@
 //! builtinModules sync. (timers, console, and crypto conformance runs in
 //! the vendored Node core suite, tests/node_compat.rs.)
 
-use std::sync::{Arc, Once};
+use std::{
+    collections::HashSet,
+    sync::{Arc, Once},
+};
 
 use server::engine::execution::ExecutionRegistry;
+use server::engine::module_loader::ModuleLoaderConfig;
 use server::engine::{Engine, initialize_v8};
 
 static INIT: Once = Once::new();
@@ -29,6 +33,16 @@ fn create_test_engine() -> Engine {
     let registry =
         ExecutionRegistry::new(tmp.to_str().unwrap()).expect("Failed to create test registry");
     Engine::new_stateless(64 * 1024 * 1024, 30, 4).with_execution_registry(Arc::new(registry))
+}
+
+fn create_test_engine_with_internals() -> Engine {
+    create_test_engine().with_module_loader_config(ModuleLoaderConfig {
+        allow_external: false,
+        policy_chain: None,
+        virtual_modules: None,
+        virtual_commonjs_modules: None,
+        virtual_files: Some(Arc::new(HashSet::new())),
+    })
 }
 
 async fn run_js(engine: &Engine, code: &str) -> Result<String, String> {
@@ -56,6 +70,14 @@ async fn run_js(engine: &Engine, code: &str) -> Result<String, String> {
 async fn expect_ok(code: &str) {
     ensure_v8();
     let engine = create_test_engine();
+    if let Err(error) = run_js(&engine, code).await {
+        panic!("execution failed: {error}");
+    }
+}
+
+async fn expect_ok_with_internals(code: &str) {
+    ensure_v8();
+    let engine = create_test_engine_with_internals();
     if let Err(error) = run_js(&engine, code).await {
         panic!("execution failed: {error}");
     }
@@ -94,7 +116,7 @@ fn node_compat_prelude_maps_registered_host_modules() {
 #[tokio::test]
 async fn node_compat_prelude_wraps_commonjs_body() {
     let prelude = include_str!("node_compat/runner/prelude.js");
-    expect_ok(&format!(
+    expect_ok_with_internals(&format!(
         r#"
         {prelude}
         globalThis.__NODE_TEST_RUN_CJS__(`
@@ -115,7 +137,7 @@ async fn node_compat_prelude_wraps_commonjs_body() {
 #[tokio::test]
 async fn node_compat_prelude_skips_when_inspector_disabled() {
     let prelude = include_str!("node_compat/runner/prelude.js");
-    expect_ok(&format!(
+    expect_ok_with_internals(&format!(
         r#"
         {prelude}
         globalThis.__NODE_TEST_RUN_CJS__(`
@@ -170,6 +192,32 @@ async fn builtin_modules_matches_registry() {
     if let Err(error) = run_js(&engine, &code).await {
         panic!("execution failed: {error}");
     }
+}
+
+#[tokio::test]
+async fn internal_builtins_require_expose_internals() {
+    expect_ok(
+        r#"
+        import { createRequire } from 'node:module';
+        const require = createRequire(import.meta.url);
+        let importError;
+        try { await import('node:internal/modules/esm/resolve'); }
+        catch (caught) { importError = caught; }
+        if (!importError) throw new Error('internal builtin import was exposed');
+
+        for (const resolve of [
+            () => require('node:internal/modules/esm/resolve'),
+            () => require.resolve('node:internal/modules/esm/resolve'),
+        ]) {
+            let error;
+            try { resolve(); } catch (caught) { error = caught; }
+            if (error?.code !== 'MODULE_NOT_FOUND') {
+                throw new Error(`internal builtin was exposed: ${error?.code || 'resolved'}`);
+            }
+        }
+        "#,
+    )
+    .await;
 }
 
 #[tokio::test]

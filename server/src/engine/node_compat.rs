@@ -4,7 +4,7 @@
 //! path/querystring/events run Node v22.14.0's own lib sources against a
 //! generated primordials shim (see tools/compat/gen-node-modules.py);
 //! buffer bundles feross/buffer (the npm browser polyfill); the rest are
-//! purpose-written subsets. `registry()` lists every served module so the
+//! purpose-written subsets. `NODE_MODULES` lists the public registry so the
 //! compat matrix in docs can be generated from code.
 
 /// (module name, ESM source) for every supported `node:` module. Subpath
@@ -42,9 +42,17 @@ pub const NODE_MODULES: &[(&str, &str)] = &[
     ("zlib", include_str!("node_compat/zlib.js")),
 ];
 
+const INTERNAL_NODE_MODULES: &[(&str, &str)] = &[
+    (
+        "internal/modules/esm/resolve",
+        include_str!("node_compat/internal_modules_esm_resolve.js"),
+    ),
+];
+
 pub fn source_for(name: &str) -> Option<&'static str> {
     NODE_MODULES
         .iter()
+        .chain(INTERNAL_NODE_MODULES)
         .find(|(n, _)| *n == name)
         .map(|(_, s)| *s)
 }
