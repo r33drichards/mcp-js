@@ -6,6 +6,7 @@ use server::engine::module_loader::ModuleLoaderConfig;
 use server::engine::{Engine, initialize_v8};
 
 static INIT: Once = Once::new();
+static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn ensure_v8() {
     INIT.call_once(initialize_v8);
@@ -79,6 +80,7 @@ async fn run_and_read(engine: &Engine, code: &str) -> Result<String, String> {
 
 #[tokio::test]
 async fn node_globals_are_disabled_by_default() {
+    let _guard = TEST_LOCK.lock().await;
     ensure_v8();
     let engine = create_test_engine(false, false);
     let output = run_and_read(
@@ -93,6 +95,7 @@ async fn node_globals_are_disabled_by_default() {
 
 #[tokio::test]
 async fn node_globals_reuse_the_builtin_compatibility_values() {
+    let _guard = TEST_LOCK.lock().await;
     ensure_v8();
     let engine = create_test_engine(true, false);
     let output = run_and_read(
@@ -119,6 +122,7 @@ console.log(JSON.stringify({
 
 #[tokio::test]
 async fn node_globals_are_enabled_for_stateful_execution() {
+    let _guard = TEST_LOCK.lock().await;
     ensure_v8();
     let engine = create_stateful_test_engine(true);
     let output = run_and_read(
@@ -133,6 +137,7 @@ async fn node_globals_are_enabled_for_stateful_execution() {
 
 #[tokio::test]
 async fn node_globals_exist_before_static_dependencies_evaluate() {
+    let _guard = TEST_LOCK.lock().await;
     ensure_v8();
     let app = Router::new().route(
         "/dependency.js",
