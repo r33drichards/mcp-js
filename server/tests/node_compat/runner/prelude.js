@@ -1,7 +1,7 @@
 // Prelude for running Node.js core tests inside the mcp-v8 engine.
 //
-// Runs as ESM before the (CJS) test body, which is evaluated via indirect
-// eval by the Rust harness. Provides the CJS shell: require() over the
+// Runs as ESM before the test body, which the Rust harness invokes through
+// a CommonJS function wrapper. Provides require() over the
 // node: compat registry, module/exports, __filename/__dirname, the process
 // and Buffer globals, and the `../common` module with mustCall tracking.
 // The harness prints a JSON result under a sentinel once timers drain.
@@ -217,6 +217,15 @@ globalThis.exports = globalThis.module.exports;
 const testPath = '/' + (globalThis.__NODE_TEST_PATH__ || ('test/parallel/' + (globalThis.__NODE_TEST_NAME__ || 'test.js')));
 globalThis.__filename = testPath;
 globalThis.__dirname = testPath.slice(0, testPath.lastIndexOf('/')) || '/';
+
+globalThis.__NODE_TEST_RUN_CJS__ = function runCommonJS(source) {
+    const compiled = Function(
+        'exports', 'require', 'module', '__filename', '__dirname', String(source),
+    );
+    return compiled.call(
+        module.exports, module.exports, require, module, __filename, __dirname,
+    );
+};
 
 globalThis.__NODE_TEST_REPORT__ = function () {
     for (const c of mustCalls) {

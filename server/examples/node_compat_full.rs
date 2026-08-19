@@ -5,17 +5,17 @@ mod shard;
 use result::{BroadResult, ResultStatus, ShardSummary};
 use serde::Deserialize;
 use server::engine::{
+    ExecutionConfig,
     fetch::FetchConfig,
     opa::{EvalMode, PolicyChain},
-    ExecutionConfig,
 };
 use std::{
     fs::{self, OpenOptions},
     io::{BufWriter, Write},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc, Once,
+        atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -53,7 +53,21 @@ enum Outcome {
     Invalid(String),
 }
 fn assemble(path: &str, body: &str) -> String {
-    format!("globalThis.__NODE_TEST_PATH__={};globalThis.__NODE_TEST_NAME__={};\n{}\ntry{{(0,eval)({});}}catch(e){{if(!(e&&e.__nodeTestSkip))throw e;}}\nglobalThis.__NODE_TEST_SETTIMEOUT__(()=>console.log({:?}+globalThis.__NODE_TEST_REPORT__()),300);",serde_json::to_string(path).unwrap(),serde_json::to_string(Path::new(path).file_name().unwrap().to_string_lossy().as_ref()).unwrap(),PRELUDE,serde_json::to_string(body).unwrap(),SENTINEL)
+    format!(
+        "globalThis.__NODE_TEST_PATH__={};globalThis.__NODE_TEST_NAME__={};\n{}\ntry{{globalThis.__NODE_TEST_RUN_CJS__({});}}catch(e){{if(!(e&&e.__nodeTestSkip))throw e;}}\nglobalThis.__NODE_TEST_SETTIMEOUT__(()=>console.log({:?}+globalThis.__NODE_TEST_REPORT__()),300);",
+        serde_json::to_string(path).unwrap(),
+        serde_json::to_string(
+            Path::new(path)
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .as_ref()
+        )
+        .unwrap(),
+        PRELUDE,
+        serde_json::to_string(body).unwrap(),
+        SENTINEL
+    )
 }
 fn run(path: &str, body: &str, timeout: Duration) -> Outcome {
     INIT.call_once(server::engine::initialize_v8);
@@ -234,6 +248,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn assemble_runs_test_body_through_commonjs_wrapper() {
+        let source = assemble("test/parallel/wrapper.js", "return;");
+        let runner = source.split_once(PRELUDE).unwrap().1;
+        assert!(runner.contains("globalThis.__NODE_TEST_RUN_CJS__("));
+        assert!(!runner.contains("(0,eval)("));
+    }
     #[test]
     fn platform_skip_is_strict() {
         assert!(result::is_platform_inapplicable("Windows-only"));

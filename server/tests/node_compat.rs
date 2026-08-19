@@ -6,7 +6,7 @@
 //! module loader. Each file runs in a fresh isolate: an ESM prelude
 //! provides the CJS shell (require over the node: registry, the
 //! `../common` module with mustCall tracking, process/Buffer globals),
-//! then the test body is evaluated with classic-script semantics and a
+//! then the test body runs through a CommonJS function wrapper and a
 //! drain-time reporter prints a JSON result under a sentinel.
 //!
 //! Results are locked against tests/node_compat/expectations.json with the
@@ -15,14 +15,14 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use server::engine::ExecutionConfig;
 use server::engine::fetch::FetchConfig;
 use server::engine::opa::{EvalMode, PolicyChain};
-use server::engine::ExecutionConfig;
 
 const PRELUDE_JS: &str = include_str!("node_compat/runner/prelude.js");
 const RESULT_SENTINEL: &str = "__NODE_TEST_RESULT__";
@@ -155,10 +155,10 @@ fn assemble(test_path: &Path) -> Result<String, String> {
         serde_json::to_string(name.as_ref()).unwrap()
     ));
     source.push_str(PRELUDE_JS);
-    // Classic-script semantics for the CJS test body (top-level function/
-    // var declarations become globals), same as the WPT harness.
+    // Run the test in Node's CommonJS function shell so top-level return
+    // and module-scoped declarations behave like a real .js test file.
     source.push_str(&format!(
-        "try {{\n  (0, eval)({});\n}} catch (e) {{\n\
+        "try {{\n  globalThis.__NODE_TEST_RUN_CJS__({});\n}} catch (e) {{\n\
          \x20 if (!(e && e.__nodeTestSkip)) throw e;\n}}\n",
         serde_json::to_string(&body).unwrap()
     ));
@@ -364,6 +364,19 @@ fn node_core_subset_matches_expectations() {
 #[cfg(test)]
 mod expectation_tests {
     use super::*;
+
+    #[test]
+    fn assemble_runs_test_body_through_commonjs_wrapper() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wrapper.js");
+        std::fs::write(&path, "return;").unwrap();
+
+        let source = assemble(&path).unwrap();
+
+        let runner = source.split_once(PRELUDE_JS).unwrap().1;
+        assert!(runner.contains("globalThis.__NODE_TEST_RUN_CJS__("));
+        assert!(!runner.contains("(0, eval)("));
+    }
 
     #[test]
     fn parses_passing_expectation_metadata() {

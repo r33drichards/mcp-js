@@ -87,6 +87,27 @@ fn node_compat_prelude_maps_registered_host_modules() {
     }
 }
 
+#[tokio::test]
+async fn node_compat_prelude_wraps_commonjs_body() {
+    let prelude = include_str!("node_compat/runner/prelude.js");
+    expect_ok(&format!(
+        r#"
+        {prelude}
+        globalThis.__NODE_TEST_RUN_CJS__(`
+            if (this !== module.exports) throw new Error('wrong CommonJS this');
+            if (arguments[0] !== exports || arguments[1] !== require ||
+                arguments[2] !== module || arguments[3] !== __filename ||
+                arguments[4] !== __dirname) {{
+                throw new Error('wrong CommonJS argument order');
+            }}
+            return;
+            throw new Error('top-level return did not exit the wrapper');
+        `);
+        "#
+    ))
+    .await;
+}
+
 /// module.builtinModules must list exactly the registry, so the eagerly
 /// imported map in module.js can't drift from node_compat.rs.
 #[tokio::test]
