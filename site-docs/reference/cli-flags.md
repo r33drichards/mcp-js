@@ -308,6 +308,13 @@ Allow external module imports (npm:, jsr:, and URL imports). When disabled (the 
 - Environment: `MCP_V8_ALLOW_EXTERNAL_MODULES`
 - Default: `false`
 
+### `--node-globals`
+
+Install the sandboxed Node.js `Buffer` and `process` compatibility values on `globalThis` before user modules are evaluated. This does not expose host environment variables or grant additional capabilities
+
+- Environment: `MCP_V8_NODE_GLOBALS`
+- Default: `false`
+
 ## OS Sandbox
 
 ### `--sandbox-manifest`

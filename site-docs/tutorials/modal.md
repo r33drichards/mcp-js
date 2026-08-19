@@ -41,20 +41,24 @@ pieces one at a time and see why each is needed.
 
   That publishes Function `my-fn` in app `my-app` — the names Step 3 looks up.
 
-## Why this needs four things turned on
+## Why this needs five settings
 
-Everything the SDK touches is a capability that `mcp-v8` keeps **off by
-default**. Turning them on one at a time makes the failure modes legible:
+The SDK needs four capabilities plus Node compatibility globals that `mcp-v8`
+keeps **off by default**. Turning them on one at a time makes the failure modes
+legible:
 
 1. **External module imports** — to `import` the `modal` package from esm.sh.
    Without it, the import throws immediately.
-2. **An `http2` policy allowing `*.modal.com`** — every gRPC connection goes
+2. **Node compatibility globals** — the SDK and its dependencies expect
+   `Buffer` and `process` during module evaluation. `--node-globals` installs
+   the sandboxed compatibility values without exposing host process state.
+3. **An `http2` policy allowing `*.modal.com`** — every gRPC connection goes
    through the gated HTTP/2 transport. With no policy, the connect is refused.
-3. **Header injection of your Modal token** — gRPC metadata is just HTTP/2
+4. **Header injection of your Modal token** — gRPC metadata is just HTTP/2
    headers, so `mcp-v8` can attach the token at the transport layer. Injection
    overwrites the same-named header the SDK sets, so the sandbox authenticates
    without ever holding the real secret (it passes a placeholder).
-4. **WebAssembly** — the SDK's dependency tree needs a live `WebAssembly`
+5. **WebAssembly** — the SDK's dependency tree needs a live `WebAssembly`
    global. WebAssembly is present in the normal runtime, but a V8
    `SnapshotCreator` isolate disables it — so **heap persistence must be off**
    (`--heap-store none`, the default). If you need per-session state, use
@@ -96,12 +100,13 @@ allow if {
 }
 ```
 
-## Step 2 — Start the server with the four capabilities
+## Step 2 — Start the server with the required settings
 
 ```bash
 mcp-v8 \
   --http-port 8080 \
   --allow-external-modules \
+  --node-globals \
   --heap-store none \
   --policies-json '{"http2":{"policies":[{"url":"file:///path/to/http2.rego"}]}}' \
   --fetch-header "host=*.modal.com,header=x-modal-token-id,value=ak-..." \
@@ -110,7 +115,10 @@ mcp-v8 \
 
 `--http-port 8080` is required: with no port flag mcp-v8 serves the stdio
 transport, and Step 3's `curl http://localhost:8080/...` would get connection
-refused. The two `--fetch-header` rules are the trick that keeps the secret out
+refused. `--node-globals` installs the sandboxed `Buffer` and `process`
+compatibility values before the Modal module graph is evaluated; it does not
+expose host environment variables or grant additional capabilities. The two
+`--fetch-header` rules are the trick that keeps the secret out
 of the isolate: they're **host-scoped** to `*.modal.com` (matching the policy
 above), so the token only ever travels to Modal, and there is no request-header
 read-back API — sandboxed code can authenticate but can never read the injected
@@ -124,6 +132,7 @@ variables (the JSON must be a single line):
 ```
 MCP_V8_HTTP_PORT=8080
 MCP_V8_ALLOW_EXTERNAL_MODULES=true
+MCP_V8_NODE_GLOBALS=true
 MCP_V8_HEAP_STORE=none
 MCP_V8_POLICIES_JSON={"http2":{"policies":[{"url":"file:///path/to/http2.rego"}]}}
 MCP_V8_FETCH_HEADER_CONFIG=[{"host":"*.modal.com","headers":{"x-modal-token-id":"ak-...","x-modal-token-secret":"as-..."}}]
@@ -136,13 +145,7 @@ the real one is injected server-side, and header injection replaces the
 same-named header the SDK sets, so the placeholder never reaches Modal.
 
 ```js
-import { ModalClient } from 'npm:modal?target=node';
-import { Buffer } from 'node:buffer';
-import process from 'node:process';
-
-// Packages built for Node expect these as globals.
-globalThis.Buffer = Buffer;
-globalThis.process = process;
+import { ModalClient } from 'npm:modal?target=node&bundle';
 
 const modal = new ModalClient({
   tokenId: 'ak-...',            // your public token id
@@ -154,8 +157,11 @@ const fn = await modal.functions.fromName('my-app', 'my-fn');
 console.log(JSON.stringify(await fn.remote(['world'])));
 ```
 
-The `?target=node` suffix matters: it selects the SDK's Node build, which
-imports the `node:*` builtins `mcp-v8` serves, rather than the browser build.
+The `target=node` query selects the SDK's Node build, which imports the
+`node:*` builtins `mcp-v8` serves. The `bundle` query keeps optional native
+detection dependencies out of the fetched module graph; without it, the current
+SDK graph imports the unsupported `node:child_process` builtin before the
+client is created.
 
 Run it through the sandbox. `/api/exec` is **asynchronous**: it returns `202`
 with an `execution_id`, and you read the result from the execution's output
@@ -241,6 +247,7 @@ MCP_V8_HEAP_STORE=none
 MCP_V8_FS_STORE=dir
 MCP_V8_FS_DIR=/data/fs
 MCP_V8_ALLOW_EXTERNAL_MODULES=true
+MCP_V8_NODE_GLOBALS=true
 MCP_V8_POLICIES_JSON={"http2":{"policies":[{"url":"file:///tmp/http2.rego"}]}}
 MCP_V8_FETCH_HEADER_CONFIG=[{"host":"*.modal.com","headers":{"x-modal-token-id":"ak-...","x-modal-token-secret":"as-..."}}]
 MCP_V8_ALLOWED_HOSTS=${{RAILWAY_PUBLIC_DOMAIN}},${{RAILWAY_PRIVATE_DOMAIN}}
@@ -369,9 +376,10 @@ run Keycloak in production mode against a database.
 | gRPC `connect` rejected / capability disabled | No `http2` policy, or it doesn't allow the host. Scope it to `*.modal.com`, not just `api.modal.com` — some calls dial a separate input-plane host. |
 | A call to `api.modal.com` works but another gRPC connect is denied | The policy (and the `--fetch-header` host) is pinned to `api.modal.com`; widen both to `*.modal.com` for the input-plane host. |
 | `UNAUTHENTICATED` from Modal | Header-injection rule missing/misspelled, or token invalid. The header names must be exactly `x-modal-token-id` / `x-modal-token-secret`, and the rule host must match the request (`*.modal.com`). |
+| `process is not defined` or `Buffer is not defined` | `--node-globals` / `MCP_V8_NODE_GLOBALS=true` is missing. |
+| `Unknown node builtin module: 'child_process'` | Import the bundled SDK build with `npm:modal?target=node&bundle`. |
 | Import fails | `--allow-external-modules` not set, or egress to esm.sh blocked by the OS sandbox or network policy. |
 | `401`/`403` from `/mcp` or `/api/*` | Missing or expired bearer token, or `JWKS_URL` doesn't point at the realm's `.../protocol/openid-connect/certs`. Mint a fresh token. |
-| Native-module load error importing `modal` | The SDK's transitive deps include a native (N-API) addon; smoke-test the import (`console.log(typeof ModalClient)`) before a real call, and confirm esm.sh egress is allowed. |
 | Keycloak token request returns `invalid_client` | Wrong `client_id`/`client_secret`, or the realm didn't import — check the service logs for the `Imported realm mcp` line. |
 
 ## See also
