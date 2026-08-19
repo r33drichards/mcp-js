@@ -27,6 +27,9 @@ jobs:
       - name: Build mcp-js
         run: nix build .#default --print-build-logs -L
 
+      - name: Run downstream browser OAuth E2E test
+        run: nix develop -c cargo test -p server --test mcp_oauth_browser_e2e -- --nocapture
+
       - name: Run MCP programmatic tool calling E2E test
         run: |
           SERVER_BIN=$(nix build .#default --print-out-paths)/bin/server

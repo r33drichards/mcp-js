@@ -43,10 +43,13 @@
           cargo = rustToolchain;
         } {
           src = ./server;
-          # Vendor hash for server's cargo deps; refreshed when deps changed.
-          # Bumped for the `toml` dependency of the single-file --config loader
-          # (vendors toml/toml_edit/toml_datetime/toml_write/serde_spanned/winnow).
-          hash = "sha256-sqG3400BG2TvSPwstZ17VbjW+S0J1QqHjj1uFUB2M3g=";
+          # Vendor hash for the server's current Cargo dependency set, including
+          # the web-compat crates (encoding_rs, flate2, brotli, urlpattern) and
+          # the websocket/http2 crates (tokio-tungstenite, h2, bytes, http,
+          # tokio-rustls, webpki-roots) added by the Modal gRPC workaround.
+          # Regenerate by building any nix package after a Cargo.lock change
+          # and copying the printed hash.
+          hash = "sha256-TD7zF5hzkQcpyP3s9iNYjHw+xpUBg0YYCWI73P+bd1w=";
         });
 
         docsPython = pkgs.python3.withPackages (
@@ -279,6 +282,31 @@
             inherit pkgs;
             mcp-js = self.packages.x86_64-linux.default;
           });
+          docs-oauth-contract-check = pkgs.stdenvNoCC.mkDerivation {
+            pname = "mcp-js-docs-oauth-contract-check";
+            version = "0.1.0";
+            src = self;
+
+            nativeBuildInputs = [ pkgs.gnugrep ];
+
+            dontUnpack = true;
+            dontConfigure = true;
+            strictDeps = true;
+
+            buildPhase = ''
+              runHook preBuild
+              ${pkgs.bash}/bin/bash "$src/scripts/check-oauth-docs.sh" "$src"
+              runHook postBuild
+            '';
+
+            installPhase = ''
+              runHook preInstall
+              mkdir -p "$out"
+              touch "$out/passed"
+              runHook postInstall
+            '';
+          };
+
           docs-generated-check = pkgs.stdenvNoCC.mkDerivation {
             pname = "mcp-js-docs-generated-check";
             version = "0.1.0";

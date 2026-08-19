@@ -15,48 +15,58 @@ pub mod fs_tree;
 pub mod heap_storage;
 pub mod heap_tags;
 pub mod mcp_client;
+pub mod mcp_oauth;
 pub mod module_loader;
+pub mod node_compat;
 pub mod opa;
 pub mod run_js_file;
 pub mod session_log;
 pub mod subprocess;
+pub mod compression;
+pub mod crypto;
+pub mod encoding;
 pub mod timers;
+pub mod url_support;
+pub mod urlpattern_support;
+pub mod http2;
 pub mod wasm_stub;
+pub mod web_compat;
+pub mod websocket;
 
 pub use console::HardeningConfig;
 
+use deno_core::v8;
+use deno_core::{JsRuntime, JsRuntimeForSnapshot, ModuleSpecifier, RuntimeOptions};
+use sha2::{Digest, Sha256};
+use std::alloc::{Layout, alloc, alloc_zeroed, dealloc};
 use std::collections::HashMap;
+use std::ffi::c_void;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
-use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::ffi::c_void;
-use std::alloc::{Layout, alloc_zeroed, alloc, dealloc};
-use deno_core::v8;
-use deno_core::{JsRuntime, JsRuntimeForSnapshot, ModuleSpecifier, RuntimeOptions};
-use sha2::{Sha256, Digest};
 
 use swc_core::common::{
-    comments::SingleThreadedComments,
-    sync::Lrc,
-    Globals, Mark, SourceMap, GLOBALS,
+    GLOBALS, Globals, Mark, SourceMap, comments::SingleThreadedComments, sync::Lrc,
 };
-use swc_core::ecma::visit::swc_ecma_ast::Pass;
-use swc_core::ecma::codegen::{text_writer::JsWriter, Emitter};
-use swc_core::ecma::parser::{lexer::Lexer, Parser, StringInput, Syntax, TsSyntax};
+use swc_core::ecma::codegen::{Emitter, text_writer::JsWriter};
+use swc_core::ecma::parser::{Parser, StringInput, Syntax, TsSyntax, lexer::Lexer};
 use swc_core::ecma::transforms::base::{fixer::fixer, hygiene::hygiene, resolver};
 use swc_core::ecma::transforms::typescript::strip;
+use swc_core::ecma::visit::swc_ecma_ast::Pass;
 
 use tokio::sync::Semaphore;
 
 use self::artifacts::{Artifact, ArtifactMeta, ArtifactState, ArtifactStore};
 use self::console::ConsoleLogState;
-use self::execution::{ExecutionId, ExecutionRegistry, ExecutionInfo, ExecutionSummary, ConsoleOutputPage};
+use self::execution::{
+    ConsoleOutputPage, ExecutionId, ExecutionInfo, ExecutionRegistry, ExecutionSummary,
+};
 
-use crate::engine::heap_storage::{HeapStorage, AnyHeapStorage};
-use crate::engine::heap_tags::{HeapTagStore, HeapTagEntry};
+use crate::engine::heap_storage::{AnyHeapStorage, HeapStorage};
+use crate::engine::heap_tags::{HeapTagEntry, HeapTagStore};
 use crate::engine::session_log::{SessionLog, SessionLogEntry};
 use wasmparser::Validator;
 
@@ -65,21 +75,37 @@ pub const DEFAULT_EXECUTION_TIMEOUT_SECS: u64 = 30;
 /// per-module limit is set. 16 MiB.
 pub const DEFAULT_WASM_MAX_BYTES: usize = 16 * 1024 * 1024;
 /// Minimum heap memory in MB. deno_core runs bootstrap JavaScript during
-/// JsRuntime creation (before our near-heap-limit callback is installed).
-/// The heap must be large enough for this bootstrap to complete — smaller
-/// values cause `FatalProcessOutOfMemory` → `abort()`.
-pub const MIN_HEAP_MEMORY_MB: usize = 8;
+/// JsRuntime creation (before our near-heap-limit callback is installed),
+/// and the web-compat layer (streams polyfill, fetch classes, URL,
+/// encoding, node: modules) adds to that baseline. The heap must be large
+/// enough for this bootstrap to complete — smaller values cause
+/// `FatalProcessOutOfMemory` → `abort()` or spurious OOM errors before
+/// user code runs.
+pub const MIN_HEAP_MEMORY_MB: usize = 16;
 
 // ── V8 initialization ───────────────────────────────────────────────────
 
 pub fn initialize_v8() {
     // deno_core initializes V8 automatically on first JsRuntime creation.
-    // Kept for backward compatibility with callers (main.rs, tests, fuzz).
+    // Kept as the common process-init hook for callers (main.rs, tests, fuzz).
     //
     // Note: V8 145 (bundled with deno_core 0.381) does not support
     // --no-harmony-sharedarraybuffer or --regexp-backtrace-limit flags.
     // SharedArrayBuffer is removed via JS in the hardening step instead.
     // ReDoS is mitigated by the per-execution timeout.
+
+    // Install the process-level rustls CryptoProvider. The dependency graph
+    // compiles rustls with both backends (aws-lc-rs via tokio-rustls's
+    // defaults, ring via reqwest's rustls-tls), and with both present every
+    // rustls config built without an explicit provider — node:http2 TLS
+    // connects, wss:// WebSockets — panics with "Could not automatically
+    // determine the process-level CryptoProvider". Ring matches what reqwest
+    // already uses, so the process speaks with one TLS backend. The `ring`
+    // module is reachable through tokio-rustls's re-export because reqwest's
+    // rustls-tls feature enables it crate-wide; if reqwest ever drops ring,
+    // this line fails to compile rather than silently changing behavior.
+    // Err means a provider is already installed — exactly the state we want.
+    let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
 }
 
 // ── Snapshot envelope ───────────────────────────────────────────────────
@@ -124,7 +150,10 @@ fn wrap_snapshot(data: &[u8]) -> WrappedSnapshot {
     wrapped.extend_from_slice(SNAPSHOT_MAGIC);
     wrapped.extend_from_slice(&hash);
     wrapped.extend_from_slice(data);
-    let content_hash = hash.iter().map(|b| format!("{:02x}", b)).collect::<String>();
+    let content_hash = hash
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect::<String>();
     WrappedSnapshot {
         data: wrapped,
         content_hash,
@@ -169,10 +198,7 @@ struct BoundedAllocatorState {
 
 const ARRAY_BUF_ALIGN: usize = 16; // match platform malloc alignment
 
-unsafe extern "C" fn bounded_allocate(
-    state: &BoundedAllocatorState,
-    len: usize,
-) -> *mut c_void {
+unsafe extern "C" fn bounded_allocate(state: &BoundedAllocatorState, len: usize) -> *mut c_void {
     if len == 0 {
         return std::ptr::null_mut();
     }
@@ -218,11 +244,7 @@ unsafe extern "C" fn bounded_allocate_uninitialized(
     ptr as *mut c_void
 }
 
-unsafe extern "C" fn bounded_free(
-    state: &BoundedAllocatorState,
-    data: *mut c_void,
-    len: usize,
-) {
+unsafe extern "C" fn bounded_free(state: &BoundedAllocatorState, data: *mut c_void, len: usize) {
     if data.is_null() || len == 0 {
         return;
     }
@@ -237,13 +259,12 @@ unsafe extern "C" fn bounded_drop(state: *const BoundedAllocatorState) {
     drop(unsafe { Box::from_raw(state as *mut BoundedAllocatorState) });
 }
 
-static BOUNDED_VTABLE: v8::RustAllocatorVtable<BoundedAllocatorState> =
-    v8::RustAllocatorVtable {
-        allocate: bounded_allocate,
-        allocate_uninitialized: bounded_allocate_uninitialized,
-        free: bounded_free,
-        drop: bounded_drop,
-    };
+static BOUNDED_VTABLE: v8::RustAllocatorVtable<BoundedAllocatorState> = v8::RustAllocatorVtable {
+    allocate: bounded_allocate,
+    allocate_uninitialized: bounded_allocate_uninitialized,
+    free: bounded_free,
+    drop: bounded_drop,
+};
 
 fn create_bounded_allocator(limit: usize) -> v8::UniqueRef<v8::Allocator> {
     let state = Box::new(BoundedAllocatorState {
@@ -311,7 +332,9 @@ struct HeapLimitGuard {
 impl Drop for HeapLimitGuard {
     fn drop(&mut self) {
         if !self.ptr.is_null() {
-            unsafe { let _ = Box::from_raw(self.ptr); }
+            unsafe {
+                let _ = Box::from_raw(self.ptr);
+            }
         }
     }
 }
@@ -344,10 +367,8 @@ fn install_heap_limit_callback(
         oom_flag,
     });
     let data_ptr = Box::into_raw(data);
-    isolate.add_near_heap_limit_callback(
-        near_heap_limit_callback,
-        data_ptr as *mut std::ffi::c_void,
-    );
+    isolate
+        .add_near_heap_limit_callback(near_heap_limit_callback, data_ptr as *mut std::ffi::c_void);
     data_ptr
 }
 
@@ -479,10 +500,7 @@ pub fn ca_to_hex(id: &[u8; 32]) -> String {
 pub fn strip_typescript_types(code: &str) -> Result<String, String> {
     let cm: Lrc<SourceMap> = Default::default();
 
-    let fm = cm.new_source_file(
-        swc_core::common::FileName::Anon.into(),
-        code.to_string(),
-    );
+    let fm = cm.new_source_file(swc_core::common::FileName::Anon.into(), code.to_string());
 
     let comments = SingleThreadedComments::default();
 
@@ -556,7 +574,11 @@ const WASM_TABLE_ELEMENT_BYTES: u64 = 8;
 /// allocated heap budget. Checks both direct declarations (memory/table
 /// sections) and imported memories/tables, since both cause V8 to allocate
 /// native memory outside the JS heap during compilation.
-fn validate_wasm_resources(name: &str, bytes: &[u8], max_memory_bytes: usize) -> Result<(), String> {
+fn validate_wasm_resources(
+    name: &str,
+    bytes: &[u8],
+    max_memory_bytes: usize,
+) -> Result<(), String> {
     use wasmparser::{Parser, Payload, TypeRef};
 
     let budget = max_memory_bytes as u64;
@@ -571,15 +593,19 @@ fn validate_wasm_resources(name: &str, bytes: &[u8], max_memory_bytes: usize) ->
                     if mem.initial > max_pages {
                         return Err(format!(
                             "WASM module '{}': memory too large ({} pages = {} MiB, budget allows {} pages = {} MiB)",
-                            name, mem.initial, mem.initial * 64 / 1024,
-                            max_pages, max_pages * 64 / 1024,
+                            name,
+                            mem.initial,
+                            mem.initial * 64 / 1024,
+                            max_pages,
+                            max_pages * 64 / 1024,
                         ));
                     }
                 }
             }
             Ok(Payload::TableSection(reader)) => {
                 for table in reader {
-                    let table = table.map_err(|e| format!("Invalid WASM module '{}': {}", name, e))?;
+                    let table =
+                        table.map_err(|e| format!("Invalid WASM module '{}': {}", name, e))?;
                     if table.ty.initial > max_table_elements {
                         return Err(format!(
                             "WASM module '{}': table too large ({} elements, budget allows {})",
@@ -590,14 +616,18 @@ fn validate_wasm_resources(name: &str, bytes: &[u8], max_memory_bytes: usize) ->
             }
             Ok(Payload::ImportSection(reader)) => {
                 for import in reader {
-                    let import = import.map_err(|e| format!("Invalid WASM module '{}': {}", name, e))?;
+                    let import =
+                        import.map_err(|e| format!("Invalid WASM module '{}': {}", name, e))?;
                     match import.ty {
                         TypeRef::Memory(mem) => {
                             if mem.initial > max_pages {
                                 return Err(format!(
                                     "WASM module '{}': imported memory too large ({} pages = {} MiB, budget allows {} pages = {} MiB)",
-                                    name, mem.initial, mem.initial * 64 / 1024,
-                                    max_pages, max_pages * 64 / 1024,
+                                    name,
+                                    mem.initial,
+                                    mem.initial * 64 / 1024,
+                                    max_pages,
+                                    max_pages * 64 / 1024,
                                 ));
                             }
                         }
@@ -656,24 +686,26 @@ pub fn inject_wasm_modules(
     let global = scope.get_current_context().global(scope);
 
     // Look up WebAssembly.Instance constructor once.
-    let wa_key = v8::String::new(scope, "WebAssembly")
-        .ok_or("Failed to create 'WebAssembly' string")?;
+    let wa_key =
+        v8::String::new(scope, "WebAssembly").ok_or("Failed to create 'WebAssembly' string")?;
     let wa_obj = global
         .get(scope, wa_key.into())
         .ok_or("WebAssembly not found on global")?;
-    let wa_obj: v8::Local<v8::Object> = wa_obj.try_into()
+    let wa_obj: v8::Local<v8::Object> = wa_obj
+        .try_into()
         .map_err(|_| "WebAssembly is not an object")?;
 
-    let instance_key = v8::String::new(scope, "Instance")
-        .ok_or("Failed to create 'Instance' string")?;
+    let instance_key =
+        v8::String::new(scope, "Instance").ok_or("Failed to create 'Instance' string")?;
     let instance_ctor = wa_obj
         .get(scope, instance_key.into())
         .ok_or("WebAssembly.Instance not found")?;
-    let instance_ctor: v8::Local<v8::Function> = instance_ctor.try_into()
+    let instance_ctor: v8::Local<v8::Function> = instance_ctor
+        .try_into()
         .map_err(|_| "WebAssembly.Instance is not a function")?;
 
-    let exports_key = v8::String::new(scope, "exports")
-        .ok_or("Failed to create 'exports' string")?;
+    let exports_key =
+        v8::String::new(scope, "exports").ok_or("Failed to create 'exports' string")?;
 
     for m in modules {
         // Pre-validate WASM bytes with wasmparser before handing them to V8.
@@ -681,7 +713,8 @@ pub fn inject_wasm_modules(
         // by our JS heap limits, so malformed modules can OOM the process.
         // wasmparser is a lightweight, safe validator that rejects invalid modules
         // before V8 gets a chance to allocate unbounded memory.
-        Validator::new().validate_all(&m.bytes)
+        Validator::new()
+            .validate_all(&m.bytes)
             .map_err(|e| format!("Invalid WASM module '{}': {}", m.name, e))?;
 
         // Reject modules declaring resources that exceed the per-module budget.
@@ -721,8 +754,9 @@ pub fn inject_wasm_modules(
                 .get(scope, exports_key.into())
                 .ok_or_else(|| format!("Failed to get exports from WASM module '{}'", m.name))?;
 
-            let name_key = v8::String::new(scope, &m.name)
-                .ok_or_else(|| format!("Failed to create global name for WASM module '{}'", m.name))?;
+            let name_key = v8::String::new(scope, &m.name).ok_or_else(|| {
+                format!("Failed to create global name for WASM module '{}'", m.name)
+            })?;
             global.set(scope, name_key.into(), exports);
         }
     }
@@ -807,6 +841,8 @@ pub struct ExecutionConfig<'a> {
     pub wasm_modules: &'a [WasmModule],
     pub wasm_default_max_bytes: usize,
     pub fetch_config: Option<&'a fetch::FetchConfig>,
+    pub websocket_config: Option<&'a websocket::WebSocketConfig>,
+    pub http2_config: Option<&'a http2::Http2Config>,
     pub fs_config: Option<&'a fs::FsConfig>,
     /// Optional overlay mount. When present, the fs ops operate on this virtual
     /// filesystem instead of the host. Independent of the heap snapshot handle.
@@ -831,6 +867,8 @@ impl<'a> ExecutionConfig<'a> {
             wasm_modules: &[],
             wasm_default_max_bytes: heap_memory_max_bytes,
             fetch_config: None,
+            websocket_config: None,
+            http2_config: None,
             fs_config: None,
             fs_mount: None,
             mcp_headers: None,
@@ -854,7 +892,10 @@ impl<'a> ExecutionConfig<'a> {
         self
     }
 
-    pub fn maybe_subprocess_config(mut self, config: Option<&'a subprocess::SubprocessConfig>) -> Self {
+    pub fn maybe_subprocess_config(
+        mut self,
+        config: Option<&'a subprocess::SubprocessConfig>,
+    ) -> Self {
         self.subprocess_config = config;
         self
     }
@@ -895,6 +936,19 @@ impl<'a> ExecutionConfig<'a> {
         self
     }
 
+    pub fn maybe_websocket_config(
+        mut self,
+        config: Option<&'a websocket::WebSocketConfig>,
+    ) -> Self {
+        self.websocket_config = config;
+        self
+    }
+
+    pub fn maybe_http2_config(mut self, config: Option<&'a http2::Http2Config>) -> Self {
+        self.http2_config = config;
+        self
+    }
+
     pub fn maybe_fs_config(mut self, config: Option<&'a fs::FsConfig>) -> Self {
         self.fs_config = config;
         self
@@ -914,7 +968,6 @@ impl<'a> ExecutionConfig<'a> {
         self.artifact_state = state;
         self
     }
-
 }
 
 /// Stateless execution — creates a fresh JsRuntime (no snapshot).
@@ -930,10 +983,12 @@ pub fn execute_stateless(
         wasm_modules,
         wasm_default_max_bytes,
         fetch_config,
+        websocket_config,
+        http2_config,
         fs_config,
         fs_mount,
         mcp_headers,
-            subprocess_config,
+        subprocess_config,
         console_tree,
         module_loader_config,
         mcp_config,
@@ -950,9 +1005,15 @@ pub fn execute_stateless(
         }
         if fetch_config.is_some() {
             extensions.push(fetch::create_extension());
-        if subprocess_config.is_some() {
-            extensions.push(subprocess::create_extension());
+            if subprocess_config.is_some() {
+                extensions.push(subprocess::create_extension());
+            }
         }
+        if websocket_config.is_some() {
+            extensions.push(websocket::create_extension());
+        }
+        if http2_config.is_some() {
+            extensions.push(http2::create_extension());
         }
         if fs_config.is_some() {
             extensions.push(fs::create_extension());
@@ -964,10 +1025,17 @@ pub fn execute_stateless(
             extensions.push(artifacts::create_extension());
         }
         extensions.push(timers::create_extension());
+        extensions.push(url_support::create_extension());
+        extensions.push(encoding::create_extension());
+        extensions.push(crypto::create_extension());
+        extensions.push(compression::create_extension());
+        extensions.push(urlpattern_support::create_extension());
 
         // Always create a module loader — all code runs as ES modules.
         let module_loader: Rc<dyn deno_core::ModuleLoader> = match module_loader_config {
-            Some(config) => Rc::new(module_loader::NetworkModuleLoader::with_config(config.clone())),
+            Some(config) => Rc::new(module_loader::NetworkModuleLoader::with_config(
+                config.clone(),
+            )),
             None => Rc::new(module_loader::NetworkModuleLoader::new()),
         };
 
@@ -984,12 +1052,25 @@ pub fn execute_stateless(
 
         // Put console log state in OpState.
         if let Some(tree) = console_tree {
-            runtime.op_state().borrow_mut().put(ConsoleLogState::new(tree));
+            runtime
+                .op_state()
+                .borrow_mut()
+                .put(ConsoleLogState::new(tree));
         }
 
         // Put fetch config in OpState if OPA is configured.
         if let Some(fc) = fetch_config {
             runtime.op_state().borrow_mut().put(fc.clone());
+        }
+
+        // Put websocket config in OpState if websocket policies are configured.
+        if let Some(wsc) = websocket_config {
+            runtime.op_state().borrow_mut().put(wsc.clone());
+        }
+
+        // Put http2 config in OpState if http2 policies are configured.
+        if let Some(h2c) = http2_config {
+            runtime.op_state().borrow_mut().put(h2c.clone());
         }
 
         // Put fs config in OpState if filesystem policies are configured.
@@ -1020,77 +1101,106 @@ pub fn execute_stateless(
         }
 
         // Publish handle immediately so caller can terminate us.
-        *isolate_handle.lock().unwrap() = Some(
-            runtime.v8_isolate().thread_safe_handle()
-        );
+        *isolate_handle.lock().unwrap() = Some(runtime.v8_isolate().thread_safe_handle());
 
-        let cb_data_ptr = install_heap_limit_callback(
-            runtime.v8_isolate(), oom_flag.clone()
-        );
+        let cb_data_ptr = install_heap_limit_callback(runtime.v8_isolate(), oom_flag.clone());
         let _heap_guard = HeapLimitGuard { ptr: cb_data_ptr };
 
         // Inject WASM modules as globals via V8 native API.
-        let eval_result = match inject_wasm_modules(&mut runtime, wasm_modules, wasm_default_max_bytes) {
-            Err(e) => Err(e),
-            Ok(()) => {
-                // Inject console JS wrapper.
-                if let Err(e) = console::inject_console(&mut runtime) {
-                    return Err(e);
-                }
-                // Neutralize dangerous built-in ops (op_panic, print).
-                if let Err(e) = console::neutralize_dangerous_ops(&mut runtime) {
-                    return Err(e);
-                }
-                // Inject atob/btoa (always available).
-                if let Err(e) = console::inject_base64(&mut runtime) {
-                    return Err(e);
-                }
-                // Inject Blob/File/FormData (always available).
-                if let Err(e) = console::inject_web_apis(&mut runtime) {
-                    return Err(e);
-                }
-                // Inject fetch() JS wrapper if OPA is configured.
-                if fetch_config.is_some() {
-                    if let Err(e) = fetch::inject_fetch(&mut runtime) {
+        let eval_result =
+            match inject_wasm_modules(&mut runtime, wasm_modules, wasm_default_max_bytes) {
+                Err(e) => Err(e),
+                Ok(()) => {
+                    // Inject console JS wrapper.
+                    if let Err(e) = console::inject_console(&mut runtime) {
                         return Err(e);
                     }
-                // Inject subprocess JS wrapper if subprocess policies are configured.
-                if subprocess_config.is_some() {
-                    if let Err(e) = subprocess::inject_subprocess(&mut runtime) {
+                    // Neutralize dangerous built-in ops (op_panic, print).
+                    if let Err(e) = console::neutralize_dangerous_ops(&mut runtime) {
                         return Err(e);
                     }
-                }
-                }
-                // Inject fs JS wrapper if filesystem policies are configured.
-                if fs_config.is_some() {
-                    if let Err(e) = fs::inject_fs(&mut runtime) {
+                    // Inject atob/btoa (always available).
+                    if let Err(e) = console::inject_base64(&mut runtime) {
                         return Err(e);
                     }
-                }
-                // Inject mcp JS wrapper if MCP servers are configured.
-                if mcp_config.is_some() {
-                    if let Err(e) = mcp_client::inject_mcp(&mut runtime) {
+                    // Inject Blob/File/FormData (always available).
+                    if let Err(e) = console::inject_web_apis(&mut runtime) {
                         return Err(e);
                     }
-                }
-                // Inject artifact() JS wrapper if an artifact store is attached.
-                if artifact_state.is_some() {
-                    if let Err(e) = artifacts::inject_artifact(&mut runtime) {
+                    // Inject fetch() JS wrapper if OPA is configured.
+                    if fetch_config.is_some() {
+                        if let Err(e) = fetch::inject_fetch(&mut runtime) {
+                            return Err(e);
+                        }
+                        // Inject subprocess JS wrapper if subprocess policies are configured.
+                        if subprocess_config.is_some() {
+                            if let Err(e) = subprocess::inject_subprocess(&mut runtime) {
+                                return Err(e);
+                            }
+                        }
+                    }
+                    // Inject fs JS wrapper if filesystem policies are configured.
+                    if fs_config.is_some() {
+                        if let Err(e) = fs::inject_fs(&mut runtime) {
+                            return Err(e);
+                        }
+                    }
+                    // Inject mcp JS wrapper if MCP servers are configured.
+                    if mcp_config.is_some() {
+                        if let Err(e) = mcp_client::inject_mcp(&mut runtime) {
+                            return Err(e);
+                        }
+                    }
+                    // Inject artifact() JS wrapper if an artifact store is attached.
+                    if artifact_state.is_some() {
+                        if let Err(e) = artifacts::inject_artifact(&mut runtime) {
+                            return Err(e);
+                        }
+                    }
+                    // Inject setTimeout/clearTimeout (always available).
+                    if let Err(e) = timers::inject_timers(&mut runtime) {
                         return Err(e);
                     }
+                    // Inject the web-platform compat layer (events, abort,
+                    // structuredClone, performance, ...). Needs timers.
+                    if let Err(e) = web_compat::inject_web_compat(&mut runtime) {
+                        return Err(e);
+                    }
+                    if let Err(e) = url_support::inject_url(&mut runtime) {
+                        return Err(e);
+                    }
+                    if let Err(e) = encoding::inject_encoding(&mut runtime) {
+                        return Err(e);
+                    }
+                    if let Err(e) = crypto::inject_crypto(&mut runtime) {
+                        return Err(e);
+                    }
+                    if let Err(e) = web_compat::inject_web_compat_extras(&mut runtime) {
+                        return Err(e);
+                    }
+                    // Inject the WebSocket class if websocket policies are
+                    // configured. Needs the web-compat layer (EventTarget,
+                    // MessageEvent, DOMException, Blob).
+                    if websocket_config.is_some() {
+                        if let Err(e) = websocket::inject_websocket(&mut runtime) {
+                            return Err(e);
+                        }
+                    }
+                    // Bind the http2 ops for the node:http2 shim if http2
+                    // policies are configured.
+                    if http2_config.is_some() {
+                        if let Err(e) = http2::inject_http2(&mut runtime) {
+                            return Err(e);
+                        }
+                    }
+                    // Harden sandbox: freeze ops, neutralize introspection, remove __bootstrap.
+                    // Must run after all inject_* calls and before user code.
+                    if let Err(e) = console::harden_runtime(&mut runtime, hardening) {
+                        return Err(e);
+                    }
+                    execute_module(&rt, &mut runtime, code)
                 }
-                // Inject setTimeout/clearTimeout (always available).
-                if let Err(e) = timers::inject_timers(&mut runtime) {
-                    return Err(e);
-                }
-                // Harden sandbox: freeze ops, neutralize introspection, remove __bootstrap.
-                // Must run after all inject_* calls and before user code.
-                if let Err(e) = console::harden_runtime(&mut runtime, hardening) {
-                    return Err(e);
-                }
-                execute_module(&rt, &mut runtime, code)
-            }
-        };
+            };
 
         // Flush any remaining console output before runtime is dropped.
         console::flush_console(&mut runtime);
@@ -1106,9 +1216,14 @@ pub fn execute_stateless(
         Ok(Err(e)) => (Err(classify_termination_error(&oom_flag, false, e)), oom),
         Err(_panic) => {
             *isolate_handle.lock().unwrap() = None;
-            (Err(classify_termination_error(
-                &oom_flag, false, "V8 execution panicked unexpectedly".to_string(),
-            )), oom)
+            (
+                Err(classify_termination_error(
+                    &oom_flag,
+                    false,
+                    "V8 execution panicked unexpectedly".to_string(),
+                )),
+                oom,
+            )
         }
     }
 }
@@ -1127,10 +1242,12 @@ pub fn execute_stateful(
         wasm_modules,
         wasm_default_max_bytes,
         fetch_config,
+        websocket_config,
+        http2_config,
         fs_config,
         fs_mount,
         mcp_headers,
-            subprocess_config,
+        subprocess_config,
         console_tree,
         module_loader_config,
         mcp_config,
@@ -1144,9 +1261,8 @@ pub fn execute_stateful(
 
         // Box::leak to get &'static [u8] required by RuntimeOptions::startup_snapshot.
         // We reclaim the memory after the runtime is consumed by snapshot().
-        let leaked_snapshot: Option<(*mut [u8], &'static [u8])> = raw_snapshot
-            .filter(|d| !d.is_empty())
-            .map(|data| {
+        let leaked_snapshot: Option<(*mut [u8], &'static [u8])> =
+            raw_snapshot.filter(|d| !d.is_empty()).map(|data| {
                 eprintln!("creating isolate from snapshot...");
                 let ptr = Box::into_raw(data.into_boxed_slice());
                 let static_ref: &'static [u8] = unsafe { &*ptr };
@@ -1165,9 +1281,15 @@ pub fn execute_stateful(
         }
         if fetch_config.is_some() {
             extensions.push(fetch::create_extension());
-        if subprocess_config.is_some() {
-            extensions.push(subprocess::create_extension());
+            if subprocess_config.is_some() {
+                extensions.push(subprocess::create_extension());
+            }
         }
+        if websocket_config.is_some() {
+            extensions.push(websocket::create_extension());
+        }
+        if http2_config.is_some() {
+            extensions.push(http2::create_extension());
         }
         if fs_config.is_some() {
             extensions.push(fs::create_extension());
@@ -1179,10 +1301,17 @@ pub fn execute_stateful(
             extensions.push(artifacts::create_extension());
         }
         extensions.push(timers::create_extension());
+        extensions.push(url_support::create_extension());
+        extensions.push(encoding::create_extension());
+        extensions.push(crypto::create_extension());
+        extensions.push(compression::create_extension());
+        extensions.push(urlpattern_support::create_extension());
 
         // Always create a module loader — all code runs as ES modules.
         let module_loader: Rc<dyn deno_core::ModuleLoader> = match module_loader_config {
-            Some(config) => Rc::new(module_loader::NetworkModuleLoader::with_config(config.clone())),
+            Some(config) => Rc::new(module_loader::NetworkModuleLoader::with_config(
+                config.clone(),
+            )),
             None => Rc::new(module_loader::NetworkModuleLoader::new()),
         };
 
@@ -1200,12 +1329,25 @@ pub fn execute_stateful(
 
         // Put console log state in OpState.
         if let Some(tree) = console_tree {
-            runtime.op_state().borrow_mut().put(ConsoleLogState::new(tree));
+            runtime
+                .op_state()
+                .borrow_mut()
+                .put(ConsoleLogState::new(tree));
         }
 
         // Put fetch config in OpState if OPA is configured.
         if let Some(fc) = fetch_config {
             runtime.op_state().borrow_mut().put(fc.clone());
+        }
+
+        // Put websocket config in OpState if websocket policies are configured.
+        if let Some(wsc) = websocket_config {
+            runtime.op_state().borrow_mut().put(wsc.clone());
+        }
+
+        // Put http2 config in OpState if http2 policies are configured.
+        if let Some(h2c) = http2_config {
+            runtime.op_state().borrow_mut().put(h2c.clone());
         }
 
         // Put fs config in OpState if filesystem policies are configured.
@@ -1236,13 +1378,9 @@ pub fn execute_stateful(
         }
 
         // Publish handle immediately so caller can terminate us.
-        *isolate_handle.lock().unwrap() = Some(
-            runtime.v8_isolate().thread_safe_handle()
-        );
+        *isolate_handle.lock().unwrap() = Some(runtime.v8_isolate().thread_safe_handle());
 
-        let cb_data_ptr = install_heap_limit_callback(
-            runtime.v8_isolate(), oom_flag.clone()
-        );
+        let cb_data_ptr = install_heap_limit_callback(runtime.v8_isolate(), oom_flag.clone());
         let _heap_guard = HeapLimitGuard { ptr: cb_data_ptr };
 
         // When restoring from a snapshot, the JS-level setup (console wrappers,
@@ -1280,12 +1418,12 @@ pub fn execute_stateful(
                         if let Err(e) = fetch::inject_fetch(&mut runtime) {
                             return Err(e);
                         }
-                // Inject subprocess JS wrapper if subprocess policies are configured.
-                if subprocess_config.is_some() {
-                    if let Err(e) = subprocess::inject_subprocess(&mut runtime) {
-                        return Err(e);
-                    }
-                }
+                        // Inject subprocess JS wrapper if subprocess policies are configured.
+                        if subprocess_config.is_some() {
+                            if let Err(e) = subprocess::inject_subprocess(&mut runtime) {
+                                return Err(e);
+                            }
+                        }
                     }
                     // Inject fs JS wrapper if filesystem policies are configured.
                     if fs_config.is_some() {
@@ -1310,6 +1448,38 @@ pub fn execute_stateful(
                     if let Err(e) = timers::inject_timers(&mut runtime) {
                         return Err(e);
                     }
+                    // Inject the web-platform compat layer (events, abort,
+                    // structuredClone, performance, ...). Needs timers.
+                    if let Err(e) = web_compat::inject_web_compat_snapshot(&mut runtime) {
+                        return Err(e);
+                    }
+                    if let Err(e) = url_support::inject_url_snapshot(&mut runtime) {
+                        return Err(e);
+                    }
+                    if let Err(e) = encoding::inject_encoding_snapshot(&mut runtime) {
+                        return Err(e);
+                    }
+                    if let Err(e) = crypto::inject_crypto_snapshot(&mut runtime) {
+                        return Err(e);
+                    }
+                    if let Err(e) = web_compat::inject_web_compat_extras_snapshot(&mut runtime) {
+                        return Err(e);
+                    }
+                    // Inject the WebSocket class if websocket policies are
+                    // configured. Needs the web-compat layer (EventTarget,
+                    // MessageEvent, DOMException, Blob).
+                    if websocket_config.is_some() {
+                        if let Err(e) = websocket::inject_websocket_snapshot(&mut runtime) {
+                            return Err(e);
+                        }
+                    }
+                    // Bind the http2 ops for the node:http2 shim if http2
+                    // policies are configured.
+                    if http2_config.is_some() {
+                        if let Err(e) = http2::inject_http2_snapshot(&mut runtime) {
+                            return Err(e);
+                        }
+                    }
                     // Harden sandbox: freeze ops, neutralize introspection, remove __bootstrap.
                     // Must run after all inject_* calls and before user code.
                     if let Err(e) = console::harden_runtime(&mut runtime, hardening) {
@@ -1330,7 +1500,9 @@ pub fn execute_stateful(
 
         // Reclaim leaked snapshot input memory (safe: runtime is consumed).
         if let Some((ptr, _)) = leaked_snapshot {
-            unsafe { let _ = Box::from_raw(ptr); }
+            unsafe {
+                let _ = Box::from_raw(ptr);
+            }
         }
 
         match output_result {
@@ -1348,9 +1520,14 @@ pub fn execute_stateful(
         Ok(Err(e)) => (Err(classify_termination_error(&oom_flag, false, e)), oom),
         Err(_panic) => {
             *isolate_handle.lock().unwrap() = None;
-            (Err(classify_termination_error(
-                &oom_flag, false, "V8 execution panicked unexpectedly".to_string(),
-            )), oom)
+            (
+                Err(classify_termination_error(
+                    &oom_flag,
+                    false,
+                    "V8 execution panicked unexpectedly".to_string(),
+                )),
+                oom,
+            )
         }
     }
 }
@@ -1399,6 +1576,8 @@ pub struct Engine {
     wasm_stub_config: wasm_stub::WasmStubConfig,
     /// OPA-gated fetch configuration. When Some, `fetch()` is injected into the JS runtime.
     fetch_config: Option<Arc<fetch::FetchConfig>>,
+    websocket_config: Option<Arc<websocket::WebSocketConfig>>,
+    http2_config: Option<Arc<http2::Http2Config>>,
     /// Policy-gated filesystem configuration. When Some, `fs` is injected into the JS runtime.
     fs_config: Option<Arc<fs::FsConfig>>,
     /// Execution registry for async execution tracking and console output.
@@ -1519,19 +1698,20 @@ impl<'a> RunJsRequest<'a> {
         self
     }
 
-
     pub async fn execute(self) -> Result<ExecutionId, String> {
-        self.engine.run_js_inner(
-            self.code,
-            self.file,
-            self.heap,
-            self.fs,
-            self.session,
-            self.heap_memory_max_mb,
-            self.execution_timeout_secs,
-            self.tags,
-            self.mcp_headers,
-        ).await
+        self.engine
+            .run_js_inner(
+                self.code,
+                self.file,
+                self.heap,
+                self.fs,
+                self.session,
+                self.heap_memory_max_mb,
+                self.execution_timeout_secs,
+                self.tags,
+                self.mcp_headers,
+            )
+            .await
     }
 }
 
@@ -1572,7 +1752,11 @@ impl Engine {
         self
     }
 
-    pub fn new_stateless(heap_memory_max_bytes: usize, execution_timeout_secs: u64, max_concurrent: usize) -> Self {
+    pub fn new_stateless(
+        heap_memory_max_bytes: usize,
+        execution_timeout_secs: u64,
+        max_concurrent: usize,
+    ) -> Self {
         Self {
             heap_storage: None,
             session_log: None,
@@ -1585,6 +1769,8 @@ impl Engine {
             wasm_modules: Arc::new(Vec::new()),
             wasm_stub_config: wasm_stub::WasmStubConfig::default(),
             fetch_config: None,
+            websocket_config: None,
+            http2_config: None,
             fs_config: None,
             execution_registry: None,
             module_loader_config: Arc::new(module_loader::ModuleLoaderConfig {
@@ -1624,6 +1810,8 @@ impl Engine {
             wasm_modules: Arc::new(Vec::new()),
             wasm_stub_config: wasm_stub::WasmStubConfig::default(),
             fetch_config: None,
+            websocket_config: None,
+            http2_config: None,
             fs_config: None,
             execution_registry: None,
             module_loader_config: Arc::new(module_loader::ModuleLoaderConfig {
@@ -1690,6 +1878,18 @@ impl Engine {
     /// Enable OPA-gated fetch() in the JS runtime.
     pub fn with_fetch_config(mut self, config: fetch::FetchConfig) -> Self {
         self.fetch_config = Some(Arc::new(config));
+        self
+    }
+
+    /// Enable the policy-gated WebSocket client in the JS runtime.
+    pub fn with_websocket_config(mut self, config: websocket::WebSocketConfig) -> Self {
+        self.websocket_config = Some(Arc::new(config));
+        self
+    }
+
+    /// Enable the policy-gated HTTP/2 ops (node:http2 shim) in the JS runtime.
+    pub fn with_http2_config(mut self, config: http2::Http2Config) -> Self {
+        self.http2_config = Some(Arc::new(config));
         self
     }
 
@@ -1830,7 +2030,8 @@ impl Engine {
         let Some(handle) = fs.as_ref().filter(|s| !s.is_empty()) else {
             return Ok(None);
         };
-        self.check_fs_snapshot_policy("pull", Some(handle), None).await?;
+        self.check_fs_snapshot_policy("pull", Some(handle), None)
+            .await?;
         let store = self
             .fs_store
             .as_ref()
@@ -1882,12 +2083,10 @@ impl Engine {
         mcp_headers: Option<&serde_json::Value>,
     ) -> Result<String, String> {
         match &self.run_js_file_policy {
-            None => Err(
-                "run_js file-path execution is disabled. Enable it with \
+            None => Err("run_js file-path execution is disabled. Enable it with \
                  --allow-run-js-file or configure a `run_js_file` policy in \
                  --policies-json."
-                    .to_string(),
-            ),
+                .to_string()),
             Some(policy) => policy.read(path, mcp_headers).await,
         }
     }
@@ -1922,7 +2121,9 @@ impl Engine {
         tags: Option<HashMap<String, String>>,
         mcp_headers: Option<serde_json::Value>,
     ) -> Result<ExecutionId, String> {
-        let registry = self.execution_registry.as_ref()
+        let registry = self
+            .execution_registry
+            .as_ref()
             .ok_or_else(|| "Execution registry not configured".to_string())?;
 
         // Resolve a file-path source (policy-gated) when provided; otherwise
@@ -1930,11 +2131,10 @@ impl Engine {
         let code = match file {
             Some(path) => {
                 if !code.trim().is_empty() {
-                    return Err(
-                        "run_js: provide either `code` or `file`, not both".to_string()
-                    );
+                    return Err("run_js: provide either `code` or `file`, not both".to_string());
                 }
-                self.resolve_run_js_file(&path, mcp_headers.as_ref()).await?
+                self.resolve_run_js_file(&path, mcp_headers.as_ref())
+                    .await?
             }
             None => code,
         };
@@ -1980,25 +2180,21 @@ impl Engine {
         // session log, so the next run picks it up with no label management.
         let fs = match &fs {
             Some(f) if !f.is_empty() => fs,
-            _ if self.fs_store.is_some() => {
-                match (session.as_ref(), self.session_log.as_ref()) {
-                    (Some(session_name), Some(log)) => {
-                        match log.get_latest(session_name).await {
-                            Ok(Some(entry)) if entry.output_fs.is_some() => entry.output_fs,
-                            Ok(_) => Some(session_name.clone()),
-                            Err(e) => {
-                                tracing::warn!(
-                                    "Failed to resolve latest fs for session '{}': {}",
-                                    session_name,
-                                    e
-                                );
-                                Some(session_name.clone())
-                            }
-                        }
+            _ if self.fs_store.is_some() => match (session.as_ref(), self.session_log.as_ref()) {
+                (Some(session_name), Some(log)) => match log.get_latest(session_name).await {
+                    Ok(Some(entry)) if entry.output_fs.is_some() => entry.output_fs,
+                    Ok(_) => Some(session_name.clone()),
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to resolve latest fs for session '{}': {}",
+                            session_name,
+                            e
+                        );
+                        Some(session_name.clone())
                     }
-                    _ => None,
-                }
-            }
+                },
+                _ => None,
+            },
             _ => None,
         };
 
@@ -2020,11 +2216,21 @@ impl Engine {
         let id_bg = id.clone();
 
         tokio::spawn(async move {
-            engine.execute_in_background(
-                id_bg, code, heap, fs, session, heap_memory_max_mb,
-                execution_timeout_secs, tags, raw_snapshot, console_tree,
-                mcp_headers,
-            ).await;
+            engine
+                .execute_in_background(
+                    id_bg,
+                    code,
+                    heap,
+                    fs,
+                    session,
+                    heap_memory_max_mb,
+                    execution_timeout_secs,
+                    tags,
+                    raw_snapshot,
+                    console_tree,
+                    mcp_headers,
+                )
+                .await;
         });
 
         Ok(id)
@@ -2074,10 +2280,15 @@ impl Engine {
         // Structural per-path 3-way merge over the trees: equal subtrees are
         // pruned by hash (never loaded), clean parts land in the merged tree,
         // divergent paths come back as conflicts.
-        let structural =
-            fs_merge::merge_trees(store, base_root, Some(load(ours)?), Some(load(theirs)?), prefer)
-                .await
-                .map_err(|e| format!("fs_merge: {e}"))?;
+        let structural = fs_merge::merge_trees(
+            store,
+            base_root,
+            Some(load(ours)?),
+            Some(load(theirs)?),
+            prefer,
+        )
+        .await
+        .map_err(|e| format!("fs_merge: {e}"))?;
         let merged_root = structural.root;
 
         // Content-merge pass: give a type-aware merger a shot at each conflict
@@ -2110,10 +2321,9 @@ impl Engine {
                         &theirs_b,
                     ) {
                         fs_content_merge::ContentMergeResult::Clean(bytes) => {
-                            let entry = store
-                                .put_file(&bytes)
-                                .await
-                                .map_err(|e| format!("fs_merge: store merged {}: {e}", c.path.display()))?;
+                            let entry = store.put_file(&bytes).await.map_err(|e| {
+                                format!("fs_merge: store merged {}: {e}", c.path.display())
+                            })?;
                             resolved.push((fs_tree::components_of(&c.path), Some(entry)));
                             continue; // resolved — not a conflict
                         }
@@ -2193,7 +2403,8 @@ impl Engine {
         ca_hex: &str,
         message: Option<String>,
     ) -> Result<(), String> {
-        self.check_fs_snapshot_policy("label", Some(name), Some(ca_hex)).await?;
+        self.check_fs_snapshot_policy("label", Some(name), Some(ca_hex))
+            .await?;
         let labels = self.labels_or_err()?;
         let id = parse_ca_hex(ca_hex).ok_or_else(|| format!("invalid CA id: {ca_hex}"))?;
         match labels.resolve(name).await? {
@@ -2238,7 +2449,8 @@ impl Engine {
         force: bool,
         message: Option<String>,
     ) -> Result<FsPushOutcome, String> {
-        self.check_fs_snapshot_policy("push", Some(label), Some(ca_hex)).await?;
+        self.check_fs_snapshot_policy("push", Some(label), Some(ca_hex))
+            .await?;
         let labels = self.labels_or_err()?;
         let new = parse_ca_hex(ca_hex).ok_or_else(|| format!("invalid CA id: {ca_hex}"))?;
 
@@ -2251,7 +2463,9 @@ impl Engine {
         }
 
         let expected = match expected {
-            Some(h) => Some(parse_ca_hex(&h).ok_or_else(|| format!("invalid expected CA id: {h}"))?),
+            Some(h) => {
+                Some(parse_ca_hex(&h).ok_or_else(|| format!("invalid expected CA id: {h}"))?)
+            }
             None => None,
         };
         let current = labels.resolve(label).await?;
@@ -2285,7 +2499,8 @@ impl Engine {
         allow_unlogged: bool,
         message: Option<String>,
     ) -> Result<(), String> {
-        self.check_fs_snapshot_policy("reset", Some(label), Some(ca_hex)).await?;
+        self.check_fs_snapshot_policy("reset", Some(label), Some(ca_hex))
+            .await?;
         let labels = self.labels_or_err()?;
         let target = parse_ca_hex(ca_hex).ok_or_else(|| format!("invalid CA id: {ca_hex}"))?;
         if !allow_unlogged {
@@ -2355,7 +2570,10 @@ impl Engine {
 
         let max_bytes = heap_memory_max_mb
             .map(|mb| mb.max(MIN_HEAP_MEMORY_MB) * 1024 * 1024)
-            .unwrap_or(self.heap_memory_max_bytes.max(MIN_HEAP_MEMORY_MB * 1024 * 1024));
+            .unwrap_or(
+                self.heap_memory_max_bytes
+                    .max(MIN_HEAP_MEMORY_MB * 1024 * 1024),
+            );
         let timeout = execution_timeout_secs.unwrap_or(self.execution_timeout_secs);
         let timeout_dur = Duration::from_secs(timeout);
 
@@ -2389,32 +2607,45 @@ impl Engine {
                 let wasm_default = self.wasm_default_max_bytes;
                 let hardening = self.hardening;
                 let fc = self.fetch_config.clone();
+                let wsc = self.websocket_config.clone();
+                let h2c = self.http2_config.clone();
                 let fsc = self.fs_config.clone();
                 let mh = mcp_headers.clone();
                 let sc = self.subprocess_config.clone();
                 let ct = console_tree;
                 let mlc = self.module_loader_config.clone();
-                let mc = self.mcp_client_manager.as_ref().map(|m| mcp_client::McpConfig { client_manager: (**m).clone(), policy_chain: self.mcp_tools_policy_chain.clone() });
+                let mc = self
+                    .mcp_client_manager
+                    .as_ref()
+                    .map(|m| mcp_client::McpConfig {
+                        client_manager: (**m).clone(),
+                        policy_chain: self.mcp_tools_policy_chain.clone(),
+                    });
                 let fm = fs_mount.clone();
                 let ast = artifact_state.clone();
                 // Cloned for the post-run session-log entry, since `code` is
                 // moved into the spawn_blocking closure below.
                 let code_for_log = code.clone();
                 let mut join_handle = tokio::task::spawn_blocking(move || {
-                    execute_stateless(&code, ExecutionConfig::new(max_bytes)
-                        .isolate_handle(ih)
-                        .maybe_fs_mount(fm)
-                        .wasm_modules(&wasm)
-                        .wasm_default_max_bytes(wasm_default)
-                        .hardening(hardening)
-                        .maybe_fetch_config(fc.as_deref())
-                        .maybe_fs_config(fsc.as_deref())
-                        .mcp_headers(mh)
-                        .maybe_subprocess_config(sc.as_deref())
-                        .console_tree(ct)
-                        .module_loader_config(&mlc)
-                        .maybe_mcp_config(mc.as_ref())
-                        .maybe_artifact_state(ast))
+                    execute_stateless(
+                        &code,
+                        ExecutionConfig::new(max_bytes)
+                            .isolate_handle(ih)
+                            .maybe_fs_mount(fm)
+                            .wasm_modules(&wasm)
+                            .wasm_default_max_bytes(wasm_default)
+                            .hardening(hardening)
+                            .maybe_fetch_config(fc.as_deref())
+                            .maybe_websocket_config(wsc.as_deref())
+                            .maybe_http2_config(h2c.as_deref())
+                            .maybe_fs_config(fsc.as_deref())
+                            .mcp_headers(mh)
+                            .maybe_subprocess_config(sc.as_deref())
+                            .console_tree(ct)
+                            .module_loader_config(&mlc)
+                            .maybe_mcp_config(mc.as_ref())
+                            .maybe_artifact_state(ast),
+                    )
                 });
 
                 // Publish isolate handle for cancellation once it's available.
@@ -2501,32 +2732,46 @@ impl Engine {
                 let wasm_default = self.wasm_default_max_bytes;
                 let hardening = self.hardening;
                 let fc = self.fetch_config.clone();
+                let wsc = self.websocket_config.clone();
+                let h2c = self.http2_config.clone();
                 let fsc = self.fs_config.clone();
                 let mh = mcp_headers.clone();
                 let sc = self.subprocess_config.clone();
                 let ct = console_tree;
                 let mlc = self.module_loader_config.clone();
-                let mc = self.mcp_client_manager.as_ref().map(|m| mcp_client::McpConfig { client_manager: (**m).clone(), policy_chain: self.mcp_tools_policy_chain.clone() });
+                let mc = self
+                    .mcp_client_manager
+                    .as_ref()
+                    .map(|m| mcp_client::McpConfig {
+                        client_manager: (**m).clone(),
+                        policy_chain: self.mcp_tools_policy_chain.clone(),
+                    });
 
                 let snap_mutex = self.snapshot_mutex.clone();
                 let fm = fs_mount.clone();
                 let ast = artifact_state.clone();
                 let mut join_handle = tokio::task::spawn_blocking(move || {
                     let _guard = snap_mutex.blocking_lock();
-                    execute_stateful(&code, raw_snapshot, ExecutionConfig::new(max_bytes)
-                        .isolate_handle(ih)
-                        .maybe_fs_mount(fm)
-                        .wasm_modules(&wasm)
-                        .wasm_default_max_bytes(wasm_default)
-                        .hardening(hardening)
-                        .maybe_fetch_config(fc.as_deref())
-                        .maybe_fs_config(fsc.as_deref())
-                        .mcp_headers(mh)
-                        .maybe_subprocess_config(sc.as_deref())
-                        .console_tree(ct)
-                        .module_loader_config(&mlc)
-                        .maybe_mcp_config(mc.as_ref())
-                        .maybe_artifact_state(ast))
+                    execute_stateful(
+                        &code,
+                        raw_snapshot,
+                        ExecutionConfig::new(max_bytes)
+                            .isolate_handle(ih)
+                            .maybe_fs_mount(fm)
+                            .wasm_modules(&wasm)
+                            .wasm_default_max_bytes(wasm_default)
+                            .hardening(hardening)
+                            .maybe_fetch_config(fc.as_deref())
+                            .maybe_websocket_config(wsc.as_deref())
+                            .maybe_http2_config(h2c.as_deref())
+                            .maybe_fs_config(fsc.as_deref())
+                            .mcp_headers(mh)
+                            .maybe_subprocess_config(sc.as_deref())
+                            .console_tree(ct)
+                            .module_loader_config(&mlc)
+                            .maybe_mcp_config(mc.as_ref())
+                            .maybe_artifact_state(ast),
+                    )
                 });
 
                 // Publish isolate handle for cancellation.
@@ -2621,9 +2866,13 @@ impl Engine {
 
     /// Get execution status and result.
     pub fn get_execution(&self, id: &str) -> Result<ExecutionInfo, String> {
-        let registry = self.execution_registry.as_ref()
+        let registry = self
+            .execution_registry
+            .as_ref()
             .ok_or_else(|| "Execution registry not configured".to_string())?;
-        registry.get(id).ok_or_else(|| format!("Execution '{}' not found", id))
+        registry
+            .get(id)
+            .ok_or_else(|| format!("Execution '{}' not found", id))
     }
 
     fn artifact_store(&self) -> Result<ArtifactStore, String> {
@@ -2653,21 +2902,27 @@ impl Engine {
         byte_offset: Option<u64>,
         byte_limit: Option<u64>,
     ) -> Result<ConsoleOutputPage, String> {
-        let registry = self.execution_registry.as_ref()
+        let registry = self
+            .execution_registry
+            .as_ref()
             .ok_or_else(|| "Execution registry not configured".to_string())?;
         registry.get_console_output(id, line_offset, line_limit, byte_offset, byte_limit)
     }
 
     /// Cancel a running execution.
     pub fn cancel_execution(&self, id: &str) -> Result<(), String> {
-        let registry = self.execution_registry.as_ref()
+        let registry = self
+            .execution_registry
+            .as_ref()
             .ok_or_else(|| "Execution registry not configured".to_string())?;
         registry.cancel(id)
     }
 
     /// List all executions.
     pub fn list_executions(&self) -> Result<Vec<ExecutionSummary>, String> {
-        let registry = self.execution_registry.as_ref()
+        let registry = self
+            .execution_registry
+            .as_ref()
             .ok_or_else(|| "Execution registry not configured".to_string())?;
         Ok(registry.list())
     }

@@ -4,7 +4,9 @@ use cli_derive::StructuredArgs;
 use crate::engine::DEFAULT_EXECUTION_TIMEOUT_SECS;
 
 fn default_max_concurrent() -> usize {
-    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4)
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
 }
 
 /// Backend selection for an independent state axis (heap or filesystem).
@@ -36,7 +38,7 @@ impl std::fmt::Display for StoreKind {
 ///
 /// Every flag is also bindable from an `MCP_V8_*` environment variable
 /// (precedence: explicit CLI flag > env var > default).
-#[derive(Parser, StructuredArgs, Debug)]
+#[derive(Parser, StructuredArgs)]
 #[command(author, version, about, long_about = None)]
 pub struct Cli {
     /// Load configuration from a single TOML or JSON file (format chosen by
@@ -46,7 +48,12 @@ pub struct Cli {
     /// what is otherwise a separate JSON file. Precedence: explicit CLI flag >
     /// MCP_V8_* env var > config file > built-in default. Unknown keys are
     /// rejected at startup. See the "Configuration file" reference page.
-    #[arg(long, env = "MCP_V8_CONFIG", value_name = "PATH", help_heading = "Core")]
+    #[arg(
+        long,
+        env = "MCP_V8_CONFIG",
+        value_name = "PATH",
+        help_heading = "Core"
+    )]
     pub config: Option<String>,
 
     /// Print the OpenAPI JSON specification to stdout and exit.
@@ -55,7 +62,11 @@ pub struct Cli {
     pub print_openapi: bool,
 
     /// JWKS endpoint URL for fetching public keys (e.g., Keycloak OIDC certs URL).
-    /// Enables JWT verification of Authorization: Bearer tokens during initialize.
+    /// When set, the HTTP transports ENFORCE auth: every request to /mcp and the
+    /// HTTP API (/api/*) must carry a valid `Authorization: Bearer <jwt>` (or
+    /// `agent-session` header) verified against this JWKS, else it is rejected
+    /// with 401. Leaving it unset keeps the server open (no auth). The openapi
+    /// spec route and CORS preflight (OPTIONS) are exempt.
     #[arg(long, env = "JWKS_URL", help_heading = "Core")]
     pub jwks_url: Option<String>,
 
@@ -72,7 +83,11 @@ pub struct Cli {
     /// under the new session id, leaving the source untouched (copy-on-write).
     /// Requires --session-id and heap and/or fs persistence. No-op if the
     /// target session already has history.
-    #[arg(long = "session-fork-from", env = "MCP_V8_SESSION_FORK_FROM", help_heading = "Core")]
+    #[arg(
+        long = "session-fork-from",
+        env = "MCP_V8_SESSION_FORK_FROM",
+        help_heading = "Core"
+    )]
     pub session_fork_from: Option<String>,
 
     /// HTTP port using Streamable HTTP transport (MCP 2025-03-26+,
@@ -80,18 +95,33 @@ pub struct Cli {
     /// neither this nor `--sse-port` is set anywhere, so platforms that inject
     /// `PORT` (Railway, Render, Heroku, Fly, Cloud Run) serve Streamable HTTP
     /// unmodified.
-    #[arg(long, env = "MCP_V8_HTTP_PORT", conflicts_with = "sse_port", help_heading = "Core")]
+    #[arg(
+        long,
+        env = "MCP_V8_HTTP_PORT",
+        conflicts_with = "sse_port",
+        help_heading = "Core"
+    )]
     pub http_port: Option<u16>,
 
     /// SSE port using the legacy HTTP+SSE transport (served by a vendored rmcp
     /// 0.1.5; no MCP tasks support — use --http-port for tasks).
-    #[arg(long, env = "MCP_V8_SSE_PORT", conflicts_with = "http_port", help_heading = "Core")]
+    #[arg(
+        long,
+        env = "MCP_V8_SSE_PORT",
+        conflicts_with = "http_port",
+        help_heading = "Core"
+    )]
     pub sse_port: Option<u16>,
 
     /// Host/address the HTTP and SSE transports bind to. Defaults to all IPv4
     /// interfaces (0.0.0.0). Set to "::" for a dual-stack IPv6 listener, which is
     /// required to be reachable over IPv6-resolving private networks (e.g. Railway).
-    #[arg(long, env = "MCP_V8_BIND_HOST", default_value = "0.0.0.0", help_heading = "Core")]
+    #[arg(
+        long,
+        env = "MCP_V8_BIND_HOST",
+        default_value = "0.0.0.0",
+        help_heading = "Core"
+    )]
     pub bind_host: String,
 
     /// `Host` header allowlist for the Streamable HTTP transport, which rejects
@@ -153,7 +183,12 @@ pub struct Cli {
     /// Path to the sled database for the session log (per-session heap+fs
     /// history) and the execution registry. Also the default parent for the
     /// heap-tag store, fs blob store, and fs label db. Default: /tmp/mcp-v8-sessions.
-    #[arg(long, env = "MCP_V8_SESSION_DB_PATH", default_value = "/tmp/mcp-v8-sessions", help_heading = "Core")]
+    #[arg(
+        long,
+        env = "MCP_V8_SESSION_DB_PATH",
+        default_value = "/tmp/mcp-v8-sessions",
+        help_heading = "Core"
+    )]
     pub session_db_path: String,
 
     // ── Heap persistence (independent axis) ──────────────────────────────────
@@ -169,7 +204,12 @@ pub struct Cli {
 
     /// Directory for the heap-snapshot store when `--heap-store dir`.
     /// Defaults to /tmp/mcp-v8-heaps.
-    #[arg(long, env = "MCP_V8_HEAP_DIR", value_name = "DIR", help_heading = "Heap")]
+    #[arg(
+        long,
+        env = "MCP_V8_HEAP_DIR",
+        value_name = "DIR",
+        help_heading = "Heap"
+    )]
     pub heap_dir: Option<String>,
 
     // ── Filesystem persistence (independent axis) ────────────────────────────
@@ -188,12 +228,22 @@ pub struct Cli {
 
     /// Directory for the fs snapshot blob store (chunks + manifests) when
     /// `--fs-store dir`. Defaults to `<session-db-path>/fs-blobs`.
-    #[arg(long = "fs-dir", env = "MCP_V8_FS_DIR", value_name = "DIR", help_heading = "Filesystem")]
+    #[arg(
+        long = "fs-dir",
+        env = "MCP_V8_FS_DIR",
+        value_name = "DIR",
+        help_heading = "Filesystem"
+    )]
     pub fs_dir: Option<String>,
 
     /// Path for the fs label/reflog database (sled). Defaults to
     /// `<session-db-path>/fs-labels`.
-    #[arg(long = "fs-labels-db", env = "MCP_V8_FS_LABELS_DB", value_name = "PATH", help_heading = "Filesystem")]
+    #[arg(
+        long = "fs-labels-db",
+        env = "MCP_V8_FS_LABELS_DB",
+        value_name = "PATH",
+        help_heading = "Filesystem"
+    )]
     pub fs_labels_db: Option<String>,
 
     /// Overlay read behaviour when a per-session fs snapshot is mounted.
@@ -202,34 +252,64 @@ pub struct Cli {
     /// — fall through to the real filesystem as a read-only lower layer (still
     /// gated by the filesystem policy), so bundled read-only paths like
     /// `/opt/languages` resolve while `/work` stays the per-session overlay.
-    #[arg(long = "fs-passthrough", env = "MCP_V8_FS_PASSTHROUGH", default_value = "false", help_heading = "Filesystem")]
+    #[arg(
+        long = "fs-passthrough",
+        env = "MCP_V8_FS_PASSTHROUGH",
+        default_value = "false",
+        help_heading = "Filesystem"
+    )]
     pub fs_passthrough: bool,
 
     // ── Sandbox hardening (all opt-in; OFF by default → unhardened) ───────────
     /// Freeze `Deno.core.ops` so user code cannot replace/intercept any op
     /// (e.g. a persistent trojan op surviving in stateful/snapshot mode).
-    #[arg(long = "harden-freeze-ops", env = "MCP_V8_HARDEN_FREEZE_OPS", default_value = "false", help_heading = "Sandbox")]
+    #[arg(
+        long = "harden-freeze-ops",
+        env = "MCP_V8_HARDEN_FREEZE_OPS",
+        default_value = "false",
+        help_heading = "Sandbox"
+    )]
     pub harden_freeze_ops: bool,
 
     /// Neutralize `op_get_proxy_details` (otherwise it bypasses `Proxy` handlers
     /// and can read a proxied target).
-    #[arg(long = "harden-neutralize-proxy-details", env = "MCP_V8_HARDEN_NEUTRALIZE_PROXY_DETAILS", default_value = "false", help_heading = "Sandbox")]
+    #[arg(
+        long = "harden-neutralize-proxy-details",
+        env = "MCP_V8_HARDEN_NEUTRALIZE_PROXY_DETAILS",
+        default_value = "false",
+        help_heading = "Sandbox"
+    )]
     pub harden_neutralize_proxy_details: bool,
 
     /// Neutralize `op_memory_usage` + `op_is_terminal` (host info leaks).
-    #[arg(long = "harden-neutralize-introspection", env = "MCP_V8_HARDEN_NEUTRALIZE_INTROSPECTION", default_value = "false", help_heading = "Sandbox")]
+    #[arg(
+        long = "harden-neutralize-introspection",
+        env = "MCP_V8_HARDEN_NEUTRALIZE_INTROSPECTION",
+        default_value = "false",
+        help_heading = "Sandbox"
+    )]
     pub harden_neutralize_introspection: bool,
 
     /// Remove `globalThis.__bootstrap` (event-loop hooks, primordials such as a
     /// pristine `Function` constructor, and internal registries).
-    #[arg(long = "harden-remove-bootstrap", env = "MCP_V8_HARDEN_REMOVE_BOOTSTRAP", default_value = "false", help_heading = "Sandbox")]
+    #[arg(
+        long = "harden-remove-bootstrap",
+        env = "MCP_V8_HARDEN_REMOVE_BOOTSTRAP",
+        default_value = "false",
+        help_heading = "Sandbox"
+    )]
     pub harden_remove_bootstrap: bool,
 
     /// Remove `globalThis.SharedArrayBuffer` + `globalThis.Atomics` — the
     /// high-resolution Spectre-timer prerequisite. NOTE: these are also the
     /// shared-memory primitives emscripten wasm-threads require, so leave this
     /// OFF to run pthreads-based WASM modules.
-    #[arg(long = "harden-remove-shared-memory", env = "MCP_V8_HARDEN_REMOVE_SHARED_MEMORY", default_value = "false", help_heading = "Sandbox")]
+    #[arg(
+        long = "harden-remove-shared-memory",
+        env = "MCP_V8_HARDEN_REMOVE_SHARED_MEMORY",
+        default_value = "false",
+        help_heading = "Sandbox"
+    )]
     pub harden_remove_shared_memory: bool,
 
     // ── OS sandbox (nono: Landlock on Linux, Seatbelt on macOS) ──────────────
@@ -251,7 +331,12 @@ pub struct Cli {
     /// features that need nono's CLI supervisor (network proxy mode,
     /// credentials, rollback, fs deny rules) are rejected rather than
     /// silently ignored.
-    #[arg(long = "sandbox-manifest", env = "MCP_V8_SANDBOX_MANIFEST", value_name = "FILE", help_heading = "OS Sandbox")]
+    #[arg(
+        long = "sandbox-manifest",
+        env = "MCP_V8_SANDBOX_MANIFEST",
+        value_name = "FILE",
+        help_heading = "OS Sandbox"
+    )]
     pub sandbox_manifest: Option<String>,
 
     // ── Shared S3 backend (used by heap-store=s3 and/or fs-store=s3) ──────────
@@ -262,7 +347,12 @@ pub struct Cli {
 
     /// Local filesystem cache directory for S3 write-through caching (only used
     /// with `--s3-bucket`).
-    #[arg(long, env = "MCP_V8_CACHE_DIR", requires = "s3_bucket", help_heading = "Storage (S3)")]
+    #[arg(
+        long,
+        env = "MCP_V8_CACHE_DIR",
+        requires = "s3_bucket",
+        help_heading = "Storage (S3)"
+    )]
     pub cache_dir: Option<String>,
 
     /// Override the MCP server `instructions` (the "system prompt" the server
@@ -271,7 +361,12 @@ pub struct Cli {
     /// treated as a path to a file whose contents are used (`@-` is not special;
     /// use `@@` for a literal leading `@`).
     /// Examples: --instructions "Run JS for me"  --instructions @./prompt.txt
-    #[arg(long, env = "MCP_V8_INSTRUCTIONS", value_name = "TEXT_OR_@FILE", help_heading = "Prompt")]
+    #[arg(
+        long,
+        env = "MCP_V8_INSTRUCTIONS",
+        value_name = "TEXT_OR_@FILE",
+        help_heading = "Prompt"
+    )]
     pub instructions: Option<String>,
 
     /// Override the description advertised for the `run_js` tool in `tools/list`.
@@ -279,7 +374,12 @@ pub struct Cli {
     /// which case the remainder is treated as a path to a file whose contents are
     /// used (use `@@` for a literal leading `@`).
     /// Examples: --run-js-description "Execute JS"  --run-js-description @./run_js.md
-    #[arg(long = "run-js-description", env = "MCP_V8_RUN_JS_DESCRIPTION", value_name = "TEXT_OR_@FILE", help_heading = "Prompt")]
+    #[arg(
+        long = "run-js-description",
+        env = "MCP_V8_RUN_JS_DESCRIPTION",
+        value_name = "TEXT_OR_@FILE",
+        help_heading = "Prompt"
+    )]
     pub run_js_description: Option<String>,
 
     /// Port for the Raft cluster HTTP server. Enables cluster mode when set.
@@ -317,12 +417,22 @@ pub struct Cli {
     pub metadata_only: bool,
 
     /// Unique node identifier within the cluster
-    #[arg(long, env = "MCP_V8_NODE_ID", default_value = "node1", help_heading = "Cluster")]
+    #[arg(
+        long,
+        env = "MCP_V8_NODE_ID",
+        default_value = "node1",
+        help_heading = "Cluster"
+    )]
     pub node_id: String,
 
     // Help is generated from `peers_grammar()` via `build_command` (the
     // structured-arg registry), so it cannot drift from the parser.
-    #[arg(long, env = "MCP_V8_PEERS", value_delimiter = ',', help_heading = "Cluster")]
+    #[arg(
+        long,
+        env = "MCP_V8_PEERS",
+        value_delimiter = ',',
+        help_heading = "Cluster"
+    )]
     #[structured(grammar = crate::cli::peers_grammar)]
     pub peers: Vec<String>,
 
@@ -343,20 +453,39 @@ pub struct Cli {
     pub advertise_addr: Option<String>,
 
     /// Heartbeat interval in milliseconds
-    #[arg(long, env = "MCP_V8_HEARTBEAT_INTERVAL", default_value = "100", help_heading = "Cluster")]
+    #[arg(
+        long,
+        env = "MCP_V8_HEARTBEAT_INTERVAL",
+        default_value = "100",
+        help_heading = "Cluster"
+    )]
     pub heartbeat_interval: u64,
 
     /// Minimum election timeout in milliseconds
-    #[arg(long, env = "MCP_V8_ELECTION_TIMEOUT_MIN", default_value = "300", help_heading = "Cluster")]
+    #[arg(
+        long,
+        env = "MCP_V8_ELECTION_TIMEOUT_MIN",
+        default_value = "300",
+        help_heading = "Cluster"
+    )]
     pub election_timeout_min: u64,
 
     /// Maximum election timeout in milliseconds
-    #[arg(long, env = "MCP_V8_ELECTION_TIMEOUT_MAX", default_value = "500", help_heading = "Cluster")]
+    #[arg(
+        long,
+        env = "MCP_V8_ELECTION_TIMEOUT_MAX",
+        default_value = "500",
+        help_heading = "Cluster"
+    )]
     pub election_timeout_max: u64,
 
     // Help is generated from `wasm_module_grammar()` via `build_command` (the
     // structured-arg registry), so it cannot drift from the parser.
-    #[arg(long = "wasm-module", value_name = "NAME=PATH[:LIMIT]", help_heading = "WASM")]
+    #[arg(
+        long = "wasm-module",
+        value_name = "NAME=PATH[:LIMIT]",
+        help_heading = "WASM"
+    )]
     #[structured(grammar = crate::cli::wasm_module_grammar)]
     pub wasm_modules: Vec<String>,
 
@@ -367,14 +496,24 @@ pub struct Cli {
     /// Object value: {"name": {"path": "/path/to/module.wasm", "max_memory_bytes": 16777216, "description": "what the module does"}}
     /// The optional "description" sets the MCP stub tool's description.
     /// NOTE: incompatible with heap persistence (`--heap-store` other than none).
-    #[arg(long = "wasm-config", env = "MCP_V8_WASM_CONFIG", value_name = "PATH_OR_JSON", help_heading = "WASM")]
+    #[arg(
+        long = "wasm-config",
+        env = "MCP_V8_WASM_CONFIG",
+        value_name = "PATH_OR_JSON",
+        help_heading = "WASM"
+    )]
     pub wasm_config: Option<String>,
 
     /// Default max native memory for WASM modules without a per-module limit.
     /// Supports suffixes: k/K (KiB), m/M (MiB), g/G (GiB), or raw bytes.
     /// This is separate from --heap-memory-max (JS heap); WASM linear memory
     /// is allocated as native memory outside the V8 heap.
-    #[arg(long = "wasm-default-max-memory", env = "MCP_V8_WASM_DEFAULT_MAX_MEMORY", default_value = "16m", help_heading = "WASM")]
+    #[arg(
+        long = "wasm-default-max-memory",
+        env = "MCP_V8_WASM_DEFAULT_MAX_MEMORY",
+        default_value = "16m",
+        help_heading = "WASM"
+    )]
     pub wasm_default_max_memory: String,
 
     /// Expose pre-loaded WASM modules on the MCPJS server itself as
@@ -384,7 +523,13 @@ pub struct Cli {
     /// returns instructional text telling the caller to use the module from
     /// JavaScript via run_js (the module is available as the `__wasm_<name>`
     /// global). Pass `--wasm-stubs false` to disable.
-    #[arg(long = "wasm-stubs", env = "MCP_V8_WASM_STUBS", default_value = "true", num_args = 1, help_heading = "WASM")]
+    #[arg(
+        long = "wasm-stubs",
+        env = "MCP_V8_WASM_STUBS",
+        default_value = "true",
+        num_args = 1,
+        help_heading = "WASM"
+    )]
     pub wasm_stubs: bool,
 
     /// Prefix applied to WASM stub tool names. Defaults to `runjs__` so it is
@@ -401,7 +546,11 @@ pub struct Cli {
 
     // Help is generated from `wasm_stub_description_grammar()` via `build_command`
     // (the structured-arg registry), so it cannot drift from the parser.
-    #[arg(long = "wasm-stub-description", value_name = "NAME=TEXT", help_heading = "WASM")]
+    #[arg(
+        long = "wasm-stub-description",
+        value_name = "NAME=TEXT",
+        help_heading = "WASM"
+    )]
     #[structured(grammar = crate::cli::wasm_stub_description_grammar)]
     pub wasm_stub_descriptions: Vec<String>,
 
@@ -415,16 +564,28 @@ pub struct Cli {
     /// JSON array of header injection rules (a path to a JSON file, or inline
     /// JSON — also settable as the `fetch_headers` section of a --config file).
     /// Each rule sets "host" (plus optional "methods") and exactly one of
-    /// "headers" or "auth".
-    /// Static: [{"host": "api.github.com", "methods": ["GET","POST"], "headers": {"Authorization": "Bearer ..."}}]
+    /// "headers" or "auth". A "headers" rule may also set "override" (bool,
+    /// default true): true overwrites a same-named header the sandbox already
+    /// set, false only fills it when absent.
+    /// Static: [{"host": "api.github.com", "methods": ["GET","POST"], "headers": {"Authorization": "Bearer ..."}, "override": true}]
     /// OAuth: [{"host": "api.example.com", "auth": {"type": "oauth_client_credentials", "header": "Authorization", "token_url": "https://issuer.example.com/token", "client_id": "abc", "client_secret": "xyz", "scope": "read:all", "refresh_buffer_secs": 30}}]
-    #[arg(long = "fetch-header-config", env = "MCP_V8_FETCH_HEADER_CONFIG", value_name = "PATH_OR_JSON", help_heading = "Fetch")]
+    #[arg(
+        long = "fetch-header-config",
+        env = "MCP_V8_FETCH_HEADER_CONFIG",
+        value_name = "PATH_OR_JSON",
+        help_heading = "Fetch"
+    )]
     pub fetch_header_config: Option<String>,
 
     /// Allow external module imports (npm:, jsr:, and URL imports).
     /// When disabled (the default), code using import declarations for external
     /// packages will be rejected. Enable with --allow-external-modules.
-    #[arg(long = "allow-external-modules", env = "MCP_V8_ALLOW_EXTERNAL_MODULES", default_value = "false", help_heading = "Module Import")]
+    #[arg(
+        long = "allow-external-modules",
+        env = "MCP_V8_ALLOW_EXTERNAL_MODULES",
+        default_value = "false",
+        help_heading = "Module Import"
+    )]
     pub allow_external_modules: bool,
 
     /// Allow the `run_js` tool to read its code from a file on the server's own
@@ -434,7 +595,12 @@ pub struct Cli {
     /// --policies-json instead (a Rego/OPA chain decides which paths are allowed);
     /// the policy input is `{ "operation": "read", "path": "<canonical path>" }`.
     /// This flag takes precedence over a configured run_js_file policy.
-    #[arg(long = "allow-run-js-file", env = "MCP_V8_ALLOW_RUN_JS_FILE", default_value = "false", help_heading = "Run JS File")]
+    #[arg(
+        long = "allow-run-js-file",
+        env = "MCP_V8_ALLOW_RUN_JS_FILE",
+        default_value = "false",
+        help_heading = "Run JS File"
+    )]
     pub allow_run_js_file: bool,
 
     /// JSON policy configuration (inline JSON or path to a JSON file).
@@ -444,20 +610,47 @@ pub struct Cli {
     /// Example: --policies-json '{"fetch":{"policies":[{"url":"file:///path/to/fetch.rego"}]}}'
     ///
     /// Schema: { "fetch": { "mode": "all"|"any", "policies": [{"url": "...", "policy_path": "...", "rule": "..."}] }, "modules": { ... } }
-    #[arg(long = "policies-json", env = "MCP_V8_POLICIES_JSON", value_name = "JSON_OR_PATH", help_heading = "Policy")]
+    #[arg(
+        long = "policies-json",
+        env = "MCP_V8_POLICIES_JSON",
+        value_name = "JSON_OR_PATH",
+        help_heading = "Policy"
+    )]
     pub policies_json: Option<String>,
 
     // Help is generated from `mcp_server_grammar()` via `build_command` (the
     // structured-arg registry), so it cannot drift from the parser.
-    #[arg(long = "mcp-server", value_name = "NAME=TRANSPORT:...", help_heading = "MCP Server Module")]
+    #[arg(
+        long = "mcp-server",
+        value_name = "NAME=TRANSPORT:...",
+        help_heading = "MCP Server Module"
+    )]
     #[structured(grammar = crate::cli::mcp_server_grammar)]
     pub mcp_servers: Vec<String>,
 
     /// JSON config for MCP server modules (a path to a JSON file, or inline
     /// JSON — also settable as the `mcp_servers` section of a --config file).
     /// Format: [{"name": "srv", "transport": "stdio", "command": "cmd", "args": ["a"]},
-    ///          {"name": "srv2", "transport": "sse", "url": "http://..."}]
-    #[arg(long = "mcp-config", env = "MCP_V8_MCP_CONFIG", value_name = "PATH_OR_JSON", help_heading = "MCP Server Module")]
+    ///          {"name": "srv2", "transport": "sse", "url": "http://..."},
+    ///          {"name": "srv3", "transport": "http", "url": "https://...",
+    ///           "auth": {"type": "oauth_browser", "scope": ["read"],
+    ///                    "client_id": "...", "client_secret": "...",
+    ///                    "redirect_port": 48123, "token_cache": "/path/to/cache.json"}}]
+    /// `oauth_browser` is supported for HTTP only through `--mcp-config` and
+    /// structured JSON/TOML `mcp_servers` configuration; compact `--mcp-server`
+    /// syntax does not support it.
+    /// Protected-resource and discovered OAuth endpoints require HTTPS unless
+    /// loopback. It prints an authorization URL only when no cached credential
+    /// can provide a token; cached refresh tokens renew access on connection or
+    /// reconnect without opening a browser. The callback binds to localhost on
+    /// redirect_port (or an available port). See the README for headless
+    /// authorization and cache-file security.
+    #[arg(
+        long = "mcp-config",
+        env = "MCP_V8_MCP_CONFIG",
+        value_name = "PATH_OR_JSON",
+        help_heading = "MCP Server Module"
+    )]
     pub mcp_config: Option<String>,
 
     /// Expose upstream MCP server tools on the MCPJS server itself as
@@ -467,7 +660,13 @@ pub struct Cli {
     /// calling a stub returns instructional text telling the caller to
     /// invoke the tool from JavaScript via run_js + mcp.callTool(...).
     /// Pass `--mcp-stubs false` to disable.
-    #[arg(long = "mcp-stubs", env = "MCP_V8_MCP_STUBS", default_value = "true", num_args = 1, help_heading = "MCP Server Module")]
+    #[arg(
+        long = "mcp-stubs",
+        env = "MCP_V8_MCP_STUBS",
+        default_value = "true",
+        num_args = 1,
+        help_heading = "MCP Server Module"
+    )]
     pub mcp_stubs: bool,
 
     /// Prefix applied to stub tool names. Defaults to `runjs__` so it is
@@ -555,6 +754,7 @@ fetch_header_keys! {
     Methods = "methods": "semicolon-separated HTTP methods to match, e.g. GET;POST (optional)",
     Header = "header": "name of the header to inject (required)",
     Value = "value": "static header value (static form)",
+    Override = "override": "static form: true (default) overwrites a same-named header the sandbox already set; false only fills when absent",
     TokenUrl = "token_url": "OAuth token endpoint URL (OAuth form)",
     ClientId = "client_id": "OAuth client id (OAuth form)",
     ClientSecret = "client_secret": "OAuth client secret (OAuth form)",
@@ -622,10 +822,21 @@ fn mcp_server_grammar() -> Grammar {
                   specified multiple times.",
         parts_label: "Transports",
         parts: vec![
-            ("name=stdio:command:arg1:arg2", "spawn a stdio MCP server process"),
+            (
+                "name=stdio:command:arg1:arg2",
+                "spawn a stdio MCP server process",
+            ),
             ("name=sse:url", "connect to an SSE MCP server endpoint"),
+            (
+                "name=http:url",
+                "connect to a Streamable HTTP MCP server endpoint",
+            ),
         ],
-        examples: &["weather=stdio:python:server.py", "remote=sse:http://localhost:9000/sse"],
+        examples: &[
+            "weather=stdio:python:server.py",
+            "remote=sse:http://localhost:9000/sse",
+            "remote=http:https://example.com/mcp",
+        ],
     }
 }
 
@@ -641,7 +852,11 @@ fn wasm_module_grammar() -> Grammar {
             "name=/path/to/module.wasm[:max_memory]",
             "load <name> from a .wasm file, optionally capping its native memory",
         )],
-        examples: &["math=/path.wasm", "math=/path.wasm:16m", "math=/path.wasm:1048576"],
+        examples: &[
+            "math=/path.wasm",
+            "math=/path.wasm:16m",
+            "math=/path.wasm:1048576",
+        ],
     }
 }
 
@@ -653,7 +868,10 @@ fn wasm_stub_description_grammar() -> Grammar {
                   must be loaded with --wasm-module or --wasm-config. Can be specified \
                   multiple times.",
         parts_label: "Format",
-        parts: vec![("name=description text", "set <name>'s stub tool description")],
+        parts: vec![(
+            "name=description text",
+            "set <name>'s stub tool description",
+        )],
         examples: &["math=Adds two numbers and returns the sum"],
     }
 }
@@ -741,7 +959,10 @@ pub fn resolve_allowed_hosts(configured: &[String]) -> Vec<String> {
     if !configured.is_empty() {
         return configured;
     }
-    LOOPBACK_HOSTS.iter().map(|host| (*host).to_string()).collect()
+    LOOPBACK_HOSTS
+        .iter()
+        .map(|host| (*host).to_string())
+        .collect()
 }
 
 /// Trim each allowlist entry and drop the empty ones.
@@ -882,7 +1103,10 @@ mod port_env_tests {
         let mut cli = parse_argv(&[]);
         apply_port_env(&mut cli, Some("3000")).expect("valid PORT");
         assert_eq!(cli.http_port, Some(3000));
-        assert_eq!(cli.sse_port, None, "PORT must not touch the legacy transport");
+        assert_eq!(
+            cli.sse_port, None,
+            "PORT must not touch the legacy transport"
+        );
     }
 
     #[test]
@@ -897,14 +1121,20 @@ mod port_env_tests {
         let mut cli = parse_argv(&["--sse-port", "8081"]);
         apply_port_env(&mut cli, Some("3000")).expect("valid PORT");
         assert_eq!(cli.sse_port, Some(8081));
-        assert_eq!(cli.http_port, None, "PORT must not re-add a conflicting transport");
+        assert_eq!(
+            cli.http_port, None,
+            "PORT must not re-add a conflicting transport"
+        );
     }
 
     #[test]
     fn metadata_only_ignores_port_env() {
         let mut cli = parse_argv(&["--metadata-only", "--cluster-port", "4000"]);
         apply_port_env(&mut cli, Some("3000")).expect("valid PORT");
-        assert_eq!(cli.http_port, None, "a metadata-only node serves no MCP transport");
+        assert_eq!(
+            cli.http_port, None,
+            "a metadata-only node serves no MCP transport"
+        );
     }
 
     #[test]
@@ -912,7 +1142,10 @@ mod port_env_tests {
         for value in [None, Some(""), Some("   ")] {
             let mut cli = parse_argv(&[]);
             apply_port_env(&mut cli, value).expect("empty PORT is not an error");
-            assert_eq!(cli.http_port, None, "PORT={value:?} must leave stdio selected");
+            assert_eq!(
+                cli.http_port, None,
+                "PORT={value:?} must leave stdio selected"
+            );
         }
     }
 
@@ -921,7 +1154,10 @@ mod port_env_tests {
         for value in ["http", "8080x", "-1", "65536", "3000.0"] {
             let mut cli = parse_argv(&[]);
             let err = apply_port_env(&mut cli, Some(value)).expect_err("PORT must be a u16");
-            assert!(err.contains(value), "error must quote the offending value: {err}");
+            assert!(
+                err.contains(value),
+                "error must quote the offending value: {err}"
+            );
         }
     }
 

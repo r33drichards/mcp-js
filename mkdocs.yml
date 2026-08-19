@@ -30,6 +30,7 @@ nav:
       - Overview: tutorials/overview.md
       - Run SQLite in WebAssembly: tutorials/sqlite-wasm.md
       - Render charts with Chart.js: tutorials/chartjs.md
+      - Call Modal (serverless GPUs/sandboxes): tutorials/modal.md
 
   - How-to:
       - Overview: how-to/overview.md
@@ -40,6 +41,8 @@ nav:
       - Returning images & artifacts: how-to/artifacts.md
       - Transports (stdio, HTTP, SSE): how-to/transports.md
       - Network access with fetch: how-to/fetch.md
+      - WebSocket connections: how-to/websocket.md
+      - HTTP/2 sessions (node:http2): how-to/http2.md
       - Filesystem access: how-to/filesystem.md
       - Filesystem snapshots: how-to/fs-snapshots.md
       - Subprocess execution: how-to/subprocess.md
@@ -77,6 +80,7 @@ nav:
       - Configuration file: reference/config-file.md
       - HTTP API: reference/http-api.md
       - MCP Tools: reference/mcp-tools.md
+      - Web & Node.js compatibility: reference/compatibility.md
 markdown_extensions:
   - tables
   - toc:

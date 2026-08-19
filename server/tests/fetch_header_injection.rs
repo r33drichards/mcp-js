@@ -359,7 +359,7 @@ async fn matching_request_receives_static_authorization_header() {
 }
 
 #[tokio::test]
-async fn user_provided_authorization_overrides_static_injection() {
+async fn static_injection_overwrites_caller_header_by_default() {
     ensure_v8();
 
     let echo_server = start_echo_server().await;
@@ -370,6 +370,39 @@ async fn user_provided_authorization_overrides_static_injection() {
         "Bearer static-token",
     )]);
 
+    // The sandbox pre-sets Authorization with a placeholder; the injected
+    // operator value must win so injection cannot be defeated from JS.
+    run_fetch(
+        &engine,
+        &echo_server.url,
+        "GET",
+        Some("Bearer placeholder"),
+    )
+    .await
+    .expect("fetch should succeed");
+
+    assert_eq!(
+        echo_server.requests().await,
+        vec![EchoRequestRecord {
+            method: "GET".to_string(),
+            authorization: Some("Bearer static-token".to_string()),
+        }]
+    );
+}
+
+#[tokio::test]
+async fn static_injection_preserves_caller_header_when_override_disabled() {
+    ensure_v8();
+
+    let echo_server = start_echo_server().await;
+    let engine = build_engine(vec![static_rule_for_host(
+        "127.0.0.1",
+        &[],
+        "Authorization",
+        "Bearer static-token",
+    )
+    .with_override_existing(false)]);
+
     run_fetch(
         &engine,
         &echo_server.url,
@@ -377,7 +410,7 @@ async fn user_provided_authorization_overrides_static_injection() {
         Some("Bearer user-provided"),
     )
     .await
-    .expect("user-provided authorization should win");
+    .expect("user-provided authorization should win when override is disabled");
 
     assert_eq!(
         echo_server.requests().await,

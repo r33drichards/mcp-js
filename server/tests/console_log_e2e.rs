@@ -233,8 +233,8 @@ async fn test_console_log_formatting() -> Result<(), Box<dyn std::error::Error>>
 
     assert!(data.contains("hello world"), "Multiple string args should be space-joined");
     assert!(data.contains("num: 42"), "Number arg should be stringified");
-    assert!(data.contains(r#""a":1"#), "Object should be JSON-serialized");
-    assert!(data.contains("[1,2,3]"), "Array should be JSON-serialized");
+    assert!(data.contains("a: 1"), "Object should be inspector-formatted");
+    assert!(data.contains("[ 1, 2, 3 ]"), "Array should be inspector-formatted");
 
     server.stop().await;
     Ok(())

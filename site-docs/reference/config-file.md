@@ -71,13 +71,13 @@ JSON config mapping global names to .wasm file paths or objects (a path to a JSO
 
 Shape: an array. Feeds `--mcp-config` (schema below).
 
-JSON config for MCP server modules (a path to a JSON file, or inline JSON — also settable as the `mcp_servers` section of a --config file). Format: [{"name": "srv", "transport": "stdio", "command": "cmd", "args": ["a"]}, {"name": "srv2", "transport": "sse", "url": "http://..."}]
+JSON config for MCP server modules (a path to a JSON file, or inline JSON — also settable as the `mcp_servers` section of a --config file). Format: [{"name": "srv", "transport": "stdio", "command": "cmd", "args": ["a"]}, {"name": "srv2", "transport": "sse", "url": "http://..."}, {"name": "srv3", "transport": "http", "url": "https://...", "auth": {"type": "oauth_browser", "scope": ["read"], "client_id": "...", "client_secret": "...", "redirect_port": 48123, "token_cache": "/path/to/cache.json"}}] `oauth_browser` is supported for HTTP only through `--mcp-config` and structured JSON/TOML `mcp_servers` configuration; compact `--mcp-server` syntax does not support it. Protected-resource and discovered OAuth endpoints require HTTPS unless loopback. It prints an authorization URL only when no cached credential can provide a token; cached refresh tokens renew access on connection or reconnect without opening a browser. The callback binds to localhost on redirect_port (or an available port). See the README for headless authorization and cache-file security
 
 ### `fetch_headers`
 
 Shape: an array. Feeds `--fetch-header-config` (schema below).
 
-JSON array of header injection rules (a path to a JSON file, or inline JSON — also settable as the `fetch_headers` section of a --config file). Each rule sets "host" (plus optional "methods") and exactly one of "headers" or "auth". Static: [{"host": "api.github.com", "methods": ["GET","POST"], "headers": {"Authorization": "Bearer ..."}}] OAuth: [{"host": "api.example.com", "auth": {"type": "oauth_client_credentials", "header": "Authorization", "token_url": "https://issuer.example.com/token", "client_id": "abc", "client_secret": "xyz", "scope": "read:all", "refresh_buffer_secs": 30}}]
+JSON array of header injection rules (a path to a JSON file, or inline JSON — also settable as the `fetch_headers` section of a --config file). Each rule sets "host" (plus optional "methods") and exactly one of "headers" or "auth". A "headers" rule may also set "override" (bool, default true): true overwrites a same-named header the sandbox already set, false only fills it when absent. Static: [{"host": "api.github.com", "methods": ["GET","POST"], "headers": {"Authorization": "Bearer ..."}, "override": true}] OAuth: [{"host": "api.example.com", "auth": {"type": "oauth_client_credentials", "header": "Authorization", "token_url": "https://issuer.example.com/token", "client_id": "abc", "client_secret": "xyz", "scope": "read:all", "refresh_buffer_secs": 30}}]
 
 ### `policies`
 
@@ -177,7 +177,7 @@ Comma-separated list of seed peer addresses. Peers can also join dynamically via
 
 ### `jwks_url`
 
-JWKS endpoint URL for fetching public keys (e.g., Keycloak OIDC certs URL). Enables JWT verification of Authorization: Bearer tokens during initialize
+JWKS endpoint URL for fetching public keys (e.g., Keycloak OIDC certs URL). When set, the HTTP transports ENFORCE auth: every request to /mcp and the HTTP API (/api/*) must carry a valid `Authorization: Bearer <jwt>` (or `agent-session` header) verified against this JWKS, else it is rejected with 401. Leaving it unset keeps the server open (no auth). The openapi spec route and CORS preflight (OPTIONS) are exempt
 
 - CLI flag: `--jwks-url`
 - Environment: `JWKS_URL`
@@ -269,7 +269,7 @@ Path to the sled database for the session log (per-session heap+fs history) and 
 
 ### `fetch_header_config`
 
-JSON array of header injection rules (a path to a JSON file, or inline JSON — also settable as the `fetch_headers` section of a --config file). Each rule sets "host" (plus optional "methods") and exactly one of "headers" or "auth". Static: [{"host": "api.github.com", "methods": ["GET","POST"], "headers": {"Authorization": "Bearer ..."}}] OAuth: [{"host": "api.example.com", "auth": {"type": "oauth_client_credentials", "header": "Authorization", "token_url": "https://issuer.example.com/token", "client_id": "abc", "client_secret": "xyz", "scope": "read:all", "refresh_buffer_secs": 30}}]
+JSON array of header injection rules (a path to a JSON file, or inline JSON — also settable as the `fetch_headers` section of a --config file). Each rule sets "host" (plus optional "methods") and exactly one of "headers" or "auth". A "headers" rule may also set "override" (bool, default true): true overwrites a same-named header the sandbox already set, false only fills it when absent. Static: [{"host": "api.github.com", "methods": ["GET","POST"], "headers": {"Authorization": "Bearer ..."}, "override": true}] OAuth: [{"host": "api.example.com", "auth": {"type": "oauth_client_credentials", "header": "Authorization", "token_url": "https://issuer.example.com/token", "client_id": "abc", "client_secret": "xyz", "scope": "read:all", "refresh_buffer_secs": 30}}]
 
 - CLI flag: `--fetch-header-config`
 - Environment: `MCP_V8_FETCH_HEADER_CONFIG`
@@ -331,7 +331,7 @@ Directory for the heap-snapshot store when `--heap-store dir`. Defaults to /tmp/
 
 ### `mcp_config`
 
-JSON config for MCP server modules (a path to a JSON file, or inline JSON — also settable as the `mcp_servers` section of a --config file). Format: [{"name": "srv", "transport": "stdio", "command": "cmd", "args": ["a"]}, {"name": "srv2", "transport": "sse", "url": "http://..."}]
+JSON config for MCP server modules (a path to a JSON file, or inline JSON — also settable as the `mcp_servers` section of a --config file). Format: [{"name": "srv", "transport": "stdio", "command": "cmd", "args": ["a"]}, {"name": "srv2", "transport": "sse", "url": "http://..."}, {"name": "srv3", "transport": "http", "url": "https://...", "auth": {"type": "oauth_browser", "scope": ["read"], "client_id": "...", "client_secret": "...", "redirect_port": 48123, "token_cache": "/path/to/cache.json"}}] `oauth_browser` is supported for HTTP only through `--mcp-config` and structured JSON/TOML `mcp_servers` configuration; compact `--mcp-server` syntax does not support it. Protected-resource and discovered OAuth endpoints require HTTPS unless loopback. It prints an authorization URL only when no cached credential can provide a token; cached refresh tokens renew access on connection or reconnect without opening a browser. The callback binds to localhost on redirect_port (or an available port). See the README for headless authorization and cache-file security
 
 - CLI flag: `--mcp-config`
 - Environment: `MCP_V8_MCP_CONFIG`

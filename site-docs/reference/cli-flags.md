@@ -114,7 +114,7 @@ Print the OpenAPI JSON specification to stdout and exit. Use this to regenerate 
 
 ### `--jwks-url`
 
-JWKS endpoint URL for fetching public keys (e.g., Keycloak OIDC certs URL). Enables JWT verification of Authorization: Bearer tokens during initialize
+JWKS endpoint URL for fetching public keys (e.g., Keycloak OIDC certs URL). When set, the HTTP transports ENFORCE auth: every request to /mcp and the HTTP API (/api/*) must carry a valid `Authorization: Bearer <jwt>` (or `agent-session` header) verified against this JWKS, else it is rejected with 401. Leaving it unset keeps the server open (no auth). The openapi spec route and CORS preflight (OPTIONS) are exempt
 
 - Environment: `JWKS_URL`
 - Value: `JWKS_URL`
@@ -208,14 +208,14 @@ Path to the sled database for the session log (per-session heap+fs history) and 
 
 ### `--fetch-header-config`
 
-JSON array of header injection rules (a path to a JSON file, or inline JSON — also settable as the `fetch_headers` section of a --config file). Each rule sets "host" (plus optional "methods") and exactly one of "headers" or "auth". Static: [{"host": "api.github.com", "methods": ["GET","POST"], "headers": {"Authorization": "Bearer ..."}}] OAuth: [{"host": "api.example.com", "auth": {"type": "oauth_client_credentials", "header": "Authorization", "token_url": "https://issuer.example.com/token", "client_id": "abc", "client_secret": "xyz", "scope": "read:all", "refresh_buffer_secs": 30}}]
+JSON array of header injection rules (a path to a JSON file, or inline JSON — also settable as the `fetch_headers` section of a --config file). Each rule sets "host" (plus optional "methods") and exactly one of "headers" or "auth". A "headers" rule may also set "override" (bool, default true): true overwrites a same-named header the sandbox already set, false only fills it when absent. Static: [{"host": "api.github.com", "methods": ["GET","POST"], "headers": {"Authorization": "Bearer ..."}, "override": true}] OAuth: [{"host": "api.example.com", "auth": {"type": "oauth_client_credentials", "header": "Authorization", "token_url": "https://issuer.example.com/token", "client_id": "abc", "client_secret": "xyz", "scope": "read:all", "refresh_buffer_secs": 30}}]
 
 - Environment: `MCP_V8_FETCH_HEADER_CONFIG`
 - Value: `PATH_OR_JSON`
 
 ### `--fetch-header`
 
-Inject a header into fetch requests that match host/method rules. Each rule is a comma-separated list of key=value pairs and must use either the static value form or the OAuth client-credentials form (mutually exclusive). Can be specified multiple times. Accepted keys: host — host pattern the request URL must match (required) methods — semicolon-separated HTTP methods to match, e.g. GET;POST (optional) header — name of the header to inject (required) value — static header value (static form) token_url — OAuth token endpoint URL (OAuth form) client_id — OAuth client id (OAuth form) client_secret — OAuth client secret (OAuth form) scope — OAuth scope (OAuth form, optional) refresh_buffer_secs — seconds before expiry to refresh the token, default 30 (OAuth form, optional)
+Inject a header into fetch requests that match host/method rules. Each rule is a comma-separated list of key=value pairs and must use either the static value form or the OAuth client-credentials form (mutually exclusive). Can be specified multiple times. Accepted keys: host — host pattern the request URL must match (required) methods — semicolon-separated HTTP methods to match, e.g. GET;POST (optional) header — name of the header to inject (required) value — static header value (static form) override — static form: true (default) overwrites a same-named header the sandbox already set; false only fills when absent token_url — OAuth token endpoint URL (OAuth form) client_id — OAuth client id (OAuth form) client_secret — OAuth client secret (OAuth form) scope — OAuth scope (OAuth form, optional) refresh_buffer_secs — seconds before expiry to refresh the token, default 30 (OAuth form, optional)
 
 - Value: `RULE`
 - Repeatable: yes
@@ -272,7 +272,7 @@ Directory for the heap-snapshot store when `--heap-store dir`. Defaults to /tmp/
 
 ### `--mcp-config`
 
-JSON config for MCP server modules (a path to a JSON file, or inline JSON — also settable as the `mcp_servers` section of a --config file). Format: [{"name": "srv", "transport": "stdio", "command": "cmd", "args": ["a"]}, {"name": "srv2", "transport": "sse", "url": "http://..."}]
+JSON config for MCP server modules (a path to a JSON file, or inline JSON — also settable as the `mcp_servers` section of a --config file). Format: [{"name": "srv", "transport": "stdio", "command": "cmd", "args": ["a"]}, {"name": "srv2", "transport": "sse", "url": "http://..."}, {"name": "srv3", "transport": "http", "url": "https://...", "auth": {"type": "oauth_browser", "scope": ["read"], "client_id": "...", "client_secret": "...", "redirect_port": 48123, "token_cache": "/path/to/cache.json"}}] `oauth_browser` is supported for HTTP only through `--mcp-config` and structured JSON/TOML `mcp_servers` configuration; compact `--mcp-server` syntax does not support it. Protected-resource and discovered OAuth endpoints require HTTPS unless loopback. It prints an authorization URL only when no cached credential can provide a token; cached refresh tokens renew access on connection or reconnect without opening a browser. The callback binds to localhost on redirect_port (or an available port). See the README for headless authorization and cache-file security
 
 - Environment: `MCP_V8_MCP_CONFIG`
 - Value: `PATH_OR_JSON`
@@ -294,7 +294,7 @@ Prefix applied to stub tool names. Defaults to `runjs__` so it is obvious to a c
 
 ### `--mcp-server`
 
-Connect to an external MCP server as a module; JS can call its tools via the `mcp` global (mcp.callTool, mcp.listTools, mcp.servers). Can be specified multiple times. Transports: name=stdio:command:arg1:arg2 — spawn a stdio MCP server process name=sse:url — connect to an SSE MCP server endpoint Examples: weather=stdio:python:server.py remote=sse:http://localhost:9000/sse
+Connect to an external MCP server as a module; JS can call its tools via the `mcp` global (mcp.callTool, mcp.listTools, mcp.servers). Can be specified multiple times. Transports: name=stdio:command:arg1:arg2 — spawn a stdio MCP server process name=sse:url — connect to an SSE MCP server endpoint name=http:url — connect to a Streamable HTTP MCP server endpoint Examples: weather=stdio:python:server.py remote=sse:http://localhost:9000/sse remote=http:https://example.com/mcp
 
 - Value: `NAME=TRANSPORT:...`
 - Repeatable: yes

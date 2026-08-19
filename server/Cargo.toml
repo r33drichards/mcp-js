@@ -14,9 +14,9 @@ path = "src/main.rs"
 [dependencies]
 cli-derive = { path = "cli-derive" }
 anyhow = "1.0.98"
-axum = "0.8.4"
+axum = { version = "0.8.4", features = ["ws"] }
 base64 = "0.22"
-rmcp = { version = "1.7", features = ["server", "client", "macros", "schemars", "server-side-http", "transport-streamable-http-server", "transport-io", "transport-child-process", "client-side-sse", "transport-streamable-http-client-reqwest"] }
+rmcp = { version = "1.7", features = ["server", "client", "macros", "schemars", "server-side-http", "transport-streamable-http-server", "transport-io", "transport-child-process", "client-side-sse", "transport-streamable-http-client-reqwest", "reqwest", "auth"] }
 # Legacy rmcp pinned ONLY for its standalone HTTP+SSE server transport, which
 # rmcp 1.x dropped. Renamed so it coexists with the primary `rmcp` 1.x above;
 # used solely by mcp_sse.rs to keep `--sse-port` working.
@@ -28,7 +28,7 @@ rmcp_legacy = { package = "rmcp", git = "https://github.com/modelcontextprotocol
 serde = "1.0.219"
 serde_json = "1.0.140"
 toml = "0.8"
-tokio = { version = "1.45.0", features = ["rt-multi-thread", "process", "signal", "time", "sync", "macros"] }
+tokio = { version = "1.45.0", features = ["rt-multi-thread", "process", "signal", "time", "sync", "macros", "net", "io-util"] }
 tracing = "0.1.41"
 tracing-subscriber = "0.3.19"
 deno_core = "0.381"
@@ -36,6 +36,7 @@ deno_error = "0.7"
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-sdk-s3 = "1"
 async-trait = "0.1"
+libc = "0.2"
 # "string" enables owned (runtime-computed) builder values, used by the
 # --config loader to install config-file values as per-arg defaults.
 clap = { version = "4.5", features = ["derive", "env", "string"] }
@@ -58,9 +59,26 @@ hyper = { version = "1.5.2", features = ["server", "http1"] }
 hyper-util = { version = "0.1.10", features = ["tokio"] }
 tokio-util = "0.7"
 rand = "0.8"
+encoding_rs = "0.8"
+flate2 = "1"
+brotli = "8"
+sha1 = "0.10"
+hmac = "0.12"
 http-body-util = "0.1"
 regorus = "0.5"
-reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+# "http2" lets fetch() negotiate HTTP/2 via ALPN on https URLs (h1 remains the
+# floor; plaintext http stays h1 because h2c needs prior knowledge).
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "http2"], default-features = false }
+# WebSocket client for the policy-gated `WebSocket` global. rustls to match
+# reqwest's TLS stack (rustls 0.23 / tokio-rustls 0.26 already in-tree).
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+# Structured HTTP/2 session/stream ops for the node:http2 shim (gRPC support).
+# h2 is hyper's client/server HTTP/2 layer; TLS via the same rustls stack.
+h2 = "0.4"
+bytes = "1"
+http = "1"
+tokio-rustls = "0.26"
+webpki-roots = "0.26"
 url = "2"
 futures = "0.3"
 wasmparser = "0.225"
@@ -73,6 +91,7 @@ zstd = "0.13"
 blake3 = "1"
 bincode = "1"
 diffy = "0.4"
+urlpattern = "0.6.0"
 
 # OS-level sandboxing layer (--sandbox-manifest): Landlock on Linux, Seatbelt on macOS.
 # default-features = false drops nono's system-keyring integration, which the
@@ -83,9 +102,12 @@ nono = { version = "0.53", default-features = false }
 
 [dev-dependencies]
 tokio-test = "0.4"
-reqwest = { version = "0.12", features = ["json", "cookies", "stream", "rustls-tls"], default-features = false }
+reqwest = { version = "0.12", features = ["json", "cookies", "stream", "rustls-tls", "http2"], default-features = false }
 uuid = { version = "1.0", features = ["v4"] }
 futures = "0.3"
 tempfile = "3"
 chrono = { version = "0.4", features = ["serde"] }
 sled = "0.34"
+
+[patch.crates-io]
+url = { path = "vendor/url" }
