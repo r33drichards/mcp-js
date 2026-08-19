@@ -440,6 +440,34 @@ console.log(pascalCase("hello_world"));
 // ══════════════════════════════════════════════════════════════════════════
 
 #[test]
+fn test_virtual_json_module_preserves_json_type() {
+    use std::collections::HashMap;
+    use server::engine::{execute_stateless, ExecutionConfig};
+
+    ensure_v8();
+    let modules = Arc::new(HashMap::from([(
+        "file:///data.json".to_string(),
+        r#"{"value":42}"#.to_string(),
+    )]));
+    let loader = ModuleLoaderConfig {
+        allow_external: false,
+        policy_chain: None,
+        virtual_modules: Some(modules),
+    };
+    let code = r#"
+        import data from './data.json' with { type: 'json' };
+        if (data.value !== 42) throw new Error('wrong JSON module value');
+    "#;
+    let (result, _) = execute_stateless(
+        code,
+        ExecutionConfig::new(64 * 1024 * 1024)
+            .module_loader_config(&loader)
+            .main_module_specifier("file:///main.mjs"),
+    );
+    assert!(result.is_ok(), "virtual JSON import failed: {result:?}");
+}
+
+#[test]
 fn test_resolve_npm_blocked_when_external_disabled() {
     use deno_core::ResolutionKind;
     use server::engine::module_loader::NetworkModuleLoader;

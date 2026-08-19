@@ -112,7 +112,7 @@ fn add_corpus_modules(
         }
         if !matches!(
             path.extension().and_then(|value| value.to_str()),
-            Some("js" | "mjs" | "cjs")
+            Some("js" | "mjs" | "cjs" | "json")
         ) {
             continue;
         }

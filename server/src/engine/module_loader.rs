@@ -177,8 +177,13 @@ impl ModuleLoader for NetworkModuleLoader {
         if let Some(source) = self.config.virtual_modules.as_ref()
             .and_then(|modules| modules.get(module_specifier.as_str()))
         {
+            let module_type = if module_specifier.path().ends_with(".json") {
+                ModuleType::Json
+            } else {
+                ModuleType::JavaScript
+            };
             return ModuleLoadResponse::Sync(Ok(ModuleSource::new(
-                ModuleType::JavaScript,
+                module_type,
                 ModuleSourceCode::String(FastString::from(source.clone())),
                 module_specifier,
                 None,
