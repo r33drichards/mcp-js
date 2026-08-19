@@ -53,6 +53,7 @@ def classify(path: str) -> tuple[str, str, str, str]:
         (("test-module", "test-require", "test-package", "es-module"), "module"),
         (("test-os",), "os"),
         (("test-path",), "path"),
+        (("test-perf", "test-performance"), "perf_hooks"),
         (("test-process",), "process"),
         (("test-querystring",), "querystring"),
         (("test-stream",), "streams"),

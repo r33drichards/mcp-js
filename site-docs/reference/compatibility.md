@@ -97,7 +97,7 @@ changelog.
 
 ## Node.js core tests (node v22.14.0)
 
-**42 / 42 vendored runnable tests passing.** The `node:` modules
+**44 / 44 vendored runnable tests passing.** The `node:` modules
 served by the module loader:
 
 | Module | Implementation |
@@ -116,6 +116,7 @@ served by the module loader:
 | `node:net` | address helpers; sockets are inert (transports are policy-gated) |
 | `node:os` | fixed sandbox values |
 | `node:path` | Node's own lib source over a primordials shim |
+| `node:perf_hooks` | user timing, observers, and function timing over the shared performance timeline |
 | `node:process` | fixed sandbox values plus active timer/immediate resource snapshots; no host env |
 | `node:querystring` | Node's own lib source over a primordials shim |
 | `node:stream` | purpose-written subset (legacy `Stream` base + Readable/Writable/Duplex/Transform) |

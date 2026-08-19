@@ -22208,7 +22208,7 @@
     },
     {
       "path": "test/parallel/test-perf-gc-crash.js",
-      "family": "other",
+      "family": "perf_hooks",
       "profile": "pure",
       "status": "untriaged",
       "compatibility": "unsupported",
@@ -22216,7 +22216,7 @@
     },
     {
       "path": "test/parallel/test-perf-hooks-eventlooputilization.js",
-      "family": "other",
+      "family": "perf_hooks",
       "profile": "pure",
       "status": "untriaged",
       "compatibility": "unsupported",
@@ -22224,7 +22224,7 @@
     },
     {
       "path": "test/parallel/test-perf-hooks-histogram-fast-calls.js",
-      "family": "other",
+      "family": "perf_hooks",
       "profile": "pure",
       "status": "untriaged",
       "compatibility": "unsupported",
@@ -22232,7 +22232,7 @@
     },
     {
       "path": "test/parallel/test-perf-hooks-histogram.js",
-      "family": "other",
+      "family": "perf_hooks",
       "profile": "pure",
       "status": "untriaged",
       "compatibility": "unsupported",
@@ -22240,7 +22240,7 @@
     },
     {
       "path": "test/parallel/test-perf-hooks-monitor-event-loop-delay-fast-calls.js",
-      "family": "other",
+      "family": "perf_hooks",
       "profile": "pure",
       "status": "untriaged",
       "compatibility": "unsupported",
@@ -22248,7 +22248,7 @@
     },
     {
       "path": "test/parallel/test-perf-hooks-resourcetiming.js",
-      "family": "other",
+      "family": "perf_hooks",
       "profile": "pure",
       "status": "untriaged",
       "compatibility": "unsupported",
@@ -22256,7 +22256,7 @@
     },
     {
       "path": "test/parallel/test-perf-hooks-timerify-basic.js",
-      "family": "other",
+      "family": "perf_hooks",
       "profile": "pure",
       "status": "untriaged",
       "compatibility": "unsupported",
@@ -22264,7 +22264,7 @@
     },
     {
       "path": "test/parallel/test-perf-hooks-timerify-constructor.js",
-      "family": "other",
+      "family": "perf_hooks",
       "profile": "pure",
       "status": "untriaged",
       "compatibility": "unsupported",
@@ -22272,7 +22272,7 @@
     },
     {
       "path": "test/parallel/test-perf-hooks-timerify-error.js",
-      "family": "other",
+      "family": "perf_hooks",
       "profile": "pure",
       "status": "untriaged",
       "compatibility": "unsupported",
@@ -22280,7 +22280,7 @@
     },
     {
       "path": "test/parallel/test-perf-hooks-timerify-histogram-async.mjs",
-      "family": "other",
+      "family": "perf_hooks",
       "profile": "pure",
       "status": "untriaged",
       "compatibility": "unsupported",
@@ -22288,7 +22288,7 @@
     },
     {
       "path": "test/parallel/test-perf-hooks-timerify-histogram-sync.mjs",
-      "family": "other",
+      "family": "perf_hooks",
       "profile": "pure",
       "status": "untriaged",
       "compatibility": "unsupported",
@@ -22296,7 +22296,7 @@
     },
     {
       "path": "test/parallel/test-perf-hooks-timerify-invalid-args.js",
-      "family": "other",
+      "family": "perf_hooks",
       "profile": "pure",
       "status": "untriaged",
       "compatibility": "unsupported",
@@ -22304,7 +22304,7 @@
     },
     {
       "path": "test/parallel/test-perf-hooks-timerify-multiple-wrapping.js",
-      "family": "other",
+      "family": "perf_hooks",
       "profile": "pure",
       "status": "untriaged",
       "compatibility": "unsupported",
@@ -22312,7 +22312,7 @@
     },
     {
       "path": "test/parallel/test-perf-hooks-timerify-return-value.js",
-      "family": "other",
+      "family": "perf_hooks",
       "profile": "pure",
       "status": "untriaged",
       "compatibility": "unsupported",
@@ -22320,7 +22320,7 @@
     },
     {
       "path": "test/parallel/test-perf-hooks-usertiming.js",
-      "family": "other",
+      "family": "perf_hooks",
       "profile": "pure",
       "status": "untriaged",
       "compatibility": "unsupported",
@@ -22336,7 +22336,7 @@
     },
     {
       "path": "test/parallel/test-performance-function-async.js",
-      "family": "other",
+      "family": "perf_hooks",
       "profile": "pure",
       "status": "untriaged",
       "compatibility": "unsupported",
@@ -22344,7 +22344,7 @@
     },
     {
       "path": "test/parallel/test-performance-gc-minor-ms.js",
-      "family": "other",
+      "family": "perf_hooks",
       "profile": "pure",
       "status": "untriaged",
       "compatibility": "unsupported",
@@ -22352,7 +22352,7 @@
     },
     {
       "path": "test/parallel/test-performance-gc.js",
-      "family": "other",
+      "family": "perf_hooks",
       "profile": "pure",
       "status": "untriaged",
       "compatibility": "unsupported",
@@ -22360,7 +22360,7 @@
     },
     {
       "path": "test/parallel/test-performance-global.js",
-      "family": "other",
+      "family": "perf_hooks",
       "profile": "pure",
       "status": "untriaged",
       "compatibility": "unsupported",
@@ -22368,7 +22368,7 @@
     },
     {
       "path": "test/parallel/test-performance-many-marks.js",
-      "family": "other",
+      "family": "perf_hooks",
       "profile": "pure",
       "status": "untriaged",
       "compatibility": "unsupported",
@@ -22376,7 +22376,7 @@
     },
     {
       "path": "test/parallel/test-performance-measure-detail.js",
-      "family": "other",
+      "family": "perf_hooks",
       "profile": "pure",
       "status": "untriaged",
       "compatibility": "unsupported",
@@ -22384,7 +22384,7 @@
     },
     {
       "path": "test/parallel/test-performance-measure.js",
-      "family": "other",
+      "family": "perf_hooks",
       "profile": "pure",
       "status": "untriaged",
       "compatibility": "unsupported",
@@ -22392,7 +22392,7 @@
     },
     {
       "path": "test/parallel/test-performance-nodetiming-uvmetricsinfo.js",
-      "family": "other",
+      "family": "perf_hooks",
       "profile": "pure",
       "status": "untriaged",
       "compatibility": "unsupported",
@@ -22400,7 +22400,7 @@
     },
     {
       "path": "test/parallel/test-performance-nodetiming.js",
-      "family": "other",
+      "family": "perf_hooks",
       "profile": "pure",
       "status": "untriaged",
       "compatibility": "unsupported",
@@ -22408,7 +22408,7 @@
     },
     {
       "path": "test/parallel/test-performance-resourcetimingbufferfull.js",
-      "family": "other",
+      "family": "perf_hooks",
       "profile": "pure",
       "status": "untriaged",
       "compatibility": "unsupported",
@@ -22416,7 +22416,7 @@
     },
     {
       "path": "test/parallel/test-performance-resourcetimingbuffersize.js",
-      "family": "other",
+      "family": "perf_hooks",
       "profile": "pure",
       "status": "untriaged",
       "compatibility": "unsupported",
@@ -22424,7 +22424,7 @@
     },
     {
       "path": "test/parallel/test-performance-timeline.mjs",
-      "family": "other",
+      "family": "perf_hooks",
       "profile": "pure",
       "status": "untriaged",
       "compatibility": "unsupported",
@@ -22432,7 +22432,7 @@
     },
     {
       "path": "test/parallel/test-performanceobserver-gc.js",
-      "family": "other",
+      "family": "perf_hooks",
       "profile": "pure",
       "status": "untriaged",
       "compatibility": "unsupported",
@@ -22440,7 +22440,7 @@
     },
     {
       "path": "test/parallel/test-performanceobserver.js",
-      "family": "other",
+      "family": "perf_hooks",
       "profile": "pure",
       "status": "untriaged",
       "compatibility": "unsupported",
@@ -39424,7 +39424,7 @@
     },
     {
       "path": "test/sequential/test-perf-hooks.js",
-      "family": "other",
+      "family": "perf_hooks",
       "profile": "pure",
       "status": "untriaged",
       "compatibility": "unsupported",
@@ -39432,7 +39432,7 @@
     },
     {
       "path": "test/sequential/test-performance-eventloopdelay.js",
-      "family": "other",
+      "family": "perf_hooks",
       "profile": "pure",
       "status": "untriaged",
       "compatibility": "unsupported",

@@ -18,6 +18,7 @@ import https from 'node:https';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
+import perfHooks from 'node:perf_hooks';
 import process from 'node:process';
 import querystring from 'node:querystring';
 import stream from 'node:stream';
@@ -46,6 +47,7 @@ const builtins = new Map([
     ['net', net],
     ['os', os],
     ['path', path],
+    ['perf_hooks', perfHooks],
     ['process', process],
     ['querystring', querystring],
     ['stream', stream],

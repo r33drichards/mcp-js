@@ -26,6 +26,7 @@ pub const NODE_MODULES: &[(&str, &str)] = &[
     ("net", include_str!("node_compat/net.js")),
     ("os", include_str!("node_compat/os.js")),
     ("path", include_str!("node_compat/gen/path.js")),
+    ("perf_hooks", include_str!("node_compat/perf_hooks.js")),
     ("process", include_str!("node_compat/process.js")),
     ("querystring", include_str!("node_compat/gen/querystring.js")),
     ("stream", include_str!("node_compat/stream.js")),

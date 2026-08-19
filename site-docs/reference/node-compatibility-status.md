@@ -13,14 +13,14 @@ versions and are intentionally reported separately.
 
 ## Fast Executable Suite
 
-**42 passing of 42 runnable tests; 44 total classified tests.**
+**44 passing of 44 runnable tests; 46 total classified tests.**
 
 ### Status
 
 | Name | Count |
 |---|---:|
 | `harness_missing` | 1 |
-| `pass` | 42 |
+| `pass` | 44 |
 | `policy_required` | 1 |
 
 ### Module Families
@@ -32,6 +32,7 @@ versions and are intentionally reported separately.
 | `crypto` | 1 |
 | `events` | 14 |
 | `path` | 11 |
+| `perf_hooks` | 2 |
 | `process` | 2 |
 | `querystring` | 3 |
 | `timers` | 7 |
@@ -41,7 +42,7 @@ versions and are intentionally reported separately.
 
 | Name | Count |
 |---|---:|
-| `pure` | 43 |
+| `pure` | 45 |
 | `subprocess` | 1 |
 
 ## Full Deno-Vendored Corpus Inventory
@@ -64,8 +65,9 @@ candidates, not executable compatibility claims for the Node 22 target.
 | `module` | 295 |
 | `networking` | 381 |
 | `os` | 8 |
-| `other` | 1785 |
+| `other` | 1754 |
 | `path` | 17 |
+| `perf_hooks` | 31 |
 | `process` | 93 |
 | `querystring` | 4 |
 | `streams` | 249 |

@@ -72,6 +72,7 @@ fn node_compat_prelude_maps_registered_host_modules() {
         ("node:http2", "http2: http2"),
         ("node:https", "https: https"),
         ("node:net", "net: net"),
+        ("node:perf_hooks", "perf_hooks: perfHooks"),
         ("node:stream/web", "'stream/web': streamWeb"),
         ("node:tls", "tls: tls"),
         ("node:zlib", "zlib: zlib"),
@@ -477,6 +478,76 @@ async fn buffer_error_contracts() {
         expectError(() => Buffer.from('x').toString('nope'), TypeError, 'ERR_UNKNOWN_ENCODING', unknownEncoding);
         expectError(() => Buffer.alloc(4).write('x', 'nope'), TypeError, 'ERR_UNKNOWN_ENCODING', unknownEncoding);
         expectError(() => Buffer.alloc(4).fill('x', 'nope'), TypeError, 'ERR_UNKNOWN_ENCODING', unknownEncoding);
+        "#,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn perf_hooks_observer_and_timerify() {
+    expect_ok(
+        r#"
+        import perfHooks, {
+            PerformanceObserver, PerformanceObserverEntryList, performance, timerify,
+        } from 'node:perf_hooks';
+
+        if (perfHooks.performance !== globalThis.performance || performance !== globalThis.performance) {
+            throw new Error('performance identity');
+        }
+        if (performance.timerify !== timerify) throw new Error('timerify identity');
+        if (!PerformanceObserver.supportedEntryTypes.includes('measure') ||
+            !PerformanceObserver.supportedEntryTypes.includes('function')) {
+            throw new Error('supported entry types');
+        }
+
+        for (const value of [1, {}, [], null, undefined, Infinity]) {
+            try { timerify(value); throw new Error('expected invalid fn'); }
+            catch (error) { if (error.code !== 'ERR_INVALID_ARG_TYPE') throw error; }
+        }
+        for (const histogram of [1, '', {}, [], false]) {
+            try { timerify(() => {}, { histogram }); throw new Error('expected invalid histogram'); }
+            catch (error) { if (error.code !== 'ERR_INVALID_ARG_TYPE') throw error; }
+        }
+
+        const batches = [];
+        const observer = new PerformanceObserver((list, self) => {
+            if (!(list instanceof PerformanceObserverEntryList) || self !== observer) {
+                throw new Error('observer callback shape');
+            }
+            batches.push(list.getEntries());
+        });
+        observer.observe({ entryTypes: ['measure', 'function'] });
+        performance.mark('perf-start');
+        performance.measure('perf-measure', 'perf-start');
+        const wrapped = timerify(function add(a, b) { return a + b; });
+        if (wrapped(2, 3) !== 5 || wrapped.length !== 2 || wrapped.name !== 'timerified add') {
+            throw new Error('timerify wrapper semantics');
+        }
+        class TimedClass {}
+        const WrappedClass = timerify(TimedClass);
+        if (!(new WrappedClass(1, 'abc') instanceof TimedClass)) {
+            throw new Error('timerify constructor semantics');
+        }
+        try {
+            timerify(() => { throw new Error('timerify-error'); })();
+            throw new Error('timerified throw must propagate');
+        } catch (error) {
+            if (error.message !== 'timerify-error') throw error;
+        }
+        await new Promise((resolve) => setImmediate(resolve));
+        const entries = batches.flat();
+        if (!entries.some((entry) => entry.name === 'perf-measure' && entry.entryType === 'measure')) {
+            throw new Error('measure entry missing');
+        }
+        if (!entries.some((entry) =>
+            entry.name === 'add' && entry.entryType === 'function' && entry[0] === 2 && entry[1] === 3)) {
+            throw new Error('function entry missing');
+        }
+        if (!entries.some((entry) =>
+            entry.name === 'TimedClass' && entry[0] === 1 && entry[1] === 'abc')) {
+            throw new Error('constructor entry missing');
+        }
+        observer.disconnect();
         "#,
     )
     .await;

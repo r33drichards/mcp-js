@@ -187,6 +187,18 @@
     "profile": "pure",
     "compatibility": "exact"
   },
+  "test/parallel/test-perf-gc-crash.js": {
+    "status": "pass",
+    "family": "perf_hooks",
+    "profile": "pure",
+    "compatibility": "exact"
+  },
+  "test/parallel/test-performance-measure.js": {
+    "status": "pass",
+    "family": "perf_hooks",
+    "profile": "pure",
+    "compatibility": "exact"
+  },
   "test/parallel/test-process-getactiveresources-track-interval-lifetime.js": {
     "status": "pass",
     "family": "process",

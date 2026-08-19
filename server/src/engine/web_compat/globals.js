@@ -85,6 +85,7 @@
     Object.defineProperty(PerformanceEntry.prototype, Symbol.toStringTag, {
         value: 'PerformanceEntry', configurable: true,
     });
+    globalThis.PerformanceEntry = PerformanceEntry;
 
     function makeEntry(Ctor, name, entryType, startTime, duration, detail) {
         var entry = Object.create(Ctor.prototype);
@@ -127,6 +128,11 @@
 
     var perfBrand = new WeakMap();
     var perfEntries = [];
+    var perfListeners = new Set();
+
+    function notifyPerformanceEntry(entry) {
+        perfListeners.forEach(function (listener) { listener(entry); });
+    }
 
     class Performance extends EventTarget {
         constructor() {
@@ -141,6 +147,7 @@
         mark(markName, markOptions) {
             var entry = new PerformanceMark(markName, markOptions);
             perfEntries.push(entry);
+            notifyPerformanceEntry(entry);
             return entry;
         }
         measure(measureName, startOrMeasureOptions, endMark) {
@@ -172,6 +179,7 @@
             var entry = makeEntry(PerformanceMeasure, String(measureName), 'measure',
                 start, end - start, detail);
             perfEntries.push(entry);
+            notifyPerformanceEntry(entry);
             return entry;
         }
         getEntries() { return perfEntries.slice(); }
@@ -205,6 +213,23 @@
     globalThis.Performance = Performance;
     globalThis.performance = new Performance();
     perfBrand.set(Performance, true); // further construction is illegal
+
+    Object.defineProperty(globalThis, '__mcpV8Performance', {
+        value: Object.freeze({
+            subscribe: function (listener) {
+                perfListeners.add(listener);
+                return function () { perfListeners.delete(listener); };
+            },
+            createEntry: function (name, entryType, startTime, duration, detail) {
+                return makeEntry(
+                    PerformanceEntry, String(name), String(entryType),
+                    Number(startTime), Number(duration), detail,
+                );
+            },
+            emit: notifyPerformanceEntry,
+        }),
+        configurable: true,
+    });
 
     delete globalThis.__webCompatInternal;
 })();
