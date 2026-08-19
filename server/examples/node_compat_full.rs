@@ -54,7 +54,7 @@ enum Outcome {
 }
 fn assemble(path: &str, body: &str) -> String {
     format!(
-        "globalThis.__NODE_TEST_PATH__={};globalThis.__NODE_TEST_NAME__={};\n{}\ntry{{globalThis.__NODE_TEST_RUN_CJS__({});}}catch(e){{if(!(e&&e.__nodeTestSkip))throw e;}}\nconst __nodeTestReportTimer=globalThis.__NODE_TEST_SETTIMEOUT__(()=>console.log({:?}+globalThis.__NODE_TEST_REPORT__()),300);globalThis.__mcpV8SetTimerResourceTracked(__nodeTestReportTimer,false);",
+        "globalThis.__NODE_TEST_PATH__={};globalThis.__NODE_TEST_NAME__={};\n{}\ntry{{globalThis.__NODE_TEST_RUN_CJS__({});}}catch(e){{if(!(e&&e.__nodeTestSkip))throw e;}}\nglobalThis.__NODE_TEST_SCHEDULE_REPORT__({:?});",
         serde_json::to_string(path).unwrap(),
         serde_json::to_string(
             Path::new(path)
@@ -253,7 +253,7 @@ mod tests {
         let source = assemble("test/parallel/wrapper.js", "return;");
         let runner = source.split_once(PRELUDE).unwrap().1;
         assert!(runner.contains("globalThis.__NODE_TEST_RUN_CJS__("));
-        assert!(runner.contains("globalThis.__mcpV8SetTimerResourceTracked("));
+        assert!(runner.contains("globalThis.__NODE_TEST_SCHEDULE_REPORT__("));
         assert!(!runner.contains("(0,eval)("));
     }
     #[test]

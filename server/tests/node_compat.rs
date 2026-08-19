@@ -169,8 +169,7 @@ fn assemble(test_path: &Path) -> Result<String, String> {
     // floor), so test-timers-non-integer-delay's 50 ticks of a ~1ms
     // interval take ~190ms here versus ~55ms in Node.
     source.push_str(&format!(
-        "const __nodeTestReportTimer = globalThis.__NODE_TEST_SETTIMEOUT__(() => {{ console.log({:?} + globalThis.__NODE_TEST_REPORT__()); }}, 300);\n\
-         globalThis.__mcpV8SetTimerResourceTracked(__nodeTestReportTimer, false);\n",
+        "globalThis.__NODE_TEST_SCHEDULE_REPORT__({:?});\n",
         RESULT_SENTINEL
     ));
     Ok(source)
@@ -376,8 +375,24 @@ mod expectation_tests {
 
         let runner = source.split_once(PRELUDE_JS).unwrap().1;
         assert!(runner.contains("globalThis.__NODE_TEST_RUN_CJS__("));
-        assert!(runner.contains("globalThis.__mcpV8SetTimerResourceTracked("));
+        assert!(runner.contains("globalThis.__NODE_TEST_SCHEDULE_REPORT__("));
         assert!(!runner.contains("(0, eval)("));
+    }
+
+    #[test]
+    fn runner_waits_for_referenced_timers_before_reporting() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("late-timer.js");
+        std::fs::write(
+            &path,
+            "const common = require('../common');\nsetTimeout(common.mustCall(() => {}), 400);",
+        )
+        .unwrap();
+
+        match run_file(&path) {
+            Outcome::Pass => {}
+            Outcome::Fail(error) => panic!("late timer reported too early: {error}"),
+        }
     }
 
     #[test]

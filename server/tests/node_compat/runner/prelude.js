@@ -231,6 +231,24 @@ globalThis.__NODE_TEST_RUN_CJS__ = function runCommonJS(source) {
     );
 };
 
+globalThis.__NODE_TEST_SCHEDULE_REPORT__ = function scheduleReport(sentinel) {
+    function scheduleCheck(delay) {
+        const timer = globalThis.__NODE_TEST_SETTIMEOUT__(check, delay);
+        globalThis.__mcpV8SetTimerResourceTracked(timer, false);
+    }
+    function check() {
+        const active = globalThis.__mcpV8GetActiveResourcesInfo();
+        if (active.length > 0) {
+            scheduleCheck(25);
+            return;
+        }
+        console.log(String(sentinel) + globalThis.__NODE_TEST_REPORT__());
+    }
+    // Preserve the original settle window for promise-only work, then wait
+    // until all referenced resources supported by the runtime have drained.
+    scheduleCheck(300);
+};
+
 globalThis.__NODE_TEST_REPORT__ = function () {
     for (const c of mustCalls) {
         const ok = c.kind === 'exact' ? c.actual === c.expected : c.actual >= c.expected;
