@@ -108,6 +108,29 @@ async fn node_compat_prelude_wraps_commonjs_body() {
     .await;
 }
 
+#[tokio::test]
+async fn node_compat_prelude_skips_when_inspector_disabled() {
+    let prelude = include_str!("node_compat/runner/prelude.js");
+    expect_ok(&format!(
+        r#"
+        {prelude}
+        const commonHarness = require('../common');
+        if (commonHarness.hasInspector !== false) throw new Error('inspector must be disabled');
+        try {{
+            commonHarness.skipIfInspectorDisabled();
+            throw new Error('expected inspector skip');
+        }} catch (error) {{
+            if (!error.__nodeTestSkip) throw error;
+        }}
+        const report = JSON.parse(globalThis.__NODE_TEST_REPORT__());
+        if (report.skipped !== 'V8 inspector is disabled') {{
+            throw new Error('wrong inspector skip reason: ' + report.skipped);
+        }}
+        "#
+    ))
+    .await;
+}
+
 /// module.builtinModules must list exactly the registry, so the eagerly
 /// imported map in module.js can't drift from node_compat.rs.
 #[tokio::test]

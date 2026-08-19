@@ -50,6 +50,7 @@ const common = {
     isDumbTerminal: false,
     isMainThread: true,
     hasCrypto: true,
+    hasInspector: false,
     hasIntl: true,
     hasIPv6: false,
     enoughTestMem: true,
@@ -65,6 +66,9 @@ const common = {
         const err = new Error('__NODE_TEST_SKIP__');
         err.__nodeTestSkip = true;
         throw err;
+    },
+    skipIfInspectorDisabled() {
+        if (!common.hasInspector) common.skip('V8 inspector is disabled');
     },
 
     mustCall(fn, exact) {

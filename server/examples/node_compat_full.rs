@@ -259,6 +259,9 @@ mod tests {
     fn platform_skip_is_strict() {
         assert!(result::is_platform_inapplicable("Windows-only"));
         assert!(!result::is_platform_inapplicable("missing crypto"));
+        assert!(!result::is_platform_inapplicable(
+            "V8 inspector is disabled"
+        ));
     }
     #[test]
     fn stable_shards() {
