@@ -180,6 +180,7 @@ async fn create_require_serves_builtins() {
         import dns from 'node:dns';
         import dnsPromises from 'node:dns/promises';
         import path from 'node:path';
+        import processModule, { execPath } from 'node:process';
         import util, { types } from 'node:util';
         import utilTypes from 'node:util/types';
 
@@ -191,6 +192,9 @@ async fn create_require_serves_builtins() {
             throw new Error('require(crypto) not functional');
         }
         if (require('module') !== module) throw new Error('require(module) identity');
+        if (execPath !== processModule.execPath || require('process') !== processModule) {
+            throw new Error('process named export identity');
+        }
         if (dns.promises !== dnsPromises || require('dns/promises') !== dnsPromises) {
             throw new Error('dns/promises identity');
         }

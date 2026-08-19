@@ -95,6 +95,8 @@ process.hrtime.bigint = function bigint() {
 
 export default process;
 export const {
-    argv, env, platform, arch, version, versions, nextTick, cwd, hrtime,
-    getActiveResourcesInfo,
+    argv, argv0, execArgv, execPath, env, platform, arch, pid, ppid,
+    version, versions, title, browser, nextTick, cwd, chdir, umask, uptime,
+    memoryUsage, hrtime, getActiveResourcesInfo, emitWarning, exit, abort,
+    kill, stdout, stderr, stdin,
 } = process;

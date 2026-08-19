@@ -1007,9 +1007,9 @@ pub fn execute_stateless(
         }
         if fetch_config.is_some() {
             extensions.push(fetch::create_extension());
-            if subprocess_config.is_some() {
-                extensions.push(subprocess::create_extension());
-            }
+        }
+        if subprocess_config.is_some() {
+            extensions.push(subprocess::create_extension());
         }
         if websocket_config.is_some() {
             extensions.push(websocket::create_extension());
@@ -1083,10 +1083,11 @@ pub fn execute_stateless(
                 runtime.op_state().borrow_mut().put(mount);
             }
 
-            // Put subprocess config in OpState if subprocess policies are configured.
-            if let Some(sc) = subprocess_config {
-                runtime.op_state().borrow_mut().put(sc.clone());
-            }
+        }
+
+        // Put subprocess config in OpState if subprocess policies are configured.
+        if let Some(sc) = subprocess_config {
+            runtime.op_state().borrow_mut().put(sc.clone());
         }
 
         // Put MCP config in OpState if MCP servers are configured.
@@ -1126,11 +1127,11 @@ pub fn execute_stateless(
                         if let Err(e) = fetch::inject_fetch(&mut runtime) {
                             return Err(e);
                         }
-                        // Inject subprocess JS wrapper if subprocess policies are configured.
-                        if subprocess_config.is_some() {
-                            if let Err(e) = subprocess::inject_subprocess(&mut runtime) {
-                                return Err(e);
-                            }
+                    }
+                    // Inject subprocess JS wrapper if subprocess policies are configured.
+                    if subprocess_config.is_some() {
+                        if let Err(e) = subprocess::inject_subprocess(&mut runtime) {
+                            return Err(e);
                         }
                     }
                     // Inject fs JS wrapper if filesystem policies are configured.
@@ -1269,9 +1270,9 @@ pub fn execute_stateful(
         }
         if fetch_config.is_some() {
             extensions.push(fetch::create_extension());
-            if subprocess_config.is_some() {
-                extensions.push(subprocess::create_extension());
-            }
+        }
+        if subprocess_config.is_some() {
+            extensions.push(subprocess::create_extension());
         }
         if websocket_config.is_some() {
             extensions.push(websocket::create_extension());
@@ -1346,10 +1347,11 @@ pub fn execute_stateful(
                 runtime.op_state().borrow_mut().put(mount);
             }
 
-            // Put subprocess config in OpState if subprocess policies are configured.
-            if let Some(sc) = subprocess_config {
-                runtime.op_state().borrow_mut().put(sc.clone());
-            }
+        }
+
+        // Put subprocess config in OpState if subprocess policies are configured.
+        if let Some(sc) = subprocess_config {
+            runtime.op_state().borrow_mut().put(sc.clone());
         }
 
         // Put MCP config in OpState if MCP servers are configured.
@@ -1398,11 +1400,11 @@ pub fn execute_stateful(
                         if let Err(e) = fetch::inject_fetch(&mut runtime) {
                             return Err(e);
                         }
-                        // Inject subprocess JS wrapper if subprocess policies are configured.
-                        if subprocess_config.is_some() {
-                            if let Err(e) = subprocess::inject_subprocess(&mut runtime) {
-                                return Err(e);
-                            }
+                    }
+                    // Inject subprocess JS wrapper if subprocess policies are configured.
+                    if subprocess_config.is_some() {
+                        if let Err(e) = subprocess::inject_subprocess(&mut runtime) {
+                            return Err(e);
                         }
                     }
                     // Inject fs JS wrapper if filesystem policies are configured.

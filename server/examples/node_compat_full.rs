@@ -10,6 +10,7 @@ use server::engine::{
     fetch::FetchConfig,
     module_loader::ModuleLoaderConfig,
     opa::{EvalMode, PolicyChain},
+    subprocess::SubprocessConfig,
 };
 use std::{
     collections::HashMap,
@@ -94,20 +95,50 @@ export const mustCall = common.mustCall.bind(common);
 export const mustCallAtLeast = common.mustCallAtLeast.bind(common);
 export const mustSucceed = common.mustSucceed.bind(common);
 export const mustNotCall = common.mustNotCall.bind(common);
+export const spawnPromisified = common.spawnPromisified.bind(common);
 export const skip = common.skip.bind(common);
 export const platformTimeout = common.platformTimeout.bind(common);
 export const fixturesDir = '/test/fixtures';
 export default common;
 "#;
+fn package_uses_modules(directory: &Path, inherited: bool) -> bool {
+    let package = directory.join("package.json");
+    let Ok(source) = fs::read_to_string(package) else {
+        return inherited;
+    };
+    serde_json::from_str::<serde_json::Value>(&source)
+        .ok()
+        .and_then(|value| value.get("type").and_then(|kind| kind.as_str()).map(str::to_owned))
+        .is_some_and(|kind| kind == "module")
+}
+fn wrap_commonjs(source: &str) -> String {
+    format!(r#"import {{ createRequire as __createRequire }} from 'node:module';
+import {{ fileURLToPath as __fileURLToPath }} from 'node:url';
+import {{ dirname as __dirnameOf }} from 'node:path';
+const __cjsModule = {{ exports: {{}} }};
+let __cjsExports = __cjsModule.exports;
+const __cjsRequire = __createRequire(import.meta.url);
+const __cjsFilename = __fileURLToPath(import.meta.url);
+const __cjsDirname = __dirnameOf(__cjsFilename);
+(function (exports, require, module, __filename, __dirname) {{
+{source}
+}}).call(__cjsModule.exports, __cjsExports, __cjsRequire, __cjsModule, __cjsFilename, __cjsDirname);
+const __cjsDefault = __cjsModule.exports;
+export default __cjsDefault;
+export {{ __cjsDefault as 'module.exports' }};
+"#)
+}
 fn add_corpus_modules(
     root: &Path,
     directory: &Path,
+    inherited_modules: bool,
     modules: &mut HashMap<String, String>,
 ) -> Result<(), String> {
+    let directory_uses_modules = package_uses_modules(directory, inherited_modules);
     for entry in fs::read_dir(directory).map_err(|error| error.to_string())? {
         let path = entry.map_err(|error| error.to_string())?.path();
         if path.is_dir() {
-            add_corpus_modules(root, &path, modules)?;
+            add_corpus_modules(root, &path, directory_uses_modules, modules)?;
             continue;
         }
         if !matches!(
@@ -121,17 +152,32 @@ fn add_corpus_modules(
         let specifier = ModuleSpecifier::from_file_path(&virtual_path)
             .map_err(|_| format!("invalid corpus module path: {}", virtual_path.display()))?;
         let source = fs::read_to_string(&path).map_err(|error| error.to_string())?;
-        modules.insert(specifier.to_string(), strip_shebang(&source).to_string());
+        let extension = path.extension().and_then(|value| value.to_str());
+        let source = if extension == Some("cjs") ||
+            (extension == Some("js") && !directory_uses_modules)
+        {
+            wrap_commonjs(strip_shebang(&source))
+        } else {
+            strip_shebang(&source).to_string()
+        };
+        modules.insert(specifier.to_string(), source);
     }
     Ok(())
 }
 fn corpus_modules(corpus: &Path) -> Result<Arc<HashMap<String, String>>, String> {
     let mut modules = HashMap::new();
-    add_corpus_modules(corpus, &corpus.join("test"), &mut modules)?;
+    add_corpus_modules(corpus, &corpus.join("test"), false, &mut modules)?;
     modules.insert("node-test:prelude".into(), PRELUDE.into());
     modules.insert("node-test:common".into(), COMMON_ESM.into());
     modules.insert("file:///test/common/index.mjs".into(), COMMON_ESM.into());
     Ok(Arc::new(modules))
+}
+fn find_executable(name: &str) -> Result<PathBuf, String> {
+    let path = std::env::var_os("PATH").ok_or_else(|| "PATH required".to_string())?;
+    std::env::split_paths(&path)
+        .map(|directory| directory.join(name))
+        .find(|candidate| candidate.is_file())
+        .ok_or_else(|| format!("{name} executable not found in PATH"))
 }
 fn test_module_specifier(path: &str) -> Result<String, String> {
     let virtual_path = Path::new("/").join(path);
@@ -144,6 +190,8 @@ fn run(
     body: &str,
     timeout: Duration,
     modules: &Arc<HashMap<String, String>>,
+    corpus: &Path,
+    node_executable: &Path,
 ) -> Outcome {
     INIT.call_once(server::engine::initialize_v8);
     let tmp = std::env::temp_dir().join(format!(
@@ -159,7 +207,9 @@ fn run(
         Err(e) => return Outcome::Runtime(e.to_string()),
     };
     let tree = db.open_tree("console").unwrap();
-    let fetch = FetchConfig::new_with_chain(Arc::new(PolicyChain::new(vec![], EvalMode::All)));
+    let policy = Arc::new(PolicyChain::new(vec![], EvalMode::All));
+    let fetch = FetchConfig::new_with_chain(policy.clone());
+    let subprocess = SubprocessConfig::new(policy);
     let module_loader = ModuleLoaderConfig {
         allow_external: true,
         policy_chain: None,
@@ -172,6 +222,7 @@ fn run(
     let config = ExecutionConfig::new(256 * 1024 * 1024)
         .console_tree(tree.clone())
         .fetch_config(&fetch)
+        .maybe_subprocess_config(Some(&subprocess))
         .module_loader_config(&module_loader)
         .main_module_specifier(&main_specifier);
     let handle = config.isolate_handle.clone();
@@ -194,7 +245,13 @@ fn run(
             }
         })
     };
-    let (res, _) = server::engine::execute_stateless(&assemble(path, body), config);
+    let source = format!(
+        "globalThis.__NODE_TEST_CORPUS_HOST__={};globalThis.__NODE_TEST_EXEC_PATH__={};\n{}",
+        serde_json::to_string(corpus.to_str().unwrap()).unwrap(),
+        serde_json::to_string(node_executable.to_str().unwrap()).unwrap(),
+        assemble(path, body),
+    );
+    let (res, _) = server::engine::execute_stateless(&source, config);
     done.store(true, Ordering::SeqCst);
     let _ = wd.join();
     let mut bytes = vec![];
@@ -242,7 +299,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let inv = std::env::var_os("NODE_COMPAT_INVENTORY")
         .map(PathBuf::from)
         .unwrap_or_else(|| repo.join("server/tests/node_compat/inventory.json"));
-    let corpus = path_env("NODE_COMPAT_CORPUS")?;
+    let corpus = fs::canonicalize(path_env("NODE_COMPAT_CORPUS")?)?;
+    let node_executable = find_executable("node")?;
     let results = path_env("NODE_COMPAT_RESULTS")?;
     let summary = path_env("NODE_COMPAT_SUMMARY")?;
     let i = num_env("NODE_COMPAT_SHARD_INDEX")?;
@@ -281,7 +339,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let start = Instant::now();
         let (status, reason, details) = match fs::read_to_string(corpus.join(&t.path)) {
-            Ok(src) => match run(&t.path, &src, timeout, &modules) {
+            Ok(src) => match run(
+                &t.path,
+                &src,
+                timeout,
+                &modules,
+                &corpus,
+                &node_executable,
+            ) {
                 Outcome::Pass => (ResultStatus::Pass, None, None),
                 Outcome::Skip(r) if result::is_platform_inapplicable(&r) => {
                     (ResultStatus::PlatformInapplicable, Some(r), None)
@@ -362,12 +427,21 @@ mod tests {
         ));
         fs::create_dir_all(root.join("test/fixtures")).unwrap();
         fs::write(root.join("test/fixtures/value.mjs"), "export default 42;\n").unwrap();
+        fs::write(root.join("test/fixtures/value.js"), "module.exports = 42;\n").unwrap();
+        fs::create_dir_all(root.join("test/fixtures/esm")).unwrap();
+        fs::write(root.join("test/fixtures/esm/package.json"), r#"{"type":"module"}"#).unwrap();
+        fs::write(root.join("test/fixtures/esm/value.js"), "export default 7;\n").unwrap();
         let modules = corpus_modules(&root).unwrap();
         fs::remove_dir_all(root).unwrap();
         assert!(modules.contains_key("node-test:prelude"));
         assert_eq!(
             modules.get("file:///test/fixtures/value.mjs").map(String::as_str),
             Some("export default 42;\n"),
+        );
+        assert!(modules["file:///test/fixtures/value.js"].contains("__cjsModule.exports"));
+        assert_eq!(
+            modules.get("file:///test/fixtures/esm/value.js").map(String::as_str),
+            Some("export default 7;\n"),
         );
         let common = modules.get("node-test:common").unwrap();
         assert!(common.contains("export const mustCall"));

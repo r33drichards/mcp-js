@@ -110,6 +110,34 @@ const common = {
                 (args.length ? ' with args: ' + args.map((a) => String(a)).join(', ') : ''));
         };
     },
+
+    async spawnPromisified(command, args = [], options = {}) {
+        const hostCorpus = globalThis.__NODE_TEST_CORPUS_HOST__;
+        const hostExecPath = globalThis.__NODE_TEST_EXEC_PATH__;
+        function translate(value) {
+            const text = String(value);
+            if (hostCorpus && text.startsWith('/test/')) return hostCorpus + text;
+            if (hostCorpus && text.startsWith('file:///test/')) {
+                return 'file://' + hostCorpus + text.slice('file://'.length);
+            }
+            return text;
+        }
+        const executable = command === '/usr/bin/node' && hostExecPath
+            ? hostExecPath
+            : translate(command);
+        const output = await new Deno.Command(executable, {
+            args: Array.from(args, translate),
+            cwd: options.cwd ? translate(options.cwd) : undefined,
+            env: options.env,
+        }).output();
+        const decoder = new TextDecoder();
+        return {
+            code: output.code,
+            signal: output.signal,
+            stdout: decoder.decode(output.stdout),
+            stderr: decoder.decode(output.stderr),
+        };
+    },
     mustNotMutateObjectDeep(obj) { return obj; },
 
     invalidArgTypeHelper(input) {
