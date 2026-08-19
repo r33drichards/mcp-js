@@ -1,45 +1,226 @@
 {
-  "test/parallel/test-console-instance.js": true,
-  "test/parallel/test-crypto-randomuuid.js": true,
-  "test/parallel/test-event-emitter-add-listeners.js": true,
-  "test/parallel/test-event-emitter-emit-context.js": true,
-  "test/parallel/test-event-emitter-errors.js": true,
-  "test/parallel/test-event-emitter-get-max-listeners.js": true,
-  "test/parallel/test-event-emitter-listener-count.js": true,
-  "test/parallel/test-event-emitter-listeners.js": true,
-  "test/parallel/test-event-emitter-max-listeners.js": true,
-  "test/parallel/test-event-emitter-method-names.js": true,
-  "test/parallel/test-event-emitter-num-args.js": true,
-  "test/parallel/test-event-emitter-once.js": true,
-  "test/parallel/test-event-emitter-prepend.js": true,
-  "test/parallel/test-event-emitter-remove-all-listeners.js": true,
-  "test/parallel/test-event-emitter-subclass.js": true,
+  "test/parallel/test-console-instance.js": {
+    "status": "pass",
+    "family": "console",
+    "profile": "pure",
+    "compatibility": "exact"
+  },
+  "test/parallel/test-crypto-randomuuid.js": {
+    "status": "pass",
+    "family": "crypto",
+    "profile": "pure",
+    "compatibility": "exact"
+  },
+  "test/parallel/test-event-emitter-add-listeners.js": {
+    "status": "pass",
+    "family": "events",
+    "profile": "pure",
+    "compatibility": "exact"
+  },
+  "test/parallel/test-event-emitter-emit-context.js": {
+    "status": "pass",
+    "family": "events",
+    "profile": "pure",
+    "compatibility": "exact"
+  },
+  "test/parallel/test-event-emitter-errors.js": {
+    "status": "pass",
+    "family": "events",
+    "profile": "pure",
+    "compatibility": "exact"
+  },
+  "test/parallel/test-event-emitter-get-max-listeners.js": {
+    "status": "pass",
+    "family": "events",
+    "profile": "pure",
+    "compatibility": "exact"
+  },
+  "test/parallel/test-event-emitter-listener-count.js": {
+    "status": "pass",
+    "family": "events",
+    "profile": "pure",
+    "compatibility": "exact"
+  },
+  "test/parallel/test-event-emitter-listeners.js": {
+    "status": "pass",
+    "family": "events",
+    "profile": "pure",
+    "compatibility": "exact"
+  },
+  "test/parallel/test-event-emitter-max-listeners.js": {
+    "status": "pass",
+    "family": "events",
+    "profile": "pure",
+    "compatibility": "exact"
+  },
+  "test/parallel/test-event-emitter-method-names.js": {
+    "status": "pass",
+    "family": "events",
+    "profile": "pure",
+    "compatibility": "exact"
+  },
+  "test/parallel/test-event-emitter-num-args.js": {
+    "status": "pass",
+    "family": "events",
+    "profile": "pure",
+    "compatibility": "exact"
+  },
+  "test/parallel/test-event-emitter-once.js": {
+    "status": "pass",
+    "family": "events",
+    "profile": "pure",
+    "compatibility": "exact"
+  },
+  "test/parallel/test-event-emitter-prepend.js": {
+    "status": "pass",
+    "family": "events",
+    "profile": "pure",
+    "compatibility": "exact"
+  },
+  "test/parallel/test-event-emitter-remove-all-listeners.js": {
+    "status": "pass",
+    "family": "events",
+    "profile": "pure",
+    "compatibility": "exact"
+  },
+  "test/parallel/test-event-emitter-subclass.js": {
+    "status": "pass",
+    "family": "events",
+    "profile": "pure",
+    "compatibility": "exact"
+  },
   "test/parallel/test-events-once.js": {
-    "ignore": true,
-    "reason": "pokes node-internal module internal/event_target"
+    "status": "harness_missing",
+    "family": "events",
+    "profile": "pure",
+    "compatibility": "unsupported",
+    "reason": "requires node-internal module internal/event_target"
   },
-  "test/parallel/test-path-basename.js": true,
-  "test/parallel/test-path-dirname.js": true,
-  "test/parallel/test-path-extname.js": true,
-  "test/parallel/test-path-isabsolute.js": true,
-  "test/parallel/test-path-join.js": true,
-  "test/parallel/test-path-normalize.js": true,
-  "test/parallel/test-path-parse-format.js": true,
-  "test/parallel/test-path-relative.js": true,
+  "test/parallel/test-path-basename.js": {
+    "status": "pass",
+    "family": "path",
+    "profile": "pure",
+    "compatibility": "exact"
+  },
+  "test/parallel/test-path-dirname.js": {
+    "status": "pass",
+    "family": "path",
+    "profile": "pure",
+    "compatibility": "exact"
+  },
+  "test/parallel/test-path-extname.js": {
+    "status": "pass",
+    "family": "path",
+    "profile": "pure",
+    "compatibility": "exact"
+  },
+  "test/parallel/test-path-isabsolute.js": {
+    "status": "pass",
+    "family": "path",
+    "profile": "pure",
+    "compatibility": "exact"
+  },
+  "test/parallel/test-path-join.js": {
+    "status": "pass",
+    "family": "path",
+    "profile": "pure",
+    "compatibility": "exact"
+  },
+  "test/parallel/test-path-normalize.js": {
+    "status": "pass",
+    "family": "path",
+    "profile": "pure",
+    "compatibility": "exact"
+  },
+  "test/parallel/test-path-parse-format.js": {
+    "status": "pass",
+    "family": "path",
+    "profile": "pure",
+    "compatibility": "exact"
+  },
+  "test/parallel/test-path-relative.js": {
+    "status": "pass",
+    "family": "path",
+    "profile": "pure",
+    "compatibility": "exact"
+  },
   "test/parallel/test-path-resolve.js": {
-    "ignore": true,
-    "reason": "requires child_process for cwd checks"
+    "status": "policy_required",
+    "family": "path",
+    "profile": "subprocess",
+    "compatibility": "adapted",
+    "reason": "requires child_process to verify cwd-dependent resolution"
   },
-  "test/parallel/test-path-zero-length-strings.js": true,
-  "test/parallel/test-path.js": true,
-  "test/parallel/test-querystring-escape.js": true,
-  "test/parallel/test-querystring-multichar-separator.js": true,
-  "test/parallel/test-querystring.js": true,
-  "test/parallel/test-timers-api-refs.js": true,
-  "test/parallel/test-timers-args.js": true,
-  "test/parallel/test-timers-clear-null-does-not-throw-error.js": true,
-  "test/parallel/test-timers-clearImmediate.js": true,
-  "test/parallel/test-timers-immediate.js": true,
-  "test/parallel/test-timers-non-integer-delay.js": true,
-  "test/parallel/test-timers-zero-timeout.js": true
+  "test/parallel/test-path-zero-length-strings.js": {
+    "status": "pass",
+    "family": "path",
+    "profile": "pure",
+    "compatibility": "exact"
+  },
+  "test/parallel/test-path.js": {
+    "status": "pass",
+    "family": "path",
+    "profile": "pure",
+    "compatibility": "exact"
+  },
+  "test/parallel/test-querystring-escape.js": {
+    "status": "pass",
+    "family": "querystring",
+    "profile": "pure",
+    "compatibility": "exact"
+  },
+  "test/parallel/test-querystring-multichar-separator.js": {
+    "status": "pass",
+    "family": "querystring",
+    "profile": "pure",
+    "compatibility": "exact"
+  },
+  "test/parallel/test-querystring.js": {
+    "status": "pass",
+    "family": "querystring",
+    "profile": "pure",
+    "compatibility": "exact"
+  },
+  "test/parallel/test-timers-api-refs.js": {
+    "status": "pass",
+    "family": "timers",
+    "profile": "pure",
+    "compatibility": "exact"
+  },
+  "test/parallel/test-timers-args.js": {
+    "status": "pass",
+    "family": "timers",
+    "profile": "pure",
+    "compatibility": "exact"
+  },
+  "test/parallel/test-timers-clear-null-does-not-throw-error.js": {
+    "status": "pass",
+    "family": "timers",
+    "profile": "pure",
+    "compatibility": "exact"
+  },
+  "test/parallel/test-timers-clearImmediate.js": {
+    "status": "pass",
+    "family": "timers",
+    "profile": "pure",
+    "compatibility": "exact"
+  },
+  "test/parallel/test-timers-immediate.js": {
+    "status": "pass",
+    "family": "timers",
+    "profile": "pure",
+    "compatibility": "exact"
+  },
+  "test/parallel/test-timers-non-integer-delay.js": {
+    "status": "pass",
+    "family": "timers",
+    "profile": "pure",
+    "compatibility": "exact"
+  },
+  "test/parallel/test-timers-zero-timeout.js": {
+    "status": "pass",
+    "family": "timers",
+    "profile": "pure",
+    "compatibility": "exact"
+  }
 }

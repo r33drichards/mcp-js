@@ -32,19 +32,82 @@ fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/node_compat")
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(untagged)]
-enum Expectation {
-    Pass(bool),
-    Detail(ExpectationDetail),
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum ExpectationStatus {
+    Pass,
+    Fail,
+    Unsupported,
+    HarnessMissing,
+    PolicyRequired,
+    Flaky,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-struct ExpectationDetail {
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    ignore: bool,
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum CompatibilityLevel {
+    Exact,
+    Adapted,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct Expectation {
+    status: ExpectationStatus,
+    family: String,
+    profile: String,
+    compatibility: CompatibilityLevel,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    expires: Option<String>,
+}
+
+impl Expectation {
+    fn passing(family: &str, profile: &str) -> Self {
+        Self {
+            status: ExpectationStatus::Pass,
+            family: family.to_string(),
+            profile: profile.to_string(),
+            compatibility: CompatibilityLevel::Exact,
+            reason: None,
+            expires: None,
+        }
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if self.family.trim().is_empty() {
+            return Err("family must not be empty".to_string());
+        }
+        if self.profile.trim().is_empty() {
+            return Err("profile must not be empty".to_string());
+        }
+        if self.status != ExpectationStatus::Pass
+            && self.reason.as_deref().is_none_or(|reason| reason.trim().is_empty())
+        {
+            return Err(format!("{:?} expectations require a reason", self.status));
+        }
+        if self.status == ExpectationStatus::Flaky
+            && self.expires.as_deref().is_none_or(|expires| expires.trim().is_empty())
+        {
+            return Err("flaky expectations require an expiry date".to_string());
+        }
+        if self.status == ExpectationStatus::Pass
+            && self.compatibility == CompatibilityLevel::Unsupported
+        {
+            return Err("passing expectations cannot be unsupported".to_string());
+        }
+        Ok(())
+    }
+
+    fn runnable(&self) -> bool {
+        matches!(self.status, ExpectationStatus::Pass | ExpectationStatus::Fail)
+    }
+
+    fn matches(&self, family: Option<&str>, profile: Option<&str>) -> bool {
+        family.is_none_or(|value| self.family == value)
+            && profile.is_none_or(|value| self.profile == value)
+    }
 }
 
 type Expectations = BTreeMap<String, Expectation>;
@@ -194,69 +257,85 @@ fn node_core_subset_matches_expectations() {
     let vendor = root().join("vendor");
     let update = std::env::var("NODE_COMPAT_UPDATE").is_ok();
     let filter = std::env::var("NODE_COMPAT_FILTER").ok();
+    let family_filter = std::env::var("NODE_COMPAT_FAMILY").ok();
+    let profile_filter = std::env::var("NODE_COMPAT_PROFILE").ok();
 
     let expectations: Expectations = std::fs::read_to_string(root().join("expectations.json"))
         .ok()
         .map(|s| serde_json::from_str(&s).expect("expectations.json must parse"))
         .unwrap_or_default();
+    for (key, expectation) in &expectations {
+        expectation
+            .validate()
+            .unwrap_or_else(|error| panic!("invalid expectation for {key}: {error}"));
+    }
 
-    let mut new_expectations = Expectations::new();
+    let mut new_expectations = expectations.clone();
     let mut drift = Vec::new();
     let mut pass = 0usize;
+    let mut run = 0usize;
+    let mut classified = 0usize;
 
     for test in collect_tests(&vendor) {
         let key = format!(
             "test/parallel/{}",
             test.file_name().unwrap().to_string_lossy()
         );
-        if let Some(f) = &filter {
-            if !key.contains(f.as_str()) {
-                if let Some(e) = expectations.get(&key) {
-                    new_expectations.insert(key, e.clone());
-                }
-                continue;
-            }
-        }
-        if let Some(Expectation::Detail(d)) = expectations.get(&key) {
-            if d.ignore {
-                new_expectations.insert(key, Expectation::Detail(d.clone()));
-                continue;
-            }
+        if filter.as_deref().is_some_and(|value| !key.contains(value)) {
+            continue;
         }
 
+        let expected = expectations
+            .get(&key)
+            .cloned()
+            .unwrap_or_else(|| Expectation::passing("other", "pure"));
+        if !expected.matches(family_filter.as_deref(), profile_filter.as_deref()) {
+            continue;
+        }
+        if !expected.runnable() {
+            classified += 1;
+            continue;
+        }
+
+        run += 1;
         let outcome = run_file(&test);
-        let actual = match &outcome {
+        let actual_status = match &outcome {
             Outcome::Pass => {
                 pass += 1;
-                Expectation::Pass(true)
+                ExpectationStatus::Pass
             }
-            Outcome::Fail(_) => Expectation::Pass(false),
+            Outcome::Fail(_) => ExpectationStatus::Fail,
         };
-        if !update {
-            let expected = expectations
-                .get(&key)
-                .cloned()
-                .unwrap_or(Expectation::Pass(true));
-            if expected != actual {
-                let detail = match &outcome {
-                    Outcome::Fail(msg) => msg.clone(),
-                    Outcome::Pass => String::new(),
-                };
-                drift.push(format!(
-                    "{key}\n  expected: {}\n  actual:   {}\n  {detail}",
-                    serde_json::to_string(&expected).unwrap(),
-                    serde_json::to_string(&actual).unwrap(),
-                ));
-            }
+
+        if !update && expected.status != actual_status {
+            let detail = match &outcome {
+                Outcome::Fail(msg) => msg.clone(),
+                Outcome::Pass => String::new(),
+            };
+            drift.push(format!(
+                "{key}\n  expected status: {:?}\n  actual status:   {:?}\n  {detail}",
+                expected.status, actual_status,
+            ));
         }
-        new_expectations.insert(key, actual);
+
+        if update {
+            let mut updated = expected;
+            updated.status = actual_status;
+            if actual_status == ExpectationStatus::Pass {
+                updated.reason = None;
+                updated.expires = None;
+            } else if updated.reason.is_none() {
+                updated.reason = Some(
+                    "observed failure; inspect before committing updated expectations".to_string(),
+                );
+            }
+            new_expectations.insert(key, updated);
+        }
     }
 
-    let total = new_expectations
-        .iter()
-        .filter(|(_, e)| !matches!(e, Expectation::Detail(d) if d.ignore))
-        .count();
-    println!("node-compat: {total} tests run, {pass} passing");
+    println!(
+        "node-compat: {run} tests run, {pass} passing, {classified} classified non-runnable"
+    );
 
     if update {
         let path = root().join("expectations.json");
@@ -275,4 +354,43 @@ fn node_core_subset_matches_expectations() {
          (re-record with NODE_COMPAT_UPDATE=1 if intentional):\n\n{}",
         drift.join("\n\n")
     );
+}
+
+#[cfg(test)]
+mod expectation_tests {
+    use super::*;
+
+    #[test]
+    fn parses_passing_expectation_metadata() {
+        let value = r#"{
+          "status":"pass",
+          "family":"events",
+          "profile":"pure",
+          "compatibility":"exact"
+        }"#;
+        let parsed: Expectation = serde_json::from_str(value).unwrap();
+        assert_eq!(parsed.status, ExpectationStatus::Pass);
+        assert_eq!(parsed.family, "events");
+        assert_eq!(parsed.profile, "pure");
+        assert_eq!(parsed.compatibility, CompatibilityLevel::Exact);
+    }
+
+    #[test]
+    fn rejects_non_pass_without_reason() {
+        let value = r#"{
+          "status":"harness_missing",
+          "family":"events",
+          "profile":"pure",
+          "compatibility":"unsupported"
+        }"#;
+        let parsed: Expectation = serde_json::from_str(value).unwrap();
+        assert!(parsed.validate().is_err());
+    }
+
+    #[test]
+    fn filter_matches_family_and_profile() {
+        let expectation = Expectation::passing("events", "pure");
+        assert!(expectation.matches(Some("events"), Some("pure")));
+        assert!(!expectation.matches(Some("streams"), Some("pure")));
+    }
 }
