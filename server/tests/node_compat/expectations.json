@@ -234,5 +234,11 @@
     "family": "timers",
     "profile": "pure",
     "compatibility": "exact"
+  },
+  "test/parallel/test-zlib-crc32.js": {
+    "status": "pass",
+    "family": "zlib",
+    "profile": "pure",
+    "compatibility": "exact"
   }
 }

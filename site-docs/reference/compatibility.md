@@ -97,7 +97,7 @@ changelog.
 
 ## Node.js core tests (node v22.14.0)
 
-**37 / 37 vendored runnable tests passing.** The `node:` modules
+**38 / 38 vendored runnable tests passing.** The `node:` modules
 served by the module loader:
 
 | Module | Implementation |
@@ -124,7 +124,7 @@ served by the module loader:
 | `node:tls` | option plumbing; TLS terminates host-side in the transports |
 | `node:url` | WHATWG URL + file-URL helpers |
 | `node:util` | purpose-written subset |
-| `node:zlib` | one-shot gzip/deflate over CompressionStream / DecompressionStream |
+| `node:zlib` | CRC32 plus one-shot gzip/deflate over CompressionStream / DecompressionStream |
 
 Classified non-runnable tests (with reasons):
 

@@ -3,7 +3,7 @@
 # server/tests/node_compat/vendor/. Files are fetched from the nodejs/node
 # repository at the pinned tag below (MIT license; LICENSE is vendored
 # alongside). Chosen families: path, process, querystring, events, timers,
-# console, crypto — the least host-coupled suites, matching the node: compat modules
+# console, crypto, zlib — the least host-coupled suites, matching the node: compat modules
 # served by the engine (see src/engine/node_compat.rs). Files that reach
 # into node-private surface (require('internal/...'), internalBinding,
 # process.on('exit') assertions, child_process, fixtures) don't fit the
@@ -55,6 +55,7 @@ FILES=(
   test/parallel/test-timers-zero-timeout.js
   test/parallel/test-console-instance.js
   test/parallel/test-crypto-randomuuid.js
+  test/parallel/test-zlib-crc32.js
   LICENSE
 )
 

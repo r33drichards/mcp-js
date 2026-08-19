@@ -392,3 +392,33 @@ async fn console_module_is_global_console() {
     )
     .await;
 }
+
+#[tokio::test]
+async fn zlib_crc32_matches_node() {
+    expect_ok(
+        r#"
+        import zlib, { crc32 } from 'node:zlib';
+        import { Buffer } from 'node:buffer';
+
+        if (zlib.crc32 !== crc32) throw new Error('crc32 export identity');
+        if (crc32('') !== 0) throw new Error('empty crc32');
+        if (crc32('hello') !== 0x3610a686) throw new Error('string crc32');
+        if (crc32(Buffer.from('test')) !== 0xd87f7e0c) throw new Error('buffer crc32');
+        if (crc32('abacus', 0x7a30360d) !== 0xf8655a84) {
+            throw new Error('seeded crc32');
+        }
+        const view = new DataView(new Uint8Array([0x74, 0x65, 0x73, 0x74]).buffer);
+        if (crc32(view) !== 0xd87f7e0c) throw new Error('DataView crc32');
+
+        for (const invalid of [undefined, null, true, 1, () => {}, {}]) {
+            try { crc32(invalid); throw new Error('expected invalid data'); }
+            catch (error) { if (error.code !== 'ERR_INVALID_ARG_TYPE') throw error; }
+        }
+        for (const invalid of [null, true, () => {}, {}]) {
+            try { crc32('test', invalid); throw new Error('expected invalid seed'); }
+            catch (error) { if (error.code !== 'ERR_INVALID_ARG_TYPE') throw error; }
+        }
+        "#,
+    )
+    .await;
+}

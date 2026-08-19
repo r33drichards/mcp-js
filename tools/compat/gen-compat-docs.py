@@ -117,7 +117,7 @@ w("| `node:timers` (+`/promises`) | the runtime timer globals, plus promisified 
 w("| `node:tls` | option plumbing; TLS terminates host-side in the transports |")
 w("| `node:url` | WHATWG URL + file-URL helpers |")
 w("| `node:util` | purpose-written subset |")
-w("| `node:zlib` | one-shot gzip/deflate over CompressionStream / DecompressionStream |")
+w("| `node:zlib` | CRC32 plus one-shot gzip/deflate over CompressionStream / DecompressionStream |")
 w("")
 if nclassified:
     w("Classified non-runnable tests (with reasons):")
