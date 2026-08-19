@@ -395,6 +395,133 @@ async fn console_module_is_global_console() {
 }
 
 #[tokio::test]
+async fn crypto_random_size_contracts() {
+    expect_ok(
+        r#"
+        import crypto, { pseudoRandomBytes, randomBytes, randomFillSync } from 'node:crypto';
+
+        function expectError(value, Type, code, message) {
+            try {
+                randomBytes(value);
+                throw new Error('expected ' + code);
+            } catch (error) {
+                if (!(error instanceof Type)) throw error;
+                if (error.code !== code) throw new Error('wrong code: ' + error.code);
+                if (error.message !== message) throw new Error('wrong message: ' + error.message);
+            }
+        }
+
+        for (const [value, received] of [
+            [undefined, 'undefined'], [null, 'null'], [false, 'type boolean (false)'],
+            [true, 'type boolean (true)'], [{}, 'an instance of Object'],
+            [[], 'an instance of Array'],
+        ]) {
+            expectError(
+                value, TypeError, 'ERR_INVALID_ARG_TYPE',
+                'The "size" argument must be of type number. Received ' + received,
+            );
+        }
+        for (const value of [-1, NaN, 2 ** 31, 2 ** 32]) {
+            expectError(
+                value, RangeError, 'ERR_OUT_OF_RANGE',
+                'The value of "size" is out of range. It must be >= 0 && <= 2147483647. Received ' + value,
+            );
+        }
+        if (randomBytes(101.2).length !== 101) throw new Error('fractional size');
+        if (typeof pseudoRandomBytes !== 'function' || pseudoRandomBytes(2).length !== 2) {
+            throw new Error('pseudoRandomBytes alias');
+        }
+        for (const name of ['pseudoRandomBytes', 'prng', 'rng']) {
+            const descriptor = Object.getOwnPropertyDescriptor(crypto, name);
+            if (!descriptor || descriptor.value !== randomBytes ||
+                descriptor.configurable !== true || descriptor.enumerable !== false) {
+                throw new Error('legacy alias descriptor: ' + name);
+            }
+        }
+        for (const callback of [1, true, NaN, null, {}, []]) {
+            try { randomBytes(1, callback); throw new Error('expected callback type'); }
+            catch (error) { if (error.code !== 'ERR_INVALID_ARG_TYPE') throw error; }
+        }
+        const raw = new ArrayBuffer(8);
+        const returned = randomFillSync(raw);
+        if (returned !== raw || new Uint8Array(raw).every((value) => value === 0)) {
+            throw new Error('ArrayBuffer randomFillSync');
+        }
+        expectError(
+            'test', TypeError, 'ERR_INVALID_ARG_TYPE',
+            'The "size" argument must be of type number. Received type string (\'test\')',
+        );
+        try { randomFillSync(new Uint8Array(10), 'test'); throw new Error('expected offset type'); }
+        catch (error) {
+            if (error.code !== 'ERR_INVALID_ARG_TYPE' ||
+                error.message !== 'The "offset" argument must be of type number. Received type string (\'test\')') {
+                throw error;
+            }
+        }
+        try { randomFillSync(new Uint8Array(10), 1, 10); throw new Error('expected size + offset'); }
+        catch (error) {
+            if (error.code !== 'ERR_OUT_OF_RANGE' ||
+                error.message !== 'The value of "size + offset" is out of range. It must be <= 10. Received 11') {
+                throw error;
+            }
+        }
+        "#,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn crypto_random_int_contracts() {
+    expect_ok(
+        r#"
+        import { randomInt } from 'node:crypto';
+
+        function expectError(run, Type, code, message) {
+            try {
+                run();
+                throw new Error('expected ' + code);
+            } catch (error) {
+                if (!(error instanceof Type)) throw error;
+                if (error.code !== code) throw new Error('wrong code: ' + error.code);
+                if (error.message !== message) throw new Error('wrong message: ' + error.message);
+            }
+        }
+
+        expectError(
+            () => randomInt('10', 100), TypeError, 'ERR_INVALID_ARG_TYPE',
+            'The "min" argument must be a safe integer. Received type string (\'10\')',
+        );
+        expectError(
+            () => randomInt('10'), TypeError, 'ERR_INVALID_ARG_TYPE',
+            'The "max" argument must be a safe integer. Received type string (\'10\')',
+        );
+        expectError(
+            () => randomInt(Number.MIN_SAFE_INTEGER - 1, Number.MIN_SAFE_INTEGER + 5),
+            TypeError, 'ERR_INVALID_ARG_TYPE',
+            'The "min" argument must be a safe integer. Received type number (-9007199254740992)',
+        );
+        expectError(
+            () => randomInt(3, 2), RangeError, 'ERR_OUT_OF_RANGE',
+            'The value of "max" is out of range. It must be greater than the value of "min" (3). Received 2',
+        );
+        expectError(
+            () => randomInt(1, 0xFFFF_FFFF_FFFF + 2), RangeError, 'ERR_OUT_OF_RANGE',
+            'The value of "max - min" is out of range. It must be <= 281474976710655. Received 281_474_976_710_656',
+        );
+        expectError(
+            () => randomInt(0xFFFF_FFFF_FFFF + 1), RangeError, 'ERR_OUT_OF_RANGE',
+            'The value of "max" is out of range. It must be <= 281474976710655. Received 281_474_976_710_656',
+        );
+        expectError(
+            () => randomInt(0, 1, 10), TypeError, 'ERR_INVALID_ARG_TYPE',
+            'The "callback" argument must be of type function. Received type number (10)',
+        );
+        "#,
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn zlib_crc32_matches_node() {
     expect_ok(
         r#"
