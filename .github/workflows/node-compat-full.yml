@@ -37,7 +37,10 @@ jobs:
           NODE_COMPAT_RESULTS: ${{ github.workspace }}/node-compat-results/results.jsonl
           NODE_COMPAT_SUMMARY: ${{ github.workspace }}/node-compat-results/summary.json
           NODE_COMPAT_TIMEOUT_SECONDS: '10'
-        run: mkdir -p node-compat-results && target/release/examples/node_compat_full 2>&1 | tee node-compat-results/runner.log
+        run: |
+          set -o pipefail
+          mkdir -p node-compat-results
+          target/release/examples/node_compat_full 2>&1 | tee node-compat-results/runner.log
       - name: Upload shard results
         if: always()
         uses: actions/upload-artifact@v4
