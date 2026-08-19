@@ -133,11 +133,19 @@ const common = {
             env: options.env,
         }).output();
         const decoder = new TextDecoder();
+        function normalizeOutput(bytes) {
+            let text = decoder.decode(bytes);
+            if (hostCorpus) {
+                const hostTestRoot = hostCorpus.replace(/\/+$/, '') + '/test';
+                text = text.split(hostTestRoot).join('/test');
+            }
+            return text;
+        }
         return {
             code: output.code,
             signal: output.signal,
-            stdout: decoder.decode(output.stdout),
-            stderr: decoder.decode(output.stderr),
+            stdout: normalizeOutput(output.stdout),
+            stderr: normalizeOutput(output.stderr),
         };
     },
     mustNotMutateObjectDeep(obj) { return obj; },
