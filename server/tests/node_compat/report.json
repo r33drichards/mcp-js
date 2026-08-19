@@ -7,11 +7,11 @@
     "citgm_commit": "09ca92bb5f1ed77e1aec3bed129285c1568797eb"
   },
   "fast_suite": {
-    "total": 37,
-    "runnable": 35,
+    "total": 39,
+    "runnable": 37,
     "status": {
       "harness_missing": 1,
-      "pass": 35,
+      "pass": 37,
       "policy_required": 1
     },
     "family": {
@@ -19,16 +19,17 @@
       "crypto": 1,
       "events": 14,
       "path": 11,
+      "process": 2,
       "querystring": 3,
       "timers": 7
     },
     "profile": {
-      "pure": 36,
+      "pure": 38,
       "subprocess": 1
     },
     "compatibility": {
       "adapted": 1,
-      "exact": 35,
+      "exact": 37,
       "unsupported": 1
     }
   },

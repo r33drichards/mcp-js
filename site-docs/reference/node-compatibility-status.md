@@ -13,14 +13,14 @@ versions and are intentionally reported separately.
 
 ## Fast Executable Suite
 
-**35 passing of 35 runnable tests; 37 total classified tests.**
+**37 passing of 37 runnable tests; 39 total classified tests.**
 
 ### Status
 
 | Name | Count |
 |---|---:|
 | `harness_missing` | 1 |
-| `pass` | 35 |
+| `pass` | 37 |
 | `policy_required` | 1 |
 
 ### Module Families
@@ -31,6 +31,7 @@ versions and are intentionally reported separately.
 | `crypto` | 1 |
 | `events` | 14 |
 | `path` | 11 |
+| `process` | 2 |
 | `querystring` | 3 |
 | `timers` | 7 |
 
@@ -38,7 +39,7 @@ versions and are intentionally reported separately.
 
 | Name | Count |
 |---|---:|
-| `pure` | 36 |
+| `pure` | 38 |
 | `subprocess` | 1 |
 
 ## Full Deno-Vendored Corpus Inventory

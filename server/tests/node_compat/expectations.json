@@ -163,6 +163,18 @@
     "profile": "pure",
     "compatibility": "exact"
   },
+  "test/parallel/test-process-getactiveresources-track-interval-lifetime.js": {
+    "status": "pass",
+    "family": "process",
+    "profile": "pure",
+    "compatibility": "exact"
+  },
+  "test/parallel/test-process-getactiveresources.js": {
+    "status": "pass",
+    "family": "process",
+    "profile": "pure",
+    "compatibility": "exact"
+  },
   "test/parallel/test-querystring-escape.js": {
     "status": "pass",
     "family": "querystring",

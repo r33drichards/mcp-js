@@ -109,7 +109,7 @@ w("| `node:module` | `createRequire`/`builtinModules` over the builtin registry 
 w("| `node:net` | address helpers; sockets are inert (transports are policy-gated) |")
 w("| `node:os` | fixed sandbox values |")
 w("| `node:path` | Node's own lib source over a primordials shim |")
-w("| `node:process` | fixed sandbox values; no host env |")
+w("| `node:process` | fixed sandbox values plus active timer/immediate resource snapshots; no host env |")
 w("| `node:querystring` | Node's own lib source over a primordials shim |")
 w("| `node:stream` | purpose-written subset (legacy `Stream` base + Readable/Writable/Duplex/Transform) |")
 w("| `node:stream/web` | the runtime's WHATWG streams globals re-exported |")

@@ -198,6 +198,60 @@ async fn create_require_serves_builtins() {
 }
 
 #[tokio::test]
+async fn process_active_resources() {
+    expect_ok(
+        r#"
+        import process, { getActiveResourcesInfo } from 'node:process';
+
+        if (process.getActiveResourcesInfo !== getActiveResourcesInfo) {
+            throw new Error('named export identity');
+        }
+        const initial = getActiveResourcesInfo();
+        if (!Array.isArray(initial) || initial.length !== 0) {
+            throw new Error('initial resources: ' + JSON.stringify(initial));
+        }
+        initial.push('fake');
+        if (getActiveResourcesInfo().includes('fake')) {
+            throw new Error('resource snapshots must be fresh');
+        }
+
+        const timeout = setTimeout(() => {}, 5000);
+        if (!getActiveResourcesInfo().includes('Timeout')) {
+            throw new Error('timeout resource missing');
+        }
+        timeout.unref();
+        if (getActiveResourcesInfo().includes('Timeout')) {
+            throw new Error('unref timeout must be hidden');
+        }
+        timeout.ref();
+        if (!getActiveResourcesInfo().includes('Timeout')) {
+            throw new Error('ref timeout must be restored');
+        }
+        clearTimeout(timeout);
+        if (getActiveResourcesInfo().includes('Timeout')) {
+            throw new Error('cleared timeout must be removed');
+        }
+
+        const interval = setInterval(() => {}, 5000);
+        if (!getActiveResourcesInfo().includes('Timeout')) {
+            throw new Error('interval resource missing');
+        }
+        clearInterval(interval);
+
+        const immediate = setImmediate(() => {});
+        if (!getActiveResourcesInfo().includes('Immediate')) {
+            throw new Error('immediate resource missing');
+        }
+        clearImmediate(immediate);
+        if (getActiveResourcesInfo().includes('Immediate')) {
+            throw new Error('cleared immediate must be removed');
+        }
+        "#,
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn timers_module_and_promises() {
     expect_ok(
         r#"

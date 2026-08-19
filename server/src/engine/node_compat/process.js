@@ -32,6 +32,10 @@ const process = {
     memoryUsage() {
         return { rss: 0, heapTotal: 0, heapUsed: 0, external: 0, arrayBuffers: 0 };
     },
+    getActiveResourcesInfo() {
+        const snapshot = globalThis.__mcpV8GetActiveResourcesInfo;
+        return typeof snapshot === 'function' ? snapshot() : [];
+    },
     hrtime(prev) {
         const now = performance.now();
         const sec = Math.floor(now / 1000);
@@ -90,4 +94,7 @@ process.hrtime.bigint = function bigint() {
 };
 
 export default process;
-export const { argv, env, platform, arch, version, versions, nextTick, cwd, hrtime } = process;
+export const {
+    argv, env, platform, arch, version, versions, nextTick, cwd, hrtime,
+    getActiveResourcesInfo,
+} = process;
