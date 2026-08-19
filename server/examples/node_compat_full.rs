@@ -2,6 +2,7 @@
 mod result;
 #[path = "node_compat_full/shard.rs"]
 mod shard;
+use deno_core::ModuleSpecifier;
 use result::{BroadResult, ResultStatus, ShardSummary};
 use serde::Deserialize;
 use server::engine::{
@@ -64,7 +65,13 @@ fn rewrite_esm_harness_imports(body: &str) -> String {
     body.replace("'../common/index.mjs'", "'node-test:common'")
         .replace("\"../common/index.mjs\"", "\"node-test:common\"")
 }
+fn strip_shebang(body: &str) -> &str {
+    body.strip_prefix("#!")
+        .and_then(|rest| rest.split_once('\n').map(|(_, body)| body))
+        .unwrap_or(body)
+}
 fn assemble(path: &str, body: &str) -> String {
+    let body = strip_shebang(body);
     if is_esm(path) {
         return format!(
             "import 'node-test:prelude';\n{}\nglobalThis.__NODE_TEST_SCHEDULE_REPORT__({:?});",
@@ -92,22 +99,52 @@ export const platformTimeout = common.platformTimeout.bind(common);
 export const fixturesDir = '/test/fixtures';
 export default common;
 "#;
-fn virtual_modules(path: &str) -> Option<Arc<HashMap<String, String>>> {
-    if !is_esm(path) {
-        return None;
+fn add_corpus_modules(
+    root: &Path,
+    directory: &Path,
+    modules: &mut HashMap<String, String>,
+) -> Result<(), String> {
+    for entry in fs::read_dir(directory).map_err(|error| error.to_string())? {
+        let path = entry.map_err(|error| error.to_string())?.path();
+        if path.is_dir() {
+            add_corpus_modules(root, &path, modules)?;
+            continue;
+        }
+        if !matches!(
+            path.extension().and_then(|value| value.to_str()),
+            Some("js" | "mjs" | "cjs")
+        ) {
+            continue;
+        }
+        let relative = path.strip_prefix(root).map_err(|error| error.to_string())?;
+        let virtual_path = Path::new("/").join(relative);
+        let specifier = ModuleSpecifier::from_file_path(&virtual_path)
+            .map_err(|_| format!("invalid corpus module path: {}", virtual_path.display()))?;
+        let source = fs::read_to_string(&path).map_err(|error| error.to_string())?;
+        modules.insert(specifier.to_string(), strip_shebang(&source).to_string());
     }
-    let prelude = format!(
-        "globalThis.__NODE_TEST_PATH__={};globalThis.__NODE_TEST_NAME__={};\n{}",
-        serde_json::to_string(path).unwrap(),
-        serde_json::to_string(test_name(path)).unwrap(),
-        PRELUDE,
-    );
-    Some(Arc::new(HashMap::from([
-        ("node-test:prelude".into(), prelude),
-        ("node-test:common".into(), COMMON_ESM.into()),
-    ])))
+    Ok(())
 }
-fn run(path: &str, body: &str, timeout: Duration) -> Outcome {
+fn corpus_modules(corpus: &Path) -> Result<Arc<HashMap<String, String>>, String> {
+    let mut modules = HashMap::new();
+    add_corpus_modules(corpus, &corpus.join("test"), &mut modules)?;
+    modules.insert("node-test:prelude".into(), PRELUDE.into());
+    modules.insert("node-test:common".into(), COMMON_ESM.into());
+    modules.insert("file:///test/common/index.mjs".into(), COMMON_ESM.into());
+    Ok(Arc::new(modules))
+}
+fn test_module_specifier(path: &str) -> Result<String, String> {
+    let virtual_path = Path::new("/").join(path);
+    ModuleSpecifier::from_file_path(&virtual_path)
+        .map(|specifier| specifier.to_string())
+        .map_err(|_| format!("invalid test module path: {}", virtual_path.display()))
+}
+fn run(
+    path: &str,
+    body: &str,
+    timeout: Duration,
+    modules: &Arc<HashMap<String, String>>,
+) -> Outcome {
     INIT.call_once(server::engine::initialize_v8);
     let tmp = std::env::temp_dir().join(format!(
         "mcp-node-full-{}-{}",
@@ -126,12 +163,17 @@ fn run(path: &str, body: &str, timeout: Duration) -> Outcome {
     let module_loader = ModuleLoaderConfig {
         allow_external: true,
         policy_chain: None,
-        virtual_modules: virtual_modules(path),
+        virtual_modules: Some(modules.clone()),
+    };
+    let main_specifier = match test_module_specifier(path) {
+        Ok(specifier) => specifier,
+        Err(error) => return Outcome::Runtime(error),
     };
     let config = ExecutionConfig::new(256 * 1024 * 1024)
         .console_tree(tree.clone())
         .fetch_config(&fetch)
-        .module_loader_config(&module_loader);
+        .module_loader_config(&module_loader)
+        .main_module_specifier(&main_specifier);
     let handle = config.isolate_handle.clone();
     let done = Arc::new(AtomicBool::new(false));
     let timed = Arc::new(AtomicBool::new(false));
@@ -215,6 +257,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or(10),
     );
     let inventory: Inventory = serde_json::from_str(&fs::read_to_string(inv)?)?;
+    let modules = corpus_modules(&corpus)?;
     if let Some(p) = results.parent() {
         fs::create_dir_all(p)?
     }
@@ -238,7 +281,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let start = Instant::now();
         let (status, reason, details) = match fs::read_to_string(corpus.join(&t.path)) {
-            Ok(src) => match run(&t.path, &src, timeout) {
+            Ok(src) => match run(&t.path, &src, timeout, &modules) {
                 Outcome::Pass => (ResultStatus::Pass, None, None),
                 Outcome::Skip(r) if result::is_platform_inapplicable(&r) => {
                     (ResultStatus::PlatformInapplicable, Some(r), None)
@@ -310,8 +353,22 @@ mod tests {
         assert!(source.contains("import 'node-test:common';"));
         assert!(source.contains("import assert from 'assert';"));
         assert!(!source.contains("globalThis.__NODE_TEST_RUN_CJS__("));
-        let modules = virtual_modules("test/es-module/example.mjs").unwrap();
+        assert_eq!(
+            test_module_specifier("test/es-module/example.mjs").unwrap(),
+            "file:///test/es-module/example.mjs",
+        );
+        let root = std::env::temp_dir().join(format!(
+            "node-compat-modules-{}", std::process::id()
+        ));
+        fs::create_dir_all(root.join("test/fixtures")).unwrap();
+        fs::write(root.join("test/fixtures/value.mjs"), "export default 42;\n").unwrap();
+        let modules = corpus_modules(&root).unwrap();
+        fs::remove_dir_all(root).unwrap();
         assert!(modules.contains_key("node-test:prelude"));
+        assert_eq!(
+            modules.get("file:///test/fixtures/value.mjs").map(String::as_str),
+            Some("export default 42;\n"),
+        );
         let common = modules.get("node-test:common").unwrap();
         assert!(common.contains("export const mustCall"));
         assert!(common.contains("globalThis.__NODE_TEST_COMMON__"));

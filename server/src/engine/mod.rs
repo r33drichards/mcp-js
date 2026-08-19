@@ -799,10 +799,16 @@ fn execute_module(
     rt: &tokio::runtime::Runtime,
     runtime: &mut JsRuntime,
     code: &str,
+    main_module_specifier: Option<&str>,
 ) -> Result<(), String> {
-    let id = MODULE_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let main_url = ModuleSpecifier::parse(&format!("file:///main_{}.js", id))
-        .map_err(|e| format!("internal specifier error: {}", e))?;
+    let main_url = if let Some(specifier) = main_module_specifier {
+        ModuleSpecifier::parse(specifier)
+            .map_err(|e| format!("invalid main module specifier: {}", e))?
+    } else {
+        let id = MODULE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        ModuleSpecifier::parse(&format!("file:///main_{}.js", id))
+            .map_err(|e| format!("internal specifier error: {}", e))?
+    };
 
     // CRITICAL: run the load, module evaluation, AND event loop inside ONE
     // `block_on`. `mod_evaluate` runs the module's top-level synchronous code
@@ -849,6 +855,7 @@ pub struct ExecutionConfig<'a> {
     pub subprocess_config: Option<&'a subprocess::SubprocessConfig>,
     pub console_tree: Option<sled::Tree>,
     pub module_loader_config: Option<&'a module_loader::ModuleLoaderConfig>,
+    pub main_module_specifier: Option<&'a str>,
     pub mcp_config: Option<&'a mcp_client::McpConfig>,
     /// Per-mitigation sandbox hardening. Default is all-off (unhardened).
     pub hardening: console::HardeningConfig,
@@ -870,6 +877,7 @@ impl<'a> ExecutionConfig<'a> {
             subprocess_config: None,
             console_tree: None,
             module_loader_config: None,
+            main_module_specifier: None,
             mcp_config: None,
             hardening: console::HardeningConfig::default(),
         }
@@ -922,6 +930,11 @@ impl<'a> ExecutionConfig<'a> {
 
     pub fn module_loader_config(mut self, config: &'a module_loader::ModuleLoaderConfig) -> Self {
         self.module_loader_config = Some(config);
+        self
+    }
+
+    pub fn main_module_specifier(mut self, specifier: &'a str) -> Self {
+        self.main_module_specifier = Some(specifier);
         self
     }
 
@@ -980,6 +993,7 @@ pub fn execute_stateless(
         subprocess_config,
         console_tree,
         module_loader_config,
+        main_module_specifier,
         mcp_config,
         hardening,
     } = config;
@@ -1172,7 +1186,7 @@ pub fn execute_stateless(
                     if let Err(e) = console::harden_runtime(&mut runtime, hardening) {
                         return Err(e);
                     }
-                    execute_module(&rt, &mut runtime, code)
+                    execute_module(&rt, &mut runtime, code, main_module_specifier)
                 }
             };
 
@@ -1224,6 +1238,7 @@ pub fn execute_stateful(
         subprocess_config,
         console_tree,
         module_loader_config,
+        main_module_specifier,
         mcp_config,
         hardening,
     } = config;
@@ -1355,7 +1370,7 @@ pub fn execute_stateful(
         let has_snapshot = leaked_snapshot.is_some();
 
         let output_result = if has_snapshot {
-            execute_module(&rt, &mut runtime, code)
+            execute_module(&rt, &mut runtime, code, main_module_specifier)
         } else {
             // Inject WASM modules as globals via V8 native API.
             // Do NOT early-return here — snapshot() must be called below.
@@ -1443,7 +1458,7 @@ pub fn execute_stateful(
                     if let Err(e) = console::harden_runtime(&mut runtime, hardening) {
                         return Err(e);
                     }
-                    execute_module(&rt, &mut runtime, code)
+                    execute_module(&rt, &mut runtime, code, main_module_specifier)
                 }
             }
         };
