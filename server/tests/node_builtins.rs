@@ -75,6 +75,7 @@ fn node_compat_prelude_maps_registered_host_modules() {
         ("node:perf_hooks", "perf_hooks: perfHooks"),
         ("node:stream/web", "'stream/web': streamWeb"),
         ("node:tls", "tls: tls"),
+        ("node:util/types", "'util/types': utilTypes"),
         ("node:zlib", "zlib: zlib"),
     ] {
         assert!(
@@ -175,6 +176,8 @@ async fn create_require_serves_builtins() {
         r#"
         import module, { createRequire, isBuiltin, builtinModules } from 'node:module';
         import path from 'node:path';
+        import util, { types } from 'node:util';
+        import utilTypes from 'node:util/types';
 
         const require = createRequire(import.meta.url);
         if (require('path') !== path) throw new Error('require(path) identity');
@@ -184,6 +187,9 @@ async fn create_require_serves_builtins() {
             throw new Error('require(crypto) not functional');
         }
         if (require('module') !== module) throw new Error('require(module) identity');
+        if (util.types !== types || types !== utilTypes || require('util/types') !== utilTypes) {
+            throw new Error('util/types identity');
+        }
         if (require.resolve('url') !== 'node:url') throw new Error('require.resolve');
 
         try { require('./local.js'); throw new Error('file require should throw'); }
@@ -194,7 +200,9 @@ async fn create_require_serves_builtins() {
         if (!isBuiltin('fs') || !isBuiltin('node:fs/promises') || isBuiltin('leftpad')) {
             throw new Error('isBuiltin');
         }
-        if (!builtinModules.includes('timers/promises')) throw new Error('subpath builtins listed');
+        if (!builtinModules.includes('timers/promises') || !builtinModules.includes('util/types')) {
+            throw new Error('subpath builtins listed');
+        }
         "#,
     )
     .await;

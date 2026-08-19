@@ -36,6 +36,7 @@ pub const NODE_MODULES: &[(&str, &str)] = &[
     ("tls", include_str!("node_compat/tls.js")),
     ("url", include_str!("node_compat/url.js")),
     ("util", include_str!("node_compat/util.js")),
+    ("util/types", include_str!("node_compat/util_types.js")),
     ("zlib", include_str!("node_compat/zlib.js")),
 ];
 

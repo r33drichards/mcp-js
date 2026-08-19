@@ -31,6 +31,7 @@ import timersPromises from 'node:timers/promises';
 import tls from 'node:tls';
 import url from 'node:url';
 import util from 'node:util';
+import utilTypes from 'node:util/types';
 import zlib from 'node:zlib';
 
 globalThis.process = process;
@@ -192,6 +193,7 @@ const modules = {
     tls: tls,
     url: url,
     util: util,
+    'util/types': utilTypes,
     zlib: zlib,
 };
 
