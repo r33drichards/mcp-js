@@ -639,6 +639,65 @@ fn test_concurrent_virtual_package_errors_reject_independently() {
 }
 
 #[test]
+fn test_create_require_enforces_package_exports() {
+    use std::collections::HashMap;
+    use server::engine::{execute_stateless, ExecutionConfig};
+
+    ensure_v8();
+    let modules = Arc::new(HashMap::from([
+        (
+            "file:///app/node_modules/hidden/package.json".to_string(),
+            r#"{"exports":"./index.cjs"}"#.to_string(),
+        ),
+        (
+            "file:///app/node_modules/exact/package.json".to_string(),
+            r#"{"exports":{"./no-ext":"./value"}}"#.to_string(),
+        ),
+    ]));
+    let commonjs_modules = Arc::new(HashMap::from([
+        (
+            "file:///app/node_modules/hidden/index.cjs".to_string(),
+            "module.exports = 42;".to_string(),
+        ),
+        (
+            "file:///app/node_modules/hidden/private.cjs".to_string(),
+            "module.exports = 7;".to_string(),
+        ),
+        (
+            "file:///app/node_modules/exact/value.js".to_string(),
+            "module.exports = 9;".to_string(),
+        ),
+    ]));
+    let loader = ModuleLoaderConfig {
+        allow_external: false,
+        policy_chain: None,
+        virtual_modules: Some(modules),
+        virtual_commonjs_modules: Some(commonjs_modules),
+    };
+    let code = r#"
+        import { createRequire } from 'node:module';
+        const require = createRequire(import.meta.url);
+        for (const [specifier, expectedCode] of [
+            ['hidden/private.cjs', 'ERR_PACKAGE_PATH_NOT_EXPORTED'],
+            ['exact/no-ext', 'MODULE_NOT_FOUND'],
+        ]) {
+            let error;
+            try { require(specifier); } catch (caught) { error = caught; }
+            if (error?.code !== expectedCode) {
+                throw new Error(`${specifier}: expected ${expectedCode}, got ${error?.code || 'resolved'}`);
+            }
+        }
+    "#;
+    let (result, _) = execute_stateless(
+        code,
+        ExecutionConfig::new(64 * 1024 * 1024)
+            .module_loader_config(&loader)
+            .main_module_specifier("file:///app/main.mjs"),
+    );
+    assert!(result.is_ok(), "createRequire exports enforcement failed: {result:?}");
+}
+
+#[test]
 fn test_create_require_virtual_package_exports() {
     use std::collections::HashMap;
     use server::engine::{execute_stateless, ExecutionConfig};

@@ -193,7 +193,8 @@ function resolveVirtualFile(url) {
 function resolvePackageSource(packageUrl, source, parts, conditions) {
     const packageData = JSON.parse(source);
     const packageSubpath = parts.subpath ? './' + parts.subpath : '.';
-    const target = packageData.exports === undefined
+    const hasExports = packageData.exports !== undefined;
+    const target = !hasExports
         ? (parts.subpath ? './' + parts.subpath : packageData.main || './index.js')
         : exportsTarget(packageData.exports, packageSubpath, conditions);
     if (target === PACKAGE_TARGET_INVALID) {
@@ -211,7 +212,12 @@ function resolvePackageSource(packageUrl, source, parts, conditions) {
         throw err;
     }
     const targetUrl = new URL(target, packageUrl);
-    const resolved = resolveVirtualFile(targetUrl);
+    const resolved = hasExports
+        ? (virtualCommonJsModules &&
+            Object.prototype.hasOwnProperty.call(virtualCommonJsModules, targetUrl.href)
+            ? targetUrl.href
+            : null)
+        : resolveVirtualFile(targetUrl);
     if (resolved) return resolved;
     const err = new Error(`Cannot find module '${decodeURIComponent(targetUrl.pathname)}'`);
     err.code = 'MODULE_NOT_FOUND';
@@ -253,14 +259,14 @@ function resolveVirtual(id, filename, conditions = ['require', 'node', 'default'
             return resolvePackageSource(selfPackageUrl, selfSource, parts, conditions);
         }
         const insideNodeModules = directory.pathname.endsWith('/node_modules/');
-        const legacyFile = insideNodeModules
-            ? null
-            : resolveVirtualFile(new URL(`node_modules/${request}`, directory));
-        if (legacyFile) return legacyFile;
         const packageBase = new URL(`node_modules/${parts.packageName}/`, directory);
         const packageUrl = new URL('package.json', packageBase);
         const source = insideNodeModules ? undefined : virtualPackageJson[packageUrl.href];
         if (source !== undefined) return resolvePackageSource(packageUrl, source, parts, conditions);
+        const legacyFile = insideNodeModules
+            ? null
+            : resolveVirtualFile(new URL(`node_modules/${request}`, directory));
+        if (legacyFile) return legacyFile;
         const legacyPackage = insideNodeModules ? null : resolveVirtualFile(new URL(
             parts.subpath || './index.js', packageBase));
         if (legacyPackage) return legacyPackage;
