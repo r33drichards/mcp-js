@@ -87,6 +87,7 @@ async fn expect_ok_with_internals(code: &str) {
 fn node_compat_prelude_maps_registered_host_modules() {
     let prelude = include_str!("node_compat/runner/prelude.js");
     for (import, mapping) in [
+        ("node:child_process", "child_process: childProcess"),
         ("node:dns", "dns: dns"),
         ("node:dns/promises", "'dns/promises': dnsPromises"),
         ("node:fs", "fs: fs"),

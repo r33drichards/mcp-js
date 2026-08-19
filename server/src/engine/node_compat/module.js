@@ -6,6 +6,7 @@
 
 import assert from 'node:assert';
 import buffer from 'node:buffer';
+import childProcess from 'node:child_process';
 import consoleModule from 'node:console';
 import crypto from 'node:crypto';
 import dns from 'node:dns';
@@ -37,6 +38,7 @@ const builtins = new Map([
     ['assert', assert],
     ['assert/strict', assert.strict],
     ['buffer', buffer],
+    ['child_process', childProcess],
     ['console', consoleModule],
     ['crypto', crypto],
     ['dns', dns],

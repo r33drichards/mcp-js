@@ -8,6 +8,7 @@
 
 import assert, { strict as assertStrict } from 'node:assert';
 import buffer, { Buffer } from 'node:buffer';
+import childProcess from 'node:child_process';
 import consoleModule from 'node:console';
 import crypto from 'node:crypto';
 import dns from 'node:dns';
@@ -201,6 +202,7 @@ const modules = {
     },
     'assert/strict': assertStrict,
     buffer: buffer,
+    child_process: childProcess,
     console: consoleModule,
     crypto: crypto,
     dns: dns,
