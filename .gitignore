@@ -9,3 +9,7 @@ node_modules
 site/
 .worktrees/
 .claude/worktrees/
+
+.cache/node-compat/
+__pycache__/
+*.pyc
