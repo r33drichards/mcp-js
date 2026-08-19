@@ -444,6 +444,84 @@ console.log(pascalCase("hello_world"));
 // ══════════════════════════════════════════════════════════════════════════
 
 #[test]
+fn test_data_url_source_preserves_query_characters() {
+    use server::engine::{execute_stateless, ExecutionConfig};
+
+    ensure_v8();
+    let code = r#"
+        const module = await import('data:text/javascript,export default "?"');
+        if (module.default !== '?') {
+            throw new Error(`unexpected data URL value: ${module.default}`);
+        }
+    "#;
+    let (result, _) = execute_stateless(
+        code,
+        ExecutionConfig::new(64 * 1024 * 1024)
+            .main_module_specifier("file:///main.mjs"),
+    );
+    assert!(result.is_ok(), "data URL source was truncated: {result:?}");
+}
+
+#[test]
+fn test_data_url_unknown_format_uses_node_error_code() {
+    use server::engine::{execute_stateless, ExecutionConfig};
+
+    ensure_v8();
+    let code = r#"
+        try {
+            await import('data:text/css,', { with: { type: 'css' } });
+            throw new Error('import unexpectedly succeeded');
+        } catch (error) {
+            if (error.code !== 'ERR_UNKNOWN_MODULE_FORMAT') {
+                throw new Error(`unexpected error code: ${error.code}: ${error.message}`);
+            }
+        }
+    "#;
+    let (result, _) = execute_stateless(
+        code,
+        ExecutionConfig::new(64 * 1024 * 1024)
+            .main_module_specifier("file:///main.mjs"),
+    );
+    assert!(result.is_ok(), "data URL import failed incorrectly: {result:?}");
+}
+
+#[test]
+fn test_virtual_module_rejects_unsupported_type_attribute() {
+    use std::collections::HashMap;
+    use server::engine::{execute_stateless, ExecutionConfig};
+
+    ensure_v8();
+    let modules = Arc::new(HashMap::from([(
+        "file:///dep.js".to_string(),
+        "export default 42;".to_string(),
+    )]));
+    let loader = ModuleLoaderConfig {
+        allow_external: false,
+        policy_chain: None,
+        virtual_modules: Some(modules),
+        virtual_commonjs_modules: None,
+        virtual_files: None,
+    };
+    let code = r#"
+        try {
+            await import('./dep.js', { with: { type: 'unsupported' } });
+            throw new Error('import unexpectedly succeeded');
+        } catch (error) {
+            if (error.code !== 'ERR_IMPORT_ATTRIBUTE_UNSUPPORTED') {
+                throw new Error(`unexpected error code: ${error.code}: ${error.message}`);
+            }
+        }
+    "#;
+    let (result, _) = execute_stateless(
+        code,
+        ExecutionConfig::new(64 * 1024 * 1024)
+            .module_loader_config(&loader)
+            .main_module_specifier("file:///main.mjs"),
+    );
+    assert!(result.is_ok(), "virtual module accepted invalid type: {result:?}");
+}
+
+#[test]
 fn test_virtual_json_module_preserves_json_type() {
     use std::collections::HashMap;
     use server::engine::{execute_stateless, ExecutionConfig};

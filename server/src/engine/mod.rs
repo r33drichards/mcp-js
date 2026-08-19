@@ -83,6 +83,32 @@ pub const MIN_HEAP_MEMORY_MB: usize = 16;
 
 // ── V8 initialization ───────────────────────────────────────────────────
 
+fn validate_node_import_attributes(
+    scope: &mut v8::PinScope,
+    attributes: &HashMap<String, String>,
+) {
+    let Some((attribute, value)) = attributes
+        .iter()
+        .find(|(key, _)| key.as_str() != "type")
+    else {
+        return;
+    };
+    let message = v8::String::new(
+        scope,
+        &format!(
+            "Import attribute \"{}\" with value \"{}\" is not supported",
+            attribute, value
+        ),
+    )
+    .unwrap();
+    let exception = v8::Exception::type_error(scope, message);
+    let object = exception.to_object(scope).unwrap();
+    let code_key = v8::String::new(scope, "code").unwrap();
+    let code_value = v8::String::new(scope, "ERR_IMPORT_ATTRIBUTE_UNSUPPORTED").unwrap();
+    object.set(scope, code_key.into(), code_value.into());
+    scope.throw_exception(exception);
+}
+
 pub fn initialize_v8() {
     // deno_core initializes V8 automatically on first JsRuntime creation.
     // Kept as the common process-init hook for callers (main.rs, tests, fuzz).
@@ -1042,6 +1068,7 @@ pub fn execute_stateless(
             create_params: Some(params),
             extensions,
             module_loader: Some(module_loader),
+            validate_import_attributes_cb: Some(Box::new(validate_node_import_attributes)),
             ..Default::default()
         });
 
@@ -1306,6 +1333,7 @@ pub fn execute_stateful(
             startup_snapshot,
             extensions,
             module_loader: Some(module_loader),
+            validate_import_attributes_cb: Some(Box::new(validate_node_import_attributes)),
             ..Default::default()
         });
 

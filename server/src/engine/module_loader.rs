@@ -1,7 +1,9 @@
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
+use deno_core::FastString;
 use deno_core::ModuleLoadOptions;
 use deno_core::ModuleLoadReferrer;
 use deno_core::ModuleLoadResponse;
@@ -10,10 +12,10 @@ use deno_core::ModuleSource;
 use deno_core::ModuleSourceCode;
 use deno_core::ModuleSpecifier;
 use deno_core::ModuleType;
+use deno_core::RequestedModuleType;
 use deno_core::ResolutionKind;
 use deno_core::resolve_import;
-use deno_core::FastString;
-use deno_error::JsErrorBox;
+use deno_error::{AdditionalProperties, JsErrorBox, JsErrorClass, PropertyValue};
 use futures::FutureExt;
 use serde::Serialize;
 
@@ -26,6 +28,106 @@ const MODULE_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 /// Connect-phase timeout. Fails fast when the remote host is unreachable
 /// (e.g. non-existent domain) without waiting for the full request timeout.
 const MODULE_FETCH_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[derive(Debug)]
+struct NodeModuleError {
+    class: &'static str,
+    code: &'static str,
+    message: String,
+}
+
+impl std::fmt::Display for NodeModuleError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for NodeModuleError {}
+
+impl JsErrorClass for NodeModuleError {
+    fn get_class(&self) -> Cow<'static, str> {
+        Cow::Borrowed(self.class)
+    }
+
+    fn get_message(&self) -> Cow<'static, str> {
+        Cow::Owned(self.message.clone())
+    }
+
+    fn get_additional_properties(&self) -> AdditionalProperties {
+        Box::new(std::iter::once((
+            Cow::Borrowed("code"),
+            PropertyValue::from(self.code),
+        )))
+    }
+
+    fn get_ref(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
+        self
+    }
+}
+
+fn node_module_error(class: &'static str, code: &'static str, message: String) -> JsErrorBox {
+    JsErrorBox::from_err(NodeModuleError {
+        class,
+        code,
+        message,
+    })
+}
+
+fn import_attribute_error(
+    module_specifier: &ModuleSpecifier,
+    format: &str,
+    requested: &RequestedModuleType,
+) -> Option<NodeModuleError> {
+    match requested {
+        RequestedModuleType::None if format == "json" => Some(NodeModuleError {
+            class: "TypeError",
+            code: "ERR_IMPORT_ATTRIBUTE_MISSING",
+            message: format!(
+                "Module \"{}\" needs an import attribute of \"type: json\"",
+                module_specifier
+            ),
+        }),
+        RequestedModuleType::None => None,
+        RequestedModuleType::Json if format == "json" => None,
+        RequestedModuleType::Json => Some(NodeModuleError {
+            class: "TypeError",
+            code: "ERR_IMPORT_ATTRIBUTE_TYPE_INCOMPATIBLE",
+            message: format!("Module \"{}\" is not of type \"json\"", module_specifier),
+        }),
+        requested => Some(NodeModuleError {
+            class: "TypeError",
+            code: "ERR_IMPORT_ATTRIBUTE_UNSUPPORTED",
+            message: format!(
+                "Import attribute \"type\" with value \"{}\" is not supported in {}",
+                requested.as_str().unwrap_or(""),
+                module_specifier
+            ),
+        }),
+    }
+}
+
+fn decode_data_url(module_specifier: &ModuleSpecifier) -> Result<(String, Vec<u8>), JsErrorBox> {
+    let data_url = data_url::DataUrl::process(module_specifier.as_str()).map_err(|_| {
+        node_module_error(
+            "TypeError",
+            "ERR_INVALID_URL",
+            format!("Invalid URL: {}", module_specifier),
+        )
+    })?;
+    let mime = format!(
+        "{}/{}",
+        data_url.mime_type().type_,
+        data_url.mime_type().subtype
+    );
+    let (body, _) = data_url.decode_to_vec().map_err(|_| {
+        node_module_error(
+            "TypeError",
+            "ERR_INVALID_URL",
+            format!("Invalid URL: {}", module_specifier),
+        )
+    })?;
+    Ok((mime, body))
+}
 
 /// Configuration for the module loader controlling external module access.
 #[derive(Clone, Debug)]
@@ -542,16 +644,23 @@ impl ModuleLoader for NetworkModuleLoader {
         &self,
         module_specifier: &ModuleSpecifier,
         _maybe_referrer: Option<&ModuleLoadReferrer>,
-        _options: ModuleLoadOptions,
+        options: ModuleLoadOptions,
     ) -> ModuleLoadResponse {
         if let Some(source) = self.config.virtual_modules.as_ref()
             .and_then(|modules| modules.get(module_specifier.as_str()))
         {
-            let module_type = if module_specifier.path().ends_with(".json") {
-                ModuleType::Json
+            let (format, module_type) = if module_specifier.path().ends_with(".json") {
+                ("json", ModuleType::Json)
             } else {
-                ModuleType::JavaScript
+                ("module", ModuleType::JavaScript)
             };
+            if let Some(error) = import_attribute_error(
+                module_specifier,
+                format,
+                &options.requested_module_type,
+            ) {
+                return ModuleLoadResponse::Sync(Err(JsErrorBox::from_err(error)));
+            }
             return ModuleLoadResponse::Sync(Ok(ModuleSource::new(
                 module_type,
                 ModuleSourceCode::String(FastString::from(source.clone())),
@@ -584,6 +693,13 @@ impl ModuleLoader for NetworkModuleLoader {
             )));
         }
         if scheme == "node" {
+            if let Some(error) = import_attribute_error(
+                module_specifier,
+                "module",
+                &options.requested_module_type,
+            ) {
+                return ModuleLoadResponse::Sync(Err(JsErrorBox::from_err(error)));
+            }
             let name = module_specifier.path();
             if name.starts_with("internal/") && self.config.virtual_files.is_none() {
                 return ModuleLoadResponse::Sync(Err(JsErrorBox::generic(format!(
@@ -646,6 +762,63 @@ impl ModuleLoader for NetworkModuleLoader {
                 )))),
             };
         }
+        if scheme == "data" {
+            let (mime, body) = match decode_data_url(module_specifier) {
+                Ok(data) => data,
+                Err(error) => return ModuleLoadResponse::Sync(Err(error)),
+            };
+            let format = if mime.eq_ignore_ascii_case("application/json") {
+                "json"
+            } else if mime.eq_ignore_ascii_case("application/wasm") {
+                "wasm"
+            } else {
+                let normalized = mime.trim().to_ascii_lowercase();
+                let javascript = normalized == "text/javascript"
+                    || normalized == "application/javascript"
+                    || normalized == "text/javascript;charset=utf-8"
+                    || normalized == "text/javascript;charset=utf8"
+                    || normalized == "application/javascript;charset=utf-8"
+                    || normalized == "application/javascript;charset=utf8";
+                if javascript { "module" } else { "" }
+            };
+            if format.is_empty() {
+                return ModuleLoadResponse::Sync(Err(JsErrorBox::from_err(
+                    NodeModuleError {
+                        class: "RangeError",
+                        code: "ERR_UNKNOWN_MODULE_FORMAT",
+                        message: format!(
+                            "Unknown module format: {} for URL {}",
+                            mime, module_specifier
+                        ),
+                    },
+                )));
+            }
+            if let Some(error) = import_attribute_error(
+                module_specifier,
+                format,
+                &options.requested_module_type,
+            ) {
+                return ModuleLoadResponse::Sync(Err(JsErrorBox::from_err(error)));
+            }
+            let module_type = match format {
+                "json" => ModuleType::Json,
+                "wasm" => ModuleType::Wasm,
+                _ => ModuleType::JavaScript,
+            };
+            let source = match module_type {
+                ModuleType::Wasm => ModuleSourceCode::Bytes(body.into_boxed_slice().into()),
+                _ => ModuleSourceCode::String(FastString::from(
+                    String::from_utf8_lossy(&body).into_owned(),
+                )),
+            };
+            return ModuleLoadResponse::Sync(Ok(ModuleSource::new(
+                module_type,
+                source,
+                module_specifier,
+                None,
+            )));
+        }
+
         if scheme != "https" && scheme != "http" {
             return ModuleLoadResponse::Sync(Err(JsErrorBox::generic(
                 format!(
@@ -662,6 +835,13 @@ impl ModuleLoader for NetworkModuleLoader {
                  Start the server with --allow-external-modules to enable.",
                 module_specifier
             ))));
+        }
+        if let Some(error) = import_attribute_error(
+            module_specifier,
+            "module",
+            &options.requested_module_type,
+        ) {
+            return ModuleLoadResponse::Sync(Err(JsErrorBox::from_err(error)));
         }
 
         let client = self.client.clone();
