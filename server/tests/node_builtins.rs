@@ -466,6 +466,12 @@ async fn buffer_error_contracts() {
             throw new Error('fractional sizes must truncate');
         }
 
+        const base64url = Buffer.from([0xfb, 0xff]).toString('base64url');
+        if (base64url !== '-_8') throw new Error('base64url encode: ' + base64url);
+        if (Buffer.from(base64url, 'base64url').toString('hex') !== 'fbff') {
+            throw new Error('base64url decode');
+        }
+
         const unknownEncoding = 'Unknown encoding: nope';
         expectError(() => Buffer.from('x', 'nope'), TypeError, 'ERR_UNKNOWN_ENCODING', unknownEncoding);
         expectError(() => Buffer.from('x').toString('nope'), TypeError, 'ERR_UNKNOWN_ENCODING', unknownEncoding);
