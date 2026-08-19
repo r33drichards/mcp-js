@@ -6,9 +6,12 @@
 //! efficient batching.
 
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering},
+};
 
-use deno_core::{JsRuntime, OpState, op2};
+use deno_core::{JsRuntime, OpState, op2, v8};
 
 // ── Configuration ────────────────────────────────────────────────────────
 
@@ -17,12 +20,40 @@ use deno_core::{JsRuntime, OpState, op2};
 /// execution end.
 const PAGE_SIZE: usize = 4096;
 
+#[derive(Clone, Default)]
+pub struct ProcessExitState {
+    exit_code: Arc<AtomicI32>,
+    exit_requested: Arc<AtomicBool>,
+}
+
+impl ProcessExitState {
+    pub fn exit_code(&self) -> i32 {
+        self.exit_code.load(Ordering::SeqCst)
+    }
+
+    pub fn exit_requested(&self) -> bool {
+        self.exit_requested.load(Ordering::SeqCst)
+    }
+
+    fn set_exit_code(&self, code: i32) {
+        self.exit_code.store(code, Ordering::SeqCst);
+    }
+
+    fn request_exit(&self, code: i32) {
+        self.set_exit_code(code);
+        self.exit_requested.store(true, Ordering::SeqCst);
+    }
+}
+
 /// Per-execution console output state, stored in deno_core's `OpState`.
 /// Buffers console output bytes and flushes them to sled in fixed-size pages.
 pub struct ConsoleLogState {
     tree: sled::Tree,
     seq: AtomicU64,
     buffer: RefCell<Vec<u8>>,
+    stderr_tree: Option<sled::Tree>,
+    stderr_seq: AtomicU64,
+    stderr_buffer: RefCell<Vec<u8>>,
 }
 
 // Safety: ConsoleLogState is only accessed from a single V8 thread.
@@ -37,27 +68,64 @@ impl ConsoleLogState {
             tree,
             seq: AtomicU64::new(0),
             buffer: RefCell::new(Vec::with_capacity(PAGE_SIZE)),
+            stderr_tree: None,
+            stderr_seq: AtomicU64::new(0),
+            stderr_buffer: RefCell::new(Vec::with_capacity(PAGE_SIZE)),
         }
     }
 
-    /// Append bytes to the buffer, flushing full pages to sled.
+    pub fn new_with_stderr(tree: sled::Tree, stderr_tree: sled::Tree) -> Self {
+        let mut state = Self::new(tree);
+        state.stderr_tree = Some(stderr_tree);
+        state
+    }
+
+    fn write_buffer(
+        tree: &sled::Tree,
+        seq: &AtomicU64,
+        buffer: &RefCell<Vec<u8>>,
+        data: &[u8],
+    ) {
+        let mut buffer = buffer.borrow_mut();
+        buffer.extend_from_slice(data);
+        while buffer.len() >= PAGE_SIZE {
+            let page: Vec<u8> = buffer.drain(..PAGE_SIZE).collect();
+            let seq = seq.fetch_add(1, Ordering::Relaxed);
+            let _ = tree.insert(seq.to_be_bytes(), page);
+        }
+    }
+
+    /// Append bytes to the stdout buffer, flushing full pages to sled.
     pub fn write(&self, data: &[u8]) {
-        let mut buf = self.buffer.borrow_mut();
-        buf.extend_from_slice(data);
-        while buf.len() >= PAGE_SIZE {
-            let page: Vec<u8> = buf.drain(..PAGE_SIZE).collect();
-            let seq = self.seq.fetch_add(1, Ordering::Relaxed);
-            let _ = self.tree.insert(seq.to_be_bytes(), page);
+        Self::write_buffer(&self.tree, &self.seq, &self.buffer, data);
+    }
+
+    pub fn write_stderr(&self, data: &[u8]) {
+        if let Some(tree) = &self.stderr_tree {
+            Self::write_buffer(tree, &self.stderr_seq, &self.stderr_buffer, data);
+        } else {
+            self.write(data);
+        }
+    }
+
+    pub fn separates_stderr(&self) -> bool {
+        self.stderr_tree.is_some()
+    }
+
+    fn flush_buffer(tree: &sled::Tree, seq: &AtomicU64, buffer: &RefCell<Vec<u8>>) {
+        let mut buffer = buffer.borrow_mut();
+        if !buffer.is_empty() {
+            let page: Vec<u8> = buffer.drain(..).collect();
+            let seq = seq.fetch_add(1, Ordering::Relaxed);
+            let _ = tree.insert(seq.to_be_bytes(), page);
         }
     }
 
     /// Flush any remaining buffered bytes to sled (call on execution end).
     pub fn flush(&self) {
-        let mut buf = self.buffer.borrow_mut();
-        if !buf.is_empty() {
-            let page: Vec<u8> = buf.drain(..).collect();
-            let seq = self.seq.fetch_add(1, Ordering::Relaxed);
-            let _ = self.tree.insert(seq.to_be_bytes(), page);
+        Self::flush_buffer(&self.tree, &self.seq, &self.buffer);
+        if let Some(tree) = &self.stderr_tree {
+            Self::flush_buffer(tree, &self.stderr_seq, &self.stderr_buffer);
         }
     }
 }
@@ -71,21 +139,49 @@ impl ConsoleLogState {
 fn op_console_write(state: &mut OpState, #[string] msg: &str, #[smi] level: i32) {
     let console_state = state.borrow::<ConsoleLogState>();
 
+    if console_state.separates_stderr() {
+        let formatted = format!("{}\n", msg);
+        if matches!(level, 2 | 3) {
+            console_state.write_stderr(formatted.as_bytes());
+        } else {
+            console_state.write(formatted.as_bytes());
+        }
+        return;
+    }
+
     let formatted = match level {
         2 => format!("[WARN] {}\n", msg),
         3 => format!("[ERROR] {}\n", msg),
         1 => format!("[INFO] {}\n", msg),
         _ => format!("{}\n", msg),
     };
-
     console_state.write(formatted.as_bytes());
+}
+
+#[op2(fast)]
+fn op_process_set_exit_code(state: &mut OpState, #[smi] code: i32) {
+    if let Some(exit_state) = state.try_borrow::<ProcessExitState>() {
+        exit_state.set_exit_code(code);
+    }
+}
+
+#[op2(fast)]
+fn op_process_exit(
+    scope: &mut v8::PinScope<'_, '_>,
+    state: &mut OpState,
+    #[smi] code: i32,
+) {
+    if let Some(exit_state) = state.try_borrow::<ProcessExitState>() {
+        exit_state.request_exit(code);
+        scope.terminate_execution();
+    }
 }
 
 // ── Extension registration ───────────────────────────────────────────────
 
 deno_core::extension!(
     console_ext,
-    ops = [op_console_write],
+    ops = [op_console_write, op_process_set_exit_code, op_process_exit],
 );
 
 /// Create the console extension for use in `RuntimeOptions::extensions`.

@@ -340,10 +340,35 @@ fn package_exports_target(
         .unwrap_or(PackageTarget::Missing))
 }
 
+fn node_display_path(specifier: &ModuleSpecifier) -> String {
+    if specifier.scheme() == "file" {
+        specifier.path().to_owned()
+    } else {
+        specifier.to_string()
+    }
+}
+
+fn invalid_package_config_message(
+    package_json: &ModuleSpecifier,
+    package: &str,
+    referrer: &ModuleSpecifier,
+    detail: &str,
+) -> String {
+    format!(
+        "Invalid package config {} while importing {:?} from {}. {}",
+        node_display_path(package_json),
+        package,
+        node_display_path(referrer),
+        detail,
+    )
+}
+
 fn resolve_package_json(
     modules: &HashMap<String, String>,
     source: &str,
     package_json: &ModuleSpecifier,
+    package: &str,
+    referrer: &ModuleSpecifier,
     subpath: &str,
     conditions: &[&str],
 ) -> ModuleSpecifier {
@@ -352,7 +377,12 @@ fn resolve_package_json(
         Err(error) => {
             return package_error_module(
                 "ERR_INVALID_PACKAGE_CONFIG",
-                &format!("Invalid package config '{}': {}", package_json, error),
+                &invalid_package_config_message(
+                    package_json,
+                    package,
+                    referrer,
+                    &error.to_string(),
+                ),
             );
         }
     };
@@ -494,10 +524,15 @@ fn resolve_virtual_package(
             let package_data: serde_json::Value = match serde_json::from_str(source) {
                 Ok(value) => value,
                 Err(error) => {
-                    return Some(Err(JsErrorBox::generic(format!(
-                        "Invalid package config '{}': {}",
-                        self_package_json, error
-                    ))));
+                    return Some(Ok(package_error_module(
+                        "ERR_INVALID_PACKAGE_CONFIG",
+                        &invalid_package_config_message(
+                            &self_package_json,
+                            &package,
+                            &referrer,
+                            &error.to_string(),
+                        ),
+                    )));
                 }
             };
             if package_data.get("name").and_then(|value| value.as_str()) == Some(package.as_str()) {
@@ -505,6 +540,8 @@ fn resolve_virtual_package(
                     modules,
                     source,
                     &self_package_json,
+                    &package,
+                    &referrer,
                     &subpath,
                     conditions,
                 )));
@@ -518,6 +555,8 @@ fn resolve_virtual_package(
                 modules,
                 source,
                 &package_json,
+                &package,
+                &referrer,
                 &subpath,
                 conditions,
             )));
@@ -681,9 +720,10 @@ impl ModuleLoader for NetworkModuleLoader {
                 }
             }
             let source = format!(
-                "const error=new Error({});error.code={};throw error;",
-                serde_json::to_string(&message).unwrap(),
-                serde_json::to_string(&code).unwrap(),
+                "const error=new Error({message});error.code={code};try{{if(typeof error.stack==='string')error.stack+='\\n  code: '+{quoted_code};}}catch{{}}throw error;",
+                message = serde_json::to_string(&message).unwrap(),
+                code = serde_json::to_string(&code).unwrap(),
+                quoted_code = serde_json::to_string(&format!("'{code}'")).unwrap(),
             );
             return ModuleLoadResponse::Sync(Ok(ModuleSource::new(
                 ModuleType::JavaScript,

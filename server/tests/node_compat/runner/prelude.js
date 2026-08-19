@@ -124,12 +124,16 @@ const common = {
             }
             return text;
         }
-        const executable = command === '/usr/bin/node' && hostExecPath
-            ? hostExecPath
-            : translate(command);
+        const selfHosted = command === process.execPath && hostExecPath;
+        const executable = selfHosted ? hostExecPath : translate(command);
+        const childArgs = selfHosted
+            ? ['--node-compat-cli', ...args]
+            : Array.from(args, translate);
         const output = await new Deno.Command(executable, {
-            args: Array.from(args, translate),
-            cwd: options.cwd ? translate(options.cwd) : undefined,
+            args: childArgs,
+            cwd: options.cwd
+                ? (selfHosted ? options.cwd : translate(options.cwd))
+                : undefined,
             env: options.env,
         }).output();
         const decoder = new TextDecoder();

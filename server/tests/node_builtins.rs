@@ -114,6 +114,14 @@ fn node_compat_prelude_maps_registered_host_modules() {
     }
 }
 
+#[test]
+fn node_compat_prelude_routes_exec_path_to_self_hosted_cli() {
+    let prelude = include_str!("node_compat/runner/prelude.js");
+    assert!(prelude.contains("command === process.execPath"));
+    assert!(prelude.contains("['--node-compat-cli', ...args]"));
+    assert!(prelude.contains("selfHosted ? options.cwd : translate(options.cwd)"));
+}
+
 #[tokio::test]
 async fn node_compat_prelude_wraps_commonjs_body() {
     let prelude = include_str!("node_compat/runner/prelude.js");
@@ -911,6 +919,26 @@ async fn perf_hooks_observer_and_timerify() {
             throw new Error('constructor entry missing');
         }
         observer.disconnect();
+        "#,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn process_config_exposes_node_build_variables() {
+    expect_ok(
+        r#"
+        import process, { config } from 'node:process';
+
+        if (process.config !== config) {
+            throw new Error('named export identity');
+        }
+        if (typeof config.variables !== 'object' || config.variables === null) {
+            throw new Error('process.config.variables missing');
+        }
+        if (config.variables.node_without_node_options !== false) {
+            throw new Error('NODE_OPTIONS support should be advertised');
+        }
         "#,
     )
     .await;

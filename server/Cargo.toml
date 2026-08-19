@@ -26,6 +26,7 @@ rmcp_legacy = { package = "rmcp", git = "https://github.com/modelcontextprotocol
 # serde ≥1.0.228, and Cargo.lock still pins the exact resolved version).
 serde = "1.0.219"
 serde_json = "1.0.140"
+shlex = "1"
 toml = "0.8"
 tokio = { version = "1.45.0", features = ["rt-multi-thread", "process", "signal", "time", "sync", "macros", "net", "io-util"] }
 tracing = "0.1.41"

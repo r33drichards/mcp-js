@@ -1,14 +1,23 @@
 // node:process — minimal process object for the sandboxed runtime.
-// No real OS process exists: env is empty (host env is never exposed),
-// exit() throws, and cwd is fixed at '/'.
 const startTime = Date.now();
+const invocation = globalThis.__mcpV8ProcessConfig || {};
+const configuredExecPath = String(invocation.execPath || '/usr/bin/node');
+const configuredCwd = String(invocation.cwd || '/');
+const setHostExitCode = Deno.core.ops.op_process_set_exit_code;
+const terminateHostProcess = Deno.core.ops.op_process_exit;
+const hostExitEnabled = invocation.hostExit === true;
+
+function normalizeExitCode(code) {
+    const numeric = Number(code);
+    return Number.isFinite(numeric) ? Math.trunc(numeric) & 0xff : 0;
+}
 
 const process = {
-    argv: ['node', '/main.js'],
-    argv0: 'node',
-    execArgv: [],
-    execPath: '/usr/bin/node',
-    env: {},
+    argv: Array.isArray(invocation.argv) ? [...invocation.argv] : [configuredExecPath, '/main.js'],
+    argv0: String(invocation.argv0 || configuredExecPath),
+    execArgv: Array.isArray(invocation.execArgv) ? [...invocation.execArgv] : [],
+    execPath: configuredExecPath,
+    env: invocation.env && typeof invocation.env === 'object' ? { ...invocation.env } : {},
     platform: 'linux',
     arch: 'x64',
     pid: 1,
@@ -20,10 +29,15 @@ const process = {
         modules: '127',
         'mcp-v8': '1.0.0',
     },
+    config: {
+        variables: {
+            node_without_node_options: false,
+        },
+    },
     title: 'mcp-v8',
     browser: false,
 
-    cwd() { return '/'; },
+    cwd() { return configuredCwd; },
     chdir() {
         throw new Error('process.chdir is not supported in this runtime');
     },
@@ -58,10 +72,14 @@ const process = {
         console.warn(warning instanceof Error ? warning.message : String(warning));
     },
     exit(code) {
-        const err = new Error(
-            'process.exit(' + (code === undefined ? '' : code) + ') is not supported in this runtime');
-        err.code = 'ERR_UNSUPPORTED_OPERATION';
-        throw err;
+        const normalized = code === undefined ? this.exitCode : normalizeExitCode(code);
+        this.exitCode = normalized;
+        if (!hostExitEnabled) {
+            const error = new Error('process.exit is not supported in this runtime');
+            error.code = 'ERR_UNSUPPORTED_OPERATION';
+            throw error;
+        }
+        terminateHostProcess(normalized);
     },
     abort() { this.exit(134); },
     kill() {
@@ -89,6 +107,17 @@ const process = {
     getMaxListeners() { return 10; },
 };
 
+let exitCode = 0;
+Object.defineProperty(process, 'exitCode', {
+    enumerable: true,
+    configurable: true,
+    get() { return exitCode; },
+    set(code) {
+        exitCode = normalizeExitCode(code);
+        setHostExitCode(exitCode);
+    },
+});
+
 process.hrtime.bigint = function bigint() {
     return BigInt(Math.round(performance.now() * 1e6));
 };
@@ -96,7 +125,7 @@ process.hrtime.bigint = function bigint() {
 export default process;
 export const {
     argv, argv0, execArgv, execPath, env, platform, arch, pid, ppid,
-    version, versions, title, browser, nextTick, cwd, chdir, umask, uptime,
+    version, versions, config, title, browser, nextTick, cwd, chdir, umask, uptime,
     memoryUsage, hrtime, getActiveResourcesInfo, emitWarning, exit, abort,
     kill, stdout, stderr, stdin,
 } = process;
