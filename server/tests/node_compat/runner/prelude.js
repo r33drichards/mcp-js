@@ -10,17 +10,27 @@ import assert, { strict as assertStrict } from 'node:assert';
 import buffer, { Buffer } from 'node:buffer';
 import consoleModule from 'node:console';
 import crypto from 'node:crypto';
+import dns from 'node:dns';
 import events from 'node:events';
+import fs from 'node:fs';
+import fsPromises from 'node:fs/promises';
+import http from 'node:http';
+import http2 from 'node:http2';
+import https from 'node:https';
 import moduleModule from 'node:module';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 import querystring from 'node:querystring';
 import stream from 'node:stream';
+import streamWeb from 'node:stream/web';
 import timers from 'node:timers';
 import timersPromises from 'node:timers/promises';
+import tls from 'node:tls';
 import url from 'node:url';
 import util from 'node:util';
+import zlib from 'node:zlib';
 
 globalThis.process = process;
 globalThis.Buffer = Buffer;
@@ -156,17 +166,27 @@ const modules = {
     buffer: buffer,
     console: consoleModule,
     crypto: crypto,
+    dns: dns,
     events: events,
+    fs: fs,
+    'fs/promises': fsPromises,
+    http: http,
+    http2: http2,
+    https: https,
     module: moduleModule,
+    net: net,
     os: os,
     path: path,
     process: process,
     querystring: querystring,
     stream: stream,
+    'stream/web': streamWeb,
     timers: timers,
     'timers/promises': timersPromises,
+    tls: tls,
     url: url,
     util: util,
+    zlib: zlib,
 };
 
 globalThis.require = function require(id) {

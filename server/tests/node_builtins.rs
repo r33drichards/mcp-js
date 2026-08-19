@@ -61,6 +61,32 @@ async fn expect_ok(code: &str) {
     }
 }
 
+#[test]
+fn node_compat_prelude_maps_registered_host_modules() {
+    let prelude = include_str!("node_compat/runner/prelude.js");
+    for (import, mapping) in [
+        ("node:dns", "dns: dns"),
+        ("node:fs", "fs: fs"),
+        ("node:fs/promises", "'fs/promises': fsPromises"),
+        ("node:http", "http: http"),
+        ("node:http2", "http2: http2"),
+        ("node:https", "https: https"),
+        ("node:net", "net: net"),
+        ("node:stream/web", "'stream/web': streamWeb"),
+        ("node:tls", "tls: tls"),
+        ("node:zlib", "zlib: zlib"),
+    ] {
+        assert!(
+            prelude.contains(import),
+            "prelude missing import for {import}"
+        );
+        assert!(
+            prelude.contains(mapping),
+            "prelude missing require mapping {mapping}"
+        );
+    }
+}
+
 /// module.builtinModules must list exactly the registry, so the eagerly
 /// imported map in module.js can't drift from node_compat.rs.
 #[tokio::test]
