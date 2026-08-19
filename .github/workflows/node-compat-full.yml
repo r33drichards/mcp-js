@@ -23,6 +23,14 @@ jobs:
       - uses: cachix/install-nix-action@v30
         with:
           extra_nix_config: experimental-features = nix-command flakes
+      - name: Read pinned Node version
+        id: node-version
+        run: echo "version=$(jq -r '.deno_node_test.node_version' server/tests/node_compat/versions.json)" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ steps.node-version.outputs.version }}
+      - name: Verify pinned Node version
+        run: test "$(node --version)" = "v${{ steps.node-version.outputs.version }}"
       - name: Fetch pinned corpus
         id: corpus
         run: echo "path=$(python3 tools/compat/fetch-node-compat-corpora.py --source deno_node_test)" >> "$GITHUB_OUTPUT"
