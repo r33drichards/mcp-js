@@ -1734,6 +1734,7 @@ impl Engine {
             module_loader_config: Arc::new(module_loader::ModuleLoaderConfig {
                 allow_external: false,
                 policy_chain: None,
+                virtual_modules: None,
             }),
             mcp_client_manager: None,
             mcp_tools_policy_chain: None,
@@ -1775,6 +1776,7 @@ impl Engine {
             module_loader_config: Arc::new(module_loader::ModuleLoaderConfig {
                 allow_external: false,
                 policy_chain: None,
+                virtual_modules: None,
             }),
             mcp_client_manager: None,
             mcp_tools_policy_chain: None,

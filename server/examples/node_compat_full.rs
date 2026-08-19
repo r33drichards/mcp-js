@@ -7,9 +7,11 @@ use serde::Deserialize;
 use server::engine::{
     ExecutionConfig,
     fetch::FetchConfig,
+    module_loader::ModuleLoaderConfig,
     opa::{EvalMode, PolicyChain},
 };
 use std::{
+    collections::HashMap,
     fs::{self, OpenOptions},
     io::{BufWriter, Write},
     path::{Path, PathBuf},
@@ -52,22 +54,47 @@ enum Outcome {
     Missing,
     Invalid(String),
 }
+fn test_name(path: &str) -> &str {
+    Path::new(path).file_name().unwrap().to_str().unwrap()
+}
+fn is_esm(path: &str) -> bool {
+    path.ends_with(".mjs")
+}
+fn rewrite_esm_harness_imports(body: &str) -> String {
+    body.replace("'../common/index.mjs'", "'node-test:common'")
+        .replace("\"../common/index.mjs\"", "\"node-test:common\"")
+}
 fn assemble(path: &str, body: &str) -> String {
+    if is_esm(path) {
+        return format!(
+            "import 'node-test:prelude';\n{}\nglobalThis.__NODE_TEST_SCHEDULE_REPORT__({:?});",
+            rewrite_esm_harness_imports(body),
+            SENTINEL,
+        );
+    }
     format!(
         "globalThis.__NODE_TEST_PATH__={};globalThis.__NODE_TEST_NAME__={};\n{}\ntry{{globalThis.__NODE_TEST_RUN_CJS__({});}}catch(e){{if(!(e&&e.__nodeTestSkip))throw e;}}\nglobalThis.__NODE_TEST_SCHEDULE_REPORT__({:?});",
         serde_json::to_string(path).unwrap(),
-        serde_json::to_string(
-            Path::new(path)
-                .file_name()
-                .unwrap()
-                .to_string_lossy()
-                .as_ref()
-        )
-        .unwrap(),
+        serde_json::to_string(test_name(path)).unwrap(),
         PRELUDE,
         serde_json::to_string(body).unwrap(),
         SENTINEL
     )
+}
+fn virtual_modules(path: &str) -> Option<Arc<HashMap<String, String>>> {
+    if !is_esm(path) {
+        return None;
+    }
+    let prelude = format!(
+        "globalThis.__NODE_TEST_PATH__={};globalThis.__NODE_TEST_NAME__={};\n{}",
+        serde_json::to_string(path).unwrap(),
+        serde_json::to_string(test_name(path)).unwrap(),
+        PRELUDE,
+    );
+    Some(Arc::new(HashMap::from([
+        ("node-test:prelude".into(), prelude),
+        ("node-test:common".into(), "import 'node-test:prelude';\n".into()),
+    ])))
 }
 fn run(path: &str, body: &str, timeout: Duration) -> Outcome {
     INIT.call_once(server::engine::initialize_v8);
@@ -85,9 +112,15 @@ fn run(path: &str, body: &str, timeout: Duration) -> Outcome {
     };
     let tree = db.open_tree("console").unwrap();
     let fetch = FetchConfig::new_with_chain(Arc::new(PolicyChain::new(vec![], EvalMode::All)));
+    let module_loader = ModuleLoaderConfig {
+        allow_external: true,
+        policy_chain: None,
+        virtual_modules: virtual_modules(path),
+    };
     let config = ExecutionConfig::new(256 * 1024 * 1024)
         .console_tree(tree.clone())
-        .fetch_config(&fetch);
+        .fetch_config(&fetch)
+        .module_loader_config(&module_loader);
     let handle = config.isolate_handle.clone();
     let done = Arc::new(AtomicBool::new(false));
     let timed = Arc::new(AtomicBool::new(false));
@@ -255,6 +288,20 @@ mod tests {
         assert!(runner.contains("globalThis.__NODE_TEST_RUN_CJS__("));
         assert!(runner.contains("globalThis.__NODE_TEST_SCHEDULE_REPORT__("));
         assert!(!runner.contains("(0,eval)("));
+    }
+    #[test]
+    fn assemble_runs_esm_body_as_a_module() {
+        let source = assemble(
+            "test/es-module/example.mjs",
+            "import '../common/index.mjs';\nimport assert from 'assert';",
+        );
+        assert!(source.starts_with("import 'node-test:prelude';"));
+        assert!(source.contains("import 'node-test:common';"));
+        assert!(source.contains("import assert from 'assert';"));
+        assert!(!source.contains("globalThis.__NODE_TEST_RUN_CJS__("));
+        let modules = virtual_modules("test/es-module/example.mjs").unwrap();
+        assert!(modules.contains_key("node-test:prelude"));
+        assert!(modules.contains_key("node-test:common"));
     }
     #[test]
     fn platform_skip_is_strict() {

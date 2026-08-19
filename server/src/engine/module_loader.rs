@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -33,6 +34,8 @@ pub struct ModuleLoaderConfig {
     pub allow_external: bool,
     /// Optional policy chain for module auditing (from `--policies-json`).
     pub policy_chain: Option<Arc<PolicyChain>>,
+    /// Explicit in-memory modules used by internal harnesses.
+    pub virtual_modules: Option<Arc<HashMap<String, String>>>,
 }
 
 /// Input sent to OPA for module import auditing.
@@ -82,6 +85,7 @@ impl NetworkModuleLoader {
             config: ModuleLoaderConfig {
                 allow_external: true,
                 policy_chain: None,
+                virtual_modules: None,
             },
         }
     }
@@ -101,6 +105,12 @@ impl ModuleLoader for NetworkModuleLoader {
         referrer: &str,
         _kind: ResolutionKind,
     ) -> Result<ModuleSpecifier, JsErrorBox> {
+        if self.config.virtual_modules.as_ref().is_some_and(|modules| modules.contains_key(specifier)) {
+            return ModuleSpecifier::parse(specifier).map_err(|e| {
+                JsErrorBox::generic(format!("Bad virtual module specifier '{}': {}", specifier, e))
+            });
+        }
+
         // node:path → served from the embedded Node compat registry.
         // Bare builtin names (e.g. "path") also resolve here, matching Node.
         let node_name = specifier.strip_prefix("node:").unwrap_or(specifier);
@@ -164,6 +174,17 @@ impl ModuleLoader for NetworkModuleLoader {
         _maybe_referrer: Option<&ModuleLoadReferrer>,
         _options: ModuleLoadOptions,
     ) -> ModuleLoadResponse {
+        if let Some(source) = self.config.virtual_modules.as_ref()
+            .and_then(|modules| modules.get(module_specifier.as_str()))
+        {
+            return ModuleLoadResponse::Sync(Ok(ModuleSource::new(
+                ModuleType::JavaScript,
+                ModuleSourceCode::String(FastString::from(source.clone())),
+                module_specifier,
+                None,
+            )));
+        }
+
         let scheme = module_specifier.scheme();
         if scheme == "node" {
             let name = module_specifier.path();

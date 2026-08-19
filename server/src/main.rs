@@ -789,6 +789,7 @@ async fn async_main(cli: Cli) -> Result<()> {
     let module_loader_config = ModuleLoaderConfig {
         allow_external: cli.allow_external_modules,
         policy_chain: modules_policy_chain,
+        virtual_modules: None,
     };
     if cli.allow_external_modules {
         tracing::info!("External module imports: ENABLED");

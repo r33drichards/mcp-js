@@ -195,15 +195,20 @@ const modules = {
     zlib: zlib,
 };
 
-globalThis.require = function require(id) {
+const fixtures = {
+    fixturesDir: '/test/fixtures',
+    path: (...args) => ['/test/fixtures', ...args].join('/'),
+};
+
+globalThis.__NODE_TEST_COMMON__ = common;
+globalThis.__NODE_TEST_FIXTURES__ = fixtures;
+
+function nodeRequire(id) {
     let name = String(id);
     if (name.startsWith('node:')) name = name.slice(5);
     if (name === '../common' || name === '../common/index.js') return common;
-    if (name === '../common/fixtures') {
-        return {
-            fixturesDir: '/test/fixtures',
-            path: (...args) => ['/test/fixtures', ...args].join('/'),
-        };
+    if (name === '../common/fixtures' || name === '../common/fixtures.js') {
+        return fixtures;
     }
     if (name.startsWith('../common/')) {
         throw new Error('Unsupported common submodule: ' + name);
@@ -212,24 +217,22 @@ globalThis.require = function require(id) {
     const err = new Error("Cannot find module '" + id + "'");
     err.code = 'MODULE_NOT_FOUND';
     throw err;
-};
+}
 
 // The harness schedules its drain-time report through this stash so tests
 // that delete the timer globals (test-timers-api-refs) can still report.
 globalThis.__NODE_TEST_SETTIMEOUT__ = globalThis.setTimeout;
 
-globalThis.module = { exports: {} };
-globalThis.exports = globalThis.module.exports;
 const testPath = '/' + (globalThis.__NODE_TEST_PATH__ || ('test/parallel/' + (globalThis.__NODE_TEST_NAME__ || 'test.js')));
-globalThis.__filename = testPath;
-globalThis.__dirname = testPath.slice(0, testPath.lastIndexOf('/')) || '/';
+const testDir = testPath.slice(0, testPath.lastIndexOf('/')) || '/';
 
 globalThis.__NODE_TEST_RUN_CJS__ = function runCommonJS(source) {
+    const testModule = { exports: {} };
     const compiled = Function(
         'exports', 'require', 'module', '__filename', '__dirname', String(source),
     );
     return compiled.call(
-        module.exports, module.exports, require, module, __filename, __dirname,
+        testModule.exports, testModule.exports, nodeRequire, testModule, testPath, testDir,
     );
 };
 

@@ -115,14 +115,16 @@ async fn node_compat_prelude_skips_when_inspector_disabled() {
     expect_ok(&format!(
         r#"
         {prelude}
-        const commonHarness = require('../common');
-        if (commonHarness.hasInspector !== false) throw new Error('inspector must be disabled');
-        try {{
-            commonHarness.skipIfInspectorDisabled();
-            throw new Error('expected inspector skip');
-        }} catch (error) {{
-            if (!error.__nodeTestSkip) throw error;
-        }}
+        globalThis.__NODE_TEST_RUN_CJS__(`
+            const commonHarness = require('../common');
+            if (commonHarness.hasInspector !== false) throw new Error('inspector must be disabled');
+            try {{
+                commonHarness.skipIfInspectorDisabled();
+                throw new Error('expected inspector skip');
+            }} catch (error) {{
+                if (!error.__nodeTestSkip) throw error;
+            }}
+        `);
         const report = JSON.parse(globalThis.__NODE_TEST_REPORT__());
         if (report.skipped !== 'V8 inspector is disabled') {{
             throw new Error('wrong inspector skip reason: ' + report.skipped);
