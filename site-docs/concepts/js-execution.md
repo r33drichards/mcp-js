@@ -113,6 +113,15 @@ After all capability extensions are injected (console, fetch, filesystem, timers
 
 `op_print` (the deno_core internal print op) is neutralized to route through the console capture op rather than writing directly to stdout, which would corrupt the JSON-RPC protocol stream.
 
+## Pre-run scripts
+
+After hardening and before the submitted code, up to two operator-configured scripts run as ES modules, in order:
+
+1. `--init-script` — only when the isolate lacks the `globalThis.__mcpV8InitDone` marker (fresh isolates, and restored heaps that never ran it). On success the marker is set, so a stateful heap lineage runs it once.
+2. `--pre-run-script` — on every execution, including snapshot-restored isolates.
+
+The full order on a fresh isolate is: inject capabilities → harden sandbox → marker-gated init script → pre-run script → user code. On a snapshot-restored isolate the injection/hardening steps are already baked into the heap, so only the scripts and user code run. A script error fails the execution with an `init script failed:` / `pre-run script failed:` prefix. See [How-to — pre-run scripts](../how-to/pre-run-scripts.md).
+
 ## See also
 
 - [How-to — execution recipes](../how-to/js-execution.md)

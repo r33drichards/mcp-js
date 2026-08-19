@@ -123,6 +123,7 @@ Precedence is CLI flag > `MCP_V8_*` env var > config file > default. See the
 - **Policy-gated capabilities** — `fetch`, filesystem (`fs`), and subprocess access, each checked against a Rego policy per operation; plus header/OAuth injection for `fetch`.
 - **Compose other MCP servers** — connect upstream MCP servers and call them from JS via `mcp.callTool()` / `mcp.listTools()`.
 - **Customizable surface** — override the server `instructions` and the `run_js` description (`--instructions`, `--run-js-description`).
+- **Pre-run scripts** — an operator init script that runs once per heap lineage (`--init-script`, marker-gated and baked into the snapshot) and/or a script that runs before every execution (`--pre-run-script`); inline JS/TS or `@file`.
 - **Single-file configuration** — one TOML/JSON `--config` file can set every flag (precedence: CLI flag > env var > config file > default).
 - **Auth & clustering** — JWKS-based JWT verification, and optional Raft clustering with replicated session metadata and horizontal scaling.
 - **Multiple transports** — stdio, Streamable HTTP (MCP 2025-03-26+), and a legacy HTTP+SSE transport (`--sse-port`, served by a vendored rmcp 0.1.5), with a REST sidecar and OpenAPI spec.

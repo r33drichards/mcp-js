@@ -46,6 +46,7 @@ the wrong shape, and keys whose flags Clap declares as conflicting (e.g.
 - [Module Import](#module-import)
 - [OS Sandbox](#os-sandbox)
 - [Policy](#policy)
+- [Pre-run Scripts](#pre-run-scripts)
 - [Prompt](#prompt)
 - [Run JS File](#run-js-file)
 - [Sandbox](#sandbox)
@@ -383,6 +384,22 @@ JSON policy configuration (inline JSON or path to a JSON file). Enables fetch() 
 
 - CLI flag: `--policies-json`
 - Environment: `MCP_V8_POLICIES_JSON`
+
+## Pre-run Scripts
+
+### `init_script`
+
+JavaScript/TypeScript that initializes the JS environment. Runs before an execution whenever the isolate lacks the init marker (`globalThis.__mcpV8InitDone`): on fresh isolates, and on restored heaps that never ran it (including heaps created before this flag was set). On success the marker is set and, in stateful mode, baked into the resulting heap, so each heap lineage runs the script once. In stateless mode every isolate is fresh, so the script runs before every execution. Runs as an ES module (imports and top-level `await` are allowed; expose values to subsequent code via `globalThis.x = ...`). The value is used verbatim as inline code, unless it begins with `@`, in which case the remainder is treated as a path to a file whose contents are used (use `@@` for a literal leading `@`). Examples: --init-script "globalThis.helper = () => 42" --init-script @./init.js
+
+- CLI flag: `--init-script`
+- Environment: `MCP_V8_INIT_SCRIPT`
+
+### `pre_run_script`
+
+JavaScript/TypeScript that runs before every execution, right before the submitted code — including on snapshot-restored isolates. Runs after the init script when both are configured. Same value syntax and ES-module semantics as --init-script. Examples: --pre-run-script "console.log('run')" --pre-run-script @./pre.js
+
+- CLI flag: `--pre-run-script`
+- Environment: `MCP_V8_PRE_RUN_SCRIPT`
 
 ## Prompt
 

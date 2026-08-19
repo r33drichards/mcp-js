@@ -53,6 +53,7 @@ nav:
       - Authentication (JWT/JWKS): how-to/authentication.md
       - Clustering & replication (Raft): how-to/clustering.md
       - Customize prompt & tool descriptions: how-to/customize-mcp-surface.md
+      - Pre-run scripts: how-to/pre-run-scripts.md
 
   - Concepts:
       - Overview: concepts/overview.md

@@ -800,8 +800,22 @@ fn execute_module(
     runtime: &mut JsRuntime,
     code: &str,
 ) -> Result<(), String> {
+    execute_module_named(rt, runtime, code, "main")
+}
+
+/// Like `execute_module`, but with a caller-chosen specifier stem so stack
+/// traces distinguish operator scripts (`init_script_{n}.js`,
+/// `pre_run_script_{n}.js`) from user code (`main_{n}.js`). The counter stays
+/// shared: fixed specifiers would collide with the module map already baked
+/// into a restored snapshot.
+fn execute_module_named(
+    rt: &tokio::runtime::Runtime,
+    runtime: &mut JsRuntime,
+    code: &str,
+    name: &str,
+) -> Result<(), String> {
     let id = MODULE_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let main_url = ModuleSpecifier::parse(&format!("file:///main_{}.js", id))
+    let main_url = ModuleSpecifier::parse(&format!("file:///{}_{}.js", name, id))
         .map_err(|e| format!("internal specifier error: {}", e))?;
 
     // CRITICAL: run the load, module evaluation, AND event loop inside ONE
@@ -829,6 +843,63 @@ fn execute_module(
     })
 }
 
+/// Global set after the init script (`--init-script`) runs successfully.
+/// Persisted through heap snapshots, so each stateful heap lineage runs the
+/// script once. Presence-only: it does not track the script's content, and
+/// user code can `delete` it to force a re-init on the next execution.
+pub const INIT_MARKER_GLOBAL: &str = "__mcpV8InitDone";
+
+/// True when a previous successful init-script run set the marker (persisted
+/// via the heap snapshot for stateful lineages).
+fn init_marker_present(runtime: &mut JsRuntime) -> Result<bool, String> {
+    deno_core::scope!(scope, runtime);
+    let global = scope.get_current_context().global(scope);
+    let key =
+        v8::String::new(scope, INIT_MARKER_GLOBAL).ok_or("Failed to create init-marker key")?;
+    Ok(global.get(scope, key.into()).is_some_and(|v| v.is_true()))
+}
+
+/// Set from Rust only after the init module evaluated to completion, so the
+/// script cannot skip or fake its own success. DONT_ENUM keeps the marker out
+/// of `Object.keys(globalThis)`; it stays configurable so an operator can
+/// force a re-init with `delete globalThis.__mcpV8InitDone`.
+fn set_init_marker(runtime: &mut JsRuntime) -> Result<(), String> {
+    deno_core::scope!(scope, runtime);
+    let global = scope.get_current_context().global(scope);
+    let key =
+        v8::String::new(scope, INIT_MARKER_GLOBAL).ok_or("Failed to create init-marker key")?;
+    let val = v8::Boolean::new(scope, true);
+    global
+        .define_own_property(scope, key.into(), val.into(), v8::PropertyAttribute::DONT_ENUM)
+        .ok_or("Failed to set init marker")?;
+    Ok(())
+}
+
+/// Run the operator-configured pre-run scripts, then the user code, in order:
+/// marker-gated init script → pre-run script → user code. Called in the same
+/// (post-hardening) position on every execution path, so the scripts see an
+/// identical environment on fresh and snapshot-restored isolates alike.
+fn run_scripts_and_code(
+    rt: &tokio::runtime::Runtime,
+    runtime: &mut JsRuntime,
+    init_script: Option<&str>,
+    pre_run_script: Option<&str>,
+    code: &str,
+) -> Result<(), String> {
+    if let Some(script) = init_script {
+        if !init_marker_present(runtime)? {
+            execute_module_named(rt, runtime, script, "init_script")
+                .map_err(|e| format!("init script failed: {}", e))?;
+            set_init_marker(runtime)?;
+        }
+    }
+    if let Some(script) = pre_run_script {
+        execute_module_named(rt, runtime, script, "pre_run_script")
+            .map_err(|e| format!("pre-run script failed: {}", e))?;
+    }
+    execute_module(rt, runtime, code)
+}
+
 /// Configuration bundle for `execute_stateless` / `execute_stateful`.
 ///
 /// Only `heap_memory_max_bytes` is required; everything else defaults to
@@ -852,6 +923,13 @@ pub struct ExecutionConfig<'a> {
     pub mcp_config: Option<&'a mcp_client::McpConfig>,
     /// Per-mitigation sandbox hardening. Default is all-off (unhardened).
     pub hardening: console::HardeningConfig,
+    /// Operator init script: runs before the user code whenever the isolate
+    /// lacks the `__mcpV8InitDone` marker (fresh isolates and restored heaps
+    /// that never ran it). TypeScript already stripped.
+    pub init_script: Option<&'a str>,
+    /// Operator pre-run script: runs before the user code on every execution,
+    /// after the init script when both fire. TypeScript already stripped.
+    pub pre_run_script: Option<&'a str>,
 }
 
 impl<'a> ExecutionConfig<'a> {
@@ -872,6 +950,8 @@ impl<'a> ExecutionConfig<'a> {
             module_loader_config: None,
             mcp_config: None,
             hardening: console::HardeningConfig::default(),
+            init_script: None,
+            pre_run_script: None,
         }
     }
 
@@ -957,6 +1037,16 @@ impl<'a> ExecutionConfig<'a> {
         self.mcp_config = config;
         self
     }
+
+    pub fn maybe_init_script(mut self, script: Option<&'a str>) -> Self {
+        self.init_script = script;
+        self
+    }
+
+    pub fn maybe_pre_run_script(mut self, script: Option<&'a str>) -> Self {
+        self.pre_run_script = script;
+        self
+    }
 }
 
 /// Stateless execution — creates a fresh JsRuntime (no snapshot).
@@ -982,6 +1072,8 @@ pub fn execute_stateless(
         module_loader_config,
         mcp_config,
         hardening,
+        init_script,
+        pre_run_script,
     } = config;
     let oom_flag = Arc::new(AtomicBool::new(false));
 
@@ -1172,7 +1264,7 @@ pub fn execute_stateless(
                     if let Err(e) = console::harden_runtime(&mut runtime, hardening) {
                         return Err(e);
                     }
-                    execute_module(&rt, &mut runtime, code)
+                    run_scripts_and_code(&rt, &mut runtime, init_script, pre_run_script, code)
                 }
             };
 
@@ -1226,6 +1318,8 @@ pub fn execute_stateful(
         module_loader_config,
         mcp_config,
         hardening,
+        init_script,
+        pre_run_script,
     } = config;
     let oom_flag = Arc::new(AtomicBool::new(false));
 
@@ -1355,7 +1449,9 @@ pub fn execute_stateful(
         let has_snapshot = leaked_snapshot.is_some();
 
         let output_result = if has_snapshot {
-            execute_module(&rt, &mut runtime, code)
+            // The injection chain is baked into the snapshot; only the
+            // (marker-gated) operator scripts and the user code run here.
+            run_scripts_and_code(&rt, &mut runtime, init_script, pre_run_script, code)
         } else {
             // Inject WASM modules as globals via V8 native API.
             // Do NOT early-return here — snapshot() must be called below.
@@ -1443,7 +1539,7 @@ pub fn execute_stateful(
                     if let Err(e) = console::harden_runtime(&mut runtime, hardening) {
                         return Err(e);
                     }
-                    execute_module(&rt, &mut runtime, code)
+                    run_scripts_and_code(&rt, &mut runtime, init_script, pre_run_script, code)
                 }
             }
         };
@@ -1569,6 +1665,14 @@ pub struct Engine {
     /// Per-mitigation sandbox hardening. Default is all-off (unhardened); each
     /// mitigation is opt-in via the `--harden-*` CLI flags.
     hardening: console::HardeningConfig,
+    /// Operator init script (`--init-script`): runs before an execution
+    /// whenever the isolate lacks the `__mcpV8InitDone` marker. TypeScript is
+    /// stripped at startup.
+    init_script: Option<Arc<str>>,
+    /// Operator pre-run script (`--pre-run-script`): runs before every
+    /// execution, after the init script when both fire. TypeScript is
+    /// stripped at startup.
+    pre_run_script: Option<Arc<str>>,
 }
 
 /// Builder for `Engine::run_js()`. Only `code` is required; everything else
@@ -1745,6 +1849,8 @@ impl Engine {
             label_store: None,
             fs_snapshot_policy_chain: None,
             hardening: console::HardeningConfig::default(),
+            init_script: None,
+            pre_run_script: None,
         }
     }
 
@@ -1786,6 +1892,8 @@ impl Engine {
             label_store: None,
             fs_snapshot_policy_chain: None,
             hardening: console::HardeningConfig::default(),
+            init_script: None,
+            pre_run_script: None,
         }
     }
 
@@ -1909,6 +2017,22 @@ impl Engine {
     /// Override the `run_js` tool description advertised in `tools/list`.
     pub fn with_run_js_description_override(mut self, text: String) -> Self {
         self.run_js_description_override = Some(Arc::from(text));
+        self
+    }
+
+    /// Set the init script (`--init-script`): runs before an execution
+    /// whenever the isolate lacks the `__mcpV8InitDone` marker. Expects
+    /// JavaScript (TypeScript already stripped).
+    pub fn with_init_script(mut self, js: String) -> Self {
+        self.init_script = Some(Arc::from(js));
+        self
+    }
+
+    /// Set the pre-run script (`--pre-run-script`): runs before every
+    /// execution, right before the submitted code. Expects JavaScript
+    /// (TypeScript already stripped).
+    pub fn with_pre_run_script(mut self, js: String) -> Self {
+        self.pre_run_script = Some(Arc::from(js));
         self
     }
 
@@ -2569,6 +2693,8 @@ impl Engine {
                         policy_chain: self.mcp_tools_policy_chain.clone(),
                     });
                 let fm = fs_mount.clone();
+                let init = self.init_script.clone();
+                let pre_run = self.pre_run_script.clone();
                 // Cloned for the post-run session-log entry, since `code` is
                 // moved into the spawn_blocking closure below.
                 let code_for_log = code.clone();
@@ -2589,7 +2715,9 @@ impl Engine {
                             .maybe_subprocess_config(sc.as_deref())
                             .console_tree(ct)
                             .module_loader_config(&mlc)
-                            .maybe_mcp_config(mc.as_ref()),
+                            .maybe_mcp_config(mc.as_ref())
+                            .maybe_init_script(init.as_deref())
+                            .maybe_pre_run_script(pre_run.as_deref()),
                     )
                 });
 
@@ -2687,6 +2815,8 @@ impl Engine {
 
                 let snap_mutex = self.snapshot_mutex.clone();
                 let fm = fs_mount.clone();
+                let init = self.init_script.clone();
+                let pre_run = self.pre_run_script.clone();
                 let mut join_handle = tokio::task::spawn_blocking(move || {
                     let _guard = snap_mutex.blocking_lock();
                     execute_stateful(
@@ -2706,7 +2836,9 @@ impl Engine {
                             .maybe_subprocess_config(sc.as_deref())
                             .console_tree(ct)
                             .module_loader_config(&mlc)
-                            .maybe_mcp_config(mc.as_ref()),
+                            .maybe_mcp_config(mc.as_ref())
+                            .maybe_init_script(init.as_deref())
+                            .maybe_pre_run_script(pre_run.as_deref()),
                     )
                 });
 

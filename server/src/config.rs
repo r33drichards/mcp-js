@@ -316,6 +316,8 @@ mod tests {
             heap_memory_max = 64
             allow_external_modules = true
             instructions = "Run JS for me"
+            init_script = "globalThis.a = 1"
+            pre-run-script = "console.log('pre')"   # kebab-case accepted
             "#,
             &[],
         );
@@ -325,6 +327,8 @@ mod tests {
         assert_eq!(cli.heap_memory_max, 64);
         assert!(cli.allow_external_modules);
         assert_eq!(cli.instructions.as_deref(), Some("Run JS for me"));
+        assert_eq!(cli.init_script.as_deref(), Some("globalThis.a = 1"));
+        assert_eq!(cli.pre_run_script.as_deref(), Some("console.log('pre')"));
     }
 
     #[test]
@@ -453,6 +457,19 @@ mod tests {
     fn clap_conflicts_are_enforced_between_config_keys() {
         let err = config_error("http_port = 8080\nsse_port = 8081");
         assert!(err.contains("'http_port' and 'sse_port'"), "got: {err}");
+    }
+
+    #[test]
+    fn metadata_only_conflicts_with_pre_run_scripts() {
+        let cli = parse_with_config(
+            "init_script = \"globalThis.a = 1\"",
+            &["--metadata-only", "--cluster-port", "7000"],
+        );
+        // Config-file values are clap defaults, so the conflict is enforced by
+        // the runtime re-check in main.rs; here both flags must at least parse
+        // into the Cli struct for that check to see them.
+        assert!(cli.metadata_only);
+        assert_eq!(cli.init_script.as_deref(), Some("globalThis.a = 1"));
     }
 
     #[test]

@@ -148,6 +148,8 @@ async fn async_main(cli: Cli) -> Result<()> {
             ("--allow-external-modules", cli.allow_external_modules),
             ("--instructions", cli.instructions.is_some()),
             ("--run-js-description", cli.run_js_description.is_some()),
+            ("--init-script", cli.init_script.is_some()),
+            ("--pre-run-script", cli.pre_run_script.is_some()),
         ]
         .into_iter()
         .filter(|(_, set)| *set)
@@ -901,6 +903,28 @@ async fn async_main(cli: Cli) -> Result<()> {
         let text = resolve_text_or_file(value, "--run-js-description")?;
         tracing::info!("Overriding run_js tool description ({} chars)", text.len());
         engine.with_run_js_description_override(text)
+    } else {
+        engine
+    };
+
+    // ── Pre-run scripts ──────────────────────────────────────────────────
+    // Same inline-or-@file syntax; TypeScript is stripped once here so an
+    // invalid script fails startup instead of every execution.
+    let engine = if let Some(ref value) = cli.init_script {
+        let text = resolve_text_or_file(value, "--init-script")?;
+        let js = engine::strip_typescript_types(&text)
+            .map_err(|e| anyhow::anyhow!("--init-script: {}", e))?;
+        tracing::info!("Init script configured ({} chars)", js.len());
+        engine.with_init_script(js)
+    } else {
+        engine
+    };
+    let engine = if let Some(ref value) = cli.pre_run_script {
+        let text = resolve_text_or_file(value, "--pre-run-script")?;
+        let js = engine::strip_typescript_types(&text)
+            .map_err(|e| anyhow::anyhow!("--pre-run-script: {}", e))?;
+        tracing::info!("Pre-run script configured ({} chars)", js.len());
+        engine.with_pre_run_script(js)
     } else {
         engine
     };

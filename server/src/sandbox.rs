@@ -107,7 +107,15 @@ impl SandboxPlan {
         if let Some(config) = &cli.config {
             plan.read_paths.insert(PathBuf::from(config));
         }
-        for value in [&cli.instructions, &cli.run_js_description].into_iter().flatten() {
+        for value in [
+            &cli.instructions,
+            &cli.run_js_description,
+            &cli.init_script,
+            &cli.pre_run_script,
+        ]
+        .into_iter()
+        .flatten()
+        {
             // Mirrors resolve_text_or_file: "@path" reads a file, "@@" is a
             // literal-@ escape, anything else is inline text.
             if let Some(path) = value.strip_prefix('@') {
@@ -562,10 +570,13 @@ mod tests {
         let cli = parse(&[
             "--instructions", "@/etc/mcp-v8/prompt.txt",
             "--run-js-description", "@@literal-not-a-file",
+            "--init-script", "@/etc/mcp-v8/init.js",
+            "--pre-run-script", "@@globalThis.inline = true",
         ]);
         let plan = SandboxPlan::from_cli(&cli);
         assert!(plan.read_paths.contains(Path::new("/etc/mcp-v8/prompt.txt")));
-        assert_eq!(plan.read_paths.len(), 1, "@@ escape is inline text, not a path");
+        assert!(plan.read_paths.contains(Path::new("/etc/mcp-v8/init.js")));
+        assert_eq!(plan.read_paths.len(), 2, "@@ escape is inline text, not a path");
     }
 
     #[test]
