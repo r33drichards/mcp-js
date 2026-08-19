@@ -275,6 +275,16 @@ exports.INSPECT_MAX_BYTES = 50
 const K_MAX_LENGTH = 0x7fffffff
 exports.kMaxLength = K_MAX_LENGTH
 
+function nodeError (ErrorType, code, message) {
+  const error = new ErrorType(message)
+  error.code = code
+  return error
+}
+
+function unknownEncodingError (encoding) {
+  return nodeError(TypeError, 'ERR_UNKNOWN_ENCODING', 'Unknown encoding: ' + encoding)
+}
+
 /**
  * If `Buffer.TYPED_ARRAY_SUPPORT`:
  *   === true    Use Uint8Array implementation (fastest)
@@ -434,9 +444,19 @@ Object.setPrototypeOf(Buffer, Uint8Array)
 
 function assertSize (size) {
   if (typeof size !== 'number') {
-    throw new TypeError('"size" argument must be of type number')
-  } else if (size < 0) {
-    throw new RangeError('The value "' + size + '" is invalid for option "size"')
+    throw nodeError(
+      TypeError,
+      'ERR_INVALID_ARG_TYPE',
+      'The "size" argument must be of type number. Received type ' + typeof size
+    )
+  }
+  if (!Number.isFinite(size) || size < 0 || size > K_MAX_LENGTH) {
+    throw nodeError(
+      RangeError,
+      'ERR_OUT_OF_RANGE',
+      'The value of "size" is out of range. It must be >= 0 && <= ' +
+        K_MAX_LENGTH + '. Received ' + size
+    )
   }
 }
 
@@ -488,7 +508,7 @@ function fromString (string, encoding) {
   }
 
   if (!Buffer.isEncoding(encoding)) {
-    throw new TypeError('Unknown encoding: ' + encoding)
+    throw unknownEncodingError(encoding)
   }
 
   const length = byteLength(string, encoding) | 0
@@ -583,10 +603,7 @@ function checked (length) {
 }
 
 function SlowBuffer (length) {
-  if (+length != length) { // eslint-disable-line eqeqeq
-    length = 0
-  }
-  return Buffer.alloc(+length)
+  return Buffer.alloc(length)
 }
 
 Buffer.isBuffer = function isBuffer (b) {
@@ -794,7 +811,7 @@ function slowToString (encoding, start, end) {
         return utf16leSlice(this, start, end)
 
       default:
-        if (loweredCase) throw new TypeError('Unknown encoding: ' + encoding)
+        if (loweredCase) throw unknownEncodingError(encoding)
         encoding = (encoding + '').toLowerCase()
         loweredCase = true
     }
@@ -1180,7 +1197,7 @@ Buffer.prototype.write = function write (string, offset, length, encoding) {
         return ucs2Write(this, string, offset, length)
 
       default:
-        if (loweredCase) throw new TypeError('Unknown encoding: ' + encoding)
+        if (loweredCase) throw unknownEncodingError(encoding)
         encoding = ('' + encoding).toLowerCase()
         loweredCase = true
     }
@@ -2000,7 +2017,7 @@ Buffer.prototype.fill = function fill (val, start, end, encoding) {
       throw new TypeError('encoding must be a string')
     }
     if (typeof encoding === 'string' && !Buffer.isEncoding(encoding)) {
-      throw new TypeError('Unknown encoding: ' + encoding)
+      throw unknownEncodingError(encoding)
     }
     if (val.length === 1) {
       const code = val.charCodeAt(0)

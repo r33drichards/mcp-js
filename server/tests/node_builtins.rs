@@ -422,3 +422,56 @@ async fn zlib_crc32_matches_node() {
     )
     .await;
 }
+
+#[tokio::test]
+async fn buffer_error_contracts() {
+    expect_ok(
+        r#"
+        import { Buffer, SlowBuffer, kMaxLength } from 'node:buffer';
+
+        function expectError(fn, Type, code, message) {
+            try {
+                fn();
+                throw new Error('expected ' + code);
+            } catch (error) {
+                if (!(error instanceof Type)) throw error;
+                if (error.code !== code) {
+                    throw new Error('wrong code: ' + error.code + ' for ' + error.message);
+                }
+                if (error.message !== message && !error.message.startsWith(message)) {
+                    throw new Error('wrong message: ' + error.message);
+                }
+            }
+        }
+
+        for (const allocate of [Buffer.allocUnsafeSlow, SlowBuffer]) {
+            for (const size of [undefined, '1', {}, true]) {
+                expectError(
+                    () => allocate(size),
+                    TypeError,
+                    'ERR_INVALID_ARG_TYPE',
+                    'The "size" argument must be of type number',
+                );
+            }
+            for (const size of [NaN, Infinity, -Infinity, -1, kMaxLength + 1]) {
+                expectError(
+                    () => allocate(size),
+                    RangeError,
+                    'ERR_OUT_OF_RANGE',
+                    'The value of "size" is out of range.',
+                );
+            }
+        }
+        if (Buffer.allocUnsafeSlow(2.9).length !== 2) {
+            throw new Error('fractional sizes must truncate');
+        }
+
+        const unknownEncoding = 'Unknown encoding: nope';
+        expectError(() => Buffer.from('x', 'nope'), TypeError, 'ERR_UNKNOWN_ENCODING', unknownEncoding);
+        expectError(() => Buffer.from('x').toString('nope'), TypeError, 'ERR_UNKNOWN_ENCODING', unknownEncoding);
+        expectError(() => Buffer.alloc(4).write('x', 'nope'), TypeError, 'ERR_UNKNOWN_ENCODING', unknownEncoding);
+        expectError(() => Buffer.alloc(4).fill('x', 'nope'), TypeError, 'ERR_UNKNOWN_ENCODING', unknownEncoding);
+        "#,
+    )
+    .await;
+}

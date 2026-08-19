@@ -1,4 +1,16 @@
 {
+  "test/parallel/test-buffer-slow.js": {
+    "status": "pass",
+    "family": "buffer",
+    "profile": "pure",
+    "compatibility": "exact"
+  },
+  "test/parallel/test-buffer-tostring.js": {
+    "status": "pass",
+    "family": "buffer",
+    "profile": "pure",
+    "compatibility": "exact"
+  },
   "test/parallel/test-console-instance.js": {
     "status": "pass",
     "family": "console",
