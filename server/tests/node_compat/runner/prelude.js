@@ -11,6 +11,7 @@ import buffer, { Buffer } from 'node:buffer';
 import consoleModule from 'node:console';
 import crypto from 'node:crypto';
 import dns from 'node:dns';
+import dnsPromises from 'node:dns/promises';
 import events from 'node:events';
 import fs from 'node:fs';
 import fsPromises from 'node:fs/promises';
@@ -173,6 +174,7 @@ const modules = {
     console: consoleModule,
     crypto: crypto,
     dns: dns,
+    'dns/promises': dnsPromises,
     events: events,
     fs: fs,
     'fs/promises': fsPromises,

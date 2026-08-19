@@ -66,6 +66,7 @@ fn node_compat_prelude_maps_registered_host_modules() {
     let prelude = include_str!("node_compat/runner/prelude.js");
     for (import, mapping) in [
         ("node:dns", "dns: dns"),
+        ("node:dns/promises", "'dns/promises': dnsPromises"),
         ("node:fs", "fs: fs"),
         ("node:fs/promises", "'fs/promises': fsPromises"),
         ("node:http", "http: http"),
@@ -175,6 +176,8 @@ async fn create_require_serves_builtins() {
     expect_ok(
         r#"
         import module, { createRequire, isBuiltin, builtinModules } from 'node:module';
+        import dns from 'node:dns';
+        import dnsPromises from 'node:dns/promises';
         import path from 'node:path';
         import util, { types } from 'node:util';
         import utilTypes from 'node:util/types';
@@ -187,6 +190,9 @@ async fn create_require_serves_builtins() {
             throw new Error('require(crypto) not functional');
         }
         if (require('module') !== module) throw new Error('require(module) identity');
+        if (dns.promises !== dnsPromises || require('dns/promises') !== dnsPromises) {
+            throw new Error('dns/promises identity');
+        }
         if (util.types !== types || types !== utilTypes || require('util/types') !== utilTypes) {
             throw new Error('util/types identity');
         }
@@ -200,8 +206,21 @@ async fn create_require_serves_builtins() {
         if (!isBuiltin('fs') || !isBuiltin('node:fs/promises') || isBuiltin('leftpad')) {
             throw new Error('isBuiltin');
         }
-        if (!builtinModules.includes('timers/promises') || !builtinModules.includes('util/types')) {
+        if (!builtinModules.includes('dns/promises') ||
+            !builtinModules.includes('timers/promises') ||
+            !builtinModules.includes('util/types')) {
             throw new Error('subpath builtins listed');
+        }
+
+        try {
+            dnsPromises.lookupService('fasdfdsaf', 0);
+            throw new Error('invalid lookupService address should throw');
+        } catch (error) {
+            if (error.name !== 'TypeError' ||
+                error.code !== 'ERR_INVALID_ARG_VALUE' ||
+                error.message !== "The argument 'address' is invalid. Received 'fasdfdsaf'") {
+                throw error;
+            }
         }
         "#,
     )
