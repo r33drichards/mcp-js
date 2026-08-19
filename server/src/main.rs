@@ -146,6 +146,7 @@ async fn async_main(cli: Cli) -> Result<()> {
             ("--mcp-config", cli.mcp_config.is_some()),
             ("--allow-run-js-file", cli.allow_run_js_file),
             ("--allow-external-modules", cli.allow_external_modules),
+            ("--node-globals", cli.node_globals),
             ("--instructions", cli.instructions.is_some()),
             ("--run-js-description", cli.run_js_description.is_some()),
         ]
@@ -800,7 +801,14 @@ async fn async_main(cli: Cli) -> Result<()> {
             "External module imports: DISABLED (use --allow-external-modules to enable)"
         );
     }
-    let engine = engine.with_module_loader_config(module_loader_config);
+    let engine = engine
+        .with_module_loader_config(module_loader_config)
+        .with_node_globals(cli.node_globals);
+    if cli.node_globals {
+        tracing::info!("Node.js Buffer/process globals: ENABLED");
+    } else {
+        tracing::info!("Node.js Buffer/process globals: DISABLED");
+    }
 
     // ── Subprocess policy ──────────────────────────────────────────────
     let engine = if let Some(chain) = subprocess_policy_chain {

@@ -799,6 +799,7 @@ fn execute_module(
     rt: &tokio::runtime::Runtime,
     runtime: &mut JsRuntime,
     code: &str,
+    node_globals: bool,
 ) -> Result<(), String> {
     let id = MODULE_COUNTER.fetch_add(1, Ordering::Relaxed);
     let main_url = ModuleSpecifier::parse(&format!("file:///main_{}.js", id))
@@ -811,6 +812,26 @@ fn execute_module(
     // `block_on` calls (where the ambient multi-thread runtime is current and
     // deno_unsync's op spawn would panic/deadlock).
     rt.block_on(async move {
+        if node_globals {
+            let bootstrap_url = ModuleSpecifier::parse(&format!(
+                "file:///__mcp_node_globals_{}.js", id
+            ))
+            .map_err(|e| format!("internal bootstrap specifier error: {}", e))?;
+            let bootstrap_id = runtime
+                .load_side_es_module_from_code(
+                    &bootstrap_url,
+                    node_compat::NODE_GLOBALS_BOOTSTRAP.to_string(),
+                )
+                .await
+                .map_err(|e| format!("{}", e))?;
+            let bootstrap_eval = runtime.mod_evaluate(bootstrap_id);
+            runtime
+                .run_event_loop(Default::default())
+                .await
+                .map_err(|e| format!("{}", e))?;
+            bootstrap_eval.await.map_err(|e| format!("{}", e))?;
+        }
+
         let mod_id = runtime
             .load_side_es_module_from_code(&main_url, code.to_string())
             .await
@@ -850,6 +871,7 @@ pub struct ExecutionConfig<'a> {
     pub console_tree: Option<sled::Tree>,
     pub module_loader_config: Option<&'a module_loader::ModuleLoaderConfig>,
     pub mcp_config: Option<&'a mcp_client::McpConfig>,
+    pub node_globals: bool,
     /// Per-mitigation sandbox hardening. Default is all-off (unhardened).
     pub hardening: console::HardeningConfig,
 }
@@ -871,8 +893,14 @@ impl<'a> ExecutionConfig<'a> {
             console_tree: None,
             module_loader_config: None,
             mcp_config: None,
+            node_globals: false,
             hardening: console::HardeningConfig::default(),
         }
+    }
+
+    pub fn node_globals(mut self, enabled: bool) -> Self {
+        self.node_globals = enabled;
+        self
     }
 
     /// Set the per-mitigation sandbox hardening configuration.
@@ -981,6 +1009,7 @@ pub fn execute_stateless(
         console_tree,
         module_loader_config,
         mcp_config,
+        node_globals,
         hardening,
     } = config;
     let oom_flag = Arc::new(AtomicBool::new(false));
@@ -1172,7 +1201,7 @@ pub fn execute_stateless(
                     if let Err(e) = console::harden_runtime(&mut runtime, hardening) {
                         return Err(e);
                     }
-                    execute_module(&rt, &mut runtime, code)
+                    execute_module(&rt, &mut runtime, code, node_globals)
                 }
             };
 
@@ -1225,6 +1254,7 @@ pub fn execute_stateful(
         console_tree,
         module_loader_config,
         mcp_config,
+        node_globals,
         hardening,
     } = config;
     let oom_flag = Arc::new(AtomicBool::new(false));
@@ -1355,7 +1385,7 @@ pub fn execute_stateful(
         let has_snapshot = leaked_snapshot.is_some();
 
         let output_result = if has_snapshot {
-            execute_module(&rt, &mut runtime, code)
+            execute_module(&rt, &mut runtime, code, node_globals)
         } else {
             // Inject WASM modules as globals via V8 native API.
             // Do NOT early-return here — snapshot() must be called below.
@@ -1443,7 +1473,7 @@ pub fn execute_stateful(
                     if let Err(e) = console::harden_runtime(&mut runtime, hardening) {
                         return Err(e);
                     }
-                    execute_module(&rt, &mut runtime, code)
+                    execute_module(&rt, &mut runtime, code, node_globals)
                 }
             }
         };
@@ -1542,6 +1572,8 @@ pub struct Engine {
     execution_registry: Option<Arc<ExecutionRegistry>>,
     /// Module loader configuration controlling external module access and OPA auditing.
     module_loader_config: Arc<module_loader::ModuleLoaderConfig>,
+    /// Install sandboxed Buffer and process globals before user module evaluation.
+    node_globals: bool,
     /// MCP client manager for programmatic tool calling from JS.
     mcp_client_manager: Option<Arc<mcp_client::McpClientManager>>,
     /// OPA policy chain for MCP tool calls (`mcp.callTool()`).
@@ -1735,6 +1767,7 @@ impl Engine {
                 allow_external: false,
                 policy_chain: None,
             }),
+            node_globals: false,
             mcp_client_manager: None,
             mcp_tools_policy_chain: None,
             subprocess_config: None,
@@ -1776,6 +1809,7 @@ impl Engine {
                 allow_external: false,
                 policy_chain: None,
             }),
+            node_globals: false,
             mcp_client_manager: None,
             mcp_tools_policy_chain: None,
             subprocess_config: None,
@@ -1787,6 +1821,12 @@ impl Engine {
             fs_snapshot_policy_chain: None,
             hardening: console::HardeningConfig::default(),
         }
+    }
+
+    /// Install the sandboxed Buffer and process globals before user modules evaluate.
+    pub fn with_node_globals(mut self, enabled: bool) -> Self {
+        self.node_globals = enabled;
+        self
     }
 
     /// Set the default max native memory for WASM modules without a per-module limit.
@@ -2553,6 +2593,7 @@ impl Engine {
                 let wasm = self.wasm_modules.clone();
                 let wasm_default = self.wasm_default_max_bytes;
                 let hardening = self.hardening;
+                let node_globals = self.node_globals;
                 let fc = self.fetch_config.clone();
                 let wsc = self.websocket_config.clone();
                 let h2c = self.http2_config.clone();
@@ -2581,6 +2622,7 @@ impl Engine {
                             .wasm_modules(&wasm)
                             .wasm_default_max_bytes(wasm_default)
                             .hardening(hardening)
+                            .node_globals(node_globals)
                             .maybe_fetch_config(fc.as_deref())
                             .maybe_websocket_config(wsc.as_deref())
                             .maybe_http2_config(h2c.as_deref())
@@ -2669,6 +2711,7 @@ impl Engine {
                 let wasm = self.wasm_modules.clone();
                 let wasm_default = self.wasm_default_max_bytes;
                 let hardening = self.hardening;
+                let node_globals = self.node_globals;
                 let fc = self.fetch_config.clone();
                 let wsc = self.websocket_config.clone();
                 let h2c = self.http2_config.clone();
@@ -2698,6 +2741,7 @@ impl Engine {
                             .wasm_modules(&wasm)
                             .wasm_default_max_bytes(wasm_default)
                             .hardening(hardening)
+                            .node_globals(node_globals)
                             .maybe_fetch_config(fc.as_deref())
                             .maybe_websocket_config(wsc.as_deref())
                             .maybe_http2_config(h2c.as_deref())
