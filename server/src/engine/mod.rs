@@ -1,3 +1,4 @@
+pub mod artifacts;
 pub mod console;
 pub mod execution;
 pub mod fetch;
@@ -58,6 +59,7 @@ use swc_core::ecma::visit::swc_ecma_ast::Pass;
 
 use tokio::sync::Semaphore;
 
+use self::artifacts::{Artifact, ArtifactMeta, ArtifactState, ArtifactStore};
 use self::console::ConsoleLogState;
 use self::execution::{
     ConsoleOutputPage, ExecutionId, ExecutionInfo, ExecutionRegistry, ExecutionSummary,
@@ -852,6 +854,9 @@ pub struct ExecutionConfig<'a> {
     pub mcp_config: Option<&'a mcp_client::McpConfig>,
     /// Per-mitigation sandbox hardening. Default is all-off (unhardened).
     pub hardening: console::HardeningConfig,
+    /// When present, the `artifact(key, mime, bytes)` global is available and
+    /// writes into this store, recording emitted keys for the execution.
+    pub artifact_state: Option<ArtifactState>,
 }
 
 impl<'a> ExecutionConfig<'a> {
@@ -872,6 +877,7 @@ impl<'a> ExecutionConfig<'a> {
             module_loader_config: None,
             mcp_config: None,
             hardening: console::HardeningConfig::default(),
+            artifact_state: None,
         }
     }
 
@@ -957,6 +963,11 @@ impl<'a> ExecutionConfig<'a> {
         self.mcp_config = config;
         self
     }
+
+    pub fn maybe_artifact_state(mut self, state: Option<ArtifactState>) -> Self {
+        self.artifact_state = state;
+        self
+    }
 }
 
 /// Stateless execution — creates a fresh JsRuntime (no snapshot).
@@ -982,6 +993,7 @@ pub fn execute_stateless(
         module_loader_config,
         mcp_config,
         hardening,
+        artifact_state,
     } = config;
     let oom_flag = Arc::new(AtomicBool::new(false));
 
@@ -1008,6 +1020,9 @@ pub fn execute_stateless(
         }
         if mcp_config.is_some() {
             extensions.push(mcp_client::create_extension());
+        }
+        if artifact_state.is_some() {
+            extensions.push(artifacts::create_extension());
         }
         extensions.push(timers::create_extension());
         extensions.push(url_support::create_extension());
@@ -1080,6 +1095,11 @@ pub fn execute_stateless(
             runtime.op_state().borrow_mut().put(mc.clone());
         }
 
+        // Put artifact state in OpState if an artifact store is attached.
+        if let Some(ast) = &artifact_state {
+            runtime.op_state().borrow_mut().put(ast.clone());
+        }
+
         // Publish handle immediately so caller can terminate us.
         *isolate_handle.lock().unwrap() = Some(runtime.v8_isolate().thread_safe_handle());
 
@@ -1128,6 +1148,12 @@ pub fn execute_stateless(
                     // Inject mcp JS wrapper if MCP servers are configured.
                     if mcp_config.is_some() {
                         if let Err(e) = mcp_client::inject_mcp(&mut runtime) {
+                            return Err(e);
+                        }
+                    }
+                    // Inject artifact() JS wrapper if an artifact store is attached.
+                    if artifact_state.is_some() {
+                        if let Err(e) = artifacts::inject_artifact(&mut runtime) {
                             return Err(e);
                         }
                     }
@@ -1226,6 +1252,7 @@ pub fn execute_stateful(
         module_loader_config,
         mcp_config,
         hardening,
+        artifact_state,
     } = config;
     let oom_flag = Arc::new(AtomicBool::new(false));
 
@@ -1269,6 +1296,9 @@ pub fn execute_stateful(
         }
         if mcp_config.is_some() {
             extensions.push(mcp_client::create_extension());
+        }
+        if artifact_state.is_some() {
+            extensions.push(artifacts::create_extension());
         }
         extensions.push(timers::create_extension());
         extensions.push(url_support::create_extension());
@@ -1342,6 +1372,11 @@ pub fn execute_stateful(
             runtime.op_state().borrow_mut().put(mc.clone());
         }
 
+        // Put artifact state in OpState if an artifact store is attached.
+        if let Some(ast) = &artifact_state {
+            runtime.op_state().borrow_mut().put(ast.clone());
+        }
+
         // Publish handle immediately so caller can terminate us.
         *isolate_handle.lock().unwrap() = Some(runtime.v8_isolate().thread_safe_handle());
 
@@ -1399,6 +1434,13 @@ pub fn execute_stateful(
                     // Inject mcp JS wrapper if MCP servers are configured.
                     if mcp_config.is_some() {
                         if let Err(e) = mcp_client::inject_mcp(&mut runtime) {
+                            return Err(e);
+                        }
+                    }
+                    // Inject artifact() JS wrapper if an artifact store is
+                    // attached. Baked into the snapshot for restored runs.
+                    if artifact_state.is_some() {
+                        if let Err(e) = artifacts::inject_artifact_snapshot(&mut runtime) {
                             return Err(e);
                         }
                     }
@@ -2546,6 +2588,17 @@ impl Engine {
 
         let isolate_handle: Arc<Mutex<Option<v8::IsolateHandle>>> = Arc::new(Mutex::new(None));
 
+        // Attach the shared keyed artifact store so `artifact(key, mime, bytes)`
+        // is available to the script; whatever it emits is filed on the
+        // execution record after the run (regardless of final status).
+        let artifact_state = match registry.artifacts_tree() {
+            Ok(tree) => Some(ArtifactState::new(ArtifactStore::new(tree), Some(id.clone()))),
+            Err(e) => {
+                tracing::warn!("artifact store unavailable for execution {}: {}", id, e);
+                None
+            }
+        };
+
         match &self.heap_storage {
             None => {
                 // Stateless mode
@@ -2569,6 +2622,7 @@ impl Engine {
                         policy_chain: self.mcp_tools_policy_chain.clone(),
                     });
                 let fm = fs_mount.clone();
+                let ast = artifact_state.clone();
                 // Cloned for the post-run session-log entry, since `code` is
                 // moved into the spawn_blocking closure below.
                 let code_for_log = code.clone();
@@ -2589,7 +2643,8 @@ impl Engine {
                             .maybe_subprocess_config(sc.as_deref())
                             .console_tree(ct)
                             .module_loader_config(&mlc)
-                            .maybe_mcp_config(mc.as_ref()),
+                            .maybe_mcp_config(mc.as_ref())
+                            .maybe_artifact_state(ast),
                     )
                 });
 
@@ -2625,6 +2680,13 @@ impl Engine {
                         Err("Execution timed out: script exceeded the time limit.".to_string())
                     }
                 };
+
+                // File whatever artifacts the script emitted before marking a
+                // terminal status, so a client that stops polling on the first
+                // terminal status cannot miss them.
+                if let Some(ast) = &artifact_state {
+                    registry.set_artifacts(&id, ast.emitted.lock().unwrap().clone());
+                }
 
                 match result {
                     Ok(js_result) => {
@@ -2687,6 +2749,7 @@ impl Engine {
 
                 let snap_mutex = self.snapshot_mutex.clone();
                 let fm = fs_mount.clone();
+                let ast = artifact_state.clone();
                 let mut join_handle = tokio::task::spawn_blocking(move || {
                     let _guard = snap_mutex.blocking_lock();
                     execute_stateful(
@@ -2706,7 +2769,8 @@ impl Engine {
                             .maybe_subprocess_config(sc.as_deref())
                             .console_tree(ct)
                             .module_loader_config(&mlc)
-                            .maybe_mcp_config(mc.as_ref()),
+                            .maybe_mcp_config(mc.as_ref())
+                            .maybe_artifact_state(ast),
                     )
                 });
 
@@ -2740,6 +2804,13 @@ impl Engine {
                         Err("Execution timed out: script exceeded the time limit.".to_string())
                     }
                 };
+
+                // File whatever artifacts the script emitted before marking a
+                // terminal status, so a client that stops polling on the first
+                // terminal status cannot miss them.
+                if let Some(ast) = &artifact_state {
+                    registry.set_artifacts(&id, ast.emitted.lock().unwrap().clone());
+                }
 
                 match v8_result {
                     Ok((output, startup_data, content_hash)) => {
@@ -2802,6 +2873,24 @@ impl Engine {
         registry
             .get(id)
             .ok_or_else(|| format!("Execution '{}' not found", id))
+    }
+
+    fn artifact_store(&self) -> Result<ArtifactStore, String> {
+        let registry = self.execution_registry.as_ref()
+            .ok_or_else(|| "Execution registry not configured".to_string())?;
+        Ok(ArtifactStore::new(registry.artifacts_tree()?))
+    }
+
+    /// Fetch an artifact stored via the `artifact(key, mime, bytes)` global.
+    pub fn get_artifact(&self, key: &str) -> Result<Artifact, String> {
+        self.artifact_store()?
+            .get(key)?
+            .ok_or_else(|| format!("artifact '{}' not found", key))
+    }
+
+    /// List metadata for all stored artifacts.
+    pub fn list_artifacts(&self) -> Result<Vec<ArtifactMeta>, String> {
+        self.artifact_store()?.list()
     }
 
     /// Get paginated console output for an execution.

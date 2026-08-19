@@ -47,7 +47,7 @@ async fn run_js(
     if let Some(f) = file { args.insert("file".into(), serde_json::Value::String(f)); }
     if let Some(m) = max_mb { args.insert("heap_memory_max_mb".into(), serde_json::json!(m)); }
     if let Some(t) = timeout { args.insert("execution_timeout_secs".into(), serde_json::json!(t)); }
-    server::mcp_dispatch::run_js_blocking(engine, None, &serde_json::Value::Object(args)).await
+    server::mcp_dispatch::run_js_blocking(engine, None, &serde_json::Value::Object(args)).await.json
 }
 
 fn parse_response(resp: serde_json::Value) -> serde_json::Value {

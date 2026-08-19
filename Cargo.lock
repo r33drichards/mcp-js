@@ -4608,6 +4608,7 @@ dependencies = [
  "aws-config",
  "aws-sdk-s3",
  "axum",
+ "base64 0.22.1",
  "bincode",
  "blake3",
  "brotli",

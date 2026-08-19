@@ -147,7 +147,7 @@ fn read_doc_resource(uri: &str, heap: bool, fs: bool) -> Option<ReadResourceResu
     }]))
 }
 
-// ── Tool result helper ──────────────────────────────────────────────────
+// ── Tool result helpers ─────────────────────────────────────────────────
 
 /// Wrap a JSON value as a successful `CallToolResult` (single JSON content).
 fn json_result(value: serde_json::Value) -> Result<CallToolResult, McpError> {
@@ -157,6 +157,32 @@ fn json_result(value: serde_json::Value) -> Result<CallToolResult, McpError> {
             "Failed to serialize response: {e}"
         ))])),
     }
+}
+
+/// Map a rendered artifact payload to the matching rmcp content block:
+/// image/* → `ImageContent`, audio/* → `AudioContent` (the MCP-spec blocks
+/// for returning media to the model), everything else → `TextContent`.
+fn artifact_block(artifact: crate::engine::artifacts::ArtifactContent) -> Content {
+    use crate::engine::artifacts::ArtifactContent as AC;
+    match artifact {
+        AC::Image { data_base64, mime_type } => Content::image(data_base64, mime_type),
+        AC::Audio { data_base64, mime_type } => Annotated::new(
+            RawContent::Audio(RawAudioContent { data: data_base64, mime_type }),
+            None,
+        ),
+        AC::Text(text) | AC::Base64(text) => Content::text(text),
+    }
+}
+
+/// Wrap a dispatch `ToolResponse` as a successful `CallToolResult`: the JSON
+/// body first, then one content block per rendered artifact.
+fn tool_result(response: crate::mcp_dispatch::ToolResponse) -> Result<CallToolResult, McpError> {
+    let mut contents = vec![match Content::json(response.json) {
+        Ok(content) => content,
+        Err(e) => Content::text(format!("Failed to serialize response: {e}")),
+    }];
+    contents.extend(response.artifacts.into_iter().map(artifact_block));
+    Ok(CallToolResult::success(contents))
 }
 
 // ── Tool argument structs ─────────────────────────────────────────────────
@@ -217,6 +243,12 @@ pub struct GetExecutionOutputArgs {
 pub struct ListSessionSnapshotsArgs {
     #[serde(default)]
     pub fields: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
+pub struct ArtifactKeyArg {
+    /// Artifact key, as passed to `artifact(key, mime, bytes)` in JS.
+    pub key: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
@@ -391,7 +423,7 @@ impl McpService {
             &value,
         )
         .await;
-        json_result(result)
+        tool_result(result)
     }
 }
 
@@ -457,6 +489,19 @@ impl McpService {
     #[tool(description = "List all executions with their status.")]
     pub async fn list_executions(&self) -> Result<CallToolResult, McpError> {
         self.dispatch("list_executions", &json!({})).await
+    }
+
+    #[tool(description = "Fetch an artifact stored by run_js code via the artifact(key, mime, bytes) global. The payload is returned as a content block matching its mime type: image/* as an MCP image block (visible to the model), audio/* as an audio block, UTF-8 payloads as text, and other binary as base64 text. A JSON metadata block (key, mime_type, size_bytes, created_at, execution_id, encoding) comes first.")]
+    pub async fn get_artifact(
+        &self,
+        Parameters(args): Parameters<ArtifactKeyArg>,
+    ) -> Result<CallToolResult, McpError> {
+        self.dispatch("get_artifact", &args).await
+    }
+
+    #[tool(description = "List metadata (key, mime_type, size_bytes, created_at, execution_id) for all artifacts stored via the artifact(key, mime, bytes) global. Use get_artifact to fetch a payload.")]
+    pub async fn list_artifacts(&self) -> Result<CallToolResult, McpError> {
+        self.dispatch("list_artifacts", &json!({})).await
     }
 
     #[tool(description = "List all named sessions (stateful mode only). Returns an array of session names that have been used via REST session fields or the X-MCP-Session-Id header.")]
@@ -711,7 +756,21 @@ impl StatelessMcpService {
         let value = serde_json::to_value(&args).unwrap_or_else(|_| json!({}));
         let result =
             crate::mcp_dispatch::run_js_blocking(&self.engine, self.mcp_headers.get(), &value).await;
-        json_result(result)
+        tool_result(result)
+    }
+
+    #[tool(description = "Fetch an artifact stored by run_js code via the artifact(key, mime, bytes) global. The payload is returned as a content block matching its mime type: image/* as an MCP image block (visible to the model), audio/* as an audio block, UTF-8 payloads as text, and other binary as base64 text. A JSON metadata block (key, mime_type, size_bytes, created_at, execution_id, encoding) comes first.")]
+    pub async fn get_artifact(
+        &self,
+        Parameters(args): Parameters<ArtifactKeyArg>,
+    ) -> Result<CallToolResult, McpError> {
+        let value = serde_json::to_value(&args).unwrap_or_else(|_| json!({}));
+        tool_result(crate::mcp_dispatch::get_artifact(&self.engine, &value))
+    }
+
+    #[tool(description = "List metadata (key, mime_type, size_bytes, created_at, execution_id) for all artifacts stored via the artifact(key, mime, bytes) global. Use get_artifact to fetch a payload.")]
+    pub async fn list_artifacts(&self) -> Result<CallToolResult, McpError> {
+        json_result(crate::mcp_dispatch::list_artifacts(&self.engine))
     }
 }
 

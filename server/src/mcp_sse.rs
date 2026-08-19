@@ -61,12 +61,31 @@ fn to_legacy_tool(tool: &rmcp::model::Tool) -> Tool {
     }
 }
 
-fn ok_result(value: serde_json::Value) -> CallToolResult {
-    match Content::json(value) {
-        Ok(content) => CallToolResult::success(vec![content]),
-        Err(e) => CallToolResult::success(vec![Content::text(format!(
-            "Failed to serialize response: {e}"
-        ))]),
+fn ok_result(response: crate::mcp_dispatch::ToolResponse) -> CallToolResult {
+    let mut contents = vec![match Content::json(response.json) {
+        Ok(content) => content,
+        Err(e) => Content::text(format!("Failed to serialize response: {e}")),
+    }];
+    contents.extend(response.artifacts.into_iter().map(artifact_block));
+    CallToolResult::success(contents)
+}
+
+/// Map a rendered artifact payload to the matching legacy-rmcp content block:
+/// image/* → `ImageContent`, audio/* → `AudioContent`, everything else →
+/// `TextContent` (mirrors `mcp.rs::artifact_block` for the 0.1.5 model types).
+fn artifact_block(artifact: crate::engine::artifacts::ArtifactContent) -> Content {
+    use crate::engine::artifacts::ArtifactContent as AC;
+    use rmcp_legacy::model::{RawAudioContent, RawContent};
+    match artifact {
+        AC::Image { data_base64, mime_type } => Content::image(data_base64, mime_type),
+        AC::Audio { data_base64, mime_type } => Annotated::new(
+            RawContent::Audio(Annotated::new(
+                RawAudioContent { data: data_base64, mime_type },
+                None,
+            )),
+            None,
+        ),
+        AC::Text(text) | AC::Base64(text) => Content::text(text),
     }
 }
 
@@ -220,14 +239,17 @@ impl ServerHandler for SseService {
         let headers = self.mcp_headers.get();
 
         // Mirror the two service modes: stateful exposes the full async tool
-        // surface; stateless exposes only run_js (run to completion, return
-        // output directly).
+        // surface; stateless exposes run_js (run to completion, return output
+        // directly) plus the artifact retrieval tools.
         let result = if self.engine.session_capable() {
             crate::mcp_dispatch::call_tool(&self.engine, session, headers, name, &args).await
-        } else if name == "run_js" {
-            crate::mcp_dispatch::run_js_blocking(&self.engine, headers, &args).await
         } else {
-            json!({ "error": format!("unknown tool: {name}") })
+            match name {
+                "run_js" => crate::mcp_dispatch::run_js_blocking(&self.engine, headers, &args).await,
+                "get_artifact" => crate::mcp_dispatch::get_artifact(&self.engine, &args),
+                "list_artifacts" => crate::mcp_dispatch::list_artifacts(&self.engine).into(),
+                _ => json!({ "error": format!("unknown tool: {name}") }).into(),
+            }
         };
         Ok(ok_result(result))
     }

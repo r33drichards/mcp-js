@@ -38,6 +38,7 @@ nav:
       - Stateful sessions & heap snapshots: how-to/sessions-and-heaps.md
       - Heap storage backends: how-to/storage-backends.md
       - Asynchronous execution & output: how-to/async-execution.md
+      - Returning images & artifacts: how-to/artifacts.md
       - Transports (stdio, HTTP, SSE): how-to/transports.md
       - Network access with fetch: how-to/fetch.md
       - WebSocket connections: how-to/websocket.md

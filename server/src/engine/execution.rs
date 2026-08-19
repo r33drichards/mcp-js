@@ -10,6 +10,8 @@ use dashmap::DashMap;
 use deno_core::v8;
 use serde::Serialize;
 
+use super::artifacts::ArtifactMeta;
+
 // ── Types ────────────────────────────────────────────────────────────────
 
 pub type ExecutionId = String;
@@ -48,6 +50,8 @@ pub struct ExecutionRecord {
     pub error: Option<String>,
     pub started_at: String,
     pub completed_at: Option<String>,
+    /// Artifacts emitted by this execution via `artifact(key, mime, bytes)`.
+    pub artifacts: Vec<ArtifactMeta>,
 }
 
 /// Summary returned by `list()`.
@@ -114,10 +118,25 @@ impl ExecutionRegistry {
             error: None,
             started_at: chrono::Utc::now().to_rfc3339(),
             completed_at: None,
+            artifacts: Vec::new(),
         };
         self.executions.insert(id.to_string(), record);
 
         Ok(tree)
+    }
+
+    /// Open the shared keyed artifact tree (`"artifacts"`) in the execution db.
+    pub fn artifacts_tree(&self) -> Result<sled::Tree, String> {
+        self.db
+            .open_tree("artifacts")
+            .map_err(|e| format!("Failed to open artifacts tree: {}", e))
+    }
+
+    /// Record the artifacts an execution emitted via `artifact()`.
+    pub fn set_artifacts(&self, id: &str, artifacts: Vec<ArtifactMeta>) {
+        if let Some(mut record) = self.executions.get_mut(id) {
+            record.artifacts = artifacts;
+        }
     }
 
     /// Store the V8 isolate handle for cancellation support.
@@ -206,6 +225,7 @@ impl ExecutionRegistry {
             error: r.error.clone(),
             started_at: r.started_at.clone(),
             completed_at: r.completed_at.clone(),
+            artifacts: r.artifacts.clone(),
         })
     }
 
@@ -336,4 +356,6 @@ pub struct ExecutionInfo {
     pub error: Option<String>,
     pub started_at: String,
     pub completed_at: Option<String>,
+    /// Artifacts emitted by this execution via `artifact(key, mime, bytes)`.
+    pub artifacts: Vec<ArtifactMeta>,
 }

@@ -103,6 +103,30 @@ pub struct ExecutionInfo {
     pub started_at: String,
     /// ISO-8601 timestamp when execution finished (absent while running).
     pub completed_at: Option<String>,
+    /// Artifacts emitted via `artifact(key, mime, bytes)` during this
+    /// execution. Fetch payloads with `GET /api/artifacts/{key}`.
+    pub artifacts: Vec<ArtifactMeta>,
+}
+
+/// Metadata for one stored artifact (payload not included).
+#[derive(Serialize, ToSchema)]
+pub struct ArtifactMeta {
+    /// Caller-chosen key, as passed to `artifact(key, mime, bytes)`.
+    pub key: String,
+    /// Mime type, e.g. `image/png`.
+    pub mime_type: String,
+    /// Payload size in bytes.
+    pub size_bytes: u64,
+    /// ISO-8601 timestamp when the artifact was (last) written.
+    pub created_at: String,
+    /// Execution that (last) wrote this artifact, when known.
+    pub execution_id: Option<String>,
+}
+
+/// List of stored artifacts.
+#[derive(Serialize, ToSchema)]
+pub struct ArtifactList {
+    pub artifacts: Vec<ArtifactMeta>,
 }
 
 /// A page of console output from an execution.
@@ -225,6 +249,8 @@ pub struct FsLogQuery {
         get_execution_handler,
         get_execution_output_handler,
         cancel_execution_handler,
+        list_artifacts_handler,
+        get_artifact_handler,
         cli_index_handler,
         cli_download_handler,
         fs_labels_handler,
@@ -242,6 +268,8 @@ pub struct FsLogQuery {
         ExecutionOutput,
         ExecutionList,
         ExecutionSummary,
+        ArtifactMeta,
+        ArtifactList,
         CancelResult,
         ApiError,
         OutputQuery,
@@ -423,12 +451,80 @@ async fn get_execution_handler(
                 "error": info.error,
                 "started_at": info.started_at,
                 "completed_at": info.completed_at,
+                "artifacts": info.artifacts,
             })),
         ),
         Err(e) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "error": e })),
         ),
+    }
+}
+
+/// List metadata for all stored artifacts.
+#[utoipa::path(
+    get,
+    path = "/api/artifacts",
+    responses(
+        (status = 200, description = "Artifact metadata list", body = ArtifactList),
+        (status = 500, description = "Artifact store unavailable", body = ApiError),
+    ),
+    tag = "artifacts"
+)]
+async fn list_artifacts_handler(
+    State(engine): State<Engine>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    match engine.list_artifacts() {
+        Ok(artifacts) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "artifacts": artifacts })),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e })),
+        ),
+    }
+}
+
+/// Download an artifact's raw payload bytes.
+///
+/// The response body is the artifact's payload verbatim, served with the
+/// stored mime type as `Content-Type` — no base64, unlike the MCP tool.
+#[utoipa::path(
+    get,
+    path = "/api/artifacts/{key}",
+    params(
+        ("key" = String, Path, description = "Artifact key, as passed to artifact(key, mime, bytes)")
+    ),
+    responses(
+        (status = 200, description = "Raw artifact bytes (Content-Type = stored mime type)"),
+        (status = 404, description = "Artifact not found", body = ApiError),
+    ),
+    tag = "artifacts"
+)]
+async fn get_artifact_handler(
+    State(engine): State<Engine>,
+    Path(key): Path<String>,
+) -> Response {
+    match engine.get_artifact(&key) {
+        // nosniff + attachment: the payload and its Content-Type are script-
+        // controlled, so keep browsers from rendering active content (e.g.
+        // text/html) in the API's origin.
+        Ok(artifact) => (
+            StatusCode::OK,
+            [
+                (header::CONTENT_TYPE, artifact.meta.mime_type),
+                (header::CONTENT_DISPOSITION, "attachment".to_string()),
+                (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
+            ],
+            artifact.bytes,
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": e })),
+        )
+            .into_response(),
     }
 }
 
@@ -939,6 +1035,8 @@ pub fn api_router(engine: Engine) -> Router {
         .route("/api/executions/{id}", get(get_execution_handler))
         .route("/api/executions/{id}/output", get(get_execution_output_handler))
         .route("/api/executions/{id}/cancel", post(cancel_execution_handler))
+        .route("/api/artifacts", get(list_artifacts_handler))
+        .route("/api/artifacts/{key}", get(get_artifact_handler))
         .route("/api/cli", get(cli_index_handler))
         .route("/api/cli/{platform}", get(cli_download_handler))
         .route("/api/fs/labels", get(fs_labels_handler).post(fs_set_label_handler))
