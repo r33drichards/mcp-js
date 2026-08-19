@@ -15,14 +15,14 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use server::engine::ExecutionConfig;
 use server::engine::fetch::FetchConfig;
 use server::engine::opa::{EvalMode, PolicyChain};
+use server::engine::ExecutionConfig;
 
 const PRELUDE_JS: &str = include_str!("node_compat/runner/prelude.js");
 const RESULT_SENTINEL: &str = "__NODE_TEST_RESULT__";
