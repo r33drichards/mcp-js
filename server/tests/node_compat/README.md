@@ -103,3 +103,7 @@ Generated files:
 - `site-docs/reference/compatibility.md`: existing compatibility overview.
 
 CI rejects stale generated reports and any unexpected fast-suite result drift.
+
+## Full Linux Corpus Workflow
+
+`.github/workflows/node-compat-full.yml` attempts every inventoried Linux x86_64 test on 16 Railway shards. The aggregate `Node Compatibility Full` job is intentionally red until every applicable result passes; only explicit upstream non-Linux/non-x86_64 skips are neutral.

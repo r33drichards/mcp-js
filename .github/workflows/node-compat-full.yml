@@ -1,0 +1,77 @@
+name: Node Compatibility Full
+on:
+  pull_request:
+    branches: [main]
+    paths: ['server/src/**','server/tests/node_compat/**','server/examples/node_compat_full.rs','server/examples/node_compat_full/**','tools/compat/**','.github/workflows/node-compat-full.yml']
+  workflow_dispatch:
+  schedule:
+    - cron: '17 3 * * *'
+concurrency:
+  group: node-compat-full-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  run:
+    name: Node compat shard ${{ matrix.shard }}
+    runs-on: [self-hosted, railway]
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v30
+        with:
+          extra_nix_config: experimental-features = nix-command flakes
+      - name: Fetch pinned corpus
+        id: corpus
+        run: echo "path=$(python3 tools/compat/fetch-node-compat-corpora.py --source deno_node_test)" >> "$GITHUB_OUTPUT"
+      - name: Build broad runner
+        run: nix develop --command bash -c 'cd server && cargo build --release --example node_compat_full'
+      - name: Run complete shard
+        id: execute
+        continue-on-error: true
+        env:
+          NODE_COMPAT_CORPUS: ${{ steps.corpus.outputs.path }}
+          NODE_COMPAT_SHARD_INDEX: ${{ matrix.shard }}
+          NODE_COMPAT_SHARD_TOTAL: '16'
+          NODE_COMPAT_RESULTS: ${{ github.workspace }}/node-compat-results/results.jsonl
+          NODE_COMPAT_SUMMARY: ${{ github.workspace }}/node-compat-results/summary.json
+          NODE_COMPAT_TIMEOUT_SECONDS: '10'
+        run: mkdir -p node-compat-results && target/release/examples/node_compat_full 2>&1 | tee node-compat-results/runner.log
+      - name: Upload shard results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-compat-full-shard-${{ matrix.shard }}
+          path: node-compat-results/
+          if-no-files-found: error
+  aggregate:
+    name: Node Compatibility Full
+    runs-on: [self-hosted, railway]
+    needs: run
+    if: always()
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: node-compat-full-shard-*
+          path: node-compat-shards
+      - name: Aggregate required gate
+        id: aggregate
+        continue-on-error: true
+        run: mkdir -p node-compat-report && python3 tools/compat/aggregate-node-compat-results.py --inventory server/tests/node_compat/inventory.json --versions server/tests/node_compat/versions.json --results-dir node-compat-shards --shard-total 16 --json-output node-compat-report/report.json --markdown-output node-compat-report/report.md
+      - name: Publish summary
+        if: always()
+        run: cat node-compat-report/report.md >> "$GITHUB_STEP_SUMMARY" || true
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-compat-full-report
+          path: node-compat-report/
+          if-no-files-found: error
+      - name: Enforce compatibility gate
+        if: always()
+        run: test '${{ steps.aggregate.outcome }}' = success

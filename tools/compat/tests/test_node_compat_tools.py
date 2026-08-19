@@ -251,3 +251,11 @@ class CommandContractTests(unittest.TestCase):
     def test_filtered_commands_require_values(self):
         self.assertNotEqual(self.run_command("family", check=False).returncode, 0)
         self.assertNotEqual(self.run_command("profile", check=False).returncode, 0)
+
+class FullWorkflowTests(unittest.TestCase):
+    def test_full_workflow_is_required_railway_matrix(self):
+        text=(REPO / ".github/workflows/node-compat-full.yml").read_text()
+        self.assertIn("runs-on: [self-hosted, railway]",text)
+        self.assertIn("fail-fast: false",text)
+        self.assertIn("name: Node Compatibility Full",text)
+        self.assertIn("if: always()",text)

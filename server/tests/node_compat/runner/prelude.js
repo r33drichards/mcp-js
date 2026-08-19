@@ -194,8 +194,9 @@ globalThis.__NODE_TEST_SETTIMEOUT__ = globalThis.setTimeout;
 
 globalThis.module = { exports: {} };
 globalThis.exports = globalThis.module.exports;
-globalThis.__filename = '/test/parallel/' + (globalThis.__NODE_TEST_NAME__ || 'test.js');
-globalThis.__dirname = '/test/parallel';
+const testPath = '/' + (globalThis.__NODE_TEST_PATH__ || ('test/parallel/' + (globalThis.__NODE_TEST_NAME__ || 'test.js')));
+globalThis.__filename = testPath;
+globalThis.__dirname = testPath.slice(0, testPath.lastIndexOf('/')) || '/';
 
 globalThis.__NODE_TEST_REPORT__ = function () {
     for (const c of mustCalls) {
