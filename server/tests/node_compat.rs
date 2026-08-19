@@ -83,12 +83,18 @@ impl Expectation {
             return Err("profile must not be empty".to_string());
         }
         if self.status != ExpectationStatus::Pass
-            && self.reason.as_deref().is_none_or(|reason| reason.trim().is_empty())
+            && self
+                .reason
+                .as_deref()
+                .is_none_or(|reason| reason.trim().is_empty())
         {
             return Err(format!("{:?} expectations require a reason", self.status));
         }
         if self.status == ExpectationStatus::Flaky
-            && self.expires.as_deref().is_none_or(|expires| expires.trim().is_empty())
+            && self
+                .expires
+                .as_deref()
+                .is_none_or(|expires| expires.trim().is_empty())
         {
             return Err("flaky expectations require an expiry date".to_string());
         }
@@ -101,7 +107,10 @@ impl Expectation {
     }
 
     fn runnable(&self) -> bool {
-        matches!(self.status, ExpectationStatus::Pass | ExpectationStatus::Fail)
+        matches!(
+            self.status,
+            ExpectationStatus::Pass | ExpectationStatus::Fail
+        )
     }
 
     fn matches(&self, family: Option<&str>, profile: Option<&str>) -> bool {
@@ -188,10 +197,8 @@ fn run_file(test_path: &Path) -> Outcome {
     let db = sled::open(&tmp).expect("open sled db");
     let tree = db.open_tree("console").expect("open tree");
 
-    let fetch_config = FetchConfig::new_with_chain(Arc::new(PolicyChain::new(
-        vec![],
-        EvalMode::All,
-    )));
+    let fetch_config =
+        FetchConfig::new_with_chain(Arc::new(PolicyChain::new(vec![], EvalMode::All)));
     let config = ExecutionConfig::new(256 * 1024 * 1024)
         .console_tree(tree.clone())
         .fetch_config(&fetch_config);
@@ -333,9 +340,7 @@ fn node_core_subset_matches_expectations() {
         }
     }
 
-    println!(
-        "node-compat: {run} tests run, {pass} passing, {classified} classified non-runnable"
-    );
+    println!("node-compat: {run} tests run, {pass} passing, {classified} classified non-runnable");
 
     if update {
         let path = root().join("expectations.json");
