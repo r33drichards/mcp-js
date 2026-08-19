@@ -315,6 +315,7 @@ mod tests {
             heap_dir = "/data/heaps"
             heap_memory_max = 64
             allow_external_modules = true
+            node_globals = true
             instructions = "Run JS for me"
             "#,
             &[],
@@ -324,6 +325,7 @@ mod tests {
         assert_eq!(cli.heap_dir.as_deref(), Some("/data/heaps"));
         assert_eq!(cli.heap_memory_max, 64);
         assert!(cli.allow_external_modules);
+        assert!(cli.node_globals);
         assert_eq!(cli.instructions.as_deref(), Some("Run JS for me"));
     }
 
@@ -349,6 +351,19 @@ mod tests {
         let cli = Cli::from_arg_matches_mut(&mut matches).unwrap();
         unsafe { std::env::remove_var("TEST_ONLY_MCP_V8_EXECUTION_TIMEOUT") };
         assert_eq!(cli.execution_timeout, 200, "env var must beat the config file");
+    }
+
+    #[test]
+    fn node_globals_env_beats_config() {
+        unsafe { std::env::set_var("TEST_ONLY_MCP_V8_NODE_GLOBALS", "true") };
+        let command = build_command();
+        let overrides = compute_overrides(&parse_toml("node_globals = false"), &command).unwrap();
+        let command = apply_overrides(command, overrides)
+            .mut_arg("node_globals", |arg| arg.env("TEST_ONLY_MCP_V8_NODE_GLOBALS"));
+        let mut matches = command.try_get_matches_from(["server"]).unwrap();
+        let cli = Cli::from_arg_matches_mut(&mut matches).unwrap();
+        unsafe { std::env::remove_var("TEST_ONLY_MCP_V8_NODE_GLOBALS") };
+        assert!(cli.node_globals, "env var must beat the config file");
     }
 
     #[test]
