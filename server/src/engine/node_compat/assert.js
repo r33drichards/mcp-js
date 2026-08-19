@@ -6,10 +6,53 @@
 // tests.
 import { inspect } from 'node:util';
 
+function codedTypeError(code, message) {
+    const error = new TypeError(message);
+    error.code = code;
+    return error;
+}
+
+function formatReceived(value) {
+    if (value === undefined || value === null) return String(value);
+    if (typeof value === 'object') {
+        const name = value.constructor && value.constructor.name;
+        return name ? 'an instance of ' + name : inspect(value);
+    }
+    return 'type ' + typeof value + ' (' + inspect(value) + ')';
+}
+
+function isPromise(value) {
+    return value !== null && typeof value === 'object' &&
+        typeof value.then === 'function' && typeof value.catch === 'function';
+}
+
+function promiseFrom(promiseOrFn) {
+    if (typeof promiseOrFn === 'function') {
+        const promise = promiseOrFn();
+        if (!isPromise(promise)) {
+            const received = promise === undefined || promise === null
+                ? String(promise)
+                : typeof promise === 'object' && promise.constructor && promise.constructor.name
+                    ? 'an instance of ' + promise.constructor.name
+                    : typeof promise;
+            throw codedTypeError('ERR_INVALID_RETURN_VALUE',
+                'Expected instance of Promise to be returned from the "promiseFn" ' +
+                'function but got ' + received + '.');
+        }
+        return promise;
+    }
+    if (!isPromise(promiseOrFn)) {
+        throw codedTypeError('ERR_INVALID_ARG_TYPE',
+            'The "promiseFn" argument must be of type function or an instance of Promise. Received ' +
+            formatReceived(promiseOrFn));
+    }
+    return promiseOrFn;
+}
+
 class AssertionError extends Error {
     constructor(options) {
         const {
-            message, actual, expected, operator, stackStartFn,
+            message, actual, expected, operator, stackStartFn, generatedMessage,
         } = options || {};
         let msg = message;
         if (msg == null) {
@@ -21,7 +64,7 @@ class AssertionError extends Error {
         this.actual = actual;
         this.expected = expected;
         this.operator = operator;
-        this.generatedMessage = message == null;
+        this.generatedMessage = generatedMessage ?? message == null;
         if (Error.captureStackTrace) {
             Error.captureStackTrace(this, stackStartFn || AssertionError);
         }
@@ -165,6 +208,9 @@ function checkExpected(actual, expected, message, fn, operator) {
         return expected.test(String(actual));
     }
     if (typeof expected === 'object' && expected !== null) {
+        if (actual === null || (typeof actual !== 'object' && typeof actual !== 'function')) {
+            return false;
+        }
         for (const k of [...Object.keys(expected), ...Object.getOwnPropertySymbols(expected)]) {
             const ev = expected[k];
             const av = actual[k];
@@ -196,11 +242,25 @@ function validateThrown(thrown, expected, message, fn, operator) {
         }
         return;
     }
+    if (typeof expected === 'function') {
+        const result = expected.call({}, thrown);
+        if (result !== true) {
+            innerFail({
+                actual: thrown, expected, operator,
+                message: message ??
+                    `The "validate" validation function is expected to return "true". ` +
+                    `Received ${inspect(result)}\n\nCaught error:\n\n${String(thrown)}`,
+                stackStartFn: fn,
+            });
+        }
+        return;
+    }
     const result = checkExpected(thrown, expected);
     if (result === false) {
         innerFail({
             actual: thrown, expected, operator,
             message: message ?? `The error does not match the expected validation: ${inspect(expected)}. Received ${inspect(thrown)}`,
+            generatedMessage: message == null,
             stackStartFn: fn,
         });
     }
@@ -228,9 +288,10 @@ function throws(fn, expected, message) {
 
 async function rejects(promiseOrFn, expected, message) {
     if (typeof expected === 'string') { message = expected; expected = undefined; }
+    const promise = promiseFrom(promiseOrFn);
     let thrown = null, didReject = false;
     try {
-        await (typeof promiseOrFn === 'function' ? promiseOrFn() : promiseOrFn);
+        await promise;
     } catch (e) {
         thrown = e;
         didReject = true;
@@ -238,7 +299,8 @@ async function rejects(promiseOrFn, expected, message) {
     if (!didReject) {
         innerFail({
             actual: undefined, expected, operator: 'rejects',
-            message: message ?? 'Missing expected rejection.',
+            message: message ?? `Missing expected rejection${
+                typeof expected === 'function' && expected.name ? ` (${expected.name})` : ''}.`,
             stackStartFn: rejects,
         });
     }
@@ -263,14 +325,18 @@ function doesNotThrow(fn, expected, message) {
 
 async function doesNotReject(promiseOrFn, expected, message) {
     if (typeof expected === 'string') { message = expected; expected = undefined; }
+    const promise = promiseFrom(promiseOrFn);
     try {
-        await (typeof promiseOrFn === 'function' ? promiseOrFn() : promiseOrFn);
+        await promise;
     } catch (e) {
-        innerFail({
-            actual: e, expected, operator: 'doesNotReject',
-            message: message ?? `Got unwanted rejection.\nActual message: "${e && e.message}"`,
-            stackStartFn: doesNotReject,
-        });
+        if (expected === undefined || checkExpected(e, expected) !== false) {
+            innerFail({
+                actual: e, expected, operator: 'doesNotReject',
+                message: message ?? `Got unwanted rejection.\nActual message: "${e && e.message}"`,
+                stackStartFn: doesNotReject,
+            });
+        }
+        throw e;
     }
 }
 

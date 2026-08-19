@@ -209,6 +209,65 @@ async fn create_require_serves_builtins() {
 }
 
 #[tokio::test]
+async fn assert_does_not_reject_validates_original_error() {
+    expect_ok(
+        r#"
+        import assert from 'node:assert';
+
+        let validated;
+        const promise = assert.doesNotReject(
+            async () => assert.fail(),
+            (error) => {
+                validated = error;
+                return true;
+            },
+        );
+        try {
+            await promise;
+            throw new Error('expected unwanted rejection');
+        } catch (error) {
+            if (!validated || validated.message !== 'Failed') {
+                throw new Error('validator did not receive original rejection');
+            }
+            if (!(error instanceof assert.AssertionError) ||
+                error.message !== 'Got unwanted rejection.\nActual message: "Failed"' ||
+                error.operator !== 'doesNotReject') {
+                throw error;
+            }
+        }
+
+        try {
+            await assert.rejects(async () => {}, function mustNotCall() {});
+            throw new Error('expected missing rejection');
+        } catch (error) {
+            if (!(error instanceof assert.AssertionError) ||
+                error.message !== 'Missing expected rejection (mustNotCall).' ||
+                error.operator !== 'rejects') {
+                throw error;
+            }
+        }
+
+        const original = new Error('foobar');
+        const validate = () => 'baz';
+        try {
+            await assert.rejects(Promise.reject(original), validate);
+            throw new Error('expected validator failure');
+        } catch (error) {
+            const expectedMessage =
+                'The "validate" validation function is expected to return "true". ' +
+                "Received 'baz'\n\nCaught error:\n\nError: foobar";
+            if (!(error instanceof assert.AssertionError) ||
+                error.message !== expectedMessage || error.actual !== original ||
+                error.expected !== validate || error.operator !== 'rejects') {
+                throw error;
+            }
+        }
+        "#,
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn process_active_resources() {
     expect_ok(
         r#"
