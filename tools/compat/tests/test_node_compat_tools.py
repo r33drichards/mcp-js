@@ -259,3 +259,5 @@ class FullWorkflowTests(unittest.TestCase):
         self.assertIn("fail-fast: false",text)
         self.assertIn("name: Node Compatibility Full",text)
         self.assertIn("if: always()",text)
+        shard_step = text.split("- name: Run complete shard", 1)[1].split("- name: Upload shard results", 1)[0]
+        self.assertNotIn("continue-on-error", shard_step)

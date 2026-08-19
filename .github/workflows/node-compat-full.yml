@@ -30,7 +30,6 @@ jobs:
         run: nix develop --command bash -c 'cd server && cargo build --release --example node_compat_full'
       - name: Run complete shard
         id: execute
-        continue-on-error: true
         env:
           NODE_COMPAT_CORPUS: ${{ steps.corpus.outputs.path }}
           NODE_COMPAT_SHARD_INDEX: ${{ matrix.shard }}
