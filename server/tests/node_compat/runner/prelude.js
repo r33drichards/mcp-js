@@ -27,6 +27,7 @@ import process from 'node:process';
 import querystring from 'node:querystring';
 import stream from 'node:stream';
 import streamWeb from 'node:stream/web';
+import test from 'node:test';
 import timers from 'node:timers';
 import timersPromises from 'node:timers/promises';
 import tls from 'node:tls';
@@ -190,6 +191,7 @@ const modules = {
     querystring: querystring,
     stream: stream,
     'stream/web': streamWeb,
+    test: test,
     timers: timers,
     'timers/promises': timersPromises,
     tls: tls,
@@ -205,6 +207,10 @@ const fixtures = {
 };
 
 globalThis.__NODE_TEST_COMMON__ = common;
+globalThis.__NODE_TEST_PENDING__ = 0;
+globalThis.__NODE_TEST_RECORD_FAILURE__ = function recordFailure(error) {
+    failures.push(error && error.stack ? error.stack : String(error));
+};
 globalThis.__NODE_TEST_FIXTURES__ = fixtures;
 
 function nodeRequire(id) {
@@ -247,7 +253,7 @@ globalThis.__NODE_TEST_SCHEDULE_REPORT__ = function scheduleReport(sentinel) {
     }
     function check() {
         const active = globalThis.__mcpV8GetActiveResourcesInfo();
-        if (active.length > 0) {
+        if (active.length > 0 || globalThis.__NODE_TEST_PENDING__ > 0) {
             scheduleCheck(25);
             return;
         }

@@ -81,6 +81,17 @@ fn assemble(path: &str, body: &str) -> String {
         SENTINEL
     )
 }
+const COMMON_ESM: &str = r#"import 'node-test:prelude';
+const common = globalThis.__NODE_TEST_COMMON__;
+export const mustCall = common.mustCall.bind(common);
+export const mustCallAtLeast = common.mustCallAtLeast.bind(common);
+export const mustSucceed = common.mustSucceed.bind(common);
+export const mustNotCall = common.mustNotCall.bind(common);
+export const skip = common.skip.bind(common);
+export const platformTimeout = common.platformTimeout.bind(common);
+export const fixturesDir = '/test/fixtures';
+export default common;
+"#;
 fn virtual_modules(path: &str) -> Option<Arc<HashMap<String, String>>> {
     if !is_esm(path) {
         return None;
@@ -93,7 +104,7 @@ fn virtual_modules(path: &str) -> Option<Arc<HashMap<String, String>>> {
     );
     Some(Arc::new(HashMap::from([
         ("node-test:prelude".into(), prelude),
-        ("node-test:common".into(), "import 'node-test:prelude';\n".into()),
+        ("node-test:common".into(), COMMON_ESM.into()),
     ])))
 }
 fn run(path: &str, body: &str, timeout: Duration) -> Outcome {
@@ -301,7 +312,9 @@ mod tests {
         assert!(!source.contains("globalThis.__NODE_TEST_RUN_CJS__("));
         let modules = virtual_modules("test/es-module/example.mjs").unwrap();
         assert!(modules.contains_key("node-test:prelude"));
-        assert!(modules.contains_key("node-test:common"));
+        let common = modules.get("node-test:common").unwrap();
+        assert!(common.contains("export const mustCall"));
+        assert!(common.contains("globalThis.__NODE_TEST_COMMON__"));
     }
     #[test]
     fn platform_skip_is_strict() {

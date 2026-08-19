@@ -24,6 +24,7 @@ import process from 'node:process';
 import querystring from 'node:querystring';
 import stream from 'node:stream';
 import streamWeb from 'node:stream/web';
+import test from 'node:test';
 import timers from 'node:timers';
 import timersPromises from 'node:timers/promises';
 import tls from 'node:tls';
@@ -55,6 +56,7 @@ const builtins = new Map([
     ['querystring', querystring],
     ['stream', stream],
     ['stream/web', streamWeb],
+    ['test', test],
     ['timers', timers],
     ['timers/promises', timersPromises],
     ['tls', tls],

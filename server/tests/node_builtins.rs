@@ -75,6 +75,7 @@ fn node_compat_prelude_maps_registered_host_modules() {
         ("node:net", "net: net"),
         ("node:perf_hooks", "perf_hooks: perfHooks"),
         ("node:stream/web", "'stream/web': streamWeb"),
+        ("node:test", "test: test"),
         ("node:tls", "tls: tls"),
         ("node:util/types", "'util/types': utilTypes"),
         ("node:zlib", "zlib: zlib"),
@@ -221,6 +222,41 @@ async fn create_require_serves_builtins() {
                 error.message !== "The argument 'address' is invalid. Received 'fasdfdsaf'") {
                 throw error;
             }
+        }
+        "#,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn node_test_runs_nested_async_hooks() {
+    expect_ok(
+        r#"
+        import test, { describe, it, before, after, beforeEach, afterEach } from 'node:test';
+
+        if (test !== test.test || describe !== test.suite || it !== test.test) {
+            throw new Error('node:test aliases');
+        }
+
+        const order = [];
+        await describe('suite', () => {
+            before(() => order.push('before'));
+            after(() => order.push('after'));
+            beforeEach(() => order.push('beforeEach'));
+            afterEach(() => order.push('afterEach'));
+            it('first', async () => {
+                await Promise.resolve();
+                order.push('first');
+            });
+            it('second', () => order.push('second'));
+        });
+
+        const expected = [
+            'before', 'beforeEach', 'first', 'afterEach',
+            'beforeEach', 'second', 'afterEach', 'after',
+        ];
+        if (JSON.stringify(order) !== JSON.stringify(expected)) {
+            throw new Error('node:test order: ' + JSON.stringify(order));
         }
         "#,
     )

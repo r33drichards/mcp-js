@@ -32,6 +32,7 @@ pub const NODE_MODULES: &[(&str, &str)] = &[
     ("querystring", include_str!("node_compat/gen/querystring.js")),
     ("stream", include_str!("node_compat/stream.js")),
     ("stream/web", include_str!("node_compat/stream_web.js")),
+    ("test", include_str!("node_compat/test.js")),
     ("timers", include_str!("node_compat/timers.js")),
     ("timers/promises", include_str!("node_compat/timers_promises.js")),
     ("tls", include_str!("node_compat/tls.js")),
