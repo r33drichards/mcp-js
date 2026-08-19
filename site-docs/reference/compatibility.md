@@ -97,7 +97,7 @@ changelog.
 
 ## Node.js core tests (node v22.14.0)
 
-**44 / 44 vendored runnable tests passing.** The `node:` modules
+**45 / 45 vendored runnable tests passing.** The `node:` modules
 served by the module loader:
 
 | Module | Implementation |

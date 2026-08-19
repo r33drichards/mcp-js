@@ -16,6 +16,7 @@ DEST="$REPO_ROOT/server/tests/node_compat/vendor"
 BASE="https://raw.githubusercontent.com/nodejs/node/$TAG"
 
 FILES=(
+  test/parallel/test-buffer-compare.js
   test/parallel/test-buffer-inspect.js
   test/parallel/test-buffer-isencoding.js
   test/parallel/test-buffer-slow.js

@@ -484,6 +484,65 @@ async fn buffer_error_contracts() {
 }
 
 #[tokio::test]
+async fn buffer_node_owned_methods() {
+    expect_ok(
+        r#"
+        import { Buffer } from 'node:buffer';
+
+        const methods = [
+            'asciiSlice', 'base64Slice', 'base64urlSlice', 'latin1Slice',
+            'hexSlice', 'ucs2Slice', 'utf8Slice', 'asciiWrite', 'base64Write',
+            'base64urlWrite', 'latin1Write', 'hexWrite', 'ucs2Write',
+            'utf8Write', 'subarray',
+        ];
+        for (const method of methods) {
+            if (!Object.prototype.hasOwnProperty.call(Buffer.prototype, method) ||
+                typeof Buffer.prototype[method] !== 'function') {
+                throw new Error('missing Buffer.prototype.' + method);
+            }
+        }
+
+        const source = Buffer.from([0x61, 0x62, 0x63]);
+        if (source.asciiSlice(0, 3) !== 'abc') throw new Error('asciiSlice');
+        if (source.hexSlice(0, 3) !== '616263') throw new Error('hexSlice');
+        if (source.base64urlSlice(0, 3) !== 'YWJj') throw new Error('base64urlSlice');
+        const view = source.subarray(1);
+        if (!Buffer.isBuffer(view) || view.toString() !== 'bc') throw new Error('subarray');
+
+        const target = Buffer.alloc(3);
+        if (target.utf8Write('abc', 0, 3) !== 3 || target.toString() !== 'abc') {
+            throw new Error('utf8Write');
+        }
+
+        const destination = new Uint8Array(2);
+        Buffer.prototype.copy.call(source, destination, 0, 1, 3);
+        if (destination[0] !== 0x62 || destination[1] !== 0x63) {
+            throw new Error('generic copy');
+        }
+        if (!Buffer.prototype.equals.call(new Uint8Array([1, 2]), new Uint8Array([1, 2]))) {
+            throw new Error('generic equals');
+        }
+        const utf16 = Uint8Array.of(0x9a, 0x03, 0x91, 0x03);
+        if (!Buffer.prototype.includes.call(utf16, '\u039A', 0, 'utf16le')) {
+            throw new Error('generic utf16 includes');
+        }
+        const genericSlice = Buffer.prototype.slice.call(new Uint8Array([1, 2, 3]), 1);
+        if (Buffer.isBuffer(genericSlice) || genericSlice.length !== 2 || genericSlice[0] !== 2) {
+            throw new Error('generic slice');
+        }
+        const integerTarget = new Uint8Array(1);
+        Buffer.prototype.writeInt8.call(integerTarget, -123, 0);
+        if (integerTarget[0] !== 133) throw new Error('generic integer write');
+        const customInspect = Buffer.prototype[Symbol.for('nodejs.util.inspect.custom')];
+        if (customInspect.call(new Uint8Array([1, 2])) !== '<Uint8Array 01 02>') {
+            throw new Error('generic inspect');
+        }
+        "#,
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn perf_hooks_observer_and_timerify() {
     expect_ok(
         r#"

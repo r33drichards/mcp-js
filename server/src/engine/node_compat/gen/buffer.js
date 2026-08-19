@@ -611,14 +611,28 @@ Buffer.isBuffer = function isBuffer (b) {
     b !== Buffer.prototype // so Buffer.isBuffer(Buffer.prototype) will be false
 }
 
-Buffer.compare = function compare (a, b) {
-  if (isInstance(a, Uint8Array)) a = Buffer.from(a, a.offset, a.byteLength)
-  if (isInstance(b, Uint8Array)) b = Buffer.from(b, b.offset, b.byteLength)
-  if (!Buffer.isBuffer(a) || !Buffer.isBuffer(b)) {
-    throw new TypeError(
-      'The "buf1", "buf2" arguments must be one of type Buffer or Uint8Array'
+function formatReceived (value) {
+  if (typeof value === 'string') return `type string ('${value}')`
+  if (value === null) return 'null'
+  return `type ${typeof value} (${String(value)})`
+}
+
+function validateBufferArgument (value, name) {
+  if (!Buffer.isBuffer(value) && !isInstance(value, Uint8Array)) {
+    throw nodeError(
+      TypeError,
+      'ERR_INVALID_ARG_TYPE',
+      `The "${name}" argument must be an instance of Buffer or Uint8Array. ` +
+        `Received ${formatReceived(value)}`
     )
   }
+}
+
+Buffer.compare = function compare (a, b) {
+  validateBufferArgument(a, 'buf1')
+  validateBufferArgument(b, 'buf2')
+  if (isInstance(a, Uint8Array)) a = Buffer.from(a, a.offset, a.byteLength)
+  if (isInstance(b, Uint8Array)) b = Buffer.from(b, b.offset, b.byteLength)
 
   if (a === b) return 0
 
@@ -885,14 +899,15 @@ Buffer.prototype.toString = function toString () {
 Buffer.prototype.toLocaleString = Buffer.prototype.toString
 
 Buffer.prototype.equals = function equals (b) {
-  if (!Buffer.isBuffer(b)) throw new TypeError('Argument must be a Buffer')
+  validateBufferArgument(b, 'otherBuffer')
   if (this === b) return true
   return Buffer.compare(this, b) === 0
 }
 
 Buffer.prototype.inspect = function inspect (_depth, options, inspectValue) {
   const max = exports.INSPECT_MAX_BYTES
-  let bytes = this.toString('hex', 0, max).replace(/(.{2})/g, '$1 ').trim()
+  const type = Buffer.isBuffer(this) ? 'Buffer' : 'Uint8Array'
+  let bytes = hexSlice(this, 0, max).replace(/(.{2})/g, '$1 ').trim()
   if (this.length > max) {
     const remaining = this.length - max
     bytes += (bytes ? ' ' : '') + '... ' + remaining + ' more byte' +
@@ -908,7 +923,7 @@ Buffer.prototype.inspect = function inspect (_depth, options, inspectValue) {
       return key + ': ' + value
     })
   const contents = [bytes].concat(props).filter(Boolean).join(', ')
-  return '<Buffer ' + contents + '>'
+  return '<' + type + ' ' + contents + '>'
 }
 if (customInspectSymbol) {
   Buffer.prototype[customInspectSymbol] = Buffer.prototype.inspect
@@ -918,12 +933,7 @@ Buffer.prototype.compare = function compare (target, start, end, thisStart, this
   if (isInstance(target, Uint8Array)) {
     target = Buffer.from(target, target.offset, target.byteLength)
   }
-  if (!Buffer.isBuffer(target)) {
-    throw new TypeError(
-      'The "target" argument must be one of type Buffer or Uint8Array. ' +
-      'Received type ' + (typeof target)
-    )
-  }
+  validateBufferArgument(target, 'target')
 
   if (start === undefined) {
     start = 0
@@ -1067,7 +1077,8 @@ function arrayIndexOf (arr, val, byteOffset, encoding, dir) {
     if (indexSize === 1) {
       return buf[i]
     } else {
-      return buf.readUInt16BE(i * indexSize)
+      const offset = i * indexSize
+      return (buf[offset] << 8) | buf[offset + 1]
     }
   }
 
@@ -1101,7 +1112,7 @@ function arrayIndexOf (arr, val, byteOffset, encoding, dir) {
 }
 
 Buffer.prototype.includes = function includes (val, byteOffset, encoding) {
-  return this.indexOf(val, byteOffset, encoding) !== -1
+  return Buffer.prototype.indexOf.call(this, val, byteOffset, encoding) !== -1
 }
 
 Buffer.prototype.indexOf = function indexOf (val, byteOffset, encoding) {
@@ -1388,6 +1399,54 @@ function utf16leSlice (buf, start, end) {
   return res
 }
 
+Buffer.prototype.asciiSlice = function asciiSliceMethod (start, end) {
+  return asciiSlice(this, start, end)
+}
+Buffer.prototype.base64Slice = function base64SliceMethod (start, end) {
+  return base64Slice(this, start, end)
+}
+Buffer.prototype.base64urlSlice = function base64urlSliceMethod (start, end) {
+  return base64urlSlice(this, start, end)
+}
+Buffer.prototype.latin1Slice = function latin1SliceMethod (start, end) {
+  return latin1Slice(this, start, end)
+}
+Buffer.prototype.hexSlice = function hexSliceMethod (start, end) {
+  return hexSlice(this, start, end)
+}
+Buffer.prototype.ucs2Slice = function ucs2SliceMethod (start, end) {
+  return utf16leSlice(this, start, end)
+}
+Buffer.prototype.utf8Slice = function utf8SliceMethod (start, end) {
+  return utf8Slice(this, start, end)
+}
+Buffer.prototype.asciiWrite = function asciiWriteMethod (string, offset, length) {
+  return asciiWrite(this, string, offset, length)
+}
+Buffer.prototype.base64Write = function base64WriteMethod (string, offset, length) {
+  return base64Write(this, string, offset, length)
+}
+Buffer.prototype.base64urlWrite = function base64urlWriteMethod (string, offset, length) {
+  return base64Write(this, string, offset, length)
+}
+Buffer.prototype.latin1Write = function latin1WriteMethod (string, offset, length) {
+  return asciiWrite(this, string, offset, length)
+}
+Buffer.prototype.hexWrite = function hexWriteMethod (string, offset, length) {
+  return hexWrite(this, string, offset, length)
+}
+Buffer.prototype.ucs2Write = function ucs2WriteMethod (string, offset, length) {
+  return ucs2Write(this, string, offset, length)
+}
+Buffer.prototype.utf8Write = function utf8WriteMethod (string, offset, length) {
+  return utf8Write(this, string, offset, length)
+}
+Buffer.prototype.subarray = function subarray (start, end) {
+  const view = Uint8Array.prototype.subarray.call(this, start, end)
+  Object.setPrototypeOf(view, Buffer.prototype)
+  return view
+}
+
 Buffer.prototype.slice = function slice (start, end) {
   const len = this.length
   start = ~~start
@@ -1409,11 +1468,7 @@ Buffer.prototype.slice = function slice (start, end) {
 
   if (end < start) end = start
 
-  const newBuf = this.subarray(start, end)
-  // Return an augmented `Uint8Array` instance
-  Object.setPrototypeOf(newBuf, Buffer.prototype)
-
-  return newBuf
+  return this.subarray(start, end)
 }
 
 /*
@@ -1688,7 +1743,7 @@ Buffer.prototype.readDoubleBE = function readDoubleBE (offset, noAssert) {
 }
 
 function checkInt (buf, value, offset, ext, max, min) {
-  if (!Buffer.isBuffer(buf)) throw new TypeError('"buffer" argument must be a Buffer instance')
+  if (!isInstance(buf, Uint8Array)) throw new TypeError('"buffer" argument must be a Buffer instance')
   if (value > max || value < min) throw new RangeError('"value" argument is out of bounds')
   if (offset + ext > buf.length) throw new RangeError('Index out of range')
 }
@@ -1985,7 +2040,7 @@ Buffer.prototype.writeDoubleBE = function writeDoubleBE (value, offset, noAssert
 
 // copy(targetBuffer, targetStart=0, sourceStart=0, sourceEnd=buffer.length)
 Buffer.prototype.copy = function copy (target, targetStart, start, end) {
-  if (!Buffer.isBuffer(target)) throw new TypeError('argument should be a Buffer')
+  if (!isInstance(target, Uint8Array)) throw new TypeError('argument should be a Buffer')
   if (!start) start = 0
   if (!end && end !== 0) end = this.length
   if (targetStart >= target.length) targetStart = target.length

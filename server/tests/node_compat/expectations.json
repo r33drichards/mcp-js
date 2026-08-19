@@ -1,4 +1,10 @@
 {
+  "test/parallel/test-buffer-compare.js": {
+    "status": "pass",
+    "family": "buffer",
+    "profile": "pure",
+    "compatibility": "exact"
+  },
   "test/parallel/test-buffer-inspect.js": {
     "status": "pass",
     "family": "buffer",
