@@ -203,3 +203,51 @@ class InventoryAndReportTests(unittest.TestCase):
             self.assertIn("Node `v22.14.0`", markdown)
             self.assertIn("Node `26.5.1`", markdown)
             self.assertNotIn("combined compatibility", markdown.lower())
+
+class CommandContractTests(unittest.TestCase):
+    def run_command(self, *args, env=None, check=True):
+        command_env = dict(**__import__("os").environ)
+        if env:
+            command_env.update(env)
+        return subprocess.run(
+            [str(REPO / "tools/compat/node-compat.sh"), *args],
+            cwd=REPO,
+            env=command_env,
+            check=check,
+            capture_output=True,
+            text=True,
+        )
+
+    def test_help_lists_supported_commands(self):
+        result = self.run_command("--help")
+        for command in ("fetch", "inventory", "report", "fast", "family <name>", "profile <name>", "check"):
+            self.assertIn(command, result.stdout)
+
+    def test_fast_and_filtered_commands_set_expected_cargo_environment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            log = root / "commands.log"
+            cargo = fake_bin / "cargo"
+            cargo.write_text(
+                "#!/usr/bin/env bash\n"
+                "printf 'family=%s profile=%s args=%s\\n' "
+                '"${NODE_COMPAT_FAMILY-}" "${NODE_COMPAT_PROFILE-}" "$*" >> "$NODE_COMPAT_COMMAND_LOG"\n'
+            )
+            cargo.chmod(0o755)
+            env = {
+                "PATH": f"{fake_bin}:{__import__('os').environ['PATH']}",
+                "NODE_COMPAT_COMMAND_LOG": str(log),
+            }
+            self.run_command("fast", env=env)
+            self.run_command("family", "events", env=env)
+            self.run_command("profile", "pure", env=env)
+            lines = log.read_text().splitlines()
+            self.assertIn("family= profile= args=test --test node_compat node_core_subset_matches_expectations -- --nocapture", lines[0])
+            self.assertIn("family=events profile=", lines[1])
+            self.assertIn("family= profile=pure", lines[2])
+
+    def test_filtered_commands_require_values(self):
+        self.assertNotEqual(self.run_command("family", check=False).returncode, 0)
+        self.assertNotEqual(self.run_command("profile", check=False).returncode, 0)
