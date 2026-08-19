@@ -86,7 +86,7 @@ fn run(path: &str, body: &str, timeout: Duration) -> Outcome {
                 if start.elapsed() > timeout {
                     timed.store(true, Ordering::SeqCst);
                     if let Some(h) = handle.lock().unwrap().as_ref() {
-                        h.terminate_execution()
+                        h.terminate_execution();
                     }
                     return;
                 }
