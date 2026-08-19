@@ -128,17 +128,28 @@ export default __cjsDefault;
 export {{ __cjsDefault as 'module.exports' }};
 "#)
 }
+struct CorpusModules {
+    esm: Arc<HashMap<String, String>>,
+    commonjs: Arc<HashMap<String, String>>,
+}
 fn add_corpus_modules(
     root: &Path,
     directory: &Path,
     inherited_modules: bool,
     modules: &mut HashMap<String, String>,
+    commonjs_modules: &mut HashMap<String, String>,
 ) -> Result<(), String> {
     let directory_uses_modules = package_uses_modules(directory, inherited_modules);
     for entry in fs::read_dir(directory).map_err(|error| error.to_string())? {
         let path = entry.map_err(|error| error.to_string())?.path();
         if path.is_dir() {
-            add_corpus_modules(root, &path, directory_uses_modules, modules)?;
+            add_corpus_modules(
+                root,
+                &path,
+                directory_uses_modules,
+                modules,
+                commonjs_modules,
+            )?;
             continue;
         }
         if !matches!(
@@ -153,6 +164,9 @@ fn add_corpus_modules(
             .map_err(|_| format!("invalid corpus module path: {}", virtual_path.display()))?;
         let source = fs::read_to_string(&path).map_err(|error| error.to_string())?;
         let extension = path.extension().and_then(|value| value.to_str());
+        if path.components().any(|component| component.as_os_str() == "node_modules") {
+            commonjs_modules.insert(specifier.to_string(), strip_shebang(&source).to_string());
+        }
         let source = if extension == Some("cjs") ||
             (extension == Some("js") && !directory_uses_modules)
         {
@@ -164,13 +178,23 @@ fn add_corpus_modules(
     }
     Ok(())
 }
-fn corpus_modules(corpus: &Path) -> Result<Arc<HashMap<String, String>>, String> {
+fn corpus_modules(corpus: &Path) -> Result<CorpusModules, String> {
     let mut modules = HashMap::new();
-    add_corpus_modules(corpus, &corpus.join("test"), false, &mut modules)?;
+    let mut commonjs_modules = HashMap::new();
+    add_corpus_modules(
+        corpus,
+        &corpus.join("test"),
+        false,
+        &mut modules,
+        &mut commonjs_modules,
+    )?;
     modules.insert("node-test:prelude".into(), PRELUDE.into());
     modules.insert("node-test:common".into(), COMMON_ESM.into());
     modules.insert("file:///test/common/index.mjs".into(), COMMON_ESM.into());
-    Ok(Arc::new(modules))
+    Ok(CorpusModules {
+        esm: Arc::new(modules),
+        commonjs: Arc::new(commonjs_modules),
+    })
 }
 fn find_executable(name: &str) -> Result<PathBuf, String> {
     let path = std::env::var_os("PATH").ok_or_else(|| "PATH required".to_string())?;
@@ -189,7 +213,7 @@ fn run(
     path: &str,
     body: &str,
     timeout: Duration,
-    modules: &Arc<HashMap<String, String>>,
+    modules: &CorpusModules,
     corpus: &Path,
     node_executable: &Path,
 ) -> Outcome {
@@ -213,7 +237,8 @@ fn run(
     let module_loader = ModuleLoaderConfig {
         allow_external: true,
         policy_chain: None,
-        virtual_modules: Some(modules.clone()),
+        virtual_modules: Some(modules.esm.clone()),
+        virtual_commonjs_modules: Some(modules.commonjs.clone()),
     };
     let main_specifier = match test_module_specifier(path) {
         Ok(specifier) => specifier,
@@ -433,17 +458,17 @@ mod tests {
         fs::write(root.join("test/fixtures/esm/value.js"), "export default 7;\n").unwrap();
         let modules = corpus_modules(&root).unwrap();
         fs::remove_dir_all(root).unwrap();
-        assert!(modules.contains_key("node-test:prelude"));
+        assert!(modules.esm.contains_key("node-test:prelude"));
         assert_eq!(
-            modules.get("file:///test/fixtures/value.mjs").map(String::as_str),
+            modules.esm.get("file:///test/fixtures/value.mjs").map(String::as_str),
             Some("export default 42;\n"),
         );
-        assert!(modules["file:///test/fixtures/value.js"].contains("__cjsModule.exports"));
+        assert!(modules.esm["file:///test/fixtures/value.js"].contains("__cjsModule.exports"));
         assert_eq!(
-            modules.get("file:///test/fixtures/esm/value.js").map(String::as_str),
+            modules.esm.get("file:///test/fixtures/esm/value.js").map(String::as_str),
             Some("export default 7;\n"),
         );
-        let common = modules.get("node-test:common").unwrap();
+        let common = modules.esm.get("node-test:common").unwrap();
         assert!(common.contains("export const mustCall"));
         assert!(common.contains("globalThis.__NODE_TEST_COMMON__"));
     }

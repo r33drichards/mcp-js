@@ -456,6 +456,7 @@ fn build_engine(allow_external_modules: bool) -> Engine {
             allow_external: allow_external_modules,
             policy_chain: None,
             virtual_modules: None,
+            virtual_commonjs_modules: None,
         })
         .with_execution_registry(Arc::new(registry))
 }

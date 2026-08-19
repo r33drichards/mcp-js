@@ -296,9 +296,12 @@ globalThis.__NODE_TEST_REPORT__ = function () {
     for (const c of mustCalls) {
         const ok = c.kind === 'exact' ? c.actual === c.expected : c.actual >= c.expected;
         if (!ok) {
+            const callsite = String(c.stack || '')
+                .split('\n')
+                .find((line) => line.includes('file:///test/'));
             failures.push(
-                `mustCall(${c.name}): expected ${c.kind === 'exact' ? '' : '>= '}` +
-                `${c.expected} calls, got ${c.actual}`);
+                `mustCall(${c.name}${callsite ? ` ${callsite.trim()}` : ''}): expected ` +
+                `${c.kind === 'exact' ? '' : '>= '}${c.expected} calls, got ${c.actual}`);
         }
     }
     return JSON.stringify({

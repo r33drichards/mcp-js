@@ -123,6 +123,7 @@ fn create_test_engine_with_external_modules() -> Engine {
             allow_external: true,
             policy_chain: None,
             virtual_modules: None,
+            virtual_commonjs_modules: None,
         })
         .with_execution_registry(Arc::new(registry))
 }
@@ -141,6 +142,7 @@ fn create_test_engine_modules_blocked() -> Engine {
             allow_external: false,
             policy_chain: None,
             virtual_modules: None,
+            virtual_commonjs_modules: None,
         })
         .with_execution_registry(Arc::new(registry))
 }
@@ -453,6 +455,7 @@ fn test_virtual_json_module_preserves_json_type() {
         allow_external: false,
         policy_chain: None,
         virtual_modules: Some(modules),
+        virtual_commonjs_modules: None,
     };
     let code = r#"
         import data from './data.json' with { type: 'json' };
@@ -468,6 +471,209 @@ fn test_virtual_json_module_preserves_json_type() {
 }
 
 #[test]
+fn test_virtual_package_exports_import() {
+    use std::collections::HashMap;
+    use server::engine::{execute_stateless, ExecutionConfig};
+
+    ensure_v8();
+    let modules = Arc::new(HashMap::from([
+        (
+            "file:///app/node_modules/example/package.json".to_string(),
+            r#"{"exports":{"./feature":"./feature.js"}}"#.to_string(),
+        ),
+        (
+            "file:///app/node_modules/example/feature.js".to_string(),
+            "export default 42;".to_string(),
+        ),
+    ]));
+    let loader = ModuleLoaderConfig {
+        allow_external: false,
+        policy_chain: None,
+        virtual_modules: Some(modules),
+        virtual_commonjs_modules: None,
+    };
+    let code = r#"
+        import value from 'example/feature';
+        if (value !== 42) throw new Error(`wrong package export: ${value}`);
+    "#;
+    let (result, _) = execute_stateless(
+        code,
+        ExecutionConfig::new(64 * 1024 * 1024)
+            .module_loader_config(&loader)
+            .main_module_specifier("file:///app/main.mjs"),
+    );
+    assert!(result.is_ok(), "virtual package import failed: {result:?}");
+}
+
+#[test]
+fn test_virtual_package_exports_reject_hidden_subpath() {
+    use std::collections::HashMap;
+    use server::engine::{execute_stateless, ExecutionConfig};
+
+    ensure_v8();
+    let modules = Arc::new(HashMap::from([
+        (
+            "file:///app/node_modules/example/package.json".to_string(),
+            r#"{"exports":"./index.js"}"#.to_string(),
+        ),
+        (
+            "file:///app/node_modules/example/index.js".to_string(),
+            "export default 42;".to_string(),
+        ),
+        (
+            "file:///app/node_modules/example/hidden.js".to_string(),
+            "export default 7;".to_string(),
+        ),
+    ]));
+    let loader = ModuleLoaderConfig {
+        allow_external: false,
+        policy_chain: None,
+        virtual_modules: Some(modules),
+        virtual_commonjs_modules: None,
+    };
+    let code = r#"
+        let caught;
+        try { await import('example/hidden.js'); } catch (error) { caught = error; }
+        if (caught?.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') {
+            throw new Error(`wrong package error: ${caught?.code || 'resolved'}`);
+        }
+    "#;
+    let (result, _) = execute_stateless(
+        code,
+        ExecutionConfig::new(64 * 1024 * 1024)
+            .module_loader_config(&loader)
+            .main_module_specifier("file:///app/main.mjs"),
+    );
+    assert!(result.is_ok(), "hidden package export was not rejected: {result:?}");
+}
+
+#[test]
+fn test_virtual_package_exports_reject_missing_target() {
+    use std::collections::HashMap;
+    use server::engine::{execute_stateless, ExecutionConfig};
+
+    ensure_v8();
+    let modules = Arc::new(HashMap::from([(
+        "file:///app/node_modules/example/package.json".to_string(),
+        r#"{"exports":{"./missing":"./missing.js"}}"#.to_string(),
+    )]));
+    let loader = ModuleLoaderConfig {
+        allow_external: false,
+        policy_chain: None,
+        virtual_modules: Some(modules),
+        virtual_commonjs_modules: None,
+    };
+    let code = r#"
+        let caught;
+        try { await import('example/missing'); } catch (error) { caught = error; }
+        if (caught?.code !== 'ERR_MODULE_NOT_FOUND') {
+            throw new Error(`wrong missing-target error: ${caught?.code || 'resolved'}`);
+        }
+    "#;
+    let (result, _) = execute_stateless(
+        code,
+        ExecutionConfig::new(64 * 1024 * 1024)
+            .module_loader_config(&loader)
+            .main_module_specifier("file:///app/main.mjs"),
+    );
+    assert!(result.is_ok(), "missing package target was not rejected: {result:?}");
+}
+
+#[test]
+fn test_concurrent_virtual_package_errors_reject_independently() {
+    use std::collections::HashMap;
+    use server::engine::{execute_stateless, ExecutionConfig};
+
+    ensure_v8();
+    let modules = Arc::new(HashMap::from([
+        (
+            "file:///app/node_modules/first/package.json".to_string(),
+            r#"{"exports":"./index.js"}"#.to_string(),
+        ),
+        (
+            "file:///app/node_modules/first/index.js".to_string(),
+            "export default 1;".to_string(),
+        ),
+        (
+            "file:///app/node_modules/second/package.json".to_string(),
+            r#"{"exports":"./index.js"}"#.to_string(),
+        ),
+        (
+            "file:///app/node_modules/second/index.js".to_string(),
+            "export default 2;".to_string(),
+        ),
+        (
+            "file:///app/node_modules/third/package.json".to_string(),
+            r#"{"exports":{"./missing":"./missing.js"}}"#.to_string(),
+        ),
+    ]));
+    let loader = ModuleLoaderConfig {
+        allow_external: false,
+        policy_chain: None,
+        virtual_modules: Some(modules),
+        virtual_commonjs_modules: None,
+    };
+    let code = r#"
+        const results = await Promise.allSettled([
+            import('first/hidden.js'),
+            import('second/hidden.js'),
+            import('third/missing'),
+        ]);
+        const fulfilled = results
+            .map((result, index) => result.status === 'fulfilled' ? index : -1)
+            .filter((index) => index >= 0);
+        if (fulfilled.length) throw new Error(`package errors resolved: ${fulfilled}`);
+        const codes = results.map((result) => result.reason?.code);
+        if (codes.join(',') !==
+            'ERR_PACKAGE_PATH_NOT_EXPORTED,ERR_PACKAGE_PATH_NOT_EXPORTED,ERR_MODULE_NOT_FOUND') {
+            throw new Error(`wrong concurrent package errors: ${codes}`);
+        }
+    "#;
+    let (result, _) = execute_stateless(
+        code,
+        ExecutionConfig::new(64 * 1024 * 1024)
+            .module_loader_config(&loader)
+            .main_module_specifier("file:///app/main.mjs"),
+    );
+    assert!(result.is_ok(), "concurrent package errors failed: {result:?}");
+}
+
+#[test]
+fn test_create_require_virtual_package_exports() {
+    use std::collections::HashMap;
+    use server::engine::{execute_stateless, ExecutionConfig};
+
+    ensure_v8();
+    let modules = Arc::new(HashMap::from([(
+        "file:///app/node_modules/example/package.json".to_string(),
+        r#"{"exports":{"./feature":"./feature.cjs"}}"#.to_string(),
+    )]));
+    let commonjs_modules = Arc::new(HashMap::from([(
+        "file:///app/node_modules/example/feature.cjs".to_string(),
+        "module.exports = 42;".to_string(),
+    )]));
+    let loader = ModuleLoaderConfig {
+        allow_external: false,
+        policy_chain: None,
+        virtual_modules: Some(modules),
+        virtual_commonjs_modules: Some(commonjs_modules),
+    };
+    let code = r#"
+        import { createRequire } from 'node:module';
+        const require = createRequire(import.meta.url);
+        const value = require('example/feature');
+        if (value !== 42) throw new Error(`wrong required package export: ${value}`);
+    "#;
+    let (result, _) = execute_stateless(
+        code,
+        ExecutionConfig::new(64 * 1024 * 1024)
+            .module_loader_config(&loader)
+            .main_module_specifier("file:///app/main.mjs"),
+    );
+    assert!(result.is_ok(), "virtual package require failed: {result:?}");
+}
+
+#[test]
 fn test_resolve_npm_blocked_when_external_disabled() {
     use deno_core::ResolutionKind;
     use server::engine::module_loader::NetworkModuleLoader;
@@ -477,6 +683,7 @@ fn test_resolve_npm_blocked_when_external_disabled() {
         allow_external: false,
         policy_chain: None,
         virtual_modules: None,
+        virtual_commonjs_modules: None,
     });
     let result = loader.resolve("npm:lodash-es@4.17.21", "file:///main.js", ResolutionKind::Import);
     assert!(result.is_err(), "npm specifier should be rejected when external modules disabled");
@@ -498,6 +705,7 @@ fn test_resolve_jsr_blocked_when_external_disabled() {
         allow_external: false,
         policy_chain: None,
         virtual_modules: None,
+        virtual_commonjs_modules: None,
     });
     let result = loader.resolve("jsr:@luca/cases@1.0.0", "file:///main.js", ResolutionKind::Import);
     assert!(result.is_err(), "jsr specifier should be rejected when external modules disabled");
@@ -515,6 +723,7 @@ fn test_resolve_url_blocked_when_external_disabled() {
         allow_external: false,
         policy_chain: None,
         virtual_modules: None,
+        virtual_commonjs_modules: None,
     });
     let result = loader.resolve(
         "https://esm.sh/jsr/@luca/cases@1.0.0",
@@ -536,6 +745,7 @@ fn test_resolve_relative_allowed_when_external_disabled() {
         allow_external: false,
         policy_chain: None,
         virtual_modules: None,
+        virtual_commonjs_modules: None,
     });
     let result = loader.resolve(
         "./utils.js",
@@ -555,6 +765,7 @@ fn test_resolve_npm_allowed_when_external_enabled() {
         allow_external: true,
         policy_chain: None,
         virtual_modules: None,
+        virtual_commonjs_modules: None,
     });
     let result = loader.resolve("npm:lodash-es@4.17.21", "file:///main.js", ResolutionKind::Import);
     assert!(result.is_ok(), "npm specifier should resolve when external enabled: {:?}", result);
