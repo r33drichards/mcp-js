@@ -97,7 +97,7 @@ changelog.
 
 ## Node.js core tests (node v22.14.0)
 
-**35 / 35 vendored tests passing.** The `node:` modules
+**35 / 35 vendored runnable tests passing.** The `node:` modules
 served by the module loader:
 
 | Module | Implementation |
@@ -126,10 +126,10 @@ served by the module loader:
 | `node:util` | purpose-written subset |
 | `node:zlib` | one-shot gzip/deflate over CompressionStream / DecompressionStream |
 
-Skipped tests (with reasons):
+Classified non-runnable tests (with reasons):
 
-- `test-events-once.js` — pokes node-internal module internal/event_target
-- `test-path-resolve.js` — requires child_process for cwd checks
+- `test-events-once.js` — `harness_missing` / `pure`: requires node-internal module internal/event_target
+- `test-path-resolve.js` — `policy_required` / `subprocess`: requires child_process to verify cwd-dependent resolution
 
 ## Known limitations
 

@@ -97,3 +97,109 @@ class CorpusMetadataTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class InventoryAndReportTests(unittest.TestCase):
+    def run_tool(self, script, *args):
+        return subprocess.run(
+            [sys.executable, str(REPO / f"tools/compat/{script}"), *map(str, args)],
+            cwd=REPO,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    def test_inventory_classifies_module_families_and_profiles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            corpus = root / "corpus"
+            files = [
+                "test/parallel/test-stream-readable.js",
+                "test/parallel/test-fs-read-file.js",
+                "test/parallel/test-child-process-exec.js",
+                "test/parallel/test-net-server.js",
+                "test/parallel/test-worker-message-port.js",
+                "test/parallel/test-addon-loading.js",
+                "test/sequential/test-inspector-session.js",
+            ]
+            for relative in files:
+                path = corpus / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("// fixture\n")
+            output = root / "inventory.json"
+            self.run_tool(
+                "gen-node-compat-inventory.py",
+                "--corpus",
+                corpus,
+                "--output",
+                output,
+            )
+            inventory = json.loads(output.read_text())
+            by_path = {entry["path"]: entry for entry in inventory["tests"]}
+            self.assertEqual(by_path[files[0]]["family"], "streams")
+            self.assertEqual(by_path[files[0]]["profile"], "pure")
+            self.assertEqual(by_path[files[1]]["family"], "filesystem")
+            self.assertEqual(by_path[files[1]]["profile"], "filesystem")
+            self.assertEqual(by_path[files[2]]["family"], "subprocess")
+            self.assertEqual(by_path[files[2]]["profile"], "subprocess")
+            self.assertEqual(by_path[files[3]]["family"], "networking")
+            self.assertEqual(by_path[files[3]]["profile"], "network-server")
+            self.assertEqual(by_path[files[4]]["family"], "workers")
+            self.assertEqual(by_path[files[4]]["profile"], "workers")
+            self.assertEqual(by_path[files[5]]["status"], "unsupported")
+            self.assertIn("native", by_path[files[5]]["reason"])
+            self.assertEqual(by_path[files[6]]["profile"], "inspector")
+            self.assertEqual([entry["path"] for entry in inventory["tests"]], sorted(files))
+
+    def test_report_aggregates_without_combining_corpus_versions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            expectations = root / "expectations.json"
+            inventory = root / "inventory.json"
+            versions = root / "versions.json"
+            json_output = root / "report.json"
+            markdown_output = root / "report.md"
+            expectations.write_text(json.dumps({
+                "test/parallel/test-events.js": {
+                    "status": "pass",
+                    "family": "events",
+                    "profile": "pure",
+                    "compatibility": "exact",
+                },
+                "test/parallel/test-fs.js": {
+                    "status": "policy_required",
+                    "family": "filesystem",
+                    "profile": "filesystem",
+                    "compatibility": "adapted",
+                    "reason": "requires filesystem policy",
+                },
+            }))
+            inventory.write_text(json.dumps({
+                "schema_version": 1,
+                "source": {"name": "deno_node_test", "commit": "abc", "node_version": "26.5.1"},
+                "tests": [
+                    {"path": "test/parallel/test-events.js", "family": "events", "profile": "pure", "status": "untriaged", "compatibility": "unsupported", "reason": "not selected"},
+                    {"path": "test/parallel/test-net.js", "family": "networking", "profile": "network-client", "status": "untriaged", "compatibility": "unsupported", "reason": "not selected"},
+                ],
+            }))
+            versions.write_text(json.dumps({
+                "node": {"tag": "v22.14.0", "repository": "https://example.test/node", "vendored_by": "script"},
+                "deno_node_test": {"repository": "https://example.test/deno", "commit": "abc", "node_version": "26.5.1", "archive_url": "https://example.test/a", "sha256": "0" * 64},
+                "citgm": {"repository": "https://example.test/citgm", "commit": "def", "archive_url": "https://example.test/b", "sha256": "1" * 64},
+            }))
+            self.run_tool(
+                "gen-node-compat-report.py",
+                "--expectations", expectations,
+                "--inventory", inventory,
+                "--versions", versions,
+                "--json-output", json_output,
+                "--markdown-output", markdown_output,
+            )
+            report = json.loads(json_output.read_text())
+            self.assertEqual(report["fast_suite"]["status"]["pass"], 1)
+            self.assertEqual(report["full_corpus"]["total"], 2)
+            self.assertEqual(report["versions"]["fast_suite_node"], "v22.14.0")
+            self.assertEqual(report["versions"]["deno_corpus_node"], "26.5.1")
+            markdown = markdown_output.read_text()
+            self.assertIn("Node `v22.14.0`", markdown)
+            self.assertIn("Node `26.5.1`", markdown)
+            self.assertNotIn("combined compatibility", markdown.lower())
