@@ -631,6 +631,66 @@ fn test_virtual_package_exports_reject_hidden_subpath() {
 }
 
 #[test]
+fn test_virtual_unknown_extension_uses_node_error() {
+    use std::collections::{HashMap, HashSet};
+    use server::engine::{execute_stateless, ExecutionConfig};
+
+    ensure_v8();
+    let loader = ModuleLoaderConfig {
+        allow_external: false,
+        policy_chain: None,
+        virtual_modules: Some(Arc::new(HashMap::new())),
+        virtual_commonjs_modules: None,
+        virtual_files: Some(Arc::new(HashSet::from([
+            "file:///app/file.unknown".to_owned(),
+        ]))),
+    };
+    let code = r#"
+        let caught;
+        try { await import('./file.unknown'); } catch (error) { caught = error; }
+        if (caught?.code !== 'ERR_UNKNOWN_FILE_EXTENSION') {
+            throw new Error(`wrong unknown-extension error: ${caught?.code || caught}`);
+        }
+    "#;
+    let (result, _) = execute_stateless(
+        code,
+        ExecutionConfig::new(64 * 1024 * 1024)
+            .module_loader_config(&loader)
+            .main_module_specifier("file:///app/main.mjs"),
+    );
+    assert!(result.is_ok(), "unknown extension used the wrong error: {result:?}");
+}
+
+#[test]
+fn test_virtual_missing_package_uses_node_error() {
+    use std::collections::HashMap;
+    use server::engine::{execute_stateless, ExecutionConfig};
+
+    ensure_v8();
+    let loader = ModuleLoaderConfig {
+        allow_external: false,
+        policy_chain: None,
+        virtual_modules: Some(Arc::new(HashMap::new())),
+        virtual_commonjs_modules: None,
+        virtual_files: None,
+    };
+    let code = r#"
+        let caught;
+        try { await import('nonexistent/file.mjs'); } catch (error) { caught = error; }
+        if (caught?.code !== 'ERR_MODULE_NOT_FOUND') {
+            throw new Error(`wrong missing-package error: ${caught?.code || caught}`);
+        }
+    "#;
+    let (result, _) = execute_stateless(
+        code,
+        ExecutionConfig::new(64 * 1024 * 1024)
+            .module_loader_config(&loader)
+            .main_module_specifier("file:///app/main.mjs"),
+    );
+    assert!(result.is_ok(), "missing package used the wrong error: {result:?}");
+}
+
+#[test]
 fn test_virtual_package_exports_reject_missing_target() {
     use std::collections::HashMap;
     use server::engine::{execute_stateless, ExecutionConfig};

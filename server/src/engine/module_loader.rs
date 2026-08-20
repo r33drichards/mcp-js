@@ -721,6 +721,12 @@ impl ModuleLoader for NetworkModuleLoader {
             {
                 return resolved;
             }
+            if let Some((package, _)) = package_specifier_parts(specifier) {
+                return Ok(package_error_module(
+                    "ERR_MODULE_NOT_FOUND",
+                    &format!("Cannot find package '{package}' imported from {referrer}"),
+                ));
+            }
         }
 
         // npm:cowsay@1.6.0 → https://esm.sh/cowsay@1.6.0
@@ -917,6 +923,26 @@ impl ModuleLoader for NetworkModuleLoader {
                     name
                 )))),
             };
+        }
+        if scheme == "file"
+            && self
+                .config
+                .virtual_files
+                .as_deref()
+                .is_some_and(|files| files.contains(module_specifier.as_str()))
+            && let Some(extension) = Path::new(module_specifier.path())
+                .extension()
+                .and_then(|value| value.to_str())
+            && !matches!(extension, "js" | "mjs" | "cjs" | "json" | "wasm")
+        {
+            return ModuleLoadResponse::Sync(Err(node_module_error(
+                "TypeError",
+                "ERR_UNKNOWN_FILE_EXTENSION",
+                format!(
+                    "Unknown file extension '.{extension}' for {}",
+                    module_specifier.path()
+                ),
+            )));
         }
         if scheme == "file"
             && let Some(path) = allowed_file_path(&self.config, module_specifier)

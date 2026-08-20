@@ -341,7 +341,11 @@ fn rewrite_dynamic_imports(body: &str) -> Option<String> {
     ))
 }
 
-fn rewrite_esm_dynamic_imports(body: &str) -> Option<String> {
+fn rewrite_esm_dynamic_imports_with_helper(
+    body: &str,
+    helper: &'static str,
+    declaration: &str,
+) -> Option<String> {
     use swc_core::{
         common::{FileName, SourceMap, sync::Lrc},
         ecma::{
@@ -354,6 +358,7 @@ fn rewrite_esm_dynamic_imports(body: &str) -> Option<String> {
 
     struct DynamicImportRewriter {
         changed: bool,
+        helper: &'static str,
     }
 
     impl VisitMut for DynamicImportRewriter {
@@ -362,7 +367,7 @@ fn rewrite_esm_dynamic_imports(body: &str) -> Option<String> {
             if matches!(call.callee, Callee::Import(_)) {
                 self.changed = true;
                 call.callee = Callee::Expr(Box::new(Expr::Ident(Ident::new_no_ctxt(
-                    "__nodeCompatImport".into(),
+                    self.helper.into(),
                     call.span,
                 ))));
             }
@@ -385,7 +390,10 @@ fn rewrite_esm_dynamic_imports(body: &str) -> Option<String> {
     if !parser.take_errors().is_empty() {
         return None;
     }
-    let mut rewriter = DynamicImportRewriter { changed: false };
+    let mut rewriter = DynamicImportRewriter {
+        changed: false,
+        helper,
+    };
     module.visit_mut_with(&mut rewriter);
     if !rewriter.changed {
         return None;
@@ -400,9 +408,23 @@ fn rewrite_esm_dynamic_imports(body: &str) -> Option<String> {
     .emit_module(&module)
     .ok()?;
     let output = String::from_utf8(output).ok()?;
-    Some(format!(
-        "const __nodeCompatImport = (specifier, options) => {{ let request; try {{ if (typeof specifier === 'symbol') throw new TypeError('Cannot convert a Symbol value to a string'); request = String(specifier); const resolved = globalThis.__NODE_COMPAT_RESOLVE_IMPORT__(request, import.meta.url); return import(resolved ?? request, options); }} catch (error) {{ return Promise.reject(error); }} }};\n{output}"
-    ))
+    Some(format!("{declaration}\n{output}"))
+}
+
+fn rewrite_esm_dynamic_imports(body: &str) -> Option<String> {
+    rewrite_esm_dynamic_imports_with_helper(
+        body,
+        "__nodeCompatImport",
+        "const __nodeCompatImport = (specifier, options) => { let request; try { if (typeof specifier === 'symbol') throw new TypeError('Cannot convert a Symbol value to a string'); request = String(specifier); const resolved = globalThis.__NODE_COMPAT_RESOLVE_IMPORT__(request, import.meta.url); return import(resolved ?? request, options); } catch (error) { return Promise.reject(error); } };",
+    )
+}
+
+fn rewrite_esm_loader_dynamic_imports(body: &str) -> Option<String> {
+    rewrite_esm_dynamic_imports_with_helper(
+        body,
+        "__nodeCompatImportWithLoaders",
+        "const __nodeCompatImportWithLoaders = globalThis.__NODE_COMPAT_IMPORT_WITH_LOADERS__;",
+    )
 }
 
 fn literal_module_specifiers(source: &str) -> Vec<String> {
@@ -470,17 +492,160 @@ fn literal_module_specifiers(source: &str) -> Vec<String> {
     collector.specifiers
 }
 
-fn test_loader_specifier(loader: &str) -> Option<String> {
+const LOADER_CONTEXT_QUERY: &str = "__mcp_v8_loader_context";
+
+fn test_loader_base_specifier(loader: &str) -> Option<ModuleSpecifier> {
     let loader = loader.strip_prefix("./").unwrap_or(loader);
     if !loader.starts_with("test/") {
         return None;
     }
-    ModuleSpecifier::from_file_path(Path::new("/").join(loader))
-        .ok()
-        .map(|specifier| specifier.to_string())
+    ModuleSpecifier::from_file_path(Path::new("/").join(loader)).ok()
 }
 
-fn loader_resolve_prelude(path: &str, body: &str) -> Option<(String, String)> {
+fn isolated_loader_specifier(specifier: &ModuleSpecifier) -> String {
+    let mut isolated = specifier.clone();
+    isolated
+        .query_pairs_mut()
+        .append_pair(LOADER_CONTEXT_QUERY, "node-test-loader");
+    isolated.to_string()
+}
+
+fn test_loader_specifier(loader: &str) -> Option<String> {
+    test_loader_base_specifier(loader).map(|specifier| isolated_loader_specifier(&specifier))
+}
+
+fn rewrite_loader_dependency_specifiers(
+    source: &str,
+    replacements: &HashMap<String, String>,
+) -> Option<String> {
+    use swc_core::{
+        common::{FileName, SourceMap, sync::Lrc},
+        ecma::{
+            ast::{Callee, ExportAll, Expr, ImportDecl, Lit, NamedExport, Str},
+            codegen::{Emitter, text_writer::JsWriter},
+            parser::{EsSyntax, Parser, StringInput, Syntax, lexer::Lexer},
+            visit::{VisitMut, VisitMutWith},
+        },
+    };
+
+    struct LoaderDependencyRewriter<'a> {
+        replacements: &'a HashMap<String, String>,
+    }
+
+    impl LoaderDependencyRewriter<'_> {
+        fn rewrite(&self, specifier: &mut Str) {
+            let current = specifier.value.to_string_lossy();
+            if let Some(replacement) = self.replacements.get(current.as_ref()) {
+                specifier.value = replacement.as_str().into();
+                specifier.raw = None;
+            }
+        }
+    }
+
+    impl VisitMut for LoaderDependencyRewriter<'_> {
+        fn visit_mut_import_decl(&mut self, import: &mut ImportDecl) {
+            self.rewrite(&mut import.src);
+        }
+
+        fn visit_mut_named_export(&mut self, export: &mut NamedExport) {
+            if let Some(source) = &mut export.src {
+                self.rewrite(source);
+            }
+        }
+
+        fn visit_mut_export_all(&mut self, export: &mut ExportAll) {
+            self.rewrite(&mut export.src);
+        }
+
+        fn visit_mut_call_expr(&mut self, call: &mut swc_core::ecma::ast::CallExpr) {
+            call.visit_mut_children_with(self);
+            if matches!(call.callee, Callee::Import(_))
+                && let Some(argument) = call.args.first_mut()
+                && let Expr::Lit(Lit::Str(specifier)) = &mut *argument.expr
+            {
+                self.rewrite(specifier);
+            }
+        }
+    }
+
+    let source_map: Lrc<SourceMap> = Default::default();
+    let source_file = source_map.new_source_file(
+        FileName::Custom("node-compat-loader.mjs".to_owned()).into(),
+        source.to_owned(),
+    );
+    let lexer = Lexer::new(
+        Syntax::Es(EsSyntax::default()),
+        Default::default(),
+        StringInput::from(&*source_file),
+        None,
+    );
+    let mut parser = Parser::new_from(lexer);
+    let mut module = parser.parse_module().ok()?;
+    if !parser.take_errors().is_empty() {
+        return None;
+    }
+    module.visit_mut_with(&mut LoaderDependencyRewriter { replacements });
+    let mut output = Vec::new();
+    Emitter {
+        cfg: Default::default(),
+        cm: source_map,
+        comments: None,
+        wr: JsWriter::new(Default::default(), "\n", &mut output, None),
+    }
+    .emit_module(&module)
+    .ok()?;
+    String::from_utf8(output).ok()
+}
+
+fn install_isolated_loader_modules(
+    body: &str,
+    modules: &mut HashMap<String, String>,
+) -> Result<(), String> {
+    let invocation = NodeCliInvocation::parse(&test_flags(body), None)?;
+    let mut pending = invocation
+        .experimental_loaders
+        .iter()
+        .filter_map(|loader| test_loader_base_specifier(loader))
+        .collect::<Vec<_>>();
+    let mut visited = HashSet::new();
+
+    while let Some(specifier) = pending.pop() {
+        if !visited.insert(specifier.to_string()) {
+            continue;
+        }
+        let Some(source) = modules.get(specifier.as_str()).cloned() else {
+            continue;
+        };
+        let mut replacements = HashMap::new();
+        for request in literal_module_specifiers(&source) {
+            if !(request.starts_with('.')
+                || request.starts_with('/')
+                || request.starts_with("file:"))
+            {
+                continue;
+            }
+            let Ok(dependency) = specifier.join(&request) else {
+                continue;
+            };
+            if !modules.contains_key(dependency.as_str()) {
+                continue;
+            }
+            replacements.insert(request, isolated_loader_specifier(&dependency));
+            pending.push(dependency);
+        }
+        let isolated_source =
+            rewrite_loader_dependency_specifiers(&source, &replacements).unwrap_or(source);
+        modules.insert(isolated_loader_specifier(&specifier), isolated_source);
+    }
+    Ok(())
+}
+
+fn loader_resolve_prelude(
+    path: &str,
+    body: &str,
+    esm: bool,
+    loader_sources: &HashMap<String, String>,
+) -> Option<(String, String)> {
     let invocation = NodeCliInvocation::parse(&test_flags(body), None).ok()?;
     if invocation.experimental_loaders.is_empty() {
         return None;
@@ -490,11 +655,51 @@ fn loader_resolve_prelude(path: &str, body: &str) -> Option<(String, String)> {
         .iter()
         .map(|loader| test_loader_specifier(loader))
         .collect::<Option<Vec<_>>>()?;
-    let body = rewrite_dynamic_imports(body)?;
+    let literal_specifiers = literal_module_specifiers(body);
+    let body = if esm {
+        rewrite_esm_loader_dynamic_imports(body)?
+    } else {
+        rewrite_dynamic_imports(body)?
+    };
     let parent_url = test_module_specifier(path).ok()?;
+    let parent = ModuleSpecifier::parse(&parent_url).ok()?;
+    let selected_loader_sources = literal_specifiers
+        .into_iter()
+        .filter_map(|specifier| {
+            let resolved = if specifier.starts_with('.')
+                || specifier.starts_with('/')
+                || specifier.starts_with("file:")
+            {
+                parent.join(&specifier).ok()?
+            } else {
+                return None;
+            };
+            loader_sources
+                .get(resolved.as_str())
+                .map(|source| (resolved.to_string(), source.clone()))
+        })
+        .collect::<HashMap<_, _>>();
     let prelude = format!(
-        r#"const __nodeCompatResolveLoaders = await Promise.all({loaders}.map((specifier) => import(specifier)));
-const __nodeCompatResolveHooks = __nodeCompatResolveLoaders.map((loader) => loader.resolve).filter((hook) => typeof hook === 'function');
+        r#"const __nodeCompatLoaderModules = await Promise.all({loaders}.map((specifier) => import(specifier)));
+const __nodeCompatResolveHooks = __nodeCompatLoaderModules.map((loader) => loader.resolve).filter((hook) => typeof hook === 'function');
+const __nodeCompatLoadHooks = __nodeCompatLoaderModules.map((loader) => loader.load).filter((hook) => typeof hook === 'function');
+const __nodeCompatLoaderSources = new Map(Object.entries({loader_sources}));
+const __nodeCompatLoaderError = (code, message, ErrorType = TypeError) => {{
+  const error = new ErrorType(message);
+  error.code = code;
+  return error;
+}};
+const __nodeCompatValidateFormatType = (format, hook) => {{
+  if (format == null || format === '' || typeof format === 'string') return;
+  throw __nodeCompatLoaderError('ERR_INVALID_RETURN_PROPERTY_VALUE', `Expected a string for "format" to be returned from the ${{hook}} hook but got type ${{typeof format}}.`);
+}};
+const __nodeCompatValidateFormat = (format) => {{
+  __nodeCompatValidateFormatType(format, 'load');
+  if (format == null || format === '') return;
+  if (!['module', 'commonjs', 'json', 'wasm', 'builtin', 'addon', 'module-typescript', 'commonjs-typescript', 'typescript'].includes(format)) {{
+    throw __nodeCompatLoaderError('ERR_UNKNOWN_MODULE_FORMAT', `Unknown module format: ${{format}}`);
+  }}
+}};
 const __nodeCompatDefaultResolve = async (specifier, context, originalImportAttributes) => {{
   const relative = specifier.startsWith('.') || specifier.startsWith('/') || specifier.startsWith('file:') || specifier.startsWith('data:');
   return {{ url: relative ? new URL(specifier, context.parentURL).href : specifier, importAttributes: originalImportAttributes }};
@@ -504,22 +709,56 @@ const __nodeCompatRunResolve = async (index, specifier, context, originalImportA
   const hook = __nodeCompatResolveHooks[index];
   return await hook(specifier, context, (nextSpecifier = specifier, nextContext = context) => __nodeCompatRunResolve(index - 1, nextSpecifier, nextContext, originalImportAttributes));
 }};
+const __nodeCompatDefaultLoad = async (url, context) => ({{ url, format: context.format, source: null, __nodeCompatDefault: true }});
+const __nodeCompatRunLoad = async (index, url, context) => {{
+  if (index < 0) return __nodeCompatDefaultLoad(url, context);
+  const hook = __nodeCompatLoadHooks[index];
+  return await hook(url, context, (nextUrl = url, nextContext = context) => __nodeCompatRunLoad(index - 1, nextUrl, nextContext));
+}};
 globalThis.__NODE_COMPAT_IMPORT_WITH_LOADERS__ = async (specifier, options) => {{
   const originalImportAttributes = {{ ...(options?.with ?? {{}}) }};
   const context = {{ conditions: ['node', 'import'], importAttributes: {{ ...originalImportAttributes }}, parentURL: {parent_url} }};
   const resolved = await __nodeCompatRunResolve(__nodeCompatResolveHooks.length - 1, String(specifier), context, originalImportAttributes);
-  const importAttributes = resolved?.importAttributes ?? context.importAttributes;
+  if (resolved == null || typeof resolved !== 'object') {{
+    throw __nodeCompatLoaderError('ERR_INVALID_RETURN_VALUE', `Expected an object to be returned from the resolve hook but got ${{resolved === null ? 'null' : typeof resolved}}.`);
+  }}
+  __nodeCompatValidateFormatType(resolved.format, 'resolve');
+  const url = resolved.url ?? String(specifier);
+  const importAttributes = resolved.importAttributes ?? context.importAttributes;
+  const loaded = await __nodeCompatRunLoad(__nodeCompatLoadHooks.length - 1, url, {{ format: resolved.format, importAttributes }});
+  if (loaded == null || typeof loaded !== 'object') {{
+    throw __nodeCompatLoaderError('ERR_INVALID_RETURN_VALUE', `Expected an object to be returned from the load hook but got ${{loaded === null ? 'null' : typeof loaded}}.`);
+  }}
+  __nodeCompatValidateFormat(loaded.format);
   const importOptions = Object.keys(importAttributes).length === 0 ? undefined : {{ with: importAttributes }};
-  return import(resolved?.url ?? String(specifier), importOptions);
+  if (loaded.source != null) {{
+    const source = typeof loaded.source === 'string'
+      ? loaded.source
+      : loaded.source instanceof ArrayBuffer || ArrayBuffer.isView(loaded.source)
+        ? new TextDecoder().decode(loaded.source)
+        : null;
+    if (source === null) {{
+      throw __nodeCompatLoaderError('ERR_INVALID_RETURN_PROPERTY_VALUE', `Expected a string, an ArrayBuffer, or a TypedArray for "source" to be returned from the 'load' hook but got type ${{typeof loaded.source}}.`);
+    }}
+    return import('data:text/javascript;charset=utf-8,' + encodeURIComponent(source), importOptions);
+  }}
+  const defaultSource = loaded.__nodeCompatDefault && loaded.format
+    ? __nodeCompatLoaderSources.get(url)
+    : undefined;
+  if (defaultSource !== undefined) {{
+    return import('data:text/javascript;charset=utf-8,' + encodeURIComponent(defaultSource), importOptions);
+  }}
+  return import(url, importOptions);
 }};
 "#,
         loaders = serde_json::to_string(&loaders).unwrap(),
+        loader_sources = serde_json::to_string(&selected_loader_sources).unwrap(),
         parent_url = serde_json::to_string(&parent_url).unwrap(),
     );
     Some((prelude, body))
 }
 
-fn assemble(path: &str, body: &str) -> String {
+fn assemble(path: &str, body: &str, loader_sources: &HashMap<String, String>) -> String {
     let body = strip_shebang(body);
     if is_esm(path) {
         let body = rewrite_esm_harness_imports(body);
@@ -528,13 +767,15 @@ fn assemble(path: &str, body: &str) -> String {
             .as_deref()
             .and_then(|specifier| rewrite_import_meta_resolve(specifier, &body))
             .unwrap_or(body);
+        let (loader_prelude, body) = loader_resolve_prelude(path, &body, true, loader_sources)
+            .unwrap_or_else(|| (String::new(), body));
         return format!(
-            "import 'node-test:prelude';\n{}\nglobalThis.__NODE_TEST_SCHEDULE_REPORT__({:?});",
-            body, SENTINEL,
+            "import 'node-test:prelude';\n{}\n{}\nglobalThis.__NODE_TEST_SCHEDULE_REPORT__({:?});",
+            loader_prelude, body, SENTINEL,
         );
     }
-    let (loader_prelude, body) =
-        loader_resolve_prelude(path, body).unwrap_or_else(|| (String::new(), body.to_owned()));
+    let (loader_prelude, body) = loader_resolve_prelude(path, body, false, loader_sources)
+        .unwrap_or_else(|| (String::new(), body.to_owned()));
     format!(
         "globalThis.__NODE_TEST_PATH__={};globalThis.__NODE_TEST_NAME__={};\n{}\n{}\ntry{{globalThis.__NODE_TEST_RUN_CJS__({});}}catch(e){{if(!(e&&e.__nodeTestSkip))throw e;}}\nglobalThis.__NODE_TEST_SCHEDULE_REPORT__({:?});",
         serde_json::to_string(path).unwrap(),
@@ -1172,6 +1413,7 @@ fn wrap_commonjs(source: &str) -> String {
 struct CorpusModules {
     esm: Arc<HashMap<String, String>>,
     commonjs: Arc<HashMap<String, String>>,
+    loader_sources: Arc<HashMap<String, String>>,
     files: Arc<HashSet<String>>,
 }
 fn add_corpus_modules(
@@ -1181,6 +1423,7 @@ fn add_corpus_modules(
     rewrite_dynamic_imports: bool,
     modules: &mut HashMap<String, String>,
     commonjs_modules: &mut HashMap<String, String>,
+    loader_sources: &mut HashMap<String, String>,
     files: &mut HashSet<String>,
 ) -> Result<(), String> {
     let directory_uses_modules = package_uses_modules(directory, inherited_modules);
@@ -1194,6 +1437,7 @@ fn add_corpus_modules(
                 rewrite_dynamic_imports,
                 modules,
                 commonjs_modules,
+                loader_sources,
                 files,
             )?;
             continue;
@@ -1207,6 +1451,9 @@ fn add_corpus_modules(
             path.extension().and_then(|value| value.to_str()),
             Some("js" | "mjs" | "cjs" | "json")
         ) {
+            if let Ok(source) = fs::read_to_string(&path) {
+                loader_sources.insert(specifier.to_string(), strip_shebang(&source).to_owned());
+            }
             continue;
         }
         let source = fs::read_to_string(&path).map_err(|error| error.to_string())?;
@@ -1247,6 +1494,7 @@ fn add_corpus_modules(
 fn corpus_modules(corpus: &Path) -> Result<CorpusModules, String> {
     let mut modules = HashMap::new();
     let mut commonjs_modules = HashMap::new();
+    let mut loader_sources = HashMap::new();
     let mut files = HashSet::new();
     add_corpus_modules(
         corpus,
@@ -1255,6 +1503,7 @@ fn corpus_modules(corpus: &Path) -> Result<CorpusModules, String> {
         true,
         &mut modules,
         &mut commonjs_modules,
+        &mut loader_sources,
         &mut files,
     )?;
     add_named_commonjs_import_errors(corpus, true, &mut modules);
@@ -1264,6 +1513,7 @@ fn corpus_modules(corpus: &Path) -> Result<CorpusModules, String> {
     Ok(CorpusModules {
         esm: Arc::new(modules),
         commonjs: Arc::new(commonjs_modules),
+        loader_sources: Arc::new(loader_sources),
         files: Arc::new(files),
     })
 }
@@ -1391,6 +1641,7 @@ fn corpus_modules_for_cli(
 
     let mut modules = HashMap::new();
     let mut commonjs_modules = HashMap::new();
+    let mut loader_sources = HashMap::new();
     let mut files = HashSet::new();
     for directory in directories {
         add_corpus_modules(
@@ -1400,6 +1651,7 @@ fn corpus_modules_for_cli(
             false,
             &mut modules,
             &mut commonjs_modules,
+            &mut loader_sources,
             &mut files,
         )?;
     }
@@ -1430,6 +1682,7 @@ fn corpus_modules_for_cli(
     Ok(CorpusModules {
         esm: Arc::new(modules),
         commonjs: Arc::new(commonjs_modules),
+        loader_sources: Arc::new(loader_sources),
         files: Arc::new(files),
     })
 }
@@ -1981,6 +2234,9 @@ fn run(
     let subprocess = SubprocessConfig::new(policy);
     let (tmpdir_esm, tmpdir_commonjs) = test_tmpdir_modules(test_tmp.path());
     let mut virtual_modules = (*modules.esm).clone();
+    if let Err(error) = install_isolated_loader_modules(body, &mut virtual_modules) {
+        return Outcome::Runtime(error);
+    }
     virtual_modules.insert("file:///test/common/tmpdir.js".to_owned(), tmpdir_esm);
     let mut virtual_commonjs_modules = (*modules.commonjs).clone();
     virtual_commonjs_modules.insert("file:///test/common/tmpdir.js".to_owned(), tmpdir_commonjs);
@@ -2034,7 +2290,7 @@ fn run(
         serde_json::to_string(node_executable.to_str().unwrap()).unwrap(),
         serde_json::to_string(&test_flags(body)).unwrap(),
         serde_json::to_string(test_tmp.path().to_str().unwrap()).unwrap(),
-        assemble(path, body),
+        assemble(path, body, &modules.loader_sources),
     );
     let (res, _) = server::engine::execute_stateless(&source, config);
     done.store(true, Ordering::SeqCst);
@@ -2442,10 +2698,67 @@ mod tests {
     }
 
     #[test]
+    fn isolated_loader_modules_use_private_dependency_instances() {
+        let loader = "file:///test/fixtures/loader.mjs".to_owned();
+        let dependency = "file:///test/fixtures/state.mjs".to_owned();
+        let mut modules = HashMap::from([
+            (
+                loader.clone(),
+                "import './state.mjs'; export const load = () => {};".to_owned(),
+            ),
+            (dependency.clone(), "export default 1;".to_owned()),
+        ]);
+
+        install_isolated_loader_modules(
+            "// Flags: --experimental-loader ./test/fixtures/loader.mjs",
+            &mut modules,
+        )
+        .unwrap();
+
+        let isolated_loader = isolated_loader_specifier(&ModuleSpecifier::parse(&loader).unwrap());
+        let isolated_dependency =
+            isolated_loader_specifier(&ModuleSpecifier::parse(&dependency).unwrap());
+        assert!(modules.contains_key(&isolated_dependency));
+        assert!(modules[&isolated_loader].contains(&isolated_dependency));
+    }
+
+    #[test]
+    fn assemble_installs_dynamic_loader_hooks_for_esm() {
+        let loader_sources = HashMap::from([(
+            "file:///test/fixtures/value.ext".to_owned(),
+            "export default 'loader source';".to_owned(),
+        )]);
+        let source = assemble(
+            "test/es-module/loader.mjs",
+            "// Flags: --experimental-loader ./test/fixtures/loader.mjs\nimport('esmHook/value.mjs');\nimport('../fixtures/value.ext');\n",
+            &loader_sources,
+        );
+
+        assert!(
+            source.contains("file:///test/fixtures/loader.mjs"),
+            "{source}"
+        );
+        assert!(
+            source.contains("__NODE_COMPAT_IMPORT_WITH_LOADERS__"),
+            "{source}"
+        );
+        assert!(
+            source.contains("__nodeCompatImportWithLoaders('esmHook/value.mjs')"),
+            "{source}"
+        );
+        assert!(
+            source.contains("file:///test/fixtures/value.ext"),
+            "{source}"
+        );
+        assert!(source.contains("loader source"), "{source}");
+    }
+
+    #[test]
     fn assemble_installs_dynamic_loader_resolve_hooks() {
         let source = assemble(
             "test/es-module/loader.js",
             "// Flags: --experimental-loader ./test/fixtures/loader.mjs\nimport('./value.json');\n",
+            &HashMap::new(),
         );
 
         assert!(
@@ -2460,7 +2773,7 @@ mod tests {
 
     #[test]
     fn assemble_runs_test_body_through_commonjs_wrapper() {
-        let source = assemble("test/parallel/wrapper.js", "return;");
+        let source = assemble("test/parallel/wrapper.js", "return;", &HashMap::new());
         let runner = source.split_once(PRELUDE).unwrap().1;
         assert!(runner.contains("globalThis.__NODE_TEST_RUN_CJS__("));
         assert!(runner.contains("globalThis.__NODE_TEST_SCHEDULE_REPORT__("));
@@ -2471,6 +2784,7 @@ mod tests {
         let source = assemble(
             "test/es-module/resolve.mjs",
             "import.meta.resolve('custom:value');\n",
+            &HashMap::new(),
         );
 
         assert!(
@@ -2484,6 +2798,7 @@ mod tests {
         let source = assemble(
             "test/es-module/example.mjs",
             "import '../common/index.mjs';\nimport assert from 'assert';",
+            &HashMap::new(),
         );
         assert!(source.starts_with("import 'node-test:prelude';"));
         assert!(source.contains("import 'node-test:common';"));
