@@ -105,7 +105,9 @@ function packageParts(specifier) {
 }
 
 const PACKAGE_TARGET_MISSING = Symbol('missing');
+const PACKAGE_TARGET_NULL = Symbol('null');
 const PACKAGE_TARGET_INVALID = Symbol('invalid');
+const PACKAGE_TARGET_INVALID_SPECIFIER = Symbol('invalid-specifier');
 
 function packageTarget(value, match, conditions) {
     if (typeof value === 'string') {
@@ -301,9 +303,182 @@ function resolvePackageSource(packageUrl, source, parts, conditions, referrer) {
     throw err;
 }
 
+function packageImportsTarget(value, match, conditions) {
+    if (typeof value === 'string') {
+        const target = value.replaceAll('*', () => match);
+        if (target.startsWith('./')) {
+            try {
+                for (const segment of target.slice(2).split('/')) {
+                    const decoded = decodeURIComponent(segment).toLowerCase();
+                    if (decoded.includes('/') || decoded.includes('\\')) {
+                        return PACKAGE_TARGET_INVALID_SPECIFIER;
+                    }
+                    if (decoded === '.' || decoded === '..' || decoded === 'node_modules') {
+                        return PACKAGE_TARGET_INVALID;
+                    }
+                }
+            } catch {
+                return PACKAGE_TARGET_INVALID_SPECIFIER;
+            }
+            return { target, external: false };
+        }
+        if (target.startsWith('../') || target.startsWith('/') || target.includes(':')) {
+            return PACKAGE_TARGET_INVALID;
+        }
+        return { target, external: true };
+    }
+    if (value === null) return PACKAGE_TARGET_NULL;
+    if (Array.isArray(value)) {
+        let invalid = false;
+        let nullTarget = false;
+        for (const target of value) {
+            const resolved = packageImportsTarget(target, match, conditions);
+            if (resolved && typeof resolved === 'object') return resolved;
+            if (resolved === PACKAGE_TARGET_INVALID_SPECIFIER) return resolved;
+            if (resolved === PACKAGE_TARGET_INVALID) invalid = true;
+            if (resolved === PACKAGE_TARGET_NULL) nullTarget = true;
+        }
+        if (nullTarget) return PACKAGE_TARGET_NULL;
+        return invalid ? PACKAGE_TARGET_INVALID : PACKAGE_TARGET_MISSING;
+    }
+    if (value && typeof value === 'object') {
+        for (const [condition, target] of Object.entries(value)) {
+            if (condition === 'default' || conditions.includes(condition)) {
+                return packageImportsTarget(target, match, conditions);
+            }
+        }
+        return PACKAGE_TARGET_MISSING;
+    }
+    return PACKAGE_TARGET_INVALID;
+}
+
+function importsTarget(imports, request, conditions) {
+    if (!imports || typeof imports !== 'object' || Array.isArray(imports)) {
+        return PACKAGE_TARGET_MISSING;
+    }
+    if (Object.prototype.hasOwnProperty.call(imports, request)) {
+        return packageImportsTarget(imports[request], '', conditions);
+    }
+    const patterns = Object.keys(imports)
+        .map((key) => {
+            const wildcard = key.indexOf('*');
+            if (wildcard < 0) return null;
+            const prefix = key.slice(0, wildcard);
+            const suffix = key.slice(wildcard + 1);
+            if (request.length <= prefix.length + suffix.length ||
+                !request.startsWith(prefix) || !request.endsWith(suffix)) return null;
+            return {
+                prefix: prefix.length,
+                suffix: suffix.length,
+                match: request.slice(prefix.length, request.length - suffix.length),
+                target: imports[key],
+            };
+        })
+        .filter(Boolean)
+        .sort((a, b) => b.prefix - a.prefix || b.suffix - a.suffix);
+    if (patterns.length === 0) return PACKAGE_TARGET_MISSING;
+    const pattern = patterns[0];
+    return packageImportsTarget(pattern.target, pattern.match, conditions);
+}
+
+function invalidPackageImportSpecifier(request, reason) {
+    const error = new Error(`Invalid module '${request}' ${reason}`);
+    error.code = 'ERR_INVALID_MODULE_SPECIFIER';
+    return error;
+}
+
+function emitPackageImportWarning(request, resolution, filename) {
+    const testFlags = globalThis.__NODE_TEST_FLAGS__;
+    if (!process.execArgv.includes('--pending-deprecation') &&
+        (!Array.isArray(testFlags) || !testFlags.includes('--pending-deprecation'))) return;
+    if (!request.includes('//') && !resolution.target.includes('//')) return;
+    process.emitWarning(
+        `Use of deprecated double slash resolving "${resolution.target}" for module request "${request}" imported from ${filename}.`,
+        'DeprecationWarning',
+        'DEP0166',
+    );
+}
+
+function resolvePackageImport(request, filename, conditions) {
+    if (request === '#') {
+        throw invalidPackageImportSpecifier(request, 'is not a valid internal imports specifier name');
+    }
+    try {
+        let invalidMatch = false;
+        if (request.split('/').some((segment) => {
+            const decoded = decodeURIComponent(segment);
+            if (decoded === '.' || decoded === '..' || decoded.toLowerCase() === 'node_modules') {
+                invalidMatch = true;
+            }
+            return decoded.includes('/') || decoded.includes('\\');
+        })) {
+            throw invalidPackageImportSpecifier(request, 'must not include encoded "/" or "\\"');
+        }
+        if (invalidMatch) {
+            throw invalidPackageImportSpecifier(request, 'request is not a valid match in pattern');
+        }
+    } catch (error) {
+        if (error?.code === 'ERR_INVALID_MODULE_SPECIFIER') throw error;
+        throw invalidPackageImportSpecifier(request, 'is not a valid internal imports specifier name');
+    }
+
+    let directory = new URL('.', virtualFileUrl(filename));
+    while (true) {
+        const packageUrl = new URL('package.json', directory);
+        const source = virtualPackageJson[packageUrl.href];
+        if (source !== undefined) {
+            const packageData = JSON.parse(source);
+            const resolution = importsTarget(packageData.imports, request, conditions);
+            if (resolution === PACKAGE_TARGET_INVALID_SPECIFIER) {
+                throw invalidPackageImportSpecifier(request, 'must not include encoded "/" or "\\"');
+            }
+            if (resolution === PACKAGE_TARGET_INVALID) {
+                const error = new Error(`Invalid "imports" target for '${request}'`);
+                error.code = 'ERR_INVALID_PACKAGE_TARGET';
+                throw error;
+            }
+            if (resolution === PACKAGE_TARGET_MISSING || resolution === PACKAGE_TARGET_NULL) {
+                const error = new Error(`Package import specifier "${request}" is not defined in ${packageUrl.href}`);
+                error.code = 'ERR_PACKAGE_IMPORT_NOT_DEFINED';
+                throw error;
+            }
+            emitPackageImportWarning(request, resolution, filename);
+            if (resolution.external) {
+                const resolved = resolveVirtual(resolution.target, packageUrl.href, conditions);
+                if (resolved) return resolved;
+                const error = new Error(`Cannot find module '${resolution.target}'`);
+                error.code = 'MODULE_NOT_FOUND';
+                throw error;
+            }
+            const targetUrl = new URL(resolution.target, packageUrl);
+            if (!targetUrl.pathname.startsWith(directory.pathname)) {
+                const error = new Error(`Invalid "imports" target for '${request}'`);
+                error.code = 'ERR_INVALID_PACKAGE_TARGET';
+                throw error;
+            }
+            const resolved = resolveVirtualFile(targetUrl);
+            if (resolved) return resolved;
+            const error = new Error(`Cannot find module '${decodeURIComponent(targetUrl.pathname)}'`);
+            error.code = 'MODULE_NOT_FOUND';
+            throw error;
+        }
+        const parent = new URL('../', directory);
+        if (parent.href === directory.href) return null;
+        directory = parent;
+    }
+}
+
+function packageUrlPath(value) {
+    return String(value).replaceAll('#', '%23').replaceAll('?', '%3F');
+}
+
 function resolveVirtual(id, filename, conditions = ['require', 'node', 'default']) {
     if (!virtualCommonJsModules || !virtualPackageJson) return null;
     const request = String(id);
+    if (request.startsWith('#')) {
+        const imported = resolvePackageImport(request, filename, conditions);
+        if (imported) return imported;
+    }
     if (request.startsWith('./') || request.startsWith('../') || request.startsWith('/')) {
         return resolveVirtualFile(new URL(request, virtualFileUrl(filename)));
     }
@@ -336,7 +511,7 @@ function resolveVirtual(id, filename, conditions = ['require', 'node', 'default'
             return resolvePackageSource(selfPackageUrl, selfSource, parts, conditions, filename);
         }
         const insideNodeModules = directory.pathname.endsWith('/node_modules/');
-        const packageBase = new URL(`node_modules/${parts.packageName}/`, directory);
+        const packageBase = new URL(`node_modules/${packageUrlPath(parts.packageName)}/`, directory);
         const packageUrl = new URL('package.json', packageBase);
         const source = insideNodeModules ? undefined : virtualPackageJson[packageUrl.href];
         if (source !== undefined) {
@@ -344,7 +519,7 @@ function resolveVirtual(id, filename, conditions = ['require', 'node', 'default'
         }
         const legacyFile = insideNodeModules
             ? null
-            : resolveVirtualFile(new URL(`node_modules/${request}`, directory));
+            : resolveVirtualFile(new URL(`node_modules/${packageUrlPath(request)}`, directory));
         if (legacyFile) return legacyFile;
         const legacyPackage = insideNodeModules ? null : resolveVirtualFile(new URL(
             parts.subpath || './index.js', packageBase));
@@ -365,6 +540,7 @@ function resolveImportSpecifier(request, filename) {
     } catch {
         return null;
     }
+    if (request.startsWith('#') && resolved) return resolved;
     if (packageDeprecationSerial !== before && resolved) return resolved;
     return null;
 }
@@ -384,21 +560,31 @@ function virtualNodeModulePaths(filename) {
     }
 }
 
+function commonJsNamespace(value) {
+    const named = value !== null && (typeof value === 'object' || typeof value === 'function')
+        ? { ...value }
+        : {};
+    return { ...named, default: value, 'module.exports': value };
+}
+
 function importVirtualModule(id, filename) {
     const name = String(id).replace(/^node:/, '');
     if (builtins.has(name)) {
         const value = builtins.get(name);
-        return Promise.resolve({ ...value, default: value, 'module.exports': value });
+        return Promise.resolve(commonJsNamespace(value));
     }
     try {
         const resolved = resolveVirtual(id, filename, ['import', 'node', 'default']);
         if (!resolved) return Promise.reject(new Error(`Cannot find module '${id}'`));
         const value = loadVirtualModule(resolved, false);
-        return Promise.resolve({ ...value, default: value, 'module.exports': value });
+        return Promise.resolve(commonJsNamespace(value));
     } catch (error) {
+        if (error?.code === 'MODULE_NOT_FOUND') error.code = 'ERR_MODULE_NOT_FOUND';
         return Promise.reject(error);
     }
 }
+
+globalThis.__mcpV8ImportVirtualModule = importVirtualModule;
 
 function originalEsmSource(source) {
     if (!source.startsWith(ORIGINAL_ESM_PREFIX)) return null;

@@ -784,6 +784,127 @@ fn test_create_require_enforces_package_exports() {
 }
 
 #[test]
+fn test_create_require_resolves_package_imports() {
+    use std::collections::HashMap;
+    use server::engine::{execute_stateless, ExecutionConfig};
+
+    ensure_v8();
+    let modules = Arc::new(HashMap::from([
+        (
+            "file:///app/package.json".to_string(),
+            r##"{"imports":{"#test":"./test.js","#branch":{"require":"./require.js","default":"./default.js"},"#sub/*":"./src/*.js","#external":"dep/value"}}"##.to_string(),
+        ),
+        (
+            "file:///app/node_modules/dep/package.json".to_string(),
+            r#"{"exports":{"./value":"./value.js"}}"#.to_string(),
+        ),
+    ]));
+    let commonjs_modules = Arc::new(HashMap::from([
+        ("file:///app/test.js".to_string(), "module.exports = 'test';".to_string()),
+        ("file:///app/require.js".to_string(), "module.exports = 'require';".to_string()),
+        ("file:///app/src/item.js".to_string(), "module.exports = 'item';".to_string()),
+        ("file:///app/node_modules/dep/value.js".to_string(), "module.exports = 'external';".to_string()),
+    ]));
+    let loader = ModuleLoaderConfig {
+        allow_external: false,
+        policy_chain: None,
+        virtual_modules: Some(modules),
+        virtual_commonjs_modules: Some(commonjs_modules),
+        virtual_files: None,
+    };
+    let code = r#"
+        import { createRequire } from 'node:module';
+        const require = createRequire(import.meta.url);
+        const values = [require('#test'), require('#branch'), require('#sub/item'), require('#external')];
+        if (values.join(',') !== 'test,require,item,external') {
+            throw new Error(`wrong package imports: ${values}`);
+        }
+    "#;
+    let (result, _) = execute_stateless(
+        code,
+        ExecutionConfig::new(64 * 1024 * 1024)
+            .module_loader_config(&loader)
+            .main_module_specifier("file:///app/main.mjs"),
+    );
+    assert!(result.is_ok(), "package imports require failed: {result:?}");
+}
+
+#[test]
+fn test_package_import_deprecation_uses_node_test_flags() {
+    use std::collections::HashMap;
+    use server::engine::{execute_stateless, ExecutionConfig};
+
+    ensure_v8();
+    let modules = Arc::new(HashMap::from([(
+        "file:///app/package.json".to_string(),
+        r##"{"imports":{"#double":"./sub//missing.js"}}"##.to_string(),
+    )]));
+    let loader = ModuleLoaderConfig {
+        allow_external: false,
+        policy_chain: None,
+        virtual_modules: Some(modules),
+        virtual_commonjs_modules: Some(Arc::new(HashMap::new())),
+        virtual_files: None,
+    };
+    let code = r#"
+        import { createRequire } from 'node:module';
+        import process from 'node:process';
+        globalThis.__NODE_TEST_FLAGS__ = ['--pending-deprecation'];
+        const warnings = [];
+        process.removeAllListeners('warning');
+        process.on('warning', (warning) => warnings.push(warning));
+        const require = createRequire(import.meta.url);
+        try { require('#double'); } catch (error) {
+            if (error?.code !== 'MODULE_NOT_FOUND') throw error;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        if (warnings.length !== 1 || warnings[0].code !== 'DEP0166' ||
+            !warnings[0].stack.includes('./sub//missing.js')) {
+            throw new Error(`missing package import deprecation warning: ${warnings}`);
+        }
+    "#;
+    let (result, _) = execute_stateless(
+        code,
+        ExecutionConfig::new(64 * 1024 * 1024)
+            .module_loader_config(&loader)
+            .main_module_specifier("file:///app/main.mjs"),
+    );
+    assert!(result.is_ok(), "package imports warning failed: {result:?}");
+}
+
+#[test]
+fn test_create_require_resolves_hash_prefixed_legacy_package() {
+    use std::collections::HashMap;
+    use server::engine::{execute_stateless, ExecutionConfig};
+
+    ensure_v8();
+    let commonjs_modules = Arc::new(HashMap::from([(
+        "file:///app/node_modules/%23cjs/index.js".to_string(),
+        "module.exports = 'cjs backcompat';".to_string(),
+    )]));
+    let loader = ModuleLoaderConfig {
+        allow_external: false,
+        policy_chain: None,
+        virtual_modules: Some(Arc::new(HashMap::new())),
+        virtual_commonjs_modules: Some(commonjs_modules),
+        virtual_files: None,
+    };
+    let code = r#"
+        import { createRequire } from 'node:module';
+        const require = createRequire(import.meta.url);
+        const value = require('#cjs');
+        if (value !== 'cjs backcompat') throw new Error(`wrong legacy package value: ${value}`);
+    "#;
+    let (result, _) = execute_stateless(
+        code,
+        ExecutionConfig::new(64 * 1024 * 1024)
+            .module_loader_config(&loader)
+            .main_module_specifier("file:///app/main.mjs"),
+    );
+    assert!(result.is_ok(), "hash-prefixed package require failed: {result:?}");
+}
+
+#[test]
 fn test_create_require_virtual_package_exports() {
     use std::collections::HashMap;
     use server::engine::{execute_stateless, ExecutionConfig};

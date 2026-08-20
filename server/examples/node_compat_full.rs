@@ -275,7 +275,7 @@ fn test_flags(body: &str) -> Vec<String> {
         })
         .collect()
 }
-fn rewrite_dynamic_imports(body: &str) -> Option<String> {
+fn rewrite_script_dynamic_imports(body: &str, helper: &str) -> Option<String> {
     use swc_core::{
         common::{FileName, SourceMap, sync::Lrc},
         ecma::{
@@ -286,14 +286,16 @@ fn rewrite_dynamic_imports(body: &str) -> Option<String> {
         },
     };
 
-    struct DynamicImportRewriter;
+    struct DynamicImportRewriter<'a> {
+        helper: &'a str,
+    }
 
-    impl VisitMut for DynamicImportRewriter {
+    impl VisitMut for DynamicImportRewriter<'_> {
         fn visit_mut_call_expr(&mut self, call: &mut swc_core::ecma::ast::CallExpr) {
             call.visit_mut_children_with(self);
             if matches!(call.callee, Callee::Import(_)) {
                 call.callee = Callee::Expr(Box::new(Expr::Ident(Ident::new_no_ctxt(
-                    "__nodeCompatImportWithLoaders".into(),
+                    self.helper.into(),
                     call.span,
                 ))));
             }
@@ -316,7 +318,7 @@ fn rewrite_dynamic_imports(body: &str) -> Option<String> {
     if !parser.take_errors().is_empty() {
         return None;
     }
-    script.visit_mut_with(&mut DynamicImportRewriter);
+    script.visit_mut_with(&mut DynamicImportRewriter { helper });
     let mut output = Vec::new();
     Emitter {
         cfg: Default::default(),
@@ -326,7 +328,11 @@ fn rewrite_dynamic_imports(body: &str) -> Option<String> {
     }
     .emit_script(&script)
     .ok()?;
-    let output = String::from_utf8(output).ok()?;
+    String::from_utf8(output).ok()
+}
+
+fn rewrite_dynamic_imports(body: &str) -> Option<String> {
+    let output = rewrite_script_dynamic_imports(body, "__nodeCompatImportWithLoaders")?;
     Some(format!(
         "const __nodeCompatImportWithLoaders = globalThis.__NODE_COMPAT_IMPORT_WITH_LOADERS__;\n{output}"
     ))
@@ -1060,6 +1066,8 @@ fn transpile_esm_to_commonjs(specifier: &str, source: &str) -> Option<String> {
 }
 
 fn wrap_commonjs_with_names(source: &str, export_names: Vec<String>) -> String {
+    let source = rewrite_script_dynamic_imports(source, "__cjsImport")
+        .unwrap_or_else(|| source.to_owned());
     let mut wrapped = format!(
         r#"import {{ createRequire as __createRequire }} from 'node:module';
 import {{ fileURLToPath as __fileURLToPath }} from 'node:url';
@@ -1069,6 +1077,7 @@ let __cjsExports = __cjsModule.exports;
 const __cjsRequire = __createRequire(import.meta.url);
 const __cjsFilename = __fileURLToPath(import.meta.url);
 const __cjsDirname = __dirnameOf(__cjsFilename);
+const __cjsImport = (specifier, options) => globalThis.__mcpV8ImportVirtualModule(specifier, import.meta.url, options);
 (function (exports, require, module, __filename, __dirname) {{
 {source}
 }}).call(__cjsModule.exports, __cjsExports, __cjsRequire, __cjsModule, __cjsFilename, __cjsDirname);
