@@ -253,6 +253,22 @@ function emitPackageExportWarning(resolution, packageSubpath, packageUrl, referr
     );
 }
 
+function emitPackageMainWarning(packageData, packageUrl, referrer, resolved) {
+    const main = typeof packageData.main === 'string' && packageData.main.length > 0
+        ? packageData.main
+        : null;
+    if (main !== null && /\.[^/]+$/.test(main)) return;
+    const warningKey = `DEP0151:${packageUrl.href}:${main ?? ''}`;
+    if (emittedPackageWarnings.has(warningKey)) return;
+    emittedPackageWarnings.add(warningKey);
+    const packageRoot = decodeURIComponent(new URL('./', packageUrl).pathname);
+    const importedFrom = decodeURIComponent(virtualFileUrl(referrer).pathname);
+    const message = main === null
+        ? `No "main" or "exports" field defined in the package.json for ${packageRoot} resolving the main entry point "index.js", imported from ${importedFrom}.\nDefault "index" lookups for the main are deprecated for ES modules.`
+        : `Package ${packageRoot} has a "main" field set to ${JSON.stringify(main)}, excluding the full filename and extension to the resolved file at ${JSON.stringify(new URL(resolved).pathname.split('/').pop())}, imported from ${importedFrom}.\n Automatic extension resolution of the "main" field is deprecated for ES modules.`;
+    process.emitWarning(message, 'DeprecationWarning', 'DEP0151');
+}
+
 function virtualFileUrl(filename) {
     const value = String(filename);
     if (value.startsWith('file:')) return new URL(value);
@@ -310,7 +326,12 @@ function resolvePackageSource(packageUrl, source, parts, conditions, referrer) {
             ? targetUrl.href
             : null)
         : resolveVirtualFile(targetUrl);
-    if (resolved) return resolved;
+    if (resolved) {
+        if (!hasExports && conditions.includes('import') && parts.subpath === '') {
+            emitPackageMainWarning(packageData, packageUrl, referrer, resolved);
+        }
+        return resolved;
+    }
     const err = new Error(`Cannot find module '${decodeURIComponent(targetUrl.pathname)}'`);
     err.code = 'MODULE_NOT_FOUND';
     throw err;

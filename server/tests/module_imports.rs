@@ -932,6 +932,64 @@ fn test_package_import_deprecation_uses_node_test_flags() {
     assert!(result.is_ok(), "package imports warning failed: {result:?}");
 }
 
+
+#[test]
+fn test_dynamic_import_legacy_package_main_warnings() {
+    use std::collections::HashMap;
+    use server::engine::{ExecutionConfig, execute_stateless};
+
+    ensure_v8();
+    let modules = Arc::new(HashMap::from([
+        (
+            "file:///app/node_modules/no_exports/package.json".to_string(),
+            r#"{"type":"module"}"#.to_string(),
+        ),
+        (
+            "file:///app/node_modules/default_index/package.json".to_string(),
+            r#"{"main":"index","type":"module"}"#.to_string(),
+        ),
+    ]));
+    let commonjs_modules = Arc::new(HashMap::from([
+        (
+            "file:///app/node_modules/no_exports/index.js".to_string(),
+            "module.exports = 'index';".to_string(),
+        ),
+        (
+            "file:///app/node_modules/default_index/index.js".to_string(),
+            "module.exports = 'main';".to_string(),
+        ),
+    ]));
+    let loader = ModuleLoaderConfig {
+        allow_external: false,
+        policy_chain: None,
+        virtual_modules: Some(modules),
+        virtual_commonjs_modules: Some(commonjs_modules),
+        virtual_files: None,
+    };
+    let code = r#"
+        import process from 'node:process';
+        await import('node:module');
+        const warnings = [];
+        process.removeAllListeners('warning');
+        process.on('warning', (warning) => warnings.push(warning));
+        await globalThis.__mcpV8ImportVirtualModule('no_exports', import.meta.url);
+        await globalThis.__mcpV8ImportVirtualModule('default_index', import.meta.url);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        if (warnings.length !== 2 || warnings.some((warning) => warning.code !== 'DEP0151') ||
+            !warnings[0].stack.includes('no_exports') ||
+            !warnings[1].stack.includes('default_index')) {
+            throw new Error(`unexpected package warnings: ${warnings.map((w) => w.stack)}`);
+        }
+    "#;
+    let (result, _) = execute_stateless(
+        code,
+        ExecutionConfig::new(64 * 1024 * 1024)
+            .module_loader_config(&loader)
+            .main_module_specifier("file:///app/main.mjs"),
+    );
+    assert!(result.is_ok(), "legacy package warnings failed: {result:?}");
+}
+
 #[test]
 fn test_create_require_resolves_hash_prefixed_legacy_package() {
     use std::collections::HashMap;
