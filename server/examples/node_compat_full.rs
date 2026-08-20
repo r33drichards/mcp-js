@@ -384,10 +384,15 @@ globalThis.__NODE_COMPAT_IMPORT_WITH_LOADERS__ = async (specifier, options) => {
 fn assemble(path: &str, body: &str) -> String {
     let body = strip_shebang(body);
     if is_esm(path) {
+        let body = rewrite_esm_harness_imports(body);
+        let specifier = test_module_specifier(path).ok();
+        let body = specifier
+            .as_deref()
+            .and_then(|specifier| rewrite_import_meta_resolve(specifier, &body))
+            .unwrap_or(body);
         return format!(
             "import 'node-test:prelude';\n{}\nglobalThis.__NODE_TEST_SCHEDULE_REPORT__({:?});",
-            rewrite_esm_harness_imports(body),
-            SENTINEL,
+            body, SENTINEL,
         );
     }
     let (loader_prelude, body) =
@@ -445,6 +450,83 @@ fn source_uses_esm_syntax(specifier: &str, source: &str) -> bool {
     })
     .is_ok_and(|parsed| !parsed.compute_is_script())
 }
+fn rewrite_import_meta_resolve(specifier: &str, source: &str) -> Option<String> {
+    use swc_core::{
+        common::{FileName, SourceMap, sync::Lrc},
+        ecma::{
+            ast::{Callee, Expr, Ident, MemberProp, MetaPropKind},
+            codegen::{Emitter, text_writer::JsWriter},
+            parser::{EsSyntax, Parser, StringInput, Syntax, lexer::Lexer},
+            visit::{VisitMut, VisitMutWith},
+        },
+    };
+
+    #[derive(Default)]
+    struct ImportMetaResolveRewriter {
+        rewritten: bool,
+    }
+
+    impl VisitMut for ImportMetaResolveRewriter {
+        fn visit_mut_call_expr(&mut self, call: &mut swc_core::ecma::ast::CallExpr) {
+            call.visit_mut_children_with(self);
+            let Callee::Expr(callee) = &call.callee else {
+                return;
+            };
+            let Expr::Member(member) = &**callee else {
+                return;
+            };
+            let Expr::MetaProp(meta) = &*member.obj else {
+                return;
+            };
+            let MemberProp::Ident(property) = &member.prop else {
+                return;
+            };
+            if meta.kind == MetaPropKind::ImportMeta && property.sym == *"resolve" {
+                self.rewritten = true;
+                call.callee = Callee::Expr(Box::new(Expr::Ident(Ident::new_no_ctxt(
+                    "__nodeCompatImportMetaResolve".into(),
+                    call.span,
+                ))));
+            }
+        }
+    }
+
+    let source_map: Lrc<SourceMap> = Default::default();
+    let source_file = source_map.new_source_file(
+        FileName::Custom(specifier.to_owned()).into(),
+        source.to_owned(),
+    );
+    let lexer = Lexer::new(
+        Syntax::Es(EsSyntax::default()),
+        Default::default(),
+        StringInput::from(&*source_file),
+        None,
+    );
+    let mut parser = Parser::new_from(lexer);
+    let mut module = parser.parse_module().ok()?;
+    if !parser.take_errors().is_empty() {
+        return None;
+    }
+    let mut rewriter = ImportMetaResolveRewriter::default();
+    module.visit_mut_with(&mut rewriter);
+    if !rewriter.rewritten {
+        return Some(source.to_owned());
+    }
+    let mut output = Vec::new();
+    Emitter {
+        cfg: Default::default(),
+        cm: source_map.clone(),
+        comments: None,
+        wr: JsWriter::new(source_map, "\n", &mut output, None),
+    }
+    .emit_module(&module)
+    .ok()?;
+    let output = String::from_utf8(output).ok()?;
+    Some(format!(
+        "const __nodeCompatImportMetaResolve = (specifier, parentURL = import.meta.url) => globalThis.__NODE_COMPAT_IMPORT_META_RESOLVE__(specifier, parentURL);\n{output}"
+    ))
+}
+
 fn commonjs_analysis(source: &str) -> deno_ast::ModuleExportsAndReExports {
     if !source.contains("exports") && !source.contains("require") {
         return Default::default();
@@ -941,6 +1023,9 @@ fn add_corpus_modules(
             let export_names =
                 commonjs_export_names_for_path(root, &path, source, &mut HashSet::new());
             wrap_commonjs_with_names(source, export_names)
+        } else if detected_esm {
+            rewrite_import_meta_resolve(specifier.as_str(), source)
+                .unwrap_or_else(|| source.to_string())
         } else {
             source.to_string()
         };
@@ -1032,6 +1117,9 @@ fn add_host_modules(
             let export_names =
                 commonjs_export_names_for_path(root, &path, source, &mut HashSet::new());
             wrap_commonjs_with_names(source, export_names)
+        } else if detected_esm {
+            rewrite_import_meta_resolve(specifier.as_str(), source)
+                .unwrap_or_else(|| source.to_string())
         } else {
             source.to_string()
         };
@@ -2020,6 +2108,20 @@ mod tests {
     }
 
     #[test]
+    fn rewrite_import_meta_resolve_uses_registered_hook_helper() {
+        let source = rewrite_import_meta_resolve(
+            "file:///fixture.mjs",
+            "export const resolved = import.meta.resolve('custom:value');\n",
+        )
+        .unwrap();
+
+        assert!(
+            source.contains("__nodeCompatImportMetaResolve('custom:value')"),
+            "{source}"
+        );
+    }
+
+    #[test]
     fn rewrite_dynamic_imports_uses_loader_helper() {
         let source = rewrite_dynamic_imports("const value = import('./value.json');").unwrap();
 
@@ -2054,6 +2156,19 @@ mod tests {
         assert!(runner.contains("globalThis.__NODE_TEST_SCHEDULE_REPORT__("));
         assert!(!runner.contains("(0,eval)("));
     }
+    #[test]
+    fn assemble_rewrites_import_meta_resolve() {
+        let source = assemble(
+            "test/es-module/resolve.mjs",
+            "import.meta.resolve('custom:value');\n",
+        );
+
+        assert!(
+            source.contains("__nodeCompatImportMetaResolve('custom:value')"),
+            "{source}"
+        );
+    }
+
     #[test]
     fn assemble_runs_esm_body_as_a_module() {
         let source = assemble(

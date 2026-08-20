@@ -408,11 +408,34 @@ export function syncBuiltinESMExports() {
     // Builtins here are plain ESM with live bindings; nothing to sync.
 }
 
+const moduleHooks = globalThis.__mcpV8ModuleHooks ??= [];
+
+export function registerHooks(hooks) {
+    if (hooks === null || typeof hooks !== 'object') {
+        throw new TypeError('hooks must be an object');
+    }
+    const registered = {
+        resolve: typeof hooks.resolve === 'function' ? hooks.resolve : undefined,
+        load: typeof hooks.load === 'function' ? hooks.load : undefined,
+    };
+    moduleHooks.push(registered);
+    let active = true;
+    return {
+        deregister() {
+            if (!active) return;
+            active = false;
+            const index = moduleHooks.indexOf(registered);
+            if (index >= 0) moduleHooks.splice(index, 1);
+        },
+    };
+}
+
 export const Module = {
     builtinModules,
     isBuiltin,
     createRequire,
     syncBuiltinESMExports,
+    registerHooks,
     _cache: requireCache,
 };
 builtins.set('module', Module);

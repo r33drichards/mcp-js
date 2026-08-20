@@ -40,6 +40,32 @@ import zlib from 'node:zlib';
 
 globalThis.process = process;
 globalThis.Buffer = Buffer;
+globalThis.__mcpV8ModuleHooks ??= [];
+globalThis.__NODE_COMPAT_IMPORT_META_RESOLVE__ = (specifier, parentURL) => {
+    const defaultResolve = (nextSpecifier, context) => {
+        const request = String(nextSpecifier);
+        const builtin = request.replace(/^node:/, '');
+        if (moduleModule.isBuiltin(request)) return { url: `node:${builtin}` };
+        const relative = request.startsWith('.') || request.startsWith('/') ||
+            request.startsWith('file:') || request.startsWith('data:');
+        return { url: relative ? new URL(request, context.parentURL).href : request };
+    };
+    const hooks = globalThis.__mcpV8ModuleHooks
+        .map((hook) => hook.resolve)
+        .filter((hook) => typeof hook === 'function');
+    const context = { conditions: ['node', 'import'], importAttributes: {}, parentURL };
+    const run = (index, request, nextContext) => {
+        if (index < 0) return defaultResolve(request, nextContext);
+        return hooks[index](request, nextContext,
+            (nextSpecifier = request, forwardedContext = nextContext) =>
+                run(index - 1, nextSpecifier, forwardedContext));
+    };
+    const result = run(hooks.length - 1, String(specifier), context);
+    if (result === null || typeof result !== 'object' || typeof result.url !== 'string') {
+        throw new TypeError('resolve hook must return an object with a URL');
+    }
+    return result.url;
+};
 
 const failures = [];
 const mustCalls = [];
