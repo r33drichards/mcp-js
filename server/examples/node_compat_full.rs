@@ -396,6 +396,71 @@ fn rewrite_esm_dynamic_imports(body: &str) -> Option<String> {
     ))
 }
 
+fn literal_module_specifiers(source: &str) -> Vec<String> {
+    use swc_core::{
+        common::{FileName, SourceMap, sync::Lrc},
+        ecma::{
+            ast::{Callee, CallExpr, ExportAll, ImportDecl, Lit, NamedExport},
+            parser::{EsSyntax, Parser, StringInput, Syntax, lexer::Lexer},
+            visit::{Visit, VisitWith},
+        },
+    };
+
+    #[derive(Default)]
+    struct LiteralModuleSpecifierCollector {
+        specifiers: Vec<String>,
+    }
+
+    impl Visit for LiteralModuleSpecifierCollector {
+        fn visit_import_decl(&mut self, import: &ImportDecl) {
+            self.specifiers.push(import.src.value.to_string_lossy().into_owned());
+        }
+
+        fn visit_named_export(&mut self, export: &NamedExport) {
+            if let Some(source) = &export.src {
+                self.specifiers.push(source.value.to_string_lossy().into_owned());
+            }
+        }
+
+        fn visit_export_all(&mut self, export: &ExportAll) {
+            self.specifiers.push(export.src.value.to_string_lossy().into_owned());
+        }
+
+        fn visit_call_expr(&mut self, call: &CallExpr) {
+            if matches!(call.callee, Callee::Import(_))
+                && let Some(argument) = call.args.first()
+                && let swc_core::ecma::ast::Expr::Lit(Lit::Str(specifier)) = &*argument.expr
+            {
+                self.specifiers
+                    .push(specifier.value.to_string_lossy().into_owned());
+            }
+            call.visit_children_with(self);
+        }
+    }
+
+    let source_map: Lrc<SourceMap> = Default::default();
+    let source_file = source_map.new_source_file(
+        FileName::Custom("node-compat-eval.mjs".to_owned()).into(),
+        source.to_owned(),
+    );
+    let lexer = Lexer::new(
+        Syntax::Es(EsSyntax::default()),
+        Default::default(),
+        StringInput::from(&*source_file),
+        None,
+    );
+    let mut parser = Parser::new_from(lexer);
+    let Ok(module) = parser.parse_module() else {
+        return Vec::new();
+    };
+    if !parser.take_errors().is_empty() {
+        return Vec::new();
+    }
+    let mut collector = LiteralModuleSpecifierCollector::default();
+    module.visit_with(&mut collector);
+    collector.specifiers
+}
+
 fn test_loader_specifier(loader: &str) -> Option<String> {
     let loader = loader.strip_prefix("./").unwrap_or(loader);
     if !loader.starts_with("test/") {
@@ -1207,6 +1272,12 @@ fn corpus_modules_for_cli(
     let test_root = corpus.join("test");
     let mut directories = HashSet::new();
     let mut needs_common = false;
+    let eval_module_specifiers = invocation
+        .eval_source
+        .as_deref()
+        .filter(|_| invocation.input_type.as_deref() == Some("module"))
+        .map(literal_module_specifiers)
+        .unwrap_or_default();
     let module_paths = invocation
         .environment_requires
         .iter()
@@ -1214,7 +1285,8 @@ fn corpus_modules_for_cli(
         .chain(&invocation.environment_imports)
         .chain(&invocation.cli_imports)
         .chain(&invocation.experimental_loaders)
-        .chain(invocation.entrypoint.iter());
+        .chain(invocation.entrypoint.iter())
+        .chain(&eval_module_specifiers);
     for value in module_paths {
         let Ok(virtual_path) = virtualize_corpus_path(value, corpus) else {
             continue;
@@ -1612,6 +1684,10 @@ fn run_node_compat_cli(
     let corpus = fs::canonicalize(corpus).map_err(|error| error.to_string())?;
     let modules = corpus_modules_for_cli(&corpus, &invocation)?;
     let (source, compile_module) = node_cli_source(&invocation, &corpus)?;
+    let process_bootstrap = format!(
+        "globalThis.__mcpV8ProcessConfig={};globalThis.__mcpV8NodeCompatCli=true;",
+        serde_json::to_string(&node_cli_process_config(&invocation, &corpus)?).unwrap(),
+    );
 
     INIT.call_once(server::engine::initialize_v8);
     let temporary = tempfile::tempdir().map_err(|error| error.to_string())?;
@@ -1647,6 +1723,7 @@ fn run_node_compat_cli(
         .console_tree(tree.clone())
         .console_error_tree(error_tree.clone())
         .process_exit_state(&process_exit_state)
+        .bootstrap_script(&process_bootstrap)
         .fetch_config(&fetch)
         .maybe_subprocess_config(Some(&subprocess))
         .module_loader_config(&module_loader);
@@ -2888,6 +2965,63 @@ mod tests {
         assert_eq!(commonjs.stdout, "function\n");
         assert_eq!(module.runtime_error, None);
         assert_eq!(module.stdout, "string\n");
+    }
+
+    #[test]
+    fn node_cli_marks_module_eval_as_main() {
+        let corpus = cli_corpus(&[]);
+        let output = run_node_compat_cli(
+            &node_cli_args(&[
+                "--input-type=module",
+                "--eval",
+                "console.log(import.meta.main);",
+            ]),
+            None,
+            corpus.path(),
+        )
+        .unwrap();
+
+        assert_eq!(output.runtime_error, None);
+        assert_eq!(output.stdout, "true\n");
+    }
+
+    #[test]
+    fn node_cli_configures_process_before_static_dependencies() {
+        let corpus = cli_corpus(&[]);
+        let output = run_node_compat_cli(
+            &node_cli_args(&[
+                "--input-type=module",
+                "--eval",
+                "import 'node:worker_threads'; console.log(process.argv.length, process.env.TMPDIR);",
+            ]),
+            None,
+            corpus.path(),
+        )
+        .unwrap();
+
+        assert_eq!(output.runtime_error, None);
+        assert_eq!(output.stdout, "1 /dev/shm\n");
+    }
+
+    #[test]
+    fn node_cli_module_eval_indexes_literal_imports() {
+        let corpus = cli_corpus(&[(
+            "test/imported.mjs",
+            "export const isMain = import.meta.main;\n",
+        )]);
+        let output = run_node_compat_cli(
+            &node_cli_args(&[
+                "--input-type=module",
+                "--eval",
+                "const imported = await import('file:///test/imported.mjs'); console.log(imported.isMain);",
+            ]),
+            None,
+            corpus.path(),
+        )
+        .unwrap();
+
+        assert_eq!(output.runtime_error, None);
+        assert_eq!(output.stdout, "false\n");
     }
 
     #[test]

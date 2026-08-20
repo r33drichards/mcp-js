@@ -912,9 +912,16 @@ fn execute_module(
     rt: &tokio::runtime::Runtime,
     runtime: &mut JsRuntime,
     code: &str,
+    bootstrap_script: Option<&str>,
     main_module_specifier: Option<&str>,
     compile_module: Option<(&str, &str, CompileMode)>,
 ) -> Result<(), String> {
+    if let Some(script) = bootstrap_script {
+        runtime
+            .execute_script("<mcp-v8-bootstrap>", script.to_owned())
+            .map_err(|error| format!("{}", error))?;
+    }
+
     let main_url = if let Some(specifier) = main_module_specifier {
         ModuleSpecifier::parse(specifier)
             .map_err(|e| format!("invalid main module specifier: {}", e))?
@@ -932,7 +939,7 @@ fn execute_module(
     // deno_unsync's op spawn would panic/deadlock).
     rt.block_on(async move {
         let mod_id = runtime
-            .load_side_es_module_from_code(&main_url, code.to_string())
+            .load_main_es_module_from_code(&main_url, code.to_string())
             .await
             .map_err(|e| format!("{}", e))?;
 
@@ -975,6 +982,7 @@ pub struct ExecutionConfig<'a> {
     pub console_error_tree: Option<sled::Tree>,
     pub process_exit_state: Option<&'a console::ProcessExitState>,
     pub module_loader_config: Option<&'a module_loader::ModuleLoaderConfig>,
+    pub bootstrap_script: Option<&'a str>,
     pub main_module_specifier: Option<&'a str>,
     /// An additional module to compile after `code` evaluates, without evaluating it.
     pub compile_module: Option<(&'a str, &'a str, CompileMode)>,
@@ -1001,6 +1009,7 @@ impl<'a> ExecutionConfig<'a> {
             console_error_tree: None,
             process_exit_state: None,
             module_loader_config: None,
+            bootstrap_script: None,
             main_module_specifier: None,
             compile_module: None,
             mcp_config: None,
@@ -1065,6 +1074,11 @@ impl<'a> ExecutionConfig<'a> {
 
     pub fn module_loader_config(mut self, config: &'a module_loader::ModuleLoaderConfig) -> Self {
         self.module_loader_config = Some(config);
+        self
+    }
+
+    pub fn bootstrap_script(mut self, script: &'a str) -> Self {
+        self.bootstrap_script = Some(script);
         self
     }
 
@@ -1141,6 +1155,7 @@ pub fn execute_stateless(
         console_error_tree,
         process_exit_state,
         module_loader_config,
+        bootstrap_script,
         main_module_specifier,
         compile_module,
         mcp_config,
@@ -1341,7 +1356,14 @@ pub fn execute_stateless(
                     if let Err(e) = console::harden_runtime(&mut runtime, hardening) {
                         return Err(e);
                     }
-                    execute_module(&rt, &mut runtime, code, main_module_specifier, compile_module)
+                    execute_module(
+                        &rt,
+                        &mut runtime,
+                        code,
+                        bootstrap_script,
+                        main_module_specifier,
+                        compile_module,
+                    )
                 }
             };
 
@@ -1395,6 +1417,7 @@ pub fn execute_stateful(
         console_error_tree,
         process_exit_state,
         module_loader_config,
+        bootstrap_script,
         main_module_specifier,
         compile_module,
         mcp_config,
@@ -1535,7 +1558,14 @@ pub fn execute_stateful(
         let has_snapshot = leaked_snapshot.is_some();
 
         let output_result = if has_snapshot {
-            execute_module(&rt, &mut runtime, code, main_module_specifier, None)
+            execute_module(
+                &rt,
+                &mut runtime,
+                code,
+                bootstrap_script,
+                main_module_specifier,
+                None,
+            )
         } else {
             // Inject WASM modules as globals via V8 native API.
             // Do NOT early-return here — snapshot() must be called below.
@@ -1623,7 +1653,14 @@ pub fn execute_stateful(
                     if let Err(e) = console::harden_runtime(&mut runtime, hardening) {
                         return Err(e);
                     }
-                    execute_module(&rt, &mut runtime, code, main_module_specifier, None)
+                    execute_module(
+                        &rt,
+                        &mut runtime,
+                        code,
+                        bootstrap_script,
+                        main_module_specifier,
+                        None,
+                    )
                 }
             }
         };

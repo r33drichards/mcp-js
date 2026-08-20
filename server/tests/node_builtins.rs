@@ -1161,3 +1161,18 @@ async fn process_warning_events_follow_event_emitter_semantics() {
     )
     .await;
 }
+
+#[tokio::test]
+async fn worker_threads_exposes_worker_runtime_contract() {
+    expect_ok(
+        r#"
+        import { Worker, isMainThread, parentPort, threadId, workerData } from 'node:worker_threads';
+
+        if (typeof Worker !== 'function') throw new Error('missing Worker constructor');
+        if (isMainThread !== true || parentPort !== null || threadId !== 0 || workerData !== null) {
+            throw new Error('unexpected main-thread state');
+        }
+        "#,
+    )
+    .await;
+}

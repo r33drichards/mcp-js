@@ -1,7 +1,7 @@
 // node:process — minimal process object for the sandboxed runtime.
 const startTime = Date.now();
 const invocation = globalThis.__mcpV8ProcessConfig || {};
-const configuredExecPath = String(invocation.execPath || '/usr/bin/node');
+const configuredExecPath = String(invocation.execPath || Deno.core.ops.op_process_exec_path?.() || '/usr/bin/node');
 const configuredCwd = String(invocation.cwd || '/');
 const setHostExitCode = Deno.core.ops.op_process_set_exit_code;
 const terminateHostProcess = Deno.core.ops.op_process_exit;

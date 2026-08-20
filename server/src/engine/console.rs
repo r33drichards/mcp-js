@@ -158,6 +158,14 @@ fn op_console_write(state: &mut OpState, #[string] msg: &str, #[smi] level: i32)
     console_state.write(formatted.as_bytes());
 }
 
+#[op2]
+#[string]
+fn op_process_exec_path() -> String {
+    std::env::current_exe()
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| "/usr/bin/node".to_owned())
+}
+
 #[op2(fast)]
 fn op_process_set_exit_code(state: &mut OpState, #[smi] code: i32) {
     if let Some(exit_state) = state.try_borrow::<ProcessExitState>() {
@@ -181,7 +189,7 @@ fn op_process_exit(
 
 deno_core::extension!(
     console_ext,
-    ops = [op_console_write, op_process_set_exit_code, op_process_exit],
+    ops = [op_console_write, op_process_exec_path, op_process_set_exit_code, op_process_exit],
 );
 
 /// Create the console extension for use in `RuntimeOptions::extensions`.

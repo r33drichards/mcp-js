@@ -32,6 +32,7 @@ import tls from 'node:tls';
 import url from 'node:url';
 import util from 'node:util';
 import utilTypes from 'node:util/types';
+import workerThreads from 'node:worker_threads';
 import zlib from 'node:zlib';
 
 const builtins = new Map([
@@ -65,6 +66,7 @@ const builtins = new Map([
     ['url', url],
     ['util', util],
     ['util/types', utilTypes],
+    ['worker_threads', workerThreads],
     ['zlib', zlib],
 ]);
 
