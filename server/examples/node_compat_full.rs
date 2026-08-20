@@ -186,10 +186,7 @@ impl NodeCliInvocation {
         }
     }
 
-    fn reject_node_options_flag(
-        source: NodeCliOptionSource,
-        flag: &str,
-    ) -> Result<(), String> {
+    fn reject_node_options_flag(source: NodeCliOptionSource, flag: &str) -> Result<(), String> {
         if matches!(source, NodeCliOptionSource::Environment) {
             return Err(format!("{flag} is not allowed in NODE_OPTIONS"));
         }
@@ -307,8 +304,25 @@ fn package_uses_modules(directory: &Path, inherited: bool) -> bool {
         })
         .is_some_and(|kind| kind == "module")
 }
+fn commonjs_export_names(source: &str) -> Vec<String> {
+    if !source.contains("exports") {
+        return Vec::new();
+    }
+    let source = source.strip_prefix('\u{feff}').unwrap_or(source);
+    let Ok(parsed) = deno_ast::parse_script(deno_ast::ParseParams {
+        specifier: deno_ast::ModuleSpecifier::parse("file:///commonjs.js").unwrap(),
+        text: source.into(),
+        media_type: deno_ast::MediaType::Cjs,
+        capture_tokens: true,
+        scope_analysis: false,
+        maybe_syntax: None,
+    }) else {
+        return Vec::new();
+    };
+    parsed.analyze_cjs().exports
+}
 fn wrap_commonjs(source: &str) -> String {
-    format!(
+    let mut wrapped = format!(
         r#"import {{ createRequire as __createRequire }} from 'node:module';
 import {{ fileURLToPath as __fileURLToPath }} from 'node:url';
 import {{ dirname as __dirnameOf }} from 'node:path';
@@ -324,7 +338,19 @@ const __cjsDefault = __cjsModule.exports;
 export default __cjsDefault;
 export {{ __cjsDefault as 'module.exports' }};
 "#
-    )
+    );
+    for (index, name) in commonjs_export_names(source)
+        .into_iter()
+        .filter(|name| name != "default" && name != "module.exports")
+        .enumerate()
+    {
+        let quoted = serde_json::to_string(&name).unwrap();
+        wrapped.push_str(&format!(
+            "const __cjsNamedExport{index} = __cjsModule.exports[{quoted}];\n\
+             export {{ __cjsNamedExport{index} as {quoted} }};\n"
+        ));
+    }
+    wrapped
 }
 struct CorpusModules {
     esm: Arc<HashMap<String, String>>,
@@ -403,6 +429,81 @@ fn corpus_modules(corpus: &Path) -> Result<CorpusModules, String> {
         files: Arc::new(files),
     })
 }
+fn inherited_package_modules(test_root: &Path, directory: &Path) -> bool {
+    let mut ancestors = directory
+        .parent()
+        .into_iter()
+        .flat_map(Path::ancestors)
+        .take_while(|ancestor| ancestor.starts_with(test_root))
+        .collect::<Vec<_>>();
+    ancestors.reverse();
+    ancestors.into_iter().fold(false, |inherited, ancestor| {
+        package_uses_modules(ancestor, inherited)
+    })
+}
+fn corpus_modules_for_cli(
+    corpus: &Path,
+    invocation: &NodeCliInvocation,
+) -> Result<CorpusModules, String> {
+    let test_root = corpus.join("test");
+    let mut directories = HashSet::new();
+    let mut needs_common = false;
+    let module_paths = invocation
+        .environment_requires
+        .iter()
+        .chain(&invocation.cli_requires)
+        .chain(&invocation.environment_imports)
+        .chain(&invocation.cli_imports)
+        .chain(invocation.entrypoint.iter());
+    for value in module_paths {
+        let Ok(virtual_path) = virtualize_corpus_path(value, corpus) else {
+            continue;
+        };
+        let path = virtual_corpus_file(&virtual_path, corpus)?;
+        let Some(directory) = path.parent() else {
+            continue;
+        };
+        directories.insert(directory.to_owned());
+        for ancestor in directory
+            .ancestors()
+            .take_while(|ancestor| ancestor.starts_with(&test_root))
+        {
+            let node_modules = ancestor.join("node_modules");
+            if node_modules.is_dir() {
+                directories.insert(node_modules);
+            }
+        }
+        if !path.starts_with(corpus.join("test/fixtures")) {
+            needs_common = true;
+        }
+    }
+    let common = corpus.join("test/common");
+    if needs_common && common.is_dir() {
+        directories.insert(common);
+    }
+
+    let mut modules = HashMap::new();
+    let mut commonjs_modules = HashMap::new();
+    let mut files = HashSet::new();
+    for directory in directories {
+        add_corpus_modules(
+            corpus,
+            &directory,
+            inherited_package_modules(&test_root, &directory),
+            &mut modules,
+            &mut commonjs_modules,
+            &mut files,
+        )?;
+    }
+    modules.insert("node-test:prelude".into(), PRELUDE.into());
+    modules.insert("node-test:common".into(), COMMON_ESM.into());
+    modules.insert("file:///test/common/index.mjs".into(), COMMON_ESM.into());
+    Ok(CorpusModules {
+        esm: Arc::new(modules),
+        commonjs: Arc::new(commonjs_modules),
+        files: Arc::new(files),
+    })
+}
 fn test_module_specifier(path: &str) -> Result<String, String> {
     let virtual_path = Path::new("/").join(path);
     ModuleSpecifier::from_file_path(&virtual_path)
@@ -437,7 +538,10 @@ fn virtualize_corpus_path(value: &str, corpus: &Path) -> Result<String, String> 
     };
 
     if is_virtual_test_path(&path) {
-        if path.components().any(|component| matches!(component, std::path::Component::ParentDir)) {
+        if path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
             return Err(format!("invalid virtual corpus path: {value}"));
         }
         return if is_file_url {
@@ -450,8 +554,8 @@ fn virtualize_corpus_path(value: &str, corpus: &Path) -> Result<String, String> 
     }
 
     let corpus = fs::canonicalize(corpus).map_err(|error| error.to_string())?;
-    let path = fs::canonicalize(&path)
-        .map_err(|error| format!("invalid corpus path {value}: {error}"))?;
+    let path =
+        fs::canonicalize(&path).map_err(|error| format!("invalid corpus path {value}: {error}"))?;
     let relative = path
         .strip_prefix(&corpus)
         .map_err(|_| format!("path is outside NODE_COMPAT_CORPUS: {value}"))?;
@@ -496,7 +600,9 @@ fn virtual_corpus_file(specifier: &str, corpus: &Path) -> Result<PathBuf, String
         .to_file_path()
         .map_err(|_| format!("invalid virtual corpus specifier: {specifier}"))?;
     if !is_virtual_test_path(&path) {
-        return Err(format!("path is outside corpus test directory: {specifier}"));
+        return Err(format!(
+            "path is outside corpus test directory: {specifier}"
+        ));
     }
     let relative = path
         .strip_prefix("/test")
@@ -651,13 +757,15 @@ fn run_node_compat_cli(
 ) -> Result<NodeCliOutput, String> {
     let invocation = NodeCliInvocation::parse(args, node_options)?;
     let corpus = fs::canonicalize(corpus).map_err(|error| error.to_string())?;
-    let modules = corpus_modules(&corpus)?;
+    let modules = corpus_modules_for_cli(&corpus, &invocation)?;
     let (source, compile_module) = node_cli_source(&invocation, &corpus)?;
 
     INIT.call_once(server::engine::initialize_v8);
     let temporary = tempfile::tempdir().map_err(|error| error.to_string())?;
     let database = sled::open(temporary.path()).map_err(|error| error.to_string())?;
-    let tree = database.open_tree("console").map_err(|error| error.to_string())?;
+    let tree = database
+        .open_tree("console")
+        .map_err(|error| error.to_string())?;
     let error_tree = database
         .open_tree("console-error")
         .map_err(|error| error.to_string())?;
@@ -705,17 +813,24 @@ fn run_node_compat_cli(
 }
 
 fn node_compat_cli_main(args: &[String]) -> Result<(), String> {
-    let corpus = fs::canonicalize(path_env("NODE_COMPAT_CORPUS")?).map_err(|error| error.to_string())?;
+    let corpus =
+        fs::canonicalize(path_env("NODE_COMPAT_CORPUS")?).map_err(|error| error.to_string())?;
     let output = run_node_compat_cli(args, std::env::var("NODE_OPTIONS").ok().as_deref(), &corpus)?;
     print!("{}", output.stdout);
     eprint!("{}", output.stderr);
-    std::io::stdout().flush().map_err(|error| error.to_string())?;
+    std::io::stdout()
+        .flush()
+        .map_err(|error| error.to_string())?;
     if let Some(error) = output.runtime_error {
         eprintln!("{error}");
-        std::io::stderr().flush().map_err(|error| error.to_string())?;
+        std::io::stderr()
+            .flush()
+            .map_err(|error| error.to_string())?;
         std::process::exit(1);
     }
-    std::io::stderr().flush().map_err(|error| error.to_string())?;
+    std::io::stderr()
+        .flush()
+        .map_err(|error| error.to_string())?;
     if output.exit_code != 0 {
         std::process::exit(output.exit_code);
     }
@@ -1002,11 +1117,9 @@ mod tests {
 
     #[test]
     fn node_cli_accepts_short_eval_alias() {
-        let invocation = NodeCliInvocation::parse(
-            &node_cli_args(&["-e", "await import('preload.mjs')"]),
-            None,
-        )
-        .unwrap();
+        let invocation =
+            NodeCliInvocation::parse(&node_cli_args(&["-e", "await import('preload.mjs')"]), None)
+                .unwrap();
 
         assert_eq!(
             invocation.eval_source.as_deref(),
@@ -1152,6 +1265,19 @@ mod tests {
         assert!(common.contains("globalThis.__NODE_TEST_COMMON__"));
     }
     #[test]
+    fn commonjs_wrapper_exposes_statically_detected_named_exports() {
+        let source = wrap_commonjs("exports.assert = require('assert');\n");
+
+        assert!(source.contains("export { __cjsNamedExport0 as \"assert\" };"));
+    }
+    #[test]
+    fn commonjs_export_analysis_accepts_a_byte_order_mark() {
+        assert_eq!(
+            commonjs_export_names("\u{feff}exports.value = 1;"),
+            ["value"]
+        );
+    }
+    #[test]
     fn platform_skip_is_strict() {
         assert!(result::is_platform_inapplicable("Windows-only"));
         assert!(!result::is_platform_inapplicable("missing crypto"));
@@ -1190,6 +1316,51 @@ mod tests {
             "file:///test/entry.mjs"
         );
         assert!(virtualize_corpus_path("/outside/entry.mjs", corpus.path()).is_err());
+    }
+
+    #[test]
+    fn node_cli_indexes_only_reachable_corpus_directories() {
+        let corpus = cli_corpus(&[
+            (
+                "test/fixtures/entry/main.mjs",
+                "import './dep.js'; import 'pkg';\n",
+            ),
+            ("test/fixtures/entry/dep.js", "exports.value = 1;\n"),
+            (
+                "test/fixtures/node_modules/pkg/index.js",
+                "exports.packageValue = 1;\n",
+            ),
+            (
+                "test/fixtures/unrelated/slow.js",
+                "exports.unrelated = 1;\n",
+            ),
+        ]);
+        let invocation = NodeCliInvocation::parse(
+            &node_cli_args(&[&corpus
+                .path()
+                .join("test/fixtures/entry/main.mjs")
+                .to_string_lossy()]),
+            None,
+        )
+        .unwrap();
+
+        let modules = corpus_modules_for_cli(corpus.path(), &invocation).unwrap();
+
+        assert!(
+            modules
+                .esm
+                .contains_key("file:///test/fixtures/entry/dep.js")
+        );
+        assert!(
+            modules
+                .esm
+                .contains_key("file:///test/fixtures/node_modules/pkg/index.js")
+        );
+        assert!(
+            !modules
+                .esm
+                .contains_key("file:///test/fixtures/unrelated/slow.js")
+        );
     }
 
     #[test]
@@ -1492,5 +1663,4 @@ mod tests {
             ])
         );
     }
-
 }

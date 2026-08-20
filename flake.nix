@@ -49,7 +49,7 @@
           # tokio-rustls, webpki-roots) added by the Modal gRPC workaround.
           # Regenerate by building any nix package after a Cargo.lock change
           # and copying the printed hash.
-          hash = "sha256-TD7zF5hzkQcpyP3s9iNYjHw+xpUBg0YYCWI73P+bd1w=";
+          hash = pkgs.lib.fakeHash;
         });
 
         docsPython = pkgs.python3.withPackages (

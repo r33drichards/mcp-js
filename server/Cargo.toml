@@ -102,6 +102,7 @@ urlpattern = "0.6.0"
 nono = { version = "0.53", default-features = false }
 
 [dev-dependencies]
+deno_ast = { version = "0.52", features = ["cjs"] }
 tokio-test = "0.4"
 reqwest = { version = "0.12", features = ["json", "cookies", "stream", "rustls-tls", "http2"], default-features = false }
 uuid = { version = "1.0", features = ["v4"] }
