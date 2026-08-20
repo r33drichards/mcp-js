@@ -273,6 +273,7 @@ function nodeRequire(id) {
     err.code = 'MODULE_NOT_FOUND';
     throw err;
 }
+nodeRequire.cache = moduleModule._cache;
 
 // The harness schedules its drain-time report through this stash so tests
 // that delete the timer globals (test-timers-api-refs) can still report.

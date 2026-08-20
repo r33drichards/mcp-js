@@ -144,6 +144,25 @@ async fn node_compat_prelude_wraps_commonjs_body() {
 }
 
 #[tokio::test]
+async fn node_compat_prelude_exposes_shared_require_cache() {
+    let prelude = include_str!("node_compat/runner/prelude.js");
+    expect_ok_with_internals(&format!(
+        r#"
+        {prelude}
+        globalThis.__NODE_TEST_RUN_CJS__(`
+            const cache = require.cache;
+            if (!cache || typeof cache !== 'object') throw new Error('missing require.cache');
+            cache.fixture = {{ exports: 42 }};
+            if (require.cache.fixture.exports !== 42) throw new Error('unstable require.cache');
+            for (const key of Object.keys(cache)) delete cache[key];
+            require('../common');
+        `);
+        "#
+    ))
+    .await;
+}
+
+#[tokio::test]
 async fn node_compat_prelude_skips_when_inspector_disabled() {
     let prelude = include_str!("node_compat/runner/prelude.js");
     expect_ok_with_internals(&format!(
