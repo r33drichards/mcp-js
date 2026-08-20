@@ -94,6 +94,20 @@ const common = {
             if (typeof fn === 'function') return fn.call(this, ...args);
         });
     },
+    expectsError(validator, exact) {
+        return common.mustCall((...args) => {
+            if (args.length !== 1) {
+                assert.fail(`Expected one argument, got ${JSON.stringify(args)}`);
+            }
+            const error = args[0];
+            assert.strictEqual(
+                Object.prototype.propertyIsEnumerable.call(error, 'message'),
+                false,
+            );
+            assert.throws(() => { throw error; }, validator);
+            return true;
+        }, exact);
+    },
     _mustCallInner(fn, criteria, field) {
         if (typeof fn === 'number') { criteria = fn; fn = () => {}; }
         else if (fn === undefined) { fn = () => {}; }

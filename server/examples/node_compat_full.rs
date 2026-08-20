@@ -843,6 +843,7 @@ const common = globalThis.__NODE_TEST_COMMON__;
 export const mustCall = common.mustCall.bind(common);
 export const mustCallAtLeast = common.mustCallAtLeast.bind(common);
 export const mustSucceed = common.mustSucceed.bind(common);
+export const expectsError = common.expectsError.bind(common);
 export const mustNotCall = common.mustNotCall.bind(common);
 export const spawnPromisified = common.spawnPromisified.bind(common);
 export const skip = common.skip.bind(common);
