@@ -320,6 +320,7 @@ fn package_uses_modules(directory: &Path, inherited: bool) -> bool {
         .is_some_and(|kind| kind == "module")
 }
 fn source_uses_esm_syntax(specifier: &str, source: &str) -> bool {
+    let source = source.strip_prefix('\u{feff}').unwrap_or(source);
     deno_ast::parse_program(deno_ast::ParseParams {
         specifier: match deno_ast::ModuleSpecifier::parse(specifier) {
             Ok(specifier) => specifier,
@@ -333,9 +334,9 @@ fn source_uses_esm_syntax(specifier: &str, source: &str) -> bool {
     })
     .is_ok_and(|parsed| !parsed.compute_is_script())
 }
-fn commonjs_export_names(source: &str) -> Vec<String> {
-    if !source.contains("exports") {
-        return Vec::new();
+fn commonjs_analysis(source: &str) -> deno_ast::ModuleExportsAndReExports {
+    if !source.contains("exports") && !source.contains("require") {
+        return Default::default();
     }
     let source = source.strip_prefix('\u{feff}').unwrap_or(source);
     let Ok(parsed) = deno_ast::parse_script(deno_ast::ParseParams {
@@ -346,10 +347,100 @@ fn commonjs_export_names(source: &str) -> Vec<String> {
         scope_analysis: false,
         maybe_syntax: None,
     }) else {
-        return Vec::new();
+        return Default::default();
     };
-    parsed.analyze_cjs().exports
+    parsed.analyze_cjs()
 }
+#[cfg(test)]
+fn commonjs_export_names(source: &str) -> Vec<String> {
+    commonjs_analysis(source).exports
+}
+fn resolve_commonjs_candidate(candidate: &Path) -> Option<PathBuf> {
+    if candidate.is_file() {
+        return Some(candidate.to_owned());
+    }
+    if candidate.extension().is_none() {
+        for extension in ["js", "cjs", "json"] {
+            let path = candidate.with_extension(extension);
+            if path.is_file() {
+                return Some(path);
+            }
+        }
+    }
+    if !candidate.is_dir() {
+        return None;
+    }
+    if let Ok(source) = fs::read_to_string(candidate.join("package.json"))
+        && let Ok(package) = serde_json::from_str::<serde_json::Value>(&source)
+        && let Some(main) = package.get("main").and_then(|value| value.as_str())
+        && let Some(path) = resolve_commonjs_candidate(&candidate.join(main))
+    {
+        return Some(path);
+    }
+    ["index.js", "index.cjs", "index.json"]
+        .into_iter()
+        .map(|name| candidate.join(name))
+        .find(|path| path.is_file())
+}
+fn resolve_commonjs_reexport(root: &Path, importer: &Path, request: &str) -> Option<PathBuf> {
+    let resolved = if request.starts_with('/') {
+        resolve_commonjs_candidate(&root.join(request.trim_start_matches('/')))
+    } else if request.starts_with('.') {
+        resolve_commonjs_candidate(&importer.parent()?.join(request))
+    } else {
+        let mut directory = importer.parent()?;
+        loop {
+            if let Some(path) =
+                resolve_commonjs_candidate(&directory.join("node_modules").join(request))
+            {
+                break Some(path);
+            }
+            if directory == root {
+                break None;
+            }
+            directory = directory.parent()?;
+            if !directory.starts_with(root) {
+                break None;
+            }
+        }
+    }?;
+    resolved.starts_with(root).then_some(resolved)
+}
+fn commonjs_export_names_for_path(
+    root: &Path,
+    path: &Path,
+    source: &str,
+    visited: &mut HashSet<PathBuf>,
+) -> Vec<String> {
+    let path = path.to_owned();
+    if !visited.insert(path.clone()) {
+        return Vec::new();
+    }
+    let analysis = commonjs_analysis(source);
+    let mut exports = analysis.exports;
+    for request in analysis.reexports {
+        let Some(reexport_path) = resolve_commonjs_reexport(root, &path, &request) else {
+            continue;
+        };
+        if reexport_path.extension().and_then(|value| value.to_str()) == Some("json") {
+            continue;
+        }
+        let Ok(reexport_source) = fs::read_to_string(&reexport_path) else {
+            continue;
+        };
+        exports.extend(commonjs_export_names_for_path(
+            root,
+            &reexport_path,
+            strip_shebang(&reexport_source),
+            visited,
+        ));
+    }
+    visited.remove(&path);
+    exports.sort_unstable();
+    exports.dedup();
+    exports
+}
+
 fn transpile_esm_to_commonjs(specifier: &str, source: &str) -> Option<String> {
     use swc_core::{
         common::{
@@ -442,7 +533,7 @@ fn transpile_esm_to_commonjs(specifier: &str, source: &str) -> Option<String> {
     Some(format!("/*mcp-v8-original-esm:{original}*/\n{output}"))
 }
 
-fn wrap_commonjs(source: &str) -> String {
+fn wrap_commonjs_with_names(source: &str, export_names: Vec<String>) -> String {
     let mut wrapped = format!(
         r#"import {{ createRequire as __createRequire }} from 'node:module';
 import {{ fileURLToPath as __fileURLToPath }} from 'node:url';
@@ -460,7 +551,7 @@ export default __cjsDefault;
 export {{ __cjsDefault as 'module.exports' }};
 "#
     );
-    for (index, name) in commonjs_export_names(source)
+    for (index, name) in export_names
         .into_iter()
         .filter(|name| name != "default" && name != "module.exports")
         .enumerate()
@@ -472,6 +563,10 @@ export {{ __cjsDefault as 'module.exports' }};
         ));
     }
     wrapped
+}
+#[cfg(test)]
+fn wrap_commonjs(source: &str) -> String {
+    wrap_commonjs_with_names(source, commonjs_export_names(source))
 }
 struct CorpusModules {
     esm: Arc<HashMap<String, String>>,
@@ -528,7 +623,9 @@ fn add_corpus_modules(
         }
 
         let module_source = if is_commonjs {
-            wrap_commonjs(source)
+            let export_names =
+                commonjs_export_names_for_path(root, &path, source, &mut HashSet::new());
+            wrap_commonjs_with_names(source, export_names)
         } else {
             source.to_string()
         };
@@ -835,7 +932,8 @@ fn node_cli_source(
     let mut source = format!(
         "globalThis.__mcpV8ProcessConfig={};\n\
          const {{ default: __nodeCompatProcess }} = await import('node:process');\n\
-         globalThis.process = __nodeCompatProcess;\n",
+         globalThis.process = __nodeCompatProcess;\n\
+         globalThis.global = globalThis;\n",
         serde_json::to_string(&process_config).unwrap(),
     );
     append_cli_modules(&mut source, &invocation.environment_requires, corpus)?;
@@ -1535,6 +1633,33 @@ mod tests {
         assert!(source.contains("export { __cjsNamedExport0 as \"assert\" };"));
     }
     #[test]
+    fn esm_syntax_detection_accepts_a_byte_order_mark() {
+        assert!(source_uses_esm_syntax(
+            "file:///fixture.js",
+            "\u{feff}export const value = 1;",
+        ));
+    }
+    #[test]
+    fn commonjs_wrapper_exposes_reexported_names() {
+        let corpus = cli_corpus(&[
+            (
+                "test/fixtures/main.js",
+                "if (global.maybe) module.exports = require('./dep');\n",
+            ),
+            ("test/fixtures/dep.js", "exports.reexported = true;\n"),
+        ]);
+        let source = fs::read_to_string(corpus.path().join("test/fixtures/main.js")).unwrap();
+        let names = commonjs_export_names_for_path(
+            corpus.path(),
+            &corpus.path().join("test/fixtures/main.js"),
+            &source,
+            &mut HashSet::new(),
+        );
+        let wrapped = wrap_commonjs_with_names(&source, names);
+
+        assert!(wrapped.contains("as \"reexported\""), "{wrapped}");
+    }
+    #[test]
     fn commonjs_export_analysis_accepts_a_byte_order_mark() {
         assert_eq!(
             commonjs_export_names("\u{feff}exports.value = 1;"),
@@ -1669,6 +1794,20 @@ mod tests {
                 "eval",
             ]
         );
+    }
+
+    #[test]
+    fn node_cli_exposes_node_global_alias() {
+        let corpus = cli_corpus(&[]);
+        let output = run_node_compat_cli(
+            &node_cli_args(&["--eval", "console.log(global === globalThis);"]),
+            None,
+            corpus.path(),
+        )
+        .unwrap();
+
+        assert_eq!(output.runtime_error, None);
+        assert_eq!(output.stdout, "true\n");
     }
 
     #[test]
