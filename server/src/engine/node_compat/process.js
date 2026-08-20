@@ -81,8 +81,8 @@ const process = {
         process.nextTick(() => process.emit('warning', normalized));
     },
     exit(code) {
-        const normalized = code === undefined ? this.exitCode : normalizeExitCode(code);
-        this.exitCode = normalized;
+        const normalized = code === undefined ? process.exitCode : normalizeExitCode(code);
+        process.exitCode = normalized;
         if (!hostExitEnabled) {
             const error = new Error('process.exit is not supported in this runtime');
             error.code = 'ERR_UNSUPPORTED_OPERATION';

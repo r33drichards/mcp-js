@@ -151,7 +151,7 @@ impl NodeCliInvocation {
                     Self::require_no_value(flag, value)?;
                     self.no_warnings = true;
                 }
-                "--experimental-import-meta-resolve" => {
+                "--experimental-import-meta-resolve" | "--interactive" | "-i" => {
                     Self::require_no_value(flag, value)?;
                 }
                 _ if flag.starts_with('-') => {
@@ -2264,6 +2264,18 @@ mod tests {
     }
 
     #[test]
+    fn node_cli_accepts_interactive_flag() {
+        let invocation = NodeCliInvocation::parse(
+            &node_cli_args(&["--interactive"]),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(invocation.exec_argv, ["--interactive"]);
+        assert!(invocation.entrypoint.is_none());
+    }
+
+    #[test]
     fn node_cli_accepts_legacy_import_meta_resolve_flag() {
         let invocation = NodeCliInvocation::parse(
             &node_cli_args(&["--experimental-import-meta-resolve", "--eval", "void 0"]),
@@ -3099,6 +3111,22 @@ mod tests {
         assert_eq!(commonjs.stdout, "function\n");
         assert_eq!(module.runtime_error, None);
         assert_eq!(module.stdout, "string\n");
+    }
+
+    #[test]
+    fn node_cli_executes_interactive_stdin_with_unbound_process_exit() {
+        let corpus = cli_corpus(&[]);
+        let output = run_node_compat_cli_with_stdin(
+            &node_cli_args(&["--interactive"]),
+            None,
+            corpus.path(),
+            Some("Promise.resolve(0).then(process.exit);".to_owned()),
+        )
+        .unwrap();
+
+        assert_eq!(output.runtime_error, None);
+        assert_eq!(output.exit_code, 0);
+        assert_eq!(output.stderr, "");
     }
 
     #[test]
