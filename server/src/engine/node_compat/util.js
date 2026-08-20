@@ -31,7 +31,13 @@ function inspectValue(value, depth, maxDepth, seen) {
     seen = seen.concat([value]);
     const next = depth + 1;
     if (typeof value[inspect.custom] === 'function') {
-        try { return String(value[inspect.custom](maxDepth - depth, {})); } catch { /* fall through */ }
+        try {
+            return String(value[inspect.custom](
+                maxDepth - depth,
+                {},
+                (nested, nestedOptions) => inspect(nested, nestedOptions),
+            ));
+        } catch { /* fall through */ }
     }
     if (Array.isArray(value)) {
         const items = value.slice(0, 100).map((v) => inspectValue(v, next, maxDepth, seen));
@@ -45,7 +51,9 @@ function inspectValue(value, depth, maxDepth, seen) {
         const tag = value.constructor.name;
         const shown = Array.from(value.subarray ? value.subarray(0, 100) : value).map(String);
         if (value.length > 100) shown.push(`... ${value.length - 100} more items`);
-        return `${tag}(${value.length}) [ ${shown.join(', ')} ]`;
+        return shown.length === 0
+            ? `${tag}(${value.length}) []`
+            : `${tag}(${value.length}) [ ${shown.join(', ')} ]`;
     }
     if (value instanceof Map) {
         const entries = [];

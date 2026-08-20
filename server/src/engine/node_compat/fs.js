@@ -1,8 +1,6 @@
-// node:fs — import-compatible stub. The sandbox's real filesystem surface
-// is the policy-gated `fs` capability (global, see engine/fs.rs); this
-// module exists so libraries whose unused code paths import node:fs (e.g.
-// certificate-file loading in gRPC stacks) can load. Every operation
-// throws.
+// node:fs — import-compatible surface backed by the policy-gated `fs`
+// capability when enabled. Without that capability, operations retain the
+// rejecting stub behavior used by the default sandbox.
 
 function unsupported(name) {
     return function () {
@@ -22,7 +20,12 @@ function unsupported(name) {
 export const readFile = unsupported('readFile');
 export const readFileSync = unsupported('readFileSync');
 export const writeFile = unsupported('writeFile');
-export const writeFileSync = unsupported('writeFileSync');
+export const writeFileSync = globalThis.fs && typeof globalThis.fs.writeFileSync === 'function'
+    ? (path, data, ...args) => globalThis.fs.writeFileSync(normalizePath(path), data, ...args)
+    : unsupported('writeFileSync');
+export const symlinkSync = globalThis.fs && typeof globalThis.fs.symlinkSync === 'function'
+    ? (target, path, ...args) => globalThis.fs.symlinkSync(normalizePath(target), normalizePath(path), ...args)
+    : unsupported('symlinkSync');
 export const openSync = unsupported('openSync');
 export const closeSync = unsupported('closeSync');
 export const readSync = unsupported('readSync');
@@ -52,7 +55,17 @@ export const constants = Object.freeze({
 
 export const promises = { constants };
 for (const name of PROMISE_METHODS) {
-    promises[name] = () => Promise.reject(makeEnosys(name));
+    const runtimeMethod = globalThis.fs && globalThis.fs[name];
+    promises[name] = typeof runtimeMethod === 'function'
+        ? (...args) => runtimeMethod.call(globalThis.fs, normalizePath(args[0]), ...args.slice(1))
+        : () => Promise.reject(makeEnosys(name));
+}
+
+function normalizePath(value) {
+    if (value instanceof URL && value.protocol === 'file:') value = decodeURIComponent(value.pathname);
+    const path = String(value);
+    const corpus = globalThis.__NODE_TEST_CORPUS_HOST__;
+    return corpus && path.startsWith('/test/') ? corpus + path : value;
 }
 
 function makeEnosys(name) {
@@ -68,6 +81,7 @@ export default {
     readFileSync,
     writeFile,
     writeFileSync,
+    symlinkSync,
     openSync,
     closeSync,
     readSync,

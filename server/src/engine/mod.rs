@@ -85,7 +85,35 @@ pub const MIN_HEAP_MEMORY_MB: usize = 16;
 
 // ── V8 initialization ───────────────────────────────────────────────────
 
+fn validate_node_import_attributes(
+    scope: &mut v8::PinScope,
+    attributes: &HashMap<String, String>,
+) {
+    let Some((attribute, value)) = attributes
+        .iter()
+        .find(|(key, _)| key.as_str() != "type")
+    else {
+        return;
+    };
+    let message = v8::String::new(
+        scope,
+        &format!(
+            "Import attribute \"{}\" with value \"{}\" is not supported",
+            attribute, value
+        ),
+    )
+    .unwrap();
+    let exception = v8::Exception::type_error(scope, message);
+    let object = exception.to_object(scope).unwrap();
+    let code_key = v8::String::new(scope, "code").unwrap();
+    let code_value = v8::String::new(scope, "ERR_IMPORT_ATTRIBUTE_UNSUPPORTED").unwrap();
+    object.set(scope, code_key.into(), code_value.into());
+    scope.throw_exception(exception);
+}
+
 pub fn initialize_v8() {
+    v8::V8::set_flags_from_string("--js-defer-import-eval");
+
     // deno_core initializes V8 automatically on first JsRuntime creation.
     // Kept as the common process-init hook for callers (main.rs, tests, fuzz).
     //
@@ -775,6 +803,91 @@ pub fn inject_wasm_modules(
 /// from a V8 heap snapshot that already has a registered module.
 static MODULE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
+#[derive(Clone, Copy, Debug)]
+pub enum CompileMode {
+    CommonJs,
+    EsModule,
+    Ambiguous,
+}
+
+fn compile_commonjs(runtime: &mut JsRuntime, specifier: &str, source: &str) -> Result<(), String> {
+    let wrapped = format!(
+        "(function (exports, require, module, __filename, __dirname) {{\n{source}\n}});"
+    );
+    deno_core::scope!(scope, runtime);
+    let scope = std::pin::pin!(v8::TryCatch::new(scope));
+    let scope = scope.init();
+    let source = v8::String::new(&scope, &wrapped).ok_or("failed to allocate check source")?;
+    let resource_name = v8::String::new(&scope, specifier)
+        .ok_or("failed to allocate check specifier")?;
+    let origin = v8::ScriptOrigin::new(
+        &scope,
+        resource_name.into(),
+        0,
+        0,
+        false,
+        -1,
+        None,
+        false,
+        false,
+        false,
+        None,
+    );
+    if v8::Script::compile(&scope, source, Some(&origin)).is_some() {
+        return Ok(());
+    }
+    Err(scope
+        .exception()
+        .and_then(|error| error.to_string(&scope))
+        .map(|error| error.to_rust_string_lossy(&scope))
+        .unwrap_or_else(|| "CommonJS syntax error".to_owned()))
+}
+
+fn compile_es_module(runtime: &mut JsRuntime, specifier: &str, source: &str) -> Result<(), String> {
+    deno_core::scope!(scope, runtime);
+    let scope = std::pin::pin!(v8::TryCatch::new(scope));
+    let scope = scope.init();
+    let source = v8::String::new(&scope, source).ok_or("failed to allocate check source")?;
+    let resource_name = v8::String::new(&scope, specifier)
+        .ok_or("failed to allocate check specifier")?;
+    let origin = v8::ScriptOrigin::new(
+        &scope,
+        resource_name.into(),
+        0,
+        0,
+        false,
+        -1,
+        None,
+        false,
+        false,
+        true,
+        None,
+    );
+    let mut source = v8::script_compiler::Source::new(source, Some(&origin));
+    if v8::script_compiler::compile_module(&scope, &mut source).is_some() {
+        return Ok(());
+    }
+    Err(scope
+        .exception()
+        .and_then(|error| error.to_string(&scope))
+        .map(|error| error.to_rust_string_lossy(&scope))
+        .unwrap_or_else(|| "ES module syntax error".to_owned()))
+}
+
+fn compile_source(
+    runtime: &mut JsRuntime,
+    specifier: &str,
+    source: &str,
+    mode: CompileMode,
+) -> Result<(), String> {
+    match mode {
+        CompileMode::CommonJs => compile_commonjs(runtime, specifier, source),
+        CompileMode::EsModule => compile_es_module(runtime, specifier, source),
+        CompileMode::Ambiguous => compile_commonjs(runtime, specifier, source)
+            .or_else(|_| compile_es_module(runtime, specifier, source)),
+    }
+}
+
 /// Execute code as an ES module. All code is always executed as a module,
 /// which supports `import` declarations, `export`, and top-level `await`.
 // Build the dedicated current-thread runtime each isolate runs on.
@@ -801,10 +914,24 @@ fn execute_module(
     rt: &tokio::runtime::Runtime,
     runtime: &mut JsRuntime,
     code: &str,
+    bootstrap_script: Option<&str>,
+    main_module_specifier: Option<&str>,
+    compile_module: Option<(&str, &str, CompileMode)>,
 ) -> Result<(), String> {
-    let id = MODULE_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let main_url = ModuleSpecifier::parse(&format!("file:///main_{}.js", id))
-        .map_err(|e| format!("internal specifier error: {}", e))?;
+    if let Some(script) = bootstrap_script {
+        runtime
+            .execute_script("<mcp-v8-bootstrap>", script.to_owned())
+            .map_err(|error| format!("{}", error))?;
+    }
+
+    let main_url = if let Some(specifier) = main_module_specifier {
+        ModuleSpecifier::parse(specifier)
+            .map_err(|e| format!("invalid main module specifier: {}", e))?
+    } else {
+        let id = MODULE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        ModuleSpecifier::parse(&format!("file:///main_{}.js", id))
+            .map_err(|e| format!("internal specifier error: {}", e))?
+    };
 
     // CRITICAL: run the load, module evaluation, AND event loop inside ONE
     // `block_on`. `mod_evaluate` runs the module's top-level synchronous code
@@ -814,7 +941,7 @@ fn execute_module(
     // deno_unsync's op spawn would panic/deadlock).
     rt.block_on(async move {
         let mod_id = runtime
-            .load_side_es_module_from_code(&main_url, code.to_string())
+            .load_main_es_module_from_code(&main_url, code.to_string())
             .await
             .map_err(|e| format!("{}", e))?;
 
@@ -826,6 +953,10 @@ fn execute_module(
             .map_err(|e| format!("{}", e))?;
 
         eval_future.await.map_err(|e| format!("{}", e))?;
+
+        if let Some((specifier, source, mode)) = compile_module {
+            compile_source(runtime, specifier, source, mode)?;
+        }
 
         Ok(())
     })
@@ -850,7 +981,13 @@ pub struct ExecutionConfig<'a> {
     pub mcp_headers: Option<serde_json::Value>,
     pub subprocess_config: Option<&'a subprocess::SubprocessConfig>,
     pub console_tree: Option<sled::Tree>,
+    pub console_error_tree: Option<sled::Tree>,
+    pub process_exit_state: Option<&'a console::ProcessExitState>,
     pub module_loader_config: Option<&'a module_loader::ModuleLoaderConfig>,
+    pub bootstrap_script: Option<&'a str>,
+    pub main_module_specifier: Option<&'a str>,
+    /// An additional module to compile after `code` evaluates, without evaluating it.
+    pub compile_module: Option<(&'a str, &'a str, CompileMode)>,
     pub mcp_config: Option<&'a mcp_client::McpConfig>,
     /// Per-mitigation sandbox hardening. Default is all-off (unhardened).
     pub hardening: console::HardeningConfig,
@@ -874,7 +1011,12 @@ impl<'a> ExecutionConfig<'a> {
             mcp_headers: None,
             subprocess_config: None,
             console_tree: None,
+            console_error_tree: None,
+            process_exit_state: None,
             module_loader_config: None,
+            bootstrap_script: None,
+            main_module_specifier: None,
+            compile_module: None,
             mcp_config: None,
             hardening: console::HardeningConfig::default(),
             artifact_state: None,
@@ -926,8 +1068,39 @@ impl<'a> ExecutionConfig<'a> {
         self
     }
 
+    pub fn console_error_tree(mut self, tree: sled::Tree) -> Self {
+        self.console_error_tree = Some(tree);
+        self
+    }
+
+    pub fn process_exit_state(mut self, state: &'a console::ProcessExitState) -> Self {
+        self.process_exit_state = Some(state);
+        self
+    }
+
     pub fn module_loader_config(mut self, config: &'a module_loader::ModuleLoaderConfig) -> Self {
         self.module_loader_config = Some(config);
+        self
+    }
+
+    pub fn bootstrap_script(mut self, script: &'a str) -> Self {
+        self.bootstrap_script = Some(script);
+        self
+    }
+
+    pub fn main_module_specifier(mut self, specifier: &'a str) -> Self {
+        self.main_module_specifier = Some(specifier);
+        self
+    }
+
+    /// Compile a module after evaluating `code`, without evaluating the module itself.
+    pub fn compile_module(
+        mut self,
+        specifier: &'a str,
+        source: &'a str,
+        mode: CompileMode,
+    ) -> Self {
+        self.compile_module = Some((specifier, source, mode));
         self
     }
 
@@ -990,7 +1163,12 @@ pub fn execute_stateless(
         mcp_headers,
         subprocess_config,
         console_tree,
+        console_error_tree,
+        process_exit_state,
         module_loader_config,
+        bootstrap_script,
+        main_module_specifier,
+        compile_module,
         mcp_config,
         hardening,
         artifact_state,
@@ -1000,14 +1178,14 @@ pub fn execute_stateless(
     let result = catch_unwind(AssertUnwindSafe(|| {
         let params = create_params_with_heap_limit(heap_memory_max_bytes);
         let mut extensions = Vec::new();
-        if console_tree.is_some() {
+        if console_tree.is_some() || process_exit_state.is_some() {
             extensions.push(console::create_extension());
         }
         if fetch_config.is_some() {
             extensions.push(fetch::create_extension());
-            if subprocess_config.is_some() {
-                extensions.push(subprocess::create_extension());
-            }
+        }
+        if subprocess_config.is_some() {
+            extensions.push(subprocess::create_extension());
         }
         if websocket_config.is_some() {
             extensions.push(websocket::create_extension());
@@ -1043,6 +1221,7 @@ pub fn execute_stateless(
             create_params: Some(params),
             extensions,
             module_loader: Some(module_loader),
+            validate_import_attributes_cb: Some(Box::new(validate_node_import_attributes)),
             ..Default::default()
         });
 
@@ -1052,10 +1231,14 @@ pub fn execute_stateless(
 
         // Put console log state in OpState.
         if let Some(tree) = console_tree {
-            runtime
-                .op_state()
-                .borrow_mut()
-                .put(ConsoleLogState::new(tree));
+            let console_state = match console_error_tree {
+                Some(stderr_tree) => ConsoleLogState::new_with_stderr(tree, stderr_tree),
+                None => ConsoleLogState::new(tree),
+            };
+            runtime.op_state().borrow_mut().put(console_state);
+        }
+        if let Some(state) = process_exit_state {
+            runtime.op_state().borrow_mut().put(state.clone());
         }
 
         // Put fetch config in OpState if OPA is configured.
@@ -1084,10 +1267,11 @@ pub fn execute_stateless(
                 runtime.op_state().borrow_mut().put(mount);
             }
 
-            // Put subprocess config in OpState if subprocess policies are configured.
-            if let Some(sc) = subprocess_config {
-                runtime.op_state().borrow_mut().put(sc.clone());
-            }
+        }
+
+        // Put subprocess config in OpState if subprocess policies are configured.
+        if let Some(sc) = subprocess_config {
+            runtime.op_state().borrow_mut().put(sc.clone());
         }
 
         // Put MCP config in OpState if MCP servers are configured.
@@ -1132,11 +1316,11 @@ pub fn execute_stateless(
                         if let Err(e) = fetch::inject_fetch(&mut runtime) {
                             return Err(e);
                         }
-                        // Inject subprocess JS wrapper if subprocess policies are configured.
-                        if subprocess_config.is_some() {
-                            if let Err(e) = subprocess::inject_subprocess(&mut runtime) {
-                                return Err(e);
-                            }
+                    }
+                    // Inject subprocess JS wrapper if subprocess policies are configured.
+                    if subprocess_config.is_some() {
+                        if let Err(e) = subprocess::inject_subprocess(&mut runtime) {
+                            return Err(e);
                         }
                     }
                     // Inject fs JS wrapper if filesystem policies are configured.
@@ -1198,7 +1382,14 @@ pub fn execute_stateless(
                     if let Err(e) = console::harden_runtime(&mut runtime, hardening) {
                         return Err(e);
                     }
-                    execute_module(&rt, &mut runtime, code)
+                    execute_module(
+                        &rt,
+                        &mut runtime,
+                        code,
+                        bootstrap_script,
+                        main_module_specifier,
+                        compile_module,
+                    )
                 }
             };
 
@@ -1249,12 +1440,18 @@ pub fn execute_stateful(
         mcp_headers,
         subprocess_config,
         console_tree,
+        console_error_tree,
+        process_exit_state,
         module_loader_config,
+        bootstrap_script,
+        main_module_specifier,
+        compile_module,
         mcp_config,
         hardening,
         artifact_state,
     } = config;
     let oom_flag = Arc::new(AtomicBool::new(false));
+    let _ = compile_module;
 
     let result = catch_unwind(AssertUnwindSafe(|| {
         let params = create_params_with_heap_limit(heap_memory_max_bytes);
@@ -1276,14 +1473,14 @@ pub fn execute_stateful(
         let startup_snapshot = leaked_snapshot.as_ref().map(|(_, s)| *s);
 
         let mut extensions = Vec::new();
-        if console_tree.is_some() {
+        if console_tree.is_some() || process_exit_state.is_some() {
             extensions.push(console::create_extension());
         }
         if fetch_config.is_some() {
             extensions.push(fetch::create_extension());
-            if subprocess_config.is_some() {
-                extensions.push(subprocess::create_extension());
-            }
+        }
+        if subprocess_config.is_some() {
+            extensions.push(subprocess::create_extension());
         }
         if websocket_config.is_some() {
             extensions.push(websocket::create_extension());
@@ -1320,6 +1517,7 @@ pub fn execute_stateful(
             startup_snapshot,
             extensions,
             module_loader: Some(module_loader),
+            validate_import_attributes_cb: Some(Box::new(validate_node_import_attributes)),
             ..Default::default()
         });
 
@@ -1329,10 +1527,14 @@ pub fn execute_stateful(
 
         // Put console log state in OpState.
         if let Some(tree) = console_tree {
-            runtime
-                .op_state()
-                .borrow_mut()
-                .put(ConsoleLogState::new(tree));
+            let console_state = match console_error_tree {
+                Some(stderr_tree) => ConsoleLogState::new_with_stderr(tree, stderr_tree),
+                None => ConsoleLogState::new(tree),
+            };
+            runtime.op_state().borrow_mut().put(console_state);
+        }
+        if let Some(state) = process_exit_state {
+            runtime.op_state().borrow_mut().put(state.clone());
         }
 
         // Put fetch config in OpState if OPA is configured.
@@ -1361,10 +1563,11 @@ pub fn execute_stateful(
                 runtime.op_state().borrow_mut().put(mount);
             }
 
-            // Put subprocess config in OpState if subprocess policies are configured.
-            if let Some(sc) = subprocess_config {
-                runtime.op_state().borrow_mut().put(sc.clone());
-            }
+        }
+
+        // Put subprocess config in OpState if subprocess policies are configured.
+        if let Some(sc) = subprocess_config {
+            runtime.op_state().borrow_mut().put(sc.clone());
         }
 
         // Put MCP config in OpState if MCP servers are configured.
@@ -1390,7 +1593,14 @@ pub fn execute_stateful(
         let has_snapshot = leaked_snapshot.is_some();
 
         let output_result = if has_snapshot {
-            execute_module(&rt, &mut runtime, code)
+            execute_module(
+                &rt,
+                &mut runtime,
+                code,
+                bootstrap_script,
+                main_module_specifier,
+                None,
+            )
         } else {
             // Inject WASM modules as globals via V8 native API.
             // Do NOT early-return here — snapshot() must be called below.
@@ -1418,11 +1628,11 @@ pub fn execute_stateful(
                         if let Err(e) = fetch::inject_fetch(&mut runtime) {
                             return Err(e);
                         }
-                        // Inject subprocess JS wrapper if subprocess policies are configured.
-                        if subprocess_config.is_some() {
-                            if let Err(e) = subprocess::inject_subprocess(&mut runtime) {
-                                return Err(e);
-                            }
+                    }
+                    // Inject subprocess JS wrapper if subprocess policies are configured.
+                    if subprocess_config.is_some() {
+                        if let Err(e) = subprocess::inject_subprocess(&mut runtime) {
+                            return Err(e);
                         }
                     }
                     // Inject fs JS wrapper if filesystem policies are configured.
@@ -1485,7 +1695,14 @@ pub fn execute_stateful(
                     if let Err(e) = console::harden_runtime(&mut runtime, hardening) {
                         return Err(e);
                     }
-                    execute_module(&rt, &mut runtime, code)
+                    execute_module(
+                        &rt,
+                        &mut runtime,
+                        code,
+                        bootstrap_script,
+                        main_module_specifier,
+                        None,
+                    )
                 }
             }
         };
@@ -1776,6 +1993,9 @@ impl Engine {
             module_loader_config: Arc::new(module_loader::ModuleLoaderConfig {
                 allow_external: false,
                 policy_chain: None,
+                virtual_modules: None,
+                virtual_commonjs_modules: None,
+                virtual_files: None,
             }),
             mcp_client_manager: None,
             mcp_tools_policy_chain: None,
@@ -1817,6 +2037,9 @@ impl Engine {
             module_loader_config: Arc::new(module_loader::ModuleLoaderConfig {
                 allow_external: false,
                 policy_chain: None,
+                virtual_modules: None,
+                virtual_commonjs_modules: None,
+                virtual_files: None,
             }),
             mcp_client_manager: None,
             mcp_tools_policy_chain: None,

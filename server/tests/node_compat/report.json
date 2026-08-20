@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "versions": {
+    "fast_suite_node": "v22.14.0",
+    "deno_corpus_node": "26.5.1",
+    "deno_node_test_commit": "f287abd897685505b021996828004a917f715a0f",
+    "citgm_commit": "09ca92bb5f1ed77e1aec3bed129285c1568797eb"
+  },
+  "fast_suite": {
+    "total": 47,
+    "runnable": 45,
+    "status": {
+      "harness_missing": 1,
+      "pass": 45,
+      "policy_required": 1
+    },
+    "family": {
+      "buffer": 5,
+      "console": 1,
+      "crypto": 1,
+      "events": 14,
+      "path": 11,
+      "perf_hooks": 2,
+      "process": 2,
+      "querystring": 3,
+      "timers": 7,
+      "zlib": 1
+    },
+    "profile": {
+      "pure": 46,
+      "subprocess": 1
+    },
+    "compatibility": {
+      "adapted": 1,
+      "exact": 45,
+      "unsupported": 1
+    }
+  },
+  "full_corpus": {
+    "total": 4961,
+    "status": {
+      "unsupported": 90,
+      "untriaged": 4871
+    },
+    "family": {
+      "assert": 14,
+      "buffer": 71,
+      "console": 22,
+      "crypto": 131,
+      "dns": 31,
+      "events": 27,
+      "filesystem": 361,
+      "http": 718,
+      "module": 295,
+      "networking": 381,
+      "os": 8,
+      "other": 1754,
+      "path": 17,
+      "perf_hooks": 31,
+      "process": 93,
+      "querystring": 4,
+      "streams": 249,
+      "subprocess": 131,
+      "timers": 59,
+      "tls": 207,
+      "url": 18,
+      "util": 33,
+      "vm": 103,
+      "workers": 203
+    },
+    "profile": {
+      "filesystem": 361,
+      "inspector": 85,
+      "native": 5,
+      "network-client": 1093,
+      "network-server": 244,
+      "pure": 2839,
+      "subprocess": 131,
+      "workers": 203
+    },
+    "compatibility": {
+      "unsupported": 4961
+    }
+  }
+}

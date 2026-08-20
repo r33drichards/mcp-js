@@ -103,6 +103,9 @@ try {{
     let loader_config = ModuleLoaderConfig {
         allow_external: false,
         policy_chain: None,
+        virtual_modules: None,
+        virtual_commonjs_modules: None,
+        virtual_files: None,
     };
     let _ = server::engine::execute_stateless(&code, ExecutionConfig::new(max_bytes)
         .isolate_handle(handle)

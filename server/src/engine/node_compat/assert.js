@@ -6,10 +6,53 @@
 // tests.
 import { inspect } from 'node:util';
 
+function codedTypeError(code, message) {
+    const error = new TypeError(message);
+    error.code = code;
+    return error;
+}
+
+function formatReceived(value) {
+    if (value === undefined || value === null) return String(value);
+    if (typeof value === 'object') {
+        const name = value.constructor && value.constructor.name;
+        return name ? 'an instance of ' + name : inspect(value);
+    }
+    return 'type ' + typeof value + ' (' + inspect(value) + ')';
+}
+
+function isPromise(value) {
+    return value !== null && typeof value === 'object' &&
+        typeof value.then === 'function' && typeof value.catch === 'function';
+}
+
+function promiseFrom(promiseOrFn) {
+    if (typeof promiseOrFn === 'function') {
+        const promise = promiseOrFn();
+        if (!isPromise(promise)) {
+            const received = promise === undefined || promise === null
+                ? String(promise)
+                : typeof promise === 'object' && promise.constructor && promise.constructor.name
+                    ? 'an instance of ' + promise.constructor.name
+                    : typeof promise;
+            throw codedTypeError('ERR_INVALID_RETURN_VALUE',
+                'Expected instance of Promise to be returned from the "promiseFn" ' +
+                'function but got ' + received + '.');
+        }
+        return promise;
+    }
+    if (!isPromise(promiseOrFn)) {
+        throw codedTypeError('ERR_INVALID_ARG_TYPE',
+            'The "promiseFn" argument must be of type function or an instance of Promise. Received ' +
+            formatReceived(promiseOrFn));
+    }
+    return promiseOrFn;
+}
+
 class AssertionError extends Error {
     constructor(options) {
         const {
-            message, actual, expected, operator, stackStartFn,
+            message, actual, expected, operator, stackStartFn, generatedMessage,
         } = options || {};
         let msg = message;
         if (msg == null) {
@@ -21,7 +64,7 @@ class AssertionError extends Error {
         this.actual = actual;
         this.expected = expected;
         this.operator = operator;
-        this.generatedMessage = message == null;
+        this.generatedMessage = generatedMessage ?? message == null;
         if (Error.captureStackTrace) {
             Error.captureStackTrace(this, stackStartFn || AssertionError);
         }
@@ -134,6 +177,152 @@ function isDeepEqual(a, b, strict, memo) {
     return true;
 }
 
+function commitPartialMemo(target, source) {
+    for (const [actual, expected] of source) target.set(actual, expected);
+}
+
+function isArrayIndexKey(key) {
+    if (typeof key !== 'string' || key === '') return false;
+    const index = Number(key);
+    return Number.isInteger(index) && index >= 0 && index < 0xffffffff && String(index) === key;
+}
+
+function hasPartialEnumerableProperties(actual, expected, memo, skipIndexedProperties) {
+    for (const key of Reflect.ownKeys(expected)) {
+        const descriptor = Object.getOwnPropertyDescriptor(expected, key);
+        if (!descriptor || !descriptor.enumerable) continue;
+        if (skipIndexedProperties && isArrayIndexKey(key)) continue;
+        if (!Object.prototype.hasOwnProperty.call(actual, key) ||
+            !isPartialDeepStrictEqual(actual[key], expected[key], memo)) return false;
+    }
+    return true;
+}
+
+function isPartialByteSequence(actual, expected) {
+    if (expected.byteLength > actual.byteLength) return false;
+    let actualIndex = 0;
+    for (let expectedIndex = 0; expectedIndex < expected.byteLength; expectedIndex++) {
+        while (actualIndex < actual.byteLength && actual[actualIndex] !== expected[expectedIndex]) {
+            actualIndex++;
+        }
+        if (actualIndex === actual.byteLength) return false;
+        actualIndex++;
+    }
+    return true;
+}
+
+function bytesForView(view) {
+    return new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
+}
+
+function isPartialDeepStrictEqual(actual, expected, memo) {
+    if (Object.is(actual, expected)) return true;
+    if (typeof actual !== typeof expected) return false;
+    if (typeof actual !== 'object' || actual === null || expected === null) return false;
+    if (actual instanceof WeakMap || actual instanceof WeakSet ||
+        expected instanceof WeakMap || expected instanceof WeakSet) {
+        return false;
+    }
+
+    memo = memo || new Map();
+    if (memo.has(actual)) return memo.get(actual) === expected;
+    memo.set(actual, expected);
+
+    const actualTag = Object.prototype.toString.call(actual);
+    const expectedTag = Object.prototype.toString.call(expected);
+    if (actualTag !== expectedTag) return false;
+
+    if (Array.isArray(expected)) {
+        if (!Array.isArray(actual) || expected.length > actual.length) return false;
+        let actualIndex = 0;
+        for (let expectedIndex = 0; expectedIndex < expected.length; expectedIndex++) {
+            let matched = false;
+            while (actualIndex < actual.length) {
+                const branch = new Map(memo);
+                if (isPartialDeepStrictEqual(actual[actualIndex++], expected[expectedIndex], branch)) {
+                    commitPartialMemo(memo, branch);
+                    matched = true;
+                    break;
+                }
+            }
+            if (!matched) return false;
+        }
+        return hasPartialEnumerableProperties(actual, expected, memo, true);
+    }
+
+    if (expected instanceof Set) {
+        if (!(actual instanceof Set) || expected.size > actual.size) return false;
+        const remaining = [...actual];
+        for (const expectedValue of expected) {
+            let matchIndex = -1;
+            let matchedMemo;
+            for (let index = 0; index < remaining.length; index++) {
+                const branch = new Map(memo);
+                if (isPartialDeepStrictEqual(remaining[index], expectedValue, branch)) {
+                    matchIndex = index;
+                    matchedMemo = branch;
+                    break;
+                }
+            }
+            if (matchIndex === -1) return false;
+            commitPartialMemo(memo, matchedMemo);
+            remaining.splice(matchIndex, 1);
+        }
+    } else if (expected instanceof Map) {
+        if (!(actual instanceof Map) || expected.size > actual.size) return false;
+        const remaining = [...actual];
+        for (const [expectedKey, expectedValue] of expected) {
+            let matchIndex = -1;
+            let matchedMemo;
+            for (let index = 0; index < remaining.length; index++) {
+                const [actualKey, actualValue] = remaining[index];
+                const branch = new Map(memo);
+                if (isPartialDeepStrictEqual(actualKey, expectedKey, branch) &&
+                    isPartialDeepStrictEqual(actualValue, expectedValue, branch)) {
+                    matchIndex = index;
+                    matchedMemo = branch;
+                    break;
+                }
+            }
+            if (matchIndex === -1) return false;
+            commitPartialMemo(memo, matchedMemo);
+            remaining.splice(matchIndex, 1);
+        }
+    } else if (ArrayBuffer.isView(expected)) {
+        if (!ArrayBuffer.isView(actual) || actualTag !== expectedTag ||
+            !isPartialByteSequence(bytesForView(actual), bytesForView(expected))) {
+            return false;
+        }
+        return hasPartialEnumerableProperties(actual, expected, memo, true);
+    } else if (expectedTag === '[object ArrayBuffer]' || expectedTag === '[object SharedArrayBuffer]') {
+        if (!isPartialByteSequence(new Uint8Array(actual), new Uint8Array(expected))) return false;
+    } else if (expected instanceof Date) {
+        const actualTime = actual.getTime();
+        const expectedTime = expected.getTime();
+        if (actualTime !== expectedTime && !(Number.isNaN(actualTime) && Number.isNaN(expectedTime))) {
+            return false;
+        }
+    } else if (expected instanceof RegExp) {
+        if (actual.source !== expected.source || actual.flags !== expected.flags ||
+            actual.lastIndex !== expected.lastIndex) return false;
+    } else if (expected instanceof Error) {
+        if (!(actual instanceof Error) || actual.name !== expected.name) return false;
+        if (expected.message !== '' && actual.message !== expected.message) return false;
+        if (Object.prototype.hasOwnProperty.call(expected, 'cause') &&
+            (!Object.prototype.hasOwnProperty.call(actual, 'cause') ||
+             !isPartialDeepStrictEqual(actual.cause, expected.cause, memo))) return false;
+        if (expected instanceof AggregateError &&
+            !isPartialDeepStrictEqual(actual.errors, expected.errors, memo)) return false;
+    } else if (['[object Boolean]', '[object Number]', '[object String]',
+                '[object BigInt]', '[object Symbol]'].includes(expectedTag)) {
+        if (!Object.is(actual.valueOf(), expected.valueOf())) return false;
+    } else if (expected instanceof URL) {
+        if (!(actual instanceof URL) || actual.href !== expected.href) return false;
+    }
+
+    return hasPartialEnumerableProperties(actual, expected, memo, false);
+}
+
 function innerFail(obj) {
     throw new AssertionError(obj);
 }
@@ -165,6 +354,9 @@ function checkExpected(actual, expected, message, fn, operator) {
         return expected.test(String(actual));
     }
     if (typeof expected === 'object' && expected !== null) {
+        if (actual === null || (typeof actual !== 'object' && typeof actual !== 'function')) {
+            return false;
+        }
         for (const k of [...Object.keys(expected), ...Object.getOwnPropertySymbols(expected)]) {
             const ev = expected[k];
             const av = actual[k];
@@ -196,11 +388,25 @@ function validateThrown(thrown, expected, message, fn, operator) {
         }
         return;
     }
+    if (typeof expected === 'function') {
+        const result = expected.call({}, thrown);
+        if (result !== true) {
+            innerFail({
+                actual: thrown, expected, operator,
+                message: message ??
+                    `The "validate" validation function is expected to return "true". ` +
+                    `Received ${inspect(result)}\n\nCaught error:\n\n${String(thrown)}`,
+                stackStartFn: fn,
+            });
+        }
+        return;
+    }
     const result = checkExpected(thrown, expected);
     if (result === false) {
         innerFail({
             actual: thrown, expected, operator,
             message: message ?? `The error does not match the expected validation: ${inspect(expected)}. Received ${inspect(thrown)}`,
+            generatedMessage: message == null,
             stackStartFn: fn,
         });
     }
@@ -228,9 +434,10 @@ function throws(fn, expected, message) {
 
 async function rejects(promiseOrFn, expected, message) {
     if (typeof expected === 'string') { message = expected; expected = undefined; }
+    const promise = promiseFrom(promiseOrFn);
     let thrown = null, didReject = false;
     try {
-        await (typeof promiseOrFn === 'function' ? promiseOrFn() : promiseOrFn);
+        await promise;
     } catch (e) {
         thrown = e;
         didReject = true;
@@ -238,7 +445,8 @@ async function rejects(promiseOrFn, expected, message) {
     if (!didReject) {
         innerFail({
             actual: undefined, expected, operator: 'rejects',
-            message: message ?? 'Missing expected rejection.',
+            message: message ?? `Missing expected rejection${
+                typeof expected === 'function' && expected.name ? ` (${expected.name})` : ''}.`,
             stackStartFn: rejects,
         });
     }
@@ -263,14 +471,18 @@ function doesNotThrow(fn, expected, message) {
 
 async function doesNotReject(promiseOrFn, expected, message) {
     if (typeof expected === 'string') { message = expected; expected = undefined; }
+    const promise = promiseFrom(promiseOrFn);
     try {
-        await (typeof promiseOrFn === 'function' ? promiseOrFn() : promiseOrFn);
+        await promise;
     } catch (e) {
-        innerFail({
-            actual: e, expected, operator: 'doesNotReject',
-            message: message ?? `Got unwanted rejection.\nActual message: "${e && e.message}"`,
-            stackStartFn: doesNotReject,
-        });
+        if (expected === undefined || checkExpected(e, expected) !== false) {
+            innerFail({
+                actual: e, expected, operator: 'doesNotReject',
+                message: message ?? `Got unwanted rejection.\nActual message: "${e && e.message}"`,
+                stackStartFn: doesNotReject,
+            });
+        }
+        throw e;
     }
 }
 
@@ -319,6 +531,14 @@ const assert = Object.assign(ok, {
     deepStrictEqual(actual, expected, message) {
         if (!isDeepEqual(actual, expected, true)) {
             innerFail({ actual, expected, operator: 'deepStrictEqual', message, stackStartFn: assert.deepStrictEqual });
+        }
+    },
+    partialDeepStrictEqual(actual, expected, message) {
+        if (!isPartialDeepStrictEqual(actual, expected)) {
+            innerFail({
+                actual, expected, operator: 'partialDeepStrictEqual', message,
+                stackStartFn: assert.partialDeepStrictEqual,
+            });
         }
     },
     notDeepStrictEqual(actual, expected, message) {
@@ -370,6 +590,7 @@ const strict = Object.assign(function strictOk(...args) { return ok(...args); },
     equal: assert.strictEqual,
     notEqual: assert.notStrictEqual,
     deepEqual: assert.deepStrictEqual,
+    partialDeepStrictEqual: assert.partialDeepStrictEqual,
     notDeepEqual: assert.notDeepStrictEqual,
 });
 strict.strict = strict;
@@ -381,6 +602,6 @@ export {
 };
 export const {
     fail, equal, notEqual, strictEqual, notStrictEqual, deepEqual,
-    notDeepEqual, deepStrictEqual, notDeepStrictEqual, match, doesNotMatch,
+    notDeepEqual, deepStrictEqual, partialDeepStrictEqual, notDeepStrictEqual, match, doesNotMatch,
     ifError,
 } = assert;

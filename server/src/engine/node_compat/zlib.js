@@ -40,6 +40,53 @@ function toUint8(input) {
     return new TextEncoder().encode(String(input));
 }
 
+const CRC32_TABLE = (() => {
+    const table = new Uint32Array(256);
+    for (let index = 0; index < table.length; index++) {
+        let value = index;
+        for (let bit = 0; bit < 8; bit++) {
+            value = (value >>> 1) ^ ((value & 1) ? 0xedb88320 : 0);
+        }
+        table[index] = value >>> 0;
+    }
+    return table;
+})();
+
+function invalidArgType(name, expected, value) {
+    const error = new TypeError(
+        `The "${name}" argument must be of type ${expected}. Received ${String(value)}`,
+    );
+    error.code = 'ERR_INVALID_ARG_TYPE';
+    return error;
+}
+
+export function crc32(data, value = 0) {
+    let bytes;
+    if (typeof data === 'string') {
+        bytes = new TextEncoder().encode(data);
+    } else if (ArrayBuffer.isView(data)) {
+        bytes = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+    } else {
+        throw invalidArgType('data', 'string or an instance of Buffer, TypedArray, or DataView', data);
+    }
+
+    if (value === undefined) value = 0;
+    if (typeof value !== 'number') {
+        throw invalidArgType('value', 'number', value);
+    }
+    if (!Number.isInteger(value) || value < 0 || value > 0xffffffff) {
+        const error = new RangeError('The value of "value" is out of range');
+        error.code = 'ERR_OUT_OF_RANGE';
+        throw error;
+    }
+
+    let checksum = (value ^ 0xffffffff) >>> 0;
+    for (const byte of bytes) {
+        checksum = (CRC32_TABLE[(checksum ^ byte) & 0xff] ^ (checksum >>> 8)) >>> 0;
+    }
+    return (checksum ^ 0xffffffff) >>> 0;
+}
+
 function callbackified(format, TransformCtor) {
     return function (input, optionsOrCallback, maybeCallback) {
         const callback =
@@ -78,5 +125,6 @@ export default {
     deflateRaw,
     inflateRaw,
     unzip,
+    crc32,
     constants,
 };

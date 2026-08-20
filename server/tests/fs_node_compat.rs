@@ -15,7 +15,9 @@
 
 use std::sync::Once;
 
-use server::engine::fs::FsConfig;
+use server::engine::fs::{FsConfig, FsMountHandle};
+use server::engine::fs_mount::SessionMount;
+use server::engine::fs_store::FsStore;
 use server::engine::opa::{EvalMode, PolicyChain};
 use server::engine::{initialize_v8, ExecutionConfig, HardeningConfig};
 
@@ -250,4 +252,64 @@ fn fs_node_compat_survives_full_hardening() {
     assert!(out.contains("len=2"), "promises.readFile must work under hardening, got: {out}");
     assert!(out.contains("missing_code=ENOENT"), "error codes must work under hardening, got: {out}");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn node_fs_write_file_sync_writes_to_mounted_filesystem() {
+    ensure_v8();
+    let (tree, console_tmp) = console_tree();
+    let fs_config = allow_all_fs();
+    let mount = FsMountHandle::new(SessionMount::empty(FsStore::in_memory()));
+    let config = ExecutionConfig::new(32 * 1024 * 1024)
+        .console_tree(tree)
+        .maybe_fs_config(Some(&fs_config))
+        .maybe_fs_mount(Some(mount.clone()));
+    let source = r#"(async () => {
+        const { symlinkSync, writeFileSync } = await import('node:fs');
+        writeFileSync('/output.txt', 'mounted sync');
+        try {
+            symlinkSync('/target.txt', '/output.txt');
+            throw new Error('symlinkSync replaced an existing mounted file');
+        } catch (error) {
+            if (error.code !== 'EEXIST') throw error;
+        }
+    })()"#;
+
+    let (result, _) = server::engine::execute_stateless(source, config);
+    assert!(result.is_ok(), "execution failed: {result:?}");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let contents = runtime.block_on(async {
+        mount
+            .0
+            .lock()
+            .await
+            .read("/output.txt".as_ref())
+            .await
+            .unwrap()
+    });
+
+    assert_eq!(contents, b"mounted sync");
+    let _ = std::fs::remove_dir_all(console_tmp);
+}
+
+#[test]
+fn node_fs_write_file_sync_uses_policy_gated_filesystem() {
+    ensure_v8();
+    let dir = temp_dir("write-sync");
+    let path = dir.join("output.txt");
+    let source = format!(
+        r#"(async () => {{
+            const {{ writeFileSync }} = await import('node:fs');
+            writeFileSync({path:?}, 'hello sync');
+        }})()"#,
+        path = path.to_string_lossy(),
+    );
+
+    run_fs(&source);
+
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello sync");
+    let _ = std::fs::remove_dir_all(dir);
 }

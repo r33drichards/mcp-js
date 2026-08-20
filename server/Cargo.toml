@@ -27,11 +27,12 @@ rmcp_legacy = { package = "rmcp", git = "https://github.com/modelcontextprotocol
 # serde ≥1.0.228, and Cargo.lock still pins the exact resolved version).
 serde = "1.0.219"
 serde_json = "1.0.140"
+shlex = "1"
 toml = "0.8"
 tokio = { version = "1.45.0", features = ["rt-multi-thread", "process", "signal", "time", "sync", "macros", "net", "io-util"] }
 tracing = "0.1.41"
 tracing-subscriber = "0.3.19"
-deno_core = "0.381"
+deno_core = { git = "https://github.com/r33drichards/deno_core", rev = "4a09194d0fb8dbe062fe066d82d7ad6bcaa4f39a" }
 deno_error = "0.7"
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-sdk-s3 = "1"
@@ -47,10 +48,13 @@ sha2 = "0.10"
 # newest line that still compiles on the nix-pinned stable toolchain.
 swc_core = { version = "54", features = [
     "common",
+    "ecma_ast",
     "ecma_codegen",
+    "ecma_helpers_inline",
     "ecma_parser",
     "ecma_transforms",
     "ecma_transforms_typescript",
+    "ecma_transforms_module",
     "ecma_visit",
 ] }
 sled = "0.34"
@@ -80,6 +84,7 @@ http = "1"
 tokio-rustls = "0.26"
 webpki-roots = "0.26"
 url = "2"
+data-url = "0.3"
 futures = "0.3"
 wasmparser = "0.225"
 uuid = { version = "1.0", features = ["v4"] }
@@ -101,6 +106,8 @@ urlpattern = "0.6.0"
 nono = { version = "0.53", default-features = false }
 
 [dev-dependencies]
+deno_ast = { version = "0.52", features = ["cjs"] }
+merve = "1.2.2"
 tokio-test = "0.4"
 reqwest = { version = "0.12", features = ["json", "cookies", "stream", "rustls-tls", "http2"], default-features = false }
 uuid = { version = "1.0", features = ["v4"] }

@@ -81,12 +81,16 @@ w("")
 
 # ── Node ────────────────────────────────────────────────────────────────
 tag = node_versions["node"]["tag"]
-npass = sum(1 for v in node.values() if v is True)
-nignore = {k: v for k, v in node.items() if isinstance(v, dict) and v.get("ignore")}
-ntotal = len(node) - len(nignore)
+npass = sum(1 for value in node.values() if value["status"] == "pass")
+nrunnable = sum(1 for value in node.values() if value["status"] in ("pass", "fail"))
+nclassified = {
+    key: value
+    for key, value in node.items()
+    if value["status"] not in ("pass", "fail")
+}
 w(f"## Node.js core tests (node {tag})")
 w("")
-w(f"**{npass} / {ntotal} vendored tests passing.** The `node:` modules")
+w(f"**{npass} / {nrunnable} vendored runnable tests passing.** The `node:` modules")
 w("served by the module loader:")
 w("")
 w("| Module | Implementation |")
@@ -105,7 +109,8 @@ w("| `node:module` | `createRequire`/`builtinModules` over the builtin registry 
 w("| `node:net` | address helpers; sockets are inert (transports are policy-gated) |")
 w("| `node:os` | fixed sandbox values |")
 w("| `node:path` | Node's own lib source over a primordials shim |")
-w("| `node:process` | fixed sandbox values; no host env |")
+w("| `node:perf_hooks` | user timing, observers, and function timing over the shared performance timeline |")
+w("| `node:process` | fixed sandbox values plus active timer/immediate resource snapshots; no host env |")
 w("| `node:querystring` | Node's own lib source over a primordials shim |")
 w("| `node:stream` | purpose-written subset (legacy `Stream` base + Readable/Writable/Duplex/Transform) |")
 w("| `node:stream/web` | the runtime's WHATWG streams globals re-exported |")
@@ -113,13 +118,16 @@ w("| `node:timers` (+`/promises`) | the runtime timer globals, plus promisified 
 w("| `node:tls` | option plumbing; TLS terminates host-side in the transports |")
 w("| `node:url` | WHATWG URL + file-URL helpers |")
 w("| `node:util` | purpose-written subset |")
-w("| `node:zlib` | one-shot gzip/deflate over CompressionStream / DecompressionStream |")
+w("| `node:zlib` | CRC32 plus one-shot gzip/deflate over CompressionStream / DecompressionStream |")
 w("")
-if nignore:
-    w("Skipped tests (with reasons):")
+if nclassified:
+    w("Classified non-runnable tests (with reasons):")
     w("")
-    for k, v in sorted(nignore.items()):
-        w(f"- `{k.split('/')[-1]}` — {v.get('reason', 'ignored')}")
+    for key, value in sorted(nclassified.items()):
+        w(
+            f"- `{key.split('/')[-1]}` — `{value['status']}` / "
+            f"`{value['profile']}`: {value['reason']}"
+        )
     w("")
 
 w("## Known limitations")

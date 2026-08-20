@@ -137,7 +137,7 @@ struct FsPolicyInput {
 // ── Async deno_core ops ──────────────────────────────────────────────────
 
 /// Read a file as UTF-8 text.
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_fs_read_file_text(
     state: Rc<RefCell<OpState>>,
@@ -189,7 +189,7 @@ async fn op_fs_read_file_text(
 }
 
 /// Read a file as raw bytes, returned as a Uint8Array to JavaScript.
-#[op2(async)]
+#[op2]
 #[buffer]
 async fn op_fs_read_file_buffer(
     state: Rc<RefCell<OpState>>,
@@ -229,8 +229,47 @@ async fn op_fs_read_file_buffer(
     .map_err(|e: String| JsErrorBox::generic(e))
 }
 
+/// Write a UTF-8 file synchronously after evaluating the filesystem policy.
+#[op2(fast)]
+fn op_fs_write_file_text_sync(
+    state: &mut OpState,
+    #[string] path: String,
+    #[string] data: String,
+) -> Result<(), JsErrorBox> {
+    let config = state
+        .try_borrow::<FsConfig>()
+        .cloned()
+        .ok_or_else(|| JsErrorBox::generic("fs: internal error - no fs config available"))?;
+    let mount = state.try_borrow::<FsMountHandle>().cloned();
+    check_policy_sync(&config, "writeFile", &path, None, None, None)?;
+    if let Some(mount) = mount {
+        let write_path = path.clone();
+        return std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| format!("fs.writeFileSync: failed to create runtime: {error}"))?;
+            runtime.block_on(async move {
+                mount
+                    .0
+                    .lock()
+                    .await
+                    .write(Path::new(&write_path), data.as_bytes())
+                    .await
+                    .map_err(|error| format!("fs.writeFileSync: {write_path}: {error}"))
+            })
+        })
+        .join()
+        .map_err(|_| JsErrorBox::generic("fs.writeFileSync thread panicked"))?
+        .map_err(JsErrorBox::generic);
+    }
+
+    std::fs::write(&path, data.as_bytes())
+        .map_err(|error| JsErrorBox::generic(io_err("writeFile", &path, &error)))
+}
+
 /// Write a file from a UTF-8 string.
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_fs_write_file_text(
     state: Rc<RefCell<OpState>>,
@@ -266,7 +305,7 @@ async fn op_fs_write_file_text(
 }
 
 /// Write a file from raw bytes (Uint8Array from JavaScript).
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_fs_write_file_buffer(
     state: Rc<RefCell<OpState>>,
@@ -300,7 +339,7 @@ async fn op_fs_write_file_buffer(
 }
 
 /// Append to a file.
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_fs_append_file(
     state: Rc<RefCell<OpState>>,
@@ -345,7 +384,7 @@ async fn op_fs_append_file(
 }
 
 /// Read a directory. Returns JSON array of entry names.
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_fs_readdir(
     state: Rc<RefCell<OpState>>,
@@ -387,7 +426,7 @@ async fn op_fs_readdir(
 }
 
 /// Stat a path. Returns JSON with size, isFile, isDirectory, etc.
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_fs_stat(
     state: Rc<RefCell<OpState>>,
@@ -420,7 +459,7 @@ async fn op_fs_stat(
 }
 
 /// Stat a path **without** following a final symlink (Node `fs.lstat`).
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_fs_lstat(
     state: Rc<RefCell<OpState>>,
@@ -454,7 +493,7 @@ async fn op_fs_lstat(
 }
 
 /// Read a symlink's target, returned as a string.
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_fs_readlink(
     state: Rc<RefCell<OpState>>,
@@ -486,8 +525,61 @@ async fn op_fs_readlink(
     .map_err(|e: String| JsErrorBox::generic(e))
 }
 
+/// Create a symlink synchronously after evaluating the filesystem policy.
+#[op2(fast)]
+fn op_fs_symlink_sync(
+    state: &mut OpState,
+    #[string] target: String,
+    #[string] link: String,
+) -> Result<(), JsErrorBox> {
+    let config = state
+        .try_borrow::<FsConfig>()
+        .cloned()
+        .ok_or_else(|| JsErrorBox::generic("fs: internal error - no fs config available"))?;
+    let mount = state.try_borrow::<FsMountHandle>().cloned();
+    check_policy_sync(&config, "symlink", &link, Some(&target), None, None)?;
+    if let Some(mount) = mount {
+        let error_link = link.clone();
+        let error_target = target.clone();
+        return std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| format!("fs.symlinkSync: failed to create runtime: {error}"))?;
+            runtime.block_on(async move {
+                mount
+                    .0
+                    .lock()
+                    .await
+                    .symlink(Path::new(&target), Path::new(&link))
+                    .await
+                    .map_err(|error| format!("fs.symlinkSync: {error_link} -> {error_target}: {error}"))
+            })
+        })
+        .join()
+        .map_err(|_| JsErrorBox::generic("fs.symlinkSync thread panicked"))?
+        .map_err(JsErrorBox::generic);
+    }
+
+    symlink_impl_sync(&target, &link)
+        .map_err(|error| JsErrorBox::generic(io_err2("symlink", &link, &target, &error)))
+}
+
+#[cfg(unix)]
+fn symlink_impl_sync(target: &str, link: &str) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(not(unix))]
+fn symlink_impl_sync(_target: &str, _link: &str) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "symlinks are not supported on this platform",
+    ))
+}
+
 /// Create a symlink at `link` pointing to `target` (Node `fs.symlink(target, path)`).
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_fs_symlink(
     state: Rc<RefCell<OpState>>,
@@ -535,7 +627,7 @@ async fn symlink_impl(_target: &str, _link: &str) -> std::io::Result<()> {
 }
 
 /// Create a directory.
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_fs_mkdir(
     state: Rc<RefCell<OpState>>,
@@ -573,7 +665,7 @@ async fn op_fs_mkdir(
 }
 
 /// Remove a file or directory.
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_fs_rm(
     state: Rc<RefCell<OpState>>,
@@ -618,7 +710,7 @@ async fn op_fs_rm(
 }
 
 /// Rename (move) a file or directory.
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_fs_rename(
     state: Rc<RefCell<OpState>>,
@@ -652,7 +744,7 @@ async fn op_fs_rename(
 }
 
 /// Copy a file.
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_fs_copy_file(
     state: Rc<RefCell<OpState>>,
@@ -687,7 +779,7 @@ async fn op_fs_copy_file(
 }
 
 /// Check if a path exists.
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_fs_exists(
     state: Rc<RefCell<OpState>>,
@@ -721,7 +813,7 @@ async fn op_fs_exists(
 /// Open a streaming write to `path`, returning a small integer handle. Bytes are
 /// fed incrementally (chunked on the fly), so a multi-GB file never has to exist
 /// in memory all at once.
-#[op2(async)]
+#[op2]
 #[smi]
 async fn op_fs_write_stream_open(
     state: Rc<RefCell<OpState>>,
@@ -763,7 +855,7 @@ async fn op_fs_write_stream_open(
 }
 
 /// Feed a chunk of bytes to an open write stream.
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_fs_write_stream_chunk_buffer(
     state: Rc<RefCell<OpState>>,
@@ -777,7 +869,7 @@ async fn op_fs_write_stream_chunk_buffer(
 }
 
 /// Feed a chunk of text to an open write stream.
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_fs_write_stream_chunk_text(
     state: Rc<RefCell<OpState>>,
@@ -791,7 +883,7 @@ async fn op_fs_write_stream_chunk_text(
 }
 
 /// Finish an open write stream: flush the final chunk and install the file.
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_fs_write_stream_close(
     state: Rc<RefCell<OpState>>,
@@ -852,6 +944,7 @@ deno_core::extension!(
     ops = [
         op_fs_read_file_text,
         op_fs_read_file_buffer,
+        op_fs_write_file_text_sync,
         op_fs_write_file_text,
         op_fs_write_file_buffer,
         op_fs_append_file,
@@ -859,6 +952,7 @@ deno_core::extension!(
         op_fs_stat,
         op_fs_lstat,
         op_fs_readlink,
+        op_fs_symlink_sync,
         op_fs_symlink,
         op_fs_mkdir,
         op_fs_rm,
@@ -966,6 +1060,29 @@ const FS_JS_WRAPPER: &str = r#"
         const enc = readEncoding(options);
         if (enc && enc !== 'buffer') return await readFileText(path);
         return await readFileBuffer(path);
+    }
+
+    function writeFileSync(path, data) {
+        if (typeof path !== 'string') throw new TypeError('fs.writeFileSync: path must be a string');
+        if (typeof data !== 'string') {
+            throw new TypeError('fs.writeFileSync: binary data is not supported yet');
+        }
+        try {
+            ops.op_fs_write_file_text_sync(path, data);
+        } catch (e) {
+            throw tagError(e);
+        }
+    }
+
+    function symlinkSync(target, link) {
+        if (typeof target !== 'string' || typeof link !== 'string') {
+            throw new TypeError('fs.symlinkSync: target and path must be strings');
+        }
+        try {
+            ops.op_fs_symlink_sync(target, link);
+        } catch (e) {
+            throw tagError(e);
+        }
     }
 
     async function writeFile(path, data) {
@@ -1086,7 +1203,7 @@ const FS_JS_WRAPPER: &str = r#"
     };
 
     globalThis.fs = {
-        readFile, writeFile, appendFile, readdir, stat, lstat, mkdir, rm, rmdir,
+        readFile, writeFile, writeFileSync, symlinkSync, appendFile, readdir, stat, lstat, mkdir, rm, rmdir,
         unlink, rename, copyFile, readlink, symlink, exists, createWriteStream,
         promises,
     };
@@ -1246,6 +1363,40 @@ fn mount_stat_json(s: &super::fs_mount::Stat) -> String {
         "birthtimeMs": null,
     })
     .to_string()
+}
+
+fn check_policy_sync(
+    config: &FsConfig,
+    operation: &str,
+    path: &str,
+    destination: Option<&str>,
+    recursive: Option<bool>,
+    encoding: Option<&str>,
+) -> Result<(), JsErrorBox> {
+    let policy_chain = config.policy_chain.clone();
+    let operation = operation.to_owned();
+    let path = path.to_owned();
+    let destination = destination.map(str::to_owned);
+    let encoding = encoding.map(str::to_owned);
+    let mcp_headers = config.mcp_headers.clone();
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| format!("fs.{operation}: failed to create policy runtime: {error}"))?;
+        runtime.block_on(check_policy(
+            &policy_chain,
+            &operation,
+            &path,
+            destination.as_deref(),
+            recursive,
+            encoding.as_deref(),
+            mcp_headers.as_ref(),
+        ))
+    })
+    .join()
+    .map_err(|_| JsErrorBox::generic("fs policy thread panicked"))?
+    .map_err(JsErrorBox::generic)
 }
 
 async fn check_policy(

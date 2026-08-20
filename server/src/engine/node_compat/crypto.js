@@ -282,17 +282,50 @@ function fillBytes(view, byteOffset, byteLength) {
     new Uint8Array(view.buffer, view.byteOffset + byteOffset, byteLength).set(bytes);
 }
 
-function checkRange(name, value, min, max) {
-    if (typeof value !== 'number' || !Number.isInteger(value) ||
-        value < min || value > max) {
+function formatReceived(value) {
+    if (value === undefined || value === null) return String(value);
+    if (typeof value === 'object') {
+        const name = value.constructor && value.constructor.name;
+        return name ? 'an instance of ' + name : String(value);
+    }
+    if (typeof value === 'string') return `type string ('${value}')`;
+    return 'type ' + typeof value + ' (' + String(value) + ')';
+}
+
+function validateRandomSize(size) {
+    if (typeof size !== 'number') {
+        throw nodeError(TypeError, 'ERR_INVALID_ARG_TYPE',
+            'The "size" argument must be of type number. Received ' +
+            formatReceived(size));
+    }
+    if (Number.isNaN(size) || size < 0 || size > 0x7fffffff) {
         throw nodeError(RangeError, 'ERR_OUT_OF_RANGE',
-            'The value of "' + name + '" is out of range. It must be an integer ' +
-            '>= ' + min + ' && <= ' + max + '. Received ' + value);
+            'The value of "size" is out of range. It must be >= 0 && <= ' +
+            '2147483647. Received ' + size);
+    }
+    return Math.floor(size);
+}
+
+function checkRange(name, value, min, max) {
+    if (typeof value !== 'number') {
+        throw nodeError(TypeError, 'ERR_INVALID_ARG_TYPE',
+            'The "' + name + '" argument must be of type number. Received ' +
+            formatReceived(value));
+    }
+    if (!Number.isInteger(value) || value < min || value > max) {
+        throw nodeError(RangeError, 'ERR_OUT_OF_RANGE',
+            'The value of "' + name + '" is out of range. It must be >= ' +
+            min + ' && <= ' + max + '. Received ' + value);
     }
 }
 
 export function randomBytes(size, callback) {
-    checkRange('size', size, 0, 0x7fffffff);
+    size = validateRandomSize(size);
+    if (callback !== undefined && typeof callback !== 'function') {
+        throw nodeError(TypeError, 'ERR_INVALID_ARG_TYPE',
+            'The "callback" argument must be of type function. Received ' +
+            formatReceived(callback));
+    }
     const buf = Buffer.alloc(size);
     fillBytes(buf, 0, size);
     if (typeof callback === 'function') {
@@ -302,16 +335,28 @@ export function randomBytes(size, callback) {
     return buf;
 }
 
+export const pseudoRandomBytes = randomBytes;
+
 export function randomFillSync(buffer, offset, size) {
-    if (!ArrayBuffer.isView(buffer)) {
+    const isRawBuffer = buffer instanceof ArrayBuffer ||
+        (typeof SharedArrayBuffer !== 'undefined' && buffer instanceof SharedArrayBuffer);
+    const view = ArrayBuffer.isView(buffer)
+        ? buffer
+        : isRawBuffer ? new Uint8Array(buffer) : null;
+    if (view === null) {
         throw nodeError(TypeError, 'ERR_INVALID_ARG_TYPE',
-            'The "buffer" argument must be an instance of Buffer, TypedArray, or DataView');
+            'The "buffer" argument must be an instance of Buffer, TypedArray, DataView, ArrayBuffer, or SharedArrayBuffer');
     }
     if (offset === undefined) offset = 0;
-    checkRange('offset', offset, 0, buffer.byteLength);
-    if (size === undefined) size = buffer.byteLength - offset;
-    checkRange('size', size, 0, buffer.byteLength - offset);
-    fillBytes(buffer, offset, size);
+    checkRange('offset', offset, 0, view.byteLength);
+    if (size === undefined) size = view.byteLength - offset;
+    checkRange('size', size, 0, 0x7fffffff);
+    if (size + offset > view.byteLength) {
+        throw nodeError(RangeError, 'ERR_OUT_OF_RANGE',
+            'The value of "size + offset" is out of range. It must be <= ' +
+            view.byteLength + '. Received ' + (size + offset));
+    }
+    fillBytes(view, offset, size);
     return buffer;
 }
 
@@ -348,26 +393,51 @@ export function randomUUID(options) {
 
 const MAX_RANDOM_RANGE = 281474976710655; // 2**48 - 1: fits 6 CSPRNG bytes.
 
+function formatRangeReceived(value) {
+    const string = String(value);
+    if (!Number.isInteger(value) || Math.abs(value) <= 2 ** 32) return string;
+    const start = string[0] === '-' ? 1 : 0;
+    let result = '';
+    let index = string.length;
+    for (; index >= start + 4; index -= 3) {
+        result = '_' + string.slice(index - 3, index) + result;
+    }
+    return string.slice(0, index) + result;
+}
+
+function validateSafeInteger(value, name) {
+    if (!Number.isSafeInteger(value)) {
+        throw nodeError(TypeError, 'ERR_INVALID_ARG_TYPE',
+            'The "' + name + '" argument must be a safe integer. Received ' +
+            formatReceived(value));
+    }
+}
+
 export function randomInt(min, max, callback) {
+    const singleBound = max === undefined || typeof max === 'function';
     if (typeof max === 'function') {
         callback = max; max = min; min = 0;
     } else if (max === undefined) {
         max = min; min = 0;
     }
-    if (!Number.isSafeInteger(min) || !Number.isSafeInteger(max)) {
-        throw nodeError(TypeError, 'ERR_INVALID_ARG_TYPE',
-            'The "min" and "max" arguments must be safe integers');
-    }
+    validateSafeInteger(min, 'min');
+    validateSafeInteger(max, 'max');
     const range = max - min;
     if (!(range > 0)) {
         throw nodeError(RangeError, 'ERR_OUT_OF_RANGE',
             'The value of "max" is out of range. It must be greater than the value of "min" (' +
-            min + '). Received ' + max);
+            min + '). Received ' + formatRangeReceived(max));
     }
     if (range > MAX_RANDOM_RANGE) {
+        const name = singleBound ? 'max' : 'max - min';
         throw nodeError(RangeError, 'ERR_OUT_OF_RANGE',
-            'The value of "max - min" is out of range. It must be <= ' +
-            MAX_RANDOM_RANGE + '. Received ' + range);
+            'The value of "' + name + '" is out of range. It must be <= ' +
+            MAX_RANDOM_RANGE + '. Received ' + formatRangeReceived(singleBound ? max : range));
+    }
+    if (callback !== undefined && typeof callback !== 'function') {
+        throw nodeError(TypeError, 'ERR_INVALID_ARG_TYPE',
+            'The "callback" argument must be of type function. Received ' +
+            formatReceived(callback));
     }
     // Rejection sampling over 48-bit draws to avoid modulo bias.
     const excess = 2 ** 48 % range;
@@ -418,7 +488,7 @@ export function getRandomValues(typedArray) {
 // exists so `crypto.constants` property reads don't throw.
 export const constants = Object.freeze({});
 
-export default {
+const crypto = {
     Hash,
     Hmac,
     createHash,
@@ -436,3 +506,17 @@ export default {
     getRandomValues,
     constants,
 };
+
+Object.defineProperties(crypto, {
+    pseudoRandomBytes: {
+        value: randomBytes, writable: true, configurable: true, enumerable: false,
+    },
+    prng: {
+        value: randomBytes, writable: true, configurable: true, enumerable: false,
+    },
+    rng: {
+        value: randomBytes, writable: true, configurable: true, enumerable: false,
+    },
+});
+
+export default crypto;

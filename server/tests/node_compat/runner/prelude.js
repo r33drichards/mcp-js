@@ -1,29 +1,51 @@
 // Prelude for running Node.js core tests inside the mcp-v8 engine.
 //
-// Runs as ESM before the (CJS) test body, which is evaluated via indirect
-// eval by the Rust harness. Provides the CJS shell: require() over the
+// Runs as ESM before the test body, which the Rust harness invokes through
+// a CommonJS function wrapper. Provides require() over the
 // node: compat registry, module/exports, __filename/__dirname, the process
 // and Buffer globals, and the `../common` module with mustCall tracking.
 // The harness prints a JSON result under a sentinel once timers drain.
 
 import assert, { strict as assertStrict } from 'node:assert';
 import buffer, { Buffer } from 'node:buffer';
+import childProcess from 'node:child_process';
 import consoleModule from 'node:console';
 import crypto from 'node:crypto';
+import dns from 'node:dns';
+import dnsPromises from 'node:dns/promises';
 import events from 'node:events';
+import fs from 'node:fs';
+import fsPromises from 'node:fs/promises';
+import http from 'node:http';
+import http2 from 'node:http2';
+import https from 'node:https';
+import internalEsmResolve from 'node:internal/modules/esm/resolve';
 import moduleModule from 'node:module';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
+import perfHooks from 'node:perf_hooks';
 import process from 'node:process';
 import querystring from 'node:querystring';
 import stream from 'node:stream';
+import streamWeb from 'node:stream/web';
+import test from 'node:test';
 import timers from 'node:timers';
 import timersPromises from 'node:timers/promises';
+import tls from 'node:tls';
 import url from 'node:url';
 import util from 'node:util';
+import utilTypes from 'node:util/types';
+import zlib from 'node:zlib';
 
 globalThis.process = process;
 globalThis.Buffer = Buffer;
+globalThis.global = globalThis;
+globalThis.__NODE_COMPAT_RESOLVE_IMPORT__ = (specifier, parentURL) =>
+    globalThis.__mcpV8ResolveImportSpecifier(specifier, parentURL);
+globalThis.__mcpV8ModuleHooks ??= [];
+globalThis.__NODE_COMPAT_IMPORT_META_RESOLVE__ =
+    globalThis.__mcpV8ImportMetaResolve;
 
 const failures = [];
 const mustCalls = [];
@@ -40,10 +62,12 @@ const common = {
     isDumbTerminal: false,
     isMainThread: true,
     hasCrypto: true,
+    hasInspector: false,
     hasIntl: true,
     hasIPv6: false,
     enoughTestMem: true,
     buildType: 'Release',
+    canCreateSymLink() { return true; },
 
     platformTimeout(ms) { return ms; },
 
@@ -55,6 +79,9 @@ const common = {
         const err = new Error('__NODE_TEST_SKIP__');
         err.__nodeTestSkip = true;
         throw err;
+    },
+    skipIfInspectorDisabled() {
+        if (!common.hasInspector) common.skip('V8 inspector is disabled');
     },
 
     mustCall(fn, exact) {
@@ -68,6 +95,20 @@ const common = {
             assert.ifError(err);
             if (typeof fn === 'function') return fn.call(this, ...args);
         });
+    },
+    expectsError(validator, exact) {
+        return common.mustCall((...args) => {
+            if (args.length !== 1) {
+                assert.fail(`Expected one argument, got ${JSON.stringify(args)}`);
+            }
+            const error = args[0];
+            assert.strictEqual(
+                Object.prototype.propertyIsEnumerable.call(error, 'message'),
+                false,
+            );
+            assert.throws(() => { throw error; }, validator);
+            return true;
+        }, exact);
     },
     _mustCallInner(fn, criteria, field) {
         if (typeof fn === 'number') { criteria = fn; fn = () => {}; }
@@ -90,6 +131,49 @@ const common = {
         return function mustNotCall(...args) {
             failures.push('mustNotCall() was called' + (msg ? ': ' + msg : '') +
                 (args.length ? ' with args: ' + args.map((a) => String(a)).join(', ') : ''));
+        };
+    },
+
+    async spawnPromisified(command, args = [], options = {}) {
+        const hostCorpus = globalThis.__NODE_TEST_CORPUS_HOST__;
+        const hostExecPath = globalThis.__NODE_TEST_EXEC_PATH__;
+        function translate(value) {
+            const text = String(value);
+            if (hostCorpus && text.startsWith('/test/')) return hostCorpus + text;
+            if (hostCorpus && text.startsWith('file:///test/')) {
+                return 'file://' + hostCorpus + text.slice('file://'.length);
+            }
+            return text;
+        }
+        const selfHosted = command === process.execPath && hostExecPath;
+        const executable = selfHosted ? hostExecPath : translate(command);
+        const childArgs = selfHosted
+            ? ['--node-compat-cli', ...args]
+            : Array.from(args, translate);
+        const commandEnv = selfHosted && options.cwd
+            ? { ...options.env, NODE_COMPAT_FILE_ROOT: globalThis.__NODE_TEST_TMPDIR__ }
+            : options.env;
+        const output = await new Deno.Command(executable, {
+            args: childArgs,
+            cwd: options.cwd
+                ? (selfHosted ? options.cwd : translate(options.cwd))
+                : undefined,
+            env: commandEnv,
+        }).output();
+        const decoder = new TextDecoder();
+        function normalizeOutput(bytes) {
+            let text = decoder.decode(bytes);
+            if (hostCorpus) {
+                const hostTestRoot = hostCorpus.replace(/\/+$/, '') + '/test';
+                text = text.split(hostTestRoot).join('/test');
+            }
+            return text;
+        }
+        return {
+            code: output.code,
+            signal: output.signal,
+            stdout: normalizeOutput(output.stdout),
+            stderr: normalizeOutput(output.stderr),
         };
     },
     mustNotMutateObjectDeep(obj) { return obj; },
@@ -154,56 +238,123 @@ const modules = {
     },
     'assert/strict': assertStrict,
     buffer: buffer,
+    child_process: childProcess,
     console: consoleModule,
     crypto: crypto,
+    dns: dns,
+    'dns/promises': dnsPromises,
     events: events,
+    fs: fs,
+    'fs/promises': fsPromises,
+    http: http,
+    http2: http2,
+    https: https,
+    'internal/modules/esm/resolve': internalEsmResolve,
     module: moduleModule,
+    net: net,
     os: os,
     path: path,
+    perf_hooks: perfHooks,
     process: process,
     querystring: querystring,
     stream: stream,
+    'stream/web': streamWeb,
+    test: test,
     timers: timers,
     'timers/promises': timersPromises,
+    tls: tls,
     url: url,
     util: util,
+    'util/types': utilTypes,
+    zlib: zlib,
 };
 
-globalThis.require = function require(id) {
+const fixtures = {
+    fixturesDir: '/test/fixtures',
+    path: (...args) => path.join('/test/fixtures', ...args),
+    fileURL: (...args) => url.pathToFileURL(path.join('/test/fixtures', ...args)),
+};
+
+const tmpdir = {
+    refresh() {},
+    resolve: (...args) => path.resolve(globalThis.__NODE_TEST_TMPDIR__, ...args),
+    fileURL: (...args) => url.pathToFileURL(path.resolve(globalThis.__NODE_TEST_TMPDIR__, ...args)),
+    hasEnoughSpace: () => true,
+    get path() { return globalThis.__NODE_TEST_TMPDIR__; },
+    set path(value) { globalThis.__NODE_TEST_TMPDIR__ = path.resolve(String(value)); },
+};
+
+globalThis.__NODE_TEST_COMMON__ = common;
+globalThis.__NODE_TEST_PENDING__ = 0;
+globalThis.__NODE_TEST_RECORD_FAILURE__ = function recordFailure(error) {
+    failures.push(error && error.stack ? error.stack : String(error));
+};
+globalThis.__NODE_TEST_FIXTURES__ = fixtures;
+
+const testPath = '/' + (globalThis.__NODE_TEST_PATH__ || ('test/parallel/' + (globalThis.__NODE_TEST_NAME__ || 'test.js')));
+const testDir = testPath.slice(0, testPath.lastIndexOf('/')) || '/';
+const virtualRequire = moduleModule.createRequire(testPath);
+
+function nodeRequire(id) {
     let name = String(id);
     if (name.startsWith('node:')) name = name.slice(5);
     if (name === '../common' || name === '../common/index.js') return common;
-    if (name === '../common/fixtures') {
-        return {
-            fixturesDir: '/test/fixtures',
-            path: (...args) => ['/test/fixtures', ...args].join('/'),
-        };
+    if (name === '../common/fixtures' || name === '../common/fixtures.js') {
+        return fixtures;
     }
+    if (name === '../common/tmpdir' || name === '../common/tmpdir.js') return tmpdir;
     if (name.startsWith('../common/')) {
         throw new Error('Unsupported common submodule: ' + name);
     }
     if (Object.prototype.hasOwnProperty.call(modules, name)) return modules[name];
-    const err = new Error("Cannot find module '" + id + "'");
-    err.code = 'MODULE_NOT_FOUND';
-    throw err;
-};
+    return virtualRequire(id);
+}
+nodeRequire.resolve = virtualRequire.resolve;
+nodeRequire.cache = virtualRequire.cache;
+nodeRequire.main = virtualRequire.main;
 
 // The harness schedules its drain-time report through this stash so tests
 // that delete the timer globals (test-timers-api-refs) can still report.
 globalThis.__NODE_TEST_SETTIMEOUT__ = globalThis.setTimeout;
 
-globalThis.module = { exports: {} };
-globalThis.exports = globalThis.module.exports;
-globalThis.__filename = '/test/parallel/' + (globalThis.__NODE_TEST_NAME__ || 'test.js');
-globalThis.__dirname = '/test/parallel';
+globalThis.__NODE_TEST_RUN_CJS__ = function runCommonJS(source) {
+    const testModule = { exports: {} };
+    const compiled = Function(
+        'exports', 'require', 'module', '__filename', '__dirname', String(source),
+    );
+    return compiled.call(
+        testModule.exports, testModule.exports, nodeRequire, testModule, testPath, testDir,
+    );
+};
+
+globalThis.__NODE_TEST_SCHEDULE_REPORT__ = function scheduleReport(sentinel) {
+    function scheduleCheck(delay) {
+        const timer = globalThis.__NODE_TEST_SETTIMEOUT__(check, delay);
+        globalThis.__mcpV8SetTimerResourceTracked(timer, false);
+    }
+    function check() {
+        const active = globalThis.__mcpV8GetActiveResourcesInfo();
+        if (active.length > 0 || globalThis.__NODE_TEST_PENDING__ > 0) {
+            scheduleCheck(25);
+            return;
+        }
+        console.log(String(sentinel) + globalThis.__NODE_TEST_REPORT__());
+    }
+    // Preserve the original settle window for promise-only work, then wait
+    // until all referenced resources supported by the runtime have drained.
+    scheduleCheck(300);
+};
 
 globalThis.__NODE_TEST_REPORT__ = function () {
     for (const c of mustCalls) {
         const ok = c.kind === 'exact' ? c.actual === c.expected : c.actual >= c.expected;
         if (!ok) {
+            const callsite = String(c.stack || '')
+                .split('\n')
+                .find((line) => line.includes('file:///test/'));
             failures.push(
-                `mustCall(${c.name}): expected ${c.kind === 'exact' ? '' : '>= '}` +
-                `${c.expected} calls, got ${c.actual}`);
+                `mustCall(${c.name}${callsite ? ` ${callsite.trim()}` : ''}): expected ` +
+                `${c.kind === 'exact' ? '' : '>= '}${c.expected} calls, got ${c.actual}`);
         }
     }
     return JSON.stringify({
