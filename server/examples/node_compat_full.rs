@@ -667,6 +667,64 @@ fn inherited_package_modules(test_root: &Path, directory: &Path) -> bool {
         package_uses_modules(ancestor, inherited)
     })
 }
+fn add_host_modules(
+    root: &Path,
+    directory: &Path,
+    inherited_modules: bool,
+    modules: &mut HashMap<String, String>,
+    commonjs_modules: &mut HashMap<String, String>,
+    files: &mut HashSet<String>,
+) -> Result<(), String> {
+    let directory_uses_modules = package_uses_modules(directory, inherited_modules);
+    for entry in fs::read_dir(directory).map_err(|error| error.to_string())? {
+        let path = entry.map_err(|error| error.to_string())?.path();
+        if path.is_dir() {
+            add_host_modules(
+                root,
+                &path,
+                directory_uses_modules,
+                modules,
+                commonjs_modules,
+                files,
+            )?;
+            continue;
+        }
+        let specifier = ModuleSpecifier::from_file_path(&path)
+            .map_err(|_| format!("invalid host module path: {}", path.display()))?;
+        files.insert(specifier.to_string());
+        if !matches!(
+            path.extension().and_then(|value| value.to_str()),
+            Some("js" | "mjs" | "cjs" | "json")
+        ) {
+            continue;
+        }
+        let source = fs::read_to_string(&path).map_err(|error| error.to_string())?;
+        let source = strip_shebang(&source);
+        let extension = path.extension().and_then(|value| value.to_str());
+        let detected_esm = extension == Some("mjs")
+            || (extension == Some("js")
+                && (directory_uses_modules || source_uses_esm_syntax(specifier.as_str(), source)));
+        let is_commonjs = extension == Some("cjs") || (extension == Some("js") && !detected_esm);
+
+        if extension == Some("json") || is_commonjs {
+            commonjs_modules.insert(specifier.to_string(), source.to_string());
+        } else if detected_esm
+            && let Some(commonjs) = transpile_esm_to_commonjs(specifier.as_str(), source)
+        {
+            commonjs_modules.insert(specifier.to_string(), commonjs);
+        }
+        let module_source = if is_commonjs {
+            let export_names =
+                commonjs_export_names_for_path(root, &path, source, &mut HashSet::new());
+            wrap_commonjs_with_names(source, export_names)
+        } else {
+            source.to_string()
+        };
+        modules.insert(specifier.to_string(), module_source);
+    }
+    Ok(())
+}
+
 fn corpus_modules_for_cli(
     corpus: &Path,
     invocation: &NodeCliInvocation,
@@ -721,6 +779,25 @@ fn corpus_modules_for_cli(
             &mut commonjs_modules,
             &mut files,
         )?;
+    }
+    if let Ok(file_root) = std::env::var("NODE_COMPAT_FILE_ROOT") {
+        let file_root = fs::canonicalize(file_root).map_err(|error| error.to_string())?;
+        let cwd = fs::canonicalize(std::env::current_dir().map_err(|error| error.to_string())?)
+            .map_err(|error| error.to_string())?;
+        if !cwd.starts_with(&file_root) {
+            return Err("Node CLI cwd is outside NODE_COMPAT_FILE_ROOT".to_owned());
+        }
+        add_host_modules(
+            &file_root,
+            &cwd,
+            inherited_package_modules(&file_root, &cwd),
+            &mut modules,
+            &mut commonjs_modules,
+            &mut files,
+        )?;
+        let root = ModuleSpecifier::from_directory_path(&file_root)
+            .map_err(|_| "invalid NODE_COMPAT_FILE_ROOT".to_owned())?;
+        files.insert(format!("mcp-v8:file-root:{root}"));
     }
     modules.insert("node-test:prelude".into(), PRELUDE.into());
     modules.insert("node-test:common".into(), COMMON_ESM.into());
@@ -1078,6 +1155,16 @@ fn run_node_compat_cli(
         virtual_commonjs_modules: Some(modules.commonjs.clone()),
         virtual_files: Some(modules.files.clone()),
     };
+    let eval_main_specifier = invocation.eval_source.as_ref().map(|_| {
+        let name = if invocation.input_type.as_deref() == Some("module") {
+            "[eval1]"
+        } else {
+            "[eval]"
+        };
+        ModuleSpecifier::from_file_path(std::env::current_dir().unwrap().join(name))
+            .unwrap()
+            .to_string()
+    });
     let mut config = ExecutionConfig::new(256 * 1024 * 1024)
         .console_tree(tree.clone())
         .console_error_tree(error_tree.clone())
@@ -1085,6 +1172,9 @@ fn run_node_compat_cli(
         .fetch_config(&fetch)
         .maybe_subprocess_config(Some(&subprocess))
         .module_loader_config(&module_loader);
+    if let Some(main_specifier) = eval_main_specifier.as_deref() {
+        config = config.main_module_specifier(main_specifier);
+    }
     if let Some((specifier, source, mode)) = compile_module.as_ref() {
         config = config.compile_module(specifier, source, *mode);
     }
@@ -1137,6 +1227,39 @@ fn node_compat_cli_main(args: &[String]) -> Result<(), String> {
         std::process::exit(output.exit_code);
     }
     Ok(())
+}
+
+fn test_tmpdir_modules(path: &Path) -> (String, String) {
+    let path = serde_json::to_string(path.to_str().unwrap()).unwrap();
+    let commonjs = format!(
+        "const path = require('path');\n\
+         const {{ pathToFileURL }} = require('url');\n\
+         let tmpPath = {path};\n\
+         const tmpdir = {{\n\
+           refresh() {{}},\n\
+           resolve: (...args) => path.resolve(tmpPath, ...args),\n\
+           fileURL: (...args) => pathToFileURL(path.resolve(tmpPath, ...args)),\n\
+           hasEnoughSpace: () => true,\n\
+           get path() {{ return tmpPath; }},\n\
+           set path(value) {{ tmpPath = path.resolve(String(value)); }},\n\
+         }};\n\
+         module.exports = tmpdir;\n"
+    );
+    let esm = format!(
+        "import path from 'node:path';\n\
+         import {{ pathToFileURL }} from 'node:url';\n\
+         let tmpPath = {path};\n\
+         export function refresh() {{}}\n\
+         export const resolve = (...args) => path.resolve(tmpPath, ...args);\n\
+         export const fileURL = (...args) => pathToFileURL(path.resolve(tmpPath, ...args));\n\
+         export const hasEnoughSpace = () => true;\n\
+         const tmpdir = {{ refresh, resolve, fileURL, hasEnoughSpace,\n\
+           get path() {{ return tmpPath; }},\n\
+           set path(value) {{ tmpPath = path.resolve(String(value)); }},\n\
+         }};\n\
+         export default tmpdir;\n"
+    );
+    (esm, commonjs)
 }
 
 fn isolated_fs_policy(root: &Path) -> Result<(tempfile::TempDir, Arc<PolicyChain>), String> {
@@ -1193,6 +1316,11 @@ fn run(
     };
     let fs_config = FsConfig::new(fs_policy);
     let subprocess = SubprocessConfig::new(policy);
+    let (tmpdir_esm, tmpdir_commonjs) = test_tmpdir_modules(test_tmp.path());
+    let mut virtual_modules = (*modules.esm).clone();
+    virtual_modules.insert("file:///test/common/tmpdir.js".to_owned(), tmpdir_esm);
+    let mut virtual_commonjs_modules = (*modules.commonjs).clone();
+    virtual_commonjs_modules.insert("file:///test/common/tmpdir.js".to_owned(), tmpdir_commonjs);
     let mut virtual_files = (*modules.files).clone();
     let file_root = match ModuleSpecifier::from_directory_path(test_tmp.path()) {
         Ok(specifier) => format!("mcp-v8:file-root:{specifier}"),
@@ -1202,8 +1330,8 @@ fn run(
     let module_loader = ModuleLoaderConfig {
         allow_external: true,
         policy_chain: None,
-        virtual_modules: Some(modules.esm.clone()),
-        virtual_commonjs_modules: Some(modules.commonjs.clone()),
+        virtual_modules: Some(Arc::new(virtual_modules)),
+        virtual_commonjs_modules: Some(Arc::new(virtual_commonjs_modules)),
         virtual_files: Some(Arc::new(virtual_files)),
     };
     let main_specifier = match test_module_specifier(path) {

@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -385,6 +385,15 @@ fn invalid_package_config_message(
     )
 }
 
+fn mark_dep0151(mut specifier: ModuleSpecifier, enabled: bool) -> ModuleSpecifier {
+    if enabled {
+        specifier
+            .query_pairs_mut()
+            .append_pair("__mcp_v8_dep0151", "1");
+    }
+    specifier
+}
+
 fn resolve_package_json(
     modules: &HashMap<String, String>,
     source: &str,
@@ -414,6 +423,11 @@ fn resolve_package_json(
         format!("./{subpath}")
     };
     let has_exports = package_data.get("exports").is_some();
+    let main = package_data.get("main").and_then(|value| value.as_str());
+    let warn_dep0151 = !has_exports
+        && main
+            .filter(|value| !value.is_empty())
+            .is_none_or(|value| Path::new(value).extension().is_none());
     let target = match package_data.get("exports") {
         Some(exports) => match package_exports_target(exports, &package_subpath, conditions) {
             Ok(target) => target,
@@ -422,9 +436,7 @@ fn resolve_package_json(
             }
         },
         None if subpath.is_empty() => PackageTarget::Resolved(
-            package_data
-                .get("main")
-                .and_then(|value| value.as_str())
+            main.filter(|value| !value.is_empty())
                 .unwrap_or("./index.js")
                 .to_string(),
         ),
@@ -457,18 +469,24 @@ fn resolve_package_json(
         }
     };
     if modules.contains_key(target_url.as_str()) {
-        return target_url;
+        return mark_dep0151(target_url, warn_dep0151);
     }
     if !has_exports {
         for suffix in [".js", ".json"] {
             let candidate = format!("{}{suffix}", target_url.as_str());
             if modules.contains_key(&candidate) {
-                return ModuleSpecifier::parse(&candidate).unwrap();
+                return mark_dep0151(
+                    ModuleSpecifier::parse(&candidate).unwrap(),
+                    warn_dep0151,
+                );
             }
         }
         let candidate = format!("{}/index.js", target_url.as_str().trim_end_matches('/'));
         if modules.contains_key(&candidate) {
-            return ModuleSpecifier::parse(&candidate).unwrap();
+            return mark_dep0151(
+                ModuleSpecifier::parse(&candidate).unwrap(),
+                warn_dep0151,
+            );
         }
     }
     let directory_prefix = format!("{}/", target_url.as_str().trim_end_matches('/'));
@@ -717,7 +735,15 @@ impl ModuleLoader for NetworkModuleLoader {
                 modules.get(normalized.as_str()).cloned()
             })
         });
-        if let Some(source) = virtual_source {
+        if let Some(mut source) = virtual_source {
+            let dep0151 = module_specifier
+                .query_pairs()
+                .any(|(key, value)| key == "__mcp_v8_dep0151" && value == "1");
+            if dep0151 {
+                source = format!(
+                    "console.error('[DEP0151] DeprecationWarning: Legacy package main resolution is deprecated');\n{source}"
+                );
+            }
             let (format, module_type) = if module_specifier.path().ends_with(".json") {
                 ("json", ModuleType::Json)
             } else {
