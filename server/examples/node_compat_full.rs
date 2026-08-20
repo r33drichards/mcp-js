@@ -275,6 +275,112 @@ fn test_flags(body: &str) -> Vec<String> {
         })
         .collect()
 }
+fn rewrite_dynamic_imports(body: &str) -> Option<String> {
+    use swc_core::{
+        common::{FileName, SourceMap, sync::Lrc},
+        ecma::{
+            ast::{Callee, Expr, Ident},
+            codegen::{Emitter, text_writer::JsWriter},
+            parser::{EsSyntax, Parser, StringInput, Syntax, lexer::Lexer},
+            visit::{VisitMut, VisitMutWith},
+        },
+    };
+
+    struct DynamicImportRewriter;
+
+    impl VisitMut for DynamicImportRewriter {
+        fn visit_mut_call_expr(&mut self, call: &mut swc_core::ecma::ast::CallExpr) {
+            call.visit_mut_children_with(self);
+            if matches!(call.callee, Callee::Import(_)) {
+                call.callee = Callee::Expr(Box::new(Expr::Ident(Ident::new_no_ctxt(
+                    "__nodeCompatImportWithLoaders".into(),
+                    call.span,
+                ))));
+            }
+        }
+    }
+
+    let source_map: Lrc<SourceMap> = Default::default();
+    let source_file = source_map.new_source_file(
+        FileName::Custom("node-compat-test.js".to_owned()).into(),
+        body.to_owned(),
+    );
+    let lexer = Lexer::new(
+        Syntax::Es(EsSyntax::default()),
+        Default::default(),
+        StringInput::from(&*source_file),
+        None,
+    );
+    let mut parser = Parser::new_from(lexer);
+    let mut script = parser.parse_script().ok()?;
+    if !parser.take_errors().is_empty() {
+        return None;
+    }
+    script.visit_mut_with(&mut DynamicImportRewriter);
+    let mut output = Vec::new();
+    Emitter {
+        cfg: Default::default(),
+        cm: source_map,
+        comments: None,
+        wr: JsWriter::new(Default::default(), "\n", &mut output, None),
+    }
+    .emit_script(&script)
+    .ok()?;
+    let output = String::from_utf8(output).ok()?;
+    Some(format!(
+        "const __nodeCompatImportWithLoaders = globalThis.__NODE_COMPAT_IMPORT_WITH_LOADERS__;\n{output}"
+    ))
+}
+
+fn test_loader_specifier(loader: &str) -> Option<String> {
+    let loader = loader.strip_prefix("./").unwrap_or(loader);
+    if !loader.starts_with("test/") {
+        return None;
+    }
+    ModuleSpecifier::from_file_path(Path::new("/").join(loader))
+        .ok()
+        .map(|specifier| specifier.to_string())
+}
+
+fn loader_resolve_prelude(path: &str, body: &str) -> Option<(String, String)> {
+    let invocation = NodeCliInvocation::parse(&test_flags(body), None).ok()?;
+    if invocation.experimental_loaders.is_empty() {
+        return None;
+    }
+    let loaders = invocation
+        .experimental_loaders
+        .iter()
+        .map(|loader| test_loader_specifier(loader))
+        .collect::<Option<Vec<_>>>()?;
+    let body = rewrite_dynamic_imports(body)?;
+    let parent_url = test_module_specifier(path).ok()?;
+    let prelude = format!(
+        r#"const __nodeCompatResolveLoaders = await Promise.all({loaders}.map((specifier) => import(specifier)));
+const __nodeCompatResolveHooks = __nodeCompatResolveLoaders.map((loader) => loader.resolve).filter((hook) => typeof hook === 'function');
+const __nodeCompatDefaultResolve = async (specifier, context, originalImportAttributes) => {{
+  const relative = specifier.startsWith('.') || specifier.startsWith('/') || specifier.startsWith('file:') || specifier.startsWith('data:');
+  return {{ url: relative ? new URL(specifier, context.parentURL).href : specifier, importAttributes: originalImportAttributes }};
+}};
+const __nodeCompatRunResolve = async (index, specifier, context, originalImportAttributes) => {{
+  if (index < 0) return __nodeCompatDefaultResolve(specifier, context, originalImportAttributes);
+  const hook = __nodeCompatResolveHooks[index];
+  return await hook(specifier, context, (nextSpecifier = specifier, nextContext = context) => __nodeCompatRunResolve(index - 1, nextSpecifier, nextContext, originalImportAttributes));
+}};
+globalThis.__NODE_COMPAT_IMPORT_WITH_LOADERS__ = async (specifier, options) => {{
+  const originalImportAttributes = {{ ...(options?.with ?? {{}}) }};
+  const context = {{ conditions: ['node', 'import'], importAttributes: {{ ...originalImportAttributes }}, parentURL: {parent_url} }};
+  const resolved = await __nodeCompatRunResolve(__nodeCompatResolveHooks.length - 1, String(specifier), context, originalImportAttributes);
+  const importAttributes = resolved?.importAttributes ?? context.importAttributes;
+  const importOptions = Object.keys(importAttributes).length === 0 ? undefined : {{ with: importAttributes }};
+  return import(resolved?.url ?? String(specifier), importOptions);
+}};
+"#,
+        loaders = serde_json::to_string(&loaders).unwrap(),
+        parent_url = serde_json::to_string(&parent_url).unwrap(),
+    );
+    Some((prelude, body))
+}
+
 fn assemble(path: &str, body: &str) -> String {
     let body = strip_shebang(body);
     if is_esm(path) {
@@ -284,15 +390,19 @@ fn assemble(path: &str, body: &str) -> String {
             SENTINEL,
         );
     }
+    let (loader_prelude, body) =
+        loader_resolve_prelude(path, body).unwrap_or_else(|| (String::new(), body.to_owned()));
     format!(
-        "globalThis.__NODE_TEST_PATH__={};globalThis.__NODE_TEST_NAME__={};\n{}\ntry{{globalThis.__NODE_TEST_RUN_CJS__({});}}catch(e){{if(!(e&&e.__nodeTestSkip))throw e;}}\nglobalThis.__NODE_TEST_SCHEDULE_REPORT__({:?});",
+        "globalThis.__NODE_TEST_PATH__={};globalThis.__NODE_TEST_NAME__={};\n{}\n{}\ntry{{globalThis.__NODE_TEST_RUN_CJS__({});}}catch(e){{if(!(e&&e.__nodeTestSkip))throw e;}}\nglobalThis.__NODE_TEST_SCHEDULE_REPORT__({:?});",
         serde_json::to_string(path).unwrap(),
         serde_json::to_string(test_name(path)).unwrap(),
         PRELUDE,
-        serde_json::to_string(body).unwrap(),
+        loader_prelude,
+        serde_json::to_string(&body).unwrap(),
         SENTINEL
     )
 }
+
 const COMMON_ESM: &str = r#"import 'node-test:prelude';
 const common = globalThis.__NODE_TEST_COMMON__;
 export const mustCall = common.mustCall.bind(common);
@@ -1906,6 +2016,33 @@ mod tests {
                 "--title=node test",
                 "--no-warnings",
             ],
+        );
+    }
+
+    #[test]
+    fn rewrite_dynamic_imports_uses_loader_helper() {
+        let source = rewrite_dynamic_imports("const value = import('./value.json');").unwrap();
+
+        assert!(
+            source.contains("__nodeCompatImportWithLoaders('./value.json')"),
+            "{source}"
+        );
+    }
+
+    #[test]
+    fn assemble_installs_dynamic_loader_resolve_hooks() {
+        let source = assemble(
+            "test/es-module/loader.js",
+            "// Flags: --experimental-loader ./test/fixtures/loader.mjs\nimport('./value.json');\n",
+        );
+
+        assert!(
+            source.contains("file:///test/fixtures/loader.mjs"),
+            "{source}"
+        );
+        assert!(
+            source.contains("__NODE_COMPAT_IMPORT_WITH_LOADERS__"),
+            "{source}"
         );
     }
 
