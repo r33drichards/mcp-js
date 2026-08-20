@@ -779,7 +779,25 @@ function resolveImportMetaSpecifier(specifier, parentURL) {
 
 globalThis.__mcpV8ImportMetaResolve = resolveImportMetaSpecifier;
 
-export const Module = {
+export class Module {
+    constructor(id = '', parent = undefined) {
+        this.id = id;
+        this.path = '';
+        this.exports = {};
+        this.filename = null;
+        this.loaded = false;
+        this.parent = parent;
+        this.children = [];
+        this.paths = [];
+    }
+
+    require(id) {
+        return createRequire(this.filename || 'file:///')(id);
+    }
+}
+
+Object.assign(Module, {
+    Module,
     builtinModules,
     isBuiltin,
     createRequire,
@@ -787,7 +805,7 @@ export const Module = {
     register,
     registerHooks,
     _cache: requireCache,
-};
+});
 builtins.set('module', Module);
 
 export default Module;

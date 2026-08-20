@@ -396,6 +396,26 @@ async fn create_require_serves_builtins() {
     .await;
 }
 
+
+#[tokio::test]
+async fn module_default_export_is_constructible_with_instance_require() {
+    expect_ok(
+        r#"
+        import Module, { Module as NamedModule, createRequire } from 'node:module';
+        if (Module !== NamedModule || Module.createRequire !== createRequire) {
+            throw new Error('Module export identity');
+        }
+        const instance = new Module();
+        const required = instance.require('fs');
+        if (required.readFileSync === undefined || instance.exports === undefined ||
+            instance.loaded !== false || !Array.isArray(instance.children)) {
+            throw new Error('Module instance contract');
+        }
+        "#,
+    )
+    .await;
+}
+
 #[tokio::test]
 async fn node_test_runs_nested_async_hooks() {
     expect_ok(
