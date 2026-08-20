@@ -409,6 +409,7 @@ pub struct Cli {
             "mcp_config",
             "allow_run_js_file",
             "allow_external_modules",
+            "node_globals",
             "instructions",
             "run_js_description",
         ],
@@ -587,6 +588,17 @@ pub struct Cli {
         help_heading = "Module Import"
     )]
     pub allow_external_modules: bool,
+
+    /// Install the sandboxed Node.js `Buffer` and `process` compatibility
+    /// values on `globalThis` before user modules are evaluated. This does
+    /// not expose host environment variables or grant additional capabilities.
+    #[arg(
+        long = "node-globals",
+        env = "MCP_V8_NODE_GLOBALS",
+        default_value = "false",
+        help_heading = "Module Import"
+    )]
+    pub node_globals: bool,
 
     /// Allow the `run_js` tool to read its code from a file on the server's own
     /// filesystem (the `file` parameter). OFF by default. When set, ANY path the
@@ -1096,6 +1108,12 @@ mod port_env_tests {
             .try_get_matches_from(std::iter::once("server").chain(argv.iter().copied()))
             .expect("argv must parse");
         Cli::from_arg_matches_mut(&mut matches).expect("argv must map onto Cli")
+    }
+
+    #[test]
+    fn node_globals_is_opt_in() {
+        assert!(!parse_argv(&[]).node_globals);
+        assert!(parse_argv(&["--node-globals"]).node_globals);
     }
 
     #[test]

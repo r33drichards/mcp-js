@@ -10,6 +10,13 @@
 /// (module name, ESM source) for every supported `node:` module. Subpath
 /// builtins (fs/promises, stream/web, timers/promises) are first-class
 /// entries: the loader resolves the full path as the module name.
+pub const NODE_GLOBALS_BOOTSTRAP: &str = r#"
+import { Buffer } from 'node:buffer';
+import process from 'node:process';
+globalThis.Buffer = Buffer;
+globalThis.process = process;
+"#;
+
 pub const NODE_MODULES: &[(&str, &str)] = &[
     ("assert", include_str!("node_compat/assert.js")),
     ("buffer", include_str!("node_compat/gen/buffer.js")),

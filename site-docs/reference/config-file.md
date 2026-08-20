@@ -366,6 +366,16 @@ Allow external module imports (npm:, jsr:, and URL imports). When disabled (the 
 - Possible values: `true`, `false`
 - Type: boolean
 
+### `node_globals`
+
+Install the sandboxed Node.js `Buffer` and `process` compatibility values on `globalThis` before user modules are evaluated. This does not expose host environment variables or grant additional capabilities
+
+- CLI flag: `--node-globals`
+- Environment: `MCP_V8_NODE_GLOBALS`
+- Default: `false`
+- Possible values: `true`, `false`
+- Type: boolean
+
 ## OS Sandbox
 
 ### `sandbox_manifest`

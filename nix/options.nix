@@ -195,6 +195,11 @@
     default = null;
     description = "Run as a metadata-only cluster node: serve Raft replication of session metadata (session log, heap tags, fs labels) and nothing else. No V8 engine is created, no MCP transport or REST sidecar is started, and no policies are needed — the node's only surface is the Raft HTTP server on --cluster-port, where it acts purely as a leader or replica for the replicated metadata store. Requires --cluster-port and conflicts with the MCP transports and all JS-execution configuration. Config-file key for the `--metadata-only` flag. Environment variable: `MCP_V8_METADATA_ONLY`. Server default: `false`.";
   };
+  node_globals = lib.mkOption {
+    type = lib.types.nullOr lib.types.bool;
+    default = null;
+    description = "Install the sandboxed Node.js `Buffer` and `process` compatibility values on `globalThis` before user modules are evaluated. This does not expose host environment variables or grant additional capabilities. Config-file key for the `--node-globals` flag. Environment variable: `MCP_V8_NODE_GLOBALS`. Server default: `false`.";
+  };
   node_id = lib.mkOption {
     type = lib.types.nullOr lib.types.str;
     default = null;
