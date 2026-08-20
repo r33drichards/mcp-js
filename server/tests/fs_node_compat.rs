@@ -265,8 +265,14 @@ fn node_fs_write_file_sync_writes_to_mounted_filesystem() {
         .maybe_fs_config(Some(&fs_config))
         .maybe_fs_mount(Some(mount.clone()));
     let source = r#"(async () => {
-        const { writeFileSync } = await import('node:fs');
+        const { symlinkSync, writeFileSync } = await import('node:fs');
         writeFileSync('/output.txt', 'mounted sync');
+        try {
+            symlinkSync('/target.txt', '/output.txt');
+            throw new Error('symlinkSync replaced an existing mounted file');
+        } catch (error) {
+            if (error.code !== 'EEXIST') throw error;
+        }
     })()"#;
 
     let (result, _) = server::engine::execute_stateless(source, config);

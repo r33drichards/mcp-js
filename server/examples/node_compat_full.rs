@@ -859,6 +859,7 @@ export const mustNotCall = common.mustNotCall.bind(common);
 export const spawnPromisified = common.spawnPromisified.bind(common);
 export const skip = common.skip.bind(common);
 export const platformTimeout = common.platformTimeout.bind(common);
+export const canCreateSymLink = common.canCreateSymLink.bind(common);
 export const fixturesDir = '/test/fixtures';
 export default common;
 "#;
@@ -2044,18 +2045,26 @@ fn node_cli_process_config(
     }))
 }
 
-fn append_commonjs_eval(source: &mut String, eval: &str) {
+fn append_commonjs_eval(source: &mut String, eval: &str, filename: &str) {
     let eval = rewrite_import_meta_resolve("file:///eval", eval)
         .unwrap_or_else(|| eval.to_owned());
-    source.push_str(
-        "const { createRequire: __nodeCompatCreateRequire } = await import('node:module');\n\
-         const __nodeCompatFilename = '/test/[eval].js';\n\
-         const __nodeCompatDirname = '/test';\n\
-         const __nodeCompatModule = { exports: {} };\n\
+    let dirname = Path::new(filename)
+        .parent()
+        .and_then(Path::to_str)
+        .unwrap_or("/");
+    let specifier = cli_path_module_specifier(filename).unwrap();
+    source.push_str(&format!(
+        "const {{ createRequire: __nodeCompatCreateRequire }} = await import('node:module');\n\
+         const __nodeCompatFilename = {};\n\
+         const __nodeCompatDirname = {};\n\
+         const __nodeCompatModule = {{ exports: {{}} }};\n\
          const __nodeCompatExports = __nodeCompatModule.exports;\n\
-         const __nodeCompatRequire = __nodeCompatCreateRequire('file:///test/[eval].js');\n\
-         (function (exports, require, module, __filename, __dirname) {\n",
-    );
+         const __nodeCompatRequire = __nodeCompatCreateRequire({});\n\
+         (function (exports, require, module, __filename, __dirname) {{\n",
+        serde_json::to_string(filename).unwrap(),
+        serde_json::to_string(dirname).unwrap(),
+        serde_json::to_string(&specifier).unwrap(),
+    ));
     source.push_str(&eval);
     source.push_str(
         "\n}).call(__nodeCompatModule.exports, __nodeCompatExports, __nodeCompatRequire, \
@@ -2120,7 +2129,13 @@ fn node_cli_source(
 
     if let Some(eval) = &invocation.eval_source {
         match invocation.input_type.as_deref().unwrap_or("commonjs") {
-            "commonjs" => append_commonjs_eval(&mut source, eval),
+            "commonjs" => {
+                let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
+                let cwd = virtualize_corpus_path(cwd.to_string_lossy().as_ref(), corpus)
+                    .unwrap_or_else(|_| cwd.to_string_lossy().into_owned());
+                let filename = Path::new(&cwd).join("[eval].js");
+                append_commonjs_eval(&mut source, eval, filename.to_string_lossy().as_ref());
+            }
             "module" => {
                 let eval = rewrite_import_meta_resolve("file:///eval", eval)
                     .unwrap_or_else(|| eval.to_owned());

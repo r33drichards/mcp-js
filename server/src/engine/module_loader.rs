@@ -620,13 +620,13 @@ fn invalid_package_subpath(subpath: &str) -> bool {
     })
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
 struct VirtualPackageMapPackage {
     url: String,
     dependencies: HashMap<String, String>,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
 struct VirtualPackageMap {
     packages: HashMap<String, VirtualPackageMapPackage>,
 }
@@ -1024,11 +1024,14 @@ impl ModuleLoader for NetworkModuleLoader {
                                     .collect::<HashMap<_, _>>()
                             })
                             .unwrap_or_default();
+                        let package_map = serde_json::to_string(&configured_package_map(&self.config)).unwrap();
                         source = format!(
                             "globalThis.__mcpV8VirtualCommonJsModules={};\n\
-                             globalThis.__mcpV8VirtualPackageJson={};\n{}",
+                             globalThis.__mcpV8VirtualPackageJson={};\n\
+                             globalThis.__mcpV8PackageMap=JSON.parse({});\n{}",
                             serde_json::to_string(commonjs).unwrap(),
                             serde_json::to_string(&package_json).unwrap(),
+                            serde_json::to_string(&package_map).unwrap(),
                             source,
                         );
                     } else if name == "internal/modules/esm/resolve" {

@@ -525,6 +525,59 @@ async fn op_fs_readlink(
     .map_err(|e: String| JsErrorBox::generic(e))
 }
 
+/// Create a symlink synchronously after evaluating the filesystem policy.
+#[op2(fast)]
+fn op_fs_symlink_sync(
+    state: &mut OpState,
+    #[string] target: String,
+    #[string] link: String,
+) -> Result<(), JsErrorBox> {
+    let config = state
+        .try_borrow::<FsConfig>()
+        .cloned()
+        .ok_or_else(|| JsErrorBox::generic("fs: internal error - no fs config available"))?;
+    let mount = state.try_borrow::<FsMountHandle>().cloned();
+    check_policy_sync(&config, "symlink", &link, Some(&target), None, None)?;
+    if let Some(mount) = mount {
+        let error_link = link.clone();
+        let error_target = target.clone();
+        return std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| format!("fs.symlinkSync: failed to create runtime: {error}"))?;
+            runtime.block_on(async move {
+                mount
+                    .0
+                    .lock()
+                    .await
+                    .symlink(Path::new(&target), Path::new(&link))
+                    .await
+                    .map_err(|error| format!("fs.symlinkSync: {error_link} -> {error_target}: {error}"))
+            })
+        })
+        .join()
+        .map_err(|_| JsErrorBox::generic("fs.symlinkSync thread panicked"))?
+        .map_err(JsErrorBox::generic);
+    }
+
+    symlink_impl_sync(&target, &link)
+        .map_err(|error| JsErrorBox::generic(io_err2("symlink", &link, &target, &error)))
+}
+
+#[cfg(unix)]
+fn symlink_impl_sync(target: &str, link: &str) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(not(unix))]
+fn symlink_impl_sync(_target: &str, _link: &str) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "symlinks are not supported on this platform",
+    ))
+}
+
 /// Create a symlink at `link` pointing to `target` (Node `fs.symlink(target, path)`).
 #[op2]
 #[string]
@@ -899,6 +952,7 @@ deno_core::extension!(
         op_fs_stat,
         op_fs_lstat,
         op_fs_readlink,
+        op_fs_symlink_sync,
         op_fs_symlink,
         op_fs_mkdir,
         op_fs_rm,
@@ -1015,6 +1069,17 @@ const FS_JS_WRAPPER: &str = r#"
         }
         try {
             ops.op_fs_write_file_text_sync(path, data);
+        } catch (e) {
+            throw tagError(e);
+        }
+    }
+
+    function symlinkSync(target, link) {
+        if (typeof target !== 'string' || typeof link !== 'string') {
+            throw new TypeError('fs.symlinkSync: target and path must be strings');
+        }
+        try {
+            ops.op_fs_symlink_sync(target, link);
         } catch (e) {
             throw tagError(e);
         }
@@ -1138,7 +1203,7 @@ const FS_JS_WRAPPER: &str = r#"
     };
 
     globalThis.fs = {
-        readFile, writeFile, writeFileSync, appendFile, readdir, stat, lstat, mkdir, rm, rmdir,
+        readFile, writeFile, writeFileSync, symlinkSync, appendFile, readdir, stat, lstat, mkdir, rm, rmdir,
         unlink, rename, copyFile, readlink, symlink, exists, createWriteStream,
         promises,
     };

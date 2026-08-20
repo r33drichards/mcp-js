@@ -86,6 +86,7 @@ export function isBuiltin(name) {
 
 const virtualCommonJsModules = globalThis.__mcpV8VirtualCommonJsModules || null;
 const virtualPackageJson = globalThis.__mcpV8VirtualPackageJson || null;
+const virtualPackageMap = globalThis.__mcpV8PackageMap || null;
 const virtualModuleCache = new Map();
 const requireCache = Object.create(null);
 globalThis.__mcpV8IsVirtualCommonJsModule = (specifier) => {
@@ -506,6 +507,55 @@ function packageUrlPath(value) {
     return String(value).replaceAll('#', '%23').replaceAll('?', '%3F');
 }
 
+function resolvePackageMap(request, filename, conditions) {
+    if (!virtualPackageMap) return null;
+    const parts = packageParts(request);
+    if (!parts) return null;
+    const referrer = virtualFileUrl(filename).href;
+    const owner = Object.values(virtualPackageMap.packages)
+        .filter((entry) => referrer.startsWith(entry.url))
+        .sort((left, right) => right.url.length - left.url.length)[0];
+    if (!owner) {
+        const error = new Error(`ERR_PACKAGE_MAP_EXTERNAL_FILE: File outside package map scope: ${referrer}`);
+        error.code = 'ERR_PACKAGE_MAP_EXTERNAL_FILE';
+        throw error;
+    }
+    const targetKey = owner.dependencies[parts.packageName];
+    if (targetKey === undefined) {
+        const error = new Error(`Cannot find module '${request}'`);
+        error.code = 'MODULE_NOT_FOUND';
+        throw error;
+    }
+    if (!Object.prototype.hasOwnProperty.call(virtualPackageMap.packages, targetKey)) {
+        const error = new Error(`ERR_PACKAGE_MAP_KEY_NOT_FOUND: Package map key '${targetKey}' was not found`);
+        error.code = 'ERR_PACKAGE_MAP_KEY_NOT_FOUND';
+        throw error;
+    }
+    const target = virtualPackageMap.packages[targetKey];
+    if (!target) {
+        const error = new Error(`ERR_PACKAGE_MAP_KEY_NOT_FOUND: Package map key '${targetKey}' was not found`);
+        error.code = 'ERR_PACKAGE_MAP_KEY_NOT_FOUND';
+        throw error;
+    }
+    const packageUrl = new URL('package.json', target.url);
+    const source = virtualPackageJson[packageUrl.href];
+    if (source !== undefined) {
+        return resolvePackageSource(packageUrl, source, parts, conditions, filename);
+    }
+    const requestPath = parts.subpath || 'index';
+    const targetUrl = new URL(requestPath, target.url);
+    if (!targetUrl.href.startsWith(target.url)) {
+        const error = new Error(`Invalid module '${request}'`);
+        error.code = 'ERR_INVALID_MODULE_SPECIFIER';
+        throw error;
+    }
+    const resolved = resolveVirtualFile(targetUrl);
+    if (resolved) return resolved;
+    const error = new Error(`Cannot find module '${request}'`);
+    error.code = 'MODULE_NOT_FOUND';
+    throw error;
+}
+
 function resolveVirtual(id, filename, conditions = ['require', 'node', 'default']) {
     if (!virtualCommonJsModules || !virtualPackageJson) return null;
     const request = String(id);
@@ -537,6 +587,8 @@ function resolveVirtual(id, filename, conditions = ['require', 'node', 'default'
             throw err;
         }
     }
+    const mapped = resolvePackageMap(request, filename, conditions);
+    if (mapped) return mapped;
     let directory = new URL('.', virtualFileUrl(filename));
     while (true) {
         const selfPackageUrl = new URL('package.json', directory);

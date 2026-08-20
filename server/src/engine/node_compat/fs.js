@@ -23,6 +23,9 @@ export const writeFile = unsupported('writeFile');
 export const writeFileSync = globalThis.fs && typeof globalThis.fs.writeFileSync === 'function'
     ? (path, data, ...args) => globalThis.fs.writeFileSync(normalizePath(path), data, ...args)
     : unsupported('writeFileSync');
+export const symlinkSync = globalThis.fs && typeof globalThis.fs.symlinkSync === 'function'
+    ? (target, path, ...args) => globalThis.fs.symlinkSync(normalizePath(target), normalizePath(path), ...args)
+    : unsupported('symlinkSync');
 export const openSync = unsupported('openSync');
 export const closeSync = unsupported('closeSync');
 export const readSync = unsupported('readSync');
@@ -59,8 +62,10 @@ for (const name of PROMISE_METHODS) {
 }
 
 function normalizePath(value) {
-    if (value instanceof URL && value.protocol === 'file:') return decodeURIComponent(value.pathname);
-    return value;
+    if (value instanceof URL && value.protocol === 'file:') value = decodeURIComponent(value.pathname);
+    const path = String(value);
+    const corpus = globalThis.__NODE_TEST_CORPUS_HOST__;
+    return corpus && path.startsWith('/test/') ? corpus + path : value;
 }
 
 function makeEnosys(name) {
@@ -76,6 +81,7 @@ export default {
     readFileSync,
     writeFile,
     writeFileSync,
+    symlinkSync,
     openSync,
     closeSync,
     readSync,

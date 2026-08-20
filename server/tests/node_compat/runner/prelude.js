@@ -67,6 +67,7 @@ const common = {
     hasIPv6: false,
     enoughTestMem: true,
     buildType: 'Release',
+    canCreateSymLink() { return true; },
 
     platformTimeout(ms) { return ms; },
 
