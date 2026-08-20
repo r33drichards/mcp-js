@@ -3032,6 +3032,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
+name = "link_args"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2c7721e472624c9aaad27a5eb6b7c9c6045c7a396f2efb6dabaec1b640d5e89b"
+
+[[package]]
 name = "linux-raw-sys"
 version = "0.4.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3123,6 +3129,17 @@ name = "memchr"
 version = "2.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
+
+[[package]]
+name = "merve"
+version = "1.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ba336c830f419d3dd99107a4abf9f097dfd29ca0238ade945dadce495d839fc4"
+dependencies = [
+ "cc",
+ "link_args",
+ "regex",
+]
 
 [[package]]
 name = "mime"
@@ -4778,6 +4795,7 @@ dependencies = [
  "hyper-util",
  "jsonwebtoken",
  "libc",
+ "merve",
  "nono",
  "rand 0.8.6",
  "regorus",

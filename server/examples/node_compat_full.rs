@@ -352,6 +352,22 @@ fn commonjs_analysis(source: &str) -> deno_ast::ModuleExportsAndReExports {
     };
     parsed.analyze_cjs()
 }
+fn node_commonjs_analysis(source: &str) -> deno_ast::ModuleExportsAndReExports {
+    let source = source.strip_prefix('\u{feff}').unwrap_or(source);
+    let Ok(analysis) = merve::parse_commonjs(source) else {
+        return Default::default();
+    };
+    deno_ast::ModuleExportsAndReExports {
+        exports: analysis
+            .exports()
+            .map(|export| export.name.to_owned())
+            .collect(),
+        reexports: analysis
+            .reexports()
+            .map(|reexport| reexport.name.to_owned())
+            .collect(),
+    }
+}
 #[cfg(test)]
 fn commonjs_export_names(source: &str) -> Vec<String> {
     commonjs_analysis(source).exports
@@ -440,6 +456,194 @@ fn commonjs_export_names_for_path(
     exports.sort_unstable();
     exports.dedup();
     exports
+}
+
+fn node_commonjs_export_names_for_path(
+    root: &Path,
+    path: &Path,
+    source: &str,
+    visited: &mut HashSet<PathBuf>,
+) -> Vec<String> {
+    let path = path.to_owned();
+    if !visited.insert(path.clone()) {
+        return Vec::new();
+    }
+    let analysis = node_commonjs_analysis(source);
+    let mut exports = analysis.exports;
+    for request in analysis.reexports {
+        let Some(reexport_path) = resolve_commonjs_reexport(root, &path, &request) else {
+            continue;
+        };
+        if reexport_path.extension().and_then(|value| value.to_str()) == Some("json") {
+            continue;
+        }
+        let Ok(reexport_source) = fs::read_to_string(&reexport_path) else {
+            continue;
+        };
+        exports.extend(node_commonjs_export_names_for_path(
+            root,
+            &reexport_path,
+            strip_shebang(&reexport_source),
+            visited,
+        ));
+    }
+    visited.remove(&path);
+    exports.sort_unstable();
+    exports.dedup();
+    exports
+}
+
+fn module_export_name(name: &swc_core::ecma::ast::ModuleExportName) -> String {
+    match name {
+        swc_core::ecma::ast::ModuleExportName::Ident(identifier) => identifier.sym.to_string(),
+        swc_core::ecma::ast::ModuleExportName::Str(string) => {
+            string.value.to_string_lossy().into_owned()
+        }
+    }
+}
+
+fn named_commonjs_import_error(root: &Path, importer: &Path, source: &str) -> Option<String> {
+    use swc_core::{
+        common::{FileName, SourceMap, Spanned, sync::Lrc},
+        ecma::{
+            ast::{ImportSpecifier, ModuleDecl, ModuleItem},
+            parser::{EsSyntax, Parser, StringInput, Syntax, lexer::Lexer},
+        },
+    };
+
+    let source_map: Lrc<SourceMap> = Default::default();
+    let source_file = source_map.new_source_file(
+        FileName::Custom(importer.display().to_string()).into(),
+        source.to_owned(),
+    );
+    let lexer = Lexer::new(
+        Syntax::Es(EsSyntax::default()),
+        Default::default(),
+        StringInput::from(&*source_file),
+        None,
+    );
+    let mut parser = Parser::new_from(lexer);
+    let module = parser.parse_module().ok()?;
+    if !parser.take_errors().is_empty() {
+        return None;
+    }
+
+    for item in module.body {
+        let ModuleItem::ModuleDecl(ModuleDecl::Import(import)) = item else {
+            continue;
+        };
+        let request = import.src.value.to_string_lossy().into_owned();
+        let node_name = request.strip_prefix("node:").unwrap_or(&request);
+        if server::engine::node_compat::resolve_submodule(node_name).is_some() {
+            continue;
+        }
+        let Some(target) = resolve_commonjs_reexport(root, importer, &request) else {
+            continue;
+        };
+        let extension = target.extension().and_then(|value| value.to_str());
+        let Some(target_directory) = target.parent() else {
+            continue;
+        };
+        let target_uses_modules = package_uses_modules(
+            target_directory,
+            inherited_package_modules(root, target_directory),
+        );
+        let is_commonjs =
+            extension == Some("cjs") || (extension == Some("js") && !target_uses_modules);
+        if !is_commonjs {
+            continue;
+        }
+        let Ok(target_source) = fs::read_to_string(&target) else {
+            continue;
+        };
+        let exports = node_commonjs_export_names_for_path(
+            root,
+            &target,
+            strip_shebang(&target_source),
+            &mut HashSet::new(),
+        );
+        let named = import
+            .specifiers
+            .iter()
+            .filter_map(|specifier| match specifier {
+                ImportSpecifier::Named(named) if !named.is_type_only => {
+                    let imported = named
+                        .imported
+                        .as_ref()
+                        .map(module_export_name)
+                        .unwrap_or_else(|| named.local.sym.to_string());
+                    Some((imported, named.local.sym.to_string()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let Some((missing, _)) = named.iter().find(|(imported, _)| {
+            imported != "default" && imported != "module.exports" && !exports.contains(imported)
+        }) else {
+            continue;
+        };
+        let span = import.span();
+        let start = (span.lo.0 - source_file.start_pos.0) as usize;
+        let end = (span.hi.0 - source_file.start_pos.0) as usize;
+        let one_line = source
+            .get(start..end)
+            .is_some_and(|statement| !statement.contains(['\n', '\r']));
+        let destructure = one_line.then(|| {
+            named
+                .iter()
+                .map(|(imported, local)| {
+                    if imported == local {
+                        imported.clone()
+                    } else {
+                        format!("{imported}: {local}")
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        });
+        let mut message = format!(
+            "Named export '{missing}' not found. The requested module '{request}' is a CommonJS module, which may not support all module.exports as named exports.\nCommonJS modules can always be imported via the default export, for example using:\n\nimport pkg from '{request}';\n"
+        );
+        if let Some(destructure) = destructure {
+            message.push_str(&format!("const {{ {destructure} }} = pkg;\n"));
+        }
+        return Some(format!(
+            "throw new SyntaxError({});\n",
+            serde_json::to_string(&message).unwrap()
+        ));
+    }
+    None
+}
+
+fn add_named_commonjs_import_errors(
+    root: &Path,
+    virtual_paths: bool,
+    modules: &mut HashMap<String, String>,
+) {
+    let importer_errors = modules
+        .iter()
+        .filter_map(|(specifier, source)| {
+            let module_specifier = ModuleSpecifier::parse(specifier).ok()?;
+            if module_specifier.scheme() != "file" {
+                return None;
+            }
+            let importer = if virtual_paths {
+                root.join(module_specifier.path().trim_start_matches('/'))
+            } else {
+                module_specifier.to_file_path().ok()?
+            };
+            if !importer.starts_with(root) || !importer.is_file() {
+                return None;
+            }
+            named_commonjs_import_error(root, &importer, source)
+                .map(|error| (specifier.clone(), error))
+        })
+        .collect::<Vec<_>>();
+    for (specifier, error) in importer_errors {
+        if let Some(source) = modules.get_mut(&specifier) {
+            source.insert_str(0, &error);
+        }
+    }
 }
 
 fn transpile_esm_to_commonjs(specifier: &str, source: &str) -> Option<String> {
@@ -646,6 +850,7 @@ fn corpus_modules(corpus: &Path) -> Result<CorpusModules, String> {
         &mut commonjs_modules,
         &mut files,
     )?;
+    add_named_commonjs_import_errors(corpus, true, &mut modules);
     modules.insert("node-test:prelude".into(), PRELUDE.into());
     modules.insert("node-test:common".into(), COMMON_ESM.into());
     modules.insert("file:///test/common/index.mjs".into(), COMMON_ESM.into());
@@ -780,6 +985,7 @@ fn corpus_modules_for_cli(
             &mut files,
         )?;
     }
+    add_named_commonjs_import_errors(corpus, true, &mut modules);
     if let Ok(file_root) = std::env::var("NODE_COMPAT_FILE_ROOT") {
         let file_root = fs::canonicalize(file_root).map_err(|error| error.to_string())?;
         let cwd = fs::canonicalize(std::env::current_dir().map_err(|error| error.to_string())?)
@@ -795,6 +1001,7 @@ fn corpus_modules_for_cli(
             &mut commonjs_modules,
             &mut files,
         )?;
+        add_named_commonjs_import_errors(&file_root, false, &mut modules);
         let root = ModuleSpecifier::from_directory_path(&file_root)
             .map_err(|_| "invalid NODE_COMPAT_FILE_ROOT".to_owned())?;
         files.insert(format!("mcp-v8:file-root:{root}"));
@@ -1859,6 +2066,115 @@ mod tests {
             ["value"]
         );
     }
+    #[test]
+    fn node_commonjs_analysis_matches_object_literal_bailout() {
+        assert!(
+            node_commonjs_analysis("module.exports = { comeOn: 'fhqwhgads' };\n")
+                .exports
+                .is_empty()
+        );
+    }
+    #[test]
+    fn named_commonjs_import_error_matches_node_message() {
+        let corpus = cli_corpus(&[
+            (
+                "test/fixtures/main.mjs",
+                "import { comeOn as renamed } from './fail.cjs';\n",
+            ),
+            (
+                "test/fixtures/fail.cjs",
+                "module.exports = { comeOn: 'fhqwhgads' };\n",
+            ),
+        ]);
+        let source = fs::read_to_string(corpus.path().join("test/fixtures/main.mjs")).unwrap();
+        let error = named_commonjs_import_error(
+            corpus.path(),
+            &corpus.path().join("test/fixtures/main.mjs"),
+            &source,
+        )
+        .unwrap();
+
+        assert!(
+            error.contains("Named export 'comeOn' not found."),
+            "{error}"
+        );
+        assert!(
+            error.contains("const { comeOn: renamed } = pkg;\\n"),
+            "{error}"
+        );
+    }
+    #[test]
+    fn named_commonjs_import_error_resolves_bare_packages() {
+        let corpus = cli_corpus(&[
+            (
+                "test/fixtures/main.mjs",
+                "import { comeOn } from 'deep-fail';\n",
+            ),
+            (
+                "test/fixtures/node_modules/deep-fail/package.json",
+                r#"{"main":"index.mjs"}"#,
+            ),
+            (
+                "test/fixtures/node_modules/deep-fail/index.js",
+                "module.exports = {\n  comeOn: 'fhqwhgads'\n};\n",
+            ),
+        ]);
+        let source = fs::read_to_string(corpus.path().join("test/fixtures/main.mjs")).unwrap();
+        let error = named_commonjs_import_error(
+            corpus.path(),
+            &corpus.path().join("test/fixtures/main.mjs"),
+            &source,
+        )
+        .unwrap();
+
+        assert!(error.contains("requested module 'deep-fail'"), "{error}");
+    }
+
+    #[test]
+    fn corpus_modules_inject_bare_commonjs_import_errors() {
+        let corpus = cli_corpus(&[
+            (
+                "test/fixtures/main.mjs",
+                "import { comeOn } from 'deep-fail';\n",
+            ),
+            (
+                "test/fixtures/node_modules/deep-fail/package.json",
+                r#"{"main":"index.mjs"}"#,
+            ),
+            (
+                "test/fixtures/node_modules/deep-fail/index.js",
+                "module.exports = {\n  comeOn: 'fhqwhgads'\n};\n",
+            ),
+        ]);
+        let modules = corpus_modules(corpus.path()).unwrap();
+        let source = modules.esm.get("file:///test/fixtures/main.mjs").unwrap();
+
+        assert!(source.starts_with("throw new SyntaxError("), "{source}");
+    }
+
+    #[test]
+    fn named_commonjs_import_error_omits_multiline_destructure() {
+        let corpus = cli_corpus(&[
+            (
+                "test/fixtures/main.mjs",
+                "import {\n  comeOn,\n  everybody,\n} from './fail.cjs';\n",
+            ),
+            (
+                "test/fixtures/fail.cjs",
+                "module.exports = { comeOn: 'fhqwhgads', everybody: 'limit' };\n",
+            ),
+        ]);
+        let source = fs::read_to_string(corpus.path().join("test/fixtures/main.mjs")).unwrap();
+        let error = named_commonjs_import_error(
+            corpus.path(),
+            &corpus.path().join("test/fixtures/main.mjs"),
+            &source,
+        )
+        .unwrap();
+
+        assert!(!error.contains("const {"), "{error}");
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn node_test_filesystem_policy_is_isolated() {
         let root = tempfile::tempdir().unwrap();

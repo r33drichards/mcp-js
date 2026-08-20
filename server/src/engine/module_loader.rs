@@ -488,6 +488,15 @@ fn resolve_package_json(
                 warn_dep0151,
             );
         }
+        if subpath.is_empty() {
+            let package_root = package_json.join("./").unwrap();
+            for name in ["index.js", "index.json"] {
+                let candidate = package_root.join(name).unwrap();
+                if modules.contains_key(candidate.as_str()) {
+                    return mark_dep0151(candidate, warn_dep0151);
+                }
+            }
+        }
     }
     let directory_prefix = format!("{}/", target_url.as_str().trim_end_matches('/'));
     if modules.keys().any(|specifier| specifier.starts_with(&directory_prefix)) {
@@ -1098,5 +1107,36 @@ impl ModuleLoader for NetworkModuleLoader {
         };
 
         ModuleLoadResponse::Async(fut.boxed_local())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn package_main_falls_back_to_package_index() {
+        let package_json =
+            ModuleSpecifier::parse("file:///app/node_modules/deep-fail/package.json").unwrap();
+        let referrer = ModuleSpecifier::parse("file:///app/main.mjs").unwrap();
+        let modules = HashMap::from([(
+            "file:///app/node_modules/deep-fail/index.js".to_owned(),
+            "module.exports = {};".to_owned(),
+        )]);
+
+        let resolved = resolve_package_json(
+            &modules,
+            r#"{"main":"index.mjs"}"#,
+            &package_json,
+            "deep-fail",
+            &referrer,
+            "",
+            &["import", "node", "default"],
+        );
+
+        assert_eq!(
+            resolved.as_str(),
+            "file:///app/node_modules/deep-fail/index.js"
+        );
     }
 }

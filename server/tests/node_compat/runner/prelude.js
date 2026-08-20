@@ -129,7 +129,7 @@ const common = {
         const childArgs = selfHosted
             ? ['--node-compat-cli', ...args]
             : Array.from(args, translate);
-        const commandEnv = selfHosted
+        const commandEnv = selfHosted && options.cwd
             ? { ...options.env, NODE_COMPAT_FILE_ROOT: globalThis.__NODE_TEST_TMPDIR__ }
             : options.env;
         const output = await new Deno.Command(executable, {
