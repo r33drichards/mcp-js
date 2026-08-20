@@ -251,6 +251,15 @@ const fixtures = {
     fileURL: (...args) => url.pathToFileURL(path.join('/test/fixtures', ...args)),
 };
 
+const tmpdir = {
+    refresh() {},
+    resolve: (...args) => path.resolve(globalThis.__NODE_TEST_TMPDIR__, ...args),
+    fileURL: (...args) => url.pathToFileURL(path.resolve(globalThis.__NODE_TEST_TMPDIR__, ...args)),
+    hasEnoughSpace: () => true,
+    get path() { return globalThis.__NODE_TEST_TMPDIR__; },
+    set path(value) { globalThis.__NODE_TEST_TMPDIR__ = path.resolve(String(value)); },
+};
+
 globalThis.__NODE_TEST_COMMON__ = common;
 globalThis.__NODE_TEST_PENDING__ = 0;
 globalThis.__NODE_TEST_RECORD_FAILURE__ = function recordFailure(error) {
@@ -269,6 +278,7 @@ function nodeRequire(id) {
     if (name === '../common/fixtures' || name === '../common/fixtures.js') {
         return fixtures;
     }
+    if (name === '../common/tmpdir' || name === '../common/tmpdir.js') return tmpdir;
     if (name.startsWith('../common/')) {
         throw new Error('Unsupported common submodule: ' + name);
     }

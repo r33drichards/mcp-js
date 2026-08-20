@@ -9,8 +9,9 @@ use server::engine::{
     CompileMode, ExecutionConfig,
     console::ProcessExitState,
     fetch::FetchConfig,
+    fs::FsConfig,
     module_loader::ModuleLoaderConfig,
-    opa::{EvalMode, PolicyChain},
+    opa::{EvalMode, LocalPolicyEvaluator, PolicyChain, PolicyEvaluatorKind},
     subprocess::SubprocessConfig,
 };
 use std::{
@@ -1138,6 +1139,26 @@ fn node_compat_cli_main(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+fn isolated_fs_policy(root: &Path) -> Result<(tempfile::TempDir, Arc<PolicyChain>), String> {
+    let policy_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let root = format!("{}/", root.to_string_lossy().trim_end_matches('/'));
+    let source = format!(
+        "package mcp.node_compat\n\ndefault allow = false\n\nallow if {{\n    startswith(input.path, {})\n}}\n",
+        serde_json::to_string(&root).unwrap(),
+    );
+    let policy_path = policy_dir.path().join("fs.rego");
+    fs::write(&policy_path, source).map_err(|error| error.to_string())?;
+    let evaluator =
+        LocalPolicyEvaluator::from_file(&policy_path, "data.mcp.node_compat.allow".to_owned())?;
+    Ok((
+        policy_dir,
+        Arc::new(PolicyChain::new(
+            vec![PolicyEvaluatorKind::Local(evaluator)],
+            EvalMode::All,
+        )),
+    ))
+}
+
 fn run(
     path: &str,
     body: &str,
@@ -1160,15 +1181,30 @@ fn run(
         Err(e) => return Outcome::Runtime(e.to_string()),
     };
     let tree = db.open_tree("console").unwrap();
+    let test_tmp = match tempfile::tempdir() {
+        Ok(directory) => directory,
+        Err(error) => return Outcome::Runtime(error.to_string()),
+    };
     let policy = Arc::new(PolicyChain::new(vec![], EvalMode::All));
     let fetch = FetchConfig::new_with_chain(policy.clone());
+    let (_fs_policy_dir, fs_policy) = match isolated_fs_policy(test_tmp.path()) {
+        Ok(policy) => policy,
+        Err(error) => return Outcome::Runtime(error),
+    };
+    let fs_config = FsConfig::new(fs_policy);
     let subprocess = SubprocessConfig::new(policy);
+    let mut virtual_files = (*modules.files).clone();
+    let file_root = match ModuleSpecifier::from_directory_path(test_tmp.path()) {
+        Ok(specifier) => format!("mcp-v8:file-root:{specifier}"),
+        Err(()) => return Outcome::Runtime("invalid module file root".to_owned()),
+    };
+    virtual_files.insert(file_root);
     let module_loader = ModuleLoaderConfig {
         allow_external: true,
         policy_chain: None,
         virtual_modules: Some(modules.esm.clone()),
         virtual_commonjs_modules: Some(modules.commonjs.clone()),
-        virtual_files: Some(modules.files.clone()),
+        virtual_files: Some(Arc::new(virtual_files)),
     };
     let main_specifier = match test_module_specifier(path) {
         Ok(specifier) => specifier,
@@ -1177,6 +1213,7 @@ fn run(
     let config = ExecutionConfig::new(256 * 1024 * 1024)
         .console_tree(tree.clone())
         .fetch_config(&fetch)
+        .maybe_fs_config(Some(&fs_config))
         .maybe_subprocess_config(Some(&subprocess))
         .module_loader_config(&module_loader)
         .main_module_specifier(&main_specifier);
@@ -1201,10 +1238,11 @@ fn run(
         })
     };
     let source = format!(
-        "globalThis.__NODE_TEST_CORPUS_HOST__={};globalThis.__NODE_TEST_EXEC_PATH__={};globalThis.__NODE_TEST_FLAGS__={};\n{}",
+        "globalThis.__NODE_TEST_CORPUS_HOST__={};globalThis.__NODE_TEST_EXEC_PATH__={};globalThis.__NODE_TEST_FLAGS__={};globalThis.__NODE_TEST_TMPDIR__={};\n{}",
         serde_json::to_string(corpus.to_str().unwrap()).unwrap(),
         serde_json::to_string(node_executable.to_str().unwrap()).unwrap(),
         serde_json::to_string(&test_flags(body)).unwrap(),
+        serde_json::to_string(test_tmp.path().to_str().unwrap()).unwrap(),
         assemble(path, body),
     );
     let (res, _) = server::engine::execute_stateless(&source, config);
@@ -1692,6 +1730,22 @@ mod tests {
             commonjs_export_names("\u{feff}exports.value = 1;"),
             ["value"]
         );
+    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn node_test_filesystem_policy_is_isolated() {
+        let root = tempfile::tempdir().unwrap();
+        let (_policy_dir, policy) = isolated_fs_policy(root.path()).unwrap();
+        let allowed = serde_json::json!({
+            "operation": "writeFile",
+            "path": root.path().join("fixture.mjs"),
+        });
+        let denied = serde_json::json!({
+            "operation": "writeFile",
+            "path": "/tmp/outside-node-compat-fixture.mjs",
+        });
+
+        assert!(policy.evaluate(&allowed).await.unwrap());
+        assert!(!policy.evaluate(&denied).await.unwrap());
     }
     #[test]
     fn platform_skip_is_strict() {

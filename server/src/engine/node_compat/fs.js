@@ -1,8 +1,6 @@
-// node:fs — import-compatible stub. The sandbox's real filesystem surface
-// is the policy-gated `fs` capability (global, see engine/fs.rs); this
-// module exists so libraries whose unused code paths import node:fs (e.g.
-// certificate-file loading in gRPC stacks) can load. Every operation
-// throws.
+// node:fs — import-compatible surface backed by the policy-gated `fs`
+// capability when enabled. Without that capability, operations retain the
+// rejecting stub behavior used by the default sandbox.
 
 function unsupported(name) {
     return function () {
@@ -52,7 +50,15 @@ export const constants = Object.freeze({
 
 export const promises = { constants };
 for (const name of PROMISE_METHODS) {
-    promises[name] = () => Promise.reject(makeEnosys(name));
+    const runtimeMethod = globalThis.fs && globalThis.fs[name];
+    promises[name] = typeof runtimeMethod === 'function'
+        ? (...args) => runtimeMethod.call(globalThis.fs, normalizePath(args[0]), ...args.slice(1))
+        : () => Promise.reject(makeEnosys(name));
+}
+
+function normalizePath(value) {
+    if (value instanceof URL && value.protocol === 'file:') return decodeURIComponent(value.pathname);
+    return value;
 }
 
 function makeEnosys(name) {

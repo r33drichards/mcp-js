@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -28,6 +29,7 @@ const MODULE_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 /// Connect-phase timeout. Fails fast when the remote host is unreachable
 /// (e.g. non-existent domain) without waiting for the full request timeout.
 const MODULE_FETCH_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const FILE_ROOT_PREFIX: &str = "mcp-v8:file-root:";
 
 #[derive(Debug)]
 struct NodeModuleError {
@@ -142,6 +144,26 @@ pub struct ModuleLoaderConfig {
     pub virtual_commonjs_modules: Option<Arc<HashMap<String, String>>>,
     /// File URLs available to Node-compatible resolution without loading them.
     pub virtual_files: Option<Arc<HashSet<String>>>,
+}
+
+fn allowed_file_path(config: &ModuleLoaderConfig, specifier: &ModuleSpecifier) -> Option<PathBuf> {
+    let path = specifier.to_file_path().ok()?;
+    let roots = config.virtual_files.as_deref()?;
+    for marker in roots {
+        let Some(root) = marker.strip_prefix(FILE_ROOT_PREFIX) else {
+            continue;
+        };
+        let root = ModuleSpecifier::parse(root).ok()?.to_file_path().ok()?;
+        if !path.starts_with(&root) {
+            continue;
+        }
+        return match std::fs::canonicalize(&path) {
+            Ok(canonical) if canonical.starts_with(&root) => Some(canonical),
+            Ok(_) => None,
+            Err(_) => Some(path),
+        };
+    }
+    None
 }
 
 /// Input sent to OPA for module import auditing.
@@ -809,6 +831,45 @@ impl ModuleLoader for NetworkModuleLoader {
                     name
                 )))),
             };
+        }
+        if scheme == "file"
+            && let Some(path) = allowed_file_path(&self.config, module_specifier)
+        {
+            let body = match std::fs::read(&path) {
+                Ok(body) => body,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return ModuleLoadResponse::Sync(Err(node_module_error(
+                        "Error",
+                        "ERR_MODULE_NOT_FOUND",
+                        format!("Cannot find module '{}'", module_specifier),
+                    )));
+                }
+                Err(error) => return ModuleLoadResponse::Sync(Err(JsErrorBox::from_err(error))),
+            };
+            let (format, module_type) = match path.extension().and_then(|value| value.to_str()) {
+                Some("json") => ("json", ModuleType::Json),
+                Some("wasm") => ("wasm", ModuleType::Wasm),
+                _ => ("module", ModuleType::JavaScript),
+            };
+            if let Some(error) = import_attribute_error(
+                module_specifier,
+                format,
+                &options.requested_module_type,
+            ) {
+                return ModuleLoadResponse::Sync(Err(JsErrorBox::from_err(error)));
+            }
+            let source = match module_type {
+                ModuleType::Wasm => ModuleSourceCode::Bytes(body.into_boxed_slice().into()),
+                _ => ModuleSourceCode::String(FastString::from(
+                    String::from_utf8_lossy(&body).into_owned(),
+                )),
+            };
+            return ModuleLoadResponse::Sync(Ok(ModuleSource::new(
+                module_type,
+                source,
+                module_specifier,
+                None,
+            )));
         }
         if scheme == "data" {
             let (mime, body) = match decode_data_url(module_specifier) {
