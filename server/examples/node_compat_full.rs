@@ -34,6 +34,7 @@ struct NodeCliInvocation {
     environment_imports: Vec<String>,
     cli_requires: Vec<String>,
     cli_imports: Vec<String>,
+    experimental_loaders: Vec<String>,
     exec_argv: Vec<String>,
     eval_source: Option<String>,
     input_type: Option<String>,
@@ -56,6 +57,7 @@ impl NodeCliInvocation {
             environment_imports: Vec::new(),
             cli_requires: Vec::new(),
             cli_imports: Vec::new(),
+            experimental_loaders: Vec::new(),
             exec_argv: Vec::new(),
             eval_source: None,
             input_type: None,
@@ -123,6 +125,10 @@ impl NodeCliInvocation {
                 "--import" => {
                     let value = Self::option_value(args, &mut index, flag, value)?;
                     self.add_import(source, value);
+                }
+                "--experimental-loader" | "--loader" => {
+                    let value = Self::option_value(args, &mut index, flag, value)?;
+                    self.experimental_loaders.push(value);
                 }
                 "--eval" | "-e" => {
                     Self::reject_node_options_flag(source, flag)?;
@@ -454,6 +460,7 @@ fn corpus_modules_for_cli(
         .chain(&invocation.cli_requires)
         .chain(&invocation.environment_imports)
         .chain(&invocation.cli_imports)
+        .chain(&invocation.experimental_loaders)
         .chain(invocation.entrypoint.iter());
     for value in module_paths {
         let Ok(virtual_path) = virtualize_corpus_path(value, corpus) else {
@@ -743,10 +750,58 @@ fn node_cli_source(
         ));
     }
 
+    let source_path = virtual_corpus_file(&entrypoint, corpus)?;
+    let entry_source = strip_shebang(
+        &fs::read_to_string(&source_path).map_err(|error| error.to_string())?,
+    )
+    .to_owned();
     let entrypoint = cli_path_module_specifier(&entrypoint)?;
-    source.push_str("await import(");
-    source.push_str(&serde_json::to_string(&entrypoint).unwrap());
-    source.push_str(");\n");
+    if invocation.experimental_loaders.is_empty() {
+        source.push_str("await import(");
+        source.push_str(&serde_json::to_string(&entrypoint).unwrap());
+        source.push_str(");\n");
+        return Ok((source, None));
+    }
+
+    let loaders = invocation
+        .experimental_loaders
+        .iter()
+        .map(|loader| {
+            let loader = virtualize_corpus_path(loader, corpus)?;
+            cli_path_module_specifier(&loader)
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let format = match check_compile_mode(&source_path, corpus) {
+        CompileMode::CommonJs => "commonjs",
+        _ => "module",
+    };
+    if !invocation.no_warnings {
+        source.push_str("console.error('ExperimentalWarning: `--experimental-loader` may be removed in the future');\n");
+    }
+    source.push_str(&format!(
+        r#"const __nodeCompatLoaderModules = await Promise.all({loaders}.map((specifier) => import(specifier)));
+const __nodeCompatLoadHooks = __nodeCompatLoaderModules.map((loader) => loader.load).filter((hook) => typeof hook === 'function');
+const __nodeCompatEntryUrl = {entrypoint};
+const __nodeCompatDefaultSource = {entry_source};
+const __nodeCompatDefaultLoad = async (url, context) => ({{ format: {format}, source: __nodeCompatDefaultSource, url }});
+const __nodeCompatRunLoad = async (index, url, context) => {{
+  if (index < 0) return __nodeCompatDefaultLoad(url, context);
+  const hook = __nodeCompatLoadHooks[index];
+  return await hook(url, context, (nextUrl = url, nextContext = context) => __nodeCompatRunLoad(index - 1, nextUrl, nextContext));
+}};
+const __nodeCompatLoaded = await __nodeCompatRunLoad(__nodeCompatLoadHooks.length - 1, __nodeCompatEntryUrl, {{ format: {format}, importAttributes: {{}} }});
+if (__nodeCompatLoaded == null || typeof __nodeCompatLoaded !== 'object') throw new TypeError('loader load hook must return an object');
+if (__nodeCompatLoaded.source === __nodeCompatDefaultSource && __nodeCompatLoaded.format === {format}) {{
+  await import(__nodeCompatEntryUrl);
+}} else {{
+  await import('data:text/javascript;charset=utf-8,' + encodeURIComponent(String(__nodeCompatLoaded.source ?? '')));
+}}
+"#,
+        loaders = serde_json::to_string(&loaders).unwrap(),
+        entrypoint = serde_json::to_string(&entrypoint).unwrap(),
+        entry_source = serde_json::to_string(&entry_source).unwrap(),
+        format = serde_json::to_string(format).unwrap(),
+    ));
     Ok((source, None))
 }
 
@@ -1113,6 +1168,22 @@ mod tests {
         assert_eq!(invocation.cli_imports, ["cli-import.mjs"]);
         assert_eq!(invocation.entrypoint.as_deref(), Some("entry.mjs"));
         assert_eq!(invocation.script_args, ["--script-flag"]);
+    }
+
+    #[test]
+    fn node_cli_parses_repeated_experimental_loaders() {
+        let invocation = NodeCliInvocation::parse(
+            &node_cli_args(&[
+                "--experimental-loader", "first.mjs",
+                "--loader=second.mjs",
+                "entry.mjs",
+            ]),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(invocation.experimental_loaders, ["first.mjs", "second.mjs"]);
+        assert_eq!(invocation.entrypoint.as_deref(), Some("entry.mjs"));
     }
 
     #[test]
