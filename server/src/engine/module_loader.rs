@@ -685,9 +685,17 @@ impl ModuleLoader for NetworkModuleLoader {
         _maybe_referrer: Option<&ModuleLoadReferrer>,
         options: ModuleLoadOptions,
     ) -> ModuleLoadResponse {
-        if let Some(source) = self.config.virtual_modules.as_ref()
-            .and_then(|modules| modules.get(module_specifier.as_str()))
-        {
+        let virtual_source = self.config.virtual_modules.as_ref().and_then(|modules| {
+            modules.get(module_specifier.as_str()).cloned().or_else(|| {
+                if module_specifier.scheme() != "file" {
+                    return None;
+                }
+                let path = module_specifier.to_file_path().ok()?;
+                let normalized = ModuleSpecifier::from_file_path(path).ok()?;
+                modules.get(normalized.as_str()).cloned()
+            })
+        });
+        if let Some(source) = virtual_source {
             let (format, module_type) = if module_specifier.path().ends_with(".json") {
                 ("json", ModuleType::Json)
             } else {
@@ -702,7 +710,7 @@ impl ModuleLoader for NetworkModuleLoader {
             }
             return ModuleLoadResponse::Sync(Ok(ModuleSource::new(
                 module_type,
-                ModuleSourceCode::String(FastString::from(source.clone())),
+                ModuleSourceCode::String(FastString::from(source)),
                 module_specifier,
                 None,
             )));
