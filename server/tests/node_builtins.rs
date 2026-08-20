@@ -147,6 +147,7 @@ fn child_process_spawn_sync_returns_buffered_result() {
     let subprocess = SubprocessConfig::new(policy);
     let code = r#"
         import childProcess, { spawnSync } from 'node:child_process';
+        globalThis.__NODE_TEST_CORPUS_HOST__ = '/host-corpus';
         if (childProcess.spawnSync !== spawnSync) {
             throw new Error('default export identity');
         }
@@ -154,6 +155,10 @@ fn child_process_spawn_sync_returns_buffered_result() {
         if (result.status !== 0 || result.signal !== null ||
             result.stdout.toString() !== 'hello' || result.stderr.toString() !== 'error') {
             throw new Error(`unexpected spawnSync result: ${JSON.stringify(result)}`);
+        }
+        const opaque = spawnSync('/bin/sh', ['-c', 'printf %s "$1"', 'sh', '/test/value']);
+        if (opaque.stdout.toString() !== '/test/value') {
+            throw new Error('spawnSync rewrote opaque argument: ' + opaque.stdout.toString());
         }
     "#;
     let (result, _) = execute_stateless(

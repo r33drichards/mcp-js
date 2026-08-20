@@ -229,6 +229,45 @@ async fn op_fs_read_file_buffer(
     .map_err(|e: String| JsErrorBox::generic(e))
 }
 
+/// Write a UTF-8 file synchronously after evaluating the filesystem policy.
+#[op2(fast)]
+fn op_fs_write_file_text_sync(
+    state: &mut OpState,
+    #[string] path: String,
+    #[string] data: String,
+) -> Result<(), JsErrorBox> {
+    let config = state
+        .try_borrow::<FsConfig>()
+        .cloned()
+        .ok_or_else(|| JsErrorBox::generic("fs: internal error - no fs config available"))?;
+    let mount = state.try_borrow::<FsMountHandle>().cloned();
+    check_policy_sync(&config, "writeFile", &path, None, None, None)?;
+    if let Some(mount) = mount {
+        let write_path = path.clone();
+        return std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| format!("fs.writeFileSync: failed to create runtime: {error}"))?;
+            runtime.block_on(async move {
+                mount
+                    .0
+                    .lock()
+                    .await
+                    .write(Path::new(&write_path), data.as_bytes())
+                    .await
+                    .map_err(|error| format!("fs.writeFileSync: {write_path}: {error}"))
+            })
+        })
+        .join()
+        .map_err(|_| JsErrorBox::generic("fs.writeFileSync thread panicked"))?
+        .map_err(JsErrorBox::generic);
+    }
+
+    std::fs::write(&path, data.as_bytes())
+        .map_err(|error| JsErrorBox::generic(io_err("writeFile", &path, &error)))
+}
+
 /// Write a file from a UTF-8 string.
 #[op2]
 #[string]
@@ -852,6 +891,7 @@ deno_core::extension!(
     ops = [
         op_fs_read_file_text,
         op_fs_read_file_buffer,
+        op_fs_write_file_text_sync,
         op_fs_write_file_text,
         op_fs_write_file_buffer,
         op_fs_append_file,
@@ -966,6 +1006,18 @@ const FS_JS_WRAPPER: &str = r#"
         const enc = readEncoding(options);
         if (enc && enc !== 'buffer') return await readFileText(path);
         return await readFileBuffer(path);
+    }
+
+    function writeFileSync(path, data) {
+        if (typeof path !== 'string') throw new TypeError('fs.writeFileSync: path must be a string');
+        if (typeof data !== 'string') {
+            throw new TypeError('fs.writeFileSync: binary data is not supported yet');
+        }
+        try {
+            ops.op_fs_write_file_text_sync(path, data);
+        } catch (e) {
+            throw tagError(e);
+        }
     }
 
     async function writeFile(path, data) {
@@ -1086,7 +1138,7 @@ const FS_JS_WRAPPER: &str = r#"
     };
 
     globalThis.fs = {
-        readFile, writeFile, appendFile, readdir, stat, lstat, mkdir, rm, rmdir,
+        readFile, writeFile, writeFileSync, appendFile, readdir, stat, lstat, mkdir, rm, rmdir,
         unlink, rename, copyFile, readlink, symlink, exists, createWriteStream,
         promises,
     };
@@ -1246,6 +1298,40 @@ fn mount_stat_json(s: &super::fs_mount::Stat) -> String {
         "birthtimeMs": null,
     })
     .to_string()
+}
+
+fn check_policy_sync(
+    config: &FsConfig,
+    operation: &str,
+    path: &str,
+    destination: Option<&str>,
+    recursive: Option<bool>,
+    encoding: Option<&str>,
+) -> Result<(), JsErrorBox> {
+    let policy_chain = config.policy_chain.clone();
+    let operation = operation.to_owned();
+    let path = path.to_owned();
+    let destination = destination.map(str::to_owned);
+    let encoding = encoding.map(str::to_owned);
+    let mcp_headers = config.mcp_headers.clone();
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| format!("fs.{operation}: failed to create policy runtime: {error}"))?;
+        runtime.block_on(check_policy(
+            &policy_chain,
+            &operation,
+            &path,
+            destination.as_deref(),
+            recursive,
+            encoding.as_deref(),
+            mcp_headers.as_ref(),
+        ))
+    })
+    .join()
+    .map_err(|_| JsErrorBox::generic("fs policy thread panicked"))?
+    .map_err(JsErrorBox::generic)
 }
 
 async fn check_policy(

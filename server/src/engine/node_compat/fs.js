@@ -20,7 +20,9 @@ function unsupported(name) {
 export const readFile = unsupported('readFile');
 export const readFileSync = unsupported('readFileSync');
 export const writeFile = unsupported('writeFile');
-export const writeFileSync = unsupported('writeFileSync');
+export const writeFileSync = globalThis.fs && typeof globalThis.fs.writeFileSync === 'function'
+    ? (path, data, ...args) => globalThis.fs.writeFileSync(normalizePath(path), data, ...args)
+    : unsupported('writeFileSync');
 export const openSync = unsupported('openSync');
 export const closeSync = unsupported('closeSync');
 export const readSync = unsupported('readSync');

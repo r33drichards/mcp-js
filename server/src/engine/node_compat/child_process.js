@@ -50,6 +50,16 @@ function hostPath(filename) {
     return corpus && value.startsWith('/test/') ? corpus + value : value;
 }
 
+function selfHostedFileRoot(cwd) {
+    if (!cwd) return undefined;
+    const value = String(cwd);
+    const corpus = globalThis.__NODE_TEST_CORPUS_HOST__;
+    if (corpus && value.startsWith(corpus + '/test/')) return corpus;
+    const tmpdir = globalThis.__NODE_TEST_TMPDIR__;
+    if (tmpdir && (value === tmpdir || value.startsWith(tmpdir + '/'))) return tmpdir;
+    return undefined;
+}
+
 class ChildProcess extends EventEmitter {
     #modulePath;
     #args;
@@ -184,12 +194,22 @@ class SpawnedChildProcess extends EventEmitter {
     #start() {
         if (this.#started) return;
         this.#started = true;
-        const selfHosted = this.#command === globalThis.__NODE_TEST_EXEC_PATH__;
+        const selfHosted = this.#command === globalThis.process?.execPath;
+        const executable = selfHosted
+            ? globalThis.__NODE_TEST_EXEC_PATH__ || this.#command
+            : hostPath(this.#command);
         const args = selfHosted ? ['--node-compat-cli', ...this.#args] : this.#args;
-        const command = new Deno.Command(this.#command, {
+        const cwd = this.#options.cwd === undefined
+            ? undefined
+            : hostPath(this.#options.cwd);
+        const fileRoot = selfHostedFileRoot(cwd);
+        const env = fileRoot
+            ? { ...this.#options.env, NODE_COMPAT_FILE_ROOT: fileRoot }
+            : this.#options.env;
+        const command = new Deno.Command(executable, {
             args,
-            cwd: this.#options.cwd,
-            env: this.#options.env,
+            cwd,
+            env,
             stdin: this.#input,
         });
         command.output().then((output) => {
@@ -231,11 +251,19 @@ export function spawnSync(command, args = [], options = {}) {
         args = [];
     }
     options ||= {};
-    const selfHosted = command === globalThis.__NODE_TEST_EXEC_PATH__;
+    const selfHosted = command === globalThis.process?.execPath;
+    const executable = selfHosted
+        ? globalThis.__NODE_TEST_EXEC_PATH__ || command
+        : hostPath(command);
     const normalizedArgs = args.map(String);
     const commandArgs = selfHosted
         ? ['--node-compat-cli', ...normalizedArgs]
         : normalizedArgs;
+    const cwd = options.cwd === undefined ? undefined : hostPath(options.cwd);
+    const fileRoot = selfHostedFileRoot(cwd);
+    const env = fileRoot
+        ? { ...options.env, NODE_COMPAT_FILE_ROOT: fileRoot }
+        : options.env;
     let stdin = null;
     if (options.input !== undefined && options.input !== null) {
         const bytes = options.input instanceof Uint8Array
@@ -243,10 +271,10 @@ export function spawnSync(command, args = [], options = {}) {
             : new TextEncoder().encode(String(options.input));
         stdin = Array.from(bytes);
     }
-    const output = new Deno.Command(command, {
+    const output = new Deno.Command(executable, {
         args: commandArgs,
-        cwd: options.cwd,
-        env: options.env,
+        cwd,
+        env,
         stdin,
     }).outputSync();
     const encoding = options.encoding;

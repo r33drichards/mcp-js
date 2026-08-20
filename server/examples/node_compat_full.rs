@@ -36,6 +36,7 @@ struct NodeCliInvocation {
     cli_requires: Vec<String>,
     cli_imports: Vec<String>,
     experimental_loaders: Vec<String>,
+    experimental_package_map: Option<String>,
     exec_argv: Vec<String>,
     eval_source: Option<String>,
     input_type: Option<String>,
@@ -59,6 +60,7 @@ impl NodeCliInvocation {
             cli_requires: Vec::new(),
             cli_imports: Vec::new(),
             experimental_loaders: Vec::new(),
+            experimental_package_map: None,
             exec_argv: Vec::new(),
             eval_source: None,
             input_type: None,
@@ -130,6 +132,15 @@ impl NodeCliInvocation {
                 "--experimental-loader" | "--loader" => {
                     let value = Self::option_value(args, &mut index, flag, value)?;
                     self.experimental_loaders.push(value);
+                }
+                "--experimental-package-map" => {
+                    let value = Self::option_value(args, &mut index, flag, value)?;
+                    if self.experimental_package_map.replace(value).is_some() {
+                        return Err(
+                            "multiple --experimental-package-map options are unsupported"
+                                .to_owned(),
+                        );
+                    }
                 }
                 "--eval" | "-e" => {
                     Self::reject_node_options_flag(source, flag)?;
@@ -1647,12 +1658,150 @@ fn add_host_modules(
     Ok(())
 }
 
+fn package_map_path(value: &str, corpus: &Path) -> Result<PathBuf, String> {
+    if is_virtual_test_path(Path::new(value)) {
+        return virtual_corpus_file(value, corpus);
+    }
+    if value.starts_with("file:") {
+        return ModuleSpecifier::parse(value)
+            .map_err(|error| format!("ERR_PACKAGE_MAP_INVALID: {error}"))?
+            .to_file_path()
+            .map_err(|_| "ERR_PACKAGE_MAP_INVALID: package map URL must be file:".to_owned());
+    }
+    let path = PathBuf::from(value);
+    Ok(if path.is_absolute() {
+        path
+    } else {
+        std::env::current_dir()
+            .map_err(|error| error.to_string())?
+            .join(path)
+    })
+}
+
+fn package_map_read_error(error: std::io::Error) -> String {
+    let message = error.to_string();
+    let mut bytes = message.into_bytes();
+    if let Some(first) = bytes.first_mut() {
+        first.make_ascii_lowercase();
+    }
+    format!(
+        "ERR_PACKAGE_MAP_INVALID: {}",
+        String::from_utf8(bytes).unwrap()
+    )
+}
+
+fn load_node_package_map(
+    invocation: &NodeCliInvocation,
+    corpus: &Path,
+) -> Result<Option<(serde_json::Value, Vec<PathBuf>)>, String> {
+    let Some(value) = invocation.experimental_package_map.as_deref() else {
+        return Ok(None);
+    };
+    let map_path = fs::canonicalize(package_map_path(value, corpus)?)
+        .map_err(package_map_read_error)?;
+    let source = fs::read_to_string(&map_path).map_err(package_map_read_error)?;
+    let document: serde_json::Value = serde_json::from_str(&source)
+        .map_err(|error| format!("ERR_PACKAGE_MAP_INVALID: {error}"))?;
+    let packages = document
+        .get("packages")
+        .and_then(|value| value.as_object())
+        .ok_or_else(|| {
+            "ERR_PACKAGE_MAP_INVALID: package map must contain a packages object".to_owned()
+        })?;
+    let map_url = ModuleSpecifier::from_file_path(&map_path)
+        .map_err(|_| "ERR_PACKAGE_MAP_INVALID: invalid package map path".to_owned())?;
+    let mut normalized = serde_json::Map::new();
+    let mut seen_urls = HashMap::<String, String>::new();
+    let mut directories = Vec::new();
+    for (name, package) in packages {
+        let package = package.as_object().ok_or_else(|| {
+            format!("ERR_PACKAGE_MAP_INVALID: package {name:?} must be an object")
+        })?;
+        let url = package
+            .get("url")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| {
+                format!("ERR_PACKAGE_MAP_INVALID: package {name:?} must contain a url")
+            })?;
+        let resolved = map_url
+            .join(url)
+            .map_err(|error| format!("ERR_PACKAGE_MAP_INVALID: {error}"))?;
+        if resolved.scheme() != "file" {
+            return Err(format!(
+                "ERR_PACKAGE_MAP_INVALID: unsupported URL scheme in {}",
+                resolved
+            ));
+        }
+        let resolved_path = resolved
+            .to_file_path()
+            .map_err(|_| "ERR_PACKAGE_MAP_INVALID: invalid file URL".to_owned())?;
+        let (host_path, virtual_url) = if is_virtual_test_path(&resolved_path) {
+            (
+                virtual_corpus_file(resolved_path.to_string_lossy().as_ref(), corpus)?,
+                resolved.to_string(),
+            )
+        } else if resolved_path.starts_with(corpus) {
+            let virtual_path =
+                virtualize_corpus_path(resolved_path.to_string_lossy().as_ref(), corpus)?;
+            (resolved_path, cli_path_module_specifier(&virtual_path)?)
+        } else {
+            (resolved_path, resolved.to_string())
+        };
+        let package_url = if virtual_url.ends_with('/') {
+            virtual_url
+        } else {
+            format!("{virtual_url}/")
+        };
+        if let Some(previous) = seen_urls.insert(package_url.clone(), name.clone()) {
+            return Err(format!(
+                "ERR_PACKAGE_MAP_INVALID: packages {previous:?} and {name:?} have duplicate URL {package_url}"
+            ));
+        }
+        let dependencies = package
+            .get("dependencies")
+            .map(|value| {
+                value.as_object().ok_or_else(|| {
+                    format!("ERR_PACKAGE_MAP_INVALID: dependencies for {name:?} must be an object")
+                })
+            })
+            .transpose()?
+            .cloned()
+            .unwrap_or_default();
+        if dependencies.values().any(|value| !value.is_string()) {
+            return Err(format!(
+                "ERR_PACKAGE_MAP_INVALID: dependency values for {name:?} must be strings"
+            ));
+        }
+        normalized.insert(
+            name.clone(),
+            serde_json::json!({
+                "url": package_url,
+                "dependencies": dependencies,
+            }),
+        );
+        directories.push(host_path);
+    }
+    Ok(Some((
+        serde_json::json!({ "packages": normalized }),
+        directories,
+    )))
+}
+
 fn corpus_modules_for_cli(
     corpus: &Path,
     invocation: &NodeCliInvocation,
 ) -> Result<CorpusModules, String> {
     let test_root = corpus.join("test");
+    let package_map = load_node_package_map(invocation, corpus)?;
     let mut directories = HashSet::new();
+    if let Some((_, package_directories)) = &package_map {
+        directories.extend(
+            package_directories
+                .iter()
+                .filter(|path| path.starts_with(corpus))
+                .cloned(),
+        );
+    }
     let mut needs_common = false;
     let eval_module_specifiers = invocation
         .eval_source
@@ -1713,6 +1862,11 @@ fn corpus_modules_for_cli(
         )?;
     }
     add_named_commonjs_import_errors(corpus, true, &mut modules);
+    if let Some((package_map, _)) = &package_map {
+        files.insert(server::engine::module_loader::virtual_package_map(
+            package_map,
+        ));
+    }
     if let Ok(file_root) = std::env::var("NODE_COMPAT_FILE_ROOT") {
         let file_root = fs::canonicalize(file_root).map_err(|error| error.to_string())?;
         let cwd = fs::canonicalize(std::env::current_dir().map_err(|error| error.to_string())?)
@@ -1943,6 +2097,7 @@ fn node_cli_source(
     invocation: &NodeCliInvocation,
     corpus: &Path,
 ) -> Result<(String, Option<(String, String, CompileMode)>), String> {
+    let _ = load_node_package_map(invocation, corpus)?;
     let process_config = node_cli_process_config(invocation, corpus)?;
     let mut source = format!(
         "globalThis.__mcpV8ProcessConfig={};\n\
@@ -2098,6 +2253,14 @@ fn run_node_compat_cli_with_stdin(
     let policy = Arc::new(PolicyChain::new(vec![], EvalMode::All));
     let fetch = FetchConfig::new_with_chain(policy.clone());
     let subprocess = SubprocessConfig::new(policy);
+    let fs_policy = std::env::var("NODE_COMPAT_FILE_ROOT")
+        .ok()
+        .filter(|root| !root.is_empty())
+        .map(|root| isolated_fs_policy(Path::new(&root)))
+        .transpose()?;
+    let fs_config = fs_policy
+        .as_ref()
+        .map(|(_, policy)| FsConfig::new(policy.clone()));
     let process_exit_state = ProcessExitState::default();
     let module_loader = ModuleLoaderConfig {
         allow_external: true,
@@ -2112,9 +2275,12 @@ fn run_node_compat_cli_with_stdin(
         } else {
             "[eval]"
         };
-        ModuleSpecifier::from_file_path(std::env::current_dir().unwrap().join(name))
-            .unwrap()
-            .to_string()
+        let cwd = std::env::current_dir().unwrap();
+        let path = virtualize_corpus_path(cwd.to_string_lossy().as_ref(), &corpus)
+            .map(PathBuf::from)
+            .unwrap_or(cwd)
+            .join(name);
+        ModuleSpecifier::from_file_path(path).unwrap().to_string()
     });
     let mut config = ExecutionConfig::new(256 * 1024 * 1024)
         .console_tree(tree.clone())
@@ -2122,6 +2288,7 @@ fn run_node_compat_cli_with_stdin(
         .process_exit_state(&process_exit_state)
         .bootstrap_script(&process_bootstrap)
         .fetch_config(&fetch)
+        .maybe_fs_config(fs_config.as_ref())
         .maybe_subprocess_config(Some(&subprocess))
         .module_loader_config(&module_loader);
     if let Some(main_specifier) = eval_main_specifier.as_deref() {
@@ -3179,6 +3346,87 @@ mod tests {
         corpus
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn package_map_relative_urls_follow_symlinked_map_target() {
+        use std::os::unix::fs::symlink;
+
+        let corpus = cli_corpus(&[(
+            "test/fixtures/package-map/symlink-target/dep/index.js",
+            "export default 'dep';\n",
+        )]);
+        let target_map = corpus
+            .path()
+            .join("test/fixtures/package-map/symlink-target/package-map.json");
+        fs::write(
+            &target_map,
+            r#"{"packages":{"dep":{"url":"./dep","dependencies":{}}}}"#,
+        )
+        .unwrap();
+        let linked_map = corpus.path().join("linked-package-map.json");
+        symlink(&target_map, &linked_map).unwrap();
+        let invocation = NodeCliInvocation::parse(
+            &node_cli_args(&[
+                "--experimental-package-map",
+                linked_map.to_string_lossy().as_ref(),
+                "--input-type=module",
+                "--eval",
+                "import dep from 'dep';",
+            ]),
+            None,
+        )
+        .unwrap();
+
+        let (_, directories) = load_node_package_map(&invocation, corpus.path())
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            directories,
+            [corpus
+                .path()
+                .join("test/fixtures/package-map/symlink-target/dep")]
+        );
+    }
+
+    #[test]
+    fn package_map_virtual_file_urls_index_corpus_directories() {
+        let corpus = cli_corpus(&[(
+            "test/fixtures/package-map/dep-a/index.js",
+            "export default 'dep-a-value';\n",
+        )]);
+        let map_path = corpus.path().join("package-map.json");
+        fs::write(
+            &map_path,
+            r#"{"packages":{"dep-a":{"url":"file:///test/fixtures/package-map/dep-a","dependencies":{}}}}"#,
+        )
+        .unwrap();
+        let invocation = NodeCliInvocation::parse(
+            &node_cli_args(&[
+                "--experimental-package-map",
+                map_path.to_string_lossy().as_ref(),
+                "--input-type=module",
+                "--eval",
+                "import dep from 'dep-a';",
+            ]),
+            None,
+        )
+        .unwrap();
+
+        let (map, directories) = load_node_package_map(&invocation, corpus.path())
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            map["packages"]["dep-a"]["url"],
+            "file:///test/fixtures/package-map/dep-a/"
+        );
+        assert_eq!(
+            directories,
+            [corpus.path().join("test/fixtures/package-map/dep-a")]
+        );
+    }
+
     #[test]
     fn node_cli_virtualizes_corpus_paths_and_rejects_external_paths() {
         let corpus = cli_corpus(&[("test/entry.mjs", "export {};\n")]);
@@ -3474,6 +3722,13 @@ mod tests {
         assert_eq!(output.stderr, "stderr\n");
         assert_eq!(output.exit_code, 7);
         assert_eq!(output.runtime_error, None);
+    }
+
+    #[test]
+    fn package_map_read_errors_use_node_style_lowercase_messages() {
+        let error = std::io::Error::from_raw_os_error(2);
+
+        assert!(package_map_read_error(error).contains("no such file or directory"));
     }
 
     #[test]

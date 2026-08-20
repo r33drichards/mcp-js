@@ -31,6 +31,7 @@ const MODULE_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 const MODULE_FETCH_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const FILE_ROOT_PREFIX: &str = "mcp-v8:file-root:";
 const FILE_MAP_PREFIX: &str = "mcp-v8:file-map:";
+const PACKAGE_MAP_PREFIX: &str = "mcp-v8:package-map:";
 
 #[derive(Debug)]
 struct NodeModuleError {
@@ -270,6 +271,16 @@ fn package_error_module(code: &str, message: &str) -> ModuleSpecifier {
         .append_pair("message", message);
     specifier
 }
+
+fn node_error_module_source(code: &str, message: &str) -> String {
+    format!(
+        "export default undefined;const error=new Error({message});error.code={code};try{{if(typeof error.stack==='string')error.stack+='\\n  code: '+{quoted_code};}}catch{{}}throw error;",
+        message = serde_json::to_string(&message).unwrap(),
+        code = serde_json::to_string(&code).unwrap(),
+        quoted_code = serde_json::to_string(&format!("'{code}'")).unwrap(),
+    )
+}
+
 
 fn package_target(
     value: &serde_json::Value,
@@ -609,6 +620,98 @@ fn invalid_package_subpath(subpath: &str) -> bool {
     })
 }
 
+#[derive(Debug, serde::Deserialize)]
+struct VirtualPackageMapPackage {
+    url: String,
+    dependencies: HashMap<String, String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct VirtualPackageMap {
+    packages: HashMap<String, VirtualPackageMapPackage>,
+}
+
+pub fn virtual_package_map(value: &serde_json::Value) -> String {
+    format!("{PACKAGE_MAP_PREFIX}{value}")
+}
+
+fn configured_package_map(config: &ModuleLoaderConfig) -> Option<VirtualPackageMap> {
+    config.virtual_files.as_deref()?.iter().find_map(|marker| {
+        marker
+            .strip_prefix(PACKAGE_MAP_PREFIX)
+            .and_then(|value| serde_json::from_str(value).ok())
+    })
+}
+
+fn resolve_package_map(
+    config: &ModuleLoaderConfig,
+    modules: &HashMap<String, String>,
+    specifier: &str,
+    referrer: &str,
+    conditions: &[&str],
+) -> Option<Result<ModuleSpecifier, JsErrorBox>> {
+    let (package, subpath) = package_specifier_parts(specifier)?;
+    let package_map = configured_package_map(config)?;
+    let referrer = ModuleSpecifier::parse(referrer).ok()?;
+    let Some(owner) = package_map
+        .packages
+        .values()
+        .filter(|entry| referrer.as_str().starts_with(&entry.url))
+        .max_by_key(|entry| entry.url.len())
+    else {
+        return Some(Ok(package_error_module(
+            "ERR_PACKAGE_MAP_EXTERNAL_FILE",
+            &format!("File outside package map scope: {referrer}"),
+        )));
+    };
+    let Some(target_key) = owner.dependencies.get(&package) else {
+        return Some(Ok(package_error_module(
+            "ERR_PACKAGE_MAP_KEY_NOT_FOUND",
+            &format!("Package map dependency key '{package}' was not found"),
+        )));
+    };
+    let Some(target) = package_map.packages.get(target_key) else {
+        return Some(Ok(package_error_module(
+            "ERR_PACKAGE_MAP_KEY_NOT_FOUND",
+            &format!("Package map key '{target_key}' was not found"),
+        )));
+    };
+    let package_root = ModuleSpecifier::parse(&target.url).ok()?;
+    let package_json = package_root.join("package.json").ok()?;
+    if let Some(source) = modules.get(package_json.as_str()) {
+        return Some(Ok(resolve_package_json(
+            modules,
+            source,
+            &package_json,
+            &package,
+            &referrer,
+            &subpath,
+            conditions,
+        )));
+    }
+    let request = if subpath.is_empty() {
+        "index"
+    } else {
+        &subpath
+    };
+    let target_url = package_root.join(request).ok()?;
+    for candidate in [
+        target_url.to_string(),
+        format!("{}.js", target_url),
+        format!("{}.cjs", target_url),
+        format!("{}/index.js", target_url.as_str().trim_end_matches('/')),
+        format!("{}/index.cjs", target_url.as_str().trim_end_matches('/')),
+    ] {
+        if modules.contains_key(&candidate) {
+            return Some(ModuleSpecifier::parse(&candidate).map_err(JsErrorBox::from_err));
+        }
+    }
+    Some(Ok(package_error_module(
+        "ERR_MODULE_NOT_FOUND",
+        &format!("Cannot find module '{}'", target_url.path()),
+    )))
+}
+
 fn resolve_virtual_package(
     modules: &HashMap<String, String>,
     specifier: &str,
@@ -737,6 +840,15 @@ impl ModuleLoader for NetworkModuleLoader {
         }
 
         if let Some(modules) = self.config.virtual_modules.as_deref() {
+            if let Some(resolved) = resolve_package_map(
+                &self.config,
+                modules,
+                specifier,
+                referrer,
+                &["import", "node", "default"],
+            ) {
+                return resolved;
+            }
             if let Some(resolved) =
                 resolve_virtual_package(modules, specifier, referrer, &["import", "node", "default"])
             {
@@ -862,12 +974,7 @@ impl ModuleLoader for NetworkModuleLoader {
                     _ => {}
                 }
             }
-            let source = format!(
-                "const error=new Error({message});error.code={code};try{{if(typeof error.stack==='string')error.stack+='\\n  code: '+{quoted_code};}}catch{{}}throw error;",
-                message = serde_json::to_string(&message).unwrap(),
-                code = serde_json::to_string(&code).unwrap(),
-                quoted_code = serde_json::to_string(&format!("'{code}'")).unwrap(),
-            );
+            let source = node_error_module_source(&code, &message);
             return ModuleLoadResponse::Sync(Ok(ModuleSource::new(
                 ModuleType::JavaScript,
                 ModuleSourceCode::String(FastString::from(source)),
@@ -1266,6 +1373,50 @@ mod tests {
                 .unwrap()
                 .contains("no_exports")
         );
+    }
+
+    #[test]
+    fn package_map_rejects_referrers_outside_mapped_packages() {
+        let package_map = serde_json::json!({
+            "packages": {
+                "root": {
+                    "url": "file:///app/root/",
+                    "dependencies": { "dep": "dep" }
+                },
+                "dep": {
+                    "url": "file:///app/dep/",
+                    "dependencies": {}
+                }
+            }
+        });
+        let config = ModuleLoaderConfig {
+            allow_external: true,
+            policy_chain: None,
+            virtual_modules: None,
+            virtual_commonjs_modules: None,
+            virtual_files: Some(Arc::new(HashSet::from([virtual_package_map(&package_map)]))),
+        };
+
+        let resolved = resolve_package_map(
+            &config,
+            &HashMap::new(),
+            "dep",
+            "file:///outside/main.mjs",
+            &["import", "node", "default"],
+        )
+        .expect("package map should handle bare imports")
+        .unwrap();
+        let query = resolved.query_pairs().collect::<HashMap<_, _>>();
+
+        assert_eq!(query.get("code").unwrap(), "ERR_PACKAGE_MAP_EXTERNAL_FILE");
+    }
+
+    #[test]
+    fn package_error_modules_link_default_imports_before_throwing() {
+        let source = node_error_module_source("ERR_PACKAGE_MAP_KEY_NOT_FOUND", "missing");
+
+        assert!(source.starts_with("export default undefined;"));
+        assert!(source.contains("throw error;"));
     }
 
 }
