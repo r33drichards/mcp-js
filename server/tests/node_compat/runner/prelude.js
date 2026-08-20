@@ -258,6 +258,10 @@ globalThis.__NODE_TEST_RECORD_FAILURE__ = function recordFailure(error) {
 };
 globalThis.__NODE_TEST_FIXTURES__ = fixtures;
 
+const testPath = '/' + (globalThis.__NODE_TEST_PATH__ || ('test/parallel/' + (globalThis.__NODE_TEST_NAME__ || 'test.js')));
+const testDir = testPath.slice(0, testPath.lastIndexOf('/')) || '/';
+const virtualRequire = moduleModule.createRequire(testPath);
+
 function nodeRequire(id) {
     let name = String(id);
     if (name.startsWith('node:')) name = name.slice(5);
@@ -269,18 +273,15 @@ function nodeRequire(id) {
         throw new Error('Unsupported common submodule: ' + name);
     }
     if (Object.prototype.hasOwnProperty.call(modules, name)) return modules[name];
-    const err = new Error("Cannot find module '" + id + "'");
-    err.code = 'MODULE_NOT_FOUND';
-    throw err;
+    return virtualRequire(id);
 }
-nodeRequire.cache = moduleModule._cache;
+nodeRequire.resolve = virtualRequire.resolve;
+nodeRequire.cache = virtualRequire.cache;
+nodeRequire.main = virtualRequire.main;
 
 // The harness schedules its drain-time report through this stash so tests
 // that delete the timer globals (test-timers-api-refs) can still report.
 globalThis.__NODE_TEST_SETTIMEOUT__ = globalThis.setTimeout;
-
-const testPath = '/' + (globalThis.__NODE_TEST_PATH__ || ('test/parallel/' + (globalThis.__NODE_TEST_NAME__ || 'test.js')));
-const testDir = testPath.slice(0, testPath.lastIndexOf('/')) || '/';
 
 globalThis.__NODE_TEST_RUN_CJS__ = function runCommonJS(source) {
     const testModule = { exports: {} };

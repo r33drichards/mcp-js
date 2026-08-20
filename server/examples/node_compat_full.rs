@@ -265,6 +265,15 @@ fn strip_shebang(body: &str) -> &str {
         .and_then(|rest| rest.split_once('\n').map(|(_, body)| body))
         .unwrap_or(body)
 }
+fn test_flags(body: &str) -> Vec<String> {
+    body.lines()
+        .filter_map(|line| line.trim_start().strip_prefix("// Flags:"))
+        .flat_map(|flags| {
+            shlex::split(flags)
+                .unwrap_or_else(|| flags.split_whitespace().map(str::to_owned).collect())
+        })
+        .collect()
+}
 fn assemble(path: &str, body: &str) -> String {
     let body = strip_shebang(body);
     if is_esm(path) {
@@ -309,6 +318,20 @@ fn package_uses_modules(directory: &Path, inherited: bool) -> bool {
                 .map(str::to_owned)
         })
         .is_some_and(|kind| kind == "module")
+}
+fn source_uses_esm_syntax(specifier: &str, source: &str) -> bool {
+    deno_ast::parse_program(deno_ast::ParseParams {
+        specifier: match deno_ast::ModuleSpecifier::parse(specifier) {
+            Ok(specifier) => specifier,
+            Err(_) => return false,
+        },
+        text: source.into(),
+        media_type: deno_ast::MediaType::JavaScript,
+        capture_tokens: false,
+        scope_analysis: false,
+        maybe_syntax: None,
+    })
+    .is_ok_and(|parsed| !parsed.compute_is_script())
 }
 fn commonjs_export_names(source: &str) -> Vec<String> {
     if !source.contains("exports") {
@@ -384,7 +407,7 @@ fn transpile_esm_to_commonjs(specifier: &str, source: &str) -> Option<String> {
         return None;
     }
 
-    GLOBALS.set(&Globals::default(), || {
+    let output = GLOBALS.set(&Globals::default(), || {
         HELPERS.set(&Helpers::new(false), || {
             let unresolved_mark = Mark::new();
             let top_level_mark = Mark::new();
@@ -414,7 +437,9 @@ fn transpile_esm_to_commonjs(specifier: &str, source: &str) -> Option<String> {
             .ok()?;
             String::from_utf8(output).ok()
         })
-    })
+    })?;
+    let original = url::form_urlencoded::byte_serialize(source.as_bytes()).collect::<String>();
+    Some(format!("/*mcp-v8-original-esm:{original}*/\n{output}"))
 }
 
 fn wrap_commonjs(source: &str) -> String {
@@ -487,27 +512,27 @@ fn add_corpus_modules(
             continue;
         }
         let source = fs::read_to_string(&path).map_err(|error| error.to_string())?;
+        let source = strip_shebang(&source);
         let extension = path.extension().and_then(|value| value.to_str());
-        if path
-            .components()
-            .any(|component| component.as_os_str() == "node_modules")
-        {
-            commonjs_modules.insert(specifier.to_string(), strip_shebang(&source).to_string());
-        }
-        let is_commonjs =
-            extension == Some("cjs") || (extension == Some("js") && !directory_uses_modules);
-        if !is_commonjs
-            && let Some(commonjs) =
-                transpile_esm_to_commonjs(specifier.as_str(), strip_shebang(&source))
+        let detected_esm = extension == Some("mjs")
+            || (extension == Some("js")
+                && (directory_uses_modules || source_uses_esm_syntax(specifier.as_str(), source)));
+        let is_commonjs = extension == Some("cjs") || (extension == Some("js") && !detected_esm);
+
+        if extension == Some("json") || is_commonjs {
+            commonjs_modules.insert(specifier.to_string(), source.to_string());
+        } else if detected_esm
+            && let Some(commonjs) = transpile_esm_to_commonjs(specifier.as_str(), source)
         {
             commonjs_modules.insert(specifier.to_string(), commonjs);
         }
-        let source = if is_commonjs {
-            wrap_commonjs(strip_shebang(&source))
+
+        let module_source = if is_commonjs {
+            wrap_commonjs(source)
         } else {
-            strip_shebang(&source).to_string()
+            source.to_string()
         };
-        modules.insert(specifier.to_string(), source);
+        modules.insert(specifier.to_string(), module_source);
     }
     Ok(())
 }
@@ -1051,9 +1076,10 @@ fn run(
         })
     };
     let source = format!(
-        "globalThis.__NODE_TEST_CORPUS_HOST__={};globalThis.__NODE_TEST_EXEC_PATH__={};\n{}",
+        "globalThis.__NODE_TEST_CORPUS_HOST__={};globalThis.__NODE_TEST_EXEC_PATH__={};globalThis.__NODE_TEST_FLAGS__={};\n{}",
         serde_json::to_string(corpus.to_str().unwrap()).unwrap(),
         serde_json::to_string(node_executable.to_str().unwrap()).unwrap(),
+        serde_json::to_string(&test_flags(body)).unwrap(),
         assemble(path, body),
     );
     let (res, _) = server::engine::execute_stateless(&source, config);
@@ -1368,6 +1394,24 @@ mod tests {
         assert!(error.contains("unsupported Node CLI flag: --inspect"));
     }
     #[test]
+    fn node_test_flags_parse_shell_words_and_multiple_directives() {
+        assert_eq!(
+            test_flags(
+                "// Flags: --no-experimental-require-module --title='node test'
+\
+                 // Flags: --no-warnings
+'use strict';
+",
+            ),
+            [
+                "--no-experimental-require-module",
+                "--title=node test",
+                "--no-warnings",
+            ],
+        );
+    }
+
+    #[test]
     fn assemble_runs_test_body_through_commonjs_wrapper() {
         let source = assemble("test/parallel/wrapper.js", "return;");
         let runner = source.split_once(PRELUDE).unwrap().1;
@@ -1397,6 +1441,12 @@ mod tests {
             "module.exports = 42;\n",
         )
         .unwrap();
+        fs::write(root.join("test/fixtures/value.json"), "{\"value\":42}\n").unwrap();
+        fs::write(
+            root.join("test/fixtures/ambiguous.js"),
+            "export default 'module';\n",
+        )
+        .unwrap();
         fs::write(root.join("test/fixtures/addon.node"), [0_u8, 1, 2]).unwrap();
         fs::create_dir_all(root.join("test/fixtures/esm")).unwrap();
         fs::write(
@@ -1420,6 +1470,40 @@ mod tests {
             Some("export default 42;\n"),
         );
         assert!(modules.esm["file:///test/fixtures/value.js"].contains("__cjsModule.exports"));
+        assert_eq!(
+            modules
+                .commonjs
+                .get("file:///test/fixtures/value.js")
+                .map(String::as_str),
+            Some(
+                "module.exports = 42;
+"
+            ),
+        );
+        assert_eq!(
+            modules
+                .commonjs
+                .get("file:///test/fixtures/value.json")
+                .map(String::as_str),
+            Some(
+                "{\"value\":42}
+"
+            ),
+        );
+        assert_eq!(
+            modules
+                .esm
+                .get("file:///test/fixtures/ambiguous.js")
+                .map(String::as_str),
+            Some(
+                "export default 'module';
+"
+            ),
+        );
+        assert!(
+            modules.commonjs["file:///test/fixtures/ambiguous.js"]
+                .starts_with("/*mcp-v8-original-esm:")
+        );
         assert!(modules.files.contains("file:///test/fixtures/addon.node"));
         assert_eq!(
             modules

@@ -87,6 +87,7 @@ const virtualPackageJson = globalThis.__mcpV8VirtualPackageJson || null;
 const virtualModuleCache = new Map();
 const requireCache = Object.create(null);
 const ESM_IMPORT_PREFIX = 'mcp-v8:esm-import:';
+const ORIGINAL_ESM_PREFIX = '/*mcp-v8-original-esm:';
 
 function packageParts(specifier) {
     if (specifier.startsWith('.') || specifier.startsWith('/') || specifier.includes(':')) {
@@ -315,14 +316,30 @@ function importVirtualModule(id, filename) {
     }
 }
 
+function originalEsmSource(source) {
+    if (!source.startsWith(ORIGINAL_ESM_PREFIX)) return null;
+    const end = source.indexOf('*/', ORIGINAL_ESM_PREFIX.length);
+    if (end < 0) return null;
+    return decodeURIComponent(source.slice(ORIGINAL_ESM_PREFIX.length, end));
+}
+
+function requireModuleEnabled() {
+    const flags = globalThis.__NODE_TEST_FLAGS__;
+    return !Array.isArray(flags) || !flags.includes('--no-experimental-require-module');
+}
+
 function loadVirtualModule(specifier, includeRequireCache = true) {
+    const source = virtualCommonJsModules[specifier];
+    if (source === undefined) return undefined;
+    const originalEsm = originalEsmSource(source);
+    if (includeRequireCache && originalEsm !== null && !requireModuleEnabled()) {
+        Function(originalEsm);
+    }
     if (virtualModuleCache.has(specifier)) {
         const module = virtualModuleCache.get(specifier);
         if (includeRequireCache) requireCache[module.filename] = module;
         return module.exports;
     }
-    const source = virtualCommonJsModules[specifier];
-    if (source === undefined) return undefined;
     if (specifier.endsWith('.json')) return JSON.parse(source);
     const filename = decodeURIComponent(new URL(specifier).pathname);
     const module = {
