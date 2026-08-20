@@ -3,6 +3,16 @@
 version = 4
 
 [[package]]
+name = "Inflector"
+version = "0.11.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fe438c63458706e03479442743baae6c88256498e6431708f6dfc520a26515d3"
+dependencies = [
+ "lazy_static",
+ "regex",
+]
+
+[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1459,6 +1469,19 @@ dependencies = [
  "darling_core 0.23.0",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "dashmap"
+version = "5.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "978747c1d849a7d2ee5e8adc0159961c48fb7e5db2f06af6723b80123bb53856"
+dependencies = [
+ "cfg-if",
+ "hashbrown 0.14.5",
+ "lock_api",
+ "once_cell",
+ "parking_lot_core 0.9.12",
 ]
 
 [[package]]
@@ -3450,6 +3473,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2ee67f1008b1ba2321834326597b8e186293b049a023cdef258527550b9935b4"
 
 [[package]]
+name = "path-clean"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "17359afc20d7ab31fdb42bb844c8b3bb1dabd7dcf7e68428492da7f16966fcef"
+
+[[package]]
+name = "pathdiff"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df94ce210e5bc13cb6651479fa48d14f601d9858cfe0467f43ae157023b938d3"
+
+[[package]]
 name = "pem"
 version = "3.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4725,7 +4760,7 @@ dependencies = [
  "chrono",
  "clap",
  "cli-derive",
- "dashmap",
+ "dashmap 6.1.0",
  "data-url",
  "deno_ast",
  "deno_core",
@@ -5339,7 +5374,12 @@ checksum = "72e90b52ee734ded867104612218101722ad87ff4cf74fe30383bd244a533f97"
 dependencies = [
  "anyhow",
  "bytes-str",
+ "dashmap 5.5.3",
+ "globset",
  "indexmap",
+ "once_cell",
+ "regex",
+ "rustc-hash",
  "serde",
  "serde_json",
  "swc_config_macro",
@@ -5364,10 +5404,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0f361c932ffe029754a10512ee217f550109ee80dda1fe6ec90772440bfc0a68"
 dependencies = [
  "swc_allocator",
+ "swc_atoms",
  "swc_common 18.0.1",
+ "swc_ecma_ast 19.0.0",
  "swc_ecma_codegen",
  "swc_ecma_parser 32.0.0",
  "swc_ecma_transforms_base",
+ "swc_ecma_transforms_module",
  "swc_ecma_transforms_typescript",
  "swc_ecma_visit 19.0.0",
  "vergen",
@@ -5470,6 +5513,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "swc_ecma_loader"
+version = "18.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4b36b38399698e77c3d63838c2e32e40df0d5e55e489bef529a77a349a722c7a"
+dependencies = [
+ "anyhow",
+ "pathdiff",
+ "rustc-hash",
+ "serde",
+ "swc_atoms",
+ "swc_common 18.0.1",
+ "tracing",
+]
+
+[[package]]
 name = "swc_ecma_parser"
 version = "27.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5527,6 +5585,34 @@ dependencies = [
  "swc_common 18.0.1",
  "swc_ecma_ast 19.0.0",
  "swc_ecma_parser 32.0.0",
+ "swc_ecma_utils 25.0.0",
+ "swc_ecma_visit 19.0.0",
+ "tracing",
+]
+
+[[package]]
+name = "swc_ecma_transforms_module"
+version = "38.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0a884810184e70414a38b7572c4ea6ef66fed036cfdcd9f9804ce83e14b1ad76"
+dependencies = [
+ "Inflector",
+ "anyhow",
+ "bitflags 2.11.1",
+ "indexmap",
+ "is-macro",
+ "path-clean",
+ "pathdiff",
+ "regex",
+ "rustc-hash",
+ "serde",
+ "swc_atoms",
+ "swc_common 18.0.1",
+ "swc_config",
+ "swc_ecma_ast 19.0.0",
+ "swc_ecma_loader",
+ "swc_ecma_parser 32.0.0",
+ "swc_ecma_transforms_base",
  "swc_ecma_utils 25.0.0",
  "swc_ecma_visit 19.0.0",
  "tracing",

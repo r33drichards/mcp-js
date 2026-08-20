@@ -85,6 +85,8 @@ export function isBuiltin(name) {
 const virtualCommonJsModules = globalThis.__mcpV8VirtualCommonJsModules || null;
 const virtualPackageJson = globalThis.__mcpV8VirtualPackageJson || null;
 const virtualModuleCache = new Map();
+const requireCache = Object.create(null);
+const ESM_IMPORT_PREFIX = 'mcp-v8:esm-import:';
 
 function packageParts(specifier) {
     if (specifier.startsWith('.') || specifier.startsWith('/') || specifier.includes(':')) {
@@ -306,15 +308,19 @@ function importVirtualModule(id, filename) {
     try {
         const resolved = resolveVirtual(id, filename, ['import', 'node', 'default']);
         if (!resolved) return Promise.reject(new Error(`Cannot find module '${id}'`));
-        const value = loadVirtualModule(resolved);
+        const value = loadVirtualModule(resolved, false);
         return Promise.resolve({ ...value, default: value, 'module.exports': value });
     } catch (error) {
         return Promise.reject(error);
     }
 }
 
-function loadVirtualModule(specifier) {
-    if (virtualModuleCache.has(specifier)) return virtualModuleCache.get(specifier).exports;
+function loadVirtualModule(specifier, includeRequireCache = true) {
+    if (virtualModuleCache.has(specifier)) {
+        const module = virtualModuleCache.get(specifier);
+        if (includeRequireCache) requireCache[module.filename] = module;
+        return module.exports;
+    }
     const source = virtualCommonJsModules[specifier];
     if (source === undefined) return undefined;
     if (specifier.endsWith('.json')) return JSON.parse(source);
@@ -327,6 +333,7 @@ function loadVirtualModule(specifier) {
         paths: virtualNodeModulePaths(specifier),
     };
     virtualModuleCache.set(specifier, module);
+    if (includeRequireCache) requireCache[filename] = module;
     const dirname = filename.slice(0, filename.lastIndexOf('/')) || '/';
     const localRequire = createRequire(specifier);
     const compiledSource = source.replace(/\bimport\s*\(/g, '__mcpV8Import(');
@@ -347,9 +354,20 @@ function loadVirtualModule(specifier) {
 
 export function createRequire(_filename) {
     function require(id) {
-        const name = String(id).replace(/^node:/, '');
+        const request = String(id);
+        if (request.startsWith(ESM_IMPORT_PREFIX)) {
+            const importId = request.slice(ESM_IMPORT_PREFIX.length);
+            const name = importId.replace(/^node:/, '');
+            if (builtins.has(name)) return builtins.get(name);
+            const resolved = resolveVirtual(importId, _filename, ['import', 'node', 'default']);
+            if (resolved) return loadVirtualModule(resolved, false);
+            const err = new Error("Cannot find module '" + importId + "'");
+            err.code = 'MODULE_NOT_FOUND';
+            throw err;
+        }
+        const name = request.replace(/^node:/, '');
         if (builtins.has(name)) return builtins.get(name);
-        const resolved = resolveVirtual(id, _filename);
+        const resolved = resolveVirtual(request, _filename);
         if (resolved) return loadVirtualModule(resolved);
         const err = new Error("Cannot find module '" + id + "'");
         err.code = 'MODULE_NOT_FOUND';
@@ -364,7 +382,7 @@ export function createRequire(_filename) {
         err.code = 'MODULE_NOT_FOUND';
         throw err;
     };
-    require.cache = Object.create(null);
+    require.cache = requireCache;
     require.main = undefined;
     return require;
 }
@@ -373,11 +391,12 @@ export function syncBuiltinESMExports() {
     // Builtins here are plain ESM with live bindings; nothing to sync.
 }
 
-const Module = {
+export const Module = {
     builtinModules,
     isBuiltin,
     createRequire,
     syncBuiltinESMExports,
+    _cache: requireCache,
 };
 builtins.set('module', Module);
 

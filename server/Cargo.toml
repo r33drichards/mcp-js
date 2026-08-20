@@ -47,10 +47,13 @@ sha2 = "0.10"
 # newest line that still compiles on the nix-pinned stable toolchain.
 swc_core = { version = "54", features = [
     "common",
+    "ecma_ast",
     "ecma_codegen",
+    "ecma_helpers_inline",
     "ecma_parser",
     "ecma_transforms",
     "ecma_transforms_typescript",
+    "ecma_transforms_module",
     "ecma_visit",
 ] }
 sled = "0.34"

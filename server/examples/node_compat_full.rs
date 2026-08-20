@@ -327,6 +327,96 @@ fn commonjs_export_names(source: &str) -> Vec<String> {
     };
     parsed.analyze_cjs().exports
 }
+fn transpile_esm_to_commonjs(specifier: &str, source: &str) -> Option<String> {
+    use swc_core::{
+        common::{
+            FileName, GLOBALS, Globals, Mark, SourceMap, comments::SingleThreadedComments,
+            sync::Lrc,
+        },
+        ecma::{
+            atoms::Atom,
+            codegen::{Emitter, text_writer::JsWriter},
+            parser::{EsSyntax, Parser, StringInput, Syntax, lexer::Lexer},
+            transforms::{
+                base::{
+                    fixer::fixer,
+                    helpers::{HELPERS, Helpers, inject_helpers},
+                    hygiene::hygiene,
+                    resolver,
+                },
+                module::{
+                    common_js,
+                    path::{ImportResolver, Resolver as ModuleResolver},
+                },
+            },
+            visit::swc_ecma_ast::Pass,
+        },
+    };
+
+    struct EsmImportResolver;
+
+    impl ImportResolver for EsmImportResolver {
+        fn resolve_import(
+            &self,
+            _base: &FileName,
+            module_specifier: &str,
+        ) -> Result<Atom, anyhow::Error> {
+            Ok(format!("mcp-v8:esm-import:{module_specifier}").into())
+        }
+    }
+
+    let source_map: Lrc<SourceMap> = Default::default();
+    let source_file = source_map.new_source_file(
+        FileName::Custom(specifier.to_owned()).into(),
+        source.to_owned(),
+    );
+    let comments = SingleThreadedComments::default();
+    let lexer = Lexer::new(
+        Syntax::Es(EsSyntax::default()),
+        Default::default(),
+        StringInput::from(&*source_file),
+        Some(&comments),
+    );
+    let mut parser = Parser::new_from(lexer);
+    let mut program =
+        swc_core::ecma::visit::swc_ecma_ast::Program::Module(parser.parse_module().ok()?);
+    if !parser.take_errors().is_empty() {
+        return None;
+    }
+
+    GLOBALS.set(&Globals::default(), || {
+        HELPERS.set(&Helpers::new(false), || {
+            let unresolved_mark = Mark::new();
+            let top_level_mark = Mark::new();
+            resolver(unresolved_mark, top_level_mark, false).process(&mut program);
+            common_js(
+                ModuleResolver::Real {
+                    base: FileName::Custom(specifier.to_owned()),
+                    resolver: std::sync::Arc::new(EsmImportResolver),
+                },
+                unresolved_mark,
+                Default::default(),
+                Default::default(),
+            )
+            .process(&mut program);
+            inject_helpers(top_level_mark).process(&mut program);
+            hygiene().process(&mut program);
+            fixer(Some(&comments)).process(&mut program);
+
+            let mut output = Vec::new();
+            Emitter {
+                cfg: Default::default(),
+                cm: source_map.clone(),
+                comments: Some(&comments),
+                wr: JsWriter::new(source_map, "\n", &mut output, None),
+            }
+            .emit_program(&program)
+            .ok()?;
+            String::from_utf8(output).ok()
+        })
+    })
+}
+
 fn wrap_commonjs(source: &str) -> String {
     let mut wrapped = format!(
         r#"import {{ createRequire as __createRequire }} from 'node:module';
@@ -404,12 +494,19 @@ fn add_corpus_modules(
         {
             commonjs_modules.insert(specifier.to_string(), strip_shebang(&source).to_string());
         }
-        let source =
-            if extension == Some("cjs") || (extension == Some("js") && !directory_uses_modules) {
-                wrap_commonjs(strip_shebang(&source))
-            } else {
-                strip_shebang(&source).to_string()
-            };
+        let is_commonjs =
+            extension == Some("cjs") || (extension == Some("js") && !directory_uses_modules);
+        if !is_commonjs
+            && let Some(commonjs) =
+                transpile_esm_to_commonjs(specifier.as_str(), strip_shebang(&source))
+        {
+            commonjs_modules.insert(specifier.to_string(), commonjs);
+        }
+        let source = if is_commonjs {
+            wrap_commonjs(strip_shebang(&source))
+        } else {
+            strip_shebang(&source).to_string()
+        };
         modules.insert(specifier.to_string(), source);
     }
     Ok(())
@@ -751,10 +848,9 @@ fn node_cli_source(
     }
 
     let source_path = virtual_corpus_file(&entrypoint, corpus)?;
-    let entry_source = strip_shebang(
-        &fs::read_to_string(&source_path).map_err(|error| error.to_string())?,
-    )
-    .to_owned();
+    let entry_source =
+        strip_shebang(&fs::read_to_string(&source_path).map_err(|error| error.to_string())?)
+            .to_owned();
     let entrypoint = cli_path_module_specifier(&entrypoint)?;
     if invocation.experimental_loaders.is_empty() {
         source.push_str("await import(");
@@ -1174,7 +1270,8 @@ mod tests {
     fn node_cli_parses_repeated_experimental_loaders() {
         let invocation = NodeCliInvocation::parse(
             &node_cli_args(&[
-                "--experimental-loader", "first.mjs",
+                "--experimental-loader",
+                "first.mjs",
                 "--loader=second.mjs",
                 "entry.mjs",
             ]),
@@ -1335,6 +1432,18 @@ mod tests {
         assert!(common.contains("export const mustCall"));
         assert!(common.contains("globalThis.__NODE_TEST_COMMON__"));
     }
+    #[test]
+    fn esm_require_transform_emits_commonjs() {
+        let output =
+            transpile_esm_to_commonjs("file:///fixture.mjs", "export { name } from './dep.mjs';")
+                .unwrap();
+        assert!(!output.contains("export "), "{output}");
+        assert!(
+            output.contains("require(\"mcp-v8:esm-import:./dep.mjs\")"),
+            "{output}"
+        );
+    }
+
     #[test]
     fn commonjs_wrapper_exposes_statically_detected_named_exports() {
         let source = wrap_commonjs("exports.assert = require('assert');\n");
