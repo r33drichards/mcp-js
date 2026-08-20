@@ -6,6 +6,12 @@ const configuredCwd = String(invocation.cwd || '/');
 const setHostExitCode = Deno.core.ops.op_process_set_exit_code;
 const terminateHostProcess = Deno.core.ops.op_process_exit;
 const hostExitEnabled = invocation.hostExit === true;
+function onWarning(warning) {
+    const prefix = warning.code ? `[${warning.code}] ` : '';
+    console.error(`${prefix}${warning.name}: ${warning.message}`);
+}
+
+const eventListeners = new Map([['warning', [onWarning]]]);
 
 function normalizeExitCode(code) {
     const numeric = Number(code);
@@ -68,8 +74,11 @@ const process = {
         }
         queueMicrotask(() => callback(...args));
     },
-    emitWarning(warning) {
-        console.warn(warning instanceof Error ? warning.message : String(warning));
+    emitWarning(warning, type = 'Warning', code) {
+        const normalized = warning instanceof Error ? warning : new Error(String(warning));
+        if (!(warning instanceof Error)) normalized.name = String(type || 'Warning');
+        if (!(warning instanceof Error) && code !== undefined) normalized.code = String(code);
+        process.nextTick(() => process.emit('warning', normalized));
     },
     exit(code) {
         const normalized = code === undefined ? this.exitCode : normalizeExitCode(code);
@@ -94,16 +103,59 @@ const process = {
         isTTY: false,
     },
     stdin: null,
-    on() { return this; },
-    once() { return this; },
-    off() { return this; },
-    removeListener() { return this; },
-    removeAllListeners() { return this; },
-    listeners() { return []; },
-    emit() { return false; },
-    addListener() { return this; },
-    prependListener() { return this; },
-    setMaxListeners() { return this; },
+    on(eventName, listener) {
+        return process.addListener(eventName, listener);
+    },
+    once(eventName, listener) {
+        if (typeof listener !== 'function') throw new TypeError('The listener argument must be a function');
+        const wrapped = (...args) => {
+            process.removeListener(eventName, wrapped);
+            return Reflect.apply(listener, process, args);
+        };
+        wrapped.listener = listener;
+        return process.addListener(eventName, wrapped);
+    },
+    off(eventName, listener) {
+        return process.removeListener(eventName, listener);
+    },
+    removeListener(eventName, listener) {
+        const listeners = eventListeners.get(eventName);
+        if (!listeners) return process;
+        const index = listeners.findLastIndex((candidate) =>
+            candidate === listener || candidate.listener === listener);
+        if (index >= 0) listeners.splice(index, 1);
+        if (listeners.length === 0) eventListeners.delete(eventName);
+        return process;
+    },
+    removeAllListeners(eventName) {
+        if (eventName === undefined) eventListeners.clear();
+        else eventListeners.delete(eventName);
+        return process;
+    },
+    listeners(eventName) {
+        return (eventListeners.get(eventName) || []).map((listener) => listener.listener || listener);
+    },
+    emit(eventName, ...args) {
+        const listeners = eventListeners.get(eventName);
+        if (!listeners || listeners.length === 0) return false;
+        for (const listener of [...listeners]) Reflect.apply(listener, process, args);
+        return true;
+    },
+    addListener(eventName, listener) {
+        if (typeof listener !== 'function') throw new TypeError('The listener argument must be a function');
+        const listeners = eventListeners.get(eventName);
+        if (listeners) listeners.push(listener);
+        else eventListeners.set(eventName, [listener]);
+        return process;
+    },
+    prependListener(eventName, listener) {
+        if (typeof listener !== 'function') throw new TypeError('The listener argument must be a function');
+        const listeners = eventListeners.get(eventName);
+        if (listeners) listeners.unshift(listener);
+        else eventListeners.set(eventName, [listener]);
+        return process;
+    },
+    setMaxListeners() { return process; },
     getMaxListeners() { return 10; },
 };
 

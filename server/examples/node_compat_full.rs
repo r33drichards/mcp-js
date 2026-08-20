@@ -332,6 +332,70 @@ fn rewrite_dynamic_imports(body: &str) -> Option<String> {
     ))
 }
 
+fn rewrite_esm_dynamic_imports(body: &str) -> Option<String> {
+    use swc_core::{
+        common::{FileName, SourceMap, sync::Lrc},
+        ecma::{
+            ast::{Callee, Expr, Ident},
+            codegen::{Emitter, text_writer::JsWriter},
+            parser::{EsSyntax, Parser, StringInput, Syntax, lexer::Lexer},
+            visit::{VisitMut, VisitMutWith},
+        },
+    };
+
+    struct DynamicImportRewriter {
+        changed: bool,
+    }
+
+    impl VisitMut for DynamicImportRewriter {
+        fn visit_mut_call_expr(&mut self, call: &mut swc_core::ecma::ast::CallExpr) {
+            call.visit_mut_children_with(self);
+            if matches!(call.callee, Callee::Import(_)) {
+                self.changed = true;
+                call.callee = Callee::Expr(Box::new(Expr::Ident(Ident::new_no_ctxt(
+                    "__nodeCompatImport".into(),
+                    call.span,
+                ))));
+            }
+        }
+    }
+
+    let source_map: Lrc<SourceMap> = Default::default();
+    let source_file = source_map.new_source_file(
+        FileName::Custom("node-compat-module.mjs".to_owned()).into(),
+        body.to_owned(),
+    );
+    let lexer = Lexer::new(
+        Syntax::Es(EsSyntax::default()),
+        Default::default(),
+        StringInput::from(&*source_file),
+        None,
+    );
+    let mut parser = Parser::new_from(lexer);
+    let mut module = parser.parse_module().ok()?;
+    if !parser.take_errors().is_empty() {
+        return None;
+    }
+    let mut rewriter = DynamicImportRewriter { changed: false };
+    module.visit_mut_with(&mut rewriter);
+    if !rewriter.changed {
+        return None;
+    }
+    let mut output = Vec::new();
+    Emitter {
+        cfg: Default::default(),
+        cm: source_map,
+        comments: None,
+        wr: JsWriter::new(Default::default(), "\n", &mut output, None),
+    }
+    .emit_module(&module)
+    .ok()?;
+    let output = String::from_utf8(output).ok()?;
+    Some(format!(
+        "const __nodeCompatImport = (specifier, options) => {{ let request; try {{ if (typeof specifier === 'symbol') throw new TypeError('Cannot convert a Symbol value to a string'); request = String(specifier); const resolved = globalThis.__NODE_COMPAT_RESOLVE_IMPORT__(request, import.meta.url); return import(resolved ?? request, options); }} catch (error) {{ return Promise.reject(error); }} }};\n{output}"
+    ))
+}
+
 fn test_loader_specifier(loader: &str) -> Option<String> {
     let loader = loader.strip_prefix("./").unwrap_or(loader);
     if !loader.starts_with("test/") {
@@ -974,6 +1038,7 @@ fn add_corpus_modules(
     root: &Path,
     directory: &Path,
     inherited_modules: bool,
+    rewrite_dynamic_imports: bool,
     modules: &mut HashMap<String, String>,
     commonjs_modules: &mut HashMap<String, String>,
     files: &mut HashSet<String>,
@@ -986,6 +1051,7 @@ fn add_corpus_modules(
                 root,
                 &path,
                 directory_uses_modules,
+                rewrite_dynamic_imports,
                 modules,
                 commonjs_modules,
                 files,
@@ -1024,8 +1090,13 @@ fn add_corpus_modules(
                 commonjs_export_names_for_path(root, &path, source, &mut HashSet::new());
             wrap_commonjs_with_names(source, export_names)
         } else if detected_esm {
-            rewrite_import_meta_resolve(specifier.as_str(), source)
-                .unwrap_or_else(|| source.to_string())
+            let source = rewrite_import_meta_resolve(specifier.as_str(), source)
+                .unwrap_or_else(|| source.to_string());
+            if rewrite_dynamic_imports {
+                rewrite_esm_dynamic_imports(&source).unwrap_or(source)
+            } else {
+                source
+            }
         } else {
             source.to_string()
         };
@@ -1041,6 +1112,7 @@ fn corpus_modules(corpus: &Path) -> Result<CorpusModules, String> {
         corpus,
         &corpus.join("test"),
         false,
+        true,
         &mut modules,
         &mut commonjs_modules,
         &mut files,
@@ -1178,6 +1250,7 @@ fn corpus_modules_for_cli(
             corpus,
             &directory,
             inherited_package_modules(&test_root, &directory),
+            false,
             &mut modules,
             &mut commonjs_modules,
             &mut files,
@@ -2119,6 +2192,20 @@ mod tests {
             source.contains("__nodeCompatImportMetaResolve('custom:value')"),
             "{source}"
         );
+    }
+
+    #[test]
+    fn rewrite_esm_dynamic_imports_keeps_native_fallback_in_referrer() {
+        let source = rewrite_esm_dynamic_imports(
+            "export function load(specifier) { return import(specifier); }",
+        )
+        .unwrap();
+        assert!(source.contains("__NODE_COMPAT_RESOLVE_IMPORT__"));
+        assert!(source.contains("typeof specifier === 'symbol'"));
+        assert!(source.contains("request = String(specifier)"));
+        assert!(source.contains("return Promise.reject(error)"));
+        assert!(source.contains("return import(resolved ?? request, options)"));
+        assert!(source.contains("return __nodeCompatImport(specifier)"));
     }
 
     #[test]

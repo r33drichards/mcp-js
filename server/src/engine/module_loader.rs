@@ -225,6 +225,13 @@ enum PackageTarget {
     Invalid,
 }
 
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PackageWarning {
+    code: &'static str,
+    message: String,
+}
+
 fn package_error_module(code: &str, message: &str) -> ModuleSpecifier {
     use std::hash::{Hash, Hasher};
 
@@ -385,13 +392,45 @@ fn invalid_package_config_message(
     )
 }
 
-fn mark_dep0151(mut specifier: ModuleSpecifier, enabled: bool) -> ModuleSpecifier {
-    if enabled {
+fn mark_package_warning(
+    mut specifier: ModuleSpecifier,
+    warning: Option<&PackageWarning>,
+) -> ModuleSpecifier {
+    if let Some(warning) = warning {
         specifier
             .query_pairs_mut()
-            .append_pair("__mcp_v8_dep0151", "1");
+            .append_pair("__mcp_v8_warning_code", warning.code)
+            .append_pair("__mcp_v8_warning_message", &warning.message);
     }
     specifier
+}
+
+fn package_main_warning(
+    package_json: &ModuleSpecifier,
+    referrer: &ModuleSpecifier,
+    main: Option<&str>,
+    resolved: &ModuleSpecifier,
+) -> PackageWarning {
+    let package_root = package_json.join("./").unwrap();
+    let message = match main.filter(|value| !value.is_empty()) {
+        Some(main) => {
+            let resolved_name = resolved.path().rsplit('/').next().unwrap_or(main);
+            format!(
+                "Package {} has a \"main\" field set to {main:?}, excluding the full filename and extension to the resolved file at {resolved_name:?}, imported from {}.\n Automatic extension resolution of the \"main\" field is deprecated for ES modules.",
+                node_display_path(&package_root),
+                node_display_path(referrer),
+            )
+        }
+        None => format!(
+            "No \"main\" or \"exports\" field defined in the package.json for {} resolving the main entry point \"index.js\", imported from {}.\nDefault \"index\" lookups for the main are deprecated for ES modules.",
+            node_display_path(&package_root),
+            node_display_path(referrer),
+        ),
+    };
+    PackageWarning {
+        code: "DEP0151",
+        message,
+    }
 }
 
 fn resolve_package_json(
@@ -469,31 +508,35 @@ fn resolve_package_json(
         }
     };
     if modules.contains_key(target_url.as_str()) {
-        return mark_dep0151(target_url, warn_dep0151);
+        let warning = warn_dep0151
+            .then(|| package_main_warning(package_json, referrer, main, &target_url));
+        return mark_package_warning(target_url, warning.as_ref());
     }
     if !has_exports {
         for suffix in [".js", ".json"] {
             let candidate = format!("{}{suffix}", target_url.as_str());
             if modules.contains_key(&candidate) {
-                return mark_dep0151(
-                    ModuleSpecifier::parse(&candidate).unwrap(),
-                    warn_dep0151,
-                );
+                let candidate = ModuleSpecifier::parse(&candidate).unwrap();
+                let warning = warn_dep0151
+                    .then(|| package_main_warning(package_json, referrer, main, &candidate));
+                return mark_package_warning(candidate, warning.as_ref());
             }
         }
         let candidate = format!("{}/index.js", target_url.as_str().trim_end_matches('/'));
         if modules.contains_key(&candidate) {
-            return mark_dep0151(
-                ModuleSpecifier::parse(&candidate).unwrap(),
-                warn_dep0151,
-            );
+            let candidate = ModuleSpecifier::parse(&candidate).unwrap();
+            let warning = warn_dep0151
+                .then(|| package_main_warning(package_json, referrer, main, &candidate));
+            return mark_package_warning(candidate, warning.as_ref());
         }
         if subpath.is_empty() {
             let package_root = package_json.join("./").unwrap();
             for name in ["index.js", "index.json"] {
                 let candidate = package_root.join(name).unwrap();
                 if modules.contains_key(candidate.as_str()) {
-                    return mark_dep0151(candidate, warn_dep0151);
+                    let warning = warn_dep0151
+                        .then(|| package_main_warning(package_json, referrer, main, &candidate));
+                    return mark_package_warning(candidate, warning.as_ref());
                 }
             }
         }
@@ -745,12 +788,20 @@ impl ModuleLoader for NetworkModuleLoader {
             })
         });
         if let Some(mut source) = virtual_source {
-            let dep0151 = module_specifier
-                .query_pairs()
-                .any(|(key, value)| key == "__mcp_v8_dep0151" && value == "1");
-            if dep0151 {
+            let mut warning_code = None;
+            let mut warning_message = None;
+            for (key, value) in module_specifier.query_pairs() {
+                match key.as_ref() {
+                    "__mcp_v8_warning_code" => warning_code = Some(value.into_owned()),
+                    "__mcp_v8_warning_message" => warning_message = Some(value.into_owned()),
+                    _ => {}
+                }
+            }
+            if let (Some(code), Some(message)) = (warning_code, warning_message) {
                 source = format!(
-                    "console.error('[DEP0151] DeprecationWarning: Legacy package main resolution is deprecated');\n{source}"
+                    "import __mcpV8WarningProcess from 'node:process';\n__mcpV8WarningProcess.emitWarning({message}, 'DeprecationWarning', {code});\nawait new Promise((resolve) => __mcpV8WarningProcess.nextTick(resolve));\n{source}",
+                    message = serde_json::to_string(&message).unwrap(),
+                    code = serde_json::to_string(&code).unwrap(),
                 );
             }
             let (format, module_type) = if module_specifier.path().ends_with(".json") {
@@ -1139,4 +1190,35 @@ mod tests {
             "file:///app/node_modules/deep-fail/index.js"
         );
     }
+
+    #[test]
+    fn package_main_resolution_marks_dep0151_message() {
+        let package_json =
+            ModuleSpecifier::parse("file:///app/node_modules/no_exports/package.json").unwrap();
+        let referrer = ModuleSpecifier::parse("file:///app/main.mjs").unwrap();
+        let modules = HashMap::from([(
+            "file:///app/node_modules/no_exports/index.js".to_owned(),
+            "export default 'index';".to_owned(),
+        )]);
+
+        let resolved = resolve_package_json(
+            &modules,
+            r#"{"type":"module"}"#,
+            &package_json,
+            "no_exports",
+            &referrer,
+            "",
+            &["import", "node", "default"],
+        );
+        let query = resolved.query_pairs().collect::<HashMap<_, _>>();
+
+        assert_eq!(query.get("__mcp_v8_warning_code").unwrap(), "DEP0151");
+        assert!(
+            query
+                .get("__mcp_v8_warning_message")
+                .unwrap()
+                .contains("no_exports")
+        );
+    }
+
 }

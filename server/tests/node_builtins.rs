@@ -1103,3 +1103,61 @@ async fn process_config_exposes_node_build_variables() {
     )
     .await;
 }
+
+#[tokio::test]
+async fn process_warning_events_follow_event_emitter_semantics() {
+    expect_ok(
+        r#"
+        import process, { emitWarning } from 'node:process';
+
+        const defaults = process.listeners('warning');
+        if (defaults.length !== 1 || defaults[0].name !== 'onWarning') {
+            throw new Error('missing default warning listener');
+        }
+        const seen = [];
+        const persistent = (warning) => seen.push(['persistent', warning]);
+        const once = (warning) => seen.push(['once', warning]);
+        process.addListener('warning', persistent);
+        process.once('warning', once);
+
+        emitWarning('first warning', 'DeprecationWarning', 'DEP9001');
+        process.emitWarning(new Error('second warning'));
+        await new Promise((resolve) => process.nextTick(resolve));
+
+        if (seen.length !== 3) throw new Error(`expected 3 warning deliveries, got ${seen.length}`);
+        if (seen[0][0] !== 'persistent' || seen[1][0] !== 'once' || seen[2][0] !== 'persistent') {
+            throw new Error('warning listener order');
+        }
+        const first = seen[0][1];
+        if (!(first instanceof Error) || first.name !== 'DeprecationWarning' ||
+            first.code !== 'DEP9001' || first.message !== 'first warning' ||
+            !first.stack.includes('first warning')) {
+            throw new Error('string warning normalization');
+        }
+        const second = seen[2][1];
+        if (!(second instanceof Error) || second.message !== 'second warning') {
+            throw new Error('error warning normalization');
+        }
+        if (process.listeners('warning').length !== 2) throw new Error('once listener removal');
+        process.removeListener('warning', persistent);
+        if (process.emit('warning', new Error('default only')) !== true) {
+            throw new Error('default warning listener result');
+        }
+        process.removeAllListeners('warning');
+        if (process.listeners('warning').length !== 0 ||
+            process.emit('warning', new Error('suppressed')) !== false) {
+            throw new Error('warning listener suppression');
+        }
+
+        const duplicate = () => {};
+        const middle = () => {};
+        process.on('duplicate', duplicate).on('duplicate', middle).on('duplicate', duplicate);
+        process.removeListener('duplicate', duplicate);
+        const remaining = process.listeners('duplicate');
+        if (remaining.length !== 2 || remaining[0] !== duplicate || remaining[1] !== middle) {
+            throw new Error('removeListener duplicate order');
+        }
+        "#,
+    )
+    .await;
+}

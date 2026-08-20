@@ -86,6 +86,8 @@ const virtualCommonJsModules = globalThis.__mcpV8VirtualCommonJsModules || null;
 const virtualPackageJson = globalThis.__mcpV8VirtualPackageJson || null;
 const virtualModuleCache = new Map();
 const requireCache = Object.create(null);
+const emittedPackageWarnings = globalThis.__mcpV8EmittedPackageWarnings ??= new Set();
+let packageDeprecationSerial = 0;
 const ESM_IMPORT_PREFIX = 'mcp-v8:esm-import:';
 const ORIGINAL_ESM_PREFIX = '/*mcp-v8-original-esm:';
 
@@ -106,7 +108,7 @@ const PACKAGE_TARGET_INVALID = Symbol('invalid');
 function packageTarget(value, match, conditions) {
     if (typeof value === 'string') {
         if (!value.startsWith('./')) return PACKAGE_TARGET_INVALID;
-        const resolved = value.replaceAll('*', () => match).replace(/\/+/g, '/');
+        const resolved = value.replaceAll('*', () => match);
         if (resolved.slice(2).split('/').some((segment) =>
             decodeURIComponent(segment).toLowerCase() === 'node_modules')) {
             return PACKAGE_TARGET_INVALID;
@@ -137,9 +139,12 @@ function packageTarget(value, match, conditions) {
 
 function exportsTarget(exports, packageSubpath, conditions) {
     if (!exports || typeof exports !== 'object' || Array.isArray(exports)) {
-        return packageSubpath === '.'
+        const target = packageSubpath === '.'
             ? packageTarget(exports, '', conditions)
             : PACKAGE_TARGET_MISSING;
+        return typeof target === 'string'
+            ? { target, patternKey: null, patternMatch: null }
+            : target;
     }
     const keys = Object.keys(exports);
     if (keys.some((key) => /^(0|[1-9]\d*)$/.test(key))) {
@@ -157,12 +162,18 @@ function exportsTarget(exports, packageSubpath, conditions) {
         throw err;
     }
     if (subpathKeys.length === 0) {
-        return packageSubpath === '.'
+        const target = packageSubpath === '.'
             ? packageTarget(exports, '', conditions)
             : PACKAGE_TARGET_MISSING;
+        return typeof target === 'string'
+            ? { target, patternKey: null, patternMatch: null }
+            : target;
     }
     if (Object.prototype.hasOwnProperty.call(exports, packageSubpath)) {
-        return packageTarget(exports[packageSubpath], '', conditions);
+        const target = packageTarget(exports[packageSubpath], '', conditions);
+        return typeof target === 'string'
+            ? { target, patternKey: null, patternMatch: null }
+            : target;
     }
     const patterns = keys
         .map((key) => {
@@ -173,6 +184,7 @@ function exportsTarget(exports, packageSubpath, conditions) {
             if (packageSubpath.length <= prefix.length + suffix.length ||
                 !packageSubpath.startsWith(prefix) || !packageSubpath.endsWith(suffix)) return null;
             return {
+                key,
                 prefix: prefix.length,
                 suffix: suffix.length,
                 match: packageSubpath.slice(prefix.length, packageSubpath.length - suffix.length),
@@ -182,7 +194,46 @@ function exportsTarget(exports, packageSubpath, conditions) {
         .filter(Boolean)
         .sort((a, b) => b.prefix - a.prefix || b.suffix - a.suffix);
     if (patterns.length === 0) return PACKAGE_TARGET_MISSING;
-    return packageTarget(patterns[0].target, patterns[0].match, conditions);
+    const pattern = patterns[0];
+    const target = packageTarget(pattern.target, pattern.match, conditions);
+    return typeof target === 'string'
+        ? { target, patternKey: pattern.key, patternMatch: pattern.match }
+        : target;
+}
+
+function emitPackageExportWarning(resolution, packageSubpath, packageUrl, referrer, isImport) {
+    const pattern = resolution.patternKey === null
+        ? ''
+        : ` matched to "${resolution.patternKey}"`;
+    const importedFrom = isImport
+        ? ` imported from ${decodeURIComponent(virtualFileUrl(referrer).pathname)}`
+        : '';
+    const location = ` in the "exports" field module resolution of the package at ${decodeURIComponent(packageUrl.pathname)}${importedFrom}.`;
+    if (packageSubpath.endsWith('/') && resolution.patternKey !== null) {
+        packageDeprecationSerial += 1;
+        const warningKey = `DEP0155:${decodeURIComponent(packageUrl.pathname)}:${packageSubpath}`;
+        if (emittedPackageWarnings.has(warningKey)) return;
+        emittedPackageWarnings.add(warningKey);
+        process.emitWarning(
+            `Use of deprecated trailing slash pattern mapping "${packageSubpath}"${pattern}${location}`,
+            'DeprecationWarning',
+            'DEP0155',
+        );
+        return;
+    }
+    const kind = resolution.target.includes('//')
+        ? 'double slash'
+        : resolution.patternMatch !== null &&
+            (resolution.patternMatch.startsWith('/') || resolution.patternMatch.endsWith('/'))
+            ? 'leading or trailing slash matching'
+            : null;
+    if (kind === null) return;
+    packageDeprecationSerial += 1;
+    process.emitWarning(
+        `Use of deprecated ${kind} resolving "${resolution.target}" for module request "${packageSubpath}"${pattern}${location}`,
+        'DeprecationWarning',
+        'DEP0166',
+    );
 }
 
 function virtualFileUrl(filename) {
@@ -201,20 +252,20 @@ function resolveVirtualFile(url) {
         virtualCommonJsModules && Object.prototype.hasOwnProperty.call(virtualCommonJsModules, candidate));
 }
 
-function resolvePackageSource(packageUrl, source, parts, conditions) {
+function resolvePackageSource(packageUrl, source, parts, conditions, referrer) {
     const packageData = JSON.parse(source);
     const packageSubpath = parts.subpath ? './' + parts.subpath : '.';
     const hasExports = packageData.exports !== undefined;
-    const target = !hasExports
+    const resolution = !hasExports
         ? (parts.subpath ? './' + parts.subpath : packageData.main || './index.js')
         : exportsTarget(packageData.exports, packageSubpath, conditions);
-    if (target === PACKAGE_TARGET_INVALID) {
+    if (resolution === PACKAGE_TARGET_INVALID) {
         const err = new Error(
             `Invalid "exports" target for '${packageSubpath}'; targets must start with './'`);
         err.code = 'ERR_INVALID_PACKAGE_TARGET';
         throw err;
     }
-    if (target === PACKAGE_TARGET_MISSING) {
+    if (resolution === PACKAGE_TARGET_MISSING) {
         const message = packageSubpath === '.'
             ? 'No "exports" main defined in ' + packageUrl.href
             : `Package subpath '${packageSubpath}' is not defined by exports`;
@@ -222,7 +273,20 @@ function resolvePackageSource(packageUrl, source, parts, conditions) {
         err.code = 'ERR_PACKAGE_PATH_NOT_EXPORTED';
         throw err;
     }
-    const targetUrl = new URL(target, packageUrl);
+    const target = hasExports ? resolution.target : resolution;
+    if (hasExports) {
+        emitPackageExportWarning(
+            resolution,
+            packageSubpath,
+            packageUrl,
+            referrer,
+            conditions.includes('import'),
+        );
+    }
+    const normalizedTarget = hasExports
+        ? './' + target.slice(2).replace(/^\/+/, '').replace(/\/+/g, '/')
+        : target;
+    const targetUrl = new URL(normalizedTarget, packageUrl);
     const resolved = hasExports
         ? (virtualCommonJsModules &&
             Object.prototype.hasOwnProperty.call(virtualCommonJsModules, targetUrl.href)
@@ -267,13 +331,15 @@ function resolveVirtual(id, filename, conditions = ['require', 'node', 'default'
         const selfPackageUrl = new URL('package.json', directory);
         const selfSource = virtualPackageJson[selfPackageUrl.href];
         if (selfSource !== undefined && JSON.parse(selfSource).name === parts.packageName) {
-            return resolvePackageSource(selfPackageUrl, selfSource, parts, conditions);
+            return resolvePackageSource(selfPackageUrl, selfSource, parts, conditions, filename);
         }
         const insideNodeModules = directory.pathname.endsWith('/node_modules/');
         const packageBase = new URL(`node_modules/${parts.packageName}/`, directory);
         const packageUrl = new URL('package.json', packageBase);
         const source = insideNodeModules ? undefined : virtualPackageJson[packageUrl.href];
-        if (source !== undefined) return resolvePackageSource(packageUrl, source, parts, conditions);
+        if (source !== undefined) {
+            return resolvePackageSource(packageUrl, source, parts, conditions, filename);
+        }
         const legacyFile = insideNodeModules
             ? null
             : resolveVirtualFile(new URL(`node_modules/${request}`, directory));
@@ -286,6 +352,22 @@ function resolveVirtual(id, filename, conditions = ['require', 'node', 'default'
         directory = parent;
     }
 }
+
+function resolveImportSpecifier(request, filename) {
+    const name = request.replace(/^node:/, '');
+    if (builtins.has(name)) return null;
+    const before = packageDeprecationSerial;
+    let resolved;
+    try {
+        resolved = resolveVirtual(request, filename, ['import', 'node', 'default']);
+    } catch {
+        return null;
+    }
+    if (packageDeprecationSerial !== before && resolved) return resolved;
+    return null;
+}
+
+globalThis.__mcpV8ResolveImportSpecifier = resolveImportSpecifier;
 
 function virtualNodeModulePaths(filename) {
     const paths = [];
