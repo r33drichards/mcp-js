@@ -1024,6 +1024,29 @@ if (__nodeCompatLoaded.source === __nodeCompatDefaultSource && __nodeCompatLoade
     Ok((source, None))
 }
 
+fn cjs_esm_load_note(
+    invocation: &NodeCliInvocation,
+    corpus: &Path,
+    runtime_error: Option<&str>,
+) -> Option<String> {
+    if !runtime_error.is_some_and(|error| error.starts_with("SyntaxError:")) {
+        return None;
+    }
+    let entrypoint = invocation.entrypoint.as_ref()?;
+    let virtual_path = virtualize_corpus_path(entrypoint, corpus).ok()?;
+    let source_path = virtual_corpus_file(&virtual_path, corpus).ok()?;
+    if source_path.extension().and_then(|value| value.to_str()) != Some("cjs") {
+        return None;
+    }
+    let source = fs::read_to_string(source_path).ok()?;
+    let specifier = cli_path_module_specifier(&virtual_path).ok()?;
+    source_uses_esm_syntax(&specifier, strip_shebang(&source)).then(|| {
+        format!(
+            "Warning: Failed to load the ES module: {virtual_path}. Make sure to set \"type\": \"module\" in the nearest package.json file or use the .mjs extension.\n"
+        )
+    })
+}
+
 fn run_node_compat_cli(
     args: &[String],
     node_options: Option<&str>,
@@ -1078,9 +1101,13 @@ fn run_node_compat_cli(
     } else {
         result.err()
     };
+    let mut stderr = String::from_utf8_lossy(&stderr).into_owned();
+    if let Some(note) = cjs_esm_load_note(&invocation, &corpus, runtime_error.as_deref()) {
+        stderr.push_str(&note);
+    }
     Ok(NodeCliOutput {
         stdout: String::from_utf8_lossy(&stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&stderr).into_owned(),
+        stderr,
         exit_code: process_exit_state.exit_code(),
         runtime_error,
     })
@@ -1793,6 +1820,42 @@ mod tests {
                 "1.0.0",
                 "eval",
             ]
+        );
+    }
+
+    #[test]
+    fn node_cli_notes_only_static_esm_syntax_in_commonjs() {
+        let corpus = cli_corpus(&[
+            ("test/static.cjs", "export const value = 1;\n"),
+            ("test/dynamic.cjs", "import('./missing.mjs');\n"),
+            ("test/error.cjs", "throw new Error('boom');\n"),
+        ]);
+        let run = |name: &str| {
+            run_node_compat_cli(
+                &node_cli_args(&[&corpus.path().join(name).to_string_lossy()]),
+                None,
+                corpus.path(),
+            )
+            .unwrap()
+        };
+
+        let static_import = run("test/static.cjs");
+        assert!(
+            static_import
+                .stderr
+                .contains("Failed to load the ES module"),
+            "{}",
+            static_import.stderr
+        );
+        assert!(
+            !run("test/dynamic.cjs")
+                .stderr
+                .contains("Failed to load the ES module")
+        );
+        assert!(
+            !run("test/error.cjs")
+                .stderr
+                .contains("Failed to load the ES module")
         );
     }
 
