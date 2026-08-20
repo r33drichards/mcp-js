@@ -21,12 +21,14 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::process::Stdio;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use deno_core::{JsRuntime, OpState, op2};
 use deno_error::JsErrorBox;
 use serde::Serialize;
+use tokio::io::AsyncWriteExt;
 
 use super::opa::PolicyChain;
 
@@ -95,8 +97,22 @@ async fn op_subprocess_output(
             cmd.envs(env);
         }
 
-        let output = cmd.output().await
-            .map_err(|e| format!("subprocess: failed to execute '{}': {}", command, e))?;
+        let output = if let Some(input) = options.stdin {
+            cmd.stdin(Stdio::piped());
+            cmd.stdout(Stdio::piped());
+            cmd.stderr(Stdio::piped());
+            let mut child = cmd.spawn()
+                .map_err(|e| format!("subprocess: failed to execute '{}': {}", command, e))?;
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin.write_all(&input).await
+                    .map_err(|e| format!("subprocess: failed to write stdin for '{}': {}", command, e))?;
+            }
+            child.wait_with_output().await
+                .map_err(|e| format!("subprocess: failed to wait for '{}': {}", command, e))?
+        } else {
+            cmd.output().await
+                .map_err(|e| format!("subprocess: failed to execute '{}': {}", command, e))?
+        };
 
         let stdout = base64_encode(&output.stdout);
         let stderr = base64_encode(&output.stderr);
@@ -255,6 +271,7 @@ const SUBPROCESS_JS_WRAPPER: &str = r#"
         var optionsJson = JSON.stringify({
             cwd: this._options.cwd || null,
             env: this._options.env || null,
+            stdin: this._options.stdin || null,
         });
 
         var rawResult = await Deno.core.ops.op_subprocess_output(
@@ -343,6 +360,8 @@ struct SubprocessOptions {
     #[allow(dead_code)]
     #[serde(default)]
     timeout: Option<u64>,
+    #[serde(default)]
+    stdin: Option<Vec<u8>>,
 }
 
 fn extract_chain(state: &Rc<RefCell<OpState>>) -> Result<Arc<PolicyChain>, JsErrorBox> {

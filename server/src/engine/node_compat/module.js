@@ -533,16 +533,11 @@ function resolveVirtual(id, filename, conditions = ['require', 'node', 'default'
 function resolveImportSpecifier(request, filename) {
     const name = request.replace(/^node:/, '');
     if (builtins.has(name)) return null;
-    const before = packageDeprecationSerial;
-    let resolved;
     try {
-        resolved = resolveVirtual(request, filename, ['import', 'node', 'default']);
+        return resolveVirtual(request, filename, ['import', 'node', 'default']);
     } catch {
         return null;
     }
-    if (request.startsWith('#') && resolved) return resolved;
-    if (packageDeprecationSerial !== before && resolved) return resolved;
-    return null;
 }
 
 globalThis.__mcpV8ResolveImportSpecifier = resolveImportSpecifier;
@@ -680,6 +675,21 @@ export function syncBuiltinESMExports() {
 
 const moduleHooks = globalThis.__mcpV8ModuleHooks ??= [];
 
+export function register(specifier, parentURL = 'file:///') {
+    const options = parentURL && typeof parentURL === 'object' && !(parentURL instanceof URL)
+        ? parentURL
+        : { parentURL };
+    const base = options.parentURL instanceof URL
+        ? options.parentURL.href
+        : String(options.parentURL || 'file:///');
+    const request = String(specifier);
+    const relative = request.startsWith('.') || request.startsWith('/') || request.startsWith('file:');
+    const resolved = relative ? new URL(request, base).href : request;
+    const pending = globalThis.__mcpV8PendingModuleRegistrations ??= [];
+    const registration = import(resolved).then((hooks) => registerHooks(hooks));
+    pending.push(registration);
+}
+
 export function registerHooks(hooks) {
     if (hooks === null || typeof hooks !== 'object') {
         throw new TypeError('hooks must be an object');
@@ -700,11 +710,68 @@ export function registerHooks(hooks) {
     };
 }
 
+function resolveImportMetaSpecifier(specifier, parentURL) {
+    if (parentURL instanceof URL) parentURL = parentURL.href;
+    else if (typeof parentURL !== 'string') {
+        const error = new TypeError('The "parent" argument must be of type string or an instance of URL.');
+        error.code = 'ERR_INVALID_ARG_TYPE';
+        throw error;
+    }
+    const defaultResolve = (nextSpecifier, context) => {
+        const request = String(nextSpecifier);
+        const builtin = request.replace(/^node:/, '');
+        if (isBuiltin(request)) return { url: `node:${builtin}` };
+        const hasScheme = /^[A-Za-z][A-Za-z0-9+.-]*:/.test(request);
+        const relative = request.startsWith('.') || request.startsWith('/') ||
+            request.startsWith('file:') || request.startsWith('data:');
+        if (context.parentURL.startsWith('data:') && !hasScheme) {
+            const error = new Error(
+                `Failed to resolve module specifier "${request}" from "${context.parentURL}"`);
+            error.code = 'ERR_UNSUPPORTED_RESOLVE_REQUEST';
+            throw error;
+        }
+        if (relative || hasScheme) {
+            return { url: relative ? new URL(request, context.parentURL).href : request };
+        }
+        if (!context.parentURL.startsWith('file:')) {
+            const error = new TypeError(`Invalid URL: ${context.parentURL}`);
+            error.name = 'TypeError [ERR_INVALID_URL]';
+            error.code = 'ERR_INVALID_URL';
+            throw error;
+        }
+        const resolved = resolveImportSpecifier(request, context.parentURL);
+        if (resolved) {
+            return { url: request.endsWith('/') ? new URL('.', resolved).href : resolved };
+        }
+        const error = new Error(`Cannot find package '${request}' imported from ${context.parentURL}`);
+        error.code = 'ERR_MODULE_NOT_FOUND';
+        throw error;
+    };
+    const context = { conditions: ['node', 'import'], importAttributes: {}, parentURL };
+    const hooks = moduleHooks
+        .map((hook) => hook.resolve)
+        .filter((hook) => typeof hook === 'function');
+    const run = (index, request, nextContext) => {
+        if (index < 0) return defaultResolve(request, nextContext);
+        return hooks[index](request, nextContext,
+            (nextSpecifier = request, forwardedContext = nextContext) =>
+                run(index - 1, nextSpecifier, forwardedContext));
+    };
+    const result = run(hooks.length - 1, String(specifier), context);
+    if (result === null || typeof result !== 'object' || typeof result.url !== 'string') {
+        throw new TypeError('resolve hook must return an object with a URL');
+    }
+    return result.url;
+}
+
+globalThis.__mcpV8ImportMetaResolve = resolveImportMetaSpecifier;
+
 export const Module = {
     builtinModules,
     isBuiltin,
     createRequire,
     syncBuiltinESMExports,
+    register,
     registerHooks,
     _cache: requireCache,
 };

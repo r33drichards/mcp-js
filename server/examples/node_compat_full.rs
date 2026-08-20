@@ -17,7 +17,7 @@ use server::engine::{
 use std::{
     collections::{HashMap, HashSet},
     fs::{self, OpenOptions},
-    io::{BufWriter, Write},
+    io::{BufWriter, Read, Write},
     path::{Path, PathBuf},
     sync::{
         Arc, Once,
@@ -150,6 +150,9 @@ impl NodeCliInvocation {
                 "--no-warnings" => {
                     Self::require_no_value(flag, value)?;
                     self.no_warnings = true;
+                }
+                "--experimental-import-meta-resolve" => {
+                    Self::require_no_value(flag, value)?;
                 }
                 _ if flag.starts_with('-') => {
                     return Err(format!("unsupported Node CLI flag: {flag}"));
@@ -585,11 +588,34 @@ fn source_uses_esm_syntax(specifier: &str, source: &str) -> bool {
     })
     .is_ok_and(|parsed| !parsed.compute_is_script())
 }
+fn rewrite_data_url_import_meta_resolve(specifier: &str) -> Option<String> {
+    if !specifier.starts_with("data:") {
+        return None;
+    }
+    let data_url = data_url::DataUrl::process(specifier).ok()?;
+    let mime = format!(
+        "{}/{}",
+        data_url.mime_type().type_,
+        data_url.mime_type().subtype
+    )
+    .to_ascii_lowercase();
+    if mime != "text/javascript" && mime != "application/javascript" {
+        return None;
+    }
+    let (body, _) = data_url.decode_to_vec().ok()?;
+    let source = String::from_utf8(body).ok()?;
+    let rewritten = rewrite_import_meta_resolve(specifier, &source)?;
+    let encoded = url::form_urlencoded::byte_serialize(rewritten.as_bytes())
+        .collect::<String>()
+        .replace('+', "%20");
+    Some(format!("data:text/javascript;charset=utf-8,{encoded}"))
+}
+
 fn rewrite_import_meta_resolve(specifier: &str, source: &str) -> Option<String> {
     use swc_core::{
         common::{FileName, SourceMap, sync::Lrc},
         ecma::{
-            ast::{Callee, Expr, Ident, MemberProp, MetaPropKind},
+            ast::{Callee, Expr, Ident, Lit, MemberProp, MetaPropKind},
             codegen::{Emitter, text_writer::JsWriter},
             parser::{EsSyntax, Parser, StringInput, Syntax, lexer::Lexer},
             visit::{VisitMut, VisitMutWith},
@@ -604,6 +630,46 @@ fn rewrite_import_meta_resolve(specifier: &str, source: &str) -> Option<String> 
     impl VisitMut for ImportMetaResolveRewriter {
         fn visit_mut_call_expr(&mut self, call: &mut swc_core::ecma::ast::CallExpr) {
             call.visit_mut_children_with(self);
+            if matches!(call.callee, Callee::Import(_))
+                && let Some(argument) = call.args.first_mut()
+            {
+                match &mut *argument.expr {
+                    Expr::Lit(Lit::Str(specifier)) => {
+                        if let Some(rewritten) = rewrite_data_url_import_meta_resolve(
+                            &specifier.value.to_string_lossy(),
+                        ) {
+                            specifier.value = rewritten.into();
+                            specifier.raw = None;
+                            self.rewritten = true;
+                        }
+                    }
+                    Expr::Tpl(template)
+                        if template.quasis.first().is_some_and(|quasi| {
+                            let raw = quasi.raw.as_ref();
+                            raw.starts_with("data:text/javascript")
+                                || raw.starts_with("data:application/javascript")
+                        }) =>
+                    {
+                        const REPLACEMENT: &str = "((specifier,parentURL=import.meta.url)=>globalThis.__mcpV8ImportMetaResolve(specifier,parentURL))";
+                        for quasi in &mut template.quasis {
+                            let raw = quasi.raw.to_string();
+                            if raw.contains("import.meta.resolve") {
+                                quasi.raw = raw.replace("import.meta.resolve", REPLACEMENT).into();
+                                if let Some(cooked) = &quasi.cooked {
+                                    quasi.cooked = Some(
+                                        cooked
+                                            .to_string_lossy()
+                                            .replace("import.meta.resolve", REPLACEMENT)
+                                            .into(),
+                                    );
+                                }
+                                self.rewritten = true;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
             let Callee::Expr(callee) = &call.callee else {
                 return;
             };
@@ -658,7 +724,7 @@ fn rewrite_import_meta_resolve(specifier: &str, source: &str) -> Option<String> 
     .ok()?;
     let output = String::from_utf8(output).ok()?;
     Some(format!(
-        "const __nodeCompatImportMetaResolve = (specifier, parentURL = import.meta.url) => globalThis.__NODE_COMPAT_IMPORT_META_RESOLVE__(specifier, parentURL);\n{output}"
+        "const __nodeCompatImportMetaResolve = (specifier, parentURL = import.meta.url) => globalThis.__mcpV8ImportMetaResolve(specifier, parentURL);\n{output}"
     ))
 }
 
@@ -1482,7 +1548,7 @@ fn append_cli_modules(
         let module = virtualize_cli_module(module, corpus)?;
         source.push_str("await import(");
         source.push_str(&serde_json::to_string(&module).unwrap());
-        source.push_str(");\n");
+        source.push_str(");\nawait Promise.all(globalThis.__mcpV8PendingModuleRegistrations ?? []);\n");
     }
     Ok(())
 }
@@ -1515,6 +1581,8 @@ fn node_cli_process_config(
 }
 
 fn append_commonjs_eval(source: &mut String, eval: &str) {
+    let eval = rewrite_import_meta_resolve("file:///eval", eval)
+        .unwrap_or_else(|| eval.to_owned());
     source.push_str(
         "const { createRequire: __nodeCompatCreateRequire } = await import('node:module');\n\
          const __nodeCompatFilename = '/test/[eval].js';\n\
@@ -1524,7 +1592,7 @@ fn append_commonjs_eval(source: &mut String, eval: &str) {
          const __nodeCompatRequire = __nodeCompatCreateRequire('file:///test/[eval].js');\n\
          (function (exports, require, module, __filename, __dirname) {\n",
     );
-    source.push_str(eval);
+    source.push_str(&eval);
     source.push_str(
         "\n}).call(__nodeCompatModule.exports, __nodeCompatExports, __nodeCompatRequire, \
          __nodeCompatModule, __nodeCompatFilename, __nodeCompatDirname);\n",
@@ -1569,6 +1637,7 @@ fn node_cli_source(
     let mut source = format!(
         "globalThis.__mcpV8ProcessConfig={};\n\
          const {{ default: __nodeCompatProcess }} = await import('node:process');\n\
+         await import('node:module');\n\
          globalThis.process = __nodeCompatProcess;\n\
          globalThis.global = globalThis;\n",
         serde_json::to_string(&process_config).unwrap(),
@@ -1582,7 +1651,9 @@ fn node_cli_source(
         match invocation.input_type.as_deref().unwrap_or("commonjs") {
             "commonjs" => append_commonjs_eval(&mut source, eval),
             "module" => {
-                source.push_str(eval);
+                let eval = rewrite_import_meta_resolve("file:///eval", eval)
+                    .unwrap_or_else(|| eval.to_owned());
+                source.push_str(&eval);
                 source.push('\n');
             }
             input_type => return Err(format!("unsupported --input-type: {input_type}")),
@@ -1684,12 +1755,19 @@ fn cjs_esm_load_note(
     })
 }
 
-fn run_node_compat_cli(
+fn run_node_compat_cli_with_stdin(
     args: &[String],
     node_options: Option<&str>,
     corpus: &Path,
+    stdin_source: Option<String>,
 ) -> Result<NodeCliOutput, String> {
-    let invocation = NodeCliInvocation::parse(args, node_options)?;
+    let mut invocation = NodeCliInvocation::parse(args, node_options)?;
+    if let Some(source) = stdin_source {
+        if invocation.eval_source.is_some() || invocation.entrypoint.is_some() {
+            return Err("stdin source cannot be combined with eval or an entrypoint".to_owned());
+        }
+        invocation.eval_source = Some(source);
+    }
     let corpus = fs::canonicalize(corpus).map_err(|error| error.to_string())?;
     let modules = corpus_modules_for_cli(&corpus, &invocation)?;
     let (source, compile_module) = node_cli_source(&invocation, &corpus)?;
@@ -1768,10 +1846,31 @@ fn run_node_compat_cli(
     })
 }
 
+#[cfg(test)]
+fn run_node_compat_cli(
+    args: &[String],
+    node_options: Option<&str>,
+    corpus: &Path,
+) -> Result<NodeCliOutput, String> {
+    run_node_compat_cli_with_stdin(args, node_options, corpus, None)
+}
+
 fn node_compat_cli_main(args: &[String]) -> Result<(), String> {
     let corpus =
         fs::canonicalize(path_env("NODE_COMPAT_CORPUS")?).map_err(|error| error.to_string())?;
-    let output = run_node_compat_cli(args, std::env::var("NODE_OPTIONS").ok().as_deref(), &corpus)?;
+    let node_options = std::env::var("NODE_OPTIONS").ok();
+    let invocation = NodeCliInvocation::parse(args, node_options.as_deref())?;
+    let stdin_source = if invocation.eval_source.is_none() && invocation.entrypoint.is_none() {
+        let mut source = String::new();
+        std::io::stdin()
+            .read_to_string(&mut source)
+            .map_err(|error| error.to_string())?;
+        Some(source)
+    } else {
+        None
+    };
+    let output =
+        run_node_compat_cli_with_stdin(args, node_options.as_deref(), &corpus, stdin_source)?;
     print!("{}", output.stdout);
     eprint!("{}", output.stderr);
     std::io::stdout()
@@ -2165,6 +2264,20 @@ mod tests {
     }
 
     #[test]
+    fn node_cli_accepts_legacy_import_meta_resolve_flag() {
+        let invocation = NodeCliInvocation::parse(
+            &node_cli_args(&["--experimental-import-meta-resolve", "--eval", "void 0"]),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            invocation.exec_argv,
+            ["--experimental-import-meta-resolve", "--eval", "void 0"]
+        );
+    }
+
+    #[test]
     fn node_cli_accepts_short_eval_alias() {
         let invocation =
             NodeCliInvocation::parse(&node_cli_args(&["-e", "await import('preload.mjs')"]), None)
@@ -2278,6 +2391,18 @@ mod tests {
             source.contains("__nodeCompatImportMetaResolve('custom:value')"),
             "{source}"
         );
+    }
+
+    #[test]
+    fn rewrite_import_meta_resolve_rewrites_javascript_data_urls() {
+        let source = rewrite_import_meta_resolve(
+            "file:///fixture.mjs",
+            "await import('data:text/javascript,export default import.meta.resolve(%22node:fs%22)');",
+        )
+        .unwrap();
+
+        assert!(source.contains("__nodeCompatImportMetaResolve"), "{source}");
+        assert!(source.contains("data:text/javascript;charset=utf-8,"), "{source}");
     }
 
     #[test]
@@ -2974,6 +3099,22 @@ mod tests {
         assert_eq!(commonjs.stdout, "function\n");
         assert_eq!(module.runtime_error, None);
         assert_eq!(module.stdout, "string\n");
+    }
+
+    #[test]
+    fn node_cli_executes_module_source_from_stdin() {
+        let corpus = cli_corpus(&[]);
+        let output = run_node_compat_cli_with_stdin(
+            &node_cli_args(&["--input-type=module"]),
+            None,
+            corpus.path(),
+            Some("console.log(typeof import.meta.resolve);".to_owned()),
+        )
+        .unwrap();
+
+        assert_eq!(output.runtime_error, None);
+        assert_eq!(output.stdout, "function\n");
+        assert_eq!(output.stderr, "");
     }
 
     #[test]

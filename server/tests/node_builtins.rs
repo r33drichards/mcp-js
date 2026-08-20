@@ -84,6 +84,59 @@ async fn expect_ok_with_internals(code: &str) {
 }
 
 #[test]
+fn module_register_queues_and_installs_esm_hooks() {
+    use server::engine::{ExecutionConfig, execute_stateless};
+
+    ensure_v8();
+    let code = r#"
+        import { register } from 'node:module';
+        register('data:text/javascript,export function resolve() {}');
+        await Promise.all(globalThis.__mcpV8PendingModuleRegistrations);
+        if (globalThis.__mcpV8ModuleHooks.length !== 1 ||
+            typeof globalThis.__mcpV8ModuleHooks[0].resolve !== 'function') {
+            throw new Error('module.register did not install the loader hooks');
+        }
+    "#;
+    let (result, _) = execute_stateless(
+        code,
+        ExecutionConfig::new(64 * 1024 * 1024).main_module_specifier("file:///app/main.mjs"),
+    );
+    assert!(result.is_ok(), "module.register failed: {result:?}");
+}
+
+#[test]
+fn child_process_spawn_supports_named_import_and_buffered_stdin() {
+    use server::engine::{ExecutionConfig, execute_stateless};
+    use server::engine::opa::{EvalMode, PolicyChain};
+    use server::engine::subprocess::SubprocessConfig;
+
+    ensure_v8();
+    let policy = Arc::new(PolicyChain::new(vec![], EvalMode::All));
+    let subprocess = SubprocessConfig::new(policy);
+    let code = r#"
+        import { spawn } from 'node:child_process';
+        const child = spawn('/bin/sh', ['-c', 'cat']);
+        child.stdin.end('hello');
+        const output = (await child.stdout.toArray()).toString();
+        if (output !== 'hello') throw new Error(`unexpected spawn output: ${output}`);
+        const result = await new Promise((resolve, reject) => {
+            child.once('error', reject);
+            child.once('close', (code, signal) => resolve({ code, signal }));
+        });
+        if (result.code !== 0 || result.signal !== null) {
+            throw new Error(`unexpected spawn result: ${JSON.stringify(result)}`);
+        }
+    "#;
+    let (result, _) = execute_stateless(
+        code,
+        ExecutionConfig::new(64 * 1024 * 1024)
+            .maybe_subprocess_config(Some(&subprocess))
+            .main_module_specifier("file:///app/main.mjs"),
+    );
+    assert!(result.is_ok(), "child_process spawn failed: {result:?}");
+}
+
+#[test]
 fn node_compat_prelude_maps_registered_host_modules() {
     let prelude = include_str!("node_compat/runner/prelude.js");
     for (import, mapping) in [

@@ -1,3 +1,4 @@
+import { Buffer } from 'node:buffer';
 import { EventEmitter } from 'node:events';
 
 const forkHelper = String.raw`
@@ -130,6 +131,97 @@ class ChildProcess extends EventEmitter {
     }
 }
 
+class BufferedReadable extends EventEmitter {
+    #encoding;
+    #chunks = [];
+    #resolve;
+    #done = new Promise((resolve) => { this.#resolve = resolve; });
+
+    setEncoding(encoding) {
+        this.#encoding = String(encoding);
+        return this;
+    }
+
+    finish(bytes) {
+        const chunk = Buffer.from(bytes);
+        this.#chunks.push(chunk);
+        this.emit('data', this.#encoding ? chunk.toString(this.#encoding) : chunk);
+        this.emit('end');
+        this.#resolve(this.#chunks);
+    }
+
+    toArray() {
+        return this.#done;
+    }
+}
+
+class SpawnedChildProcess extends EventEmitter {
+    #command;
+    #args;
+    #options;
+    #input;
+    #started = false;
+
+    constructor(command, args, options) {
+        super();
+        this.#command = command;
+        this.#args = args;
+        this.#options = options;
+        this.exitCode = null;
+        this.signalCode = null;
+        this.stdout = new BufferedReadable();
+        this.stderr = new BufferedReadable();
+        this.stdin = {
+            end: (input = '') => {
+                const bytes = input instanceof Uint8Array ? input : new TextEncoder().encode(String(input));
+                this.#input = Array.from(bytes);
+                this.#start();
+            },
+        };
+        queueMicrotask(() => this.#start());
+    }
+
+    #start() {
+        if (this.#started) return;
+        this.#started = true;
+        const selfHosted = this.#command === globalThis.__NODE_TEST_EXEC_PATH__;
+        const args = selfHosted ? ['--node-compat-cli', ...this.#args] : this.#args;
+        const command = new Deno.Command(this.#command, {
+            args,
+            cwd: this.#options.cwd,
+            env: this.#options.env,
+            stdin: this.#input,
+        });
+        command.output().then((output) => {
+            this.exitCode = output.code;
+            this.stdout.finish(output.stdout);
+            this.stderr.finish(output.stderr);
+            setTimeout(() => {
+                this.emit('exit', output.code, null);
+                this.emit('close', output.code, null);
+            }, 0);
+        }, (error) => {
+            this.stdout.finish(new Uint8Array());
+            this.stderr.finish(new Uint8Array());
+            setTimeout(() => {
+                this.emit('error', error);
+                this.emit('close', -1, null);
+            }, 0);
+        });
+    }
+}
+
+export function spawn(command, args = [], options = {}) {
+    if (typeof command !== 'string') {
+        throw new TypeError('The "command" argument must be of type string.');
+    }
+    if (!Array.isArray(args)) {
+        options = args || {};
+        args = [];
+    }
+    return new SpawnedChildProcess(command, args.map(String), options || {});
+}
+
 export function fork(modulePath, args = [], options = {}) {
     if (typeof modulePath !== 'string') {
         throw new TypeError('The "modulePath" argument must be of type string.');
@@ -143,5 +235,5 @@ export function fork(modulePath, args = [], options = {}) {
 
 export const exec = (...args) => globalThis.child_process.exec(...args);
 
-export default { ChildProcess, exec, fork };
+export default { ChildProcess, exec, fork, spawn };
 export { ChildProcess };
