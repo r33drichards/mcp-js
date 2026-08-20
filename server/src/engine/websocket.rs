@@ -130,7 +130,7 @@ const CONNECT_TIMEOUT_SECS: u64 = 30;
 
 /// Async op: policy-gated WebSocket connect. Returns JSON
 /// `{"rid": <u32>, "protocol": "<accepted subprotocol or empty>"}`.
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_ws_connect(
     state: Rc<RefCell<OpState>>,
@@ -270,7 +270,7 @@ async fn do_ws_connect(
 
 /// Async op: send one frame. `kind` is "text" (data is the text) or
 /// "binary" (data is base64).
-#[op2(async)]
+#[op2]
 async fn op_ws_send(
     state: Rc<RefCell<OpState>>,
     #[smi] rid: u32,
@@ -298,7 +298,7 @@ async fn op_ws_send(
 /// `{"kind":"text","data":...}`, `{"kind":"binary","data":<b64>}`,
 /// `{"kind":"close","code":u16,"reason":...,"wasClean":bool}`,
 /// `{"kind":"error","message":...}`.
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_ws_recv(state: Rc<RefCell<OpState>>, #[smi] rid: u32) -> Result<String, JsErrorBox> {
     let WsHandle { source, cancel, .. } = take_handle(&state, rid)?;
@@ -355,7 +355,7 @@ async fn op_ws_recv(state: Rc<RefCell<OpState>>, #[smi] rid: u32) -> Result<Stri
 }
 
 /// Async op: send a close frame. `code == 0` means "no code" (bare close).
-#[op2(async)]
+#[op2]
 async fn op_ws_close(
     state: Rc<RefCell<OpState>>,
     #[smi] rid: u32,

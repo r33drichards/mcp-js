@@ -11,10 +11,6 @@ resolver = "2"
 debug = "line-tables-only"
 
 [patch.crates-io]
-# Includes the prepare_for_snapshot heap-leak fix and preserves structured
-# module-loader error properties through dynamic-import rejection handling.
-# Upstream fixes pending; using our fork until merged.
-deno_core = { git = "https://github.com/r33drichards/deno_core", rev = "a1c27fdd1788397cdb8499e66d82f361352714da" }
 # Fork-probe for the URL-parser benchmark (see docs/url-impl-benchmark.md):
 # rust-url with the whatwg/url#963 host-retention behavior.
 url = { path = "server/vendor/url" }

@@ -325,6 +325,103 @@ async fn node_test_runs_nested_async_hooks() {
 }
 
 #[tokio::test]
+async fn assert_partial_deep_strict_equal_matches_nested_subsets() {
+    expect_ok(
+        r#"
+        import assert from 'node:assert';
+
+        assert.partialDeepStrictEqual(
+            [{ foo: 'yarp', nested: { keep: 1, extra: 2 } }, 2, 3, 4],
+            [{ nested: { keep: 1 } }, 3],
+        );
+        assert.partialDeepStrictEqual(new Set([{ a: 1 }, { b: 2 }]), new Set([{ b: 2 }]));
+        assert.partialDeepStrictEqual(new Map([[{ id: 1 }, { value: 2, extra: 3 }]]),
+                                             new Map([[{ id: 1 }, { value: 2 }]]));
+
+        for (const [actual, expected] of [
+            [[1, 2], [2, 1]],
+            [{ a: 1 }, { a: 2 }],
+            [0, -0],
+        ]) {
+            assert.throws(
+                () => assert.partialDeepStrictEqual(actual, expected),
+                (error) => error.code === 'ERR_ASSERTION' &&
+                           error.operator === 'partialDeepStrictEqual',
+            );
+        }
+        "#,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn assert_partial_deep_strict_equal_ignores_object_prototypes() {
+    expect_ok(
+        r#"
+        import assert from 'node:assert';
+
+        const actual = Object.assign(Object.create({ actualPrototype: true }), {
+            nested: { keep: 1, extra: 2 },
+        });
+        const expected = Object.assign(Object.create({ expectedPrototype: true }), {
+            nested: { keep: 1 },
+        });
+        assert.partialDeepStrictEqual(actual, expected);
+        "#,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn assert_partial_deep_strict_equal_checks_special_object_properties() {
+    expect_ok(
+        r#"
+        import assert from 'node:assert';
+
+        const actual = /abc/g;
+        actual.lastIndex = 2;
+        actual.metadata = { keep: 1, extra: 2 };
+
+        const expected = /abc/g;
+        expected.lastIndex = 2;
+        expected.metadata = { keep: 1 };
+        assert.partialDeepStrictEqual(actual, expected);
+
+        const wrongIndex = /abc/g;
+        wrongIndex.lastIndex = 1;
+        assert.throws(() => assert.partialDeepStrictEqual(actual, wrongIndex));
+
+        const wrongMetadata = /abc/g;
+        wrongMetadata.lastIndex = 2;
+        wrongMetadata.metadata = { keep: 2 };
+        assert.throws(() => assert.partialDeepStrictEqual(actual, wrongMetadata));
+        "#,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn assert_partial_deep_strict_equal_matches_binary_subsequences() {
+    expect_ok(
+        r#"
+        import assert from 'node:assert';
+
+        const actualBuffer = Uint8Array.from([1, 9, 2, 9, 3]).buffer;
+        const expectedBuffer = Uint8Array.from([1, 2, 3]).buffer;
+        assert.partialDeepStrictEqual(actualBuffer, expectedBuffer);
+
+        const actualView = new DataView(Uint8Array.from([1, 9, 2, 9, 3]).buffer);
+        const expectedView = new DataView(Uint8Array.from([1, 2, 3]).buffer);
+        assert.partialDeepStrictEqual(actualView, expectedView);
+
+        const wrongView = new DataView(Uint8Array.from([1, 4, 3]).buffer);
+        assert.throws(() => assert.partialDeepStrictEqual(actualView, wrongView));
+        "#,
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn assert_does_not_reject_validates_original_error() {
     expect_ok(
         r#"

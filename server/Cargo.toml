@@ -31,7 +31,7 @@ toml = "0.8"
 tokio = { version = "1.45.0", features = ["rt-multi-thread", "process", "signal", "time", "sync", "macros", "net", "io-util"] }
 tracing = "0.1.41"
 tracing-subscriber = "0.3.19"
-deno_core = "0.381"
+deno_core = { git = "https://github.com/r33drichards/deno_core", rev = "4a09194d0fb8dbe062fe066d82d7ad6bcaa4f39a" }
 deno_error = "0.7"
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-sdk-s3 = "1"

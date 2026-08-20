@@ -49,7 +49,7 @@
           # tokio-rustls, webpki-roots) added by the Modal gRPC workaround.
           # Regenerate by building any nix package after a Cargo.lock change
           # and copying the printed hash.
-          hash = "sha256-vLX0V5TIXrQjbdRznMRVLTWOsdt8RD3doipsUbJjKgk=";
+          hash = pkgs.lib.fakeHash;
         });
 
         docsPython = pkgs.python3.withPackages (
@@ -84,7 +84,7 @@
         # which fails inside the Nix sandbox and on network-restricted
         # CI runners.  Pre-fetching and setting RUSTY_V8_ARCHIVE avoids
         # any network access during build.
-        rustyV8Version = "145.0.0";
+        rustyV8Version = "146.9.0";
         rustyV8Target = {
           "x86_64-linux"   = "x86_64-unknown-linux-gnu";
           "aarch64-linux"  = "aarch64-unknown-linux-gnu";
@@ -94,10 +94,10 @@
         rustyV8Archive = pkgs.fetchurl {
           url = "https://github.com/denoland/rusty_v8/releases/download/v${rustyV8Version}/librusty_v8_release_${rustyV8Target}.a.gz";
           hash = {
-            "x86_64-linux"   = "sha256-chV1PAx40UH3Ute5k3lLrgfhih39Rm3KqE+mTna6ysE=";
-            "aarch64-linux"  = "sha256-4IivYskhUSsMLZY97+g23UtUYh4p5jk7CzhMbMyqXyY=";
-            "x86_64-darwin"  = "sha256-1jUuC+z7saQfPYILNyRJanD4+zOOhXU2ac/LFoytwho=";
-            "aarch64-darwin" = "sha256-yHa1eydVCrfYGgrZANbzgmmf25p7ui1VMas2A7BhG6k=";
+            "x86_64-linux"   = "sha256-Yu8vHivMad6I+uo1iXMIRBVrziVVUZ+7IiXYpbiB/pg=";
+            "aarch64-linux"  = "sha256-Jk7v/5DEnFmbLCGGzIaZVjtzeL6k66CY/p6mXZvFt9I=";
+            "x86_64-darwin"  = "sha256-YOv8BnCfL7vFkmiar+VDbxdiJ95OpXZvGKm9OfDjtP0=";
+            "aarch64-darwin" = "sha256-5N5IQxBpGKWBEemXd4Y7nLdXzCg+ZcBb11Td0mbjokI=";
           }.${system};
         };
 

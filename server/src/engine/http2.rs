@@ -164,7 +164,7 @@ const CONNECT_TIMEOUT_SECS: u64 = 30;
 /// Async op: policy-gated HTTP/2 session connect. `url` is an
 /// `http://host[:port]` or `https://host[:port]` authority. Returns JSON
 /// `{"rid": <u32>}`.
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_h2_connect(
     state: Rc<RefCell<OpState>>,
@@ -317,7 +317,7 @@ async fn do_h2_connect(
 /// values; `:method` and `:path` pseudo-headers are required, `:authority`
 /// and `:scheme` default to the session's. Header-injection rules and the
 /// per-stream policy run here. Returns JSON `{"rid": <u32>}`.
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_h2_request(
     state: Rc<RefCell<OpState>>,
@@ -439,7 +439,7 @@ async fn do_h2_request(
 // ── Stream data ops ──────────────────────────────────────────────────────
 
 /// Async op: send one DATA chunk (base64), respecting h2 flow control.
-#[op2(async)]
+#[op2]
 async fn op_h2_send_data(
     state: Rc<RefCell<OpState>>,
     #[smi] stream_rid: u32,
@@ -486,7 +486,7 @@ async fn send_all(
 /// `{"kind":"response","status":<u16>,"headers":{..},"endStream":bool}`, or
 /// — when the stream dies before headers arrive — `{"kind":"reset","code":..}`
 /// / `{"kind":"error","message":..}` so RST_STREAM keeps its error code.
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_h2_response(
     state: Rc<RefCell<OpState>>,
@@ -528,7 +528,7 @@ async fn op_h2_response(
 /// Async op: read the next body event. Shapes:
 /// `{"kind":"data","data":<b64>}`, `{"kind":"trailers","trailers":{..}}`,
 /// `{"kind":"end"}`, `{"kind":"reset","code":<u32>}`, `{"kind":"error","message":..}`.
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_h2_read(
     state: Rc<RefCell<OpState>>,
@@ -607,7 +607,7 @@ fn op_h2_drop_stream(state: &mut OpState, #[smi] stream_rid: u32) {
 // ── Session lifecycle ops ────────────────────────────────────────────────
 
 /// Async op: HTTP/2 PING round trip (used by gRPC keepalive).
-#[op2(async)]
+#[op2]
 async fn op_h2_ping(
     state: Rc<RefCell<OpState>>,
     #[smi] session_rid: u32,

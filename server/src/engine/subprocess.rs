@@ -67,7 +67,7 @@ struct SubprocessPolicyInput {
 /// Async op: Run a command to completion (Deno.Command.output() equivalent).
 /// Called from JS via `Deno.core.ops.op_subprocess_output(command, args_json, options_json)`.
 /// Returns a JSON string with {code, stdout, stderr}.
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_subprocess_output(
     state: Rc<RefCell<OpState>>,
@@ -118,7 +118,7 @@ async fn op_subprocess_output(
 /// Async op: Execute a shell command (Node.js child_process.exec equivalent).
 /// Called from JS via `Deno.core.ops.op_subprocess_exec(command, options_json)`.
 /// Returns a JSON string with {code, stdout, stderr}.
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_subprocess_exec(
     state: Rc<RefCell<OpState>>,

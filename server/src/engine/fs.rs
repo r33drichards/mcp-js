@@ -137,7 +137,7 @@ struct FsPolicyInput {
 // ── Async deno_core ops ──────────────────────────────────────────────────
 
 /// Read a file as UTF-8 text.
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_fs_read_file_text(
     state: Rc<RefCell<OpState>>,
@@ -189,7 +189,7 @@ async fn op_fs_read_file_text(
 }
 
 /// Read a file as raw bytes, returned as a Uint8Array to JavaScript.
-#[op2(async)]
+#[op2]
 #[buffer]
 async fn op_fs_read_file_buffer(
     state: Rc<RefCell<OpState>>,
@@ -230,7 +230,7 @@ async fn op_fs_read_file_buffer(
 }
 
 /// Write a file from a UTF-8 string.
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_fs_write_file_text(
     state: Rc<RefCell<OpState>>,
@@ -266,7 +266,7 @@ async fn op_fs_write_file_text(
 }
 
 /// Write a file from raw bytes (Uint8Array from JavaScript).
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_fs_write_file_buffer(
     state: Rc<RefCell<OpState>>,
@@ -300,7 +300,7 @@ async fn op_fs_write_file_buffer(
 }
 
 /// Append to a file.
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_fs_append_file(
     state: Rc<RefCell<OpState>>,
@@ -345,7 +345,7 @@ async fn op_fs_append_file(
 }
 
 /// Read a directory. Returns JSON array of entry names.
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_fs_readdir(
     state: Rc<RefCell<OpState>>,
@@ -387,7 +387,7 @@ async fn op_fs_readdir(
 }
 
 /// Stat a path. Returns JSON with size, isFile, isDirectory, etc.
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_fs_stat(
     state: Rc<RefCell<OpState>>,
@@ -420,7 +420,7 @@ async fn op_fs_stat(
 }
 
 /// Stat a path **without** following a final symlink (Node `fs.lstat`).
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_fs_lstat(
     state: Rc<RefCell<OpState>>,
@@ -454,7 +454,7 @@ async fn op_fs_lstat(
 }
 
 /// Read a symlink's target, returned as a string.
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_fs_readlink(
     state: Rc<RefCell<OpState>>,
@@ -487,7 +487,7 @@ async fn op_fs_readlink(
 }
 
 /// Create a symlink at `link` pointing to `target` (Node `fs.symlink(target, path)`).
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_fs_symlink(
     state: Rc<RefCell<OpState>>,
@@ -535,7 +535,7 @@ async fn symlink_impl(_target: &str, _link: &str) -> std::io::Result<()> {
 }
 
 /// Create a directory.
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_fs_mkdir(
     state: Rc<RefCell<OpState>>,
@@ -573,7 +573,7 @@ async fn op_fs_mkdir(
 }
 
 /// Remove a file or directory.
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_fs_rm(
     state: Rc<RefCell<OpState>>,
@@ -618,7 +618,7 @@ async fn op_fs_rm(
 }
 
 /// Rename (move) a file or directory.
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_fs_rename(
     state: Rc<RefCell<OpState>>,
@@ -652,7 +652,7 @@ async fn op_fs_rename(
 }
 
 /// Copy a file.
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_fs_copy_file(
     state: Rc<RefCell<OpState>>,
@@ -687,7 +687,7 @@ async fn op_fs_copy_file(
 }
 
 /// Check if a path exists.
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_fs_exists(
     state: Rc<RefCell<OpState>>,
@@ -721,7 +721,7 @@ async fn op_fs_exists(
 /// Open a streaming write to `path`, returning a small integer handle. Bytes are
 /// fed incrementally (chunked on the fly), so a multi-GB file never has to exist
 /// in memory all at once.
-#[op2(async)]
+#[op2]
 #[smi]
 async fn op_fs_write_stream_open(
     state: Rc<RefCell<OpState>>,
@@ -763,7 +763,7 @@ async fn op_fs_write_stream_open(
 }
 
 /// Feed a chunk of bytes to an open write stream.
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_fs_write_stream_chunk_buffer(
     state: Rc<RefCell<OpState>>,
@@ -777,7 +777,7 @@ async fn op_fs_write_stream_chunk_buffer(
 }
 
 /// Feed a chunk of text to an open write stream.
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_fs_write_stream_chunk_text(
     state: Rc<RefCell<OpState>>,
@@ -791,7 +791,7 @@ async fn op_fs_write_stream_chunk_text(
 }
 
 /// Finish an open write stream: flush the final chunk and install the file.
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_fs_write_stream_close(
     state: Rc<RefCell<OpState>>,

@@ -110,6 +110,8 @@ fn validate_node_import_attributes(
 }
 
 pub fn initialize_v8() {
+    v8::V8::set_flags_from_string("--js-defer-import-eval");
+
     // deno_core initializes V8 automatically on first JsRuntime creation.
     // Kept as the common process-init hook for callers (main.rs, tests, fuzz).
     //
