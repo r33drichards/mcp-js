@@ -2107,6 +2107,12 @@ fn node_cli_source(
          globalThis.global = globalThis;\n",
         serde_json::to_string(&process_config).unwrap(),
     );
+    if invocation.experimental_package_map.is_some() && !invocation.no_warnings {
+        source.push_str("console.error('ExperimentalWarning: Package maps are an experimental feature');\n");
+    }
+    if !invocation.experimental_loaders.is_empty() && !invocation.no_warnings {
+        source.push_str("console.error('ExperimentalWarning: `--experimental-loader` may be removed in the future');\n");
+    }
     append_cli_modules(&mut source, &invocation.environment_requires, corpus)?;
     append_cli_modules(&mut source, &invocation.cli_requires, corpus)?;
     append_cli_modules(&mut source, &invocation.environment_imports, corpus)?;
@@ -2167,9 +2173,6 @@ fn node_cli_source(
         CompileMode::CommonJs => "commonjs",
         _ => "module",
     };
-    if !invocation.no_warnings {
-        source.push_str("console.error('ExperimentalWarning: `--experimental-loader` may be removed in the future');\n");
-    }
     source.push_str(&format!(
         r#"const __nodeCompatLoaderModules = await Promise.all({loaders}.map((specifier) => import(specifier)));
 const __nodeCompatLoadHooks = __nodeCompatLoaderModules.map((loader) => loader.load).filter((hook) => typeof hook === 'function');

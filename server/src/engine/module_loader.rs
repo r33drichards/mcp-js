@@ -666,8 +666,8 @@ fn resolve_package_map(
     };
     let Some(target_key) = owner.dependencies.get(&package) else {
         return Some(Ok(package_error_module(
-            "ERR_PACKAGE_MAP_KEY_NOT_FOUND",
-            &format!("Package map dependency key '{package}' was not found"),
+            "ERR_MODULE_NOT_FOUND",
+            &format!("Cannot find package '{package}' imported from {referrer}"),
         )));
     };
     let Some(target) = package_map.packages.get(target_key) else {
