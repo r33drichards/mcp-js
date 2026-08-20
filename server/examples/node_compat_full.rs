@@ -427,6 +427,36 @@ fn rewrite_esm_loader_dynamic_imports(body: &str) -> Option<String> {
     )
 }
 
+fn commonjs_dynamic_import_prelude(path: &str, body: &str) -> Option<(String, String)> {
+    let body = rewrite_script_dynamic_imports(body, "__nodeCompatImport")?;
+    let body = format!(
+        "const __nodeCompatImport = globalThis.__NODE_COMPAT_IMPORT__;\n{body}"
+    );
+    let parent_url = test_module_specifier(path).ok()?;
+    let prelude = format!(
+        r#"globalThis.__NODE_COMPAT_IMPORT__ = (specifier, options) => {{
+  let request;
+  try {{
+    if (typeof specifier === 'symbol') throw new TypeError('Cannot convert a Symbol value to a string');
+    request = String(specifier);
+    const relative = request.startsWith('.') || request.startsWith('/') || request.startsWith('file:') || request.startsWith('data:');
+    const resolved = globalThis.__NODE_COMPAT_RESOLVE_IMPORT__?.(request, {parent_url}) ?? (relative ? new URL(request, {parent_url}).href : request);
+    const releaseNextTicks = globalThis.__mcpV8IsVirtualCommonJsModule?.(resolved)
+      ? globalThis.__mcpV8DeferNextTickDrain?.()
+      : null;
+    const imported = import(resolved, options);
+    if (releaseNextTicks) imported.then(releaseNextTicks, releaseNextTicks);
+    return imported;
+  }} catch (error) {{
+    return Promise.reject(error);
+  }}
+}};
+"#,
+        parent_url = serde_json::to_string(&parent_url).unwrap(),
+    );
+    Some((prelude, body))
+}
+
 fn literal_module_specifiers(source: &str) -> Vec<String> {
     use swc_core::{
         common::{FileName, SourceMap, sync::Lrc},
@@ -795,6 +825,7 @@ fn assemble(path: &str, body: &str, loader_sources: &HashMap<String, String>) ->
         );
     }
     let (loader_prelude, body) = loader_resolve_prelude(path, body, false, loader_sources)
+        .or_else(|| commonjs_dynamic_import_prelude(path, body))
         .unwrap_or_else(|| (String::new(), body.to_owned()));
     format!(
         "globalThis.__NODE_TEST_PATH__={};globalThis.__NODE_TEST_NAME__={};\n{}\n{}\ntry{{globalThis.__NODE_TEST_RUN_CJS__({});}}catch(e){{if(!(e&&e.__nodeTestSkip))throw e;}}\nglobalThis.__NODE_TEST_SCHEDULE_REPORT__({:?});",
@@ -2800,6 +2831,21 @@ mod tests {
         );
         assert!(
             source.contains("__NODE_COMPAT_IMPORT_WITH_LOADERS__"),
+            "{source}"
+        );
+    }
+
+    #[test]
+    fn assemble_defers_next_ticks_during_commonjs_dynamic_imports() {
+        let source = assemble(
+            "test/es-module/dynamic-import.js",
+            "(async () => { await import('./fixture.cjs'); })();",
+            &HashMap::new(),
+        );
+
+        assert!(source.contains("__mcpV8DeferNextTickDrain"), "{source}");
+        assert!(
+            source.contains("__nodeCompatImport('./fixture.cjs')"),
             "{source}"
         );
     }

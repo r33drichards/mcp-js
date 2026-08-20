@@ -88,6 +88,19 @@ const virtualCommonJsModules = globalThis.__mcpV8VirtualCommonJsModules || null;
 const virtualPackageJson = globalThis.__mcpV8VirtualPackageJson || null;
 const virtualModuleCache = new Map();
 const requireCache = Object.create(null);
+globalThis.__mcpV8IsVirtualCommonJsModule = (specifier) => {
+    if (!virtualCommonJsModules) return false;
+    const url = String(specifier);
+    if (Object.prototype.hasOwnProperty.call(virtualCommonJsModules, url)) return true;
+    try {
+        const normalized = new URL(url);
+        normalized.search = '';
+        normalized.hash = '';
+        return Object.prototype.hasOwnProperty.call(virtualCommonJsModules, normalized.href);
+    } catch {
+        return false;
+    }
+};
 const emittedPackageWarnings = globalThis.__mcpV8EmittedPackageWarnings ??= new Set();
 let packageDeprecationSerial = 0;
 const ESM_IMPORT_PREFIX = 'mcp-v8:esm-import:';

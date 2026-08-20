@@ -12,6 +12,37 @@ function onWarning(warning) {
 }
 
 const eventListeners = new Map([['warning', [onWarning]]]);
+const nextTickQueue = [];
+let nextTickDrainScheduled = false;
+let nextTickDeferrals = 0;
+
+function scheduleNextTickDrain() {
+    if (nextTickDrainScheduled || nextTickQueue.length === 0) return;
+    nextTickDrainScheduled = true;
+    queueMicrotask(() => {
+        nextTickDrainScheduled = false;
+        if (nextTickDeferrals > 0) return;
+        while (nextTickQueue.length > 0) {
+            const { callback, args } = nextTickQueue.shift();
+            callback(...args);
+        }
+    });
+}
+
+function deferNextTickDrain() {
+    nextTickDeferrals += 1;
+    let released = false;
+    return () => {
+        if (released) return;
+        released = true;
+        queueMicrotask(() => {
+            nextTickDeferrals -= 1;
+            scheduleNextTickDrain();
+        });
+    };
+}
+
+globalThis.__mcpV8DeferNextTickDrain = deferNextTickDrain;
 
 function normalizeExitCode(code) {
     const numeric = Number(code);
@@ -72,7 +103,8 @@ const process = {
         if (typeof callback !== 'function') {
             throw new TypeError('Callback must be a function');
         }
-        queueMicrotask(() => callback(...args));
+        nextTickQueue.push({ callback, args });
+        scheduleNextTickDrain();
     },
     emitWarning(warning, type = 'Warning', code) {
         const normalized = warning instanceof Error ? warning : new Error(String(warning));
