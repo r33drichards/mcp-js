@@ -601,9 +601,8 @@ fn install_isolated_loader_modules(
     body: &str,
     modules: &mut HashMap<String, String>,
 ) -> Result<(), String> {
-    let invocation = NodeCliInvocation::parse(&test_flags(body), None)?;
-    let mut pending = invocation
-        .experimental_loaders
+    let experimental_loaders = test_experimental_loaders(body);
+    let mut pending = experimental_loaders
         .iter()
         .filter_map(|loader| test_loader_base_specifier(loader))
         .collect::<Vec<_>>();
@@ -640,18 +639,39 @@ fn install_isolated_loader_modules(
     Ok(())
 }
 
+fn test_experimental_loaders(body: &str) -> Vec<String> {
+    let flags = test_flags(body);
+    let mut loaders = Vec::new();
+    let mut index = 0;
+    while index < flags.len() {
+        let flag = &flags[index];
+        if let Some(loader) = flag
+            .strip_prefix("--experimental-loader=")
+            .or_else(|| flag.strip_prefix("--loader="))
+        {
+            loaders.push(loader.to_owned());
+        } else if matches!(flag.as_str(), "--experimental-loader" | "--loader")
+            && let Some(loader) = flags.get(index + 1)
+        {
+            loaders.push(loader.clone());
+            index += 1;
+        }
+        index += 1;
+    }
+    loaders
+}
+
 fn loader_resolve_prelude(
     path: &str,
     body: &str,
     esm: bool,
     loader_sources: &HashMap<String, String>,
 ) -> Option<(String, String)> {
-    let invocation = NodeCliInvocation::parse(&test_flags(body), None).ok()?;
-    if invocation.experimental_loaders.is_empty() {
+    let experimental_loaders = test_experimental_loaders(body);
+    if experimental_loaders.is_empty() {
         return None;
     }
-    let loaders = invocation
-        .experimental_loaders
+    let loaders = experimental_loaders
         .iter()
         .map(|loader| test_loader_specifier(loader))
         .collect::<Option<Vec<_>>>()?;
@@ -2695,6 +2715,19 @@ mod tests {
             source.contains("__nodeCompatImportWithLoaders('./value.json')"),
             "{source}"
         );
+    }
+
+    #[test]
+    fn isolated_loader_modules_ignore_unrelated_node_flags() {
+        let mut modules = HashMap::new();
+
+        install_isolated_loader_modules(
+            "// Flags: --js-defer-import-eval",
+            &mut modules,
+        )
+        .unwrap();
+
+        assert!(modules.is_empty());
     }
 
     #[test]
