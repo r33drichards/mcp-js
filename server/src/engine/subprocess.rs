@@ -21,6 +21,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::io::Write as _;
 use std::process::Stdio;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -131,6 +132,86 @@ async fn op_subprocess_output(
     .map_err(|e: String| JsErrorBox::generic(e))
 }
 
+/// Sync op: Run a command to completion (Deno.Command.outputSync() equivalent).
+#[op2]
+#[string]
+fn op_subprocess_output_sync(
+    state: &mut OpState,
+    #[string] command: String,
+    #[string] args_json: String,
+    #[string] options_json: String,
+) -> Result<String, JsErrorBox> {
+    let config = state
+        .try_borrow::<SubprocessConfig>()
+        .ok_or_else(|| JsErrorBox::generic(
+            "subprocess: internal error — no subprocess config available"))?;
+    let policy_chain = config.policy_chain.clone();
+    let args: Vec<String> = serde_json::from_str(&args_json)
+        .map_err(|e| JsErrorBox::generic(format!("subprocess: invalid args JSON: {}", e)))?;
+    let options: SubprocessOptions = serde_json::from_str(&options_json)
+        .map_err(|e| JsErrorBox::generic(format!("subprocess: invalid options JSON: {}", e)))?;
+
+    let policy_command = command.clone();
+    let policy_args = args.clone();
+    let policy_options = options.clone();
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("subprocess: failed to create policy runtime: {}", e))?;
+        runtime.block_on(check_policy(
+            &policy_chain,
+            "command_output",
+            &policy_command,
+            &policy_args,
+            &policy_options,
+        ))
+    })
+    .join()
+    .map_err(|_| JsErrorBox::generic("subprocess: policy thread panicked"))?
+    .map_err(JsErrorBox::generic)?;
+
+    let mut cmd = std::process::Command::new(&command);
+    cmd.args(&args);
+    if let Some(ref cwd) = options.cwd {
+        cmd.current_dir(cwd);
+    }
+    if let Some(ref env) = options.env {
+        cmd.envs(env);
+    }
+
+    let output = if let Some(input) = options.stdin {
+        cmd.stdin(Stdio::piped());
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+        let mut child = cmd.spawn().map_err(|e| {
+            JsErrorBox::generic(format!("subprocess: failed to execute '{}': {}", command, e))
+        })?;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(&input).map_err(|e| {
+                JsErrorBox::generic(format!(
+                    "subprocess: failed to write stdin for '{}': {}", command, e
+                ))
+            })?;
+        }
+        child.wait_with_output().map_err(|e| {
+            JsErrorBox::generic(format!("subprocess: failed to wait for '{}': {}", command, e))
+        })?
+    } else {
+        cmd.output().map_err(|e| {
+            JsErrorBox::generic(format!("subprocess: failed to execute '{}': {}", command, e))
+        })?
+    };
+
+    Ok(serde_json::json!({
+        "code": output.status.code().unwrap_or(-1),
+        "stdout": base64_encode(&output.stdout),
+        "stderr": base64_encode(&output.stderr),
+        "success": output.status.success(),
+    })
+    .to_string())
+}
+
 /// Async op: Execute a shell command (Node.js child_process.exec equivalent).
 /// Called from JS via `Deno.core.ops.op_subprocess_exec(command, options_json)`.
 /// Returns a JSON string with {code, stdout, stderr}.
@@ -202,7 +283,7 @@ async fn op_subprocess_exec(
 
 deno_core::extension!(
     subprocess_ext,
-    ops = [op_subprocess_output, op_subprocess_exec],
+    ops = [op_subprocess_output, op_subprocess_output_sync, op_subprocess_exec],
 );
 
 pub fn create_extension() -> deno_core::Extension {
@@ -289,7 +370,27 @@ const SUBPROCESS_JS_WRAPPER: &str = r#"
     };
 
     DenoCommand.prototype.outputSync = function() {
-        throw new Error('Deno.Command.outputSync() is not supported; use output() instead');
+        var args = this._options.args || [];
+        if (!Array.isArray(args)) {
+            throw new TypeError('Deno.Command: args must be an array');
+        }
+        var argsJson = JSON.stringify(args.map(String));
+        var optionsJson = JSON.stringify({
+            cwd: this._options.cwd || null,
+            env: this._options.env || null,
+            stdin: this._options.stdin || null,
+        });
+        var rawResult = Deno.core.ops.op_subprocess_output_sync(
+            this._command, argsJson, optionsJson
+        );
+        var result = JSON.parse(rawResult);
+        return {
+            code: result.code,
+            success: result.success,
+            stdout: base64ToUint8Array(result.stdout),
+            stderr: base64ToUint8Array(result.stderr),
+            signal: null,
+        };
     };
 
     DenoCommand.prototype.spawn = function() {
@@ -349,7 +450,7 @@ const SUBPROCESS_JS_WRAPPER: &str = r#"
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
-#[derive(serde::Deserialize)]
+#[derive(Clone, serde::Deserialize)]
 struct SubprocessOptions {
     #[serde(default)]
     cwd: Option<String>,

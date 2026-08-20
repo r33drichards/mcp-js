@@ -106,9 +106,9 @@ fn module_register_queues_and_installs_esm_hooks() {
 
 #[test]
 fn child_process_spawn_supports_named_import_and_buffered_stdin() {
-    use server::engine::{ExecutionConfig, execute_stateless};
     use server::engine::opa::{EvalMode, PolicyChain};
     use server::engine::subprocess::SubprocessConfig;
+    use server::engine::{ExecutionConfig, execute_stateless};
 
     ensure_v8();
     let policy = Arc::new(PolicyChain::new(vec![], EvalMode::All));
@@ -134,6 +134,35 @@ fn child_process_spawn_supports_named_import_and_buffered_stdin() {
             .main_module_specifier("file:///app/main.mjs"),
     );
     assert!(result.is_ok(), "child_process spawn failed: {result:?}");
+}
+
+#[test]
+fn child_process_spawn_sync_returns_buffered_result() {
+    use server::engine::opa::{EvalMode, PolicyChain};
+    use server::engine::subprocess::SubprocessConfig;
+    use server::engine::{ExecutionConfig, execute_stateless};
+
+    ensure_v8();
+    let policy = Arc::new(PolicyChain::new(vec![], EvalMode::All));
+    let subprocess = SubprocessConfig::new(policy);
+    let code = r#"
+        import childProcess, { spawnSync } from 'node:child_process';
+        if (childProcess.spawnSync !== spawnSync) {
+            throw new Error('default export identity');
+        }
+        const result = spawnSync('/bin/sh', ['-c', 'printf hello; printf error >&2']);
+        if (result.status !== 0 || result.signal !== null ||
+            result.stdout.toString() !== 'hello' || result.stderr.toString() !== 'error') {
+            throw new Error(`unexpected spawnSync result: ${JSON.stringify(result)}`);
+        }
+    "#;
+    let (result, _) = execute_stateless(
+        code,
+        ExecutionConfig::new(64 * 1024 * 1024)
+            .maybe_subprocess_config(Some(&subprocess))
+            .main_module_specifier("file:///app/main.mjs"),
+    );
+    assert!(result.is_ok(), "child_process spawnSync failed: {result:?}");
 }
 
 #[test]
@@ -165,6 +194,12 @@ fn node_compat_prelude_maps_registered_host_modules() {
             "prelude missing require mapping {mapping}"
         );
     }
+}
+
+#[test]
+fn node_compat_prelude_exposes_node_global_alias() {
+    let prelude = include_str!("node_compat/runner/prelude.js");
+    assert!(prelude.contains("globalThis.global = globalThis;"));
 }
 
 #[test]
@@ -1141,7 +1176,7 @@ async fn process_report_matches_node_module_contract() {
 async fn process_config_exposes_node_build_variables() {
     expect_ok(
         r#"
-        import process, { config } from 'node:process';
+        import process, { config, features } from 'node:process';
 
         if (process.config !== config) {
             throw new Error('named export identity');
@@ -1151,6 +1186,55 @@ async fn process_config_exposes_node_build_variables() {
         }
         if (config.variables.node_without_node_options !== false) {
             throw new Error('NODE_OPTIONS support should be advertised');
+        }
+        if (process.features !== features || features.inspector !== false) {
+            throw new Error('process.features contract');
+        }
+        "#,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn net_auto_select_family_attempt_timeout_matches_node_contract() {
+    expect_ok(
+        r#"
+        import net, {
+            getDefaultAutoSelectFamilyAttemptTimeout,
+            setDefaultAutoSelectFamilyAttemptTimeout,
+        } from 'node:net';
+
+        if (net.getDefaultAutoSelectFamilyAttemptTimeout !==
+            getDefaultAutoSelectFamilyAttemptTimeout ||
+            net.setDefaultAutoSelectFamilyAttemptTimeout !==
+            setDefaultAutoSelectFamilyAttemptTimeout) {
+            throw new Error('default export identity');
+        }
+        if (getDefaultAutoSelectFamilyAttemptTimeout() !== 2500) {
+            throw new Error('unexpected default timeout');
+        }
+
+        for (const value of [1, 9]) {
+            setDefaultAutoSelectFamilyAttemptTimeout(value);
+            if (getDefaultAutoSelectFamilyAttemptTimeout() !== 10) {
+                throw new Error(`timeout should clamp to 10 for ${value}`);
+            }
+        }
+
+        for (const value of [-10, 0, 1.5, NaN, Infinity]) {
+            try {
+                setDefaultAutoSelectFamilyAttemptTimeout(value);
+                throw new Error(`expected rejection for ${value}`);
+            } catch (error) {
+                if (error.code !== 'ERR_OUT_OF_RANGE') throw error;
+            }
+        }
+
+        try {
+            setDefaultAutoSelectFamilyAttemptTimeout('10');
+            throw new Error('expected string rejection');
+        } catch (error) {
+            if (error.code !== 'ERR_INVALID_ARG_TYPE') throw error;
         }
         "#,
     )

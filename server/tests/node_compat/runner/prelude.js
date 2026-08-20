@@ -40,6 +40,7 @@ import zlib from 'node:zlib';
 
 globalThis.process = process;
 globalThis.Buffer = Buffer;
+globalThis.global = globalThis;
 globalThis.__NODE_COMPAT_RESOLVE_IMPORT__ = (specifier, parentURL) =>
     globalThis.__mcpV8ResolveImportSpecifier(specifier, parentURL);
 globalThis.__mcpV8ModuleHooks ??= [];

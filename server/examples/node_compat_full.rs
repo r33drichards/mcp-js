@@ -1499,6 +1499,11 @@ fn add_corpus_modules(
         let specifier = ModuleSpecifier::from_file_path(&virtual_path)
             .map_err(|_| format!("invalid corpus file path: {}", virtual_path.display()))?;
         files.insert(specifier.to_string());
+        if path.extension().and_then(|value| value.to_str()) == Some("wasm") {
+            files.insert(server::engine::module_loader::virtual_file_mapping(
+                &specifier, &path,
+            ));
+        }
         if !matches!(
             path.extension().and_then(|value| value.to_str()),
             Some("js" | "mjs" | "cjs" | "json")
@@ -1984,9 +1989,6 @@ fn node_cli_source(
     }
 
     let source_path = virtual_corpus_file(&entrypoint, corpus)?;
-    let entry_source =
-        strip_shebang(&fs::read_to_string(&source_path).map_err(|error| error.to_string())?)
-            .to_owned();
     let entrypoint = cli_path_module_specifier(&entrypoint)?;
     if invocation.experimental_loaders.is_empty() {
         source.push_str("await import(");
@@ -1995,6 +1997,9 @@ fn node_cli_source(
         return Ok((source, None));
     }
 
+    let entry_source =
+        strip_shebang(&fs::read_to_string(&source_path).map_err(|error| error.to_string())?)
+            .to_owned();
     let loaders = invocation
         .experimental_loaders
         .iter()
@@ -3232,6 +3237,39 @@ mod tests {
                 .esm
                 .contains_key("file:///test/fixtures/unrelated/slow.js")
         );
+    }
+
+    #[test]
+    fn node_cli_executes_binary_wasm_entrypoint() {
+        let corpus = cli_corpus(&[]);
+        let entry = corpus.path().join("test/entry.wasm");
+        fs::write(
+            &entry,
+            [
+                0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x06, 0x0d, 0x02, 0x7f,
+                0x00, 0x41, 0xfb, 0x00, 0x0b, 0x7f, 0x00, 0x41, 0xc8, 0x03, 0x0b, 0x07,
+                0x49, 0x02, 0x3a, 0x3b, 0x69, 0x6d, 0x70, 0x6f, 0x72, 0x74, 0x2e, 0x6d,
+                0x65, 0x74, 0x61, 0x2e, 0x64, 0x6f, 0x6e, 0x65, 0x3d, 0x28, 0x29, 0x3d,
+                0x3e, 0x7b, 0x7d, 0x3b, 0x63, 0x6f, 0x6e, 0x73, 0x6f, 0x6c, 0x65, 0x2e,
+                0x6c, 0x6f, 0x67, 0x28, 0x27, 0x63, 0x6f, 0x64, 0x65, 0x20, 0x69, 0x6e,
+                0x6a, 0x65, 0x63, 0x74, 0x69, 0x6f, 0x6e, 0x27, 0x29, 0x3b, 0x7b, 0x2f,
+                0x2a, 0x03, 0x00, 0x08, 0x2f, 0x2a, 0x2f, 0x24, 0x3b, 0x60, 0x2f, 0x2f,
+                0x03, 0x01,
+            ],
+        )
+        .unwrap();
+
+        let output = run_node_compat_cli(
+            &node_cli_args(&[&entry.to_string_lossy()]),
+            None,
+            corpus.path(),
+        )
+        .unwrap();
+
+        assert_eq!(output.runtime_error, None);
+        assert_eq!(output.exit_code, 0);
+        assert_eq!(output.stdout, "");
+        assert_eq!(output.stderr, "");
     }
 
     #[test]

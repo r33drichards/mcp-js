@@ -222,6 +222,53 @@ export function spawn(command, args = [], options = {}) {
     return new SpawnedChildProcess(command, args.map(String), options || {});
 }
 
+export function spawnSync(command, args = [], options = {}) {
+    if (typeof command !== 'string') {
+        throw new TypeError('The "command" argument must be of type string.');
+    }
+    if (!Array.isArray(args)) {
+        options = args || {};
+        args = [];
+    }
+    options ||= {};
+    const selfHosted = command === globalThis.__NODE_TEST_EXEC_PATH__;
+    const normalizedArgs = args.map(String);
+    const commandArgs = selfHosted
+        ? ['--node-compat-cli', ...normalizedArgs]
+        : normalizedArgs;
+    let stdin = null;
+    if (options.input !== undefined && options.input !== null) {
+        const bytes = options.input instanceof Uint8Array
+            ? options.input
+            : new TextEncoder().encode(String(options.input));
+        stdin = Array.from(bytes);
+    }
+    const output = new Deno.Command(command, {
+        args: commandArgs,
+        cwd: options.cwd,
+        env: options.env,
+        stdin,
+    }).outputSync();
+    const encoding = options.encoding;
+    const stdout = Buffer.from(output.stdout);
+    const stderr = Buffer.from(output.stderr);
+    const result = {
+        pid: undefined,
+        output: [null, stdout, stderr],
+        stdout,
+        stderr,
+        status: output.code,
+        signal: output.signal,
+        error: undefined,
+    };
+    if (encoding && encoding !== 'buffer') {
+        result.output = [null, stdout.toString(encoding), stderr.toString(encoding)];
+        result.stdout = result.output[1];
+        result.stderr = result.output[2];
+    }
+    return result;
+}
+
 export function fork(modulePath, args = [], options = {}) {
     if (typeof modulePath !== 'string') {
         throw new TypeError('The "modulePath" argument must be of type string.');
@@ -235,5 +282,5 @@ export function fork(modulePath, args = [], options = {}) {
 
 export const exec = (...args) => globalThis.child_process.exec(...args);
 
-export default { ChildProcess, exec, fork, spawn };
+export default { ChildProcess, exec, fork, spawn, spawnSync };
 export { ChildProcess };

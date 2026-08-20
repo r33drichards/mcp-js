@@ -71,6 +71,20 @@ const process = {
             node_without_node_options: false,
         },
     },
+    features: Object.freeze({
+        inspector: false,
+        debug: false,
+        uv: true,
+        ipv6: false,
+        tls_alpn: false,
+        tls_sni: false,
+        tls_ocsp: false,
+        tls: false,
+        cached_builtins: true,
+        require_module: true,
+        typescript: false,
+        openssl_is_boringssl: false,
+    }),
     title: 'mcp-v8',
     browser: false,
 
@@ -297,7 +311,7 @@ process.hrtime.bigint = function bigint() {
 export default process;
 export const {
     argv, argv0, execArgv, execPath, env, platform, arch, pid, ppid,
-    version, versions, config, title, browser, nextTick, cwd, chdir, umask, uptime,
+    version, versions, config, features, title, browser, nextTick, cwd, chdir, umask, uptime,
     memoryUsage, hrtime, getActiveResourcesInfo, emitWarning, exit, abort,
     kill, stdout, stderr, stdin, report,
 } = process;

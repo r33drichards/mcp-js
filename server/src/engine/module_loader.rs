@@ -30,6 +30,7 @@ const MODULE_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 /// (e.g. non-existent domain) without waiting for the full request timeout.
 const MODULE_FETCH_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const FILE_ROOT_PREFIX: &str = "mcp-v8:file-root:";
+const FILE_MAP_PREFIX: &str = "mcp-v8:file-map:";
 
 #[derive(Debug)]
 struct NodeModuleError {
@@ -146,9 +147,29 @@ pub struct ModuleLoaderConfig {
     pub virtual_files: Option<Arc<HashSet<String>>>,
 }
 
+pub fn virtual_file_mapping(specifier: &ModuleSpecifier, path: &Path) -> String {
+    format!(
+        "{FILE_MAP_PREFIX}{}",
+        serde_json::to_string(&(specifier.as_str(), path)).unwrap()
+    )
+}
+
 fn allowed_file_path(config: &ModuleLoaderConfig, specifier: &ModuleSpecifier) -> Option<PathBuf> {
-    let path = specifier.to_file_path().ok()?;
     let roots = config.virtual_files.as_deref()?;
+    for marker in roots {
+        let Some(mapping) = marker.strip_prefix(FILE_MAP_PREFIX) else {
+            continue;
+        };
+        let Ok((virtual_specifier, host_path)) =
+            serde_json::from_str::<(String, PathBuf)>(mapping)
+        else {
+            continue;
+        };
+        if virtual_specifier == specifier.as_str() {
+            return std::fs::canonicalize(host_path).ok();
+        }
+    }
+    let path = specifier.to_file_path().ok()?;
     for marker in roots {
         let Some(root) = marker.strip_prefix(FILE_ROOT_PREFIX) else {
             continue;

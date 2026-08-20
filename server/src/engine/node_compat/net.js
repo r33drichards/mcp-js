@@ -41,6 +41,34 @@ export function isIP(input) {
     return 0;
 }
 
+let defaultAutoSelectFamilyAttemptTimeout = 2500;
+
+export function getDefaultAutoSelectFamilyAttemptTimeout() {
+    return defaultAutoSelectFamilyAttemptTimeout;
+}
+
+export function setDefaultAutoSelectFamilyAttemptTimeout(value) {
+    if (typeof value !== 'number') {
+        const error = new TypeError(
+            `The "value" argument must be of type number. Received type ${typeof value}`);
+        error.code = 'ERR_INVALID_ARG_TYPE';
+        throw error;
+    }
+    if (!Number.isInteger(value)) {
+        const error = new RangeError(
+            `The value of "value" is out of range. It must be an integer. Received ${value}`);
+        error.code = 'ERR_OUT_OF_RANGE';
+        throw error;
+    }
+    if (value < 1 || value > 0x7fffffff) {
+        const error = new RangeError(
+            `The value of "value" is out of range. It must be >= 1 && <= 2147483647. Received ${value}`);
+        error.code = 'ERR_OUT_OF_RANGE';
+        throw error;
+    }
+    defaultAutoSelectFamilyAttemptTimeout = Math.max(10, value);
+}
+
 /// Inert socket: satisfies "construct, configure, listen for events" call
 /// patterns without any transport behind it. Anything that would actually
 /// move bytes emits an error explaining the capability model.
@@ -87,6 +115,8 @@ export default {
     isIP,
     isIPv4,
     isIPv6,
+    getDefaultAutoSelectFamilyAttemptTimeout,
+    setDefaultAutoSelectFamilyAttemptTimeout,
     Socket,
     connect,
     createConnection,
