@@ -107,6 +107,94 @@ const process = {
     getMaxListeners() { return 10; },
 };
 
+Object.defineProperty(process, Symbol.toStringTag, {
+    value: 'process',
+    writable: true,
+    enumerable: false,
+    configurable: false,
+});
+
+function diagnosticStack(error) {
+    if (!(error instanceof Error)) return { message: '', stack: [], errorProperties: {} };
+    const lines = String(error.stack || error).split('\n');
+    return {
+        message: lines.shift() || `${error.name}: ${error.message}`,
+        stack: lines.map((line) => line.trim()),
+        errorProperties: {},
+    };
+}
+
+const diagnosticReport = {
+    compact: false,
+    directory: '',
+    excludeEnv: false,
+    excludeNetwork: false,
+    filename: '',
+    reportOnFatalError: false,
+    reportOnSignal: false,
+    reportOnUncaughtException: false,
+    signal: 'SIGUSR2',
+
+    getReport(error) {
+        const now = new Date();
+        return {
+            header: {
+                reportVersion: 5,
+                event: 'JavaScript API',
+                trigger: 'GetReport',
+                filename: null,
+                dumpEventTime: now.toISOString(),
+                dumpEventTimeStamp: String(now.getTime()),
+                processId: process.pid,
+                threadId: 0,
+                cwd: process.cwd(),
+                commandLine: [...process.argv],
+                nodejsVersion: process.version,
+                wordSize: '64 bit',
+                arch: process.arch,
+                platform: process.platform,
+                componentVersions: { ...process.versions },
+                release: { name: 'node' },
+                cpus: [],
+                networkInterfaces: this.excludeNetwork || typeof Deno.networkInterfaces !== 'function'
+                    ? []
+                    : Deno.networkInterfaces(),
+            },
+            javascriptStack: diagnosticStack(error),
+            javascriptHeap: {},
+            nativeStack: [],
+            resourceUsage: {},
+            uvthreadResourceUsage: {},
+            libuv: [],
+            workers: [],
+            environmentVariables: this.excludeEnv ? {} : { ...process.env },
+            userLimits: {},
+            sharedObjects: [],
+        };
+    },
+
+    writeReport(filename, error) {
+        if (filename instanceof Error && error === undefined) {
+            error = filename;
+            filename = undefined;
+        }
+        let target = filename === undefined ? this.filename : String(filename);
+        if (!target) {
+            const timestamp = new Date().toISOString().replace(/\D/g, '').slice(0, 14);
+            target = `report.${timestamp}.${process.pid}.0.001.json`;
+        }
+        if (this.directory && !target.startsWith('/')) {
+            target = `${this.directory.replace(/\/+$/, '')}/${target}`;
+        }
+        Deno.writeTextFileSync(
+            target,
+            JSON.stringify(this.getReport(error), null, this.compact ? 0 : 2),
+        );
+        return target;
+    },
+};
+process.report = diagnosticReport;
+
 let exitCode = 0;
 Object.defineProperty(process, 'exitCode', {
     enumerable: true,
@@ -127,5 +215,5 @@ export const {
     argv, argv0, execArgv, execPath, env, platform, arch, pid, ppid,
     version, versions, config, title, browser, nextTick, cwd, chdir, umask, uptime,
     memoryUsage, hrtime, getActiveResourcesInfo, emitWarning, exit, abort,
-    kill, stdout, stderr, stdin,
+    kill, stdout, stderr, stdin, report,
 } = process;

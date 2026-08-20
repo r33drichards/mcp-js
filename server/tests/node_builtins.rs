@@ -1041,6 +1041,50 @@ async fn perf_hooks_observer_and_timerify() {
 }
 
 #[tokio::test]
+async fn process_report_matches_node_module_contract() {
+    expect_ok(
+        r#"
+        import process, { report } from 'node:process';
+
+        if (Object.prototype.toString.call(process) !== '[object process]') {
+            throw new Error('process toStringTag');
+        }
+        const descriptor = Object.getOwnPropertyDescriptor(process, Symbol.toStringTag);
+        if (!descriptor || descriptor.value !== 'process' || descriptor.writable !== true ||
+            descriptor.enumerable !== false || descriptor.configurable !== false) {
+            throw new Error('process toStringTag descriptor');
+        }
+        if (process.report !== report) throw new Error('report named export identity');
+        for (const name of ['getReport', 'writeReport']) {
+            if (typeof report[name] !== 'function') throw new Error('missing report.' + name);
+        }
+        for (const name of [
+            'compact', 'excludeEnv', 'excludeNetwork', 'reportOnFatalError',
+            'reportOnSignal', 'reportOnUncaughtException',
+        ]) {
+            if (typeof report[name] !== 'boolean') throw new Error('invalid report.' + name);
+        }
+        for (const name of ['directory', 'filename', 'signal']) {
+            if (typeof report[name] !== 'string') throw new Error('invalid report.' + name);
+        }
+        const diagnostic = report.getReport(new Error('probe'));
+        for (const name of [
+            'header', 'javascriptStack', 'javascriptHeap', 'nativeStack', 'resourceUsage',
+            'uvthreadResourceUsage', 'libuv', 'workers', 'environmentVariables', 'userLimits',
+            'sharedObjects',
+        ]) {
+            if (!(name in diagnostic)) throw new Error('missing diagnostic ' + name);
+        }
+        if (diagnostic.header.processId !== process.pid ||
+            diagnostic.javascriptStack.message !== 'Error: probe') {
+            throw new Error('invalid diagnostic report');
+        }
+        "#,
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn process_config_exposes_node_build_variables() {
     expect_ok(
         r#"
