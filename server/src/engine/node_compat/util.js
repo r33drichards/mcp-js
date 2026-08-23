@@ -181,6 +181,12 @@ const types = {
     isAsyncFunction: (v) => typeof v === 'function' && v.constructor && v.constructor.name === 'AsyncFunction',
     isGeneratorFunction: (v) => typeof v === 'function' && v.constructor && v.constructor.name === 'GeneratorFunction',
     isProxy: () => false,
+    isModuleNamespaceObject: (v) => {
+        if (v === null || typeof v !== 'object') return false;
+        const tag = Object.getOwnPropertyDescriptor(v, Symbol.toStringTag);
+        return tag !== undefined && tag.value === 'Module' &&
+            tag.writable === false && tag.configurable === false;
+    },
     isBoxedPrimitive: (v) => {
         const t = Object.prototype.toString.call(v);
         return typeof v === 'object' && v !== null &&

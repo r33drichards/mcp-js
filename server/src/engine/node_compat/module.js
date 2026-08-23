@@ -5,10 +5,12 @@
 // file and package requires throw MODULE_NOT_FOUND, pointing at import.
 
 import assert from 'node:assert';
+import asyncHooks from 'node:async_hooks';
 import buffer from 'node:buffer';
 import childProcess from 'node:child_process';
 import consoleModule from 'node:console';
 import crypto from 'node:crypto';
+import diagnosticsChannel from 'node:diagnostics_channel';
 import dns from 'node:dns';
 import dnsPromises from 'node:dns/promises';
 import events from 'node:events';
@@ -38,10 +40,12 @@ import zlib from 'node:zlib';
 const builtins = new Map([
     ['assert', assert],
     ['assert/strict', assert.strict],
+    ['async_hooks', asyncHooks],
     ['buffer', buffer],
     ['child_process', childProcess],
     ['console', consoleModule],
     ['crypto', crypto],
+    ['diagnostics_channel', diagnosticsChannel],
     ['dns', dns],
     ['dns/promises', dnsPromises],
     ['events', events],

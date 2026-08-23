@@ -165,6 +165,11 @@ impl NodeCliInvocation {
                 "--experimental-import-meta-resolve" | "--interactive" | "-i" => {
                     Self::require_no_value(flag, value)?;
                 }
+                // V8 heap-tuning flags only size the isolate; the embedded
+                // engine keeps its own limit, so accept and ignore them.
+                "--max-old-space-size" | "--max-semi-space-size" | "--stack-size" => {
+                    Self::option_value(args, &mut index, flag, value)?;
+                }
                 _ if flag.starts_with('-') => {
                     return Err(format!("unsupported Node CLI flag: {flag}"));
                 }
@@ -850,16 +855,43 @@ fn assemble(path: &str, body: &str, loader_sources: &HashMap<String, String>) ->
 }
 
 const COMMON_ESM: &str = r#"import 'node-test:prelude';
+export { createRequire } from 'node:module';
 const common = globalThis.__NODE_TEST_COMMON__;
 export const mustCall = common.mustCall.bind(common);
 export const mustCallAtLeast = common.mustCallAtLeast.bind(common);
 export const mustSucceed = common.mustSucceed.bind(common);
 export const expectsError = common.expectsError.bind(common);
+export const expectRequiredModule = common.expectRequiredModule.bind(common);
+export const expectRequiredTLAError = common.expectRequiredTLAError.bind(common);
+export const expectWarning = common.expectWarning.bind(common);
+export const allowGlobals = common.allowGlobals.bind(common);
 export const mustNotCall = common.mustNotCall.bind(common);
+export const mustNotMutateObjectDeep = common.mustNotMutateObjectDeep.bind(common);
 export const spawnPromisified = common.spawnPromisified.bind(common);
 export const skip = common.skip.bind(common);
+export const printSkipMessage = common.printSkipMessage.bind(common);
+export const skipIfInspectorDisabled = common.skipIfInspectorDisabled.bind(common);
 export const platformTimeout = common.platformTimeout.bind(common);
 export const canCreateSymLink = common.canCreateSymLink.bind(common);
+export const getArrayBufferViews = common.getArrayBufferViews.bind(common);
+export const getBufferSources = common.getBufferSources.bind(common);
+export const invalidArgTypeHelper = common.invalidArgTypeHelper.bind(common);
+export const isWindows = common.isWindows;
+export const isLinux = common.isLinux;
+export const isMacOS = common.isMacOS;
+export const isAIX = common.isAIX;
+export const isIBMi = common.isIBMi;
+export const isFreeBSD = common.isFreeBSD;
+export const isOpenBSD = common.isOpenBSD;
+export const isSunOS = common.isSunOS;
+export const isDumbTerminal = common.isDumbTerminal;
+export const isMainThread = common.isMainThread;
+export const hasCrypto = common.hasCrypto;
+export const hasInspector = common.hasInspector;
+export const hasIntl = common.hasIntl;
+export const hasIPv6 = common.hasIPv6;
+export const enoughTestMem = common.enoughTestMem;
+export const buildType = common.buildType;
 export const fixturesDir = '/test/fixtures';
 export default common;
 "#;
@@ -2549,6 +2581,11 @@ fn run(
     }
     if let Err(e) = res {
         let d = e.to_string();
+        // ESM bodies have no CommonJS catch wrapper, so common.skip()
+        // surfaces as this sentinel error instead of a skipped report.
+        if d.contains("__NODE_TEST_SKIP__") {
+            return Outcome::Skip("skipped via common.skip".to_owned());
+        }
         return if d.starts_with("AssertionError:") {
             Outcome::Assertion(d)
         } else {
@@ -2598,6 +2635,16 @@ fn shard_main() -> Result<(), Box<dyn std::error::Error>> {
     let n = num_env("NODE_COMPAT_SHARD_TOTAL")?;
     if n == 0 || i >= n {
         return Err("invalid shard".into());
+    }
+    // Children must never inherit shard mode: a corpus test that re-executes
+    // this binary without --node-compat-cli would re-enter shard_main and
+    // truncate the results file mid-run.
+    // SAFETY: no other thread is reading the environment yet.
+    unsafe {
+        std::env::remove_var("NODE_COMPAT_RESULTS");
+        std::env::remove_var("NODE_COMPAT_SUMMARY");
+        std::env::remove_var("NODE_COMPAT_SHARD_INDEX");
+        std::env::remove_var("NODE_COMPAT_SHARD_TOTAL");
     }
     let timeout = Duration::from_secs(
         std::env::var("NODE_COMPAT_TIMEOUT_SECONDS")
