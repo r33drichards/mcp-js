@@ -2453,12 +2453,28 @@ fn test_tmpdir_modules(path: &Path) -> (String, String) {
 }
 
 fn isolated_fs_policy(root: &Path) -> Result<(tempfile::TempDir, Arc<PolicyChain>), String> {
+    isolated_fs_policy_with_read_roots(root, &[])
+}
+
+/// Writable access under `root`; read-only operations additionally allowed
+/// under each of `read_roots` (the corpus, so fixtures are readable).
+fn isolated_fs_policy_with_read_roots(
+    root: &Path,
+    read_roots: &[&Path],
+) -> Result<(tempfile::TempDir, Arc<PolicyChain>), String> {
     let policy_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
     let root = format!("{}/", root.to_string_lossy().trim_end_matches('/'));
-    let source = format!(
-        "package mcp.node_compat\n\ndefault allow = false\n\nallow if {{\n    startswith(input.path, {})\n}}\n",
+    let mut source = format!(
+        "package mcp.node_compat\n\ndefault allow = false\n\nread_operations := {{\"readFile\", \"stat\", \"lstat\", \"readdir\", \"readlink\"}}\n\nallow if {{\n    startswith(input.path, {})\n}}\n",
         serde_json::to_string(&root).unwrap(),
     );
+    for read_root in read_roots {
+        let read_root = format!("{}/", read_root.to_string_lossy().trim_end_matches('/'));
+        source.push_str(&format!(
+            "\nallow if {{\n    read_operations[input.operation]\n    startswith(input.path, {})\n}}\n",
+            serde_json::to_string(&read_root).unwrap(),
+        ));
+    }
     let policy_path = policy_dir.path().join("fs.rego");
     fs::write(&policy_path, source).map_err(|error| error.to_string())?;
     let evaluator =
@@ -2500,10 +2516,11 @@ fn run(
     };
     let policy = Arc::new(PolicyChain::new(vec![], EvalMode::All));
     let fetch = FetchConfig::new_with_chain(policy.clone());
-    let (_fs_policy_dir, fs_policy) = match isolated_fs_policy(test_tmp.path()) {
-        Ok(policy) => policy,
-        Err(error) => return Outcome::Runtime(error),
-    };
+    let (_fs_policy_dir, fs_policy) =
+        match isolated_fs_policy_with_read_roots(test_tmp.path(), &[corpus]) {
+            Ok(policy) => policy,
+            Err(error) => return Outcome::Runtime(error),
+        };
     let fs_config = FsConfig::new(fs_policy);
     let subprocess = SubprocessConfig::new(policy);
     let (tmpdir_esm, tmpdir_commonjs) = test_tmpdir_modules(test_tmp.path());

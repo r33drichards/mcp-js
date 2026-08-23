@@ -601,6 +601,16 @@ const fixtures = {
     fixturesDir: '/test/fixtures',
     path: (...args) => path.join('/test/fixtures', ...args),
     fileURL: (...args) => url.pathToFileURL(path.join('/test/fixtures', ...args)),
+    readSync: (args, enc) => fs.readFileSync(
+        Array.isArray(args) ? fixtures.path(...args) : fixtures.path(args), enc),
+    readKey: (name, enc) => fs.readFileSync(fixtures.path('keys', name), enc),
+    readKeys: (enc, ...names) => names.map((name) => fixtures.readKey(name, enc)),
+    get utf8TestText() {
+        return fixtures.readSync('utf8_test_text.txt', 'utf8');
+    },
+    get utf8TestTextPath() {
+        return fixtures.path('utf8_test_text.txt');
+    },
 };
 
 const tmpdir = {
