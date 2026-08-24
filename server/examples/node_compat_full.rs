@@ -2301,7 +2301,15 @@ fn run_node_compat_cli_with_stdin(
         .map_err(|error| error.to_string())?;
     let policy = Arc::new(PolicyChain::new(vec![], EvalMode::All));
     let fetch = FetchConfig::new_with_chain(policy.clone());
-    let subprocess = SubprocessConfig::new(policy);
+    // Grandchildren get the same wall-clock cap as shard children so a
+    // stay-alive-forever fixture can't outlive its test.
+    let mut subprocess = SubprocessConfig::new(policy);
+    if let Some(timeout) = std::env::var("NODE_COMPAT_TIMEOUT_SECONDS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+    {
+        subprocess = subprocess.with_timeout(Duration::from_secs(timeout));
+    }
     let fs_policy = std::env::var("NODE_COMPAT_FILE_ROOT")
         .ok()
         .filter(|root| !root.is_empty())
@@ -2527,7 +2535,10 @@ fn run(
             Err(error) => return Outcome::Runtime(error),
         };
     let fs_config = FsConfig::new(fs_policy);
-    let subprocess = SubprocessConfig::new(policy);
+    // A child that never exits must not wedge the shard: the isolate's
+    // watchdog cannot interrupt a synchronous outputSync wait, so the cap
+    // kills the child instead.
+    let subprocess = SubprocessConfig::new(policy).with_timeout(timeout);
     let (tmpdir_esm, tmpdir_commonjs) = test_tmpdir_modules(test_tmp.path());
     let mut virtual_modules = (*modules.esm).clone();
     if let Err(error) = install_isolated_loader_modules(body, &mut virtual_modules) {
