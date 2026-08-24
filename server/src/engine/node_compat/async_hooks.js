@@ -244,16 +244,21 @@ export class AsyncResource {
         return this;
     }
 
-    bind(fn, thisArg) {
+    bind(fn, ...thisArgHolder) {
         if (typeof fn !== 'function') {
             throw nodeError(TypeError, 'ERR_INVALID_ARG_TYPE',
                 'The "fn" argument must be of type function');
         }
         const resource = this;
-        const bound = function (...args) {
-            return resource.runInAsyncScope(
-                fn, thisArg === undefined ? this : thisArg, ...args);
-        };
+        // An omitted thisArg forwards the call-site `this` (Node's contract:
+        // an explicit undefined pins `this` to undefined instead).
+        const bound = thisArgHolder.length > 0
+            ? function (...args) {
+                return resource.runInAsyncScope(fn, thisArgHolder[0], ...args);
+            }
+            : function (...args) {
+                return resource.runInAsyncScope(fn, this, ...args);
+            };
         Object.defineProperty(bound, 'asyncResource', {
             value: resource,
             configurable: true,
@@ -267,10 +272,10 @@ export class AsyncResource {
         return bound;
     }
 
-    static bind(fn, type, thisArg) {
+    static bind(fn, type, ...thisArgHolder) {
         const resource = new AsyncResource(
             type || fn?.name || 'bound-anonymous-fn');
-        return resource.bind(fn, thisArg);
+        return resource.bind(fn, ...thisArgHolder);
     }
 }
 

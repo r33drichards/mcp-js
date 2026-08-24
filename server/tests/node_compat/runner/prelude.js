@@ -666,11 +666,15 @@ globalThis.__NODE_TEST_SETTIMEOUT__ = globalThis.setTimeout;
 
 globalThis.__NODE_TEST_RUN_CJS__ = function runCommonJS(source) {
     const testModule = { exports: {} };
+    // The dynamic-import helpers are wrapper parameters rather than prepended
+    // statements so a leading 'use strict' directive keeps its force.
     const compiled = Function(
-        'exports', 'require', 'module', '__filename', '__dirname', String(source),
+        'exports', 'require', 'module', '__filename', '__dirname',
+        '__nodeCompatImport', '__nodeCompatImportWithLoaders', String(source),
     );
     return compiled.call(
         testModule.exports, testModule.exports, nodeRequire, testModule, testPath, testDir,
+        globalThis.__NODE_COMPAT_IMPORT__, globalThis.__NODE_COMPAT_IMPORT_WITH_LOADERS__,
     );
 };
 

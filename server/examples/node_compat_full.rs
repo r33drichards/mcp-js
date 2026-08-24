@@ -351,10 +351,9 @@ fn rewrite_script_dynamic_imports(body: &str, helper: &str) -> Option<String> {
 }
 
 fn rewrite_dynamic_imports(body: &str) -> Option<String> {
-    let output = rewrite_script_dynamic_imports(body, "__nodeCompatImportWithLoaders")?;
-    Some(format!(
-        "const __nodeCompatImportWithLoaders = globalThis.__NODE_COMPAT_IMPORT_WITH_LOADERS__;\n{output}"
-    ))
+    // Like commonjs_dynamic_import_prelude, the helper arrives as a CJS
+    // wrapper parameter so the body's directive prologue stays first.
+    rewrite_script_dynamic_imports(body, "__nodeCompatImportWithLoaders")
 }
 
 fn rewrite_esm_dynamic_imports_with_helper(
@@ -444,10 +443,10 @@ fn rewrite_esm_loader_dynamic_imports(body: &str) -> Option<String> {
 }
 
 fn commonjs_dynamic_import_prelude(path: &str, body: &str) -> Option<(String, String)> {
+    // The helper reaches the compiled body as a CJS wrapper parameter, not a
+    // prepended statement: anything inserted before the source would break a
+    // leading 'use strict' directive prologue.
     let body = rewrite_script_dynamic_imports(body, "__nodeCompatImport")?;
-    let body = format!(
-        "const __nodeCompatImport = globalThis.__NODE_COMPAT_IMPORT__;\n{body}"
-    );
     let parent_url = test_module_specifier(path).ok()?;
     let prelude = format!(
         r#"globalThis.__NODE_COMPAT_IMPORT__ = (specifier, options) => {{
@@ -2470,9 +2469,15 @@ fn isolated_fs_policy_with_read_roots(
     );
     for read_root in read_roots {
         let read_root = format!("{}/", read_root.to_string_lossy().trim_end_matches('/'));
+        let read_root_json = serde_json::to_string(&read_root).unwrap();
         source.push_str(&format!(
-            "\nallow if {{\n    read_operations[input.operation]\n    startswith(input.path, {})\n}}\n",
-            serde_json::to_string(&read_root).unwrap(),
+            "\nallow if {{\n    read_operations[input.operation]\n    startswith(input.path, {read_root_json})\n}}\n",
+        ));
+        // Copying a fixture into the writable sandbox reads the corpus and
+        // writes only under the isolated root.
+        source.push_str(&format!(
+            "\nallow if {{\n    input.operation == \"copyFile\"\n    startswith(input.path, {read_root_json})\n    startswith(input.destination, {})\n}}\n",
+            serde_json::to_string(&root).unwrap(),
         ));
     }
     let policy_path = policy_dir.path().join("fs.rego");
