@@ -363,6 +363,19 @@ fn node_fs_sync_surface_round_trips() {
                 }});
             }});
             console.log('cb=' + cbText);
+
+            fs.mkdirSync(path.join(root, 'tree/nested'), {{ recursive: true }});
+            fs.writeFileSync(path.join(root, 'tree/top.txt'), 'top');
+            fs.writeFileSync(path.join(root, 'tree/nested/deep.txt'), 'deep');
+            fs.cpSync(path.join(root, 'tree'), path.join(root, 'copy'), {{ recursive: true }});
+            console.log('cp=' + fs.readFileSync(path.join(root, 'copy/top.txt'), 'utf8') +
+                ',' + fs.readFileSync(path.join(root, 'copy/nested/deep.txt'), 'utf8'));
+            try {{
+                fs.cpSync(path.join(root, 'tree'), path.join(root, 'copy2'));
+                console.log('cpNoRecursive=no-error');
+            }} catch (e) {{
+                console.log('cpNoRecursive=' + e.code);
+            }}
         }})()"#,
         root = dir.to_string_lossy(),
     );
@@ -378,5 +391,10 @@ fn node_fs_sync_surface_round_trips() {
     assert!(out.contains("afterUnlink=false"), "unlinkSync failed: {out}");
     assert!(out.contains("afterRm=false"), "recursive rmSync failed: {out}");
     assert!(out.contains("cb=from cb"), "callback API failed: {out}");
+    assert!(out.contains("cp=top,deep"), "recursive cpSync failed: {out}");
+    assert!(
+        out.contains("cpNoRecursive=ERR_FS_EISDIR"),
+        "cpSync on a directory without recursive must fail: {out}"
+    );
     let _ = std::fs::remove_dir_all(dir);
 }

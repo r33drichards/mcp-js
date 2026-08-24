@@ -3,6 +3,7 @@
 // rejecting stub behavior used by the default sandbox.
 
 import { Buffer } from 'node:buffer';
+import path from 'node:path';
 
 function unsupported(name) {
     return function () {
@@ -86,6 +87,62 @@ export const existsSync = hostExistsSync
     ? (path) => hostExistsSync(normalizePath(path))
     : () => false;
 
+// Recursive copy built on the sync surface. Subset semantics: recursive,
+// errorOnExist, and symlink preservation; filters and mode flags are not
+// implemented.
+function cpSyncImpl(src, dest, options) {
+    const stats = lstatSync(src);
+    if (stats.isDirectory()) {
+        if (!options.recursive) {
+            const err = new Error(
+                `Recursive option not enabled, error about ${src}`);
+            err.code = 'ERR_FS_EISDIR';
+            throw err;
+        }
+        mkdirSync(dest, { recursive: true });
+        for (const name of readdirSync(src)) {
+            cpSyncImpl(path.join(src, name), path.join(dest, name), options);
+        }
+        return;
+    }
+    if (options.errorOnExist && existsSync(dest)) {
+        const err = new Error(`${dest} already exists`);
+        err.code = 'ERR_FS_CP_EEXIST';
+        throw err;
+    }
+    if (stats.isSymbolicLink()) {
+        symlinkSync(readlinkSync(src), dest);
+        return;
+    }
+    copyFileSync(src, dest);
+}
+
+export const cpSync = globalThis.fs
+    ? (src, dest, options) => cpSyncImpl(
+        String(normalizePath(src)), String(normalizePath(dest)), options || {})
+    : unsupported('cpSync');
+
+export const cp = globalThis.fs
+    ? function cp(src, dest, optionsOrCallback, maybeCallback) {
+        const callback = typeof optionsOrCallback === 'function'
+            ? optionsOrCallback
+            : maybeCallback;
+        const options = typeof optionsOrCallback === 'function'
+            ? {}
+            : optionsOrCallback;
+        if (typeof callback !== 'function') {
+            throw new TypeError('fs.cp: callback must be a function');
+        }
+        try {
+            cpSync(src, dest, options);
+        } catch (error) {
+            queueMicrotask(() => callback(error));
+            return;
+        }
+        queueMicrotask(() => callback(null));
+    }
+    : unsupported('cp');
+
 export const openSync = unsupported('openSync');
 export const closeSync = unsupported('closeSync');
 export const readSync = unsupported('readSync');
@@ -149,6 +206,16 @@ for (const name of PROMISE_METHODS) {
         ? (...args) => runtimeMethod.call(globalThis.fs, normalizePath(args[0]), ...args.slice(1))
         : () => Promise.reject(makeEnosys(name));
 }
+if (globalThis.fs) {
+    promises.cp = (src, dest, options) => {
+        try {
+            cpSync(src, dest, options);
+            return Promise.resolve();
+        } catch (error) {
+            return Promise.reject(error);
+        }
+    };
+}
 
 function normalizePath(value) {
     if (value instanceof URL && value.protocol === 'file:') value = decodeURIComponent(value.pathname);
@@ -190,6 +257,8 @@ export default {
     renameSync,
     copyFile,
     copyFileSync,
+    cp,
+    cpSync,
     readlink,
     readlinkSync,
     symlink,

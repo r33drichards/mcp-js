@@ -67,6 +67,8 @@ const common = {
     hasInspector: false,
     hasIntl: true,
     hasIPv6: false,
+    hasQuic: false,
+    hasSQLite: false,
     enoughTestMem: true,
     buildType: 'Release',
     canCreateSymLink() { return true; },
@@ -262,6 +264,9 @@ const common = {
 
     skipIfEslintMissing() {
         common.skip('missing ESLint');
+    },
+    skipIfSQLiteMissing() {
+        common.skip('missing SQLite');
     },
     skipIf32Bits() {},
 
