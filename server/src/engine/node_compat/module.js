@@ -39,6 +39,18 @@ import workerThreads from 'node:worker_threads';
 import zlib from 'node:zlib';
 
 const builtins = new Map([
+    // Legacy require-able http internals, aliased onto the http module.
+    ['_http_agent', { Agent: http.Agent, globalAgent: http.globalAgent }],
+    ['_http_client', { ClientRequest: http.ClientRequest }],
+    ['_http_common', {
+        methods: http.METHODS,
+        chunkExpression: /(?:^|\W)chunked(?:$|\W)/i,
+    }],
+    ['_http_server', {
+        STATUS_CODES: http.STATUS_CODES,
+        Server: http.Server,
+        ServerResponse: http.ServerResponse,
+    }],
     ['assert', assert],
     ['assert/strict', assert.strict],
     ['async_hooks', asyncHooks],
@@ -80,10 +92,14 @@ if (typeof __mcpV8InternalEsmResolve !== 'undefined') {
     builtins.set('internal/modules/esm/resolve', __mcpV8InternalEsmResolve);
 }
 
-// Matches Node: subpath builtins are listed, alias names are not.
+// Matches Node: subpath builtins are listed, alias names are not. The
+// _http_* legacy aliases stay require-able but unlisted — the registry
+// contract (builtin_modules_matches_registry) pins this list to the
+// modules the loader actually serves.
 export const builtinModules = Object.freeze(
     [...builtins.keys()].filter((name) =>
-        name !== 'assert/strict' && !name.startsWith('internal/')));
+        name !== 'assert/strict' && !name.startsWith('internal/')
+        && !name.startsWith('_http_')));
 
 export function isBuiltin(name) {
     const normalized = String(name).replace(/^node:/, '');

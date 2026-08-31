@@ -2517,6 +2517,14 @@ fn run(
     node_executable: &Path,
 ) -> Outcome {
     INIT.call_once(server::engine::initialize_v8);
+    // Internals are deliberately not exposed in the sandboxed runtime, so a
+    // test that declares it needs them can never apply here.
+    if test_flags(body)
+        .iter()
+        .any(|flag| flag == "--expose-internals")
+    {
+        return Outcome::Skip("requires --expose-internals".to_owned());
+    }
     let tmp = std::env::temp_dir().join(format!(
         "mcp-node-full-{}-{}",
         std::process::id(),
