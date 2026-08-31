@@ -2603,8 +2603,11 @@ fn run(
             }
         })
     };
+    // __mcpV8NodeCompatCli unlocks worker_threads: shard mode has the same
+    // subprocess capability and execPath as the self-hosted CLI, so Workers
+    // re-exec this binary with --node-compat-cli exactly as CLI mode does.
     let source = format!(
-        "globalThis.__NODE_TEST_CORPUS_HOST__={};globalThis.__NODE_TEST_EXEC_PATH__={};globalThis.__NODE_TEST_FLAGS__={};globalThis.__NODE_TEST_TMPDIR__={};\n{}",
+        "globalThis.__mcpV8NodeCompatCli=true;globalThis.__NODE_TEST_CORPUS_HOST__={};globalThis.__NODE_TEST_EXEC_PATH__={};globalThis.__NODE_TEST_FLAGS__={};globalThis.__NODE_TEST_TMPDIR__={};\n{}",
         serde_json::to_string(corpus.to_str().unwrap()).unwrap(),
         serde_json::to_string(node_executable.to_str().unwrap()).unwrap(),
         serde_json::to_string(&test_flags(body)).unwrap(),
