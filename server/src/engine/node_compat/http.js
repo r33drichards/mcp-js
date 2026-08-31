@@ -323,6 +323,12 @@ class ServerResponseImpl extends OutgoingMessageImpl {
             this._chunked = true;
             this.setHeaderInternal('Transfer-Encoding', 'chunked');
         }
+        // A body-framing header on a bodyless status makes the response
+        // length ambiguous; Node answers by closing the connection.
+        if ((status === 204 || status === 304)
+            && (this.hasHeader('transfer-encoding') || this.hasHeader('content-length'))) {
+            this._keepAlive = false;
+        }
         if (this.sendDate && !this.hasHeader('date')) {
             this.setHeaderInternal('Date', new Date().toUTCString());
         }
@@ -343,7 +349,9 @@ class ServerResponseImpl extends OutgoingMessageImpl {
 
     _afterFinal() {
         const socket = this.socket;
-        if (!this._keepAlive && socket && !socket.destroyed) {
+        if (socket) socket._httpActive = false;
+        if (socket && !socket.destroyed
+            && (!this._keepAlive || (socket._server && socket._server._closing))) {
             socket.end();
         }
         Promise.resolve().then(() => this.emit('close'));
@@ -411,6 +419,7 @@ class ConnectionParser {
             this.socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n');
             return false;
         }
+        this.socket._httpActive = true;
         const req = new IncomingMessageImpl(this.socket);
         req.method = match[1];
         req.url = match[2];
@@ -515,10 +524,16 @@ class ServerImpl extends net.Server {
             options = {};
         }
         super(options || {});
+        const opts = options || {};
         this.timeout = 0;
-        this.keepAliveTimeout = 5000;
-        this.headersTimeout = 60000;
-        this.requestTimeout = 300000;
+        this.keepAliveTimeout = opts.keepAliveTimeout !== undefined
+            ? opts.keepAliveTimeout : 5000;
+        this.headersTimeout = opts.headersTimeout !== undefined
+            ? opts.headersTimeout : 60000;
+        this.requestTimeout = opts.requestTimeout !== undefined
+            ? opts.requestTimeout : 300000;
+        this.maxHeadersCount = null;
+        this.maxRequestsPerSocket = 0;
         if (typeof requestListener === 'function') {
             this.on('request', requestListener);
         }
@@ -548,12 +563,23 @@ class ServerImpl extends net.Server {
         return this;
     }
 
+    // Node 19+: close() also closes idle keep-alive connections; sockets
+    // mid-request drain first (_afterFinal ends them once the server is
+    // closing).
+    close(cb) {
+        super.close(cb);
+        this.closeIdleConnections();
+        return this;
+    }
+
     closeAllConnections() {
         for (const socket of [...this._connections]) socket.destroy();
     }
 
     closeIdleConnections() {
-        this.closeAllConnections();
+        for (const socket of [...this._connections]) {
+            if (!socket._httpActive) socket.destroy();
+        }
     }
 }
 
@@ -571,6 +597,8 @@ class AgentImpl extends EventEmitter {
         super();
         this.options = options || {};
         this.keepAlive = Boolean(this.options.keepAlive);
+        this.defaultPort = this.options.defaultPort || 80;
+        this.protocol = this.options.protocol || 'http:';
         this.maxSockets = this.options.maxSockets || Infinity;
         this.maxFreeSockets = this.options.maxFreeSockets || 256;
         this.maxTotalSockets = this.options.maxTotalSockets || Infinity;
@@ -585,6 +613,21 @@ class AgentImpl extends EventEmitter {
             socket.once('error', (error) => callback(error));
         }
         return socket;
+    }
+    // The layer ClientRequest goes through; tests stub either this or
+    // createConnection.
+    createSocket(req, options, cb) {
+        let returned;
+        try {
+            returned = this.createConnection(options, (error, socket) => {
+                if (error) cb(error);
+                else if (!returned) cb(null, socket);
+            });
+        } catch (error) {
+            cb(error);
+            return;
+        }
+        if (returned) cb(null, returned);
     }
     keepSocketAlive() { return false; }
     reuseSocket() {}
@@ -628,7 +671,10 @@ class ClientRequestImpl extends OutgoingMessageImpl {
         this.method = String(opts.method || 'GET').toUpperCase();
         this.path = opts.path || '/';
         this.host = opts.hostname || opts.host || 'localhost';
-        this.port = Number(opts.port) || 80;
+        this.port = Number(opts.port)
+            || (opts.agent && Number(opts.agent.defaultPort))
+            || (opts._defaultAgent && Number(opts._defaultAgent.defaultPort))
+            || 80;
         this.res = null;
         this.aborted = false;
         this.reusedSocket = false;
@@ -638,14 +684,68 @@ class ClientRequestImpl extends OutgoingMessageImpl {
                 this.setHeader(name, opts.headers[name]);
             }
         }
-        const socket = net.connect({ port: this.port, host: this.host });
+        // A user createConnection (or one from a custom agent) may hand back
+        // any duplex stream — the generic-streams pattern — either as a
+        // return value or through a (err, socket) callback; otherwise dial
+        // the loopback TCP transport.
+        const connectOptions = { ...opts, port: this.port, host: this.host };
+        let settled = false;
+        const settle = (error, socket) => {
+            if (settled) return;
+            settled = true;
+            if (error) {
+                Promise.resolve().then(() => {
+                    this.emit('error', error);
+                    this.destroy();
+                });
+            } else {
+                this._adoptSocket(socket);
+            }
+        };
+        if (typeof opts.createConnection === 'function') {
+            let returned;
+            try {
+                returned = opts.createConnection(connectOptions, settle);
+            } catch (error) {
+                settle(error);
+                return;
+            }
+            if (returned && !settled) settle(null, returned);
+        } else if (opts.agent && typeof opts.agent.createSocket === 'function') {
+            opts.agent.createSocket(this, connectOptions, settle);
+        } else if (opts.agent && typeof opts.agent.createConnection === 'function') {
+            settle(null, opts.agent.createConnection(connectOptions));
+        } else {
+            this._adoptSocket(net.connect({ port: this.port, host: this.host }));
+        }
+        // GET/HEAD requests without a body are finalized by http.get() or by
+        // the caller invoking end(); nothing is sent until then.
+    }
+
+    _adoptSocket(socket) {
         this.socket = socket;
         this.connection = socket;
-        socket.on('connect', () => {
-            this.emit('socket', socket);
+        if (!socket || typeof socket.on !== 'function') {
+            // createConnection returned nothing usable; surface the socket
+            // event with what it gave us and go no further, matching the
+            // construction-only tests.
+            Promise.resolve().then(() => this.emit('socket', socket));
+            return;
+        }
+        if (socket.connecting) {
+            socket.on('connect', () => {
+                this.emit('socket', socket);
+                this._connected = true;
+                this.emit('_ready');
+            });
+        } else {
+            // Pre-connected duplex (generic stream): usable immediately.
             this._connected = true;
-            this.emit('_ready');
-        });
+            Promise.resolve().then(() => {
+                this.emit('socket', socket);
+                this.emit('_ready');
+            });
+        }
         socket.on('error', (error) => {
             if (!this.aborted) this.emit('error', error);
         });
@@ -661,8 +761,6 @@ class ClientRequestImpl extends OutgoingMessageImpl {
             this._responseParser.onClose();
             this.emit('close');
         });
-        // GET/HEAD requests without a body are finalized by http.get() or by
-        // the caller invoking end(); nothing is sent until then.
     }
 
     _flushHead() {
