@@ -379,6 +379,31 @@ class ConnectionParser {
         this.remaining = null;    // content-length countdown
         this.chunked = false;
         this.chunkRemaining = null; // null = expecting a size line
+        this.activeReq = null;    // request whose response is unfinished
+        this.activeRes = null;
+    }
+
+    // Connection died: any request mid-body or with an unfinished response
+    // learns about it the way Node reports it.
+    onSocketClose() {
+        const req = this.activeReq;
+        const res = this.activeRes;
+        this.activeReq = null;
+        this.activeRes = null;
+        this.req = null;
+        if (req && (!req.complete || (res && !res.finished))) {
+            req.aborted = true;
+            req.emit('aborted');
+            if (req.listenerCount('error') > 0) {
+                const err = new Error('aborted');
+                err.code = 'ECONNRESET';
+                req.emit('error', err);
+            }
+            req.emit('close');
+            if (res && !res.finished) {
+                Promise.resolve().then(() => res.emit('close'));
+            }
+        }
     }
 
     feed(chunk) {
@@ -445,6 +470,14 @@ class ConnectionParser {
             if (!Number.isFinite(this.remaining) || this.remaining < 0) this.remaining = 0;
         }
         const res = new ServerResponseImpl(req);
+        this.activeReq = req;
+        this.activeRes = res;
+        res.on('finish', () => {
+            if (this.activeRes === res) {
+                this.activeReq = null;
+                this.activeRes = null;
+            }
+        });
         if (req.headers.expect &&
             String(req.headers.expect).toLowerCase() === '100-continue') {
             if (this.server.listenerCount('checkContinue') > 0) {
@@ -555,6 +588,7 @@ class ServerImpl extends net.Server {
                 this.emit('clientError', error, socket);
             }
         });
+        socket.on('close', () => parser.onSocketClose());
     }
 
     setTimeout(ms, callback) {
@@ -808,7 +842,9 @@ class ClientRequestImpl extends OutgoingMessageImpl {
     }
 
     abort() {
+        if (this.aborted) return;
         this.aborted = true;
+        this.emit('abort');
         this.destroy();
     }
 
@@ -967,6 +1003,11 @@ class ResponseParser {
         } else if (this.res) {
             this.res.aborted = true;
             this.res.emit('aborted');
+            if (this.res.listenerCount('error') > 0) {
+                const err = new Error('aborted');
+                err.code = 'ECONNRESET';
+                this.res.emit('error', err);
+            }
             this.res.push(null);
         }
     }
