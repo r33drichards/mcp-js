@@ -452,6 +452,13 @@ class SocketImpl extends EventEmitter {
     unref() { return this; }
 }
 
+if (Symbol.asyncDispose) {
+    SocketImpl.prototype[Symbol.asyncDispose] = function asyncDispose() {
+        if (this._closed) return Promise.resolve();
+        return new Promise((resolve) => this.close(() => resolve()));
+    };
+}
+
 export const Socket = callable(SocketImpl);
 
 export function createSocket(typeOrOptions, listener) {

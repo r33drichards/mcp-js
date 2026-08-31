@@ -414,6 +414,16 @@ class ServerImpl extends EventEmitter {
     unref() { return this; }
 }
 
+if (Symbol.asyncDispose) {
+    ServerImpl.prototype[Symbol.asyncDispose] = function asyncDispose() {
+        return new Promise((resolve) => this.close(() => resolve()));
+    };
+    SocketImpl.prototype[Symbol.asyncDispose] = function asyncDispose() {
+        this.destroy();
+        return Promise.resolve();
+    };
+}
+
 export const Socket = callable(SocketImpl);
 export const Server = callable(ServerImpl);
 
