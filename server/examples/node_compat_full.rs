@@ -891,6 +891,8 @@ export const hasCrypto = common.hasCrypto;
 export const hasInspector = common.hasInspector;
 export const hasIntl = common.hasIntl;
 export const hasIPv6 = common.hasIPv6;
+export const localhostIPv4 = common.localhostIPv4;
+export const localhostIPv6 = common.localhostIPv6;
 export const hasQuic = common.hasQuic;
 export const hasSQLite = common.hasSQLite;
 export const enoughTestMem = common.enoughTestMem;
@@ -2635,6 +2637,12 @@ fn run(
     drop(db);
     let _ = fs::remove_dir_all(tmp);
     if timed.load(Ordering::SeqCst) {
+        if std::env::var_os("NODE_COMPAT_DEBUG_TIMEOUT").is_some() {
+            eprintln!(
+                "=== console at timeout for {path} ===\n{}\n===",
+                String::from_utf8_lossy(&bytes)
+            );
+        }
         return Outcome::Timeout;
     }
     if let Err(e) = res {

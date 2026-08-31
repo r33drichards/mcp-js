@@ -53,6 +53,8 @@ const failures = [];
 const mustCalls = [];
 
 const common = {
+    localhostIPv4: '127.0.0.1',
+    localhostIPv6: '::1',
     isWindows: false,
     isLinux: true,
     isMacOS: false,

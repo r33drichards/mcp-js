@@ -76,6 +76,38 @@ export function setDefaultAutoSelectFamilyAttemptTimeout(value) {
     defaultAutoSelectFamilyAttemptTimeout = Math.max(10, value);
 }
 
+function receivedRepr(value) {
+    if (value === undefined) return 'undefined';
+    if (value === null) return 'null';
+    const type = typeof value;
+    if (type === 'string') return `type string ('${value}')`;
+    if (type === 'object') {
+        const name = value.constructor && value.constructor.name;
+        return `an instance of ${name || 'Object'}`;
+    }
+    return `type ${type} (${String(value)})`;
+}
+
+// Node's validatePort: wrong TYPE is ERR_INVALID_ARG_TYPE, a number/string
+// with a bad VALUE (including '' and 65536+) is ERR_SOCKET_BAD_PORT; 0 is
+// valid here and fails later at the transport.
+export function validatePort(port, name = 'options.port') {
+    if (typeof port !== 'number' && typeof port !== 'string') {
+        const err = new TypeError(
+            `The "${name}" property must be of type number or string. Received ${receivedRepr(port)}`);
+        err.code = 'ERR_INVALID_ARG_TYPE';
+        throw err;
+    }
+    if ((typeof port === 'string' && port.trim().length === 0)
+        || +port !== (+port >>> 0) || +port > 0xFFFF) {
+        const err = new RangeError(
+            `${name} should be >= 0 and < 65536. Received ${receivedRepr(port)}.`);
+        err.code = 'ERR_SOCKET_BAD_PORT';
+        throw err;
+    }
+    return +port;
+}
+
 function opError(message) {
     const match = /\((E[A-Z]+)\)/.exec(message);
     const err = new Error(message);
@@ -90,16 +122,15 @@ function normalizeConnectArgs(args) {
     if (typeof args[0] === 'object' && args[0] !== null) {
         options = args[0];
         cb = args[1];
-    } else if (typeof args[0] === 'number' || typeof args[0] === 'string' && /^\d+$/.test(args[0])) {
-        options = { port: Number(args[0]) };
+    } else {
+        // Anything else lands in port — validatePort rejects bad values.
+        options = { port: args[0] };
         if (typeof args[1] === 'string') {
             options.host = args[1];
             cb = args[2];
         } else {
             cb = args[1];
         }
-    } else {
-        cb = args[1];
     }
     return [options, typeof cb === 'function' ? cb : undefined];
 }
@@ -175,8 +206,18 @@ class SocketImpl extends Duplex {
             return this;
         }
         const [options, cb] = normalizeConnectArgs(args);
-        const port = Number(options.port);
+        const port = validatePort(options.port, 'options.port');
         const host = options.host || options.hostname || '127.0.0.1';
+        if (options.blockList && typeof options.blockList.check === 'function') {
+            const ip = host === 'localhost' ? '127.0.0.1' : host;
+            const family = isIPv6(ip) ? 'ipv6' : 'ipv4';
+            if (options.blockList.check(ip, family)) {
+                const err = new Error(`connect ERR_IP_BLOCKED ${ip}:${port}`);
+                err.code = 'ERR_IP_BLOCKED';
+                Promise.resolve().then(() => this.destroy(err));
+                return this;
+            }
+        }
         this.connecting = true;
         if (cb) this.once('connect', cb);
         ops.connect(String(host), port >>> 0).then((json) => {
@@ -288,6 +329,12 @@ class SocketImpl extends Duplex {
         }
     }
 
+    resetAndDestroy() {
+        // Approximation: a hard close (the loopback transport has no RST
+        // control), which still tears the connection down immediately.
+        return this.destroy();
+    }
+
     setNoDelay() { return this; }
     setKeepAlive() { return this; }
     ref() { return this; }
@@ -321,16 +368,17 @@ class ServerImpl extends EventEmitter {
         let cb;
         if (typeof args[0] === 'object' && args[0] !== null) {
             options = args[0];
-            cb = args[1];
         } else {
             options.port = args[0];
-            let i = 1;
-            if (typeof args[i] === 'string') options.host = args[i++];
-            if (typeof args[i] === 'number') i++; // backlog
-            cb = args[i];
+            if (typeof args[1] === 'string') options.host = args[1];
         }
+        // The callback is whatever trailing function was passed, however
+        // many host/backlog slots (possibly undefined) sit before it.
+        const last = args[args.length - 1];
+        if (typeof last === 'function') cb = last;
         if (typeof cb === 'function') this.once('listening', cb);
-        const port = Number(options.port) || 0;
+        const port = options.port === undefined || options.port === null
+            ? 0 : validatePort(options.port);
         const host = options.host || '';
         let json;
         try {
@@ -362,6 +410,22 @@ class ServerImpl extends EventEmitter {
                 break;
             }
             if (result.closed) break;
+            const blockList = this._options.blockList;
+            if (blockList && typeof blockList.check === 'function'
+                && blockList.check(
+                    result.remoteAddress,
+                    result.remoteFamily === 'IPv6' ? 'ipv6' : 'ipv4')) {
+                ops.closeStream(result.rid);
+                this.emit('drop', {
+                    localAddress: result.localAddress,
+                    localPort: result.localPort,
+                    localFamily: result.localFamily,
+                    remoteAddress: result.remoteAddress,
+                    remotePort: result.remotePort,
+                    remoteFamily: result.remoteFamily,
+                });
+                continue;
+            }
             const socket = new Socket();
             socket._adopt(result, this);
             this._connections.add(socket);
@@ -414,6 +478,168 @@ class ServerImpl extends EventEmitter {
     unref() { return this; }
 }
 
+// ── SocketAddress / BlockList (pure address arithmetic) ─────────────────
+
+function ipToBigInt(address, family) {
+    if (family === 'ipv4') {
+        const parts = address.split('.').map(Number);
+        return BigInt(((parts[0] << 24) >>> 0) + (parts[1] << 16) + (parts[2] << 8) + parts[3]);
+    }
+    // Normalize IPv6 through expansion of '::'.
+    let addr = address;
+    if (addr.includes('.')) {
+        const lastColon = addr.lastIndexOf(':');
+        const v4 = addr.slice(lastColon + 1).split('.').map(Number);
+        addr = addr.slice(0, lastColon + 1)
+            + ((v4[0] << 8) + v4[1]).toString(16) + ':' + ((v4[2] << 8) + v4[3]).toString(16);
+    }
+    const sides = addr.split('::');
+    const head = sides[0] ? sides[0].split(':') : [];
+    const tail = sides.length === 2 && sides[1] ? sides[1].split(':') : [];
+    const groups = [...head, ...Array(8 - head.length - tail.length).fill('0'), ...tail];
+    return groups.reduce((acc, g) => (acc << 16n) + BigInt(parseInt(g, 16) || 0), 0n);
+}
+
+export class SocketAddress {
+    constructor(options = {}) {
+        const family = (options.family || 'ipv4').toLowerCase();
+        if (family !== 'ipv4' && family !== 'ipv6') {
+            const err = new TypeError(
+                `The argument 'options.family' must be one of: 'ipv4', 'ipv6'. Received ${receivedRepr(options.family)}`);
+            err.code = 'ERR_INVALID_ARG_VALUE';
+            throw err;
+        }
+        this.family = family;
+        this.address = options.address || (family === 'ipv4' ? '127.0.0.1' : '::');
+        this.port = options.port !== undefined ? validatePort(options.port) : 0;
+        this.flowlabel = options.flowlabel || 0;
+    }
+}
+
+export class BlockList {
+    constructor() {
+        this.rules = [];
+        this._ranges = [];
+    }
+
+    static isBlockList(value) {
+        return value instanceof BlockList;
+    }
+
+    _family(family) {
+        if (family === undefined) return 'ipv4';
+        if (typeof family !== 'string') {
+            const err = new TypeError(
+                `The "family" argument must be of type string. Received ${receivedRepr(family)}`);
+            err.code = 'ERR_INVALID_ARG_TYPE';
+            throw err;
+        }
+        const f = family.toLowerCase();
+        if (f !== 'ipv4' && f !== 'ipv6') {
+            const err = new TypeError(
+                `The argument 'family' must be one of: 'ipv4', 'ipv6'. Received '${family}'`);
+            err.code = 'ERR_INVALID_ARG_VALUE';
+            throw err;
+        }
+        return f;
+    }
+
+    _validateAddress(address, name) {
+        if (typeof address !== 'string') {
+            const err = new TypeError(
+                `The "${name}" argument must be of type string. Received ${receivedRepr(address)}`);
+            err.code = 'ERR_INVALID_ARG_TYPE';
+            throw err;
+        }
+    }
+
+    addAddress(address, family) {
+        if (address instanceof SocketAddress) {
+            family = address.family;
+            address = address.address;
+        } else {
+            this._validateAddress(address, 'address');
+            family = this._family(family);
+        }
+        const value = ipToBigInt(address, family);
+        this._ranges.push({ family, start: value, end: value });
+        this.rules.push(`Address: ${family.toUpperCase()} ${address}`);
+    }
+
+    addRange(start, end, family) {
+        if (start instanceof SocketAddress) {
+            family = start.family;
+            end = end instanceof SocketAddress ? end.address : end;
+            start = start.address;
+        } else {
+            this._validateAddress(start, 'start');
+            family = this._family(family);
+            if (end instanceof SocketAddress) end = end.address;
+        }
+        this._validateAddress(end, 'end');
+        this._ranges.push({
+            family,
+            start: ipToBigInt(start, family),
+            end: ipToBigInt(end, family),
+        });
+        this.rules.push(`Range: ${family.toUpperCase()} ${start}-${end}`);
+    }
+
+    addSubnet(network, prefix, family) {
+        if (network instanceof SocketAddress) {
+            family = network.family;
+            network = network.address;
+        } else {
+            this._validateAddress(network, 'network');
+            family = this._family(family);
+        }
+        const bits = family === 'ipv4' ? 32 : 128;
+        if (typeof prefix !== 'number') {
+            const err = new TypeError(
+                `The "prefix" argument must be of type number. Received ${receivedRepr(prefix)}`);
+            err.code = 'ERR_INVALID_ARG_TYPE';
+            throw err;
+        }
+        if (!Number.isInteger(prefix) || prefix < 0 || prefix > bits) {
+            const err = new RangeError(
+                `The value of "prefix" is out of range. It must be >= 0 and <= ${bits}. Received ${prefix}`);
+            err.code = 'ERR_OUT_OF_RANGE';
+            throw err;
+        }
+        const base = ipToBigInt(network, family);
+        const mask = ((1n << BigInt(bits - prefix)) - 1n);
+        const start = base & ~mask;
+        this._ranges.push({ family, start, end: start + mask });
+        this.rules.push(`Subnet: ${family.toUpperCase()} ${network}/${prefix}`);
+    }
+
+    check(address, family) {
+        if (address instanceof SocketAddress) {
+            family = address.family;
+            address = address.address;
+        } else {
+            family = String(family || 'ipv4').toLowerCase();
+        }
+        if (typeof address !== 'string') return false;
+        if (family === 'ipv4' && !isIPv4(address)) return false;
+        if (family === 'ipv6' && !isIPv6(address)) return false;
+        const value = ipToBigInt(address, family);
+        const matches = (fam, v) => this._ranges.some((r) =>
+            r.family === fam && v >= r.start && v <= r.end);
+        if (matches(family, value)) return true;
+        // IPv4-mapped IPv6 cross-matching: ::ffff:a.b.c.d and a.b.c.d name
+        // the same host on both rule families.
+        const V4_MAPPED = 0xffffn << 32n;
+        if (family === 'ipv6' && (value >> 32n) === 0xffffn) {
+            return matches('ipv4', value & 0xffffffffn);
+        }
+        if (family === 'ipv4') {
+            return matches('ipv6', V4_MAPPED | value);
+        }
+        return false;
+    }
+}
+
 if (Symbol.asyncDispose) {
     ServerImpl.prototype[Symbol.asyncDispose] = function asyncDispose() {
         return new Promise((resolve) => this.close(() => resolve()));
@@ -426,6 +652,8 @@ if (Symbol.asyncDispose) {
 
 export const Socket = callable(SocketImpl);
 export const Server = callable(ServerImpl);
+// Legacy alias predating the Socket name.
+export const Stream = Socket;
 
 export function connect(...args) {
     const socket = new SocketImpl(typeof args[0] === 'object' ? args[0] : undefined);
@@ -449,6 +677,9 @@ export default {
     setDefaultAutoSelectFamilyAttemptTimeout,
     Socket,
     Server,
+    Stream,
+    SocketAddress,
+    BlockList,
     connect,
     createConnection,
     createServer,

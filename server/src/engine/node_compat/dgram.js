@@ -97,6 +97,8 @@ class SocketImpl extends EventEmitter {
         }
         this._recvBufferSize = (options && options.recvBufferSize) || 65536;
         this._sendBufferSize = (options && options.sendBufferSize) || 65536;
+        this._sendBlockList = (options && options.sendBlockList) || null;
+        this._receiveBlockList = (options && options.receiveBlockList) || null;
         if (typeof listener === 'function') this.on('message', listener);
         const signal = options && options.signal;
         if (signal !== undefined) {
@@ -113,6 +115,14 @@ class SocketImpl extends EventEmitter {
                 }, { once: true });
             }
         }
+    }
+
+    _blockedBySendList(address) {
+        if (!this._sendBlockList || typeof this._sendBlockList.check !== 'function') {
+            return false;
+        }
+        const ip = address === 'localhost' ? '127.0.0.1' : address;
+        return this._sendBlockList.check(ip, isIPv6(ip) ? 'ipv6' : 'ipv4');
     }
 
     _healthy() {
@@ -185,6 +195,12 @@ class SocketImpl extends EventEmitter {
                 this.emit('error', new Error(result.error));
                 break;
             }
+            if (this._receiveBlockList
+                && typeof this._receiveBlockList.check === 'function'
+                && this._receiveBlockList.check(
+                    result.address, result.family === 'IPv6' ? 'ipv6' : 'ipv4')) {
+                continue;
+            }
             const msg = Buffer.from(result.data, 'base64');
             this.emit('message', msg, {
                 address: result.address,
@@ -204,11 +220,17 @@ class SocketImpl extends EventEmitter {
         if (this._connectState !== CONNECT_STATE_DISCONNECTED) {
             throw nodeError(Error, 'ERR_SOCKET_DGRAM_IS_CONNECTED', 'Already connected');
         }
+        const target = address || (this.type === 'udp6' ? '::1' : '127.0.0.1');
+        if (this._blockedBySendList(target)) {
+            const err = nodeError(Error, 'ERR_IP_BLOCKED', `IP ${target} is blocked`);
+            Promise.resolve().then(() => {
+                if (typeof callback === 'function') callback(err);
+                else this.emit('error', err);
+            });
+            return this;
+        }
         this._connectState = CONNECT_STATE_CONNECTING;
-        this._connectedTo = {
-            port: validPort,
-            address: address || (this.type === 'udp6' ? '::1' : '127.0.0.1'),
-        };
+        this._connectedTo = { port: validPort, address: target };
         if (!this._bound) this.bind(0);
         Promise.resolve().then(() => {
             if (this._closed) return;
@@ -297,6 +319,12 @@ class SocketImpl extends EventEmitter {
             if (typeof cb === 'function') cb(error || null, error ? undefined : sent);
             else if (error) this.emit('error', error);
         };
+        const target = String(address || '127.0.0.1');
+        if (this._blockedBySendList(target)) {
+            Promise.resolve().then(() => finish(
+                nodeError(Error, 'ERR_IP_BLOCKED', `IP ${target} is blocked`)));
+            return;
+        }
         if (rid === null) {
             // bind() failed synchronously and emitted its own error.
             Promise.resolve().then(() => finish(new Error('dgram: socket not bound')));
