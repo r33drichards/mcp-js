@@ -2,10 +2,12 @@
 // net_tcp.rs). Without the capability, createSocket throws the standard
 // capability-model error. With it, sockets bind and exchange datagrams on
 // 127.0.0.1 only — the Rust side pins every bind and send target to the
-// loopback interface.
+// loopback interface. Multicast and broadcast configuration is accepted
+// (validated, then a no-op) since loopback traffic never leaves the host.
 
 import { EventEmitter } from 'node:events';
 import { Buffer } from 'node:buffer';
+import { isIPv4, isIPv6 } from 'node:net';
 
 const ops = globalThis.__mcpV8NetOps;
 
@@ -15,26 +17,120 @@ function callable(Cls) {
     });
 }
 
+function nodeError(Ctor, code, message) {
+    const err = new Ctor(message);
+    err.code = code;
+    return err;
+}
+
+function receivedRepr(value) {
+    if (value === undefined) return 'undefined';
+    if (value === null) return 'null';
+    const type = typeof value;
+    if (type === 'string') return `type string ('${value}')`;
+    if (type === 'object') {
+        const name = value.constructor && value.constructor.name;
+        return `an instance of ${name || 'Object'}`;
+    }
+    if (type === 'function') return `function ${value.name || ''}`.trim();
+    return `type ${type} (${String(value)})`;
+}
+
+function validateNumberArg(value, name) {
+    if (typeof value !== 'number') {
+        throw nodeError(TypeError, 'ERR_INVALID_ARG_TYPE',
+            `The "${name}" argument must be of type number. Received ${receivedRepr(value)}`);
+    }
+}
+
+function validatePort(port) {
+    const value = typeof port === 'number' ? port : Number.NaN;
+    if (!Number.isInteger(value) || value <= 0 || value >= 65536) {
+        throw nodeError(RangeError, 'ERR_SOCKET_BAD_PORT',
+            `Port should be > 0 and < 65536. Received ${receivedRepr(port)}.`);
+    }
+    return value;
+}
+
+function toSendBuffer(msg) {
+    if (typeof msg === 'string') return Buffer.from(msg);
+    if (Buffer.isBuffer(msg)) return msg;
+    if (ArrayBuffer.isView(msg)) {
+        return Buffer.from(msg.buffer, msg.byteOffset, msg.byteLength);
+    }
+    throw nodeError(TypeError, 'ERR_INVALID_ARG_TYPE',
+        'The "buffer" argument must be of type string or an instance of ' +
+        `Buffer, TypedArray, or DataView. Received ${receivedRepr(msg)}`);
+}
+
+const CONNECT_STATE_DISCONNECTED = 0;
+const CONNECT_STATE_CONNECTING = 1;
+const CONNECT_STATE_CONNECTED = 2;
+
 class SocketImpl extends EventEmitter {
     constructor(typeOrOptions, listener) {
         super();
-        const options = typeof typeOrOptions === 'string'
-            ? { type: typeOrOptions }
-            : (typeOrOptions || {});
-        this.type = options.type || 'udp4';
+        let options = null;
+        if (typeof typeOrOptions === 'string') {
+            options = { type: typeOrOptions };
+        } else if (typeOrOptions !== null && typeof typeOrOptions === 'object'
+            && !Array.isArray(typeOrOptions) && !(typeOrOptions instanceof String)) {
+            options = typeOrOptions;
+        }
+        const type = options && options.type;
+        if (type !== 'udp4' && type !== 'udp6') {
+            throw nodeError(TypeError, 'ERR_SOCKET_BAD_TYPE',
+                'Bad socket type specified. Valid types are: udp4, udp6');
+        }
+        this.type = type;
         this._rid = null;
         this._address = null;
         this._bound = false;
         this._closed = false;
+        this._connectState = CONNECT_STATE_DISCONNECTED;
         this._connectedTo = null;
+        if (options && options.recvBufferSize !== undefined) {
+            validateNumberArg(options.recvBufferSize, 'options.recvBufferSize');
+        }
+        if (options && options.sendBufferSize !== undefined) {
+            validateNumberArg(options.sendBufferSize, 'options.sendBufferSize');
+        }
+        this._recvBufferSize = (options && options.recvBufferSize) || 65536;
+        this._sendBufferSize = (options && options.sendBufferSize) || 65536;
         if (typeof listener === 'function') this.on('message', listener);
+        const signal = options && options.signal;
+        if (signal !== undefined) {
+            if (!signal || typeof signal.addEventListener !== 'function'
+                || typeof signal.aborted !== 'boolean') {
+                throw nodeError(TypeError, 'ERR_INVALID_ARG_TYPE',
+                    `The "options.signal" property must be an instance of AbortSignal. Received ${receivedRepr(signal)}`);
+            }
+            if (signal.aborted) {
+                Promise.resolve().then(() => { if (!this._closed) this.close(); });
+            } else {
+                signal.addEventListener('abort', () => {
+                    if (!this._closed) this.close();
+                }, { once: true });
+            }
+        }
+    }
+
+    _healthy() {
+        return this._bound && !this._closed && this._rid !== null;
+    }
+
+    // Node's health check: only a closed socket is "not running" — an
+    // unbound one is implicitly bound by the operations that need it.
+    _requireRunning() {
+        if (this._closed) {
+            throw nodeError(Error, 'ERR_SOCKET_DGRAM_NOT_RUNNING', 'Not running');
+        }
     }
 
     bind(...args) {
-        if (this._bound) {
-            const err = new Error('bind() called twice');
-            err.code = 'ERR_SOCKET_ALREADY_BOUND';
-            throw err;
+        if (this._bound || this._closed) {
+            throw nodeError(Error, 'ERR_SOCKET_ALREADY_BOUND',
+                'Socket is already bound');
         }
         let options = {};
         let cb;
@@ -104,24 +200,36 @@ class SocketImpl extends EventEmitter {
             callback = address;
             address = undefined;
         }
-        this._connectedTo = { port: Number(port), address: address || '127.0.0.1' };
-        if (!this._bound) this.bind(0);
-        if (typeof callback === 'function') {
-            Promise.resolve().then(callback);
+        const validPort = validatePort(port);
+        if (this._connectState !== CONNECT_STATE_DISCONNECTED) {
+            throw nodeError(Error, 'ERR_SOCKET_DGRAM_IS_CONNECTED', 'Already connected');
         }
-        Promise.resolve().then(() => this.emit('connect'));
+        this._connectState = CONNECT_STATE_CONNECTING;
+        this._connectedTo = {
+            port: validPort,
+            address: address || (this.type === 'udp6' ? '::1' : '127.0.0.1'),
+        };
+        if (!this._bound) this.bind(0);
+        Promise.resolve().then(() => {
+            if (this._closed) return;
+            this._connectState = CONNECT_STATE_CONNECTED;
+            if (typeof callback === 'function') callback();
+            this.emit('connect');
+        });
         return this;
     }
 
     disconnect() {
+        if (this._connectState !== CONNECT_STATE_CONNECTED) {
+            throw nodeError(Error, 'ERR_SOCKET_DGRAM_NOT_CONNECTED', 'Not connected');
+        }
+        this._connectState = CONNECT_STATE_DISCONNECTED;
         this._connectedTo = null;
     }
 
     remoteAddress() {
-        if (!this._connectedTo) {
-            const err = new Error('Socket is not connected');
-            err.code = 'ERR_SOCKET_DGRAM_NOT_CONNECTED';
-            throw err;
+        if (this._connectState !== CONNECT_STATE_CONNECTED || !this._connectedTo) {
+            throw nodeError(Error, 'ERR_SOCKET_DGRAM_NOT_CONNECTED', 'Not connected');
         }
         return {
             address: this._connectedTo.address,
@@ -139,32 +247,54 @@ class SocketImpl extends EventEmitter {
         let port;
         let address;
         let cb;
-        if (rest.length >= 3 && typeof rest[0] === 'number' && typeof rest[1] === 'number'
-            && typeof rest[2] === 'number') {
-            [offset, length, port] = rest;
+        if (typeof rest[0] === 'number' && typeof rest[1] === 'number') {
+            [offset, length] = rest;
+            if (rest[2] !== undefined || rest.length > 2) port = rest[2];
             if (typeof rest[3] === 'string') address = rest[3];
             if (typeof rest[rest.length - 1] === 'function') cb = rest[rest.length - 1];
         } else {
             if (typeof rest[0] === 'number') port = rest[0];
             if (typeof rest[1] === 'string') address = rest[1];
             if (typeof rest[rest.length - 1] === 'function') cb = rest[rest.length - 1];
+            if (rest.length > 0 && typeof rest[0] !== 'number'
+                && typeof rest[0] !== 'function' && typeof rest[0] !== 'string'
+                && rest[0] !== undefined) {
+                port = rest[0]; // let validatePort reject it below
+            }
         }
-        if (port === undefined && this._connectedTo) {
+
+        const connected = this._connectState === CONNECT_STATE_CONNECTED
+            || this._connectState === CONNECT_STATE_CONNECTING;
+        if (connected && port !== undefined) {
+            throw nodeError(Error, 'ERR_SOCKET_DGRAM_IS_CONNECTED', 'Already connected');
+        }
+
+        let buf;
+        if (Array.isArray(msg)) {
+            buf = Buffer.concat(msg.map((part) => toSendBuffer(part)));
+        } else {
+            buf = toSendBuffer(msg);
+            if (offset !== undefined && length !== undefined) {
+                buf = buf.subarray(offset, offset + length);
+            }
+        }
+
+        if (connected) {
             port = this._connectedTo.port;
             address = address || this._connectedTo.address;
+        } else {
+            port = validatePort(port);
         }
-        let buf = Buffer.isBuffer(msg)
-            ? msg
-            : Array.isArray(msg)
-                ? Buffer.concat(msg.map((m) => Buffer.isBuffer(m) ? m : Buffer.from(m)))
-                : Buffer.from(String(msg));
-        if (offset !== undefined && length !== undefined) {
-            buf = buf.subarray(offset, offset + length);
+        if (address !== undefined && address !== null && typeof address !== 'string') {
+            throw nodeError(TypeError, 'ERR_INVALID_ARG_TYPE',
+                `The "address" argument must be of type string. Received ${receivedRepr(address)}`);
         }
+
         if (!this._bound) this.bind(0);
         const rid = this._rid;
+        const sent = buf.length;
         const finish = (error) => {
-            if (typeof cb === 'function') cb(error || null);
+            if (typeof cb === 'function') cb(error || null, error ? undefined : sent);
             else if (error) this.emit('error', error);
         };
         if (rid === null) {
@@ -172,25 +302,22 @@ class SocketImpl extends EventEmitter {
             Promise.resolve().then(() => finish(new Error('dgram: socket not bound')));
             return;
         }
-        ops.udpSend(rid, String(address || '127.0.0.1'), (Number(port) || 0) >>> 0,
+        ops.udpSend(rid, String(address || '127.0.0.1'), port >>> 0,
             buf.toString('base64')).then(
             () => finish(null),
             (error) => finish(new Error(String(error && error.message || error))));
     }
 
     address() {
-        if (!this._bound || !this._address) {
-            const err = new Error('getsockname EBADF');
-            err.code = 'EBADF';
-            throw err;
+        if (!this._healthy() || !this._address) {
+            throw nodeError(Error, 'EBADF', 'getsockname EBADF');
         }
         return { ...this._address };
     }
 
     close(cb) {
         if (this._closed) {
-            const err = new Error('Not running');
-            err.code = 'ERR_SOCKET_DGRAM_NOT_RUNNING';
+            const err = nodeError(Error, 'ERR_SOCKET_DGRAM_NOT_RUNNING', 'Not running');
             if (typeof cb === 'function') { Promise.resolve().then(() => cb(err)); return this; }
             throw err;
         }
@@ -203,17 +330,124 @@ class SocketImpl extends EventEmitter {
         return this;
     }
 
-    setBroadcast() {}
-    setTTL(ttl) { return ttl; }
-    setMulticastTTL(ttl) { return ttl; }
-    setMulticastLoopback(flag) { return flag; }
-    setMulticastInterface() {}
-    addMembership() {}
-    dropMembership() {}
-    setRecvBufferSize() {}
-    setSendBufferSize() {}
-    getRecvBufferSize() { return 65536; }
-    getSendBufferSize() { return 65536; }
+    setBroadcast(_flag) {
+        if (!this._healthy()) throw new Error('setBroadcast EBADF');
+    }
+
+    setTTL(ttl) {
+        validateNumberArg(ttl, 'ttl');
+        if (!this._healthy()) throw new Error('setTTL EBADF');
+        if (ttl < 1 || ttl > 255 || !Number.isInteger(ttl)) {
+            throw new Error('setTTL EINVAL');
+        }
+        return ttl;
+    }
+
+    setMulticastTTL(ttl) {
+        validateNumberArg(ttl, 'ttl');
+        if (!this._healthy()) throw new Error('setMulticastTTL EBADF');
+        if (ttl < 0 || ttl > 255 || !Number.isInteger(ttl)) {
+            throw new Error('setMulticastTTL EINVAL');
+        }
+        return ttl;
+    }
+
+    setMulticastLoopback(flag) {
+        if (!this._healthy()) throw new Error('setMulticastLoopback EBADF');
+        return flag;
+    }
+
+    setMulticastInterface(interfaceAddress) {
+        if (typeof interfaceAddress !== 'string') {
+            throw nodeError(TypeError, 'ERR_INVALID_ARG_TYPE',
+                `The "interfaceAddress" argument must be of type string. Received ${receivedRepr(interfaceAddress)}`);
+        }
+        if (!this._healthy()) throw new Error('setMulticastInterface EBADF');
+        if (!isIPv4(interfaceAddress) && !isIPv6(interfaceAddress)) {
+            throw new Error('setMulticastInterface EINVAL');
+        }
+    }
+
+    addMembership(multicastAddress, _interfaceAddress) {
+        if (!multicastAddress) {
+            throw nodeError(TypeError, 'ERR_MISSING_ARGS',
+                'The "multicastAddress" argument must be specified');
+        }
+        this._requireRunning();
+        if (!isIPv4(multicastAddress) && !isIPv6(multicastAddress)) {
+            throw new Error('addMembership EINVAL');
+        }
+    }
+
+    dropMembership(multicastAddress, _interfaceAddress) {
+        if (!multicastAddress) {
+            throw nodeError(TypeError, 'ERR_MISSING_ARGS',
+                'The "multicastAddress" argument must be specified');
+        }
+        this._requireRunning();
+        if (!isIPv4(multicastAddress) && !isIPv6(multicastAddress)) {
+            throw new Error('dropMembership EINVAL');
+        }
+    }
+
+    addSourceSpecificMembership(sourceAddress, groupAddress, _interfaceAddress) {
+        if (typeof sourceAddress !== 'string') {
+            throw nodeError(TypeError, 'ERR_INVALID_ARG_TYPE',
+                `The "sourceAddress" argument must be of type string. Received ${receivedRepr(sourceAddress)}`);
+        }
+        if (typeof groupAddress !== 'string') {
+            throw nodeError(TypeError, 'ERR_INVALID_ARG_TYPE',
+                `The "groupAddress" argument must be of type string. Received ${receivedRepr(groupAddress)}`);
+        }
+        this._requireRunning();
+        if (!isIPv4(sourceAddress) && !isIPv6(sourceAddress)) {
+            throw nodeError(Error, 'EINVAL', 'addSourceSpecificMembership EINVAL');
+        }
+        if (!isIPv4(groupAddress) && !isIPv6(groupAddress)) {
+            throw nodeError(Error, 'EINVAL', 'addSourceSpecificMembership EINVAL');
+        }
+    }
+
+    dropSourceSpecificMembership(sourceAddress, groupAddress, _interfaceAddress) {
+        if (typeof sourceAddress !== 'string') {
+            throw nodeError(TypeError, 'ERR_INVALID_ARG_TYPE',
+                `The "sourceAddress" argument must be of type string. Received ${receivedRepr(sourceAddress)}`);
+        }
+        if (typeof groupAddress !== 'string') {
+            throw nodeError(TypeError, 'ERR_INVALID_ARG_TYPE',
+                `The "groupAddress" argument must be of type string. Received ${receivedRepr(groupAddress)}`);
+        }
+        this._requireRunning();
+        if (!isIPv4(sourceAddress) && !isIPv6(sourceAddress)) {
+            throw nodeError(Error, 'EINVAL', 'dropSourceSpecificMembership EINVAL');
+        }
+        if (!isIPv4(groupAddress) && !isIPv6(groupAddress)) {
+            throw nodeError(Error, 'EINVAL', 'dropSourceSpecificMembership EINVAL');
+        }
+    }
+
+    setRecvBufferSize(size) {
+        validateNumberArg(size, 'size');
+        if (!this._healthy()) throw new Error('setRecvBufferSize EBADF');
+        this._recvBufferSize = size;
+    }
+
+    setSendBufferSize(size) {
+        validateNumberArg(size, 'size');
+        if (!this._healthy()) throw new Error('setSendBufferSize EBADF');
+        this._sendBufferSize = size;
+    }
+
+    getRecvBufferSize() {
+        if (!this._healthy()) throw new Error('getRecvBufferSize EBADF');
+        return this._recvBufferSize;
+    }
+
+    getSendBufferSize() {
+        if (!this._healthy()) throw new Error('getSendBufferSize EBADF');
+        return this._sendBufferSize;
+    }
+
     ref() { return this; }
     unref() { return this; }
 }

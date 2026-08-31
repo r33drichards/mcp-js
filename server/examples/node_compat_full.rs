@@ -2146,8 +2146,10 @@ fn node_cli_source(
     let mut source = format!(
         "globalThis.__mcpV8ProcessConfig={};\n\
          const {{ default: __nodeCompatProcess }} = await import('node:process');\n\
+         const {{ Buffer: __nodeCompatBuffer }} = await import('node:buffer');\n\
          await import('node:module');\n\
          globalThis.process = __nodeCompatProcess;\n\
+         globalThis.Buffer = __nodeCompatBuffer;\n\
          globalThis.global = globalThis;\n",
         serde_json::to_string(&process_config).unwrap(),
     );

@@ -201,6 +201,23 @@ const util = {
     TextDecoder: globalThis.TextDecoder,
 };
 
+// V8 stack-trace-backed approximation of util.getCallSites (Node 22+).
+export function getCallSites(frameCount = 10) {
+    const stack = String(new Error().stack || '').split('\n').slice(2, 2 + frameCount);
+    return stack.map((line) => {
+        const match = /at (?:(.+?) \()?([^()]+?):(\d+):(\d+)\)?\s*$/.exec(line);
+        return {
+            functionName: (match && match[1]) || '',
+            scriptName: (match && match[2]) || '',
+            scriptId: '0',
+            lineNumber: match ? Number(match[3]) : 0,
+            column: match ? Number(match[4]) : 0,
+            columnNumber: match ? Number(match[4]) : 0,
+        };
+    });
+}
+util.getCallSites = getCallSites;
+
 export { format, inspect, promisify, callbackify, inherits, deprecate, debuglog, types };
 export const TextEncoder = globalThis.TextEncoder;
 export const TextDecoder = globalThis.TextDecoder;

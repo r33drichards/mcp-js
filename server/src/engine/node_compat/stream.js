@@ -447,6 +447,27 @@ export class PassThrough extends Transform {
     }
 }
 
+export function duplexPair(options) {
+    const opts = options || {};
+    const sides = [];
+    const other = (self) => sides[sides[0] === self ? 1 : 0];
+    for (let i = 0; i < 2; i++) {
+        sides.push(new Duplex({
+            ...opts,
+            write(chunk, _encoding, callback) {
+                other(this).push(chunk);
+                callback();
+            },
+            final(callback) {
+                other(this).push(null);
+                callback();
+            },
+            read() {},
+        }));
+    }
+    return sides;
+}
+
 export function finished(stream, callback) {
     let done = false;
     const fire = (err) => {
@@ -475,6 +496,7 @@ Object.assign(Stream, {
     Transform,
     PassThrough,
     Stream,
+    duplexPair,
     finished,
     pipeline,
 });
