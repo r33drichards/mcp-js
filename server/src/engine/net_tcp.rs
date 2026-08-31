@@ -53,11 +53,18 @@ struct StreamHandle {
     cancel: CancellationToken,
 }
 
+#[derive(Clone)]
+struct UdpHandle {
+    socket: Arc<tokio::net::UdpSocket>,
+    cancel: CancellationToken,
+}
+
 #[derive(Default)]
 struct TcpRegistry {
     next_id: u32,
     listeners: HashMap<u32, ListenerHandle>,
     streams: HashMap<u32, StreamHandle>,
+    udp: HashMap<u32, UdpHandle>,
 }
 
 fn ensure_enabled(state: &mut OpState) -> Result<&mut TcpRegistry, JsErrorBox> {
@@ -379,6 +386,133 @@ fn op_tcp_close_listener(state: &mut OpState, #[smi] rid: u32) {
     }
 }
 
+// ── UDP (node:dgram) ────────────────────────────────────────────────────
+
+fn get_udp(
+    state: &Rc<RefCell<OpState>>,
+    rid: u32,
+) -> Result<(UdpHandle, CancellationToken), JsErrorBox> {
+    let state = state.borrow();
+    let shutdown = shutdown_token(&state)?;
+    state
+        .try_borrow::<TcpRegistry>()
+        .and_then(|r| r.udp.get(&rid).cloned())
+        .map(|handle| (handle, shutdown))
+        .ok_or_else(|| JsErrorBox::generic(format!("dgram: unknown socket id {rid}")))
+}
+
+/// Sync op: bind a loopback UDP socket. Returns `{rid, address, port, family}`.
+#[op2]
+#[string]
+fn op_udp_bind(
+    state: &mut OpState,
+    #[string] host: String,
+    #[smi] port: u32,
+) -> Result<String, JsErrorBox> {
+    ensure_enabled(state)?;
+    let ip = loopback_host(&host, host.contains(':'))?;
+    let addr = SocketAddr::new(ip, port as u16);
+    let std_socket = std::net::UdpSocket::bind(addr).map_err(|e| {
+        JsErrorBox::generic(format!(
+            "dgram: bind on {addr} failed: {e} ({})",
+            match e.kind() {
+                std::io::ErrorKind::AddrInUse => "EADDRINUSE",
+                std::io::ErrorKind::PermissionDenied => "EACCES",
+                _ => "EIO",
+            }
+        ))
+    })?;
+    std_socket
+        .set_nonblocking(true)
+        .map_err(|e| JsErrorBox::generic(format!("dgram: set_nonblocking failed: {e}")))?;
+    let socket = tokio::net::UdpSocket::from_std(std_socket)
+        .map_err(|e| JsErrorBox::generic(format!("dgram: socket setup failed: {e}")))?;
+    let local = socket
+        .local_addr()
+        .map_err(|e| JsErrorBox::generic(format!("dgram: local_addr failed: {e}")))?;
+    let registry = ensure_enabled(state)?;
+    let rid = registry.next_id;
+    registry.next_id += 1;
+    registry.udp.insert(
+        rid,
+        UdpHandle {
+            socket: Arc::new(socket),
+            cancel: CancellationToken::new(),
+        },
+    );
+    Ok(serde_json::json!({
+        "rid": rid,
+        "address": local.ip().to_string(),
+        "port": local.port(),
+        "family": if local.is_ipv6() { "IPv6" } else { "IPv4" },
+    })
+    .to_string())
+}
+
+/// Async op: send one datagram to a loopback target (base64 payload).
+#[op2]
+async fn op_udp_send(
+    state: Rc<RefCell<OpState>>,
+    #[smi] rid: u32,
+    #[string] host: String,
+    #[smi] port: u32,
+    #[string] data: String,
+) -> Result<(), JsErrorBox> {
+    let (UdpHandle { socket, .. }, _) = get_udp(&state, rid)?;
+    let ip = loopback_host(&host, host.contains(':'))?;
+    let addr = SocketAddr::new(ip, port as u16);
+    let bytes = b64_decode(&data).map_err(JsErrorBox::generic)?;
+    tokio::spawn(async move { socket.send_to(&bytes, addr).await })
+        .await
+        .map_err(|e| JsErrorBox::generic(format!("net task join error: {e}")))?
+        .map_err(|e| JsErrorBox::generic(format!("dgram: send failed: {e}")))?;
+    Ok(())
+}
+
+/// Async op: receive one datagram. Returns
+/// `{"data": <b64>, "address": ..., "port": ..., "family": ...}` or
+/// `{"closed": true}` once the socket is dropped.
+#[op2]
+#[string]
+async fn op_udp_recv(state: Rc<RefCell<OpState>>, #[smi] rid: u32) -> Result<String, JsErrorBox> {
+    let (UdpHandle { socket, cancel }, shutdown) = get_udp(&state, rid)?;
+    let result = tokio::spawn(async move {
+        let mut buf = vec![0u8; 64 * 1024];
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => Ok(None),
+            _ = shutdown.cancelled() => Ok(None),
+            received = socket.recv_from(&mut buf) => {
+                received.map(|(n, from)| { buf.truncate(n); Some((buf, from)) })
+            }
+        }
+    })
+    .await
+    .map_err(|e| JsErrorBox::generic(format!("net task join error: {e}")))?;
+
+    match result {
+        Ok(None) => Ok(serde_json::json!({"closed": true}).to_string()),
+        Ok(Some((bytes, from))) => Ok(serde_json::json!({
+            "data": b64_encode(&bytes),
+            "address": from.ip().to_string(),
+            "port": from.port(),
+            "family": if from.is_ipv6() { "IPv6" } else { "IPv4" },
+        })
+        .to_string()),
+        Err(e) => Ok(serde_json::json!({"error": e.to_string()}).to_string()),
+    }
+}
+
+/// Fast op: drop a UDP socket, waking any pending recv.
+#[op2(fast)]
+fn op_udp_close(state: &mut OpState, #[smi] rid: u32) {
+    if let Some(registry) = state.try_borrow_mut::<TcpRegistry>() {
+        if let Some(handle) = registry.udp.remove(&rid) {
+            handle.cancel.cancel();
+        }
+    }
+}
+
 // ── Extension registration ──────────────────────────────────────────────
 
 deno_core::extension!(
@@ -392,6 +526,10 @@ deno_core::extension!(
         op_tcp_shutdown,
         op_tcp_close_stream,
         op_tcp_close_listener,
+        op_udp_bind,
+        op_udp_send,
+        op_udp_recv,
+        op_udp_close,
     ],
 );
 
@@ -416,6 +554,10 @@ const NET_BINDING_JS: &str = r#"
             shutdown: ops.op_tcp_shutdown,
             closeStream: ops.op_tcp_close_stream,
             closeListener: ops.op_tcp_close_listener,
+            udpBind: ops.op_udp_bind,
+            udpSend: ops.op_udp_send,
+            udpRecv: ops.op_udp_recv,
+            udpClose: ops.op_udp_close,
         }),
         writable: false, enumerable: false, configurable: false,
     });

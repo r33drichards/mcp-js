@@ -118,6 +118,37 @@ fn http_server_and_client_round_trip() {
 }
 
 #[test]
+fn dgram_round_trip() {
+    let result = run_with_net(
+        r#"
+        const dgram = await import('node:dgram');
+        const { Buffer } = await import('node:buffer');
+        const got = await new Promise((resolve, reject) => {
+            const receiver = dgram.createSocket('udp4');
+            const sender = dgram.createSocket('udp4');
+            receiver.on('error', reject);
+            sender.on('error', reject);
+            receiver.on('message', (msg, rinfo) => {
+                receiver.close(() => sender.close(() => resolve({
+                    text: msg.toString(),
+                    isBuffer: Buffer.isBuffer(msg),
+                    family: rinfo.family,
+                    hasPort: rinfo.port > 0,
+                })));
+            });
+            receiver.bind(0, () => {
+                sender.send('datagram', receiver.address().port, '127.0.0.1');
+            });
+        });
+        if (got.text !== 'datagram' || !got.isBuffer || got.family !== 'IPv4' || !got.hasPort) {
+            throw new Error('dgram round trip mismatch: ' + JSON.stringify(got));
+        }
+        "#,
+    );
+    assert!(result.is_ok(), "dgram round trip failed: {result:?}");
+}
+
+#[test]
 fn non_loopback_addresses_are_refused() {
     let result = run_with_net(
         r#"
