@@ -21,7 +21,6 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::io::Write as _;
 use std::process::Stdio;
 use std::rc::Rc;
 use std::sync::Arc;

@@ -12,6 +12,7 @@ use server::engine::{
     fs::FsConfig,
     module_loader::ModuleLoaderConfig,
     opa::{EvalMode, LocalPolicyEvaluator, PolicyChain, PolicyEvaluatorKind},
+    net_tcp::NetTcpConfig,
     subprocess::SubprocessConfig,
 };
 use std::{
@@ -2350,6 +2351,7 @@ fn run_node_compat_cli_with_stdin(
         .fetch_config(&fetch)
         .maybe_fs_config(fs_config.as_ref())
         .maybe_subprocess_config(Some(&subprocess))
+        .maybe_net_tcp_config(Some(NetTcpConfig::default()))
         .module_loader_config(&module_loader);
     if let Some(main_specifier) = eval_main_specifier.as_deref() {
         config = config.main_module_specifier(main_specifier);
@@ -2567,11 +2569,17 @@ fn run(
         Ok(specifier) => specifier,
         Err(error) => return Outcome::Runtime(error),
     };
+    let net_tcp = NetTcpConfig::default();
+    // The watchdog must cancel pending TCP ops alongside terminating the
+    // isolate: a pending accept keeps the event loop alive and
+    // terminate_execution alone cannot wake it.
+    let net_shutdown = net_tcp.shutdown.clone();
     let config = ExecutionConfig::new(256 * 1024 * 1024)
         .console_tree(tree.clone())
         .fetch_config(&fetch)
         .maybe_fs_config(Some(&fs_config))
         .maybe_subprocess_config(Some(&subprocess))
+        .maybe_net_tcp_config(Some(net_tcp))
         .module_loader_config(&module_loader)
         .main_module_specifier(&main_specifier);
     let handle = config.isolate_handle.clone();
@@ -2585,6 +2593,7 @@ fn run(
             while !done.load(Ordering::SeqCst) {
                 if start.elapsed() > timeout {
                     timed.store(true, Ordering::SeqCst);
+                    net_shutdown.cancel();
                     if let Some(h) = handle.lock().unwrap().as_ref() {
                         h.terminate_execution();
                     }
@@ -2706,10 +2715,13 @@ fn shard_main() -> Result<(), Box<dyn std::error::Error>> {
         &inventory.source.commit,
         &inventory.source.node_version,
     );
+    // Optional substring filter for targeted subset runs.
+    let only = std::env::var("NODE_COMPAT_ONLY").ok();
     for t in inventory
         .tests
         .iter()
         .filter(|t| shard::stable_shard(&t.path, n) == i)
+        .filter(|t| only.as_deref().is_none_or(|s| t.path.contains(s)))
     {
         let start = Instant::now();
         let (status, reason, details) = match fs::read_to_string(corpus.join(&t.path)) {
