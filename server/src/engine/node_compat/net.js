@@ -104,7 +104,16 @@ function normalizeConnectArgs(args) {
     return [options, typeof cb === 'function' ? cb : undefined];
 }
 
-export class Socket extends Duplex {
+// Node's net/http constructors predate class syntax and are callable
+// without `new` (`net.Server(fn)` works); a Proxy apply trap preserves
+// that while keeping instanceof and prototype identity.
+function callable(Cls) {
+    return new Proxy(Cls, {
+        apply: (target, _thisArg, args) => new target(...args),
+    });
+}
+
+class SocketImpl extends Duplex {
     constructor(_options) {
         super({});
         this.connecting = false;
@@ -285,7 +294,7 @@ export class Socket extends Duplex {
     unref() { return this; }
 }
 
-export class Server extends EventEmitter {
+class ServerImpl extends EventEmitter {
     constructor(options, connectionListener) {
         super();
         if (typeof options === 'function') {
@@ -405,8 +414,11 @@ export class Server extends EventEmitter {
     unref() { return this; }
 }
 
+export const Socket = callable(SocketImpl);
+export const Server = callable(ServerImpl);
+
 export function connect(...args) {
-    const socket = new Socket(typeof args[0] === 'object' ? args[0] : undefined);
+    const socket = new SocketImpl(typeof args[0] === 'object' ? args[0] : undefined);
     return socket.connect(...args);
 }
 

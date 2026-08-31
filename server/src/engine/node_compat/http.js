@@ -13,6 +13,15 @@ import net from 'node:net';
 
 const netEnabled = Boolean(globalThis.__mcpV8NetOps);
 
+// Node's http constructors predate class syntax and are callable without
+// `new`; a Proxy apply trap preserves that while keeping instanceof and
+// prototype identity.
+function callable(Cls) {
+    return new Proxy(Cls, {
+        apply: (target, _thisArg, args) => new target(...args),
+    });
+}
+
 export const METHODS = [
     'ACL', 'BIND', 'CHECKOUT', 'CONNECT', 'COPY', 'DELETE', 'GET', 'HEAD',
     'LINK', 'LOCK', 'M-SEARCH', 'MERGE', 'MKACTIVITY', 'MKCALENDAR', 'MKCOL',
@@ -98,7 +107,7 @@ function addIncomingHeader(headers, rawHeaders, name, value) {
 
 // ── incoming message ────────────────────────────────────────────────────
 
-export class IncomingMessage extends Readable {
+class IncomingMessageImpl extends Readable {
     constructor(socket) {
         super({});
         this.socket = socket;
@@ -133,7 +142,7 @@ export class IncomingMessage extends Readable {
 
 // ── outgoing message (shared by ServerResponse / ClientRequest) ─────────
 
-export class OutgoingMessage extends Writable {
+class OutgoingMessageImpl extends Writable {
     constructor() {
         super({});
         this.headersSent = false;
@@ -255,7 +264,7 @@ export class OutgoingMessage extends Writable {
 
 // ── server response ─────────────────────────────────────────────────────
 
-export class ServerResponse extends OutgoingMessage {
+class ServerResponseImpl extends OutgoingMessageImpl {
     constructor(req) {
         super();
         this.req = req;
@@ -402,7 +411,7 @@ class ConnectionParser {
             this.socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n');
             return false;
         }
-        const req = new IncomingMessage(this.socket);
+        const req = new IncomingMessageImpl(this.socket);
         req.method = match[1];
         req.url = match[2];
         req.httpVersionMajor = Number(match[3]);
@@ -426,7 +435,7 @@ class ConnectionParser {
             this.remaining = contentLength === undefined ? 0 : Number(contentLength);
             if (!Number.isFinite(this.remaining) || this.remaining < 0) this.remaining = 0;
         }
-        const res = new ServerResponse(req);
+        const res = new ServerResponseImpl(req);
         if (req.headers.expect &&
             String(req.headers.expect).toLowerCase() === '100-continue') {
             if (this.server.listenerCount('checkContinue') > 0) {
@@ -499,7 +508,7 @@ class ConnectionParser {
 
 // ── server ──────────────────────────────────────────────────────────────
 
-export class Server extends net.Server {
+class ServerImpl extends net.Server {
     constructor(options, requestListener) {
         if (typeof options === 'function') {
             requestListener = options;
@@ -552,28 +561,41 @@ export function createServer(options, requestListener) {
     if (!netEnabled) {
         throw new Error('http.createServer is not supported in this runtime');
     }
-    return new Server(options, requestListener);
+    return new ServerImpl(options, requestListener);
 }
 
 // ── client ──────────────────────────────────────────────────────────────
 
-export class Agent extends EventEmitter {
+class AgentImpl extends EventEmitter {
     constructor(options) {
         super();
         this.options = options || {};
         this.keepAlive = Boolean(this.options.keepAlive);
         this.maxSockets = this.options.maxSockets || Infinity;
+        this.maxFreeSockets = this.options.maxFreeSockets || 256;
+        this.maxTotalSockets = this.options.maxTotalSockets || Infinity;
         this.requests = {};
         this.sockets = {};
         this.freeSockets = {};
     }
+    createConnection(options, callback) {
+        const socket = net.connect(options);
+        if (typeof callback === 'function') {
+            socket.once('connect', () => callback(null, socket));
+            socket.once('error', (error) => callback(error));
+        }
+        return socket;
+    }
+    keepSocketAlive() { return false; }
+    reuseSocket() {}
     destroy() {}
     getName(options) {
         return `${options.host || 'localhost'}:${options.port || 80}:`;
     }
 }
 
-export const globalAgent = new Agent({ keepAlive: true });
+export const Agent = callable(AgentImpl);
+export const globalAgent = new AgentImpl({ keepAlive: true });
 
 function normalizeRequestArgs(input, options, cb) {
     let opts = {};
@@ -600,7 +622,7 @@ function normalizeRequestArgs(input, options, cb) {
     return [opts, cb];
 }
 
-export class ClientRequest extends OutgoingMessage {
+class ClientRequestImpl extends OutgoingMessageImpl {
     constructor(opts, cb) {
         super();
         this.method = String(opts.method || 'GET').toUpperCase();
@@ -731,7 +753,7 @@ class ResponseParser {
                 this.socket.destroy(new Error('Parse Error: invalid status line'));
                 return;
             }
-            const res = new IncomingMessage(this.socket);
+            const res = new IncomingMessageImpl(this.socket);
             res.httpVersionMajor = Number(match[1]);
             res.httpVersionMinor = Number(match[2]);
             res.httpVersion = `${match[1]}.${match[2]}`;
@@ -859,7 +881,7 @@ export function request(input, options, cb) {
             'or node:http2 instead');
     }
     const [opts, callback] = normalizeRequestArgs(input, options, cb);
-    return new ClientRequest(opts, callback);
+    return new ClientRequestImpl(opts, callback);
 }
 
 export function get(input, options, cb) {
@@ -869,6 +891,12 @@ export function get(input, options, cb) {
 }
 
 export function setMaxIdleHTTPParsers() {}
+
+export const IncomingMessage = callable(IncomingMessageImpl);
+export const OutgoingMessage = callable(OutgoingMessageImpl);
+export const ServerResponse = callable(ServerResponseImpl);
+export const Server = callable(ServerImpl);
+export const ClientRequest = callable(ClientRequestImpl);
 
 export default {
     METHODS,
