@@ -1934,7 +1934,7 @@ impl Engine {
     }
 
     /// Set an OPA policy chain for MCP tool calls, wrapped as the sole pre hook.
-    pub fn with_mcp_tools_policy_chain(mut self, chain: Arc<opa::PolicyChain>) -> Self {
+    pub fn with_mcp_tools_policy_chain(self, chain: Arc<opa::PolicyChain>) -> Self {
         self.with_mcp_tools_hooks(Arc::new(hooks::HookChain::from_policy("mcp_tools", chain)))
     }
 
@@ -1998,7 +1998,7 @@ impl Engine {
 
     /// Gate fs snapshot pointer moves behind a bare policy chain, wrapped as
     /// the sole pre hook.
-    pub fn with_fs_snapshot_policy(mut self, chain: Arc<opa::PolicyChain>) -> Self {
+    pub fn with_fs_snapshot_policy(self, chain: Arc<opa::PolicyChain>) -> Self {
         self.with_fs_snapshot_hooks(Arc::new(hooks::HookChain::from_policy("fs_snapshot", chain)))
     }
 

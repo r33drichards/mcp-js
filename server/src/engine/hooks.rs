@@ -8,8 +8,10 @@
 //! the effective (post-mutation) input — a mutating hook can never rewrite an
 //! input *after* the policy approved a different one.
 //!
-//! Hook backends mirror policy sources:
-//! - `file://` URLs evaluate a Rego rule locally via `regorus`
+//! Hook backends mirror policy sources, plus a JavaScript one:
+//! - `file://` URLs ending in `.js` run a JavaScript hook in a bare,
+//!   capability-free V8 isolate (see [`LocalJsHookEvaluator`])
+//! - other `file://` URLs evaluate a Rego rule locally via `regorus`
 //! - `http://` / `https://` URLs query an OPA-style REST endpoint
 //!   (`POST {base}/v1/data/{path}` with `{"input": ...}`, result unwrapped
 //!   from `{"result": ...}`)
@@ -62,15 +64,21 @@ use super::opa::{OperationPolicies, PolicyChain, build_policy_chain};
 pub struct HookSource {
     /// URL of the hook:
     /// - `http://` / `https://` → OPA-style REST endpoint
-    /// - `file://` → local `.rego` file or directory of `.rego` files
+    /// - `file://` ending in `.js` → local JavaScript hook (see
+    ///   [`LocalJsHookEvaluator`])
+    /// - `file://` otherwise → local `.rego` file or directory of `.rego` files
     pub url: String,
     /// (Remote only) REST API data path, e.g. `"mcp/fetch/pre"`. Defaults to
     /// the operation's policy path with `/pre` or `/post` appended.
     pub policy_path: Option<String>,
-    /// (Local only) Regorus eval rule, e.g. `"data.mcp.fetch.pre"`. Defaults
-    /// to the operation's policy rule with the trailing `.allow` replaced by
-    /// `.pre` or `.post`.
+    /// (Rego) eval rule, e.g. `"data.mcp.fetch.pre"` — defaults to the
+    /// operation's policy rule with the trailing `.allow` replaced by `.pre`
+    /// or `.post`. (JS) the global function name to call — defaults to
+    /// `"pre"` / `"post"`.
     pub rule: Option<String>,
+    /// (JS only) per-call timeout in milliseconds; a hook still running when
+    /// it expires is terminated and the operation fails. Default 5000.
+    pub timeout_ms: Option<u64>,
 }
 
 /// What the operation's executor supports; enforced at build/run time.
@@ -344,6 +352,225 @@ impl RemoteHookEvaluator {
     }
 }
 
+// ── Local (JavaScript) hook evaluator ────────────────────────────────────
+
+/// Evaluates a JavaScript hook file in a dedicated, bare V8 isolate.
+///
+/// The file is executed once to define its hook functions in the global
+/// scope; each call then invokes one of them:
+///
+/// ```js
+/// function pre(input) {
+///     if (input.url.startsWith("http://")) {
+///         return { input: { ...input, url: "https://" + input.url.slice(7) } };
+///     }
+///     // no return value (undefined) = abstain
+/// }
+///
+/// function post(input, output) {
+///     if (output.status >= 500) return { allow: false, reason: "upstream error" };
+/// }
+/// ```
+///
+/// Return semantics match Rego hooks: `undefined`/`null` abstains, a bool
+/// allows/denies, and `{allow, reason, input|output}` denies or rewrites.
+///
+/// The isolate is created lazily on a dedicated worker thread (never on an
+/// executing sandbox's isolate thread) and kept warm across calls, so
+/// top-level state in the hook file persists — deliberately, for counters
+/// and caches. It has **no host capabilities**: no `fetch`, no `fs`, no ops
+/// — a JS hook is pure computation over its arguments. Hooks must be
+/// synchronous; returning a Promise is an error. A call that exceeds the
+/// timeout is terminated via V8 and fails the operation (fail closed).
+#[derive(Debug)]
+pub struct LocalJsHookEvaluator {
+    path: String,
+    source: String,
+    function: String,
+    timeout: std::time::Duration,
+    worker: std::sync::Mutex<Option<Result<JsWorker, String>>>,
+}
+
+#[derive(Clone)]
+struct JsWorker {
+    tx: std::sync::mpsc::Sender<JsCall>,
+    isolate_handle: deno_core::v8::IsolateHandle,
+}
+
+impl std::fmt::Debug for JsWorker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JsWorker").finish_non_exhaustive()
+    }
+}
+
+struct JsCall {
+    args: Vec<Value>,
+    respond: tokio::sync::oneshot::Sender<Result<Option<Value>, String>>,
+}
+
+impl LocalJsHookEvaluator {
+    pub fn from_file<P: AsRef<Path>>(
+        path: P,
+        function: String,
+        timeout_ms: u64,
+    ) -> Result<Self, String> {
+        let path = path.as_ref();
+        let source = std::fs::read_to_string(path)
+            .map_err(|e| format!("Failed to read JS hook file '{}': {}", path.display(), e))?;
+        Ok(Self {
+            path: path.display().to_string(),
+            source,
+            function,
+            timeout: std::time::Duration::from_millis(timeout_ms),
+            worker: std::sync::Mutex::new(None),
+        })
+    }
+
+    /// Get the warm worker, spawning it on first use. Spawning is lazy so
+    /// evaluators can be constructed before V8 platform initialization.
+    fn worker(&self) -> Result<JsWorker, String> {
+        let mut guard = self
+            .worker
+            .lock()
+            .map_err(|e| format!("JS hook worker lock poisoned: {}", e))?;
+        if guard.is_none() {
+            let (tx, rx) = std::sync::mpsc::channel::<JsCall>();
+            let (setup_tx, setup_rx) =
+                std::sync::mpsc::channel::<Result<deno_core::v8::IsolateHandle, String>>();
+            let source = self.source.clone();
+            let path = self.path.clone();
+            let function = self.function.clone();
+            let spawned = std::thread::Builder::new()
+                .name("js-hook".to_string())
+                .spawn(move || js_hook_worker(source, path, function, rx, setup_tx));
+            let setup = match spawned {
+                Err(e) => Err(format!("Failed to spawn JS hook thread: {}", e)),
+                Ok(_) => match setup_rx.recv_timeout(std::time::Duration::from_secs(10)) {
+                    Ok(Ok(handle)) => Ok(JsWorker {
+                        tx,
+                        isolate_handle: handle,
+                    }),
+                    Ok(Err(e)) => Err(e),
+                    Err(_) => Err(format!(
+                        "JS hook '{}' failed to initialize within 10s",
+                        self.path
+                    )),
+                },
+            };
+            *guard = Some(setup);
+        }
+        guard.as_ref().unwrap().clone()
+    }
+
+    /// Call the hook function with `args`. `Ok(None)` when the function
+    /// returns `undefined` or `null` (the hook abstains).
+    async fn evaluate(&self, args: Vec<Value>) -> Result<Option<Value>, String> {
+        let worker = self.worker()?;
+        let (respond, rx) = tokio::sync::oneshot::channel();
+        worker
+            .tx
+            .send(JsCall { args, respond })
+            .map_err(|_| format!("JS hook '{}' worker is no longer running", self.path))?;
+        match tokio::time::timeout(self.timeout, rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(format!(
+                "JS hook '{}' worker terminated unexpectedly",
+                self.path
+            )),
+            Err(_) => {
+                // Fail closed and unstick the worker for subsequent calls.
+                worker.isolate_handle.terminate_execution();
+                Err(format!(
+                    "JS hook '{}' timed out after {:?}",
+                    self.path, self.timeout
+                ))
+            }
+        }
+    }
+}
+
+/// Worker-thread body: create the isolate, evaluate the hook file once, then
+/// serve calls until every sender is dropped.
+fn js_hook_worker(
+    source: String,
+    path: String,
+    function: String,
+    rx: std::sync::mpsc::Receiver<JsCall>,
+    setup_tx: std::sync::mpsc::Sender<Result<deno_core::v8::IsolateHandle, String>>,
+) {
+    let mut runtime = deno_core::JsRuntime::new(deno_core::RuntimeOptions::default());
+    let handle = runtime.v8_isolate().thread_safe_handle();
+    if let Err(e) = runtime.execute_script("<js-hook>", source) {
+        let _ = setup_tx.send(Err(format!(
+            "Failed to evaluate JS hook '{}': {}",
+            path, e
+        )));
+        return;
+    }
+    let _ = setup_tx.send(Ok(handle));
+
+    for call in rx {
+        let result = js_hook_call(&mut runtime, &function, &call.args, &path);
+        // A timed-out call leaves the isolate in the terminated state (the
+        // flag outlives the aborted script); clear it so later calls work.
+        if result.is_err() {
+            runtime.v8_isolate().cancel_terminate_execution();
+        }
+        let _ = call.respond.send(result);
+    }
+}
+
+fn js_hook_call(
+    runtime: &mut deno_core::JsRuntime,
+    function: &str,
+    args: &[Value],
+    path: &str,
+) -> Result<Option<Value>, String> {
+    use deno_core::v8;
+
+    // Hand the arguments over as a global, then call the function by name.
+    {
+        deno_core::scope!(scope, runtime);
+        let global = scope.get_current_context().global(scope);
+        let key = v8::String::new(scope, "__hook_args")
+            .ok_or_else(|| "JS hook: failed to allocate v8 string".to_string())?;
+        let args_v8 = deno_core::serde_v8::to_v8(scope, args)
+            .map_err(|e| format!("JS hook '{}': failed to convert arguments: {}", path, e))?;
+        global.set(scope, key.into(), args_v8);
+    }
+
+    let fname = serde_json::to_string(function)
+        .map_err(|e| format!("JS hook '{}': invalid function name: {}", path, e))?;
+    let script = format!(
+        r#"(function() {{
+            const name = {fname};
+            const fn = globalThis[name];
+            if (typeof fn !== "function") {{
+                throw new Error("JS hook function '" + name + "' is not defined");
+            }}
+            return fn(...globalThis.__hook_args);
+        }})()"#
+    );
+    let result = runtime
+        .execute_script("<js-hook-call>", script)
+        .map_err(|e| format!("JS hook '{}' failed: {}", path, e))?;
+
+    deno_core::scope!(scope, runtime);
+    let local = v8::Local::new(scope, result);
+    if local.is_undefined() || local.is_null() {
+        return Ok(None);
+    }
+    if local.is_promise() {
+        return Err(format!(
+            "JS hook '{}' returned a Promise; hooks must be synchronous",
+            path
+        ));
+    }
+    deno_core::serde_v8::from_v8::<Value>(scope, local)
+        .map(Some)
+        .map_err(|e| format!("JS hook '{}' returned an unserializable value: {}", path, e))
+}
+
 // ── Hook ─────────────────────────────────────────────────────────────────
 
 /// A single hook in a chain. `Policy` wraps a whole [`PolicyChain`] as a
@@ -351,6 +578,7 @@ impl RemoteHookEvaluator {
 #[derive(Debug)]
 pub enum Hook {
     Local(LocalHookEvaluator),
+    LocalJs(LocalJsHookEvaluator),
     Remote(RemoteHookEvaluator),
     Policy(Arc<PolicyChain>),
 }
@@ -379,6 +607,18 @@ impl Hook {
                 };
             }
             Hook::Local(eval) => eval.evaluate(payload)?,
+            Hook::LocalJs(eval) => {
+                // JS hooks take positional arguments: pre(input) and
+                // post(input, output), unwrapped from the combined payload.
+                let args = match phase {
+                    Phase::Pre => vec![payload.clone()],
+                    Phase::Post => vec![
+                        payload.get("input").cloned().unwrap_or(Value::Null),
+                        payload.get("output").cloned().unwrap_or(Value::Null),
+                    ],
+                };
+                eval.evaluate(args).await?
+            }
             Hook::Remote(eval) => eval.evaluate(payload).await?,
         };
 
@@ -509,10 +749,14 @@ impl HookChain {
 
 // ── Builder ──────────────────────────────────────────────────────────────
 
+/// Default per-call timeout for JS hooks.
+const JS_HOOK_DEFAULT_TIMEOUT_MS: u64 = 5000;
+
 fn build_hook(
     source: &HookSource,
     default_remote_path: &str,
     default_local_rule: &str,
+    phase: &Phase,
 ) -> Result<Hook, String> {
     if source.url.starts_with("http://") || source.url.starts_with("https://") {
         let policy_path = source
@@ -524,11 +768,26 @@ fn build_hook(
             policy_path,
         )))
     } else if let Some(file_path) = source.url.strip_prefix("file://") {
+        let path = Path::new(file_path);
+        if path.extension().and_then(|x| x.to_str()) == Some("js") {
+            // JS hook: `rule` names the global function, defaulting to the
+            // phase name ("pre" / "post").
+            let function = source.rule.clone().unwrap_or_else(|| {
+                match phase {
+                    Phase::Pre => "pre",
+                    Phase::Post => "post",
+                }
+                .to_string()
+            });
+            let timeout_ms = source.timeout_ms.unwrap_or(JS_HOOK_DEFAULT_TIMEOUT_MS);
+            return Ok(Hook::LocalJs(LocalJsHookEvaluator::from_file(
+                path, function, timeout_ms,
+            )?));
+        }
         let rule = source
             .rule
             .clone()
             .unwrap_or_else(|| default_local_rule.to_string());
-        let path = Path::new(file_path);
         if path.is_dir() {
             Ok(Hook::Local(LocalHookEvaluator::from_directory(path, rule)?))
         } else {
@@ -586,7 +845,7 @@ pub fn build_hook_chain(
     let (pre_remote, pre_rule) = phase_defaults(default_remote_path, default_local_rule, &Phase::Pre);
     let mut pre: Vec<Hook> = Vec::new();
     for source in &config.pre {
-        pre.push(build_hook(source, &pre_remote, &pre_rule)?);
+        pre.push(build_hook(source, &pre_remote, &pre_rule, &Phase::Pre)?);
     }
 
     // Policies are pre hooks — the last ones, so they gate the effective
@@ -600,7 +859,7 @@ pub fn build_hook_chain(
         phase_defaults(default_remote_path, default_local_rule, &Phase::Post);
     let mut post: Vec<Hook> = Vec::new();
     for source in &config.post {
-        post.push(build_hook(source, &post_remote, &post_rule)?);
+        post.push(build_hook(source, &post_remote, &post_rule, &Phase::Post)?);
     }
 
     Ok(HookChain {
@@ -644,6 +903,7 @@ mod tests {
             url: format!("file://{}", path.display()),
             policy_path: None,
             rule: Some(rule.to_string()),
+            timeout_ms: None,
         }
     }
 
@@ -1211,6 +1471,7 @@ pre := {"output": {"oops": true}}
                     url: format!("file://{}", path.display()),
                     policy_path: None,
                     rule: None, // → data.mcp.test.pre
+                    timeout_ms: None,
                 }],
                 vec![],
             ),
@@ -1235,6 +1496,7 @@ pre := {"output": {"oops": true}}
                     url: "ftp://example.com/h.rego".to_string(),
                     policy_path: None,
                     rule: None,
+                    timeout_ms: None,
                 }],
                 vec![],
             ),
@@ -1260,11 +1522,13 @@ pre := {"output": {"oops": true}}
                     url: format!("file://{}", example.display()),
                     policy_path: None,
                     rule: None, // → data.mcp.fetch.pre
+                    timeout_ms: None,
                 }],
                 vec![HookSource {
                     url: format!("file://{}", example.display()),
                     policy_path: None,
                     rule: None, // → data.mcp.fetch.post
+                    timeout_ms: None,
                 }],
             ),
             "mcp/fetch",
@@ -1286,6 +1550,305 @@ pre := {"output": {"oops": true}}
         // Credentials in the query string are refused.
         let input = serde_json::json!({
             "url": "http://example.com/x?api_key=123",
+            "url_parsed": {"query": "api_key=123"},
+        });
+        match chain.run_pre(input).await.unwrap() {
+            PreOutcome::Deny(msg) => {
+                assert_eq!(msg, "denied by pre hook (credentials in query string)")
+            }
+            other => panic!("expected deny, got {:?}", other),
+        }
+
+        // The sensitive response header is stripped; others survive.
+        let input = serde_json::json!({"url": "https://example.com/x"});
+        let output = serde_json::json!({
+            "status": 200,
+            "headers": {"x-internal-trace": "t-1", "content-type": "text/plain"},
+        });
+        match chain.run_post(&input, output).await.unwrap() {
+            PostOutcome::Allow(v) => {
+                assert!(v["headers"].get("x-internal-trace").is_none());
+                assert_eq!(v["headers"]["content-type"], "text/plain");
+            }
+            other => panic!("expected allow, got {:?}", other),
+        }
+    }
+
+    // ── JavaScript hooks ─────────────────────────────────────────────────
+
+    static V8_INIT: std::sync::Once = std::sync::Once::new();
+
+    fn ensure_v8() {
+        V8_INIT.call_once(|| {
+            crate::engine::initialize_v8();
+        });
+    }
+
+    fn write_js(dir: &std::path::Path, name: &str, content: &str) -> std::path::PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, content).unwrap();
+        path
+    }
+
+    fn js_hook(path: &std::path::Path, timeout_ms: Option<u64>) -> HookSource {
+        HookSource {
+            url: format!("file://{}", path.display()),
+            policy_path: None,
+            rule: None,
+            timeout_ms,
+        }
+    }
+
+    #[tokio::test]
+    async fn js_pre_hook_mutates_denies_and_abstains() {
+        ensure_v8();
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_js(
+            dir.path(),
+            "hook.js",
+            r#"
+function pre(input) {
+    if (input.method === "TRACE") {
+        return { allow: false, reason: "TRACE forbidden" };
+    }
+    if (input.url.startsWith("http://")) {
+        return { input: { ...input, url: "https://" + input.url.slice(7) } };
+    }
+    // undefined = abstain
+}
+"#,
+        );
+        let chain = build_hook_chain(
+            "test",
+            &op_config(vec![], vec![js_hook(&path, None)], vec![]),
+            "mcp/test",
+            "data.mcp.test.allow",
+            CAPS_FULL,
+        )
+        .unwrap();
+
+        match chain
+            .run_pre(serde_json::json!({"url": "http://example.com/x", "method": "GET"}))
+            .await
+            .unwrap()
+        {
+            PreOutcome::Allow(v) => assert_eq!(v["url"], "https://example.com/x"),
+            other => panic!("expected allow, got {:?}", other),
+        }
+        match chain
+            .run_pre(serde_json::json!({"url": "https://example.com/x", "method": "TRACE"}))
+            .await
+            .unwrap()
+        {
+            PreOutcome::Deny(msg) => assert_eq!(msg, "denied by pre hook (TRACE forbidden)"),
+            other => panic!("expected deny, got {:?}", other),
+        }
+        // Abstain: input passes through untouched.
+        let input = serde_json::json!({"url": "https://ok.example/x", "method": "GET"});
+        match chain.run_pre(input.clone()).await.unwrap() {
+            PreOutcome::Allow(v) => assert_eq!(v, input),
+            other => panic!("expected allow, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn js_post_hook_sees_both_args_and_mutates_output() {
+        ensure_v8();
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_js(
+            dir.path(),
+            "hook.js",
+            r#"
+function post(input, output) {
+    if (input.method === "GET" && output.secret) {
+        const { secret, ...rest } = output;
+        return { output: { ...rest, redacted: true } };
+    }
+}
+"#,
+        );
+        let chain = build_hook_chain(
+            "test",
+            &op_config(vec![], vec![], vec![js_hook(&path, None)]),
+            "mcp/test",
+            "data.mcp.test.allow",
+            CAPS_FULL,
+        )
+        .unwrap();
+
+        let input = serde_json::json!({"method": "GET"});
+        match chain
+            .run_post(&input, serde_json::json!({"secret": "hunter2", "ok": 1}))
+            .await
+            .unwrap()
+        {
+            PostOutcome::Allow(v) => {
+                assert!(v.get("secret").is_none());
+                assert_eq!(v["redacted"], true);
+                assert_eq!(v["ok"], 1);
+            }
+            other => panic!("expected allow, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn js_hook_exception_fails_the_operation() {
+        ensure_v8();
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_js(
+            dir.path(),
+            "hook.js",
+            "function pre(input) { throw new Error('boom'); }\n",
+        );
+        let chain = build_hook_chain(
+            "test",
+            &op_config(vec![], vec![js_hook(&path, None)], vec![]),
+            "mcp/test",
+            "data.mcp.test.allow",
+            CAPS_FULL,
+        )
+        .unwrap();
+        let err = chain.run_pre(serde_json::json!({})).await.unwrap_err();
+        assert!(err.contains("boom"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn js_hook_missing_function_errors() {
+        ensure_v8();
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_js(dir.path(), "hook.js", "function unrelated() {}\n");
+        let chain = build_hook_chain(
+            "test",
+            &op_config(vec![], vec![js_hook(&path, None)], vec![]),
+            "mcp/test",
+            "data.mcp.test.allow",
+            CAPS_FULL,
+        )
+        .unwrap();
+        let err = chain.run_pre(serde_json::json!({})).await.unwrap_err();
+        assert!(err.contains("'pre' is not defined"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn js_hook_state_persists_across_calls() {
+        ensure_v8();
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_js(
+            dir.path(),
+            "hook.js",
+            r#"
+let calls = 0;
+function pre(input) {
+    calls += 1;
+    return { input: { ...input, call_number: calls } };
+}
+"#,
+        );
+        let chain = build_hook_chain(
+            "test",
+            &op_config(vec![], vec![js_hook(&path, None)], vec![]),
+            "mcp/test",
+            "data.mcp.test.allow",
+            CAPS_FULL,
+        )
+        .unwrap();
+
+        for expected in 1..=3 {
+            match chain.run_pre(serde_json::json!({})).await.unwrap() {
+                PreOutcome::Allow(v) => assert_eq!(v["call_number"], expected),
+                other => panic!("expected allow, got {:?}", other),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn js_hook_timeout_terminates_and_worker_recovers() {
+        ensure_v8();
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_js(
+            dir.path(),
+            "hook.js",
+            r#"
+function pre(input) {
+    if (input.spin) { for (;;) {} }
+    return true;
+}
+"#,
+        );
+        let chain = build_hook_chain(
+            "test",
+            &op_config(vec![], vec![js_hook(&path, Some(250))], vec![]),
+            "mcp/test",
+            "data.mcp.test.allow",
+            CAPS_FULL,
+        )
+        .unwrap();
+
+        let err = chain
+            .run_pre(serde_json::json!({"spin": true}))
+            .await
+            .unwrap_err();
+        assert!(err.contains("timed out"), "got: {err}");
+
+        // The isolate was terminated and resumed; the next call works.
+        match chain.run_pre(serde_json::json!({"spin": false})).await.unwrap() {
+            PreOutcome::Allow(_) => {}
+            other => panic!("expected allow after recovery, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn js_hook_returning_promise_is_an_error() {
+        ensure_v8();
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_js(
+            dir.path(),
+            "hook.js",
+            "function pre(input) { return Promise.resolve(true); }\n",
+        );
+        let chain = build_hook_chain(
+            "test",
+            &op_config(vec![], vec![js_hook(&path, None)], vec![]),
+            "mcp/test",
+            "data.mcp.test.allow",
+            CAPS_FULL,
+        )
+        .unwrap();
+        let err = chain.run_pre(serde_json::json!({})).await.unwrap_err();
+        assert!(err.contains("must be synchronous"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn shipped_fetch_hooks_js_example_works() {
+        ensure_v8();
+        let example = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../policies/fetch_hooks.js");
+        let chain = build_hook_chain(
+            "fetch",
+            &op_config(
+                vec![],
+                vec![js_hook(&example, None)],
+                vec![js_hook(&example, None)],
+            ),
+            "mcp/fetch",
+            "data.mcp.fetch.allow",
+            CAPS_FULL,
+        )
+        .unwrap();
+
+        // http:// is upgraded to https://.
+        let input = serde_json::json!({
+            "url": "http://example.com/x",
+            "url_parsed": {"query": ""},
+        });
+        match chain.run_pre(input).await.unwrap() {
+            PreOutcome::Allow(v) => assert_eq!(v["url"], "https://example.com/x"),
+            other => panic!("expected allow, got {:?}", other),
+        }
+
+        // Credentials in the query string are refused.
+        let input = serde_json::json!({
+            "url": "https://example.com/x?api_key=123",
             "url_parsed": {"query": "api_key=123"},
         });
         match chain.run_pre(input).await.unwrap() {
@@ -1346,6 +1909,7 @@ pre := {"output": {"oops": true}}
                     url: format!("http://{}", addr),
                     policy_path: None, // → mcp/test/pre
                     rule: None,
+                    timeout_ms: None,
                 }],
                 vec![],
             ),

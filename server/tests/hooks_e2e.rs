@@ -156,6 +156,7 @@ allow if {
             url: hook_url,
             policy_path: None,
             rule: None, // → data.mcp.fetch.pre
+            timeout_ms: None,
         }],
         ..Default::default()
     };
@@ -217,6 +218,7 @@ pre := {"allow": false, "reason": "mutating methods are frozen"} if {
             url: hook_url,
             policy_path: None,
             rule: None,
+            timeout_ms: None,
         }],
         ..Default::default()
     };
@@ -286,6 +288,7 @@ post := {"output": patched} if {
             url: post_url,
             policy_path: None,
             rule: None, // → data.mcp.fetch.post
+            timeout_ms: None,
         }],
         ..Default::default()
     };
@@ -375,6 +378,7 @@ allow if {{
             url: hook_url,
             policy_path: None,
             rule: None, // → data.mcp.filesystem.pre
+            timeout_ms: None,
         }],
         ..Default::default()
     };
@@ -407,6 +411,89 @@ allow if {{
     );
 }
 
+// ── fetch: JavaScript hooks (file://*.js) ───────────────────────────────────
+
+/// A JS pre hook rewrites `/blocked` to `/echo` and injects a header; a JS
+/// post hook stamps the response. Same flow as the Rego tests, in JavaScript.
+#[tokio::test]
+async fn fetch_js_hooks_rewrite_request_and_response() {
+    ensure_v8();
+    let base = start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+
+    let hook_url = write_rego(
+        dir.path(),
+        "hooks.js",
+        r#"
+function pre(input) {
+    if (input.method !== "GET") {
+        return { allow: false, reason: "read-only" };
+    }
+    if (input.url.endsWith("/blocked")) {
+        return {
+            input: {
+                ...input,
+                url: input.url.replace("/blocked", "/echo"),
+                headers: { ...input.headers, "x-hooked": "js" },
+            },
+        };
+    }
+}
+
+function post(input, output) {
+    return { output: { ...output, headers: { ...output.headers, "x-post-hooked": "js" } } };
+}
+"#,
+    );
+
+    let op = OperationPolicies {
+        pre: vec![HookSource {
+            url: hook_url.clone(),
+            policy_path: None,
+            rule: None, // → function pre()
+            timeout_ms: None,
+        }],
+        post: vec![HookSource {
+            url: hook_url,
+            policy_path: None,
+            rule: None, // → function post()
+            timeout_ms: None,
+        }],
+        ..Default::default()
+    };
+    let chain = build_hook_chain(
+        "fetch",
+        &op,
+        "mcp/fetch",
+        "data.mcp.fetch.allow",
+        HookCaps {
+            input_mutation: true,
+            post: true,
+        },
+    )
+    .unwrap();
+    let engine = build_engine().with_fetch_config(FetchConfig::new_with_hooks(Arc::new(chain)));
+
+    // The JS pre hook rewrites the path and injects the header; the JS post
+    // hook stamps the response.
+    let out = eval(
+        &engine,
+        format!(
+            r#"fetch("{base}/blocked").then(async r => (await r.text()) + " post=" + r.headers.get("x-post-hooked"))"#
+        ),
+    )
+    .await;
+    assert_eq!(out, "echo hooked=js post=js");
+
+    // Non-GET is denied by the JS hook with its reason.
+    let out = eval(
+        &engine,
+        format!(r#"fetch("{base}/echo", {{method: "POST"}}).then(r => r.text())"#),
+    )
+    .await;
+    assert!(out.contains("denied by pre hook (read-only)"), "got: {out}");
+}
+
 // ── gate-only op refuses mutation ───────────────────────────────────────────
 
 #[tokio::test]
@@ -426,6 +513,7 @@ pre := {"input": object.union(input, {"url": "wss://elsewhere"})}
             url: hook_url,
             policy_path: None,
             rule: None,
+            timeout_ms: None,
         }],
         ..Default::default()
     };
