@@ -157,6 +157,7 @@ allow if {
             policy_path: None,
             rule: None, // → data.mcp.fetch.pre
             timeout_ms: None,
+            capabilities: None,
         }],
         ..Default::default()
     };
@@ -219,6 +220,7 @@ pre := {"allow": false, "reason": "mutating methods are frozen"} if {
             policy_path: None,
             rule: None,
             timeout_ms: None,
+            capabilities: None,
         }],
         ..Default::default()
     };
@@ -289,6 +291,7 @@ post := {"output": patched} if {
             policy_path: None,
             rule: None, // → data.mcp.fetch.post
             timeout_ms: None,
+            capabilities: None,
         }],
         ..Default::default()
     };
@@ -379,6 +382,7 @@ allow if {{
             policy_path: None,
             rule: None, // → data.mcp.filesystem.pre
             timeout_ms: None,
+            capabilities: None,
         }],
         ..Default::default()
     };
@@ -441,6 +445,7 @@ function pre(input) {
             policy_path: None,
             rule: None,
             timeout_ms: None,
+            capabilities: None,
         }],
         ..Default::default()
     };
@@ -512,12 +517,14 @@ function post(input, output) {
             policy_path: None,
             rule: None, // → function pre()
             timeout_ms: None,
+            capabilities: None,
         }],
         post: vec![HookSource {
             url: hook_url,
             policy_path: None,
             rule: None, // → function post()
             timeout_ms: None,
+            capabilities: None,
         }],
         ..Default::default()
     };
@@ -554,6 +561,83 @@ function post(input, output) {
     assert!(out.contains("denied by pre hook (read-only)"), "got: {out}");
 }
 
+// ── fs: capability-bearing JS hook audits writes to a log file ──────────────
+
+/// A JS pre hook granted the `fs` capability appends an audit line for every
+/// guest write, then abstains — the guest's own operations run unchanged.
+/// The hook's `fs.appendFile` is ungated (no recursion into the chain).
+#[tokio::test]
+async fn fs_js_hook_with_fs_capability_audits_guest_writes() {
+    ensure_v8();
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path().join("data");
+    std::fs::create_dir(&data_dir).unwrap();
+    let data_dir_str = data_dir.to_string_lossy().into_owned();
+    let log_path = dir.path().join("audit.log");
+
+    let hook_url = write_rego(
+        dir.path(),
+        "audit.js",
+        &format!(
+            r#"
+const LOG = {log:?};
+async function pre(input) {{
+    if (["writeFile", "appendFile", "rename", "remove"].includes(input.operation)) {{
+        await fs.appendFile(LOG, input.operation + " " + input.path + "\n");
+    }}
+    // No return value: the hook observes and abstains.
+}}
+"#,
+            log = log_path.to_string_lossy(),
+        ),
+    );
+
+    let op = OperationPolicies {
+        pre: vec![HookSource {
+            url: hook_url,
+            policy_path: None,
+            rule: None,
+            timeout_ms: None,
+            capabilities: Some(vec!["fs".to_string()]),
+        }],
+        ..Default::default()
+    };
+    let chain = build_hook_chain(
+        "filesystem",
+        &op,
+        "mcp/filesystem",
+        "data.mcp.filesystem.allow",
+        HookCaps {
+            input_mutation: true,
+            post: false,
+        },
+    )
+    .unwrap();
+    let engine = build_engine().with_fs_config(FsConfig::new_with_hooks(Arc::new(chain)));
+
+    // The guest writes two files; both succeed and both are audited.
+    let out = eval(
+        &engine,
+        format!(
+            r#"fs.writeFile("{data_dir_str}/one.txt", "1")
+                .then(() => fs.writeFile("{data_dir_str}/two.txt", "2"))
+                .then(() => fs.readFile("{data_dir_str}/one.txt", "utf8"))"#
+        ),
+    )
+    .await;
+    assert_eq!(out, "1");
+    assert!(data_dir.join("two.txt").exists());
+
+    let log = std::fs::read_to_string(&log_path).unwrap();
+    assert_eq!(
+        log,
+        format!(
+            "writeFile {data_dir_str}/one.txt\nwriteFile {data_dir_str}/two.txt\n"
+        ),
+        "reads are not audited, writes are"
+    );
+}
+
 // ── gate-only op refuses mutation ───────────────────────────────────────────
 
 #[tokio::test]
@@ -574,6 +658,7 @@ pre := {"input": object.union(input, {"url": "wss://elsewhere"})}
             policy_path: None,
             rule: None,
             timeout_ms: None,
+            capabilities: None,
         }],
         ..Default::default()
     };

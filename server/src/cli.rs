@@ -613,7 +613,7 @@ pub struct Cli {
     /// Example: --policies-json '{"fetch":{"policies":[{"url":"file:///path/to/fetch.rego"}]}}'
     ///
     /// Schema per operation: { "mode": "all"|"any", "policies": [{"url": "...", "policy_path": "...", "rule": "..."}], "pre": [{"url": "...", ...}], "post": [{"url": "...", ...}] }.
-    /// Hook sources: file://*.rego (Rego rule; "rule" names it), file://*.js (JavaScript in a bare capability-free V8 isolate — "rule" names the function, default pre/post; "timeout_ms" bounds a call, default 5000), or http(s):// (OPA-style REST).
+    /// Hook sources: file://*.rego (Rego rule; "rule" names it), file://*.js (JavaScript in its own V8 isolate — "rule" names the function, default pre/post; "timeout_ms" bounds a call, default 5000; hooks may be async; "capabilities": ["fs","fetch"] grants the guest environment's APIs, ungated, for observing hooks like write-audit logs), or http(s):// (OPA-style REST).
     /// A hook evaluates to a bool, or to {"allow": bool, "reason": "...", "input"|"output": {...}} to deny or rewrite; an undefined result abstains.
     /// Input mutation applies to fetch, filesystem, subprocess, mcp_tools, and run_js_file; post hooks to fetch, subprocess, and mcp_tools.
     #[arg(

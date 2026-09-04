@@ -79,6 +79,16 @@ pub struct HookSource {
     /// (JS only) per-call timeout in milliseconds; a hook still running when
     /// it expires is terminated and the operation fails. Default 5000.
     pub timeout_ms: Option<u64>,
+    /// (JS only) host capabilities granted to the hook's isolate, expressed
+    /// with the same APIs the sandboxed guest sees: `"fs"` (the `fs.*`
+    /// wrapper) and `"fetch"` (the `fetch()` wrapper). Default: none — the
+    /// hook is pure computation. Capability-bearing hooks may be `async`.
+    ///
+    /// Hook-issued operations are **ungated**: they run through no hook chain
+    /// and no policy, both because the hook file is operator-trusted config
+    /// (the same trust as the policy files themselves) and because gating
+    /// them would recurse into the very chain the hook runs inside.
+    pub capabilities: Option<Vec<String>>,
 }
 
 /// What the operation's executor supports; enforced at build/run time.
@@ -374,20 +384,32 @@ impl RemoteHookEvaluator {
 ///
 /// Return semantics match Rego hooks: `undefined`/`null` abstains, a bool
 /// allows/denies, and `{allow, reason, input|output}` denies or rewrites.
+/// A hook may be `async` (or return a Promise): the worker drives the
+/// isolate's event loop until it settles, still bounded by the timeout.
 ///
 /// The isolate is created lazily on a dedicated worker thread (never on an
 /// executing sandbox's isolate thread) and kept warm across calls, so
 /// top-level state in the hook file persists — deliberately, for counters
-/// and caches. It has **no host capabilities**: no `fetch`, no `fs`, no ops
-/// — a JS hook is pure computation over its arguments. Hooks must be
-/// synchronous; returning a Promise is an error. A call that exceeds the
-/// timeout is terminated via V8 and fails the operation (fail closed).
+/// and caches. By default it has **no host capabilities** — no `fetch`, no
+/// `fs`, no ops; a JS hook is pure computation over its arguments. The
+/// source's `capabilities` list opts into pieces of the guest environment,
+/// with the same JS API the sandbox sees: `"fs"` installs the `fs.*`
+/// wrapper, `"fetch"` installs `fetch()` (plus `atob`/`btoa`). Hook-issued
+/// operations run through no hook chain and no policy: the hook file is
+/// operator-trusted config, and gating them would recurse into the chain
+/// the hook runs inside.
+///
+/// A call that exceeds the timeout fails the operation (fail closed):
+/// running script is terminated via V8's thread-safe handle, and a call
+/// parked on a pending host op (a hung `fetch`) is abandoned by the
+/// worker's own event-loop timeout.
 #[derive(Debug)]
 pub struct LocalJsHookEvaluator {
     path: String,
     source: String,
     function: String,
     timeout: std::time::Duration,
+    capabilities: Vec<String>,
     worker: std::sync::Mutex<Option<Result<JsWorker, String>>>,
 }
 
@@ -408,13 +430,27 @@ struct JsCall {
     respond: tokio::sync::oneshot::Sender<Result<Option<Value>, String>>,
 }
 
+/// Capabilities a JS hook isolate can be granted.
+const JS_HOOK_CAPABILITIES: &[&str] = &["fs", "fetch"];
+
 impl LocalJsHookEvaluator {
     pub fn from_file<P: AsRef<Path>>(
         path: P,
         function: String,
         timeout_ms: u64,
+        capabilities: Vec<String>,
     ) -> Result<Self, String> {
         let path = path.as_ref();
+        for cap in &capabilities {
+            if !JS_HOOK_CAPABILITIES.contains(&cap.as_str()) {
+                return Err(format!(
+                    "JS hook '{}': unknown capability '{}' (supported: {})",
+                    path.display(),
+                    cap,
+                    JS_HOOK_CAPABILITIES.join(", ")
+                ));
+            }
+        }
         let source = std::fs::read_to_string(path)
             .map_err(|e| format!("Failed to read JS hook file '{}': {}", path.display(), e))?;
         Ok(Self {
@@ -422,6 +458,7 @@ impl LocalJsHookEvaluator {
             source,
             function,
             timeout: std::time::Duration::from_millis(timeout_ms),
+            capabilities,
             worker: std::sync::Mutex::new(None),
         })
     }
@@ -440,9 +477,13 @@ impl LocalJsHookEvaluator {
             let source = self.source.clone();
             let path = self.path.clone();
             let function = self.function.clone();
+            let capabilities = self.capabilities.clone();
+            let timeout = self.timeout;
             let spawned = std::thread::Builder::new()
                 .name("js-hook".to_string())
-                .spawn(move || js_hook_worker(source, path, function, rx, setup_tx));
+                .spawn(move || {
+                    js_hook_worker(source, path, function, capabilities, timeout, rx, setup_tx)
+                });
             let setup = match spawned {
                 Err(e) => Err(format!("Failed to spawn JS hook thread: {}", e)),
                 Ok(_) => match setup_rx.recv_timeout(std::time::Duration::from_secs(10)) {
@@ -471,7 +512,12 @@ impl LocalJsHookEvaluator {
             .tx
             .send(JsCall { args, respond })
             .map_err(|_| format!("JS hook '{}' worker is no longer running", self.path))?;
-        match tokio::time::timeout(self.timeout, rx).await {
+        // The worker's own event-loop timeout fires at `self.timeout` for a
+        // call parked on host ops; the grace period here lets that cleaner
+        // path win. A pure-JS spin blocks the worker thread outright, so this
+        // caller-side terminate is what unsticks it.
+        let grace = self.timeout + std::time::Duration::from_millis(500);
+        match tokio::time::timeout(grace, rx).await {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => Err(format!(
                 "JS hook '{}' worker terminated unexpectedly",
@@ -489,28 +535,86 @@ impl LocalJsHookEvaluator {
     }
 }
 
-/// Worker-thread body: create the isolate, evaluate the hook file once, then
-/// serve calls until every sender is dropped.
+/// Worker-thread body: create the isolate with the granted capabilities,
+/// evaluate the hook file once, then serve calls until every sender is
+/// dropped. All JS execution happens under a current-thread tokio runtime —
+/// deno_core's op machinery (deno_unsync) requires one to drive async ops.
 fn js_hook_worker(
     source: String,
     path: String,
     function: String,
+    capabilities: Vec<String>,
+    timeout: std::time::Duration,
     rx: std::sync::mpsc::Receiver<JsCall>,
     setup_tx: std::sync::mpsc::Sender<Result<deno_core::v8::IsolateHandle, String>>,
 ) {
-    let mut runtime = deno_core::JsRuntime::new(deno_core::RuntimeOptions::default());
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            let _ = setup_tx.send(Err(format!(
+                "JS hook '{}': failed to build worker runtime: {}",
+                path, e
+            )));
+            return;
+        }
+    };
+
+    let has = |c: &str| capabilities.iter().any(|x| x == c);
+    let mut extensions: Vec<deno_core::Extension> = Vec::new();
+    if has("fs") {
+        extensions.push(super::fs::create_extension());
+    }
+    if has("fetch") {
+        extensions.push(super::fetch::create_extension());
+    }
+    let mut runtime = deno_core::JsRuntime::new(deno_core::RuntimeOptions {
+        extensions,
+        ..Default::default()
+    });
     let handle = runtime.v8_isolate().thread_safe_handle();
-    if let Err(e) = runtime.execute_script("<js-hook>", source) {
-        let _ = setup_tx.send(Err(format!(
-            "Failed to evaluate JS hook '{}': {}",
-            path, e
-        )));
+
+    // Grant capabilities with the same wrappers the guest sandbox gets, but
+    // over permissive chains: hook-issued operations are ungated (see the
+    // struct docs — trusted config code, and gating would recurse).
+    let setup: Result<(), String> = rt.block_on(async {
+        if has("fs") {
+            runtime.op_state().borrow_mut().put(super::fs::FsConfig::new_with_hooks(
+                Arc::new(HookChain::permissive("filesystem")),
+            ));
+            super::fs::inject_fs(&mut runtime)?;
+        }
+        if has("fetch") {
+            runtime
+                .op_state()
+                .borrow_mut()
+                .put(super::fetch::FetchConfig::new_with_hooks(Arc::new(
+                    HookChain::permissive("fetch"),
+                )));
+            super::console::inject_base64(&mut runtime)?;
+            super::fetch::inject_fetch(&mut runtime)?;
+        }
+        runtime
+            .execute_script("<js-hook>", source)
+            .map_err(|e| format!("Failed to evaluate JS hook '{}': {}", path, e))?;
+        Ok(())
+    });
+    if let Err(e) = setup {
+        let _ = setup_tx.send(Err(e));
         return;
     }
     let _ = setup_tx.send(Ok(handle));
 
     for call in rx {
-        let result = js_hook_call(&mut runtime, &function, &call.args, &path);
+        let result = rt.block_on(js_hook_call(
+            &mut runtime,
+            &function,
+            &call.args,
+            &path,
+            timeout,
+        ));
         // A timed-out call leaves the isolate in the terminated state (the
         // flag outlives the aborted script); clear it so later calls work.
         if result.is_err() {
@@ -520,11 +624,12 @@ fn js_hook_worker(
     }
 }
 
-fn js_hook_call(
+async fn js_hook_call(
     runtime: &mut deno_core::JsRuntime,
     function: &str,
     args: &[Value],
     path: &str,
+    timeout: std::time::Duration,
 ) -> Result<Option<Value>, String> {
     use deno_core::v8;
 
@@ -555,16 +660,26 @@ fn js_hook_call(
         .execute_script("<js-hook-call>", script)
         .map_err(|e| format!("JS hook '{}' failed: {}", path, e))?;
 
+    // An async hook returns a Promise: drive the event loop until it
+    // settles, bounded by the timeout (a pure-JS spin never reaches here —
+    // the caller's terminate handles that case).
+    let is_promise = {
+        deno_core::scope!(scope, runtime);
+        v8::Local::new(scope, &result).is_promise()
+    };
+    let settled = if is_promise {
+        tokio::time::timeout(timeout, runtime.resolve_value(result))
+            .await
+            .map_err(|_| format!("JS hook '{}' timed out after {:?}", path, timeout))?
+            .map_err(|e| format!("JS hook '{}' failed: {}", path, e))?
+    } else {
+        result
+    };
+
     deno_core::scope!(scope, runtime);
-    let local = v8::Local::new(scope, result);
+    let local = v8::Local::new(scope, settled);
     if local.is_undefined() || local.is_null() {
         return Ok(None);
-    }
-    if local.is_promise() {
-        return Err(format!(
-            "JS hook '{}' returned a Promise; hooks must be synchronous",
-            path
-        ));
     }
     deno_core::serde_v8::from_v8::<Value>(scope, local)
         .map(Some)
@@ -758,6 +873,15 @@ fn build_hook(
     default_local_rule: &str,
     phase: &Phase,
 ) -> Result<Hook, String> {
+    let is_js = source.url.strip_prefix("file://").is_some_and(|p| {
+        Path::new(p).extension().and_then(|x| x.to_str()) == Some("js")
+    });
+    if !is_js && source.capabilities.is_some() {
+        return Err(format!(
+            "Hook '{}': 'capabilities' is only supported for JavaScript (file://*.js) hooks",
+            source.url
+        ));
+    }
     if source.url.starts_with("http://") || source.url.starts_with("https://") {
         let policy_path = source
             .policy_path
@@ -769,7 +893,7 @@ fn build_hook(
         )))
     } else if let Some(file_path) = source.url.strip_prefix("file://") {
         let path = Path::new(file_path);
-        if path.extension().and_then(|x| x.to_str()) == Some("js") {
+        if is_js {
             // JS hook: `rule` names the global function, defaulting to the
             // phase name ("pre" / "post").
             let function = source.rule.clone().unwrap_or_else(|| {
@@ -780,8 +904,9 @@ fn build_hook(
                 .to_string()
             });
             let timeout_ms = source.timeout_ms.unwrap_or(JS_HOOK_DEFAULT_TIMEOUT_MS);
+            let capabilities = source.capabilities.clone().unwrap_or_default();
             return Ok(Hook::LocalJs(LocalJsHookEvaluator::from_file(
-                path, function, timeout_ms,
+                path, function, timeout_ms, capabilities,
             )?));
         }
         let rule = source
@@ -904,6 +1029,7 @@ mod tests {
             policy_path: None,
             rule: Some(rule.to_string()),
             timeout_ms: None,
+            capabilities: None,
         }
     }
 
@@ -1472,6 +1598,7 @@ pre := {"output": {"oops": true}}
                     policy_path: None,
                     rule: None, // → data.mcp.test.pre
                     timeout_ms: None,
+                    capabilities: None,
                 }],
                 vec![],
             ),
@@ -1497,6 +1624,7 @@ pre := {"output": {"oops": true}}
                     policy_path: None,
                     rule: None,
                     timeout_ms: None,
+                    capabilities: None,
                 }],
                 vec![],
             ),
@@ -1523,12 +1651,14 @@ pre := {"output": {"oops": true}}
                     policy_path: None,
                     rule: None, // → data.mcp.fetch.pre
                     timeout_ms: None,
+                    capabilities: None,
                 }],
                 vec![HookSource {
                     url: format!("file://{}", example.display()),
                     policy_path: None,
                     rule: None, // → data.mcp.fetch.post
                     timeout_ms: None,
+                    capabilities: None,
                 }],
             ),
             "mcp/fetch",
@@ -1596,6 +1726,7 @@ pre := {"output": {"oops": true}}
             policy_path: None,
             rule: None,
             timeout_ms,
+            capabilities: None,
         }
     }
 
@@ -1798,13 +1929,18 @@ function pre(input) {
     }
 
     #[tokio::test]
-    async fn js_hook_returning_promise_is_an_error() {
+    async fn js_hook_may_be_async() {
         ensure_v8();
         let dir = tempfile::tempdir().unwrap();
         let path = write_js(
             dir.path(),
             "hook.js",
-            "function pre(input) { return Promise.resolve(true); }\n",
+            r#"
+async function pre(input) {
+    if (input.block) return { allow: false, reason: "async deny" };
+    return { input: { ...input, tagged: true } };
+}
+"#,
         );
         let chain = build_hook_chain(
             "test",
@@ -1814,8 +1950,125 @@ function pre(input) {
             CAPS_FULL,
         )
         .unwrap();
-        let err = chain.run_pre(serde_json::json!({})).await.unwrap_err();
-        assert!(err.contains("must be synchronous"), "got: {err}");
+        match chain.run_pre(serde_json::json!({"block": false})).await.unwrap() {
+            PreOutcome::Allow(v) => assert_eq!(v["tagged"], true),
+            other => panic!("expected allow, got {:?}", other),
+        }
+        match chain.run_pre(serde_json::json!({"block": true})).await.unwrap() {
+            PreOutcome::Deny(msg) => assert_eq!(msg, "denied by pre hook (async deny)"),
+            other => panic!("expected deny, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn js_hook_with_fs_capability_writes_audit_log() {
+        ensure_v8();
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("audit.log");
+        let path = write_js(
+            dir.path(),
+            "hook.js",
+            &format!(
+                r#"
+const LOG = {log:?};
+async function pre(input) {{
+    await fs.appendFile(LOG, input.operation + " " + input.path + "\n");
+    // abstain: observe, don't gate
+}}
+"#,
+                log = log_path.to_string_lossy(),
+            ),
+        );
+        let mut source = js_hook(&path, None);
+        source.capabilities = Some(vec!["fs".to_string()]);
+        let chain = build_hook_chain(
+            "filesystem",
+            &op_config(vec![], vec![source], vec![]),
+            "mcp/filesystem",
+            "data.mcp.filesystem.allow",
+            CAPS_FULL,
+        )
+        .unwrap();
+
+        for (op, p) in [("writeFile", "/data/a.txt"), ("readFile", "/data/b.txt")] {
+            match chain
+                .run_pre(serde_json::json!({"operation": op, "path": p}))
+                .await
+                .unwrap()
+            {
+                PreOutcome::Allow(_) => {}
+                other => panic!("expected allow, got {:?}", other),
+            }
+        }
+        let log = std::fs::read_to_string(&log_path).unwrap();
+        assert_eq!(log, "writeFile /data/a.txt\nreadFile /data/b.txt\n");
+    }
+
+    #[tokio::test]
+    async fn js_hook_unknown_capability_is_a_startup_error() {
+        ensure_v8();
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_js(dir.path(), "hook.js", "function pre(input) {}\n");
+        let mut source = js_hook(&path, None);
+        source.capabilities = Some(vec!["subprocess".to_string()]);
+        let err = build_hook_chain(
+            "test",
+            &op_config(vec![], vec![source], vec![]),
+            "mcp/test",
+            "data.mcp.test.allow",
+            CAPS_FULL,
+        )
+        .unwrap_err();
+        assert!(err.contains("unknown capability 'subprocess'"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn capabilities_on_rego_hook_is_a_startup_error() {
+        ensure_v8();
+        let dir = tempfile::tempdir().unwrap();
+        let rego = dir.path().join("hook.rego");
+        std::fs::write(&rego, "package mcp.test\n").unwrap();
+        let mut source = js_hook(&rego, None);
+        source.capabilities = Some(vec!["fs".to_string()]);
+        let err = build_hook_chain(
+            "test",
+            &op_config(vec![], vec![source], vec![]),
+            "mcp/test",
+            "data.mcp.test.allow",
+            CAPS_FULL,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("only supported for JavaScript"),
+            "got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn shipped_audit_fs_hooks_js_example_evaluates() {
+        ensure_v8();
+        let example = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../policies/audit_fs_hooks.js");
+        let mut source = js_hook(&example, None);
+        source.capabilities = Some(vec!["fs".to_string()]);
+        let chain = build_hook_chain(
+            "filesystem",
+            &op_config(vec![], vec![source], vec![]),
+            "mcp/filesystem",
+            "data.mcp.filesystem.allow",
+            CAPS_FULL,
+        )
+        .unwrap();
+        // A read op is not audited (no fs access), so this exercises the
+        // example's eval + call path without touching its log location.
+        match chain
+            .run_pre(serde_json::json!({"operation": "readFile", "path": "/x"}))
+            .await
+            .unwrap()
+        {
+            PreOutcome::Allow(_) => {}
+            other => panic!("expected allow, got {:?}", other),
+        }
     }
 
     #[tokio::test]
@@ -1910,6 +2163,7 @@ function pre(input) {
                     policy_path: None, // → mcp/test/pre
                     rule: None,
                     timeout_ms: None,
+                    capabilities: None,
                 }],
                 vec![],
             ),

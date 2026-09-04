@@ -131,7 +131,35 @@ function post(input, output) {
 }
 ```
 
-Each JS hook file runs in its own **bare V8 isolate with no host capabilities** — no `fetch`, no `fs`, no ops of any kind; a hook is pure computation over its arguments. The isolate lives on a dedicated worker thread (never a sandbox's isolate thread) and stays warm across calls, so top-level state in the file persists — deliberately, for counters and caches; calls through one evaluator are serialized. Hooks must be synchronous (returning a Promise is an error), and each call is bounded by a timeout (`timeout_ms` per source, default 5000 ms) after which the script is terminated and the operation fails closed.
+Each JS hook file runs in its own V8 isolate on a dedicated worker thread (never a sandbox's isolate thread), kept warm across calls so top-level state in the file persists — deliberately, for counters and caches; calls through one evaluator are serialized. By default the isolate is **bare** — no `fetch`, no `fs`, no ops of any kind; a hook is pure computation over its arguments. Each call is bounded by a timeout (`timeout_ms` per source, default 5000 ms) after which the script is terminated and the operation fails closed.
+
+Hooks may be `async` (or return a Promise): the worker drives the isolate's event loop until the result settles, still under the same timeout.
+
+#### Hook capabilities
+
+A JS hook source can opt into pieces of the guest environment via `capabilities`, expressed with the same JS APIs the sandbox sees — `"fs"` installs the `fs.*` wrapper, `"fetch"` installs `fetch()` (plus `atob`/`btoa`). This is how you write observing hooks with side effects — for example, auditing every filesystem write to a log file:
+
+```json
+{"filesystem": {"pre": [{"url": "file:///etc/policies/audit_fs_hooks.js",
+                          "capabilities": ["fs"]}]}}
+```
+
+```js
+const LOG = "/var/log/mcp-js/fs-audit.log";
+async function pre(input) {
+    if (["writeFile", "appendFile", "rename", "remove"].includes(input.operation)) {
+        await fs.appendFile(LOG, input.operation + " " + input.path + "\n");
+    }
+    // no return value: observe and abstain
+}
+```
+
+Two properties to understand before granting capabilities:
+
+- **Hook-issued operations are ungated.** The hook's `fs`/`fetch` run through no hook chain and no policy — the hook file is operator-trusted configuration (the same trust level as the policy files themselves), and gating its operations would recurse into the very chain the hook runs inside (the audit hook above would trigger itself on every `appendFile`).
+- **The timeout still applies end to end**, including time spent awaiting hook-issued I/O: a hung `fetch` inside a hook fails the guest operation closed when `timeout_ms` expires.
+
+The shipped example [`policies/audit_fs_hooks.js`](https://github.com/r33drichards/mcp-js/blob/main/policies/audit_fs_hooks.js) is a complete write-audit hook.
 
 The `--policies-json` config for the example above is the same as any other hook source:
 
