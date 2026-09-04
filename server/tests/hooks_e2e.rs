@@ -411,6 +411,66 @@ allow if {{
     );
 }
 
+// ── fs: a hook that drops `destination` fails the operation ─────────────────
+
+#[tokio::test]
+async fn fs_hook_dropping_destination_fails_closed() {
+    ensure_v8();
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path().join("data");
+    std::fs::create_dir(&data_dir).unwrap();
+    std::fs::write(data_dir.join("a.txt"), "x").unwrap();
+    let data_dir_str = data_dir.to_string_lossy().into_owned();
+
+    // A buggy hook that rebuilds the input without `destination`.
+    let hook_url = write_rego(
+        dir.path(),
+        "hooks.js",
+        r#"
+function pre(input) {
+    if (input.operation === "rename") {
+        const { destination, ...rest } = input;
+        return { input: rest };
+    }
+}
+"#,
+    );
+    let op = OperationPolicies {
+        pre: vec![HookSource {
+            url: hook_url,
+            policy_path: None,
+            rule: None,
+            timeout_ms: None,
+        }],
+        ..Default::default()
+    };
+    let chain = build_hook_chain(
+        "filesystem",
+        &op,
+        "mcp/filesystem",
+        "data.mcp.filesystem.allow",
+        HookCaps {
+            input_mutation: true,
+            post: false,
+        },
+    )
+    .unwrap();
+    let engine = build_engine().with_fs_config(FsConfig::new_with_hooks(Arc::new(chain)));
+
+    let out = eval(
+        &engine,
+        format!(r#"fs.rename("{data_dir_str}/a.txt", "{data_dir_str}/b.txt")"#),
+    )
+    .await;
+    assert!(
+        out.starts_with("ERROR:") && out.contains("pre hook removed 'destination'"),
+        "got: {out}"
+    );
+    // The operation did not run: the source file is untouched.
+    assert!(data_dir.join("a.txt").exists());
+    assert!(!data_dir.join("b.txt").exists());
+}
+
 // ── fetch: JavaScript hooks (file://*.js) ───────────────────────────────────
 
 /// A JS pre hook rewrites `/blocked` to `/echo` and injects a header; a JS

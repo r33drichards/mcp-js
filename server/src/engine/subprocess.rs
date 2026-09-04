@@ -183,7 +183,10 @@ async fn op_subprocess_exec(
             "encoding": encoding,
         });
 
-        run_post_hooks(&hooks, "exec", &command, &eff_input, result).await
+        // Post-hook messages name what actually ran: the effective shell
+        // command a pre hook may have rewritten, not the original string.
+        let effective_display = eff.args.get(1).cloned().unwrap_or_else(|| eff.command.clone());
+        run_post_hooks(&hooks, "exec", &effective_display, &eff_input, result).await
     })
     .await
     .map_err(|e| JsErrorBox::generic(format!("subprocess task join error: {}", e)))?

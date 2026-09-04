@@ -519,6 +519,8 @@ async fn op_fs_symlink(
         let eff = check_policy(&config.hooks, "symlink", &link, Some(&target), None, None, config.mcp_headers.as_ref())
             .await
             .map_err(JsErrorBox::generic)?;
+        // check_policy fails closed if a hook dropped `destination`, so this
+        // fallback never rewrites the operation.
         let (link, target) = (eff.path, eff.destination.unwrap_or(target));
         m.0.lock().await.symlink(Path::new(&target), Path::new(&link)).await
             .map_err(|e| JsErrorBox::generic(format!("fs.symlink: {} -> {}: {}", link, target, e)))?;
@@ -527,6 +529,8 @@ async fn op_fs_symlink(
 
     tokio::spawn(async move {
         let eff = check_policy(&config.hooks, "symlink", &link, Some(&target), None, None, config.mcp_headers.as_ref()).await?;
+        // check_policy fails closed if a hook dropped `destination`, so this
+        // fallback never rewrites the operation.
         let (link, target) = (eff.path, eff.destination.unwrap_or(target));
 
         symlink_impl(&target, &link).await
@@ -653,6 +657,8 @@ async fn op_fs_rename(
         let eff = check_policy(&config.hooks, "rename", &from, Some(&to), None, None, config.mcp_headers.as_ref())
             .await
             .map_err(JsErrorBox::generic)?;
+        // check_policy fails closed if a hook dropped `destination`, so this
+        // fallback never rewrites the operation.
         let (from, to) = (eff.path, eff.destination.unwrap_or(to));
         m.0.lock().await.rename(Path::new(&from), Path::new(&to)).await
             .map_err(|e| JsErrorBox::generic(format!("fs.rename: {} -> {}: {}", from, to, e)))?;
@@ -661,6 +667,8 @@ async fn op_fs_rename(
 
     tokio::spawn(async move {
         let eff = check_policy(&config.hooks, "rename", &from, Some(&to), None, None, config.mcp_headers.as_ref()).await?;
+        // check_policy fails closed if a hook dropped `destination`, so this
+        // fallback never rewrites the operation.
         let (from, to) = (eff.path, eff.destination.unwrap_or(to));
 
         tokio::fs::rename(&from, &to).await
@@ -689,6 +697,8 @@ async fn op_fs_copy_file(
         let eff = check_policy(&config.hooks, "copyFile", &from, Some(&to), None, None, config.mcp_headers.as_ref())
             .await
             .map_err(JsErrorBox::generic)?;
+        // check_policy fails closed if a hook dropped `destination`, so this
+        // fallback never rewrites the operation.
         let (from, to) = (eff.path, eff.destination.unwrap_or(to));
         // Copy by reference: clones the content-addressed entry, no rechunk.
         m.0.lock().await.copy(Path::new(&from), Path::new(&to)).await
@@ -698,6 +708,8 @@ async fn op_fs_copy_file(
 
     tokio::spawn(async move {
         let eff = check_policy(&config.hooks, "copyFile", &from, Some(&to), None, None, config.mcp_headers.as_ref()).await?;
+        // check_policy fails closed if a hook dropped `destination`, so this
+        // fallback never rewrites the operation.
         let (from, to) = (eff.path, eff.destination.unwrap_or(to));
 
         tokio::fs::copy(&from, &to).await
@@ -1319,8 +1331,21 @@ async fn check_policy(
         }
     };
 
-    serde_json::from_value(effective)
-        .map_err(|e| format!("fs.{}: invalid effective input after pre hooks: {}", operation, e))
+    let eff: FsEffective = serde_json::from_value(effective)
+        .map_err(|e| format!("fs.{}: invalid effective input after pre hooks: {}", operation, e))?;
+
+    // Fail closed on a hook that drops the destination of a two-path
+    // operation (rename/copyFile/symlink): silently falling back to the
+    // original destination would ignore part of the mutation and mask hook
+    // misconfiguration.
+    if destination.is_some() && eff.destination.is_none() {
+        return Err(format!(
+            "fs.{}: pre hook removed 'destination' from the input",
+            operation
+        ));
+    }
+
+    Ok(eff)
 }
 
 #[cfg(test)]
