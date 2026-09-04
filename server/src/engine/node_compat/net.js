@@ -32,6 +32,10 @@ function netHandleRegistry() {
 }
 const handleRegistry = netHandleRegistry();
 
+// Unix-socket/pipe paths are emulated over loopback TCP: a listen(path)
+// records path -> port here and connect({path}) resolves it.
+const pipeRegistry = new Map();
+
 // Mixin: each handle contributes 1 while open and refed.
 function syncHandle(self, open) {
     self._handleOpen = open;
@@ -234,7 +238,21 @@ class SocketImpl extends Duplex {
             return this;
         }
         const [options, cb] = normalizeConnectArgs(args);
-        const port = validatePort(options.port, 'options.port');
+        const pipePath = options.path || options.socketPath;
+        let port;
+        if (pipePath !== undefined) {
+            if (!pipeRegistry.has(String(pipePath))) {
+                const err = new Error(`connect ENOENT ${pipePath}`);
+                err.code = 'ENOENT';
+                err.syscall = 'connect';
+                err.address = String(pipePath);
+                Promise.resolve().then(() => this.destroy(err));
+                return this;
+            }
+            port = pipeRegistry.get(String(pipePath));
+        } else {
+            port = validatePort(options.port, 'options.port');
+        }
         const host = options.host || options.hostname || '127.0.0.1';
         if (host !== 'localhost' && !isIPv4(host) && !isIPv6(host)) {
             // The sandbox has no resolver; an unknown hostname surfaces the
@@ -427,6 +445,11 @@ class ServerImpl extends EventEmitter {
         let cb;
         if (typeof args[0] === 'object' && args[0] !== null) {
             options = args[0];
+        } else if (typeof args[0] === 'function') {
+            // listen(cb): everything defaults.
+        } else if (typeof args[0] === 'string' && !/^\d+$/.test(args[0])) {
+            // listen(path): pipe/unix-socket path, emulated over loopback.
+            options.path = args[0];
         } else {
             options.port = args[0];
             if (typeof args[1] === 'string') options.host = args[1];
@@ -436,7 +459,8 @@ class ServerImpl extends EventEmitter {
         const last = args[args.length - 1];
         if (typeof last === 'function') cb = last;
         if (typeof cb === 'function') this.once('listening', cb);
-        const port = options.port === undefined || options.port === null
+        const pipePath = options.path;
+        const port = pipePath || options.port === undefined || options.port === null
             ? 0 : validatePort(options.port);
         const host = options.host || '';
         let json;
@@ -450,6 +474,10 @@ class ServerImpl extends EventEmitter {
         const info = JSON.parse(json);
         this._rid = info.rid;
         this._address = { address: info.address, port: info.port, family: info.family };
+        if (pipePath) {
+            this._pipePath = String(pipePath);
+            pipeRegistry.set(this._pipePath, info.port);
+        }
         this.listening = true;
         syncHandle(this, true);
         if (globalThis.__mcpV8ClusterOnListening) {
@@ -531,6 +559,7 @@ class ServerImpl extends EventEmitter {
         }
         this._closing = true;
         this.listening = false;
+        if (this._pipePath) pipeRegistry.delete(this._pipePath);
         const rid = this._rid;
         this._rid = null;
         if (rid !== null && ops) ops.closeListener(rid);
@@ -539,6 +568,7 @@ class ServerImpl extends EventEmitter {
     }
 
     address() {
+        if (this._pipePath) return this._pipePath;
         return this._address;
     }
 

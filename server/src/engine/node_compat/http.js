@@ -272,8 +272,15 @@ class OutgoingMessageImpl extends Writable {
         this._flushHead();
     }
 
+    addTrailers(_trailers) {}
+
     setTimeout(ms, callback) {
         if (this.socket) this.socket.setTimeout(ms, callback);
+        return this;
+    }
+
+    clearTimeout(callback) {
+        if (this.socket) this.socket.setTimeout(0, callback);
         return this;
     }
 
@@ -289,7 +296,9 @@ class OutgoingMessageImpl extends Writable {
 
     _writeRaw(data) {
         if (this.socket && !this.socket.destroyed) {
-            this.socket.write(data);
+            // Transport failures (peer already gone: EPIPE/ECONNRESET)
+            // surface through 'aborted'/'clientError', not the write path.
+            this.socket.write(data, (error) => void error);
         }
     }
 
@@ -484,6 +493,7 @@ class ConnectionParser {
     }
 
     feed(chunk) {
+        if (!Buffer.isBuffer(chunk)) chunk = Buffer.from(chunk);
         this.buf = this.buf.length === 0 ? chunk : Buffer.concat([this.buf, chunk]);
         this.process();
     }
@@ -652,6 +662,18 @@ class ServerImpl extends net.Server {
     }
 
     _setupConnection(socket) {
+        // Server-level idle timeout applies to each connection; with no
+        // 'timeout' listener Node destroys the socket.
+        if (this.timeout > 0 && typeof socket.setTimeout === 'function') {
+            socket.setTimeout(this.timeout);
+        }
+        socket.on('timeout', () => {
+            if (this.listenerCount('timeout') > 0) {
+                this.emit('timeout', socket);
+            } else {
+                socket.destroy();
+            }
+        });
         const parser = new ConnectionParser(this, socket);
         socket.on('data', (chunk) => {
             try {
@@ -672,6 +694,9 @@ class ServerImpl extends net.Server {
     setTimeout(ms, callback) {
         this.timeout = ms;
         if (callback) this.on('timeout', callback);
+        for (const socket of this._connections) {
+            if (typeof socket.setTimeout === 'function') socket.setTimeout(ms);
+        }
         return this;
     }
 
@@ -1043,6 +1068,7 @@ class ResponseParser {
 
     feed(chunk) {
         if (this.done) return;
+        if (!Buffer.isBuffer(chunk)) chunk = Buffer.from(chunk);
         this.buf = this.buf.length === 0 ? chunk : Buffer.concat([this.buf, chunk]);
         this.process();
     }

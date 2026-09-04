@@ -658,6 +658,13 @@ function nodeRequire(id) {
     if (name === '../common/crypto' || name === '../common/crypto.js') {
         return commonCrypto;
     }
+    if (name === '../common/gc' || name === '../common/gc.js'
+        || name === '../common/dns' || name === '../common/dns.js'
+        || name === '../common/internet' || name === '../common/internet.js'
+        || name === '../common/udp' || name === '../common/udp.js') {
+        // Capability the sandbox does not provide; the test cannot run.
+        common.skip('missing common submodule ' + name);
+    }
     if (name.startsWith('../common/')) {
         throw new Error('Unsupported common submodule: ' + name);
     }
