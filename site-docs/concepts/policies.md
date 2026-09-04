@@ -82,7 +82,7 @@ Internally, **policies are pre hooks**: the configured policy chain runs as the 
 
 ### Hook result contract
 
-A hook rule (default: `data.mcp.<category>.pre` / `data.mcp.<category>.post`; remote default path: `mcp/<category>/pre` / `mcp/<category>/post`) evaluates to either a bare boolean (pure policy behavior) or an object:
+A hook rule's default name derives from the operation's policy defaults: the policy rule with `.allow` replaced by `.pre` / `.post`, and the remote policy path with `/pre` / `/post` appended. For most categories that is `data.mcp.<category>.pre` and `mcp/<category>/pre`, but where the policy defaults differ from the config key they carry over — e.g. `mcp_tools` defaults to `data.mcp.tools.pre` / `mcp/tools/pre`. A hook evaluates to either a bare boolean (pure policy behavior) or an object:
 
 | Field | Meaning |
 |---|---|

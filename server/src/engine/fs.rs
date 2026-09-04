@@ -1320,7 +1320,7 @@ async fn check_policy(
     let effective = match hooks
         .run_pre(input_value)
         .await
-        .map_err(|e| format!("fs.{}: policy error: {}", operation, e))?
+        .map_err(|e| format!("fs.{}: hook chain error: {}", operation, e))?
     {
         PreOutcome::Allow(v) => v,
         PreOutcome::Deny(deny) => {

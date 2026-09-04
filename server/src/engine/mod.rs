@@ -2017,7 +2017,7 @@ impl Engine {
         match chain
             .run_pre(input)
             .await
-            .map_err(|e| format!("fs_snapshot policy error: {e}"))?
+            .map_err(|e| format!("fs_snapshot hook chain error: {e}"))?
         {
             hooks::PreOutcome::Allow(_) => Ok(()),
             hooks::PreOutcome::Deny(deny) => Err(format!(

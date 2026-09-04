@@ -400,7 +400,7 @@ async fn run_pre_hooks(
     let effective = match hooks
         .run_pre(input_value)
         .await
-        .map_err(|e| format!("subprocess.{}: policy error: {}", operation, e))?
+        .map_err(|e| format!("subprocess.{}: hook chain error: {}", operation, e))?
     {
         PreOutcome::Allow(v) => v,
         PreOutcome::Deny(deny) => {
