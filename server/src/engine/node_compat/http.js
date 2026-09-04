@@ -148,21 +148,38 @@ export function validateHeaderValue(name, value) {
 
 // ── header collection helpers ───────────────────────────────────────────
 
-function addIncomingHeader(headers, rawHeaders, name, value) {
+// Headers Node treats as single-valued: duplicates are discarded rather
+// than joined.
+const SINGLETON_HEADERS = new Set([
+    'age', 'authorization', 'content-length', 'content-type', 'etag',
+    'expires', 'from', 'host', 'if-modified-since', 'if-unmodified-since',
+    'last-modified', 'location', 'max-forwards', 'proxy-authorization',
+    'referer', 'retry-after', 'server', 'user-agent',
+]);
+
+function addIncomingHeader(headers, rawHeaders, name, value, joinDuplicates) {
     rawHeaders.push(name, value);
     const key = name.toLowerCase();
-    const existing = headers[key];
+    const existing = Object.hasOwn(headers, key) ? headers[key] : undefined;
+    if (existing !== undefined && SINGLETON_HEADERS.has(key)) {
+        if (joinDuplicates && key !== 'set-cookie' && key !== 'cookie') {
+            headers[key] = existing + ', ' + value;
+        }
+        return;
+    }
     if (existing === undefined) {
-        headers[key] = value;
-    } else if (key === 'set-cookie') {
+        Object.defineProperty(headers, key, {
+            value: key === 'set-cookie' ? [value] : value,
+            writable: true, enumerable: true, configurable: true,
+        });
+        return;
+    }
+    if (key === 'set-cookie') {
         existing.push(value);
     } else if (key === 'cookie') {
         headers[key] = existing + '; ' + value;
     } else {
         headers[key] = existing + ', ' + value;
-    }
-    if (key === 'set-cookie' && !Array.isArray(headers[key])) {
-        headers[key] = [value];
     }
 }
 
@@ -272,7 +289,9 @@ class OutgoingMessageImpl extends Writable {
         this._flushHead();
     }
 
-    addTrailers(_trailers) {}
+    addTrailers(trailers) {
+        this._trailers = trailers;
+    }
 
     setTimeout(ms, callback) {
         if (this.socket) this.socket.setTimeout(ms, callback);
@@ -324,7 +343,16 @@ class OutgoingMessageImpl extends Writable {
     _final(callback) {
         this._flushHead();
         if (this._chunked && !this._suppressBody) {
-            this._writeRaw(Buffer.from('0\r\n\r\n'));
+            let block = '0\r\n';
+            if (this._trailers) {
+                const entries = Array.isArray(this._trailers)
+                    ? this._trailers
+                    : Object.entries(this._trailers);
+                for (const [name, value] of entries) {
+                    block += `${name}: ${value}\r\n`;
+                }
+            }
+            this._writeRaw(Buffer.from(block + '\r\n'));
         }
         this.finished = true;
         this._afterFinal();
@@ -359,8 +387,14 @@ class ServerResponseImpl extends OutgoingMessageImpl {
         if (reason !== undefined) this.statusMessage = reason;
         if (headers) {
             if (Array.isArray(headers)) {
-                for (let i = 0; i + 1 < headers.length; i += 2) {
-                    this.setHeader(headers[i], headers[i + 1]);
+                if (headers.length > 0 && Array.isArray(headers[0])) {
+                    for (const [name, value] of headers) {
+                        this.appendHeader(name, value);
+                    }
+                } else {
+                    for (let i = 0; i + 1 < headers.length; i += 2) {
+                        this.appendHeader(headers[i], headers[i + 1]);
+                    }
                 }
             } else {
                 for (const name of Object.keys(headers)) {
@@ -376,6 +410,7 @@ class ServerResponseImpl extends OutgoingMessageImpl {
     // rather than chunked encoding.
     end(chunk, encoding, callback) {
         if (!this.headersSent && !this._wroteBody && !this._suppressBody
+            && !this.hasHeader('trailer')
             && !this.hasHeader('content-length') && !this.hasHeader('transfer-encoding')) {
             const length = chunk == null ? 0 : (Buffer.isBuffer(chunk)
                 ? chunk.length
@@ -393,7 +428,6 @@ class ServerResponseImpl extends OutgoingMessageImpl {
         this._writeRaw('HTTP/1.1 102 Processing\r\n\r\n');
     }
 
-    addTrailers(_trailers) {}
 
     _flushHead() {
         if (this.headersSent) return;
@@ -404,11 +438,8 @@ class ServerResponseImpl extends OutgoingMessageImpl {
             : (STATUS_CODES[status] || 'unknown');
         const noBody = this._suppressBody
             || status === 204 || status === 304 || (status >= 100 && status < 200);
-        if (!this.hasHeader('content-length') && !this.hasHeader('transfer-encoding')
-            && !noBody) {
-            this._chunked = true;
-            this.setHeaderInternal('Transfer-Encoding', 'chunked');
-        }
+        const useChunked = !this.hasHeader('content-length')
+            && !this.hasHeader('transfer-encoding') && !noBody;
         // A body-framing header on a bodyless status makes the response
         // length ambiguous; Node answers by closing the connection.
         if ((status === 204 || status === 304)
@@ -422,6 +453,14 @@ class ServerResponseImpl extends OutgoingMessageImpl {
             this.setHeaderInternal('Connection', this._keepAlive ? 'keep-alive' : 'close');
         } else if (String(this.getHeader('connection')).toLowerCase() === 'close') {
             this._keepAlive = false;
+        }
+        if (useChunked) {
+            // Node appends Transfer-Encoding after Date/Connection.
+            this._chunked = true;
+            this.setHeaderInternal('Transfer-Encoding', 'chunked');
+        } else if (!noBody
+            && /chunked/i.test(String(this.getHeader('transfer-encoding') || ''))) {
+            this._chunked = true;
         }
         this._writeRaw(
             `HTTP/1.1 ${status} ${message}\r\n` + this._serializeHeaders() + '\r\n');
@@ -543,7 +582,8 @@ class ConnectionParser {
             if (sep === -1) continue;
             addIncomingHeader(
                 req.headers, req.rawHeaders,
-                lines[i].slice(0, sep).trim(), lines[i].slice(sep + 1).trim());
+                lines[i].slice(0, sep).trim(), lines[i].slice(sep + 1).trim(),
+                Boolean(this.server._options && this.server._options.joinDuplicateHeaders));
         }
         const te = String(req.headers['transfer-encoding'] || '').toLowerCase();
         const contentLength = req.headers['content-length'];
@@ -556,7 +596,13 @@ class ConnectionParser {
             this.remaining = contentLength === undefined ? 0 : Number(contentLength);
             if (!Number.isFinite(this.remaining) || this.remaining < 0) this.remaining = 0;
         }
-        const res = new ServerResponseImpl(req);
+        let res;
+        try {
+            res = new ServerResponseImpl(req);
+        } catch (error) {
+            error.__fromRequestHandler = true;
+            throw error;
+        }
         this.activeReq = req;
         this.activeRes = res;
         res.on('finish', () => {
@@ -565,16 +611,23 @@ class ConnectionParser {
                 this.activeRes = null;
             }
         });
-        if (req.headers.expect &&
-            String(req.headers.expect).toLowerCase() === '100-continue') {
-            if (this.server.listenerCount('checkContinue') > 0) {
-                this.server.emit('checkContinue', req, res);
+        try {
+            if (req.headers.expect &&
+                String(req.headers.expect).toLowerCase() === '100-continue') {
+                if (this.server.listenerCount('checkContinue') > 0) {
+                    this.server.emit('checkContinue', req, res);
+                } else {
+                    res.writeContinue();
+                    this.server.emit('request', req, res);
+                }
             } else {
-                res.writeContinue();
                 this.server.emit('request', req, res);
             }
-        } else {
-            this.server.emit('request', req, res);
+        } catch (error) {
+            // A throw from the user's request listener is an uncaught
+            // exception in Node, never a connection teardown.
+            if (error && typeof error === 'object') error.__fromRequestHandler = true;
+            throw error;
         }
         return true;
     }
@@ -584,30 +637,41 @@ class ConnectionParser {
             if (this.chunkRemaining === null) {
                 const lineEnd = this.buf.indexOf('\r\n');
                 if (lineEnd === -1) return false;
-                const size = parseInt(this.buf.subarray(0, lineEnd).toString('latin1'), 16);
+                const sizeLine = this.buf.subarray(0, lineEnd).toString('latin1');
                 this.buf = this.buf.subarray(lineEnd + 2);
-                if (!Number.isFinite(size)) {
-                    this.socket.destroy(new Error('invalid chunk size'));
+                if (!/^[0-9a-fA-F]+(;.*)?$/.test(sizeLine)) {
+                    this.socket.destroy(new Error('Parse Error: Invalid character in chunk size'));
                     return false;
                 }
-                if (size === 0) {
-                    // Trailer section ends with a blank line, which may be
-                    // the very next CRLF.
-                    const trailerEnd = this.buf.indexOf('\r\n');
-                    if (trailerEnd === -1) { this.chunkRemaining = 0; return false; }
-                    this.buf = this.buf.subarray(trailerEnd + 2);
-                    this.endBody();
-                    return true;
-                }
-                this.chunkRemaining = size;
+                const size = parseInt(sizeLine, 16);
+                if (size === 0) { this.chunkRemaining = 0; }
+                else this.chunkRemaining = size;
+            }
+            if (this.chunkRemaining === -1) {
+                // Waiting for the CRLF that closes a data chunk.
+                if (this.buf.length < 2) return false;
+                this.buf = this.buf.subarray(2);
+                this.chunkRemaining = null;
+                continue;
             }
             if (this.chunkRemaining === 0) {
-                // Waiting for the final CRLF after a zero-size line.
-                const trailerEnd = this.buf.indexOf('\r\n');
-                if (trailerEnd === -1) return false;
-                this.buf = this.buf.subarray(trailerEnd + 2);
-                this.endBody();
-                return true;
+                // Trailer section: header lines until a blank line.
+                for (;;) {
+                    const lineEnd = this.buf.indexOf('\r\n');
+                    if (lineEnd === -1) return false;
+                    const line = this.buf.subarray(0, lineEnd).toString('latin1');
+                    this.buf = this.buf.subarray(lineEnd + 2);
+                    if (!line) { this.endBody(); return true; }
+                    const sep = line.indexOf(':');
+                    if (sep !== -1 && this.req) {
+                        const name = line.slice(0, sep).trim();
+                        const value = line.slice(sep + 1).trim();
+                        this.req.rawTrailers.push(name, value);
+                        const key = name.toLowerCase();
+                        this.req.trailers[key] = Object.hasOwn(this.req.trailers, key)
+                            ? this.req.trailers[key] + ', ' + value : value;
+                    }
+                }
             }
             if (this.buf.length === 0) return false;
             const take = Math.min(this.chunkRemaining, this.buf.length);
@@ -679,6 +743,10 @@ class ServerImpl extends net.Server {
             try {
                 parser.feed(chunk);
             } catch (error) {
+                if (error && error.__fromRequestHandler) {
+                    delete error.__fromRequestHandler;
+                    throw error;
+                }
                 socket.destroy(error);
             }
         });
@@ -809,10 +877,20 @@ export const globalAgent = new AgentImpl({ keepAlive: true });
 function normalizeRequestArgs(input, options, cb) {
     let opts = {};
     if (typeof input === 'string' || (input && input.href && input.hostname !== undefined)) {
+        const isWhatwg = typeof input !== 'string' && typeof input.searchParams === 'object';
         const url = typeof input === 'string' ? new URL(input) : input;
+        if (typeof input !== 'string' && !isWhatwg) {
+            // Legacy url.parse object: extra properties (method, headers,
+            // agent, ...) ride along.
+            opts = { ...input };
+        }
         opts.hostname = url.hostname;
         opts.port = url.port ? Number(url.port) : 80;
-        opts.path = `${url.pathname}${url.search || ''}` || '/';
+        opts.path = (typeof url.path === 'string' && url.path)
+            || `${url.pathname || '/'}${url.search || ''}` || '/';
+        if (!opts.auth && (url.username || url.password)) {
+            opts.auth = `${decodeURIComponent(url.username || '')}:${decodeURIComponent(url.password || '')}`;
+        }
         if (url.protocol && url.protocol !== 'http:') {
             const err = new TypeError(
                 `Protocol "${url.protocol}" not supported. Expected "http:"`);
@@ -846,20 +924,42 @@ class ClientRequestImpl extends OutgoingMessageImpl {
         this.aborted = false;
         this.reusedSocket = false;
         this._timeoutOpt = typeof opts.timeout === 'number' ? opts.timeout : null;
+        this._joinDuplicateHeaders = Boolean(opts.joinDuplicateHeaders);
+        this._headersFromArray = Array.isArray(opts.headers);
         // Node's req emits 'close' when the underlying socket is done, not
         // when the writable side finishes; suppress the stream-level close.
         this._closeEmitted = true;
         if (cb) this.once('response', cb);
         if (opts.headers) {
-            for (const name of Object.keys(opts.headers)) {
-                this.setHeader(name, opts.headers[name]);
+            if (Array.isArray(opts.headers)) {
+                if (opts.headers.length > 0 && Array.isArray(opts.headers[0])) {
+                    for (const [name, value] of opts.headers) {
+                        this.appendHeader(name, value);
+                    }
+                } else {
+                    for (let i = 0; i + 1 < opts.headers.length; i += 2) {
+                        this.appendHeader(opts.headers[i], opts.headers[i + 1]);
+                    }
+                }
+            } else {
+                for (const name of Object.keys(opts.headers)) {
+                    this.setHeader(name, opts.headers[name]);
+                }
             }
+        }
+        if (opts.auth && !this._headersFromArray && !this.hasHeader('authorization')) {
+            this._headers.set('authorization', ['Authorization',
+                'Basic ' + Buffer.from(String(opts.auth)).toString('base64')]);
         }
         // A user createConnection (or one from a custom agent) may hand back
         // any duplex stream — the generic-streams pattern — either as a
         // return value or through a (err, socket) callback; otherwise dial
         // the loopback TCP transport.
         const connectOptions = { ...opts, port: this.port, host: this.host };
+        // In socket options "path" means an IPC pipe; the request path must
+        // not leak through (Node nulls it the same way).
+        delete connectOptions.path;
+        if (opts.socketPath) connectOptions.path = opts.socketPath;
         let settled = false;
         const settle = (error, socket) => {
             if (settled) return;
@@ -992,9 +1092,12 @@ class ClientRequestImpl extends OutgoingMessageImpl {
     _flushHead() {
         if (this.headersSent) return;
         this.headersSent = true;
-        if (!this.hasHeader('host')) {
+        if (!this.hasHeader('host') && !this._headersFromArray) {
             const hostHeader = this.port === 80 ? this.host : `${this.host}:${this.port}`;
+            const entries = [...this._headers];
+            this._headers.clear();
             this._headers.set('host', ['Host', hostHeader]);
+            for (const [key, entry] of entries) this._headers.set(key, entry);
         }
         if (!this.hasHeader('connection')) {
             // Node's default agent advertises keep-alive; our transport still
@@ -1008,6 +1111,8 @@ class ClientRequestImpl extends OutgoingMessageImpl {
                 this._chunked = true;
                 this._headers.set('transfer-encoding', ['Transfer-Encoding', 'chunked']);
             }
+        } else if (/chunked/i.test(String(this.getHeader('transfer-encoding') || ''))) {
+            this._chunked = true;
         }
         this._sendRaw(
             `${this.method} ${this.path} HTTP/1.1\r\n` +
@@ -1096,7 +1201,8 @@ class ResponseParser {
                 if (sep === -1) continue;
                 addIncomingHeader(
                     res.headers, res.rawHeaders,
-                    lines[i].slice(0, sep).trim(), lines[i].slice(sep + 1).trim());
+                    lines[i].slice(0, sep).trim(), lines[i].slice(sep + 1).trim(),
+                    Boolean(this.request._joinDuplicateHeaders));
             }
             this.res = res;
             this.request.res = res;
@@ -1146,27 +1252,39 @@ class ResponseParser {
             if (this.chunkRemaining === null) {
                 const lineEnd = this.buf.indexOf('\r\n');
                 if (lineEnd === -1) return;
-                const size = parseInt(this.buf.subarray(0, lineEnd).toString('latin1'), 16);
+                const sizeLine = this.buf.subarray(0, lineEnd).toString('latin1');
                 this.buf = this.buf.subarray(lineEnd + 2);
-                if (!Number.isFinite(size)) {
-                    this.socket.destroy(new Error('Parse Error: invalid chunk size'));
+                if (!/^[0-9a-fA-F]+(;.*)?$/.test(sizeLine)) {
+                    this.socket.destroy(new Error('Parse Error: Invalid character in chunk size'));
                     return;
                 }
-                if (size === 0) {
-                    const trailerEnd = this.buf.indexOf('\r\n');
-                    if (trailerEnd === -1) { this.chunkRemaining = 0; return; }
-                    this.buf = this.buf.subarray(trailerEnd + 2);
-                    this.finish();
-                    return;
-                }
-                this.chunkRemaining = size;
+                const size = parseInt(sizeLine, 16);
+                if (size === 0) { this.chunkRemaining = 0; }
+                else this.chunkRemaining = size;
+            }
+            if (this.chunkRemaining === -1) {
+                if (this.buf.length < 2) return;
+                this.buf = this.buf.subarray(2);
+                this.chunkRemaining = null;
+                continue;
             }
             if (this.chunkRemaining === 0) {
-                const trailerEnd = this.buf.indexOf('\r\n');
-                if (trailerEnd === -1) return;
-                this.buf = this.buf.subarray(trailerEnd + 2);
-                this.finish();
-                return;
+                for (;;) {
+                    const lineEnd = this.buf.indexOf('\r\n');
+                    if (lineEnd === -1) return;
+                    const line = this.buf.subarray(0, lineEnd).toString('latin1');
+                    this.buf = this.buf.subarray(lineEnd + 2);
+                    if (!line) { this.finish(); return; }
+                    const sep = line.indexOf(':');
+                    if (sep !== -1 && this.res) {
+                        const name = line.slice(0, sep).trim();
+                        const value = line.slice(sep + 1).trim();
+                        this.res.rawTrailers.push(name, value);
+                        const key = name.toLowerCase();
+                        this.res.trailers[key] = Object.hasOwn(this.res.trailers, key)
+                            ? this.res.trailers[key] + ', ' + value : value;
+                    }
+                }
             }
             if (this.buf.length === 0) return;
             const take = Math.min(this.chunkRemaining, this.buf.length);
