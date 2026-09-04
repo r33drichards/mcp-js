@@ -159,7 +159,7 @@ Two properties to understand before granting capabilities:
 - **Hook-issued operations are ungated.** The hook's `fs`/`fetch` run through no hook chain and no policy — the hook file is operator-trusted configuration (the same trust level as the policy files themselves), and gating its operations would recurse into the very chain the hook runs inside (the audit hook above would trigger itself on every `appendFile`).
 - **The timeout still applies end to end**, including time spent awaiting hook-issued I/O: a hung `fetch` inside a hook fails the guest operation closed when `timeout_ms` expires.
 
-The shipped example [`policies/audit_fs_hooks.js`](https://github.com/r33drichards/mcp-js/blob/main/policies/audit_fs_hooks.js) is a complete write-audit hook.
+The shipped example `policies/audit_fs_hooks.js` in the repository is a complete write-audit hook.
 
 The `--policies-json` config for the example above is the same as any other hook source:
 
