@@ -891,6 +891,7 @@ export const hasCrypto = common.hasCrypto;
 export const hasInspector = common.hasInspector;
 export const hasIntl = common.hasIntl;
 export const hasIPv6 = common.hasIPv6;
+export const PORT = common.PORT;
 export const localhostIPv4 = common.localhostIPv4;
 export const localhostIPv6 = common.localhostIPv6;
 export const hasQuic = common.hasQuic;

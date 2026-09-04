@@ -14,6 +14,32 @@ import { Buffer } from 'node:buffer';
 
 const ops = globalThis.__mcpV8NetOps;
 
+// Shared count of open, refed net/dgram handles. The corpus harness's
+// end-of-test check consults it (like Node's active-handle accounting) so
+// reports wait for sockets to close or unref instead of racing them.
+function netHandleRegistry() {
+    if (!globalThis.__mcpV8NetHandleCount) {
+        try {
+            Object.defineProperty(globalThis, '__mcpV8NetHandleCount', {
+                value: { refed: 0 },
+                writable: false, enumerable: false, configurable: false,
+            });
+        } catch {
+            return { refed: 0 };
+        }
+    }
+    return globalThis.__mcpV8NetHandleCount;
+}
+const handleRegistry = netHandleRegistry();
+
+// Mixin: each handle contributes 1 while open and refed.
+function syncHandle(self, open) {
+    self._handleOpen = open;
+    const contribution = (self._handleOpen && !self._unrefed) ? 1 : 0;
+    handleRegistry.refed += contribution - (self._handleContrib || 0);
+    self._handleContrib = contribution;
+}
+
 const V4_SEG = '(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])';
 const V4_RE = new RegExp(`^${V4_SEG}\\.${V4_SEG}\\.${V4_SEG}\\.${V4_SEG}$`);
 
@@ -171,6 +197,7 @@ class SocketImpl extends Duplex {
 
     _teardown() {
         this._clearTimeout();
+        syncHandle(this, false);
         const rid = this._rid;
         this._rid = null;
         if (rid !== null && ops) ops.closeStream(rid);
@@ -182,6 +209,7 @@ class SocketImpl extends Duplex {
     }
 
     _adopt(info, server) {
+        syncHandle(this, true);
         this._rid = info.rid;
         this.pending = false;
         this.connecting = false;
@@ -208,6 +236,17 @@ class SocketImpl extends Duplex {
         const [options, cb] = normalizeConnectArgs(args);
         const port = validatePort(options.port, 'options.port');
         const host = options.host || options.hostname || '127.0.0.1';
+        if (host !== 'localhost' && !isIPv4(host) && !isIPv6(host)) {
+            // The sandbox has no resolver; an unknown hostname surfaces the
+            // way Node reports a failed lookup.
+            const err = new Error(`getaddrinfo ENOTFOUND ${host}`);
+            err.code = 'ENOTFOUND';
+            err.errno = -3008;
+            err.syscall = 'getaddrinfo';
+            err.hostname = host;
+            Promise.resolve().then(() => this.destroy(err));
+            return this;
+        }
         if (options.blockList && typeof options.blockList.check === 'function') {
             const ip = host === 'localhost' ? '127.0.0.1' : host;
             const family = isIPv6(ip) ? 'ipv6' : 'ipv4';
@@ -240,7 +279,11 @@ class SocketImpl extends Duplex {
         while (this._rid === rid && !this.destroyed) {
             let result;
             try {
-                result = JSON.parse(await ops.read(rid));
+                this._readPromise = ops.read(rid);
+                if (this._unrefed && ops.unrefOpPromise) {
+                    ops.unrefOpPromise(this._readPromise);
+                }
+                result = JSON.parse(await this._readPromise);
             } catch {
                 break;
             }
@@ -337,8 +380,19 @@ class SocketImpl extends Duplex {
 
     setNoDelay() { return this; }
     setKeepAlive() { return this; }
-    ref() { return this; }
-    unref() { return this; }
+    ref() {
+        this._unrefed = false;
+        syncHandle(this, this._handleOpen);
+        if (this._readPromise && ops.refOpPromise) ops.refOpPromise(this._readPromise);
+        return this;
+    }
+
+    unref() {
+        this._unrefed = true;
+        syncHandle(this, this._handleOpen);
+        if (this._readPromise && ops.unrefOpPromise) ops.unrefOpPromise(this._readPromise);
+        return this;
+    }
 }
 
 class ServerImpl extends EventEmitter {
@@ -392,6 +446,7 @@ class ServerImpl extends EventEmitter {
         this._rid = info.rid;
         this._address = { address: info.address, port: info.port, family: info.family };
         this.listening = true;
+        syncHandle(this, true);
         Promise.resolve().then(() => this.emit('listening'));
         this._acceptLoop(info.rid);
         return this;
@@ -401,7 +456,11 @@ class ServerImpl extends EventEmitter {
         while (this._rid === rid) {
             let result;
             try {
-                result = JSON.parse(await ops.accept(rid));
+                this._acceptPromise = ops.accept(rid);
+                if (this._unrefed && ops.unrefOpPromise) {
+                    ops.unrefOpPromise(this._acceptPromise);
+                }
+                result = JSON.parse(await this._acceptPromise);
             } catch {
                 break;
             }
@@ -440,6 +499,7 @@ class ServerImpl extends EventEmitter {
     }
 
     _maybeEmitClose() {
+        if (this._rid === null) syncHandle(this, false);
         if (this._closing && this._rid === null && this._connections.size === 0) {
             this._closing = false;
             Promise.resolve().then(() => this.emit('close'));
@@ -474,8 +534,19 @@ class ServerImpl extends EventEmitter {
         return this;
     }
 
-    ref() { return this; }
-    unref() { return this; }
+    ref() {
+        this._unrefed = false;
+        syncHandle(this, this._handleOpen);
+        if (this._acceptPromise && ops.refOpPromise) ops.refOpPromise(this._acceptPromise);
+        return this;
+    }
+
+    unref() {
+        this._unrefed = true;
+        syncHandle(this, this._handleOpen);
+        if (this._acceptPromise && ops.unrefOpPromise) ops.unrefOpPromise(this._acceptPromise);
+        return this;
+    }
 }
 
 // ── SocketAddress / BlockList (pure address arithmetic) ─────────────────

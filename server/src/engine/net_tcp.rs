@@ -465,7 +465,17 @@ async fn op_udp_send(
     tokio::spawn(async move { socket.send_to(&bytes, addr).await })
         .await
         .map_err(|e| JsErrorBox::generic(format!("net task join error: {e}")))?
-        .map_err(|e| JsErrorBox::generic(format!("dgram: send failed: {e}")))?;
+        .map_err(|e| {
+            let code = match e.raw_os_error() {
+                Some(90) => "EMSGSIZE",
+                Some(13) => "EACCES",
+                _ => match e.kind() {
+                    std::io::ErrorKind::ConnectionRefused => "ECONNREFUSED",
+                    _ => "EIO",
+                },
+            };
+            JsErrorBox::generic(format!("dgram: send failed: {e} ({code})"))
+        })?;
     Ok(())
 }
 
@@ -558,6 +568,8 @@ const NET_BINDING_JS: &str = r#"
             udpSend: ops.op_udp_send,
             udpRecv: ops.op_udp_recv,
             udpClose: ops.op_udp_close,
+            unrefOpPromise: Deno.core.unrefOpPromise,
+            refOpPromise: Deno.core.refOpPromise,
         }),
         writable: false, enumerable: false, configurable: false,
     });

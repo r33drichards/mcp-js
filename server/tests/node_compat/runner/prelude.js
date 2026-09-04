@@ -53,6 +53,7 @@ const failures = [];
 const mustCalls = [];
 
 const common = {
+    PORT: 12346,
     localhostIPv4: '127.0.0.1',
     localhostIPv6: '::1',
     isWindows: false,
@@ -96,11 +97,11 @@ const common = {
     mustCallAtLeast(fn, minimum) {
         return common._mustCallInner(fn, minimum === undefined ? 1 : minimum, 'minimum');
     },
-    mustSucceed(fn) {
+    mustSucceed(fn, exact) {
         return common.mustCall(function (err, ...args) {
             assert.ifError(err);
             if (typeof fn === 'function') return fn.call(this, ...args);
-        });
+        }, exact);
     },
     expectsError(validator, exact) {
         return common.mustCall((...args) => {
@@ -692,7 +693,9 @@ globalThis.__NODE_TEST_SCHEDULE_REPORT__ = function scheduleReport(sentinel) {
     }
     function check() {
         const active = globalThis.__mcpV8GetActiveResourcesInfo();
-        if (active.length > 0 || globalThis.__NODE_TEST_PENDING__ > 0) {
+        const netHandles = globalThis.__mcpV8NetHandleCount;
+        if (active.length > 0 || globalThis.__NODE_TEST_PENDING__ > 0
+            || (netHandles && netHandles.refed > 0)) {
             scheduleCheck(25);
             return;
         }
