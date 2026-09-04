@@ -348,6 +348,7 @@ class SocketImpl extends Duplex {
 
     setTimeout(ms, callback) {
         this._timeoutMs = ms;
+        this.timeout = ms;
         this._timeoutFired = false;
         if (callback) {
             if (ms === 0) this.removeListener('timeout', callback);

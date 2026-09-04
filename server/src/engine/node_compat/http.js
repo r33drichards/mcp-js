@@ -196,7 +196,9 @@ class IncomingMessageImpl extends Readable {
     }
 
     destroy(err) {
-        if (this.socket && !this.socket.destroyed) this.socket.destroy(err);
+        // The error belongs to this message; tearing the socket down with it
+        // would rebroadcast it through socket 'error' forwarding.
+        if (this.socket && !this.socket.destroyed) this.socket.destroy();
         return super.destroy(err);
     }
 }
@@ -881,8 +883,16 @@ class ClientRequestImpl extends OutgoingMessageImpl {
             socket.on('timeout', () => this.emit('timeout'));
         }
         if (socket.connecting) {
+            // Node emits 'socket' at assignment, before the connection
+            // completes, so listeners can attach to 'connect' in time.
+            Promise.resolve().then(() => this.emit('socket', socket));
             socket.on('connect', () => {
-                this.emit('socket', socket);
+                if (this._pendingTimeout !== undefined
+                    && typeof socket.setTimeout === 'function') {
+                    socket.setTimeout(this._pendingTimeout, this._pendingTimeoutCb);
+                    this._pendingTimeout = undefined;
+                    this._pendingTimeoutCb = undefined;
+                }
                 this._connected = true;
                 this.emit('_ready');
             });
@@ -929,6 +939,18 @@ class ClientRequestImpl extends OutgoingMessageImpl {
             throw err;
         }
         this._path = value;
+    }
+
+    setTimeout(ms, callback) {
+        if (this.socket && this._connected && typeof this.socket.setTimeout === 'function') {
+            this.socket.setTimeout(ms, callback);
+        } else {
+            // Applied once the socket connects (Node's assignment timing).
+            this._pendingTimeout = ms;
+            this._pendingTimeoutCb = callback;
+            if (typeof callback === 'function') this.once('timeout', callback);
+        }
+        return this;
     }
 
     end(chunk, encoding, callback) {
@@ -1140,6 +1162,7 @@ class ResponseParser {
         // Node marks the message destroyed once fully consumed, before its
         // 'close' event.
         this.res.once('end', () => { this.res.destroyed = true; });
+        this.request.destroyed = true;
         this.res.push(null);
         // One request per connection (Connection: close by default).
         const socket = this.socket;

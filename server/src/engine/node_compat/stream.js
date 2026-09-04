@@ -254,6 +254,7 @@ function maybeEmitClose(stream) {
 function destroyImpl(stream, err) {
     if (stream.destroyed) return stream;
     stream.destroyed = true;
+    if (err) stream.errored = err;
     if (stream._readableState) stream._readableState.destroyed = true;
     if (stream._writableState) stream._writableState.destroyed = true;
     const emitClose = () => {
@@ -264,6 +265,7 @@ function destroyImpl(stream, err) {
     };
     const done = (destroyErr) => {
         const finalErr = destroyErr || err;
+        if (finalErr) stream.errored = finalErr;
         later(() => {
             if (finalErr) stream.emit('error', finalErr);
             emitClose();
@@ -290,7 +292,12 @@ function destroyImpl(stream, err) {
 // Node's `module.exports = Stream` shape (`new (require('stream'))()`).
 export function Stream(_options) {
     EventEmitter.call(this);
+    this.errored = null;
 }
+Object.defineProperty(Stream.prototype, 'closed', {
+    get() { return Boolean(this._closeEmitted); },
+    configurable: true,
+});
 Object.setPrototypeOf(Stream.prototype, EventEmitter.prototype);
 Object.setPrototypeOf(Stream, EventEmitter);
 
