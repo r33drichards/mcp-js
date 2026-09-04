@@ -308,6 +308,14 @@ class SocketImpl extends EventEmitter {
                 family: info.family,
             };
             syncHandle(this, true);
+            if (globalThis.__mcpV8ClusterOnListening) {
+                globalThis.__mcpV8ClusterOnListening({
+                    address: this._address.address,
+                    port: this._address.port,
+                    addressType: this._address.family === 'IPv6' ? 6 : 4,
+                    fd: -1,
+                });
+            }
             if (!this._closed) this.emit('listening');
             this._drainBoundQueue();
             if (!this._closed) this._recvLoop(info.rid);

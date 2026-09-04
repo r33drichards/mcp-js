@@ -21,6 +21,7 @@ pub const NODE_MODULES: &[(&str, &str)] = &[
         "diagnostics_channel",
         include_str!("node_compat/diagnostics_channel.js"),
     ),
+    ("cluster", include_str!("node_compat/cluster.js")),
     ("dgram", include_str!("node_compat/dgram.js")),
     ("dns", include_str!("node_compat/dns.js")),
     ("dns/promises", include_str!("node_compat/dns_promises.js")),

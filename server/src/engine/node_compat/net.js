@@ -447,6 +447,14 @@ class ServerImpl extends EventEmitter {
         this._address = { address: info.address, port: info.port, family: info.family };
         this.listening = true;
         syncHandle(this, true);
+        if (globalThis.__mcpV8ClusterOnListening) {
+            globalThis.__mcpV8ClusterOnListening({
+                address: info.address,
+                port: info.port,
+                addressType: info.family === 'IPv6' ? 6 : 4,
+                fd: -1,
+            });
+        }
         Promise.resolve().then(() => this.emit('listening'));
         this._acceptLoop(info.rid);
         return this;

@@ -11,6 +11,7 @@ import childProcess from 'node:child_process';
 import consoleModule from 'node:console';
 import crypto from 'node:crypto';
 import diagnosticsChannel from 'node:diagnostics_channel';
+import cluster from 'node:cluster';
 import dgram from 'node:dgram';
 import dns from 'node:dns';
 import dnsPromises from 'node:dns/promises';
@@ -59,6 +60,7 @@ const builtins = new Map([
     ['console', consoleModule],
     ['crypto', crypto],
     ['diagnostics_channel', diagnosticsChannel],
+    ['cluster', cluster],
     ['dgram', dgram],
     ['dns', dns],
     ['dns/promises', dnsPromises],
