@@ -66,7 +66,7 @@ flowchart TD
 
 ## Pre/post hooks
 
-Policies answer one question — allow or deny. **Hooks** generalize the gate: each category can also run an ordered list of `pre` hooks (which see the operation input and may deny it *or rewrite it*) and `post` hooks (which see the input and output and may deny the result or rewrite the output). Hooks use the same source vocabulary as policies (`file://` Rego via regorus, `http(s)://` OPA-style REST) plus JavaScript (`file://….js`), and are configured alongside them:
+Policies answer one question — allow or deny. **Hooks** generalize the gate: each category can also run an ordered list of `pre` hooks (which see the operation input and may deny it *or rewrite it*) and `post` hooks (which see the input and output and may deny the result or rewrite the output). Hooks use the same source vocabulary as policies (`file://` Rego via regorus, `http(s)://` OPA-style REST) plus JavaScript (`file://*.js`), and are configured alongside them:
 
 ```json
 {

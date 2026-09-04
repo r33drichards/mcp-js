@@ -872,7 +872,7 @@ async fn op_mcp_call_tool(
                 ))
             })?;
             let effective = match hooks.run_pre(input_value).await.map_err(|e| {
-                JsErrorBox::generic(format!("mcp.callTool: policy evaluation error: {}", e))
+                JsErrorBox::generic(format!("mcp.callTool: hook chain error: {}", e))
             })? {
                 super::hooks::PreOutcome::Allow(v) => v,
                 super::hooks::PreOutcome::Deny(deny) => {

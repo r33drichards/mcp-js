@@ -501,39 +501,39 @@ async fn async_main(cli: Cli) -> Result<()> {
     const CAPS_MUTATE: HookCaps = HookCaps { input_mutation: true, post: false };
     const CAPS_FULL: HookCaps = HookCaps { input_mutation: true, post: true };
 
-    let fetch_policy_chain = op_hooks(
+    let fetch_hooks = op_hooks(
         &policies_config, |c| &c.fetch,
         "fetch", "mcp/fetch", "data.mcp.fetch.allow", CAPS_FULL,
     )?;
-    let websocket_policy_chain = op_hooks(
+    let websocket_hooks = op_hooks(
         &policies_config, |c| &c.websocket,
         "websocket", "mcp/websocket", "data.mcp.websocket.allow", CAPS_GATE_ONLY,
     )?;
-    let http2_policy_chain = op_hooks(
+    let http2_hooks = op_hooks(
         &policies_config, |c| &c.http2,
         "http2", "mcp/http2", "data.mcp.http2.allow", CAPS_GATE_ONLY,
     )?;
-    let modules_policy_chain = op_hooks(
+    let modules_hooks = op_hooks(
         &policies_config, |c| &c.modules,
         "modules", "mcp/modules", "data.mcp.modules.allow", CAPS_GATE_ONLY,
     )?;
-    let fs_policy_chain = op_hooks(
+    let fs_hooks = op_hooks(
         &policies_config, |c| &c.filesystem,
         "filesystem", "mcp/filesystem", "data.mcp.filesystem.allow", CAPS_MUTATE,
     )?;
-    let fs_snapshot_policy_chain = op_hooks(
+    let fs_snapshot_hooks = op_hooks(
         &policies_config, |c| &c.fs_snapshot,
         "fs_snapshot", "mcp/fs_snapshot", "data.mcp.fs_snapshot.allow", CAPS_GATE_ONLY,
     )?;
-    let mcp_tools_policy_chain = op_hooks(
+    let mcp_tools_hooks = op_hooks(
         &policies_config, |c| &c.mcp_tools,
         "mcp_tools", "mcp/tools", "data.mcp.tools.allow", CAPS_FULL,
     )?;
-    let subprocess_policy_chain = op_hooks(
+    let subprocess_hooks = op_hooks(
         &policies_config, |c| &c.subprocess,
         "subprocess", "mcp/subprocess", "data.mcp.subprocess.allow", CAPS_FULL,
     )?;
-    let run_js_file_policy_chain = op_hooks(
+    let run_js_file_hooks = op_hooks(
         &policies_config, |c| &c.run_js_file,
         "run_js_file", "mcp/run_js_file", "data.mcp.run_js_file.allow", CAPS_MUTATE,
     )?;
@@ -547,7 +547,7 @@ async fn async_main(cli: Cli) -> Result<()> {
         );
     }
 
-    let engine = if let Some(chain) = fetch_policy_chain {
+    let engine = if let Some(chain) = fetch_hooks {
         let fetch_config =
             FetchConfig::new_with_hooks(chain).with_header_rules(header_rules.clone());
         engine.with_fetch_config(fetch_config)
@@ -559,7 +559,7 @@ async fn async_main(cli: Cli) -> Result<()> {
     // Handshake header injection reuses the fetch header rules (the JS
     // WebSocket API cannot set or read handshake headers, so injected
     // credentials stay outside the isolate).
-    let engine = if let Some(chain) = websocket_policy_chain {
+    let engine = if let Some(chain) = websocket_hooks {
         let websocket_config =
             WebSocketConfig::new_with_hooks(chain).with_header_rules(header_rules.clone());
         engine.with_websocket_config(websocket_config)
@@ -571,7 +571,7 @@ async fn async_main(cli: Cli) -> Result<()> {
     // Per-stream header injection reuses the fetch header rules; gRPC
     // metadata rides HTTP/2 headers, so host-scoped credentials attach
     // outside the isolate exactly as they do for fetch.
-    let engine = if let Some(chain) = http2_policy_chain {
+    let engine = if let Some(chain) = http2_hooks {
         let http2_config = Http2Config::new_with_hooks(chain).with_header_rules(header_rules);
         engine.with_http2_config(http2_config)
     } else {
@@ -581,7 +581,7 @@ async fn async_main(cli: Cli) -> Result<()> {
     // ── Filesystem policy ────────────────────────────────────────────────
     // A mount needs the fs surface present, so when snapshots are enabled but
     // no fs policy was supplied, default to an allow-all policy chain.
-    let engine = if let Some(chain) = fs_policy_chain {
+    let engine = if let Some(chain) = fs_hooks {
         engine.with_fs_config(FsConfig::new_with_hooks(chain).with_passthrough(cli.fs_passthrough))
     } else if fs_enabled {
         engine.with_fs_config(
@@ -664,7 +664,7 @@ async fn async_main(cli: Cli) -> Result<()> {
                     labels
                 };
                 let engine = engine.with_fs_snapshots(store, Arc::new(labels));
-                if let Some(chain) = fs_snapshot_policy_chain {
+                if let Some(chain) = fs_snapshot_hooks {
                     tracing::info!("FS snapshot pointer moves are policy-gated");
                     engine.with_fs_snapshot_hooks(chain)
                 } else {
@@ -687,7 +687,7 @@ async fn async_main(cli: Cli) -> Result<()> {
     // ── Module loader config ─────────────────────────────────────────────
     let module_loader_config = ModuleLoaderConfig {
         allow_external: cli.allow_external_modules,
-        hooks: modules_policy_chain,
+        hooks: modules_hooks,
     };
     if cli.allow_external_modules {
         tracing::info!("External module imports: ENABLED");
@@ -702,7 +702,7 @@ async fn async_main(cli: Cli) -> Result<()> {
     let engine = engine.with_module_loader_config(module_loader_config);
 
     // ── Subprocess policy ──────────────────────────────────────────────
-    let engine = if let Some(chain) = subprocess_policy_chain {
+    let engine = if let Some(chain) = subprocess_hooks {
         engine.with_subprocess_config(SubprocessConfig::new_with_hooks(chain))
     } else {
         engine
@@ -713,14 +713,14 @@ async fn async_main(cli: Cli) -> Result<()> {
     // a `run_js_file` policy in --policies-json gates reads per path. The flag
     // wins over a configured policy (it is the explicit "allow all" switch).
     let engine = if cli.allow_run_js_file {
-        if run_js_file_policy_chain.is_some() {
+        if run_js_file_hooks.is_some() {
             tracing::warn!(
                 "--allow-run-js-file overrides the configured run_js_file policy (all paths allowed)"
             );
         }
         tracing::info!("run_js file-path reads: ENABLED (allow all server-readable paths)");
         engine.with_run_js_file_policy(RunJsFilePolicy::AllowAll)
-    } else if let Some(chain) = run_js_file_policy_chain {
+    } else if let Some(chain) = run_js_file_hooks {
         tracing::info!("run_js file-path reads: ENABLED (policy-gated)");
         engine.with_run_js_file_policy(RunJsFilePolicy::Policy(chain))
     } else {
@@ -777,7 +777,7 @@ async fn async_main(cli: Cli) -> Result<()> {
             "All MCP servers connected. JS code can use mcp.callTool(), mcp.listTools(), mcp.servers"
         );
         let engine = engine.with_mcp_client_manager(manager);
-        if let Some(chain) = mcp_tools_policy_chain {
+        if let Some(chain) = mcp_tools_hooks {
             tracing::info!("MCP tools policy: ENABLED");
             engine.with_mcp_tools_hooks(chain)
         } else {
