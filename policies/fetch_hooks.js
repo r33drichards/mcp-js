@@ -9,9 +9,11 @@
 //     }
 //   }'
 //
-// A JS hook file runs in its own bare V8 isolate with no host capabilities
-// (no fetch, no fs — pure computation), kept warm across calls so top-level
-// state persists. Functions must be synchronous. Return semantics:
+// A JS hook file runs in its own V8 isolate, kept warm across calls so
+// top-level state persists. By default it has no host capabilities (no
+// fetch, no fs — pure computation); a source's "capabilities" list opts
+// into guest APIs (see audit_fs_hooks.js). Hooks may be async; each call
+// is bounded by timeout_ms (default 5000 ms). Return semantics:
 //   - undefined / null            → abstain (allow, no change)
 //   - true / false                → allow / deny
 //   - {allow, reason, input}      → pre: deny with reason, or rewrite input
