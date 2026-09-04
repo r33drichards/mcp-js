@@ -348,6 +348,7 @@ class SocketImpl extends Duplex {
 
     setTimeout(ms, callback) {
         this._timeoutMs = ms;
+        this._timeoutFired = false;
         if (callback) {
             if (ms === 0) this.removeListener('timeout', callback);
             else this.once('timeout', callback);
@@ -358,8 +359,11 @@ class SocketImpl extends Duplex {
 
     _touchTimeout() {
         this._clearTimeout();
-        if (this._timeoutMs > 0) {
+        // Once fired, activity does not re-arm the idle timer — only an
+        // explicit setTimeout() call does (matches observable Node behavior).
+        if (this._timeoutMs > 0 && !this._timeoutFired) {
             this._timeoutTimer = setTimeout(() => {
+                this._timeoutFired = true;
                 this.emit('timeout');
             }, this._timeoutMs);
         }

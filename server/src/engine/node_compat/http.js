@@ -61,6 +61,67 @@ export const STATUS_CODES = {
 export const maxHeaderSize = 16384;
 
 const TOKEN_RE = /^[\^_`a-zA-Z\-0-9!#$%&'*+.|~]+$/;
+// Anything outside 0x21-0xff must be escaped in a request path.
+const INVALID_PATH_RE = /[^!-ÿ]/;
+
+function receivedRepr(value) {
+    if (value === undefined) return 'undefined';
+    if (value === null) return 'null';
+    const type = typeof value;
+    if (type === 'string') return `type string ('${value}')`;
+    if (type === 'object') {
+        const name = value.constructor && value.constructor.name;
+        return `an instance of ${name || 'Object'}`;
+    }
+    if (type === 'function') return `function ${value.name}`;
+    if (type === 'bigint') return `type bigint (${value}n)`;
+    return `type ${type} (${String(value)})`;
+}
+
+function argTypeError(message) {
+    const err = new TypeError(message);
+    err.code = 'ERR_INVALID_ARG_TYPE';
+    return err;
+}
+
+function validateRequestOptions(opts) {
+    if (opts.method !== undefined && opts.method !== null) {
+        if (typeof opts.method !== 'string') {
+            throw argTypeError(
+                `The "options.method" property must be of type string. Received ${receivedRepr(opts.method)}`);
+        }
+        if (!TOKEN_RE.test(opts.method)) {
+            const err = new TypeError(`Method must be a valid HTTP token ["${opts.method}"]`);
+            err.code = 'ERR_INVALID_HTTP_TOKEN';
+            throw err;
+        }
+    }
+    if (opts.path !== undefined && INVALID_PATH_RE.test(String(opts.path))) {
+        const err = new TypeError('Request path contains unescaped characters');
+        err.code = 'ERR_UNESCAPED_CHARACTERS';
+        throw err;
+    }
+    const agent = opts.agent;
+    if (agent !== undefined && agent !== null && agent !== false
+        && !(typeof agent === 'object' && typeof agent.addRequest === 'function')) {
+        throw argTypeError(
+            'The "options.agent" property must be one of Agent-like Object, ' +
+            `undefined, or false. Received ${receivedRepr(agent)}`);
+    }
+    if (opts.insecureHTTPParser !== undefined
+        && typeof opts.insecureHTTPParser !== 'boolean') {
+        throw argTypeError(
+            `The "options.insecureHTTPParser" property must be of type boolean. Received ${receivedRepr(opts.insecureHTTPParser)}`);
+    }
+    if (opts.timeout !== undefined && typeof opts.timeout !== 'number') {
+        throw argTypeError(
+            `The "timeout" argument must be of type number. Received ${receivedRepr(opts.timeout)}`);
+    }
+    if (opts.headers && Array.isArray(opts.headers.host)) {
+        throw argTypeError(
+            `The "options.headers.host" property must be of type string. Received ${receivedRepr(opts.headers.host)}`);
+    }
+}
 
 export function validateHeaderName(name) {
     if (typeof name !== 'string' || !name || !TOKEN_RE.test(name)) {
@@ -231,6 +292,7 @@ class OutgoingMessageImpl extends Writable {
     }
 
     _write(chunk, encoding, callback) {
+        this._wroteBody = true;
         this._flushHead();
         const buf = Buffer.isBuffer(chunk)
             ? chunk
@@ -297,6 +359,19 @@ class ServerResponseImpl extends OutgoingMessageImpl {
         }
         this._flushHead();
         return this;
+    }
+
+    // Node buffers a single-shot end() and frames it with Content-Length
+    // rather than chunked encoding.
+    end(chunk, encoding, callback) {
+        if (!this.headersSent && !this._wroteBody && !this._suppressBody
+            && !this.hasHeader('content-length') && !this.hasHeader('transfer-encoding')) {
+            const length = chunk == null ? 0 : (Buffer.isBuffer(chunk)
+                ? chunk.length
+                : Buffer.byteLength(String(chunk), typeof encoding === 'string' ? encoding : 'utf8'));
+            this.setHeaderInternal('Content-Length', String(length));
+        }
+        return super.end(chunk, encoding, callback);
     }
 
     writeContinue() {
@@ -543,6 +618,7 @@ class ConnectionParser {
         this.remaining = null;
         if (req) {
             req.complete = true;
+            req.once('end', () => { req.destroyed = true; });
             req.push(null);
         }
     }
@@ -635,7 +711,21 @@ class AgentImpl extends EventEmitter {
         this.protocol = this.options.protocol || 'http:';
         this.maxSockets = this.options.maxSockets || Infinity;
         this.maxFreeSockets = this.options.maxFreeSockets || 256;
-        this.maxTotalSockets = this.options.maxTotalSockets || Infinity;
+        if (this.options.maxTotalSockets !== undefined) {
+            const value = this.options.maxTotalSockets;
+            if (typeof value !== 'number') {
+                throw argTypeError(
+                    `The "maxTotalSockets" argument must be of type number. Received ${receivedRepr(value)}`);
+            }
+            if (Number.isNaN(value) || value <= 0) {
+                const err = new RangeError(
+                    `The value of "maxTotalSockets" is out of range. It must be > 0. Received ${value}`);
+                err.code = 'ERR_OUT_OF_RANGE';
+                throw err;
+            }
+        }
+        this.maxTotalSockets = this.options.maxTotalSockets !== undefined
+            ? this.options.maxTotalSockets : Infinity;
         this.requests = {};
         this.sockets = {};
         this.freeSockets = {};
@@ -663,11 +753,26 @@ class AgentImpl extends EventEmitter {
         }
         if (returned) cb(null, returned);
     }
+    // The layer requests attach through when constructed with an agent
+    // externally (tests drive it directly too).
+    addRequest(req, options) {
+        this.createSocket(req, { ...this.options, ...options }, (error, socket) => {
+            if (error) {
+                Promise.resolve().then(() => req.emit('error', error));
+            } else if (typeof req._adoptSocket === 'function') {
+                req._adoptSocket(socket);
+            }
+        });
+    }
     keepSocketAlive() { return false; }
     reuseSocket() {}
     destroy() {}
-    getName(options) {
-        return `${options.host || 'localhost'}:${options.port || 80}:`;
+    getName(options = {}) {
+        let name = `${options.host || 'localhost'}:${options.port || ''}:`;
+        if (options.localAddress) name += options.localAddress;
+        if (options.family === 4 || options.family === 6) name += `:${options.family}`;
+        if (options.socketPath) name += `:${options.socketPath}`;
+        return name;
     }
 }
 
@@ -702,8 +807,9 @@ function normalizeRequestArgs(input, options, cb) {
 class ClientRequestImpl extends OutgoingMessageImpl {
     constructor(opts, cb) {
         super();
+        validateRequestOptions(opts);
         this.method = String(opts.method || 'GET').toUpperCase();
-        this.path = opts.path || '/';
+        this._path = opts.path || '/';
         this.host = opts.hostname || opts.host || 'localhost';
         this.port = Number(opts.port)
             || (opts.agent && Number(opts.agent.defaultPort))
@@ -712,6 +818,10 @@ class ClientRequestImpl extends OutgoingMessageImpl {
         this.res = null;
         this.aborted = false;
         this.reusedSocket = false;
+        this._timeoutOpt = typeof opts.timeout === 'number' ? opts.timeout : null;
+        // Node's req emits 'close' when the underlying socket is done, not
+        // when the writable side finishes; suppress the stream-level close.
+        this._closeEmitted = true;
         if (cb) this.once('response', cb);
         if (opts.headers) {
             for (const name of Object.keys(opts.headers)) {
@@ -766,6 +876,10 @@ class ClientRequestImpl extends OutgoingMessageImpl {
             Promise.resolve().then(() => this.emit('socket', socket));
             return;
         }
+        if (typeof socket.setTimeout === 'function') {
+            if (this._timeoutOpt !== null) socket.setTimeout(this._timeoutOpt);
+            socket.on('timeout', () => this.emit('timeout'));
+        }
         if (socket.connecting) {
             socket.on('connect', () => {
                 this.emit('socket', socket);
@@ -793,8 +907,39 @@ class ClientRequestImpl extends OutgoingMessageImpl {
         });
         socket.on('close', () => {
             this._responseParser.onClose();
-            this.emit('close');
+            this._emitReqClose();
         });
+    }
+
+    _emitReqClose() {
+        if (this._reqClosed) return;
+        this._reqClosed = true;
+        this.emit('close');
+    }
+
+    // Node validates on every assignment (TOCTOU regression contract).
+    get path() {
+        return this._path;
+    }
+
+    set path(value) {
+        if (INVALID_PATH_RE.test(String(value))) {
+            const err = new TypeError('Request path contains unescaped characters');
+            err.code = 'ERR_UNESCAPED_CHARACTERS';
+            throw err;
+        }
+        this._path = value;
+    }
+
+    end(chunk, encoding, callback) {
+        if (!this.headersSent && chunk != null && !this._hasBody
+            && !this.hasHeader('content-length') && !this.hasHeader('transfer-encoding')) {
+            const length = Buffer.isBuffer(chunk)
+                ? chunk.length
+                : Buffer.byteLength(String(chunk), typeof encoding === 'string' ? encoding : 'utf8');
+            this._headers.set('content-length', ['Content-Length', String(length)]);
+        }
+        return super.end(chunk, encoding, callback);
     }
 
     _flushHead() {
@@ -805,7 +950,9 @@ class ClientRequestImpl extends OutgoingMessageImpl {
             this._headers.set('host', ['Host', hostHeader]);
         }
         if (!this.hasHeader('connection')) {
-            this._headers.set('connection', ['Connection', 'close']);
+            // Node's default agent advertises keep-alive; our transport still
+            // uses one connection per request (the response parser closes it).
+            this._headers.set('connection', ['Connection', 'keep-alive']);
         }
         const bodyless = this.method === 'GET' || this.method === 'HEAD'
             || this.method === 'DELETE' || this.method === 'OPTIONS';
@@ -849,8 +996,11 @@ class ClientRequestImpl extends OutgoingMessageImpl {
     }
 
     destroy(err) {
-        if (this.socket && !this.socket.destroyed) this.socket.destroy();
-        return super.destroy(err);
+        const hadSocket = this.socket && typeof this.socket.destroy === 'function';
+        if (hadSocket && !this.socket.destroyed) this.socket.destroy();
+        const result = super.destroy(err);
+        if (!hadSocket) Promise.resolve().then(() => this._emitReqClose());
+        return result;
     }
 
     setNoDelay() {}
@@ -987,6 +1137,9 @@ class ResponseParser {
         if (this.done) return;
         this.done = true;
         this.res.complete = true;
+        // Node marks the message destroyed once fully consumed, before its
+        // 'close' event.
+        this.res.once('end', () => { this.res.destroyed = true; });
         this.res.push(null);
         // One request per connection (Connection: close by default).
         const socket = this.socket;
@@ -997,6 +1150,17 @@ class ResponseParser {
 
     onClose() {
         if (this.done) return;
+        if (!this.res) {
+            // Connection ended before any response: Node's classic
+            // "socket hang up", suppressed for an explicit abort().
+            if (!this.request.aborted && !this.request._hangupEmitted) {
+                this.request._hangupEmitted = true;
+                const err = new Error('socket hang up');
+                err.code = 'ECONNRESET';
+                this.request.emit('error', err);
+            }
+            return;
+        }
         if (this.res && this.remaining === null && !this.chunked) {
             // Read-until-close body: EOF terminates it cleanly.
             this.finish();
