@@ -248,7 +248,7 @@ impl ModuleLoader for NetworkModuleLoader {
                     PreOutcome::Allow(_) => {}
                     PreOutcome::Deny(deny) => {
                         return Err(JsErrorBox::generic(format!(
-                            "Module import {}: '{}' is not allowed by the module policy",
+                            "Module import {}: '{}' is not allowed",
                             deny, specifier
                         )));
                     }
