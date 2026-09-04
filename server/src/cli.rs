@@ -603,13 +603,18 @@ pub struct Cli {
     )]
     pub allow_run_js_file: bool,
 
-    /// JSON policy configuration (inline JSON or path to a JSON file).
-    /// Enables fetch() and/or module policy gating via local Rego files
-    /// and/or remote OPA servers.
+    /// JSON policy and hook configuration (inline JSON or path to a JSON
+    /// file). Enables per-operation gating (fetch, modules, filesystem, …)
+    /// via local Rego files and/or remote OPA servers, plus composable
+    /// pre/post hooks that can deny or mutate operation inputs and outputs.
+    /// Policies run as the final pre hook, so they always evaluate the
+    /// effective (post-mutation) input.
     ///
     /// Example: --policies-json '{"fetch":{"policies":[{"url":"file:///path/to/fetch.rego"}]}}'
     ///
-    /// Schema: { "fetch": { "mode": "all"|"any", "policies": [{"url": "...", "policy_path": "...", "rule": "..."}] }, "modules": { ... } }
+    /// Schema per operation: { "mode": "all"|"any", "policies": [{"url": "...", "policy_path": "...", "rule": "..."}], "pre": [{"url": "...", ...}], "post": [{"url": "...", ...}] }.
+    /// A hook rule evaluates to a bool, or to {"allow": bool, "reason": "...", "input"|"output": {...}} to deny or rewrite; an undefined rule abstains.
+    /// Input mutation applies to fetch, filesystem, subprocess, mcp_tools, and run_js_file; post hooks to fetch, subprocess, and mcp_tools.
     #[arg(
         long = "policies-json",
         env = "MCP_V8_POLICIES_JSON",

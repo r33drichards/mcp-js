@@ -60,6 +60,7 @@ fn engine_with_policy(rego: &str) -> Engine {
             policy_path: None,
             rule: None,
         }],
+        ..Default::default()
     };
     let chain =
         build_policy_chain(&op, "mcp/fs_snapshot", "data.mcp.fs_snapshot.allow").unwrap();

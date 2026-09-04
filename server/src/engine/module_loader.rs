@@ -16,7 +16,7 @@ use deno_error::JsErrorBox;
 use futures::FutureExt;
 use serde::Serialize;
 
-use super::opa::PolicyChain;
+use super::hooks::{HookChain, PreOutcome};
 
 /// Per-request timeout for module fetches. Limits how long a single HTTP
 /// request (DNS + connect + transfer) can take. Prevents hanging on
@@ -31,8 +31,9 @@ const MODULE_FETCH_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 pub struct ModuleLoaderConfig {
     /// When false, all external module imports (npm:, jsr:, URL) are rejected.
     pub allow_external: bool,
-    /// Optional policy chain for module auditing (from `--policies-json`).
-    pub policy_chain: Option<Arc<PolicyChain>>,
+    /// Optional hook chain for module auditing (from `--policies-json`).
+    /// Gate-only: pre hooks may deny an import but not mutate the specifier.
+    pub hooks: Option<Arc<HookChain>>,
 }
 
 /// Input sent to OPA for module import auditing.
@@ -81,7 +82,7 @@ impl NetworkModuleLoader {
             client: Self::build_client(),
             config: ModuleLoaderConfig {
                 allow_external: true,
-                policy_chain: None,
+                hooks: None,
             },
         }
     }
@@ -200,12 +201,12 @@ impl ModuleLoader for NetworkModuleLoader {
 
         let client = self.client.clone();
         let specifier = module_specifier.clone();
-        let policy_chain = self.config.policy_chain.clone();
+        let hooks = self.config.hooks.clone();
         let specifier_url_str = specifier.to_string();
 
         let fut = async move {
-            // Evaluate policy chain if configured.
-            if let Some(ref chain) = policy_chain {
+            // Evaluate the hook chain (pre hooks + policy) if configured.
+            if let Some(ref hooks) = hooks {
                 let parsed = url::Url::parse(specifier_url_str.as_str()).ok();
                 let url_parsed = parsed.as_ref().map(|p| ModuleUrlParsed {
                     scheme: p.scheme().to_string(),
@@ -237,19 +238,20 @@ impl ModuleLoader for NetworkModuleLoader {
                         "Failed to serialize module policy input: {}", e
                     )))?;
 
-                let allowed = chain
-                    .evaluate(&input_value)
+                match hooks
+                    .run_pre(input_value)
                     .await
                     .map_err(|e| JsErrorBox::generic(format!(
-                        "Module policy chain check failed for '{}': {}",
+                        "Module hook chain check failed for '{}': {}",
                         specifier, e
-                    )))?;
-
-                if !allowed {
-                    return Err(JsErrorBox::generic(format!(
-                        "Module import denied by policy: '{}' is not allowed by the module policy",
-                        specifier
-                    )));
+                    )))? {
+                    PreOutcome::Allow(_) => {}
+                    PreOutcome::Deny(deny) => {
+                        return Err(JsErrorBox::generic(format!(
+                            "Module import {}: '{}' is not allowed by the module policy",
+                            deny, specifier
+                        )));
+                    }
                 }
             }
 

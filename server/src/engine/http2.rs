@@ -29,6 +29,7 @@ use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
 use super::fetch::{HeaderRule, apply_header_rules, b64_decode, b64_encode};
+use super::hooks::{HookChain, PreOutcome};
 use super::opa::PolicyChain;
 
 // ── Configuration ────────────────────────────────────────────────────────
@@ -37,17 +38,23 @@ use super::opa::PolicyChain;
 /// its presence is what turns the ops (and the `node:http2` shim) on.
 #[derive(Clone)]
 pub struct Http2Config {
-    pub policy_chain: Arc<PolicyChain>,
+    pub hooks: Arc<HookChain>,
     /// Per-stream header injection rules (shared vocabulary with fetch).
     pub header_rules: Vec<HeaderRule>,
 }
 
 impl Http2Config {
-    pub fn new_with_chain(chain: Arc<PolicyChain>) -> Self {
+    /// Create from a full [`HookChain`] (used with `--policies-json`).
+    pub fn new_with_hooks(hooks: Arc<HookChain>) -> Self {
         Self {
-            policy_chain: chain,
+            hooks,
             header_rules: Vec::new(),
         }
+    }
+
+    /// Create from a bare [`PolicyChain`], wrapped as the sole pre hook.
+    pub fn new_with_chain(chain: Arc<PolicyChain>) -> Self {
+        Self::new_with_hooks(Arc::new(HookChain::from_policy("http2", chain)))
     }
 
     pub fn with_header_rules(mut self, rules: Vec<HeaderRule>) -> Self {
@@ -170,11 +177,11 @@ async fn op_h2_connect(
     state: Rc<RefCell<OpState>>,
     #[string] url: String,
 ) -> Result<String, JsErrorBox> {
-    let (policy_chain, _) = config_from_state(&state)?;
+    let (hooks, _) = config_from_state(&state)?;
 
     // Same spawn pattern as op_fetch: keep the nested async state machine
     // off deno_core's op driver (RefCell re-entrancy, see fetch.rs).
-    let session = tokio::spawn(async move { do_h2_connect(url, policy_chain).await })
+    let session = tokio::spawn(async move { do_h2_connect(url, hooks).await })
         .await
         .map_err(|e| JsErrorBox::generic(format!("http2 task join error: {e}")))?
         .map_err(JsErrorBox::generic)?;
@@ -192,17 +199,17 @@ async fn op_h2_connect(
 
 fn config_from_state(
     state: &Rc<RefCell<OpState>>,
-) -> Result<(Arc<PolicyChain>, Vec<HeaderRule>), JsErrorBox> {
+) -> Result<(Arc<HookChain>, Vec<HeaderRule>), JsErrorBox> {
     let state = state.borrow();
     let config = state.try_borrow::<Http2Config>().ok_or_else(|| {
         JsErrorBox::generic("http2: internal error — no http2 config available")
     })?;
-    Ok((config.policy_chain.clone(), config.header_rules.clone()))
+    Ok((config.hooks.clone(), config.header_rules.clone()))
 }
 
 async fn do_h2_connect(
     url_str: String,
-    policy_chain: Arc<PolicyChain>,
+    hooks: Arc<HookChain>,
 ) -> Result<H2Session, String> {
     let parsed = url::Url::parse(&url_str)
         .map_err(|e| format!("http2: invalid URL '{url_str}': {e}"))?;
@@ -237,9 +244,10 @@ async fn do_h2_connect(
     };
     let input_value = serde_json::to_value(&policy_input)
         .map_err(|e| format!("http2: failed to serialize policy input: {e}"))?;
-    if !policy_chain.evaluate(&input_value).await? {
+    // Gate-only: http2 does not apply input mutation.
+    if let PreOutcome::Deny(deny) = hooks.run_pre(input_value).await? {
         return Err(format!(
-            "http2 denied by policy: connect to {url_str} is not allowed"
+            "http2 {deny}: connect to {url_str} is not allowed"
         ));
     }
 
@@ -325,11 +333,11 @@ async fn op_h2_request(
     #[string] headers_json: String,
     end_stream: bool,
 ) -> Result<String, JsErrorBox> {
-    let (policy_chain, header_rules) = config_from_state(&state)?;
+    let (hooks, header_rules) = config_from_state(&state)?;
     let session = get_session(&state, session_rid)?;
 
     let (response, send) = tokio::spawn(async move {
-        do_h2_request(session, headers_json, end_stream, policy_chain, header_rules).await
+        do_h2_request(session, headers_json, end_stream, hooks, header_rules).await
     })
     .await
     .map_err(|e| JsErrorBox::generic(format!("http2 task join error: {e}")))?
@@ -359,7 +367,7 @@ async fn do_h2_request(
     session: H2Session,
     headers_json: String,
     end_stream: bool,
-    policy_chain: Arc<PolicyChain>,
+    hooks: Arc<HookChain>,
     header_rules: Vec<HeaderRule>,
 ) -> Result<(h2::client::ResponseFuture, h2::SendStream<Bytes>), String> {
     let raw_headers: HashMap<String, String> = serde_json::from_str(&headers_json)
@@ -404,9 +412,9 @@ async fn do_h2_request(
     };
     let input_value = serde_json::to_value(&policy_input)
         .map_err(|e| format!("http2: failed to serialize policy input: {e}"))?;
-    if !policy_chain.evaluate(&input_value).await? {
+    if let PreOutcome::Deny(deny) = hooks.run_pre(input_value).await? {
         return Err(format!(
-            "http2 denied by policy: {method} {scheme}://{authority}{path} is not allowed"
+            "http2 {deny}: {method} {scheme}://{authority}{path} is not allowed"
         ));
     }
 

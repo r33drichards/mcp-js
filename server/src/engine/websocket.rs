@@ -31,6 +31,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 
 use super::fetch::{HeaderRule, apply_header_rules, b64_decode, b64_encode};
+use super::hooks::{HookChain, PreOutcome};
 use super::opa::PolicyChain;
 
 // ── Configuration ────────────────────────────────────────────────────────
@@ -39,17 +40,23 @@ use super::opa::PolicyChain;
 /// `OpState`; its presence is what turns the ops on.
 #[derive(Clone)]
 pub struct WebSocketConfig {
-    pub policy_chain: Arc<PolicyChain>,
+    pub hooks: Arc<HookChain>,
     /// Handshake header injection rules (shared vocabulary with fetch).
     pub header_rules: Vec<HeaderRule>,
 }
 
 impl WebSocketConfig {
-    pub fn new_with_chain(chain: Arc<PolicyChain>) -> Self {
+    /// Create from a full [`HookChain`] (used with `--policies-json`).
+    pub fn new_with_hooks(hooks: Arc<HookChain>) -> Self {
         Self {
-            policy_chain: chain,
+            hooks,
             header_rules: Vec::new(),
         }
+    }
+
+    /// Create from a bare [`PolicyChain`], wrapped as the sole pre hook.
+    pub fn new_with_chain(chain: Arc<PolicyChain>) -> Self {
+        Self::new_with_hooks(Arc::new(HookChain::from_policy("websocket", chain)))
     }
 
     pub fn with_header_rules(mut self, rules: Vec<HeaderRule>) -> Self {
@@ -138,12 +145,12 @@ async fn op_ws_connect(
     #[string] protocols_json: String,
 ) -> Result<String, JsErrorBox> {
     // Clone config out of OpState before any .await (Rc is !Send).
-    let (policy_chain, header_rules) = {
+    let (hooks, header_rules) = {
         let state = state.borrow();
         let config = state.try_borrow::<WebSocketConfig>().ok_or_else(|| {
             JsErrorBox::generic("websocket: internal error — no websocket config available")
         })?;
-        (config.policy_chain.clone(), config.header_rules.clone())
+        (config.hooks.clone(), config.header_rules.clone())
     };
 
     let protocols: Vec<String> = serde_json::from_str(&protocols_json)
@@ -152,7 +159,7 @@ async fn op_ws_connect(
     // Same spawn pattern as op_fetch: keep the deeply nested async state
     // machine off deno_core's op driver (RefCell re-entrancy, see fetch.rs).
     let (ws, accepted_protocol) = tokio::spawn(async move {
-        do_ws_connect(url, protocols, policy_chain, header_rules).await
+        do_ws_connect(url, protocols, hooks, header_rules).await
     })
     .await
     .map_err(|e| JsErrorBox::generic(format!("websocket task join error: {e}")))?
@@ -184,7 +191,7 @@ async fn op_ws_connect(
 async fn do_ws_connect(
     url_str: String,
     protocols: Vec<String>,
-    policy_chain: Arc<PolicyChain>,
+    hooks: Arc<HookChain>,
     header_rules: Vec<HeaderRule>,
 ) -> Result<(WebSocketStream<MaybeTlsStream<TcpStream>>, String), String> {
     let parsed_url = url::Url::parse(&url_str)
@@ -220,10 +227,11 @@ async fn do_ws_connect(
     };
     let input_value = serde_json::to_value(&policy_input)
         .map_err(|e| format!("websocket: failed to serialize policy input: {e}"))?;
-    let allowed = policy_chain.evaluate(&input_value).await?;
-    if !allowed {
+    // Gate-only: websocket does not apply input mutation, so a pre hook that
+    // attempts one fails the connect (enforced by the chain).
+    if let PreOutcome::Deny(deny) = hooks.run_pre(input_value).await? {
         return Err(format!(
-            "websocket denied by policy: connect to {url_str} is not allowed"
+            "websocket {deny}: connect to {url_str} is not allowed"
         ));
     }
 

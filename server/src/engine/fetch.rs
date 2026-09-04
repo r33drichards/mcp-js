@@ -26,28 +26,34 @@ use deno_error::JsErrorBox;
 use serde::Serialize;
 
 use super::fetch_auth::{OAuthClientCredentialsTokenSource, OAuthTokenSourceConfig};
+use super::hooks::{HookChain, PostOutcome, PreOutcome};
 use super::opa::PolicyChain;
 
 // ── Configuration ────────────────────────────────────────────────────────
 
-/// Configuration for the fetch() function, including policy settings.
+/// Configuration for the fetch() function, including hook/policy settings.
 /// Stored in deno_core's `OpState` for access from async ops.
 #[derive(Clone, Debug)]
 pub struct FetchConfig {
-    pub policy_chain: Arc<PolicyChain>,
+    pub hooks: Arc<HookChain>,
     pub http_client: reqwest::Client,
     pub header_rules: Vec<HeaderRule>,
 }
 
 impl FetchConfig {
-    /// Create from a [`PolicyChain`] (used with `--policies-json`).
-    pub fn new_with_chain(chain: Arc<PolicyChain>) -> Self {
+    /// Create from a full [`HookChain`] (used with `--policies-json`).
+    pub fn new_with_hooks(hooks: Arc<HookChain>) -> Self {
         let http_client = build_fetch_http_client();
         Self {
-            policy_chain: chain,
+            hooks,
             http_client,
             header_rules: Vec::new(),
         }
+    }
+
+    /// Create from a bare [`PolicyChain`], wrapped as the sole pre hook.
+    pub fn new_with_chain(chain: Arc<PolicyChain>) -> Self {
+        Self::new_with_hooks(Arc::new(HookChain::from_policy("fetch", chain)))
     }
 
     pub fn with_header_rules(mut self, rules: Vec<HeaderRule>) -> Self {
@@ -399,12 +405,12 @@ async fn op_fetch(
     #[string] body: String,
 ) -> Result<String, JsErrorBox> {
     // Clone config from OpState before any .await (Rc is !Send).
-    let (policy_chain, http_client, header_rules) = {
+    let (hooks, http_client, header_rules) = {
         let state = state.borrow();
         let config = state.try_borrow::<FetchConfig>()
             .ok_or_else(|| JsErrorBox::generic("fetch: internal error — no fetch config available"))?;
         (
-            config.policy_chain.clone(),
+            config.hooks.clone(),
             config.http_client.clone(),
             config.header_rules.clone(),
         )
@@ -419,7 +425,7 @@ async fn op_fetch(
     // RefCell re-entrancy panic in deno_core's FuturesUnorderedDriver on
     // some Rust toolchains (observed with stable, not nightly).
     tokio::spawn(async move {
-        do_fetch(url, method, headers_json, body, policy_chain, http_client, header_rules).await
+        do_fetch(url, method, headers_json, body, hooks, http_client, header_rules).await
     })
     .await
     .map_err(|e| JsErrorBox::generic(format!("fetch task join error: {}", e)))?
@@ -675,25 +681,59 @@ pub(crate) fn b64_decode(s: &str) -> Result<Vec<u8>, String> {
 /// check. (Following redirects below the policy layer was the authorization
 /// bypass this guards against — the authorizer would validate the reference but
 /// not the destination.)
+/// The request fields a pre hook may have mutated, extracted back out of the
+/// effective hook-chain input.
+#[derive(serde::Deserialize)]
+struct EffectiveFetchInput {
+    url: String,
+    method: String,
+    headers: HashMap<String, String>,
+}
+
+/// Recompute `url_parsed` from `url` after a pre hook mutates the input, so
+/// later hooks — and the policy, which runs last — never see a stale
+/// derivation.
+fn normalize_fetch_input(input: &mut serde_json::Value) -> Result<(), String> {
+    let url_str = input
+        .get("url")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "fetch: pre hook produced an input without a string 'url'".to_string())?
+        .to_string();
+    let parsed = url::Url::parse(&url_str)
+        .map_err(|e| format!("fetch: pre hook produced invalid URL '{}': {}", url_str, e))?;
+    input["url_parsed"] = serde_json::json!({
+        "scheme": parsed.scheme(),
+        "host": parsed.host_str().unwrap_or(""),
+        "port": parsed.port(),
+        "path": parsed.path(),
+        "query": parsed.query().unwrap_or(""),
+    });
+    Ok(())
+}
+
 async fn do_fetch(
     url_str: String,
     method: String,
     headers_json: String,
     body: Option<String>,
-    policy_chain: Arc<PolicyChain>,
+    hooks: Arc<HookChain>,
     http_client: reqwest::Client,
     header_rules: Vec<HeaderRule>,
 ) -> Result<String, String> {
     let mut headers: HashMap<String, String> = serde_json::from_str(&headers_json)
         .map_err(|e| format!("fetch: invalid headers JSON: {}", e))?;
 
-    // Parse URL into components for policy input
+    // Parse URL into components for the hook/policy input
     let parsed_url = url::Url::parse(&url_str)
         .map_err(|e| format!("fetch: invalid URL '{}': {}", url_str, e))?;
 
     let url_host = parsed_url.host_str().unwrap_or("").to_string();
 
-    // Apply header injection rules. User-provided headers take precedence.
+    // Apply header injection rules, keyed on the URL as requested by JS.
+    // This runs before the hook chain so the policy (the chain's final pre
+    // hook) validates the headers that will actually be sent. A pre hook that
+    // rewrites the URL host owns the header consequences: injection is not
+    // re-run, and the hook sees (and can rewrite or drop) every header.
     apply_header_rules(&header_rules, &url_host, &method, &mut headers)
         .await
         .map_err(|e| format!("fetch: credential injection failed for host '{}': {}", url_host, e))?;
@@ -714,16 +754,27 @@ async fn do_fetch(
         url_parsed,
     };
 
-    // Evaluate policy chain.
+    // Run pre hooks, then the policy chain (as the final pre hook) over the
+    // effective input.
     let input_value = serde_json::to_value(&policy_input)
         .map_err(|e| format!("fetch: failed to serialize policy input: {}", e))?;
-    let allowed = policy_chain.evaluate(&input_value).await?;
-    if !allowed {
-        return Err(format!(
-            "fetch denied by policy: {} {} is not allowed",
-            method, url_str
-        ));
-    }
+    let effective = match hooks.run_pre_with(input_value, normalize_fetch_input).await? {
+        PreOutcome::Allow(v) => v,
+        PreOutcome::Deny(deny) => {
+            return Err(format!(
+                "fetch {}: {} {} is not allowed",
+                deny, method, url_str
+            ));
+        }
+    };
+
+    // Execute the request a pre hook may have rewritten.
+    let EffectiveFetchInput {
+        url: url_str,
+        method,
+        headers,
+    } = serde_json::from_value(effective.clone())
+        .map_err(|e| format!("fetch: invalid effective input after pre hooks: {}", e))?;
 
     // Execute the HTTP request. The client is configured not to auto-follow
     // redirects, so a 3xx comes back here unfollowed.
@@ -788,6 +839,18 @@ async fn do_fetch(
         // of a redirect this layer performed.
         "redirected": false,
     });
+
+    // Post hooks see {"input": <effective request>, "output": <response>} and
+    // may mutate the response (note: "body" is base64-encoded) or deny it.
+    if hooks.has_post() {
+        return match hooks.run_post(&effective, result).await? {
+            PostOutcome::Allow(v) => Ok(v.to_string()),
+            PostOutcome::Deny(deny) => Err(format!(
+                "fetch response {}: {} {}",
+                deny, method, url_str
+            )),
+        };
+    }
 
     Ok(result.to_string())
 }
@@ -972,6 +1035,10 @@ mod tests {
             },
         )
         .expect("rule should be valid")
+    }
+
+    fn wrap(chain: Arc<PolicyChain>) -> Arc<crate::engine::hooks::HookChain> {
+        Arc::new(crate::engine::hooks::HookChain::from_policy("fetch", chain))
     }
 
     fn allow_when_authorization_matches(expected: &str) -> Arc<PolicyChain> {
@@ -1361,7 +1428,7 @@ allow if {{
         }))])
         .await;
         let echo_server = start_echo_server().await;
-        let policy_chain = allow_when_authorization_matches("Bearer policy-token");
+        let policy_chain = wrap(allow_when_authorization_matches("Bearer policy-token"));
 
         let response = do_fetch(
             echo_server.url.clone(),
@@ -1414,7 +1481,7 @@ allow if {{
             "GET".to_string(),
             "{}".to_string(),
             None,
-            Arc::new(PolicyChain::new(vec![], EvalMode::All)),
+            wrap(Arc::new(PolicyChain::new(vec![], EvalMode::All))),
             reqwest::Client::new(),
             vec![oauth_rule_for_host("example.com", token_server.token_url())],
         )
@@ -1485,7 +1552,7 @@ allow if {{
             headers_json,
             // do_fetch expects the request body base64-encoded (binary-safe).
             Some(super::b64_encode(body.as_bytes())),
-            Arc::new(PolicyChain::new(vec![], EvalMode::All)),
+            wrap(Arc::new(PolicyChain::new(vec![], EvalMode::All))),
             reqwest::Client::new(),
             vec![],
         )
@@ -1552,7 +1619,7 @@ allow if {{
         let echo = start_echo_server().await;
 
         // No real port equals 0, so this policy denies every request.
-        let policy = policy_allowing_only_port(0);
+        let policy = wrap(policy_allowing_only_port(0));
 
         let err = do_fetch(
             echo.url.clone(),
@@ -1627,7 +1694,7 @@ allow if {{
         }
 
         // Allow only the allowed host's port.
-        let policy = policy_allowing_only_port(allowed_addr.port());
+        let policy = wrap(policy_allowing_only_port(allowed_addr.port()));
 
         let response = do_fetch(
             start_url,

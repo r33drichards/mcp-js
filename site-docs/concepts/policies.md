@@ -64,6 +64,76 @@ flowchart TD
     K -- No, last --> I
 ```
 
+## Pre/post hooks
+
+Policies answer one question — allow or deny. **Hooks** generalize the gate: each category can also run an ordered list of `pre` hooks (which see the operation input and may deny it *or rewrite it*) and `post` hooks (which see the input and output and may deny the result or rewrite the output). Hooks use the same source vocabulary as policies (`file://` Rego via regorus, `http(s)://` OPA-style REST) and are configured alongside them:
+
+```json
+{
+  "fetch": {
+    "policies": [{"url": "file:///etc/policies/fetch.rego"}],
+    "pre":      [{"url": "file:///etc/policies/fetch_hooks.rego"}],
+    "post":     [{"url": "file:///etc/policies/fetch_hooks.rego"}]
+  }
+}
+```
+
+Internally, **policies are pre hooks**: the configured policy chain runs as the *last* pre hook, so it always evaluates the effective (post-mutation) input. A pre hook can therefore rewrite a request into compliance, but never rewrite one out from under an approval the policy already gave.
+
+### Hook result contract
+
+A hook rule (default: `data.mcp.<category>.pre` / `.post`; remote default path: `mcp/<category>/pre` / `/post`) evaluates to either a bare boolean (pure policy behavior) or an object:
+
+| Field | Meaning |
+|---|---|
+| `allow` (bool, default `true`) | Deny the operation when `false` |
+| `reason` (string) | Human-readable denial reason, surfaced in the JS error |
+| `input` (object, pre only) | Replacement operation input |
+| `output` (object, post only) | Replacement operation output |
+
+A Rego rule that is *undefined* for a given input abstains — allow, no mutation — so partial rules compose naturally. Hooks run in configured order, each seeing the previous hook's effective value.
+
+```rego
+package mcp.fetch
+
+# pre: tag every request, and upgrade http:// to https://
+pre := {"input": patched} if {
+    startswith(input.url, "http://")
+    patched := object.union(input, {
+        "url": concat("", ["https://", substring(input.url, 7, -1)]),
+    })
+}
+
+# post: refuse to hand oversized responses back to the isolate
+post := {"allow": false, "reason": "response too large"} if {
+    count(input.output.body) > 10000000
+}
+```
+
+Pre hooks receive the same input document the category's policies see. Post hooks receive `{"input": <effective input>, "output": <operation output>}` — for fetch, the output is `{status, statusText, url, headers, body, bodyEncoding, redirected}` with `body` base64-encoded.
+
+### Per-category hook capabilities
+
+Not every operation can honor a rewritten input, and not every operation produces a hookable output:
+
+| Category | Pre hooks | Input mutation applied | Post hooks (output mutation) |
+|---|---|---|---|
+| `fetch` | ✓ | ✓ (`url`, `method`, `headers`) | ✓ (response) |
+| `filesystem` | ✓ | ✓ (`path`, `destination`) | — |
+| `subprocess` | ✓ | ✓ (`command`, `args`, `cwd`, `env`) | ✓ (`{code, stdout, stderr, success}`) |
+| `mcp_tools` | ✓ | ✓ (`server`, `tool`, `arguments`) | ✓ (tool result) |
+| `run_js_file` | ✓ | ✓ (`path`, re-canonicalized after rewrite) | — |
+| `websocket` | ✓ (gate-only) | — | — |
+| `http2` | ✓ (gate-only) | — | — |
+| `modules` | ✓ (gate-only) | — | — |
+| `fs_snapshot` | ✓ (gate-only) | — | — |
+
+The rules fail closed: a pre hook that returns a replacement `input` for a gate-only category errors the operation rather than silently ignoring the rewrite, and configuring `post` hooks for a category without a hookable output is a startup error.
+
+Two details worth knowing for `fetch`: derived fields are re-normalized after every mutation (`url_parsed` is recomputed from the rewritten `url`, so later hooks and the policy never see a stale parse), and `--fetch-header` credential injection runs *before* the hook chain, keyed on the URL as requested by JS — a pre hook that rewrites the URL host sees every header and owns the consequences (injection is not re-run for the new host). Similarly, `run_js_file` re-canonicalizes a rewritten path immediately, preserving the invariant that its policies only ever see canonicalized paths.
+
+Hooks are operator configuration, loaded from the same trusted `--policies-json` as policies — they are not reachable or modifiable from sandboxed JS.
+
 ## OPA vs embedded regorus
 
 mcp-v8 supports two evaluation backends, selected by the `url` scheme in each policy source entry:

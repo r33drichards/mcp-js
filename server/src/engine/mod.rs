@@ -14,6 +14,7 @@ pub mod fs_store;
 pub mod fs_tree;
 pub mod heap_storage;
 pub mod heap_tags;
+pub mod hooks;
 pub mod mcp_client;
 pub mod mcp_oauth;
 pub mod module_loader;
@@ -1586,8 +1587,9 @@ pub struct Engine {
     module_loader_config: Arc<module_loader::ModuleLoaderConfig>,
     /// MCP client manager for programmatic tool calling from JS.
     mcp_client_manager: Option<Arc<mcp_client::McpClientManager>>,
-    /// OPA policy chain for MCP tool calls (`mcp.callTool()`).
-    mcp_tools_policy_chain: Option<Arc<opa::PolicyChain>>,
+    /// Hook chain for MCP tool calls (`mcp.callTool()`): pre hooks + policy,
+    /// post hooks over the tool result.
+    mcp_tools_hooks: Option<Arc<hooks::HookChain>>,
     /// Policy-gated subprocess configuration. When Some, subprocess execution is injected into the JS runtime.
     subprocess_config: Option<Arc<subprocess::SubprocessConfig>>,
     /// Optional override for the MCP server `instructions` field (the "system
@@ -1606,8 +1608,9 @@ pub struct Engine {
     fs_store: Option<Arc<fs_store::FsStore>>,
     /// Mutable label → manifest pointer store with reflog.
     label_store: Option<Arc<fs_labels::LabelStore>>,
-    /// Policy chain gating fs snapshot pointer moves (pull/push/reset/label).
-    fs_snapshot_policy_chain: Option<Arc<opa::PolicyChain>>,
+    /// Hook chain gating fs snapshot pointer moves (pull/push/reset/label).
+    /// Gate-only: pre hooks may deny a move but not mutate it.
+    fs_snapshot_hooks: Option<Arc<hooks::HookChain>>,
     /// Per-mitigation sandbox hardening. Default is all-off (unhardened); each
     /// mitigation is opt-in via the `--harden-*` CLI flags.
     hardening: console::HardeningConfig,
@@ -1775,17 +1778,17 @@ impl Engine {
             execution_registry: None,
             module_loader_config: Arc::new(module_loader::ModuleLoaderConfig {
                 allow_external: false,
-                policy_chain: None,
+                hooks: None,
             }),
             mcp_client_manager: None,
-            mcp_tools_policy_chain: None,
+            mcp_tools_hooks: None,
             subprocess_config: None,
             instructions_override: None,
             run_js_description_override: None,
             run_js_file_policy: None,
             fs_store: None,
             label_store: None,
-            fs_snapshot_policy_chain: None,
+            fs_snapshot_hooks: None,
             hardening: console::HardeningConfig::default(),
         }
     }
@@ -1816,17 +1819,17 @@ impl Engine {
             execution_registry: None,
             module_loader_config: Arc::new(module_loader::ModuleLoaderConfig {
                 allow_external: false,
-                policy_chain: None,
+                hooks: None,
             }),
             mcp_client_manager: None,
-            mcp_tools_policy_chain: None,
+            mcp_tools_hooks: None,
             subprocess_config: None,
             instructions_override: None,
             run_js_description_override: None,
             run_js_file_policy: None,
             fs_store: None,
             label_store: None,
-            fs_snapshot_policy_chain: None,
+            fs_snapshot_hooks: None,
             hardening: console::HardeningConfig::default(),
         }
     }
@@ -1923,10 +1926,16 @@ impl Engine {
         self.mcp_client_manager.clone()
     }
 
-    /// Set OPA policy chain for MCP tool calls (`mcp.callTool()`).
-    pub fn with_mcp_tools_policy_chain(mut self, chain: Arc<opa::PolicyChain>) -> Self {
-        self.mcp_tools_policy_chain = Some(chain);
+    /// Set the hook chain (pre hooks + policy + post hooks) for MCP tool
+    /// calls (`mcp.callTool()`).
+    pub fn with_mcp_tools_hooks(mut self, hooks: Arc<hooks::HookChain>) -> Self {
+        self.mcp_tools_hooks = Some(hooks);
         self
+    }
+
+    /// Set an OPA policy chain for MCP tool calls, wrapped as the sole pre hook.
+    pub fn with_mcp_tools_policy_chain(mut self, chain: Arc<opa::PolicyChain>) -> Self {
+        self.with_mcp_tools_hooks(Arc::new(hooks::HookChain::from_policy("mcp_tools", chain)))
     }
 
     /// Submit code for async execution. Returns an execution ID immediately.
@@ -1980,13 +1989,20 @@ impl Engine {
         self
     }
 
-    /// Gate fs snapshot pointer moves (pull/push/reset/label) behind a policy.
-    pub fn with_fs_snapshot_policy(mut self, chain: Arc<opa::PolicyChain>) -> Self {
-        self.fs_snapshot_policy_chain = Some(chain);
+    /// Gate fs snapshot pointer moves (pull/push/reset/label) behind a hook
+    /// chain (pre hooks + policy; gate-only).
+    pub fn with_fs_snapshot_hooks(mut self, hooks: Arc<hooks::HookChain>) -> Self {
+        self.fs_snapshot_hooks = Some(hooks);
         self
     }
 
-    /// Evaluate the fs-snapshot policy for an operation, if a chain is set.
+    /// Gate fs snapshot pointer moves behind a bare policy chain, wrapped as
+    /// the sole pre hook.
+    pub fn with_fs_snapshot_policy(mut self, chain: Arc<opa::PolicyChain>) -> Self {
+        self.with_fs_snapshot_hooks(Arc::new(hooks::HookChain::from_policy("fs_snapshot", chain)))
+    }
+
+    /// Evaluate the fs-snapshot hook chain for an operation, if one is set.
     /// Input: `{ "op": ..., "label": ..., "ca_id": ... }`.
     async fn check_fs_snapshot_policy(
         &self,
@@ -1994,20 +2010,20 @@ impl Engine {
         label: Option<&str>,
         ca_id: Option<&str>,
     ) -> Result<(), String> {
-        let Some(chain) = &self.fs_snapshot_policy_chain else {
+        let Some(chain) = &self.fs_snapshot_hooks else {
             return Ok(());
         };
         let input = serde_json::json!({ "op": op, "label": label, "ca_id": ca_id });
-        let allowed = chain
-            .evaluate(&input)
+        match chain
+            .run_pre(input)
             .await
-            .map_err(|e| format!("fs_snapshot policy error: {e}"))?;
-        if !allowed {
-            return Err(format!(
-                "fs_snapshot {op} denied by policy (label={label:?}, ca_id={ca_id:?})"
-            ));
+            .map_err(|e| format!("fs_snapshot policy error: {e}"))?
+        {
+            hooks::PreOutcome::Allow(_) => Ok(()),
+            hooks::PreOutcome::Deny(deny) => Err(format!(
+                "fs_snapshot {op} {deny} (label={label:?}, ca_id={ca_id:?})"
+            )),
         }
-        Ok(())
     }
 
     /// The fs object store, if configured.
@@ -2619,7 +2635,7 @@ impl Engine {
                     .as_ref()
                     .map(|m| mcp_client::McpConfig {
                         client_manager: (**m).clone(),
-                        policy_chain: self.mcp_tools_policy_chain.clone(),
+                        hooks: self.mcp_tools_hooks.clone(),
                     });
                 let fm = fs_mount.clone();
                 let ast = artifact_state.clone();
@@ -2744,7 +2760,7 @@ impl Engine {
                     .as_ref()
                     .map(|m| mcp_client::McpConfig {
                         client_manager: (**m).clone(),
-                        policy_chain: self.mcp_tools_policy_chain.clone(),
+                        hooks: self.mcp_tools_hooks.clone(),
                     });
 
                 let snap_mutex = self.snapshot_mutex.clone();
