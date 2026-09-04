@@ -92,7 +92,7 @@ impl RunJsFilePolicy {
                     Ok(())
                 })
                 .await
-                .map_err(|e| format!("run_js file policy evaluation failed: {}", e))?;
+                .map_err(|e| format!("run_js file hook chain error: {}", e))?;
 
             match outcome {
                 PreOutcome::Allow(effective) => {
