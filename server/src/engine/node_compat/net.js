@@ -146,6 +146,82 @@ function opError(message) {
     return err;
 }
 
+function validateConnectOptions(options) {
+    for (const key of ['objectMode', 'readableObjectMode', 'writableObjectMode']) {
+        if (key in options) {
+            const err = new TypeError(
+                `The property 'options.${key}' is not supported. Received ${String(options[key])}`);
+            err.code = 'ERR_INVALID_ARG_VALUE';
+            throw err;
+        }
+    }
+    if (options.host !== undefined && typeof options.host !== 'string') {
+        const err = new TypeError(
+            `The "options.host" property must be of type string. Received ${receivedRepr(options.host)}`);
+        err.code = 'ERR_INVALID_ARG_TYPE';
+        throw err;
+    }
+    if (typeof options.host === 'string' && options.host.includes('\u0000')) {
+        const err = new TypeError(
+            "The property 'options.host' must be a string without null bytes. " +
+            `Received '${options.host}'`);
+        err.code = 'ERR_INVALID_ARG_VALUE';
+        throw err;
+    }
+    if (options.lookup !== undefined && typeof options.lookup !== 'function') {
+        const err = new TypeError(
+            `The "options.lookup" property must be of type function. Received ${receivedRepr(options.lookup)}`);
+        err.code = 'ERR_INVALID_ARG_TYPE';
+        throw err;
+    }
+    if (options.autoSelectFamily !== undefined
+        && typeof options.autoSelectFamily !== 'boolean') {
+        const err = new TypeError(
+            `The "options.autoSelectFamily" property must be of type boolean. Received ${receivedRepr(options.autoSelectFamily)}`);
+        err.code = 'ERR_INVALID_ARG_TYPE';
+        throw err;
+    }
+    if (options.autoSelectFamilyAttemptTimeout !== undefined) {
+        const value = options.autoSelectFamilyAttemptTimeout;
+        if (typeof value !== 'number') {
+            const err = new TypeError(
+                `The "options.autoSelectFamilyAttemptTimeout" property must be of type number. Received ${receivedRepr(value)}`);
+            err.code = 'ERR_INVALID_ARG_TYPE';
+            throw err;
+        }
+        if (!Number.isInteger(value) || value < 1) {
+            const err = new RangeError(
+                `The value of "options.autoSelectFamilyAttemptTimeout" is out of range. Received ${value}`);
+            err.code = 'ERR_OUT_OF_RANGE';
+            throw err;
+        }
+    }
+    if (options.localAddress !== undefined
+        && (typeof options.localAddress !== 'string' || !isIP(options.localAddress))) {
+        const err = new TypeError(
+            `Invalid IP address: ${options.localAddress}`);
+        err.code = 'ERR_INVALID_IP_ADDRESS';
+        throw err;
+    }
+    if (options.localPort !== undefined && typeof options.localPort !== 'number') {
+        const err = new TypeError(
+            `The "options.localPort" property must be of type number. Received ${receivedRepr(options.localPort)}`);
+        err.code = 'ERR_INVALID_ARG_TYPE';
+        throw err;
+    }
+    if (options.hints !== undefined) {
+        const err = new TypeError(
+            `The argument 'hints' is invalid. Received ${String(options.hints)}`);
+        // Valid dns hint combinations pass through; only obvious junk is
+        // rejected (0/1/2/4 combinations are fine).
+        if (typeof options.hints !== 'number'
+            || (options.hints & ~7) !== 0) {
+            err.code = 'ERR_INVALID_ARG_VALUE';
+            throw err;
+        }
+    }
+}
+
 function normalizeConnectArgs(args) {
     let options = {};
     let cb;
@@ -176,12 +252,26 @@ function callable(Cls) {
 
 class SocketImpl extends Duplex {
     constructor(_options) {
-        super({});
+        super({ highWaterMark: _options && _options.highWaterMark });
+        if (_options && _options.fd !== undefined) {
+            if (typeof _options.fd !== 'number') {
+                const err = new TypeError(
+                    `The "options.fd" property must be of type number. Received ${receivedRepr(_options.fd)}`);
+                err.code = 'ERR_INVALID_ARG_TYPE';
+                throw err;
+            }
+            if (_options.fd < 0) {
+                const err = new RangeError(
+                    `The value of "options.fd" is out of range. It must be >= 0. Received ${_options.fd}`);
+                err.code = 'ERR_OUT_OF_RANGE';
+                throw err;
+            }
+        }
         this.connecting = false;
         this.pending = true;
         this.destroyed = false;
-        this.readable = false;
-        this.writable = false;
+        this.readable = true;
+        this.writable = true;
         this.remoteAddress = undefined;
         this.remotePort = undefined;
         this.remoteFamily = undefined;
@@ -195,12 +285,19 @@ class SocketImpl extends Duplex {
         this._timeoutTimer = null;
         this._server = null;
         this.allowHalfOpen = Boolean(_options && _options.allowHalfOpen);
+        if (_options && _options.readable !== undefined) {
+            this.readable = Boolean(_options.readable);
+        }
+        if (_options && _options.writable !== undefined) {
+            this.writable = Boolean(_options.writable);
+        }
         // Fires on both the destroy path and graceful end+finish teardown.
         this.once('close', () => this._teardown());
     }
 
     _teardown() {
         this._clearTimeout();
+        this.pending = true;
         syncHandle(this, false);
         const rid = this._rid;
         this._rid = null;
@@ -238,6 +335,7 @@ class SocketImpl extends Duplex {
             return this;
         }
         const [options, cb] = normalizeConnectArgs(args);
+        validateConnectOptions(options);
         const pipePath = options.path || options.socketPath;
         let port;
         if (pipePath !== undefined) {
@@ -254,6 +352,36 @@ class SocketImpl extends Duplex {
             port = validatePort(options.port, 'options.port');
         }
         const host = options.host || options.hostname || '127.0.0.1';
+        if (typeof options.lookup === 'function' && !isIPv4(host) && !isIPv6(host)) {
+            // Custom resolver: whatever it yields is dialed (loopback-gated
+            // by the transport); if it never calls back, nothing happens —
+            // matching Node.
+            this.connecting = true;
+            options.lookup(host, { family: 4 }, (error, address, family) => {
+                if (this.destroyed) return;
+                if (error) { this.connecting = false; this.destroy(error); return; }
+                let resolved = address;
+                let resolvedFamily = family;
+                if (Array.isArray(address)) {
+                    resolved = address[0] && address[0].address;
+                    resolvedFamily = address[0] && address[0].family;
+                }
+                if (resolvedFamily !== undefined && resolvedFamily !== 4
+                    && resolvedFamily !== 6) {
+                    const err = new Error(
+                        `Invalid address family: ${resolvedFamily} ${host}:${port}`);
+                    err.code = 'ERR_INVALID_ADDRESS_FAMILY';
+                    err.host = host;
+                    err.port = port;
+                    this.connecting = false;
+                    this.destroy(err);
+                    return;
+                }
+                this._dial(String(resolved || '127.0.0.1'), port, options);
+            });
+            if (cb) this.once('connect', cb);
+            return this;
+        }
         if (host !== 'localhost' && !isIPv4(host) && !isIPv6(host)) {
             // The sandbox has no resolver; an unknown hostname surfaces the
             // way Node reports a failed lookup.
@@ -277,6 +405,12 @@ class SocketImpl extends Duplex {
         }
         this.connecting = true;
         if (cb) this.once('connect', cb);
+        this._dial(String(host), port, options);
+        return this;
+    }
+
+    _dial(host, port, _options) {
+        this.connecting = true;
         ops.connect(String(host), port >>> 0).then((json) => {
             if (this.destroyed) {
                 ops.closeStream(JSON.parse(json).rid);
@@ -289,7 +423,6 @@ class SocketImpl extends Duplex {
             this.connecting = false;
             this.destroy(opError(String(error && error.message || error)));
         });
-        return this;
     }
 
     async _startReading() {
@@ -325,6 +458,31 @@ class SocketImpl extends Duplex {
         }
     }
 
+    write(chunk, encoding, callback) {
+        // Node counts queued pre-connect bytes in bytesWritten immediately.
+        if (chunk !== null && chunk !== undefined
+            && (typeof chunk === 'string' || ArrayBuffer.isView(chunk))) {
+            this.bytesWritten += Buffer.isBuffer(chunk)
+                ? chunk.length
+                : typeof chunk === 'string'
+                    ? Buffer.byteLength(chunk, typeof encoding === 'string' ? encoding : 'utf8')
+                    : chunk.byteLength;
+        }
+        return super.write(chunk, encoding, callback);
+    }
+
+    end(chunk, encoding, callback) {
+        if (chunk !== null && chunk !== undefined
+            && (typeof chunk === 'string' || ArrayBuffer.isView(chunk))) {
+            this.bytesWritten += Buffer.isBuffer(chunk)
+                ? chunk.length
+                : typeof chunk === 'string'
+                    ? Buffer.byteLength(chunk, typeof encoding === 'string' ? encoding : 'utf8')
+                    : chunk.byteLength;
+        }
+        return super.end(chunk, encoding, callback);
+    }
+
     _write(chunk, encoding, callback) {
         if (this._rid === null) {
             // Not connected yet: queue behind the connect.
@@ -335,7 +493,6 @@ class SocketImpl extends Duplex {
             return;
         }
         const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), encoding || 'utf8');
-        this.bytesWritten += buf.length;
         this._touchTimeout();
         ops.write(this._rid, buf.toString('base64')).then(
             () => callback(),
@@ -395,6 +552,14 @@ class SocketImpl extends Duplex {
         }
     }
 
+    get readyState() {
+        if (this.connecting) return 'opening';
+        if (this.readable && this.writable) return 'open';
+        if (this.readable) return 'readOnly';
+        if (this.writable) return 'writeOnly';
+        return 'closed';
+    }
+
     resetAndDestroy() {
         // Approximation: a hard close (the loopback transport has no RST
         // control), which still tears the connection down immediately.
@@ -424,6 +589,12 @@ class ServerImpl extends EventEmitter {
         if (typeof options === 'function') {
             connectionListener = options;
             options = {};
+        } else if (options !== undefined && options !== null
+            && typeof options !== 'object') {
+            const err = new TypeError(
+                `The "options" argument must be of type object. Received ${receivedRepr(options)}`);
+            err.code = 'ERR_INVALID_ARG_TYPE';
+            throw err;
         }
         this.listening = false;
         this.maxConnections = undefined;
@@ -440,6 +611,11 @@ class ServerImpl extends EventEmitter {
     listen(...args) {
         if (!ops) {
             throw new Error('net.createServer is not supported in this runtime');
+        }
+        if (this.listening) {
+            const err = new Error('Listen method has been called more than once without closing.');
+            err.code = 'ERR_SERVER_ALREADY_LISTEN';
+            throw err;
         }
         let options = {};
         let cb;
@@ -458,6 +634,19 @@ class ServerImpl extends EventEmitter {
         // many host/backlog slots (possibly undefined) sit before it.
         const last = args[args.length - 1];
         if (typeof last === 'function') cb = last;
+        if (options.signal !== undefined) {
+            const signal = options.signal;
+            if (!signal || typeof signal.addEventListener !== 'function'
+                || typeof signal.aborted !== 'boolean') {
+                const err = new TypeError(
+                    `The "options.signal" property must be an instance of AbortSignal. Received ${receivedRepr(signal)}`);
+                err.code = 'ERR_INVALID_ARG_TYPE';
+                throw err;
+            }
+            const onAbort = () => this.close();
+            if (signal.aborted) Promise.resolve().then(onAbort);
+            else signal.addEventListener('abort', onAbort, { once: true });
+        }
         if (typeof cb === 'function') this.once('listening', cb);
         const pipePath = options.path;
         const port = pipePath || options.port === undefined || options.port === null

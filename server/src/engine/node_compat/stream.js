@@ -127,12 +127,21 @@ function maybeEmitEnd(stream) {
 function initWritable(self, options) {
     self._writableState = {
         objectMode: !!(options && options.objectMode),
+        highWaterMark: options && options.highWaterMark !== undefined
+            ? options.highWaterMark : 16384,
+        pendingBytes: 0,
         queue: [],       // {chunk, encoding, callback}
         writing: false,
         ended: false,    // end() called
         finished: false,
         destroyed: false,
     };
+}
+
+function chunkSize(state, chunk) {
+    if (state.objectMode) return 1;
+    if (typeof chunk === 'string') return chunk.length;
+    return chunk && chunk.byteLength !== undefined ? chunk.byteLength : 1;
 }
 
 function writableMethods(proto) {
@@ -142,6 +151,25 @@ function writableMethods(proto) {
             encoding = undefined;
         }
         const state = this._writableState;
+        if (!state.objectMode) {
+            if (chunk === null) {
+                const err = new TypeError('May not write null values to stream');
+                err.code = 'ERR_STREAM_NULL_VALUES';
+                throw err;
+            }
+            if (typeof chunk !== 'string' && !ArrayBuffer.isView(chunk)) {
+                const err = new TypeError(
+                    'The "chunk" argument must be of type string or an instance of ' +
+                    `Buffer, TypedArray, or DataView. Received ${
+                        chunk === undefined ? 'undefined'
+                        : typeof chunk === 'object'
+                            ? `an instance of ${(chunk.constructor && chunk.constructor.name) || 'Object'}`
+                            : typeof chunk === 'function' ? `function ${chunk.name}`
+                            : `type ${typeof chunk} (${String(chunk)})`}`);
+                err.code = 'ERR_INVALID_ARG_TYPE';
+                throw err;
+            }
+        }
         if (state.ended || state.destroyed) {
             const err = new Error('write after end');
             if (callback) later(() => callback(err));
@@ -149,8 +177,10 @@ function writableMethods(proto) {
             return false;
         }
         state.queue.push({ chunk, encoding, callback });
+        state.pendingBytes += chunkSize(state, chunk);
         processWriteQueue(this);
-        return true;
+        // Backpressure signal: false once buffered bytes reach the mark.
+        return state.pendingBytes < state.highWaterMark;
     };
 
     proto.end = function end(chunk, encoding, callback) {
@@ -191,6 +221,8 @@ function processWriteQueue(stream) {
     state.writing = true;
     const onDone = (err) => {
         state.writing = false;
+        state.pendingBytes -= chunkSize(state, chunk);
+        if (state.pendingBytes < 0) state.pendingBytes = 0;
         if (callback) later(() => callback(err || null));
         if (err) {
             if (!callback) stream.emit('error', err);
