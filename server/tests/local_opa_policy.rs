@@ -145,6 +145,7 @@ allow if {
             policy_path: None,
             rule: None,
         }],
+        ..Default::default()
     };
     let chain = Arc::new(
         build_policy_chain(&op, "mcp/fetch", "data.mcp.fetch.allow").unwrap(),
@@ -177,6 +178,7 @@ allow if {
             policy_path: None,
             rule: None,
         }],
+        ..Default::default()
     };
     let chain = Arc::new(
         build_policy_chain(&op, "mcp/fetch", "data.mcp.fetch.allow").unwrap(),
@@ -214,6 +216,7 @@ async fn test_local_rego_uses_existing_policy_file() {
             policy_path: None,
             rule: None,
         }],
+        ..Default::default()
     };
     let chain = Arc::new(
         build_policy_chain(&op, "mcp/fetch", "data.mcp.fetch.allow").unwrap(),
@@ -258,6 +261,7 @@ default allow = false
                 rule: None,
             },
         ],
+        ..Default::default()
     };
     let chain = Arc::new(
         build_policy_chain(&op, "mcp/fetch", "data.mcp.fetch.allow").unwrap(),
@@ -302,6 +306,7 @@ allow if { input.method == "GET" }
                 rule: None,
             },
         ],
+        ..Default::default()
     };
     let chain = Arc::new(
         build_policy_chain(&op, "mcp/fetch", "data.mcp.fetch.allow").unwrap(),
@@ -341,6 +346,7 @@ allow if { input.method == "HEAD" }
             policy_path: None,
             rule: None,
         }],
+        ..Default::default()
     };
     let chain = Arc::new(
         build_policy_chain(&op, "mcp/fetch", "data.mcp.fetch.allow").unwrap(),

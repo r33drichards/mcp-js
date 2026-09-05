@@ -286,14 +286,29 @@ pub struct PoliciesConfig {
     pub run_js_file: Option<OperationPolicies>,
 }
 
-/// Per-operation policy configuration.
-#[derive(Debug, Clone, Deserialize)]
+/// Per-operation policy and hook configuration.
+///
+/// `policies` is the deny/allow gate; `pre` and `post` are composable hooks
+/// (see [`super::hooks`]). Internally the policies are themselves run as the
+/// *final* pre hook, so they always evaluate the effective (post-mutation)
+/// operation input.
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct OperationPolicies {
-    /// Evaluation mode: `"all"` (default) or `"any"`.
+    /// Evaluation mode for `policies`: `"all"` (default) or `"any"`.
     #[serde(default)]
     pub mode: EvalMode,
     /// Ordered list of policy sources.
+    #[serde(default)]
     pub policies: Vec<PolicySource>,
+    /// Ordered pre hooks: run before the operation (and before `policies`),
+    /// each seeing the operation input; a hook may deny or mutate it.
+    #[serde(default)]
+    pub pre: Vec<super::hooks::HookSource>,
+    /// Ordered post hooks: run after the operation, each seeing the input and
+    /// output; a hook may deny the result or mutate the output. Only
+    /// supported for operations that produce a hookable output.
+    #[serde(default)]
+    pub post: Vec<super::hooks::HookSource>,
 }
 
 /// A single policy source — either a remote OPA server or a local Rego file/directory.
@@ -552,6 +567,7 @@ allow if { input.admin == true }
                 policy_path: None,
                 rule: None,
             }],
+            ..Default::default()
         };
         let chain = build_policy_chain(&op, "mcp/fetch", "data.mcp.test.allow").unwrap();
         assert_eq!(chain.evaluators.len(), 1);
@@ -569,6 +585,7 @@ allow if { input.admin == true }
                 policy_path: None,
                 rule: None,
             }],
+            ..Default::default()
         };
         let chain = build_policy_chain(&op, "mcp/fetch", "data.mcp.test.allow").unwrap();
         assert_eq!(chain.evaluators.len(), 1);
@@ -583,6 +600,7 @@ allow if { input.admin == true }
                 policy_path: Some("custom/path".to_string()),
                 rule: None,
             }],
+            ..Default::default()
         };
         let chain = build_policy_chain(&op, "mcp/fetch", "data.mcp.fetch.allow").unwrap();
         assert_eq!(chain.evaluators.len(), 1);
@@ -598,6 +616,7 @@ allow if { input.admin == true }
                 policy_path: None,
                 rule: None,
             }],
+            ..Default::default()
         };
         let result = build_policy_chain(&op, "mcp/fetch", "data.mcp.fetch.allow");
         assert!(result.is_err());
@@ -684,6 +703,7 @@ allow if { input.admin == true }
                 policy_path: None,
                 rule: None, // will use default
             }],
+            ..Default::default()
         };
         let chain = build_policy_chain(&op, "mcp/fetch", "data.mcp.fetch.allow").unwrap();
 
@@ -725,6 +745,7 @@ allow if {
                 policy_path: None,
                 rule: None,
             }],
+            ..Default::default()
         };
         let chain = build_policy_chain(&op, "mcp/tools", "data.mcp.tools.allow").unwrap();
 
@@ -759,6 +780,7 @@ allow if {
                 policy_path: None,
                 rule: None,
             }],
+            ..Default::default()
         };
         let chain = build_policy_chain(&op, "mcp/tools", "data.mcp.tools.allow").unwrap();
 
@@ -868,6 +890,7 @@ allow if {
                 policy_path: None,
                 rule: None,
             }],
+            ..Default::default()
         };
         let chain = build_policy_chain(&op, "mcp/subprocess", "data.mcp.subprocess.allow").unwrap();
 
@@ -900,6 +923,7 @@ allow if {
                 policy_path: None,
                 rule: None,
             }],
+            ..Default::default()
         };
         let chain = build_policy_chain(&op, "mcp/subprocess", "data.mcp.subprocess.allow").unwrap();
 

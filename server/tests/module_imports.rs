@@ -121,7 +121,7 @@ fn create_test_engine_with_external_modules() -> Engine {
     Engine::new_stateless(16 * 1024 * 1024, 60, 4)
         .with_module_loader_config(ModuleLoaderConfig {
             allow_external: true,
-            policy_chain: None,
+            hooks: None,
         })
         .with_execution_registry(Arc::new(registry))
 }
@@ -138,7 +138,7 @@ fn create_test_engine_modules_blocked() -> Engine {
     Engine::new_stateless(16 * 1024 * 1024, 60, 4)
         .with_module_loader_config(ModuleLoaderConfig {
             allow_external: false,
-            policy_chain: None,
+            hooks: None,
         })
         .with_execution_registry(Arc::new(registry))
 }
@@ -445,7 +445,7 @@ fn test_resolve_npm_blocked_when_external_disabled() {
 
     let loader = NetworkModuleLoader::with_config(ModuleLoaderConfig {
         allow_external: false,
-        policy_chain: None,
+        hooks: None,
     });
     let result = loader.resolve("npm:lodash-es@4.17.21", "file:///main.js", ResolutionKind::Import);
     assert!(result.is_err(), "npm specifier should be rejected when external modules disabled");
@@ -465,7 +465,7 @@ fn test_resolve_jsr_blocked_when_external_disabled() {
 
     let loader = NetworkModuleLoader::with_config(ModuleLoaderConfig {
         allow_external: false,
-        policy_chain: None,
+        hooks: None,
     });
     let result = loader.resolve("jsr:@luca/cases@1.0.0", "file:///main.js", ResolutionKind::Import);
     assert!(result.is_err(), "jsr specifier should be rejected when external modules disabled");
@@ -481,7 +481,7 @@ fn test_resolve_url_blocked_when_external_disabled() {
 
     let loader = NetworkModuleLoader::with_config(ModuleLoaderConfig {
         allow_external: false,
-        policy_chain: None,
+        hooks: None,
     });
     let result = loader.resolve(
         "https://esm.sh/jsr/@luca/cases@1.0.0",
@@ -501,7 +501,7 @@ fn test_resolve_relative_allowed_when_external_disabled() {
 
     let loader = NetworkModuleLoader::with_config(ModuleLoaderConfig {
         allow_external: false,
-        policy_chain: None,
+        hooks: None,
     });
     let result = loader.resolve(
         "./utils.js",
@@ -519,7 +519,7 @@ fn test_resolve_npm_allowed_when_external_enabled() {
 
     let loader = NetworkModuleLoader::with_config(ModuleLoaderConfig {
         allow_external: true,
-        policy_chain: None,
+        hooks: None,
     });
     let result = loader.resolve("npm:lodash-es@4.17.21", "file:///main.js", ResolutionKind::Import);
     assert!(result.is_ok(), "npm specifier should resolve when external enabled: {:?}", result);

@@ -792,8 +792,10 @@ fn is_oauth_unauthorized(error: &rmcp::service::ClientInitializeError) -> bool {
 #[derive(Clone)]
 pub struct McpConfig {
     pub client_manager: McpClientManager,
-    /// Optional OPA policy chain for gating `mcp.callTool()` calls.
-    pub policy_chain: Option<std::sync::Arc<super::opa::PolicyChain>>,
+    /// Optional hook chain for `mcp.callTool()` calls: pre hooks may deny or
+    /// mutate the call (server/tool/arguments), the policy gates the
+    /// effective call, post hooks may deny or mutate the tool result.
+    pub hooks: Option<std::sync::Arc<super::hooks::HookChain>>,
 }
 
 // ── Deno ops ─────────────────────────────────────────────────────────────
@@ -807,6 +809,16 @@ struct McpToolPolicyInput {
     arguments: serde_json::Value,
 }
 
+/// The call fields a pre hook may have mutated, extracted back out of the
+/// effective hook-chain input.
+#[derive(serde::Deserialize)]
+struct EffectiveMcpCall {
+    server: String,
+    tool: String,
+    #[serde(default)]
+    arguments: serde_json::Value,
+}
+
 /// Async op: call an MCP tool. Spawned on a separate tokio task to avoid
 /// RefCell re-entrancy issues (same pattern as op_fetch).
 #[op2(async)]
@@ -817,12 +829,12 @@ async fn op_mcp_call_tool(
     #[string] tool_name: String,
     #[string] arguments_json: String,
 ) -> Result<String, JsErrorBox> {
-    let (manager, policy_chain) = {
+    let (manager, hooks) = {
         let state = state.borrow();
         let config = state
             .try_borrow::<McpConfig>()
             .ok_or_else(|| JsErrorBox::generic("mcp: internal error — no MCP config available"))?;
-        (config.client_manager.clone(), config.policy_chain.clone())
+        (config.client_manager.clone(), config.hooks.clone())
     };
 
     let arguments: Option<serde_json::Map<String, serde_json::Value>> = if arguments_json.is_empty()
@@ -837,8 +849,13 @@ async fn op_mcp_call_tool(
     // Spawn on separate tokio task (same pattern as fetch) to avoid
     // RefCell re-entrancy panic in deno_core's FuturesUnorderedDriver.
     tokio::spawn(async move {
-        // Evaluate OPA policy if configured.
-        if let Some(ref chain) = policy_chain {
+        let mut server_name = server_name;
+        let mut tool_name = tool_name;
+        let mut arguments = arguments;
+        let mut eff_input: Option<serde_json::Value> = None;
+
+        // Run pre hooks + policy if configured; a hook may rewrite the call.
+        if let Some(ref hooks) = hooks {
             let policy_input = McpToolPolicyInput {
                 operation: "mcp_call_tool",
                 server: server_name.clone(),
@@ -854,21 +871,68 @@ async fn op_mcp_call_tool(
                     e
                 ))
             })?;
-            let allowed = chain.evaluate(&input_value).await.map_err(|e| {
-                JsErrorBox::generic(format!("mcp.callTool: policy evaluation error: {}", e))
-            })?;
-            if !allowed {
-                return Err(JsErrorBox::generic(format!(
-                    "mcp.callTool denied by policy: {}.{} is not allowed",
-                    server_name, tool_name
-                )));
-            }
+            let effective = match hooks.run_pre(input_value).await.map_err(|e| {
+                JsErrorBox::generic(format!("mcp.callTool: hook chain error: {}", e))
+            })? {
+                super::hooks::PreOutcome::Allow(v) => {
+                    super::hooks::verify_operation(&v, "mcp_call_tool", "mcp.callTool")
+                        .map_err(JsErrorBox::generic)?;
+                    v
+                }
+                super::hooks::PreOutcome::Deny(deny) => {
+                    return Err(JsErrorBox::generic(format!(
+                        "mcp.callTool {}: {}.{} is not allowed",
+                        deny, server_name, tool_name
+                    )));
+                }
+            };
+
+            let eff: EffectiveMcpCall = serde_json::from_value(effective.clone())
+                .map_err(|e| {
+                    JsErrorBox::generic(format!(
+                        "mcp.callTool: invalid effective input after pre hooks: {}",
+                        e
+                    ))
+                })?;
+            server_name = eff.server;
+            tool_name = eff.tool;
+            arguments = match eff.arguments {
+                serde_json::Value::Object(map) => Some(map),
+                serde_json::Value::Null => None,
+                other => {
+                    return Err(JsErrorBox::generic(format!(
+                        "mcp.callTool: pre hook produced non-object arguments: {}",
+                        other
+                    )));
+                }
+            };
+            eff_input = Some(effective);
         }
 
         let result = manager
             .call_tool(&server_name, &tool_name, arguments)
             .await
             .map_err(|e| JsErrorBox::generic(e))?;
+
+        // Post hooks see {"input": <effective call>, "output": <tool result>}
+        // and may mutate or deny the result.
+        if let (Some(hooks), Some(eff_input)) = (hooks.as_ref(), eff_input.as_ref()) {
+            if hooks.has_post() {
+                let output = serde_json::to_value(&result).map_err(|e| {
+                    JsErrorBox::generic(format!("mcp.callTool: serialization error: {}", e))
+                })?;
+                return match hooks.run_post(eff_input, output).await.map_err(|e| {
+                    JsErrorBox::generic(format!("mcp.callTool: post hook error: {}", e))
+                })? {
+                    super::hooks::PostOutcome::Allow(v) => Ok(v.to_string()),
+                    super::hooks::PostOutcome::Deny(deny) => Err(JsErrorBox::generic(format!(
+                        "mcp.callTool result {}: {}.{}",
+                        deny, server_name, tool_name
+                    ))),
+                };
+            }
+        }
+
         serde_json::to_string(&result)
             .map_err(|e| JsErrorBox::generic(format!("mcp.callTool: serialization error: {}", e)))
     })

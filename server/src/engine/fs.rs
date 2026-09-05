@@ -46,6 +46,7 @@ use serde::Serialize;
 
 use super::fs_mount::SessionMount;
 use super::fs_store::FileWriter;
+use super::hooks::{HookChain, PreOutcome};
 use super::opa::PolicyChain;
 use std::collections::HashMap;
 use std::path::Path;
@@ -67,7 +68,7 @@ impl FsMountHandle {
 /// Configuration for the fs module. Stored in deno_core's `OpState`.
 #[derive(Clone, Debug)]
 pub struct FsConfig {
-    pub policy_chain: Arc<PolicyChain>,
+    pub hooks: Arc<HookChain>,
     pub mcp_headers: Option<serde_json::Value>,
     /// When a per-session overlay mount is attached, controls what happens on an
     /// overlay miss: `false` (default) = overlay-only (the overlay is the whole
@@ -78,8 +79,14 @@ pub struct FsConfig {
 }
 
 impl FsConfig {
+    /// Create from a full [`HookChain`] (used with `--policies-json`).
+    pub fn new_with_hooks(hooks: Arc<HookChain>) -> Self {
+        Self { hooks, mcp_headers: None, passthrough: false }
+    }
+
+    /// Create from a bare [`PolicyChain`], wrapped as the sole pre hook.
     pub fn new(chain: Arc<PolicyChain>) -> Self {
-        Self { policy_chain: chain, mcp_headers: None, passthrough: false }
+        Self::new_with_hooks(Arc::new(HookChain::from_policy("filesystem", chain)))
     }
 
     pub fn with_mcp_headers(mut self, mcp_headers: Option<serde_json::Value>) -> Self {
@@ -151,9 +158,10 @@ async fn op_fs_read_file_text(
     // tokio::spawn would move the work onto the multi-thread runtime and abort
     // the process. Only the real-filesystem path is offloaded via spawn.
     if let Some(m) = mount {
-        check_policy(&config.policy_chain, "readFile", &path, None, None, Some("utf8"), config.mcp_headers.as_ref())
+        let path = check_policy(&config.hooks, "readFile", &path, None, None, Some("utf8"), config.mcp_headers.as_ref())
             .await
-            .map_err(JsErrorBox::generic)?;
+            .map_err(JsErrorBox::generic)?
+            .path;
         if let Some(content) = m.0.lock().await.read_opt(Path::new(&path)).await
             .map_err(|e| JsErrorBox::generic(format!("fs.readFile: {}: {}", path, e)))?
         {
@@ -175,7 +183,7 @@ async fn op_fs_read_file_text(
     }
 
     tokio::spawn(async move {
-        check_policy(&config.policy_chain, "readFile", &path, None, None, Some("utf8"), config.mcp_headers.as_ref()).await?;
+        let path = check_policy(&config.hooks, "readFile", &path, None, None, Some("utf8"), config.mcp_headers.as_ref()).await?.path;
 
         let content = tokio::fs::read(&path).await
             .map_err(|e| io_err("readFile", &path, &e))?;
@@ -200,9 +208,10 @@ async fn op_fs_read_file_buffer(
 
     // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
     if let Some(m) = mount {
-        check_policy(&config.policy_chain, "readFile", &path, None, None, Some("buffer"), config.mcp_headers.as_ref())
+        let path = check_policy(&config.hooks, "readFile", &path, None, None, Some("buffer"), config.mcp_headers.as_ref())
             .await
-            .map_err(JsErrorBox::generic)?;
+            .map_err(JsErrorBox::generic)?
+            .path;
         if let Some(content) = m.0.lock().await.read_opt(Path::new(&path)).await
             .map_err(|e| JsErrorBox::generic(format!("fs.readFile: {}: {}", path, e)))?
         {
@@ -219,7 +228,7 @@ async fn op_fs_read_file_buffer(
     }
 
     tokio::spawn(async move {
-        check_policy(&config.policy_chain, "readFile", &path, None, None, Some("buffer"), config.mcp_headers.as_ref()).await?;
+        let path = check_policy(&config.hooks, "readFile", &path, None, None, Some("buffer"), config.mcp_headers.as_ref()).await?.path;
 
         tokio::fs::read(&path).await
             .map_err(|e| io_err("readFile", &path, &e))
@@ -244,16 +253,17 @@ async fn op_fs_write_file_text(
     // CAS overlay uses deno_unsync, which asserts a current-thread flavor).
     // tokio::spawn would move the work onto the multi-thread runtime and abort.
     if let Some(m) = mount {
-        check_policy(&config.policy_chain, "writeFile", &path, None, None, None, config.mcp_headers.as_ref())
+        let path = check_policy(&config.hooks, "writeFile", &path, None, None, None, config.mcp_headers.as_ref())
             .await
-            .map_err(JsErrorBox::generic)?;
+            .map_err(JsErrorBox::generic)?
+            .path;
         m.0.lock().await.write(Path::new(&path), data.as_bytes()).await
             .map_err(|e| JsErrorBox::generic(format!("fs.writeFile: {}: {}", path, e)))?;
         return Ok("{}".to_string());
     }
 
     tokio::spawn(async move {
-        check_policy(&config.policy_chain, "writeFile", &path, None, None, None, config.mcp_headers.as_ref()).await?;
+        let path = check_policy(&config.hooks, "writeFile", &path, None, None, None, config.mcp_headers.as_ref()).await?.path;
 
         tokio::fs::write(&path, data.as_bytes()).await
             .map_err(|e| io_err("writeFile", &path, &e))?;
@@ -278,16 +288,17 @@ async fn op_fs_write_file_buffer(
 
     // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
     if let Some(m) = mount {
-        check_policy(&config.policy_chain, "writeFile", &path, None, None, None, config.mcp_headers.as_ref())
+        let path = check_policy(&config.hooks, "writeFile", &path, None, None, None, config.mcp_headers.as_ref())
             .await
-            .map_err(JsErrorBox::generic)?;
+            .map_err(JsErrorBox::generic)?
+            .path;
         m.0.lock().await.write(Path::new(&path), &data).await
             .map_err(|e| JsErrorBox::generic(format!("fs.writeFile: {}: {}", path, e)))?;
         return Ok("{}".to_string());
     }
 
     tokio::spawn(async move {
-        check_policy(&config.policy_chain, "writeFile", &path, None, None, None, config.mcp_headers.as_ref()).await?;
+        let path = check_policy(&config.hooks, "writeFile", &path, None, None, None, config.mcp_headers.as_ref()).await?.path;
 
         tokio::fs::write(&path, &data).await
             .map_err(|e| io_err("writeFile", &path, &e))?;
@@ -312,9 +323,10 @@ async fn op_fs_append_file(
 
     // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
     if let Some(m) = mount {
-        check_policy(&config.policy_chain, "appendFile", &path, None, None, None, config.mcp_headers.as_ref())
+        let path = check_policy(&config.hooks, "appendFile", &path, None, None, None, config.mcp_headers.as_ref())
             .await
-            .map_err(JsErrorBox::generic)?;
+            .map_err(JsErrorBox::generic)?
+            .path;
         let mut guard = m.0.lock().await;
         let mut existing = guard.read(Path::new(&path)).await.unwrap_or_default();
         existing.extend_from_slice(data.as_bytes());
@@ -324,7 +336,7 @@ async fn op_fs_append_file(
     }
 
     tokio::spawn(async move {
-        check_policy(&config.policy_chain, "appendFile", &path, None, None, None, config.mcp_headers.as_ref()).await?;
+        let path = check_policy(&config.hooks, "appendFile", &path, None, None, None, config.mcp_headers.as_ref()).await?.path;
 
         use tokio::io::AsyncWriteExt;
         let mut file = tokio::fs::OpenOptions::new()
@@ -356,16 +368,17 @@ async fn op_fs_readdir(
 
     // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
     if let Some(m) = mount {
-        check_policy(&config.policy_chain, "readdir", &path, None, None, None, config.mcp_headers.as_ref())
+        let path = check_policy(&config.hooks, "readdir", &path, None, None, None, config.mcp_headers.as_ref())
             .await
-            .map_err(JsErrorBox::generic)?;
+            .map_err(JsErrorBox::generic)?
+            .path;
         let names = m.0.lock().await.readdir(Path::new(&path)).await
             .map_err(|e| JsErrorBox::generic(format!("fs.readdir: {}: {}", path, e)))?;
         return Ok(deno_core::serde_json::json!(names).to_string());
     }
 
     tokio::spawn(async move {
-        check_policy(&config.policy_chain, "readdir", &path, None, None, None, config.mcp_headers.as_ref()).await?;
+        let path = check_policy(&config.hooks, "readdir", &path, None, None, None, config.mcp_headers.as_ref()).await?.path;
 
         let mut entries = Vec::new();
         let mut dir = tokio::fs::read_dir(&path).await
@@ -398,16 +411,17 @@ async fn op_fs_stat(
 
     // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
     if let Some(m) = mount {
-        check_policy(&config.policy_chain, "stat", &path, None, None, None, config.mcp_headers.as_ref())
+        let path = check_policy(&config.hooks, "stat", &path, None, None, None, config.mcp_headers.as_ref())
             .await
-            .map_err(JsErrorBox::generic)?;
+            .map_err(JsErrorBox::generic)?
+            .path;
         let s = m.0.lock().await.stat(Path::new(&path)).await
             .map_err(|e| JsErrorBox::generic(format!("fs.stat: {}: {}", path, e)))?;
         return Ok(mount_stat_json(&s));
     }
 
     tokio::spawn(async move {
-        check_policy(&config.policy_chain, "stat", &path, None, None, None, config.mcp_headers.as_ref()).await?;
+        let path = check_policy(&config.hooks, "stat", &path, None, None, None, config.mcp_headers.as_ref()).await?.path;
 
         let metadata = tokio::fs::metadata(&path).await
             .map_err(|e| io_err("stat", &path, &e))?;
@@ -432,16 +446,17 @@ async fn op_fs_lstat(
     // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
     // The overlay never follows symlinks, so its stat already has lstat semantics.
     if let Some(m) = mount {
-        check_policy(&config.policy_chain, "lstat", &path, None, None, None, config.mcp_headers.as_ref())
+        let path = check_policy(&config.hooks, "lstat", &path, None, None, None, config.mcp_headers.as_ref())
             .await
-            .map_err(JsErrorBox::generic)?;
+            .map_err(JsErrorBox::generic)?
+            .path;
         let s = m.0.lock().await.stat(Path::new(&path)).await
             .map_err(|e| JsErrorBox::generic(format!("fs.lstat: {}: {}", path, e)))?;
         return Ok(mount_stat_json(&s));
     }
 
     tokio::spawn(async move {
-        check_policy(&config.policy_chain, "lstat", &path, None, None, None, config.mcp_headers.as_ref()).await?;
+        let path = check_policy(&config.hooks, "lstat", &path, None, None, None, config.mcp_headers.as_ref()).await?.path;
 
         let metadata = tokio::fs::symlink_metadata(&path).await
             .map_err(|e| io_err("lstat", &path, &e))?;
@@ -465,16 +480,17 @@ async fn op_fs_readlink(
 
     // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
     if let Some(m) = mount {
-        check_policy(&config.policy_chain, "readlink", &path, None, None, None, config.mcp_headers.as_ref())
+        let path = check_policy(&config.hooks, "readlink", &path, None, None, None, config.mcp_headers.as_ref())
             .await
-            .map_err(JsErrorBox::generic)?;
+            .map_err(JsErrorBox::generic)?
+            .path;
         let target = m.0.lock().await.readlink(Path::new(&path)).await
             .map_err(|e| JsErrorBox::generic(format!("fs.readlink: {}: {}", path, e)))?;
         return Ok(target.to_string_lossy().into_owned());
     }
 
     tokio::spawn(async move {
-        check_policy(&config.policy_chain, "readlink", &path, None, None, None, config.mcp_headers.as_ref()).await?;
+        let path = check_policy(&config.hooks, "readlink", &path, None, None, None, config.mcp_headers.as_ref()).await?.path;
 
         let target = tokio::fs::read_link(&path).await
             .map_err(|e| io_err("readlink", &path, &e))?;
@@ -500,16 +516,22 @@ async fn op_fs_symlink(
     // The policy gates on the link path being created; the target is carried as
     // the destination so a policy can constrain both sides.
     if let Some(m) = mount {
-        check_policy(&config.policy_chain, "symlink", &link, Some(&target), None, None, config.mcp_headers.as_ref())
+        let eff = check_policy(&config.hooks, "symlink", &link, Some(&target), None, None, config.mcp_headers.as_ref())
             .await
             .map_err(JsErrorBox::generic)?;
+        // check_policy fails closed if a hook dropped `destination`, so this
+        // fallback never rewrites the operation.
+        let (link, target) = (eff.path, eff.destination.unwrap_or(target));
         m.0.lock().await.symlink(Path::new(&target), Path::new(&link)).await
             .map_err(|e| JsErrorBox::generic(format!("fs.symlink: {} -> {}: {}", link, target, e)))?;
         return Ok("{}".to_string());
     }
 
     tokio::spawn(async move {
-        check_policy(&config.policy_chain, "symlink", &link, Some(&target), None, None, config.mcp_headers.as_ref()).await?;
+        let eff = check_policy(&config.hooks, "symlink", &link, Some(&target), None, None, config.mcp_headers.as_ref()).await?;
+        // check_policy fails closed if a hook dropped `destination`, so this
+        // fallback never rewrites the operation.
+        let (link, target) = (eff.path, eff.destination.unwrap_or(target));
 
         symlink_impl(&target, &link).await
             .map_err(|e| io_err2("symlink", &link, &target, &e))?;
@@ -548,16 +570,17 @@ async fn op_fs_mkdir(
 
     // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
     if let Some(m) = mount {
-        check_policy(&config.policy_chain, "mkdir", &path, None, Some(recursive), None, config.mcp_headers.as_ref())
+        let path = check_policy(&config.hooks, "mkdir", &path, None, Some(recursive), None, config.mcp_headers.as_ref())
             .await
-            .map_err(JsErrorBox::generic)?;
+            .map_err(JsErrorBox::generic)?
+            .path;
         m.0.lock().await.mkdir(Path::new(&path)).await
             .map_err(|e| JsErrorBox::generic(format!("fs.mkdir: {}: {}", path, e)))?;
         return Ok("{}".to_string());
     }
 
     tokio::spawn(async move {
-        check_policy(&config.policy_chain, "mkdir", &path, None, Some(recursive), None, config.mcp_headers.as_ref()).await?;
+        let path = check_policy(&config.hooks, "mkdir", &path, None, Some(recursive), None, config.mcp_headers.as_ref()).await?.path;
 
         if recursive {
             tokio::fs::create_dir_all(&path).await
@@ -586,16 +609,17 @@ async fn op_fs_rm(
 
     // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
     if let Some(m) = mount {
-        check_policy(&config.policy_chain, "rm", &path, None, Some(recursive), None, config.mcp_headers.as_ref())
+        let path = check_policy(&config.hooks, "rm", &path, None, Some(recursive), None, config.mcp_headers.as_ref())
             .await
-            .map_err(JsErrorBox::generic)?;
+            .map_err(JsErrorBox::generic)?
+            .path;
         m.0.lock().await.remove(Path::new(&path), recursive).await
             .map_err(|e| JsErrorBox::generic(format!("fs.rm: {}: {}", path, e)))?;
         return Ok("{}".to_string());
     }
 
     tokio::spawn(async move {
-        check_policy(&config.policy_chain, "rm", &path, None, Some(recursive), None, config.mcp_headers.as_ref()).await?;
+        let path = check_policy(&config.hooks, "rm", &path, None, Some(recursive), None, config.mcp_headers.as_ref()).await?.path;
 
         let metadata = tokio::fs::metadata(&path).await
             .map_err(|e| io_err("rm", &path, &e))?;
@@ -630,16 +654,22 @@ async fn op_fs_rename(
 
     // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
     if let Some(m) = mount {
-        check_policy(&config.policy_chain, "rename", &from, Some(&to), None, None, config.mcp_headers.as_ref())
+        let eff = check_policy(&config.hooks, "rename", &from, Some(&to), None, None, config.mcp_headers.as_ref())
             .await
             .map_err(JsErrorBox::generic)?;
+        // check_policy fails closed if a hook dropped `destination`, so this
+        // fallback never rewrites the operation.
+        let (from, to) = (eff.path, eff.destination.unwrap_or(to));
         m.0.lock().await.rename(Path::new(&from), Path::new(&to)).await
             .map_err(|e| JsErrorBox::generic(format!("fs.rename: {} -> {}: {}", from, to, e)))?;
         return Ok("{}".to_string());
     }
 
     tokio::spawn(async move {
-        check_policy(&config.policy_chain, "rename", &from, Some(&to), None, None, config.mcp_headers.as_ref()).await?;
+        let eff = check_policy(&config.hooks, "rename", &from, Some(&to), None, None, config.mcp_headers.as_ref()).await?;
+        // check_policy fails closed if a hook dropped `destination`, so this
+        // fallback never rewrites the operation.
+        let (from, to) = (eff.path, eff.destination.unwrap_or(to));
 
         tokio::fs::rename(&from, &to).await
             .map_err(|e| io_err2("rename", &from, &to, &e))?;
@@ -664,9 +694,12 @@ async fn op_fs_copy_file(
 
     // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
     if let Some(m) = mount {
-        check_policy(&config.policy_chain, "copyFile", &from, Some(&to), None, None, config.mcp_headers.as_ref())
+        let eff = check_policy(&config.hooks, "copyFile", &from, Some(&to), None, None, config.mcp_headers.as_ref())
             .await
             .map_err(JsErrorBox::generic)?;
+        // check_policy fails closed if a hook dropped `destination`, so this
+        // fallback never rewrites the operation.
+        let (from, to) = (eff.path, eff.destination.unwrap_or(to));
         // Copy by reference: clones the content-addressed entry, no rechunk.
         m.0.lock().await.copy(Path::new(&from), Path::new(&to)).await
             .map_err(|e| JsErrorBox::generic(format!("fs.copyFile: {} -> {}: {}", from, to, e)))?;
@@ -674,7 +707,10 @@ async fn op_fs_copy_file(
     }
 
     tokio::spawn(async move {
-        check_policy(&config.policy_chain, "copyFile", &from, Some(&to), None, None, config.mcp_headers.as_ref()).await?;
+        let eff = check_policy(&config.hooks, "copyFile", &from, Some(&to), None, None, config.mcp_headers.as_ref()).await?;
+        // check_policy fails closed if a hook dropped `destination`, so this
+        // fallback never rewrites the operation.
+        let (from, to) = (eff.path, eff.destination.unwrap_or(to));
 
         tokio::fs::copy(&from, &to).await
             .map_err(|e| io_err2("copyFile", &from, &to, &e))?;
@@ -698,15 +734,16 @@ async fn op_fs_exists(
 
     // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
     if let Some(m) = mount {
-        check_policy(&config.policy_chain, "exists", &path, None, None, None, config.mcp_headers.as_ref())
+        let path = check_policy(&config.hooks, "exists", &path, None, None, None, config.mcp_headers.as_ref())
             .await
-            .map_err(JsErrorBox::generic)?;
+            .map_err(JsErrorBox::generic)?
+            .path;
         let exists = m.0.lock().await.exists(Path::new(&path)).await;
         return Ok(if exists { "true" } else { "false" }.to_string());
     }
 
     tokio::spawn(async move {
-        check_policy(&config.policy_chain, "exists", &path, None, None, None, config.mcp_headers.as_ref()).await?;
+        let path = check_policy(&config.hooks, "exists", &path, None, None, None, config.mcp_headers.as_ref()).await?.path;
 
         let exists = tokio::fs::try_exists(&path).await.unwrap_or(false);
         Ok(if exists { "true" } else { "false" }.to_string())
@@ -733,9 +770,10 @@ async fn op_fs_write_stream_open(
 
     // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
     if let Some(m) = mount {
-        check_policy(&config.policy_chain, "writeFile", &path, None, None, None, config.mcp_headers.as_ref())
+        let path = check_policy(&config.hooks, "writeFile", &path, None, None, None, config.mcp_headers.as_ref())
             .await
-            .map_err(JsErrorBox::generic)?;
+            .map_err(JsErrorBox::generic)?
+            .path;
         let store = m.0.lock().await.store_handle();
         let ow = OpenWrite::Overlay { path: path.clone(), writer: FileWriter::new(store) };
         let mut g = writers.0.lock().await;
@@ -746,7 +784,7 @@ async fn op_fs_write_stream_open(
     }
 
     tokio::spawn(async move {
-        check_policy(&config.policy_chain, "writeFile", &path, None, None, None, config.mcp_headers.as_ref()).await?;
+        let path = check_policy(&config.hooks, "writeFile", &path, None, None, None, config.mcp_headers.as_ref()).await?.path;
 
         let f = tokio::fs::File::create(&path).await
             .map_err(|e| io_err("createWriteStream", &path, &e))?;
@@ -1248,15 +1286,25 @@ fn mount_stat_json(s: &super::fs_mount::Stat) -> String {
     .to_string()
 }
 
+/// The fields a pre hook may have mutated, extracted back out of the
+/// effective hook-chain input. Only `path` and `destination` feed back into
+/// the operation; other input fields are context.
+#[derive(serde::Deserialize)]
+struct FsEffective {
+    path: String,
+    #[serde(default)]
+    destination: Option<String>,
+}
+
 async fn check_policy(
-    policy_chain: &PolicyChain,
+    hooks: &HookChain,
     operation: &str,
     path: &str,
     destination: Option<&str>,
     recursive: Option<bool>,
     encoding: Option<&str>,
     mcp_headers: Option<&serde_json::Value>,
-) -> Result<(), String> {
+) -> Result<FsEffective, String> {
     let input = FsPolicyInput {
         operation: operation.to_string(),
         path: path.to_string(),
@@ -1269,19 +1317,37 @@ async fn check_policy(
     let input_value = serde_json::to_value(&input)
         .map_err(|e| format!("fs.{}: failed to serialize policy input: {}", operation, e))?;
 
-    let allowed = policy_chain
-        .evaluate(&input_value)
+    let effective = match hooks
+        .run_pre(input_value)
         .await
-        .map_err(|e| format!("fs.{}: policy error: {}", operation, e))?;
+        .map_err(|e| format!("fs.{}: hook chain error: {}", operation, e))?
+    {
+        PreOutcome::Allow(v) => v,
+        PreOutcome::Deny(deny) => {
+            return Err(format!(
+                "fs.{} {}: {} is not allowed",
+                operation, deny, path
+            ));
+        }
+    };
 
-    if !allowed {
+    super::hooks::verify_operation(&effective, operation, &format!("fs.{}", operation))?;
+
+    let eff: FsEffective = serde_json::from_value(effective)
+        .map_err(|e| format!("fs.{}: invalid effective input after pre hooks: {}", operation, e))?;
+
+    // Fail closed on a hook that drops the destination of a two-path
+    // operation (rename/copyFile/symlink): silently falling back to the
+    // original destination would ignore part of the mutation and mask hook
+    // misconfiguration.
+    if destination.is_some() && eff.destination.is_none() {
         return Err(format!(
-            "fs.{} denied by policy: {} is not allowed",
-            operation, path
+            "fs.{}: pre hook removed 'destination' from the input",
+            operation
         ));
     }
 
-    Ok(())
+    Ok(eff)
 }
 
 #[cfg(test)]

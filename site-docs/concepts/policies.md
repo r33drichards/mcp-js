@@ -2,6 +2,8 @@
 
 mcp-v8 gates every host capability — network access, filesystem operations, subprocess execution, ES module imports, and upstream MCP tool calls — through an embedded policy engine. This page explains the design of that system, the trade-offs between local and remote evaluation, and the exact information each category of policy receives.
 
+> **Direction:** policies are implemented in terms of [hooks](hooks.md) — a configured policy chain runs as the final *pre hook* of its operation. The `policies` key remains fully supported, but hooks are the primary vocabulary going forward; new gating, rewriting, and observing behavior should be written as hooks.
+
 ## The capability model
 
 JavaScript code running inside a V8 isolate has no host access by default. Each capability is a distinct, opt-in channel:
@@ -63,6 +65,10 @@ flowchart TD
     K -- No, more remain --> J
     K -- No, last --> I
 ```
+
+## Pre/post hooks
+
+Hooks generalize the policy gate: ordered `pre` hooks can deny **or rewrite** an operation's input, and `post` hooks can deny or rewrite its output, with policies running as the final pre hook over the effective input. Hooks have their own page — see [Hooks: the programmable effect boundary](hooks.md) for the model, the result contract, JavaScript hooks and capabilities, per-operation mutation support, and worked examples.
 
 ## OPA vs embedded regorus
 

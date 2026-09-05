@@ -28,6 +28,7 @@ use deno_core::{JsRuntime, OpState, op2};
 use deno_error::JsErrorBox;
 use serde::Serialize;
 
+use super::hooks::{HookChain, PostOutcome, PreOutcome};
 use super::opa::PolicyChain;
 
 // ── Configuration ────────────────────────────────────────────────────────
@@ -35,12 +36,18 @@ use super::opa::PolicyChain;
 /// Configuration for subprocess execution. Stored in deno_core's `OpState`.
 #[derive(Clone, Debug)]
 pub struct SubprocessConfig {
-    pub policy_chain: Arc<PolicyChain>,
+    pub hooks: Arc<HookChain>,
 }
 
 impl SubprocessConfig {
+    /// Create from a full [`HookChain`] (used with `--policies-json`).
+    pub fn new_with_hooks(hooks: Arc<HookChain>) -> Self {
+        Self { hooks }
+    }
+
+    /// Create from a bare [`PolicyChain`], wrapped as the sole pre hook.
     pub fn new(chain: Arc<PolicyChain>) -> Self {
-        Self { policy_chain: chain }
+        Self::new_with_hooks(Arc::new(HookChain::from_policy("subprocess", chain)))
     }
 }
 
@@ -75,7 +82,7 @@ async fn op_subprocess_output(
     #[string] args_json: String,
     #[string] options_json: String,
 ) -> Result<String, JsErrorBox> {
-    let policy_chain = extract_chain(&state)?;
+    let hooks = extract_hooks(&state)?;
 
     tokio::spawn(async move {
         let args: Vec<String> = serde_json::from_str(&args_json)
@@ -83,20 +90,21 @@ async fn op_subprocess_output(
         let options: SubprocessOptions = serde_json::from_str(&options_json)
             .map_err(|e| format!("subprocess: invalid options JSON: {}", e))?;
 
-        check_policy(&policy_chain, "command_output", &command, &args, &options).await?;
+        let (eff, eff_input) =
+            run_pre_hooks(&hooks, "command_output", &command, &args, &options).await?;
 
-        let mut cmd = tokio::process::Command::new(&command);
-        cmd.args(&args);
+        let mut cmd = tokio::process::Command::new(&eff.command);
+        cmd.args(&eff.args);
 
-        if let Some(ref cwd) = options.cwd {
+        if let Some(ref cwd) = eff.cwd {
             cmd.current_dir(cwd);
         }
-        if let Some(ref env) = options.env {
+        if let Some(ref env) = eff.env {
             cmd.envs(env);
         }
 
         let output = cmd.output().await
-            .map_err(|e| format!("subprocess: failed to execute '{}': {}", command, e))?;
+            .map_err(|e| format!("subprocess: failed to execute '{}': {}", eff.command, e))?;
 
         let stdout = base64_encode(&output.stdout);
         let stderr = base64_encode(&output.stderr);
@@ -108,7 +116,7 @@ async fn op_subprocess_output(
             "success": output.status.success(),
         });
 
-        Ok(result.to_string())
+        run_post_hooks(&hooks, "command_output", &eff.command, &eff_input, result).await
     })
     .await
     .map_err(|e| JsErrorBox::generic(format!("subprocess task join error: {}", e)))?
@@ -125,7 +133,7 @@ async fn op_subprocess_exec(
     #[string] command: String,
     #[string] options_json: String,
 ) -> Result<String, JsErrorBox> {
-    let policy_chain = extract_chain(&state)?;
+    let hooks = extract_hooks(&state)?;
 
     tokio::spawn(async move {
         let options: SubprocessOptions = serde_json::from_str(&options_json)
@@ -136,21 +144,21 @@ async fn op_subprocess_exec(
         let shell = if cfg!(target_os = "windows") { "cmd" } else { "/bin/sh" };
         let shell_arg = if cfg!(target_os = "windows") { "/C" } else { "-c" };
 
-        check_policy(
-            &policy_chain,
+        let (eff, eff_input) = run_pre_hooks(
+            &hooks,
             "exec",
             shell,
             &[shell_arg.to_string(), command.clone()],
             &options,
         ).await?;
 
-        let mut cmd = tokio::process::Command::new(shell);
-        cmd.arg(shell_arg).arg(&command);
+        let mut cmd = tokio::process::Command::new(&eff.command);
+        cmd.args(&eff.args);
 
-        if let Some(ref cwd) = options.cwd {
+        if let Some(ref cwd) = eff.cwd {
             cmd.current_dir(cwd);
         }
-        if let Some(ref env) = options.env {
+        if let Some(ref env) = eff.env {
             cmd.envs(env);
         }
 
@@ -175,7 +183,10 @@ async fn op_subprocess_exec(
             "encoding": encoding,
         });
 
-        Ok(result.to_string())
+        // Post-hook messages name what actually ran: the effective shell
+        // command a pre hook may have rewritten, not the original string.
+        let effective_display = eff.args.get(1).cloned().unwrap_or_else(|| eff.command.clone());
+        run_post_hooks(&hooks, "exec", &effective_display, &eff_input, result).await
     })
     .await
     .map_err(|e| JsErrorBox::generic(format!("subprocess task join error: {}", e)))?
@@ -345,20 +356,36 @@ struct SubprocessOptions {
     timeout: Option<u64>,
 }
 
-fn extract_chain(state: &Rc<RefCell<OpState>>) -> Result<Arc<PolicyChain>, JsErrorBox> {
+fn extract_hooks(state: &Rc<RefCell<OpState>>) -> Result<Arc<HookChain>, JsErrorBox> {
     let state = state.borrow();
     let config = state.try_borrow::<SubprocessConfig>()
         .ok_or_else(|| JsErrorBox::generic("subprocess: internal error — no subprocess config available"))?;
-    Ok(config.policy_chain.clone())
+    Ok(config.hooks.clone())
 }
 
-async fn check_policy(
-    policy_chain: &PolicyChain,
+/// The execution fields a pre hook may have mutated, extracted back out of
+/// the effective hook-chain input.
+#[derive(serde::Deserialize)]
+struct EffectiveSubprocess {
+    command: String,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    env: Option<HashMap<String, String>>,
+}
+
+/// Run pre hooks + policy over the subprocess input. Returns the effective
+/// (possibly hook-mutated) execution parameters and the effective input
+/// document (for post hooks).
+async fn run_pre_hooks(
+    hooks: &HookChain,
     operation: &str,
     command: &str,
     args: &[String],
     options: &SubprocessOptions,
-) -> Result<(), String> {
+) -> Result<(EffectiveSubprocess, serde_json::Value), String> {
     let input = SubprocessPolicyInput {
         operation: operation.to_string(),
         command: command.to_string(),
@@ -370,19 +397,47 @@ async fn check_policy(
     let input_value = serde_json::to_value(&input)
         .map_err(|e| format!("subprocess.{}: failed to serialize policy input: {}", operation, e))?;
 
-    let allowed = policy_chain
-        .evaluate(&input_value)
+    let effective = match hooks
+        .run_pre(input_value)
         .await
-        .map_err(|e| format!("subprocess.{}: policy error: {}", operation, e))?;
+        .map_err(|e| format!("subprocess.{}: hook chain error: {}", operation, e))?
+    {
+        PreOutcome::Allow(v) => {
+            super::hooks::verify_operation(&v, operation, &format!("subprocess.{}", operation))?;
+            v
+        }
+        PreOutcome::Deny(deny) => {
+            return Err(format!(
+                "subprocess.{} {}: '{}' is not allowed",
+                operation, deny, command
+            ));
+        }
+    };
 
-    if !allowed {
-        return Err(format!(
-            "subprocess.{} denied by policy: '{}' is not allowed",
-            operation, command
-        ));
+    let eff: EffectiveSubprocess = serde_json::from_value(effective.clone())
+        .map_err(|e| format!("subprocess.{}: invalid effective input after pre hooks: {}", operation, e))?;
+    Ok((eff, effective))
+}
+
+/// Run post hooks over the result JSON ({code, stdout, stderr, success, ...};
+/// stdout/stderr encoding matches what JS receives — base64 for buffers).
+async fn run_post_hooks(
+    hooks: &HookChain,
+    operation: &str,
+    command: &str,
+    eff_input: &serde_json::Value,
+    result: serde_json::Value,
+) -> Result<String, String> {
+    if !hooks.has_post() {
+        return Ok(result.to_string());
     }
-
-    Ok(())
+    match hooks.run_post(eff_input, result).await? {
+        PostOutcome::Allow(v) => Ok(v.to_string()),
+        PostOutcome::Deny(deny) => Err(format!(
+            "subprocess.{} result {}: '{}'",
+            operation, deny, command
+        )),
+    }
 }
 
 fn base64_encode(data: &[u8]) -> String {

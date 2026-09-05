@@ -37,8 +37,8 @@ use engine::heap_storage::{
 };
 use engine::heap_tags::HeapTagStore;
 use engine::module_loader::ModuleLoaderConfig;
-use engine::opa::{EvalMode, PolicyChain};
-use engine::opa::{PoliciesConfig, build_policy_chain};
+use engine::hooks::{HookCaps, HookChain, build_hook_chain};
+use engine::opa::PoliciesConfig;
 use engine::http2::Http2Config;
 use engine::websocket::WebSocketConfig;
 use engine::run_js_file::RunJsFilePolicy;
@@ -465,179 +465,78 @@ async fn async_main(cli: Cli) -> Result<()> {
         None
     };
 
-    // Build policy chains from the parsed config.
-    let fetch_policy_chain = if let Some(ref config) = policies_config {
-        if let Some(ref fetch_policies) = config.fetch {
-            let chain = build_policy_chain(fetch_policies, "mcp/fetch", "data.mcp.fetch.allow")
-                .map_err(|e| anyhow::anyhow!("Failed to build fetch policy chain: {}", e))?;
-            tracing::info!(
-                "Fetch policy chain: {} evaluator(s), mode={:?}",
-                fetch_policies.policies.len(),
-                fetch_policies.mode
-            );
-            Some(Arc::new(chain))
-        } else {
-            None
-        }
-    } else {
-        None
-    };
+    // Build a hook chain (pre hooks → policies-as-final-pre-hook → post
+    // hooks) for one operation from the parsed config.
+    fn op_hooks(
+        policies_config: &Option<PoliciesConfig>,
+        select: impl Fn(&PoliciesConfig) -> &Option<engine::opa::OperationPolicies>,
+        op: &str,
+        remote_path: &str,
+        local_rule: &str,
+        caps: HookCaps,
+    ) -> anyhow::Result<Option<Arc<HookChain>>> {
+        let Some(config) = policies_config else {
+            return Ok(None);
+        };
+        let Some(op_config) = select(config) else {
+            return Ok(None);
+        };
+        let chain = build_hook_chain(op, op_config, remote_path, local_rule, caps)
+            .map_err(|e| anyhow::anyhow!("Failed to build {} hook chain: {}", op, e))?;
+        tracing::info!(
+            "{} hook chain: {} policy(ies), {} pre hook(s), {} post hook(s), mode={:?}",
+            op,
+            op_config.policies.len(),
+            op_config.pre.len(),
+            op_config.post.len(),
+            op_config.mode
+        );
+        Ok(Some(Arc::new(chain)))
+    }
 
-    let websocket_policy_chain = if let Some(ref config) = policies_config {
-        if let Some(ref websocket_policies) = config.websocket {
-            let chain = build_policy_chain(
-                websocket_policies,
-                "mcp/websocket",
-                "data.mcp.websocket.allow",
-            )
-            .map_err(|e| anyhow::anyhow!("Failed to build websocket policy chain: {}", e))?;
-            tracing::info!(
-                "WebSocket policy chain: {} evaluator(s), mode={:?}",
-                websocket_policies.policies.len(),
-                websocket_policies.mode
-            );
-            Some(Arc::new(chain))
-        } else {
-            None
-        }
-    } else {
-        None
-    };
+    // Per-operation capabilities: which executors apply a hook-mutated input,
+    // and which produce a hookable output. Gate-only operations still run pre
+    // hooks but fail closed if a hook attempts a mutation.
+    const CAPS_GATE_ONLY: HookCaps = HookCaps { input_mutation: false, post: false };
+    const CAPS_MUTATE: HookCaps = HookCaps { input_mutation: true, post: false };
+    const CAPS_FULL: HookCaps = HookCaps { input_mutation: true, post: true };
 
-    let http2_policy_chain = if let Some(ref config) = policies_config {
-        if let Some(ref http2_policies) = config.http2 {
-            let chain = build_policy_chain(http2_policies, "mcp/http2", "data.mcp.http2.allow")
-                .map_err(|e| anyhow::anyhow!("Failed to build http2 policy chain: {}", e))?;
-            tracing::info!(
-                "HTTP/2 policy chain: {} evaluator(s), mode={:?}",
-                http2_policies.policies.len(),
-                http2_policies.mode
-            );
-            Some(Arc::new(chain))
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    let modules_policy_chain = if let Some(ref config) = policies_config {
-        if let Some(ref module_policies) = config.modules {
-            let chain =
-                build_policy_chain(module_policies, "mcp/modules", "data.mcp.modules.allow")
-                    .map_err(|e| anyhow::anyhow!("Failed to build modules policy chain: {}", e))?;
-            tracing::info!(
-                "Modules policy chain: {} evaluator(s), mode={:?}",
-                module_policies.policies.len(),
-                module_policies.mode
-            );
-            Some(Arc::new(chain))
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    let fs_policy_chain = if let Some(ref config) = policies_config {
-        if let Some(ref fs_policies) = config.filesystem {
-            let chain =
-                build_policy_chain(fs_policies, "mcp/filesystem", "data.mcp.filesystem.allow")
-                    .map_err(|e| {
-                        anyhow::anyhow!("Failed to build filesystem policy chain: {}", e)
-                    })?;
-            tracing::info!(
-                "Filesystem policy chain: {} evaluator(s), mode={:?}",
-                fs_policies.policies.len(),
-                fs_policies.mode
-            );
-            Some(Arc::new(chain))
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    let fs_snapshot_policy_chain = if let Some(ref config) = policies_config {
-        if let Some(ref snap_policies) = config.fs_snapshot {
-            let chain = build_policy_chain(
-                snap_policies,
-                "mcp/fs_snapshot",
-                "data.mcp.fs_snapshot.allow",
-            )
-            .map_err(|e| anyhow::anyhow!("Failed to build fs_snapshot policy chain: {}", e))?;
-            tracing::info!(
-                "FS snapshot policy chain: {} evaluator(s), mode={:?}",
-                snap_policies.policies.len(),
-                snap_policies.mode
-            );
-            Some(Arc::new(chain))
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    let mcp_tools_policy_chain = if let Some(ref config) = policies_config {
-        if let Some(ref mcp_tools_policies) = config.mcp_tools {
-            let chain = build_policy_chain(mcp_tools_policies, "mcp/tools", "data.mcp.tools.allow")
-                .map_err(|e| anyhow::anyhow!("Failed to build MCP tools policy chain: {}", e))?;
-            tracing::info!(
-                "MCP tools policy chain: {} evaluator(s), mode={:?}",
-                mcp_tools_policies.policies.len(),
-                mcp_tools_policies.mode
-            );
-            Some(Arc::new(chain))
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    let subprocess_policy_chain = if let Some(ref config) = policies_config {
-        if let Some(ref subprocess_policies) = config.subprocess {
-            let chain = build_policy_chain(
-                subprocess_policies,
-                "mcp/subprocess",
-                "data.mcp.subprocess.allow",
-            )
-            .map_err(|e| anyhow::anyhow!("Failed to build subprocess policy chain: {}", e))?;
-            tracing::info!(
-                "Subprocess policy chain: {} evaluator(s), mode={:?}",
-                subprocess_policies.policies.len(),
-                subprocess_policies.mode
-            );
-            Some(Arc::new(chain))
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    let run_js_file_policy_chain = if let Some(ref config) = policies_config {
-        if let Some(ref run_js_file_policies) = config.run_js_file {
-            let chain = build_policy_chain(
-                run_js_file_policies,
-                "mcp/run_js_file",
-                "data.mcp.run_js_file.allow",
-            )
-            .map_err(|e| anyhow::anyhow!("Failed to build run_js_file policy chain: {}", e))?;
-            tracing::info!(
-                "run_js file policy chain: {} evaluator(s), mode={:?}",
-                run_js_file_policies.policies.len(),
-                run_js_file_policies.mode
-            );
-            Some(Arc::new(chain))
-        } else {
-            None
-        }
-    } else {
-        None
-    };
+    let fetch_hooks = op_hooks(
+        &policies_config, |c| &c.fetch,
+        "fetch", "mcp/fetch", "data.mcp.fetch.allow", CAPS_FULL,
+    )?;
+    let websocket_hooks = op_hooks(
+        &policies_config, |c| &c.websocket,
+        "websocket", "mcp/websocket", "data.mcp.websocket.allow", CAPS_GATE_ONLY,
+    )?;
+    let http2_hooks = op_hooks(
+        &policies_config, |c| &c.http2,
+        "http2", "mcp/http2", "data.mcp.http2.allow", CAPS_GATE_ONLY,
+    )?;
+    let modules_hooks = op_hooks(
+        &policies_config, |c| &c.modules,
+        "modules", "mcp/modules", "data.mcp.modules.allow", CAPS_GATE_ONLY,
+    )?;
+    let fs_hooks = op_hooks(
+        &policies_config, |c| &c.filesystem,
+        "filesystem", "mcp/filesystem", "data.mcp.filesystem.allow", CAPS_MUTATE,
+    )?;
+    let fs_snapshot_hooks = op_hooks(
+        &policies_config, |c| &c.fs_snapshot,
+        "fs_snapshot", "mcp/fs_snapshot", "data.mcp.fs_snapshot.allow", CAPS_GATE_ONLY,
+    )?;
+    let mcp_tools_hooks = op_hooks(
+        &policies_config, |c| &c.mcp_tools,
+        "mcp_tools", "mcp/tools", "data.mcp.tools.allow", CAPS_FULL,
+    )?;
+    let subprocess_hooks = op_hooks(
+        &policies_config, |c| &c.subprocess,
+        "subprocess", "mcp/subprocess", "data.mcp.subprocess.allow", CAPS_FULL,
+    )?;
+    let run_js_file_hooks = op_hooks(
+        &policies_config, |c| &c.run_js_file,
+        "run_js_file", "mcp/run_js_file", "data.mcp.run_js_file.allow", CAPS_MUTATE,
+    )?;
 
     // ── Fetch policy ───────────────────────────────────────────────────
     let header_rules = load_fetch_header_rules(&cli.fetch_headers, &cli.fetch_header_config)?;
@@ -648,9 +547,9 @@ async fn async_main(cli: Cli) -> Result<()> {
         );
     }
 
-    let engine = if let Some(chain) = fetch_policy_chain {
+    let engine = if let Some(chain) = fetch_hooks {
         let fetch_config =
-            FetchConfig::new_with_chain(chain).with_header_rules(header_rules.clone());
+            FetchConfig::new_with_hooks(chain).with_header_rules(header_rules.clone());
         engine.with_fetch_config(fetch_config)
     } else {
         engine
@@ -660,9 +559,9 @@ async fn async_main(cli: Cli) -> Result<()> {
     // Handshake header injection reuses the fetch header rules (the JS
     // WebSocket API cannot set or read handshake headers, so injected
     // credentials stay outside the isolate).
-    let engine = if let Some(chain) = websocket_policy_chain {
+    let engine = if let Some(chain) = websocket_hooks {
         let websocket_config =
-            WebSocketConfig::new_with_chain(chain).with_header_rules(header_rules.clone());
+            WebSocketConfig::new_with_hooks(chain).with_header_rules(header_rules.clone());
         engine.with_websocket_config(websocket_config)
     } else {
         engine
@@ -672,8 +571,8 @@ async fn async_main(cli: Cli) -> Result<()> {
     // Per-stream header injection reuses the fetch header rules; gRPC
     // metadata rides HTTP/2 headers, so host-scoped credentials attach
     // outside the isolate exactly as they do for fetch.
-    let engine = if let Some(chain) = http2_policy_chain {
-        let http2_config = Http2Config::new_with_chain(chain).with_header_rules(header_rules);
+    let engine = if let Some(chain) = http2_hooks {
+        let http2_config = Http2Config::new_with_hooks(chain).with_header_rules(header_rules);
         engine.with_http2_config(http2_config)
     } else {
         engine
@@ -682,11 +581,11 @@ async fn async_main(cli: Cli) -> Result<()> {
     // ── Filesystem policy ────────────────────────────────────────────────
     // A mount needs the fs surface present, so when snapshots are enabled but
     // no fs policy was supplied, default to an allow-all policy chain.
-    let engine = if let Some(chain) = fs_policy_chain {
-        engine.with_fs_config(FsConfig::new(chain).with_passthrough(cli.fs_passthrough))
+    let engine = if let Some(chain) = fs_hooks {
+        engine.with_fs_config(FsConfig::new_with_hooks(chain).with_passthrough(cli.fs_passthrough))
     } else if fs_enabled {
         engine.with_fs_config(
-            FsConfig::new(Arc::new(PolicyChain::new(vec![], EvalMode::All)))
+            FsConfig::new_with_hooks(Arc::new(HookChain::permissive("filesystem")))
                 .with_passthrough(cli.fs_passthrough),
         )
     } else {
@@ -765,9 +664,9 @@ async fn async_main(cli: Cli) -> Result<()> {
                     labels
                 };
                 let engine = engine.with_fs_snapshots(store, Arc::new(labels));
-                if let Some(chain) = fs_snapshot_policy_chain {
+                if let Some(chain) = fs_snapshot_hooks {
                     tracing::info!("FS snapshot pointer moves are policy-gated");
-                    engine.with_fs_snapshot_policy(chain)
+                    engine.with_fs_snapshot_hooks(chain)
                 } else {
                     engine
                 }
@@ -788,11 +687,11 @@ async fn async_main(cli: Cli) -> Result<()> {
     // ── Module loader config ─────────────────────────────────────────────
     let module_loader_config = ModuleLoaderConfig {
         allow_external: cli.allow_external_modules,
-        policy_chain: modules_policy_chain,
+        hooks: modules_hooks,
     };
     if cli.allow_external_modules {
         tracing::info!("External module imports: ENABLED");
-        if module_loader_config.policy_chain.is_some() {
+        if module_loader_config.hooks.is_some() {
             tracing::info!("Module policy chain: ENABLED");
         }
     } else {
@@ -803,8 +702,8 @@ async fn async_main(cli: Cli) -> Result<()> {
     let engine = engine.with_module_loader_config(module_loader_config);
 
     // ── Subprocess policy ──────────────────────────────────────────────
-    let engine = if let Some(chain) = subprocess_policy_chain {
-        engine.with_subprocess_config(SubprocessConfig::new(chain))
+    let engine = if let Some(chain) = subprocess_hooks {
+        engine.with_subprocess_config(SubprocessConfig::new_with_hooks(chain))
     } else {
         engine
     };
@@ -814,14 +713,14 @@ async fn async_main(cli: Cli) -> Result<()> {
     // a `run_js_file` policy in --policies-json gates reads per path. The flag
     // wins over a configured policy (it is the explicit "allow all" switch).
     let engine = if cli.allow_run_js_file {
-        if run_js_file_policy_chain.is_some() {
+        if run_js_file_hooks.is_some() {
             tracing::warn!(
                 "--allow-run-js-file overrides the configured run_js_file policy (all paths allowed)"
             );
         }
         tracing::info!("run_js file-path reads: ENABLED (allow all server-readable paths)");
         engine.with_run_js_file_policy(RunJsFilePolicy::AllowAll)
-    } else if let Some(chain) = run_js_file_policy_chain {
+    } else if let Some(chain) = run_js_file_hooks {
         tracing::info!("run_js file-path reads: ENABLED (policy-gated)");
         engine.with_run_js_file_policy(RunJsFilePolicy::Policy(chain))
     } else {
@@ -878,9 +777,9 @@ async fn async_main(cli: Cli) -> Result<()> {
             "All MCP servers connected. JS code can use mcp.callTool(), mcp.listTools(), mcp.servers"
         );
         let engine = engine.with_mcp_client_manager(manager);
-        if let Some(chain) = mcp_tools_policy_chain {
+        if let Some(chain) = mcp_tools_hooks {
             tracing::info!("MCP tools policy: ENABLED");
-            engine.with_mcp_tools_policy_chain(chain)
+            engine.with_mcp_tools_hooks(chain)
         } else {
             engine
         }

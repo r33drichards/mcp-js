@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use serde::Serialize;
 
-use super::opa::PolicyChain;
+use super::hooks::{HookChain, PreOutcome};
 
 /// How `run_js` file-path reads are authorized.
 #[derive(Clone, Debug)]
@@ -26,9 +26,10 @@ pub enum RunJsFilePolicy {
     /// Allow reading any path the server process can access
     /// (`--allow-run-js-file`).
     AllowAll,
-    /// Evaluate each path against a policy chain
+    /// Evaluate each path against a hook chain — pre hooks (which may deny
+    /// the read or rewrite the path) followed by the policy chain
     /// (`run_js_file` in `--policies-json`).
-    Policy(Arc<PolicyChain>),
+    Policy(Arc<HookChain>),
 }
 
 /// Input handed to a `run_js_file` policy for each read.
@@ -62,6 +63,7 @@ impl RunJsFilePolicy {
             .map_err(|e| format!("run_js file '{}': {}", path, e))?;
         let canonical_str = canonical.to_string_lossy().into_owned();
 
+        let mut effective_path = canonical_str.clone();
         if let RunJsFilePolicy::Policy(chain) = self {
             let input = serde_json::to_value(RunJsFilePolicyInput {
                 operation: "read",
@@ -70,21 +72,51 @@ impl RunJsFilePolicy {
             })
             .map_err(|e| format!("run_js file policy input error: {}", e))?;
 
-            let allowed = chain
-                .evaluate(&input)
+            // When a pre hook rewrites the path, the normalizer re-canonicalizes
+            // it immediately, so later hooks — and the policy, which runs last —
+            // keep the "policies see canonicalized paths" invariant.
+            let outcome = chain
+                .run_pre_with(input, |input| {
+                    let path = input
+                        .get("path")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| {
+                            "run_js file: pre hook produced an input without a string 'path'"
+                                .to_string()
+                        })?
+                        .to_string();
+                    let canonical = std::fs::canonicalize(&path)
+                        .map_err(|e| format!("run_js file '{}': {}", path, e))?;
+                    input["path"] =
+                        serde_json::json!(canonical.to_string_lossy().into_owned());
+                    Ok(())
+                })
                 .await
-                .map_err(|e| format!("run_js file policy evaluation failed: {}", e))?;
-            if !allowed {
-                return Err(format!(
-                    "run_js file '{}' denied by run_js_file policy",
-                    canonical_str
-                ));
+                .map_err(|e| format!("run_js file hook chain error: {}", e))?;
+
+            match outcome {
+                PreOutcome::Allow(effective) => {
+                    super::hooks::verify_operation(&effective, "read", "run_js file")?;
+                    effective_path = effective
+                        .get("path")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| {
+                            "run_js file: effective input lost its 'path'".to_string()
+                        })?
+                        .to_string();
+                }
+                PreOutcome::Deny(deny) => {
+                    return Err(format!(
+                        "run_js file '{}' {} (run_js_file policy)",
+                        canonical_str, deny
+                    ));
+                }
             }
         }
 
-        tokio::fs::read_to_string(&canonical)
+        tokio::fs::read_to_string(&effective_path)
             .await
-            .map_err(|e| format!("run_js file '{}': {}", canonical_str, e))
+            .map_err(|e| format!("run_js file '{}': {}", effective_path, e))
     }
 }
 
@@ -133,16 +165,17 @@ allow if {{
         )
     }
 
-    fn chain_from_rego(dir: &std::path::Path, rego: &str) -> Arc<PolicyChain> {
+    fn chain_from_rego(dir: &std::path::Path, rego: &str) -> Arc<HookChain> {
         let rego_path = dir.join("run_js_file.rego");
         std::fs::write(&rego_path, rego).unwrap();
         let eval =
             LocalPolicyEvaluator::from_file(&rego_path, "data.mcp.run_js_file.allow".to_string())
                 .unwrap();
-        Arc::new(PolicyChain::new(
+        let policy = Arc::new(PolicyChain::new(
             vec![PolicyEvaluatorKind::Local(eval)],
             EvalMode::All,
-        ))
+        ));
+        Arc::new(HookChain::from_policy("run_js_file", policy))
     }
 
     #[tokio::test]
@@ -188,6 +221,6 @@ allow if {{
             .read(outside.to_str().unwrap(), None)
             .await
             .expect_err("policy should deny file outside the allowed dir");
-        assert!(err.contains("denied by run_js_file policy"), "got: {err}");
+        assert!(err.contains("denied by policy (run_js_file policy)"), "got: {err}");
     }
 }
