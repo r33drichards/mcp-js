@@ -122,6 +122,11 @@ function readableMethods(proto) {
                     if (this.errored) throw this.errored;
                     return;
                 }
+                // Pump a pull-based stream: without this, a stream that only
+                // produces data when _read() is called would wait forever for
+                // a 'readable' that never fires.
+                callRead(this);
+                if (state.queue.length > 0) continue;
                 await new Promise((resolve, reject) => {
                     const cleanup = () => {
                         this.removeListener('readable', onWake);
