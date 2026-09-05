@@ -1581,6 +1581,30 @@ class ClientRequestImpl extends OutgoingMessageImpl {
         if (this._expectContinue) {
             this.once('_ready', () => { if (!this.headersSent) this._flushHead(); });
         }
+        // An AbortSignal option destroys the request with an AbortError when
+        // it fires. This is distinct from req.abort(): it does not set
+        // `aborted`, and it surfaces as an 'error' (ABORT_ERR / AbortError).
+        const signal = opts.signal;
+        if (signal && typeof signal.addEventListener === 'function') {
+            const onAbort = () => {
+                if (this.destroyed) return;
+                const err = new Error('The operation was aborted');
+                err.code = 'ABORT_ERR';
+                err.name = 'AbortError';
+                this.destroy(err);
+            };
+            if (signal.aborted) {
+                // Already aborted: destroy synchronously (destroyed is true
+                // right away) — destroyImpl still emits 'error' on a later
+                // tick, so a listener attached after construction sees it —
+                // and never dial, never register a listener (count stays 0).
+                onAbort();
+                return;
+            }
+            signal.addEventListener('abort', onAbort, { once: true });
+            this.once('close',
+                () => signal.removeEventListener('abort', onAbort));
+        }
         // A user createConnection (or one from a custom agent) may hand back
         // any duplex stream — the generic-streams pattern — either as a
         // return value or through a (err, socket) callback; otherwise dial
@@ -1589,6 +1613,9 @@ class ClientRequestImpl extends OutgoingMessageImpl {
         // In socket options "path" means an IPC pipe; the request path must
         // not leak through (Node nulls it the same way).
         delete connectOptions.path;
+        // The request owns the AbortSignal; the socket must not register its
+        // own listener on it (Node keeps a single 'abort' listener).
+        delete connectOptions.signal;
         if (opts.socketPath) connectOptions.path = opts.socketPath;
         let settled = false;
         const settle = (error, socket) => {
@@ -2062,9 +2089,12 @@ class ResponseParser {
         if (this.done) return;
         if (!this.res) {
             // Connection ended before any response: Node's classic
-            // "socket hang up", suppressed for an explicit abort().
+            // "socket hang up", suppressed for an explicit abort() or a
+            // request torn down with its own error (e.g. an AbortSignal
+            // destroy, which already surfaced ABORT_ERR). A bare destroy()
+            // with no error still reports the hang up.
             if (!this.request.aborted && !this.request._sawError
-                && !this.request._hangupEmitted) {
+                && !this.request._hangupEmitted && !this.request.errored) {
                 this.request._hangupEmitted = true;
                 const err = new Error('socket hang up');
                 err.code = 'ECONNRESET';
@@ -2076,14 +2106,20 @@ class ResponseParser {
             // Read-until-close body: EOF terminates it cleanly.
             this.finish();
         } else if (this.res) {
+            // A framed body (content-length or chunked) cut short is an abort,
+            // not a clean end. Tear the message down at the readable level
+            // (bypassing IncomingMessage.destroy, which would only re-poke the
+            // already-closed socket): res.destroyed becomes true and 'close'
+            // fires, but 'end' never does. The ECONNRESET only surfaces when
+            // someone is listening, so an unwatched abort doesn't throw.
             this.res.aborted = true;
             this.res.emit('aborted');
+            let err;
             if (this.res.listenerCount('error') > 0) {
-                const err = new Error('aborted');
+                err = new Error('aborted');
                 err.code = 'ECONNRESET';
-                this.res.emit('error', err);
             }
-            this.res.push(null);
+            Readable.prototype.destroy.call(this.res, err);
         }
     }
 }
