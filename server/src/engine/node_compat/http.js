@@ -451,8 +451,43 @@ class ServerResponseImpl extends OutgoingMessageImpl {
             headers = reason;
             reason = undefined;
         }
-        this.statusCode = statusCode;
-        if (reason !== undefined) this.statusMessage = reason;
+        if (this.headersSent) {
+            const err = new Error('Cannot render headers after they are sent to the client');
+            err.code = 'ERR_HTTP_HEADERS_SENT';
+            throw err;
+        }
+        // A flat header array must hold whole name/value pairs.
+        if (Array.isArray(headers) && headers.length && !Array.isArray(headers[0])
+            && headers.length % 2 !== 0) {
+            const err = new TypeError(
+                `The argument 'headers' is invalid. Received ${receivedRepr(headers)}`);
+            err.code = 'ERR_INVALID_ARG_VALUE';
+            throw err;
+        }
+        // Node validates the status code (integer 100-999) before anything
+        // else; everything outside that range is ERR_HTTP_INVALID_STATUS_CODE.
+        const numeric = Number(statusCode);
+        if (!Number.isInteger(numeric) || numeric < 100 || numeric > 999) {
+            // Node renders the offending value inspect-style (an object as
+            // `{}`, a string unquoted here), not via plain String().
+            const repr = statusCode !== null && typeof statusCode === 'object'
+                ? (Array.isArray(statusCode)
+                    ? (statusCode.length
+                        ? `[ ${statusCode.map(String).join(', ')} ]` : '[]')
+                    : (Object.keys(statusCode).length
+                        ? `{ ${Object.keys(statusCode).join(', ')} }` : '{}'))
+                : String(statusCode);
+            const err = new RangeError(`Invalid status code: ${repr}`);
+            err.code = 'ERR_HTTP_INVALID_STATUS_CODE';
+            throw err;
+        }
+        this.statusCode = numeric;
+        // writeHead resolves the reason phrase immediately: an explicit
+        // reason, else the standard text (or 'unknown' for a non-standard
+        // code), so res.statusMessage reflects it right away.
+        this.statusMessage = reason !== undefined
+            ? reason
+            : (STATUS_CODES[numeric] || 'unknown');
         // A CR/LF in the reason phrase is a header-injection vector; Node
         // rejects it here (explicit) and at flush time (implicit setter).
         if (this.statusMessage !== undefined && this.statusMessage !== null
@@ -460,14 +495,23 @@ class ServerResponseImpl extends OutgoingMessageImpl {
             throw new Error('Invalid character in statusMessage');
         }
         if (headers) {
+            // The first time a name appears in this writeHead call it
+            // replaces any value set earlier via setHeader(); a later
+            // repeat of the same name within the call appends (so
+            // ['a','1','a','2'] yields two `a` headers). Object form has no
+            // repeats, so it is plain replace.
+            const seen = new Set();
+            const put = (name, value) => {
+                const key = String(name).toLowerCase();
+                if (seen.has(key)) this.appendHeader(name, value);
+                else { seen.add(key); this.setHeader(name, value); }
+            };
             if (Array.isArray(headers)) {
                 if (headers.length > 0 && Array.isArray(headers[0])) {
-                    for (const [name, value] of headers) {
-                        this.appendHeader(name, value);
-                    }
+                    for (const [name, value] of headers) put(name, value);
                 } else {
                     for (let i = 0; i + 1 < headers.length; i += 2) {
-                        this.appendHeader(headers[i], headers[i + 1]);
+                        put(headers[i], headers[i + 1]);
                     }
                 }
             } else {
