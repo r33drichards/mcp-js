@@ -407,13 +407,30 @@ class ServerResponseImpl extends OutgoingMessageImpl {
     constructor(req) {
         super();
         this.req = req;
-        this.socket = req.socket;
-        this.connection = req.socket;
+        // A ServerResponse can be constructed standalone (unit tests) with a
+        // bare req object and its socket assigned later via assignSocket().
+        this.socket = (req && req.socket) || null;
+        this.connection = this.socket;
         this.statusCode = 200;
         this.statusMessage = undefined;
         this.sendDate = true;
         this._keepAlive = shouldKeepAlive(req);
-        this._suppressBody = req.method === 'HEAD';
+        this._suppressBody = Boolean(req && req.method === 'HEAD');
+    }
+
+    // Node's assignSocket/detachSocket: bind a socket to a standalone
+    // response (or rebind one), then flush through it.
+    assignSocket(socket) {
+        this.socket = socket;
+        this.connection = socket;
+        if (socket) socket._httpMessage = this;
+        this.emit('socket', socket);
+    }
+
+    detachSocket(socket) {
+        if (socket && socket._httpMessage === this) socket._httpMessage = null;
+        this.socket = null;
+        this.connection = null;
     }
 
     writeHead(statusCode, reason, headers) {
@@ -611,7 +628,8 @@ class ServerResponseImpl extends OutgoingMessageImpl {
 }
 
 function shouldKeepAlive(req) {
-    const connection = String(req.headers.connection || '').toLowerCase();
+    const headers = (req && req.headers) || {};
+    const connection = String(headers.connection || '').toLowerCase();
     if (req.httpVersionMajor === 1 && req.httpVersionMinor === 0) {
         return connection.includes('keep-alive');
     }
