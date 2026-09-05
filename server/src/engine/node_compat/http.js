@@ -425,17 +425,11 @@ class OutgoingMessageImpl extends Writable {
         return out;
     }
 
-    _writeRaw(data, cb) {
+    _writeRaw(data) {
         if (this.socket && !this.socket.destroyed) {
             // Transport failures (peer already gone: EPIPE/ECONNRESET)
             // surface through 'aborted'/'clientError', not the write path.
-            // The completion callback drives the writable's backpressure: it
-            // fires only once the socket has drained the bytes, so a tight
-            // `while (res.write(...))` loop eventually sees write() return
-            // false instead of spinning forever.
-            this.socket.write(data, (error) => { void error; if (cb) cb(); });
-        } else if (cb) {
-            cb();
+            this.socket.write(data, (error) => void error);
         }
     }
 
@@ -456,10 +450,11 @@ class OutgoingMessageImpl extends Writable {
                 Buffer.from(buf.length.toString(16) + '\r\n'),
                 buf,
                 Buffer.from('\r\n'),
-            ]), callback);
+            ]));
         } else {
-            this._writeRaw(buf, callback);
+            this._writeRaw(buf);
         }
+        callback();
     }
 
     _final(callback) {
@@ -1870,17 +1865,16 @@ class ClientRequestImpl extends OutgoingMessageImpl {
             this._serializeHeaders() + '\r\n');
     }
 
-    _sendRaw(data, cb) {
-        const done = cb ? (error) => { void error; cb(); } : undefined;
+    _sendRaw(data) {
         if (this._connected) {
-            this.socket.write(data, done);
+            this.socket.write(data);
         } else {
-            this.once('_ready', () => this.socket.write(data, done));
+            this.once('_ready', () => this.socket.write(data));
         }
     }
 
-    _writeRaw(data, cb) {
-        this._sendRaw(data, cb);
+    _writeRaw(data) {
+        this._sendRaw(data);
     }
 
     _write(chunk, encoding, callback) {
