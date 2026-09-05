@@ -54,6 +54,7 @@ const builtins = new Map([
         STATUS_CODES: http.STATUS_CODES,
         Server: http.Server,
         ServerResponse: http.ServerResponse,
+        kConnectionsCheckingInterval: http.kConnectionsCheckingInterval,
     }],
     ['assert', assert],
     ['assert/strict', assert.strict],

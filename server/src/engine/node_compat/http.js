@@ -60,6 +60,10 @@ export const STATUS_CODES = {
 
 export const maxHeaderSize = 16384;
 
+// _http_server exposes this symbol so tests can inspect the interval timer the
+// server arms to enforce headersTimeout/requestTimeout across live sockets.
+export const kConnectionsCheckingInterval = Symbol('http.server.connectionsCheckingInterval');
+
 const TOKEN_RE = /^[\^_`a-zA-Z\-0-9!#$%&'*+.|~]+$/;
 // Anything outside 0x21-0xff must be escaped in a request path.
 const INVALID_PATH_RE = /[^!-ÿ]/;
@@ -1127,6 +1131,22 @@ class ServerImpl extends net.Server {
             this.on('request', requestListener);
         }
         this.on('connection', (socket) => this._setupConnection(socket));
+        this[kConnectionsCheckingInterval] = undefined;
+        // Node (re)arms a connections-checking interval each time the server
+        // starts listening; the prior one is cleared first.
+        this.on('listening', () => this._armConnectionsChecking());
+    }
+
+    _armConnectionsChecking() {
+        const prev = this[kConnectionsCheckingInterval];
+        if (prev) clearInterval(prev);
+        // The real interval sweeps sockets for headers/request-timeout
+        // enforcement; our transport enforces those per-socket, so the timer
+        // exists purely to match Node's lifecycle (armed while listening,
+        // destroyed on close). Unref'd so it never keeps the loop alive.
+        const timer = setInterval(() => {}, 30000);
+        if (typeof timer.unref === 'function') timer.unref();
+        this[kConnectionsCheckingInterval] = timer;
     }
 
     _setupConnection(socket) {
@@ -1176,6 +1196,11 @@ class ServerImpl extends net.Server {
     // mid-request drain first (_afterFinal ends them once the server is
     // closing).
     close(cb) {
+        const timer = this[kConnectionsCheckingInterval];
+        if (timer) {
+            clearInterval(timer);
+            // Keep the (now-destroyed) handle referenceable for inspection.
+        }
         super.close(cb);
         this.closeIdleConnections();
         return this;
@@ -2012,4 +2037,5 @@ export default {
     request,
     get,
     setMaxIdleHTTPParsers,
+    kConnectionsCheckingInterval,
 };

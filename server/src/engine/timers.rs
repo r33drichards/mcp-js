@@ -85,6 +85,12 @@ const TIMERS_JS_WRAPPER: &str = r#"
     };
     Timeout.prototype.hasRef = function hasRef() { return this._timer.refed; };
     Timeout.prototype.refresh = function refresh() { return this; };
+    // Node exposes `_destroyed` on the handle; it flips true once the timer is
+    // cleared/unenrolled. Mirrors the cancelled flag on our internal record.
+    Object.defineProperty(Timeout.prototype, '_destroyed', {
+        get: function () { return this._timer.cancelled; },
+        configurable: true, enumerable: false,
+    });
     Timeout.prototype.valueOf = function valueOf() { return this._id; };
     Timeout.prototype.toString = function toString() { return String(this._id); };
     Timeout.prototype[Symbol.toPrimitive] = function (hint) {
