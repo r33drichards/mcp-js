@@ -636,6 +636,73 @@ function shouldKeepAlive(req) {
     return !connection.includes('close');
 }
 
+// Strict validation of a request's header block, mirroring the checks
+// llhttp performs (Node's clientError / 400 path). Returns a {code,message}
+// parse error, or null when the head is well-formed.
+function validateRequestHead(lines) {
+    let contentLength = null;
+    let clSeen = false;
+    const teValues = [];
+    for (let i = 1; i < lines.length; i++) {
+        const line = lines[i];
+        if (line === '') continue;
+        // A bare CR or LF embedded in a header line (the head was split on
+        // CRLF, so any residual \n/\r means a missing/!CRLF separator).
+        if (line.includes('\n') || line.includes('\r')) {
+            return { code: 'HPE_LF_EXPECTED',
+                message: 'Parse Error: Expected LF after headers' };
+        }
+        const sep = line.indexOf(':');
+        if (sep <= 0) {
+            return { code: 'HPE_INVALID_HEADER_TOKEN',
+                message: 'Parse Error: Invalid header token' };
+        }
+        // The name must be a bare token — no spaces (incl. before the colon)
+        // or control characters. "Content-Length : 5" is rejected here.
+        const rawName = line.slice(0, sep);
+        if (!TOKEN_RE.test(rawName)) {
+            return { code: 'HPE_INVALID_HEADER_TOKEN',
+                message: 'Parse Error: Invalid header token' };
+        }
+        const name = rawName.toLowerCase();
+        const value = line.slice(sep + 1).trim();
+        if (name === 'content-length') {
+            clSeen = true;
+            for (const part of value.split(',').map((s) => s.trim())) {
+                if (!/^\d+$/.test(part)) {
+                    return { code: 'HPE_INVALID_CONTENT_LENGTH',
+                        message: 'Parse Error: Invalid Content-Length' };
+                }
+                if (contentLength === null) contentLength = part;
+                else if (contentLength !== part) {
+                    return { code: 'HPE_UNEXPECTED_CONTENT_LENGTH',
+                        message: 'Parse Error: Duplicate Content-Length' };
+                }
+            }
+        } else if (name === 'transfer-encoding') {
+            for (const enc of value.toLowerCase().split(',')
+                .map((s) => s.trim()).filter(Boolean)) {
+                teValues.push(enc);
+            }
+        }
+    }
+    // When Transfer-Encoding is present the message must be chunked-framed:
+    // the final coding has to be exactly `chunked` (so `chunkedchunked`,
+    // `chunked-false`, or `chunked` followed by another coding are all
+    // rejected — the body length would otherwise be indeterminable).
+    if (teValues.length > 0 && teValues[teValues.length - 1] !== 'chunked') {
+        return { code: 'HPE_INVALID_TRANSFER_ENCODING',
+            message: 'Parse Error: Invalid Transfer-Encoding' };
+    }
+    // Transfer-Encoding together with Content-Length is a request-smuggling
+    // vector; llhttp rejects it as an invalid Transfer-Encoding.
+    if (teValues.length > 0 && clSeen) {
+        return { code: 'HPE_INVALID_TRANSFER_ENCODING',
+            message: "Parse Error: Transfer-Encoding can't be present with Content-Length" };
+    }
+    return null;
+}
+
 // ── request parsing (server side) ───────────────────────────────────────
 
 const EMPTY = Buffer.alloc(0);
@@ -673,6 +740,23 @@ class ConnectionParser {
             if (res && !res.finished) {
                 Promise.resolve().then(() => res.emit('close'));
             }
+        }
+    }
+
+    // A parse error: emit 'clientError' (Node's hook) and, unless a handler
+    // already tore the socket down, send the default 400 and close. Further
+    // bytes on the connection (a smuggled second request) are not parsed.
+    _clientError(parseError, head) {
+        this.upgraded = true;
+        const err = new Error(parseError.message);
+        err.code = parseError.code;
+        if (head !== undefined) {
+            err.bytesParsed = head.length;
+            err.rawPacket = Buffer.from(head + '\r\n\r\n', 'latin1');
+        }
+        this.server.emit('clientError', err, this.socket);
+        if (this.socket && !this.socket.destroyed && this.socket.writable) {
+            this.socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n');
         }
     }
 
@@ -716,7 +800,14 @@ class ConnectionParser {
         const lines = head.split('\r\n');
         const match = /^(\S+) (\S+) HTTP\/(\d)\.(\d)$/.exec(lines[0]);
         if (!match) {
-            this.socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n');
+            this._clientError({ code: 'HPE_INVALID_METHOD',
+                message: 'Parse Error: Invalid method encountered' });
+            return false;
+        }
+        // Reject malformed / smuggling-prone header blocks before dispatch.
+        const parseError = validateRequestHead(lines);
+        if (parseError) {
+            this._clientError(parseError, head);
             return false;
         }
         this.socket._httpActive = true;
@@ -1545,6 +1636,18 @@ class ResponseParser {
             }
             this.res = res;
             this.request.res = res;
+            // A response carrying both Transfer-Encoding and Content-Length
+            // is a smuggling vector; the client rejects it like llhttp.
+            if (res.headers['transfer-encoding'] !== undefined
+                && res.headers['content-length'] !== undefined) {
+                this.done = true;
+                const err = new Error(
+                    "Parse Error: Transfer-Encoding can't be present with Content-Length");
+                err.code = 'HPE_INVALID_TRANSFER_ENCODING';
+                if (this.socket) this.socket.destroy();
+                this.request.emit('error', err);
+                return;
+            }
             // HTTP Upgrade / CONNECT: hand the raw socket to the user. A 101
             // (or an Upgrade + Connection: upgrade response), and a 2xx to a
             // CONNECT request, detach the socket from HTTP parsing and emit
