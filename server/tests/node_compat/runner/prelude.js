@@ -187,7 +187,10 @@ const common = {
 
     invalidArgTypeHelper(input) {
         if (input == null) return ` Received ${input}`;
-        if (typeof input === 'function') {
+        // Matches Node's helper: only a *named* function uses this form;
+        // an anonymous function has no name and falls through to the
+        // generic "Received type function (...)" branch below.
+        if (typeof input === 'function' && input.name) {
             return ` Received function ${input.name}`;
         }
         if (typeof input === 'object') {

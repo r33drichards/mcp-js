@@ -84,7 +84,9 @@ function readableMethods(proto) {
     };
 
     proto.isPaused = function isPaused() {
-        return !this._readableState.flowing;
+        // Node reports paused only after an explicit pause() (flowing ===
+        // false); a fresh, never-flowed stream is not paused.
+        return this._readableState.paused === true;
     };
 
     proto.resume = function resume() {
