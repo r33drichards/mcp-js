@@ -561,6 +561,99 @@ function post(input, output) {
     assert!(out.contains("denied by pre hook (read-only)"), "got: {out}");
 }
 
+// ── fetch: injected credentials do not follow a hook's host rewrite ─────────
+
+/// A header rule injects a credential for host `127.0.0.1`. A pre hook that
+/// rewrites the URL to `localhost` (same listener, different host, so the
+/// rule no longer matches) must not carry the credential along; a same-host
+/// path rewrite keeps it. The echo server reports what it received.
+#[tokio::test]
+async fn fetch_injected_credential_stripped_on_host_rewrite() {
+    ensure_v8();
+    let dir = tempfile::tempdir().unwrap();
+
+    async fn token_handler(headers: HeaderMap) -> impl IntoResponse {
+        let token = headers
+            .get("x-injected-token")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("absent")
+            .to_string();
+        (StatusCode::OK, format!("token={}", token))
+    }
+    let app = Router::new().route("/token", get(token_handler));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let hook_url = write_rego(
+        dir.path(),
+        "hooks.js",
+        &format!(
+            r#"
+function pre(input) {{
+    if (input.url_parsed.path === "/hop") {{
+        // Cross-host rewrite: the injecting rule (127.0.0.1) stops matching.
+        return {{ input: {{ ...input, url: "http://localhost:{port}/token" }} }};
+    }}
+    if (input.url_parsed.path === "/stay") {{
+        // Same-host rewrite: the rule still matches, credential survives.
+        return {{ input: {{ ...input, url: "http://127.0.0.1:{port}/token" }} }};
+    }}
+}}
+"#
+        ),
+    );
+    let op = OperationPolicies {
+        pre: vec![HookSource {
+            url: hook_url,
+            policy_path: None,
+            rule: None,
+            timeout_ms: None,
+            capabilities: None,
+        }],
+        ..Default::default()
+    };
+    let chain = build_hook_chain(
+        "fetch",
+        &op,
+        "mcp/fetch",
+        "data.mcp.fetch.allow",
+        HookCaps {
+            input_mutation: true,
+            post: true,
+        },
+    )
+    .unwrap();
+    let rule = server::engine::fetch::HeaderRule::static_header(
+        "127.0.0.1".to_string(),
+        vec![],
+        "x-injected-token".to_string(),
+        "hunter2".to_string(),
+    )
+    .unwrap();
+    let engine = build_engine().with_fetch_config(
+        FetchConfig::new_with_hooks(Arc::new(chain)).with_header_rules(vec![rule]),
+    );
+
+    // Same-host rewrite: injected credential is kept.
+    let out = eval(
+        &engine,
+        format!(r#"fetch("http://127.0.0.1:{port}/stay").then(r => r.text())"#),
+    )
+    .await;
+    assert_eq!(out, "token=hunter2");
+
+    // Cross-host rewrite: the credential must be stripped.
+    let out = eval(
+        &engine,
+        format!(r#"fetch("http://127.0.0.1:{port}/hop").then(r => r.text())"#),
+    )
+    .await;
+    assert_eq!(out, "token=absent", "credential must not follow the host rewrite");
+}
+
 // ── fs: a hook that rewrites `operation` fails closed ───────────────────────
 
 /// The executor performs the operation it was invoked for regardless of the

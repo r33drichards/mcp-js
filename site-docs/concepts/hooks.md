@@ -130,6 +130,8 @@ Operations with derived input fields keep them consistent through mutation: fetc
 
 The `operation` discriminator is likewise pinned: the executor performs the operation it was invoked for regardless of the JSON field, so a hook that rewrites `operation` (say `writeFile` → `readFile`) could only make the policy evaluate something other than what will run. Such a mutation fails the operation closed.
 
+Injected credentials don't follow rewrites: fetch's `--fetch-header` injection (static and OAuth) runs before the chain against the requested URL, and the injected set is tracked — when a hook rewrites the request so an injecting rule no longer matches (a different host, say), the untouched credential is stripped before later hooks and the policy see it. Injection is never re-run for a hook-chosen destination; a hook that redirects a request supplies any credentials the new destination needs itself.
+
 ## Policies are hooks
 
 The `policies` key is implemented *in terms of* hooks: `build_hook_chain` wraps the configured `PolicyChain` in a `Hook::Policy` variant and appends it as the final pre hook. A policy is precisely a pre hook that only ever answers with a boolean and never mutates. These two configurations gate identically:

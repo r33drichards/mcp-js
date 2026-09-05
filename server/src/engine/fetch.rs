@@ -333,7 +333,31 @@ pub async fn apply_header_rules(
     method: &str,
     headers: &mut HashMap<String, String>,
 ) -> Result<(), String> {
-    for rule in rules {
+    apply_header_rules_tracked(rules, host, method, headers).await?;
+    Ok(())
+}
+
+/// One header actually inserted by [`apply_header_rules_tracked`], with the
+/// index of the rule that injected it.
+#[derive(Debug, Clone)]
+pub struct InjectedHeader {
+    pub name: String,
+    pub value: String,
+    pub rule: usize,
+}
+
+/// Like [`apply_header_rules`], but reports exactly which headers were
+/// inserted. Fetch uses this to strip injected credentials back out when a
+/// pre hook rewrites the request so the injecting rule no longer matches —
+/// otherwise a credential intended for host A would ride along to host B.
+pub async fn apply_header_rules_tracked(
+    rules: &[HeaderRule],
+    host: &str,
+    method: &str,
+    headers: &mut HashMap<String, String>,
+) -> Result<Vec<InjectedHeader>, String> {
+    let mut injected = Vec::new();
+    for (rule_idx, rule) in rules.iter().enumerate() {
         if !rule.matches(host, method) {
             continue;
         }
@@ -342,10 +366,21 @@ pub async fn apply_header_rules(
             HeaderInjection::Static { headers: rule_headers } => {
                 for (k, v) in rule_headers {
                     let key = k.to_ascii_lowercase();
-                    if rule.override_existing {
-                        headers.insert(key, v.clone());
+                    let inserted = if rule.override_existing {
+                        headers.insert(key.clone(), v.clone());
+                        true
+                    } else if headers.contains_key(&key) {
+                        false
                     } else {
-                        headers.entry(key).or_insert_with(|| v.clone());
+                        headers.insert(key.clone(), v.clone());
+                        true
+                    };
+                    if inserted {
+                        injected.push(InjectedHeader {
+                            name: key,
+                            value: v.clone(),
+                            rule: rule_idx,
+                        });
                     }
                 }
             }
@@ -362,11 +397,57 @@ pub async fn apply_header_rules(
                     .authorization_header_value()
                     .await
                     .map_err(|_| sanitized_dynamic_auth_error(&config.header_name, "token acquisition"))?;
-                headers.insert(key, value);
+                headers.insert(key.clone(), value.clone());
+                injected.push(InjectedHeader {
+                    name: key,
+                    value,
+                    rule: rule_idx,
+                });
             }
         }
     }
 
+    Ok(injected)
+}
+
+/// Remove injected headers whose injecting rule no longer matches the
+/// effective request. Runs inside the pre-chain normalizer (after every
+/// mutation), so later hooks — and the policy, which runs last — evaluate
+/// the header set that will actually be sent. Only untouched injections are
+/// stripped: a hook that explicitly rewrote an injected header's value owns
+/// the result. Injection is never re-run for a rewritten host; a hook that
+/// redirects a request supplies any credentials the new host needs itself.
+fn strip_stale_injected_headers(
+    input: &mut serde_json::Value,
+    rules: &[HeaderRule],
+    injected: &[InjectedHeader],
+) -> Result<(), String> {
+    if injected.is_empty() {
+        return Ok(());
+    }
+    let host = input["url_parsed"]["host"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    let method = input
+        .get("method")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let Some(headers) = input.get_mut("headers").and_then(|h| h.as_object_mut()) else {
+        return Ok(());
+    };
+    for inj in injected {
+        if rules
+            .get(inj.rule)
+            .is_some_and(|rule| rule.matches(&host, &method))
+        {
+            continue;
+        }
+        if headers.get(&inj.name).and_then(|v| v.as_str()) == Some(inj.value.as_str()) {
+            headers.remove(&inj.name);
+        }
+    }
     Ok(())
 }
 
@@ -731,10 +812,12 @@ async fn do_fetch(
 
     // Apply header injection rules, keyed on the URL as requested by JS.
     // This runs before the hook chain so the policy (the chain's final pre
-    // hook) validates the headers that will actually be sent. A pre hook that
-    // rewrites the URL host owns the header consequences: injection is not
-    // re-run, and the hook sees (and can rewrite or drop) every header.
-    apply_header_rules(&header_rules, &url_host, &method, &mut headers)
+    // hook) validates the headers that will actually be sent. The injected
+    // set is tracked: if a pre hook rewrites the request so an injecting
+    // rule no longer matches (a different host, say), the normalizer strips
+    // that credential back out before later hooks and the policy see it —
+    // injection is never re-run for a hook-chosen destination.
+    let injected = apply_header_rules_tracked(&header_rules, &url_host, &method, &mut headers)
         .await
         .map_err(|e| format!("fetch: credential injection failed for host '{}': {}", url_host, e))?;
 
@@ -758,7 +841,11 @@ async fn do_fetch(
     // effective input.
     let input_value = serde_json::to_value(&policy_input)
         .map_err(|e| format!("fetch: failed to serialize policy input: {}", e))?;
-    let effective = match hooks.run_pre_with(input_value, normalize_fetch_input).await? {
+    let normalize = |input: &mut serde_json::Value| -> Result<(), String> {
+        normalize_fetch_input(input)?;
+        strip_stale_injected_headers(input, &header_rules, &injected)
+    };
+    let effective = match hooks.run_pre_with(input_value, normalize).await? {
         PreOutcome::Allow(v) => {
             super::hooks::verify_operation(&v, "fetch", "fetch")?;
             v
