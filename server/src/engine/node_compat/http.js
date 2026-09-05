@@ -151,7 +151,11 @@ export function validateHeaderValue(name, value) {
         err.code = 'ERR_HTTP_INVALID_HEADER_VALUE';
         throw err;
     }
-    if (/[\r\n]/.test(String(value))) {
+    // Node's checkInvalidHeaderChar: valid field-value bytes are tab, the
+    // printable ASCII range, and the Latin-1 high range. Anything else
+    // (CR/LF injection, other control chars, non-Latin-1 code points) is
+    // ERR_INVALID_CHAR.
+    if (/[^\t\x20-\x7e\x80-\xff]/.test(String(value))) {
         const err = new TypeError(
             `Invalid character in header content ["${name}"]`);
         err.code = 'ERR_INVALID_CHAR';
