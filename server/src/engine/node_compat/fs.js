@@ -67,8 +67,25 @@ export const symlinkSync = globalThis.fs && typeof globalThis.fs.symlinkSync ===
 function syncDelegate(name, pathCount = 1) {
     const method = hostFs(name);
     if (!method) return unsupported(name);
-    return (...args) => method(
-        ...args.map((value, index) => (index < pathCount ? normalizePath(value) : value)));
+    return (...args) => {
+        try {
+            return method(...args.map(
+                (value, index) => (index < pathCount ? normalizePath(value) : value)));
+        } catch (error) {
+            // Host errors embed the errno code in the message
+            // ("fs.rm: /path: ENOENT: ...") but do not set error.code.
+            if (error && !error.code) {
+                const msg = String(error.message || '');
+                const codeMatch = /\b(E[A-Z]+)\b/.exec(msg);
+                if (codeMatch) {
+                    error.code = codeMatch[1];
+                } else if (/no such file|not found|does not exist/i.test(msg)) {
+                    error.code = 'ENOENT';
+                }
+            }
+            throw error;
+        }
+    };
 }
 
 export const mkdirSync = syncDelegate('mkdirSync');

@@ -11,6 +11,7 @@
 import { EventEmitter } from 'node:events';
 import { Duplex } from 'node:stream';
 import { Buffer } from 'node:buffer';
+import { existsSync } from 'node:fs';
 
 const ops = globalThis.__mcpV8NetOps;
 
@@ -53,11 +54,22 @@ const V4_SEG = '(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])';
 const V4_RE = new RegExp(`^${V4_SEG}\\.${V4_SEG}\\.${V4_SEG}\\.${V4_SEG}$`);
 
 export function isIPv4(input) {
-    return typeof input === 'string' && V4_RE.test(input);
+    // Node's isIP* are regex tests, so any value string-coerces first
+    // (objects with toString included).
+    return V4_RE.test(String(input));
 }
 
-export function isIPv6(input) {
-    if (typeof input !== 'string' || input.length === 0) return false;
+export function isIPv6(value) {
+    let input = String(value);
+    if (input.length === 0) return false;
+    // Scoped addresses: fe80::1%eth0. The zone id allows the same character
+    // set as Node's IPv6 regex.
+    const pct = input.indexOf('%');
+    if (pct !== -1) {
+        const zone = input.slice(pct + 1);
+        if (zone.length === 0 || !/^[0-9a-zA-Z.:-]+$/.test(zone)) return false;
+        input = input.slice(0, pct);
+    }
     if (input.includes('.')) {
         // Mixed notation ::ffff:1.2.3.4
         const lastColon = input.lastIndexOf(':');
@@ -166,6 +178,14 @@ function validateConnectOptions(options) {
         err.code = 'ERR_INVALID_ARG_TYPE';
         throw err;
     }
+    for (const key of ['path', 'socketPath']) {
+        if (options[key] !== undefined && typeof options[key] !== 'string') {
+            const err = new TypeError(
+                `The "options.${key}" property must be of type string. Received ${receivedRepr(options[key])}`);
+            err.code = 'ERR_INVALID_ARG_TYPE';
+            throw err;
+        }
+    }
     if (typeof options.host === 'string' && options.host.includes('\u0000')) {
         const err = new TypeError(
             "The property 'options.host' must be a string without null bytes. " +
@@ -230,8 +250,21 @@ function validateConnectOptions(options) {
 function normalizeConnectArgs(args) {
     let options = {};
     let cb;
+    if (args.length === 0
+        || (typeof args[0] === 'object' && args[0] !== null
+            && args[0].port === undefined && args[0].path === undefined
+            && args[0].socketPath === undefined)) {
+        const err = new TypeError(
+            'The "options" or "port" or "path" argument must be specified');
+        err.code = 'ERR_MISSING_ARGS';
+        throw err;
+    }
     if (typeof args[0] === 'object' && args[0] !== null) {
         options = args[0];
+        cb = args[1];
+    } else if (typeof args[0] === 'string' && !/^\d+$/.test(args[0].trim())) {
+        // A non-numeric string is a pipe path (Node's isPipeName).
+        options = { path: args[0] };
         cb = args[1];
     } else {
         // Anything else lands in port — validatePort rejects bad values.
@@ -285,9 +318,13 @@ class SocketImpl extends Duplex {
         this.bytesRead = 0;
         this.bytesWritten = 0;
         this._rid = null;
+        this._handle = (_options && _options.handle) || null;
+        this.server = null;
+        this._noDelay = false;
         this._endSent = false;
         this._eofReceived = false;
         this._loopReleased = false;
+        this._connGen = 0;
         this._timeoutMs = 0;
         this._timeoutTimer = null;
         this._server = null;
@@ -299,17 +336,40 @@ class SocketImpl extends Duplex {
             this.writable = Boolean(_options.writable);
         }
         // Fires on both the destroy path and graceful end+finish teardown.
-        this.once('close', () => this._teardown());
+        // Persistent (not once): a reconnected socket closes again, and each
+        // close must null the rid so the next connect re-initializes state.
+        this.on('close', () => this._teardown());
         this.on('finish', () => this._maybeDestroyAfterEof());
+        if (_options && _options.signal) {
+            const signal = _options.signal;
+            const abort = () => {
+                const err = new Error('The operation was aborted');
+                err.name = 'AbortError';
+                err.code = 'ABORT_ERR';
+                this.destroy(err);
+            };
+            // An already-aborted signal destroys without ever listening.
+            if (signal.aborted) Promise.resolve().then(abort);
+            else {
+                const onAbort = () => abort();
+                signal.addEventListener('abort', onAbort, { once: true });
+                this.once('close', () =>
+                    signal.removeEventListener('abort', onAbort));
+            }
+        }
+        // The half-open enforcer is a real listener in Node (tests count it);
+        // the actual auto-end happens on transport EOF in _startReading.
+        if (!this.allowHalfOpen) {
+            this.on('end', function onReadableStreamEnd() {});
+        }
     }
 
-    // Once the FIN is sent and the peer EOF has been seen the transport no
+    // Once the peer EOF has been seen the transport stops reading, so it no
     // longer keeps the event loop alive (libuv semantics): unread data can
-    // still be drained, but a socket nobody reads must not hang the run.
+    // still be drained and writes still work, but a socket nobody reads
+    // must not hang the run.
     _maybeDestroyAfterEof() {
-        if (!this._eofReceived || this.destroyed || this._loopReleased) return;
-        const ws = this._writableState;
-        if (!ws || !ws.finished) return;
+        if (!this._eofReceived || this._loopReleased) return;
         this._loopReleased = true;
         syncHandle(this, this._handleOpen);
     }
@@ -320,6 +380,7 @@ class SocketImpl extends Duplex {
         syncHandle(this, false);
         const rid = this._rid;
         this._rid = null;
+        this._handle = null;
         if (rid !== null && ops) ops.closeStream(rid);
         if (this._server) {
             const server = this._server;
@@ -328,9 +389,26 @@ class SocketImpl extends Duplex {
         }
     }
 
+    // The handle object exists from connect() onward (Node semantics: tests
+    // install spies on _handle.setNoDelay/setKeepAlive right after calling
+    // connect, and may call _handle.close() to sever the transport).
+    _createHandle() {
+        const self = this;
+        return {
+            close() {
+                if (self._rid !== null && ops) ops.closeStream(self._rid);
+                self._loopReleased = true;
+                syncHandle(self, self._handleOpen);
+            },
+        };
+    }
+
     _adopt(info, server) {
         syncHandle(this, true);
         this._rid = info.rid;
+        this._connGen = (this._connGen || 0) + 1;
+        if (!this._handle) this._handle = this._createHandle();
+        this.server = server || null;
         this.pending = false;
         this.connecting = false;
         this.readable = true;
@@ -340,7 +418,10 @@ class SocketImpl extends Duplex {
         this.remoteFamily = info.remoteFamily;
         this.localAddress = info.localAddress;
         this.localPort = info.localPort;
+        this.localFamily = info.localFamily;
         this._server = server || null;
+        // Arm any timeout requested before the connection existed.
+        if (this._timeoutMs > 0) this._touchTimeout();
         this._startReading();
     }
 
@@ -397,8 +478,17 @@ class SocketImpl extends Duplex {
         let port;
         if (pipePath !== undefined) {
             if (!pipeRegistry.has(String(pipePath))) {
-                const err = new Error(`connect ENOENT ${pipePath}`);
-                err.code = 'ENOENT';
+                // A path that exists but is not one of our listening pipes
+                // refuses the connection; a missing path is ENOENT.
+                let exists = false;
+                try {
+                    exists = existsSync(String(pipePath));
+                } catch {
+                    exists = false;
+                }
+                const code = exists ? 'ECONNREFUSED' : 'ENOENT';
+                const err = new Error(`connect ${code} ${pipePath}`);
+                err.code = code;
                 err.syscall = 'connect';
                 err.address = String(pipePath);
                 Promise.resolve().then(() => this.destroy(err));
@@ -414,9 +504,14 @@ class SocketImpl extends Duplex {
             // by the transport); if it never calls back, nothing happens —
             // matching Node.
             this.connecting = true;
-            options.lookup(host, { family: 4 }, (error, address, family) => {
+            options.lookup(host, { family: options.family || 4 }, (error, address, family) => {
                 if (this.destroyed) return;
-                if (error) { this.connecting = false; this.destroy(error); return; }
+                if (error) {
+                    this.connecting = false;
+                    this.emit('lookup', error, undefined, undefined, host);
+                    this.destroy(error);
+                    return;
+                }
                 let resolved = address;
                 let resolvedFamily = family;
                 if (Array.isArray(address)) {
@@ -434,7 +529,19 @@ class SocketImpl extends Duplex {
                     this.destroy(err);
                     return;
                 }
-                this._dial(String(resolved || '127.0.0.1'), port, options);
+                if (!isIPv4(String(resolved)) && !isIPv6(String(resolved))) {
+                    const err = new TypeError(`Invalid IP address: ${resolved}`);
+                    err.code = 'ERR_INVALID_IP_ADDRESS';
+                    this.connecting = false;
+                    this.destroy(err);
+                    return;
+                }
+                this.emit('lookup', null, String(resolved),
+                    resolvedFamily !== undefined
+                        ? resolvedFamily
+                        : (isIPv6(String(resolved)) ? 6 : 4),
+                    host);
+                this._dial(String(resolved), port, options);
             });
             if (cb) this.once('connect', cb);
             return this;
@@ -447,8 +554,19 @@ class SocketImpl extends Duplex {
             err.errno = -3008;
             err.syscall = 'getaddrinfo';
             err.hostname = host;
-            Promise.resolve().then(() => this.destroy(err));
+            Promise.resolve().then(() => {
+                this.emit('lookup', err, undefined, undefined, host);
+                this.destroy(err);
+            });
             return this;
+        }
+        if (host === 'localhost') {
+            // A hostname resolves before dialing; IP literals skip 'lookup'.
+            Promise.resolve().then(() => {
+                if (!this.destroyed) {
+                    this.emit('lookup', null, '127.0.0.1', 4, host);
+                }
+            });
         }
         if (options.blockList && typeof options.blockList.check === 'function') {
             const ip = host === 'localhost' ? '127.0.0.1' : host;
@@ -461,13 +579,34 @@ class SocketImpl extends Duplex {
             }
         }
         this.connecting = true;
+        if (!this._handle) this._handle = this._createHandle();
         if (cb) this.once('connect', cb);
+        // Socket options apply once connected, after the connect callback
+        // (whose spies on _handle these calls are expected to hit).
+        if (options.noDelay) {
+            this.once('connect', () => this.setNoDelay(true));
+        }
+        if (options.keepAlive) {
+            this.once('connect',
+                () => this.setKeepAlive(true, options.keepAliveInitialDelay));
+        }
         this._dial(String(host), port, options);
         return this;
     }
 
     _dial(host, port, _options) {
         this.connecting = true;
+        // The blocklist applies to the resolved address, so a custom lookup
+        // that lands on a blocked IP is refused here too.
+        const blockList = _options && _options.blockList;
+        if (blockList && typeof blockList.check === 'function'
+            && blockList.check(host, isIPv6(host) ? 'ipv6' : 'ipv4')) {
+            const err = new Error(`connect ERR_IP_BLOCKED ${host}:${port}`);
+            err.code = 'ERR_IP_BLOCKED';
+            this.connecting = false;
+            Promise.resolve().then(() => this.destroy(err));
+            return;
+        }
         const localHost = _options && _options.localAddress
             ? String(_options.localAddress) : '';
         const localPort = _options && _options.localPort
@@ -482,13 +621,47 @@ class SocketImpl extends Duplex {
             this.emit('ready');
         }, (error) => {
             this.connecting = false;
-            this.destroy(opError(String(error && error.message || error)));
+            // Reshape transport failures into Node's connect error form:
+            // "connect ECONNREFUSED 127.0.0.1:80" with syscall/address/port.
+            const raw = String(error && error.message || error);
+            const parsed = /connect to ([^ ]+):(\d+) failed:.*\((E[A-Z]+)\)/.exec(raw);
+            if (parsed) {
+                const address = parsed[1].replace(/^\[|\]$/g, '');
+                const code = parsed[3];
+                let message = `connect ${code} ${address}:${parsed[2]}`;
+                const localHost = _options && _options.localAddress;
+                const localPort = _options && _options.localPort;
+                if (localHost || localPort) {
+                    message += ` - Local (${localHost || '0.0.0.0'}:${localPort || 0})`;
+                }
+                const err = new Error(message);
+                err.code = code;
+                err.syscall = 'connect';
+                err.address = address;
+                err.port = Number(parsed[2]);
+                if (localHost || localPort) {
+                    err.localAddress = localHost;
+                    err.localPort = localPort;
+                }
+                this.destroy(err);
+            } else {
+                this.destroy(opError(raw));
+            }
         });
     }
 
     async _startReading() {
         const rid = this._rid;
         while (this._rid === rid && !this.destroyed) {
+            if (this._explicitPaused) {
+                // Handle-level readStop: no transport reads (and no
+                // bytesRead growth) while the socket is explicitly paused.
+                await new Promise((resolve) => {
+                    this.once('_readWake', resolve);
+                    this.once('close', resolve);
+                });
+                continue;
+            }
             let result;
             try {
                 this._readPromise = ops.read(rid);
@@ -509,13 +682,38 @@ class SocketImpl extends Duplex {
                 this.readable = false;
                 this._eofReceived = true;
                 this.push(null);
-                if (!this.allowHalfOpen && !this._endSent) this.end();
+                if (!this.allowHalfOpen && !this._endSent
+                    && !this._writableState.ended) {
+                    // The half-open enforcer ends the writable side after the
+                    // peer FIN. Deferring by a macrotask lets the readable
+                    // 'end' (a microtask) fire first, so its handlers still
+                    // observe a writable socket (Node semantics); it is not
+                    // gated on 'end' itself, since an unconsumed socket never
+                    // emits 'end' yet must still close. Scoped to this
+                    // connection so a reconnect does not inherit the timer.
+                    const gen = this._connGen;
+                    setTimeout(() => {
+                        if (this._connGen === gen && !this._endSent
+                            && !this.destroyed && !this._writableState.ended) {
+                            this.end();
+                        }
+                    }, 0);
+                }
                 this._maybeDestroyAfterEof();
                 break;
             } else if (result.closed) {
                 break;
             } else {
-                this.destroy(opError(result.error || 'read error'));
+                let err;
+                if (result.code === 'ECONNRESET') {
+                    err = new Error('read ECONNRESET');
+                    err.code = 'ECONNRESET';
+                    err.syscall = 'read';
+                } else {
+                    err = opError(result.error || 'read error');
+                    if (result.code && !err.code) err.code = result.code;
+                }
+                this.destroy(err);
                 break;
             }
         }
@@ -525,7 +723,7 @@ class SocketImpl extends Duplex {
         // Node's writeAfterFIN: once the peer FIN arrived on a
         // !allowHalfOpen socket whose own end() was already sent, a write
         // fails with EPIPE (asynchronously) and destroys the socket.
-        if (this._eofReceived && !this.allowHalfOpen
+        if (this._eofReceived && !this.allowHalfOpen && !this.destroyed
             && this._writableState && this._writableState.ended) {
             if (typeof encoding === 'function') {
                 callback = encoding;
@@ -560,16 +758,44 @@ class SocketImpl extends Duplex {
                     ? Buffer.byteLength(chunk, typeof encoding === 'string' ? encoding : 'utf8')
                     : chunk.byteLength;
         }
+        // Node drops writable as soon as end() is called.
+        this.writable = false;
         return super.end(chunk, encoding, callback);
     }
 
     _write(chunk, encoding, callback) {
         if (this._rid === null) {
-            // Not connected yet: queue behind the connect.
-            this.once('connect', () => this._write(chunk, encoding, callback));
+            if (this.destroyed) {
+                const err = new Error(
+                    'Socket closed before the connection was established');
+                err.code = 'ERR_SOCKET_CLOSED_BEFORE_CONNECTION';
+                callback(err);
+                return;
+            }
+            // Not connected yet: queue behind the connect; a destroy that
+            // beats the connect errors the write like Node.
+            const onConnect = () => {
+                this.removeListener('close', onClose);
+                this._write(chunk, encoding, callback);
+            };
+            const onClose = () => {
+                this.removeListener('connect', onConnect);
+                const err = new Error(
+                    'Socket closed before the connection was established');
+                err.code = 'ERR_SOCKET_CLOSED_BEFORE_CONNECTION';
+                callback(err);
+            };
+            this.once('connect', onConnect);
+            this.once('close', onClose);
             if (!this.connecting && !ops) {
                 callback(new Error('net.Socket is not connected'));
             }
+            return;
+        }
+        if (!this._handle) {
+            const err = new Error('Socket is closed');
+            err.code = 'ERR_SOCKET_CLOSED';
+            callback(err);
             return;
         }
         const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), encoding || 'utf8');
@@ -582,7 +808,17 @@ class SocketImpl extends Duplex {
                 // write had a callback, and the callback also gets the
                 // error. The stream layer skips its own emit for destroyed
                 // streams, so the error surfaces exactly once.
-                const err = opError(String(error && error.message || error));
+                const raw = String(error && error.message || error);
+                let err;
+                if (raw.includes('unknown socket id')) {
+                    // The transport was closed out from under the socket
+                    // (e.g. _handle.close()): Node reports write EBADF.
+                    err = new Error('write EBADF');
+                    err.code = 'EBADF';
+                    err.syscall = 'write';
+                } else {
+                    err = opError(raw);
+                }
                 if (!this.destroyed) this.destroy(err);
                 callback(err);
             });
@@ -627,6 +863,25 @@ class SocketImpl extends Duplex {
     }
 
     setTimeout(ms, callback) {
+        if (typeof ms !== 'number') {
+            const err = new TypeError(
+                `The "msecs" argument must be of type number. Received ${receivedRepr(ms)}`);
+            err.code = 'ERR_INVALID_ARG_TYPE';
+            throw err;
+        }
+        if (!(ms >= 0) || !Number.isFinite(ms)) {
+            const err = new RangeError(
+                'The value of "msecs" is out of range. It must be a ' +
+                `non-negative finite number. Received ${ms}`);
+            err.code = 'ERR_OUT_OF_RANGE';
+            throw err;
+        }
+        if (callback !== undefined && typeof callback !== 'function') {
+            const err = new TypeError(
+                `The "callback" argument must be of type function. Received ${receivedRepr(callback)}`);
+            err.code = 'ERR_INVALID_ARG_TYPE';
+            throw err;
+        }
         this._timeoutMs = ms;
         this.timeout = ms;
         this._timeoutFired = false;
@@ -640,13 +895,22 @@ class SocketImpl extends Duplex {
 
     _touchTimeout() {
         this._clearTimeout();
-        // Once fired, activity does not re-arm the idle timer — only an
-        // explicit setTimeout() call does (matches observable Node behavior).
-        if (this._timeoutMs > 0 && !this._timeoutFired) {
+        // The idle timer is tied to the transport handle, like Node: an
+        // unconnected socket's setTimeout is remembered but not armed (so it
+        // never keeps the event loop alive without a connection). Once
+        // fired, activity does not re-arm it — only an explicit setTimeout()
+        // call does.
+        if (this._timeoutMs > 0 && !this._timeoutFired && !this.destroyed
+            && this._rid !== null) {
             this._timeoutTimer = setTimeout(() => {
                 this._timeoutFired = true;
                 this.emit('timeout');
             }, this._timeoutMs);
+            // An unref'd socket's timeout must not keep the loop alive.
+            if (this._unrefed && this._timeoutTimer
+                && typeof this._timeoutTimer.unref === 'function') {
+                this._timeoutTimer.unref();
+            }
         }
     }
 
@@ -655,6 +919,17 @@ class SocketImpl extends Duplex {
             clearTimeout(this._timeoutTimer);
             this._timeoutTimer = null;
         }
+    }
+
+    get bufferSize() {
+        if (this.destroyed && this._rid === null && !this._writableState) {
+            return undefined;
+        }
+        return this._writableState ? this._writableState.pendingBytes : 0;
+    }
+
+    get _connecting() {
+        return this.connecting;
     }
 
     get readyState() {
@@ -666,13 +941,63 @@ class SocketImpl extends Duplex {
     }
 
     resetAndDestroy() {
-        // Approximation: a hard close (the loopback transport has no RST
-        // control), which still tears the connection down immediately.
+        // A linger-0 close on the transport sends a real RST, so the peer's
+        // pending read fails with ECONNRESET like Node.
+        if (this._rid !== null && ops && ops.reset) {
+            const rid = this._rid;
+            this._rid = null;
+            ops.reset(rid).catch(() => {});
+            return this.destroy();
+        }
+        if (!this.connecting && !this.destroyed) {
+            // No transport to reset: Node errors with ERR_SOCKET_CLOSED.
+            const err = new Error('Socket is closed');
+            err.code = 'ERR_SOCKET_CLOSED';
+            return this.destroy(err);
+        }
         return this.destroy();
     }
 
-    setNoDelay() { return this; }
-    setKeepAlive() { return this; }
+    setNoDelay(enable) {
+        const value = enable === undefined ? true : Boolean(enable);
+        // Forward to the handle only on state changes, like Node. The real
+        // transport always runs with TCP_NODELAY; user-supplied handle
+        // objects (tests) observe the calls.
+        if (value !== Boolean(this._noDelay)) {
+            this._noDelay = value;
+            if (this._handle && typeof this._handle.setNoDelay === 'function') {
+                this._handle.setNoDelay(value);
+            }
+        }
+        return this;
+    }
+
+    setKeepAlive(enable, initialDelayMsecs, intervalMsecs, count) {
+        if (typeof enable === 'object' && enable !== null) {
+            return this.setKeepAlive(
+                enable.enable, enable.initialDelay, enable.interval, enable.count);
+        }
+        if (this._rid === null && this.connecting) {
+            this.once('connect', () =>
+                this.setKeepAlive(enable, initialDelayMsecs, intervalMsecs, count));
+            return this;
+        }
+        const value = Boolean(enable);
+        const delaySecs = Math.max(0, ~~((initialDelayMsecs || 0) / 1000));
+        const changed = value !== Boolean(this._keepAlive)
+            || (value && this._keepAliveDelay !== delaySecs)
+            || intervalMsecs !== undefined || count !== undefined;
+        if (changed) {
+            this._keepAlive = value;
+            this._keepAliveDelay = delaySecs;
+            if (this._handle && typeof this._handle.setKeepAlive === 'function') {
+                this._handle.setKeepAlive(value, delaySecs,
+                    intervalMsecs === undefined ? undefined : ~~(intervalMsecs / 1000),
+                    count);
+            }
+        }
+        return this;
+    }
 
     // Node's pause() issues a handle-level readStop: a paused socket no
     // longer keeps the event loop alive (that is what lets a process whose
@@ -688,6 +1013,7 @@ class SocketImpl extends Duplex {
 
     resume() {
         this._explicitPaused = false;
+        this.emit('_readWake');
         if (this._readPromise && ops.refOpPromise && !this._unrefed) {
             ops.refOpPromise(this._readPromise);
         }
@@ -699,6 +1025,9 @@ class SocketImpl extends Duplex {
         this._unrefed = false;
         syncHandle(this, this._handleOpen);
         if (this._readPromise && ops.refOpPromise) ops.refOpPromise(this._readPromise);
+        if (this._timeoutTimer && typeof this._timeoutTimer.ref === 'function') {
+            this._timeoutTimer.ref();
+        }
         return this;
     }
 
@@ -706,13 +1035,18 @@ class SocketImpl extends Duplex {
         this._unrefed = true;
         syncHandle(this, this._handleOpen);
         if (this._readPromise && ops.unrefOpPromise) ops.unrefOpPromise(this._readPromise);
+        // The idle timeout timer must not keep the loop alive either.
+        if (this._timeoutTimer && typeof this._timeoutTimer.unref === 'function') {
+            this._timeoutTimer.unref();
+        }
         return this;
     }
 }
 
 class ServerImpl extends EventEmitter {
     constructor(options, connectionListener) {
-        super();
+        // captureRejections (and other EventEmitter options) pass through.
+        super(typeof options === 'object' && options !== null ? options : undefined);
         if (typeof options === 'function') {
             connectionListener = options;
             options = {};
@@ -748,6 +1082,13 @@ class ServerImpl extends EventEmitter {
         let cb;
         if (typeof args[0] === 'object' && args[0] !== null) {
             options = args[0];
+            if (!('port' in options) && !('path' in options)
+                && !('fd' in options)) {
+                const err = new TypeError(
+                    `The argument 'options' must have the property "port" or "path". Received ${receivedRepr(options)}`);
+                err.code = 'ERR_INVALID_ARG_VALUE';
+                throw err;
+            }
         } else if (typeof args[0] === 'function') {
             // listen(cb): everything defaults.
         } else if (typeof args[0] === 'string' && !/^\d+$/.test(args[0])) {
@@ -775,21 +1116,83 @@ class ServerImpl extends EventEmitter {
             else signal.addEventListener('abort', onAbort, { once: true });
         }
         if (typeof cb === 'function') this.once('listening', cb);
-        const pipePath = options.path;
-        const port = pipePath || options.port === undefined || options.port === null
+        // Port takes precedence over path, and its validation throws before
+        // any pipe handling (listen({port: -1, path}) is a RangeError).
+        const port = options.port === undefined || options.port === null
             ? 0 : validatePort(options.port);
+        const pipePath = options.port !== undefined && options.port !== null
+            ? undefined : options.path;
+        if (options.fd !== undefined && pipePath === undefined
+            && (options.port === undefined || options.port === null)) {
+            // Listening on an inherited fd is not supported; surface the
+            // error Node gives for a non-socket fd.
+            const err = new Error('listen EINVAL: invalid argument');
+            err.code = 'EINVAL';
+            err.syscall = 'listen';
+            Promise.resolve().then(() => this.emit('error', err));
+            return this;
+        }
+        if (pipePath !== undefined && typeof pipePath === 'string'
+            && pipePath.includes('/')) {
+            // A pipe path in a directory that does not exist fails like Node
+            // (the emulated pipe would otherwise happily bind a TCP port).
+            const dir = pipePath.slice(0, pipePath.lastIndexOf('/')) || '/';
+            let dirExists = true;
+            try {
+                dirExists = existsSync(dir);
+            } catch {
+                dirExists = true;
+            }
+            if (!dirExists) {
+                const err = new Error(
+                    `listen EACCES: permission denied ${pipePath}`);
+                err.code = 'EACCES';
+                err.syscall = 'listen';
+                err.address = pipePath;
+                Promise.resolve().then(() => this.emit('error', err));
+                return this;
+            }
+        }
         const host = options.host || '';
         let json;
         try {
             json = ops.listen(String(host), port >>> 0);
         } catch (error) {
-            const err = opError(String(error && error.message || error));
+            // Shape listen failures the way Node reports them.
+            const raw = String(error && error.message || error);
+            const codeMatch = /\((E[A-Z]+)\)/.exec(raw);
+            let err;
+            if (codeMatch) {
+                const code = codeMatch[1];
+                const detail = code === 'EADDRINUSE'
+                    ? 'address already in use' : 'unavailable';
+                err = new Error(`listen ${code}: ${detail} ${host || '0.0.0.0'}:${port}`);
+                err.code = code;
+            } else if (/not allowed/.test(raw)) {
+                err = new Error(
+                    `listen EADDRNOTAVAIL: address not available ${host}:${port}`);
+                err.code = 'EADDRNOTAVAIL';
+            } else {
+                err = opError(raw);
+            }
+            err.syscall = 'listen';
+            err.address = host || '0.0.0.0';
+            err.port = port;
             Promise.resolve().then(() => this.emit('error', err));
             return this;
         }
         const info = JSON.parse(json);
         this._rid = info.rid;
-        this._address = { address: info.address, port: info.port, family: info.family };
+        // A listen with no host reports the unspecified address like Node
+        // (0.0.0.0 / ::); an explicit host reports where it actually bound
+        // (the sandbox pins wildcard/explicit binds to loopback). address()
+        // and _connectionKey use the same address so their forms agree.
+        const reportedAddress = host === ''
+            ? (info.family === 'IPv6' ? '::' : '0.0.0.0')
+            : info.address;
+        this._address = { address: reportedAddress, port: info.port, family: info.family };
+        this._connectionKey =
+            `${info.family === 'IPv6' ? '6' : '4'}:${reportedAddress}:${port >>> 0}`;
         if (pipePath) {
             this._pipePath = String(pipePath);
             pipeRegistry.set(this._pipePath, info.port);
@@ -804,7 +1207,11 @@ class ServerImpl extends EventEmitter {
                 fd: -1,
             });
         }
-        Promise.resolve().then(() => this.emit('listening'));
+        Promise.resolve().then(() => {
+            // close() before this microtask suppresses 'listening' (and the
+            // listen callback with it), like Node.
+            if (this.listening) this.emit('listening');
+        });
         this._acceptLoop(info.rid);
         return this;
     }
@@ -855,7 +1262,10 @@ class ServerImpl extends EventEmitter {
                 });
                 continue;
             }
-            const socket = new Socket();
+            const socket = new Socket({
+                allowHalfOpen: Boolean(this._options.allowHalfOpen),
+            });
+            if (this._options.pauseOnConnect) socket.pause();
             socket._adopt(result, this);
             this._connections.add(socket);
             this.emit('connection', socket);
@@ -888,6 +1298,7 @@ class ServerImpl extends EventEmitter {
         }
         this._closing = true;
         this.listening = false;
+        this._address = null;
         if (this._pipePath) pipeRegistry.delete(this._pipePath);
         const rid = this._rid;
         this._rid = null;
@@ -901,9 +1312,26 @@ class ServerImpl extends EventEmitter {
         return this._address;
     }
 
+    [Symbol.asyncDispose]() {
+        // Resolves once closed; a server that is not running resolves too
+        // (the not-running error is swallowed, matching Node).
+        return new Promise((resolve) => this.close(() => resolve()));
+    }
+
     getConnections(cb) {
         Promise.resolve().then(() => cb(null, this._connections.size));
         return this;
+    }
+
+    // An async 'connection' listener that rejects routes the error to the
+    // socket, like Node's Server[Symbol.for('nodejs.rejection')].
+    [Symbol.for('nodejs.rejection')](err, event, ...args) {
+        if (event === 'connection' && args[0]
+            && typeof args[0].destroy === 'function') {
+            args[0].destroy(err);
+        } else {
+            this.emit('error', err);
+        }
     }
 
     ref() {

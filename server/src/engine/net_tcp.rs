@@ -554,6 +554,39 @@ fn op_udp_close(state: &mut OpState, #[smi] rid: u32) {
     }
 }
 
+/// Async op: hard-reset a stream. Cancels in-flight I/O, then reunites the
+/// halves and closes with SO_LINGER=0 so the peer sees a real RST
+/// (ECONNRESET) rather than a graceful FIN. Best effort: if a half is still
+/// held by an unfinished task after a short grace period, the stream is
+/// simply dropped (plain close).
+#[op2]
+async fn op_tcp_reset(state: Rc<RefCell<OpState>>, #[smi] rid: u32) -> Result<(), JsErrorBox> {
+    let handle = {
+        let mut st = state.borrow_mut();
+        let registry = ensure_enabled(&mut st)?;
+        registry.streams.remove(&rid)
+    };
+    let Some(handle) = handle else {
+        return Ok(());
+    };
+    handle.cancel.cancel();
+    let StreamHandle { read, write, .. } = handle;
+    for _ in 0..100 {
+        if Arc::strong_count(&read) == 1 && Arc::strong_count(&write) == 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    }
+    if let (Ok(read_mutex), Ok(write_mutex)) = (Arc::try_unwrap(read), Arc::try_unwrap(write)) {
+        let read_half = read_mutex.into_inner();
+        let write_half = write_mutex.into_inner();
+        if let Ok(stream) = read_half.reunite(write_half) {
+            let _ = stream.set_linger(Some(std::time::Duration::from_secs(0)));
+        }
+    }
+    Ok(())
+}
+
 // ── Extension registration ──────────────────────────────────────────────
 
 deno_core::extension!(
@@ -565,6 +598,7 @@ deno_core::extension!(
         op_tcp_read,
         op_tcp_write,
         op_tcp_shutdown,
+        op_tcp_reset,
         op_tcp_close_stream,
         op_tcp_close_listener,
         op_udp_bind,
@@ -593,6 +627,7 @@ const NET_BINDING_JS: &str = r#"
             read: ops.op_tcp_read,
             write: ops.op_tcp_write,
             shutdown: ops.op_tcp_shutdown,
+            reset: ops.op_tcp_reset,
             closeStream: ops.op_tcp_close_stream,
             closeListener: ops.op_tcp_close_listener,
             udpBind: ops.op_udp_bind,

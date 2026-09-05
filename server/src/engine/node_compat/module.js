@@ -33,6 +33,7 @@ import test from 'node:test';
 import timers from 'node:timers';
 import timersPromises from 'node:timers/promises';
 import tls from 'node:tls';
+import tty from 'node:tty';
 import url from 'node:url';
 import util from 'node:util';
 import utilTypes from 'node:util/types';
@@ -83,6 +84,7 @@ const builtins = new Map([
     ['timers', timers],
     ['timers/promises', timersPromises],
     ['tls', tls],
+    ['tty', tty],
     ['url', url],
     ['util', util],
     ['util/types', utilTypes],

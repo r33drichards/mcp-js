@@ -7,6 +7,7 @@
 // read(), and pipe() is a minimal data/end/error bridge.
 
 import { EventEmitter } from 'node:events';
+import { Buffer } from 'node:buffer';
 
 function later(fn) {
     Promise.resolve().then(fn);
@@ -24,9 +25,15 @@ function initReadable(self, options) {
         reading: false,
         destroyed: false,
     };
-    // Attaching a 'data' listener switches to flowing mode, like Node.
+    // Attaching a 'data' listener switches to flowing mode, like Node —
+    // unless the stream was explicitly paused (Node's flowing === false vs
+    // null distinction).
     self.on('newListener', (event) => {
-        if (event === 'data') later(() => self.resume());
+        if (event === 'data') {
+            later(() => {
+                if (!self._readableState.paused) self.resume();
+            });
+        }
     });
 }
 
@@ -35,9 +42,21 @@ function readableMethods(proto) {
         const state = this._readableState;
         if (state.destroyed) return false;
         if (chunk === null) {
+            // Flush any bytes held back by the incremental decoder.
+            if (state.decodePending && state.decodePending.length > 0) {
+                state.queue.push(state.decodePending.toString(state.encoding));
+                state.decodePending = null;
+                if (state.flowing) flushReadQueue(this);
+                else this.emit('readable');
+            }
             state.ended = true;
             maybeEmitEnd(this);
             return false;
+        }
+        if (state.encoding && !state.objectMode) {
+            chunk = decodeChunk(state, chunk);
+            // Every byte held back for a later chunk: nothing to deliver.
+            if (chunk === '') return !state.ended;
         }
         state.queue.push(chunk);
         if (state.flowing) flushReadQueue(this);
@@ -60,6 +79,7 @@ function readableMethods(proto) {
 
     proto.pause = function pause() {
         this._readableState.flowing = false;
+        this._readableState.paused = true;
         return this;
     };
 
@@ -70,6 +90,7 @@ function readableMethods(proto) {
     proto.resume = function resume() {
         const state = this._readableState;
         if (state.destroyed) return this;
+        state.paused = false;
         if (!state.flowing) {
             state.flowing = true;
             flushReadQueue(this);
@@ -85,7 +106,51 @@ function readableMethods(proto) {
         return dest;
     };
 
-    proto.setEncoding = function setEncoding() { return this; };
+    proto[Symbol.asyncIterator] = async function* asyncIterator() {
+        const state = this._readableState;
+        try {
+            for (;;) {
+                if (state.queue.length > 0) {
+                    const chunk = state.queue.shift();
+                    if (state.queue.length === 0) maybeEmitEnd(this);
+                    yield chunk;
+                    continue;
+                }
+                if (state.ended || state.destroyed) {
+                    if (this.errored) throw this.errored;
+                    return;
+                }
+                await new Promise((resolve, reject) => {
+                    const cleanup = () => {
+                        this.removeListener('readable', onWake);
+                        this.removeListener('end', onWake);
+                        this.removeListener('close', onWake);
+                        this.removeListener('error', onError);
+                    };
+                    const onWake = () => { cleanup(); resolve(); };
+                    const onError = (err) => { cleanup(); reject(err); };
+                    this.once('readable', onWake);
+                    this.once('end', onWake);
+                    this.once('close', onWake);
+                    this.once('error', onError);
+                });
+            }
+        } finally {
+            // Ending iteration early destroys the stream, like Node.
+            if (!state.endEmitted && !state.destroyed) this.destroy();
+        }
+    };
+
+    proto.setEncoding = function setEncoding(enc) {
+        const state = this._readableState;
+        state.encoding = normalizeEncoding(enc);
+        state.decodePending = null;
+        // Chunks already buffered are converted in place (no cross-chunk
+        // boundary handling for data that predates the setEncoding call).
+        state.queue = state.queue.map((c) =>
+            typeof c === 'string' ? c : c.toString(state.encoding));
+        return this;
+    };
     proto.unshift = function unshift(chunk) {
         this._readableState.queue.unshift(chunk);
         return true;
@@ -114,6 +179,56 @@ function callRead(stream) {
             state.reading = false;
         }
     }
+}
+
+function normalizeEncoding(enc) {
+    const lowered = String(enc || 'utf8').toLowerCase();
+    if (lowered === 'utf-8') return 'utf8';
+    if (lowered === 'ucs-2' || lowered === 'ucs2') return 'ucs2';
+    if (lowered === 'utf-16le') return 'utf16le';
+    if (lowered === 'binary') return 'latin1';
+    return lowered;
+}
+
+// How many trailing bytes of `buf` are an incomplete UTF-8 sequence.
+function utf8Holdback(buf) {
+    let i = buf.length - 1;
+    let trailing = 0;
+    while (i >= 0 && trailing < 4 && (buf[i] & 0xC0) === 0x80) {
+        i--;
+        trailing++;
+    }
+    if (i < 0) return 0;
+    const lead = buf[i];
+    let seqLen = 0;
+    if ((lead & 0x80) === 0) seqLen = 1;
+    else if ((lead & 0xE0) === 0xC0) seqLen = 2;
+    else if ((lead & 0xF0) === 0xE0) seqLen = 3;
+    else if ((lead & 0xF8) === 0xF0) seqLen = 4;
+    else return 0; // invalid lead byte: let toString substitute
+    const have = trailing + 1;
+    return have < seqLen ? have : 0;
+}
+
+// StringDecoder-style incremental conversion: bytes that end mid-character
+// are held back and prepended to the next chunk.
+function decodeChunk(state, chunk) {
+    if (typeof chunk === 'string') return chunk;
+    let buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    if (state.decodePending) {
+        buf = Buffer.concat([state.decodePending, buf]);
+        state.decodePending = null;
+    }
+    const enc = state.encoding;
+    let holdback = 0;
+    if (enc === 'utf8') holdback = utf8Holdback(buf);
+    else if (enc === 'ucs2' || enc === 'utf16le') holdback = buf.length % 2;
+    else if (enc === 'base64') holdback = buf.length % 3;
+    if (holdback > 0) {
+        state.decodePending = buf.slice(buf.length - holdback);
+        buf = buf.slice(0, buf.length - holdback);
+    }
+    return buf.toString(enc);
 }
 
 function maybeEmitEnd(stream) {
@@ -176,7 +291,13 @@ function writableMethods(proto) {
             }
         }
         if (state.ended || state.destroyed) {
-            const err = new Error('write after end');
+            const err = state.destroyed
+                ? Object.assign(
+                    new Error('Cannot call write after a stream was destroyed'),
+                    { code: 'ERR_STREAM_DESTROYED' })
+                : Object.assign(
+                    new Error('write after end'),
+                    { code: 'ERR_STREAM_WRITE_AFTER_END' });
             if (callback) later(() => callback(err));
             else this.emit('error', err);
             return false;
@@ -205,6 +326,10 @@ function writableMethods(proto) {
     proto.uncork = function uncork() {};
     proto.setDefaultEncoding = function setDefaultEncoding() { return this; };
 
+    Object.defineProperty(proto, 'writableLength', {
+        get() { return this._writableState.pendingBytes; },
+        configurable: true,
+    });
     Object.defineProperty(proto, 'writableEnded', {
         get() { return this._writableState.ended; },
         configurable: true,
@@ -286,7 +411,8 @@ function maybeEmitClose(stream) {
     const writeDone = !writable || writable.finished || writable.destroyed;
     if (readDone && writeDone && !stream._closeEmitted) {
         stream._closeEmitted = true;
-        later(() => stream.emit('close'));
+        // net.Socket 'close' carries hadError; harmless extra for others.
+        later(() => stream.emit('close', false));
     }
 }
 
@@ -296,10 +422,10 @@ function destroyImpl(stream, err) {
     if (err) stream.errored = err;
     if (stream._readableState) stream._readableState.destroyed = true;
     if (stream._writableState) stream._writableState.destroyed = true;
-    const emitClose = () => {
+    const emitClose = (hadError) => {
         if (!stream._closeEmitted) {
             stream._closeEmitted = true;
-            stream.emit('close');
+            stream.emit('close', hadError);
         }
     };
     const done = (destroyErr) => {
@@ -307,7 +433,7 @@ function destroyImpl(stream, err) {
         if (finalErr) stream.errored = finalErr;
         later(() => {
             if (finalErr) stream.emit('error', finalErr);
-            emitClose();
+            emitClose(!!finalErr);
         });
     };
     if (typeof stream._destroy === 'function') {

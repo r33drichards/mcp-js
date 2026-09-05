@@ -44,6 +44,7 @@ pub const NODE_MODULES: &[(&str, &str)] = &[
     ("timers", include_str!("node_compat/timers.js")),
     ("timers/promises", include_str!("node_compat/timers_promises.js")),
     ("tls", include_str!("node_compat/tls.js")),
+    ("tty", include_str!("node_compat/tty.js")),
     ("url", include_str!("node_compat/url.js")),
     ("util", include_str!("node_compat/util.js")),
     ("util/types", include_str!("node_compat/util_types.js")),
