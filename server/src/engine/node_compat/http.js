@@ -532,6 +532,9 @@ class ConnectionParser {
     }
 
     feed(chunk) {
+        // After an Upgrade/CONNECT the socket belongs to the user; stop
+        // interpreting its bytes as HTTP.
+        if (this.upgraded) return;
         if (!Buffer.isBuffer(chunk)) chunk = Buffer.from(chunk);
         this.buf = this.buf.length === 0 ? chunk : Buffer.concat([this.buf, chunk]);
         this.process();
@@ -539,6 +542,7 @@ class ConnectionParser {
 
     process() {
         for (;;) {
+            if (this.upgraded) return;
             if (this.req === null) {
                 const headEnd = this.buf.indexOf('\r\n\r\n');
                 if (headEnd === -1) return;
@@ -584,6 +588,27 @@ class ConnectionParser {
                 req.headers, req.rawHeaders,
                 lines[i].slice(0, sep).trim(), lines[i].slice(sep + 1).trim(),
                 Boolean(this.server._options && this.server._options.joinDuplicateHeaders));
+        }
+        // HTTP Upgrade / CONNECT: when the server has a matching listener,
+        // hand it the raw socket (req, socket, head) and detach from HTTP
+        // parsing — no 'request' event, no ServerResponse. Without a
+        // listener the request is served normally, like Node.
+        const upgradeHeader = req.headers['upgrade'];
+        const connUpgrade = String(req.headers['connection'] || '')
+            .toLowerCase().split(',').some((t) => t.trim() === 'upgrade');
+        const isConnect = req.method === 'CONNECT';
+        if ((isConnect && this.server.listenerCount('connect') > 0)
+            || (upgradeHeader !== undefined && connUpgrade
+                && this.server.listenerCount('upgrade') > 0)) {
+            const head = this.buf;
+            this.buf = EMPTY;
+            this.req = null;
+            this.upgraded = true;
+            req.complete = true;
+            if (this.socket) this.socket._httpUpgraded = true;
+            this.server.emit(isConnect ? 'connect' : 'upgrade',
+                req, this.socket, head);
+            return false;
         }
         const te = String(req.headers['transfer-encoding'] || '').toLowerCase();
         const contentLength = req.headers['content-length'];
@@ -1353,6 +1378,35 @@ class ResponseParser {
             }
             this.res = res;
             this.request.res = res;
+            // HTTP Upgrade / CONNECT: hand the raw socket to the user. A 101
+            // (or an Upgrade + Connection: upgrade response), and a 2xx to a
+            // CONNECT request, detach the socket from HTTP parsing and emit
+            // 'upgrade'/'connect' with (res, socket, head). With no listener,
+            // Node closes the socket.
+            const isConnect = this.request.method === 'CONNECT';
+            const upgradeHeader = res.headers['upgrade'];
+            const connUpgrade = String(res.headers['connection'] || '')
+                .toLowerCase().split(',').some((t) => t.trim() === 'upgrade');
+            const isUpgrade = res.statusCode === 101
+                || (upgradeHeader !== undefined && connUpgrade);
+            if (isUpgrade || (isConnect && res.statusCode >= 200 && res.statusCode < 300)) {
+                this.done = true;
+                res.upgrade = true;
+                const head = this.buf;
+                this.buf = EMPTY;
+                if (this.socket) {
+                    this.socket._currentParser = null;
+                    this.socket._currentRequest = null;
+                    // The socket is now the user's; don't pool or auto-manage it.
+                    this.socket._httpUpgraded = true;
+                }
+                this.request._upgraded = true;
+                const eventName = isConnect ? 'connect' : 'upgrade';
+                const hadListener =
+                    this.request.emit(eventName, res, this.socket, head);
+                if (!hadListener && this.socket) this.socket.destroy();
+                return;
+            }
             const te = String(res.headers['transfer-encoding'] || '').toLowerCase();
             const contentLength = res.headers['content-length'];
             const noBody = this.request.method === 'HEAD'
