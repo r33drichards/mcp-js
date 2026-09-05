@@ -236,6 +236,19 @@ class IncomingMessageImpl extends Readable {
         this.statusMessage = null;
         this.complete = false;
         this.aborted = false;
+        this._dumped = false;
+    }
+
+    // Discard the rest of the request body without delivering it (Node's
+    // IncomingMessage._dump). Removes 'data'/'readable' listeners so a
+    // handler that ended its response early sees no further body, and
+    // resumes the stream so its framing keeps draining.
+    _dump() {
+        if (this._dumped) return;
+        this._dumped = true;
+        this.removeAllListeners('data');
+        this.removeAllListeners('readable');
+        this.resume();
     }
 
     _read() {}
@@ -764,9 +777,29 @@ class ConnectionParser {
         // After an Upgrade/CONNECT the socket belongs to the user; stop
         // interpreting its bytes as HTTP.
         if (this.upgraded) return;
+        // New bytes on a previously idle keep-alive connection re-arm it.
+        if (this._idleUnrefed && this.socket && typeof this.socket.ref === 'function') {
+            this._idleUnrefed = false;
+            this.socket.ref();
+        }
         if (!Buffer.isBuffer(chunk)) chunk = Buffer.from(chunk);
         this.buf = this.buf.length === 0 ? chunk : Buffer.concat([this.buf, chunk]);
         this.process();
+    }
+
+    // An idle keep-alive connection (request complete, response sent, no
+    // buffered next request) is unref'd so it doesn't keep the event loop
+    // alive on its own — mirroring how Node lets an unref'd server exit
+    // with idle connections still open. Re-ref'd when the next request's
+    // bytes arrive.
+    _maybeIdleUnref() {
+        if (this.req === null && this.activeRes === null
+            && this.buf.length === 0 && !this._idleUnrefed
+            && this.socket && !this.socket.destroyed
+            && typeof this.socket.unref === 'function') {
+            this._idleUnrefed = true;
+            this.socket.unref();
+        }
     }
 
     process() {
@@ -787,7 +820,9 @@ class ConnectionParser {
             if (this.remaining > 0) {
                 if (this.buf.length === 0) return;
                 const take = Math.min(this.remaining, this.buf.length);
-                this.req.push(this.buf.subarray(0, take));
+                // A dumped request still advances its framing so the next
+                // pipelined message parses, but the body is discarded.
+                if (!this.req._dumped) this.req.push(this.buf.subarray(0, take));
                 this.buf = this.buf.subarray(take);
                 this.remaining -= take;
             }
@@ -889,10 +924,15 @@ class ConnectionParser {
         this.activeReq = req;
         this.activeRes = res;
         res.on('finish', () => {
+            // Response finished with the request body still incoming: dump
+            // the remainder so it is discarded (not delivered) and the
+            // connection frees up for keep-alive, like Node.
+            if (!req.complete && !req._dumped) req._dump();
             if (this.activeRes === res) {
                 this.activeReq = null;
                 this.activeRes = null;
             }
+            this._maybeIdleUnref();
         });
         try {
             if (req.headers.expect &&
@@ -958,7 +998,7 @@ class ConnectionParser {
             }
             if (this.buf.length === 0) return false;
             const take = Math.min(this.chunkRemaining, this.buf.length);
-            this.req.push(this.buf.subarray(0, take));
+            if (!this.req._dumped) this.req.push(this.buf.subarray(0, take));
             this.buf = this.buf.subarray(take);
             this.chunkRemaining -= take;
             if (this.chunkRemaining === 0) {
@@ -980,6 +1020,9 @@ class ConnectionParser {
             req.once('end', () => { req.destroyed = true; });
             req.push(null);
         }
+        // The request finished; if its response is already out, the
+        // keep-alive connection is now idle.
+        this._maybeIdleUnref();
     }
 }
 
