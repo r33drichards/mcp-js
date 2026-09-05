@@ -882,6 +882,14 @@ class AgentImpl extends EventEmitter {
     removeSocket(socket, name) {
         this._removeFrom(this.sockets, name, socket);
         this._removeFrom(this.freeSockets, name, socket);
+        // Freed capacity dispatches a queued request for this name.
+        const queue = this.requests[name];
+        if (queue && queue.length > 0) {
+            const req = queue.shift();
+            if (queue.length === 0) delete this.requests[name];
+            Promise.resolve().then(() =>
+                this.addRequest(req, req._queuedOptions || {}));
+        }
     }
 
     createConnection(options, callback) {
@@ -924,12 +932,16 @@ class AgentImpl extends EventEmitter {
         }
         const busy = (this.sockets[name] || []).length;
         if (busy >= this.maxSockets || this.totalSocketCount >= this.maxTotalSockets) {
+            req._queuedOptions = { ...options };
             this._pool(this.requests, name).push(req);
             return;
         }
         this.createSocket(req, { ...this.options, ...options }, (error, socket) => {
             if (error) {
-                Promise.resolve().then(() => req.emit('error', error));
+                Promise.resolve().then(() => {
+                    req.emit('error', error);
+                    req.destroy();
+                });
                 return;
             }
             if (socket && typeof socket.on === 'function') {
