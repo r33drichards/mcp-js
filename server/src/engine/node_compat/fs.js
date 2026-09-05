@@ -32,7 +32,9 @@ function callbackify(name, promiseMethod, pathCount = 1) {
     return function (...args) {
         const callback = args.pop();
         if (typeof callback !== 'function') {
-            throw new TypeError(`fs.${name}: callback must be a function`);
+            const err = new TypeError(`fs.${name}: callback must be a function`);
+            err.code = 'ERR_INVALID_ARG_TYPE';
+            throw err;
         }
         const normalized = args.map(
             (value, index) => (index < pathCount ? normalizePath(value) : value));
@@ -148,7 +150,9 @@ export const cp = globalThis.fs
             ? {}
             : optionsOrCallback;
         if (typeof callback !== 'function') {
-            throw new TypeError('fs.cp: callback must be a function');
+            const err = new TypeError('fs.cp: callback must be a function');
+            err.code = 'ERR_INVALID_ARG_TYPE';
+            throw err;
         }
         try {
             cpSync(src, dest, options);
@@ -177,7 +181,9 @@ export const readFile = hostFs('readFile')
             ? undefined
             : optionsOrCallback;
         if (typeof callback !== 'function') {
-            throw new TypeError('fs.readFile: callback must be a function');
+            const err = new TypeError('fs.readFile: callback must be a function');
+            err.code = 'ERR_INVALID_ARG_TYPE';
+            throw err;
         }
         hostFs('readFile')(normalizePath(path), options).then(
             (result) => callback(
