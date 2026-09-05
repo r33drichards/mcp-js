@@ -410,6 +410,31 @@ class OutgoingMessageImpl extends Writable {
         callback();
     }
 
+    // Node's low-level OutgoingMessage._send: flush the header block (if it
+    // has not gone out yet) then push the data through the framing path.
+    // Some tests drive it directly to force an early header flush.
+    _send(data, encoding, callback) {
+        if (typeof encoding === 'function') { callback = encoding; encoding = undefined; }
+        this._flushHead();
+        const buf = Buffer.isBuffer(data)
+            ? data
+            : Buffer.from(String(data == null ? '' : data), encoding || 'utf8');
+        if (buf.length > 0 && !this._suppressBody) {
+            this._wroteBody = true;
+            if (this._chunked) {
+                this._writeRaw(Buffer.concat([
+                    Buffer.from(buf.length.toString(16) + '\r\n'),
+                    buf,
+                    Buffer.from('\r\n'),
+                ]));
+            } else {
+                this._writeRaw(buf);
+            }
+        }
+        if (typeof callback === 'function') callback();
+        return true;
+    }
+
     _flushHead() {}
     _afterFinal() {}
 }
@@ -639,8 +664,17 @@ class ServerResponseImpl extends OutgoingMessageImpl {
             : (STATUS_CODES[status] || 'unknown');
         const noBody = this._suppressBody
             || status === 204 || status === 304 || (status >= 100 && status < 200);
+        // HTTP/1.0 clients predate chunked transfer-encoding; Node frames the
+        // body by closing the connection instead (Connection: close).
+        const isHttp10 = this.req && this.req.httpVersionMajor === 1
+            && this.req.httpVersionMinor === 0;
         const useChunked = !this.hasHeader('content-length')
-            && !this.hasHeader('transfer-encoding') && !noBody;
+            && !this.hasHeader('transfer-encoding') && !noBody && !isHttp10;
+        // A 1.0 response with an unframed body must close to delimit it.
+        if (isHttp10 && !noBody && !this.hasHeader('content-length')
+            && !this.hasHeader('transfer-encoding')) {
+            this._keepAlive = false;
+        }
         // A body-framing header on a bodyless status makes the response
         // length ambiguous; Node answers by closing the connection.
         if ((status === 204 || status === 304)
