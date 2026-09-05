@@ -36,10 +36,15 @@ const handleRegistry = netHandleRegistry();
 // records path -> port here and connect({path}) resolves it.
 const pipeRegistry = new Map();
 
-// Mixin: each handle contributes 1 while open and refed.
+// Mixin: each handle contributes 1 while open and refed. `_loopReleased`
+// mirrors libuv: a socket whose FIN went out and whose peer EOF arrived no
+// longer keeps the event loop alive, even though the object stays usable
+// (unread data can still be drained later).
 function syncHandle(self, open) {
     self._handleOpen = open;
-    const contribution = (self._handleOpen && !self._unrefed) ? 1 : 0;
+    const contribution =
+        (self._handleOpen && !self._unrefed && !self._loopReleased
+            && !self._explicitPaused) ? 1 : 0;
     handleRegistry.refed += contribution - (self._handleContrib || 0);
     self._handleContrib = contribution;
 }
@@ -281,6 +286,8 @@ class SocketImpl extends Duplex {
         this.bytesWritten = 0;
         this._rid = null;
         this._endSent = false;
+        this._eofReceived = false;
+        this._loopReleased = false;
         this._timeoutMs = 0;
         this._timeoutTimer = null;
         this._server = null;
@@ -293,6 +300,18 @@ class SocketImpl extends Duplex {
         }
         // Fires on both the destroy path and graceful end+finish teardown.
         this.once('close', () => this._teardown());
+        this.on('finish', () => this._maybeDestroyAfterEof());
+    }
+
+    // Once the FIN is sent and the peer EOF has been seen the transport no
+    // longer keeps the event loop alive (libuv semantics): unread data can
+    // still be drained, but a socket nobody reads must not hang the run.
+    _maybeDestroyAfterEof() {
+        if (!this._eofReceived || this.destroyed || this._loopReleased) return;
+        const ws = this._writableState;
+        if (!ws || !ws.finished) return;
+        this._loopReleased = true;
+        syncHandle(this, this._handleOpen);
     }
 
     _teardown() {
@@ -325,6 +344,43 @@ class SocketImpl extends Duplex {
         this._startReading();
     }
 
+    // A socket object can be dialed again after its previous connection
+    // finished (Node re-initializes the handle and stream state). Fresh
+    // sockets pass through unchanged.
+    _resetForReconnect() {
+        if (this._rid !== null || this.connecting) return;
+        const rs = this._readableState;
+        const ws = this._writableState;
+        const used = this._closeEmitted || this.destroyed
+            || (rs && rs.ended) || (ws && ws.ended);
+        if (!used) return;
+        this.destroyed = false;
+        this.errored = null;
+        this._closeEmitted = false;
+        this._endSent = false;
+        this._eofReceived = false;
+        this._loopReleased = false;
+        this.readable = true;
+        this.writable = true;
+        this.bytesRead = 0;
+        this.bytesWritten = 0;
+        if (rs) {
+            rs.queue = [];
+            rs.ended = false;
+            rs.endEmitted = false;
+            rs.destroyed = false;
+            rs.reading = false;
+        }
+        if (ws) {
+            ws.queue = [];
+            ws.ended = false;
+            ws.finished = false;
+            ws.destroyed = false;
+            ws.writing = false;
+            ws.pendingBytes = 0;
+        }
+    }
+
     connect(...args) {
         if (!ops) {
             Promise.resolve().then(() => {
@@ -336,6 +392,7 @@ class SocketImpl extends Duplex {
         }
         const [options, cb] = normalizeConnectArgs(args);
         validateConnectOptions(options);
+        this._resetForReconnect();
         const pipePath = options.path || options.socketPath;
         let port;
         if (pipePath !== undefined) {
@@ -411,7 +468,11 @@ class SocketImpl extends Duplex {
 
     _dial(host, port, _options) {
         this.connecting = true;
-        ops.connect(String(host), port >>> 0).then((json) => {
+        const localHost = _options && _options.localAddress
+            ? String(_options.localAddress) : '';
+        const localPort = _options && _options.localPort
+            ? (_options.localPort >>> 0) : 0;
+        ops.connect(String(host), port >>> 0, localHost, localPort).then((json) => {
             if (this.destroyed) {
                 ops.closeStream(JSON.parse(json).rid);
                 return;
@@ -431,7 +492,7 @@ class SocketImpl extends Duplex {
             let result;
             try {
                 this._readPromise = ops.read(rid);
-                if (this._unrefed && ops.unrefOpPromise) {
+                if ((this._unrefed || this._explicitPaused) && ops.unrefOpPromise) {
                     ops.unrefOpPromise(this._readPromise);
                 }
                 result = JSON.parse(await this._readPromise);
@@ -446,8 +507,10 @@ class SocketImpl extends Duplex {
                 this.push(chunk);
             } else if (result.eof) {
                 this.readable = false;
+                this._eofReceived = true;
                 this.push(null);
                 if (!this.allowHalfOpen && !this._endSent) this.end();
+                this._maybeDestroyAfterEof();
                 break;
             } else if (result.closed) {
                 break;
@@ -459,6 +522,23 @@ class SocketImpl extends Duplex {
     }
 
     write(chunk, encoding, callback) {
+        // Node's writeAfterFIN: once the peer FIN arrived on a
+        // !allowHalfOpen socket whose own end() was already sent, a write
+        // fails with EPIPE (asynchronously) and destroys the socket.
+        if (this._eofReceived && !this.allowHalfOpen
+            && this._writableState && this._writableState.ended) {
+            if (typeof encoding === 'function') {
+                callback = encoding;
+                encoding = undefined;
+            }
+            const err = new Error('This socket has been ended by the other party');
+            err.code = 'EPIPE';
+            if (typeof callback === 'function') {
+                Promise.resolve().then(() => callback(err));
+            }
+            this.destroy(err);
+            return false;
+        }
         // Node counts queued pre-connect bytes in bytesWritten immediately.
         if (chunk !== null && chunk !== undefined
             && (typeof chunk === 'string' || ArrayBuffer.isView(chunk))) {
@@ -496,12 +576,37 @@ class SocketImpl extends Duplex {
         this._touchTimeout();
         ops.write(this._rid, buf.toString('base64')).then(
             () => callback(),
-            (error) => callback(opError(String(error && error.message || error))));
+            (error) => {
+                // A transport write error kills the socket in Node: the
+                // socket emits 'error' (via destroy) whether or not the
+                // write had a callback, and the callback also gets the
+                // error. The stream layer skips its own emit for destroyed
+                // streams, so the error surfaces exactly once.
+                const err = opError(String(error && error.message || error));
+                if (!this.destroyed) this.destroy(err);
+                callback(err);
+            });
     }
 
     _final(callback) {
         this._endSent = true;
-        if (this._rid === null) { callback(); return; }
+        if (this._rid === null) {
+            if (this.connecting) {
+                // end() before the connect resolved: send the FIN once the
+                // transport exists, or give up when the connect fails.
+                this.once('connect', () => {
+                    if (this._rid !== null) {
+                        ops.shutdown(this._rid).then(() => callback(), () => callback());
+                    } else {
+                        callback();
+                    }
+                });
+                this.once('close', () => callback());
+                return;
+            }
+            callback();
+            return;
+        }
         ops.shutdown(this._rid).then(() => callback(), () => callback());
     }
 
@@ -568,6 +673,28 @@ class SocketImpl extends Duplex {
 
     setNoDelay() { return this; }
     setKeepAlive() { return this; }
+
+    // Node's pause() issues a handle-level readStop: a paused socket no
+    // longer keeps the event loop alive (that is what lets a process whose
+    // only handle is a paused connection exit).
+    pause() {
+        this._explicitPaused = true;
+        if (this._readPromise && ops.unrefOpPromise) {
+            ops.unrefOpPromise(this._readPromise);
+        }
+        syncHandle(this, this._handleOpen);
+        return super.pause();
+    }
+
+    resume() {
+        this._explicitPaused = false;
+        if (this._readPromise && ops.refOpPromise && !this._unrefed) {
+            ops.refOpPromise(this._readPromise);
+        }
+        syncHandle(this, this._handleOpen);
+        return super.resume();
+    }
+
     ref() {
         this._unrefed = false;
         syncHandle(this, this._handleOpen);
@@ -699,6 +826,19 @@ class ServerImpl extends EventEmitter {
                 break;
             }
             if (result.closed) break;
+            if (this.maxConnections != null
+                && this._connections.size >= this.maxConnections) {
+                ops.closeStream(result.rid);
+                this.emit('drop', {
+                    localAddress: result.localAddress,
+                    localPort: result.localPort,
+                    localFamily: result.localFamily,
+                    remoteAddress: result.remoteAddress,
+                    remotePort: result.remotePort,
+                    remoteFamily: result.remoteFamily,
+                });
+                continue;
+            }
             const blockList = this._options.blockList;
             if (blockList && typeof blockList.check === 'function'
                 && blockList.check(

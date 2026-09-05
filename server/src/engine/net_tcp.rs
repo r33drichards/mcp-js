@@ -261,6 +261,8 @@ async fn op_tcp_connect(
     state: Rc<RefCell<OpState>>,
     #[string] host: String,
     #[smi] port: u32,
+    #[string] local_host: String,
+    #[smi] local_port: u32,
 ) -> Result<String, JsErrorBox> {
     let shutdown = {
         let mut st = state.borrow_mut();
@@ -269,12 +271,39 @@ async fn op_tcp_connect(
     };
     let ip = loopback_host(&host, host.contains(':'))?;
     let addr = SocketAddr::new(ip, port as u16);
+    // Optional local bind (Node's localAddress/localPort connect options);
+    // pinned to loopback like every other bind in this module.
+    let local = if local_host.is_empty() && local_port == 0 {
+        None
+    } else {
+        let bind_host = if local_host.is_empty() {
+            "127.0.0.1".to_string()
+        } else {
+            local_host
+        };
+        let local_ip = loopback_host(&bind_host, bind_host.contains(':'))?;
+        Some(SocketAddr::new(local_ip, local_port as u16))
+    };
     let stream = tokio::spawn(async move {
+        let connect = async move {
+            match local {
+                None => TcpStream::connect(addr).await,
+                Some(local_addr) => {
+                    let socket = if addr.is_ipv6() {
+                        tokio::net::TcpSocket::new_v6()?
+                    } else {
+                        tokio::net::TcpSocket::new_v4()?
+                    };
+                    socket.bind(local_addr)?;
+                    socket.connect(addr).await
+                }
+            }
+        };
         tokio::select! {
             biased;
             _ = shutdown.cancelled() => Ok(Err(std::io::Error::other("net: shutting down"))),
             connected = tokio::time::timeout(
-                std::time::Duration::from_secs(30), TcpStream::connect(addr)) => connected,
+                std::time::Duration::from_secs(30), connect) => connected,
         }
     })
     .await
@@ -283,6 +312,8 @@ async fn op_tcp_connect(
     .map_err(|e| {
         let code = match e.kind() {
             std::io::ErrorKind::ConnectionRefused => "ECONNREFUSED",
+            std::io::ErrorKind::AddrInUse => "EADDRINUSE",
+            std::io::ErrorKind::AddrNotAvailable => "EADDRNOTAVAIL",
             std::io::ErrorKind::TimedOut => "ETIMEDOUT",
             _ => "EIO",
         };

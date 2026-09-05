@@ -47,7 +47,12 @@ function readableMethods(proto) {
 
     proto.read = function read() {
         const state = this._readableState;
-        if (state.queue.length > 0) return state.queue.shift();
+        if (state.queue.length > 0) {
+            const chunk = state.queue.shift();
+            // Draining the buffer may unblock 'end' (EOF already pushed).
+            if (state.queue.length === 0) maybeEmitEnd(this);
+            return chunk;
+        }
         callRead(this);
         maybeEmitEnd(this);
         return null;
@@ -225,7 +230,9 @@ function processWriteQueue(stream) {
         if (state.pendingBytes < 0) state.pendingBytes = 0;
         if (callback) later(() => callback(err || null));
         if (err) {
-            if (!callback) stream.emit('error', err);
+            // A destroyed stream already routed the error through destroy();
+            // emitting here again would double-report it.
+            if (!callback && !stream.destroyed) stream.emit('error', err);
             return;
         }
         later(() => {
