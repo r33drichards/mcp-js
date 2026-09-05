@@ -241,6 +241,26 @@ class IncomingMessageImpl extends Readable {
         this.complete = false;
         this.aborted = false;
         this._dumped = false;
+        this._signalController = undefined;
+    }
+
+    // Node lazily attaches an AbortSignal to the message; it aborts when the
+    // message closes (or is already aborted/destroyed at first access).
+    get signal() {
+        if (this._signalController === undefined) {
+            const controller = new AbortController();
+            this._signalController = controller;
+            if (this.destroyed || this.aborted) {
+                controller.abort();
+            } else {
+                const onDone = () => {
+                    if (!controller.signal.aborted) controller.abort();
+                };
+                this.once('close', onDone);
+                this.once('aborted', onDone);
+            }
+        }
+        return this._signalController.signal;
     }
 
     // Discard the rest of the request body without delivering it (Node's
@@ -263,6 +283,11 @@ class IncomingMessageImpl extends Readable {
     }
 
     destroy(err) {
+        // A signal handed out earlier aborts as soon as the message is torn
+        // down (Node aborts synchronously on destroy).
+        if (this._signalController && !this._signalController.signal.aborted) {
+            this._signalController.abort();
+        }
         // The error belongs to this message; tearing the socket down with it
         // would rebroadcast it through socket 'error' forwarding.
         if (this.socket && !this.socket.destroyed) this.socket.destroy();
@@ -473,6 +498,15 @@ class ServerResponseImpl extends OutgoingMessageImpl {
         if (socket && socket._httpMessage === this) socket._httpMessage = null;
         this.socket = null;
         this.connection = null;
+    }
+
+    // Aborting a response tears down its connection so the client sees the
+    // reset rather than waiting on a reply that will never come.
+    destroy(err) {
+        if (this.destroyed) return this;
+        const socket = this.socket;
+        if (socket && !socket.destroyed) socket.destroy(err);
+        return super.destroy(err);
     }
 
     writeHead(statusCode, reason, headers) {
@@ -1346,7 +1380,12 @@ class AgentImpl extends EventEmitter {
     }
     // The layer requests attach through when constructed with an agent
     // externally (tests drive it directly too).
-    addRequest(req, options) {
+    addRequest(req, options, port, localAddress) {
+        // Legacy positional signature: addRequest(req, host, port, localAddress).
+        // The localAddress (not a request path) participates in the socket name.
+        if (typeof options === 'string') {
+            options = { host: options, port, localAddress };
+        }
         const name = this.getName({ ...this.options, ...options });
         req._agent = this;
         req._agentName = name;
