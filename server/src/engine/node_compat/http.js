@@ -123,6 +123,19 @@ function validateRequestOptions(opts) {
     }
 }
 
+// A body chunk written to an OutgoingMessage must be a string or a
+// Buffer/TypedArray/DataView; anything else (an Array, an object) is
+// ERR_INVALID_ARG_TYPE, before the stream layer sees it.
+function validateOutgoingChunk(chunk) {
+    if (chunk === undefined || chunk === null) return;
+    if (typeof chunk === 'string' || ArrayBuffer.isView(chunk)) return;
+    const err = new TypeError(
+        'The "chunk" argument must be of type string or an instance of ' +
+        `Buffer or Uint8Array. Received ${receivedRepr(chunk)}`);
+    err.code = 'ERR_INVALID_ARG_TYPE';
+    throw err;
+}
+
 export function validateHeaderName(name) {
     if (typeof name !== 'string' || !name || !TOKEN_RE.test(name)) {
         const err = new TypeError(
@@ -321,6 +334,11 @@ class OutgoingMessageImpl extends Writable {
         }
     }
 
+    write(chunk, encoding, callback) {
+        validateOutgoingChunk(chunk);
+        return super.write(chunk, encoding, callback);
+    }
+
     _write(chunk, encoding, callback) {
         this._wroteBody = true;
         this._flushHead();
@@ -385,6 +403,12 @@ class ServerResponseImpl extends OutgoingMessageImpl {
         }
         this.statusCode = statusCode;
         if (reason !== undefined) this.statusMessage = reason;
+        // A CR/LF in the reason phrase is a header-injection vector; Node
+        // rejects it here (explicit) and at flush time (implicit setter).
+        if (this.statusMessage !== undefined && this.statusMessage !== null
+            && /[\r\n]/.test(String(this.statusMessage))) {
+            throw new Error('Invalid character in statusMessage');
+        }
         if (headers) {
             if (Array.isArray(headers)) {
                 if (headers.length > 0 && Array.isArray(headers[0])) {
@@ -409,6 +433,7 @@ class ServerResponseImpl extends OutgoingMessageImpl {
     // Node buffers a single-shot end() and frames it with Content-Length
     // rather than chunked encoding.
     end(chunk, encoding, callback) {
+        if (typeof chunk !== 'function') validateOutgoingChunk(chunk);
         if (!this.headersSent && !this._wroteBody && !this._suppressBody
             && !this.hasHeader('trailer')
             && !this.hasHeader('content-length') && !this.hasHeader('transfer-encoding')) {
@@ -431,6 +456,12 @@ class ServerResponseImpl extends OutgoingMessageImpl {
 
     _flushHead() {
         if (this.headersSent) return;
+        // Implicit writeHead (a statusMessage set directly then a body
+        // write) validates the reason phrase here.
+        if (this.statusMessage !== undefined && this.statusMessage !== null
+            && /[\r\n]/.test(String(this.statusMessage))) {
+            throw new Error('Invalid character in statusMessage');
+        }
         this.headersSent = true;
         const status = this.statusCode;
         const message = this.statusMessage !== undefined
