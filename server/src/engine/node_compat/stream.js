@@ -267,7 +267,10 @@ function initWritable(self, options) {
 
 function chunkSize(state, chunk) {
     if (state.objectMode) return 1;
-    if (typeof chunk === 'string') return chunk.length;
+    // Backpressure is byte-based: a string counts its UTF-8 byte length,
+    // not its UTF-16 code-unit count, so non-ASCII data is accounted for
+    // correctly against highWaterMark.
+    if (typeof chunk === 'string') return Buffer.byteLength(chunk);
     return chunk && chunk.byteLength !== undefined ? chunk.byteLength : 1;
 }
 
