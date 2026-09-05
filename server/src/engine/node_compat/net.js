@@ -321,6 +321,8 @@ class SocketImpl extends Duplex {
         this._handle = (_options && _options.handle) || null;
         this.server = null;
         this._noDelay = false;
+        this._onread = (_options && _options.onread) || null;
+        if (this._onread && this._readableState) this._readableState.paused = true;
         this._endSent = false;
         this._eofReceived = false;
         this._loopReleased = false;
@@ -474,6 +476,14 @@ class SocketImpl extends Duplex {
         const [options, cb] = normalizeConnectArgs(args);
         validateConnectOptions(options);
         this._resetForReconnect();
+        // onread: deliver reads into a caller-owned buffer via a callback
+        // instead of 'data' events.
+        if (options.onread && typeof options.onread === 'object') {
+            this._onread = options.onread;
+            // onread replaces 'data' delivery; a 'data' listener must not
+            // auto-resume and race the callback's manual pause/resume.
+            if (this._readableState) this._readableState.paused = true;
+        }
         const pipePath = options.path || options.socketPath;
         let port;
         if (pipePath !== undefined) {
@@ -650,6 +660,32 @@ class SocketImpl extends Duplex {
         });
     }
 
+    // Deliver a chunk into the onread buffer(s) in buffer-sized slices, one
+    // callback per fill (the callback runs with the socket as `this`, so it
+    // may pause/resume). A pause mid-chunk stashes the remainder, which the
+    // read loop re-delivers on resume.
+    _deliverOnread(chunk) {
+        let offset = 0;
+        while (offset < chunk.length) {
+            const dst = typeof this._onread.buffer === 'function'
+                ? this._onread.buffer() : this._onread.buffer;
+            const view = ArrayBuffer.isView(dst)
+                ? new Uint8Array(dst.buffer, dst.byteOffset, dst.byteLength)
+                : dst;
+            const n = Math.min(chunk.length - offset, view.length);
+            for (let i = 0; i < n; i++) view[i] = chunk[offset + i];
+            offset += n;
+            // The callback runs with the socket as `this`; returning false
+            // (or calling this.pause()) stops further delivery until resume.
+            const ret = this._onread.callback.call(this, n, dst);
+            if (ret === false && !this._explicitPaused) this.pause();
+            if (this._explicitPaused && offset < chunk.length) {
+                this._onreadRemainder = chunk.slice(offset);
+                return;
+            }
+        }
+    }
+
     async _startReading() {
         const rid = this._rid;
         while (this._rid === rid && !this.destroyed) {
@@ -660,6 +696,14 @@ class SocketImpl extends Duplex {
                     this.once('_readWake', resolve);
                     this.once('close', resolve);
                 });
+                continue;
+            }
+            // onread mode: finish delivering a chunk that a pause interrupted
+            // before reading more from the transport.
+            if (this._onreadRemainder) {
+                const rem = this._onreadRemainder;
+                this._onreadRemainder = null;
+                this._deliverOnread(rem);
                 continue;
             }
             let result;
@@ -677,10 +721,19 @@ class SocketImpl extends Duplex {
             if (result.data !== undefined) {
                 const chunk = Buffer.from(result.data, 'base64');
                 this.bytesRead += chunk.length;
-                this.push(chunk);
+                if (this._onread && this._onread.buffer && this._onread.callback) {
+                    this._deliverOnread(chunk);
+                } else {
+                    this.push(chunk);
+                }
             } else if (result.eof) {
                 this.readable = false;
                 this._eofReceived = true;
+                // onread allocates a buffer for the read that observes EOF,
+                // even though no data callback fires for it (Node parity).
+                if (this._onread && typeof this._onread.buffer === 'function') {
+                    this._onread.buffer();
+                }
                 this.push(null);
                 if (!this.allowHalfOpen && !this._endSent
                     && !this._writableState.ended) {
@@ -695,7 +748,10 @@ class SocketImpl extends Duplex {
                     setTimeout(() => {
                         if (this._connGen === gen && !this._endSent
                             && !this.destroyed && !this._writableState.ended) {
-                            this.end();
+                            // Enforcer-driven end: not a user end(), so the
+                            // writeAfterFIN EPIPE path stays off for it.
+                            this.writable = false;
+                            super.end();
                         }
                     }, 0);
                 }
@@ -723,7 +779,13 @@ class SocketImpl extends Duplex {
         // Node's writeAfterFIN: once the peer FIN arrived on a
         // !allowHalfOpen socket whose own end() was already sent, a write
         // fails with EPIPE (asynchronously) and destroys the socket.
+        // writeAfterFIN (EPIPE + 'error' emit) applies only when the user
+        // ended this side and the peer FIN arrived. An auto-ended socket
+        // (half-open enforcer) instead routes the error through the normal
+        // write-after-end path, which delivers it to the callback without
+        // emitting 'error'.
         if (this._eofReceived && !this.allowHalfOpen && !this.destroyed
+            && this._userEnded
             && this._writableState && this._writableState.ended) {
             if (typeof encoding === 'function') {
                 callback = encoding;
@@ -760,6 +822,7 @@ class SocketImpl extends Duplex {
         }
         // Node drops writable as soon as end() is called.
         this.writable = false;
+        this._userEnded = true;
         return super.end(chunk, encoding, callback);
     }
 
@@ -895,19 +958,18 @@ class SocketImpl extends Duplex {
 
     _touchTimeout() {
         this._clearTimeout();
-        // The idle timer is tied to the transport handle, like Node: an
-        // unconnected socket's setTimeout is remembered but not armed (so it
-        // never keeps the event loop alive without a connection). Once
-        // fired, activity does not re-arm it — only an explicit setTimeout()
-        // call does.
-        if (this._timeoutMs > 0 && !this._timeoutFired && !this.destroyed
-            && this._rid !== null) {
+        // Once fired, activity does not re-arm the idle timer — only an
+        // explicit setTimeout() call does (matches observable Node behavior).
+        if (this._timeoutMs > 0 && !this._timeoutFired && !this.destroyed) {
             this._timeoutTimer = setTimeout(() => {
                 this._timeoutFired = true;
                 this.emit('timeout');
             }, this._timeoutMs);
-            // An unref'd socket's timeout must not keep the loop alive.
-            if (this._unrefed && this._timeoutTimer
+            // The timer keeps the event loop alive only while the socket is
+            // connected and refed (Node ties it to the transport handle): an
+            // unconnected or unref'd socket's timeout still fires if the loop
+            // is otherwise alive, but never pins the loop by itself.
+            if ((this._unrefed || this._rid === null) && this._timeoutTimer
                 && typeof this._timeoutTimer.unref === 'function') {
                 this._timeoutTimer.unref();
             }
@@ -970,6 +1032,29 @@ class SocketImpl extends Duplex {
             }
         }
         return this;
+    }
+
+    setTypeOfService(value) {
+        // Node's validateNumber rejects non-numbers and NaN as a type error.
+        if (typeof value !== 'number' || Number.isNaN(value)) {
+            const err = new TypeError(
+                `The "tos" argument must be of type number. Received ${receivedRepr(value)}`);
+            err.code = 'ERR_INVALID_ARG_TYPE';
+            throw err;
+        }
+        if (value < 0 || value > 255 || !Number.isInteger(value)) {
+            const err = new RangeError(
+                `The value of "tos" is out of range. It must be >= 0 && <= 255. Received ${value}`);
+            err.code = 'ERR_OUT_OF_RANGE';
+            throw err;
+        }
+        // No-op on the loopback transport (IP_TOS has no observable effect).
+        this._tos = value;
+        return this;
+    }
+
+    getTypeOfService() {
+        return this._tos !== undefined ? this._tos : 0;
     }
 
     setKeepAlive(enable, initialDelayMsecs, intervalMsecs, count) {
