@@ -980,6 +980,17 @@ class ConnectionParser {
                 lines[i].slice(0, sep).trim(), lines[i].slice(sep + 1).trim(),
                 Boolean(this.server._options && this.server._options.joinDuplicateHeaders));
         }
+        // RFC 7230 5.4: a server MUST answer 400 to an HTTP/1.1 request that
+        // lacks a Host header. The requireHostHeader option (default true)
+        // relaxes this for callers that need it.
+        if (req.httpVersionMajor === 1 && req.httpVersionMinor === 1
+            && req.headers.host === undefined
+            && !(this.server._options
+                && this.server._options.requireHostHeader === false)) {
+            this._clientError({ code: 'HPE_INVALID_HEADER_TOKEN',
+                message: 'Host header required' }, head);
+            return false;
+        }
         // HTTP Upgrade / CONNECT: when the server has a matching listener,
         // hand it the raw socket (req, socket, head) and detach from HTTP
         // parsing — no 'request' event, no ServerResponse. Without a
@@ -1529,6 +1540,15 @@ class ClientRequestImpl extends OutgoingMessageImpl {
             this._headers.set('authorization', ['Authorization',
                 'Basic ' + Buffer.from(String(opts.auth)).toString('base64')]);
         }
+        // A request advertising Expect: 100-continue must flush its headers
+        // immediately (without a body) so the server can answer 100 Continue;
+        // the caller writes the body only after the 'continue' event.
+        const expectEntry = this._headers.get('expect');
+        this._expectContinue = Boolean(expectEntry
+            && /100-continue/i.test(String(expectEntry[1])));
+        if (this._expectContinue) {
+            this.once('_ready', () => { if (!this.headersSent) this._flushHead(); });
+        }
         // A user createConnection (or one from a custom agent) may hand back
         // any duplex stream — the generic-streams pattern — either as a
         // return value or through a (err, socket) callback; otherwise dial
@@ -1871,6 +1891,9 @@ class ResponseParser {
             if (res.statusCode >= 100 && res.statusCode < 200) {
                 this.res = null;
                 this.request.res = null;
+                // A 100 Continue is surfaced through the dedicated 'continue'
+                // event as well as the generic 'information' one.
+                if (res.statusCode === 100) this.request.emit('continue');
                 this.request.emit('information', {
                     httpVersion: res.httpVersion,
                     httpVersionMajor: res.httpVersionMajor,
