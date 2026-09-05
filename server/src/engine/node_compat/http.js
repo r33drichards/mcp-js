@@ -60,6 +60,10 @@ export const STATUS_CODES = {
 
 export const maxHeaderSize = 16384;
 
+// Ceiling on a chunk-size line's length (size digits + chunk extensions),
+// mirroring the limit in Node's node_http_parser.cc. Over this is a 413.
+const MAX_CHUNK_EXT_SIZE = 16384;
+
 // _http_server exposes this symbol so tests can inspect the interval timer the
 // server arms to enforce headersTimeout/requestTimeout across live sockets.
 export const kConnectionsCheckingInterval = Symbol('http.server.connectionsCheckingInterval');
@@ -288,9 +292,14 @@ class IncomingMessageImpl extends Readable {
         if (this._signalController && !this._signalController.signal.aborted) {
             this._signalController.abort();
         }
-        // The error belongs to this message; tearing the socket down with it
-        // would rebroadcast it through socket 'error' forwarding.
-        if (this.socket && !this.socket.destroyed) this.socket.destroy();
+        // Node routes the error to the underlying socket rather than the
+        // readable: destroying the message with an error otherwise raises an
+        // unhandled 'error' on a stream nobody listens to. The socket's own
+        // error handling (server clientError / client 'error') takes it.
+        if (!this.destroyed && this.socket) {
+            if (!this.socket.destroyed) this.socket.destroy(err);
+            return this;
+        }
         return super.destroy(err);
     }
 }
@@ -889,6 +898,16 @@ class ConnectionParser {
         }
     }
 
+    // An over-long chunk-size line (chunk extensions past 16KiB) is answered
+    // with 413 and the connection is closed.
+    _send413() {
+        this.upgraded = true;
+        if (this.socket && !this.socket.destroyed && this.socket.writable) {
+            this.socket.end(
+                'HTTP/1.1 413 Payload Too Large\r\nConnection: close\r\n\r\n');
+        }
+    }
+
     feed(chunk) {
         // After an Upgrade/CONNECT the socket belongs to the user; stop
         // interpreting its bytes as HTTP.
@@ -1086,7 +1105,20 @@ class ConnectionParser {
         for (;;) {
             if (this.chunkRemaining === null) {
                 const lineEnd = this.buf.indexOf('\r\n');
-                if (lineEnd === -1) return false;
+                if (lineEnd === -1) {
+                    // A chunk-size line (size + extensions) is capped at 16KiB;
+                    // an over-long line that hasn't even terminated yet is a
+                    // 413, matching Node's node_http_parser limit.
+                    if (this.buf.length > MAX_CHUNK_EXT_SIZE) {
+                        this._send413();
+                        return false;
+                    }
+                    return false;
+                }
+                if (lineEnd > MAX_CHUNK_EXT_SIZE) {
+                    this._send413();
+                    return false;
+                }
                 const sizeLine = this.buf.subarray(0, lineEnd).toString('latin1');
                 this.buf = this.buf.subarray(lineEnd + 2);
                 if (!/^[0-9a-fA-F]+(;.*)?$/.test(sizeLine)) {
