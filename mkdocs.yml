@@ -69,6 +69,7 @@ nav:
       - WebAssembly modules: concepts/wasm-modules.md
       - ES module imports: concepts/module-imports.md
       - Calling upstream MCP servers: concepts/mcp-client.md
+      - Hooks (effect boundary): concepts/hooks.md
       - Security policies (OPA/Rego): concepts/policies.md
       - OS sandboxing: concepts/os-sandbox.md
       - Authentication (JWT/JWKS): concepts/authentication.md

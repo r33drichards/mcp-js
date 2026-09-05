@@ -2,6 +2,8 @@
 
 mcp-v8 gates every host capability — network access, filesystem operations, subprocess execution, ES module imports, and upstream MCP tool calls — through an embedded policy engine. This page explains the design of that system, the trade-offs between local and remote evaluation, and the exact information each category of policy receives.
 
+> **Direction:** policies are implemented in terms of [hooks](hooks.md) — a configured policy chain runs as the final *pre hook* of its operation. The `policies` key remains fully supported, but hooks are the primary vocabulary going forward; new gating, rewriting, and observing behavior should be written as hooks.
+
 ## The capability model
 
 JavaScript code running inside a V8 isolate has no host access by default. Each capability is a distinct, opt-in channel:
@@ -66,129 +68,7 @@ flowchart TD
 
 ## Pre/post hooks
 
-Policies answer one question — allow or deny. **Hooks** generalize the gate: each category can also run an ordered list of `pre` hooks (which see the operation input and may deny it *or rewrite it*) and `post` hooks (which see the input and output and may deny the result or rewrite the output). Hooks use the same source vocabulary as policies (`file://` Rego via regorus, `http(s)://` OPA-style REST) plus JavaScript (`file://*.js`), and are configured alongside them:
-
-```json
-{
-  "fetch": {
-    "policies": [{"url": "file:///etc/policies/fetch.rego"}],
-    "pre":      [{"url": "file:///etc/policies/fetch_hooks.rego"}],
-    "post":     [{"url": "file:///etc/policies/fetch_hooks.rego"}]
-  }
-}
-```
-
-Internally, **policies are pre hooks**: the configured policy chain runs as the *last* pre hook, so it always evaluates the effective (post-mutation) input. A pre hook can therefore rewrite a request into compliance, but never rewrite one out from under an approval the policy already gave.
-
-### Hook result contract
-
-A hook rule's default name derives from the operation's policy defaults: the policy rule with `.allow` replaced by `.pre` / `.post`, and the remote policy path with `/pre` / `/post` appended. For most categories that is `data.mcp.<category>.pre` and `mcp/<category>/pre`, but where the policy defaults differ from the config key they carry over — e.g. `mcp_tools` defaults to `data.mcp.tools.pre` / `mcp/tools/pre`. A hook evaluates to either a bare boolean (pure policy behavior) or an object:
-
-| Field | Meaning |
-|---|---|
-| `allow` (bool, default `true`) | Deny the operation when `false` |
-| `reason` (string) | Human-readable denial reason, surfaced in the JS error |
-| `input` (object, pre only) | Replacement operation input |
-| `output` (object, post only) | Replacement operation output |
-
-A Rego rule that is *undefined* for a given input abstains — allow, no mutation — so partial rules compose naturally. Hooks run in configured order, each seeing the previous hook's effective value.
-
-```rego
-package mcp.fetch
-
-# pre: tag every request, and upgrade http:// to https://
-pre := {"input": patched} if {
-    startswith(input.url, "http://")
-    patched := object.union(input, {
-        "url": concat("", ["https://", substring(input.url, 7, -1)]),
-    })
-}
-
-# post: refuse to hand oversized responses back to the isolate
-post := {"allow": false, "reason": "response too large"} if {
-    count(input.output.body) > 10000000
-}
-```
-
-Pre hooks receive the same input document the category's policies see. Post hooks receive `{"input": <effective input>, "output": <operation output>}` — for fetch, the output is `{status, statusText, url, headers, body, bodyEncoding, redirected}` with `body` base64-encoded.
-
-### JavaScript hooks
-
-A hook source whose `file://` URL ends in `.js` is a JavaScript hook. The file defines global functions — `pre(input)` and/or `post(input, output)` (names overridable per source via `rule`) — with the same return semantics as Rego hooks: `undefined`/`null` abstains, a bool allows or denies, and `{allow, reason, input|output}` denies or rewrites.
-
-```js
-function pre(input) {
-    if (input.url_parsed.query.toLowerCase().includes("api_key=")) {
-        return { allow: false, reason: "credentials in query string" };
-    }
-    if (input.url.startsWith("http://")) {
-        return { input: { ...input, url: "https://" + input.url.slice(7) } };
-    }
-}
-
-function post(input, output) {
-    if (output.status >= 500) return { allow: false, reason: "upstream error" };
-}
-```
-
-Each JS hook file runs in its own V8 isolate on a dedicated worker thread (never a sandbox's isolate thread), kept warm across calls so top-level state in the file persists — deliberately, for counters and caches; calls through one evaluator are serialized. By default the isolate is **bare** — no `fetch`, no `fs`, no ops of any kind; a hook is pure computation over its arguments. Each call is bounded by a timeout (`timeout_ms` per source, default 5000 ms) after which the script is terminated and the operation fails closed.
-
-Hooks may be `async` (or return a Promise): the worker drives the isolate's event loop until the result settles, still under the same timeout.
-
-#### Hook capabilities
-
-A JS hook source can opt into pieces of the guest environment via `capabilities`, expressed with the same JS APIs the sandbox sees — `"fs"` installs the `fs.*` wrapper, `"fetch"` installs `fetch()` (plus `atob`/`btoa`). This is how you write observing hooks with side effects — for example, auditing every filesystem write to a log file:
-
-```json
-{"filesystem": {"pre": [{"url": "file:///etc/policies/audit_fs_hooks.js",
-                          "capabilities": ["fs"]}]}}
-```
-
-```js
-const LOG = "/var/log/mcp-js/fs-audit.log";
-async function pre(input) {
-    if (["writeFile", "appendFile", "rename", "remove"].includes(input.operation)) {
-        await fs.appendFile(LOG, input.operation + " " + input.path + "\n");
-    }
-    // no return value: observe and abstain
-}
-```
-
-Two properties to understand before granting capabilities:
-
-- **Hook-issued operations are ungated.** The hook's `fs`/`fetch` run through no hook chain and no policy — the hook file is operator-trusted configuration (the same trust level as the policy files themselves), and gating its operations would recurse into the very chain the hook runs inside (the audit hook above would trigger itself on every `appendFile`).
-- **The timeout still applies end to end**, including time spent awaiting hook-issued I/O: a hung `fetch` inside a hook fails the guest operation closed when `timeout_ms` expires.
-
-The shipped example `policies/audit_fs_hooks.js` in the repository is a complete write-audit hook.
-
-The `--policies-json` config for the example above is the same as any other hook source:
-
-```json
-{"fetch": {"pre": [{"url": "file:///etc/policies/fetch_hooks.js"}],
-            "post": [{"url": "file:///etc/policies/fetch_hooks.js", "timeout_ms": 1000}]}}
-```
-
-### Per-category hook capabilities
-
-Not every operation can honor a rewritten input, and not every operation produces a hookable output:
-
-| Category | Pre hooks | Input mutation applied | Post hooks (output mutation) |
-|---|---|---|---|
-| `fetch` | ✓ | ✓ (`url`, `method`, `headers`) | ✓ (response) |
-| `filesystem` | ✓ | ✓ (`path`, `destination`) | — |
-| `subprocess` | ✓ | ✓ (`command`, `args`, `cwd`, `env`) | ✓ (`{code, stdout, stderr, success}`) |
-| `mcp_tools` | ✓ | ✓ (`server`, `tool`, `arguments`) | ✓ (tool result) |
-| `run_js_file` | ✓ | ✓ (`path`, re-canonicalized after rewrite) | — |
-| `websocket` | ✓ (gate-only) | — | — |
-| `http2` | ✓ (gate-only) | — | — |
-| `modules` | ✓ (gate-only) | — | — |
-| `fs_snapshot` | ✓ (gate-only) | — | — |
-
-The rules fail closed: a pre hook that returns a replacement `input` for a gate-only category errors the operation rather than silently ignoring the rewrite, and configuring `post` hooks for a category without a hookable output is a startup error.
-
-Two details worth knowing for `fetch`: derived fields are re-normalized after every mutation (`url_parsed` is recomputed from the rewritten `url`, so later hooks and the policy never see a stale parse), and `--fetch-header` credential injection runs *before* the hook chain, keyed on the URL as requested by JS — a pre hook that rewrites the URL host sees every header and owns the consequences (injection is not re-run for the new host). Similarly, `run_js_file` re-canonicalizes a rewritten path immediately, preserving the invariant that its policies only ever see canonicalized paths.
-
-Hooks are operator configuration, loaded from the same trusted `--policies-json` as policies — they are not reachable or modifiable from sandboxed JS.
+Hooks generalize the policy gate: ordered `pre` hooks can deny **or rewrite** an operation's input, and `post` hooks can deny or rewrite its output, with policies running as the final pre hook over the effective input. Hooks have their own page — see [Hooks: the programmable effect boundary](hooks.md) for the model, the result contract, JavaScript hooks and capabilities, per-operation mutation support, and worked examples.
 
 ## OPA vs embedded regorus
 
