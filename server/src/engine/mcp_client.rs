@@ -874,7 +874,11 @@ async fn op_mcp_call_tool(
             let effective = match hooks.run_pre(input_value).await.map_err(|e| {
                 JsErrorBox::generic(format!("mcp.callTool: hook chain error: {}", e))
             })? {
-                super::hooks::PreOutcome::Allow(v) => v,
+                super::hooks::PreOutcome::Allow(v) => {
+                    super::hooks::verify_operation(&v, "mcp_call_tool", "mcp.callTool")
+                        .map_err(JsErrorBox::generic)?;
+                    v
+                }
                 super::hooks::PreOutcome::Deny(deny) => {
                     return Err(JsErrorBox::generic(format!(
                         "mcp.callTool {}: {}.{} is not allowed",

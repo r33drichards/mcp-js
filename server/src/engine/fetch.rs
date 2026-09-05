@@ -759,7 +759,10 @@ async fn do_fetch(
     let input_value = serde_json::to_value(&policy_input)
         .map_err(|e| format!("fetch: failed to serialize policy input: {}", e))?;
     let effective = match hooks.run_pre_with(input_value, normalize_fetch_input).await? {
-        PreOutcome::Allow(v) => v,
+        PreOutcome::Allow(v) => {
+            super::hooks::verify_operation(&v, "fetch", "fetch")?;
+            v
+        }
         PreOutcome::Deny(deny) => {
             return Err(format!(
                 "fetch {}: {} {} is not allowed",

@@ -686,6 +686,21 @@ async fn js_hook_call(
         .map_err(|e| format!("JS hook '{}' returned an unserializable value: {}", path, e))
 }
 
+/// Fail closed if a pre hook changed the `operation` discriminator in the
+/// effective input. The executor performs the operation it was invoked for
+/// regardless of the JSON field, so a rewritten `operation` could only
+/// desynchronize what later hooks — and the policy, which runs last — are
+/// evaluating from what will actually run.
+pub fn verify_operation(effective: &Value, expected: &str, op: &str) -> Result<(), String> {
+    match effective.get("operation").and_then(|v| v.as_str()) {
+        Some(o) if o == expected => Ok(()),
+        other => Err(format!(
+            "{}: pre hook changed 'operation' (expected {:?}, got {:?})",
+            op, expected, other
+        )),
+    }
+}
+
 // ── Hook ─────────────────────────────────────────────────────────────────
 
 /// A single hook in a chain. `Policy` wraps a whole [`PolicyChain`] as a
@@ -2124,6 +2139,22 @@ async function pre(input) {{
             }
             other => panic!("expected allow, got {:?}", other),
         }
+    }
+
+    // ── verify_operation ─────────────────────────────────────────────────
+
+    #[test]
+    fn verify_operation_accepts_match_and_rejects_spoof() {
+        let ok = serde_json::json!({"operation": "writeFile", "path": "/x"});
+        assert!(verify_operation(&ok, "writeFile", "fs.writeFile").is_ok());
+
+        let spoofed = serde_json::json!({"operation": "readFile", "path": "/x"});
+        let err = verify_operation(&spoofed, "writeFile", "fs.writeFile").unwrap_err();
+        assert!(err.contains("pre hook changed 'operation'"), "got: {err}");
+
+        let dropped = serde_json::json!({"path": "/x"});
+        let err = verify_operation(&dropped, "writeFile", "fs.writeFile").unwrap_err();
+        assert!(err.contains("got None"), "got: {err}");
     }
 
     // ── Remote hooks (OPA-style HTTP endpoint) ───────────────────────────

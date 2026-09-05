@@ -128,6 +128,8 @@ Mutation is honored only where the executor can apply it; everywhere else the sy
 
 Operations with derived input fields keep them consistent through mutation: fetch re-parses `url_parsed` from a rewritten `url` before the next hook runs, and `run_js_file` re-canonicalizes a rewritten path — so the policy, which runs last, never sees a stale derivation.
 
+The `operation` discriminator is likewise pinned: the executor performs the operation it was invoked for regardless of the JSON field, so a hook that rewrites `operation` (say `writeFile` → `readFile`) could only make the policy evaluate something other than what will run. Such a mutation fails the operation closed.
+
 ## Policies are hooks
 
 The `policies` key is implemented *in terms of* hooks: `build_hook_chain` wraps the configured `PolicyChain` in a `Hook::Policy` variant and appends it as the final pre hook. A policy is precisely a pre hook that only ever answers with a boolean and never mutates. These two configurations gate identically:

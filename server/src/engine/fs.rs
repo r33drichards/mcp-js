@@ -1331,6 +1331,8 @@ async fn check_policy(
         }
     };
 
+    super::hooks::verify_operation(&effective, operation, &format!("fs.{}", operation))?;
+
     let eff: FsEffective = serde_json::from_value(effective)
         .map_err(|e| format!("fs.{}: invalid effective input after pre hooks: {}", operation, e))?;
 

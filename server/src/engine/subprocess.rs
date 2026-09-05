@@ -402,7 +402,10 @@ async fn run_pre_hooks(
         .await
         .map_err(|e| format!("subprocess.{}: hook chain error: {}", operation, e))?
     {
-        PreOutcome::Allow(v) => v,
+        PreOutcome::Allow(v) => {
+            super::hooks::verify_operation(&v, operation, &format!("subprocess.{}", operation))?;
+            v
+        }
         PreOutcome::Deny(deny) => {
             return Err(format!(
                 "subprocess.{} {}: '{}' is not allowed",

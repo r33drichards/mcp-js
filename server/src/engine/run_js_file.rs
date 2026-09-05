@@ -96,6 +96,7 @@ impl RunJsFilePolicy {
 
             match outcome {
                 PreOutcome::Allow(effective) => {
+                    super::hooks::verify_operation(&effective, "read", "run_js file")?;
                     effective_path = effective
                         .get("path")
                         .and_then(|v| v.as_str())

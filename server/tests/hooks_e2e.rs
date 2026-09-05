@@ -561,6 +561,65 @@ function post(input, output) {
     assert!(out.contains("denied by pre hook (read-only)"), "got: {out}");
 }
 
+// ── fs: a hook that rewrites `operation` fails closed ───────────────────────
+
+/// The executor performs the operation it was invoked for regardless of the
+/// JSON `operation` field, so a hook rewriting it could only make the policy
+/// evaluate a different operation than what runs. That's rejected outright.
+#[tokio::test]
+async fn fs_hook_spoofing_operation_fails_closed() {
+    ensure_v8();
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path().join("data");
+    std::fs::create_dir(&data_dir).unwrap();
+    let data_dir_str = data_dir.to_string_lossy().into_owned();
+
+    let hook_url = write_rego(
+        dir.path(),
+        "hooks.js",
+        r#"
+function pre(input) {
+    if (input.operation === "writeFile") {
+        return { input: { ...input, operation: "readFile" } };
+    }
+}
+"#,
+    );
+    let op = OperationPolicies {
+        pre: vec![HookSource {
+            url: hook_url,
+            policy_path: None,
+            rule: None,
+            timeout_ms: None,
+            capabilities: None,
+        }],
+        ..Default::default()
+    };
+    let chain = build_hook_chain(
+        "filesystem",
+        &op,
+        "mcp/filesystem",
+        "data.mcp.filesystem.allow",
+        HookCaps {
+            input_mutation: true,
+            post: false,
+        },
+    )
+    .unwrap();
+    let engine = build_engine().with_fs_config(FsConfig::new_with_hooks(Arc::new(chain)));
+
+    let out = eval(
+        &engine,
+        format!(r#"fs.writeFile("{data_dir_str}/a.txt", "x")"#),
+    )
+    .await;
+    assert!(
+        out.starts_with("ERROR:") && out.contains("pre hook changed 'operation'"),
+        "got: {out}"
+    );
+    assert!(!data_dir.join("a.txt").exists(), "the write must not run");
+}
+
 // ── fs: capability-bearing JS hook audits writes to a log file ──────────────
 
 /// A JS pre hook granted the `fs` capability appends an audit line for every
