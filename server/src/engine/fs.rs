@@ -48,6 +48,7 @@ use super::fs_mount::SessionMount;
 use super::fs_store::FileWriter;
 use super::opa::PolicyChain;
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::Path;
 
 // ── Configuration ────────────────────────────────────────────────────────
@@ -565,6 +566,343 @@ fn op_fs_symlink_sync(
         .map_err(|error| JsErrorBox::generic(io_err2("symlink", &link, &target, &error)))
 }
 
+/// Run a mount operation to completion from a synchronous op. The overlay
+/// needs a current-thread runtime, so the future runs on a fresh thread.
+fn block_on_mount<T: Send + 'static>(
+    operation: &'static str,
+    task: impl Future<Output = Result<T, String>> + Send + 'static,
+) -> Result<T, JsErrorBox> {
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| format!("fs.{operation}: failed to create runtime: {error}"))?;
+        runtime.block_on(task)
+    })
+    .join()
+    .map_err(|_| JsErrorBox::generic(format!("fs.{operation} thread panicked")))?
+    .map_err(JsErrorBox::generic)
+}
+
+/// Read a file synchronously as raw bytes.
+#[op2]
+#[buffer]
+fn op_fs_read_file_sync(
+    state: &mut OpState,
+    #[string] path: String,
+) -> Result<Vec<u8>, JsErrorBox> {
+    let config = state
+        .try_borrow::<FsConfig>()
+        .cloned()
+        .ok_or_else(|| JsErrorBox::generic("fs: internal error - no fs config available"))?;
+    let mount = state.try_borrow::<FsMountHandle>().cloned();
+    check_policy_sync(&config, "readFile", &path, None, None, Some("buffer"))?;
+    if let Some(mount) = mount {
+        let read_path = path.clone();
+        let passthrough = config.passthrough;
+        let content = block_on_mount("readFileSync", async move {
+            mount
+                .0
+                .lock()
+                .await
+                .read_opt(Path::new(&read_path))
+                .await
+                .map_err(|error| format!("fs.readFileSync: {read_path}: {error}"))
+        })?;
+        if let Some(content) = content {
+            return Ok(content);
+        }
+        if !passthrough {
+            return Err(JsErrorBox::generic(format!("fs.readFileSync: {path}: ENOENT")));
+        }
+    }
+
+    std::fs::read(&path).map_err(|error| JsErrorBox::generic(io_err("readFile", &path, &error)))
+}
+
+/// Write raw bytes synchronously (Node `fs.writeFileSync` with a Buffer).
+#[op2(fast)]
+fn op_fs_write_file_buffer_sync(
+    state: &mut OpState,
+    #[string] path: String,
+    #[buffer(copy)] data: Vec<u8>,
+) -> Result<(), JsErrorBox> {
+    let config = state
+        .try_borrow::<FsConfig>()
+        .cloned()
+        .ok_or_else(|| JsErrorBox::generic("fs: internal error - no fs config available"))?;
+    let mount = state.try_borrow::<FsMountHandle>().cloned();
+    check_policy_sync(&config, "writeFile", &path, None, None, Some("buffer"))?;
+    if let Some(mount) = mount {
+        let write_path = path.clone();
+        return block_on_mount("writeFileSync", async move {
+            mount
+                .0
+                .lock()
+                .await
+                .write(Path::new(&write_path), &data)
+                .await
+                .map_err(|error| format!("fs.writeFileSync: {write_path}: {error}"))
+        });
+    }
+
+    std::fs::write(&path, &data)
+        .map_err(|error| JsErrorBox::generic(io_err("writeFile", &path, &error)))
+}
+
+/// Create a directory synchronously.
+#[op2(fast)]
+fn op_fs_mkdir_sync(
+    state: &mut OpState,
+    #[string] path: String,
+    #[smi] recursive: i32,
+) -> Result<(), JsErrorBox> {
+    let config = state
+        .try_borrow::<FsConfig>()
+        .cloned()
+        .ok_or_else(|| JsErrorBox::generic("fs: internal error - no fs config available"))?;
+    let mount = state.try_borrow::<FsMountHandle>().cloned();
+    let recursive = recursive != 0;
+    check_policy_sync(&config, "mkdir", &path, None, Some(recursive), None)?;
+    if let Some(mount) = mount {
+        let mkdir_path = path.clone();
+        return block_on_mount("mkdirSync", async move {
+            mount
+                .0
+                .lock()
+                .await
+                .mkdir(Path::new(&mkdir_path))
+                .await
+                .map_err(|error| format!("fs.mkdirSync: {mkdir_path}: {error}"))
+        });
+    }
+
+    if recursive {
+        std::fs::create_dir_all(&path)
+    } else {
+        std::fs::create_dir(&path)
+    }
+    .map_err(|error| JsErrorBox::generic(io_err("mkdir", &path, &error)))
+}
+
+/// Stat a path synchronously; same JSON shape as `op_fs_stat`.
+#[op2]
+#[string]
+fn op_fs_stat_sync(
+    state: &mut OpState,
+    #[string] path: String,
+    #[smi] follow_symlinks: i32,
+) -> Result<String, JsErrorBox> {
+    let config = state
+        .try_borrow::<FsConfig>()
+        .cloned()
+        .ok_or_else(|| JsErrorBox::generic("fs: internal error - no fs config available"))?;
+    let mount = state.try_borrow::<FsMountHandle>().cloned();
+    let follow = follow_symlinks != 0;
+    let operation = if follow { "stat" } else { "lstat" };
+    check_policy_sync(&config, operation, &path, None, None, None)?;
+    if let Some(mount) = mount {
+        // The overlay never follows symlinks; its stat covers both flavors.
+        let stat_path = path.clone();
+        let s = block_on_mount("statSync", async move {
+            mount
+                .0
+                .lock()
+                .await
+                .stat(Path::new(&stat_path))
+                .await
+                .map_err(|error| format!("fs.statSync: {stat_path}: {error}"))
+        })?;
+        return Ok(mount_stat_json(&s));
+    }
+
+    let metadata = if follow {
+        std::fs::metadata(&path)
+    } else {
+        std::fs::symlink_metadata(&path)
+    }
+    .map_err(|error| JsErrorBox::generic(io_err(operation, &path, &error)))?;
+    Ok(metadata_stat_json(&metadata))
+}
+
+/// List a directory synchronously; returns a JSON array of names.
+#[op2]
+#[string]
+fn op_fs_readdir_sync(
+    state: &mut OpState,
+    #[string] path: String,
+) -> Result<String, JsErrorBox> {
+    let config = state
+        .try_borrow::<FsConfig>()
+        .cloned()
+        .ok_or_else(|| JsErrorBox::generic("fs: internal error - no fs config available"))?;
+    let mount = state.try_borrow::<FsMountHandle>().cloned();
+    check_policy_sync(&config, "readdir", &path, None, None, None)?;
+    if let Some(mount) = mount {
+        let readdir_path = path.clone();
+        let names = block_on_mount("readdirSync", async move {
+            mount
+                .0
+                .lock()
+                .await
+                .readdir(Path::new(&readdir_path))
+                .await
+                .map_err(|error| format!("fs.readdirSync: {readdir_path}: {error}"))
+        })?;
+        return Ok(deno_core::serde_json::json!(names).to_string());
+    }
+
+    let mut entries = Vec::new();
+    for entry in
+        std::fs::read_dir(&path).map_err(|error| JsErrorBox::generic(io_err("readdir", &path, &error)))?
+    {
+        let entry = entry.map_err(|error| JsErrorBox::generic(io_err("readdir", &path, &error)))?;
+        if let Some(name) = entry.file_name().to_str() {
+            entries.push(name.to_string());
+        }
+    }
+    Ok(deno_core::serde_json::json!(entries).to_string())
+}
+
+/// Remove a file or directory synchronously.
+#[op2(fast)]
+fn op_fs_rm_sync(
+    state: &mut OpState,
+    #[string] path: String,
+    #[smi] recursive: i32,
+) -> Result<(), JsErrorBox> {
+    let config = state
+        .try_borrow::<FsConfig>()
+        .cloned()
+        .ok_or_else(|| JsErrorBox::generic("fs: internal error - no fs config available"))?;
+    let mount = state.try_borrow::<FsMountHandle>().cloned();
+    let recursive = recursive != 0;
+    check_policy_sync(&config, "rm", &path, None, Some(recursive), None)?;
+    if let Some(mount) = mount {
+        let rm_path = path.clone();
+        return block_on_mount("rmSync", async move {
+            mount
+                .0
+                .lock()
+                .await
+                .remove(Path::new(&rm_path), recursive)
+                .await
+                .map_err(|error| format!("fs.rmSync: {rm_path}: {error}"))
+        });
+    }
+
+    let metadata = std::fs::metadata(&path)
+        .map_err(|error| JsErrorBox::generic(io_err("rm", &path, &error)))?;
+    if metadata.is_dir() {
+        if recursive {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_dir(&path)
+        }
+    } else {
+        std::fs::remove_file(&path)
+    }
+    .map_err(|error| JsErrorBox::generic(io_err("rm", &path, &error)))
+}
+
+/// Rename synchronously.
+#[op2(fast)]
+fn op_fs_rename_sync(
+    state: &mut OpState,
+    #[string] from: String,
+    #[string] to: String,
+) -> Result<(), JsErrorBox> {
+    let config = state
+        .try_borrow::<FsConfig>()
+        .cloned()
+        .ok_or_else(|| JsErrorBox::generic("fs: internal error - no fs config available"))?;
+    let mount = state.try_borrow::<FsMountHandle>().cloned();
+    check_policy_sync(&config, "rename", &from, Some(&to), None, None)?;
+    if let Some(mount) = mount {
+        let rename_from = from.clone();
+        let rename_to = to.clone();
+        return block_on_mount("renameSync", async move {
+            mount
+                .0
+                .lock()
+                .await
+                .rename(Path::new(&rename_from), Path::new(&rename_to))
+                .await
+                .map_err(|error| format!("fs.renameSync: {rename_from} -> {rename_to}: {error}"))
+        });
+    }
+
+    std::fs::rename(&from, &to)
+        .map_err(|error| JsErrorBox::generic(io_err2("rename", &from, &to, &error)))
+}
+
+/// Copy a file synchronously.
+#[op2(fast)]
+fn op_fs_copy_file_sync(
+    state: &mut OpState,
+    #[string] from: String,
+    #[string] to: String,
+) -> Result<(), JsErrorBox> {
+    let config = state
+        .try_borrow::<FsConfig>()
+        .cloned()
+        .ok_or_else(|| JsErrorBox::generic("fs: internal error - no fs config available"))?;
+    let mount = state.try_borrow::<FsMountHandle>().cloned();
+    check_policy_sync(&config, "copyFile", &from, Some(&to), None, None)?;
+    if let Some(mount) = mount {
+        let copy_from = from.clone();
+        let copy_to = to.clone();
+        return block_on_mount("copyFileSync", async move {
+            let mut mount = mount.0.lock().await;
+            let content = mount
+                .read_opt(Path::new(&copy_from))
+                .await
+                .map_err(|error| format!("fs.copyFileSync: {copy_from}: {error}"))?
+                .ok_or_else(|| format!("fs.copyFileSync: {copy_from}: ENOENT"))?;
+            mount
+                .write(Path::new(&copy_to), &content)
+                .await
+                .map_err(|error| format!("fs.copyFileSync: {copy_to}: {error}"))
+        });
+    }
+
+    std::fs::copy(&from, &to)
+        .map(|_| ())
+        .map_err(|error| JsErrorBox::generic(io_err2("copyFile", &from, &to, &error)))
+}
+
+/// Read a symlink target synchronously.
+#[op2]
+#[string]
+fn op_fs_readlink_sync(
+    state: &mut OpState,
+    #[string] path: String,
+) -> Result<String, JsErrorBox> {
+    let config = state
+        .try_borrow::<FsConfig>()
+        .cloned()
+        .ok_or_else(|| JsErrorBox::generic("fs: internal error - no fs config available"))?;
+    let mount = state.try_borrow::<FsMountHandle>().cloned();
+    check_policy_sync(&config, "readlink", &path, None, None, None)?;
+    if let Some(mount) = mount {
+        let link_path = path.clone();
+        return block_on_mount("readlinkSync", async move {
+            mount
+                .0
+                .lock()
+                .await
+                .readlink(Path::new(&link_path))
+                .await
+                .map(|target| target.to_string_lossy().into_owned())
+                .map_err(|error| format!("fs.readlinkSync: {link_path}: {error}"))
+        });
+    }
+
+    std::fs::read_link(&path)
+        .map(|target| target.to_string_lossy().into_owned())
+        .map_err(|error| JsErrorBox::generic(io_err("readlink", &path, &error)))
+}
+
 #[cfg(unix)]
 fn symlink_impl_sync(target: &str, link: &str) -> std::io::Result<()> {
     std::os::unix::fs::symlink(target, link)
@@ -953,6 +1291,15 @@ deno_core::extension!(
         op_fs_lstat,
         op_fs_readlink,
         op_fs_symlink_sync,
+        op_fs_read_file_sync,
+        op_fs_write_file_buffer_sync,
+        op_fs_mkdir_sync,
+        op_fs_stat_sync,
+        op_fs_readdir_sync,
+        op_fs_rm_sync,
+        op_fs_rename_sync,
+        op_fs_copy_file_sync,
+        op_fs_readlink_sync,
         op_fs_symlink,
         op_fs_mkdir,
         op_fs_rm,
@@ -1062,15 +1409,27 @@ const FS_JS_WRAPPER: &str = r#"
         return await readFileBuffer(path);
     }
 
-    function writeFileSync(path, data) {
-        if (typeof path !== 'string') throw new TypeError('fs.writeFileSync: path must be a string');
-        if (typeof data !== 'string') {
-            throw new TypeError('fs.writeFileSync: binary data is not supported yet');
-        }
+    function callSync(name, ...args) {
         try {
-            ops.op_fs_write_file_text_sync(path, data);
+            return ops[name](...args);
         } catch (e) {
             throw tagError(e);
+        }
+    }
+
+    function writeFileSync(path, data) {
+        if (typeof path !== 'string') throw new TypeError('fs.writeFileSync: path must be a string');
+        if (typeof data === 'string') {
+            callSync('op_fs_write_file_text_sync', path, data);
+        } else if (data instanceof Uint8Array) {
+            callSync('op_fs_write_file_buffer_sync', path, data);
+        } else if (ArrayBuffer.isView(data)) {
+            callSync('op_fs_write_file_buffer_sync', path,
+                new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+        } else if (data instanceof ArrayBuffer) {
+            callSync('op_fs_write_file_buffer_sync', path, new Uint8Array(data));
+        } else {
+            callSync('op_fs_write_file_text_sync', path, String(data));
         }
     }
 
@@ -1078,10 +1437,80 @@ const FS_JS_WRAPPER: &str = r#"
         if (typeof target !== 'string' || typeof link !== 'string') {
             throw new TypeError('fs.symlinkSync: target and path must be strings');
         }
+        callSync('op_fs_symlink_sync', target, link);
+    }
+
+    function readFileSync(path, options) {
+        if (typeof path !== 'string') throw new TypeError('fs.readFileSync: path must be a string');
+        const bytes = callSync('op_fs_read_file_sync', path);
+        const enc = readEncoding(options);
+        if (enc && enc !== 'buffer') return new TextDecoder(enc).decode(bytes);
+        return bytes;
+    }
+
+    function mkdirSync(path, options) {
+        if (typeof path !== 'string') throw new TypeError('fs.mkdirSync: path must be a string');
+        callSync('op_fs_mkdir_sync', path, (options && options.recursive) ? 1 : 0);
+    }
+
+    function statSync(path) {
+        if (typeof path !== 'string') throw new TypeError('fs.statSync: path must be a string');
+        return makeStats(JSON.parse(callSync('op_fs_stat_sync', path, 1)));
+    }
+
+    function lstatSync(path) {
+        if (typeof path !== 'string') throw new TypeError('fs.lstatSync: path must be a string');
+        return makeStats(JSON.parse(callSync('op_fs_stat_sync', path, 0)));
+    }
+
+    function readdirSync(path) {
+        if (typeof path !== 'string') throw new TypeError('fs.readdirSync: path must be a string');
+        return JSON.parse(callSync('op_fs_readdir_sync', path));
+    }
+
+    function rmSync(path, options) {
+        if (typeof path !== 'string') throw new TypeError('fs.rmSync: path must be a string');
         try {
-            ops.op_fs_symlink_sync(target, link);
+            callSync('op_fs_rm_sync', path, (options && options.recursive) ? 1 : 0);
         } catch (e) {
-            throw tagError(e);
+            if (options && options.force && e && e.code === 'ENOENT') return;
+            throw e;
+        }
+    }
+
+    function rmdirSync(path, options) {
+        if (typeof path !== 'string') throw new TypeError('fs.rmdirSync: path must be a string');
+        callSync('op_fs_rm_sync', path, (options && options.recursive) ? 1 : 0);
+    }
+
+    function unlinkSync(path) {
+        if (typeof path !== 'string') throw new TypeError('fs.unlinkSync: path must be a string');
+        callSync('op_fs_rm_sync', path, 0);
+    }
+
+    function renameSync(oldPath, newPath) {
+        if (typeof oldPath !== 'string') throw new TypeError('fs.renameSync: oldPath must be a string');
+        if (typeof newPath !== 'string') throw new TypeError('fs.renameSync: newPath must be a string');
+        callSync('op_fs_rename_sync', oldPath, newPath);
+    }
+
+    function copyFileSync(src, dest) {
+        if (typeof src !== 'string') throw new TypeError('fs.copyFileSync: src must be a string');
+        if (typeof dest !== 'string') throw new TypeError('fs.copyFileSync: dest must be a string');
+        callSync('op_fs_copy_file_sync', src, dest);
+    }
+
+    function readlinkSync(path) {
+        if (typeof path !== 'string') throw new TypeError('fs.readlinkSync: path must be a string');
+        return callSync('op_fs_readlink_sync', path);
+    }
+
+    function existsSync(path) {
+        try {
+            statSync(String(path));
+            return true;
+        } catch (e) {
+            return false;
         }
     }
 
@@ -1205,6 +1634,8 @@ const FS_JS_WRAPPER: &str = r#"
     globalThis.fs = {
         readFile, writeFile, writeFileSync, symlinkSync, appendFile, readdir, stat, lstat, mkdir, rm, rmdir,
         unlink, rename, copyFile, readlink, symlink, exists, createWriteStream,
+        readFileSync, mkdirSync, statSync, lstatSync, readdirSync, rmSync, rmdirSync,
+        unlinkSync, renameSync, copyFileSync, readlinkSync, existsSync,
         promises,
     };
 })();

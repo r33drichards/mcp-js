@@ -22,6 +22,7 @@ export const {
     isGeneratorFunction,
     isProxy,
     isBoxedPrimitive,
+    isModuleNamespaceObject,
 } = types;
 
 export default types;

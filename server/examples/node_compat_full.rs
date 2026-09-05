@@ -12,6 +12,7 @@ use server::engine::{
     fs::FsConfig,
     module_loader::ModuleLoaderConfig,
     opa::{EvalMode, LocalPolicyEvaluator, PolicyChain, PolicyEvaluatorKind},
+    net_tcp::NetTcpConfig,
     subprocess::SubprocessConfig,
 };
 use std::{
@@ -164,6 +165,11 @@ impl NodeCliInvocation {
                 }
                 "--experimental-import-meta-resolve" | "--interactive" | "-i" => {
                     Self::require_no_value(flag, value)?;
+                }
+                // V8 heap-tuning flags only size the isolate; the embedded
+                // engine keeps its own limit, so accept and ignore them.
+                "--max-old-space-size" | "--max-semi-space-size" | "--stack-size" => {
+                    Self::option_value(args, &mut index, flag, value)?;
                 }
                 _ if flag.starts_with('-') => {
                     return Err(format!("unsupported Node CLI flag: {flag}"));
@@ -346,10 +352,9 @@ fn rewrite_script_dynamic_imports(body: &str, helper: &str) -> Option<String> {
 }
 
 fn rewrite_dynamic_imports(body: &str) -> Option<String> {
-    let output = rewrite_script_dynamic_imports(body, "__nodeCompatImportWithLoaders")?;
-    Some(format!(
-        "const __nodeCompatImportWithLoaders = globalThis.__NODE_COMPAT_IMPORT_WITH_LOADERS__;\n{output}"
-    ))
+    // Like commonjs_dynamic_import_prelude, the helper arrives as a CJS
+    // wrapper parameter so the body's directive prologue stays first.
+    rewrite_script_dynamic_imports(body, "__nodeCompatImportWithLoaders")
 }
 
 fn rewrite_esm_dynamic_imports_with_helper(
@@ -439,10 +444,10 @@ fn rewrite_esm_loader_dynamic_imports(body: &str) -> Option<String> {
 }
 
 fn commonjs_dynamic_import_prelude(path: &str, body: &str) -> Option<(String, String)> {
+    // The helper reaches the compiled body as a CJS wrapper parameter, not a
+    // prepended statement: anything inserted before the source would break a
+    // leading 'use strict' directive prologue.
     let body = rewrite_script_dynamic_imports(body, "__nodeCompatImport")?;
-    let body = format!(
-        "const __nodeCompatImport = globalThis.__NODE_COMPAT_IMPORT__;\n{body}"
-    );
     let parent_url = test_module_specifier(path).ok()?;
     let prelude = format!(
         r#"globalThis.__NODE_COMPAT_IMPORT__ = (specifier, options) => {{
@@ -850,16 +855,49 @@ fn assemble(path: &str, body: &str, loader_sources: &HashMap<String, String>) ->
 }
 
 const COMMON_ESM: &str = r#"import 'node-test:prelude';
+export { createRequire } from 'node:module';
 const common = globalThis.__NODE_TEST_COMMON__;
 export const mustCall = common.mustCall.bind(common);
 export const mustCallAtLeast = common.mustCallAtLeast.bind(common);
 export const mustSucceed = common.mustSucceed.bind(common);
 export const expectsError = common.expectsError.bind(common);
+export const expectRequiredModule = common.expectRequiredModule.bind(common);
+export const expectRequiredTLAError = common.expectRequiredTLAError.bind(common);
+export const expectWarning = common.expectWarning.bind(common);
+export const allowGlobals = common.allowGlobals.bind(common);
 export const mustNotCall = common.mustNotCall.bind(common);
+export const mustNotMutateObjectDeep = common.mustNotMutateObjectDeep.bind(common);
 export const spawnPromisified = common.spawnPromisified.bind(common);
 export const skip = common.skip.bind(common);
+export const printSkipMessage = common.printSkipMessage.bind(common);
+export const skipIfInspectorDisabled = common.skipIfInspectorDisabled.bind(common);
+export const skipIfSQLiteMissing = common.skipIfSQLiteMissing.bind(common);
 export const platformTimeout = common.platformTimeout.bind(common);
 export const canCreateSymLink = common.canCreateSymLink.bind(common);
+export const getArrayBufferViews = common.getArrayBufferViews.bind(common);
+export const getBufferSources = common.getBufferSources.bind(common);
+export const invalidArgTypeHelper = common.invalidArgTypeHelper.bind(common);
+export const isWindows = common.isWindows;
+export const isLinux = common.isLinux;
+export const isMacOS = common.isMacOS;
+export const isAIX = common.isAIX;
+export const isIBMi = common.isIBMi;
+export const isFreeBSD = common.isFreeBSD;
+export const isOpenBSD = common.isOpenBSD;
+export const isSunOS = common.isSunOS;
+export const isDumbTerminal = common.isDumbTerminal;
+export const isMainThread = common.isMainThread;
+export const hasCrypto = common.hasCrypto;
+export const hasInspector = common.hasInspector;
+export const hasIntl = common.hasIntl;
+export const hasIPv6 = common.hasIPv6;
+export const PORT = common.PORT;
+export const localhostIPv4 = common.localhostIPv4;
+export const localhostIPv6 = common.localhostIPv6;
+export const hasQuic = common.hasQuic;
+export const hasSQLite = common.hasSQLite;
+export const enoughTestMem = common.enoughTestMem;
+export const buildType = common.buildType;
 export const fixturesDir = '/test/fixtures';
 export default common;
 "#;
@@ -2111,8 +2149,10 @@ fn node_cli_source(
     let mut source = format!(
         "globalThis.__mcpV8ProcessConfig={};\n\
          const {{ default: __nodeCompatProcess }} = await import('node:process');\n\
+         const {{ Buffer: __nodeCompatBuffer }} = await import('node:buffer');\n\
          await import('node:module');\n\
          globalThis.process = __nodeCompatProcess;\n\
+         globalThis.Buffer = __nodeCompatBuffer;\n\
          globalThis.global = globalThis;\n",
         serde_json::to_string(&process_config).unwrap(),
     );
@@ -2270,7 +2310,15 @@ fn run_node_compat_cli_with_stdin(
         .map_err(|error| error.to_string())?;
     let policy = Arc::new(PolicyChain::new(vec![], EvalMode::All));
     let fetch = FetchConfig::new_with_chain(policy.clone());
-    let subprocess = SubprocessConfig::new(policy);
+    // Grandchildren get the same wall-clock cap as shard children so a
+    // stay-alive-forever fixture can't outlive its test.
+    let mut subprocess = SubprocessConfig::new(policy);
+    if let Some(timeout) = std::env::var("NODE_COMPAT_TIMEOUT_SECONDS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+    {
+        subprocess = subprocess.with_timeout(Duration::from_secs(timeout));
+    }
     let fs_policy = std::env::var("NODE_COMPAT_FILE_ROOT")
         .ok()
         .filter(|root| !root.is_empty())
@@ -2308,6 +2356,7 @@ fn run_node_compat_cli_with_stdin(
         .fetch_config(&fetch)
         .maybe_fs_config(fs_config.as_ref())
         .maybe_subprocess_config(Some(&subprocess))
+        .maybe_net_tcp_config(Some(NetTcpConfig::default()))
         .module_loader_config(&module_loader);
     if let Some(main_specifier) = eval_main_specifier.as_deref() {
         config = config.main_module_specifier(main_specifier);
@@ -2421,12 +2470,34 @@ fn test_tmpdir_modules(path: &Path) -> (String, String) {
 }
 
 fn isolated_fs_policy(root: &Path) -> Result<(tempfile::TempDir, Arc<PolicyChain>), String> {
+    isolated_fs_policy_with_read_roots(root, &[])
+}
+
+/// Writable access under `root`; read-only operations additionally allowed
+/// under each of `read_roots` (the corpus, so fixtures are readable).
+fn isolated_fs_policy_with_read_roots(
+    root: &Path,
+    read_roots: &[&Path],
+) -> Result<(tempfile::TempDir, Arc<PolicyChain>), String> {
     let policy_dir = tempfile::tempdir().map_err(|error| error.to_string())?;
     let root = format!("{}/", root.to_string_lossy().trim_end_matches('/'));
-    let source = format!(
-        "package mcp.node_compat\n\ndefault allow = false\n\nallow if {{\n    startswith(input.path, {})\n}}\n",
+    let mut source = format!(
+        "package mcp.node_compat\n\ndefault allow = false\n\nread_operations := {{\"readFile\", \"stat\", \"lstat\", \"readdir\", \"readlink\"}}\n\nallow if {{\n    startswith(input.path, {})\n}}\n",
         serde_json::to_string(&root).unwrap(),
     );
+    for read_root in read_roots {
+        let read_root = format!("{}/", read_root.to_string_lossy().trim_end_matches('/'));
+        let read_root_json = serde_json::to_string(&read_root).unwrap();
+        source.push_str(&format!(
+            "\nallow if {{\n    read_operations[input.operation]\n    startswith(input.path, {read_root_json})\n}}\n",
+        ));
+        // Copying a fixture into the writable sandbox reads the corpus and
+        // writes only under the isolated root.
+        source.push_str(&format!(
+            "\nallow if {{\n    input.operation == \"copyFile\"\n    startswith(input.path, {read_root_json})\n    startswith(input.destination, {})\n}}\n",
+            serde_json::to_string(&root).unwrap(),
+        ));
+    }
     let policy_path = policy_dir.path().join("fs.rego");
     fs::write(&policy_path, source).map_err(|error| error.to_string())?;
     let evaluator =
@@ -2449,6 +2520,14 @@ fn run(
     node_executable: &Path,
 ) -> Outcome {
     INIT.call_once(server::engine::initialize_v8);
+    // Internals are deliberately not exposed in the sandboxed runtime, so a
+    // test that declares it needs them can never apply here.
+    if test_flags(body)
+        .iter()
+        .any(|flag| flag == "--expose-internals")
+    {
+        return Outcome::Skip("requires --expose-internals".to_owned());
+    }
     let tmp = std::env::temp_dir().join(format!(
         "mcp-node-full-{}-{}",
         std::process::id(),
@@ -2468,12 +2547,16 @@ fn run(
     };
     let policy = Arc::new(PolicyChain::new(vec![], EvalMode::All));
     let fetch = FetchConfig::new_with_chain(policy.clone());
-    let (_fs_policy_dir, fs_policy) = match isolated_fs_policy(test_tmp.path()) {
-        Ok(policy) => policy,
-        Err(error) => return Outcome::Runtime(error),
-    };
+    let (_fs_policy_dir, fs_policy) =
+        match isolated_fs_policy_with_read_roots(test_tmp.path(), &[corpus]) {
+            Ok(policy) => policy,
+            Err(error) => return Outcome::Runtime(error),
+        };
     let fs_config = FsConfig::new(fs_policy);
-    let subprocess = SubprocessConfig::new(policy);
+    // A child that never exits must not wedge the shard: the isolate's
+    // watchdog cannot interrupt a synchronous outputSync wait, so the cap
+    // kills the child instead.
+    let subprocess = SubprocessConfig::new(policy).with_timeout(timeout);
     let (tmpdir_esm, tmpdir_commonjs) = test_tmpdir_modules(test_tmp.path());
     let mut virtual_modules = (*modules.esm).clone();
     if let Err(error) = install_isolated_loader_modules(body, &mut virtual_modules) {
@@ -2499,11 +2582,17 @@ fn run(
         Ok(specifier) => specifier,
         Err(error) => return Outcome::Runtime(error),
     };
+    let net_tcp = NetTcpConfig::default();
+    // The watchdog must cancel pending TCP ops alongside terminating the
+    // isolate: a pending accept keeps the event loop alive and
+    // terminate_execution alone cannot wake it.
+    let net_shutdown = net_tcp.shutdown.clone();
     let config = ExecutionConfig::new(256 * 1024 * 1024)
         .console_tree(tree.clone())
         .fetch_config(&fetch)
         .maybe_fs_config(Some(&fs_config))
         .maybe_subprocess_config(Some(&subprocess))
+        .maybe_net_tcp_config(Some(net_tcp))
         .module_loader_config(&module_loader)
         .main_module_specifier(&main_specifier);
     let handle = config.isolate_handle.clone();
@@ -2517,6 +2606,7 @@ fn run(
             while !done.load(Ordering::SeqCst) {
                 if start.elapsed() > timeout {
                     timed.store(true, Ordering::SeqCst);
+                    net_shutdown.cancel();
                     if let Some(h) = handle.lock().unwrap().as_ref() {
                         h.terminate_execution();
                     }
@@ -2526,8 +2616,11 @@ fn run(
             }
         })
     };
+    // __mcpV8NodeCompatCli unlocks worker_threads: shard mode has the same
+    // subprocess capability and execPath as the self-hosted CLI, so Workers
+    // re-exec this binary with --node-compat-cli exactly as CLI mode does.
     let source = format!(
-        "globalThis.__NODE_TEST_CORPUS_HOST__={};globalThis.__NODE_TEST_EXEC_PATH__={};globalThis.__NODE_TEST_FLAGS__={};globalThis.__NODE_TEST_TMPDIR__={};\n{}",
+        "globalThis.__mcpV8NodeCompatCli=true;globalThis.__NODE_TEST_CORPUS_HOST__={};globalThis.__NODE_TEST_EXEC_PATH__={};globalThis.__NODE_TEST_FLAGS__={};globalThis.__NODE_TEST_TMPDIR__={};\n{}",
         serde_json::to_string(corpus.to_str().unwrap()).unwrap(),
         serde_json::to_string(node_executable.to_str().unwrap()).unwrap(),
         serde_json::to_string(&test_flags(body)).unwrap(),
@@ -2545,10 +2638,21 @@ fn run(
     drop(db);
     let _ = fs::remove_dir_all(tmp);
     if timed.load(Ordering::SeqCst) {
+        if std::env::var_os("NODE_COMPAT_DEBUG_TIMEOUT").is_some() {
+            eprintln!(
+                "=== console at timeout for {path} ===\n{}\n===",
+                String::from_utf8_lossy(&bytes)
+            );
+        }
         return Outcome::Timeout;
     }
     if let Err(e) = res {
         let d = e.to_string();
+        // ESM bodies have no CommonJS catch wrapper, so common.skip()
+        // surfaces as this sentinel error instead of a skipped report.
+        if d.contains("__NODE_TEST_SKIP__") {
+            return Outcome::Skip("skipped via common.skip".to_owned());
+        }
         return if d.starts_with("AssertionError:") {
             Outcome::Assertion(d)
         } else {
@@ -2599,6 +2703,16 @@ fn shard_main() -> Result<(), Box<dyn std::error::Error>> {
     if n == 0 || i >= n {
         return Err("invalid shard".into());
     }
+    // Children must never inherit shard mode: a corpus test that re-executes
+    // this binary without --node-compat-cli would re-enter shard_main and
+    // truncate the results file mid-run.
+    // SAFETY: no other thread is reading the environment yet.
+    unsafe {
+        std::env::remove_var("NODE_COMPAT_RESULTS");
+        std::env::remove_var("NODE_COMPAT_SUMMARY");
+        std::env::remove_var("NODE_COMPAT_SHARD_INDEX");
+        std::env::remove_var("NODE_COMPAT_SHARD_TOTAL");
+    }
     let timeout = Duration::from_secs(
         std::env::var("NODE_COMPAT_TIMEOUT_SECONDS")
             .ok()
@@ -2623,10 +2737,13 @@ fn shard_main() -> Result<(), Box<dyn std::error::Error>> {
         &inventory.source.commit,
         &inventory.source.node_version,
     );
+    // Optional substring filter for targeted subset runs.
+    let only = std::env::var("NODE_COMPAT_ONLY").ok();
     for t in inventory
         .tests
         .iter()
         .filter(|t| shard::stable_shard(&t.path, n) == i)
+        .filter(|t| only.as_deref().is_none_or(|s| t.path.contains(s)))
     {
         let start = Instant::now();
         let (status, reason, details) = match fs::read_to_string(corpus.join(&t.path)) {

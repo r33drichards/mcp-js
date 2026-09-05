@@ -12,10 +12,17 @@
 /// entries: the loader resolves the full path as the module name.
 pub const NODE_MODULES: &[(&str, &str)] = &[
     ("assert", include_str!("node_compat/assert.js")),
+    ("async_hooks", include_str!("node_compat/async_hooks.js")),
     ("buffer", include_str!("node_compat/gen/buffer.js")),
     ("child_process", include_str!("node_compat/child_process.js")),
     ("console", include_str!("node_compat/console.js")),
     ("crypto", include_str!("node_compat/crypto.js")),
+    (
+        "diagnostics_channel",
+        include_str!("node_compat/diagnostics_channel.js"),
+    ),
+    ("cluster", include_str!("node_compat/cluster.js")),
+    ("dgram", include_str!("node_compat/dgram.js")),
     ("dns", include_str!("node_compat/dns.js")),
     ("dns/promises", include_str!("node_compat/dns_promises.js")),
     ("events", include_str!("node_compat/gen/events.js")),
@@ -37,6 +44,7 @@ pub const NODE_MODULES: &[(&str, &str)] = &[
     ("timers", include_str!("node_compat/timers.js")),
     ("timers/promises", include_str!("node_compat/timers_promises.js")),
     ("tls", include_str!("node_compat/tls.js")),
+    ("tty", include_str!("node_compat/tty.js")),
     ("url", include_str!("node_compat/url.js")),
     ("util", include_str!("node_compat/util.js")),
     ("util/types", include_str!("node_compat/util_types.js")),

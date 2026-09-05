@@ -186,8 +186,12 @@ export const promises = {
     CANCELLED, ADDRCONFIG, V4MAPPED, ALL,
 };
 
+export function setServers(_servers) {}
+export function getServers() { return []; }
+
 export default {
     lookup, lookupService, resolveTxt, resolveSrv, promises,
+    setServers, getServers,
     NODATA, FORMERR, SERVFAIL, NOTFOUND, NOTIMP, REFUSED,
     BADQUERY, BADNAME, BADFAMILY, BADRESP, CONNREFUSED, TIMEOUT,
     EOF, FILE, NOMEM, DESTRUCTION, BADSTR, BADFLAGS, NONAME,

@@ -313,3 +313,88 @@ fn node_fs_write_file_sync_uses_policy_gated_filesystem() {
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello sync");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn node_fs_sync_surface_round_trips() {
+    ensure_v8();
+    let dir = temp_dir("sync-surface");
+    let source = format!(
+        r#"(async () => {{
+            const fs = (await import('node:fs')).default;
+            const path = (await import('node:path')).default;
+            const {{ Buffer }} = await import('node:buffer');
+            const root = {root:?};
+
+            fs.mkdirSync(path.join(root, 'a/b'), {{ recursive: true }});
+            const file = path.join(root, 'a/b/data.bin');
+            fs.writeFileSync(file, Buffer.from([104, 105, 0, 255]));
+            const bytes = fs.readFileSync(file);
+            console.log('bytes=' + Array.from(bytes).join(','));
+            console.log('isBuffer=' + Buffer.isBuffer(bytes));
+
+            fs.writeFileSync(file, 'text mode');
+            console.log('text=' + fs.readFileSync(file, 'utf8'));
+
+            const stats = fs.statSync(file);
+            console.log('statFile=' + stats.isFile() + ',' + stats.isDirectory());
+            console.log('exists=' + fs.existsSync(file) + ',' +
+                fs.existsSync(path.join(root, 'missing')));
+            console.log('dir=' + JSON.stringify(fs.readdirSync(path.join(root, 'a/b'))));
+
+            const renamed = path.join(root, 'a/b/renamed.bin');
+            fs.renameSync(file, renamed);
+            fs.copyFileSync(renamed, file);
+            console.log('afterRename=' + fs.existsSync(file) + ',' + fs.existsSync(renamed));
+
+            fs.unlinkSync(renamed);
+            console.log('afterUnlink=' + fs.existsSync(renamed));
+
+            fs.rmSync(path.join(root, 'a'), {{ recursive: true }});
+            console.log('afterRm=' + fs.existsSync(path.join(root, 'a')));
+
+            await new Promise((resolve, reject) => {{
+                fs.mkdir(path.join(root, 'cb'), (err) => err ? reject(err) : resolve());
+            }});
+            const cbText = await new Promise((resolve, reject) => {{
+                fs.writeFile(path.join(root, 'cb/file.txt'), 'from cb', (err) => {{
+                    if (err) return reject(err);
+                    fs.readFile(path.join(root, 'cb/file.txt'), 'utf8',
+                        (err, data) => err ? reject(err) : resolve(data));
+                }});
+            }});
+            console.log('cb=' + cbText);
+
+            fs.mkdirSync(path.join(root, 'tree/nested'), {{ recursive: true }});
+            fs.writeFileSync(path.join(root, 'tree/top.txt'), 'top');
+            fs.writeFileSync(path.join(root, 'tree/nested/deep.txt'), 'deep');
+            fs.cpSync(path.join(root, 'tree'), path.join(root, 'copy'), {{ recursive: true }});
+            console.log('cp=' + fs.readFileSync(path.join(root, 'copy/top.txt'), 'utf8') +
+                ',' + fs.readFileSync(path.join(root, 'copy/nested/deep.txt'), 'utf8'));
+            try {{
+                fs.cpSync(path.join(root, 'tree'), path.join(root, 'copy2'));
+                console.log('cpNoRecursive=no-error');
+            }} catch (e) {{
+                console.log('cpNoRecursive=' + e.code);
+            }}
+        }})()"#,
+        root = dir.to_string_lossy(),
+    );
+
+    let out = run_fs(&source);
+    assert!(out.contains("bytes=104,105,0,255"), "binary round trip failed: {out}");
+    assert!(out.contains("isBuffer=true"), "readFileSync should return a Buffer: {out}");
+    assert!(out.contains("text=text mode"), "text round trip failed: {out}");
+    assert!(out.contains("statFile=true,false"), "statSync predicates failed: {out}");
+    assert!(out.contains("exists=true,false"), "existsSync failed: {out}");
+    assert!(out.contains("dir=[\"data.bin\"]"), "readdirSync failed: {out}");
+    assert!(out.contains("afterRename=true,true"), "rename/copy failed: {out}");
+    assert!(out.contains("afterUnlink=false"), "unlinkSync failed: {out}");
+    assert!(out.contains("afterRm=false"), "recursive rmSync failed: {out}");
+    assert!(out.contains("cb=from cb"), "callback API failed: {out}");
+    assert!(out.contains("cp=top,deep"), "recursive cpSync failed: {out}");
+    assert!(
+        out.contains("cpNoRecursive=ERR_FS_EISDIR"),
+        "cpSync on a directory without recursive must fail: {out}"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
