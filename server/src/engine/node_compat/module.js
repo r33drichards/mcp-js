@@ -47,6 +47,8 @@ const builtins = new Map([
     ['_http_common', {
         methods: http.METHODS,
         chunkExpression: /(?:^|\W)chunked(?:$|\W)/i,
+        _checkIsHttpToken: http._checkIsHttpToken,
+        _checkInvalidHeaderChar: http._checkInvalidHeaderChar,
     }],
     ['_http_server', {
         STATUS_CODES: http.STATUS_CODES,

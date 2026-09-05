@@ -136,6 +136,22 @@ function validateOutgoingChunk(chunk) {
     throw err;
 }
 
+// Internal predicates Node exposes as http._checkIsHttpToken /
+// http._checkInvalidHeaderChar (used by the test harness and some libs).
+export function _checkIsHttpToken(str) {
+    return typeof str === 'string' && TOKEN_RE.test(str);
+}
+
+export function _checkInvalidHeaderChar(val, lenient) {
+    // Strict (RFC 7230): only tab, printable ASCII, and obs-text (0x80-0xff)
+    // are valid. Lenient (insecureHTTPParser, per Fetch): only NUL, CR, LF,
+    // and code points above 0xff are rejected.
+    if (lenient) {
+        return /[\x00\x0a\x0d]|[^\x00-\xff]/.test(String(val));
+    }
+    return /[^\t\x20-\x7e\x80-\xff]/.test(String(val));
+}
+
 export function validateHeaderName(name) {
     if (typeof name !== 'string' || !name || !TOKEN_RE.test(name)) {
         const err = new TypeError(
@@ -686,7 +702,11 @@ class ConnectionParser {
             return false;
         }
         this.socket._httpActive = true;
-        const req = new IncomingMessageImpl(this.socket);
+        // http.Server({ IncomingMessage, ServerResponse }) lets callers
+        // substitute their own message classes.
+        const IncomingClass = (this.server._options
+            && this.server._options.IncomingMessage) || IncomingMessageImpl;
+        const req = new IncomingClass(this.socket);
         req.method = match[1];
         req.url = match[2];
         req.httpVersionMajor = Number(match[3]);
@@ -750,7 +770,9 @@ class ConnectionParser {
         }
         let res;
         try {
-            res = new ServerResponseImpl(req);
+            const ResponseClass = (this.server._options
+                && this.server._options.ServerResponse) || ServerResponseImpl;
+            res = new ResponseClass(req);
         } catch (error) {
             error.__fromRequestHandler = true;
             throw error;
@@ -1735,6 +1757,8 @@ export default {
     maxHeaderSize,
     validateHeaderName,
     validateHeaderValue,
+    _checkIsHttpToken,
+    _checkInvalidHeaderChar,
     Agent,
     globalAgent,
     ClientRequest,
