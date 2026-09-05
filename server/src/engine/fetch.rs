@@ -26,7 +26,7 @@ use deno_error::JsErrorBox;
 use serde::Serialize;
 
 use super::fetch_auth::{OAuthClientCredentialsTokenSource, OAuthTokenSourceConfig};
-use super::hooks::{HookChain, PostOutcome, PreOutcome};
+use super::hooks::{Hook, HookChain, PostOutcome, PreOutcome};
 use super::opa::PolicyChain;
 
 // ── Configuration ────────────────────────────────────────────────────────
@@ -56,7 +56,20 @@ impl FetchConfig {
         Self::new_with_hooks(Arc::new(HookChain::from_policy("fetch", chain)))
     }
 
+    /// Attach header injection rules by inserting a native
+    /// [`Hook::FetchHeaderInject`] into the chain — after every configured
+    /// pre hook, before the policy. Injection therefore keys off the
+    /// *effective* request (a hook rewrite can never carry a credential to a
+    /// destination its rule doesn't match), the policy validates the headers
+    /// that will actually be sent, and user hooks never see the credentials.
+    ///
+    /// Must be called at construction time, before the chain is shared.
     pub fn with_header_rules(mut self, rules: Vec<HeaderRule>) -> Self {
+        if !rules.is_empty() {
+            Arc::get_mut(&mut self.hooks)
+                .expect("with_header_rules must be called before the hook chain is shared")
+                .insert_pre_before_policy(Hook::FetchHeaderInject(rules.clone()));
+        }
         self.header_rules = rules;
         self
     }
@@ -410,47 +423,6 @@ pub async fn apply_header_rules_tracked(
     Ok(injected)
 }
 
-/// Remove injected headers whose injecting rule no longer matches the
-/// effective request. Runs inside the pre-chain normalizer (after every
-/// mutation), so later hooks — and the policy, which runs last — evaluate
-/// the header set that will actually be sent. Only untouched injections are
-/// stripped: a hook that explicitly rewrote an injected header's value owns
-/// the result. Injection is never re-run for a rewritten host; a hook that
-/// redirects a request supplies any credentials the new host needs itself.
-fn strip_stale_injected_headers(
-    input: &mut serde_json::Value,
-    rules: &[HeaderRule],
-    injected: &[InjectedHeader],
-) -> Result<(), String> {
-    if injected.is_empty() {
-        return Ok(());
-    }
-    let host = input["url_parsed"]["host"]
-        .as_str()
-        .unwrap_or("")
-        .to_string();
-    let method = input
-        .get("method")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let Some(headers) = input.get_mut("headers").and_then(|h| h.as_object_mut()) else {
-        return Ok(());
-    };
-    for inj in injected {
-        if rules
-            .get(inj.rule)
-            .is_some_and(|rule| rule.matches(&host, &method))
-        {
-            continue;
-        }
-        if headers.get(&inj.name).and_then(|v| v.as_str()) == Some(inj.value.as_str()) {
-            headers.remove(&inj.name);
-        }
-    }
-    Ok(())
-}
-
 // ── OPA policy input ─────────────────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -486,15 +458,11 @@ async fn op_fetch(
     #[string] body: String,
 ) -> Result<String, JsErrorBox> {
     // Clone config from OpState before any .await (Rc is !Send).
-    let (hooks, http_client, header_rules) = {
+    let (hooks, http_client) = {
         let state = state.borrow();
         let config = state.try_borrow::<FetchConfig>()
             .ok_or_else(|| JsErrorBox::generic("fetch: internal error — no fetch config available"))?;
-        (
-            config.hooks.clone(),
-            config.http_client.clone(),
-            config.header_rules.clone(),
-        )
+        (config.hooks.clone(), config.http_client.clone())
     };
 
     // Convert empty string (from JS null body) to None.
@@ -506,7 +474,7 @@ async fn op_fetch(
     // RefCell re-entrancy panic in deno_core's FuturesUnorderedDriver on
     // some Rust toolchains (observed with stable, not nightly).
     tokio::spawn(async move {
-        do_fetch(url, method, headers_json, body, hooks, http_client, header_rules).await
+        do_fetch(url, method, headers_json, body, hooks, http_client).await
     })
     .await
     .map_err(|e| JsErrorBox::generic(format!("fetch task join error: {}", e)))?
@@ -799,27 +767,19 @@ async fn do_fetch(
     body: Option<String>,
     hooks: Arc<HookChain>,
     http_client: reqwest::Client,
-    header_rules: Vec<HeaderRule>,
 ) -> Result<String, String> {
-    let mut headers: HashMap<String, String> = serde_json::from_str(&headers_json)
+    let headers: HashMap<String, String> = serde_json::from_str(&headers_json)
         .map_err(|e| format!("fetch: invalid headers JSON: {}", e))?;
 
-    // Parse URL into components for the hook/policy input
+    // Parse URL into components for the hook/policy input. Header injection
+    // is not applied here: it runs inside the chain as a native pre hook
+    // (`Hook::FetchHeaderInject`, inserted by `with_header_rules`), after
+    // every configured pre hook and before the policy — so it keys off the
+    // effective request and user hooks never see operator credentials.
     let parsed_url = url::Url::parse(&url_str)
         .map_err(|e| format!("fetch: invalid URL '{}': {}", url_str, e))?;
 
     let url_host = parsed_url.host_str().unwrap_or("").to_string();
-
-    // Apply header injection rules, keyed on the URL as requested by JS.
-    // This runs before the hook chain so the policy (the chain's final pre
-    // hook) validates the headers that will actually be sent. The injected
-    // set is tracked: if a pre hook rewrites the request so an injecting
-    // rule no longer matches (a different host, say), the normalizer strips
-    // that credential back out before later hooks and the policy see it —
-    // injection is never re-run for a hook-chosen destination.
-    let injected = apply_header_rules_tracked(&header_rules, &url_host, &method, &mut headers)
-        .await
-        .map_err(|e| format!("fetch: credential injection failed for host '{}': {}", url_host, e))?;
 
     let url_parsed = UrlParsed {
         scheme: parsed_url.scheme().to_string(),
@@ -841,11 +801,7 @@ async fn do_fetch(
     // effective input.
     let input_value = serde_json::to_value(&policy_input)
         .map_err(|e| format!("fetch: failed to serialize policy input: {}", e))?;
-    let normalize = |input: &mut serde_json::Value| -> Result<(), String> {
-        normalize_fetch_input(input)?;
-        strip_stale_injected_headers(input, &header_rules, &injected)
-    };
-    let effective = match hooks.run_pre_with(input_value, normalize).await? {
+    let effective = match hooks.run_pre_with(input_value, normalize_fetch_input).await? {
         PreOutcome::Allow(v) => {
             super::hooks::verify_operation(&v, "fetch", "fetch")?;
             v
@@ -1129,6 +1085,17 @@ mod tests {
 
     fn wrap(chain: Arc<PolicyChain>) -> Arc<crate::engine::hooks::HookChain> {
         Arc::new(crate::engine::hooks::HookChain::from_policy("fetch", chain))
+    }
+
+    /// Like `wrap`, with header injection installed as the native pre hook —
+    /// the same shape `FetchConfig::with_header_rules` produces.
+    fn wrap_with_rules(
+        chain: Arc<PolicyChain>,
+        rules: Vec<HeaderRule>,
+    ) -> Arc<crate::engine::hooks::HookChain> {
+        let mut hc = crate::engine::hooks::HookChain::from_policy("fetch", chain);
+        hc.insert_pre_before_policy(Hook::FetchHeaderInject(rules));
+        Arc::new(hc)
     }
 
     fn allow_when_authorization_matches(expected: &str) -> Arc<PolicyChain> {
@@ -1518,7 +1485,10 @@ allow if {{
         }))])
         .await;
         let echo_server = start_echo_server().await;
-        let policy_chain = wrap(allow_when_authorization_matches("Bearer policy-token"));
+        let policy_chain = wrap_with_rules(
+            allow_when_authorization_matches("Bearer policy-token"),
+            vec![oauth_rule_for_host("127.0.0.1", token_server.token_url())],
+        );
 
         let response = do_fetch(
             echo_server.url.clone(),
@@ -1527,7 +1497,6 @@ allow if {{
             None,
             policy_chain,
             reqwest::Client::new(),
-            vec![oauth_rule_for_host("127.0.0.1", token_server.token_url())],
         )
         .await
         .expect("fetch should succeed when policy sees injected auth");
@@ -1571,9 +1540,11 @@ allow if {{
             "GET".to_string(),
             "{}".to_string(),
             None,
-            wrap(Arc::new(PolicyChain::new(vec![], EvalMode::All))),
+            wrap_with_rules(
+                Arc::new(PolicyChain::new(vec![], EvalMode::All)),
+                vec![oauth_rule_for_host("example.com", token_server.token_url())],
+            ),
             reqwest::Client::new(),
-            vec![oauth_rule_for_host("example.com", token_server.token_url())],
         )
         .await
         .expect_err("dynamic auth failure should bubble up");
@@ -1644,7 +1615,6 @@ allow if {{
             Some(super::b64_encode(body.as_bytes())),
             wrap(Arc::new(PolicyChain::new(vec![], EvalMode::All))),
             reqwest::Client::new(),
-            vec![],
         )
         .await
         .expect("multipart fetch should succeed");
@@ -1718,7 +1688,6 @@ allow if {{
             None,
             policy,
             reqwest::Client::new(),
-            vec![],
         )
         .await
         .expect_err("a policy-denied host must be rejected");
@@ -1794,7 +1763,6 @@ allow if {{
             policy,
             // Production client — does not auto-follow redirects.
             super::build_fetch_http_client(),
-            vec![],
         )
         .await
         .expect("fetching the allowed host should succeed; the redirect is returned unfollowed");

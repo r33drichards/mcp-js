@@ -130,7 +130,7 @@ Operations with derived input fields keep them consistent through mutation: fetc
 
 The `operation` discriminator is likewise pinned: the executor performs the operation it was invoked for regardless of the JSON field, so a hook that rewrites `operation` (say `writeFile` → `readFile`) could only make the policy evaluate something other than what will run. Such a mutation fails the operation closed.
 
-Injected credentials don't follow rewrites: fetch's `--fetch-header` injection (static and OAuth) runs before the chain against the requested URL, and the injected set is tracked — when a hook rewrites the request so an injecting rule no longer matches (a different host, say), the untouched credential is stripped before later hooks and the policy see it. Injection is never re-run for a hook-chosen destination; a hook that redirects a request supplies any credentials the new destination needs itself.
+Credential injection is itself a hook: fetch's `--fetch-header` rules (static and OAuth) run as a native pre hook inserted after every configured pre hook and before the policy. The position does the security work — injection keys off the *effective* request, so a hook rewrite can never carry a credential to a destination its rule doesn't match; the policy validates the headers that will actually be sent; and user hooks never see operator credentials at all (a capability-bearing hook cannot exfiltrate a token it never receives). It is the first built-in boundary behavior realized as a chain member rather than a special case.
 
 ## Policies are hooks
 
@@ -172,7 +172,7 @@ A layer can call `next(input')` zero, one, or many times — and that one change
 
 In that model the *boundary itself* is a hook: the terminal executor — the real HTTP client, the real filesystem — is simply the default innermost layer, replaceable in configuration the way SQLite swaps its bottom VFS. A policy is the degenerate layer `if allow(input) { next(input) } else { deny }`; an audit log is a layer that calls `next` and appends a line either side; a record/replay harness is a layer that never calls `next` at all.
 
-None of the layered form is implemented yet — it is the design direction this system was shaped for. The current contract was chosen to be forward-compatible with it: every existing hook (abstain / deny / rewrite) maps mechanically onto a layer, so migrating the engine underneath does not have to break a single configured hook.
+The layered form is not implemented yet — it is the design direction this system was shaped for — but the flat chain is already absorbing built-ins: the policy runs as the final pre hook, and fetch credential injection runs as a native pre hook just before it. The current contract was chosen to be forward-compatible with full layering: every existing hook (abstain / deny / rewrite) maps mechanically onto a layer, so migrating the engine underneath does not have to break a single configured hook.
 
 ## Worked examples
 

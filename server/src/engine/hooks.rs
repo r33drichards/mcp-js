@@ -711,6 +711,13 @@ pub enum Hook {
     LocalJs(LocalJsHookEvaluator),
     Remote(RemoteHookEvaluator),
     Policy(Arc<PolicyChain>),
+    /// Native fetch credential injection as a pre hook. Positioned after the
+    /// configured pre hooks and before the policy, so it keys off the
+    /// *effective* destination (a hook rewrite can never carry credentials
+    /// to a host its rule doesn't match), the policy validates the headers
+    /// that will actually be sent, and user hooks never see operator
+    /// credentials at all.
+    FetchHeaderInject(Vec<super::fetch::HeaderRule>),
 }
 
 impl Hook {
@@ -735,6 +742,30 @@ impl Hook {
                 } else {
                     Ok(Err("denied by policy".to_string()))
                 };
+            }
+            Hook::FetchHeaderInject(rules) => {
+                debug_assert_eq!(*phase, Phase::Pre);
+                let host = payload["url_parsed"]["host"].as_str().unwrap_or("");
+                let method = payload.get("method").and_then(|v| v.as_str()).unwrap_or("");
+                let mut headers: std::collections::HashMap<String, String> = payload
+                    .get("headers")
+                    .cloned()
+                    .map(serde_json::from_value)
+                    .transpose()
+                    .map_err(|e| format!("{}: invalid headers in hook input: {}", op, e))?
+                    .unwrap_or_default();
+                let injected =
+                    super::fetch::apply_header_rules_tracked(rules, host, method, &mut headers)
+                        .await
+                        .map_err(|e| {
+                            format!("{}: credential injection failed for host '{}': {}", op, host, e)
+                        })?;
+                if injected.is_empty() {
+                    return Ok(Ok(current));
+                }
+                let mut replaced = current;
+                replaced["headers"] = serde_json::json!(headers);
+                return Ok(Ok(replaced));
             }
             Hook::Local(eval) => eval.evaluate(payload)?,
             Hook::LocalJs(eval) => {
@@ -822,6 +853,19 @@ impl HookChain {
     /// the output document when there is nothing to run).
     pub fn has_post(&self) -> bool {
         !self.post.is_empty()
+    }
+
+    /// Insert a system pre hook immediately before the trailing policy hook
+    /// (or at the end when no policy is configured). This is how built-in
+    /// boundary behavior — fetch credential injection — takes its place in
+    /// the chain: after every configured pre hook, before the policy.
+    pub fn insert_pre_before_policy(&mut self, hook: Hook) {
+        let at = if matches!(self.pre.last(), Some(Hook::Policy(_))) {
+            self.pre.len() - 1
+        } else {
+            self.pre.len()
+        };
+        self.pre.insert(at, hook);
     }
 
     /// Run the pre-hook chain over `input`.
