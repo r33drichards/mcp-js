@@ -449,12 +449,88 @@ class ServerResponseImpl extends OutgoingMessageImpl {
         return super.end(chunk, encoding, callback);
     }
 
-    writeContinue() {
+    writeContinue(callback) {
         this._writeRaw('HTTP/1.1 100 Continue\r\n\r\n');
+        if (typeof callback === 'function') Promise.resolve().then(callback);
     }
 
-    writeProcessing() {
+    writeProcessing(callback) {
         this._writeRaw('HTTP/1.1 102 Processing\r\n\r\n');
+        if (typeof callback === 'function') Promise.resolve().then(callback);
+    }
+
+    // Send an interim 1xx informational response (RFC 8297 / 100-series).
+    // 101 is reserved for protocol upgrade and is rejected here.
+    writeInformation(code, headers, callback) {
+        if (typeof headers === 'function') { callback = headers; headers = undefined; }
+        if (typeof code !== 'number') {
+            const err = new TypeError(
+                `The "code" argument must be of type number. Received ${receivedRepr(code)}`);
+            err.code = 'ERR_INVALID_ARG_TYPE';
+            throw err;
+        }
+        if (code === 101) {
+            const err = new RangeError(`Invalid status code: ${code}`);
+            err.code = 'ERR_HTTP_INVALID_STATUS_CODE';
+            throw err;
+        }
+        if (!Number.isInteger(code) || code < 100 || code > 199) {
+            const err = new RangeError(
+                `The value of "code" is out of range. It must be >= 100 && <= 199. Received ${code}`);
+            err.code = 'ERR_OUT_OF_RANGE';
+            throw err;
+        }
+        if (this.headersSent) {
+            const err = new Error('Cannot render headers after they are sent to the client');
+            err.code = 'ERR_HTTP_HEADERS_SENT';
+            throw err;
+        }
+        let block = `HTTP/1.1 ${code} ${STATUS_CODES[code] || 'unknown'}\r\n`;
+        const emit = (name, value) => {
+            validateHeaderName(name);
+            validateHeaderValue(name, value);
+            block += `${name}: ${value}\r\n`;
+        };
+        if (Array.isArray(headers)) {
+            if (headers.length > 0 && Array.isArray(headers[0])) {
+                for (const [name, value] of headers) emit(name, value);
+            } else {
+                for (let i = 0; i + 1 < headers.length; i += 2) emit(headers[i], headers[i + 1]);
+            }
+        } else if (headers && typeof headers === 'object') {
+            for (const name of Object.keys(headers)) {
+                const value = headers[name];
+                if (Array.isArray(value)) for (const v of value) emit(name, v);
+                else emit(name, value);
+            }
+        }
+        this._writeRaw(block + '\r\n');
+        if (typeof callback === 'function') Promise.resolve().then(callback);
+    }
+
+    // Early Hints (103): a convenience wrapper over writeInformation for the
+    // Link header preload pattern. `hints.link` (a string or array of link
+    // values) becomes a single Link header; an empty set sends nothing.
+    writeEarlyHints(hints, callback) {
+        const headers = {};
+        let hasHeader = false;
+        if (hints && typeof hints === 'object') {
+            for (const name of Object.keys(hints)) {
+                if (name.toLowerCase() === 'link') continue;
+                headers[name] = hints[name];
+                hasHeader = true;
+            }
+            if (hints.link !== undefined) {
+                const link = Array.isArray(hints.link)
+                    ? hints.link.join(', ') : String(hints.link);
+                if (link.length > 0) { headers.Link = link; hasHeader = true; }
+            }
+        }
+        if (!hasHeader) {
+            if (typeof callback === 'function') Promise.resolve().then(callback);
+            return;
+        }
+        this.writeInformation(103, headers, callback);
     }
 
 
@@ -1459,6 +1535,24 @@ class ResponseParser {
                 // The request itself is finished once upgraded; Node emits
                 // its 'close' after the upgrade is handed off.
                 Promise.resolve().then(() => this.request._emitReqClose());
+                return;
+            }
+            // A 1xx (other than 101, handled above) is an interim
+            // informational response: emit 'information' and keep parsing
+            // for the real response that follows.
+            if (res.statusCode >= 100 && res.statusCode < 200) {
+                this.res = null;
+                this.request.res = null;
+                this.request.emit('information', {
+                    httpVersion: res.httpVersion,
+                    httpVersionMajor: res.httpVersionMajor,
+                    httpVersionMinor: res.httpVersionMinor,
+                    statusCode: res.statusCode,
+                    statusMessage: res.statusMessage,
+                    headers: res.headers,
+                    rawHeaders: res.rawHeaders,
+                });
+                if (this.buf.length > 0) this.process();
                 return;
             }
             const te = String(res.headers['transfer-encoding'] || '').toLowerCase();
