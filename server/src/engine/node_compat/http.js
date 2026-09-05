@@ -68,6 +68,34 @@ const MAX_CHUNK_EXT_SIZE = 16384;
 // server arms to enforce headersTimeout/requestTimeout across live sockets.
 export const kConnectionsCheckingInterval = Symbol('http.server.connectionsCheckingInterval');
 
+// A single RFC 8288 Link field value: <uri>; then token or token=value params.
+// The URI may not carry CR/LF (a header-injection vector).
+const LINK_HEADER_RE = /^(?:<[^>\r\n]*>)(?:\s*;\s*[^;"\s]+(?:=(")?[^;"\s]*\1)?)*$/;
+
+// Validate an early-hints Link value (string or array of strings); anything
+// not shaped like `</styles.css>; rel=preload; as=style` is ERR_INVALID_ARG_VALUE.
+function validateLinkHeaderValue(hints) {
+    const bad = (value) => {
+        const err = new TypeError(
+            `The argument 'hints' is invalid. Received ${receivedRepr(value)}`);
+        err.code = 'ERR_INVALID_ARG_VALUE';
+        return err;
+    };
+    if (typeof hints === 'string') {
+        if (!LINK_HEADER_RE.test(hints)) throw bad(hints);
+        return hints;
+    }
+    if (Array.isArray(hints)) {
+        const parts = [];
+        for (const item of hints) {
+            if (typeof item !== 'string' || !LINK_HEADER_RE.test(item)) throw bad(item);
+            parts.push(item);
+        }
+        return parts.join(', ');
+    }
+    throw bad(hints);
+}
+
 const TOKEN_RE = /^[\^_`a-zA-Z\-0-9!#$%&'*+.|~]+$/;
 // Anything outside 0x21-0xff must be escaped in a request path.
 const INVALID_PATH_RE = /[^!-ÿ]/;
@@ -497,6 +525,37 @@ class ServerResponseImpl extends OutgoingMessageImpl {
         this.sendDate = true;
         this._keepAlive = shouldKeepAlive(req);
         this._suppressBody = Boolean(req && req.method === 'HEAD');
+        // Opt-in strict Content-Length accounting (res.strictContentLength).
+        this.strictContentLength = false;
+        this._bodyBytesWritten = 0;
+    }
+
+    // When strictContentLength is on and a Content-Length is set, a body
+    // write that would exceed it — or an end() that leaves the total unequal
+    // to it — throws ERR_HTTP_CONTENT_LENGTH_MISMATCH.
+    _checkContentLength(chunk, encoding, isEnd) {
+        if (!this.strictContentLength || !this.hasHeader('content-length')) return;
+        const cl = Number(this.getHeader('content-length'));
+        if (!Number.isFinite(cl)) return;
+        const len = chunk == null ? 0 : (Buffer.isBuffer(chunk)
+            ? chunk.length
+            : Buffer.byteLength(String(chunk),
+                typeof encoding === 'string' ? encoding : 'utf8'));
+        const total = this._bodyBytesWritten + len;
+        if (isEnd ? total !== cl : total > cl) {
+            const err = new Error(
+                'Response body larger than or unequal to content-length');
+            err.code = 'ERR_HTTP_CONTENT_LENGTH_MISMATCH';
+            throw err;
+        }
+        this._bodyBytesWritten = total;
+    }
+
+    write(chunk, encoding, callback) {
+        if (typeof chunk !== 'function') {
+            this._checkContentLength(chunk, encoding, false);
+        }
+        return super.write(chunk, encoding, callback);
     }
 
     // Node's assignSocket/detachSocket: bind a socket to a standalone
@@ -604,7 +663,10 @@ class ServerResponseImpl extends OutgoingMessageImpl {
     // Node buffers a single-shot end() and frames it with Content-Length
     // rather than chunked encoding.
     end(chunk, encoding, callback) {
-        if (typeof chunk !== 'function') validateOutgoingChunk(chunk);
+        if (typeof chunk !== 'function') {
+            validateOutgoingChunk(chunk);
+            this._checkContentLength(chunk, encoding, true);
+        }
         if (!this.headersSent && !this._wroteBody && !this._suppressBody
             && !this.hasHeader('trailer')
             && !this.hasHeader('content-length') && !this.hasHeader('transfer-encoding')) {
@@ -679,19 +741,23 @@ class ServerResponseImpl extends OutgoingMessageImpl {
     // Link header preload pattern. `hints.link` (a string or array of link
     // values) becomes a single Link header; an empty set sends nothing.
     writeEarlyHints(hints, callback) {
+        // Node requires an object; a bad type is ERR_INVALID_ARG_TYPE.
+        if (typeof hints !== 'object' || hints === null || Array.isArray(hints)) {
+            const err = new TypeError(
+                `The "hints" argument must be of type object. Received ${receivedRepr(hints)}`);
+            err.code = 'ERR_INVALID_ARG_TYPE';
+            throw err;
+        }
         const headers = {};
         let hasHeader = false;
-        if (hints && typeof hints === 'object') {
-            for (const name of Object.keys(hints)) {
-                if (name.toLowerCase() === 'link') continue;
-                headers[name] = hints[name];
-                hasHeader = true;
-            }
-            if (hints.link !== undefined) {
-                const link = Array.isArray(hints.link)
-                    ? hints.link.join(', ') : String(hints.link);
-                if (link.length > 0) { headers.Link = link; hasHeader = true; }
-            }
+        for (const name of Object.keys(hints)) {
+            if (name.toLowerCase() === 'link') continue;
+            headers[name] = hints[name];
+            hasHeader = true;
+        }
+        if (hints.link !== undefined) {
+            const link = validateLinkHeaderValue(hints.link);
+            if (link.length > 0) { headers.Link = link; hasHeader = true; }
         }
         if (!hasHeader) {
             if (typeof callback === 'function') Promise.resolve().then(callback);
