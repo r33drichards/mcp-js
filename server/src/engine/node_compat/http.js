@@ -597,17 +597,33 @@ class ConnectionParser {
         const connUpgrade = String(req.headers['connection'] || '')
             .toLowerCase().split(',').some((t) => t.trim() === 'upgrade');
         const isConnect = req.method === 'CONNECT';
-        if ((isConnect && this.server.listenerCount('connect') > 0)
-            || (upgradeHeader !== undefined && connUpgrade
-                && this.server.listenerCount('upgrade') > 0)) {
+        // A shouldUpgradeCallback option can veto an upgrade, in which case
+        // the request is served normally (Node 22+).
+        const shouldUpgrade = this.server._options
+            && typeof this.server._options.shouldUpgradeCallback === 'function'
+            ? Boolean(this.server._options.shouldUpgradeCallback(req))
+            : true;
+        if (shouldUpgrade
+            && ((isConnect && this.server.listenerCount('connect') > 0)
+                || (upgradeHeader !== undefined && connUpgrade
+                    && this.server.listenerCount('upgrade') > 0))) {
             const head = this.buf;
             this.buf = EMPTY;
             this.req = null;
             this.upgraded = true;
             req.complete = true;
             if (this.socket) this.socket._httpUpgraded = true;
-            this.server.emit(isConnect ? 'connect' : 'upgrade',
-                req, this.socket, head);
+            try {
+                this.server.emit(isConnect ? 'connect' : 'upgrade',
+                    req, this.socket, head);
+            } catch (error) {
+                // A throw from an upgrade/connect handler is an uncaught
+                // exception in Node, never a socket teardown.
+                if (error && typeof error === 'object') {
+                    error.__fromRequestHandler = true;
+                }
+                throw error;
+            }
             return false;
         }
         const te = String(req.headers['transfer-encoding'] || '').toLowerCase();
@@ -1405,6 +1421,9 @@ class ResponseParser {
                 const hadListener =
                     this.request.emit(eventName, res, this.socket, head);
                 if (!hadListener && this.socket) this.socket.destroy();
+                // The request itself is finished once upgraded; Node emits
+                // its 'close' after the upgrade is handed off.
+                Promise.resolve().then(() => this.request._emitReqClose());
                 return;
             }
             const te = String(res.headers['transfer-encoding'] || '').toLowerCase();
