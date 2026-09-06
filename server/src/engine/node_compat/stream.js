@@ -345,7 +345,7 @@ function writableMethods(proto) {
         configurable: true,
     });
     Object.defineProperty(proto, 'writableFinished', {
-        get() { return this._writableState.finished; },
+        get() { return this._writableState.finishEmitted === true; },
         configurable: true,
     });
 }
@@ -394,6 +394,9 @@ function maybeFinish(stream) {
         if (state.finished || state.destroyed) return;
         state.finished = true;
         later(() => {
+            // writableFinished flips true only once 'finish' actually fires,
+            // not when it is merely queued (Node's public-property timing).
+            state.finishEmitted = true;
             stream.emit('finish');
             maybeEmitClose(stream);
         });

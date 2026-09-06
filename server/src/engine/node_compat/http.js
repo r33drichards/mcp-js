@@ -346,6 +346,12 @@ class OutgoingMessageImpl extends Writable {
         this._suppressBody = false;
     }
 
+    // Node keeps an OutgoingMessage `writable` until it is torn down — it
+    // stays true even after end() (a documented legacy quirk).
+    get writable() {
+        return !(this._writableState && this._writableState.destroyed);
+    }
+
     setHeader(name, value) {
         validateHeaderName(name);
         validateHeaderValue(name, value);
