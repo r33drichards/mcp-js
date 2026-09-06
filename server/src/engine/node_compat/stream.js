@@ -323,7 +323,24 @@ function writableMethods(proto) {
         if (typeof chunk === 'function') { callback = chunk; chunk = undefined; }
         if (typeof encoding === 'function') { callback = encoding; encoding = undefined; }
         const state = this._writableState;
-        if (chunk !== undefined && chunk !== null && !state.ended && !state.destroyed) {
+        const hasChunk = chunk !== undefined && chunk !== null;
+        // A repeat end() on an already-ended stream: writing more data is a
+        // write-after-end error (surfaced on the stream too); an empty repeat
+        // just tells the caller the stream was already finished.
+        if (state.ended && !state.destroyed) {
+            if (hasChunk) {
+                const err = Object.assign(new Error('write after end'),
+                    { code: 'ERR_STREAM_WRITE_AFTER_END' });
+                if (callback) later(() => callback(err));
+                later(() => this.emit('error', err));
+            } else if (callback) {
+                const err = Object.assign(new Error('Cannot call end after a stream was finished'),
+                    { code: 'ERR_STREAM_ALREADY_FINISHED' });
+                later(() => callback(err));
+            }
+            return this;
+        }
+        if (hasChunk && !state.destroyed) {
             state.queue.push({ chunk, encoding, callback: undefined });
         }
         state.ended = true;
@@ -346,6 +363,18 @@ function writableMethods(proto) {
     });
     Object.defineProperty(proto, 'writableFinished', {
         get() { return this._writableState.finishEmitted === true; },
+        configurable: true,
+    });
+    Object.defineProperty(proto, 'writableCorked', {
+        get() { return this._writableState.corked || 0; },
+        configurable: true,
+    });
+    Object.defineProperty(proto, 'writableObjectMode', {
+        get() { return Boolean(this._writableState.objectMode); },
+        configurable: true,
+    });
+    Object.defineProperty(proto, 'writableHighWaterMark', {
+        get() { return this._writableState.highWaterMark; },
         configurable: true,
     });
 }
