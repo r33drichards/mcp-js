@@ -854,6 +854,63 @@ async fn op_mcp_call_tool(
         let mut arguments = arguments;
         let mut eff_input: Option<serde_json::Value> = None;
 
+        // Layered-stack mode: the tool call is the innermost layer; layers
+        // may rewrite the call, short-circuit with a synthetic result,
+        // retry, or transform the result.
+        if let Some(ref hooks) = hooks {
+            if hooks.has_stack() {
+                let policy_input = McpToolPolicyInput {
+                    operation: "mcp_call_tool",
+                    server: server_name.clone(),
+                    tool: tool_name.clone(),
+                    arguments: arguments
+                        .as_ref()
+                        .map(|a| serde_json::Value::Object(a.clone()))
+                        .unwrap_or(serde_json::Value::Null),
+                };
+                let input_value = serde_json::to_value(&policy_input).map_err(|e| {
+                    JsErrorBox::generic(format!(
+                        "mcp.callTool: failed to serialize input: {}",
+                        e
+                    ))
+                })?;
+                let manager = manager.clone();
+                let executor: super::hooks::StackExecutor =
+                    std::sync::Arc::new(move |effective: serde_json::Value| {
+                        let manager = manager.clone();
+                        Box::pin(async move {
+                            let eff: EffectiveMcpCall = serde_json::from_value(effective)
+                                .map_err(|e| {
+                                    format!("mcp.callTool: invalid effective input: {}", e)
+                                })?;
+                            let arguments = match eff.arguments {
+                                serde_json::Value::Object(map) => Some(map),
+                                serde_json::Value::Null => None,
+                                other => {
+                                    return Err(format!(
+                                        "mcp.callTool: layer produced non-object arguments: {}",
+                                        other
+                                    ));
+                                }
+                            };
+                            let result = manager
+                                .call_tool(&eff.server, &eff.tool, arguments)
+                                .await?;
+                            serde_json::to_value(&result)
+                                .map_err(|e| format!("mcp.callTool: serialization error: {}", e))
+                        })
+                            as std::pin::Pin<
+                                Box<dyn std::future::Future<Output = _> + Send>,
+                            >
+                    });
+                let output = hooks
+                    .run_stack_full(input_value, |_| Ok(()), executor)
+                    .await
+                    .map_err(|e| JsErrorBox::generic(e))?;
+                return Ok(output.to_string());
+            }
+        }
+
         // Run pre hooks + policy if configured; a hook may rewrite the call.
         if let Some(ref hooks) = hooks {
             let policy_input = McpToolPolicyInput {

@@ -857,6 +857,160 @@ async function handle(input, next) {
     assert_eq!(out, "token=hunter2 layer-saw=no");
 }
 
+// ── subprocess: full stack (executor innermost) ─────────────────────────────
+
+/// A subprocess stack layer short-circuits a "mocked" command with a
+/// synthetic result and transforms the exit code of real ones — the guest's
+/// child_process.exec sees layer output either way.
+#[tokio::test]
+async fn subprocess_stack_layer_short_circuits_and_transforms() {
+    ensure_v8();
+    let dir = tempfile::tempdir().unwrap();
+
+    // A synthetic result uses the executor's document shape; with utf8
+    // encoding, stdout is a plain string.
+    let layer_url = write_rego(
+        dir.path(),
+        "layer.js",
+        r#"
+async function handle(input, next) {
+    if (input.args.some((a) => a.includes("magic"))) {
+        return { code: 0, stdout: "mocked", stderr: "", success: true, encoding: "utf8" };
+    }
+    const out = await next(input);
+    return { ...out, code: out.code === 0 ? 0 : 42 };
+}
+"#,
+    );
+    let op = OperationPolicies {
+        stack: vec![
+            StackEntry::Source(js_source(layer_url, None)),
+            StackEntry::Builtin("@execute".to_string()),
+        ],
+        ..Default::default()
+    };
+    let chain = build_hook_chain(
+        "subprocess",
+        &op,
+        "mcp/subprocess",
+        "data.mcp.subprocess.allow",
+        stack_caps(),
+    )
+    .unwrap();
+    // Guest subprocess wiring rides on fetch + fs being configured.
+    let engine = build_engine()
+        .with_fetch_config(FetchConfig::new_with_hooks(Arc::new(HookChain::permissive(
+            "fetch",
+        ))))
+        .with_fs_config(FsConfig::new_with_hooks(Arc::new(HookChain::permissive(
+            "filesystem",
+        ))))
+        .with_subprocess_config(server::engine::subprocess::SubprocessConfig::new_with_hooks(
+            Arc::new(chain),
+        ));
+
+    // Short-circuit: the "magic" command never runs; the layer answers.
+    let out = eval(
+        &engine,
+        r#"child_process.exec("magic").then(r => r.stdout)"#.to_string(),
+    )
+    .await;
+    assert_eq!(out, "mocked");
+
+    // Real execution with a transformed exit code on failure.
+    let out = eval(
+        &engine,
+        r#"child_process.exec("exit 3").then(r => "code=" + r.code)"#.to_string(),
+    )
+    .await;
+    assert_eq!(out, "code=42");
+}
+
+// ── filesystem: gate-mode stack ─────────────────────────────────────────────
+
+/// An fs stack runs in gate mode: the layer rewrites the path (full next
+/// mechanics) and `@policy` gates the effective input; the operation then
+/// executes with the captured input. Layers cannot fabricate outputs.
+#[tokio::test]
+async fn fs_stack_gate_mode_rewrites_and_gates() {
+    ensure_v8();
+    let dir = tempfile::tempdir().unwrap();
+    let data_dir = dir.path().join("data");
+    let safe_dir = data_dir.join("safe");
+    std::fs::create_dir_all(&safe_dir).unwrap();
+    let data_dir_str = data_dir.to_string_lossy().into_owned();
+
+    let layer_url = write_rego(
+        dir.path(),
+        "layer.js",
+        &format!(
+            r#"
+async function handle(input, next) {{
+    if (input.path && !input.path.includes("/safe/")) {{
+        const parts = input.path.split("/");
+        return next({{ ...input, path: {data:?} + "/safe/" + parts[parts.length - 1] }});
+    }}
+    return next(input);
+}}
+"#,
+            data = data_dir_str,
+        ),
+    );
+    let policy_url = write_rego(
+        dir.path(),
+        "policy.rego",
+        &format!(
+            r#"
+package mcp.filesystem
+
+default allow = false
+
+allow if {{
+    startswith(input.path, "{data_dir_str}/safe/")
+}}
+"#
+        ),
+    );
+    let op = OperationPolicies {
+        policies: vec![PolicySource {
+            url: policy_url,
+            policy_path: None,
+            rule: None,
+        }],
+        stack: vec![
+            StackEntry::Source(js_source(layer_url, None)),
+            StackEntry::Builtin("@policy".to_string()),
+            StackEntry::Builtin("@execute".to_string()),
+        ],
+        ..Default::default()
+    };
+    let chain = build_hook_chain(
+        "filesystem",
+        &op,
+        "mcp/filesystem",
+        "data.mcp.filesystem.allow",
+        HookCaps {
+            input_mutation: true,
+            post: false,
+        },
+    )
+    .unwrap();
+    let engine = build_engine().with_fs_config(FsConfig::new_with_hooks(Arc::new(chain)));
+
+    // A write outside /safe/ is rewritten into it (and the policy passes
+    // because it evaluates the rewritten path).
+    let out = eval(
+        &engine,
+        format!(
+            r#"fs.writeFile("{data_dir_str}/a.txt", "1").then(() => fs.readFile("{data_dir_str}/safe/a.txt", "utf8"))"#
+        ),
+    )
+    .await;
+    assert_eq!(out, "1");
+    assert!(!data_dir.join("a.txt").exists(), "original path must not be written");
+    assert!(safe_dir.join("a.txt").exists());
+}
+
 // ── fetch: injected credentials do not follow a hook's host rewrite ─────────
 
 /// A header rule injects a credential for host `127.0.0.1`. A pre hook that

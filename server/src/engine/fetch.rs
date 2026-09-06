@@ -893,13 +893,17 @@ async fn do_fetch(
     if hooks.has_stack() {
         let client = http_client.clone();
         let body = body.clone();
-        let executor: &super::hooks::StackExecutor<'_> = &move |effective: serde_json::Value| {
-            let client = client.clone();
-            let body = body.clone();
-            Box::pin(async move { execute_fetch_request(&client, effective, body).await })
-        };
+        let executor: super::hooks::StackExecutor =
+            Arc::new(move |effective: serde_json::Value| {
+                let client = client.clone();
+                let body = body.clone();
+                Box::pin(async move { execute_fetch_request(&client, effective, body).await })
+                    as std::pin::Pin<
+                        Box<dyn std::future::Future<Output = Result<serde_json::Value, String>> + Send>,
+                    >
+            });
         let output = hooks
-            .run_stack(input_value, normalize_fetch_input, executor)
+            .run_stack_full(input_value, normalize_fetch_input, executor)
             .await?;
         return Ok(output.to_string());
     }

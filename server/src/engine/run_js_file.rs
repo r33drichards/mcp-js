@@ -75,41 +75,55 @@ impl RunJsFilePolicy {
             // When a pre hook rewrites the path, the normalizer re-canonicalizes
             // it immediately, so later hooks — and the policy, which runs last —
             // keep the "policies see canonicalized paths" invariant.
-            let outcome = chain
-                .run_pre_with(input, |input| {
-                    let path = input
-                        .get("path")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| {
-                            "run_js file: pre hook produced an input without a string 'path'"
-                                .to_string()
-                        })?
-                        .to_string();
-                    let canonical = std::fs::canonicalize(&path)
-                        .map_err(|e| format!("run_js file '{}': {}", path, e))?;
-                    input["path"] =
-                        serde_json::json!(canonical.to_string_lossy().into_owned());
-                    Ok(())
-                })
-                .await
-                .map_err(|e| format!("run_js file hook chain error: {}", e))?;
+            fn canonicalize_path(input: &mut serde_json::Value) -> Result<(), String> {
+                let path = input
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        "run_js file: pre hook produced an input without a string 'path'"
+                            .to_string()
+                    })?
+                    .to_string();
+                let canonical = std::fs::canonicalize(&path)
+                    .map_err(|e| format!("run_js file '{}': {}", path, e))?;
+                input["path"] = serde_json::json!(canonical.to_string_lossy().into_owned());
+                Ok(())
+            }
+            if chain.has_stack() {
+                let effective = chain
+                    .run_stack_gate(input, canonicalize_path)
+                    .await
+                    .map_err(|e| format!("run_js file: {}", e))?;
+                effective_path = effective
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        "run_js file: effective input lost its 'path'".to_string()
+                    })?
+                    .to_string();
+            } else {
+                let outcome = chain
+                    .run_pre_with(input, canonicalize_path)
+                    .await
+                    .map_err(|e| format!("run_js file hook chain error: {}", e))?;
 
-            match outcome {
-                PreOutcome::Allow(effective) => {
-                    super::hooks::verify_operation(&effective, "read", "run_js file")?;
-                    effective_path = effective
-                        .get("path")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| {
-                            "run_js file: effective input lost its 'path'".to_string()
-                        })?
-                        .to_string();
-                }
-                PreOutcome::Deny(deny) => {
-                    return Err(format!(
-                        "run_js file '{}' {} (run_js_file policy)",
-                        canonical_str, deny
-                    ));
+                match outcome {
+                    PreOutcome::Allow(effective) => {
+                        super::hooks::verify_operation(&effective, "read", "run_js file")?;
+                        effective_path = effective
+                            .get("path")
+                            .and_then(|v| v.as_str())
+                            .ok_or_else(|| {
+                                "run_js file: effective input lost its 'path'".to_string()
+                            })?
+                            .to_string();
+                    }
+                    PreOutcome::Deny(deny) => {
+                        return Err(format!(
+                            "run_js file '{}' {} (run_js_file policy)",
+                            canonical_str, deny
+                        ));
+                    }
                 }
             }
         }

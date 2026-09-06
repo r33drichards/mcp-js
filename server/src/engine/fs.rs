@@ -1317,17 +1317,27 @@ async fn check_policy(
     let input_value = serde_json::to_value(&input)
         .map_err(|e| format!("fs.{}: failed to serialize policy input: {}", operation, e))?;
 
-    let effective = match hooks
-        .run_pre(input_value)
-        .await
-        .map_err(|e| format!("fs.{}: hook chain error: {}", operation, e))?
-    {
-        PreOutcome::Allow(v) => v,
-        PreOutcome::Deny(deny) => {
-            return Err(format!(
-                "fs.{} {}: {} is not allowed",
-                operation, deny, path
-            ));
+    let effective = if hooks.has_stack() {
+        // Gate-mode stack: layers gate/rewrite/observe with full next()
+        // mechanics; the terminal captures the effective input, which this
+        // operation then executes.
+        hooks
+            .run_stack_gate(input_value, |_| Ok(()))
+            .await
+            .map_err(|e| format!("fs.{}: {}", operation, e))?
+    } else {
+        match hooks
+            .run_pre(input_value)
+            .await
+            .map_err(|e| format!("fs.{}: hook chain error: {}", operation, e))?
+        {
+            PreOutcome::Allow(v) => v,
+            PreOutcome::Deny(deny) => {
+                return Err(format!(
+                    "fs.{} {}: {} is not allowed",
+                    operation, deny, path
+                ));
+            }
         }
     };
 

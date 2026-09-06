@@ -801,12 +801,8 @@ async fn js_hook_call(
     deno_core::scope!(scope, runtime);
     let local = v8::Local::new(scope, settled);
     if local.is_undefined() || local.is_null() {
-        if layer {
-            return Err(format!(
-                "JS layer '{}' returned no output; return next(input)'s result or a response object",
-                path
-            ));
-        }
+        // Layers: null propagates (gate-mode next() resolves to null; full
+        // mode rejects a null final output at the top of the stack).
         return Ok(None);
     }
     deno_core::serde_v8::from_v8::<Value>(scope, local)
@@ -963,12 +959,14 @@ pub enum Layer {
 
 /// The operation's real executor, as seen by the layer driver: called at the
 /// innermost position, possibly more than once (a layer may retry).
-pub type StackExecutor<'a> = dyn Fn(
-        Value,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<Value, String>> + Send + 'a>,
-    > + Send
-    + Sync;
+pub type StackExecutor = Arc<
+    dyn Fn(
+            Value,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<Value, String>> + Send>,
+        > + Send
+        + Sync,
+>;
 
 // ── HookChain ────────────────────────────────────────────────────────────
 
@@ -1060,11 +1058,11 @@ impl HookChain {
     /// possibly more than once if a layer retries). `normalize` re-derives
     /// computed input fields after every rewrite, and the `operation`
     /// discriminator is pinned at every descent.
-    pub async fn run_stack<'a>(
-        &'a self,
+    pub async fn run_stack(
+        &self,
         input: Value,
         normalize: fn(&mut Value) -> Result<(), String>,
-        executor: &'a StackExecutor<'a>,
+        executor: StackExecutor,
     ) -> Result<Value, String> {
         let identity = input
             .get("operation")
@@ -1074,12 +1072,94 @@ impl HookChain {
         self.call_layer(0, input, normalize, executor, identity).await
     }
 
+    /// Run a layered stack in **gate mode**, for operations whose executor
+    /// produces no layered output document (filesystem, run_js_file, and the
+    /// gate-only operations). Layers run with full `next` mechanics, but the
+    /// terminal position captures the effective input and resolves `next` to
+    /// `null`; the caller then executes with the captured input. Fail-closed
+    /// rules: a synthetic (non-null) output is rejected, the terminal may be
+    /// reached at most once, a stack that never reaches it is an error, and
+    /// operations without input-mutation support reject a rewritten input.
+    pub async fn run_stack_gate(
+        &self,
+        input: Value,
+        normalize: fn(&mut Value) -> Result<(), String>,
+    ) -> Result<Value, String> {
+        let original = input.clone();
+        let captured = Arc::new(Mutex::new(None::<Value>));
+        let capture = captured.clone();
+        let op_name = self.op.clone();
+        let executor: StackExecutor = Arc::new(move |effective: Value| {
+            let mut slot = capture.lock().expect("gate capture lock poisoned");
+            let result = if slot.is_some() {
+                Err(format!(
+                    "{}: gate-only stack — the executor may be reached only once \
+                     (this operation cannot be retried from a layer)",
+                    op_name
+                ))
+            } else {
+                *slot = Some(effective);
+                Ok(Value::Null)
+            };
+            Box::pin(async move { result })
+                as std::pin::Pin<Box<dyn std::future::Future<Output = _> + Send>>
+        });
+        let output = self.run_stack(input, normalize, executor).await?;
+        if !output.is_null() {
+            return Err(format!(
+                "{}: gate-only stack — this operation has no layered output; a layer must \
+                 return next(input)'s result, not a synthetic response",
+                self.op
+            ));
+        }
+        let effective = captured
+            .lock()
+            .expect("gate capture lock poisoned")
+            .take()
+            .ok_or_else(|| {
+                format!(
+                    "{}: stack completed without reaching '@execute' — a gate-mode layer \
+                     must call next(input)",
+                    self.op
+                )
+            })?;
+        if !self.input_mutation && effective != original {
+            return Err(format!(
+                "a layer attempted to mutate the input for '{}', which does not support \
+                 input mutation",
+                self.op
+            ));
+        }
+        Ok(effective)
+    }
+
+    /// Run a layered stack in **full mode** (operations with a layered
+    /// output document — fetch, subprocess, mcp_tools): the final output
+    /// must be an object; a stack whose outermost layer returns nothing is
+    /// an error rather than a silent null response.
+    pub async fn run_stack_full(
+        &self,
+        input: Value,
+        normalize: fn(&mut Value) -> Result<(), String>,
+        executor: StackExecutor,
+    ) -> Result<Value, String> {
+        let output = self.run_stack(input, normalize, executor).await?;
+        if !output.is_object() {
+            return Err(format!(
+                "{}: stack produced no output — the outermost layer must return \
+                 next(input)'s result or a response object",
+                self.op
+            ));
+        }
+        Ok(output)
+    }
+
     fn call_layer<'a>(
         &'a self,
         idx: usize,
         input: Value,
         normalize: fn(&mut Value) -> Result<(), String>,
-        executor: &'a StackExecutor<'a>,
+        executor: StackExecutor,
         identity: String,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, String>> + Send + 'a>>
     {
@@ -1088,10 +1168,11 @@ impl HookChain {
                 // Innermost position: the real executor.
                 return executor(input).await;
             };
+            let executor = &executor;
             match layer {
                 Layer::InjectSlot => {
                     // "@inject" configured but no header rules attached.
-                    self.call_layer(idx + 1, input, normalize, executor, identity)
+                    self.call_layer(idx + 1, input, normalize, executor.clone(), identity)
                         .await
                 }
                 Layer::Gate(hook) => {
@@ -1106,7 +1187,7 @@ impl HookChain {
                                 normalize(&mut next_input)?;
                                 verify_operation(&next_input, &identity, &self.op)?;
                             }
-                            self.call_layer(idx + 1, next_input, normalize, executor, identity)
+                            self.call_layer(idx + 1, next_input, normalize, executor.clone(), identity)
                                 .await
                         }
                     }
@@ -1126,13 +1207,7 @@ impl HookChain {
                                 let result = r.map_err(|_| {
                                     format!("JS layer '{}' worker terminated unexpectedly", eval.path)
                                 })??;
-                                return result.ok_or_else(|| {
-                                    format!(
-                                        "JS layer '{}' returned no output; return next(input)'s \
-                                         result or a response object",
-                                        eval.path
-                                    )
-                                });
+                                return Ok(result.unwrap_or(Value::Null));
                             }
                             Some((mut inner_input, reply)) = next_rx.recv() => {
                                 let descent = async {
@@ -1142,7 +1217,7 @@ impl HookChain {
                                         idx + 1,
                                         inner_input,
                                         normalize,
-                                        executor,
+                                        executor.clone(),
                                         identity.clone(),
                                     )
                                     .await
@@ -1328,12 +1403,6 @@ pub fn build_hook_chain(
     }
 
     if !config.stack.is_empty() {
-        if op != "fetch" {
-            return Err(format!(
-                "'stack' is currently supported for 'fetch' only (got operation '{}')",
-                op
-            ));
-        }
         if !config.pre.is_empty() || !config.post.is_empty() {
             return Err(
                 "'stack' is mutually exclusive with 'pre'/'post': a stack expresses both sides \
@@ -1426,6 +1495,12 @@ fn build_stack_chain(
                     layers.push(Layer::Gate(Hook::Policy(Arc::new(chain))));
                 }
                 "@inject" => {
+                    if op != "fetch" {
+                        return Err(format!(
+                            "stack for '{}': '@inject' is a fetch built-in (header injection)",
+                            op
+                        ));
+                    }
                     if saw_inject {
                         return Err(format!("stack for '{}': duplicate '@inject'", op));
                     }
@@ -2677,15 +2752,24 @@ async function pre(input) {{
 
     #[test]
     fn stack_is_fetch_only_and_excludes_pre_post() {
-        let err = build_hook_chain(
+        // Stacks build for every operation; "@inject" stays fetch-only.
+        assert!(build_hook_chain(
             "filesystem",
             &stack_config(vec![builtin("@execute")]),
             "mcp/filesystem",
             "data.mcp.filesystem.allow",
             CAPS_FULL,
         )
+        .is_ok());
+        let err = build_hook_chain(
+            "filesystem",
+            &stack_config(vec![builtin("@inject"), builtin("@execute")]),
+            "mcp/filesystem",
+            "data.mcp.filesystem.allow",
+            CAPS_FULL,
+        )
         .unwrap_err();
-        assert!(err.contains("supported for 'fetch' only"), "got: {err}");
+        assert!(err.contains("fetch built-in"), "got: {err}");
 
         let dir = tempfile::tempdir().unwrap();
         let path = write_js(dir.path(), "hook.js", "function pre(input) {}\n");
@@ -2730,6 +2814,127 @@ async function pre(input) {{
         )
         .unwrap_err();
         assert!(err.contains("appears more than once"), "got: {err}");
+    }
+
+    // ── gate-mode stacks ─────────────────────────────────────────────────
+
+    const CAPS_GATE: HookCaps = HookCaps {
+        input_mutation: false,
+        post: false,
+    };
+
+    fn stack_with_js(dir: &std::path::Path, body: &str) -> OperationPolicies {
+        let path = write_js(dir, "layer.js", body);
+        stack_config(vec![
+            StackEntry::Source(js_hook(&path, None)),
+            builtin("@execute"),
+        ])
+    }
+
+    #[tokio::test]
+    async fn gate_mode_rejects_synthetic_output_and_double_execute() {
+        ensure_v8();
+        let dir = tempfile::tempdir().unwrap();
+
+        let chain = build_hook_chain(
+            "filesystem",
+            &stack_with_js(dir.path(), r#"
+async function handle(input, next) { return { fake: true }; }
+"#),
+            "mcp/filesystem",
+            "data.mcp.filesystem.allow",
+            CAPS_FULL,
+        )
+        .unwrap();
+        let err = chain
+            .run_stack_gate(serde_json::json!({"operation": "readFile", "path": "/x"}), |_| Ok(()))
+            .await
+            .unwrap_err();
+        assert!(err.contains("no layered output"), "got: {err}");
+
+        let chain = build_hook_chain(
+            "filesystem",
+            &stack_with_js(dir.path(), r#"
+async function handle(input, next) { await next(input); return next(input); }
+"#),
+            "mcp/filesystem",
+            "data.mcp.filesystem.allow",
+            CAPS_FULL,
+        )
+        .unwrap();
+        let err = chain
+            .run_stack_gate(serde_json::json!({"operation": "readFile", "path": "/x"}), |_| Ok(()))
+            .await
+            .unwrap_err();
+        assert!(err.contains("reached only once"), "got: {err}");
+
+        let chain = build_hook_chain(
+            "filesystem",
+            &stack_with_js(dir.path(), r#"
+async function handle(input, next) { return null; }
+"#),
+            "mcp/filesystem",
+            "data.mcp.filesystem.allow",
+            CAPS_FULL,
+        )
+        .unwrap();
+        let err = chain
+            .run_stack_gate(serde_json::json!({"operation": "readFile", "path": "/x"}), |_| Ok(()))
+            .await
+            .unwrap_err();
+        // A null return with no next() reads as "layer returned no output".
+        assert!(
+            err.contains("returned no output") || err.contains("without reaching"),
+            "got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn gate_mode_mutation_rules_follow_op_capabilities() {
+        ensure_v8();
+        let dir = tempfile::tempdir().unwrap();
+        let body = r#"
+async function handle(input, next) {
+    return next({ ...input, path: "/rewritten" });
+}
+"#;
+        // Mutation-capable op: the rewrite is captured.
+        let chain = build_hook_chain(
+            "filesystem",
+            &stack_with_js(dir.path(), body),
+            "mcp/filesystem",
+            "data.mcp.filesystem.allow",
+            CAPS_FULL,
+        )
+        .unwrap();
+        let eff = chain
+            .run_stack_gate(serde_json::json!({"operation": "readFile", "path": "/x"}), |_| Ok(()))
+            .await
+            .unwrap();
+        assert_eq!(eff["path"], "/rewritten");
+
+        // Gate-only op: the same rewrite fails closed.
+        let body_ws = r#"
+async function handle(input, next) {
+    return next({ ...input, url: "wss://elsewhere" });
+}
+"#;
+        let chain = build_hook_chain(
+            "websocket",
+            &stack_with_js(dir.path(), body_ws),
+            "mcp/websocket",
+            "data.mcp.websocket.allow",
+            CAPS_GATE,
+        )
+        .unwrap();
+        let err = chain
+            .run_stack_gate(
+                serde_json::json!({"operation": "websocket_connect", "url": "wss://ok"}),
+                |_| Ok(()),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.contains("does not support"), "got: {err}");
     }
 
     // ── verify_operation ─────────────────────────────────────────────────

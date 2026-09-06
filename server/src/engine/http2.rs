@@ -245,7 +245,9 @@ async fn do_h2_connect(
     let input_value = serde_json::to_value(&policy_input)
         .map_err(|e| format!("http2: failed to serialize policy input: {e}"))?;
     // Gate-only: http2 does not apply input mutation.
-    if let PreOutcome::Deny(deny) = hooks.run_pre(input_value).await? {
+    if hooks.has_stack() {
+        hooks.run_stack_gate(input_value, |_| Ok(())).await?;
+    } else if let PreOutcome::Deny(deny) = hooks.run_pre(input_value).await? {
         return Err(format!(
             "http2 {deny}: connect to {url_str} is not allowed"
         ));
@@ -412,7 +414,9 @@ async fn do_h2_request(
     };
     let input_value = serde_json::to_value(&policy_input)
         .map_err(|e| format!("http2: failed to serialize policy input: {e}"))?;
-    if let PreOutcome::Deny(deny) = hooks.run_pre(input_value).await? {
+    if hooks.has_stack() {
+        hooks.run_stack_gate(input_value, |_| Ok(())).await?;
+    } else if let PreOutcome::Deny(deny) = hooks.run_pre(input_value).await? {
         return Err(format!(
             "http2 {deny}: {method} {scheme}://{authority}{path} is not allowed"
         ));

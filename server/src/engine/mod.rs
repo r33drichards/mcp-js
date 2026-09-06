@@ -2014,6 +2014,13 @@ impl Engine {
             return Ok(());
         };
         let input = serde_json::json!({ "op": op, "label": label, "ca_id": ca_id });
+        if chain.has_stack() {
+            return chain
+                .run_stack_gate(input, |_| Ok(()))
+                .await
+                .map(|_| ())
+                .map_err(|e| format!("fs_snapshot: {e}"));
+        }
         match chain
             .run_pre(input)
             .await

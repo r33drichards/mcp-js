@@ -228,8 +228,10 @@ async fn do_ws_connect(
     let input_value = serde_json::to_value(&policy_input)
         .map_err(|e| format!("websocket: failed to serialize policy input: {e}"))?;
     // Gate-only: websocket does not apply input mutation, so a pre hook that
-    // attempts one fails the connect (enforced by the chain).
-    if let PreOutcome::Deny(deny) = hooks.run_pre(input_value).await? {
+    // attempts one fails the connect (enforced by the chain / gate stack).
+    if hooks.has_stack() {
+        hooks.run_stack_gate(input_value, |_| Ok(())).await?;
+    } else if let PreOutcome::Deny(deny) = hooks.run_pre(input_value).await? {
         return Err(format!(
             "websocket {deny}: connect to {url_str} is not allowed"
         ));

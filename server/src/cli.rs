@@ -616,7 +616,7 @@ pub struct Cli {
     /// Hook sources: file://*.rego (Rego rule; "rule" names it), file://*.js (JavaScript in its own V8 isolate — "rule" names the function, default pre/post; "timeout_ms" bounds a call, default 5000; hooks may be async; "capabilities": ["fs","fetch"] grants the guest environment's APIs, ungated, for observing hooks like write-audit logs), or http(s):// (OPA-style REST).
     /// A hook evaluates to a bool, or to {"allow": bool, "reason": "...", "input"|"output": {...}} to deny or rewrite; an undefined result abstains.
     /// Input mutation applies to fetch, filesystem, subprocess, mcp_tools, and run_js_file; post hooks to fetch, subprocess, and mcp_tools.
-    /// fetch also accepts "stack": an ordered layered form replacing pre/post — hook sources plus the built-ins "@inject", "@policy", and "@execute" (required, last); JS stack sources export handle(input, next) and may short-circuit, retry, or transform the response.
+    /// Every operation also accepts "stack": an ordered layered form replacing pre/post — hook sources plus the built-ins "@inject" (fetch only), "@policy", and "@execute" (required, last); JS stack sources export handle(input, next). fetch/subprocess/mcp_tools run full mode (short-circuit, retry, response transforms); the other operations run gate mode (next resolves to null, layers gate/rewrite/observe, synthetic outputs fail closed).
     #[arg(
         long = "policies-json",
         env = "MCP_V8_POLICIES_JSON",

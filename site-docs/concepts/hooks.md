@@ -151,7 +151,7 @@ The direction of travel is to phase out the separate policies vocabulary: `polic
 
 ## Layered stacks
 
-Because every sandbox effect crosses through exactly one operation seam, the hook system generalizes to the model SQLite uses for its VFS layer: each shim implements the same interface, wraps the next one down, and the real executor is just the default innermost layer. This is implemented today for **fetch** via the `stack` config key:
+Because every sandbox effect crosses through exactly one operation seam, the hook system generalizes to the model SQLite uses for its VFS layer: each shim implements the same interface, wraps the next one down, and the real executor is just the default innermost layer. Every operation accepts the `stack` config key:
 
 ```json
 {
@@ -195,7 +195,19 @@ A rejected `next` (an inner deny, a failed request) is an ordinary exception the
 - **Timeout is per layer call**, terminating runaway script and abandoning hung descents (fail closed).
 - **One worker per file.** Calls through one JS file are serialized on its warm isolate; the same file may appear only once per stack (a nested self-call would deadlock — enforced at startup).
 
-The flat `pre`/`post` chain remains fully supported; a stack is opt-in per operation, and `stack` is currently accepted for `fetch` only. Extending it to the remaining operations — and swapping `@execute` itself for a virtual executor (recorded network, in-memory fs) — is the design direction the contract was shaped for: every flat hook maps mechanically onto a layer, so the migration cannot break a configured hook.
+### Full mode and gate mode
+
+How much of the layer contract an operation supports follows from whether its executor produces a layered output document:
+
+| Operations | Mode | `next()` resolves to | Short-circuit / retry | Rewrite |
+|---|---|---|---|---|
+| `fetch`, `subprocess`, `mcp_tools` | **full** | the real output document | ✅ | ✅ |
+| `filesystem`, `run_js_file` | **gate** | `null` | ❌ (fails closed) | ✅ |
+| `websocket`, `http2`, `modules`, `fs_snapshot` | **gate** | `null` | ❌ (fails closed) | ❌ (fails closed) |
+
+In **gate mode** the operation has no layered output: layers gate, rewrite (where the executor applies mutations), and observe with full `next` mechanics, but the terminal position captures the effective input and resolves `next` to `null` — the operation then executes with the captured input. A layer returning a synthetic non-null output, reaching the terminal twice, or never calling `next` fails the operation closed, as does a rewrite on an operation without input-mutation support. A gate-mode pass-through layer is simply `return next(input)`.
+
+The flat `pre`/`post` chain remains fully supported; a stack is opt-in per operation. Swapping `@execute` itself for a virtual executor (recorded network, in-memory fs) is the remaining step of the design direction: every flat hook maps mechanically onto a layer, so that migration cannot break a configured hook.
 
 ## Worked examples
 

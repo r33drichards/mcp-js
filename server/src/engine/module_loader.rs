@@ -238,19 +238,28 @@ impl ModuleLoader for NetworkModuleLoader {
                         "Failed to serialize module policy input: {}", e
                     )))?;
 
-                match hooks
-                    .run_pre(input_value)
-                    .await
-                    .map_err(|e| JsErrorBox::generic(format!(
-                        "Module hook chain check failed for '{}': {}",
-                        specifier, e
-                    )))? {
-                    PreOutcome::Allow(_) => {}
-                    PreOutcome::Deny(deny) => {
-                        return Err(JsErrorBox::generic(format!(
-                            "Module import {}: '{}' is not allowed",
-                            deny, specifier
-                        )));
+                if hooks.has_stack() {
+                    hooks
+                        .run_stack_gate(input_value, |_| Ok(()))
+                        .await
+                        .map_err(|e| JsErrorBox::generic(format!(
+                            "Module import '{}': {}", specifier, e
+                        )))?;
+                } else {
+                    match hooks
+                        .run_pre(input_value)
+                        .await
+                        .map_err(|e| JsErrorBox::generic(format!(
+                            "Module hook chain check failed for '{}': {}",
+                            specifier, e
+                        )))? {
+                        PreOutcome::Allow(_) => {}
+                        PreOutcome::Deny(deny) => {
+                            return Err(JsErrorBox::generic(format!(
+                                "Module import {}: '{}' is not allowed",
+                                deny, specifier
+                            )));
+                        }
                     }
                 }
             }

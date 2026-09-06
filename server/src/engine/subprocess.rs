@@ -90,32 +90,13 @@ async fn op_subprocess_output(
         let options: SubprocessOptions = serde_json::from_str(&options_json)
             .map_err(|e| format!("subprocess: invalid options JSON: {}", e))?;
 
+        if hooks.has_stack() {
+            return run_stack_mode(&hooks, "command_output", &command, &args, &options).await;
+        }
+
         let (eff, eff_input) =
             run_pre_hooks(&hooks, "command_output", &command, &args, &options).await?;
-
-        let mut cmd = tokio::process::Command::new(&eff.command);
-        cmd.args(&eff.args);
-
-        if let Some(ref cwd) = eff.cwd {
-            cmd.current_dir(cwd);
-        }
-        if let Some(ref env) = eff.env {
-            cmd.envs(env);
-        }
-
-        let output = cmd.output().await
-            .map_err(|e| format!("subprocess: failed to execute '{}': {}", eff.command, e))?;
-
-        let stdout = base64_encode(&output.stdout);
-        let stderr = base64_encode(&output.stderr);
-
-        let result = serde_json::json!({
-            "code": output.status.code().unwrap_or(-1),
-            "stdout": stdout,
-            "stderr": stderr,
-            "success": output.status.success(),
-        });
-
+        let result = execute_subprocess_effective(eff_input.clone(), None).await?;
         run_post_hooks(&hooks, "command_output", &eff.command, &eff_input, result).await
     })
     .await
@@ -144,6 +125,17 @@ async fn op_subprocess_exec(
         let shell = if cfg!(target_os = "windows") { "cmd" } else { "/bin/sh" };
         let shell_arg = if cfg!(target_os = "windows") { "/C" } else { "-c" };
 
+        if hooks.has_stack() {
+            return run_stack_mode(
+                &hooks,
+                "exec",
+                shell,
+                &[shell_arg.to_string(), command.clone()],
+                &options,
+            )
+            .await;
+        }
+
         let (eff, eff_input) = run_pre_hooks(
             &hooks,
             "exec",
@@ -151,37 +143,8 @@ async fn op_subprocess_exec(
             &[shell_arg.to_string(), command.clone()],
             &options,
         ).await?;
-
-        let mut cmd = tokio::process::Command::new(&eff.command);
-        cmd.args(&eff.args);
-
-        if let Some(ref cwd) = eff.cwd {
-            cmd.current_dir(cwd);
-        }
-        if let Some(ref env) = eff.env {
-            cmd.envs(env);
-        }
-
-        let output = cmd.output().await
-            .map_err(|e| format!("subprocess.exec: failed to execute '{}': {}", command, e))?;
-
-        let encoding = options.encoding.as_deref().unwrap_or("utf8");
-        let (stdout, stderr) = if encoding == "buffer" {
-            (base64_encode(&output.stdout), base64_encode(&output.stderr))
-        } else {
-            (
-                String::from_utf8_lossy(&output.stdout).to_string(),
-                String::from_utf8_lossy(&output.stderr).to_string(),
-            )
-        };
-
-        let result = serde_json::json!({
-            "code": output.status.code().unwrap_or(-1),
-            "stdout": stdout,
-            "stderr": stderr,
-            "success": output.status.success(),
-            "encoding": encoding,
-        });
+        let encoding = options.encoding.as_deref().unwrap_or("utf8").to_string();
+        let result = execute_subprocess_effective(eff_input.clone(), Some(&encoding)).await?;
 
         // Post-hook messages name what actually ran: the effective shell
         // command a pre hook may have rewritten, not the original string.
@@ -374,6 +337,91 @@ struct EffectiveSubprocess {
     cwd: Option<String>,
     #[serde(default)]
     env: Option<HashMap<String, String>>,
+}
+
+/// The real subprocess executor: run the effective command and produce the
+/// result document `{code, stdout, stderr, success}` (stdout/stderr base64).
+/// In layered-stack mode this is the innermost layer and may run more than
+/// once (a layer may retry).
+async fn execute_subprocess_effective(
+    effective: serde_json::Value,
+    encoding: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    let eff: EffectiveSubprocess = serde_json::from_value(effective)
+        .map_err(|e| format!("subprocess: invalid effective input: {}", e))?;
+
+    let mut cmd = tokio::process::Command::new(&eff.command);
+    cmd.args(&eff.args);
+    if let Some(ref cwd) = eff.cwd {
+        cmd.current_dir(cwd);
+    }
+    if let Some(ref env) = eff.env {
+        cmd.envs(env);
+    }
+
+    let output = cmd
+        .output()
+        .await
+        .map_err(|e| format!("subprocess: failed to execute '{}': {}", eff.command, e))?;
+
+    let mut result = match encoding {
+        // exec: honor the caller's encoding and echo it for the JS wrapper.
+        Some(enc) => {
+            let (stdout, stderr) = if enc == "buffer" {
+                (base64_encode(&output.stdout), base64_encode(&output.stderr))
+            } else {
+                (
+                    String::from_utf8_lossy(&output.stdout).to_string(),
+                    String::from_utf8_lossy(&output.stderr).to_string(),
+                )
+            };
+            serde_json::json!({ "stdout": stdout, "stderr": stderr, "encoding": enc })
+        }
+        // command_output: always base64 (the JS side decodes to Uint8Array).
+        None => serde_json::json!({
+            "stdout": base64_encode(&output.stdout),
+            "stderr": base64_encode(&output.stderr),
+        }),
+    };
+    result["code"] = serde_json::json!(output.status.code().unwrap_or(-1));
+    result["success"] = serde_json::json!(output.status.success());
+    Ok(result)
+}
+
+/// Layered-stack mode: the executor is the innermost layer; layers may
+/// rewrite the command, short-circuit with a synthetic result, retry, or
+/// transform the result document.
+async fn run_stack_mode(
+    hooks: &HookChain,
+    operation: &str,
+    command: &str,
+    args: &[String],
+    options: &SubprocessOptions,
+) -> Result<String, String> {
+    let input = SubprocessPolicyInput {
+        operation: operation.to_string(),
+        command: command.to_string(),
+        args: args.to_vec(),
+        cwd: options.cwd.clone(),
+        env: options.env.clone(),
+    };
+    let input_value = serde_json::to_value(&input)
+        .map_err(|e| format!("subprocess.{}: failed to serialize input: {}", operation, e))?;
+    // exec honors the caller's encoding; command_output is always base64.
+    let encoding: Option<String> = if operation == "exec" {
+        Some(options.encoding.clone().unwrap_or_else(|| "utf8".to_string()))
+    } else {
+        None
+    };
+    let executor: super::hooks::StackExecutor = std::sync::Arc::new(move |effective| {
+        let encoding = encoding.clone();
+        Box::pin(async move {
+            execute_subprocess_effective(effective, encoding.as_deref()).await
+        })
+            as std::pin::Pin<Box<dyn std::future::Future<Output = _> + Send>>
+    });
+    let output = hooks.run_stack_full(input_value, |_| Ok(()), executor).await?;
+    Ok(output.to_string())
 }
 
 /// Run pre hooks + policy over the subprocess input. Returns the effective
