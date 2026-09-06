@@ -258,7 +258,6 @@ class IncomingMessageImpl extends Readable {
     constructor(socket) {
         super({});
         this.socket = socket;
-        this.connection = socket;
         this.httpVersion = '1.1';
         this.httpVersionMajor = 1;
         this.httpVersionMinor = 1;
@@ -275,6 +274,11 @@ class IncomingMessageImpl extends Readable {
         this._dumped = false;
         this._signalController = undefined;
     }
+
+    // Node's `connection` is a legacy alias for `socket`: reading it returns
+    // the socket, and assigning it updates the socket too.
+    get connection() { return this.socket; }
+    set connection(value) { this.socket = value; }
 
     // Node lazily attaches an AbortSignal to the message; it aborts when the
     // message closes (or is already aborted/destroyed at first access).
