@@ -393,7 +393,13 @@ class OutgoingMessageImpl extends Writable {
             err.code = 'ERR_HTTP_HEADERS_SENT';
             throw err;
         }
-        this._headers.delete(String(name).toLowerCase());
+        const key = String(name).toLowerCase();
+        // Explicitly removing a framing header keeps the flush from silently
+        // re-adding it (Node's _removed{Connection,ContLen,TE} flags).
+        if (key === 'connection') this._removedConnection = true;
+        else if (key === 'content-length') this._removedContLen = true;
+        else if (key === 'transfer-encoding') this._removedTE = true;
+        this._headers.delete(key);
     }
 
     appendHeader(name, value) {
@@ -673,7 +679,7 @@ class ServerResponseImpl extends OutgoingMessageImpl {
             this._checkContentLength(chunk, encoding, true);
         }
         if (!this.headersSent && !this._wroteBody && !this._suppressBody
-            && !this.hasHeader('trailer')
+            && !this.hasHeader('trailer') && !this._removedContLen
             && !this.hasHeader('content-length') && !this.hasHeader('transfer-encoding')) {
             const length = chunk == null ? 0 : (Buffer.isBuffer(chunk)
                 ? chunk.length
@@ -792,10 +798,13 @@ class ServerResponseImpl extends OutgoingMessageImpl {
         const isHttp10 = this.req && this.req.httpVersionMajor === 1
             && this.req.httpVersionMinor === 0;
         const useChunked = !this.hasHeader('content-length')
-            && !this.hasHeader('transfer-encoding') && !noBody && !isHttp10;
-        // A 1.0 response with an unframed body must close to delimit it.
-        if (isHttp10 && !noBody && !this.hasHeader('content-length')
-            && !this.hasHeader('transfer-encoding')) {
+            && !this.hasHeader('transfer-encoding') && !noBody && !isHttp10
+            && !this._removedTE;
+        // An unframed body (HTTP/1.0, or the caller explicitly removed both
+        // content-length and transfer-encoding) must close to delimit it.
+        if (!noBody && !this.hasHeader('content-length')
+            && !this.hasHeader('transfer-encoding')
+            && (isHttp10 || this._removedTE)) {
             this._keepAlive = false;
         }
         // A body-framing header on a bodyless status makes the response
@@ -807,7 +816,7 @@ class ServerResponseImpl extends OutgoingMessageImpl {
         if (this.sendDate && !this.hasHeader('date')) {
             this.setHeaderInternal('Date', new Date().toUTCString());
         }
-        if (!this.hasHeader('connection')) {
+        if (!this.hasHeader('connection') && !this._removedConnection) {
             this.setHeaderInternal('Connection', this._keepAlive ? 'keep-alive' : 'close');
         } else if (String(this.getHeader('connection')).toLowerCase() === 'close') {
             this._keepAlive = false;
