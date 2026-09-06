@@ -399,6 +399,30 @@ mod tests {
     }
 
     #[test]
+    fn toml_mcp_server_oauth_browser_config_parses() {
+        let cli = parse_with_config(
+            r#"
+            [[mcp_servers]]
+            name = "protected-api"
+            transport = "http"
+            url = "https://api.example.com/mcp"
+
+            [mcp_servers.auth]
+            type = "oauth_browser"
+            scope = ["read"]
+            client_id = "client-id"
+            "#,
+            &[],
+        );
+
+        let mcp: Value = serde_json::from_str(cli.mcp_config.as_deref().unwrap()).unwrap();
+        assert_eq!(mcp[0]["name"], "protected-api");
+        assert_eq!(mcp[0]["auth"]["type"], "oauth_browser");
+        assert_eq!(mcp[0]["auth"]["scope"], serde_json::json!(["read"]));
+        assert_eq!(mcp[0]["auth"]["client_id"], "client-id");
+    }
+
+    #[test]
     fn unknown_keys_are_rejected_with_the_accepted_list() {
         let err = config_error("htpp_port = 8080");
         assert!(err.contains("unknown key: htpp_port"), "got: {err}");

@@ -5,6 +5,11 @@ on:
     branches: [ main ]
   pull_request:
     branches: [ main ]
+    paths-ignore:
+      - 'site-docs/**'
+      - '**.md'
+      - 'mkdocs.yml'
+      - '.lychee.toml'
 
 concurrency:
   group: fuzz-${{ github.ref }}

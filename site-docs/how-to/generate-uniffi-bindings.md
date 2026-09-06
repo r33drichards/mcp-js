@@ -66,6 +66,59 @@ environment.
 
 ## Verify the exported surface
 
+### Run the Python smoke test locally
+
+With `uv` installed, enter `nix develop`, install `uniffi-bindgen` as shown
+above, then run:
+
+```bash
+uv run scripts/test-python-uniffi.py
+```
+
+This builds the Python-loadable shared library, generates fresh Python
+bindings in a temporary directory, and imports them using uv's Python.
+It does not start or connect to an HTTP server. The first run builds V8 from
+source with shared-library-compatible flags and can take a long time; subsequent
+runs reuse `target/python-uniffi`. Linux and macOS are supported.
+
+To test a shared library you already built:
+
+```bash
+uv run scripts/test-python-uniffi.py \
+  --library target/python-uniffi/release/libmcp_v8_uniffi.so
+```
+
+On macOS use `libmcp_v8_uniffi.dylib`. The test creates a native stateless
+engine and checks JavaScript output, Promise awaiting, thrown errors, timeout
+recovery, and idempotent shutdown.
+
+With generated bindings on `PYTHONPATH`, synchronous embedding looks like:
+
+```python
+import json
+import server
+
+engine = server.Engine.create_stateless(64, 2)  # heap MB, default timeout seconds
+try:
+    result = json.loads(engine.call_tool(
+        "run_js", json.dumps({"code": "console.log(6 * 7)"}), None, None,
+    ))
+    assert "42" in result["output"]
+finally:
+    engine.close()
+```
+
+Factory limits are 16-4096 MB and 1-300 seconds. Each engine permits one V8
+execution at a time. Network, filesystem, subprocess, and external module
+capabilities are disabled by default. Its execution database is temporary.
+The synchronous methods own a Tokio runtime and do not require Python asyncio.
+Close the engine explicitly; dropping the last reference releases its runtime
+without blocking a Tokio worker. Per-call execution options retain the existing
+`run_js` semantics; factory limits are defaults, not a security boundary against
+the embedding Python application.
+
+### Check all generated languages
+
 Run the repository smoke check:
 
 ```bash

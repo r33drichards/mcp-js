@@ -25,6 +25,16 @@
     default = null;
     description = "Allow the `run_js` tool to read its code from a file on the server's own filesystem (the `file` parameter). OFF by default. When set, ANY path the server process can read is allowed — this is the easy \"allow all\" switch. For finer control, leave this off and configure a `run_js_file` policy in --policies-json instead (a Rego/OPA chain decides which paths are allowed); the policy input is `{ \"operation\": \"read\", \"path\": \"<canonical path>\" }`. This flag takes precedence over a configured run_js_file policy. Config-file key for the `--allow-run-js-file` flag. Environment variable: `MCP_V8_ALLOW_RUN_JS_FILE`. Server default: `false`.";
   };
+  allowed_hosts = lib.mkOption {
+    type = lib.types.nullOr (lib.types.listOf lib.types.str);
+    default = null;
+    description = "`Host` header allowlist for the Streamable HTTP transport, which rejects unlisted hosts with 403 to blunt DNS-rebinding attacks. Entries are hostnames or `host:port` authorities (a bare hostname matches any port); `*` allows any host. Defaults to loopback-only (`localhost`, `127.0.0.1`, `::1`) whatever `--bind-host` is, because a wildcard bind still answers on loopback and so is reachable by a browser on the same machine. Set this to the hostnames clients use when serving over a network; the Docker image ships `MCP_V8_ALLOWED_HOSTS=*`. Config-file key for the `--allowed-hosts` flag. Environment variable: `MCP_V8_ALLOWED_HOSTS`.";
+  };
+  allowed_origins = lib.mkOption {
+    type = lib.types.nullOr (lib.types.listOf lib.types.str);
+    default = null;
+    description = "`Origin` header allowlist for the Streamable HTTP transport, for browser clients. Entries must include a scheme (`https://app.example.com`); `null` matches a sandboxed browser's `Origin: null`. Empty (the default) skips Origin validation entirely; when non-empty, a request carrying an unlisted Origin is rejected with 403, while one sending no Origin at all still passes. Config-file key for the `--allowed-origins` flag. Environment variable: `MCP_V8_ALLOWED_ORIGINS`.";
+  };
   bind_host = lib.mkOption {
     type = lib.types.nullOr lib.types.str;
     default = null;
@@ -58,12 +68,12 @@
   fetch_header_config = lib.mkOption {
     type = lib.types.nullOr lib.types.str;
     default = null;
-    description = "JSON array of header injection rules (a path to a JSON file, or inline JSON — also settable as the `fetch_headers` section of a --config file). Each rule sets \"host\" (plus optional \"methods\") and exactly one of \"headers\" or \"auth\". Static: [{\"host\": \"api.github.com\", \"methods\": [\"GET\",\"POST\"], \"headers\": {\"Authorization\": \"Bearer ...\"}}] OAuth: [{\"host\": \"api.example.com\", \"auth\": {\"type\": \"oauth_client_credentials\", \"header\": \"Authorization\", \"token_url\": \"https://issuer.example.com/token\", \"client_id\": \"abc\", \"client_secret\": \"xyz\", \"scope\": \"read:all\", \"refresh_buffer_secs\": 30}}]. Config-file key for the `--fetch-header-config` flag. Environment variable: `MCP_V8_FETCH_HEADER_CONFIG`.";
+    description = "JSON array of header injection rules (a path to a JSON file, or inline JSON — also settable as the `fetch_headers` section of a --config file). Each rule sets \"host\" (plus optional \"methods\") and exactly one of \"headers\" or \"auth\". A \"headers\" rule may also set \"override\" (bool, default true): true overwrites a same-named header the sandbox already set, false only fills it when absent. Static: [{\"host\": \"api.github.com\", \"methods\": [\"GET\",\"POST\"], \"headers\": {\"Authorization\": \"Bearer ...\"}, \"override\": true}] OAuth: [{\"host\": \"api.example.com\", \"auth\": {\"type\": \"oauth_client_credentials\", \"header\": \"Authorization\", \"token_url\": \"https://issuer.example.com/token\", \"client_id\": \"abc\", \"client_secret\": \"xyz\", \"scope\": \"read:all\", \"refresh_buffer_secs\": 30}}]. Config-file key for the `--fetch-header-config` flag. Environment variable: `MCP_V8_FETCH_HEADER_CONFIG`.";
   };
   fetch_headers = lib.mkOption {
     type = lib.types.nullOr (lib.types.listOf (lib.types.attrsOf lib.types.anything));
     default = null;
-    description = "Structured `fetch_headers` section of the config file; the inline equivalent of the `--fetch-header-config` flag (and mutually exclusive with the `fetch_header_config` key). JSON array of header injection rules (a path to a JSON file, or inline JSON — also settable as the `fetch_headers` section of a --config file). Each rule sets \"host\" (plus optional \"methods\") and exactly one of \"headers\" or \"auth\". Static: [{\"host\": \"api.github.com\", \"methods\": [\"GET\",\"POST\"], \"headers\": {\"Authorization\": \"Bearer ...\"}}] OAuth: [{\"host\": \"api.example.com\", \"auth\": {\"type\": \"oauth_client_credentials\", \"header\": \"Authorization\", \"token_url\": \"https://issuer.example.com/token\", \"client_id\": \"abc\", \"client_secret\": \"xyz\", \"scope\": \"read:all\", \"refresh_buffer_secs\": 30}}].";
+    description = "Structured `fetch_headers` section of the config file; the inline equivalent of the `--fetch-header-config` flag (and mutually exclusive with the `fetch_header_config` key). JSON array of header injection rules (a path to a JSON file, or inline JSON — also settable as the `fetch_headers` section of a --config file). Each rule sets \"host\" (plus optional \"methods\") and exactly one of \"headers\" or \"auth\". A \"headers\" rule may also set \"override\" (bool, default true): true overwrites a same-named header the sandbox already set, false only fills it when absent. Static: [{\"host\": \"api.github.com\", \"methods\": [\"GET\",\"POST\"], \"headers\": {\"Authorization\": \"Bearer ...\"}, \"override\": true}] OAuth: [{\"host\": \"api.example.com\", \"auth\": {\"type\": \"oauth_client_credentials\", \"header\": \"Authorization\", \"token_url\": \"https://issuer.example.com/token\", \"client_id\": \"abc\", \"client_secret\": \"xyz\", \"scope\": \"read:all\", \"refresh_buffer_secs\": 30}}].";
   };
   fs_dir = lib.mkOption {
     type = lib.types.nullOr lib.types.str;
@@ -133,7 +143,7 @@
   http_port = lib.mkOption {
     type = lib.types.nullOr lib.types.port;
     default = null;
-    description = "HTTP port using Streamable HTTP transport (MCP 2025-03-26+, load-balanceable). Config-file key for the `--http-port` flag. Environment variable: `MCP_V8_HTTP_PORT`.";
+    description = "HTTP port using Streamable HTTP transport (MCP 2025-03-26+, load-balanceable). Falls back to the `PORT` environment variable when neither this nor `--sse-port` is set anywhere, so platforms that inject `PORT` (Railway, Render, Heroku, Fly, Cloud Run) serve Streamable HTTP unmodified. Config-file key for the `--http-port` flag. Environment variable: `MCP_V8_HTTP_PORT`.";
   };
   instructions = lib.mkOption {
     type = lib.types.nullOr lib.types.str;
@@ -153,7 +163,7 @@
   jwks_url = lib.mkOption {
     type = lib.types.nullOr lib.types.str;
     default = null;
-    description = "JWKS endpoint URL for fetching public keys (e.g., Keycloak OIDC certs URL). Enables JWT verification of Authorization: Bearer tokens during initialize. Config-file key for the `--jwks-url` flag. Environment variable: `JWKS_URL`.";
+    description = "JWKS endpoint URL for fetching public keys (e.g., Keycloak OIDC certs URL). When set, the HTTP transports ENFORCE auth: every request to /mcp and the HTTP API (/api/*) must carry a valid `Authorization: Bearer <jwt>` (or `agent-session` header) verified against this JWKS, else it is rejected with 401. Leaving it unset keeps the server open (no auth). The openapi spec route and CORS preflight (OPTIONS) are exempt. Config-file key for the `--jwks-url` flag. Environment variable: `JWKS_URL`.";
   };
   max_concurrent_executions = lib.mkOption {
     type = lib.types.nullOr lib.types.ints.unsigned;
@@ -163,12 +173,12 @@
   mcp_config = lib.mkOption {
     type = lib.types.nullOr lib.types.str;
     default = null;
-    description = "JSON config for MCP server modules (a path to a JSON file, or inline JSON — also settable as the `mcp_servers` section of a --config file). Format: [{\"name\": \"srv\", \"transport\": \"stdio\", \"command\": \"cmd\", \"args\": [\"a\"]}, {\"name\": \"srv2\", \"transport\": \"sse\", \"url\": \"http://...\"}]. Config-file key for the `--mcp-config` flag. Environment variable: `MCP_V8_MCP_CONFIG`.";
+    description = "JSON config for MCP server modules (a path to a JSON file, or inline JSON — also settable as the `mcp_servers` section of a --config file). Format: [{\"name\": \"srv\", \"transport\": \"stdio\", \"command\": \"cmd\", \"args\": [\"a\"]}, {\"name\": \"srv2\", \"transport\": \"sse\", \"url\": \"http://...\"}, {\"name\": \"srv3\", \"transport\": \"http\", \"url\": \"https://...\", \"auth\": {\"type\": \"oauth_browser\", \"scope\": [\"read\"], \"client_id\": \"...\", \"client_secret\": \"...\", \"redirect_port\": 48123, \"token_cache\": \"/path/to/cache.json\"}}] `oauth_browser` is supported for HTTP only through `--mcp-config` and structured JSON/TOML `mcp_servers` configuration; compact `--mcp-server` syntax does not support it. Protected-resource and discovered OAuth endpoints require HTTPS unless loopback. It prints an authorization URL only when no cached credential can provide a token; cached refresh tokens renew access on connection or reconnect without opening a browser. The callback binds to localhost on redirect_port (or an available port). See the README for headless authorization and cache-file security. Config-file key for the `--mcp-config` flag. Environment variable: `MCP_V8_MCP_CONFIG`.";
   };
   mcp_servers = lib.mkOption {
     type = lib.types.nullOr (lib.types.listOf (lib.types.attrsOf lib.types.anything));
     default = null;
-    description = "Structured `mcp_servers` section of the config file; the inline equivalent of the `--mcp-config` flag (and mutually exclusive with the `mcp_config` key). JSON config for MCP server modules (a path to a JSON file, or inline JSON — also settable as the `mcp_servers` section of a --config file). Format: [{\"name\": \"srv\", \"transport\": \"stdio\", \"command\": \"cmd\", \"args\": [\"a\"]}, {\"name\": \"srv2\", \"transport\": \"sse\", \"url\": \"http://...\"}].";
+    description = "Structured `mcp_servers` section of the config file; the inline equivalent of the `--mcp-config` flag (and mutually exclusive with the `mcp_config` key). JSON config for MCP server modules (a path to a JSON file, or inline JSON — also settable as the `mcp_servers` section of a --config file). Format: [{\"name\": \"srv\", \"transport\": \"stdio\", \"command\": \"cmd\", \"args\": [\"a\"]}, {\"name\": \"srv2\", \"transport\": \"sse\", \"url\": \"http://...\"}, {\"name\": \"srv3\", \"transport\": \"http\", \"url\": \"https://...\", \"auth\": {\"type\": \"oauth_browser\", \"scope\": [\"read\"], \"client_id\": \"...\", \"client_secret\": \"...\", \"redirect_port\": 48123, \"token_cache\": \"/path/to/cache.json\"}}] `oauth_browser` is supported for HTTP only through `--mcp-config` and structured JSON/TOML `mcp_servers` configuration; compact `--mcp-server` syntax does not support it. Protected-resource and discovered OAuth endpoints require HTTPS unless loopback. It prints an authorization URL only when no cached credential can provide a token; cached refresh tokens renew access on connection or reconnect without opening a browser. The callback binds to localhost on redirect_port (or an available port). See the README for headless authorization and cache-file security.";
   };
   mcp_stub_prefix = lib.mkOption {
     type = lib.types.nullOr lib.types.str;

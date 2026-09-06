@@ -4,6 +4,9 @@
 [![Release](https://img.shields.io/github/v/release/r33drichards/mcp-js)](https://github.com/r33drichards/mcp-js/releases)
 [![License: AGPL v3](https://img.shields.io/badge/license-AGPL--3.0-blue)](./LICENSE)
 
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/mcp-js?referralCode=cj5P6Z&utm_medium=integration&utm_source=template&utm_campaign=generic)
+
+
 **mcp-v8** is a [Model Context Protocol](https://modelcontextprotocol.io) server,
 written in Rust, that lets an AI agent **run JavaScript and TypeScript in a
 sandboxed V8 isolate**. Instead of wiring up dozens of narrow tools, you give the
@@ -48,6 +51,11 @@ curl -fsSL https://raw.githubusercontent.com/r33drichards/mcp-js/main/install-cl
 Installs to `/usr/local/bin`. Supported platforms: Linux x86_64/arm64 and macOS
 Apple Silicon. You can also `nix run github:r33drichards/mcp-js`, use Docker (see
 the `docker-compose.*.yml` stacks), or [build from source](#build-from-source).
+
+Prefer a hosted server? [Deploy on Railway](./RAILWAY.md) — the repo's
+`railway.json` configures the build, healthcheck, and restart policy, and
+[RAILWAY.md](./RAILWAY.md) walks through the volume, variables, and one-click
+template setup.
 
 ### Connect an MCP client
 
@@ -180,6 +188,72 @@ is the generated [CLI flags reference](https://r33drichards.github.io/mcp-js/ref
 mcp-v8 --help            # all flags
 mcp-v8 --print-openapi   # print the REST OpenAPI spec
 ```
+
+### Browser OAuth for upstream MCP servers
+
+Use `--mcp-config` to connect to a protected Streamable HTTP MCP server with
+the OAuth 2.1 authorization-code flow. This setting is JSON-only; it is not
+available through the compact `--mcp-server` syntax.
+
+```json
+[
+  {
+    "name": "protected",
+    "transport": "http",
+    "url": "https://mcp.example.com/mcp",
+    "auth": {
+      "type": "oauth_browser",
+      "scope": ["tools.read", "tools.call"],
+      "client_id": "optional-registered-client-id",
+      "client_secret": "optional-client-secret",
+      "redirect_port": 48123,
+      "token_cache": "/home/alice/.cache/mcp-js/oauth-protected.json"
+    }
+  }
+]
+```
+
+All fields inside `auth` other than `type` are optional. Without `client_id`,
+the server uses OAuth dynamic client registration; otherwise it uses the
+provided registered client. `scope` is an array of requested scopes.
+
+Protected-resource, authorization, token, and dynamic-registration endpoints
+require HTTPS unless they are loopback endpoints. This permits local OAuth test
+servers while refusing plaintext remote authorization infrastructure.
+
+On first use, or when no usable cached credentials exist, `mcp-v8` starts a
+loopback callback listener and prints the authorization URL. It then attempts
+to open that URL locally. For a headless host, copy the printed URL into a
+browser on another machine, complete authorization, and make sure that browser
+can reach the host's `http://localhost:<port>/callback` URL (for example,
+through an SSH port forward). Authorization waits up to five minutes. A
+callback with the wrong OAuth `state` is ignored; an authorization denial or
+timeout fails the connection.
+
+When `redirect_port` is omitted, the listener selects an available local port.
+Set it only when an identity provider requires a registered callback port. The
+callback always binds to loopback and uses the resulting
+`http://localhost:<port>/callback` redirect URI.
+
+Credentials are cached at `token_cache`, or by default at
+`${XDG_CACHE_HOME:-$HOME/.cache}/mcp-js/oauth-<server-name>.json` (falling back
+to the system temporary directory when neither cache location is available).
+The cache is bound to the MCP URL, scopes, and client configuration. OAuth
+credentials are resolved on each initial connection or reconnect. A valid
+refresh token renews an expired access token during that resolution without
+opening a browser; interactive authorization happens only when cached
+credentials cannot provide a token. An established transport keeps its bearer
+token until reconnect or invalidity. It does not refresh an already-established
+transport proactively.
+
+Treat the cache as a secret: it can contain refresh tokens. On Unix, mcp-v8
+writes it with mode `0600` and rejects symlinks, non-regular files, files owned
+by another user, and group/world-readable files. Unsafe, wrong-owner, or
+symlinked cache files are never consumed. They are treated as unusable, so
+reauthorization starts and successful authorization may replace the cache
+securely. Do not commit, share, or edit it. To revoke local access, revoke the
+grant at the authorization server and delete the configured cache file; the
+next connection starts authorization again.
 
 ## CLI client (`mcp-v8-cli`)
 

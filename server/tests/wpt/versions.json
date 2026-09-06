@@ -1,0 +1,7 @@
+{
+  "wpt": {
+    "commit": "0cc6a7e1904a69dae98c86412b15bc81256279f8",
+    "repository": "https://github.com/web-platform-tests/wpt",
+    "vendored_by": "tools/compat/vendor-wpt.sh"
+  }
+}

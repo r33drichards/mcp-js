@@ -13,5 +13,10 @@ start with [Install](../install/overview.md).
 - [Run SQLite in WebAssembly](sqlite-wasm.md) — build the bundled SQLite `.wasm`
   module, load it into the server, and query an in-memory database from
   JavaScript.
+- [Render charts with Chart.js](chartjs.md) — run Chart.js in the isolate with a
+  pure-JS canvas, and rasterize the result to PNG with WebAssembly.
+- [Call Modal (serverless GPUs and sandboxes)](modal.md) — drive the stock Modal
+  JS SDK over gRPC from the sandbox, deploy it to Railway behind Keycloak auth,
+  and connect Claude Code.
 
 _More end-to-end use cases are on the way._

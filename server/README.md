@@ -450,6 +450,75 @@ The session database path defaults to `/tmp/mcp-v8-sessions` and can be overridd
 
 ## Integration
 
+## Browser OAuth for Upstream MCP Servers
+
+`mcp-v8` can call an OAuth-protected Streamable HTTP MCP server from JavaScript
+through `mcp.callTool()` and `mcp.listTools()`. Configure it with
+`--mcp-config` (a JSON file path or inline JSON), not `--mcp-server`:
+
+```json
+[
+  {
+    "name": "protected",
+    "transport": "http",
+    "url": "https://mcp.example.com/mcp",
+    "auth": {
+      "type": "oauth_browser",
+      "scope": ["tools.read", "tools.call"],
+      "client_id": "optional-registered-client-id",
+      "client_secret": "optional-client-secret",
+      "redirect_port": 48123,
+      "token_cache": "/home/alice/.cache/mcp-js/oauth-protected.json"
+    }
+  }
+]
+```
+
+`type` must be `oauth_browser`. Every other `auth` property is optional:
+
+- `scope` is an array of requested OAuth scopes.
+- `client_id` and `client_secret` select a pre-registered client. Omitting
+  `client_id` uses OAuth dynamic client registration.
+- `redirect_port` requests a specific loopback callback port. Omit it to use an
+  available ephemeral port. The redirect URI is always
+  `http://localhost:<port>/callback`.
+- `token_cache` sets the credentials file. Its default is
+  `${XDG_CACHE_HOME:-$HOME/.cache}/mcp-js/oauth-<server-name>.json`, with the
+  system temporary directory as a final fallback.
+
+Protected-resource, authorization, token, and dynamic-registration endpoints
+require HTTPS unless they are loopback endpoints. This permits local OAuth test
+servers while refusing plaintext remote authorization infrastructure.
+
+The server discovers OAuth metadata before connecting. If a matching cache can
+provide an access token, it connects without showing a browser. OAuth
+credentials are resolved on each initial connection or reconnect. Expired
+access tokens are refreshed with the cached refresh token during that
+resolution when possible; browser authorization runs only if no usable cached
+credentials remain. An established transport keeps its bearer token until
+reconnect or invalidity. It does not refresh an already-established transport
+proactively. The cache is bound to the protected resource URL, requested
+scopes, and client configuration, so changing any of those values requires a
+new authorization.
+
+For an interactive flow, mcp-v8 binds the callback listener to loopback, prints
+the authorization URL, and tries to open it. On a headless machine, copy the
+printed URL to a browser elsewhere and arrange access to the printed
+`localhost` callback port, such as with SSH port forwarding. The server waits
+five minutes. A mismatched callback `state` does not complete authorization;
+provider denial, callback errors, metadata/registration failures, token
+exchange failures, and timeout fail the MCP connection.
+
+The token cache contains bearer and refresh credentials. Keep it outside source
+control and do not share or edit it. On Unix, mcp-v8 creates it with `0600`
+permissions and rejects symlinks, non-regular files, files owned by another
+user, or files readable by group or others. Unsafe, wrong-owner, or symlinked
+cache files are never consumed. They are treated as unusable, triggering
+reauthorization; successful authorization may replace the cache securely. To
+disconnect and revoke access, revoke the grant at the authorization provider
+and delete `token_cache` (or its default path). The next connection requires
+authorization again.
+
 ### Claude for Desktop
 
 1. Install the server as above.

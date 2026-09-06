@@ -55,6 +55,8 @@ impl Default for FeatureBootstrapConfig {
 #[derive(Default, Deserialize)]
 pub struct PolicyBootstrapConfig {
     pub fetch: Option<OperationPolicies>,
+    pub websocket: Option<OperationPolicies>,
+    pub http2: Option<OperationPolicies>,
     pub modules: Option<OperationPolicies>,
     pub filesystem: Option<OperationPolicies>,
     pub fs_snapshot: Option<OperationPolicies>,
@@ -136,12 +138,16 @@ impl RuntimeBootstrap {
         policies: PolicyBootstrapConfig,
         capabilities: CapabilityBootstrapConfig,
     ) -> Result<Self, RuntimeError> {
-        let fetch_policy = build_policy_chain(
-            policies.fetch,
-            "mcp/fetch",
-            "data.mcp.fetch.allow",
-            "fetch",
+        let fetch_policy =
+            build_policy_chain(policies.fetch, "mcp/fetch", "data.mcp.fetch.allow", "fetch")?;
+        let websocket_policy = build_policy_chain(
+            policies.websocket,
+            "mcp/websocket",
+            "data.mcp.websocket.allow",
+            "websocket",
         )?;
+        let http2_policy =
+            build_policy_chain(policies.http2, "mcp/http2", "data.mcp.http2.allow", "http2")?;
         let modules_policy = build_policy_chain(
             policies.modules,
             "mcp/modules",
@@ -183,6 +189,18 @@ impl RuntimeBootstrap {
         if let Some(chain) = fetch_policy {
             self.engine = self.engine.with_fetch_config(
                 crate::engine::fetch::FetchConfig::new_with_chain(chain)
+                    .with_header_rules(header_rules.clone()),
+            );
+        }
+        if let Some(chain) = websocket_policy {
+            self.engine = self.engine.with_websocket_config(
+                crate::engine::websocket::WebSocketConfig::new_with_chain(chain)
+                    .with_header_rules(header_rules.clone()),
+            );
+        }
+        if let Some(chain) = http2_policy {
+            self.engine = self.engine.with_http2_config(
+                crate::engine::http2::Http2Config::new_with_chain(chain)
                     .with_header_rules(header_rules),
             );
         }
@@ -292,10 +310,7 @@ impl RuntimeBootstrap {
         Engine::from_engine_with_cluster(self.engine, self.cluster_node)
     }
 
-    pub(crate) fn build_with_runtime(
-        self,
-        tokio_runtime: tokio::runtime::Runtime,
-    ) -> Arc<Engine> {
+    pub(crate) fn build_with_runtime(self, tokio_runtime: tokio::runtime::Runtime) -> Arc<Engine> {
         Engine::from_engine_with_tokio_runtime(self.engine, tokio_runtime, self.cluster_node)
     }
 }

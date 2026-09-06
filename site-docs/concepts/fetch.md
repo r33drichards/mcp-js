@@ -66,10 +66,16 @@ outbound requests. These rules are evaluated entirely within the server process:
   The resulting token is placed in the configured header.
 
 In both cases, the JS runtime never receives the raw credential value. JS code
-simply calls `fetch(url)` and the server appends the necessary headers. If JS
-code explicitly sets the same header that a rule would inject, the JS-supplied
-value wins and the injected value is skipped — this prevents a rule from
-silently overriding an application-level header.
+simply calls `fetch(url)` and the server appends the necessary headers.
+
+If JS code explicitly sets the same header that a **static** rule would inject,
+the injected value wins by default — the operator-declared credential overwrites
+whatever the sandbox set, so an SDK that pre-populates the header with a
+placeholder cannot suppress injection. A static rule can opt out with
+`override=false` (or `"override": false` in the JSON config) to fall back to
+fill-only-if-absent, leaving an application-level header untouched.
+**OAuth client-credentials** injection is always fill-only-if-absent: a
+caller-supplied value for that header is left in place.
 
 ## OAuth token lifecycle
 

@@ -26,9 +26,11 @@ These tools execute in isolated runs and return output directly.
 - [`fs_pull`](#heap+fs-fs-pull)
 - [`fs_push`](#heap+fs-fs-push)
 - [`fs_reset`](#heap+fs-fs-reset)
+- [`get_artifact`](#heap+fs-get-artifact)
 - [`get_execution`](#heap+fs-get-execution)
 - [`get_execution_output`](#heap+fs-get-execution-output)
 - [`get_heap_tags`](#heap+fs-get-heap-tags)
+- [`list_artifacts`](#heap+fs-list-artifacts)
 - [`list_executions`](#heap+fs-list-executions)
 - [`list_session_snapshots`](#heap+fs-list-session-snapshots)
 - [`list_sessions`](#heap+fs-list-sessions)
@@ -149,6 +151,17 @@ Parameters:
 | `label` | `string` | yes | - |
 | `message` | `string | null` | no | - |
 
+### `get_artifact`
+<a id="heap+fs-get-artifact"></a>
+
+Fetch an artifact stored by run_js code via the artifact(key, mime, bytes) global. The payload is returned as a content block matching its mime type: image/* as an MCP image block (visible to the model), audio/* as an audio block, UTF-8 payloads as text, and other binary as base64 text. A JSON metadata block (key, mime_type, size_bytes, created_at, execution_id, encoding) comes first.
+
+Parameters:
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `key` | `string` | yes | Artifact key, as passed to `artifact(key, mime, bytes)` in JS. |
+
 ### `get_execution`
 <a id="heap+fs-get-execution"></a>
 
@@ -185,6 +198,16 @@ Parameters:
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
 | `heap` | `string` | yes | - |
+
+### `list_artifacts`
+<a id="heap+fs-list-artifacts"></a>
+
+List metadata (key, mime_type, size_bytes, created_at, execution_id) for all artifacts stored via the artifact(key, mime, bytes) global. Use get_artifact to fetch a payload.
+
+Parameters:
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
 
 ### `list_executions`
 <a id="heap+fs-list-executions"></a>
@@ -295,6 +318,20 @@ const data = await resp.json();
 console.log(JSON.stringify(data));
 ```
 
+#### Artifacts (returning images and other non-text content)
+
+Console output is text-only. To return an image — or any other typed payload (audio, CSV, arbitrary binary) — store it as an artifact:
+
+```js
+const png = renderChart(); // Uint8Array of PNG bytes
+artifact("chart", "image/png", png);
+```
+
+- `artifact(key, mime, bytes)` — store an artifact under a caller-chosen key (same key overwrites). `bytes` may be a Uint8Array, TypedArray, ArrayBuffer, or string (UTF-8 encoded). Max 16 MiB per artifact.
+- A completed execution lists what it emitted (`key`, `mime_type`, `size_bytes`) in the `artifacts` field of `get_execution`.
+- Fetch a payload with the `get_artifact(key)` tool. `image/*` artifacts come back as an MCP image content block — the model can actually see the image — `audio/*` as an audio block, UTF-8 payloads as text, and other binary as base64 text. `list_artifacts` lists everything stored.
+- Artifacts persist across executions and are also downloadable raw (no base64) via `GET /api/artifacts/{key}` on the REST API.
+
 #### Importing Packages
 
 You can import npm packages, JSR packages, and URL modules using ES module `import` syntax. Packages are fetched from esm.sh at runtime — no installation needed.
@@ -366,7 +403,30 @@ These tools execute in isolated runs and return output directly.
 
 ### Tools
 
+- [`get_artifact`](#stateless-get-artifact)
+- [`list_artifacts`](#stateless-list-artifacts)
 - [`run_js`](#stateless-run-js)
+
+### `get_artifact`
+<a id="stateless-get-artifact"></a>
+
+Fetch an artifact stored by run_js code via the artifact(key, mime, bytes) global. The payload is returned as a content block matching its mime type: image/* as an MCP image block (visible to the model), audio/* as an audio block, UTF-8 payloads as text, and other binary as base64 text. A JSON metadata block (key, mime_type, size_bytes, created_at, execution_id, encoding) comes first.
+
+Parameters:
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `key` | `string` | yes | Artifact key, as passed to `artifact(key, mime, bytes)` in JS. |
+
+### `list_artifacts`
+<a id="stateless-list-artifacts"></a>
+
+List metadata (key, mime_type, size_bytes, created_at, execution_id) for all artifacts stored via the artifact(key, mime, bytes) global. Use get_artifact to fetch a payload.
+
+Parameters:
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
 
 ### `run_js`
 <a id="stateless-run-js"></a>
@@ -408,6 +468,19 @@ console.log(JSON.stringify(obj));
 Returns `output: '{"a":1,"b":2}'`.
 
 async/await is supported. The runtime resolves top-level Promises automatically.
+
+#### Artifacts (returning images and other non-text content)
+
+Console output is text-only. To return an image — or any other typed payload (audio, CSV, arbitrary binary) — store it as an artifact:
+
+```js
+const png = renderChart(); // Uint8Array of PNG bytes
+artifact("chart", "image/png", png);
+```
+
+- `artifact(key, mime, bytes)` — store an artifact under a caller-chosen key (same key overwrites). `bytes` may be a Uint8Array, TypedArray, ArrayBuffer, or string (UTF-8 encoded). Max 16 MiB per artifact.
+- Emitted artifacts are attached directly to this tool's result as content blocks: `image/*` as an MCP image block (the model can actually see the image), `audio/*` as audio, UTF-8 payloads as text, other binary as base64 text. Up to 8 MiB of payloads are attached inline; anything larger stays retrievable via the `get_artifact(key)` tool.
+- The result JSON lists each emitted artifact (`key`, `mime_type`, `size_bytes`, `inline`).
 
 #### Importing Packages
 

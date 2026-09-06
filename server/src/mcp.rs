@@ -14,9 +14,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use tokio::sync::Mutex;
 
-use crate::engine::{
-    Engine, RuntimeError, McpRequestHeaders, ToolCallRequest,
-};
+use crate::engine::{Engine, McpRequestHeaders, ToolCallRequest};
 use crate::session::SessionVerifier;
 
 // ── Embedded documentation resources ───────────────────────────────────
@@ -96,21 +94,27 @@ fn doc_resources(_heap: bool, _fs: bool) -> Vec<Resource> {
     vec![
         Annotated::new(
             RawResource::new("docs://readme", "README")
-                .with_description("Full mcp-v8 README with usage, CLI flags, and examples (Markdown)")
+                .with_description(
+                    "Full mcp-v8 README with usage, CLI flags, and examples (Markdown)",
+                )
                 .with_mime_type("text/markdown")
                 .with_size(README_MD.len() as u32),
             None,
         ),
         Annotated::new(
             RawResource::new("docs://llms-txt", "llms.txt")
-                .with_description("Machine-readable agent guide: connection options, tools, REST API (Markdown)")
+                .with_description(
+                    "Machine-readable agent guide: connection options, tools, REST API (Markdown)",
+                )
                 .with_mime_type("text/markdown")
                 .with_size(LLMS_TXT.len() as u32),
             None,
         ),
         Annotated::new(
             RawResource::new("docs://openapi", "OpenAPI spec")
-                .with_description("OpenAPI 3.0 JSON spec for the REST API (/api/exec, /api/executions/*, etc.)")
+                .with_description(
+                    "OpenAPI 3.0 JSON spec for the REST API (/api/exec, /api/executions/*, etc.)",
+                )
                 .with_mime_type("application/json"),
             None,
         ),
@@ -130,7 +134,8 @@ fn read_doc_resource(uri: &str, heap: bool, fs: bool) -> Option<ReadResourceResu
     use utoipa::OpenApi as _;
 
     let openapi_json = serde_json::to_string_pretty(&ApiDoc::openapi()).unwrap_or_default();
-    let tools_json = serde_json::to_string_pretty(&built_in_tool_catalog(heap, fs)).unwrap_or_default();
+    let tools_json =
+        serde_json::to_string_pretty(&built_in_tool_catalog(heap, fs)).unwrap_or_default();
 
     let text = match uri {
         "docs://readme" => (README_MD.to_string(), "text/markdown"),
@@ -140,25 +145,17 @@ fn read_doc_resource(uri: &str, heap: bool, fs: bool) -> Option<ReadResourceResu
         _ => return None,
     };
 
-    Some(ReadResourceResult::new(vec![ResourceContents::TextResourceContents {
-        uri: uri.to_string(),
-        mime_type: Some(text.1.into()),
-        text: text.0,
-        meta: None,
-    }]))
+    Some(ReadResourceResult::new(vec![
+        ResourceContents::TextResourceContents {
+            uri: uri.to_string(),
+            mime_type: Some(text.1.into()),
+            text: text.0,
+            meta: None,
+        },
+    ]))
 }
 
-// ── Tool result helper ──────────────────────────────────────────────────
-
-/// Wrap a JSON value as a successful `CallToolResult` (single JSON content).
-fn json_result(value: serde_json::Value) -> Result<CallToolResult, McpError> {
-    match Content::json(value) {
-        Ok(content) => Ok(CallToolResult::success(vec![content])),
-        Err(e) => Ok(CallToolResult::success(vec![Content::text(format!(
-            "Failed to serialize response: {e}"
-        ))])),
-    }
-}
+// ── Tool result helpers ─────────────────────────────────────────────────
 
 async fn invoke_runtime_tool(
     runtime: &Engine,
@@ -166,21 +163,51 @@ async fn invoke_runtime_tool(
     arguments_json: String,
     session_id: Option<String>,
     mcp_headers: Option<&McpRequestHeaders>,
-) -> serde_json::Value {
+) -> crate::mcp_dispatch::ToolResponse {
     runtime
-        .invoke_tool(ToolCallRequest {
+        .invoke_tool_response(ToolCallRequest {
             name: name.to_string(),
             arguments_json,
             session_id,
             mcp_headers: mcp_headers.cloned(),
         })
         .await
-        .and_then(|json| {
-            serde_json::from_str(&json).map_err(|error| RuntimeError::ToolCall {
-                message: format!("failed to deserialize result: {error}"),
-            })
-        })
-        .unwrap_or_else(|error| json!({ "error": error.to_string() }))
+        .unwrap_or_else(|error| json!({ "error": error.to_string() }).into())
+}
+
+/// Map a rendered artifact payload to the matching rmcp content block:
+/// image/* → `ImageContent`, audio/* → `AudioContent` (the MCP-spec blocks
+/// for returning media to the model), everything else → `TextContent`.
+fn artifact_block(artifact: crate::engine::artifacts::ArtifactContent) -> Content {
+    use crate::engine::artifacts::ArtifactContent as AC;
+    match artifact {
+        AC::Image {
+            data_base64,
+            mime_type,
+        } => Content::image(data_base64, mime_type),
+        AC::Audio {
+            data_base64,
+            mime_type,
+        } => Annotated::new(
+            RawContent::Audio(RawAudioContent {
+                data: data_base64,
+                mime_type,
+            }),
+            None,
+        ),
+        AC::Text(text) | AC::Base64(text) => Content::text(text),
+    }
+}
+
+/// Wrap a dispatch `ToolResponse` as a successful `CallToolResult`: the JSON
+/// body first, then one content block per rendered artifact.
+fn tool_result(response: crate::mcp_dispatch::ToolResponse) -> Result<CallToolResult, McpError> {
+    let mut contents = vec![match Content::json(response.json) {
+        Ok(content) => content,
+        Err(e) => Content::text(format!("Failed to serialize response: {e}")),
+    }];
+    contents.extend(response.artifacts.into_iter().map(artifact_block));
+    Ok(CallToolResult::success(contents))
 }
 
 // ── Tool argument structs ─────────────────────────────────────────────────
@@ -241,6 +268,12 @@ pub struct GetExecutionOutputArgs {
 pub struct ListSessionSnapshotsArgs {
     #[serde(default)]
     pub fields: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
+pub struct ArtifactKeyArg {
+    /// Artifact key, as passed to `artifact(key, mime, bytes)` in JS.
+    pub key: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
@@ -339,12 +372,17 @@ fn apply_run_js_description_override(tools: &mut [Tool], override_desc: Option<A
 const RUN_JS_FS_ONLY_DESC: &str = include_str!("run_js_tool_fs_only.md");
 
 /// Heap-only tools (heap-tag management). Hidden when heap persistence is off.
-const HEAP_ONLY_TOOLS: &[&str] =
-    &["get_heap_tags", "set_heap_tags", "delete_heap_tags", "query_heaps_by_tags"];
+const HEAP_ONLY_TOOLS: &[&str] = &[
+    "get_heap_tags",
+    "set_heap_tags",
+    "delete_heap_tags",
+    "query_heaps_by_tags",
+];
 
 /// Filesystem snapshot tools. Hidden when fs persistence is off.
-const FS_TOOLS: &[&str] =
-    &["fs_ls", "fs_pull", "fs_label", "fs_log", "fs_push", "fs_reset", "fs_merge"];
+const FS_TOOLS: &[&str] = &[
+    "fs_ls", "fs_pull", "fs_label", "fs_log", "fs_push", "fs_reset", "fs_merge",
+];
 
 /// True if `name` is a tool that requires a capability the engine doesn't have.
 fn tool_requires_missing_capability(name: &str, heap: bool, fs: bool) -> bool {
@@ -401,7 +439,11 @@ pub struct McpService {
 impl McpService {
     /// Forward a tool call to the transport-agnostic dispatcher and wrap the
     /// result as a `CallToolResult`.
-    async fn dispatch<T: Serialize>(&self, name: &str, args: &T) -> Result<CallToolResult, McpError> {
+    async fn dispatch<T: Serialize>(
+        &self,
+        name: &str,
+        args: &T,
+    ) -> Result<CallToolResult, McpError> {
         let arguments_json = serde_json::to_string(args).unwrap_or_else(|_| "{}".to_string());
         let result = invoke_runtime_tool(
             &self.runtime,
@@ -411,7 +453,7 @@ impl McpService {
             self.mcp_headers.get(),
         )
         .await;
-        json_result(result)
+        tool_result(result)
     }
 }
 
@@ -448,7 +490,9 @@ impl McpService {
         self.dispatch("run_js", &args).await
     }
 
-    #[tool(description = "Get the status and result of an execution. Returns execution_id, status (running/completed/failed/cancelled/timed_out), result (if completed), heap (if stateful), fs (resulting filesystem snapshot CA id, if a mount was attached), error (if failed), started_at, and completed_at.")]
+    #[tool(
+        description = "Get the status and result of an execution. Returns execution_id, status (running/completed/failed/cancelled/timed_out), result (if completed), heap (if stateful), fs (resulting filesystem snapshot CA id, if a mount was attached), error (if failed), started_at, and completed_at."
+    )]
     pub async fn get_execution(
         &self,
         Parameters(args): Parameters<ExecutionIdArg>,
@@ -456,7 +500,9 @@ impl McpService {
         self.dispatch("get_execution", &args).await
     }
 
-    #[tool(description = "Get paginated console output for an execution. Supports two modes: line-based (line_offset + line_limit) or byte-based (byte_offset + byte_limit). If byte_offset is provided, byte mode takes precedence. Response includes both line and byte coordinates for cross-referencing. Use next_line_offset or next_byte_offset from a previous response to resume reading.")]
+    #[tool(
+        description = "Get paginated console output for an execution. Supports two modes: line-based (line_offset + line_limit) or byte-based (byte_offset + byte_limit). If byte_offset is provided, byte mode takes precedence. Response includes both line and byte coordinates for cross-referencing. Use next_line_offset or next_byte_offset from a previous response to resume reading."
+    )]
     pub async fn get_execution_output(
         &self,
         Parameters(args): Parameters<GetExecutionOutputArgs>,
@@ -477,12 +523,33 @@ impl McpService {
         self.dispatch("list_executions", &json!({})).await
     }
 
-    #[tool(description = "List all named sessions (stateful mode only). Returns an array of session names that have been used via REST session fields or the X-MCP-Session-Id header.")]
+    #[tool(
+        description = "Fetch an artifact stored by run_js code via the artifact(key, mime, bytes) global. The payload is returned as a content block matching its mime type: image/* as an MCP image block (visible to the model), audio/* as an audio block, UTF-8 payloads as text, and other binary as base64 text. A JSON metadata block (key, mime_type, size_bytes, created_at, execution_id, encoding) comes first."
+    )]
+    pub async fn get_artifact(
+        &self,
+        Parameters(args): Parameters<ArtifactKeyArg>,
+    ) -> Result<CallToolResult, McpError> {
+        self.dispatch("get_artifact", &args).await
+    }
+
+    #[tool(
+        description = "List metadata (key, mime_type, size_bytes, created_at, execution_id) for all artifacts stored via the artifact(key, mime, bytes) global. Use get_artifact to fetch a payload."
+    )]
+    pub async fn list_artifacts(&self) -> Result<CallToolResult, McpError> {
+        self.dispatch("list_artifacts", &json!({})).await
+    }
+
+    #[tool(
+        description = "List all named sessions (stateful mode only). Returns an array of session names that have been used via REST session fields or the X-MCP-Session-Id header."
+    )]
     pub async fn list_sessions(&self) -> Result<CallToolResult, McpError> {
         self.dispatch("list_sessions", &json!({})).await
     }
 
-    #[tool(description = "List all log entries for the current session (stateful mode only). Each entry contains the input heap hash, output heap hash, code executed, and timestamp. Use the fields parameter to select specific fields (comma-separated: index,input_heap,output_heap,code,timestamp).")]
+    #[tool(
+        description = "List all log entries for the current session (stateful mode only). Each entry contains the input heap hash, output heap hash, code executed, and timestamp. Use the fields parameter to select specific fields (comma-separated: index,input_heap,output_heap,code,timestamp)."
+    )]
     pub async fn list_session_snapshots(
         &self,
         Parameters(args): Parameters<ListSessionSnapshotsArgs>,
@@ -490,7 +557,9 @@ impl McpService {
         self.dispatch("list_session_snapshots", &args).await
     }
 
-    #[tool(description = "Get tags for a heap snapshot (stateful mode only). Returns a map of key-value tags associated with the given heap content hash.")]
+    #[tool(
+        description = "Get tags for a heap snapshot (stateful mode only). Returns a map of key-value tags associated with the given heap content hash."
+    )]
     pub async fn get_heap_tags(
         &self,
         Parameters(args): Parameters<HeapArg>,
@@ -498,7 +567,9 @@ impl McpService {
         self.dispatch("get_heap_tags", &args).await
     }
 
-    #[tool(description = "Set or replace tags on a heap snapshot (stateful mode only). Provide a map of key-value string pairs. This replaces all existing tags for the heap.")]
+    #[tool(
+        description = "Set or replace tags on a heap snapshot (stateful mode only). Provide a map of key-value string pairs. This replaces all existing tags for the heap."
+    )]
     pub async fn set_heap_tags(
         &self,
         Parameters(args): Parameters<SetHeapTagsArgs>,
@@ -506,7 +577,9 @@ impl McpService {
         self.dispatch("set_heap_tags", &args).await
     }
 
-    #[tool(description = "Delete tags from a heap snapshot (stateful mode only). If keys is provided (comma-separated), only those tag keys are removed. If keys is omitted, all tags are deleted.")]
+    #[tool(
+        description = "Delete tags from a heap snapshot (stateful mode only). If keys is provided (comma-separated), only those tag keys are removed. If keys is omitted, all tags are deleted."
+    )]
     pub async fn delete_heap_tags(
         &self,
         Parameters(args): Parameters<DeleteHeapTagsArgs>,
@@ -514,7 +587,9 @@ impl McpService {
         self.dispatch("delete_heap_tags", &args).await
     }
 
-    #[tool(description = "Query heap snapshots by tags (stateful mode only). Provide a map of key-value pairs to match. Returns all heaps whose tags contain all the specified key-value pairs.")]
+    #[tool(
+        description = "Query heap snapshots by tags (stateful mode only). Provide a map of key-value pairs to match. Returns all heaps whose tags contain all the specified key-value pairs."
+    )]
     pub async fn query_heaps_by_tags(
         &self,
         Parameters(args): Parameters<TagsArg>,
@@ -524,12 +599,16 @@ impl McpService {
 
     // ── fs snapshot tools ────────────────────────────────────────────────
 
-    #[tool(description = "List filesystem snapshot labels. Returns each label name and its current head CA id (hex).")]
+    #[tool(
+        description = "List filesystem snapshot labels. Returns each label name and its current head CA id (hex)."
+    )]
     pub async fn fs_ls(&self) -> Result<CallToolResult, McpError> {
         self.dispatch("fs_ls", &json!({})).await
     }
 
-    #[tool(description = "Resolve a filesystem snapshot label to its current head CA id (hex). Use this as the `fs` argument to run_js to mount it.")]
+    #[tool(
+        description = "Resolve a filesystem snapshot label to its current head CA id (hex). Use this as the `fs` argument to run_js to mount it."
+    )]
     pub async fn fs_pull(
         &self,
         Parameters(args): Parameters<FsPullArgs>,
@@ -537,7 +616,9 @@ impl McpService {
         self.dispatch("fs_pull", &args).await
     }
 
-    #[tool(description = "Create or repoint a filesystem snapshot label to a CA id (hex). Pass an optional `message` (a commit-style note) to record on the reflog entry.")]
+    #[tool(
+        description = "Create or repoint a filesystem snapshot label to a CA id (hex). Pass an optional `message` (a commit-style note) to record on the reflog entry."
+    )]
     pub async fn fs_label(
         &self,
         Parameters(args): Parameters<FsLabelArgs>,
@@ -545,7 +626,9 @@ impl McpService {
         self.dispatch("fs_label", &args).await
     }
 
-    #[tool(description = "Show the reflog (move history) for a filesystem snapshot label, oldest first. Each entry has at, from, to (CA ids), op (create/push/reset/force), and an optional message. Use a `to` value as the ca_id for fs_reset. Pass `limit` to return only the most recent N entries (bounding the scan over long histories).")]
+    #[tool(
+        description = "Show the reflog (move history) for a filesystem snapshot label, oldest first. Each entry has at, from, to (CA ids), op (create/push/reset/force), and an optional message. Use a `to` value as the ca_id for fs_reset. Pass `limit` to return only the most recent N entries (bounding the scan over long histories)."
+    )]
     pub async fn fs_log(
         &self,
         Parameters(args): Parameters<FsLogArgs>,
@@ -553,7 +636,9 @@ impl McpService {
         self.dispatch("fs_log", &args).await
     }
 
-    #[tool(description = "Advance a filesystem snapshot label to a CA id (typically the `fs` value returned by a completed run_js execution). Default is reject-and-rebase: pass `expected` (the head you pulled) and the push fails if the label moved since. Set force=true to override, or detach=true to just return the CA id without touching the label. Pass an optional `message` (a commit-style note, max 4096 bytes) to record on the reflog entry.")]
+    #[tool(
+        description = "Advance a filesystem snapshot label to a CA id (typically the `fs` value returned by a completed run_js execution). Default is reject-and-rebase: pass `expected` (the head you pulled) and the push fails if the label moved since. Set force=true to override, or detach=true to just return the CA id without touching the label. Pass an optional `message` (a commit-style note, max 4096 bytes) to record on the reflog entry."
+    )]
     pub async fn fs_push(
         &self,
         Parameters(args): Parameters<FsPushArgs>,
@@ -561,7 +646,9 @@ impl McpService {
         self.dispatch("fs_push", &args).await
     }
 
-    #[tool(description = "Reset a filesystem snapshot label to an earlier CA id from its reflog (rollback). The CA id must appear in the label's reflog (see fs_log) unless allow_unlogged=true. Pass an optional `message` (a commit-style note) to record on the reflog entry.")]
+    #[tool(
+        description = "Reset a filesystem snapshot label to an earlier CA id from its reflog (rollback). The CA id must appear in the label's reflog (see fs_log) unless allow_unlogged=true. Pass an optional `message` (a commit-style note) to record on the reflog entry."
+    )]
     pub async fn fs_reset(
         &self,
         Parameters(args): Parameters<FsResetArgs>,
@@ -569,7 +656,9 @@ impl McpService {
         self.dispatch("fs_reset", &args).await
     }
 
-    #[tool(description = "Three-way merge two filesystem snapshots (CA ids) into a new snapshot. Pass `base` — the snapshot both sides diverged from (e.g. the label head you mounted before two runs) — so only paths BOTH sides changed conflict; omit it for a 2-way merge. Text files are merged at line level: edits to different lines of the same file auto-merge cleanly. On success returns the merged snapshot's ca_id (push it to a label separately). On conflict returns status=conflict with, per path: each side's content id (null = absent), kind (text/binary/sqlite/modify-delete), and for text the diff3 conflict `markers` plus unified `diff_ours`/`diff_theirs` so you can resolve at line level (edit the markers, write the file back, push). Set prefer=ours|theirs to auto-resolve remaining conflicts to that side.")]
+    #[tool(
+        description = "Three-way merge two filesystem snapshots (CA ids) into a new snapshot. Pass `base` — the snapshot both sides diverged from (e.g. the label head you mounted before two runs) — so only paths BOTH sides changed conflict; omit it for a 2-way merge. Text files are merged at line level: edits to different lines of the same file auto-merge cleanly. On success returns the merged snapshot's ca_id (push it to a label separately). On conflict returns status=conflict with, per path: each side's content id (null = absent), kind (text/binary/sqlite/modify-delete), and for text the diff3 conflict `markers` plus unified `diff_ours`/`diff_theirs` so you can resolve at line level (edit the markers, write the file back, push). Set prefer=ours|theirs to auto-resolve remaining conflicts to that side."
+    )]
     pub async fn fs_merge(
         &self,
         Parameters(args): Parameters<FsMergeArgs>,
@@ -623,11 +712,14 @@ impl ServerHandler for McpService {
         request: ReadResourceRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResult, McpError> {
-        read_doc_resource(&request.uri, self.runtime.heap_enabled(), self.runtime.fs_enabled())
-            .ok_or_else(|| McpError::resource_not_found(
-                format!("Unknown resource URI: {}", request.uri),
-                None,
-            ))
+        read_doc_resource(
+            &request.uri,
+            self.runtime.heap_enabled(),
+            self.runtime.fs_enabled(),
+        )
+        .ok_or_else(|| {
+            McpError::resource_not_found(format!("Unknown resource URI: {}", request.uri), None)
+        })
     }
 
     async fn list_tools(
@@ -658,10 +750,15 @@ impl ServerHandler for McpService {
             return Ok(result);
         }
         // WASM module stubs return run_js usage instructions instead of dispatching.
-        if let Some(result) = self.runtime.wasm_stub_call_response(&request.name, request.arguments.as_ref()) {
+        if let Some(result) = self
+            .runtime
+            .wasm_stub_call_response(&request.name, request.arguments.as_ref())
+        {
             return Ok(result);
         }
-        self.tool_router.call(ToolCallContext::new(self, request, context)).await
+        self.tool_router
+            .call(ToolCallContext::new(self, request, context))
+            .await
     }
 
     async fn initialize(
@@ -669,7 +766,13 @@ impl ServerHandler for McpService {
         _request: InitializeRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<InitializeResult, McpError> {
-        capture_mcp_headers(&context, Some(&self.session_id), &self.mcp_headers, self.verifier.as_ref()).await;
+        capture_mcp_headers(
+            &context,
+            Some(&self.session_id),
+            &self.mcp_headers,
+            self.verifier.as_ref(),
+        )
+        .await;
         Ok(self.get_info())
     }
 }
@@ -717,20 +820,55 @@ impl StatelessMcpService {
             self.mcp_headers.get(),
         )
         .await;
-        json_result(result)
+        tool_result(result)
+    }
+
+    #[tool(
+        description = "Fetch an artifact stored by run_js code via the artifact(key, mime, bytes) global. The payload is returned as a content block matching its mime type: image/* as an MCP image block (visible to the model), audio/* as an audio block, UTF-8 payloads as text, and other binary as base64 text. A JSON metadata block (key, mime_type, size_bytes, created_at, execution_id, encoding) comes first."
+    )]
+    pub async fn get_artifact(
+        &self,
+        Parameters(args): Parameters<ArtifactKeyArg>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = invoke_runtime_tool(
+            &self.runtime,
+            "get_artifact",
+            serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string()),
+            None,
+            self.mcp_headers.get(),
+        )
+        .await;
+        tool_result(result)
+    }
+
+    #[tool(
+        description = "List metadata (key, mime_type, size_bytes, created_at, execution_id) for all artifacts stored via the artifact(key, mime, bytes) global. Use get_artifact to fetch a payload."
+    )]
+    pub async fn list_artifacts(&self) -> Result<CallToolResult, McpError> {
+        let result = invoke_runtime_tool(
+            &self.runtime,
+            "list_artifacts",
+            "{}".to_string(),
+            None,
+            self.mcp_headers.get(),
+        )
+        .await;
+        tool_result(result)
     }
 }
 
 #[task_handler]
 impl ServerHandler for StatelessMcpService {
     fn get_info(&self) -> ServerInfo {
-        let instructions = self.runtime.instructions_override()
+        let instructions = self
+            .runtime
+            .instructions_override()
             .map(|s| s.to_string())
             .unwrap_or_else(|| {
                 "JavaScript execution service (stateless mode — no heap persistence). \
                  Use resources/list and resources/read to explore docs://readme, \
                  docs://llms-txt, docs://openapi, and docs://tools before calling tools."
-                .to_string()
+                    .to_string()
             });
         let mut info = ServerInfo::default();
         info.instructions = Some(instructions);
@@ -759,11 +897,9 @@ impl ServerHandler for StatelessMcpService {
         request: ReadResourceRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResult, McpError> {
-        read_doc_resource(&request.uri, false, false)
-            .ok_or_else(|| McpError::resource_not_found(
-                format!("Unknown resource URI: {}", request.uri),
-                None,
-            ))
+        read_doc_resource(&request.uri, false, false).ok_or_else(|| {
+            McpError::resource_not_found(format!("Unknown resource URI: {}", request.uri), None)
+        })
     }
 
     async fn list_tools(
@@ -793,10 +929,15 @@ impl ServerHandler for StatelessMcpService {
         {
             return Ok(result);
         }
-        if let Some(result) = self.runtime.wasm_stub_call_response(&request.name, request.arguments.as_ref()) {
+        if let Some(result) = self
+            .runtime
+            .wasm_stub_call_response(&request.name, request.arguments.as_ref())
+        {
             return Ok(result);
         }
-        self.tool_router.call(ToolCallContext::new(self, request, context)).await
+        self.tool_router
+            .call(ToolCallContext::new(self, request, context))
+            .await
     }
 
     async fn initialize(
@@ -825,21 +966,25 @@ pub(crate) async fn capture_mcp_headers(
     tracing::info!(?initialize_headers, %initialize_uri, "initialize from http server");
 
     if let Some(verifier) = verifier {
-        let token = http_request_part.headers
+        let token = http_request_part
+            .headers
             .get("authorization")
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "))
             .or_else(|| {
-                http_request_part.headers
+                http_request_part
+                    .headers
                     .get("agent-session")
                     .and_then(|v| v.to_str().ok())
             });
         match token {
-            Some(token) => if verifier.verify(token).await {
-                tracing::info!("JWT verified");
-            } else {
-                tracing::warn!("JWT present but failed verification");
-            },
+            Some(token) => {
+                if verifier.verify(token).await {
+                    tracing::info!("JWT verified");
+                } else {
+                    tracing::warn!("JWT present but failed verification");
+                }
+            }
             None => tracing::debug!("No Authorization/AgentSession header in initialize request"),
         }
     }
@@ -855,14 +1000,19 @@ pub(crate) async fn capture_mcp_headers(
 
     if let Some(session_id) = session_id {
         if let Some(sid) = mcp_header_map.get("session-id") {
-            tracing::info!(session_id = sid.as_str(), "Session ID from X-MCP-Session-Id header");
+            tracing::info!(
+                session_id = sid.as_str(),
+                "Session ID from X-MCP-Session-Id header"
+            );
             let _ = session_id.set(sid.clone());
         }
     }
 
     if !mcp_header_map.is_empty() {
         tracing::info!(?mcp_header_map, "X-MCP-* headers captured");
-        let _ = mcp_headers.set(McpRequestHeaders { values: mcp_header_map });
+        let _ = mcp_headers.set(McpRequestHeaders {
+            values: mcp_header_map,
+        });
     }
 }
 

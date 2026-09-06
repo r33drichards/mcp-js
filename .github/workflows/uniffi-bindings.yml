@@ -6,22 +6,28 @@ on:
     paths:
       - "mcp-v8-uniffi/**"
       - "mcp-v8-uniffi-python/**"
-      - "server/src/library.rs"
-      - "server/src/runtime.rs"
+      - "server/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
       - "scripts/*uniffi-bindings.sh"
       - "scripts/python-uniffi-library-smoke.py"
       - "scripts/test-python-uniffi-library.sh"
+      - "scripts/test-python-uniffi.py"
+      - "scripts/test_python_uniffi_runner.py"
       - ".github/workflows/uniffi-bindings.yml"
   pull_request:
     branches: [ main ]
     paths:
       - "mcp-v8-uniffi/**"
       - "mcp-v8-uniffi-python/**"
-      - "server/src/library.rs"
-      - "server/src/runtime.rs"
+      - "server/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
       - "scripts/*uniffi-bindings.sh"
       - "scripts/python-uniffi-library-smoke.py"
       - "scripts/test-python-uniffi-library.sh"
+      - "scripts/test-python-uniffi.py"
+      - "scripts/test_python_uniffi_runner.py"
       - ".github/workflows/uniffi-bindings.yml"
   workflow_dispatch:
 
@@ -29,6 +35,16 @@ permissions:
   contents: read
 
 jobs:
+  python-runner-unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Test Python runner without a native build
+        run: python -m unittest discover -s scripts -p test_python_uniffi_runner.py
+
   staticlib-bindings:
     runs-on: ubuntu-latest
     steps:
@@ -64,7 +80,7 @@ jobs:
             cargo build -p mcp-v8-uniffi-python --release \
               --config mcp-v8-uniffi-python/cargo-config.toml
           '
-      - name: Import Python library and execute JavaScript
+      - name: Execute JavaScript through the native Python library
         run: |
-          nix develop --command ./scripts/test-python-uniffi-library.sh \
-            target/python-uniffi/release/libmcp_v8_uniffi.so
+          nix develop --command python3 ./scripts/test-python-uniffi.py \
+            --library target/python-uniffi/release/libmcp_v8_uniffi.so

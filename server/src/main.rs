@@ -1,29 +1,32 @@
 use anyhow::Result;
-use rmcp::{ServerHandler, ServiceExt, transport::stdio};
-use tracing_subscriber::{self};
 use clap::CommandFactory;
 use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
 };
+use rmcp::{ServerHandler, ServiceExt, transport::stdio};
+use tracing_subscriber::{self};
 // Legacy HTTP+SSE server transport, vendored from rmcp 0.1.5 (dropped in 1.x).
+use cluster::{ClusterConfig, ClusterNode};
 use rmcp_legacy::transport::sse_server::{SseServer, SseServerConfig};
-use serde::{Deserialize, de::{self, MapAccess, Visitor}};
-use tokio_util::sync::CancellationToken;
-use std::sync::Arc;
-use utoipa::OpenApi as _;
-use std::fmt;
-use server::cli::{Cli, FetchHeaderKey, StoreKind};
-use server::mcp::{McpService, StatelessMcpService};
+use serde::{
+    Deserialize,
+    de::{self, MapAccess, Visitor},
+};
 use server::bootstrap::{
     CapabilityBootstrapConfig, FeatureBootstrapConfig, PolicyBootstrapConfig, RunJsFileAccess,
 };
+use server::cli::{Cli, FetchHeaderKey, StoreKind};
 use server::engine::fetch::OAuthClientCredentialsConfig;
 use server::engine::mcp_client::{McpServerConfig, McpServerTransport, StubConfig};
 use server::engine::wasm_stub::WasmStubConfig;
 use server::engine::{Engine, HardeningConfig, WasmModule};
+use server::mcp::{McpService, StatelessMcpService};
+use server::session::{JwksKeyStore, SessionVerifier, apply_auth_enforcement};
 use server::{api, bootstrap, cli, cluster, mcp_sse, sandbox};
-use server::session::{SessionVerifier, JwksKeyStore};
-use cluster::{ClusterConfig, ClusterNode};
+use std::fmt;
+use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
+use utoipa::OpenApi as _;
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -36,7 +39,10 @@ fn main() -> Result<()> {
     // ── --print-openapi: dump spec and exit ─────────────────────────────
     if cli.print_openapi {
         let spec = api::ApiDoc::openapi();
-        println!("{}", serde_json::to_string_pretty(&spec).expect("serialize OpenAPI spec"));
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&spec).expect("serialize OpenAPI spec")
+        );
         return Ok(());
     }
 
@@ -52,14 +58,42 @@ fn main() -> Result<()> {
         .block_on(async_main(cli))
 }
 
+#[derive(Debug)]
+struct StartupLogSummary {
+    has_config_file: bool,
+    has_mcp_config: bool,
+    mcp_server_count: usize,
+}
+
+fn startup_log_summary(cli: &Cli) -> StartupLogSummary {
+    StartupLogSummary {
+        has_config_file: cli.config.is_some(),
+        has_mcp_config: cli.mcp_config.is_some(),
+        mcp_server_count: cli.mcp_servers.len(),
+    }
+}
+
 async fn async_main(cli: Cli) -> Result<()> {
-    tracing::info!(?cli, "Starting MCP server with CLI arguments");
+    let startup = startup_log_summary(&cli);
+    tracing::info!(
+        has_config_file = startup.has_config_file,
+        has_mcp_config = startup.has_mcp_config,
+        mcp_server_count = startup.mcp_server_count,
+        "Starting MCP server"
+    );
 
     let heap_memory_max_bytes = (cli.heap_memory_max as usize) * 1024 * 1024;
     let execution_timeout_secs = cli.execution_timeout;
-    tracing::info!("V8 heap memory limit: {} MB ({} bytes)", cli.heap_memory_max, heap_memory_max_bytes);
+    tracing::info!(
+        "V8 heap memory limit: {} MB ({} bytes)",
+        cli.heap_memory_max,
+        heap_memory_max_bytes
+    );
     tracing::info!("V8 execution timeout: {} seconds", execution_timeout_secs);
-    tracing::info!("Max concurrent V8 executions: {}", cli.max_concurrent_executions);
+    tracing::info!(
+        "Max concurrent V8 executions: {}",
+        cli.max_concurrent_executions
+    );
 
     // Cluster membership attaches to the engine (session log / heap tags / fs
     // labels via `with_cluster`), which is independent of the MCP transport, so
@@ -112,7 +146,10 @@ async fn async_main(cli: Cli) -> Result<()> {
             peers: peer_addrs_list,
             peer_addrs: peer_addrs_map,
             cluster_port,
-            advertise_addr: cli.advertise_addr.clone().or_else(|| Some(format!("{}:{}", cli.node_id, cluster_port))),
+            advertise_addr: cli
+                .advertise_addr
+                .clone()
+                .or_else(|| Some(format!("{}:{}", cli.node_id, cluster_port))),
             heartbeat_interval: std::time::Duration::from_millis(cli.heartbeat_interval),
             election_timeout_min: std::time::Duration::from_millis(cli.election_timeout_min),
             election_timeout_max: std::time::Duration::from_millis(cli.election_timeout_max),
@@ -120,16 +157,23 @@ async fn async_main(cli: Cli) -> Result<()> {
         };
 
         let cluster_db_path = format!("{}/cluster-{}", cli.session_db_path, cli.node_id);
-        let cluster_db = sled::open(&cluster_db_path)
-            .expect("Failed to open cluster sled database");
+        let cluster_db =
+            sled::open(&cluster_db_path).expect("Failed to open cluster sled database");
 
         let node = ClusterNode::new(cluster_config, cluster_db);
         node.start().await;
-        tracing::info!("Cluster node {} started on port {}", cli.node_id, cluster_port);
+        tracing::info!(
+            "Cluster node {} started on port {}",
+            cli.node_id,
+            cluster_port
+        );
 
         // If --join is specified, register with an existing cluster member.
         if let Some(ref seed_addr) = cli.join {
-            let my_addr = cli.advertise_addr.clone().unwrap_or_else(|| format!("{}:{}", cli.node_id, cluster_port));
+            let my_addr = cli
+                .advertise_addr
+                .clone()
+                .unwrap_or_else(|| format!("{}:{}", cli.node_id, cluster_port));
             tracing::info!("Joining cluster via seed node {}", seed_addr);
             let join_req = cluster::JoinRequest {
                 node_id: cli.node_id.clone(),
@@ -163,8 +207,8 @@ async fn async_main(cli: Cli) -> Result<()> {
     // MCP transport or REST sidecar is started, and policies never apply —
     // the Raft HTTP server on --cluster-port is the entire surface.
     if cli.metadata_only {
-        let node = cluster_node
-            .expect("--metadata-only requires --cluster-port (enforced at parse time)");
+        let node =
+            cluster_node.expect("--metadata-only requires --cluster-port (enforced at parse time)");
         tracing::info!(
             "Metadata-only mode: node {} serves Raft replication on port {}; \
              JS execution, policies, and MCP transports are disabled",
@@ -180,12 +224,27 @@ async fn async_main(cli: Cli) -> Result<()> {
     // ── WASM configuration ─────────────────────────────────────────────
     let wasm_default_max_bytes = parse_memory_size(&cli.wasm_default_max_memory)
         .map_err(|e| anyhow::anyhow!("Invalid --wasm-default-max-memory: {}", e))?;
-    tracing::info!("WASM default max memory: {} bytes ({} MiB)", wasm_default_max_bytes, wasm_default_max_bytes / 1024 / 1024);
+    tracing::info!(
+        "WASM default max memory: {} bytes ({} MiB)",
+        wasm_default_max_bytes,
+        wasm_default_max_bytes / 1024 / 1024
+    );
 
-    let wasm_modules = load_wasm_modules(&cli.wasm_modules, &cli.wasm_config, &cli.wasm_stub_descriptions)?;
+    let wasm_modules = load_wasm_modules(
+        &cli.wasm_modules,
+        &cli.wasm_config,
+        &cli.wasm_stub_descriptions,
+    )?;
     if !wasm_modules.is_empty() {
-        tracing::info!("Loaded {} WASM module(s): {}", wasm_modules.len(),
-            wasm_modules.iter().map(|m| m.name.as_str()).collect::<Vec<_>>().join(", "));
+        tracing::info!(
+            "Loaded {} WASM module(s): {}",
+            wasm_modules.len(),
+            wasm_modules
+                .iter()
+                .map(|m| m.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
     }
 
     let heap_enabled = cli.heap_enabled();
@@ -263,8 +322,9 @@ async fn async_main(cli: Cli) -> Result<()> {
         let json_str = if json_or_path.trim_start().starts_with('{') {
             json_or_path.clone()
         } else {
-            std::fs::read_to_string(json_or_path)
-                .map_err(|e| anyhow::anyhow!("Failed to read policies config '{}': {}", json_or_path, e))?
+            std::fs::read_to_string(json_or_path).map_err(|e| {
+                anyhow::anyhow!("Failed to read policies config '{}': {}", json_or_path, e)
+            })?
         };
         let config = serde_json::from_str(&json_str)
             .map_err(|e| anyhow::anyhow!("Invalid policies JSON: {}", e))?;
@@ -274,8 +334,7 @@ async fn async_main(cli: Cli) -> Result<()> {
         PolicyBootstrapConfig::default()
     };
 
-    let fetch_header_rules =
-        load_fetch_header_rules(&cli.fetch_headers, &cli.fetch_header_config)?;
+    let fetch_header_rules = load_fetch_header_rules(&cli.fetch_headers, &cli.fetch_header_config)?;
     if !fetch_header_rules.is_empty() {
         tracing::info!(
             "Loaded {} fetch header injection rule(s)",
@@ -298,9 +357,7 @@ async fn async_main(cli: Cli) -> Result<()> {
                 "--allow-run-js-file overrides the configured run_js_file policy (all paths allowed)"
             );
         }
-        tracing::info!(
-            "run_js file-path reads: ENABLED (allow all server-readable paths)"
-        );
+        tracing::info!("run_js file-path reads: ENABLED (allow all server-readable paths)");
         RunJsFileAccess::AllowAll
     } else if policy_config.run_js_file.is_some() {
         tracing::info!("run_js file-path reads: ENABLED (policy-gated)");
@@ -323,7 +380,10 @@ async fn async_main(cli: Cli) -> Result<()> {
     let mcp_server_configs = load_mcp_server_configs(&cli.mcp_servers, &cli.mcp_config)?;
     let has_upstream_mcp_servers = !mcp_server_configs.is_empty();
     if has_upstream_mcp_servers {
-        tracing::info!("Connecting to {} MCP server(s)...", mcp_server_configs.len());
+        tracing::info!(
+            "Connecting to {} MCP server(s)...",
+            mcp_server_configs.len()
+        );
         tracing::info!(
             stubs = cli.mcp_stubs,
             prefix = %cli.mcp_stub_prefix,
@@ -340,19 +400,25 @@ async fn async_main(cli: Cli) -> Result<()> {
         )
         .await?;
     if has_upstream_mcp_servers {
-        tracing::info!("All MCP servers connected. JS code can use mcp.callTool(), mcp.listTools(), mcp.servers");
+        tracing::info!(
+            "All MCP servers connected. JS code can use mcp.callTool(), mcp.listTools(), mcp.servers"
+        );
     }
 
     // ── Embedded runtime features ────────────────────────────────────────
     // Resolve CLI file references before handing one typed configuration to
     // the canonical library bootstrap.
-    let instructions_override = cli.instructions.as_deref()
+    let instructions_override = cli
+        .instructions
+        .as_deref()
         .map(|value| resolve_text_or_file(value, "--instructions"))
         .transpose()?;
     if let Some(text) = &instructions_override {
         tracing::info!("Overriding MCP server instructions ({} chars)", text.len());
     }
-    let run_js_description_override = cli.run_js_description.as_deref()
+    let run_js_description_override = cli
+        .run_js_description
+        .as_deref()
         .map(|value| resolve_text_or_file(value, "--run-js-description"))
         .transpose()?;
     if let Some(text) = &run_js_description_override {
@@ -387,7 +453,8 @@ async fn async_main(cli: Cli) -> Result<()> {
     // ── Build session verifier (if --jwks-url) ─────────────────────────
     let session_verifier: Option<Arc<SessionVerifier>> = if let Some(ref jwks_url) = cli.jwks_url {
         tracing::info!("Fetching JWKS keys from {}", jwks_url);
-        let key_store = JwksKeyStore::new(jwks_url.clone()).await
+        let key_store = JwksKeyStore::new(jwks_url.clone())
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to initialize JWKS key store: {}", e))?;
         Some(Arc::new(SessionVerifier::new(Arc::new(key_store))))
     } else {
@@ -402,17 +469,50 @@ async fn async_main(cli: Cli) -> Result<()> {
     let bind_host = cli.bind_host.clone();
     let transport_result: Result<()> = if let Some(port) = cli.http_port {
         tracing::info!("Starting Streamable HTTP transport on port {}", port);
+        let allowed_hosts = cli::resolve_allowed_hosts(&cli.allowed_hosts);
+        let allowed_origins = cli::normalize_allowlist(&cli.allowed_origins);
+        if allowed_hosts.is_empty() {
+            tracing::info!("Host header validation disabled: accepting any Host");
+        } else {
+            tracing::info!("Host header allowlist: {}", allowed_hosts.join(", "));
+        }
+        if allowed_origins.is_empty() {
+            tracing::info!("Origin header validation disabled: accepting any Origin");
+        } else {
+            tracing::info!("Origin header allowlist: {}", allowed_origins.join(", "));
+        }
         if runtime.session_capable() {
             let verifier = session_verifier.clone();
-            start_streamable_http(runtime.clone(), bind_host, port, move |e| McpService::new(e, verifier.clone())).await
+            start_streamable_http(
+                runtime.clone(),
+                bind_host,
+                port,
+                allowed_hosts,
+                allowed_origins,
+                session_verifier.clone(),
+                move |e| McpService::new(e, verifier.clone()),
+            )
+            .await
         } else {
             let verifier = session_verifier.clone();
-            start_streamable_http(runtime.clone(), bind_host, port, move |e| StatelessMcpService::new(e, verifier.clone())).await
+            start_streamable_http(
+                runtime.clone(),
+                bind_host,
+                port,
+                allowed_hosts,
+                allowed_origins,
+                session_verifier.clone(),
+                move |e| StatelessMcpService::new(e, verifier.clone()),
+            )
+            .await
         }
     } else if let Some(port) = cli.sse_port {
         // Legacy HTTP+SSE transport, served by the vendored rmcp 0.1.5 SSE
         // server. No MCP tasks support here — use --http-port for tasks.
-        tracing::info!("Starting legacy HTTP+SSE transport on port {} (no MCP tasks; use --http-port for tasks)", port);
+        tracing::info!(
+            "Starting legacy HTTP+SSE transport on port {} (no MCP tasks; use --http-port for tasks)",
+            port
+        );
         let verifier = session_verifier.clone();
         start_sse_server(runtime.clone(), bind_host, port, verifier).await
     } else {
@@ -461,7 +561,15 @@ fn resolve_bind_addr(host: &str, port: u16) -> Result<std::net::SocketAddr> {
 
 // ── Streamable HTTP transport (--http-port) ─────────────────────────────
 
-async fn start_streamable_http<S, F>(runtime: Arc<Engine>, host: String, port: u16, make_service: F) -> Result<()>
+async fn start_streamable_http<S, F>(
+    runtime: Arc<Engine>,
+    host: String,
+    port: u16,
+    allowed_hosts: Vec<String>,
+    allowed_origins: Vec<String>,
+    verifier: Option<Arc<SessionVerifier>>,
+    make_service: F,
+) -> Result<()>
 where
     S: ServerHandler + Send + Sync + 'static,
     F: Fn(Arc<Engine>) -> S + Send + Sync + Clone + 'static,
@@ -477,14 +585,17 @@ where
     let mcp_service = StreamableHttpService::new(
         move || Ok(make_service(factory_runtime.clone())),
         LocalSessionManager::default().into(),
-        StreamableHttpServerConfig::default(),
+        StreamableHttpServerConfig::default()
+            .with_allowed_hosts(allowed_hosts)
+            .with_allowed_origins(allowed_origins),
     );
 
     // Serve OpenAPI JSON spec at /api-doc/openapi.json
     let openapi_spec = api::ApiDoc::openapi();
     let openapi_json = serde_json::to_string(&openapi_spec).unwrap_or_default();
-    let openapi_route = axum::Router::new()
-        .route("/api-doc/openapi.json", axum::routing::get(move || {
+    let openapi_route = axum::Router::new().route(
+        "/api-doc/openapi.json",
+        axum::routing::get(move || {
             let json = openapi_json.clone();
             async move {
                 axum::response::Response::builder()
@@ -492,13 +603,16 @@ where
                     .body(axum::body::Body::from(json))
                     .unwrap()
             }
-        }));
+        }),
+    );
 
-    // Mount the MCP service at /mcp alongside the plain HTTP API and openapi route.
-    let app = axum::Router::new()
+    // Mount the MCP service at /mcp alongside the plain HTTP API. Both run
+    // arbitrary JS, so when JWKS enforcement is active they sit behind the
+    // bearer-auth layer; the openapi spec route stays public.
+    let protected = axum::Router::new()
         .nest_service("/mcp", mcp_service)
-        .merge(api::api_router(runtime.clone()))
-        .merge(openapi_route);
+        .merge(api::api_router(runtime.clone()));
+    let app = apply_auth_enforcement(protected, &verifier).merge(openapi_route);
 
     let listener = tokio::net::TcpListener::bind(bind).await?;
     tracing::info!("Streamable HTTP server listening on {}", bind);
@@ -542,8 +656,9 @@ async fn start_sse_server(
 
     // Serve OpenAPI JSON spec at /api-doc/openapi.json
     let openapi_json = serde_json::to_string(&api::ApiDoc::openapi()).unwrap_or_default();
-    let openapi_route = axum::Router::new()
-        .route("/api-doc/openapi.json", axum::routing::get(move || {
+    let openapi_route = axum::Router::new().route(
+        "/api-doc/openapi.json",
+        axum::routing::get(move || {
             let json = openapi_json.clone();
             async move {
                 axum::response::Response::builder()
@@ -551,11 +666,11 @@ async fn start_sse_server(
                     .body(axum::body::Body::from(json))
                     .unwrap()
             }
-        }));
+        }),
+    );
 
-    let app = sse_router
-        .merge(api::api_router(runtime.clone()))
-        .merge(openapi_route);
+    let protected = sse_router.merge(api::api_router(runtime.clone()));
+    let app = apply_auth_enforcement(protected, &verifier).merge(openapi_route);
 
     let listener = tokio::net::TcpListener::bind(sse_server.config.bind).await?;
     tracing::info!("SSE server listening on {}", sse_server.config.bind);
@@ -568,9 +683,8 @@ async fn start_sse_server(
     });
 
     let service_runtime = runtime.clone();
-    sse_server.with_service(move || {
-        mcp_sse::SseService::new(service_runtime.clone(), verifier.clone())
-    });
+    sse_server
+        .with_service(move || mcp_sse::SseService::new(service_runtime.clone(), verifier.clone()));
 
     let server_task = tokio::spawn(async move {
         if let Err(e) = server.await {
@@ -599,10 +713,12 @@ fn load_wasm_modules(
 
     // Parse CLI --wasm-module flags (format: name=/path/to/file.wasm[:max_memory])
     for entry in cli_modules {
-        let (name, rest) = entry.split_once('=')
-            .ok_or_else(|| anyhow::anyhow!(
-                "Invalid --wasm-module format: '{}'. Expected name=/path/to/file.wasm[:max_memory]", entry
-            ))?;
+        let (name, rest) = entry.split_once('=').ok_or_else(|| {
+            anyhow::anyhow!(
+                "Invalid --wasm-module format: '{}'. Expected name=/path/to/file.wasm[:max_memory]",
+                entry
+            )
+        })?;
         let name = name.trim().to_string();
         let rest = rest.trim();
         validate_wasm_name(&name)?;
@@ -610,7 +726,10 @@ fn load_wasm_modules(
         // Split path and optional :max_memory suffix.
         // Scan from the right for ':' that isn't part of a Windows drive letter (e.g. C:\).
         let (path, max_memory_bytes) = match rest.rfind(':') {
-            Some(pos) if pos > 0 && !rest[..pos].ends_with(|c: char| c.is_ascii_alphabetic() && pos == 1) => {
+            Some(pos)
+                if pos > 0
+                    && !rest[..pos].ends_with(|c: char| c.is_ascii_alphabetic() && pos == 1) =>
+            {
                 let suffix = &rest[pos + 1..];
                 if suffix.is_empty() {
                     (rest, None)
@@ -645,8 +764,9 @@ fn load_wasm_modules(
         let config_str = if config_path.trim_start().starts_with('{') {
             config_path.clone()
         } else {
-            std::fs::read_to_string(config_path)
-                .map_err(|e| anyhow::anyhow!("Failed to read WASM config '{}': {}", config_path, e))?
+            std::fs::read_to_string(config_path).map_err(|e| {
+                anyhow::anyhow!("Failed to read WASM config '{}': {}", config_path, e)
+            })?
         };
         let config: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&config_str)
             .map_err(|e| anyhow::anyhow!("Invalid JSON in WASM config '{}': {}", config_path, e))?;
@@ -654,39 +774,57 @@ fn load_wasm_modules(
             let (path, max_memory_bytes, description) = if let Some(s) = value.as_str() {
                 (s.to_string(), None, None)
             } else if let Some(obj) = value.as_object() {
-                let path = obj.get("path")
+                let path = obj
+                    .get("path")
                     .and_then(|v| v.as_str())
-                    .ok_or_else(|| anyhow::anyhow!(
-                        "WASM config object for '{}' must have a \"path\" string field", name
-                    ))?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "WASM config object for '{}' must have a \"path\" string field",
+                            name
+                        )
+                    })?
                     .to_string();
-                let max_mem = obj.get("max_memory_bytes")
-                    .map(|v| v.as_u64().ok_or_else(|| anyhow::anyhow!(
+                let max_mem = obj
+                    .get("max_memory_bytes")
+                    .map(|v| {
+                        v.as_u64().ok_or_else(|| anyhow::anyhow!(
                         "WASM config \"max_memory_bytes\" for '{}' must be a positive integer", name
-                    )))
-                    .transpose()?
-                    ;
-                let description = obj.get("description")
-                    .map(|v| v.as_str().ok_or_else(|| anyhow::anyhow!(
-                        "WASM config \"description\" for '{}' must be a string", name
-                    )))
+                    ))
+                    })
+                    .transpose()?;
+                let description = obj
+                    .get("description")
+                    .map(|v| {
+                        v.as_str().ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "WASM config \"description\" for '{}' must be a string",
+                                name
+                            )
+                        })
+                    })
                     .transpose()?
                     .map(|s| s.to_string());
                 (path, max_mem, description)
             } else {
                 anyhow::bail!(
-                    "WASM config value for '{}' must be a string path or object, got: {}", name, value
+                    "WASM config value for '{}' must be a string path or object, got: {}",
+                    name,
+                    value
                 );
             };
             validate_wasm_name(&name)?;
             let bytes = std::fs::read(&path)
                 .map_err(|e| anyhow::anyhow!("Failed to read WASM file '{}': {}", path, e))?;
-            let max_memory_bytes = max_memory_bytes
-                .map(usize::try_from)
-                .transpose()
-                .map_err(|_| anyhow::anyhow!(
-                    "WASM config \"max_memory_bytes\" for '{}' is too large", name
-                ))?;
+            let max_memory_bytes =
+                max_memory_bytes
+                    .map(usize::try_from)
+                    .transpose()
+                    .map_err(|_| {
+                        anyhow::anyhow!(
+                            "WASM config \"max_memory_bytes\" for '{}' is too large",
+                            name
+                        )
+                    })?;
             modules.push(WasmModule {
                 name,
                 bytes,
@@ -699,16 +837,20 @@ fn load_wasm_modules(
     // Apply --wasm-stub-description overrides (format: name=description text).
     // These take precedence over a description set inline in --wasm-config.
     for entry in stub_descriptions {
-        let (name, desc) = entry.split_once('=')
-            .ok_or_else(|| anyhow::anyhow!(
-                "Invalid --wasm-stub-description format: '{}'. Expected name=description", entry
-            ))?;
+        let (name, desc) = entry.split_once('=').ok_or_else(|| {
+            anyhow::anyhow!(
+                "Invalid --wasm-stub-description format: '{}'. Expected name=description",
+                entry
+            )
+        })?;
         let name = name.trim();
-        let module = modules.iter_mut().find(|m| m.name == name)
-            .ok_or_else(|| anyhow::anyhow!(
+        let module = modules.iter_mut().find(|m| m.name == name).ok_or_else(|| {
+            anyhow::anyhow!(
                 "--wasm-stub-description refers to unknown WASM module '{}'. \
-                 Load it first with --wasm-module or --wasm-config.", name
-            ))?;
+                 Load it first with --wasm-module or --wasm-config.",
+                name
+            )
+        })?;
         module.description = Some(desc.to_string());
     }
 
@@ -748,7 +890,8 @@ fn parse_memory_size(s: &str) -> Result<usize> {
         Some(b'g' | b'G') => (&s[..s.len() - 1], 1024 * 1024 * 1024),
         _ => (s, 1),
     };
-    let num: usize = num_str.parse()
+    let num: usize = num_str
+        .parse()
         .map_err(|_| anyhow::anyhow!("Invalid memory size: '{}'", s))?;
     num.checked_mul(multiplier)
         .ok_or_else(|| anyhow::anyhow!("Memory size overflow: '{}'", s))
@@ -762,11 +905,18 @@ fn validate_wasm_name(name: &str) -> Result<()> {
     let mut chars = name.chars();
     let first = chars.next().unwrap();
     if !first.is_ascii_alphabetic() && first != '_' && first != '$' {
-        anyhow::bail!("WASM module name '{}' must start with a letter, underscore, or dollar sign", name);
+        anyhow::bail!(
+            "WASM module name '{}' must start with a letter, underscore, or dollar sign",
+            name
+        );
     }
     for c in chars {
         if !c.is_ascii_alphanumeric() && c != '_' && c != '$' {
-            anyhow::bail!("WASM module name '{}' contains invalid character '{}'", name, c);
+            anyhow::bail!(
+                "WASM module name '{}' contains invalid character '{}'",
+                name,
+                c
+            );
         }
     }
     Ok(())
@@ -784,6 +934,10 @@ struct FetchHeaderConfigRule {
     headers: Option<StaticHeadersConfig>,
     #[serde(default)]
     auth: Option<FetchHeaderAuthConfig>,
+    /// Static form only: whether an injected header overwrites a same-named
+    /// header the sandbox already set. Defaults to `true` (overwrite).
+    #[serde(default, rename = "override")]
+    override_existing: Option<bool>,
 }
 
 #[derive(Debug)]
@@ -844,6 +998,9 @@ struct FetchHeaderAuthConfig {
 
 impl FetchHeaderConfigRule {
     fn into_rule(self) -> Result<server::engine::fetch::HeaderRule> {
+        if self.override_existing.is_some() && self.auth.is_some() {
+            anyhow::bail!("Fetch header config 'override' only applies to 'headers', not 'auth'");
+        }
         match (&self.headers, &self.auth) {
             (Some(_), Some(_)) => anyhow::bail!(
                 "Fetch header config rule for host '{}' cannot define both 'headers' and 'auth'",
@@ -881,6 +1038,10 @@ impl FetchHeaderConfigRule {
             self.headers.map(|headers| headers.0),
             oauth,
         )
+        .map(|rule| match self.override_existing {
+            Some(value) => rule.with_override_existing(value),
+            None => rule,
+        })
         .map_err(Into::into)
     }
 }
@@ -902,11 +1063,14 @@ fn load_fetch_header_rules(
         let content = if path.trim_start().starts_with('[') {
             path.clone()
         } else {
-            std::fs::read_to_string(path)
-                .map_err(|e| anyhow::anyhow!("Failed to read fetch header config '{}': {}", path, e))?
+            std::fs::read_to_string(path).map_err(|e| {
+                anyhow::anyhow!("Failed to read fetch header config '{}': {}", path, e)
+            })?
         };
-        let file_rules: Vec<FetchHeaderConfigRule> = serde_json::from_str(&content)
-            .map_err(|e| anyhow::anyhow!("Invalid JSON in fetch header config '{}': {}", path, e))?;
+        let file_rules: Vec<FetchHeaderConfigRule> =
+            serde_json::from_str(&content).map_err(|e| {
+                anyhow::anyhow!("Invalid JSON in fetch header config '{}': {}", path, e)
+            })?;
         for rule in file_rules {
             rules.push(rule.into_rule()?);
         }
@@ -928,17 +1092,22 @@ fn parse_fetch_header_cli(s: &str) -> Result<server::engine::fetch::HeaderRule> 
     let mut client_secret = None;
     let mut scope = None;
     let mut refresh_buffer_secs = None;
+    let mut override_existing = None;
 
     for part in s.split(',') {
-        let (key, val) = part.split_once('=')
-            .ok_or_else(|| anyhow::anyhow!(
-                "Invalid --fetch-header segment '{}'. Expected key=value", part
-            ))?;
-        let parsed_key = FetchHeaderKey::from_key(key.trim()).ok_or_else(|| anyhow::anyhow!(
-            "Unknown key '{}' in --fetch-header. Expected: {}",
-            key.trim(),
-            FetchHeaderKey::expected()
-        ))?;
+        let (key, val) = part.split_once('=').ok_or_else(|| {
+            anyhow::anyhow!(
+                "Invalid --fetch-header segment '{}'. Expected key=value",
+                part
+            )
+        })?;
+        let parsed_key = FetchHeaderKey::from_key(key.trim()).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Unknown key '{}' in --fetch-header. Expected: {}",
+                key.trim(),
+                FetchHeaderKey::expected()
+            )
+        })?;
         match parsed_key {
             FetchHeaderKey::Host => host = Some(val.trim().to_string()),
             FetchHeaderKey::Methods => methods = val.split(';').map(|m| m.to_string()).collect(),
@@ -949,27 +1118,43 @@ fn parse_fetch_header_cli(s: &str) -> Result<server::engine::fetch::HeaderRule> 
             FetchHeaderKey::ClientSecret => client_secret = Some(val.to_string()),
             FetchHeaderKey::Scope => scope = Some(val.trim().to_string()),
             FetchHeaderKey::RefreshBufferSecs => {
-                refresh_buffer_secs = Some(val.trim().parse::<u64>().map_err(|e| anyhow::anyhow!(
-                    "Invalid 'refresh_buffer_secs' value '{}': {}",
-                    val.trim(),
-                    e
-                ))?)
+                refresh_buffer_secs = Some(val.trim().parse::<u64>().map_err(|e| {
+                    anyhow::anyhow!(
+                        "Invalid 'refresh_buffer_secs' value '{}': {}",
+                        val.trim(),
+                        e
+                    )
+                })?)
+            }
+            FetchHeaderKey::Override => {
+                override_existing = Some(val.trim().parse::<bool>().map_err(|_| {
+                    anyhow::anyhow!(
+                        "Invalid 'override' value '{}': expected true or false",
+                        val.trim()
+                    )
+                })?)
             }
         }
     }
 
     let host = host.ok_or_else(|| anyhow::anyhow!("--fetch-header missing 'host'"))?;
-    let header_name = header_name.ok_or_else(|| anyhow::anyhow!("--fetch-header missing 'header'"))?;
+    let header_name =
+        header_name.ok_or_else(|| anyhow::anyhow!("--fetch-header missing 'header'"))?;
     let has_dynamic_keys = token_url.is_some()
         || client_id.is_some()
         || client_secret.is_some()
         || scope.is_some()
         || refresh_buffer_secs.is_some();
 
+    if override_existing.is_some() && has_dynamic_keys {
+        anyhow::bail!(
+            "--fetch-header 'override' only applies to the static 'value' form, not dynamic oauth rules"
+        );
+    }
     let (static_headers, oauth) = match (header_value, has_dynamic_keys) {
-        (Some(_), true) => anyhow::bail!(
-            "--fetch-header cannot mix static 'value' with dynamic oauth keys"
-        ),
+        (Some(_), true) => {
+            anyhow::bail!("--fetch-header cannot mix static 'value' with dynamic oauth keys")
+        }
         (Some(value), false) => (
             Some(std::collections::HashMap::from([(header_name, value)])),
             None,
@@ -978,15 +1163,15 @@ fn parse_fetch_header_cli(s: &str) -> Result<server::engine::fetch::HeaderRule> 
             None,
             Some(OAuthClientCredentialsConfig {
                 header_name,
-                token_url: token_url.ok_or_else(|| anyhow::anyhow!(
-                    "--fetch-header missing 'token_url' for dynamic oauth rule"
-                ))?,
-                client_id: client_id.ok_or_else(|| anyhow::anyhow!(
-                    "--fetch-header missing 'client_id' for dynamic oauth rule"
-                ))?,
-                client_secret: client_secret.ok_or_else(|| anyhow::anyhow!(
-                    "--fetch-header missing 'client_secret' for dynamic oauth rule"
-                ))?,
+                token_url: token_url.ok_or_else(|| {
+                    anyhow::anyhow!("--fetch-header missing 'token_url' for dynamic oauth rule")
+                })?,
+                client_id: client_id.ok_or_else(|| {
+                    anyhow::anyhow!("--fetch-header missing 'client_id' for dynamic oauth rule")
+                })?,
+                client_secret: client_secret.ok_or_else(|| {
+                    anyhow::anyhow!("--fetch-header missing 'client_secret' for dynamic oauth rule")
+                })?,
                 scope,
                 refresh_buffer_secs: refresh_buffer_secs
                     .unwrap_or_else(default_fetch_oauth_refresh_buffer_secs),
@@ -996,8 +1181,12 @@ fn parse_fetch_header_cli(s: &str) -> Result<server::engine::fetch::HeaderRule> 
             "--fetch-header must provide either 'value' for a static rule or the full dynamic oauth key set: token_url, client_id, client_secret"
         ),
     };
-    server::bootstrap::fetch_header_rule(host, methods, static_headers, oauth).map_err(Into::into)
-
+    server::bootstrap::fetch_header_rule(host, methods, static_headers, oauth)
+        .map(|rule| match override_existing {
+            Some(value) => rule.with_override_existing(value),
+            None => rule,
+        })
+        .map_err(Into::into)
 }
 
 // ── MCP server module loading ────────────────────────────────────────────
@@ -1012,10 +1201,12 @@ fn load_mcp_server_configs(
 
     // Parse CLI --mcp-server flags
     for entry in cli_servers {
-        let (name, rest) = entry.split_once('=')
-            .ok_or_else(|| anyhow::anyhow!(
-                "Invalid --mcp-server format: '{}'. Expected name=transport:...", entry
-            ))?;
+        let (name, rest) = entry.split_once('=').ok_or_else(|| {
+            anyhow::anyhow!(
+                "Invalid --mcp-server format: '{}'. Expected name=transport:...",
+                entry
+            )
+        })?;
         let name = name.trim().to_string();
 
         if let Some(cmd_args) = rest.strip_prefix("stdio:") {
@@ -1031,6 +1222,7 @@ fn load_mcp_server_configs(
                     args: parts[1..].iter().map(|s| s.to_string()).collect(),
                     env: std::collections::HashMap::new(),
                 },
+                auth: None,
             });
         } else if let Some(url) = rest.strip_prefix("sse:") {
             configs.push(McpServerConfig {
@@ -1038,11 +1230,21 @@ fn load_mcp_server_configs(
                 transport: McpServerTransport::Sse {
                     url: url.to_string(),
                 },
+                auth: None,
+            });
+        } else if let Some(url) = rest.strip_prefix("http:") {
+            configs.push(McpServerConfig {
+                name,
+                transport: McpServerTransport::Http {
+                    url: url.to_string(),
+                },
+                auth: None,
             });
         } else {
             anyhow::bail!(
-                "Invalid --mcp-server transport for '{}': must start with 'stdio:' or 'sse:'. Got: '{}'",
-                name, rest
+                "Invalid --mcp-server transport for '{}': must start with 'stdio:', 'sse:', or 'http:'. Got: '{}'",
+                name,
+                rest
             );
         }
     }
@@ -1050,14 +1252,20 @@ fn load_mcp_server_configs(
     // Parse --mcp-config: inline JSON (as injected by the `mcp_servers` section
     // of a --config file) or a path to a JSON file.
     if let Some(config_path) = config_path {
-        let content = if config_path.trim_start().starts_with('[') {
-            config_path.clone()
+        let inline_json = config_path
+            .trim_start()
+            .starts_with(|character| matches!(character, '[' | '{'));
+        let (content, source) = if inline_json {
+            (config_path.clone(), "inline MCP config")
         } else {
-            std::fs::read_to_string(config_path)
-                .map_err(|e| anyhow::anyhow!("Failed to read MCP config '{}': {}", config_path, e))?
+            (
+                std::fs::read_to_string(config_path)
+                    .map_err(|e| anyhow::anyhow!("Failed to read MCP config file: {}", e))?,
+                "MCP config file",
+            )
         };
         let file_configs: Vec<McpServerConfig> = serde_json::from_str(&content)
-            .map_err(|e| anyhow::anyhow!("Invalid JSON in MCP config '{}': {}", config_path, e))?;
+            .map_err(|e| anyhow::anyhow!("Invalid JSON in {}: {}", source, e))?;
         configs.extend(file_configs);
     }
 
@@ -1076,8 +1284,11 @@ fn load_mcp_server_configs(
 mod tests {
     use super::{
         load_fetch_header_rules, load_mcp_server_configs, load_wasm_modules,
-        parse_fetch_header_cli, resolve_text_or_file,
+        parse_fetch_header_cli, resolve_text_or_file, startup_log_summary,
     };
+    use crate::cli::Cli;
+    use clap::Parser;
+    use server::engine::mcp_client::McpServerTransport;
 
     // ── Systematic structured-flag drift guard ──────────────────────────
     // Every flag registered in `cli::structured_args()` has its --help generated
@@ -1096,16 +1307,26 @@ mod tests {
     }
 
     fn check_mcp_servers() -> anyhow::Result<()> {
-
         let configs = load_mcp_server_configs(
             &[
                 "weather=stdio:python:server.py:--verbose".to_string(),
                 "remote=sse:http://127.0.0.1:9000/sse".to_string(),
+                "canonical=http:https://example.com/mcp".to_string(),
             ],
             &None,
         )?;
-        anyhow::ensure!(matches!(configs[0].transport, server::engine::mcp_client::McpServerTransport::Stdio { .. }));
-        anyhow::ensure!(matches!(configs[1].transport, server::engine::mcp_client::McpServerTransport::Sse { .. }));
+        anyhow::ensure!(matches!(
+            configs[0].transport,
+            McpServerTransport::Stdio { .. }
+        ));
+        anyhow::ensure!(matches!(
+            configs[1].transport,
+            McpServerTransport::Sse { .. }
+        ));
+        anyhow::ensure!(matches!(
+            configs[2].transport,
+            McpServerTransport::Http { .. }
+        ));
         Ok(())
     }
 
@@ -1175,7 +1396,8 @@ mod tests {
 
         let checks = structured_arg_checks();
         let check_ids: BTreeSet<&str> = checks.iter().map(|(id, _)| *id).collect();
-        let grammar_ids: BTreeSet<&str> = server::cli::Cli::structured_arg_ids().into_iter().collect();
+        let grammar_ids: BTreeSet<&str> =
+            server::cli::Cli::structured_arg_ids().into_iter().collect();
 
         // Help registry (cli.rs) and parse-check registry (here) must cover the
         // exact same flags — so neither side can grow without the other.
@@ -1186,7 +1408,10 @@ mod tests {
 
         for (arg_id, check) in checks {
             check().unwrap_or_else(|err| {
-                panic!("documented grammar for --{} must parse: {err}", arg_id.replace('_', "-"))
+                panic!(
+                    "documented grammar for --{} must parse: {err}",
+                    arg_id.replace('_', "-")
+                )
             });
         }
     }
@@ -1213,20 +1438,68 @@ mod tests {
     }
 
     #[test]
-    fn load_mcp_server_configs_accepts_inline_json() {
+    fn startup_log_summary_redacts_mcp_config_secrets() {
+        let secret = "client-secret-must-not-be-logged";
+        let cli = Cli::try_parse_from([
+            "server",
+            "--mcp-config",
+            &format!(
+                r#"[{{"name":"protected","transport":"http","url":"https://example.com/mcp","auth":{{"type":"oauth_browser","client_secret":"{secret}"}}}}]"#
+            ),
+        ])
+        .expect("CLI arguments should parse");
 
+        let rendered = format!("{:?}", startup_log_summary(&cli));
+        assert!(!rendered.contains(secret));
+        assert!(!rendered.contains("client_secret"));
+        assert!(rendered.contains("has_mcp_config: true"));
+    }
+
+    #[test]
+    fn load_mcp_server_configs_redacts_inline_json_from_errors() {
+        let secret = "client-secret-must-not-be-logged";
+        let inline = format!(
+            r#"[{{"name":"protected","transport":"http","url":"https://example.com/mcp","auth":{{"type":"oauth_browser","client_secret":"{secret}"}}"#
+        );
+
+        let error = load_mcp_server_configs(&[], &Some(inline))
+            .expect_err("malformed inline JSON should be rejected");
+        let rendered = error.to_string();
+        assert!(!rendered.contains(secret));
+        assert!(rendered.contains("Invalid JSON in inline MCP config"));
+    }
+
+    #[test]
+    fn load_mcp_server_configs_redacts_object_inline_json_from_errors() {
+        let secret = "object-client-secret-must-not-be-logged";
+        let inline = format!(
+            r#"{{"name":"protected","transport":"http","url":"https://example.com/mcp","auth":{{"type":"oauth_browser","client_secret":"{secret}"}}}}"#
+        );
+
+        let error = load_mcp_server_configs(&[], &Some(inline))
+            .expect_err("object-form inline JSON should be rejected as a config list");
+        let rendered = error.to_string();
+        assert!(!rendered.contains(secret));
+        assert!(rendered.contains("Invalid JSON in inline MCP config"));
+    }
+
+    #[test]
+    fn load_mcp_server_configs_accepts_inline_json() {
         let inline = r#"[{"name": "weather", "transport": "stdio", "command": "python", "args": ["server.py"]}]"#;
-        let configs =
-            load_mcp_server_configs(&[], &Some(inline.to_string())).expect("inline JSON should load");
+        let configs = load_mcp_server_configs(&[], &Some(inline.to_string()))
+            .expect("inline JSON should load");
         assert_eq!(configs[0].name, "weather");
-        assert!(matches!(configs[0].transport, server::engine::mcp_client::McpServerTransport::Stdio { .. }));
+        assert!(matches!(
+            configs[0].transport,
+            McpServerTransport::Stdio { .. }
+        ));
     }
 
     #[test]
     fn load_fetch_header_rules_accepts_inline_json() {
         let inline = r#"[{"host": "api.github.com", "headers": {"Authorization": "Bearer x"}}]"#;
-        let rules =
-            load_fetch_header_rules(&[], &Some(inline.to_string())).expect("inline JSON should load");
+        let rules = load_fetch_header_rules(&[], &Some(inline.to_string()))
+            .expect("inline JSON should load");
         assert_eq!(rules.len(), 1);
         assert!(rules[0].static_headers().is_some());
     }
@@ -1245,8 +1518,8 @@ mod tests {
         std::fs::write(&path, "from a file\n").expect("file should be written");
 
         let arg = format!("@{}", path.display());
-        let resolved = resolve_text_or_file(&arg, "--instructions")
-            .expect("file value should resolve");
+        let resolved =
+            resolve_text_or_file(&arg, "--instructions").expect("file value should resolve");
         assert_eq!(resolved, "from a file\n");
     }
 
@@ -1261,7 +1534,10 @@ mod tests {
     fn resolve_text_or_file_errors_on_missing_file() {
         let err = resolve_text_or_file("@/no/such/file/here.txt", "--run-js-description")
             .expect_err("missing file should error");
-        assert!(err.to_string().contains("Failed to read --run-js-description file"));
+        assert!(
+            err.to_string()
+                .contains("Failed to read --run-js-description file")
+        );
     }
 
     #[test]
@@ -1278,6 +1554,70 @@ mod tests {
         );
         assert!(rule.dynamic_auth().is_none());
         assert_eq!(rule.methods(), &["GET".to_string(), "POST".to_string()]);
+        // Static rules overwrite a caller-set header of the same name by default.
+        assert!(rule.override_existing);
+    }
+
+    #[test]
+    fn parse_fetch_header_cli_static_honors_override_false() {
+        let rule = parse_fetch_header_cli(
+            "host=api.example.com,header=Authorization,value=Bearer fixed,override=false",
+        )
+        .expect("static rule with override=false should parse");
+        assert!(!rule.override_existing);
+    }
+
+    #[test]
+    fn parse_fetch_header_cli_static_honors_override_true() {
+        let rule = parse_fetch_header_cli(
+            "host=api.example.com,header=Authorization,value=Bearer fixed,override=true",
+        )
+        .expect("static rule with override=true should parse");
+        assert!(rule.override_existing);
+    }
+
+    #[test]
+    fn parse_fetch_header_cli_rejects_invalid_override() {
+        let err = parse_fetch_header_cli(
+            "host=api.example.com,header=Authorization,value=Bearer fixed,override=maybe",
+        )
+        .expect_err("non-boolean override should fail");
+        assert!(err.to_string().contains("Invalid 'override' value"));
+    }
+
+    #[test]
+    fn parse_fetch_header_cli_rejects_override_on_dynamic_rule() {
+        let err = parse_fetch_header_cli(
+            "host=api.example.com,header=Authorization,token_url=https://issuer/token,client_id=abc,client_secret=xyz,override=false",
+        )
+        .expect_err("override on a dynamic rule should fail");
+        assert!(err.to_string().contains("only applies to the static"));
+    }
+
+    #[test]
+    fn load_fetch_header_rules_json_honors_override_false() {
+        let json = r#"[{"host":"api.modal.com","headers":{"x-modal-token-secret":"real"},"override":false}]"#;
+        let rules = load_fetch_header_rules(&[], &Some(json.to_string()))
+            .expect("json config with override should load");
+        assert_eq!(rules.len(), 1);
+        assert!(!rules[0].override_existing);
+    }
+
+    #[test]
+    fn load_fetch_header_rules_json_defaults_override_true() {
+        let json = r#"[{"host":"api.modal.com","headers":{"x-modal-token-secret":"real"}}]"#;
+        let rules =
+            load_fetch_header_rules(&[], &Some(json.to_string())).expect("json config should load");
+        assert_eq!(rules.len(), 1);
+        assert!(rules[0].override_existing);
+    }
+
+    #[test]
+    fn load_fetch_header_rules_json_rejects_override_on_auth_rule() {
+        let json = r#"[{"host":"api.example.com","auth":{"type":"oauth_client_credentials","header":"Authorization","token_url":"https://issuer/token","client_id":"abc","client_secret":"xyz"},"override":false}]"#;
+        let err = load_fetch_header_rules(&[], &Some(json.to_string()))
+            .expect_err("override on an auth rule should fail");
+        assert!(err.to_string().contains("only applies to 'headers'"));
     }
 
     #[test]
@@ -1323,20 +1663,16 @@ mod tests {
 
     #[test]
     fn parse_fetch_header_cli_rejects_empty_host() {
-        let err = parse_fetch_header_cli(
-            "host=   ,header=Authorization,value=Bearer fixed",
-        )
-        .expect_err("blank host should fail");
+        let err = parse_fetch_header_cli("host=   ,header=Authorization,value=Bearer fixed")
+            .expect_err("blank host should fail");
 
         assert!(err.to_string().contains("'host' cannot be empty"));
     }
 
     #[test]
     fn parse_fetch_header_cli_rejects_empty_header_name() {
-        let err = parse_fetch_header_cli(
-            "host=api.example.com,header=   ,value=Bearer fixed",
-        )
-        .expect_err("blank header name should fail");
+        let err = parse_fetch_header_cli("host=api.example.com,header=   ,value=Bearer fixed")
+            .expect_err("blank header name should fail");
 
         assert!(err.to_string().contains("'header' cannot be empty"));
     }
@@ -1347,19 +1683,31 @@ mod tests {
             "host=api.example.com,header=Authorization,token_url=   ,client_id=abc,client_secret=xyz",
         )
         .expect_err("blank token_url should fail");
-        assert!(token_url_err.to_string().contains("'token_url' cannot be empty"));
+        assert!(
+            token_url_err
+                .to_string()
+                .contains("'token_url' cannot be empty")
+        );
 
         let client_id_err = parse_fetch_header_cli(
             "host=api.example.com,header=Authorization,token_url=https://issuer/token,client_id=   ,client_secret=xyz",
         )
         .expect_err("blank client_id should fail");
-        assert!(client_id_err.to_string().contains("'client_id' cannot be empty"));
+        assert!(
+            client_id_err
+                .to_string()
+                .contains("'client_id' cannot be empty")
+        );
 
         let client_secret_err = parse_fetch_header_cli(
             "host=api.example.com,header=Authorization,token_url=https://issuer/token,client_id=abc,client_secret=   ",
         )
         .expect_err("blank client_secret should fail");
-        assert!(client_secret_err.to_string().contains("'client_secret' cannot be empty"));
+        assert!(
+            client_secret_err
+                .to_string()
+                .contains("'client_secret' cannot be empty")
+        );
     }
 
     #[test]
@@ -1418,7 +1766,10 @@ mod tests {
         let err = load_fetch_header_rules(&[], &Some(path.display().to_string()))
             .expect_err("mixed headers/auth json rule should fail");
 
-        assert!(err.to_string().contains("cannot define both 'headers' and 'auth'"));
+        assert!(
+            err.to_string()
+                .contains("cannot define both 'headers' and 'auth'")
+        );
     }
 
     #[test]
@@ -1581,9 +1932,14 @@ mod tests {
             }]"#,
         )
         .expect("config should be written");
-        let token_url_err = load_fetch_header_rules(&[], &Some(empty_token_url.display().to_string()))
-            .expect_err("blank token_url should fail");
-        assert!(token_url_err.to_string().contains("'token_url' cannot be empty"));
+        let token_url_err =
+            load_fetch_header_rules(&[], &Some(empty_token_url.display().to_string()))
+                .expect_err("blank token_url should fail");
+        assert!(
+            token_url_err
+                .to_string()
+                .contains("'token_url' cannot be empty")
+        );
     }
 
     #[test]

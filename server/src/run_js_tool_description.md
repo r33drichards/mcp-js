@@ -62,6 +62,20 @@ const data = await resp.json();
 console.log(JSON.stringify(data));
 ```
 
+## Artifacts (returning images and other non-text content)
+
+Console output is text-only. To return an image — or any other typed payload (audio, CSV, arbitrary binary) — store it as an artifact:
+
+```js
+const png = renderChart(); // Uint8Array of PNG bytes
+artifact("chart", "image/png", png);
+```
+
+- `artifact(key, mime, bytes)` — store an artifact under a caller-chosen key (same key overwrites). `bytes` may be a Uint8Array, TypedArray, ArrayBuffer, or string (UTF-8 encoded). Max 16 MiB per artifact.
+- A completed execution lists what it emitted (`key`, `mime_type`, `size_bytes`) in the `artifacts` field of `get_execution`.
+- Fetch a payload with the `get_artifact(key)` tool. `image/*` artifacts come back as an MCP image content block — the model can actually see the image — `audio/*` as an audio block, UTF-8 payloads as text, and other binary as base64 text. `list_artifacts` lists everything stored.
+- Artifacts persist across executions and are also downloadable raw (no base64) via `GET /api/artifacts/{key}` on the REST API.
+
 ## Importing Packages
 
 You can import npm packages, JSR packages, and URL modules using ES module `import` syntax. Packages are fetched from esm.sh at runtime — no installation needed.

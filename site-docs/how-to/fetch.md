@@ -3,6 +3,11 @@
 Recipes for enabling outbound HTTP, restricting which URLs are reachable, and
 injecting authentication headers server-side.
 
+`fetch()` negotiates HTTP/2 via ALPN on `https` URLs when the server supports
+it, and falls back to HTTP/1.1 otherwise; plaintext `http` URLs always use
+HTTP/1.1 (h2c requires prior knowledge). The negotiated protocol does not
+change any JS-observable behavior.
+
 ## Enable fetch with a domain allowlist
 
 `fetch()` is available in JS only when the server is started with a
@@ -84,8 +89,17 @@ Restrict injection to specific HTTP methods with `methods=` (semicolon-separated
 --fetch-header "host=api.example.com,methods=GET;POST,header=X-Api-Key,value=abc123"
 ```
 
-If JS code already sets the same header, the JS-provided value takes precedence
-and the injected value is skipped.
+By default a static injection **overwrites** a header of the same name that the
+JS code already set, so an SDK that pre-sets a placeholder for the injected
+header cannot defeat the operator-supplied value. To instead fill the header
+only when the caller left it unset, add `override=false`:
+
+```bash
+--fetch-header "host=api.example.com,header=Authorization,value=Bearer my-token,override=false"
+```
+
+(`override` applies to the static `value` form only; OAuth client-credentials
+injection is always fill-only-if-absent.)
 
 The flag is repeatable; each `--fetch-header` adds one rule. Rules are
 evaluated in declaration order and the first matching rule wins per header.
@@ -193,8 +207,12 @@ hostname and all its subdomains:
 `*.github.com` matches `api.github.com`, `raw.github.com`, and `github.com`
 itself. Matching is case-insensitive.
 
+Header-injection rules also apply to WebSocket handshakes for matching hosts —
+see [WebSocket connections](websocket.md).
+
 ## See also
 
+- [How-to: WebSocket connections](websocket.md)
 - [Concepts: Network access with fetch](../concepts/fetch.md)
 - [Concepts: Security policies](../concepts/policies.md)
 - [Reference: CLI flags](../reference/cli-flags.md)

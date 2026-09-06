@@ -9,6 +9,73 @@
     "version": "0.1.0"
   },
   "paths": {
+    "/api/artifacts": {
+      "get": {
+        "tags": [
+          "artifacts"
+        ],
+        "summary": "List metadata for all stored artifacts.",
+        "operationId": "list_artifacts_handler",
+        "responses": {
+          "200": {
+            "description": "Artifact metadata list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArtifactList"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Artifact store unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/artifacts/{key}": {
+      "get": {
+        "tags": [
+          "artifacts"
+        ],
+        "summary": "Download an artifact's raw payload bytes.",
+        "description": "The response body is the artifact's payload verbatim, served with the\nstored mime type as `Content-Type` — no base64, unlike the MCP tool.",
+        "operationId": "get_artifact_handler",
+        "parameters": [
+          {
+            "name": "key",
+            "in": "path",
+            "description": "Artifact key, as passed to artifact(key, mime, bytes)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Raw artifact bytes (Content-Type = stored mime type)"
+          },
+          "404": {
+            "description": "Artifact not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/cli": {
       "get": {
         "tags": [
@@ -545,6 +612,56 @@
           }
         }
       },
+      "ArtifactList": {
+        "type": "object",
+        "description": "List of stored artifacts.",
+        "required": [
+          "artifacts"
+        ],
+        "properties": {
+          "artifacts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ArtifactMeta"
+            }
+          }
+        }
+      },
+      "ArtifactMeta": {
+        "type": "object",
+        "description": "Metadata for one stored artifact (payload not included).",
+        "required": [
+          "key",
+          "mime_type",
+          "size_bytes",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "description": "ISO-8601 timestamp when the artifact was (last) written."
+          },
+          "execution_id": {
+            "type": "string",
+            "description": "Execution that (last) wrote this artifact, when known.",
+            "nullable": true
+          },
+          "key": {
+            "type": "string",
+            "description": "Caller-chosen key, as passed to `artifact(key, mime, bytes)`."
+          },
+          "mime_type": {
+            "type": "string",
+            "description": "Mime type, e.g. `image/png`."
+          },
+          "size_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Payload size in bytes.",
+            "minimum": 0
+          }
+        }
+      },
       "CancelResult": {
         "type": "object",
         "description": "Result of a cancel request.",
@@ -673,9 +790,17 @@
         "required": [
           "execution_id",
           "status",
-          "started_at"
+          "started_at",
+          "artifacts"
         ],
         "properties": {
+          "artifacts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ArtifactMeta"
+            },
+            "description": "Artifacts emitted via `artifact(key, mime, bytes)` during this\nexecution. Fetch payloads with `GET /api/artifacts/{key}`."
+          },
           "completed_at": {
             "type": "string",
             "description": "ISO-8601 timestamp when execution finished (absent while running).",

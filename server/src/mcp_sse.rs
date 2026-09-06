@@ -18,17 +18,15 @@ use rmcp_legacy::{
     Error as McpError, RoleServer, ServerHandler,
     model::{
         Annotated, CallToolRequestParam, CallToolResult, Content, InitializeRequestParam,
-        InitializeResult, ListResourcesResult, ListToolsResult, PaginatedRequestParam,
-        RawResource, ReadResourceRequestParam, ReadResourceResult, Resource, ResourceContents,
+        InitializeResult, ListResourcesResult, ListToolsResult, PaginatedRequestParam, RawResource,
+        ReadResourceRequestParam, ReadResourceResult, Resource, ResourceContents,
         ServerCapabilities, ServerInfo, Tool,
     },
     service::RequestContext,
 };
 use serde_json::json;
 
-use crate::engine::{
-    Engine, RuntimeError, McpRequestHeaders, ToolCallRequest,
-};
+use crate::engine::{Engine, McpRequestHeaders, ToolCallRequest};
 use crate::session::SessionVerifier;
 
 const LLMS_TXT: &str = include_str!("llms_txt.md");
@@ -64,12 +62,40 @@ fn to_legacy_tool(tool: &rmcp::model::Tool) -> Tool {
     }
 }
 
-fn ok_result(value: serde_json::Value) -> CallToolResult {
-    match Content::json(value) {
-        Ok(content) => CallToolResult::success(vec![content]),
-        Err(e) => CallToolResult::success(vec![Content::text(format!(
-            "Failed to serialize response: {e}"
-        ))]),
+fn ok_result(response: crate::mcp_dispatch::ToolResponse) -> CallToolResult {
+    let mut contents = vec![match Content::json(response.json) {
+        Ok(content) => content,
+        Err(e) => Content::text(format!("Failed to serialize response: {e}")),
+    }];
+    contents.extend(response.artifacts.into_iter().map(artifact_block));
+    CallToolResult::success(contents)
+}
+
+/// Map a rendered artifact payload to the matching legacy-rmcp content block:
+/// image/* → `ImageContent`, audio/* → `AudioContent`, everything else →
+/// `TextContent` (mirrors `mcp.rs::artifact_block` for the 0.1.5 model types).
+fn artifact_block(artifact: crate::engine::artifacts::ArtifactContent) -> Content {
+    use crate::engine::artifacts::ArtifactContent as AC;
+    use rmcp_legacy::model::{RawAudioContent, RawContent};
+    match artifact {
+        AC::Image {
+            data_base64,
+            mime_type,
+        } => Content::image(data_base64, mime_type),
+        AC::Audio {
+            data_base64,
+            mime_type,
+        } => Annotated::new(
+            RawContent::Audio(Annotated::new(
+                RawAudioContent {
+                    data: data_base64,
+                    mime_type,
+                },
+                None,
+            )),
+            None,
+        ),
+        AC::Text(text) | AC::Base64(text) => Content::text(text),
     }
 }
 
@@ -79,7 +105,9 @@ fn doc_resources() -> Vec<Resource> {
             RawResource {
                 uri: "docs://readme".into(),
                 name: "README".into(),
-                description: Some("Full mcp-v8 README with usage, CLI flags, and examples (Markdown)".into()),
+                description: Some(
+                    "Full mcp-v8 README with usage, CLI flags, and examples (Markdown)".into(),
+                ),
                 mime_type: Some("text/markdown".into()),
                 size: Some(README_MD.len() as u32),
             },
@@ -89,7 +117,10 @@ fn doc_resources() -> Vec<Resource> {
             RawResource {
                 uri: "docs://llms-txt".into(),
                 name: "llms.txt".into(),
-                description: Some("Machine-readable agent guide: connection options, tools, REST API (Markdown)".into()),
+                description: Some(
+                    "Machine-readable agent guide: connection options, tools, REST API (Markdown)"
+                        .into(),
+                ),
                 mime_type: Some("text/markdown".into()),
                 size: Some(LLMS_TXT.len() as u32),
             },
@@ -99,7 +130,10 @@ fn doc_resources() -> Vec<Resource> {
             RawResource {
                 uri: "docs://openapi".into(),
                 name: "OpenAPI spec".into(),
-                description: Some("OpenAPI 3.0 JSON spec for the REST API (/api/exec, /api/executions/*, etc.)".into()),
+                description: Some(
+                    "OpenAPI 3.0 JSON spec for the REST API (/api/exec, /api/executions/*, etc.)"
+                        .into(),
+                ),
                 mime_type: Some("application/json".into()),
                 size: None,
             },
@@ -109,7 +143,9 @@ fn doc_resources() -> Vec<Resource> {
             RawResource {
                 uri: "docs://tools".into(),
                 name: "MCP tool list".into(),
-                description: Some("JSON list of available MCP tools with descriptions, mode-aware".into()),
+                description: Some(
+                    "JSON list of available MCP tools with descriptions, mode-aware".into(),
+                ),
                 mime_type: Some("application/json".into()),
                 size: None,
             },
@@ -130,7 +166,8 @@ fn read_doc_resource(uri: &str, heap: bool, fs: bool) -> Option<ReadResourceResu
             "application/json",
         ),
         "docs://tools" => (
-            serde_json::to_string_pretty(&crate::mcp::built_in_tool_catalog(heap, fs)).unwrap_or_default(),
+            serde_json::to_string_pretty(&crate::mcp::built_in_tool_catalog(heap, fs))
+                .unwrap_or_default(),
             "application/json",
         ),
         _ => return None,
@@ -190,11 +227,14 @@ impl ServerHandler for SseService {
         request: ReadResourceRequestParam,
         _context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResult, McpError> {
-        read_doc_resource(&request.uri, self.runtime.heap_enabled(), self.runtime.fs_enabled())
-            .ok_or_else(|| McpError::resource_not_found(
-                format!("Unknown resource URI: {}", request.uri),
-                None,
-            ))
+        read_doc_resource(
+            &request.uri,
+            self.runtime.heap_enabled(),
+            self.runtime.fs_enabled(),
+        )
+        .ok_or_else(|| {
+            McpError::resource_not_found(format!("Unknown resource URI: {}", request.uri), None)
+        })
     }
 
     async fn list_tools(
@@ -202,11 +242,16 @@ impl ServerHandler for SseService {
         _request: Option<PaginatedRequestParam>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        let tools = self.runtime.core_mcp_tools()
+        let tools = self
+            .runtime
+            .core_mcp_tools()
             .iter()
             .map(to_legacy_tool)
             .collect();
-        Ok(ListToolsResult { next_cursor: None, tools })
+        Ok(ListToolsResult {
+            next_cursor: None,
+            tools,
+        })
     }
 
     async fn call_tool(
@@ -227,15 +272,11 @@ impl ServerHandler for SseService {
         };
 
         // Keep legacy SSE behavior aligned with the primary MCP transports.
-        let result = self.runtime
-            .invoke_tool(request)
+        let result = self
+            .runtime
+            .invoke_tool_response(request)
             .await
-            .and_then(|json| {
-                serde_json::from_str(&json).map_err(|error| RuntimeError::ToolCall {
-                    message: format!("failed to deserialize result: {error}"),
-                })
-            })
-            .unwrap_or_else(|error| json!({ "error": error.to_string() }));
+            .unwrap_or_else(|error| json!({ "error": error.to_string() }).into());
         Ok(ok_result(result))
     }
 

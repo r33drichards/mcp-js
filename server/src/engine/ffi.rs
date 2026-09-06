@@ -7,6 +7,25 @@
 
 use super::*;
 
+/// Runtime clones can be released on a Tokio worker when an execution ends.
+/// Nonblocking teardown avoids Tokio's panic when the last owner drops there.
+pub(super) struct OwnedRuntime(Option<tokio::runtime::Runtime>);
+
+impl std::ops::Deref for OwnedRuntime {
+    type Target = tokio::runtime::Runtime;
+    fn deref(&self) -> &Self::Target {
+        self.0.as_ref().expect("runtime exists until drop")
+    }
+}
+
+impl Drop for OwnedRuntime {
+    fn drop(&mut self) {
+        if let Some(runtime) = self.0.take() {
+            runtime.shutdown_background();
+        }
+    }
+}
+
 pub const DEFAULT_WASM_STUB_PREFIX: &str = crate::engine::wasm_stub::DEFAULT_WASM_STUB_PREFIX;
 pub const DEFAULT_MCP_STUB_PREFIX: &str = crate::engine::mcp_client::DEFAULT_STUB_PREFIX;
 #[derive(Clone, Copy, Debug, uniffi::Enum)]
@@ -101,6 +120,64 @@ impl RuntimeError {
 
 #[uniffi::export]
 impl Engine {
+    /// Construct a local, capability-restricted engine for synchronous foreign callers.
+    #[uniffi::constructor]
+    pub fn create_stateless(
+        heap_memory_max_mb: u64,
+        execution_timeout_secs: u64,
+    ) -> Result<Arc<Self>, RuntimeError> {
+        if !(16..=4096).contains(&heap_memory_max_mb)
+            || !(1..=300).contains(&execution_timeout_secs)
+        {
+            return Err(RuntimeError::InvalidConfig {
+                message: "heap_memory_max_mb must be 16..=4096 and execution_timeout_secs must be 1..=300".into(),
+            });
+        }
+        let bytes = usize::try_from(heap_memory_max_mb * 1024 * 1024).map_err(|_| {
+            RuntimeError::InvalidConfig {
+                message: "heap limit exceeds platform capacity".into(),
+            }
+        })?;
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .map_err(|e| RuntimeError::Initialization {
+                message: e.to_string(),
+            })?;
+        let directory = tempfile::tempdir().map_err(|e| RuntimeError::Initialization {
+            message: e.to_string(),
+        })?;
+        initialize_v8();
+        let registry =
+            ExecutionRegistry::new(directory.path().join("executions").to_str().ok_or_else(
+                || RuntimeError::Initialization {
+                    message: "temporary path is not UTF-8".into(),
+                },
+            )?)
+            .map_err(|message| RuntimeError::Initialization { message })?;
+        let engine = Engine::new_stateless(bytes, execution_timeout_secs, 1)
+            .with_execution_registry(Arc::new(registry));
+        Ok(Self::wrap(engine, Some(runtime), Some(directory), None))
+    }
+
+    /// Synchronous counterpart of shutdown for Python callers.
+    pub fn close(&self) -> Result<RuntimeShutdownResult, RuntimeError> {
+        if tokio::runtime::Handle::try_current().is_ok() {
+            return Err(RuntimeError::Operation {
+                message: "close must be called outside a Tokio runtime; use shutdown instead"
+                    .into(),
+            });
+        }
+        let runtime = self
+            .tokio_runtime
+            .as_ref()
+            .ok_or_else(|| RuntimeError::Initialization {
+                message: "synchronous close requires a library-created runtime".into(),
+            })?;
+        Ok(runtime.block_on(self.shutdown()))
+    }
+
     pub fn mode(&self) -> RuntimeMode {
         if self.session_capable() {
             RuntimeMode::LocalStateful
@@ -175,7 +252,8 @@ impl Engine {
             })?;
         let mcp_headers = request.mcp_headers.map(mcp_headers_value);
 
-        let mut execution = self.run_js(request.code)
+        let mut execution = self
+            .run_js(request.code)
             .maybe_file(request.file)
             .maybe_fs(request.fs)
             .maybe_session(request.session)
@@ -195,7 +273,7 @@ impl Engine {
         execution.execute().await.map_err(operation_message)
     }
 
-        pub fn get_execution(&self, execution_id: String) -> Result<ExecutionInfo, RuntimeError> {
+    pub fn get_execution(&self, execution_id: String) -> Result<ExecutionInfo, RuntimeError> {
         self.execution_registry()?
             .get(&execution_id)
             .ok_or_else(|| operation_message(format!("Execution '{}' not found", execution_id)))
@@ -210,7 +288,13 @@ impl Engine {
         byte_limit: Option<u64>,
     ) -> Result<ConsoleOutputPage, RuntimeError> {
         self.execution_registry()?
-            .get_console_output(&execution_id, line_offset, line_limit, byte_offset, byte_limit)
+            .get_console_output(
+                &execution_id,
+                line_offset,
+                line_limit,
+                byte_offset,
+                byte_limit,
+            )
             .map_err(operation_message)
     }
 
@@ -320,8 +404,7 @@ impl Engine {
         message: Option<String>,
     ) -> Result<(), RuntimeError> {
         let result: Result<(), String> = async {
-            self
-                .check_fs_snapshot_policy("label", Some(&name), Some(&ca_id))
+            self.check_fs_snapshot_policy("label", Some(&name), Some(&ca_id))
                 .await?;
             let labels = self.labels_or_err()?;
             let id = parse_ca_hex(&ca_id).ok_or_else(|| format!("invalid CA id: {ca_id}"))?;
@@ -381,8 +464,7 @@ impl Engine {
         message: Option<String>,
     ) -> Result<FsPushOutcome, RuntimeError> {
         let result: Result<FsPushOutcome, String> = async {
-            self
-                .check_fs_snapshot_policy("push", Some(&label), Some(&ca_id))
+            self.check_fs_snapshot_policy("push", Some(&label), Some(&ca_id))
                 .await?;
             let labels = self.labels_or_err()?;
             let new = parse_ca_hex(&ca_id).ok_or_else(|| format!("invalid CA id: {ca_id}"))?;
@@ -436,8 +518,7 @@ impl Engine {
         message: Option<String>,
     ) -> Result<(), RuntimeError> {
         let result: Result<(), String> = async {
-            self
-                .check_fs_snapshot_policy("reset", Some(&label), Some(&ca_id))
+            self.check_fs_snapshot_policy("reset", Some(&label), Some(&ca_id))
                 .await?;
             let labels = self.labels_or_err()?;
             let target = parse_ca_hex(&ca_id).ok_or_else(|| format!("invalid CA id: {ca_id}"))?;
@@ -499,14 +580,12 @@ impl Engine {
             for c in structural.conflicts {
                 let view = match (&c.ours, &c.theirs) {
                     (Some(oe), Some(te)) => {
-                        let ours_b = store
-                            .read_file(oe)
-                            .await
-                            .map_err(|e| format!("fs_merge: read ours {}: {e}", c.path.display()))?;
-                        let theirs_b = store
-                            .read_file(te)
-                            .await
-                            .map_err(|e| format!("fs_merge: read theirs {}: {e}", c.path.display()))?;
+                        let ours_b = store.read_file(oe).await.map_err(|e| {
+                            format!("fs_merge: read ours {}: {e}", c.path.display())
+                        })?;
+                        let theirs_b = store.read_file(te).await.map_err(|e| {
+                            format!("fs_merge: read theirs {}: {e}", c.path.display())
+                        })?;
                         let base_b = match &c.base {
                             Some(be) => Some(store.read_file(be).await.map_err(|e| {
                                 format!("fs_merge: read base {}: {e}", c.path.display())
@@ -606,6 +685,13 @@ impl Engine {
         session_id: Option<String>,
         mcp_headers: Option<McpRequestHeaders>,
     ) -> Result<String, RuntimeError> {
+        if tokio::runtime::Handle::try_current().is_ok() {
+            return Err(RuntimeError::Operation {
+                message:
+                    "call_tool must be called outside a Tokio runtime; use invoke_tool instead"
+                        .into(),
+            });
+        }
         let tokio_runtime =
             self.tokio_runtime
                 .as_ref()
@@ -620,10 +706,20 @@ impl Engine {
         }))
     }
 
-    pub async fn invoke_tool(
+    pub async fn invoke_tool(&self, request: ToolCallRequest) -> Result<String, RuntimeError> {
+        let result = self.invoke_tool_response(request).await?;
+        serde_json::to_string(&result.json).map_err(|error| RuntimeError::ToolCall {
+            message: format!("failed to serialize result: {error}"),
+        })
+    }
+}
+
+impl Engine {
+    /// Preserve artifact content blocks for Rust transports without serializing them through JSON.
+    pub async fn invoke_tool_response(
         &self,
         request: ToolCallRequest,
-    ) -> Result<String, RuntimeError> {
+    ) -> Result<crate::mcp_dispatch::ToolResponse, RuntimeError> {
         let _lifecycle_guard = self.shutdown_lock.lock().await;
         self.ensure_running()?;
         let arguments = parse_json_object("arguments_json", &request.arguments_json)?;
@@ -637,13 +733,9 @@ impl Engine {
             )
             .await;
 
-        serde_json::to_string(&result).map_err(|error| RuntimeError::ToolCall {
-            message: format!("failed to serialize result: {error}"),
-        })
+        Ok(result)
     }
-}
 
-impl Engine {
     /// Wrap a fully configured runtime for Rust transports without creating a
     /// second Tokio executor or crossing the FFI boundary.
     fn wrap(
@@ -652,7 +744,7 @@ impl Engine {
         ephemeral_data_dir: Option<tempfile::TempDir>,
         cluster_node: Option<Arc<ClusterNode>>,
     ) -> Arc<Self> {
-        engine.tokio_runtime = tokio_runtime.map(Arc::new);
+        engine.tokio_runtime = tokio_runtime.map(|runtime| Arc::new(OwnedRuntime(Some(runtime))));
         engine.cluster_node = cluster_node;
         engine._ephemeral_data_dir = ephemeral_data_dir.map(Arc::new);
         Arc::new(engine)
@@ -671,22 +763,19 @@ impl Engine {
     }
 
     fn execution_registry(&self) -> Result<&ExecutionRegistry, RuntimeError> {
-        self
-            .execution_registry
+        self.execution_registry
             .as_deref()
             .ok_or_else(|| operation_message("Execution registry not configured".to_string()))
     }
 
     fn session_log(&self) -> Result<&SessionLog, RuntimeError> {
-        self
-            .session_log
+        self.session_log
             .as_ref()
             .ok_or_else(|| operation_message("Session log not configured".to_string()))
     }
 
     fn heap_tag_store(&self) -> Result<&HeapTagStore, RuntimeError> {
-        self
-            .heap_tag_store
+        self.heap_tag_store
             .as_ref()
             .ok_or_else(|| operation_message("Heap tag store not configured".to_string()))
     }
@@ -735,8 +824,7 @@ impl Engine {
     }
 
     pub fn upstream_mcp_stub_tools(&self) -> Vec<rmcp::model::Tool> {
-        self
-            .mcp_client_manager()
+        self.mcp_client_manager()
             .map(|client| client.stub_tools())
             .unwrap_or_default()
     }
@@ -748,14 +836,17 @@ impl Engine {
         mcp_headers: Option<&Value>,
         name: &str,
         arguments: &Value,
-    ) -> Value {
+    ) -> crate::mcp_dispatch::ToolResponse {
         if self.session_capable() {
-            crate::mcp_dispatch::call_tool(self, session_id, mcp_headers, name, arguments)
-                .await
+            crate::mcp_dispatch::call_tool(self, session_id, mcp_headers, name, arguments).await
         } else if name == "run_js" {
             crate::mcp_dispatch::run_js_blocking(self, mcp_headers, arguments).await
+        } else if name == "get_artifact" {
+            crate::mcp_dispatch::get_artifact(self, arguments)
+        } else if name == "list_artifacts" {
+            crate::mcp_dispatch::list_artifacts(self).into()
         } else {
-            json!({ "error": format!("unknown stateless tool: {name}") })
+            json!({ "error": format!("unknown stateless tool: {name}") }).into()
         }
     }
 
@@ -764,11 +855,9 @@ impl Engine {
         name: &str,
         arguments: Option<&serde_json::Map<String, Value>>,
     ) -> Option<rmcp::model::CallToolResult> {
-        self
-            .mcp_client_manager()
+        self.mcp_client_manager()
             .and_then(|client| client.stub_call_response(name, arguments))
     }
-
 }
 
 fn operation_message(message: String) -> RuntimeError {
@@ -872,5 +961,67 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.to_string().contains("runtime is Shutdown"));
+    }
+}
+
+#[cfg(test)]
+mod embedded_python_tests {
+    use super::*;
+
+    #[test]
+    fn synchronous_engine_executes_and_closes() {
+        let engine = Engine::create_stateless(64, 1).unwrap();
+        let run = |code: &str| -> Value {
+            serde_json::from_str(
+                &engine
+                    .call_tool(
+                        "run_js".into(),
+                        json!({"code": code}).to_string(),
+                        None,
+                        None,
+                    )
+                    .unwrap(),
+            )
+            .unwrap()
+        };
+        assert!(
+            run("console.log(6 * 7)")["output"]
+                .as_str()
+                .unwrap()
+                .contains("42")
+        );
+        assert!(run("while (true) {}")["error"].is_string());
+        assert!(
+            run("console.log('again')")["output"]
+                .as_str()
+                .unwrap()
+                .contains("again")
+        );
+        assert!(!engine.close().unwrap().already_shutdown);
+        assert!(engine.close().unwrap().already_shutdown);
+        assert!(
+            engine
+                .call_tool("run_js".into(), json!({"code":"1"}).to_string(), None, None)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_limits() {
+        for (memory, timeout) in [(0, 1), (15, 1), (4097, 1), (64, 0), (64, 301)] {
+            assert!(Engine::create_stateless(memory, timeout).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn owned_runtime_can_drop_inside_tokio() {
+        let engine = Engine::create_stateless(64, 1).unwrap();
+        assert!(engine.close().is_err());
+        assert!(
+            engine
+                .call_tool("run_js".into(), "{}".into(), None, None)
+                .is_err()
+        );
+        drop(engine);
     }
 }

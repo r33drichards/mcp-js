@@ -6,6 +6,86 @@
 This page documents the HTTP surface exposed by `mcp-v8` from the committed
 OpenAPI description.
 
+## Artifacts
+
+
+### List metadata for all stored artifacts.
+
+
+<a id="opIdlist_artifacts_handler"></a>
+
+`GET /api/artifacts`
+
+> Example responses
+
+> 200 Response
+
+```json
+{
+  "artifacts": [
+    {
+      "created_at": "string",
+      "execution_id": "string",
+      "key": "string",
+      "mime_type": "string",
+      "size_bytes": 0
+    }
+  ]
+}
+```
+
+<a id="list-metadata-for-all-stored-artifacts.-responses"></a>
+#### Responses
+
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Artifact metadata list|[ArtifactList](#schemaartifactlist)|
+|500|[Internal Server Error](https://tools.ietf.org/html/rfc7231#section-6.6.1)|Artifact store unavailable|[ApiError](#schemaapierror)|
+
+Authentication: none.
+
+
+### Download an artifact's raw payload bytes.
+
+
+<a id="opIdget_artifact_handler"></a>
+
+`GET /api/artifacts/{key}`
+
+The response body is the artifact's payload verbatim, served with the
+stored mime type as `Content-Type` — no base64, unlike the MCP tool.
+
+<a id="download-an-artifact's-raw-payload-bytes.-parameters"></a>
+#### Parameters
+
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|key|path|string|true|Artifact key, as passed to artifact(key, mime, bytes)|
+
+> Example responses
+
+> 404 Response
+
+```json
+{
+  "error": "string"
+}
+```
+
+<a id="download-an-artifact's-raw-payload-bytes.-responses"></a>
+#### Responses
+
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Raw artifact bytes (Content-Type = stored mime type)|None|
+|404|[Not Found](https://tools.ietf.org/html/rfc7231#section-6.5.4)|Artifact not found|[ApiError](#schemaapierror)|
+
+Authentication: none.
+
+
 ## CLI
 
 
@@ -213,6 +293,15 @@ Authentication: none.
 
 ```json
 {
+  "artifacts": [
+    {
+      "created_at": "string",
+      "execution_id": "string",
+      "key": "string",
+      "mime_type": "string",
+      "size_bytes": 0
+    }
+  ],
   "completed_at": "string",
   "error": "string",
   "execution_id": "string",
@@ -602,6 +691,66 @@ Generic error body.
 |---|---|---|---|---|
 |error|string|true|none|none|
 
+<h2 id="tocS_ArtifactList">ArtifactList</h2>
+<!-- backwards compatibility -->
+<a id="schemaartifactlist"></a>
+<a id="schema_ArtifactList"></a>
+<a id="tocSartifactlist"></a>
+<a id="tocsartifactlist"></a>
+
+```json
+{
+  "artifacts": [
+    {
+      "created_at": "string",
+      "execution_id": "string",
+      "key": "string",
+      "mime_type": "string",
+      "size_bytes": 0
+    }
+  ]
+}
+
+```
+
+List of stored artifacts.
+
+### Properties
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|artifacts|[[ArtifactMeta](#schemaartifactmeta)]|true|none|[Metadata for one stored artifact (payload not included).]|
+
+<h2 id="tocS_ArtifactMeta">ArtifactMeta</h2>
+<!-- backwards compatibility -->
+<a id="schemaartifactmeta"></a>
+<a id="schema_ArtifactMeta"></a>
+<a id="tocSartifactmeta"></a>
+<a id="tocsartifactmeta"></a>
+
+```json
+{
+  "created_at": "string",
+  "execution_id": "string",
+  "key": "string",
+  "mime_type": "string",
+  "size_bytes": 0
+}
+
+```
+
+Metadata for one stored artifact (payload not included).
+
+### Properties
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|created_at|string|true|none|ISO-8601 timestamp when the artifact was (last) written.|
+|execution_id|string¦null|false|none|Execution that (last) wrote this artifact, when known.|
+|key|string|true|none|Caller-chosen key, as passed to `artifact(key, mime, bytes)`.|
+|mime_type|string|true|none|Mime type, e.g. `image/png`.|
+|size_bytes|integer(int64)|true|none|Payload size in bytes.|
+
 <h2 id="tocS_CancelResult">CancelResult</h2>
 <!-- backwards compatibility -->
 <a id="schemacancelresult"></a>
@@ -751,6 +900,15 @@ Request body for executing JavaScript code.
 
 ```json
 {
+  "artifacts": [
+    {
+      "created_at": "string",
+      "execution_id": "string",
+      "key": "string",
+      "mime_type": "string",
+      "size_bytes": 0
+    }
+  ],
   "completed_at": "string",
   "error": "string",
   "execution_id": "string",
@@ -769,6 +927,7 @@ Detailed status of a single execution.
 
 |Name|Type|Required|Restrictions|Description|
 |---|---|---|---|---|
+|artifacts|[[ArtifactMeta](#schemaartifactmeta)]|true|none|Artifacts emitted via `artifact(key, mime, bytes)` during this<br>execution. Fetch payloads with `GET /api/artifacts/{key}`.|
 |completed_at|string¦null|false|none|ISO-8601 timestamp when execution finished (absent while running).|
 |error|string¦null|false|none|Error message (present when `status` is `failed`).|
 |execution_id|string|true|none|none|

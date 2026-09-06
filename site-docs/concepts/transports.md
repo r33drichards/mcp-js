@@ -6,7 +6,7 @@ mcp-v8 supports three transport modes. The choice determines how MCP clients dis
 
 ### stdio
 
-stdio is the default. The server binary reads newline-delimited MCP JSON-RPC messages from stdin and writes responses to stdout. The MCP client is responsible for spawning the process as a child and piping stdio. No port is opened; no network is involved.
+stdio is the default when no port is configured — by `--http-port`/`--sse-port`, by the corresponding `MCP_V8_*` variables or config-file keys, or by the platform-conventional `$PORT` variable (see [Take the port from `PORT`](../how-to/transports.md#take-the-port-from-port)). The server binary reads newline-delimited MCP JSON-RPC messages from stdin and writes responses to stdout. The MCP client is responsible for spawning the process as a child and piping stdio. No port is opened; no network is involved.
 
 This transport is ideal for local development and for LLM clients (such as Claude Desktop) that manage tool servers as subprocesses. Because the process lifetime is tied to the client, there is no need for network authentication or keep-alive management.
 

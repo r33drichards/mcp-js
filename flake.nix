@@ -43,9 +43,8 @@
           cargo = rustToolchain;
         } {
           src = ./server;
-          # Vendor hash for server's cargo deps; refreshed when deps changed.
-          # Refreshed for the combined sandbox and UniFFI dependency graph.
-          hash = "sha256-ivQcr7zUIIVLCHIQW9dzUJCn4zFXfwIBNbrSj+v5DIU=";
+          # Vendor hash for the merged server dependency graph (including UniFFI).
+          hash = "sha256-T3FLjR7we/kl8hok2Pm1ZmOHbpmvM0VhKNxXmauMee0=";
         });
 
         docsPython = pkgs.python3.withPackages (
@@ -278,6 +277,31 @@
             inherit pkgs;
             mcp-js = self.packages.x86_64-linux.default;
           });
+          docs-oauth-contract-check = pkgs.stdenvNoCC.mkDerivation {
+            pname = "mcp-js-docs-oauth-contract-check";
+            version = "0.1.0";
+            src = self;
+
+            nativeBuildInputs = [ pkgs.gnugrep ];
+
+            dontUnpack = true;
+            dontConfigure = true;
+            strictDeps = true;
+
+            buildPhase = ''
+              runHook preBuild
+              ${pkgs.bash}/bin/bash "$src/scripts/check-oauth-docs.sh" "$src"
+              runHook postBuild
+            '';
+
+            installPhase = ''
+              runHook preInstall
+              mkdir -p "$out"
+              touch "$out/passed"
+              runHook postInstall
+            '';
+          };
+
           docs-generated-check = pkgs.stdenvNoCC.mkDerivation {
             pname = "mcp-js-docs-generated-check";
             version = "0.1.0";
