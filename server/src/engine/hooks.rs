@@ -103,6 +103,13 @@ pub struct HookSource {
 #[serde(untagged)]
 pub enum StackEntry {
     Builtin(String),
+    /// A **virtual executor** replacing `"@execute"`: this source *is* the
+    /// innermost layer. JS only; called as `handle(input)` with no `next`,
+    /// and must return the operation's output document. Full-mode
+    /// operations only (fetch, subprocess, mcp_tools).
+    Execute {
+        execute: HookSource,
+    },
     Source(HookSource),
 }
 
@@ -440,11 +447,22 @@ impl std::fmt::Debug for JsWorker {
     }
 }
 
+/// How a JS worker invocation calls the target function.
+#[derive(Clone, Copy, PartialEq)]
+enum JsCallMode {
+    /// Pre/post hook contract: `fn(...args)`.
+    Hook,
+    /// Stack layer contract: `fn(input, next)`.
+    Layer,
+    /// Virtual executor contract: `fn(input)` — no `next`, nothing below.
+    Executor,
+}
+
 struct JsCall {
     args: Vec<Value>,
     respond: tokio::sync::oneshot::Sender<Result<Option<Value>, String>>,
-    /// Layered-stack call: invoke `function(input, next)` instead of the
-    /// pre/post contract, with `next` bridged over this channel.
+    mode: JsCallMode,
+    /// Layer calls only: `next` bridged over this channel.
     next: Option<tokio::sync::mpsc::UnboundedSender<NextRequest>>,
 }
 
@@ -571,6 +589,7 @@ impl LocalJsHookEvaluator {
             .send(JsCall {
                 args,
                 respond,
+                mode: JsCallMode::Hook,
                 next: None,
             })
             .map_err(|_| format!("JS hook '{}' worker is no longer running", self.path))?;
@@ -596,6 +615,47 @@ impl LocalJsHookEvaluator {
         }
     }
 
+    /// Call the evaluator as a **virtual executor**: `function(input)` with
+    /// no `next` — this file *is* the innermost layer. Must return the
+    /// operation's output document.
+    async fn evaluate_executor(&self, input: Value) -> Result<Value, String> {
+        let worker = self.worker()?;
+        let (respond, rx) = tokio::sync::oneshot::channel();
+        worker
+            .tx
+            .send(JsCall {
+                args: vec![input],
+                respond,
+                mode: JsCallMode::Executor,
+                next: None,
+            })
+            .map_err(|_| format!("JS executor '{}' worker is no longer running", self.path))?;
+        let grace = self.timeout + std::time::Duration::from_millis(500);
+        let result = match tokio::time::timeout(grace, rx).await {
+            Ok(Ok(result)) => result?,
+            Ok(Err(_)) => {
+                return Err(format!(
+                    "JS executor '{}' worker terminated unexpectedly",
+                    self.path
+                ));
+            }
+            Err(_) => {
+                worker.isolate_handle.terminate_execution();
+                return Err(format!(
+                    "JS executor '{}' timed out after {:?}",
+                    self.path, self.timeout
+                ));
+            }
+        };
+        result.ok_or_else(|| {
+            format!(
+                "JS executor '{}' returned no output; a virtual executor must return \
+                 the operation's output document",
+                self.path
+            )
+        })
+    }
+
     /// Start a layered-stack call: `function(input, next)` runs on the
     /// worker, and every `next(input')` the layer makes arrives on the
     /// returned channel for the driver to answer. The driver owns the
@@ -619,6 +679,7 @@ impl LocalJsHookEvaluator {
             .send(JsCall {
                 args: vec![input],
                 respond,
+                mode: JsCallMode::Layer,
                 next: Some(next_tx),
             })
             .map_err(|_| format!("JS layer '{}' worker is no longer running", self.path))?;
@@ -711,7 +772,7 @@ fn js_hook_worker(
             &call.args,
             &path,
             timeout,
-            call.next.is_some(),
+            call.mode,
         ));
         if call.next.is_some() {
             runtime.op_state().borrow_mut().take::<NextSender>();
@@ -731,7 +792,7 @@ async fn js_hook_call(
     args: &[Value],
     path: &str,
     timeout: std::time::Duration,
-    layer: bool,
+    mode: JsCallMode,
 ) -> Result<Option<Value>, String> {
     use deno_core::v8;
 
@@ -752,7 +813,7 @@ async fn js_hook_call(
     // `op_hook_next` and resolves to the inner layers' output. A rejected
     // next (inner deny/failure) is an ordinary exception the layer may catch
     // — that's what makes retry/fallback expressible.
-    let script = if layer {
+    let script = if mode == JsCallMode::Layer {
         format!(
             r#"(function() {{
                 const name = {fname};
@@ -764,6 +825,17 @@ async fn js_hook_call(
                     await Deno.core.ops.op_hook_next(JSON.stringify(input))
                 );
                 return fn(globalThis.__hook_args[0], next);
+            }})()"#
+        )
+    } else if mode == JsCallMode::Executor {
+        format!(
+            r#"(function() {{
+                const name = {fname};
+                const fn = globalThis[name];
+                if (typeof fn !== "function") {{
+                    throw new Error("JS executor function '" + name + "' is not defined");
+                }}
+                return fn(globalThis.__hook_args[0]);
             }})()"#
         )
     } else {
@@ -955,6 +1027,10 @@ pub enum Layer {
     /// Position reserved by `"@inject"` until `with_header_rules` fills it;
     /// a slot never filled (no rules configured) is a pass-through.
     InjectSlot,
+    /// A config-supplied virtual executor at the innermost position: called
+    /// as `handle(input)` (no `next`), replaces the operation's real
+    /// executor entirely.
+    VirtualJs(LocalJsHookEvaluator),
 }
 
 /// The operation's real executor, as seen by the layer driver: called at the
@@ -1174,6 +1250,19 @@ impl HookChain {
                     // "@inject" configured but no header rules attached.
                     self.call_layer(idx + 1, input, normalize, executor.clone(), identity)
                         .await
+                }
+                Layer::VirtualJs(eval) => {
+                    // Innermost by validation: the real executor is never
+                    // reached; this file produces the output document.
+                    let output = eval.evaluate_executor(input).await?;
+                    if !output.is_object() {
+                        return Err(format!(
+                            "{}: virtual executor '{}' must return the operation's \
+                             output document (an object)",
+                            self.op, eval.path
+                        ));
+                    }
+                    Ok(output)
                 }
                 Layer::Gate(hook) => {
                     let before = input.clone();
@@ -1475,6 +1564,48 @@ fn build_stack_chain(
             ));
         }
         match entry {
+            StackEntry::Execute { execute } => {
+                // Full-mode operations only: gate-mode operations have no
+                // layered output document a virtual executor could produce.
+                if !matches!(op, "fetch" | "subprocess" | "mcp_tools") {
+                    return Err(format!(
+                        "stack for '{}': a virtual executor requires a layered output \
+                         document; this operation runs gate-mode stacks and keeps its \
+                         real executor",
+                        op
+                    ));
+                }
+                let is_js = execute.url.strip_prefix("file://").is_some_and(|p| {
+                    Path::new(p).extension().and_then(|x| x.to_str()) == Some("js")
+                });
+                if !is_js {
+                    return Err(format!(
+                        "stack for '{}': a virtual executor must be a JavaScript \
+                         (file://*.js) source",
+                        op
+                    ));
+                }
+                let file_path = execute.url.strip_prefix("file://").unwrap().to_string();
+                if js_paths.contains(&file_path) {
+                    return Err(format!(
+                        "stack for '{}': JS file '{}' appears more than once — layer calls \
+                         through one file share a serialized worker, so a nested self-call \
+                         would deadlock",
+                        op, file_path
+                    ));
+                }
+                js_paths.push(file_path.clone());
+                let function = execute.rule.clone().unwrap_or_else(|| "handle".to_string());
+                let timeout_ms = execute.timeout_ms.unwrap_or(JS_LAYER_DEFAULT_TIMEOUT_MS);
+                let capabilities = execute.capabilities.clone().unwrap_or_default();
+                layers.push(Layer::VirtualJs(LocalJsHookEvaluator::from_file(
+                    Path::new(&file_path),
+                    function,
+                    timeout_ms,
+                    capabilities,
+                )?));
+                saw_execute = true;
+            }
             StackEntry::Builtin(name) => match name.as_str() {
                 "@execute" => {
                     saw_execute = true;
@@ -1554,15 +1685,22 @@ fn build_stack_chain(
     }
     if !saw_execute {
         return Err(format!(
-            "stack for '{}': '@execute' is required as the last entry",
+            "stack for '{}': '@execute' (or a virtual 'execute' entry) is required as the \
+             last entry",
             op
         ));
     }
     if !saw_policy && !config.policies.is_empty() {
         // Policies configured but not placed: keep the chain-mode guarantee
-        // and gate the effective input right before execution.
+        // and gate the effective input right before execution (before a
+        // virtual executor, when one terminates the stack).
         let chain = build_policy_chain(config, default_remote_path, default_local_rule)?;
-        layers.push(Layer::Gate(Hook::Policy(Arc::new(chain))));
+        let at = if matches!(layers.last(), Some(Layer::VirtualJs(_))) {
+            layers.len() - 1
+        } else {
+            layers.len()
+        };
+        layers.insert(at, Layer::Gate(Hook::Policy(Arc::new(chain))));
     }
     Ok(HookChain {
         op: op.to_string(),
@@ -2737,7 +2875,7 @@ async function pre(input) {{
             CAPS_FULL,
         )
         .unwrap_err();
-        assert!(err.contains("'@execute' is required"), "got: {err}");
+        assert!(err.contains("is required as the last entry"), "got: {err}");
 
         let err = build_hook_chain(
             "fetch",
@@ -2814,6 +2952,226 @@ async function pre(input) {{
         )
         .unwrap_err();
         assert!(err.contains("appears more than once"), "got: {err}");
+    }
+
+    // ── virtual executors ────────────────────────────────────────────────
+
+    fn virtual_execute(path: &std::path::Path) -> StackEntry {
+        StackEntry::Execute {
+            execute: js_hook(path, None),
+        }
+    }
+
+    #[test]
+    fn virtual_executor_validation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_js(dir.path(), "exec.js", "function handle(input) { return {}; }\n");
+
+        // Gate-mode operations keep their real executor.
+        let err = build_hook_chain(
+            "filesystem",
+            &stack_config(vec![virtual_execute(&path)]),
+            "mcp/filesystem",
+            "data.mcp.filesystem.allow",
+            CAPS_FULL,
+        )
+        .unwrap_err();
+        assert!(err.contains("gate-mode stacks"), "got: {err}");
+
+        // Only JS sources can produce an output document.
+        let rego = write_rego(dir.path(), "exec.rego", "package x\nallow = true\n");
+        let err = build_hook_chain(
+            "fetch",
+            &stack_config(vec![StackEntry::Execute {
+                execute: HookSource {
+                    url: format!("file://{}", rego.display()),
+                    policy_path: None,
+                    rule: None,
+                    timeout_ms: None,
+                    capabilities: None,
+                },
+            }]),
+            "mcp/fetch",
+            "data.mcp.fetch.allow",
+            CAPS_FULL,
+        )
+        .unwrap_err();
+        assert!(err.contains("must be a JavaScript"), "got: {err}");
+
+        // The executor is innermost: nothing may follow it.
+        let layer = write_js(dir.path(), "layer.js", "function handle(i, n) { return n(i); }\n");
+        let err = build_hook_chain(
+            "fetch",
+            &stack_config(vec![
+                virtual_execute(&path),
+                StackEntry::Source(js_hook(&layer, None)),
+            ]),
+            "mcp/fetch",
+            "data.mcp.fetch.allow",
+            CAPS_FULL,
+        )
+        .unwrap_err();
+        assert!(err.contains("must be the last entry"), "got: {err}");
+    }
+
+    /// A real executor that must never run: virtual executors replace it.
+    fn unreachable_executor() -> StackExecutor {
+        Arc::new(|_input: Value| {
+            Box::pin(async { Err("real executor reached — virtual executor should have replaced it".to_string()) })
+                as std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, String>> + Send>>
+        })
+    }
+
+    #[tokio::test]
+    async fn virtual_executor_replaces_real_executor_and_layers_compose_above() {
+        ensure_v8();
+        let dir = tempfile::tempdir().unwrap();
+        let layer = write_js(
+            dir.path(),
+            "layer.js",
+            r#"
+async function handle(input, next) {
+    const out = await next({ ...input, tagged: true });
+    return { ...out, wrapped: true };
+}
+"#,
+        );
+        let exec = write_js(
+            dir.path(),
+            "exec.js",
+            r#"
+function handle(input) {
+    return { status: 299, echoed: input.tagged === true };
+}
+"#,
+        );
+        let chain = build_hook_chain(
+            "fetch",
+            &stack_config(vec![
+                StackEntry::Source(js_hook(&layer, None)),
+                virtual_execute(&exec),
+            ]),
+            "mcp/fetch",
+            "data.mcp.fetch.allow",
+            CAPS_FULL,
+        )
+        .unwrap();
+        let out = chain
+            .run_stack_full(
+                serde_json::json!({"operation": "fetch", "url": "https://example.com"}),
+                |_| Ok(()),
+                unreachable_executor(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(out["status"], 299);
+        assert_eq!(out["echoed"], true);
+        assert_eq!(out["wrapped"], true);
+    }
+
+    #[tokio::test]
+    async fn virtual_executor_output_is_validated() {
+        ensure_v8();
+        let dir = tempfile::tempdir().unwrap();
+
+        // Returning undefined is "no output", not a silent null response.
+        let exec = write_js(dir.path(), "exec.js", "function handle(input) {}\n");
+        let chain = build_hook_chain(
+            "fetch",
+            &stack_config(vec![virtual_execute(&exec)]),
+            "mcp/fetch",
+            "data.mcp.fetch.allow",
+            CAPS_FULL,
+        )
+        .unwrap();
+        let err = chain
+            .run_stack_full(
+                serde_json::json!({"operation": "fetch", "url": "https://example.com"}),
+                |_| Ok(()),
+                unreachable_executor(),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.contains("returned no output"), "got: {err}");
+
+        // A non-object result is rejected as well.
+        let exec2 = write_js(dir.path(), "exec2.js", "function handle(input) { return 42; }\n");
+        let chain = build_hook_chain(
+            "fetch",
+            &stack_config(vec![virtual_execute(&exec2)]),
+            "mcp/fetch",
+            "data.mcp.fetch.allow",
+            CAPS_FULL,
+        )
+        .unwrap();
+        let err = chain
+            .run_stack_full(
+                serde_json::json!({"operation": "fetch", "url": "https://example.com"}),
+                |_| Ok(()),
+                unreachable_executor(),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.contains("output document"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn virtual_executor_still_gated_by_unplaced_policy() {
+        ensure_v8();
+        let dir = tempfile::tempdir().unwrap();
+        let exec = write_js(
+            dir.path(),
+            "exec.js",
+            "function handle(input) { return { status: 200 }; }\n",
+        );
+        let policy = write_rego(
+            dir.path(),
+            "fetch.rego",
+            r#"
+package mcp.fetch
+
+default allow = false
+
+allow if {
+    input.url == "https://allowed.example"
+}
+"#,
+        );
+        let mut config = stack_config(vec![virtual_execute(&exec)]);
+        config.policies = vec![PolicySource {
+            url: format!("file://{}", policy.display()),
+            policy_path: None,
+            rule: None,
+        }];
+        let chain = build_hook_chain(
+            "fetch",
+            &config,
+            "mcp/fetch",
+            "data.mcp.fetch.allow",
+            CAPS_FULL,
+        )
+        .unwrap();
+
+        // The auto-placed policy gates BEFORE the virtual executor runs.
+        let err = chain
+            .run_stack_full(
+                serde_json::json!({"operation": "fetch", "url": "https://blocked.example"}),
+                |_| Ok(()),
+                unreachable_executor(),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.contains("denied by policy"), "got: {err}");
+
+        let out = chain
+            .run_stack_full(
+                serde_json::json!({"operation": "fetch", "url": "https://allowed.example"}),
+                |_| Ok(()),
+                unreachable_executor(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(out["status"], 200);
     }
 
     // ── gate-mode stacks ─────────────────────────────────────────────────

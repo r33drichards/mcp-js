@@ -207,7 +207,39 @@ How much of the layer contract an operation supports follows from whether its ex
 
 In **gate mode** the operation has no layered output: layers gate, rewrite (where the executor applies mutations), and observe with full `next` mechanics, but the terminal position captures the effective input and resolves `next` to `null` — the operation then executes with the captured input. A layer returning a synthetic non-null output, reaching the terminal twice, or never calling `next` fails the operation closed, as does a rewrite on an operation without input-mutation support. A gate-mode pass-through layer is simply `return next(input)`.
 
-The flat `pre`/`post` chain remains fully supported; a stack is opt-in per operation. Swapping `@execute` itself for a virtual executor (recorded network, in-memory fs) is the remaining step of the design direction: every flat hook maps mechanically onto a layer, so that migration cannot break a configured hook.
+### Virtual executors
+
+Because the executor is just the innermost layer, it can be swapped from config: replace `"@execute"` with an `execute` entry naming a JS source, and that file *becomes* the operation — a recorded/mocked network, a fabricated subprocess, a stubbed tool server, with every layer, policy gate, and injection composing above it unchanged.
+
+```json
+{
+  "fetch": {
+    "stack": [
+      {"url": "file:///etc/hooks/cache_layer.js"},
+      "@policy",
+      {"execute": {"url": "file:///etc/hooks/recorded_responses.js"}}
+    ]
+  }
+}
+```
+
+A virtual executor is called as `handle(input)` — no `next`, because there is nothing below it — and must return the operation's output document (the same shape a layer sees from `next`):
+
+```js
+// recorded_responses.js — the whole network, from a file
+function handle(input) {
+    return {
+        status: 200, statusText: "OK", url: input.url,
+        headers: { "x-source": "recording" },
+        body: RECORDINGS[input.url] ?? "", bodyEncoding: "base64",
+        redirected: false,
+    };
+}
+```
+
+The entry takes the usual source fields (`rule` for the function name, `timeout_ms`, `capabilities` — an in-memory fs mock might take `["fs"]` to persist state). It must be the last stack entry, is JS-only (only JS can produce an output document), and is limited to full-mode operations — gate-mode operations have no layered output for it to produce, so they keep their real executor. Returning nothing or a non-object fails the operation, and an unplaced `policies` chain still auto-inserts *before* the virtual executor, so configured policies gate what reaches it.
+
+The flat `pre`/`post` chain remains fully supported; a stack is opt-in per operation. With virtual executors, the design direction is complete: every boundary from the first layer down to the executor itself is a composable, addressable shim — every flat hook maps mechanically onto a layer, so migration cannot break a configured hook.
 
 ## Worked examples
 

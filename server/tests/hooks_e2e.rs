@@ -1011,6 +1011,120 @@ allow if {{
     assert!(safe_dir.join("a.txt").exists());
 }
 
+// ── virtual executors: a config-supplied innermost layer ────────────────────
+
+/// A virtual executor replaces `@execute` from config: the mock JS file
+/// produces the fetch response document, layers compose above it as usual,
+/// and the network is never touched (the URL points at the discard port).
+#[tokio::test]
+async fn fetch_virtual_executor_serves_synthetic_responses() {
+    ensure_v8();
+    let dir = tempfile::tempdir().unwrap();
+
+    let layer_url = write_rego(
+        dir.path(),
+        "layer.js",
+        r#"
+async function handle(input, next) {
+    const out = await next({ ...input, headers: { ...input.headers, "x-from-layer": "yes" } });
+    return { ...out, headers: { ...out.headers, "x-wrapped": "yes" } };
+}
+"#,
+    );
+    // "dmlydHVhbA==" = base64("virtual"); the executor isolate is bare (no
+    // btoa), so the body is precomputed.
+    let exec_url = write_rego(
+        dir.path(),
+        "mock.js",
+        r#"
+function handle(input) {
+    return {
+        status: 200, statusText: "OK", url: input.url,
+        headers: { "x-saw-layer": input.headers["x-from-layer"] || "no" },
+        body: "dmlydHVhbA==", bodyEncoding: "base64", redirected: false,
+    };
+}
+"#,
+    );
+    let op = OperationPolicies {
+        stack: vec![
+            StackEntry::Source(js_source(layer_url, None)),
+            StackEntry::Execute {
+                execute: js_source(exec_url, None),
+            },
+        ],
+        ..Default::default()
+    };
+    let chain = build_hook_chain("fetch", &op, "mcp/fetch", "data.mcp.fetch.allow", stack_caps())
+        .unwrap();
+    let engine = build_engine().with_fetch_config(FetchConfig::new_with_hooks(Arc::new(chain)));
+
+    // Port 9 (discard) would hang or refuse — the virtual executor answers.
+    let out = eval(
+        &engine,
+        r#"fetch("http://127.0.0.1:9/anything").then(async r =>
+            (await r.text()) + " layer=" + r.headers.get("x-saw-layer") + " wrapped=" + r.headers.get("x-wrapped"))"#
+            .to_string(),
+    )
+    .await;
+    assert_eq!(out, "virtual layer=yes wrapped=yes");
+}
+
+/// A subprocess virtual executor fabricates the whole result: the command
+/// never spawns (it doesn't even exist), the guest sees the mock's document.
+#[tokio::test]
+async fn subprocess_virtual_executor_fabricates_result() {
+    ensure_v8();
+    let dir = tempfile::tempdir().unwrap();
+
+    let exec_url = write_rego(
+        dir.path(),
+        "mock.js",
+        r#"
+function handle(input) {
+    // exec() runs via the shell: args[1] carries the caller's command line.
+    return {
+        code: 0,
+        stdout: "ran " + input.args[1] + " virtually",
+        stderr: "", success: true, encoding: "utf8",
+    };
+}
+"#,
+    );
+    let op = OperationPolicies {
+        stack: vec![StackEntry::Execute {
+            execute: js_source(exec_url, None),
+        }],
+        ..Default::default()
+    };
+    let chain = build_hook_chain(
+        "subprocess",
+        &op,
+        "mcp/subprocess",
+        "data.mcp.subprocess.allow",
+        stack_caps(),
+    )
+    .unwrap();
+    let engine = build_engine()
+        .with_fetch_config(FetchConfig::new_with_hooks(Arc::new(HookChain::permissive(
+            "fetch",
+        ))))
+        .with_fs_config(FsConfig::new_with_hooks(Arc::new(HookChain::permissive(
+            "filesystem",
+        ))))
+        .with_subprocess_config(server::engine::subprocess::SubprocessConfig::new_with_hooks(
+            Arc::new(chain),
+        ));
+
+    let out = eval(
+        &engine,
+        r#"child_process.exec("no-such-binary-anywhere --flag").then(r => r.stdout + " code=" + r.code)"#
+            .to_string(),
+    )
+    .await;
+    assert_eq!(out, "ran no-such-binary-anywhere --flag virtually code=0");
+}
+
 // ── fetch: injected credentials do not follow a hook's host rewrite ─────────
 
 /// A header rule injects a credential for host `127.0.0.1`. A pre hook that
