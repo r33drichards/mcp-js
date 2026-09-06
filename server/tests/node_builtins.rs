@@ -174,7 +174,12 @@ fn child_process_spawn_sync_returns_buffered_result() {
 fn node_compat_prelude_maps_registered_host_modules() {
     let prelude = include_str!("node_compat/runner/prelude.js");
     for (import, mapping) in [
+        ("node:async_hooks", "async_hooks: asyncHooks"),
         ("node:child_process", "child_process: childProcess"),
+        (
+            "node:diagnostics_channel",
+            "diagnostics_channel: diagnosticsChannel",
+        ),
         ("node:dns", "dns: dns"),
         ("node:dns/promises", "'dns/promises': dnsPromises"),
         ("node:fs", "fs: fs"),
@@ -401,6 +406,175 @@ async fn create_require_serves_builtins() {
     .await;
 }
 
+
+#[tokio::test]
+async fn async_local_storage_propagates_through_await_and_timers() {
+    expect_ok(
+        r#"
+        import { AsyncLocalStorage, AsyncResource, createHook, executionAsyncId }
+            from 'node:async_hooks';
+
+        const als = new AsyncLocalStorage();
+        if (als.getStore() !== undefined) throw new Error('empty store');
+        if (als.name !== '') throw new Error('default name');
+
+        const withDefault = new AsyncLocalStorage({ defaultValue: 42, name: 'meaning' });
+        if (withDefault.getStore() !== 42) throw new Error('defaultValue');
+        if (withDefault.name !== 'meaning') throw new Error('name option');
+
+        // Synchronous run/exit nesting.
+        const sync = als.run('outer', () => {
+            if (als.getStore() !== 'outer') throw new Error('run store');
+            const inner = als.run('inner', () => als.getStore());
+            if (inner !== 'inner') throw new Error('nested run');
+            const exited = als.exit(() => als.getStore());
+            if (exited !== undefined) throw new Error('exit clears store');
+            return als.getStore();
+        });
+        if (sync !== 'outer' || als.getStore() !== undefined) {
+            throw new Error('run restores context');
+        }
+
+        // Await propagation: the store survives crossing microtasks.
+        const awaited = await als.run('async-store', async () => {
+            await Promise.resolve();
+            await new Promise((resolve) => setTimeout(resolve, 1));
+            return als.getStore();
+        });
+        if (awaited !== 'async-store') {
+            throw new Error('store lost across await: ' + awaited);
+        }
+
+        // Timer propagation.
+        const timed = await new Promise((resolve) => {
+            als.run('timer-store', () => {
+                setTimeout(() => resolve(als.getStore()), 1);
+            });
+        });
+        if (timed !== 'timer-store') throw new Error('store lost in setTimeout: ' + timed);
+
+        // AsyncResource scope entry.
+        const resource = als.run('resource-store', () => new AsyncResource('TEST'));
+        const inScope = resource.runInAsyncScope(() => als.getStore());
+        if (inScope !== 'resource-store') throw new Error('AsyncResource scope store');
+        if (resource.asyncId() === executionAsyncId()) {
+            throw new Error('AsyncResource ids are fresh');
+        }
+
+        // createHook validation matches Node.
+        for (const name of ['init', 'before', 'after', 'destroy', 'promiseResolve']) {
+            for (const bad of [null, -1, 1, {}, []]) {
+                try {
+                    createHook({ [name]: bad });
+                    throw new Error('createHook should reject non-function ' + name);
+                } catch (error) {
+                    if (error.code !== 'ERR_ASYNC_CALLBACK' ||
+                        error.name !== 'TypeError' ||
+                        error.message !== `hook.${name} must be a function`) {
+                        throw error;
+                    }
+                }
+            }
+        }
+
+        // Hook lifecycle events for AsyncResource scopes.
+        const events = [];
+        const hook = createHook({
+            init(id, type) { if (type === 'HOOKED') events.push('init'); },
+            destroy() { events.push('destroy'); },
+        }).enable();
+        const tracked = new AsyncResource('HOOKED');
+        tracked.emitDestroy();
+        hook.disable();
+        if (JSON.stringify(events) !== JSON.stringify(['init', 'destroy'])) {
+            throw new Error('hook events mismatch: ' + JSON.stringify(events));
+        }
+        "#,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn diagnostics_channel_pub_sub_and_tracing() {
+    expect_ok(
+        r#"
+        import dc, {
+            channel, subscribe, unsubscribe, hasSubscribers, tracingChannel, Channel,
+        } from 'node:diagnostics_channel';
+        import { createRequire } from 'node:module';
+        const require = createRequire(import.meta.url);
+        if (require('diagnostics_channel') !== dc) {
+            throw new Error('require(diagnostics_channel) identity');
+        }
+
+        const ch = channel('test:one');
+        if (!(ch instanceof Channel)) throw new Error('channel() instance');
+        if (channel('test:one') !== ch) throw new Error('channel() registry identity');
+        if (ch.hasSubscribers || hasSubscribers('test:one')) {
+            throw new Error('fresh channel has no subscribers');
+        }
+
+        const seen = [];
+        const onMessage = (message, name) => seen.push([message, name]);
+        subscribe('test:one', onMessage);
+        if (!ch.hasSubscribers || !hasSubscribers('test:one')) {
+            throw new Error('subscribe should mark subscribers');
+        }
+        ch.publish({ hello: 'world' });
+        if (seen.length !== 1 || seen[0][0].hello !== 'world' || seen[0][1] !== 'test:one') {
+            throw new Error('publish payload mismatch: ' + JSON.stringify(seen));
+        }
+        if (!unsubscribe('test:one', onMessage)) throw new Error('unsubscribe result');
+        if (unsubscribe('test:one', onMessage)) throw new Error('double unsubscribe');
+        if (ch.hasSubscribers) throw new Error('unsubscribe should clear subscribers');
+
+        try {
+            subscribe('test:bad', 'not a function');
+            throw new Error('subscribe should validate the subscription');
+        } catch (error) {
+            if (error.code !== 'ERR_INVALID_ARG_TYPE') throw error;
+        }
+        try {
+            channel(42);
+            throw new Error('channel should validate the name');
+        } catch (error) {
+            if (error.code !== 'ERR_INVALID_ARG_TYPE') throw error;
+        }
+
+        const tc = tracingChannel('demo');
+        const events = [];
+        tc.subscribe({
+            start(message) { events.push('start:' + message.input); },
+            end(message) { events.push('end:' + message.result); },
+            error(message) { events.push('error:' + message.error.message); },
+        });
+        const result = tc.traceSync((value) => value * 2, { input: 21 }, undefined, 21);
+        if (result !== 42) throw new Error('traceSync result');
+        try {
+            tc.traceSync(() => { throw new Error('boom'); }, {});
+        } catch (error) {
+            if (error.message !== 'boom') throw error;
+        }
+        const expected = ['start:21', 'end:42', 'start:undefined', 'error:boom', 'end:undefined'];
+        if (JSON.stringify(events) !== JSON.stringify(expected)) {
+            throw new Error('tracing events mismatch: ' + JSON.stringify(events));
+        }
+
+        const asyncEvents = [];
+        const tp = tracingChannel('demo:promise');
+        tp.subscribe({
+            asyncStart(message) { asyncEvents.push('asyncStart:' + message.result); },
+            asyncEnd(message) { asyncEvents.push('asyncEnd:' + message.result); },
+        });
+        const value = await tp.tracePromise(async () => 'done', {});
+        if (value !== 'done') throw new Error('tracePromise result');
+        if (JSON.stringify(asyncEvents) !== JSON.stringify(['asyncStart:done', 'asyncEnd:done'])) {
+            throw new Error('tracePromise events mismatch: ' + JSON.stringify(asyncEvents));
+        }
+        "#,
+    )
+    .await;
+}
 
 #[tokio::test]
 async fn module_default_export_is_constructible_with_instance_require() {

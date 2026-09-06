@@ -21,7 +21,6 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::io::Write as _;
 use std::process::Stdio;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -39,11 +38,43 @@ use super::opa::PolicyChain;
 #[derive(Clone, Debug)]
 pub struct SubprocessConfig {
     pub policy_chain: Arc<PolicyChain>,
+    /// Hard wall-clock cap for a spawned command. When it expires the child
+    /// is killed (`kill_on_drop`) and the op returns an error, so a child
+    /// that never exits cannot wedge a synchronous wait forever. `None`
+    /// (the default) preserves unlimited runtime.
+    pub timeout: Option<std::time::Duration>,
 }
 
 impl SubprocessConfig {
     pub fn new(chain: Arc<PolicyChain>) -> Self {
-        Self { policy_chain: chain }
+        Self {
+            policy_chain: chain,
+            timeout: None,
+        }
+    }
+
+    pub fn with_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
+}
+
+/// Await a child-process future under the configured cap. The future must
+/// own the child with `kill_on_drop(true)` so cancellation reaps it.
+async fn await_with_timeout<T>(
+    label: &str,
+    command: &str,
+    timeout: Option<std::time::Duration>,
+    task: impl std::future::Future<Output = Result<T, String>>,
+) -> Result<T, String> {
+    match timeout {
+        Some(limit) => tokio::time::timeout(limit, task).await.map_err(|_| {
+            format!(
+                "{label}: '{command}' timed out after {} seconds",
+                limit.as_secs()
+            )
+        })?,
+        None => task.await,
     }
 }
 
@@ -78,7 +109,7 @@ async fn op_subprocess_output(
     #[string] args_json: String,
     #[string] options_json: String,
 ) -> Result<String, JsErrorBox> {
-    let policy_chain = extract_chain(&state)?;
+    let (policy_chain, timeout) = extract_chain(&state)?;
 
     tokio::spawn(async move {
         let args: Vec<String> = serde_json::from_str(&args_json)
@@ -90,6 +121,7 @@ async fn op_subprocess_output(
 
         let mut cmd = tokio::process::Command::new(&command);
         cmd.args(&args);
+        cmd.kill_on_drop(true);
 
         if let Some(ref cwd) = options.cwd {
             cmd.current_dir(cwd);
@@ -98,22 +130,26 @@ async fn op_subprocess_output(
             cmd.envs(env);
         }
 
-        let output = if let Some(input) = options.stdin {
-            cmd.stdin(Stdio::piped());
-            cmd.stdout(Stdio::piped());
-            cmd.stderr(Stdio::piped());
-            let mut child = cmd.spawn()
-                .map_err(|e| format!("subprocess: failed to execute '{}': {}", command, e))?;
-            if let Some(mut stdin) = child.stdin.take() {
-                stdin.write_all(&input).await
-                    .map_err(|e| format!("subprocess: failed to write stdin for '{}': {}", command, e))?;
+        let stdin = options.stdin;
+        let run = async {
+            if let Some(input) = stdin {
+                cmd.stdin(Stdio::piped());
+                cmd.stdout(Stdio::piped());
+                cmd.stderr(Stdio::piped());
+                let mut child = cmd.spawn()
+                    .map_err(|e| format!("subprocess: failed to execute '{}': {}", command, e))?;
+                if let Some(mut stdin) = child.stdin.take() {
+                    stdin.write_all(&input).await
+                        .map_err(|e| format!("subprocess: failed to write stdin for '{}': {}", command, e))?;
+                }
+                child.wait_with_output().await
+                    .map_err(|e| format!("subprocess: failed to wait for '{}': {}", command, e))
+            } else {
+                cmd.output().await
+                    .map_err(|e| format!("subprocess: failed to execute '{}': {}", command, e))
             }
-            child.wait_with_output().await
-                .map_err(|e| format!("subprocess: failed to wait for '{}': {}", command, e))?
-        } else {
-            cmd.output().await
-                .map_err(|e| format!("subprocess: failed to execute '{}': {}", command, e))?
         };
+        let output = await_with_timeout("subprocess", &command, timeout, run).await?;
 
         let stdout = base64_encode(&output.stdout);
         let stderr = base64_encode(&output.stderr);
@@ -146,70 +182,69 @@ fn op_subprocess_output_sync(
         .ok_or_else(|| JsErrorBox::generic(
             "subprocess: internal error — no subprocess config available"))?;
     let policy_chain = config.policy_chain.clone();
+    let timeout = config.timeout;
     let args: Vec<String> = serde_json::from_str(&args_json)
         .map_err(|e| JsErrorBox::generic(format!("subprocess: invalid args JSON: {}", e)))?;
     let options: SubprocessOptions = serde_json::from_str(&options_json)
         .map_err(|e| JsErrorBox::generic(format!("subprocess: invalid options JSON: {}", e)))?;
 
-    let policy_command = command.clone();
-    let policy_args = args.clone();
-    let policy_options = options.clone();
+    // The whole run happens on a helper thread's current-thread runtime so
+    // the configured cap can kill a child that never exits — a plain
+    // std::process wait would block this op (and terminate_execution)
+    // forever.
     std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .map_err(|e| format!("subprocess: failed to create policy runtime: {}", e))?;
-        runtime.block_on(check_policy(
-            &policy_chain,
-            "command_output",
-            &policy_command,
-            &policy_args,
-            &policy_options,
-        ))
+            .map_err(|e| format!("subprocess: failed to create runtime: {}", e))?;
+        runtime.block_on(async {
+            check_policy(&policy_chain, "command_output", &command, &args, &options).await?;
+
+            let mut cmd = tokio::process::Command::new(&command);
+            cmd.args(&args);
+            cmd.kill_on_drop(true);
+            if let Some(ref cwd) = options.cwd {
+                cmd.current_dir(cwd);
+            }
+            if let Some(ref env) = options.env {
+                cmd.envs(env);
+            }
+
+            let stdin = options.stdin;
+            let run = async {
+                if let Some(input) = stdin {
+                    cmd.stdin(Stdio::piped());
+                    cmd.stdout(Stdio::piped());
+                    cmd.stderr(Stdio::piped());
+                    let mut child = cmd.spawn()
+                        .map_err(|e| format!("subprocess: failed to execute '{}': {}", command, e))?;
+                    if let Some(mut stdin) = child.stdin.take() {
+                        stdin.write_all(&input).await.map_err(|e| {
+                            format!("subprocess: failed to write stdin for '{}': {}", command, e)
+                        })?;
+                    }
+                    child.wait_with_output().await
+                        .map_err(|e| format!("subprocess: failed to wait for '{}': {}", command, e))
+                } else {
+                    cmd.output().await
+                        .map_err(|e| format!("subprocess: failed to execute '{}': {}", command, e))
+                }
+            };
+            await_with_timeout("subprocess", &command, timeout, run).await
+        })
     })
     .join()
-    .map_err(|_| JsErrorBox::generic("subprocess: policy thread panicked"))?
-    .map_err(JsErrorBox::generic)?;
-
-    let mut cmd = std::process::Command::new(&command);
-    cmd.args(&args);
-    if let Some(ref cwd) = options.cwd {
-        cmd.current_dir(cwd);
-    }
-    if let Some(ref env) = options.env {
-        cmd.envs(env);
-    }
-
-    let output = if let Some(input) = options.stdin {
-        cmd.stdin(Stdio::piped());
-        cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::piped());
-        let mut child = cmd.spawn().map_err(|e| {
-            JsErrorBox::generic(format!("subprocess: failed to execute '{}': {}", command, e))
-        })?;
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(&input).map_err(|e| {
-                JsErrorBox::generic(format!(
-                    "subprocess: failed to write stdin for '{}': {}", command, e
-                ))
-            })?;
-        }
-        child.wait_with_output().map_err(|e| {
-            JsErrorBox::generic(format!("subprocess: failed to wait for '{}': {}", command, e))
-        })?
-    } else {
-        cmd.output().map_err(|e| {
-            JsErrorBox::generic(format!("subprocess: failed to execute '{}': {}", command, e))
-        })?
-    };
-
-    Ok(serde_json::json!({
-        "code": output.status.code().unwrap_or(-1),
-        "stdout": base64_encode(&output.stdout),
-        "stderr": base64_encode(&output.stderr),
-        "success": output.status.success(),
+    .map_err(|_| JsErrorBox::generic("subprocess: worker thread panicked"))?
+    .map_err(JsErrorBox::generic)
+    .map(|output| {
+        serde_json::json!({
+            "code": output.status.code().unwrap_or(-1),
+            "stdout": base64_encode(&output.stdout),
+            "stderr": base64_encode(&output.stderr),
+            "success": output.status.success(),
+        })
+        .to_string()
     })
-    .to_string())
 }
 
 /// Async op: Execute a shell command (Node.js child_process.exec equivalent).
@@ -222,7 +257,7 @@ async fn op_subprocess_exec(
     #[string] command: String,
     #[string] options_json: String,
 ) -> Result<String, JsErrorBox> {
-    let policy_chain = extract_chain(&state)?;
+    let (policy_chain, timeout) = extract_chain(&state)?;
 
     tokio::spawn(async move {
         let options: SubprocessOptions = serde_json::from_str(&options_json)
@@ -243,6 +278,7 @@ async fn op_subprocess_exec(
 
         let mut cmd = tokio::process::Command::new(shell);
         cmd.arg(shell_arg).arg(&command);
+        cmd.kill_on_drop(true);
 
         if let Some(ref cwd) = options.cwd {
             cmd.current_dir(cwd);
@@ -251,8 +287,11 @@ async fn op_subprocess_exec(
             cmd.envs(env);
         }
 
-        let output = cmd.output().await
-            .map_err(|e| format!("subprocess.exec: failed to execute '{}': {}", command, e))?;
+        let run = async {
+            cmd.output().await
+                .map_err(|e| format!("subprocess.exec: failed to execute '{}': {}", command, e))
+        };
+        let output = await_with_timeout("subprocess.exec", &command, timeout, run).await?;
 
         let encoding = options.encoding.as_deref().unwrap_or("utf8");
         let (stdout, stderr) = if encoding == "buffer" {
@@ -465,11 +504,13 @@ struct SubprocessOptions {
     stdin: Option<Vec<u8>>,
 }
 
-fn extract_chain(state: &Rc<RefCell<OpState>>) -> Result<Arc<PolicyChain>, JsErrorBox> {
+fn extract_chain(
+    state: &Rc<RefCell<OpState>>,
+) -> Result<(Arc<PolicyChain>, Option<std::time::Duration>), JsErrorBox> {
     let state = state.borrow();
     let config = state.try_borrow::<SubprocessConfig>()
         .ok_or_else(|| JsErrorBox::generic("subprocess: internal error — no subprocess config available"))?;
-    Ok(config.policy_chain.clone())
+    Ok((config.policy_chain.clone(), config.timeout))
 }
 
 async fn check_policy(

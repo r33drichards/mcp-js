@@ -2,6 +2,9 @@
 // capability when enabled. Without that capability, operations retain the
 // rejecting stub behavior used by the default sandbox.
 
+import { Buffer } from 'node:buffer';
+import path from 'node:path';
+
 function unsupported(name) {
     return function () {
         const maybeCb = arguments[arguments.length - 1];
@@ -17,15 +20,150 @@ function unsupported(name) {
     };
 }
 
-export const readFile = unsupported('readFile');
-export const readFileSync = unsupported('readFileSync');
-export const writeFile = unsupported('writeFile');
+function hostFs(name) {
+    const method = globalThis.fs && globalThis.fs[name];
+    return typeof method === 'function' ? method.bind(globalThis.fs) : null;
+}
+
+// Wrap a host promise method as Node's callback style: trailing callback,
+// options argument optional.
+function callbackify(name, promiseMethod, pathCount = 1) {
+    if (!promiseMethod) return unsupported(name);
+    return function (...args) {
+        const callback = args.pop();
+        if (typeof callback !== 'function') {
+            const err = new TypeError(`fs.${name}: callback must be a function`);
+            err.code = 'ERR_INVALID_ARG_TYPE';
+            throw err;
+        }
+        const normalized = args.map(
+            (value, index) => (index < pathCount ? normalizePath(value) : value));
+        promiseMethod(...normalized).then(
+            (result) => callback(null, result),
+            (error) => callback(error),
+        );
+    };
+}
+
+const hostReadFileSync = hostFs('readFileSync');
+export const readFileSync = hostReadFileSync
+    ? (path, options) => {
+        const encoding = typeof options === 'string'
+            ? options
+            : options && options.encoding;
+        const bytes = hostReadFileSync(normalizePath(path));
+        if (encoding && encoding !== 'buffer') {
+            return Buffer.from(bytes).toString(encoding);
+        }
+        return Buffer.from(bytes);
+    }
+    : unsupported('readFileSync');
+
 export const writeFileSync = globalThis.fs && typeof globalThis.fs.writeFileSync === 'function'
     ? (path, data, ...args) => globalThis.fs.writeFileSync(normalizePath(path), data, ...args)
     : unsupported('writeFileSync');
 export const symlinkSync = globalThis.fs && typeof globalThis.fs.symlinkSync === 'function'
     ? (target, path, ...args) => globalThis.fs.symlinkSync(normalizePath(target), normalizePath(path), ...args)
     : unsupported('symlinkSync');
+
+function syncDelegate(name, pathCount = 1) {
+    const method = hostFs(name);
+    if (!method) return unsupported(name);
+    return (...args) => {
+        try {
+            return method(...args.map(
+                (value, index) => (index < pathCount ? normalizePath(value) : value)));
+        } catch (error) {
+            // Host errors embed the errno code in the message
+            // ("fs.rm: /path: ENOENT: ...") but do not set error.code.
+            if (error && !error.code) {
+                const msg = String(error.message || '');
+                const codeMatch = /\b(E[A-Z]+)\b/.exec(msg);
+                if (codeMatch) {
+                    error.code = codeMatch[1];
+                } else if (/no such file|not found|does not exist/i.test(msg)) {
+                    error.code = 'ENOENT';
+                }
+            }
+            throw error;
+        }
+    };
+}
+
+export const mkdirSync = syncDelegate('mkdirSync');
+export const statSync = syncDelegate('statSync');
+export const lstatSync = syncDelegate('lstatSync');
+export const readdirSync = syncDelegate('readdirSync');
+export const rmSync = syncDelegate('rmSync');
+export const rmdirSync = syncDelegate('rmdirSync');
+export const unlinkSync = syncDelegate('unlinkSync');
+export const renameSync = syncDelegate('renameSync', 2);
+export const copyFileSync = syncDelegate('copyFileSync', 2);
+export const readlinkSync = syncDelegate('readlinkSync');
+
+const hostExistsSync = hostFs('existsSync');
+export const existsSync = hostExistsSync
+    ? (path) => hostExistsSync(normalizePath(path))
+    : () => false;
+
+// Recursive copy built on the sync surface. Subset semantics: recursive,
+// errorOnExist, and symlink preservation; filters and mode flags are not
+// implemented.
+function cpSyncImpl(src, dest, options) {
+    const stats = lstatSync(src);
+    if (stats.isDirectory()) {
+        if (!options.recursive) {
+            const err = new Error(
+                `Recursive option not enabled, error about ${src}`);
+            err.code = 'ERR_FS_EISDIR';
+            throw err;
+        }
+        mkdirSync(dest, { recursive: true });
+        for (const name of readdirSync(src)) {
+            cpSyncImpl(path.join(src, name), path.join(dest, name), options);
+        }
+        return;
+    }
+    if (options.errorOnExist && existsSync(dest)) {
+        const err = new Error(`${dest} already exists`);
+        err.code = 'ERR_FS_CP_EEXIST';
+        throw err;
+    }
+    if (stats.isSymbolicLink()) {
+        symlinkSync(readlinkSync(src), dest);
+        return;
+    }
+    copyFileSync(src, dest);
+}
+
+export const cpSync = globalThis.fs
+    ? (src, dest, options) => cpSyncImpl(
+        String(normalizePath(src)), String(normalizePath(dest)), options || {})
+    : unsupported('cpSync');
+
+export const cp = globalThis.fs
+    ? function cp(src, dest, optionsOrCallback, maybeCallback) {
+        const callback = typeof optionsOrCallback === 'function'
+            ? optionsOrCallback
+            : maybeCallback;
+        const options = typeof optionsOrCallback === 'function'
+            ? {}
+            : optionsOrCallback;
+        if (typeof callback !== 'function') {
+            const err = new TypeError('fs.cp: callback must be a function');
+            err.code = 'ERR_INVALID_ARG_TYPE';
+            throw err;
+        }
+        try {
+            cpSync(src, dest, options);
+        } catch (error) {
+            queueMicrotask(() => callback(error));
+            return;
+        }
+        queueMicrotask(() => callback(null));
+    }
+    : unsupported('cp');
+
 export const openSync = unsupported('openSync');
 export const closeSync = unsupported('closeSync');
 export const readSync = unsupported('readSync');
@@ -33,9 +171,40 @@ export const watch = unsupported('watch');
 export const createReadStream = unsupported('createReadStream');
 export const createWriteStream = unsupported('createWriteStream');
 
-export function existsSync() {
-    return false;
-}
+// Node-style callback API over the host promise surface.
+export const readFile = hostFs('readFile')
+    ? function readFile(path, optionsOrCallback, maybeCallback) {
+        const callback = typeof optionsOrCallback === 'function'
+            ? optionsOrCallback
+            : maybeCallback;
+        const options = typeof optionsOrCallback === 'function'
+            ? undefined
+            : optionsOrCallback;
+        if (typeof callback !== 'function') {
+            const err = new TypeError('fs.readFile: callback must be a function');
+            err.code = 'ERR_INVALID_ARG_TYPE';
+            throw err;
+        }
+        hostFs('readFile')(normalizePath(path), options).then(
+            (result) => callback(
+                null, result instanceof Uint8Array ? Buffer.from(result) : result),
+            (error) => callback(error),
+        );
+    }
+    : unsupported('readFile');
+export const writeFile = callbackify('writeFile', hostFs('writeFile'));
+export const appendFile = callbackify('appendFile', hostFs('appendFile'));
+export const mkdir = callbackify('mkdir', hostFs('mkdir'));
+export const stat = callbackify('stat', hostFs('stat'));
+export const lstat = callbackify('lstat', hostFs('lstat'));
+export const readdir = callbackify('readdir', hostFs('readdir'));
+export const rm = callbackify('rm', hostFs('rm'));
+export const rmdir = callbackify('rmdir', hostFs('rmdir'));
+export const unlink = callbackify('unlink', hostFs('unlink'));
+export const rename = callbackify('rename', hostFs('rename'), 2);
+export const copyFile = callbackify('copyFile', hostFs('copyFile'), 2);
+export const readlink = callbackify('readlink', hostFs('readlink'));
+export const symlink = callbackify('symlink', hostFs('symlink'), 2);
 
 // The method set fs-consuming libraries bind at load time (isomorphic-git,
 // globby, config loaders). node:fs/promises re-exports these names.
@@ -60,6 +229,16 @@ for (const name of PROMISE_METHODS) {
         ? (...args) => runtimeMethod.call(globalThis.fs, normalizePath(args[0]), ...args.slice(1))
         : () => Promise.reject(makeEnosys(name));
 }
+if (globalThis.fs) {
+    promises.cp = (src, dest, options) => {
+        try {
+            cpSync(src, dest, options);
+            return Promise.resolve();
+        } catch (error) {
+            return Promise.reject(error);
+        }
+    };
+}
 
 function normalizePath(value) {
     if (value instanceof URL && value.protocol === 'file:') value = decodeURIComponent(value.pathname);
@@ -81,7 +260,31 @@ export default {
     readFileSync,
     writeFile,
     writeFileSync,
+    appendFile,
     symlinkSync,
+    mkdir,
+    mkdirSync,
+    stat,
+    statSync,
+    lstat,
+    lstatSync,
+    readdir,
+    readdirSync,
+    rm,
+    rmSync,
+    rmdir,
+    rmdirSync,
+    unlink,
+    unlinkSync,
+    rename,
+    renameSync,
+    copyFile,
+    copyFileSync,
+    cp,
+    cpSync,
+    readlink,
+    readlinkSync,
+    symlink,
     openSync,
     closeSync,
     readSync,

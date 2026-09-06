@@ -5,10 +5,14 @@
 // file and package requires throw MODULE_NOT_FOUND, pointing at import.
 
 import assert from 'node:assert';
+import asyncHooks from 'node:async_hooks';
 import buffer from 'node:buffer';
 import childProcess from 'node:child_process';
 import consoleModule from 'node:console';
 import crypto from 'node:crypto';
+import diagnosticsChannel from 'node:diagnostics_channel';
+import cluster from 'node:cluster';
+import dgram from 'node:dgram';
 import dns from 'node:dns';
 import dnsPromises from 'node:dns/promises';
 import events from 'node:events';
@@ -29,6 +33,7 @@ import test from 'node:test';
 import timers from 'node:timers';
 import timersPromises from 'node:timers/promises';
 import tls from 'node:tls';
+import tty from 'node:tty';
 import url from 'node:url';
 import util from 'node:util';
 import utilTypes from 'node:util/types';
@@ -36,12 +41,31 @@ import workerThreads from 'node:worker_threads';
 import zlib from 'node:zlib';
 
 const builtins = new Map([
+    // Legacy require-able http internals, aliased onto the http module.
+    ['_http_agent', { Agent: http.Agent, globalAgent: http.globalAgent }],
+    ['_http_client', { ClientRequest: http.ClientRequest }],
+    ['_http_common', {
+        methods: http.METHODS,
+        chunkExpression: /(?:^|\W)chunked(?:$|\W)/i,
+        _checkIsHttpToken: http._checkIsHttpToken,
+        _checkInvalidHeaderChar: http._checkInvalidHeaderChar,
+    }],
+    ['_http_server', {
+        STATUS_CODES: http.STATUS_CODES,
+        Server: http.Server,
+        ServerResponse: http.ServerResponse,
+        kConnectionsCheckingInterval: http.kConnectionsCheckingInterval,
+    }],
     ['assert', assert],
     ['assert/strict', assert.strict],
+    ['async_hooks', asyncHooks],
     ['buffer', buffer],
     ['child_process', childProcess],
     ['console', consoleModule],
     ['crypto', crypto],
+    ['diagnostics_channel', diagnosticsChannel],
+    ['cluster', cluster],
+    ['dgram', dgram],
     ['dns', dns],
     ['dns/promises', dnsPromises],
     ['events', events],
@@ -63,6 +87,7 @@ const builtins = new Map([
     ['timers', timers],
     ['timers/promises', timersPromises],
     ['tls', tls],
+    ['tty', tty],
     ['url', url],
     ['util', util],
     ['util/types', utilTypes],
@@ -74,10 +99,14 @@ if (typeof __mcpV8InternalEsmResolve !== 'undefined') {
     builtins.set('internal/modules/esm/resolve', __mcpV8InternalEsmResolve);
 }
 
-// Matches Node: subpath builtins are listed, alias names are not.
+// Matches Node: subpath builtins are listed, alias names are not. The
+// _http_* legacy aliases stay require-able but unlisted — the registry
+// contract (builtin_modules_matches_registry) pins this list to the
+// modules the loader actually serves.
 export const builtinModules = Object.freeze(
     [...builtins.keys()].filter((name) =>
-        name !== 'assert/strict' && !name.startsWith('internal/')));
+        name !== 'assert/strict' && !name.startsWith('internal/')
+        && !name.startsWith('_http_')));
 
 export function isBuiltin(name) {
     const normalized = String(name).replace(/^node:/, '');
