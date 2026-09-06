@@ -48,9 +48,13 @@
 //! ([`HookCaps::input_mutation`] = false) and fail closed if a hook attempts
 //! one.
 
+use std::cell::RefCell;
 use std::path::Path;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::Mutex;
+
+use deno_core::OpState;
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -89,6 +93,17 @@ pub struct HookSource {
     /// (the same trust as the policy files themselves) and because gating
     /// them would recurse into the very chain the hook runs inside.
     pub capabilities: Option<Vec<String>>,
+}
+
+/// One entry in a layered `stack`: a hook source, or a built-in position
+/// marker — `"@inject"` (fetch header injection), `"@policy"` (the
+/// operation's `policies` chain), `"@execute"` (the real executor; required
+/// and last).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum StackEntry {
+    Builtin(String),
+    Source(HookSource),
 }
 
 /// What the operation's executor supports; enforced at build/run time.
@@ -428,7 +443,50 @@ impl std::fmt::Debug for JsWorker {
 struct JsCall {
     args: Vec<Value>,
     respond: tokio::sync::oneshot::Sender<Result<Option<Value>, String>>,
+    /// Layered-stack call: invoke `function(input, next)` instead of the
+    /// pre/post contract, with `next` bridged over this channel.
+    next: Option<tokio::sync::mpsc::UnboundedSender<NextRequest>>,
 }
+
+/// One `next(input)` call from a JS layer: the rewritten input and the slot
+/// the driver answers into (the inner layers' output, or an error).
+pub type NextRequest = (Value, tokio::sync::oneshot::Sender<Result<Value, String>>);
+
+/// OpState-resident sender for the layer call currently executing in a hook
+/// isolate; `op_hook_next` uses it to reach the driver.
+#[derive(Clone)]
+struct NextSender(tokio::sync::mpsc::UnboundedSender<NextRequest>);
+
+#[deno_core::op2(async)]
+#[string]
+async fn op_hook_next(
+    state: Rc<RefCell<OpState>>,
+    #[string] input_json: String,
+) -> Result<String, deno_error::JsErrorBox> {
+    let sender = state
+        .borrow()
+        .try_borrow::<NextSender>()
+        .cloned()
+        .ok_or_else(|| {
+            deno_error::JsErrorBox::generic(
+                "next() is only available to stack layers during a layer call",
+            )
+        })?;
+    let input: Value = serde_json::from_str(&input_json)
+        .map_err(|e| deno_error::JsErrorBox::generic(format!("next(): invalid input: {}", e)))?;
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    sender
+        .0
+        .send((input, reply_tx))
+        .map_err(|_| deno_error::JsErrorBox::generic("layer driver is gone"))?;
+    let output = reply_rx
+        .await
+        .map_err(|_| deno_error::JsErrorBox::generic("layer driver dropped the call"))?
+        .map_err(deno_error::JsErrorBox::generic)?;
+    Ok(output.to_string())
+}
+
+deno_core::extension!(hook_layer_ext, ops = [op_hook_next]);
 
 /// Capabilities a JS hook isolate can be granted.
 const JS_HOOK_CAPABILITIES: &[&str] = &["fs", "fetch"];
@@ -510,7 +568,11 @@ impl LocalJsHookEvaluator {
         let (respond, rx) = tokio::sync::oneshot::channel();
         worker
             .tx
-            .send(JsCall { args, respond })
+            .send(JsCall {
+                args,
+                respond,
+                next: None,
+            })
             .map_err(|_| format!("JS hook '{}' worker is no longer running", self.path))?;
         // The worker's own event-loop timeout fires at `self.timeout` for a
         // call parked on host ops; the grace period here lets that cleaner
@@ -532,6 +594,35 @@ impl LocalJsHookEvaluator {
                 ))
             }
         }
+    }
+
+    /// Start a layered-stack call: `function(input, next)` runs on the
+    /// worker, and every `next(input')` the layer makes arrives on the
+    /// returned channel for the driver to answer. The driver owns the
+    /// deadline (see [`HookChain::run_stack`]).
+    fn begin_layer_call(
+        &self,
+        input: Value,
+    ) -> Result<
+        (
+            tokio::sync::oneshot::Receiver<Result<Option<Value>, String>>,
+            tokio::sync::mpsc::UnboundedReceiver<NextRequest>,
+            JsWorker,
+        ),
+        String,
+    > {
+        let worker = self.worker()?;
+        let (respond, respond_rx) = tokio::sync::oneshot::channel();
+        let (next_tx, next_rx) = tokio::sync::mpsc::unbounded_channel();
+        worker
+            .tx
+            .send(JsCall {
+                args: vec![input],
+                respond,
+                next: Some(next_tx),
+            })
+            .map_err(|_| format!("JS layer '{}' worker is no longer running", self.path))?;
+        Ok((respond_rx, next_rx, worker))
     }
 }
 
@@ -563,7 +654,7 @@ fn js_hook_worker(
     };
 
     let has = |c: &str| capabilities.iter().any(|x| x == c);
-    let mut extensions: Vec<deno_core::Extension> = Vec::new();
+    let mut extensions: Vec<deno_core::Extension> = vec![hook_layer_ext::init()];
     if has("fs") {
         extensions.push(super::fs::create_extension());
     }
@@ -608,13 +699,23 @@ fn js_hook_worker(
     let _ = setup_tx.send(Ok(handle));
 
     for call in rx {
+        if let Some(next_tx) = &call.next {
+            runtime
+                .op_state()
+                .borrow_mut()
+                .put(NextSender(next_tx.clone()));
+        }
         let result = rt.block_on(js_hook_call(
             &mut runtime,
             &function,
             &call.args,
             &path,
             timeout,
+            call.next.is_some(),
         ));
+        if call.next.is_some() {
+            runtime.op_state().borrow_mut().take::<NextSender>();
+        }
         // A timed-out call leaves the isolate in the terminated state (the
         // flag outlives the aborted script); clear it so later calls work.
         if result.is_err() {
@@ -630,6 +731,7 @@ async fn js_hook_call(
     args: &[Value],
     path: &str,
     timeout: std::time::Duration,
+    layer: bool,
 ) -> Result<Option<Value>, String> {
     use deno_core::v8;
 
@@ -646,16 +748,36 @@ async fn js_hook_call(
 
     let fname = serde_json::to_string(function)
         .map_err(|e| format!("JS hook '{}': invalid function name: {}", path, e))?;
-    let script = format!(
-        r#"(function() {{
-            const name = {fname};
-            const fn = globalThis[name];
-            if (typeof fn !== "function") {{
-                throw new Error("JS hook function '" + name + "' is not defined");
-            }}
-            return fn(...globalThis.__hook_args);
-        }})()"#
-    );
+    // A layer is called as `fn(input, next)`; next() reaches the driver via
+    // `op_hook_next` and resolves to the inner layers' output. A rejected
+    // next (inner deny/failure) is an ordinary exception the layer may catch
+    // — that's what makes retry/fallback expressible.
+    let script = if layer {
+        format!(
+            r#"(function() {{
+                const name = {fname};
+                const fn = globalThis[name];
+                if (typeof fn !== "function") {{
+                    throw new Error("JS layer function '" + name + "' is not defined");
+                }}
+                const next = async (input) => JSON.parse(
+                    await Deno.core.ops.op_hook_next(JSON.stringify(input))
+                );
+                return fn(globalThis.__hook_args[0], next);
+            }})()"#
+        )
+    } else {
+        format!(
+            r#"(function() {{
+                const name = {fname};
+                const fn = globalThis[name];
+                if (typeof fn !== "function") {{
+                    throw new Error("JS hook function '" + name + "' is not defined");
+                }}
+                return fn(...globalThis.__hook_args);
+            }})()"#
+        )
+    };
     let result = runtime
         .execute_script("<js-hook-call>", script)
         .map_err(|e| format!("JS hook '{}' failed: {}", path, e))?;
@@ -679,6 +801,12 @@ async fn js_hook_call(
     deno_core::scope!(scope, runtime);
     let local = v8::Local::new(scope, settled);
     if local.is_undefined() || local.is_null() {
+        if layer {
+            return Err(format!(
+                "JS layer '{}' returned no output; return next(input)'s result or a response object",
+                path
+            ));
+        }
         return Ok(None);
     }
     deno_core::serde_v8::from_v8::<Value>(scope, local)
@@ -814,6 +942,34 @@ impl Hook {
     }
 }
 
+// ── Layered stacks (v2) ──────────────────────────────────────────────────
+
+/// One layer in a layered stack. The executor is not a variant: it is the
+/// implicit innermost position (index == stack length), supplied by the
+/// operation at run time.
+#[derive(Debug)]
+pub enum Layer {
+    /// A gate/rewrite layer with pre-hook semantics (Rego, remote OPA, the
+    /// policy chain, native injection): abstain or rewrite wraps `next`,
+    /// deny stops the descent.
+    Gate(Hook),
+    /// A full JavaScript layer: `function(input, next)`, which may call
+    /// `next` zero (short-circuit), one, or many (retry/fallback) times.
+    Js(LocalJsHookEvaluator),
+    /// Position reserved by `"@inject"` until `with_header_rules` fills it;
+    /// a slot never filled (no rules configured) is a pass-through.
+    InjectSlot,
+}
+
+/// The operation's real executor, as seen by the layer driver: called at the
+/// innermost position, possibly more than once (a layer may retry).
+pub type StackExecutor<'a> = dyn Fn(
+        Value,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Value, String>> + Send + 'a>,
+    > + Send
+    + Sync;
+
 // ── HookChain ────────────────────────────────────────────────────────────
 
 /// Ordered pre and post hooks for one operation.
@@ -825,6 +981,10 @@ pub struct HookChain {
     post: Vec<Hook>,
     /// Whether the operation's executor applies mutated inputs.
     input_mutation: bool,
+    /// Layered stack (v2). Non-empty means the operation runs through
+    /// [`HookChain::run_stack`] with the executor innermost; `pre`/`post`
+    /// are unused in that mode (build-time mutual exclusion).
+    stack: Vec<Layer>,
 }
 
 impl HookChain {
@@ -835,6 +995,7 @@ impl HookChain {
             pre: Vec::new(),
             post: Vec::new(),
             input_mutation: false,
+            stack: Vec::new(),
         }
     }
 
@@ -846,6 +1007,7 @@ impl HookChain {
             pre: vec![Hook::Policy(chain)],
             post: Vec::new(),
             input_mutation: false,
+            stack: Vec::new(),
         }
     }
 
@@ -866,6 +1028,140 @@ impl HookChain {
             self.pre.len()
         };
         self.pre.insert(at, hook);
+    }
+
+    /// Whether this chain runs in layered-stack mode.
+    pub fn has_stack(&self) -> bool {
+        !self.stack.is_empty()
+    }
+
+    /// Fill (or place) the fetch header-injection layer in a stack: the
+    /// `"@inject"` slot when the config reserved one, otherwise immediately
+    /// before the policy gate (or innermost, before the executor).
+    pub fn attach_stack_header_rules(&mut self, rules: Vec<super::fetch::HeaderRule>) {
+        if let Some(slot) = self
+            .stack
+            .iter_mut()
+            .find(|l| matches!(l, Layer::InjectSlot))
+        {
+            *slot = Layer::Gate(Hook::FetchHeaderInject(rules));
+            return;
+        }
+        let at = self
+            .stack
+            .iter()
+            .position(|l| matches!(l, Layer::Gate(Hook::Policy(_))))
+            .unwrap_or(self.stack.len());
+        self.stack.insert(at, Layer::Gate(Hook::FetchHeaderInject(rules)));
+    }
+
+    /// Run the layered stack: each layer wraps the rest, and `executor` is
+    /// the implicit innermost layer (called at index == stack length,
+    /// possibly more than once if a layer retries). `normalize` re-derives
+    /// computed input fields after every rewrite, and the `operation`
+    /// discriminator is pinned at every descent.
+    pub async fn run_stack<'a>(
+        &'a self,
+        input: Value,
+        normalize: fn(&mut Value) -> Result<(), String>,
+        executor: &'a StackExecutor<'a>,
+    ) -> Result<Value, String> {
+        let identity = input
+            .get("operation")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        self.call_layer(0, input, normalize, executor, identity).await
+    }
+
+    fn call_layer<'a>(
+        &'a self,
+        idx: usize,
+        input: Value,
+        normalize: fn(&mut Value) -> Result<(), String>,
+        executor: &'a StackExecutor<'a>,
+        identity: String,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, String>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let Some(layer) = self.stack.get(idx) else {
+                // Innermost position: the real executor.
+                return executor(input).await;
+            };
+            match layer {
+                Layer::InjectSlot => {
+                    // "@inject" configured but no header rules attached.
+                    self.call_layer(idx + 1, input, normalize, executor, identity)
+                        .await
+                }
+                Layer::Gate(hook) => {
+                    let before = input.clone();
+                    match hook
+                        .run(&Phase::Pre, &before, input, &self.op, self.input_mutation)
+                        .await?
+                    {
+                        Err(deny) => Err(format!("{}: {}", self.op, deny)),
+                        Ok(mut next_input) => {
+                            if next_input != before {
+                                normalize(&mut next_input)?;
+                                verify_operation(&next_input, &identity, &self.op)?;
+                            }
+                            self.call_layer(idx + 1, next_input, normalize, executor, identity)
+                                .await
+                        }
+                    }
+                }
+                Layer::Js(eval) => {
+                    let (mut respond_rx, mut next_rx, worker) =
+                        eval.begin_layer_call(input)?;
+                    // One deadline over the whole layer call, next() time
+                    // included; on expiry, terminate any running script and
+                    // fail the operation closed.
+                    let deadline =
+                        tokio::time::sleep(eval.timeout + std::time::Duration::from_millis(500));
+                    tokio::pin!(deadline);
+                    loop {
+                        tokio::select! {
+                            r = &mut respond_rx => {
+                                let result = r.map_err(|_| {
+                                    format!("JS layer '{}' worker terminated unexpectedly", eval.path)
+                                })??;
+                                return result.ok_or_else(|| {
+                                    format!(
+                                        "JS layer '{}' returned no output; return next(input)'s \
+                                         result or a response object",
+                                        eval.path
+                                    )
+                                });
+                            }
+                            Some((mut inner_input, reply)) = next_rx.recv() => {
+                                let descent = async {
+                                    normalize(&mut inner_input)?;
+                                    verify_operation(&inner_input, &identity, &self.op)?;
+                                    self.call_layer(
+                                        idx + 1,
+                                        inner_input,
+                                        normalize,
+                                        executor,
+                                        identity.clone(),
+                                    )
+                                    .await
+                                }
+                                .await;
+                                let _ = reply.send(descent);
+                            }
+                            _ = &mut deadline => {
+                                worker.isolate_handle.terminate_execution();
+                                return Err(format!(
+                                    "JS layer '{}' timed out after {:?}",
+                                    eval.path, eval.timeout
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        })
     }
 
     /// Run the pre-hook chain over `input`.
@@ -925,6 +1221,11 @@ impl HookChain {
 
 /// Default per-call timeout for JS hooks.
 const JS_HOOK_DEFAULT_TIMEOUT_MS: u64 = 5000;
+
+/// Default per-call timeout for JS stack layers. Wall clock includes time a
+/// layer spends awaiting `next()` (the inner layers and the real executor),
+/// so the default is far larger than the pure-compute hook default.
+const JS_LAYER_DEFAULT_TIMEOUT_MS: u64 = 30_000;
 
 fn build_hook(
     source: &HookSource,
@@ -1026,6 +1327,23 @@ pub fn build_hook_chain(
         ));
     }
 
+    if !config.stack.is_empty() {
+        if op != "fetch" {
+            return Err(format!(
+                "'stack' is currently supported for 'fetch' only (got operation '{}')",
+                op
+            ));
+        }
+        if !config.pre.is_empty() || !config.post.is_empty() {
+            return Err(
+                "'stack' is mutually exclusive with 'pre'/'post': a stack expresses both sides \
+                 of the operation as layers"
+                    .to_string(),
+            );
+        }
+        return build_stack_chain(op, config, default_remote_path, default_local_rule, caps);
+    }
+
     let (pre_remote, pre_rule) = phase_defaults(default_remote_path, default_local_rule, &Phase::Pre);
     let mut pre: Vec<Hook> = Vec::new();
     for source in &config.pre {
@@ -1051,6 +1369,132 @@ pub fn build_hook_chain(
         pre,
         post,
         input_mutation: caps.input_mutation,
+        stack: Vec::new(),
+    })
+}
+
+/// Build a layered stack chain from `config.stack` (fetch only for now).
+///
+/// Rules: `"@execute"` is required, unique, and last (the executor is the
+/// innermost layer — nothing can run "after" it); `"@policy"` places the
+/// `policies` chain (auto-appended before `@execute` when policies are
+/// configured but not placed); `"@inject"` reserves the header-injection
+/// slot filled by `FetchConfig::with_header_rules`. JS sources use the
+/// layered `handle(input, next)` contract; Rego/remote sources join as
+/// gate/rewrite layers with pre-hook semantics. The same JS file may appear
+/// only once per stack: layer calls through one file share a serialized
+/// worker, so a nested self-call would deadlock.
+fn build_stack_chain(
+    op: &str,
+    config: &OperationPolicies,
+    default_remote_path: &str,
+    default_local_rule: &str,
+    caps: HookCaps,
+) -> Result<HookChain, String> {
+    let (pre_remote, pre_rule) = phase_defaults(default_remote_path, default_local_rule, &Phase::Pre);
+    let mut layers: Vec<Layer> = Vec::new();
+    let mut js_paths: Vec<String> = Vec::new();
+    let mut saw_policy = false;
+    let mut saw_inject = false;
+    let mut saw_execute = false;
+    for (i, entry) in config.stack.iter().enumerate() {
+        if saw_execute {
+            return Err(format!(
+                "stack for '{}': '@execute' must be the last entry — the executor is the \
+                 innermost layer, nothing can run after it",
+                op
+            ));
+        }
+        match entry {
+            StackEntry::Builtin(name) => match name.as_str() {
+                "@execute" => {
+                    saw_execute = true;
+                }
+                "@policy" => {
+                    if saw_policy {
+                        return Err(format!("stack for '{}': duplicate '@policy'", op));
+                    }
+                    if config.policies.is_empty() {
+                        return Err(format!(
+                            "stack for '{}': '@policy' requires a non-empty 'policies' list",
+                            op
+                        ));
+                    }
+                    saw_policy = true;
+                    let chain =
+                        build_policy_chain(config, default_remote_path, default_local_rule)?;
+                    layers.push(Layer::Gate(Hook::Policy(Arc::new(chain))));
+                }
+                "@inject" => {
+                    if saw_inject {
+                        return Err(format!("stack for '{}': duplicate '@inject'", op));
+                    }
+                    saw_inject = true;
+                    layers.push(Layer::InjectSlot);
+                }
+                other => {
+                    return Err(format!(
+                        "stack for '{}': unknown built-in '{}' (supported: @inject, @policy, @execute)",
+                        op, other
+                    ));
+                }
+            },
+            StackEntry::Source(source) => {
+                let is_js = source.url.strip_prefix("file://").is_some_and(|p| {
+                    Path::new(p).extension().and_then(|x| x.to_str()) == Some("js")
+                });
+                if is_js {
+                    let file_path = source.url.strip_prefix("file://").unwrap().to_string();
+                    if js_paths.contains(&file_path) {
+                        return Err(format!(
+                            "stack for '{}': JS file '{}' appears more than once — layer calls \
+                             through one file share a serialized worker, so a nested self-call \
+                             would deadlock",
+                            op, file_path
+                        ));
+                    }
+                    js_paths.push(file_path.clone());
+                    let function = source.rule.clone().unwrap_or_else(|| "handle".to_string());
+                    let timeout_ms = source
+                        .timeout_ms
+                        .unwrap_or(JS_LAYER_DEFAULT_TIMEOUT_MS);
+                    let capabilities = source.capabilities.clone().unwrap_or_default();
+                    layers.push(Layer::Js(LocalJsHookEvaluator::from_file(
+                        Path::new(&file_path),
+                        function,
+                        timeout_ms,
+                        capabilities,
+                    )?));
+                } else {
+                    layers.push(Layer::Gate(build_hook(
+                        source,
+                        &pre_remote,
+                        &pre_rule,
+                        &Phase::Pre,
+                    )?));
+                }
+            }
+        }
+        let _ = i;
+    }
+    if !saw_execute {
+        return Err(format!(
+            "stack for '{}': '@execute' is required as the last entry",
+            op
+        ));
+    }
+    if !saw_policy && !config.policies.is_empty() {
+        // Policies configured but not placed: keep the chain-mode guarantee
+        // and gate the effective input right before execution.
+        let chain = build_policy_chain(config, default_remote_path, default_local_rule)?;
+        layers.push(Layer::Gate(Hook::Policy(Arc::new(chain))));
+    }
+    Ok(HookChain {
+        op: op.to_string(),
+        pre: Vec::new(),
+        post: Vec::new(),
+        input_mutation: caps.input_mutation,
+        stack: layers,
     })
 }
 
@@ -1079,6 +1523,7 @@ mod tests {
             policies,
             pre,
             post,
+            stack: Vec::new(),
         }
     }
 
@@ -2183,6 +2628,108 @@ async function pre(input) {{
             }
             other => panic!("expected allow, got {:?}", other),
         }
+    }
+
+    // ── stack validation ─────────────────────────────────────────────────
+
+    fn stack_config(entries: Vec<StackEntry>) -> OperationPolicies {
+        OperationPolicies {
+            stack: entries,
+            ..Default::default()
+        }
+    }
+
+    fn builtin(name: &str) -> StackEntry {
+        StackEntry::Builtin(name.to_string())
+    }
+
+    #[test]
+    fn stack_requires_execute_last() {
+        let err = build_hook_chain(
+            "fetch",
+            &stack_config(vec![]),
+            "mcp/fetch",
+            "data.mcp.fetch.allow",
+            CAPS_FULL,
+        );
+        assert!(err.is_ok(), "empty stack is just chain mode");
+
+        let err = build_hook_chain(
+            "fetch",
+            &stack_config(vec![builtin("@inject")]),
+            "mcp/fetch",
+            "data.mcp.fetch.allow",
+            CAPS_FULL,
+        )
+        .unwrap_err();
+        assert!(err.contains("'@execute' is required"), "got: {err}");
+
+        let err = build_hook_chain(
+            "fetch",
+            &stack_config(vec![builtin("@execute"), builtin("@inject")]),
+            "mcp/fetch",
+            "data.mcp.fetch.allow",
+            CAPS_FULL,
+        )
+        .unwrap_err();
+        assert!(err.contains("must be the last entry"), "got: {err}");
+    }
+
+    #[test]
+    fn stack_is_fetch_only_and_excludes_pre_post() {
+        let err = build_hook_chain(
+            "filesystem",
+            &stack_config(vec![builtin("@execute")]),
+            "mcp/filesystem",
+            "data.mcp.filesystem.allow",
+            CAPS_FULL,
+        )
+        .unwrap_err();
+        assert!(err.contains("supported for 'fetch' only"), "got: {err}");
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_js(dir.path(), "hook.js", "function pre(input) {}\n");
+        let mut config = stack_config(vec![builtin("@execute")]);
+        config.pre = vec![js_hook(&path, None)];
+        let err = build_hook_chain(
+            "fetch",
+            &config,
+            "mcp/fetch",
+            "data.mcp.fetch.allow",
+            CAPS_FULL,
+        )
+        .unwrap_err();
+        assert!(err.contains("mutually exclusive"), "got: {err}");
+    }
+
+    #[test]
+    fn stack_rejects_policy_builtin_without_policies_and_duplicate_js() {
+        let err = build_hook_chain(
+            "fetch",
+            &stack_config(vec![builtin("@policy"), builtin("@execute")]),
+            "mcp/fetch",
+            "data.mcp.fetch.allow",
+            CAPS_FULL,
+        )
+        .unwrap_err();
+        assert!(err.contains("requires a non-empty 'policies'"), "got: {err}");
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_js(dir.path(), "layer.js", "function handle(i, n) { return n(i); }\n");
+        let src = js_hook(&path, None);
+        let err = build_hook_chain(
+            "fetch",
+            &stack_config(vec![
+                StackEntry::Source(src.clone()),
+                StackEntry::Source(src),
+                builtin("@execute"),
+            ]),
+            "mcp/fetch",
+            "data.mcp.fetch.allow",
+            CAPS_FULL,
+        )
+        .unwrap_err();
+        assert!(err.contains("appears more than once"), "got: {err}");
     }
 
     // ── verify_operation ─────────────────────────────────────────────────

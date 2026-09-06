@@ -309,6 +309,14 @@ pub struct OperationPolicies {
     /// supported for operations that produce a hookable output.
     #[serde(default)]
     pub post: Vec<super::hooks::HookSource>,
+    /// Layered stack (v2): an explicit ordered list of layers wrapping the
+    /// operation's executor, mutually exclusive with `pre`/`post`. Entries
+    /// are hook sources or the built-ins `"@inject"`, `"@policy"` (places
+    /// the `policies` chain), and `"@execute"` (the real executor; required,
+    /// last). JS sources in a stack use the layered contract
+    /// `handle(input, next)`. Currently supported for `fetch` only.
+    #[serde(default)]
+    pub stack: Vec<super::hooks::StackEntry>,
 }
 
 /// A single policy source — either a remote OPA server or a local Rego file/directory.

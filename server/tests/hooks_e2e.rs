@@ -13,7 +13,7 @@ use axum::{
 use server::engine::execution::ExecutionRegistry;
 use server::engine::fetch::FetchConfig;
 use server::engine::fs::FsConfig;
-use server::engine::hooks::{build_hook_chain, HookCaps, HookChain, HookSource};
+use server::engine::hooks::{build_hook_chain, HookCaps, HookChain, HookSource, StackEntry};
 use server::engine::opa::{OperationPolicies, PolicySource};
 use server::engine::{initialize_v8, Engine};
 
@@ -559,6 +559,302 @@ function post(input, output) {
     )
     .await;
     assert!(out.contains("denied by pre hook (read-only)"), "got: {out}");
+}
+
+// ── layered stacks (v2) ─────────────────────────────────────────────────────
+
+fn js_source(url: String, capabilities: Option<Vec<String>>) -> HookSource {
+    HookSource {
+        url,
+        policy_path: None,
+        rule: None,
+        timeout_ms: None,
+        capabilities,
+    }
+}
+
+fn stack_caps() -> HookCaps {
+    HookCaps {
+        input_mutation: true,
+        post: true,
+    }
+}
+
+/// A single JS layer pairs both sides of one call: it rewrites the request,
+/// awaits `next`, and stamps the response — state held in one closure, which
+/// the flat pre/post chain cannot express.
+#[tokio::test]
+async fn fetch_stack_layer_pairs_request_and_response() {
+    ensure_v8();
+    let base = start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+
+    let layer_url = write_rego(
+        dir.path(),
+        "layer.js",
+        r#"
+async function handle(input, next) {
+    const started = input.url;
+    const out = await next({
+        ...input,
+        url: input.url.replace("/blocked", "/echo"),
+        headers: { ...input.headers, "x-hooked": "layered" },
+    });
+    return { ...out, headers: { ...out.headers, "x-started-as": started.endsWith("/blocked") ? "blocked" : "other" } };
+}
+"#,
+    );
+    let op = OperationPolicies {
+        stack: vec![
+            StackEntry::Source(js_source(layer_url, None)),
+            StackEntry::Builtin("@execute".to_string()),
+        ],
+        ..Default::default()
+    };
+    let chain = build_hook_chain("fetch", &op, "mcp/fetch", "data.mcp.fetch.allow", stack_caps())
+        .unwrap();
+    let engine = build_engine().with_fetch_config(FetchConfig::new_with_hooks(Arc::new(chain)));
+
+    let out = eval(
+        &engine,
+        format!(
+            r#"fetch("{base}/blocked").then(async r => (await r.text()) + " started=" + r.headers.get("x-started-as"))"#
+        ),
+    )
+    .await;
+    assert_eq!(out, "echo hooked=layered started=blocked");
+}
+
+/// A layer that never calls `next` short-circuits the operation: the guest
+/// gets a synthetic response and the server is never contacted.
+#[tokio::test]
+async fn fetch_stack_layer_short_circuits_without_executing() {
+    ensure_v8();
+    let dir = tempfile::tempdir().unwrap();
+
+    // "ZnJvbS1jYWNoZQ==" = base64("from-cache"); the layer isolate is bare
+    // (no btoa), so the test precomputes it.
+    let layer_url = write_rego(
+        dir.path(),
+        "layer.js",
+        r#"
+async function handle(input, next) {
+    if (input.url_parsed.path === "/cached") {
+        return {
+            status: 200, statusText: "OK", url: input.url,
+            headers: { "x-cache": "hit" },
+            body: "ZnJvbS1jYWNoZQ==", bodyEncoding: "base64", redirected: false,
+        };
+    }
+    return next(input);
+}
+"#,
+    );
+    let op = OperationPolicies {
+        stack: vec![
+            StackEntry::Source(js_source(layer_url, None)),
+            StackEntry::Builtin("@execute".to_string()),
+        ],
+        ..Default::default()
+    };
+    let chain = build_hook_chain("fetch", &op, "mcp/fetch", "data.mcp.fetch.allow", stack_caps())
+        .unwrap();
+    let engine = build_engine().with_fetch_config(FetchConfig::new_with_hooks(Arc::new(chain)));
+
+    // Port 9 (discard) would hang or refuse — the layer must answer instead.
+    let out = eval(
+        &engine,
+        r#"fetch("http://127.0.0.1:9/cached").then(async r => (await r.text()) + " cache=" + r.headers.get("x-cache"))"#.to_string(),
+    )
+    .await;
+    assert_eq!(out, "from-cache cache=hit");
+}
+
+/// A layer may call `next` more than once: on a 500 it retries a fallback
+/// path — retry/fallback logic the flat chain cannot express.
+#[tokio::test]
+async fn fetch_stack_layer_retries_on_error_status() {
+    ensure_v8();
+    let dir = tempfile::tempdir().unwrap();
+
+    async fn fail_handler() -> impl IntoResponse {
+        (StatusCode::INTERNAL_SERVER_ERROR, "boom")
+    }
+    async fn ok_handler() -> impl IntoResponse {
+        (StatusCode::OK, "recovered")
+    }
+    let app = Router::new()
+        .route("/fail", get(fail_handler))
+        .route("/fallback", get(ok_handler));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let layer_url = write_rego(
+        dir.path(),
+        "layer.js",
+        r#"
+async function handle(input, next) {
+    let out = await next(input);
+    if (out.status >= 500) {
+        out = await next({ ...input, url: input.url.replace("/fail", "/fallback") });
+        out = { ...out, headers: { ...out.headers, "x-retried": "yes" } };
+    }
+    return out;
+}
+"#,
+    );
+    let op = OperationPolicies {
+        stack: vec![
+            StackEntry::Source(js_source(layer_url, None)),
+            StackEntry::Builtin("@execute".to_string()),
+        ],
+        ..Default::default()
+    };
+    let chain = build_hook_chain("fetch", &op, "mcp/fetch", "data.mcp.fetch.allow", stack_caps())
+        .unwrap();
+    let engine = build_engine().with_fetch_config(FetchConfig::new_with_hooks(Arc::new(chain)));
+
+    let out = eval(
+        &engine,
+        format!(
+            r#"fetch("{base}/fail").then(async r => (await r.text()) + " retried=" + r.headers.get("x-retried"))"#
+        ),
+    )
+    .await;
+    assert_eq!(out, "recovered retried=yes");
+}
+
+/// `@policy` in a stack gates the effective input: a layer's rewrite into
+/// compliance passes, and every descent re-checks (a retry cannot slip an
+/// unapproved input past it).
+#[tokio::test]
+async fn fetch_stack_policy_gates_every_descent() {
+    ensure_v8();
+    let base = start_server().await;
+    let dir = tempfile::tempdir().unwrap();
+
+    let layer_url = write_rego(
+        dir.path(),
+        "layer.js",
+        r#"
+async function handle(input, next) {
+    return next({ ...input, url: input.url.replace("/blocked", "/echo") });
+}
+"#,
+    );
+    let policy_url = write_rego(
+        dir.path(),
+        "policy.rego",
+        r#"
+package mcp.fetch
+
+default allow = false
+
+allow if {
+    input.url_parsed.path == "/echo"
+}
+"#,
+    );
+    let op = OperationPolicies {
+        policies: vec![PolicySource {
+            url: policy_url,
+            policy_path: None,
+            rule: None,
+        }],
+        stack: vec![
+            StackEntry::Source(js_source(layer_url, None)),
+            StackEntry::Builtin("@policy".to_string()),
+            StackEntry::Builtin("@execute".to_string()),
+        ],
+        ..Default::default()
+    };
+    let chain = build_hook_chain("fetch", &op, "mcp/fetch", "data.mcp.fetch.allow", stack_caps())
+        .unwrap();
+    let engine = build_engine().with_fetch_config(FetchConfig::new_with_hooks(Arc::new(chain)));
+
+    let out = eval(
+        &engine,
+        format!(r#"fetch("{base}/blocked").then(r => r.text())"#),
+    )
+    .await;
+    assert_eq!(out, "echo hooked=absent");
+
+    let out = eval(
+        &engine,
+        format!(r#"fetch("{base}/secret").then(r => r.text())"#),
+    )
+    .await;
+    assert!(
+        out.starts_with("ERROR:") && out.contains("denied by policy"),
+        "got: {out}"
+    );
+}
+
+/// `@inject` ordering in a stack: a layer placed before it never sees the
+/// injected credential, while the executor (and server) does.
+#[tokio::test]
+async fn fetch_stack_inject_after_layers() {
+    ensure_v8();
+    let dir = tempfile::tempdir().unwrap();
+
+    async fn token_handler(headers: HeaderMap) -> impl IntoResponse {
+        let token = headers
+            .get("x-injected-token")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("absent")
+            .to_string();
+        (StatusCode::OK, format!("token={}", token))
+    }
+    let app = Router::new().route("/token", get(token_handler));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let layer_url = write_rego(
+        dir.path(),
+        "layer.js",
+        r#"
+async function handle(input, next) {
+    const saw = input.headers["x-injected-token"] ? "yes" : "no";
+    const out = await next(input);
+    return { ...out, headers: { ...out.headers, "x-layer-saw-token": saw } };
+}
+"#,
+    );
+    let op = OperationPolicies {
+        stack: vec![
+            StackEntry::Source(js_source(layer_url, None)),
+            StackEntry::Builtin("@inject".to_string()),
+            StackEntry::Builtin("@execute".to_string()),
+        ],
+        ..Default::default()
+    };
+    let chain = build_hook_chain("fetch", &op, "mcp/fetch", "data.mcp.fetch.allow", stack_caps())
+        .unwrap();
+    let rule = server::engine::fetch::HeaderRule::static_header(
+        "127.0.0.1".to_string(),
+        vec![],
+        "x-injected-token".to_string(),
+        "hunter2".to_string(),
+    )
+    .unwrap();
+    let engine = build_engine().with_fetch_config(
+        FetchConfig::new_with_hooks(Arc::new(chain)).with_header_rules(vec![rule]),
+    );
+
+    let out = eval(
+        &engine,
+        format!(
+            r#"fetch("{base}/token").then(async r => (await r.text()) + " layer-saw=" + r.headers.get("x-layer-saw-token"))"#
+        ),
+    )
+    .await;
+    assert_eq!(out, "token=hunter2 layer-saw=no");
 }
 
 // ── fetch: injected credentials do not follow a hook's host rewrite ─────────

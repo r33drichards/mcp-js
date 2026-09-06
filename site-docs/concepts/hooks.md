@@ -149,30 +149,53 @@ The `policies` key is implemented *in terms of* hooks: `build_hook_chain` wraps 
 
 The direction of travel is to phase out the separate policies vocabulary: `policies` remains supported as the compatibility spelling, but new gating, rewriting, and observing behavior should be written as hooks, and the deny messages already distinguish `denied by policy` from `denied by pre hook (reason)` only for continuity.
 
-## Design direction: composable effect boundaries
+## Layered stacks
 
-Because every sandbox effect already crosses through exactly one operation seam, the hook chain generalizes further — toward the model SQLite uses for its VFS layer, where each shim implements the same interface, wraps the next one down, and the operating system itself is just the default bottom layer.
+Because every sandbox effect crosses through exactly one operation seam, the hook system generalizes to the model SQLite uses for its VFS layer: each shim implements the same interface, wraps the next one down, and the real executor is just the default innermost layer. This is implemented today for **fetch** via the `stack` config key:
 
-Today's chain is flat: `pre* → execute → post*`, with `execute` fixed. The composable-boundary form makes each hook a **layer around the rest of the stack**:
-
-```text
-handle(input, next) -> output
+```json
+{
+  "fetch": {
+    "policies": [{"url": "file:///etc/policies/fetch.rego"}],
+    "stack": [
+      {"url": "file:///etc/hooks/cache_layer.js"},
+      "@inject",
+      "@policy",
+      "@execute"
+    ]
+  }
+}
 ```
 
-A layer can call `next(input')` zero, one, or many times — and that one change subsumes everything the flat chain does while adding what it cannot express:
+A stack replaces `pre`/`post` (mutually exclusive) with one explicit, ordered list. Built-ins are addressable: `"@inject"` places header injection, `"@policy"` places the `policies` chain (auto-appended before `@execute` when policies are configured but not placed), and `"@execute"` is the real executor — required, and last, because the executor is the innermost layer and nothing can run "after" it.
 
-| Capability | Flat chain (today) | Layered (direction) |
-|---|---|---|
-| Deny / rewrite input | ✅ pre hook | ✅ don't call `next`, or call it with `input'` |
-| Deny / rewrite output | ✅ post hook | ✅ transform `next`'s return |
-| Short-circuit with a synthetic result (mock, cache hit) | ❌ | ✅ return without calling `next` |
-| Retry / fallback | ❌ | ✅ call `next` again |
-| Pair state across one call (timing, request↔response correlation) | ❌ pre and post are separate hooks | ✅ one closure sees both sides |
-| Swap the executor itself (virtual fs, recorded network) | ❌ `execute` is fixed | ✅ the real executor is just the innermost layer |
+### The layer contract
 
-In that model the *boundary itself* is a hook: the terminal executor — the real HTTP client, the real filesystem — is simply the default innermost layer, replaceable in configuration the way SQLite swaps its bottom VFS. A policy is the degenerate layer `if allow(input) { next(input) } else { deny }`; an audit log is a layer that calls `next` and appends a line either side; a record/replay harness is a layer that never calls `next` at all.
+A JS source in a stack exports `handle(input, next)` (name overridable via `rule`; default timeout 30 s, wall clock including time inside `next`). `next(input')` runs the rest of the stack — inner layers, then the executor — and resolves to the output. A layer may call it **zero, one, or many** times:
 
-The layered form is not implemented yet — it is the design direction this system was shaped for — but the flat chain is already absorbing built-ins: the policy runs as the final pre hook, and fetch credential injection runs as a native pre hook just before it. The current contract was chosen to be forward-compatible with full layering: every existing hook (abstain / deny / rewrite) maps mechanically onto a layer, so migrating the engine underneath does not have to break a single configured hook.
+```js
+async function handle(input, next) {
+    if (cache.has(input.url)) return cache.get(input.url);      // zero: short-circuit
+    const t0 = Date.now();
+    let out = await next(input);                                 // one: pass through
+    if (out.status >= 500) {
+        out = await next({ ...input, url: FALLBACK });           // many: retry/fallback
+    }
+    out = { ...out, headers: { ...out.headers, "x-ms": String(Date.now() - t0) } };
+    return out;                                                  // paired both sides
+}
+```
+
+A rejected `next` (an inner deny, a failed request) is an ordinary exception the layer may catch — that is what makes fallback expressible. Throwing out of `handle` fails the operation; returning nothing is an error, not an abstain (a layer that wants to pass through returns `next(input)`'s result). Rego and remote sources may also appear in a stack: they join as gate/rewrite layers with pre-hook semantics (abstain/deny/rewrite wrapping the descent).
+
+### Guarantees
+
+- **Every descent is re-checked.** `normalize` re-derives computed fields (`url_parsed`) and the `operation` discriminator is pinned on every `next` — a retry cannot slip a different operation past the layers below, and `@policy` gates *each* input that reaches it, including retries.
+- **Credentials stay inside.** With `"@inject"` placed after user layers, a layer never sees operator credentials, and injection keys off exactly the input the layer passed down.
+- **Timeout is per layer call**, terminating runaway script and abandoning hung descents (fail closed).
+- **One worker per file.** Calls through one JS file are serialized on its warm isolate; the same file may appear only once per stack (a nested self-call would deadlock — enforced at startup).
+
+The flat `pre`/`post` chain remains fully supported; a stack is opt-in per operation, and `stack` is currently accepted for `fetch` only. Extending it to the remaining operations — and swapping `@execute` itself for a virtual executor (recorded network, in-memory fs) — is the design direction the contract was shaped for: every flat hook maps mechanically onto a layer, so the migration cannot break a configured hook.
 
 ## Worked examples
 

@@ -66,9 +66,13 @@ impl FetchConfig {
     /// Must be called at construction time, before the chain is shared.
     pub fn with_header_rules(mut self, rules: Vec<HeaderRule>) -> Self {
         if !rules.is_empty() {
-            Arc::get_mut(&mut self.hooks)
-                .expect("with_header_rules must be called before the hook chain is shared")
-                .insert_pre_before_policy(Hook::FetchHeaderInject(rules.clone()));
+            let chain = Arc::get_mut(&mut self.hooks)
+                .expect("with_header_rules must be called before the hook chain is shared");
+            if chain.has_stack() {
+                chain.attach_stack_header_rules(rules.clone());
+            } else {
+                chain.insert_pre_before_policy(Hook::FetchHeaderInject(rules.clone()));
+            }
         }
         self.header_rules = rules;
         self
@@ -760,66 +764,20 @@ fn normalize_fetch_input(input: &mut serde_json::Value) -> Result<(), String> {
     Ok(())
 }
 
-async fn do_fetch(
-    url_str: String,
-    method: String,
-    headers_json: String,
+/// The real fetch executor: send the effective request, return the response
+/// document `{status, statusText, url, headers, body(base64), bodyEncoding,
+/// redirected}`. In layered-stack mode this runs at the innermost position
+/// and may be invoked more than once (a layer may retry).
+async fn execute_fetch_request(
+    http_client: &reqwest::Client,
+    effective: serde_json::Value,
     body: Option<String>,
-    hooks: Arc<HookChain>,
-    http_client: reqwest::Client,
-) -> Result<String, String> {
-    let headers: HashMap<String, String> = serde_json::from_str(&headers_json)
-        .map_err(|e| format!("fetch: invalid headers JSON: {}", e))?;
-
-    // Parse URL into components for the hook/policy input. Header injection
-    // is not applied here: it runs inside the chain as a native pre hook
-    // (`Hook::FetchHeaderInject`, inserted by `with_header_rules`), after
-    // every configured pre hook and before the policy — so it keys off the
-    // effective request and user hooks never see operator credentials.
-    let parsed_url = url::Url::parse(&url_str)
-        .map_err(|e| format!("fetch: invalid URL '{}': {}", url_str, e))?;
-
-    let url_host = parsed_url.host_str().unwrap_or("").to_string();
-
-    let url_parsed = UrlParsed {
-        scheme: parsed_url.scheme().to_string(),
-        host: url_host,
-        port: parsed_url.port(),
-        path: parsed_url.path().to_string(),
-        query: parsed_url.query().unwrap_or("").to_string(),
-    };
-
-    let policy_input = FetchPolicyInput {
-        operation: "fetch",
-        url: url_str.clone(),
-        method: method.clone(),
-        headers: headers.clone(),
-        url_parsed,
-    };
-
-    // Run pre hooks, then the policy chain (as the final pre hook) over the
-    // effective input.
-    let input_value = serde_json::to_value(&policy_input)
-        .map_err(|e| format!("fetch: failed to serialize policy input: {}", e))?;
-    let effective = match hooks.run_pre_with(input_value, normalize_fetch_input).await? {
-        PreOutcome::Allow(v) => {
-            super::hooks::verify_operation(&v, "fetch", "fetch")?;
-            v
-        }
-        PreOutcome::Deny(deny) => {
-            return Err(format!(
-                "fetch {}: {} {} is not allowed",
-                deny, method, url_str
-            ));
-        }
-    };
-
-    // Execute the request a pre hook may have rewritten.
+) -> Result<serde_json::Value, String> {
     let EffectiveFetchInput {
         url: url_str,
         method,
         headers,
-    } = serde_json::from_value(effective.clone())
+    } = serde_json::from_value(effective)
         .map_err(|e| format!("fetch: invalid effective input after pre hooks: {}", e))?;
 
     // Execute the HTTP request. The client is configured not to auto-follow
@@ -874,7 +832,7 @@ async fn do_fetch(
         .map_err(|e| format!("fetch: failed to read response body: {}", e))?;
     let resp_body = b64_encode(&resp_bytes);
 
-    let result = serde_json::json!({
+    Ok(serde_json::json!({
         "status": status,
         "statusText": status_text,
         "url": final_url,
@@ -884,7 +842,83 @@ async fn do_fetch(
         // Redirects are not auto-followed, so the response is never the product
         // of a redirect this layer performed.
         "redirected": false,
-    });
+    }))
+}
+
+async fn do_fetch(
+    url_str: String,
+    method: String,
+    headers_json: String,
+    body: Option<String>,
+    hooks: Arc<HookChain>,
+    http_client: reqwest::Client,
+) -> Result<String, String> {
+    let headers: HashMap<String, String> = serde_json::from_str(&headers_json)
+        .map_err(|e| format!("fetch: invalid headers JSON: {}", e))?;
+
+    // Parse URL into components for the hook/policy input. Header injection
+    // is not applied here: it runs inside the chain as a native pre hook
+    // (`Hook::FetchHeaderInject`, inserted by `with_header_rules`), after
+    // every configured pre hook and before the policy — so it keys off the
+    // effective request and user hooks never see operator credentials.
+    let parsed_url = url::Url::parse(&url_str)
+        .map_err(|e| format!("fetch: invalid URL '{}': {}", url_str, e))?;
+
+    let url_host = parsed_url.host_str().unwrap_or("").to_string();
+
+    let url_parsed = UrlParsed {
+        scheme: parsed_url.scheme().to_string(),
+        host: url_host,
+        port: parsed_url.port(),
+        path: parsed_url.path().to_string(),
+        query: parsed_url.query().unwrap_or("").to_string(),
+    };
+
+    let policy_input = FetchPolicyInput {
+        operation: "fetch",
+        url: url_str.clone(),
+        method: method.clone(),
+        headers: headers.clone(),
+        url_parsed,
+    };
+
+    // Run pre hooks, then the policy chain (as the final pre hook) over the
+    // effective input.
+    let input_value = serde_json::to_value(&policy_input)
+        .map_err(|e| format!("fetch: failed to serialize policy input: {}", e))?;
+
+    // Layered-stack mode: the executor is the innermost layer; layers may
+    // rewrite the request, short-circuit with a synthetic response, retry,
+    // or transform the response on the way back out.
+    if hooks.has_stack() {
+        let client = http_client.clone();
+        let body = body.clone();
+        let executor: &super::hooks::StackExecutor<'_> = &move |effective: serde_json::Value| {
+            let client = client.clone();
+            let body = body.clone();
+            Box::pin(async move { execute_fetch_request(&client, effective, body).await })
+        };
+        let output = hooks
+            .run_stack(input_value, normalize_fetch_input, executor)
+            .await?;
+        return Ok(output.to_string());
+    }
+
+    let effective = match hooks.run_pre_with(input_value, normalize_fetch_input).await? {
+        PreOutcome::Allow(v) => {
+            super::hooks::verify_operation(&v, "fetch", "fetch")?;
+            v
+        }
+        PreOutcome::Deny(deny) => {
+            return Err(format!(
+                "fetch {}: {} {} is not allowed",
+                deny, method, url_str
+            ));
+        }
+    };
+
+    // Execute the request a pre hook may have rewritten.
+    let result = execute_fetch_request(&http_client, effective.clone(), body).await?;
 
     // Post hooks see {"input": <effective request>, "output": <response>} and
     // may mutate the response (note: "body" is base64-encoded) or deny it.
