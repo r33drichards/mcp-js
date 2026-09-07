@@ -15,4 +15,4 @@ cd "$root"
 "$generator" generate napi bindings --library "$library" \
   --ts-dir "$root/node/generated" --lib-colocated --no-format
 
-cp "$library" "$root/node/generated/libmcp_v8_uniffi.so"
+cp "$library" "$root/node/generated/libserver.so"

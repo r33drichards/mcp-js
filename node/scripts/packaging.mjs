@@ -25,9 +25,9 @@ export function checkDependencies(dynamic, dependencies) {
 
 export function checkTarball(files) {
   const paths = files.map(f => f.path);
-  for (const required of ['package.json', 'LICENSE', 'README.md', 'dist/index.js', 'dist/index.d.ts', 'dist/libmcp_v8_uniffi.so']) {
+  for (const required of ['package.json', 'LICENSE', 'README.md', 'dist/index.js', 'dist/index.d.ts', 'dist/libserver.so']) {
     assert.ok(paths.includes(required), `Tarball missing ${required}`);
   }
   assert.ok(paths.every(p => ['package.json', 'LICENSE', 'README.md'].includes(p) ||
-    /^dist\/(?:[\w-]+\.(?:js|d\.ts)|libmcp_v8_uniffi\.so)$/.test(p)), 'Unexpected tarball payload');
+    /^dist\/(?:[\w-]+\.(?:js|d\.ts)|libserver\.so)$/.test(p)), 'Unexpected tarball payload');
 }

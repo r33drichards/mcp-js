@@ -6,7 +6,7 @@ import { checkDependencies, checkElf } from './packaging.mjs';
 process.chdir(fileURLToPath(new URL('..', import.meta.url)));
 assert.equal(process.platform, 'linux');
 assert.equal(process.arch, 'x64');
-const library = 'dist/libmcp_v8_uniffi.so';
+const library = 'dist/libserver.so';
 checkElf(readFileSync(library));
 assert.equal(readFileSync('LICENSE', 'utf8'), readFileSync('../LICENSE', 'utf8'), 'Package must include root license');
 for (const file of ['dist/index.js', 'dist/index.d.ts']) assert.ok(readFileSync(file).length, `Empty ${file}`);

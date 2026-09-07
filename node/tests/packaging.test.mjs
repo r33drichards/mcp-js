@@ -36,7 +36,7 @@ test('portability gate rejects build-host paths and unresolved libraries', () =>
 });
 
 test('tarball includes native library, ESM, types and license only', () => {
-  const paths = ['package.json', 'README.md', 'LICENSE', 'dist/index.js', 'dist/index.d.ts', 'dist/libmcp_v8_uniffi.so'];
+  const paths = ['package.json', 'README.md', 'LICENSE', 'dist/index.js', 'dist/index.d.ts', 'dist/libserver.so'];
   const files = paths.map(path => ({ path }));
   checkTarball(files);
   for (let i = 0; i < files.length; i++) assert.throws(() => checkTarball(files.filter((_, j) => j !== i)));
