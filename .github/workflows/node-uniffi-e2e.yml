@@ -110,6 +110,22 @@ jobs:
         run: |
           nix develop --command bash node/scripts/generate.sh \
             target/python-uniffi/release/libmcp_v8_uniffi.so
+      - name: Build the native npm tarball as a Nix derivation
+        run: |
+          stage="$(mktemp -d)"
+          tar --exclude=node/node_modules --exclude=node/dist -cf - LICENSE node | tar -C "$stage" -xf -
+          NATIVE_NPM_SOURCE="$stage" nix build --impure --expr '
+            let
+              flake = builtins.getFlake (toString ./.);
+              pkgs = flake.inputs.nixpkgs.legacyPackages.${builtins.currentSystem};
+            in import ./nix/npm-native.nix {
+              inherit pkgs;
+              src = builtins.path {
+                path = /. + builtins.getEnv "NATIVE_NPM_SOURCE";
+                name = "mcp-js-node-source";
+              };
+            }
+          '
       - name: Typecheck the Node program
         run: npm run typecheck --prefix node
       - name: Run Node against the native engine (no server or Python)

@@ -109,6 +109,20 @@ jobs:
           nix develop --command bash node/scripts/build-bindgen.sh
           nix develop --command bash node/scripts/generate.sh \
             target/python-uniffi/release/libmcp_v8_uniffi.so
+          stage="$(mktemp -d)"
+          tar --exclude=node/node_modules --exclude=node/dist -cf - LICENSE node | tar -C "$stage" -xf -
+          NATIVE_NPM_SOURCE="$stage" nix build --impure --expr '
+            let
+              flake = builtins.getFlake (toString ./.);
+              pkgs = flake.inputs.nixpkgs.legacyPackages.${builtins.currentSystem};
+            in import ./nix/npm-native.nix {
+              inherit pkgs;
+              src = builtins.path {
+                path = /. + builtins.getEnv "NATIVE_NPM_SOURCE";
+                name = "mcp-js-node-source";
+              };
+            }
+          '
           npm run test:unit --prefix node
           npm run typecheck --prefix node
           timeout 90s npm test --prefix node
