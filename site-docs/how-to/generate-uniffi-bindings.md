@@ -66,6 +66,31 @@ environment.
 
 ## Verify the exported surface
 
+### Import the Python library
+
+The public Python package exposes `from mcp_js import Engine`:
+
+```python
+from mcp_js import Engine
+
+with Engine(memory_mb=64, timeout_secs=2) as engine:
+    result = engine.run_js("console.log(6 * 7)")
+    print(result.output)
+```
+
+This executes in-process, without shell commands or a running server. After
+building the native library, prepare and install the package once:
+
+```bash
+python scripts/prepare-python-package.py \
+  --library target/python-uniffi/release/libmcp_v8_uniffi.so
+uv pip install ./python
+```
+
+The preparation command is build tooling, not part of your application.
+Installed packages bundle the native library and generated private bindings.
+See `python/README.md` in the repository for wheel packaging and result semantics.
+
 ### Run the Python smoke test locally
 
 With `uv` installed, enter `nix develop`, install `uniffi-bindgen` as shown

@@ -6,6 +6,8 @@ on:
     paths:
       - "mcp-v8-uniffi/**"
       - "mcp-v8-uniffi-python/**"
+      - "python/**"
+      - "scripts/prepare-python-package.py"
       - "server/**"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -20,6 +22,8 @@ on:
     paths:
       - "mcp-v8-uniffi/**"
       - "mcp-v8-uniffi-python/**"
+      - "python/**"
+      - "scripts/prepare-python-package.py"
       - "server/**"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -84,3 +88,13 @@ jobs:
         run: |
           nix develop --command python3 ./scripts/test-python-uniffi.py \
             --library target/python-uniffi/release/libmcp_v8_uniffi.so
+
+      - name: Package and test the importable Python API
+        run: |
+          nix develop --command python3 scripts/prepare-python-package.py \
+            --library target/python-uniffi/release/libmcp_v8_uniffi.so
+          python3 -m venv /tmp/mcp-js-package-test
+          /tmp/mcp-js-package-test/bin/pip install ./python
+          cd /tmp
+          /tmp/mcp-js-package-test/bin/python -m unittest discover \
+            -s "$GITHUB_WORKSPACE/python/tests" -v
