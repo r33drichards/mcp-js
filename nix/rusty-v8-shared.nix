@@ -28,7 +28,7 @@ rustPlatform.buildRustPackage {
     repo = "rusty_v8";
     rev = "e6a88b35dd3d7f2849a0df33a71d338701c55316";
     fetchSubmodules = true;
-    hash = lib.fakeHash;
+    hash = "sha256-uFB5Ao92c4tTTpEli5se8I9fvBrNHrDV3sbxJDokp/M=";
   };
   cargoHash = lib.fakeHash;
 
