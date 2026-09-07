@@ -8,7 +8,9 @@ services:
       - ./policies:/policies:ro
 
   mcp-js:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile.source
     command:
       - --http-port=3000
       - --heap-store=dir
