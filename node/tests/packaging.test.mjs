@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { checkDependencies, checkElf, checkTarball, packResult } from '../scripts/packaging.mjs';
+import { checkDependencies, checkElf, checkTarball, packResult, scrubBuildPaths } from '../scripts/packaging.mjs';
 
 test('npm pack JSON supports npm <=11 arrays and npm 12 keyed objects', () => {
   const result = { filename: 'mcp-js-node-0.1.0.tgz', files: [] };
@@ -36,6 +36,13 @@ test('portability gate rejects build-host paths and unresolved libraries', () =>
   for (const bad of ['libfoo => not found', 'libc.so.6 => /nix/store/abc/libc.so.6', 'statically linked', '']) {
     assert.throws(() => checkDependencies(dynamic, bad));
   }
+});
+
+test('build path scrubber preserves binary size and removes host prefixes', () => {
+  const input = Buffer.from('a/nix/store/hash b/home/runner/work/repo c');
+  const output = scrubBuildPaths(input);
+  assert.equal(output.length, input.length);
+  assert.equal(output.toString(), 'a/build/src/hash b/workspace/source/repo c');
 });
 
 test('tarball includes native library, ESM, types and license only', () => {
