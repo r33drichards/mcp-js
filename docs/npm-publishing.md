@@ -19,10 +19,14 @@ GitHub Environment-protected `publish` job.
    still says `MIT`, but the repository root license is AGPL-3.0 and no
    client-specific MIT license text is present. The history shows the root was
    migrated to AGPL in commit `1b809f09`, while the TypeScript client retained
-   its manifest declaration. The project owner must decide whether the client
-   is AGPL, remains separately MIT-licensed (and provide the approved text), or
-   has another approved license. Update the manifest, package contents, and
-   this document together; do not publish while this is ambiguous.
+   its manifest declaration from its creation commits (`8ba7855a` and
+   `1f92b993`). Repository history contains no package-specific MIT license
+   file, explicit separate-license decision, or post-migration acknowledgement.
+   That is evidence of historical metadata, not affirmative rights-holder
+   authorization. The project owner must decide whether the client is AGPL,
+   remains separately MIT-licensed (and provide the approved text), or has
+   another approved license. Update the manifest, package contents, and this
+   document together; do not publish while this is ambiguous.
 2. **Native Linux portability must pass CI.** The native package's `prepack`
    rejects missing/non-x64 ELF files, RPATH/RUNPATH, absolute `DT_NEEDED`,
    unresolved libraries, and Nix-store dependency resolutions. The full native
