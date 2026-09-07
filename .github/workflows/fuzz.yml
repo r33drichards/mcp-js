@@ -3,8 +3,12 @@ name: Fuzz
 on:
   push:
     branches: [ main ]
+  # On pull requests, fuzzing is opt-in: apply the `fuzz` label to run it.
+  # The `labeled` type triggers a run the moment the label is added; every
+  # push to main still fuzzes unconditionally.
   pull_request:
     branches: [ main ]
+    types: [ opened, synchronize, reopened, labeled ]
     paths-ignore:
       - 'site-docs/**'
       - '**.md'
@@ -18,6 +22,7 @@ concurrency:
 jobs:
   fuzz:
     name: Fuzz V8 Unsafe Code
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'fuzz')
     runs-on: [self-hosted, railway]
     timeout-minutes: 30
 
