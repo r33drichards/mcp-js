@@ -1,0 +1,18 @@
+{
+  "name": "@mcp-js/node-uniffi-e2e",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --import tsx --test --test-timeout=60000 tests/engine.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@ubjs/core": "0.31.0-5",
+    "@ubjs/node": "0.31.0-5"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.1",
+    "tsx": "4.23.13",
+    "typescript": "5.9.3"
+  }
+}

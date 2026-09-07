@@ -1,0 +1,81 @@
+name: Node UniFFI E2E
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "node/**"
+      - "server/**"
+      - "mcp-v8-uniffi-python/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "flake.nix"
+      - "flake.lock"
+      - ".github/workflows/node-uniffi-e2e.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "node/**"
+      - "server/**"
+      - "mcp-v8-uniffi-python/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "flake.nix"
+      - "flake.lock"
+      - ".github/workflows/node-uniffi-e2e.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: node-uniffi-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  node-library-e2e:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: node/package-lock.json
+      - uses: DeterminateSystems/nix-installer-action@main
+      - name: Restore native library build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/git
+            ~/.cargo/registry
+            target/python-uniffi
+          key: python-uniffi-v8-145-shared-v2-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'server/**', 'mcp-v8-uniffi-python/**') }}
+      - name: Restore Node generator build cache
+        uses: actions/cache@v4
+        with:
+          path: target/node-bindgen
+          key: node-uniffi-bindgen-v1-${{ runner.os }}-${{ hashFiles('node/patches/**', 'node/scripts/build-bindgen.sh', 'flake.lock') }}
+      - name: Build the real native engine shared library
+        run: |
+          nix develop --command bash -c '
+            unset RUSTY_V8_ARCHIVE
+            export V8_FROM_SOURCE=1
+            export GN_ARGS="v8_monolithic=true v8_monolithic_for_shared_library=true"
+            export CARGO_TARGET_DIR="$PWD/target/python-uniffi"
+            cargo build -p mcp-v8-uniffi-python --release \
+              --config mcp-v8-uniffi-python/cargo-config.toml
+          '
+      - name: Build pinned UniFFI TypeScript generator
+        run: nix develop --command bash node/scripts/build-bindgen.sh
+      - name: Install locked Node runtime and test dependencies
+        run: npm ci --prefix node
+      - name: Generate bindings from the real shared library
+        run: |
+          nix develop --command bash node/scripts/generate.sh \
+            target/python-uniffi/release/libmcp_v8_uniffi.so
+      - name: Typecheck the Node program
+        run: npm run typecheck --prefix node
+      - name: Run Node against the native engine (no server or Python)
+        run: timeout 90s npm test --prefix node
