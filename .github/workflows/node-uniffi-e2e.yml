@@ -74,6 +74,8 @@ jobs:
             ~/.cargo/registry
             target/python-uniffi
           key: python-uniffi-v8-145-e6a88b35-shared-v3-${{ runner.os }}-${{ hashFiles('flake.lock', 'mcp-v8-uniffi-python/cargo-config.toml') }}
+          restore-keys: |
+            python-uniffi-v8-145-shared-v2-${{ runner.os }}-
       - name: Restore Node generator build cache
         uses: actions/cache@v4
         with:

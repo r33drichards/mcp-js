@@ -93,6 +93,8 @@ jobs:
             ~/.cargo/registry
             target/python-uniffi
           key: python-uniffi-v8-145-e6a88b35-shared-v3-${{ runner.os }}-${{ hashFiles('flake.lock', 'mcp-v8-uniffi-python/cargo-config.toml') }}
+          restore-keys: |
+            python-uniffi-v8-145-shared-v2-${{ runner.os }}-
       - name: Build and verify native engine tarball
         if: matrix.id == 'node'
         run: |
@@ -160,6 +162,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
       - name: Require Node and npm versions supported for trusted publishing
         run: |
           node - <<'NODE'
