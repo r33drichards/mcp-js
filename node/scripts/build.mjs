@@ -14,8 +14,7 @@ for (const name of readdirSync('dist').filter(n => n.endsWith('.js') || n.endsWi
   writeFileSync(`dist/${name}`, esmImports(text, name));
 }
 cpSync('generated/libserver.so', 'dist/libserver.so');
-// Cargo invoked in a Nix shell embeds its store paths; the npm artifact must not.
+// Remove loader search paths from the distributable copy.
 execFileSync('patchelf', ['--remove-rpath', 'dist/libserver.so'], { stdio: 'inherit' });
 execFileSync('strip', ['--strip-unneeded', 'dist/libserver.so'], { stdio: 'inherit' });
-writeFileSync('dist/libserver.so'(readFileSync('dist/libserver.so')));
 cpSync('../LICENSE', 'LICENSE');
