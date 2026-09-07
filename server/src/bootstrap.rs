@@ -138,99 +138,138 @@ impl RuntimeBootstrap {
         policies: PolicyBootstrapConfig,
         capabilities: CapabilityBootstrapConfig,
     ) -> Result<Self, RuntimeError> {
-        let fetch_policy =
-            build_policy_chain(policies.fetch, "mcp/fetch", "data.mcp.fetch.allow", "fetch")?;
-        let websocket_policy = build_policy_chain(
+        use crate::engine::hooks::HookCaps;
+
+        // Per-operation capabilities: which executors apply a hook-mutated
+        // input, and which produce a hookable output. Gate-only operations
+        // still run pre hooks but fail closed if a hook attempts a mutation.
+        const CAPS_GATE_ONLY: HookCaps = HookCaps {
+            input_mutation: false,
+            post: false,
+        };
+        const CAPS_MUTATE: HookCaps = HookCaps {
+            input_mutation: true,
+            post: false,
+        };
+        const CAPS_FULL: HookCaps = HookCaps {
+            input_mutation: true,
+            post: true,
+        };
+
+        let fetch_hooks = build_op_hooks(
+            policies.fetch,
+            "fetch",
+            "mcp/fetch",
+            "data.mcp.fetch.allow",
+            CAPS_FULL,
+        )?;
+        let websocket_hooks = build_op_hooks(
             policies.websocket,
+            "websocket",
             "mcp/websocket",
             "data.mcp.websocket.allow",
-            "websocket",
+            CAPS_GATE_ONLY,
         )?;
-        let http2_policy =
-            build_policy_chain(policies.http2, "mcp/http2", "data.mcp.http2.allow", "http2")?;
-        let modules_policy = build_policy_chain(
+        let http2_hooks = build_op_hooks(
+            policies.http2,
+            "http2",
+            "mcp/http2",
+            "data.mcp.http2.allow",
+            CAPS_GATE_ONLY,
+        )?;
+        let modules_hooks = build_op_hooks(
             policies.modules,
+            "modules",
             "mcp/modules",
             "data.mcp.modules.allow",
-            "modules",
+            CAPS_GATE_ONLY,
         )?;
-        let filesystem_policy = build_policy_chain(
+        let fs_hooks = build_op_hooks(
             policies.filesystem,
+            "filesystem",
             "mcp/filesystem",
             "data.mcp.filesystem.allow",
-            "filesystem",
+            CAPS_MUTATE,
         )?;
-        let fs_snapshot_policy = build_policy_chain(
+        let fs_snapshot_hooks = build_op_hooks(
             policies.fs_snapshot,
+            "fs_snapshot",
             "mcp/fs_snapshot",
             "data.mcp.fs_snapshot.allow",
-            "fs_snapshot",
+            CAPS_GATE_ONLY,
         )?;
-        let mcp_tools_policy = build_policy_chain(
+        let mcp_tools_hooks = build_op_hooks(
             policies.mcp_tools,
+            "mcp_tools",
             "mcp/tools",
             "data.mcp.tools.allow",
-            "mcp_tools",
+            CAPS_FULL,
         )?;
-        let subprocess_policy = build_policy_chain(
+        let subprocess_hooks = build_op_hooks(
             policies.subprocess,
+            "subprocess",
             "mcp/subprocess",
             "data.mcp.subprocess.allow",
-            "subprocess",
+            CAPS_FULL,
         )?;
-        let run_js_file_policy = build_policy_chain(
+        let run_js_file_hooks = build_op_hooks(
             policies.run_js_file,
+            "run_js_file",
             "mcp/run_js_file",
             "data.mcp.run_js_file.allow",
-            "run_js_file",
+            CAPS_MUTATE,
         )?;
         let header_rules = capabilities.fetch_header_rules;
 
-        if let Some(chain) = fetch_policy {
+        if let Some(chain) = fetch_hooks {
             self.engine = self.engine.with_fetch_config(
-                crate::engine::fetch::FetchConfig::new_with_chain(chain)
+                crate::engine::fetch::FetchConfig::new_with_hooks(chain)
                     .with_header_rules(header_rules.clone()),
             );
         }
-        if let Some(chain) = websocket_policy {
+        // Handshake/per-stream header injection reuses the fetch header rules
+        // (the JS WebSocket and http2 APIs cannot read these headers, so
+        // injected credentials stay outside the isolate).
+        if let Some(chain) = websocket_hooks {
             self.engine = self.engine.with_websocket_config(
-                crate::engine::websocket::WebSocketConfig::new_with_chain(chain)
+                crate::engine::websocket::WebSocketConfig::new_with_hooks(chain)
                     .with_header_rules(header_rules.clone()),
             );
         }
-        if let Some(chain) = http2_policy {
+        if let Some(chain) = http2_hooks {
             self.engine = self.engine.with_http2_config(
-                crate::engine::http2::Http2Config::new_with_chain(chain)
+                crate::engine::http2::Http2Config::new_with_hooks(chain)
                     .with_header_rules(header_rules),
             );
         }
-        if let Some(chain) = filesystem_policy {
+        if let Some(chain) = fs_hooks {
             self.engine = self.engine.with_fs_config(
-                crate::engine::fs::FsConfig::new(chain)
+                crate::engine::fs::FsConfig::new_with_hooks(chain)
                     .with_passthrough(capabilities.filesystem_passthrough),
             );
         } else if self.engine.fs_enabled() {
+            // A mount needs the fs surface present, so when snapshots are
+            // enabled but no fs policy was supplied, default to permissive.
             self.engine = self.engine.with_fs_config(
-                crate::engine::fs::FsConfig::new(Arc::new(crate::engine::opa::PolicyChain::new(
-                    Vec::new(),
-                    crate::engine::opa::EvalMode::All,
-                )))
+                crate::engine::fs::FsConfig::new_with_hooks(Arc::new(
+                    crate::engine::hooks::HookChain::permissive("filesystem"),
+                ))
                 .with_passthrough(capabilities.filesystem_passthrough),
             );
         }
-        if let Some(chain) = fs_snapshot_policy {
-            self.engine = self.engine.with_fs_snapshot_policy(chain);
+        if let Some(chain) = fs_snapshot_hooks {
+            self.engine = self.engine.with_fs_snapshot_hooks(chain);
         }
         self.engine = self.engine.with_module_loader_config(
             crate::engine::module_loader::ModuleLoaderConfig {
                 allow_external: capabilities.allow_external_modules,
-                policy_chain: modules_policy,
+                hooks: modules_hooks,
             },
         );
-        if let Some(chain) = subprocess_policy {
-            self.engine = self
-                .engine
-                .with_subprocess_config(crate::engine::subprocess::SubprocessConfig::new(chain));
+        if let Some(chain) = subprocess_hooks {
+            self.engine = self.engine.with_subprocess_config(
+                crate::engine::subprocess::SubprocessConfig::new_with_hooks(chain),
+            );
         }
         match capabilities.run_js_file_access {
             RunJsFileAccess::AllowAll => {
@@ -239,7 +278,7 @@ impl RuntimeBootstrap {
                     .with_run_js_file_policy(crate::engine::run_js_file::RunJsFilePolicy::AllowAll);
             }
             RunJsFileAccess::Policy => {
-                let chain = run_js_file_policy.ok_or_else(|| RuntimeError::InvalidConfig {
+                let chain = run_js_file_hooks.ok_or_else(|| RuntimeError::InvalidConfig {
                     message: "run_js_file_access=Policy requires a run_js_file policy".to_string(),
                 })?;
                 self.engine = self.engine.with_run_js_file_policy(
@@ -247,15 +286,15 @@ impl RuntimeBootstrap {
                 );
             }
             RunJsFileAccess::Disabled => {
-                if let Some(chain) = run_js_file_policy {
+                if let Some(chain) = run_js_file_hooks {
                     self.engine = self.engine.with_run_js_file_policy(
                         crate::engine::run_js_file::RunJsFilePolicy::Policy(chain),
                     );
                 }
             }
         }
-        if let Some(chain) = mcp_tools_policy {
-            self.engine = self.engine.with_mcp_tools_policy_chain(chain);
+        if let Some(chain) = mcp_tools_hooks {
+            self.engine = self.engine.with_mcp_tools_hooks(chain);
         }
         Ok(self)
     }
@@ -315,21 +354,38 @@ impl RuntimeBootstrap {
     }
 }
 
-fn build_policy_chain(
+/// Build a hook chain (pre hooks → policies-as-final-pre-hook → post hooks,
+/// or a layered stack) for one operation from its parsed config.
+fn build_op_hooks(
     policies: Option<OperationPolicies>,
+    operation: &str,
     default_remote_path: &str,
     default_local_rule: &str,
-    operation: &str,
-) -> Result<Option<Arc<crate::engine::opa::PolicyChain>>, RuntimeError> {
-    let Some(policies) = policies else {
+    caps: crate::engine::hooks::HookCaps,
+) -> Result<Option<Arc<crate::engine::hooks::HookChain>>, RuntimeError> {
+    let Some(config) = policies else {
         return Ok(None);
     };
-    crate::engine::opa::build_policy_chain(&policies, default_remote_path, default_local_rule)
-        .map(Arc::new)
-        .map(Some)
-        .map_err(|message| RuntimeError::InvalidConfig {
-            message: format!("failed to build {operation} policy chain: {message}"),
-        })
+    let chain = crate::engine::hooks::build_hook_chain(
+        operation,
+        &config,
+        default_remote_path,
+        default_local_rule,
+        caps,
+    )
+    .map_err(|message| RuntimeError::InvalidConfig {
+        message: format!("failed to build {operation} hook chain: {message}"),
+    })?;
+    tracing::info!(
+        "{} hook chain: {} policy(ies), {} pre hook(s), {} post hook(s), {} stack layer(s), mode={:?}",
+        operation,
+        config.policies.len(),
+        config.pre.len(),
+        config.post.len(),
+        config.stack.len(),
+        config.mode
+    );
+    Ok(Some(Arc::new(chain)))
 }
 
 /// Build a validated fetch header rule from its parts. Exactly one of
