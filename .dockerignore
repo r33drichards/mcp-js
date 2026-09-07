@@ -19,8 +19,8 @@ flake.lock
 shell.nix
 
 # Documentation
-# The Dockerfile installs a release binary and copies nothing from the
-# checkout, so these only keep the build context small.
+# NOTE: README.md is intentionally NOT excluded — Dockerfile.source embeds it at
+# compile time via include_str!() in server/src/api.rs and server/src/mcp.rs.
 LICENSE
 
 # IDE files

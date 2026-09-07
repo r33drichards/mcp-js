@@ -25,10 +25,7 @@ services:
   mcp-js:
     build:
       context: .
-      args:
-        # release (default) installs the latest GitHub release; source compiles
-        # this checkout (used by the integration tests).
-        MCP_V8_BUILD: ${MCP_V8_BUILD:-release}
+      dockerfile: Dockerfile.source
     environment:
       - JWKS_URL=http://keycloak:8080/realms/mcp/protocol/openid-connect/certs
     command:

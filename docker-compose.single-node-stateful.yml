@@ -23,10 +23,7 @@ services:
   node1:
     build:
       context: .
-      args:
-        # release (default) installs the latest GitHub release; source compiles
-        # this checkout (used by the integration tests).
-        MCP_V8_BUILD: ${MCP_V8_BUILD:-release}
+      dockerfile: Dockerfile.source
     command:
       - --http-port=3000
       - --heap-store=dir

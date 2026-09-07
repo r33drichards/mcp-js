@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
     paths:
-      - Dockerfile
+      - Dockerfile.source
       - docker-compose.secure-sessions.yml
       - keycloak/**
       - scripts/test-keycloak-sessions.ts
@@ -16,7 +16,7 @@ on:
   pull_request:
     branches: [main]
     paths:
-      - Dockerfile
+      - Dockerfile.source
       - docker-compose.secure-sessions.yml
       - keycloak/**
       - scripts/test-keycloak-sessions.ts
@@ -33,10 +33,6 @@ jobs:
     name: Keycloak Session Integration
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    env:
-      # Build the server image from this checkout, not from the latest release,
-      # so the tests exercise the code under test.
-      MCP_V8_BUILD: source
 
     steps:
       - name: Checkout code

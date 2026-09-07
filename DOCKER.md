@@ -30,19 +30,15 @@ Pass an explicit version or `docker build --no-cache` to pick up a new release.
 Check what an image contains with `docker run --rm mcp-v8:latest --version`.
 
 To compile the checkout instead of downloading a release (for example while
-working on the server), select the source build:
+working on the server), build with `Dockerfile.source`:
 
 ```bash
-docker build --build-arg MCP_V8_BUILD=source -t mcp-v8:dev .
+docker build -f Dockerfile.source -t mcp-v8:dev .
 ```
 
 This uses the Rust nightly toolchain and takes considerably longer. The compose
-stacks in the repository read the same switch from the environment, which is
-how the integration-test workflows build the code under test:
-
-```bash
-MCP_V8_BUILD=source docker compose -f docker-compose.yml up --build
-```
+stacks in the repository build with `Dockerfile.source`, which is how the
+integration-test workflows exercise the code under review.
 
 ## Running the Container
 

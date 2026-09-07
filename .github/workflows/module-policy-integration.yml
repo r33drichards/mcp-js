@@ -3,7 +3,7 @@ name: Module Policy Integration Test
 on:
   pull_request:
     paths:
-      - Dockerfile
+      - Dockerfile.source
       - docker-compose.module-policy.yml
       - policies/**
       - tests/module-policy-integration.sh
@@ -14,10 +14,6 @@ jobs:
     name: Module Policy Integration
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    env:
-      # Build the server image from this checkout, not from the latest release,
-      # so the tests exercise the code under test.
-      MCP_V8_BUILD: source
 
     steps:
       - name: Checkout code
