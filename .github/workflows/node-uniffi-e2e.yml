@@ -90,11 +90,11 @@ jobs:
         run: |
           npm run typecheck --prefix node
           timeout 90s npm test --prefix node
+      - name: Compile a relocatable npm package
+        run: nix develop --command npm run build --prefix node
       - name: Pack and execute an isolated tarball consumer
         # This runs outside nix develop and rejects unresolved Nix dependencies.
-        run: |
-          npm run build --prefix node
-          timeout 240s npm run test:package --prefix node
+        run: timeout 240s npm run test:package --prefix node
 
   node-library-e2e:
     if: github.event_name != 'workflow_dispatch' || inputs.validation != 'archive'
@@ -146,7 +146,7 @@ jobs:
       - name: Run Node against the native engine (no server or Python)
         run: timeout 90s npm test --prefix node
       - name: Compile relocatable npm package
-        run: npm run build --prefix node
+        run: nix develop --command npm run build --prefix node
       - name: Pack and execute an isolated tarball consumer
         # Runs outside nix develop: Nix-only or unresolved dynamic dependencies fail prepack.
         run: timeout 240s npm run test:package --prefix node
