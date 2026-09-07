@@ -18,15 +18,13 @@ installs it into a fresh directory without install hooks, imports it as ESM, and
 typechecks both its root and schema exports. It accepts npm 12's keyed
 `npm pack --json` result and npm's older array format.
 
-## Release blocker: license
+## License
 
-This client package deliberately retains its existing `"license": "MIT"`
-manifest value. The repository root is AGPL-3.0, and no package-specific MIT
-license text is currently present in this source tree. That conflict has **not**
-been resolved or silently relicensed by this change. Do not publish
-`@wholelottahoopla/mcp-js-client` until the project owner supplies and approves
-the correct package license text and distribution policy. The CI workflow only
-builds and tests tarballs; it never publishes.
+`@wholelottahoopla/mcp-js-client` is MIT-licensed. Its package tarball includes
+[`LICENSE`](LICENSE), with the copyright attribution carried from the
+repository's pre-AGPL license history. This is intentionally separate from the
+root AGPL-3.0 license used by `@wholelottahoopla/mcp-js-node`; do not replace
+this scoped MIT license with the root license when packaging the HTTP client.
 
 ## Install (after the license blocker is resolved)
 

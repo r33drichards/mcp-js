@@ -2,10 +2,10 @@
 
 This repository has two public npm package candidates:
 
-| Package | Source directory | Supported release target |
-| --- | --- | --- |
-| `@wholelottahoopla/mcp-js-node` | `node/` | Linux x64 with glibc only |
-| `@wholelottahoopla/mcp-js-client` | `clients/typescript/` | Node.js 18+ HTTP client |
+| Package | Source directory | License | Supported release target |
+| --- | --- | --- | --- |
+| `@wholelottahoopla/mcp-js-node` | `node/` | AGPL-3.0-only; verbatim root text in `node/LICENSE` | Linux x64 with glibc only |
+| `@wholelottahoopla/mcp-js-client` | `clients/typescript/` | MIT; scoped text in `clients/typescript/LICENSE` | Node.js 18+ HTTP client |
 
 Do not publish either package until every gate in this document is satisfied.
 The repository's [`npm-publish.yml`](../.github/workflows/npm-publish.yml) is
@@ -13,26 +13,24 @@ intentionally release/manual-only; pull requests and pushes cannot publish.
 It has no npm token fallback. The only job granted `id-token: write` is the
 GitHub Environment-protected `publish` job.
 
+## Licensing split
+
+The owner approved a deliberate package-level split: the HTTP client
+`@wholelottahoopla/mcp-js-client` is MIT-licensed and ships its own MIT
+`LICENSE`; the native `@wholelottahoopla/mcp-js-node` package remains
+AGPL-3.0-only and ships the verbatim root AGPL text. The HTTP copyright
+attribution is grounded in the repository's pre-AGPL license commit
+`22a0bddb` and the TypeScript-client creation commits `8ba7855a` and
+`1f92b993`; no new rights-holder identity was invented.
+
 ## Current release blockers
 
-1. **HTTP client license decision required.** `clients/typescript/package.json`
-   still says `MIT`, but the repository root license is AGPL-3.0 and no
-   client-specific MIT license text is present. The history shows the root was
-   migrated to AGPL in commit `1b809f09`, while the TypeScript client retained
-   its manifest declaration from its creation commits (`8ba7855a` and
-   `1f92b993`). Repository history contains no package-specific MIT license
-   file, explicit separate-license decision, or post-migration acknowledgement.
-   That is evidence of historical metadata, not affirmative rights-holder
-   authorization. The project owner must decide whether the client is AGPL,
-   remains separately MIT-licensed (and provide the approved text), or has
-   another approved license. Update the manifest, package contents, and this
-   document together; do not publish while this is ambiguous.
-2. **Native Linux portability must pass CI.** The native package's `prepack`
+1. **Native Linux portability must pass CI.** The native package's `prepack`
    rejects missing/non-x64 ELF files, RPATH/RUNPATH, absolute `DT_NEEDED`,
    unresolved libraries, and Nix-store dependency resolutions. The full native
    build and installed-tarball execution must pass on GitHub's Ubuntu runner;
    a local Nix build is not sufficient proof.
-3. **First-publication bootstrap is manual.** npm trusted-publisher settings
+2. **First-publication bootstrap is manual.** npm trusted-publisher settings
    are configured in an existing package's npm settings. Because both scoped
    package names are currently absent from npm, an owner must perform the first
    approved public release manually before OIDC can be attached. Do not add an

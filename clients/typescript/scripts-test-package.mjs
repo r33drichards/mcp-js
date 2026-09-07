@@ -15,10 +15,10 @@ try {
   const result = Array.isArray(output) ? output[0] : output['@wholelottahoopla/mcp-js-client'];
   assert.ok(result?.filename && Array.isArray(result.files), 'Unrecognized npm pack --json output');
   const paths = result.files.map(file => file.path);
-  for (const required of ['package.json', 'README.md', 'dist/index.js', 'dist/index.d.ts', 'dist/schema.d.ts']) {
+  for (const required of ['package.json', 'README.md', 'LICENSE', 'dist/index.js', 'dist/index.d.ts', 'dist/schema.d.ts']) {
     assert.ok(paths.includes(required), `Tarball missing ${required}`);
   }
-  assert.ok(paths.every(path => ['package.json', 'README.md'].includes(path) || /^dist\/(?:index\.(?:js|d\.ts)|schema\.d\.ts)$/.test(path)), 'Unexpected tarball payload');
+  assert.ok(paths.every(path => ['package.json', 'README.md', 'LICENSE'].includes(path) || /^dist\/(?:index\.(?:js|d\.ts)|schema\.d\.ts)$/.test(path)), 'Unexpected tarball payload');
   writeFileSync(join(temp, 'package.json'), JSON.stringify({ private: true, type: 'module' }));
   run('npm', ['install', '--ignore-scripts', '--no-audit', '--no-fund', join(temp, result.filename)]);
   writeFileSync(join(temp, 'consumer.mjs'), 'import { createMcpV8Client } from "@wholelottahoopla/mcp-js-client";\nconst client = createMcpV8Client("https://example.test");\nif (typeof client.runJs !== "function") throw new Error("missing client API");\nconsole.log("installed HTTP client imported");\n');
