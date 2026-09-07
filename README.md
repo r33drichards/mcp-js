@@ -30,6 +30,9 @@ MCP servers) are all **off by default** and unlocked only by explicit
 
 ## Documentation
 
+Maintainers: see [Publishing to the MCP Registry](./docs/mcp-registry.md) for
+the Docker-backed registry manifest and automated release process.
+
 Full documentation lives at **<https://r33drichards.github.io/mcp-js/>** (built
 from [`site-docs/`](./site-docs)) — tutorials, how-to guides, concept
 explanations, and complete reference for the [CLI flags](https://r33drichards.github.io/mcp-js/reference/cli-flags/),

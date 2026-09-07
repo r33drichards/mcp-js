@@ -1,0 +1,27 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.r33drichards/mcp-js",
+  "title": "mcp-v8",
+  "description": "Run JavaScript and TypeScript in sandboxed V8 isolates with policy-controlled host capabilities.",
+  "repository": {
+    "url": "https://github.com/r33drichards/mcp-js",
+    "source": "github"
+  },
+  "version": "0.20.0",
+  "packages": [
+    {
+      "registryType": "oci",
+      "identifier": "docker.io/wholelottahoopla/mcp-js:0.20.0",
+      "runtimeHint": "docker",
+      "runtimeArguments": [
+        { "type": "named", "name": "--rm" },
+        { "type": "named", "name": "-i" },
+        { "type": "named", "name": "--env", "value": "PORT=" }
+      ],
+      "packageArguments": [
+        { "type": "named", "name": "--stateless" }
+      ],
+      "transport": { "type": "stdio" }
+    }
+  ]
+}
