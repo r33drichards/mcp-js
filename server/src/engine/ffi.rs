@@ -706,6 +706,39 @@ impl Engine {
         }))
     }
 
+    /// Invoke a tool without blocking the foreign caller's host thread.
+    pub async fn call_tool_async(
+        self: Arc<Self>,
+        name: String,
+        arguments_json: String,
+        session_id: Option<String>,
+        mcp_headers: Option<McpRequestHeaders>,
+    ) -> Result<String, RuntimeError> {
+        let request = ToolCallRequest {
+            name,
+            arguments_json,
+            session_id,
+            mcp_headers,
+        };
+        if tokio::runtime::Handle::try_current().is_ok() {
+            return self.invoke_tool(request).await;
+        }
+        let tokio_runtime = self
+            .tokio_runtime
+            .as_ref()
+            .ok_or_else(|| RuntimeError::Initialization {
+                message: "asynchronous tool calls require an active or library-created runtime"
+                    .to_string(),
+            })?;
+        let engine = self.clone();
+        tokio_runtime
+            .spawn(async move { engine.invoke_tool(request).await })
+            .await
+            .map_err(|error| RuntimeError::Operation {
+                message: format!("asynchronous tool call task failed: {error}"),
+            })?
+    }
+
     pub async fn invoke_tool(&self, request: ToolCallRequest) -> Result<String, RuntimeError> {
         let result = self.invoke_tool_response(request).await?;
         serde_json::to_string(&result.json).map_err(|error| RuntimeError::ToolCall {
@@ -928,12 +961,13 @@ mod tests {
         );
 
         let result = engine
-            .invoke_tool(ToolCallRequest {
-                name: "run_js".to_string(),
-                arguments_json: r#"{"code":"console.log(6 * 7)"}"#.to_string(),
-                session_id: None,
-                mcp_headers: None,
-            })
+            .clone()
+            .call_tool_async(
+                "run_js".to_string(),
+                r#"{"code":"console.log(6 * 7)"}"#.to_string(),
+                None,
+                None,
+            )
             .await
             .unwrap();
         let value: Value = serde_json::from_str(&result).unwrap();
