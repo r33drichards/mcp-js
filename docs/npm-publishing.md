@@ -102,7 +102,7 @@ Build the HTTP client tarball as a real Nix derivation with
 The HTTP package E2E and release workflows install this exact derivation
 output in an independent outside-Nix consumer test. Native CI generates the bindings from the
 real shared engine, stages that content-addressed source tree, and evaluates
-`nix/npm-native.nix`; this makes compilation, RPATH removal, path scrubbing,
+`nix/npm-native.nix`; this makes compilation, RPATH removal,
 and packing a Nix derivation too. The independent test then installs the exact
 Nix-produced tarball outside Nix, checks its installed ELF with `readelf` and `ldd`,
 and executes the engine. Packing inside Nix disables lifecycle scripts because
@@ -112,11 +112,7 @@ TypeScript, and engine execution checks before release artifacts are uploaded.
 
 This native derivation consumes an externally generated engine and bindings.
 It is not yet a complete native flake output or an independently substitutable
-source-V8 derivation. The Cargo cache below is not a Nix binary cache. Native
-readiness also requires review of the current binary path-prefix rewriting;
-byte rewriting alone does not establish portability.
-
-The native package cannot use rusty_v8's ordinary release archive: CI run
+source-V8 derivation. The Cargo cache below is not a Nix binary cache. The native package cannot use rusty_v8's ordinary release archive: CI run
 `34153857783` proved that it contains `R_X86_64_TPOFF32` relocations that the
 linker rejects in a shared object. Native CI therefore uses the pinned
 rusty_v8 revision with `v8_monolithic_for_shared_library=true`. Its persisted
@@ -126,7 +122,7 @@ Node, and application source. The cache is saved immediately after the costly
 build, before package checks, so application or packaging changes reuse V8 and
 rebuild only affected Rust crates. The release workflow consumes the same
 cache. This cache is build acceleration only: every release still links the
-engine, strips build-host paths, validates dynamic dependencies outside Nix,
+engine, removes build-host RPATH, validates dynamic dependencies outside Nix,
 and executes an installed tarball.
 
 ## Release checklist after OIDC setup

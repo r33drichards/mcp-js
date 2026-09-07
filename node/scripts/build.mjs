@@ -2,7 +2,7 @@ import { cpSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:f
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { esmImports } from './esm-imports.mjs';
-import { checkElf, scrubBuildPaths } from './packaging.mjs';
+import { checkElf } from './packaging.mjs';
 
 process.chdir(fileURLToPath(new URL('..', import.meta.url)));
 checkElf(readFileSync('generated/libserver.so'));
@@ -17,5 +17,5 @@ cpSync('generated/libserver.so', 'dist/libserver.so');
 // Cargo invoked in a Nix shell embeds its store paths; the npm artifact must not.
 execFileSync('patchelf', ['--remove-rpath', 'dist/libserver.so'], { stdio: 'inherit' });
 execFileSync('strip', ['--strip-unneeded', 'dist/libserver.so'], { stdio: 'inherit' });
-writeFileSync('dist/libserver.so', scrubBuildPaths(readFileSync('dist/libserver.so')));
+writeFileSync('dist/libserver.so'(readFileSync('dist/libserver.so')));
 cpSync('../LICENSE', 'LICENSE');

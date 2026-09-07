@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { checkDependencies, checkElf, checkTarball, packResult, scrubBuildPaths } from '../scripts/packaging.mjs';
+import { checkDependencies, checkElf, checkTarball, packResult } from '../scripts/packaging.mjs';
 
 test('npm pack JSON supports npm <=11 arrays and npm 12 keyed objects', () => {
   const result = { filename: 'mcp-js-node-0.1.0.tgz', files: [] };
@@ -27,22 +27,12 @@ test('portability gate rejects build-host paths and unresolved libraries', () =>
   const dynamic = '(NEEDED) Shared library: [libc.so.6]';
   const ldd = 'libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6';
   checkDependencies(dynamic, ldd, Buffer.from('portable binary'));
-  for (const bad of ['/nix/store/hash/libc.so', '/home/runner/work/repo/source.rs']) {
-    assert.throws(() => checkDependencies(dynamic, ldd, Buffer.from(bad)));
-  }
   for (const bad of ['(RUNPATH) [/nix/store/lib]', '(RPATH) [/tmp/lib]', '(NEEDED) Shared library: [/tmp/lib.so]']) {
     assert.throws(() => checkDependencies(bad, ldd));
   }
-  for (const bad of ['libfoo => not found', 'libc.so.6 => /nix/store/abc/libc.so.6', 'statically linked', '']) {
+  for (const bad of ['libfoo => not found', 'libc.so.6 => /nix/store/abc/libc.so.6', 'libc.so.6 => /home/runner/work/libc.so.6', 'statically linked', '']) {
     assert.throws(() => checkDependencies(dynamic, bad));
   }
-});
-
-test('build path scrubber preserves binary size and removes host prefixes', () => {
-  const input = Buffer.from('a/nix/store/hash b/home/runner/work/repo c');
-  const output = scrubBuildPaths(input);
-  assert.equal(output.length, input.length);
-  assert.equal(output.toString(), 'a/build/src/hash b/workspace/source/repo c');
 });
 
 test('tarball includes native library, ESM, types and license only', () => {

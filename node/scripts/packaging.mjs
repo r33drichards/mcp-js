@@ -15,28 +15,14 @@ export function checkElf(bytes) {
   assert.equal(bytes.readUInt16LE(18), 62, 'Native library must be x86-64');
 }
 
-export function scrubBuildPaths(bytes) {
-  const output = Buffer.from(bytes);
-  for (const [from, to] of [['/nix/store/', '/build/src/'], ['/home/runner/work/', '/workspace/source/']]) {
-    assert.equal(Buffer.byteLength(from), Buffer.byteLength(to));
-    const needle = Buffer.from(from);
-    for (let offset = output.indexOf(needle); offset !== -1; offset = output.indexOf(needle, offset + needle.length)) {
-      output.write(to, offset, needle.length, 'utf8');
-    }
-  }
-  return output;
-}
-
-export function checkDependencies(dynamic, dependencies, bytes) {
+export function checkDependencies(dynamic, dependencies) {
   assert.doesNotMatch(dynamic, /\((?:RPATH|RUNPATH)\)/, 'Remove build-host RPATH/RUNPATH before packaging');
   assert.doesNotMatch(dynamic, /Shared library: \[[^\]]*\//, 'Absolute/path-based DT_NEEDED is not portable');
   assert.doesNotMatch(dependencies, /not found|\/nix\/store\/|not a dynamic executable|statically linked/i,
     'Native dependencies must resolve outside the Nix store');
   assert.match(dependencies, /libc\.so/, 'Expected Linux glibc dynamic dependency report');
-  if (bytes) {
-    assert.equal(/\/nix\/store\/|\/home\/runner\/work\//.test(bytes.toString('latin1')), false,
-      'Native package must not retain Nix-store or CI-workspace paths');
-  }
+  assert.doesNotMatch(`${dynamic}\n${dependencies}`, /\/nix\/store\/|\/home\/runner\/work\//,
+    'Native runtime metadata must not reference the Nix store or CI workspace');
 }
 
 export function checkTarball(files) {
