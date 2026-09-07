@@ -131,4 +131,5 @@ Verify the foreign-thread Tokio execution path before using submit APIs directly
    Mock adapter tests alone are not native integration proof.
 
 Current PRs remain prototypes until these changes and native verification are
-complete. The prior setup and limitations remain documented in `mcp-js.md`.
+complete. The prior setup and limitations remain documented in
+[the pi prototype guide](https://github.com/r33drichards/pi/blob/openclaw/cool-claw/packages/agent/docs/mcp-js.md).
