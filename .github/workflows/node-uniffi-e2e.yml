@@ -65,11 +65,13 @@ jobs:
             target/native-archive-compat
           key: native-archive-compat-v8-145-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'server/**', 'mcp-v8-uniffi-python/**', 'flake.lock') }}
       - name: Link the pinned rusty_v8 release archive into the native cdylib
-        # nix develop supplies the pinned RUSTY_V8_ARCHIVE. Do not set
-        # V8_FROM_SOURCE: a successful shared-library link proves PIC support.
+        # nix develop supplies the pinned RUSTY_V8_ARCHIVE. rusty_v8's archive
+        # intentionally excludes generated bindings, so fetch its matching,
+        # versioned binding source. Do not set V8_FROM_SOURCE or GN_ARGS.
         run: |
           nix develop --command bash -c '
             unset V8_FROM_SOURCE GN_ARGS
+            export RUSTY_V8_MIRROR=https://github.com/denoland/rusty_v8/releases/download
             export CARGO_TARGET_DIR="$PWD/target/native-archive-compat"
             cargo build -p mcp-v8-uniffi-python --release \
               --config mcp-v8-uniffi-python/cargo-config.toml
