@@ -59,7 +59,6 @@ jobs:
           fi
           test "$(node -p "require('./${{ matrix.directory }}/package.json').version")" = "$REQUESTED_VERSION"
       - uses: DeterminateSystems/nix-installer-action@main
-        if: matrix.id == 'node'
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
@@ -78,12 +77,11 @@ jobs:
         run: npm ci --include=dev --prefix '${{ matrix.directory }}'
       - name: Audit production dependency tree
         run: npm audit --omit=dev --prefix '${{ matrix.directory }}'
-      - name: Build and verify HTTP client tarball
+      - name: Build and verify HTTP client Nix tarball
         if: matrix.id == 'client'
         run: |
-          npm run typecheck --prefix clients/typescript
-          npm run build --prefix clients/typescript
-          npm run test:package --prefix clients/typescript
+          nix build .#npm-client
+          timeout 180s node clients/typescript/scripts-test-package.mjs result/*.tgz
       - name: Restore reusable source-V8 build cache
         if: matrix.id == 'node'
         uses: actions/cache@v4
@@ -135,7 +133,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release-artifacts
-          if [ "$DIRECTORY" = node ]; then
+          if compgen -G 'result/*.tgz' >/dev/null; then
             cp result/*.tgz release-artifacts/
             basename result/*.tgz > release-artifacts/tarball-name
             exit 0

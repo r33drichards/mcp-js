@@ -25,7 +25,9 @@ attribution is grounded in the repository's pre-AGPL license commit
 
 ## Current release blockers
 
-1. **Native Linux portability must pass CI.** The native package's `prepack`
+1. **Revalidate the exact release head.** The native Linux portability gate has
+   passed on PR head `5532fcb3` in CI run `34160872507`; any later release
+   change must pass the same exact Nix-tarball consumer gate. The native package's `prepack`
    rejects missing/non-x64 ELF files, RPATH/RUNPATH, absolute `DT_NEEDED`,
    unresolved libraries, Nix-store dependency resolutions, and retained Nix or
    CI workspace paths. The full native build and installed-tarball execution
@@ -82,9 +84,13 @@ not a request to store a credential in this repository or in GitHub Actions.
    engine and strip its build-host RPATH inside `nix develop`, then run
    `npm run test:package --prefix node` outside `nix develop`. That isolated
    consumer clears loader overrides, runs `ldd` on the installed tarball, and
-   executes the real engine API.
-3. Inspect the `.tgz` contents and publish each approved package manually with
-   `npm publish --access public --provenance` from its package directory. The
+   executes the real engine API. Use the exact Nix-produced tarballs, not a
+   separately repacked checkout.
+3. Inspect each exact Nix-produced `.tgz` and publish the approved artifact path
+   with `npm publish path/to/package.tgz --access public`. Do not run a
+   directory-based publish that repacks the checkout. Local interactive
+   bootstrap cannot generate CI provenance; provenance starts with the subsequent
+   trusted-publishing release from the supported GitHub-hosted runner. The
    first public scoped publish requires `--access public`.
 4. Verify the release using the commands below. Then complete the trusted
    publisher and GitHub Environment setup above before a second release.
@@ -93,12 +99,12 @@ not a request to store a credential in this repository or in GitHub Actions.
 
 Build the HTTP client tarball as a real Nix derivation with
 `nix build .#npm-client`; the output directory contains the scoped `.tgz`.
-The HTTP package E2E workflow runs this derivation as well as an independent
-outside-Nix installed-consumer test. Native CI generates the bindings from the
+The HTTP package E2E and release workflows install this exact derivation
+output in an independent outside-Nix consumer test. Native CI generates the bindings from the
 real shared engine, stages that content-addressed source tree, and evaluates
 `nix/npm-native.nix`; this makes compilation, RPATH removal, path scrubbing,
-and packing a Nix derivation too. The independent test then installs the exact Nix-produced
-tarball outside Nix, checks its installed ELF with `readelf` and `ldd`,
+and packing a Nix derivation too. The independent test then installs the exact
+Nix-produced tarball outside Nix, checks its installed ELF with `readelf` and `ldd`,
 and executes the engine. Packing inside Nix disables lifecycle scripts because
 prepack's outside-Nix loader checks cannot run meaningfully in that sandbox;
 the mandatory installed-tarball gate performs ELF, license, dependency,

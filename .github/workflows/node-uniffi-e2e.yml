@@ -48,12 +48,10 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@main
       - name: Build the HTTP npm tarball as a Nix derivation
         run: nix build .#npm-client
-      - name: Verify the outside-Nix installed consumer
+      - name: Verify the exact Nix tarball with an outside-Nix consumer
         run: |
           npm ci --include=dev --prefix clients/typescript
-          npm run typecheck --prefix clients/typescript
-          npm run build --prefix clients/typescript
-          timeout 180s npm run test:package --prefix clients/typescript
+          timeout 180s node clients/typescript/scripts-test-package.mjs result/*.tgz
 
   node-library-e2e:
     runs-on: ubuntu-24.04
