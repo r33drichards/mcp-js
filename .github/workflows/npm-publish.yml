@@ -1,0 +1,184 @@
+name: Publish npm Packages
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Exact shared package version to publish (for example 0.1.0)"
+        required: true
+        type: string
+      confirm_publish:
+        description: "I confirmed the npm trusted-publisher and GitHub environment prerequisites"
+        required: true
+        default: false
+        type: boolean
+
+# PRs, pushes, and pull_request_target never reach publish jobs. The only
+# publisher is a protected release/manual invocation from main.
+permissions:
+  contents: read
+
+jobs:
+  build-tarballs:
+    name: Build ${{ matrix.id }} tarball
+    if: >-
+      github.event_name == 'release' ||
+      (github.ref == 'refs/heads/main' && inputs.confirm_publish == true)
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: node
+            directory: node
+            package: '@wholelottahoopla/mcp-js-node'
+          - id: client
+            directory: clients/typescript
+            package: '@wholelottahoopla/mcp-js-client'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify release/manual source and version input
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+          if [ "$EVENT_NAME" = release ]; then
+            [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]
+            REQUESTED_VERSION="${RELEASE_TAG#v}"
+          else
+            test "$GITHUB_REF" = refs/heads/main
+          fi
+          test "$(node -p "require('./${{ matrix.directory }}/package.json').version")" = "$REQUESTED_VERSION"
+      - uses: DeterminateSystems/nix-installer-action@main
+        if: matrix.id == 'node'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: ${{ matrix.directory }}/package-lock.json
+      - name: Require an npm CLI with OIDC/provenance support
+        run: |
+          node - <<'NODE'
+          const [major, minor] = require('child_process').execFileSync('npm', ['--version'], { encoding: 'utf8' }).trim().split('.').map(Number);
+          if (major < 9 || (major === 9 && minor < 5)) throw new Error('npm CLI 9.5.0 or newer is required');
+          NODE
+      - name: Install locked Node dependencies
+        run: npm ci --include=dev --prefix '${{ matrix.directory }}'
+      - name: Audit production dependency tree
+        run: npm audit --omit=dev --prefix '${{ matrix.directory }}'
+      - name: Build and verify HTTP client tarball
+        if: matrix.id == 'client'
+        run: |
+          npm run typecheck --prefix clients/typescript
+          npm run build --prefix clients/typescript
+          npm run test:package --prefix clients/typescript
+      - name: Build and verify native engine tarball
+        if: matrix.id == 'node'
+        run: |
+          nix develop --command bash -c '
+            unset RUSTY_V8_ARCHIVE
+            export V8_FROM_SOURCE=1
+            export GN_ARGS="v8_monolithic=true v8_monolithic_for_shared_library=true"
+            export CARGO_TARGET_DIR="$PWD/target/python-uniffi"
+            cargo build -p mcp-v8-uniffi-python --release \
+              --config mcp-v8-uniffi-python/cargo-config.toml
+          '
+          nix develop --command bash node/scripts/build-bindgen.sh
+          nix develop --command bash node/scripts/generate.sh \
+            target/python-uniffi/release/libmcp_v8_uniffi.so
+          npm run test:unit --prefix node
+          npm run typecheck --prefix node
+          timeout 90s npm test --prefix node
+          npm run build --prefix node
+          timeout 240s npm run test:package --prefix node
+      - name: Pack exact release tarball
+        id: pack
+        env:
+          DIRECTORY: ${{ matrix.directory }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-artifacts
+          output="$(npm pack --json --pack-destination release-artifacts --prefix "$DIRECTORY")"
+          node - "$output" <<'NODE' > release-artifacts/tarball-name
+          const result = JSON.parse(process.argv[2]);
+          const item = Array.isArray(result) ? result[0] : Object.values(result)[0];
+          if (!item?.filename) throw new Error('npm pack did not return a filename');
+          process.stdout.write(item.filename);
+          NODE
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-tarball-${{ matrix.id }}
+          path: release-artifacts/*.tgz
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish ${{ matrix.package }}
+    needs: build-tarballs
+    if: >-
+      github.event_name == 'release' ||
+      (github.ref == 'refs/heads/main' && inputs.confirm_publish == true)
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: node
+            package: '@wholelottahoopla/mcp-js-node'
+          - id: client
+            package: '@wholelottahoopla/mcp-js-client'
+    runs-on: ubuntu-24.04
+    environment: npm-publish
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: npm-tarball-${{ matrix.id }}
+          path: release-artifacts
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Require an npm CLI with OIDC/provenance support
+        run: |
+          node - <<'NODE'
+          const [major, minor] = require('child_process').execFileSync('npm', ['--version'], { encoding: 'utf8' }).trim().split('.').map(Number);
+          if (major < 9 || (major === 9 && minor < 5)) throw new Error('npm CLI 9.5.0 or newer is required');
+          NODE
+      - name: Verify tarball identity before OIDC publication
+        env:
+          EXPECTED_PACKAGE: ${{ matrix.package }}
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          tarball="$(find release-artifacts -type f -name '*.tgz' -print -quit)"
+          test -n "$tarball"
+          test "$(find release-artifacts -type f -name '*.tgz' | wc -l)" = 1
+          mkdir unpacked
+          tar -xzf "$tarball" -C unpacked
+          node - "$EXPECTED_PACKAGE" "$EVENT_NAME" "$RELEASE_TAG" "$REQUESTED_VERSION" <<'NODE'
+          const fs = require('fs');
+          const [expectedName, eventName, releaseTag, requestedVersion] = process.argv.slice(2);
+          const manifest = JSON.parse(fs.readFileSync('unpacked/package/package.json', 'utf8'));
+          const expectedVersion = eventName === 'release' ? releaseTag.replace(/^v/, '') : requestedVersion;
+          if (manifest.name !== expectedName || manifest.version !== expectedVersion) {
+            throw new Error(`tarball identity mismatch: ${manifest.name}@${manifest.version}`);
+          }
+          NODE
+          tar -tzf "$tarball" | sort > contents.txt
+          grep -qx 'package/package.json' contents.txt
+          grep -qx 'package/README.md' contents.txt
+      - name: Publish with npm trusted publishing and provenance
+        # No NODE_AUTH_TOKEN or npm token fallback is configured in this workflow.
+        run: npm publish "$(find release-artifacts -type f -name '*.tgz' -print -quit)" --access public --provenance
