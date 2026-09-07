@@ -65,6 +65,14 @@ impl FsMountHandle {
     }
 }
 
+/// Hook capabilities of the filesystem executor: pre hooks may rewrite
+/// `path`/`destination` (the effective values are what the operation
+/// executes); there is no hookable output, so post hooks are rejected.
+pub const HOOK_CAPS: super::hooks::HookCaps = super::hooks::HookCaps {
+    input_mutation: true,
+    post: false,
+};
+
 /// Configuration for the fs module. Stored in deno_core's `OpState`.
 #[derive(Clone, Debug)]
 pub struct FsConfig {

@@ -120,31 +120,40 @@ impl RuntimeError {
 
 #[uniffi::export]
 impl Engine {
-    /// Enable policy-gated host filesystem access without enabling subprocesses.
-    /// The JSON is one OperationPolicies object, not the server policies map.
+    /// Enable hook/policy-gated host filesystem access without enabling subprocesses.
+    /// The JSON is one `OperationPolicies` object (the `filesystem` entry of
+    /// `--policies-json`), so `policies`, `pre`, `post`, and `stack` are all
+    /// interpreted exactly as the server interprets them.
     #[uniffi::constructor]
     pub fn create_with_filesystem(
         heap_memory_max_mb: u64,
         execution_timeout_secs: u64,
         filesystem_policy_json: String,
     ) -> Result<Arc<Self>, RuntimeError> {
-        let policies: opa::OperationPolicies = serde_json::from_str(&filesystem_policy_json)
+        let config: opa::OperationPolicies = serde_json::from_str(&filesystem_policy_json)
             .map_err(|error| RuntimeError::InvalidConfig { message: error.to_string() })?;
-        // An empty all-mode chain permits everything: require explicit authority.
-        if policies.policies.is_empty() {
+        // An empty chain permits everything: require explicitly configured authority.
+        if config.policies.is_empty() && config.pre.is_empty() && config.stack.is_empty() {
             return Err(RuntimeError::InvalidConfig {
-                message: "filesystem policy sources must not be empty".into(),
+                message: "filesystem configuration must declare policies, pre hooks, or a stack".into(),
             });
         }
-        let chain = opa::build_policy_chain(
-            &policies, "mcp/filesystem", "data.mcp.filesystem.allow",
-        ).map_err(|message| RuntimeError::InvalidConfig { message })?;
+        let chain = hooks::build_hook_chain(
+            "filesystem",
+            &config,
+            "mcp/filesystem",
+            "data.mcp.filesystem.allow",
+            fs::HOOK_CAPS,
+        )
+        .map_err(|message| RuntimeError::InvalidConfig {
+            message: format!("failed to build filesystem hook chain: {message}"),
+        })?;
         let mut engine = Self::create_stateless(heap_memory_max_mb, execution_timeout_secs)?;
         Arc::get_mut(&mut engine)
             .ok_or_else(|| RuntimeError::Initialization {
                 message: "new embedded engine unexpectedly shared".into(),
             })?
-            .fs_config = Some(Arc::new(fs::FsConfig::new(Arc::new(chain))));
+            .fs_config = Some(Arc::new(fs::FsConfig::new_with_hooks(Arc::new(chain))));
         Ok(engine)
     }
 
