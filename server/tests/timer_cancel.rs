@@ -43,7 +43,7 @@ async fn run_and_wait(engine: &Engine, code: &str) -> Result<String, String> {
     let exec_id = engine.run_js(code).execute().await?;
     for _ in 0..600 {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        if let Ok(info) = engine.get_execution(&exec_id) {
+        if let Ok(info) = engine.get_execution(exec_id.clone()) {
             match info.status.as_str() {
                 "completed" => return Ok(info.result.unwrap_or_default()),
                 "failed" => return Err(info.error.unwrap_or_else(|| "Unknown error".to_string())),

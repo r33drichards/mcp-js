@@ -57,7 +57,7 @@ fn parse_response(resp: serde_json::Value) -> serde_json::Value {
 #[tokio::test]
 async fn test_stateless_shell_console_log() {
     ensure_v8();
-    let engine = create_test_engine();
+    let engine = Engine::from_engine(create_test_engine());
     let resp = run_js(&engine,Some("console.log('hello world')".to_string()), None, None, None).await;
     let value = parse_response(resp);
 
@@ -69,7 +69,7 @@ async fn test_stateless_shell_console_log() {
 #[tokio::test]
 async fn test_stateless_shell_multiple_console_logs() {
     ensure_v8();
-    let engine = create_test_engine();
+    let engine = Engine::from_engine(create_test_engine());
     let code = r#"
         console.log("line 1");
         console.log("line 2");
@@ -88,7 +88,7 @@ async fn test_stateless_shell_multiple_console_logs() {
 #[tokio::test]
 async fn test_stateless_shell_error_handling() {
     ensure_v8();
-    let engine = create_test_engine();
+    let engine = Engine::from_engine(create_test_engine());
     let resp = run_js(&engine,Some("throw new Error('boom')".to_string()), None, None, None).await;
     let value = parse_response(resp);
 
@@ -100,7 +100,7 @@ async fn test_stateless_shell_error_handling() {
 #[tokio::test]
 async fn test_stateless_shell_no_execution_id_exposed() {
     ensure_v8();
-    let engine = create_test_engine();
+    let engine = Engine::from_engine(create_test_engine());
     let resp = run_js(&engine,Some("console.log('test')".to_string()), None, None, None).await;
     let value = parse_response(resp);
 
@@ -110,7 +110,7 @@ async fn test_stateless_shell_no_execution_id_exposed() {
 #[tokio::test]
 async fn test_stateless_shell_computation_with_output() {
     ensure_v8();
-    let engine = create_test_engine();
+    let engine = Engine::from_engine(create_test_engine());
     let code = r#"
         const sum = [1, 2, 3, 4, 5].reduce((a, b) => a + b, 0);
         console.log("sum is", sum);
@@ -126,7 +126,7 @@ async fn test_stateless_shell_computation_with_output() {
 #[tokio::test]
 async fn test_stateless_shell_top_level_await() {
     ensure_v8();
-    let engine = create_test_engine();
+    let engine = Engine::from_engine(create_test_engine());
     let code = r#"
         const result = await Promise.resolve(42);
         console.log("result is", result);
@@ -143,7 +143,7 @@ async fn test_stateless_shell_top_level_await() {
 #[tokio::test]
 async fn test_stateless_shell_top_level_await_async_chain() {
     ensure_v8();
-    let engine = create_test_engine();
+    let engine = Engine::from_engine(create_test_engine());
     let code = r#"
         const a = await Promise.resolve(10);
         const b = await Promise.resolve(20);
@@ -167,7 +167,7 @@ async fn test_run_js_file_allow_all_reads_and_runs() {
     let script = dir.path().join("script.js");
     std::fs::write(&script, "console.log('from a file', 6 * 7);").unwrap();
 
-    let engine = create_test_engine_allow_file();
+    let engine = Engine::from_engine(create_test_engine_allow_file());
 
     // code omitted; file provided.
     let resp = run_js(&engine, None, Some(script.to_str().unwrap().to_string()), None, None).await;
@@ -186,7 +186,7 @@ async fn test_run_js_file_disabled_by_default_errors() {
     std::fs::write(&script, "console.log('nope');").unwrap();
 
     // Default engine has no run_js_file policy → file reads are disabled.
-    let engine = create_test_engine();
+    let engine = Engine::from_engine(create_test_engine());
 
     let resp = run_js(&engine, None, Some(script.to_str().unwrap().to_string()), None, None).await;
     let value = parse_response(resp);
@@ -202,7 +202,7 @@ async fn test_run_js_file_and_code_conflict_errors() {
     let script = dir.path().join("script.js");
     std::fs::write(&script, "console.log('file');").unwrap();
 
-    let engine = create_test_engine_allow_file();
+    let engine = Engine::from_engine(create_test_engine_allow_file());
 
     // Both code and file supplied → error.
     let resp = run_js(

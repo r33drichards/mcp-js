@@ -8,14 +8,14 @@ use std::sync::{Arc, Once};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use reqwest::Client;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::process::Stdio;
 use tokio::process::Command;
-use tokio::time::{sleep, timeout, Duration};
+use tokio::time::{Duration, sleep, timeout};
 
 use server::engine::artifacts::ArtifactContent;
 use server::engine::execution::ExecutionRegistry;
-use server::engine::{initialize_v8, Engine};
+use server::engine::{Engine, initialize_v8};
 
 static INIT: Once = Once::new();
 
@@ -27,7 +27,10 @@ fn ensure_v8() {
 
 fn rand_id() -> u64 {
     use std::time::SystemTime;
-    SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_nanos() as u64
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as u64
 }
 
 /// Create a stateless engine with an execution registry.
@@ -37,7 +40,8 @@ fn create_test_engine() -> Engine {
         std::process::id(),
         rand_id()
     ));
-    let registry = ExecutionRegistry::new(tmp.to_str().unwrap()).expect("Failed to create test registry");
+    let registry =
+        ExecutionRegistry::new(tmp.to_str().unwrap()).expect("Failed to create test registry");
     Engine::new_stateless(8 * 1024 * 1024, 30, 4).with_execution_registry(Arc::new(registry))
 }
 
@@ -50,7 +54,8 @@ async fn run_js(engine: &Engine, code: &str) -> server::mcp_dispatch::ToolRespon
 
 /// PNG magic prefix plus a few extra bytes — deliberately not valid UTF-8.
 const PNG_BYTES: &[u8] = &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x01, 0x02];
-const PNG_BYTES_JS: &str = "new Uint8Array([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x01, 0x02])";
+const PNG_BYTES_JS: &str =
+    "new Uint8Array([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x01, 0x02])";
 
 // ── Dispatch-level tests ─────────────────────────────────────────────────
 
@@ -67,7 +72,9 @@ async fn test_image_artifact_inline_on_stateless_run_js() {
     .await;
 
     assert!(resp.json["error"].is_null(), "run failed: {:?}", resp.json);
-    let metas = resp.json["artifacts"].as_array().expect("artifacts metadata list");
+    let metas = resp.json["artifacts"]
+        .as_array()
+        .expect("artifacts metadata list");
     assert_eq!(metas.len(), 1);
     assert_eq!(metas[0]["key"], "chart");
     assert_eq!(metas[0]["mime_type"], "image/png");
@@ -76,7 +83,10 @@ async fn test_image_artifact_inline_on_stateless_run_js() {
 
     assert_eq!(resp.artifacts.len(), 1);
     match &resp.artifacts[0] {
-        ArtifactContent::Image { data_base64, mime_type } => {
+        ArtifactContent::Image {
+            data_base64,
+            mime_type,
+        } => {
             assert_eq!(mime_type, "image/png");
             assert_eq!(data_base64, &BASE64.encode(PNG_BYTES));
         }
@@ -143,9 +153,17 @@ async fn test_artifact_overwrite_and_persistence_across_executions() {
     let engine = create_test_engine();
 
     let first = run_js(&engine, r#"artifact("report", "text/plain", "v1");"#).await;
-    assert!(first.json["error"].is_null(), "run failed: {:?}", first.json);
+    assert!(
+        first.json["error"].is_null(),
+        "run failed: {:?}",
+        first.json
+    );
     let second = run_js(&engine, r#"artifact("report", "text/plain", "v2");"#).await;
-    assert!(second.json["error"].is_null(), "run failed: {:?}", second.json);
+    assert!(
+        second.json["error"].is_null(),
+        "run failed: {:?}",
+        second.json
+    );
 
     let got = server::mcp_dispatch::get_artifact(&engine, &json!({ "key": "report" }));
     match &got.artifacts[0] {
@@ -155,7 +173,11 @@ async fn test_artifact_overwrite_and_persistence_across_executions() {
 
     let listed = server::mcp_dispatch::list_artifacts(&engine);
     let artifacts = listed["artifacts"].as_array().unwrap();
-    assert_eq!(artifacts.len(), 1, "same key should overwrite, not duplicate");
+    assert_eq!(
+        artifacts.len(),
+        1,
+        "same key should overwrite, not duplicate"
+    );
     assert_eq!(artifacts[0]["key"], "report");
 }
 
@@ -202,7 +224,12 @@ async fn test_artifact_validation_errors_in_js() {
     assert!(resp.json["error"].is_null(), "run failed: {:?}", resp.json);
     let output = resp.json["output"].as_str().unwrap();
     let errors: Vec<String> = serde_json::from_str(output.trim()).unwrap();
-    assert_eq!(errors.len(), 3, "all three calls should throw: {:?}", errors);
+    assert_eq!(
+        errors.len(),
+        3,
+        "all three calls should throw: {:?}",
+        errors
+    );
     assert!(errors.iter().all(|e| e.contains("artifact")));
 
     let listed = server::mcp_dispatch::list_artifacts(&engine);
@@ -223,7 +250,9 @@ async fn test_artifacts_recorded_on_failed_execution() {
     )
     .await;
     assert!(resp.json["error"].as_str().unwrap_or("").contains("boom"));
-    let metas = resp.json["artifacts"].as_array().expect("artifacts metadata list");
+    let metas = resp.json["artifacts"]
+        .as_array()
+        .expect("artifacts metadata list");
     assert_eq!(metas[0]["key"], "partial");
 
     let got = server::mcp_dispatch::get_artifact(&engine, &json!({ "key": "partial" }));
@@ -239,7 +268,7 @@ async fn test_artifacts_recorded_on_failed_execution() {
 async fn wait_for_execution(engine: &Engine, id: &str) -> server::engine::execution::ExecutionInfo {
     for _ in 0..600 {
         sleep(Duration::from_millis(50)).await;
-        if let Ok(info) = engine.get_execution(id) {
+        if let Ok(info) = engine.get_execution(id.to_string()) {
             if info.status != "running" {
                 return info;
             }
@@ -297,9 +326,13 @@ async fn test_artifact_on_fresh_and_restored_heap_snapshot() {
     assert_eq!(info2.artifacts[0].key, "stateful-2");
     assert_eq!(info2.artifacts[0].mime_type, "image/png");
 
-    let one = engine.get_artifact("stateful-1").expect("stateful-1 stored");
+    let one = engine
+        .get_artifact("stateful-1")
+        .expect("stateful-1 stored");
     assert_eq!(one.bytes, b"first");
-    let two = engine.get_artifact("stateful-2").expect("stateful-2 stored");
+    let two = engine
+        .get_artifact("stateful-2")
+        .expect("stateful-2 stored");
     assert_eq!(two.bytes, &[0x89, 0x50]);
     assert!(matches!(two.content(), ArtifactContent::Image { .. }));
 }
@@ -313,7 +346,9 @@ struct HttpServer {
 
 impl HttpServer {
     async fn start() -> Result<Self, Box<dyn std::error::Error>> {
-        let port = std::net::TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
+        let port = std::net::TcpListener::bind("127.0.0.1:0")?
+            .local_addr()?
+            .port();
         let child = Command::new(env!("CARGO_BIN_EXE_server"))
             .args(&["--http-port", &port.to_string()])
             .stdin(Stdio::null())
@@ -332,7 +367,10 @@ impl HttpServer {
                 .await
                 .is_ok()
             {
-                return Ok(HttpServer { child: Some(child), base_url });
+                return Ok(HttpServer {
+                    child: Some(child),
+                    base_url,
+                });
             }
             sleep(Duration::from_millis(100)).await;
         }
@@ -429,4 +467,56 @@ async fn test_artifact_rest_roundtrip() -> Result<(), Box<dyn std::error::Error>
 
     server.stop().await;
     Ok(())
+}
+
+/// The canonical invocation path used by both MCP transports must retain media,
+/// while the string-returning UniFFI API retains its JSON metadata contract.
+#[tokio::test]
+async fn test_canonical_invocation_preserves_artifact_content() {
+    use server::engine::ToolCallRequest;
+    ensure_v8();
+    let engine = create_test_engine();
+    let request = |name: &str, args: Value| ToolCallRequest {
+        name: name.to_string(),
+        arguments_json: args.to_string(),
+        session_id: None,
+        mcp_headers: None,
+    };
+    let response = engine
+        .invoke_tool_response(request(
+            "run_js",
+            json!({
+                "code": format!(r#"artifact("canonical", "image/png", {PNG_BYTES_JS});"#),
+            }),
+        ))
+        .await
+        .unwrap();
+    assert!(response.json["error"].is_null(), "{:?}", response.json);
+    assert!(matches!(
+        response.artifacts.first(),
+        Some(ArtifactContent::Image { .. })
+    ));
+    let fetched = engine
+        .invoke_tool_response(request("get_artifact", json!({"key": "canonical"})))
+        .await
+        .unwrap();
+    assert!(matches!(
+        fetched.artifacts.first(),
+        Some(ArtifactContent::Image { .. })
+    ));
+    let listed: Value = serde_json::from_str(
+        &engine
+            .invoke_tool(request("list_artifacts", json!({})))
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(listed["artifacts"][0]["key"], "canonical");
+    engine.shutdown().await;
+    assert!(
+        engine
+            .invoke_tool_response(request("get_artifact", json!({"key": "canonical"})))
+            .await
+            .is_err()
+    );
 }

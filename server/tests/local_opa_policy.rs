@@ -109,7 +109,7 @@ async fn run_fetch(engine: &Engine, url: &str, method: &str) -> Result<String, S
 
     for _ in 0..600 {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        if let Ok(info) = engine.get_execution(&exec_id) {
+        if let Ok(info) = engine.get_execution(exec_id.clone()) {
             match info.status.as_str() {
                 "completed" => return Ok(info.result.expect("should have result")),
                 "failed" => return Err(info.error.unwrap_or_default()),
@@ -149,7 +149,7 @@ allow if {
     let chain = Arc::new(
         build_policy_chain(&op, "mcp/fetch", "data.mcp.fetch.allow").unwrap(),
     );
-    let engine = build_engine_with_chain(chain);
+    let engine = Engine::from_engine(build_engine_with_chain(chain));
 
     let result = run_fetch(&engine, &echo_url, "GET").await;
     assert!(result.is_ok(), "GET should be allowed. Got: {:?}", result);
@@ -181,7 +181,7 @@ allow if {
     let chain = Arc::new(
         build_policy_chain(&op, "mcp/fetch", "data.mcp.fetch.allow").unwrap(),
     );
-    let engine = build_engine_with_chain(chain);
+    let engine = Engine::from_engine(build_engine_with_chain(chain));
 
     let result = run_fetch(&engine, &echo_url, "POST").await;
     assert!(result.is_err(), "POST should be denied. Got: {:?}", result);
@@ -218,7 +218,7 @@ async fn test_local_rego_uses_existing_policy_file() {
     let chain = Arc::new(
         build_policy_chain(&op, "mcp/fetch", "data.mcp.fetch.allow").unwrap(),
     );
-    let engine = build_engine_with_chain(chain);
+    let engine = Engine::from_engine(build_engine_with_chain(chain));
 
     // 127.0.0.1 is not in the allowlist → denied
     let result = run_fetch(&engine, &echo_url, "GET").await;
@@ -262,7 +262,7 @@ default allow = false
     let chain = Arc::new(
         build_policy_chain(&op, "mcp/fetch", "data.mcp.fetch.allow").unwrap(),
     );
-    let engine = build_engine_with_chain(chain);
+    let engine = Engine::from_engine(build_engine_with_chain(chain));
 
     // First allows GET, second denies everything → denied
     let result = run_fetch(&engine, &echo_url, "GET").await;
@@ -306,7 +306,7 @@ allow if { input.method == "GET" }
     let chain = Arc::new(
         build_policy_chain(&op, "mcp/fetch", "data.mcp.fetch.allow").unwrap(),
     );
-    let engine = build_engine_with_chain(chain);
+    let engine = Engine::from_engine(build_engine_with_chain(chain));
 
     // First denies, second allows GET → allowed (Any mode)
     let result = run_fetch(&engine, &echo_url, "GET").await;
@@ -345,7 +345,7 @@ allow if { input.method == "HEAD" }
     let chain = Arc::new(
         build_policy_chain(&op, "mcp/fetch", "data.mcp.fetch.allow").unwrap(),
     );
-    let engine = build_engine_with_chain(chain);
+    let engine = Engine::from_engine(build_engine_with_chain(chain));
 
     // GET is allowed by a_get.rego
     let result = run_fetch(&engine, &echo_url, "GET").await;

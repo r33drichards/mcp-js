@@ -1,0 +1,100 @@
+name: UniFFI Bindings
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - "mcp-v8-uniffi/**"
+      - "mcp-v8-uniffi-python/**"
+      - "python/**"
+      - "scripts/prepare-python-package.py"
+      - "server/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "scripts/*uniffi-bindings.sh"
+      - "scripts/python-uniffi-library-smoke.py"
+      - "scripts/test-python-uniffi-library.sh"
+      - "scripts/test-python-uniffi.py"
+      - "scripts/test_python_uniffi_runner.py"
+      - ".github/workflows/uniffi-bindings.yml"
+  pull_request:
+    branches: [ main ]
+    paths:
+      - "mcp-v8-uniffi/**"
+      - "mcp-v8-uniffi-python/**"
+      - "python/**"
+      - "scripts/prepare-python-package.py"
+      - "server/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "scripts/*uniffi-bindings.sh"
+      - "scripts/python-uniffi-library-smoke.py"
+      - "scripts/test-python-uniffi-library.sh"
+      - "scripts/test-python-uniffi.py"
+      - "scripts/test_python_uniffi_runner.py"
+      - ".github/workflows/uniffi-bindings.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  python-runner-unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Test Python runner without a native build
+        run: python -m unittest discover -s scripts -p test_python_uniffi_runner.py
+
+  staticlib-bindings:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - name: Install UniFFI bindgen
+        run: nix develop --command cargo install uniffi --version 0.32.0 --locked --features cli
+      - name: Generate and check language bindings
+        run: nix develop --command ./scripts/check-uniffi-bindings.sh
+
+  python-library-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/git
+            ~/.cargo/registry
+            target/python-uniffi
+          key: python-uniffi-v8-145-shared-v2-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'server/**', 'mcp-v8-uniffi-python/**') }}
+      - name: Install UniFFI bindgen
+        run: nix develop --command cargo install uniffi --version 0.32.0 --locked --features cli
+      - name: Build Python-loadable UniFFI library
+        run: |
+          nix develop --command bash -c '
+            unset RUSTY_V8_ARCHIVE
+            export V8_FROM_SOURCE=1
+            export GN_ARGS="v8_monolithic=true v8_monolithic_for_shared_library=true"
+            export CARGO_TARGET_DIR="$PWD/target/python-uniffi"
+            cargo build -p mcp-v8-uniffi-python --release \
+              --config mcp-v8-uniffi-python/cargo-config.toml
+          '
+      - name: Execute JavaScript through the native Python library
+        run: |
+          nix develop --command python3 ./scripts/test-python-uniffi.py \
+            --library target/python-uniffi/release/libmcp_v8_uniffi.so
+
+      - name: Package and test the importable Python API
+        run: |
+          nix develop --command python3 scripts/prepare-python-package.py \
+            --library target/python-uniffi/release/libmcp_v8_uniffi.so
+          python3 -m venv /tmp/mcp-js-package-test
+          /tmp/mcp-js-package-test/bin/pip install ./python
+          cd /tmp
+          /tmp/mcp-js-package-test/bin/python -m unittest discover \
+            -s "$GITHUB_WORKSPACE/python/tests" -v

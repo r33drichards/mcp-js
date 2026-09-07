@@ -1,0 +1,12 @@
+[package]
+name = "mcp-v8-uniffi-python"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+name = "mcp_v8_uniffi"
+crate-type = ["cdylib"]
+
+[dependencies]
+server = { path = "../server" }

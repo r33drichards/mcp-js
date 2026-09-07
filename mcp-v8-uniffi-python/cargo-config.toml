@@ -1,0 +1,2 @@
+[patch.crates-io]
+v8 = { git = "https://github.com/denoland/rusty_v8.git", rev = "e6a88b35dd3d7f2849a0df33a71d338701c55316" }
