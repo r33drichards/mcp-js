@@ -64,7 +64,7 @@ Perform these steps separately for **each** package on npmjs.com:
 npm's trusted-publisher configuration is case-sensitive and cannot be edited
 in place. If its repository, workflow filename, or environment is wrong,
 delete it and create a new configuration. npm supports cloud-hosted runners;
-the workflow uses `ubuntu-24.04` and Node 24, and checks npm CLI >=9.5.0.
+the workflow uses `ubuntu-24.04` and Node 24, and explicitly requires Node.js >=22.14.0 and npm >=11.5.1 for trusted publishing (rather than the older npm 9.5.0 provenance-only baseline).
 Public OIDC publication from this public repository produces provenance
 attestations automatically; the workflow also explicitly requests
 `--provenance`.

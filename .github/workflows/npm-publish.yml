@@ -65,11 +65,14 @@ jobs:
           node-version: '24'
           cache: npm
           cache-dependency-path: ${{ matrix.directory }}/package-lock.json
-      - name: Require an npm CLI with OIDC/provenance support
+      - name: Require Node and npm versions supported for trusted publishing
         run: |
           node - <<'NODE'
-          const [major, minor] = require('child_process').execFileSync('npm', ['--version'], { encoding: 'utf8' }).trim().split('.').map(Number);
-          if (major < 9 || (major === 9 && minor < 5)) throw new Error('npm CLI 9.5.0 or newer is required');
+          const version = command => require('child_process').execFileSync(command, ['--version'], { encoding: 'utf8' }).trim().split('.').map(Number);
+          const [nodeMajor, nodeMinor] = version('node');
+          const [npmMajor, npmMinor, npmPatch] = version('npm');
+          if (nodeMajor < 22 || (nodeMajor === 22 && nodeMinor < 14)) throw new Error('Node.js 22.14.0 or newer is required for npm trusted publishing');
+          if (npmMajor < 11 || (npmMajor === 11 && (npmMinor < 5 || (npmMinor === 5 && npmPatch < 1)))) throw new Error('npm CLI 11.5.1 or newer is required for npm trusted publishing');
           NODE
       - name: Install locked Node dependencies
         run: npm ci --include=dev --prefix '${{ matrix.directory }}'
@@ -148,11 +151,14 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-      - name: Require an npm CLI with OIDC/provenance support
+      - name: Require Node and npm versions supported for trusted publishing
         run: |
           node - <<'NODE'
-          const [major, minor] = require('child_process').execFileSync('npm', ['--version'], { encoding: 'utf8' }).trim().split('.').map(Number);
-          if (major < 9 || (major === 9 && minor < 5)) throw new Error('npm CLI 9.5.0 or newer is required');
+          const version = command => require('child_process').execFileSync(command, ['--version'], { encoding: 'utf8' }).trim().split('.').map(Number);
+          const [nodeMajor, nodeMinor] = version('node');
+          const [npmMajor, npmMinor, npmPatch] = version('npm');
+          if (nodeMajor < 22 || (nodeMajor === 22 && nodeMinor < 14)) throw new Error('Node.js 22.14.0 or newer is required for npm trusted publishing');
+          if (npmMajor < 11 || (npmMajor === 11 && (npmMinor < 5 || (npmMinor === 5 && npmPatch < 1)))) throw new Error('npm CLI 11.5.1 or newer is required for npm trusted publishing');
           NODE
       - name: Verify tarball identity before OIDC publication
         env:
