@@ -91,6 +91,9 @@ zstd = "0.13"
 blake3 = "1"
 bincode = "1"
 diffy = "0.4"
+tempfile = "3"
+thiserror = "2"
+uniffi = { version = "0.32.0", default-features = false }
 urlpattern = "0.6.0"
 
 # OS-level sandboxing layer (--sandbox-manifest): Landlock on Linux, Seatbelt on macOS.

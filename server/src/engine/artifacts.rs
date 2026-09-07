@@ -33,7 +33,7 @@ pub const MAX_MIME_BYTES: usize = 128;
 // ── Types ────────────────────────────────────────────────────────────────
 
 /// Artifact metadata (everything except the payload bytes).
-#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize, uniffi::Record)]
 pub struct ArtifactMeta {
     pub key: String,
     pub mime_type: String,

@@ -43,13 +43,8 @@
           cargo = rustToolchain;
         } {
           src = ./server;
-          # Vendor hash for the server's current Cargo dependency set, including
-          # the web-compat crates (encoding_rs, flate2, brotli, urlpattern) and
-          # the websocket/http2 crates (tokio-tungstenite, h2, bytes, http,
-          # tokio-rustls, webpki-roots) added by the Modal gRPC workaround.
-          # Regenerate by building any nix package after a Cargo.lock change
-          # and copying the printed hash.
-          hash = "sha256-TD7zF5hzkQcpyP3s9iNYjHw+xpUBg0YYCWI73P+bd1w=";
+          # Vendor hash for the merged server dependency graph (including UniFFI).
+          hash = "sha256-T3FLjR7we/kl8hok2Pm1ZmOHbpmvM0VhKNxXmauMee0=";
         });
 
         docsPython = pkgs.python3.withPackages (
