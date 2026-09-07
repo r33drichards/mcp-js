@@ -94,7 +94,21 @@ not a request to store a credential in this repository or in GitHub Actions.
 Build the HTTP client tarball as a real Nix derivation with
 `nix build .#npm-client`; the output directory contains the scoped `.tgz`.
 The HTTP package E2E workflow runs this derivation as well as an independent
-outside-Nix installed-consumer test.
+outside-Nix installed-consumer test. Native CI generates the bindings from the
+real shared engine, stages that content-addressed source tree, and evaluates
+`nix/npm-native.nix`; this makes compilation, RPATH removal, path scrubbing,
+and packing a Nix derivation too. The independent test then installs the exact Nix-produced
+tarball outside Nix, checks its installed ELF with `readelf` and `ldd`,
+and executes the engine. Packing inside Nix disables lifecycle scripts because
+prepack's outside-Nix loader checks cannot run meaningfully in that sandbox;
+the mandatory installed-tarball gate performs ELF, license, dependency,
+TypeScript, and engine execution checks before release artifacts are uploaded.
+
+This native derivation consumes an externally generated engine and bindings.
+It is not yet a complete native flake output or an independently substitutable
+source-V8 derivation. The Cargo cache below is not a Nix binary cache. Native
+readiness also requires review of the current binary path-prefix rewriting;
+byte rewriting alone does not establish portability.
 
 The native package cannot use rusty_v8's ordinary release archive: CI run
 `34153857783` proved that it contains `R_X86_64_TPOFF32` relocations that the

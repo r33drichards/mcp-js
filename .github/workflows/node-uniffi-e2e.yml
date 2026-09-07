@@ -134,4 +134,4 @@ jobs:
         run: nix develop --command npm run build --prefix node
       - name: Pack and execute an isolated tarball consumer
         # Runs outside nix develop: Nix-only or unresolved dynamic dependencies fail prepack.
-        run: timeout 240s npm run test:package --prefix node
+        run: timeout 240s node node/scripts/test-package.mjs result/*.tgz

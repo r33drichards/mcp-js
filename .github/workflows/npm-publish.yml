@@ -127,7 +127,7 @@ jobs:
           npm run typecheck --prefix node
           timeout 90s npm test --prefix node
           nix develop --command npm run build --prefix node
-          timeout 240s npm run test:package --prefix node
+          timeout 240s node node/scripts/test-package.mjs result/*.tgz
       - name: Pack exact release tarball
         id: pack
         env:
@@ -135,6 +135,11 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release-artifacts
+          if [ "$DIRECTORY" = node ]; then
+            cp result/*.tgz release-artifacts/
+            basename result/*.tgz > release-artifacts/tarball-name
+            exit 0
+          fi
           output="$(npm pack --json --pack-destination release-artifacts --prefix "$DIRECTORY")"
           node - "$output" <<'NODE' > release-artifacts/tarball-name
           const result = JSON.parse(process.argv[2]);

@@ -16,11 +16,17 @@ pkgs.buildNpmPackage {
     patchelf
   ];
 
-  npmBuildScript = "build";
+  buildPhase = ''
+    runHook preBuild
+    cd node
+    npm run build
+    runHook postBuild
+  '';
   installPhase = ''
     runHook preInstall
     mkdir -p "$out"
-    npm pack --pack-destination "$out"
+    # Validate this exact tarball outside Nix before release.
+    npm pack --ignore-scripts --pack-destination "$out"
     runHook postInstall
   '';
 }
