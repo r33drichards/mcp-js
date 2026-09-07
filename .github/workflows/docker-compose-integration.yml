@@ -24,6 +24,10 @@ jobs:
     name: Docker Compose Integration
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      # Build the server image from this checkout, not from the latest release,
+      # so the tests exercise the code under test.
+      MCP_V8_BUILD: source
 
     steps:
       - name: Checkout code

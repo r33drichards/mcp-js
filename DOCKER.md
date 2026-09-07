@@ -29,9 +29,20 @@ Docker caches the download by its inputs, so rebuilding with the default
 Pass an explicit version or `docker build --no-cache` to pick up a new release.
 Check what an image contains with `docker run --rm mcp-v8:latest --version`.
 
-To run a container from a source checkout instead (for example while working on
-the server), build the binary with `cargo build --release -p server` and mount
-or copy it over `/usr/local/bin/mcp-v8` in the image.
+To compile the checkout instead of downloading a release (for example while
+working on the server), select the source build:
+
+```bash
+docker build --build-arg MCP_V8_BUILD=source -t mcp-v8:dev .
+```
+
+This uses the Rust nightly toolchain and takes considerably longer. The compose
+stacks in the repository read the same switch from the environment, which is
+how the integration-test workflows build the code under test:
+
+```bash
+MCP_V8_BUILD=source docker compose -f docker-compose.yml up --build
+```
 
 ## Running the Container
 

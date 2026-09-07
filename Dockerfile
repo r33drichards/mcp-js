@@ -4,18 +4,25 @@
 # Releases instead of compiling the source in this checkout. A release build
 # takes a few seconds to download; a source build of V8 takes tens of minutes.
 #
-#   docker build -t mcp-v8 .                                  # latest release
+#   docker build -t mcp-v8 .                                    # latest release
 #   docker build --build-arg MCP_V8_VERSION=v0.20.1 -t mcp-v8 . # pinned release
+#   docker build --build-arg MCP_V8_BUILD=source -t mcp-v8 .    # compile checkout
 #
 # MCP_V8_VERSION accepts a release tag with or without the leading "v", or
 # "latest" (the default). Docker caches the download layer by its inputs, so a
 # rebuild with the default "latest" reuses a previously downloaded binary even
 # after a newer release ships; pass an explicit tag or `--no-cache` to refresh.
+#
+# MCP_V8_BUILD selects where the binary comes from: "release" (the default)
+# downloads it, "source" compiles the working tree. The integration-test
+# workflows use "source" so they exercise the code under test; only the stage
+# that is selected gets built.
 ARG MCP_V8_VERSION=latest
 ARG MCP_V8_REPO=r33drichards/mcp-js
+ARG MCP_V8_BUILD=release
 
-# ── Fetch stage ──────────────────────────────────────────────────────────────
-FROM debian:trixie-slim AS fetch
+# ── Release binary: download from GitHub Releases ────────────────────────────
+FROM debian:trixie-slim AS binary-release
 
 ARG MCP_V8_VERSION
 ARG MCP_V8_REPO
@@ -56,6 +63,33 @@ RUN set -eu; \
       /mcp-v8 --version; \
     fi
 
+# ── Source binary: compile this checkout ─────────────────────────────────────
+FROM rust:latest AS binary-source
+
+# Install required dependencies for V8 build
+RUN apt-get update && apt-get install -y \
+    python3 \
+    pkg-config \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy the entire project
+COPY . .
+
+# Install nightly toolchain as required by rust-toolchain file
+RUN rustup default nightly
+
+# Build the release binary
+RUN cargo build --release -p server \
+    && cp target/release/server /mcp-v8 \
+    && /mcp-v8 --version
+
+# ── Binary selection ─────────────────────────────────────────────────────────
+# Resolves to binary-release or binary-source; BuildKit builds only that one.
+FROM binary-${MCP_V8_BUILD} AS binary
+
 # ── Runtime stage ────────────────────────────────────────────────────────────
 FROM debian:trixie-slim
 
@@ -70,8 +104,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Create non-root user for security
 RUN useradd -m -u 1000 mcpuser
 
-# Install the release binary fetched above
-COPY --from=fetch --chown=mcpuser:mcpuser /mcp-v8 /usr/local/bin/mcp-v8
+# Install the selected binary
+COPY --from=binary --chown=mcpuser:mcpuser /mcp-v8 /usr/local/bin/mcp-v8
 
 # Create default data directory for stateful mode (heaps, sessions, etc.)
 RUN mkdir -p /data && chown mcpuser:mcpuser /data

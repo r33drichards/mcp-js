@@ -21,7 +21,12 @@ services:
 
   # ── Single MCP-JS node ─────────────────────────────────────────────────
   node1:
-    build: .
+    build:
+      context: .
+      args:
+        # release (default) installs the latest GitHub release; source compiles
+        # this checkout (used by the integration tests).
+        MCP_V8_BUILD: ${MCP_V8_BUILD:-release}
     command:
       - --http-port=3000
     expose:
