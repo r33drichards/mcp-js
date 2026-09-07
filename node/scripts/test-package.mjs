@@ -13,7 +13,7 @@ try {
   writeFileSync(join(temp, 'package.json'), JSON.stringify({ private: true, type: 'module' }));
   run('npm', ['install', '--ignore-scripts', '--no-audit', '--no-fund', join(temp, result.filename)]);
   cpSync(join(root, 'tests/consumer.mjs'), join(temp, 'consumer.mjs'));
-  writeFileSync(join(temp, 'consumer.ts'), 'import { Engine } from "@mcp-js/node";\nconst engine: Engine = Engine.createStateless(64n, 1n);\nengine.close();\nengine.uniffiDestroy();\n');
+  writeFileSync(join(temp, 'consumer.ts'), 'import { Engine } from "@wholelottahoopla/mcp-js-node";\nconst engine: Engine = Engine.createStateless(64n, 1n);\nengine.close();\nengine.uniffiDestroy();\n');
   run(process.execPath, [join(root, 'node_modules/typescript/bin/tsc'), '--noEmit', '--strict', '--skipLibCheck', '--target', 'ES2022', '--module', 'NodeNext', '--moduleResolution', 'NodeNext', 'consumer.ts']);
   // Hide source outputs: loading must use only the installed tarball, not the checkout.
   const hidden = [];

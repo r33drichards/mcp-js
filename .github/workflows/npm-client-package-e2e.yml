@@ -1,0 +1,37 @@
+name: npm HTTP Client Package E2E
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "clients/typescript/**"
+      - ".github/workflows/npm-client-package-e2e.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "clients/typescript/**"
+      - ".github/workflows/npm-client-package-e2e.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package-consumer:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: clients/typescript/package-lock.json
+      - name: Install locked package tooling
+        run: npm ci --include=dev --prefix clients/typescript
+      - name: Typecheck source client
+        run: npm run typecheck --prefix clients/typescript
+      - name: Compile ESM and declarations
+        run: npm run build --prefix clients/typescript
+      - name: Pack and import an isolated tarball consumer
+        run: timeout 180s npm run test:package --prefix clients/typescript

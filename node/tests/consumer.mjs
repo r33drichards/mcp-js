@@ -6,7 +6,7 @@ for (const method of ['spawn', 'spawnSync', 'exec', 'execSync', 'execFile', 'exe
   childProcess[method] = () => { throw new Error('Unexpected subprocess'); };
 }
 syncBuiltinESMExports();
-const { Engine } = await import('@mcp-js/node');
+const { Engine } = await import('@wholelottahoopla/mcp-js-node');
 const engine = Engine.createStateless(64n, 1n);
 try {
   const result = JSON.parse(engine.callTool('run_js', JSON.stringify({ code: 'console.log(await Promise.resolve(6 * 7))' }), undefined, undefined));

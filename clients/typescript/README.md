@@ -1,4 +1,4 @@
-# @mcp-v8/client (TypeScript)
+# @wholelottahoopla/mcp-js-client
 
 A TypeScript client for the [mcp-v8](https://github.com/r33drichards/mcp-js)
 JavaScript execution server. The wire types are **generated from the server's
@@ -8,10 +8,30 @@ tiny, fully-typed [`openapi-fetch`](https://openapi-ts.dev/openapi-fetch/)
 runtime — mirroring how the Rust client (`mcp-v8-client`) is generated with
 progenitor from the same spec.
 
-## Install
+## Package output
+
+`npm run build` compiles `src/index.ts` to ESM at `dist/index.js`, emits
+`dist/index.d.ts`, and copies the generated schema declaration to
+`dist/schema.d.ts`. Package exports are NodeNext-compatible (`./schema` is a
+type-only subpath). `npm run test:package` packs the actual allowlisted payload,
+installs it into a fresh directory without install hooks, imports it as ESM, and
+typechecks both its root and schema exports. It accepts npm 12's keyed
+`npm pack --json` result and npm's older array format.
+
+## Release blocker: license
+
+This client package deliberately retains its existing `"license": "MIT"`
+manifest value. The repository root is AGPL-3.0, and no package-specific MIT
+license text is currently present in this source tree. That conflict has **not**
+been resolved or silently relicensed by this change. Do not publish
+`@wholelottahoopla/mcp-js-client` until the project owner supplies and approves
+the correct package license text and distribution policy. The CI workflow only
+builds and tests tarballs; it never publishes.
+
+## Install (after the license blocker is resolved)
 
 ```bash
-npm install   # from clients/typescript
+npm install @wholelottahoopla/mcp-js-client
 ```
 
 ## Regenerating the types
@@ -28,7 +48,7 @@ npm run generate   # openapi-typescript ../../openapi.json -> src/schema.d.ts
 ## Usage
 
 ```ts
-import { createMcpV8Client } from "@mcp-v8/client";
+import { createMcpV8Client } from "@wholelottahoopla/mcp-js-client";
 
 const client = createMcpV8Client("http://localhost:8080");
 

@@ -1,5 +1,5 @@
 {
-  "name": "@mcp-js/node",
+  "name": "@wholelottahoopla/mcp-js-node",
   "type": "module",
   "scripts": {
     "test": "node --import tsx --test --test-timeout=60000 tests/engine.test.ts",

@@ -8,9 +8,9 @@
  * completion, and collects the full console output.
  */
 import createOpenApiClient from "openapi-fetch";
-import type { components, paths } from "./schema";
+import type { components, paths } from "./schema.js";
 
-export type { components, paths } from "./schema";
+export type { components, paths } from "./schema.js";
 
 export type ExecRequest = components["schemas"]["ExecRequest"];
 export type ExecAccepted = components["schemas"]["ExecAccepted"];

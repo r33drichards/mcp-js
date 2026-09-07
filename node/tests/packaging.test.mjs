@@ -5,8 +5,8 @@ import { checkDependencies, checkElf, checkTarball, packResult } from '../script
 test('npm pack JSON supports npm <=11 arrays and npm 12 keyed objects', () => {
   const result = { filename: 'mcp-js-node-0.1.0.tgz', files: [] };
   assert.equal(packResult([result]), result);
-  assert.equal(packResult({ '@mcp-js/node': result }), result);
-  for (const bad of [{}, [], { '@mcp-js/node': {} }]) assert.throws(() => packResult(bad));
+  assert.equal(packResult({ '@wholelottahoopla/mcp-js-node': result }), result);
+  for (const bad of [{}, [], { '@wholelottahoopla/mcp-js-node': {} }]) assert.throws(() => packResult(bad));
 });
 
 test('native gate rejects absent, text, wrong architecture and executable files', () => {

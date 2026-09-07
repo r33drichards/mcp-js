@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 
 export function packResult(json) {
-  const result = Array.isArray(json) ? json[0] : json['@mcp-js/node'];
+  const result = Array.isArray(json) ? json[0] : json['@wholelottahoopla/mcp-js-node'];
   assert.ok(result?.filename && Array.isArray(result.files), 'Unrecognized npm pack --json output');
   return result;
 }

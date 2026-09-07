@@ -1,4 +1,4 @@
-# @mcp-js/node
+# @wholelottahoopla/mcp-js-node
 
 Native embedded mcp-js engine for Node.js 22+, using the pinned `@ubjs/node`
 Node-API runtime. This is an ESM package with JavaScript and TypeScript
@@ -70,7 +70,7 @@ and adds these packaging checks. Unit tests alone are not native validation.
 ## API
 
 ```js
-import { Engine } from '@mcp-js/node';
+import { Engine } from '@wholelottahoopla/mcp-js-node';
 
 const engine = Engine.createStateless(64n, 1n);
 try {
