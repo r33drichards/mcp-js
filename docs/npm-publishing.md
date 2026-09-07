@@ -29,8 +29,8 @@ attribution is grounded in the repository's pre-AGPL license commit
    passed on PR head `5532fcb3` in CI run `34160872507`; any later release
    change must pass the same exact Nix-tarball consumer gate. The native package's `prepack`
    rejects missing/non-x64 ELF files, RPATH/RUNPATH, absolute `DT_NEEDED`,
-   unresolved libraries, Nix-store dependency resolutions, and retained Nix or
-   CI workspace paths. The full native build and installed-tarball execution
+   unresolved libraries, Nix-store dependency resolutions, and Nix-store or CI
+   workspace references in runtime loader metadata. The full native build and installed-tarball execution
    must pass on GitHub's Ubuntu runner; a local Nix build is not sufficient proof.
 2. **First-publication bootstrap is manual.** npm trusted-publisher settings
    are configured in an existing package's npm settings. Because both scoped
@@ -112,8 +112,8 @@ subsequent OIDC publications do.
 Build the HTTP client tarball as a real Nix derivation with
 `nix build .#npm-client`; the output directory contains the scoped `.tgz`.
 The HTTP package E2E and release workflows install this exact derivation
-output in an independent outside-Nix consumer test. Native CI generates the bindings from the
-real shared engine, stages that content-addressed source tree, and evaluates
+output in an independent outside-Nix consumer test. Native CI generates the
+bindings from the real shared engine, stages that content-addressed source tree, and evaluates
 `nix/npm-native.nix`; this makes compilation, RPATH removal,
 and packing a Nix derivation too. The independent test then installs the exact
 Nix-produced tarball outside Nix, checks its installed ELF with `readelf` and `ldd`,
@@ -124,7 +124,9 @@ TypeScript, and engine execution checks before release artifacts are uploaded.
 
 This native derivation consumes an externally generated engine and bindings.
 It is not yet a complete native flake output or an independently substitutable
-source-V8 derivation. The Cargo cache below is not a Nix binary cache. The native package cannot use rusty_v8's ordinary release archive: CI run
+source-V8 derivation. The Cargo cache below is not a Nix binary cache.
+
+The native package cannot use rusty_v8's ordinary release archive: CI run
 `34153857783` proved that it contains `R_X86_64_TPOFF32` relocations that the
 linker rejects in a shared object. Native CI therefore uses the pinned
 rusty_v8 revision with `v8_monolithic_for_shared_library=true`. Its persisted
