@@ -454,7 +454,7 @@ fn build_engine(allow_external_modules: bool) -> Engine {
         .with_http2_config(Http2Config::new_with_chain(chain))
         .with_module_loader_config(ModuleLoaderConfig {
             allow_external: allow_external_modules,
-            policy_chain: None,
+            hooks: None,
         })
         .with_execution_registry(Arc::new(registry))
 }

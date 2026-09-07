@@ -102,7 +102,7 @@ try {{
     let handle = Arc::new(Mutex::new(None));
     let loader_config = ModuleLoaderConfig {
         allow_external: false,
-        policy_chain: None,
+        hooks: None,
     };
     let _ = server::engine::execute_stateless(&code, ExecutionConfig::new(max_bytes)
         .isolate_handle(handle)

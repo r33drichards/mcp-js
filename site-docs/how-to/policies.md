@@ -2,6 +2,8 @@
 
 Policies are written in [Rego](https://www.openpolicyagent.org/docs/latest/policy-language/) and are evaluated before each capability call. This guide shows focused recipes for common gating tasks. See [Concepts: Security policies](../concepts/policies.md) for the evaluation model and the input documents each capability receives.
 
+> Policies are implemented as [hooks](../concepts/hooks.md) — pre hooks that only gate. When a recipe needs to *rewrite* a request, observe operations (audit logging), or inspect outputs, write a hook instead: the same Rego (or JavaScript) vocabulary, configured under `pre`/`post` alongside `policies`.
+
 ## Gate network access by host and method
 
 Write a `fetch.rego` that restricts to GET-only on a specific host:
