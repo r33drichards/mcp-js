@@ -1,44 +1,77 @@
-# Build stage
-FROM rust:latest AS builder
+# syntax=docker/dockerfile:1
 
-# Install required dependencies for V8 build
-RUN apt-get update && apt-get install -y \
-    python3 \
-    pkg-config \
-    libssl-dev \
+# The image installs a prebuilt mcp-v8 server binary from the project's GitHub
+# Releases instead of compiling the source in this checkout. A release build
+# takes a few seconds to download; a source build of V8 takes tens of minutes.
+#
+#   docker build -t mcp-v8 .                                  # latest release
+#   docker build --build-arg MCP_V8_VERSION=v0.20.1 -t mcp-v8 . # pinned release
+#
+# MCP_V8_VERSION accepts a release tag with or without the leading "v", or
+# "latest" (the default). Docker caches the download layer by its inputs, so a
+# rebuild with the default "latest" reuses a previously downloaded binary even
+# after a newer release ships; pass an explicit tag or `--no-cache` to refresh.
+ARG MCP_V8_VERSION=latest
+ARG MCP_V8_REPO=r33drichards/mcp-js
+
+# ── Fetch stage ──────────────────────────────────────────────────────────────
+FROM debian:trixie-slim AS fetch
+
+ARG MCP_V8_VERSION
+ARG MCP_V8_REPO
+# Populated by BuildKit from --platform (amd64 / arm64); defaults to the host.
+ARG TARGETARCH
+ARG BUILDPLATFORM
+ARG TARGETPLATFORM
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Set working directory
-WORKDIR /app
+# Release assets are named per release.yml: mcp-v8-linux.gz (x86_64) and
+# mcp-v8-linux-arm64.gz (aarch64). Both are glibc-floored (2.27) dynamic
+# binaries linked against rustls, so they need no OpenSSL at runtime.
+RUN set -eu; \
+    case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
+      amd64) asset="mcp-v8-linux.gz" ;; \
+      arm64) asset="mcp-v8-linux-arm64.gz" ;; \
+      *) echo "mcp-v8 has no release binary for architecture '${TARGETARCH}'" >&2; exit 1 ;; \
+    esac; \
+    case "$MCP_V8_VERSION" in \
+      latest) url="https://github.com/${MCP_V8_REPO}/releases/latest/download/${asset}" ;; \
+      v*)     url="https://github.com/${MCP_V8_REPO}/releases/download/${MCP_V8_VERSION}/${asset}" ;; \
+      *)      url="https://github.com/${MCP_V8_REPO}/releases/download/v${MCP_V8_VERSION}/${asset}" ;; \
+    esac; \
+    echo "Downloading ${url}"; \
+    curl --fail --silent --show-error --location --retry 5 --retry-delay 2 \
+      -o /tmp/mcp-v8.gz "$url"; \
+    gunzip -c /tmp/mcp-v8.gz > /mcp-v8; \
+    chmod 0755 /mcp-v8; \
+    rm /tmp/mcp-v8.gz; \
+    # Smoke-test the binary when it can run natively. Under emulation
+    # (a cross-platform buildx build) the check is skipped rather than run
+    # through QEMU.
+    if [ -z "${TARGETPLATFORM:-}" ] || [ "${BUILDPLATFORM:-}" = "${TARGETPLATFORM:-}" ]; then \
+      /mcp-v8 --version; \
+    fi
 
-# Copy the entire project
-COPY . .
-
-# Install nightly toolchain as required by rust-toolchain file
-RUN rustup default nightly
-
-# Build the release binary
-RUN cargo build --release -p server
-
-# Runtime stage
+# ── Runtime stage ────────────────────────────────────────────────────────────
 FROM debian:trixie-slim
 
 LABEL io.modelcontextprotocol.server.name="io.github.r33drichards/mcp-js"
 
-# Install runtime dependencies
-RUN apt-get update && apt-get install -y \
+# ca-certificates lets the server's outbound HTTPS (fetch(), JWKS, S3) verify
+# peers; TLS itself is rustls, statically linked into the binary.
+RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
-    libssl3 \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user for security
 RUN useradd -m -u 1000 mcpuser
 
-# Copy the binary from builder
-COPY --from=builder /app/target/release/server /usr/local/bin/mcp-v8
-
-# Set ownership
-RUN chown mcpuser:mcpuser /usr/local/bin/mcp-v8
+# Install the release binary fetched above
+COPY --from=fetch --chown=mcpuser:mcpuser /mcp-v8 /usr/local/bin/mcp-v8
 
 # Create default data directory for stateful mode (heaps, sessions, etc.)
 RUN mkdir -p /data && chown mcpuser:mcpuser /data
@@ -82,4 +115,3 @@ ENTRYPOINT ["mcp-v8"]
 # appended to the ENTRYPOINT and rejected as an unexpected argument. The
 # transport comes from $PORT above, so no default arguments are needed.
 CMD []
-

@@ -10,12 +10,28 @@ Build the image from the project root:
 docker build -t mcp-v8:latest .
 ```
 
-The build process:
-1. Uses Rust nightly toolchain (as required by the project)
-2. Installs dependencies needed for V8 compilation
-3. Builds the release binary
-4. Creates a minimal runtime image with only necessary dependencies
-5. Runs as non-root user for security
+The Dockerfile does not compile the server. It downloads the prebuilt
+`mcp-v8` binary for the image's architecture from the project's
+[GitHub Releases](https://github.com/r33drichards/mcp-js/releases) and installs
+it into a minimal Debian image that runs as a non-root user. A build takes
+seconds instead of the tens of minutes a V8 build needs, and the container runs
+exactly the binary a release shipped.
+
+By default the newest release is used. Pin one with `MCP_V8_VERSION` (the
+leading `v` is optional):
+
+```bash
+docker build --build-arg MCP_V8_VERSION=v0.20.1 -t mcp-v8:0.20.1 .
+```
+
+Docker caches the download by its inputs, so rebuilding with the default
+`latest` reuses an already-downloaded binary even after a newer release ships.
+Pass an explicit version or `docker build --no-cache` to pick up a new release.
+Check what an image contains with `docker run --rm mcp-v8:latest --version`.
+
+To run a container from a source checkout instead (for example while working on
+the server), build the binary with `cargo build --release -p server` and mount
+or copy it over `/usr/local/bin/mcp-v8` in the image.
 
 ## Running the Container
 
@@ -245,6 +261,10 @@ docker run -it --entrypoint bash mcp-v8:latest -c "env | grep AWS"
 
 ## Building for Different Architectures
 
+Releases ship Linux binaries for x86_64 and ARM64, and the Dockerfile picks the
+one matching the target platform, so cross-platform builds need no compiler or
+emulated build step.
+
 Build for ARM64 (Apple Silicon, ARM servers):
 ```bash
 docker buildx build --platform linux/arm64 -t mcp-v8:arm64 .
@@ -259,3 +279,6 @@ Multi-platform build:
 ```bash
 docker buildx build --platform linux/amd64,linux/arm64 -t mcp-v8:latest .
 ```
+
+The published `wholelottahoopla/mcp-js` image on Docker Hub is built this way
+for both platforms.

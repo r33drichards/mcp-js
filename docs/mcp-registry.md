@@ -14,9 +14,11 @@ manifest name identical.
    `wholelottahoopla/mcp-js` and that the image is public.
 3. Create and push a new, unused version tag on the merged commit, for example
    `git tag v0.20.1 && git push origin v0.20.1` (check availability first).
-4. Watch **Build and Push Docker Image**. After the image succeeds, its
-   `publish-mcp` job sets the manifest version and image tag from the release
-   tag, authenticates using GitHub OIDC, and publishes the metadata.
+4. Watch **Release Rust Server**, then **Build and Push Docker Image**, which
+   starts when the release workflow completes and packages that release's
+   server binary. After the image succeeds, its `publish-mcp` job sets the
+   manifest version and image tag from the release tag, authenticates using
+   GitHub OIDC, and publishes the metadata.
 
 No MCP Registry secret is required. The job needs `id-token: write`, and must
 run in the repository owner's namespace. Existing release images do not gain
