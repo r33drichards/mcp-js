@@ -131,6 +131,15 @@ jobs:
             cargo build -p mcp-v8-uniffi-python --release \
               --config mcp-v8-uniffi-python/cargo-config.toml
           '
+      - name: Save source-V8 build cache before later package checks
+        if: success()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/git
+            ~/.cargo/registry
+            target/python-uniffi
+          key: python-uniffi-v8-145-shared-v2-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'server/**', 'mcp-v8-uniffi-python/**') }}
       - name: Build pinned UniFFI TypeScript generator
         run: nix develop --command bash node/scripts/build-bindgen.sh
       - name: Install locked Node runtime and test dependencies
