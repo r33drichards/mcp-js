@@ -55,6 +55,47 @@ useful in scripts but blocks the host thread. The native engine awaits Promises
 in the executed JavaScript. Execution errors and deadlines are returned in
 JSON; native API failures reject the Promise (or throw from `callTool`).
 
+## Host filesystem access
+
+`Engine.createWithFilesystem(heapMb, timeoutSecs, filesystemJson)` enables
+hook/policy-gated host filesystem access and nothing else (no subprocess,
+network, or module imports). `filesystemJson` is the `filesystem` entry of
+`--policies-json`, so `policies`, `pre` hooks, and `stack` layers behave
+exactly as they do for the server; a configuration without any of them is
+rejected. Guest code then has `fs.*`, and the same engine exposes typed
+native methods that run through the same hook chain, with no JavaScript
+evaluation, no JSON or base64 encoding of file bytes, and structured errors:
+
+```ts
+const engine = Engine.createWithFilesystem(64n, 5n, JSON.stringify({
+  policies: [{ url: "file:///etc/policies/filesystem.rego" }],
+}));
+await engine.fsWriteFile("/work/data.bin", new Uint8Array([1, 2, 3]));
+const bytes = new Uint8Array(await engine.fsReadFile("/work/data.bin"));
+const text = await engine.fsReadTextFile("/work/notes.txt");
+const stat = await engine.fsStat("/work/notes.txt"); // { kind, size, readonly, mode, modifiedMs }
+const names = await engine.fsReadDir("/work");
+await engine.fsAppendFile("/work/notes.txt", new TextEncoder().encode("\n"));
+await engine.fsMakeDir("/work/out", true);
+await engine.fsRename("/work/notes.txt", "/work/out/notes.txt");
+await engine.fsRemove("/work/out", true);
+await engine.fsExists("/work/out"); // false
+```
+
+`fsLstat`, `fsReadLink`, `fsReadFileRange(path, offset, maxBytes)` for paging
+through large files, and `fsCanonicalPath` (gated as a `stat`) complete the set. A pre hook that rewrites `path`
+or `destination` applies to native calls exactly as to guest `fs.*` calls.
+Failures reject with `RuntimeError.FileSystem`, carrying a `kind`
+(`NotFound`, `PermissionDenied`, `AlreadyExists`, `NotDirectory`,
+`IsDirectory`, `NotEmpty`, `InvalidData`, `NotSupported`, `Other`) and the
+same message the guest wrapper would report, including its Node-style code
+token. Engines created with `createStateless` reject native filesystem calls;
+`hostFilesystemEnabled()` reports which kind you have. Overlay-backed
+(session snapshot) engines are not supported by the native methods.
+
+`tests/filesystem.test.ts` covers policy denial, hook-only configuration with a
+path rewrite, guest/native parity on the same bytes, and each typed failure.
+
 ## Generator compatibility
 
 The upstream release `0.31.0-5` (commit

@@ -76,6 +76,77 @@ pub struct RuntimeCapabilities {
     pub sessions: bool,
 }
 
+/// Classification of a native filesystem failure. Mirrors [`fs::FsErrorKind`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum FsErrorKind {
+    NotFound,
+    PermissionDenied,
+    AlreadyExists,
+    NotDirectory,
+    IsDirectory,
+    NotEmpty,
+    InvalidData,
+    NotSupported,
+    Other,
+}
+
+impl From<fs::FsErrorKind> for FsErrorKind {
+    fn from(kind: fs::FsErrorKind) -> Self {
+        match kind {
+            fs::FsErrorKind::NotFound => Self::NotFound,
+            fs::FsErrorKind::PermissionDenied => Self::PermissionDenied,
+            fs::FsErrorKind::AlreadyExists => Self::AlreadyExists,
+            fs::FsErrorKind::NotDirectory => Self::NotDirectory,
+            fs::FsErrorKind::IsDirectory => Self::IsDirectory,
+            fs::FsErrorKind::NotEmpty => Self::NotEmpty,
+            fs::FsErrorKind::InvalidData => Self::InvalidData,
+            fs::FsErrorKind::NotSupported => Self::NotSupported,
+            fs::FsErrorKind::Other => Self::Other,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum FsEntryKind {
+    File,
+    Directory,
+    Symlink,
+    Other,
+}
+
+/// Metadata returned by the native `fs_stat` / `fs_lstat` calls.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct FsMetadata {
+    pub kind: FsEntryKind,
+    pub size: u64,
+    pub readonly: bool,
+    /// Unix mode bits (type bits included); synthesized on other platforms.
+    pub mode: u32,
+    /// Modification time in milliseconds since the Unix epoch, when known.
+    pub modified_ms: Option<f64>,
+}
+
+impl From<fs::FsStat> for FsMetadata {
+    fn from(stat: fs::FsStat) -> Self {
+        let kind = if stat.is_symlink {
+            FsEntryKind::Symlink
+        } else if stat.is_directory {
+            FsEntryKind::Directory
+        } else if stat.is_file {
+            FsEntryKind::File
+        } else {
+            FsEntryKind::Other
+        };
+        Self {
+            kind,
+            size: stat.size,
+            readonly: stat.readonly,
+            mode: stat.mode,
+            modified_ms: stat.mtime_ms,
+        }
+    }
+}
+
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct ExecutionRequest {
     pub code: String,
@@ -101,6 +172,16 @@ pub enum RuntimeError {
     ToolCall { message: String },
     #[error("operation failed: {message}")]
     Operation { message: String },
+    /// A native filesystem call failed. `message` is the same text the guest
+    /// `fs.*` wrapper would surface for the failure.
+    #[error("filesystem operation failed: {message}")]
+    FileSystem { kind: FsErrorKind, message: String },
+}
+
+impl From<fs::FsError> for RuntimeError {
+    fn from(error: fs::FsError) -> Self {
+        Self::FileSystem { kind: error.kind.into(), message: error.message }
+    }
 }
 
 impl RuntimeError {
@@ -113,7 +194,7 @@ impl RuntimeError {
             | Self::Initialization { message }
             | Self::ToolCall { message }
             | Self::Operation { message } => message,
-            Self::InvalidJson { message, .. } => message,
+            Self::InvalidJson { message, .. } | Self::FileSystem { message, .. } => message,
         }
     }
 }
@@ -155,6 +236,89 @@ impl Engine {
             })?
             .fs_config = Some(Arc::new(fs::FsConfig::new_with_hooks(Arc::new(chain))));
         Ok(engine)
+    }
+
+    /// True when this engine was constructed with a filesystem hook chain, so
+    /// both guest `fs.*` calls and the native `fs_*` methods are available.
+    pub fn host_filesystem_enabled(&self) -> bool {
+        self.fs_config.is_some()
+    }
+
+    /// Read a file as bytes through the filesystem hook chain.
+    pub async fn fs_read_file(self: Arc<Self>, path: String) -> Result<Vec<u8>, RuntimeError> {
+        self.native_fs(|fs| async move { fs.read_file(&path).await }).await
+    }
+
+    /// Read at most `max_bytes` bytes of a file starting at `offset`; fewer
+    /// bytes are returned only at end of file. Gated as a read of the file.
+    pub async fn fs_read_file_range(
+        self: Arc<Self>,
+        path: String,
+        offset: u64,
+        max_bytes: u64,
+    ) -> Result<Vec<u8>, RuntimeError> {
+        self.native_fs(|fs| async move { fs.read_range(&path, offset, max_bytes).await }).await
+    }
+
+    /// The canonical path of an existing path, resolving symlinks. Gated as a
+    /// `stat` of the path.
+    pub async fn fs_canonical_path(self: Arc<Self>, path: String) -> Result<String, RuntimeError> {
+        self.native_fs(|fs| async move { fs.canonical_path(&path).await }).await
+    }
+
+    /// Read a file as UTF-8 text; invalid UTF-8 is an `InvalidData` failure.
+    pub async fn fs_read_text_file(self: Arc<Self>, path: String) -> Result<String, RuntimeError> {
+        self.native_fs(|fs| async move { fs.read_text(&path).await }).await
+    }
+
+    /// Create or replace a file with `data`.
+    pub async fn fs_write_file(self: Arc<Self>, path: String, data: Vec<u8>) -> Result<(), RuntimeError> {
+        self.native_fs(|fs| async move { fs.write_file(&path, &data).await }).await
+    }
+
+    /// Append `data` to a file, creating it when missing.
+    pub async fn fs_append_file(self: Arc<Self>, path: String, data: Vec<u8>) -> Result<(), RuntimeError> {
+        self.native_fs(|fs| async move { fs.append_file(&path, &data).await }).await
+    }
+
+    /// Metadata for a path, following a final symlink (Node `fs.stat`).
+    pub async fn fs_stat(self: Arc<Self>, path: String) -> Result<FsMetadata, RuntimeError> {
+        self.native_fs(|fs| async move { fs.stat(&path, true).await.map(FsMetadata::from) }).await
+    }
+
+    /// Metadata for a path without following a final symlink (Node `fs.lstat`).
+    pub async fn fs_lstat(self: Arc<Self>, path: String) -> Result<FsMetadata, RuntimeError> {
+        self.native_fs(|fs| async move { fs.stat(&path, false).await.map(FsMetadata::from) }).await
+    }
+
+    /// Names of a directory's direct children.
+    pub async fn fs_read_dir(self: Arc<Self>, path: String) -> Result<Vec<String>, RuntimeError> {
+        self.native_fs(|fs| async move { fs.readdir(&path).await }).await
+    }
+
+    /// The target of a symlink.
+    pub async fn fs_read_link(self: Arc<Self>, path: String) -> Result<String, RuntimeError> {
+        self.native_fs(|fs| async move { fs.readlink(&path).await }).await
+    }
+
+    /// Create a directory, and its missing parents when `recursive` is set.
+    pub async fn fs_make_dir(self: Arc<Self>, path: String, recursive: bool) -> Result<(), RuntimeError> {
+        self.native_fs(|fs| async move { fs.mkdir(&path, recursive).await }).await
+    }
+
+    /// Remove a file, or a directory (its contents too when `recursive` is set).
+    pub async fn fs_remove(self: Arc<Self>, path: String, recursive: bool) -> Result<(), RuntimeError> {
+        self.native_fs(|fs| async move { fs.rm(&path, recursive).await }).await
+    }
+
+    /// Rename `from` to `to`, replacing an existing destination file.
+    pub async fn fs_rename(self: Arc<Self>, from: String, to: String) -> Result<(), RuntimeError> {
+        self.native_fs(|fs| async move { fs.rename(&from, &to).await }).await
+    }
+
+    /// Whether a path exists. Only the hook chain can fail this call.
+    pub async fn fs_exists(self: Arc<Self>, path: String) -> Result<bool, RuntimeError> {
+        self.native_fs(|fs| async move { fs.exists(&path).await }).await
     }
 
     /// Construct a local, capability-restricted engine for synchronous foreign callers.
@@ -806,6 +970,56 @@ impl Engine {
         Ok(result)
     }
 
+    /// The filesystem service native callers share with guest `fs.*` calls:
+    /// the same hook chain, headers, and host backend.
+    ///
+    /// Overlay-backed engines are rejected: the CAS overlay must run on the
+    /// current-thread isolate runtime, which foreign callers do not have.
+    fn native_fs_service(&self) -> Result<fs::FsService, RuntimeError> {
+        let config = self.fs_config.as_ref().ok_or_else(|| RuntimeError::Operation {
+            message: "filesystem access is not configured; construct the engine with create_with_filesystem"
+                .into(),
+        })?;
+        if self.fs_store.is_some() {
+            return Err(RuntimeError::Operation {
+                message: "native filesystem calls are not supported on overlay-backed engines".into(),
+            });
+        }
+        Ok(fs::FsService::host((**config).clone()))
+    }
+
+    /// Run one native filesystem operation, on the caller's runtime when there
+    /// is one and otherwise on the library-created runtime, without blocking the
+    /// foreign host thread. Shutdown waits for in-flight operations, as it does
+    /// for tool calls.
+    async fn native_fs<T, F, Fut>(self: Arc<Self>, op: F) -> Result<T, RuntimeError>
+    where
+        T: Send + 'static,
+        F: FnOnce(fs::FsService) -> Fut,
+        Fut: std::future::Future<Output = Result<T, fs::FsError>> + Send + 'static,
+    {
+        let _lifecycle_guard = self.shutdown_lock.lock().await;
+        self.ensure_running()?;
+        let operation = op(self.native_fs_service()?);
+        if tokio::runtime::Handle::try_current().is_ok() {
+            return operation.await.map_err(RuntimeError::from);
+        }
+        let tokio_runtime = self
+            .tokio_runtime
+            .as_ref()
+            .ok_or_else(|| RuntimeError::Initialization {
+                message: "native filesystem calls require an active or library-created runtime"
+                    .to_string(),
+            })?;
+        tokio_runtime
+            .spawn(operation)
+            .await
+            .map_err(|error| RuntimeError::Operation {
+                message: format!("native filesystem task failed: {error}"),
+            })?
+            .map_err(RuntimeError::from)
+    }
+
     /// Wrap a fully configured runtime for Rust transports without creating a
     /// second Tokio executor or crossing the FFI boundary.
     fn wrap(
@@ -1009,6 +1223,103 @@ mod tests {
             .unwrap();
         let value: Value = serde_json::from_str(&result).unwrap();
         assert_eq!(value["output"], "42");
+    }
+
+    #[tokio::test]
+    async fn native_filesystem_methods_share_the_guest_hook_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_str().unwrap().to_string();
+        let hook = dir.path().join("hooks.rego");
+        let alias = format!("{root}/alias.bin");
+        let redirected = format!("{root}/redirected.bin");
+        std::fs::write(
+            &hook,
+            format!(
+                "package mcp.filesystem\n\
+                 pre := {{\"input\": object.union(input, {{\"path\": \"{redirected}\"}})}} if {{ input.path == \"{alias}\" }}\n\
+                 pre := {{\"allow\": false, \"reason\": \"outside sandbox\"}} if {{ not startswith(input.path, \"{root}\") }}\n"
+            ),
+        )
+        .unwrap();
+        let config = serde_json::json!({"pre": [{"url": format!("file://{}", hook.display())}]}).to_string();
+        let engine = Engine::create_with_filesystem(64, 5, config).unwrap();
+        assert!(engine.host_filesystem_enabled());
+
+        // A pre-hook path rewrite applies to native writes and reads alike, and
+        // the guest reads the same bytes through the same chain.
+        engine.clone().fs_write_file(alias.clone(), vec![0, 255, 10]).await.unwrap();
+        assert!(!std::path::Path::new(&alias).exists());
+        assert_eq!(std::fs::read(&redirected).unwrap(), vec![0, 255, 10]);
+        assert_eq!(engine.clone().fs_read_file(alias.clone()).await.unwrap(), vec![0, 255, 10]);
+        let code = format!(
+            "console.log(JSON.stringify(Array.from(await fs.readFile({}))))",
+            serde_json::to_string(&alias).unwrap()
+        );
+        let result = engine
+            .clone()
+            .call_tool_async(
+                "run_js".to_string(),
+                serde_json::json!({ "code": code }).to_string(),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(value["output"].as_str().unwrap().trim(), "[0,255,10]");
+
+        let text = format!("{root}/notes.txt");
+        engine.clone().fs_write_file(text.clone(), "héllo".as_bytes().to_vec()).await.unwrap();
+        engine.clone().fs_append_file(text.clone(), " wörld".as_bytes().to_vec()).await.unwrap();
+        assert_eq!(engine.clone().fs_read_text_file(text.clone()).await.unwrap(), "héllo wörld");
+        assert_eq!(
+            engine.clone().fs_read_file_range(text.clone(), 1, 4).await.unwrap(),
+            "héllo wörld".as_bytes()[1..5].to_vec()
+        );
+        assert_eq!(engine.clone().fs_read_file_range(text.clone(), 100, 4).await.unwrap(), Vec::<u8>::new());
+        assert_eq!(engine.clone().fs_canonical_path(text.clone()).await.unwrap(), std::fs::canonicalize(&text).unwrap().to_string_lossy());
+        let stat = engine.clone().fs_stat(text.clone()).await.unwrap();
+        assert_eq!(stat.kind, FsEntryKind::File);
+        assert_eq!(stat.size, "héllo wörld".len() as u64);
+        assert!(stat.modified_ms.is_some());
+        engine.clone().fs_make_dir(format!("{root}/a/b"), true).await.unwrap();
+        assert_eq!(engine.clone().fs_read_dir(format!("{root}/a")).await.unwrap(), vec!["b".to_string()]);
+        engine.clone().fs_rename(text.clone(), format!("{root}/a/b/moved.txt")).await.unwrap();
+        assert!(!engine.clone().fs_exists(text.clone()).await.unwrap());
+        assert_eq!(engine.clone().fs_lstat(format!("{root}/a")).await.unwrap().kind, FsEntryKind::Directory);
+        engine.clone().fs_remove(format!("{root}/a"), true).await.unwrap();
+        assert!(!engine.clone().fs_exists(format!("{root}/a")).await.unwrap());
+
+        // Typed failures.
+        let missing = engine.clone().fs_read_file(format!("{root}/missing")).await.unwrap_err();
+        assert!(
+            matches!(missing, RuntimeError::FileSystem { kind: FsErrorKind::NotFound, .. }),
+            "{missing}"
+        );
+        assert!(missing.message().contains("ENOENT"), "{missing}");
+        let invalid = engine.clone().fs_read_text_file(redirected.clone()).await.unwrap_err();
+        assert!(
+            matches!(invalid, RuntimeError::FileSystem { kind: FsErrorKind::InvalidData, .. }),
+            "{invalid}"
+        );
+        match engine.clone().fs_read_dir("/etc".to_string()).await.unwrap_err() {
+            RuntimeError::FileSystem { kind, message } => {
+                assert_eq!(kind, FsErrorKind::PermissionDenied);
+                assert!(message.contains("outside sandbox"), "{message}");
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+
+        // Engines without a filesystem configuration reject native calls.
+        let plain = Engine::create_stateless(64, 1).unwrap();
+        assert!(!plain.host_filesystem_enabled());
+        let error = plain.clone().fs_exists(root.clone()).await.unwrap_err();
+        assert!(error.to_string().contains("not configured"), "{error}");
+        plain.shutdown().await;
+
+        engine.shutdown().await;
+        let closed = engine.clone().fs_exists(root).await.unwrap_err();
+        assert!(closed.to_string().contains("runtime is Shutdown"), "{closed}");
     }
 
     #[tokio::test]

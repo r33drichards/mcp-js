@@ -142,6 +142,22 @@ without blocking a Tokio worker. Per-call execution options retain the existing
 `run_js` semantics; factory limits are defaults, not a security boundary against
 the embedding Python application.
 
+### Host filesystem access from native callers
+
+`Engine.create_with_filesystem(heap_mb, timeout_secs, filesystem_json)` builds
+an engine whose only extra capability is hook/policy-gated host filesystem
+access. `filesystem_json` is the `filesystem` entry of `--policies-json`
+(`policies`, `pre`, `stack`), interpreted exactly as the server interprets it.
+Guest code gets `fs.*`; the same engine also exports typed native methods
+(`fs_read_file`, `fs_read_file_range`, `fs_read_text_file`, `fs_write_file`,
+`fs_append_file`, `fs_stat`, `fs_lstat`, `fs_read_dir`, `fs_read_link`,
+`fs_canonical_path`, `fs_make_dir`, `fs_remove`, `fs_rename`, `fs_exists`) that run through the same hook chain
+and backend as the guest ops, so a pre hook rewrite or denial applies to both.
+Bytes cross the boundary as `bytes`, never as JSON text, and failures are
+`RuntimeError::FileSystem { kind, message }`. See `node/README.md` for the
+Node.js shape of this API and `node/tests/filesystem.test.ts` for the
+guest/native parity checks CI runs.
+
 ### Check all generated languages
 
 Run the repository smoke check:
