@@ -35,6 +35,26 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  npm-client-nix-e2e:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: clients/typescript/package-lock.json
+      - uses: DeterminateSystems/nix-installer-action@main
+      - name: Build the HTTP npm tarball as a Nix derivation
+        run: nix build .#npm-client
+      - name: Verify the outside-Nix installed consumer
+        run: |
+          npm ci --include=dev --prefix clients/typescript
+          npm run typecheck --prefix clients/typescript
+          npm run build --prefix clients/typescript
+          timeout 180s npm run test:package --prefix clients/typescript
+
   node-library-e2e:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
