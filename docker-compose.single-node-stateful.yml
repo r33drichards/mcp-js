@@ -21,7 +21,9 @@ services:
 
   # ── Single MCP-JS node (stateful — heap snapshots on local FS) ─────────
   node1:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile.source
     command:
       - --http-port=3000
       - --heap-store=dir
