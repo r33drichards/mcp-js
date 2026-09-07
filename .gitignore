@@ -9,3 +9,4 @@ node_modules
 site/
 .worktrees/
 .claude/worktrees/
+.mcpregistry*

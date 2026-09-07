@@ -23,6 +23,8 @@ RUN cargo build --release -p server
 # Runtime stage
 FROM debian:trixie-slim
 
+LABEL io.modelcontextprotocol.server.name="io.github.r33drichards/mcp-js"
+
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y \
     ca-certificates \
