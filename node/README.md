@@ -45,7 +45,7 @@ try {
   console.log(result.output); // 42
 } finally {
   engine.close();
-  engine.uniffiDestroy();
+  if (Engine.instanceOf(engine)) engine.uniffiDestroy();
 }
 ```
 

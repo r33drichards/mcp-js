@@ -15,6 +15,7 @@ test("Node executes JavaScript through the native UniFFI engine", async () => {
   try {
     const { Engine, RuntimeLifecycleState } = await import("../generated/index");
     const engine = Engine.createStateless(64n, 1n);
+    assert.ok(Engine.instanceOf(engine), "constructor must return a native Engine");
     const run = (code: string): { output: string; error?: string } =>
       JSON.parse(engine.callTool("run_js", JSON.stringify({ code }), undefined, undefined));
 
