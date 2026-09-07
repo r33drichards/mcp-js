@@ -40,10 +40,7 @@ permissions:
 jobs:
   build-tarballs:
     name: Build ${{ matrix.id }} tarball
-    if: >-
-      github.event_name == 'release' ||
-      (github.ref == 'refs/heads/main' &&
-       (inputs.package == 'both' || inputs.package == matrix.id))
+    if: github.event_name == 'release' || github.ref == 'refs/heads/main'
     strategy:
       fail-fast: false
       matrix:
@@ -57,10 +54,24 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
+      - name: Select matrix package
+        id: select
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PACKAGE_SELECTION: ${{ inputs.package }}
+          PACKAGE_ID: ${{ matrix.id }}
+        run: |
+          if [ "$EVENT_NAME" = release ] || [ "$PACKAGE_SELECTION" = both ] || [ "$PACKAGE_SELECTION" = "$PACKAGE_ID" ]; then
+            echo selected=true >> "$GITHUB_OUTPUT"
+          else
+            echo selected=false >> "$GITHUB_OUTPUT"
+          fi
       - uses: actions/checkout@v4
+        if: steps.select.outputs.selected == 'true'
         with:
           fetch-depth: 0
       - name: Verify release/manual source and version input
+        if: steps.select.outputs.selected == 'true'
         env:
           EVENT_NAME: ${{ github.event_name }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
@@ -86,12 +97,15 @@ jobs:
           fi
           test "$(node -p "require('./${{ matrix.directory }}/package.json').version")" = "$requested_version"
       - uses: DeterminateSystems/nix-installer-action@main
+        if: steps.select.outputs.selected == 'true'
       - uses: actions/setup-node@v4
+        if: steps.select.outputs.selected == 'true'
         with:
           node-version: '24'
           cache: npm
           cache-dependency-path: ${{ matrix.directory }}/package-lock.json
       - name: Require Node and npm versions supported for trusted publishing
+        if: steps.select.outputs.selected == 'true'
         run: |
           node - <<'NODE'
           const version = command => require('child_process').execFileSync(command, ['--version'], { encoding: 'utf8' }).trim().split('.').map(Number);
@@ -101,16 +115,18 @@ jobs:
           if (npmMajor < 11 || (npmMajor === 11 && (npmMinor < 5 || (npmMinor === 5 && npmPatch < 1)))) throw new Error('npm CLI 11.5.1 or newer is required for npm trusted publishing');
           NODE
       - name: Install locked Node dependencies
+        if: steps.select.outputs.selected == 'true'
         run: npm ci --include=dev --prefix '${{ matrix.directory }}'
       - name: Audit production dependency tree
+        if: steps.select.outputs.selected == 'true'
         run: npm audit --omit=dev --prefix '${{ matrix.directory }}'
       - name: Build and verify HTTP client Nix tarball
-        if: matrix.id == 'client'
+        if: steps.select.outputs.selected == 'true' && matrix.id == 'client'
         run: |
           nix build .#npm-client
           timeout 180s node clients/typescript/scripts-test-package.mjs result/*.tgz
       - name: Restore reusable source-V8 build cache
-        if: matrix.id == 'node'
+        if: steps.select.outputs.selected == 'true' && matrix.id == 'node'
         uses: actions/cache@v4
         with:
           path: |
@@ -121,7 +137,7 @@ jobs:
           restore-keys: |
             python-uniffi-v8-145-shared-v2-${{ runner.os }}-
       - name: Build and verify native engine tarball
-        if: matrix.id == 'node'
+        if: steps.select.outputs.selected == 'true' && matrix.id == 'node'
         run: |
           nix develop --command bash -c '
             unset RUSTY_V8_ARCHIVE
@@ -154,6 +170,7 @@ jobs:
           nix develop --command npm run build --prefix node
           timeout 240s node node/scripts/test-package.mjs result/*.tgz
       - name: Pack exact release tarball
+        if: steps.select.outputs.selected == 'true'
         id: pack
         env:
           DIRECTORY: ${{ matrix.directory }}
@@ -173,6 +190,7 @@ jobs:
           process.stdout.write(item.filename);
           NODE
       - uses: actions/upload-artifact@v4
+        if: steps.select.outputs.selected == 'true'
         with:
           name: npm-tarball-${{ matrix.id }}
           path: release-artifacts/*.tgz
@@ -180,21 +198,12 @@ jobs:
           retention-days: 7
 
   publish:
-    name: Publish ${{ matrix.package }}
+    name: Publish selected npm package(s)
     needs: build-tarballs
     if: >-
       github.event_name == 'release' ||
       (github.ref == 'refs/heads/main' && inputs.mode == 'publish' &&
-       inputs.confirm_publish == true &&
-       (inputs.package == 'both' || inputs.package == matrix.id))
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - id: node
-            package: '@wholelottahoopla/mcp-js-node'
-          - id: client
-            package: '@wholelottahoopla/mcp-js-client'
+       inputs.confirm_publish == true)
     runs-on: ubuntu-24.04
     environment: npm-publish
     permissions:
@@ -202,9 +211,15 @@ jobs:
       id-token: write
     steps:
       - uses: actions/download-artifact@v4
+        if: github.event_name == 'release' || inputs.package == 'both' || inputs.package == 'node'
         with:
-          name: npm-tarball-${{ matrix.id }}
-          path: release-artifacts
+          name: npm-tarball-node
+          path: release-artifacts/node
+      - uses: actions/download-artifact@v4
+        if: github.event_name == 'release' || inputs.package == 'both' || inputs.package == 'client'
+        with:
+          name: npm-tarball-client
+          path: release-artifacts/client
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
@@ -218,34 +233,46 @@ jobs:
           if (nodeMajor < 22 || (nodeMajor === 22 && nodeMinor < 14)) throw new Error('Node.js 22.14.0 or newer is required for npm trusted publishing');
           if (npmMajor < 11 || (npmMajor === 11 && (npmMinor < 5 || (npmMinor === 5 && npmPatch < 1)))) throw new Error('npm CLI 11.5.1 or newer is required for npm trusted publishing');
           NODE
-      - name: Verify tarball identity before OIDC publication
+      - name: Verify selected tarball identities and payloads
         env:
-          EXPECTED_PACKAGE: ${{ matrix.package }}
           EVENT_NAME: ${{ github.event_name }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
+          PACKAGE_SELECTION: ${{ inputs.package }}
           NODE_VERSION: ${{ inputs.node_version }}
           CLIENT_VERSION: ${{ inputs.client_version }}
-          PACKAGE_ID: ${{ matrix.id }}
         run: |
           set -euo pipefail
-          tarball="$(find release-artifacts -type f -name '*.tgz' -print -quit)"
-          test -n "$tarball"
-          test "$(find release-artifacts -type f -name '*.tgz' | wc -l)" = 1
-          mkdir unpacked
-          tar -xzf "$tarball" -C unpacked
-          node - "$EXPECTED_PACKAGE" "$EVENT_NAME" "$RELEASE_TAG" "$NODE_VERSION" "$CLIENT_VERSION" "$PACKAGE_ID" <<'NODE'
+          verify() {
+            id="$1" expected_name="$2" requested_version="$3"
+            tarball="$(find "release-artifacts/$id" -type f -name '*.tgz' -print -quit)"
+            test -n "$tarball"
+            test "$(find "release-artifacts/$id" -type f -name '*.tgz' | wc -l)" = 1
+            rm -rf unpacked
+            mkdir unpacked
+            tar -xzf "$tarball" -C unpacked
+            expected_version="$requested_version"
+            if [ "$EVENT_NAME" = release ]; then expected_version="${RELEASE_TAG#v}"; fi
+            node - "$expected_name" "$expected_version" <<'NODE'
           const fs = require('fs');
-          const [expectedName, eventName, releaseTag, nodeVersion, clientVersion, packageId] = process.argv.slice(2);
-          const requestedVersion = packageId === 'node' ? nodeVersion : clientVersion;
+          const [expectedName, expectedVersion] = process.argv.slice(2);
           const manifest = JSON.parse(fs.readFileSync('unpacked/package/package.json', 'utf8'));
-          const expectedVersion = eventName === 'release' ? releaseTag.replace(/^v/, '') : requestedVersion;
           if (manifest.name !== expectedName || manifest.version !== expectedVersion) {
             throw new Error(`tarball identity mismatch: ${manifest.name}@${manifest.version}`);
           }
           NODE
-          tar -tzf "$tarball" | sort > contents.txt
-          grep -qx 'package/package.json' contents.txt
-          grep -qx 'package/README.md' contents.txt
-      - name: Publish with npm trusted publishing and provenance
-        # No NODE_AUTH_TOKEN or npm token fallback is configured in this workflow.
-        run: npm publish "$(find release-artifacts -type f -name '*.tgz' -print -quit)" --access public --provenance
+            tar -tzf "$tarball" | sort > contents.txt
+            grep -qx 'package/package.json' contents.txt
+            grep -qx 'package/README.md' contents.txt
+          }
+          if [ "$EVENT_NAME" = release ] || [ "$PACKAGE_SELECTION" = both ] || [ "$PACKAGE_SELECTION" = node ]; then
+            verify node '@wholelottahoopla/mcp-js-node' "$NODE_VERSION"
+          fi
+          if [ "$EVENT_NAME" = release ] || [ "$PACKAGE_SELECTION" = both ] || [ "$PACKAGE_SELECTION" = client ]; then
+            verify client '@wholelottahoopla/mcp-js-client' "$CLIENT_VERSION"
+          fi
+      - name: Publish native package with npm trusted publishing and provenance
+        if: github.event_name == 'release' || inputs.package == 'both' || inputs.package == 'node'
+        run: npm publish "$(find release-artifacts/node -type f -name '*.tgz' -print -quit)" --access public --provenance
+      - name: Publish HTTP client with npm trusted publishing and provenance
+        if: github.event_name == 'release' || inputs.package == 'both' || inputs.package == 'client'
+        run: npm publish "$(find release-artifacts/client -type f -name '*.tgz' -print -quit)" --access public --provenance
