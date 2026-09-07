@@ -27,9 +27,9 @@ attribution is grounded in the repository's pre-AGPL license commit
 
 1. **Native Linux portability must pass CI.** The native package's `prepack`
    rejects missing/non-x64 ELF files, RPATH/RUNPATH, absolute `DT_NEEDED`,
-   unresolved libraries, and Nix-store dependency resolutions. The full native
-   build and installed-tarball execution must pass on GitHub's Ubuntu runner;
-   a local Nix build is not sufficient proof.
+   unresolved libraries, Nix-store dependency resolutions, and retained Nix or
+   CI workspace paths. The full native build and installed-tarball execution
+   must pass on GitHub's Ubuntu runner; a local Nix build is not sufficient proof.
 2. **First-publication bootstrap is manual.** npm trusted-publisher settings
    are configured in an existing package's npm settings. Because both scoped
    package names are currently absent from npm, an owner must perform the first
@@ -78,14 +78,36 @@ not a request to store a credential in this repository or in GitHub Actions.
 
 1. Choose the shared semver version, for example `0.1.0`. Both package manifests
    must use that exact version and the release tag must be `v0.1.0`.
-2. Run the package validation commands in the next section. For the native
-   package, run the full build outside `nix develop` before packing so the
-   dynamic dependency gate evaluates the consumer environment.
+2. Run the package validation commands in the next section. Build the native
+   engine and strip its build-host RPATH inside `nix develop`, then run
+   `npm run test:package --prefix node` outside `nix develop`. That isolated
+   consumer clears loader overrides, runs `ldd` on the installed tarball, and
+   executes the real engine API.
 3. Inspect the `.tgz` contents and publish each approved package manually with
    `npm publish --access public --provenance` from its package directory. The
    first public scoped publish requires `--access public`.
 4. Verify the release using the commands below. Then complete the trusted
    publisher and GitHub Environment setup above before a second release.
+
+## Reproducible builds and native cache
+
+Build the HTTP client tarball as a real Nix derivation with
+`nix build .#npm-client`; the output directory contains the scoped `.tgz`.
+The HTTP package E2E workflow runs this derivation as well as an independent
+outside-Nix installed-consumer test.
+
+The native package cannot use rusty_v8's ordinary release archive: CI run
+`34153857783` proved that it contains `R_X86_64_TPOFF32` relocations that the
+linker rejects in a shared object. Native CI therefore uses the pinned
+rusty_v8 revision with `v8_monolithic_for_shared_library=true`. Its persisted
+cache key contains the V8 version/revision, GN mode, runner target, pinned Nix
+toolchain, and cargo linker configuration, but deliberately excludes server,
+Node, and application source. The cache is saved immediately after the costly
+build, before package checks, so application or packaging changes reuse V8 and
+rebuild only affected Rust crates. The release workflow consumes the same
+cache. This cache is build acceleration only: every release still links the
+engine, strips build-host paths, validates dynamic dependencies outside Nix,
+and executes an installed tarball.
 
 ## Release checklist after OIDC setup
 

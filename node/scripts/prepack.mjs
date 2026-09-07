@@ -14,6 +14,6 @@ for (const file of readdirSync('dist').filter(f => f.endsWith('.js'))) {
   assert.doesNotMatch(readFileSync(`dist/${file}`, 'utf8'), /\boverride\s*:|\/nix\/store\//, 'Bindings must use colocated resolution');
 }
 const run = (command, args) => execFileSync(command, args, { encoding: 'utf8', timeout: 90000, env: { ...process.env, LD_LIBRARY_PATH: '', LD_PRELOAD: '', NODE_PATH: '', NODE_OPTIONS: '' } });
-checkDependencies(run('readelf', ['-d', library]), run('ldd', [library]));
+checkDependencies(run('readelf', ['-d', library]), run('ldd', [library]), readFileSync(library));
 // Header checks alone cannot prove this is the engine. Execute the real API before packing.
 console.error(run(process.execPath, ['tests/consumer.mjs']));

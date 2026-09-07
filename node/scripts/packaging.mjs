@@ -15,12 +15,16 @@ export function checkElf(bytes) {
   assert.equal(bytes.readUInt16LE(18), 62, 'Native library must be x86-64');
 }
 
-export function checkDependencies(dynamic, dependencies) {
+export function checkDependencies(dynamic, dependencies, bytes) {
   assert.doesNotMatch(dynamic, /\((?:RPATH|RUNPATH)\)/, 'Remove build-host RPATH/RUNPATH before packaging');
   assert.doesNotMatch(dynamic, /Shared library: \[[^\]]*\//, 'Absolute/path-based DT_NEEDED is not portable');
   assert.doesNotMatch(dependencies, /not found|\/nix\/store\/|not a dynamic executable|statically linked/i,
     'Native dependencies must resolve outside the Nix store');
   assert.match(dependencies, /libc\.so/, 'Expected Linux glibc dynamic dependency report');
+  if (bytes) {
+    assert.doesNotMatch(bytes.toString('latin1'), /\/nix\/store\/|\/home\/runner\/work\//,
+      'Native package must not retain Nix-store or CI-workspace paths');
+  }
 }
 
 export function checkTarball(files) {

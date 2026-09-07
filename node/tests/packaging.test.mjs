@@ -26,7 +26,10 @@ test('native gate rejects absent, text, wrong architecture and executable files'
 test('portability gate rejects build-host paths and unresolved libraries', () => {
   const dynamic = '(NEEDED) Shared library: [libc.so.6]';
   const ldd = 'libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6';
-  checkDependencies(dynamic, ldd);
+  checkDependencies(dynamic, ldd, Buffer.from('portable binary'));
+  for (const bad of ['/nix/store/hash/libc.so', '/home/runner/work/repo/source.rs']) {
+    assert.throws(() => checkDependencies(dynamic, ldd, Buffer.from(bad)));
+  }
   for (const bad of ['(RUNPATH) [/nix/store/lib]', '(RPATH) [/tmp/lib]', '(NEEDED) Shared library: [/tmp/lib.so]']) {
     assert.throws(() => checkDependencies(bad, ldd));
   }
