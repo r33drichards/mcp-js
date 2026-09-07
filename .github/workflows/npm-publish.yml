@@ -5,18 +5,35 @@ on:
     types: [published]
   workflow_dispatch:
     inputs:
-      version:
-        description: "Exact shared package version to publish (for example 0.1.0)"
+      mode:
+        description: "Build artifacts only, or publish after environment approval"
         required: true
+        default: validate
+        type: choice
+        options: [validate, publish]
+      package:
+        description: "Package(s) to build or publish"
+        required: true
+        default: both
+        type: choice
+        options: [both, node, client]
+      node_version:
+        description: "Exact mcp-js-node version when node is selected"
+        required: false
+        type: string
+      client_version:
+        description: "Exact mcp-js-client version when client is selected"
+        required: false
         type: string
       confirm_publish:
-        description: "I confirmed the npm trusted-publisher and GitHub environment prerequisites"
+        description: "Required only in publish mode: npm trusted publishing is configured"
         required: true
         default: false
         type: boolean
 
-# PRs, pushes, and pull_request_target never reach publish jobs. The only
-# publisher is a protected release/manual invocation from main.
+# PRs, pushes, and pull_request_target never reach publish jobs. Manual
+# validation can only build downloadable artifacts; publication additionally
+# requires publish mode, explicit confirmation, and environment approval.
 permissions:
   contents: read
 
@@ -25,7 +42,8 @@ jobs:
     name: Build ${{ matrix.id }} tarball
     if: >-
       github.event_name == 'release' ||
-      (github.ref == 'refs/heads/main' && inputs.confirm_publish == true)
+      (github.ref == 'refs/heads/main' &&
+       (inputs.package == 'both' || inputs.package == matrix.id))
     strategy:
       fail-fast: false
       matrix:
@@ -46,18 +64,27 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
-          REQUESTED_VERSION: ${{ inputs.version }}
+          PACKAGE_ID: ${{ matrix.id }}
+          NODE_VERSION: ${{ inputs.node_version }}
+          CLIENT_VERSION: ${{ inputs.client_version }}
         run: |
           set -euo pipefail
           git fetch --no-tags origin main
           git merge-base --is-ancestor "$GITHUB_SHA" origin/main
           if [ "$EVENT_NAME" = release ]; then
             [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]
-            REQUESTED_VERSION="${RELEASE_TAG#v}"
+            requested_version="${RELEASE_TAG#v}"
           else
             test "$GITHUB_REF" = refs/heads/main
+            if [ "$PACKAGE_ID" = node ]; then
+              requested_version="$NODE_VERSION"
+            else
+              requested_version="$CLIENT_VERSION"
+            fi
+            test -n "$requested_version"
+            [[ "$requested_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]
           fi
-          test "$(node -p "require('./${{ matrix.directory }}/package.json').version")" = "$REQUESTED_VERSION"
+          test "$(node -p "require('./${{ matrix.directory }}/package.json').version")" = "$requested_version"
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: actions/setup-node@v4
         with:
@@ -157,7 +184,9 @@ jobs:
     needs: build-tarballs
     if: >-
       github.event_name == 'release' ||
-      (github.ref == 'refs/heads/main' && inputs.confirm_publish == true)
+      (github.ref == 'refs/heads/main' && inputs.mode == 'publish' &&
+       inputs.confirm_publish == true &&
+       (inputs.package == 'both' || inputs.package == matrix.id))
     strategy:
       fail-fast: false
       matrix:
@@ -194,7 +223,9 @@ jobs:
           EXPECTED_PACKAGE: ${{ matrix.package }}
           EVENT_NAME: ${{ github.event_name }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
-          REQUESTED_VERSION: ${{ inputs.version }}
+          NODE_VERSION: ${{ inputs.node_version }}
+          CLIENT_VERSION: ${{ inputs.client_version }}
+          PACKAGE_ID: ${{ matrix.id }}
         run: |
           set -euo pipefail
           tarball="$(find release-artifacts -type f -name '*.tgz' -print -quit)"
@@ -202,9 +233,10 @@ jobs:
           test "$(find release-artifacts -type f -name '*.tgz' | wc -l)" = 1
           mkdir unpacked
           tar -xzf "$tarball" -C unpacked
-          node - "$EXPECTED_PACKAGE" "$EVENT_NAME" "$RELEASE_TAG" "$REQUESTED_VERSION" <<'NODE'
+          node - "$EXPECTED_PACKAGE" "$EVENT_NAME" "$RELEASE_TAG" "$NODE_VERSION" "$CLIENT_VERSION" "$PACKAGE_ID" <<'NODE'
           const fs = require('fs');
-          const [expectedName, eventName, releaseTag, requestedVersion] = process.argv.slice(2);
+          const [expectedName, eventName, releaseTag, nodeVersion, clientVersion, packageId] = process.argv.slice(2);
+          const requestedVersion = packageId === 'node' ? nodeVersion : clientVersion;
           const manifest = JSON.parse(fs.readFileSync('unpacked/package/package.json', 'utf8'));
           const expectedVersion = eventName === 'release' ? releaseTag.replace(/^v/, '') : requestedVersion;
           if (manifest.name !== expectedName || manifest.version !== expectedVersion) {

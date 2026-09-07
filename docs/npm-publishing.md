@@ -73,27 +73,39 @@ attestations automatically; the workflow also explicitly requests
 
 ## First publication bootstrap
 
-Only do this after resolving all blockers, reviewing the generated tarball, and
-confirming with the owner that this is the intended public release. The human
-owner must use npm's normal interactive authentication/2FA locally; this is
-not a request to store a credential in this repository or in GitHub Actions.
+Both package names currently return HTTP 404 from the npm registry, so npm has
+no package settings page on which to add a trusted publisher. Bootstrap each
+package once with an owner's normal interactive npm login and 2FA. Do not add
+that credential to GitHub, and do not use `--provenance` locally: npm provenance
+requires a supported cloud CI runner.
 
-1. Choose the shared semver version, for example `0.1.0`. Both package manifests
-   must use that exact version and the release tag must be `v0.1.0`.
-2. Run the package validation commands in the next section. Build the native
-   engine and strip its build-host RPATH inside `nix develop`, then run
-   `npm run test:package --prefix node` outside `nix develop`. That isolated
-   consumer clears loader overrides, runs `ldd` on the installed tarball, and
-   executes the real engine API. Use the exact Nix-produced tarballs, not a
-   separately repacked checkout.
-3. Inspect each exact Nix-produced `.tgz` and publish the approved artifact path
-   with `npm publish path/to/package.tgz --access public`. Do not run a
-   directory-based publish that repacks the checkout. Local interactive
-   bootstrap cannot generate CI provenance; provenance starts with the subsequent
-   trusted-publishing release from the supported GitHub-hosted runner. The
-   first public scoped publish requires `--access public`.
-4. Verify the release using the commands below. Then complete the trusted
-   publisher and GitHub Environment setup above before a second release.
+The two packages version independently. Set and commit only the selected
+package manifest version on protected `main`; selecting `both` does not require
+the two version inputs to match. Then run **Publish npm Packages** manually on
+`main` with:
+
+- Mode: `validate`
+- Package: `node`, `client`, or `both`
+- Node version: the exact `node/package.json` version if node is selected
+- Client version: the exact `clients/typescript/package.json` version if client is selected
+- Confirm publish: unchecked
+
+This mode cannot reach the OIDC publish job. Wait for the selected build job,
+download `npm-tarball-node` and/or `npm-tarball-client` from the run's
+**Artifacts** section, and inspect the archive. These are the exact Nix-produced
+tarballs that passed their outside-Nix installed-consumer tests. Publish each
+approved bootstrap artifact interactively:
+
+```sh
+npm login
+npm publish path/to/wholelottahoopla-mcp-js-node-VERSION.tgz --access public
+npm publish path/to/wholelottahoopla-mcp-js-client-VERSION.tgz --access public
+```
+
+Run only the command for the selected package. Complete the trusted-publisher
+setup above immediately after each bootstrap publication, then run the
+verification commands. The first publication has no provenance attestation;
+subsequent OIDC publications do.
 
 ## Reproducible builds and native cache
 
@@ -127,20 +139,18 @@ and executes an installed tarball.
 
 ## Release checklist after OIDC setup
 
-1. Update both package versions to the selected shared semver value and commit
-   the changes to protected `main`. Create a protected annotated tag named
-   `vVERSION` from that exact `main` commit, then publish the GitHub release.
-   This triggers `npm-publish.yml`; it requires the package versions to exactly
-   match the tag and requires that commit to be an ancestor of `main`.
-2. Alternatively use **Actions -> Publish npm Packages -> Run workflow** on
-   `main`, enter the exact shared version and explicitly confirm. The workflow releases
-   both packages together; use the protected tag/release flow for every release.
-3. Approve the `npm-publish` Environment deployment. The workflow builds from
-   locked dependencies, audits production dependencies, executes the relevant
-   tarball tests, creates a tarball, verifies its name/version and required
-   payload before publication, then runs `npm publish --access public
-   --provenance` without an npm token.
-4. Verify each result:
+The packages can release independently through the manual workflow:
+
+1. Set and commit the selected package version on protected `main`.
+2. First run **Publish npm Packages** in `validate` mode with the selected
+   package and exact version input. Review the successful checks and downloaded
+   artifact without approving any deployment.
+3. Rerun it on the same `main` commit with mode `publish`, the same package and
+   version inputs, and **Confirm publish** checked. Approve the protected
+   `npm-publish` Environment deployment. The workflow downloads the already
+   validated Nix artifact for that matrix job, verifies name/version/payload,
+   and invokes `npm publish --access public --provenance` using OIDC only.
+4. Verify the selected result:
 
    ```sh
    npm view @wholelottahoopla/mcp-js-node@VERSION version dist.integrity
@@ -154,8 +164,12 @@ and executes an installed tarball.
    npm audit signatures
    ```
 
-   Run the native install/import check on supported Linux x64 glibc only. Check
-   npm's package page for provenance after publication as well.
+   Run only checks for packages released in this invocation. Run native checks
+   on supported Linux x64 glibc and confirm npm's package page shows provenance.
+
+A GitHub release tag `vVERSION` remains an atomic convenience path: it builds
+and publishes **both** packages and therefore requires both manifests to equal
+`VERSION`. Use manual package selection whenever versions differ.
 
 ## Rollback and incident response
 

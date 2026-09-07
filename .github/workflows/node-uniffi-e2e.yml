@@ -26,23 +26,16 @@ on:
       - "flake.lock"
       - ".github/workflows/node-uniffi-e2e.yml"
   workflow_dispatch:
-    inputs:
-      validation:
-        description: Validation path
-        type: choice
-        default: full
-        options: [full, source-v8]
 
 permissions:
   contents: read
 
 concurrency:
-  group: node-uniffi-${{ github.ref }}-${{ inputs.validation || 'full' }}
+  group: node-uniffi-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   npm-client-nix-e2e:
-    if: github.event_name != 'workflow_dispatch' || inputs.validation == 'full'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -60,31 +53,7 @@ jobs:
           npm ci --include=dev --prefix clients/typescript
           timeout 180s node clients/typescript/scripts-test-package.mjs result/*.tgz
 
-  source-v8:
-    if: github.event_name == 'workflow_dispatch' && inputs.validation == 'source-v8'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@v4
-      - uses: DeterminateSystems/nix-installer-action@main
-      - name: Restore the Nix binary cache directory
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/mcp-js-v8-nix
-          key: rusty-v8-shared-e6a88b35-linux-x64-${{ hashFiles('flake.lock', 'nix/rusty-v8-shared.nix') }}
-      - name: Import, build, and export the source-V8 Nix closure
-        run: |
-          if [ -d "$HOME/.cache/mcp-js-v8-nix/nar" ]; then
-            nix copy --from "file://$HOME/.cache/mcp-js-v8-nix" .#rusty-v8-shared || true
-          fi
-          nix build .#rusty-v8-shared
-          mkdir -p "$HOME/.cache/mcp-js-v8-nix"
-          nix copy --to "file://$HOME/.cache/mcp-js-v8-nix" .#rusty-v8-shared
-          test -s result/lib/librusty_v8.a
-          test -s result/src_binding.rs
-
   node-library-e2e:
-    if: github.event_name != 'workflow_dispatch' || inputs.validation == 'full'
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:

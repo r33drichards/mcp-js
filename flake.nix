@@ -188,7 +188,6 @@
         packages.sqlite-wasm = import ./nix/sqlite-wasm.nix { inherit pkgs; };
         packages.docs-tools = docsTools;
         packages.npm-client = npmClient;
-        packages.rusty-v8-shared = import ./nix/rusty-v8-shared.nix { inherit pkgs; };
         packages.widdershins = widdershins;
 
         packages.default = rustPlatform.buildRustPackage {
