@@ -35,6 +35,37 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  native-archive-compatibility:
+    # The ordinary rusty_v8 release archive is the cheapest safe path only if
+    # it links into the UniFFI cdylib. This job proves that before source V8.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/git
+            ~/.cargo/registry
+            target/native-archive-compat
+          key: native-archive-compat-v8-145-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'server/**', 'mcp-v8-uniffi-python/**', 'flake.lock') }}
+      - name: Link the pinned rusty_v8 release archive into the native cdylib
+        # nix develop supplies the pinned RUSTY_V8_ARCHIVE. Do not set
+        # V8_FROM_SOURCE: a successful shared-library link proves PIC support.
+        run: |
+          nix develop --command bash -c '
+            unset V8_FROM_SOURCE GN_ARGS
+            export CARGO_TARGET_DIR="$PWD/target/native-archive-compat"
+            cargo build -p mcp-v8-uniffi-python --release \
+              --config mcp-v8-uniffi-python/cargo-config.toml
+          '
+          test -f target/native-archive-compat/release/libmcp_v8_uniffi.so
+          readelf -d target/native-archive-compat/release/libmcp_v8_uniffi.so
+
   node-library-e2e:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
