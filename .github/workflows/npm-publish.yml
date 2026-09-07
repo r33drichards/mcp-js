@@ -84,6 +84,15 @@ jobs:
           npm run typecheck --prefix clients/typescript
           npm run build --prefix clients/typescript
           npm run test:package --prefix clients/typescript
+      - name: Restore reusable source-V8 build cache
+        if: matrix.id == 'node'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/git
+            ~/.cargo/registry
+            target/python-uniffi
+          key: python-uniffi-v8-145-e6a88b35-shared-v3-${{ runner.os }}-${{ hashFiles('flake.lock', 'mcp-v8-uniffi-python/cargo-config.toml') }}
       - name: Build and verify native engine tarball
         if: matrix.id == 'node'
         run: |
@@ -101,7 +110,7 @@ jobs:
           npm run test:unit --prefix node
           npm run typecheck --prefix node
           timeout 90s npm test --prefix node
-          npm run build --prefix node
+          nix develop --command npm run build --prefix node
           timeout 240s npm run test:package --prefix node
       - name: Pack exact release tarball
         id: pack

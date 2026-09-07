@@ -26,78 +26,16 @@ on:
       - "flake.lock"
       - ".github/workflows/node-uniffi-e2e.yml"
   workflow_dispatch:
-    inputs:
-      validation:
-        description: "Validation path to run"
-        required: true
-        default: full
-        type: choice
-        options:
-          - full
-          - archive
 
 permissions:
   contents: read
 
 concurrency:
-  # Archive diagnostics must never cancel an in-flight, costly source-V8 run.
-  group: node-uniffi-${{ github.ref }}-${{ inputs.validation || 'full' }}
+  group: node-uniffi-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  native-archive-compatibility:
-    # The ordinary rusty_v8 release archive is the cheapest safe path only if
-    # it links into the UniFFI cdylib. This job proves that before source V8.
-    if: github.event_name == 'workflow_dispatch' && inputs.validation == 'archive'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-      - uses: DeterminateSystems/nix-installer-action@main
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/git
-            ~/.cargo/registry
-            target/native-archive-compat
-          key: native-archive-compat-v8-145-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'server/**', 'mcp-v8-uniffi-python/**', 'flake.lock') }}
-      - name: Link the pinned rusty_v8 release archive into the native cdylib
-        # nix develop supplies the pinned RUSTY_V8_ARCHIVE. rusty_v8's archive
-        # intentionally excludes generated bindings, so fetch its matching,
-        # versioned binding source. Do not set V8_FROM_SOURCE or GN_ARGS.
-        run: |
-          nix develop --command bash -c '
-            unset V8_FROM_SOURCE GN_ARGS
-            export RUSTY_V8_MIRROR=https://github.com/denoland/rusty_v8/releases/download
-            export CARGO_TARGET_DIR="$PWD/target/native-archive-compat"
-            cargo build -p mcp-v8-uniffi-python --release \
-              --config mcp-v8-uniffi-python/cargo-config.toml
-          '
-          test -f target/native-archive-compat/release/libmcp_v8_uniffi.so
-          readelf -d target/native-archive-compat/release/libmcp_v8_uniffi.so
-      - name: Build pinned UniFFI TypeScript generator
-        run: nix develop --command bash node/scripts/build-bindgen.sh
-      - name: Install locked Node runtime and test dependencies
-        run: npm ci --include=dev --prefix node
-      - name: Generate bindings from the archive-linked shared library
-        run: |
-          nix develop --command bash node/scripts/generate.sh \
-            target/native-archive-compat/release/libmcp_v8_uniffi.so
-      - name: Typecheck and execute Node against the native engine
-        run: |
-          npm run typecheck --prefix node
-          timeout 90s npm test --prefix node
-      - name: Compile a relocatable npm package
-        run: nix develop --command npm run build --prefix node
-      - name: Pack and execute an isolated tarball consumer
-        # This runs outside nix develop and rejects unresolved Nix dependencies.
-        run: timeout 240s npm run test:package --prefix node
-
   node-library-e2e:
-    if: github.event_name != 'workflow_dispatch' || inputs.validation != 'archive'
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
@@ -115,7 +53,7 @@ jobs:
             ~/.cargo/git
             ~/.cargo/registry
             target/python-uniffi
-          key: python-uniffi-v8-145-shared-v2-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'server/**', 'mcp-v8-uniffi-python/**') }}
+          key: python-uniffi-v8-145-e6a88b35-shared-v3-${{ runner.os }}-${{ hashFiles('flake.lock', 'mcp-v8-uniffi-python/cargo-config.toml') }}
       - name: Restore Node generator build cache
         uses: actions/cache@v4
         with:
@@ -139,7 +77,7 @@ jobs:
             ~/.cargo/git
             ~/.cargo/registry
             target/python-uniffi
-          key: python-uniffi-v8-145-shared-v2-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'server/**', 'mcp-v8-uniffi-python/**') }}
+          key: python-uniffi-v8-145-e6a88b35-shared-v3-${{ runner.os }}-${{ hashFiles('flake.lock', 'mcp-v8-uniffi-python/cargo-config.toml') }}
       - name: Build pinned UniFFI TypeScript generator
         run: nix develop --command bash node/scripts/build-bindgen.sh
       - name: Install locked Node runtime and test dependencies

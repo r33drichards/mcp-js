@@ -122,6 +122,25 @@
           doCheck = false;
         };
 
+        npmClient = pkgs.buildNpmPackage {
+          pname = "mcp-js-client-npm";
+          version = "0.1.0";
+          src = ./clients/typescript;
+
+          npmDeps = pkgs.importNpmLock {
+            npmRoot = ./clients/typescript;
+          };
+          npmConfigHook = pkgs.importNpmLock.npmConfigHook;
+
+          npmBuildScript = "build";
+          installPhase = ''
+            runHook preInstall
+            mkdir -p "$out"
+            npm pack --pack-destination "$out"
+            runHook postInstall
+          '';
+        };
+
         widdershins = pkgs.buildNpmPackage {
           pname = "widdershins";
           version = "4.0.1";
@@ -168,6 +187,7 @@
         # SQLite compiled to WASM via Emscripten — used by the sqlite-wasm example.
         packages.sqlite-wasm = import ./nix/sqlite-wasm.nix { inherit pkgs; };
         packages.docs-tools = docsTools;
+        packages.npm-client = npmClient;
         packages.widdershins = widdershins;
 
         packages.default = rustPlatform.buildRustPackage {

@@ -5,11 +5,15 @@ on:
     branches: [main]
     paths:
       - "clients/typescript/**"
+      - "flake.nix"
+      - "flake.lock"
       - ".github/workflows/npm-client-package-e2e.yml"
   pull_request:
     branches: [main]
     paths:
       - "clients/typescript/**"
+      - "flake.nix"
+      - "flake.lock"
       - ".github/workflows/npm-client-package-e2e.yml"
   workflow_dispatch:
 
@@ -27,6 +31,9 @@ jobs:
           node-version: "22"
           cache: npm
           cache-dependency-path: clients/typescript/package-lock.json
+      - uses: DeterminateSystems/nix-installer-action@main
+      - name: Build the HTTP npm tarball as a Nix derivation
+        run: nix build .#npm-client
       - name: Install locked package tooling
         run: npm ci --include=dev --prefix clients/typescript
       - name: Typecheck source client
