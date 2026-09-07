@@ -120,6 +120,34 @@ impl RuntimeError {
 
 #[uniffi::export]
 impl Engine {
+    /// Enable policy-gated host filesystem access without enabling subprocesses.
+    /// The JSON is one OperationPolicies object, not the server policies map.
+    #[uniffi::constructor]
+    pub fn create_with_filesystem(
+        heap_memory_max_mb: u64,
+        execution_timeout_secs: u64,
+        filesystem_policy_json: String,
+    ) -> Result<Arc<Self>, RuntimeError> {
+        let policies: opa::OperationPolicies = serde_json::from_str(&filesystem_policy_json)
+            .map_err(|error| RuntimeError::InvalidConfig { message: error.to_string() })?;
+        // An empty all-mode chain permits everything: require explicit authority.
+        if policies.policies.is_empty() {
+            return Err(RuntimeError::InvalidConfig {
+                message: "filesystem policy sources must not be empty".into(),
+            });
+        }
+        let chain = opa::build_policy_chain(
+            &policies, "mcp/filesystem", "data.mcp.filesystem.allow",
+        ).map_err(|message| RuntimeError::InvalidConfig { message })?;
+        let mut engine = Self::create_stateless(heap_memory_max_mb, execution_timeout_secs)?;
+        Arc::get_mut(&mut engine)
+            .ok_or_else(|| RuntimeError::Initialization {
+                message: "new embedded engine unexpectedly shared".into(),
+            })?
+            .fs_config = Some(Arc::new(fs::FsConfig::new(Arc::new(chain))));
+        Ok(engine)
+    }
+
     /// Construct a local, capability-restricted engine for synchronous foreign callers.
     #[uniffi::constructor]
     pub fn create_stateless(
