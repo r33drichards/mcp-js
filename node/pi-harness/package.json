@@ -1,0 +1,19 @@
+{
+  "name": "@mcp-js/pi-harness-e2e",
+  "private": true,
+  "type": "module",
+  "description": "Runs the pi agent harness file tools and run_js against the real native mcp-js engine.",
+  "scripts": {
+    "test": "node --import tsx --test --test-timeout=120000 tests/harness.test.ts"
+  },
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "file:../../pi-checkout/packages/agent",
+    "@ubjs/core": "0.31.0-5",
+    "@ubjs/node": "0.31.0-5"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.1",
+    "tsx": "4.23.13",
+    "typescript": "5.9.3"
+  }
+}

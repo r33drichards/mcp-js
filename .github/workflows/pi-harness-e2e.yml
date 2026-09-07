@@ -1,0 +1,109 @@
+name: pi Harness E2E
+
+# Cross-repository proof: the pi agent harness's McpJsExecutionEnv and its file
+# and run_js tools driven against the real native engine through the generated
+# Node bindings. Mirrors node-uniffi-e2e.yml's build, then adds a pi checkout.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "node/**"
+      - "server/**"
+      - "mcp-v8-uniffi-python/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "flake.nix"
+      - "flake.lock"
+      - ".github/workflows/pi-harness-e2e.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "node/**"
+      - "server/**"
+      - "mcp-v8-uniffi-python/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "flake.nix"
+      - "flake.lock"
+      - ".github/workflows/pi-harness-e2e.yml"
+  workflow_dispatch:
+    inputs:
+      pi_ref:
+        description: "pi branch, tag, or commit to test against"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pi-harness-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Until the pi integration branch merges, test against it; override per run
+  # with the workflow_dispatch input.
+  PI_REF_DEFAULT: claude/mcpjs-pi-integration-k1l3w7
+
+jobs:
+  pi-harness-e2e:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: node/package-lock.json
+      - uses: DeterminateSystems/nix-installer-action@main
+      - name: Restore native library build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/git
+            ~/.cargo/registry
+            target/python-uniffi
+          key: python-uniffi-v8-145-shared-v2-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'server/**', 'mcp-v8-uniffi-python/**') }}
+      - name: Restore Node generator build cache
+        uses: actions/cache@v4
+        with:
+          path: target/node-bindgen
+          key: node-uniffi-bindgen-v1-${{ runner.os }}-${{ hashFiles('node/patches/**', 'node/scripts/build-bindgen.sh', 'flake.lock') }}
+      - name: Build the real native engine shared library
+        run: |
+          nix develop --command bash -c '
+            unset RUSTY_V8_ARCHIVE
+            export V8_FROM_SOURCE=1
+            export GN_ARGS="v8_monolithic=true v8_monolithic_for_shared_library=true"
+            export CARGO_TARGET_DIR="$PWD/target/python-uniffi"
+            cargo build -p mcp-v8-uniffi-python --release \
+              --config mcp-v8-uniffi-python/cargo-config.toml
+          '
+      - name: Build pinned UniFFI TypeScript generator
+        run: nix develop --command bash node/scripts/build-bindgen.sh
+      - name: Install locked Node runtime dependencies
+        run: npm ci --prefix node
+      - name: Generate bindings from the real shared library
+        run: |
+          nix develop --command bash node/scripts/generate.sh \
+            target/python-uniffi/release/libmcp_v8_uniffi.so
+      - name: Check out pi
+        uses: actions/checkout@v4
+        with:
+          repository: r33drichards/pi
+          ref: ${{ github.event.inputs.pi_ref || env.PI_REF_DEFAULT }}
+          path: pi-checkout
+      - name: Install pi system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev
+      - name: Install and build pi
+        run: |
+          npm ci --ignore-scripts --prefix pi-checkout
+          npm run build --prefix pi-checkout
+      - name: Install the pi agent package into the harness test
+        run: npm install --prefix node/pi-harness
+      - name: Run pi tools against the native engine
+        run: timeout 300s npm test --prefix node/pi-harness

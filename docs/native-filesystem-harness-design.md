@@ -1,32 +1,32 @@
 # Direct native filesystem design
 
-Status: proposed revision of [pi #1](https://github.com/r33drichards/pi/pull/1)
-and [mcp-js #260](https://github.com/r33drichards/mcp-js/pull/260), reviewed
-2026-09-07. This document does not describe implemented adapter behavior.
+Status: implemented on the `claude/mcpjs-pi-integration-k1l3w7` branches of
+[pi](https://github.com/r33drichards/pi) and this repository as of 2026-09-07.
+This document records the design; `node/README.md` documents the shipped native
+filesystem API.
 
-## Verified upstream state
+## Upstream state
 
-Fetched `r33drichards/mcp-js` main: `04876586`.
-Since our original base `299a26df`, main adds Docker release-binary packaging
-([#264](https://github.com/r33drichards/mcp-js/pull/264)) and label-gated PR fuzzing
-([#265](https://github.com/r33drichards/mcp-js/pull/265)). It does not add a
-native filesystem operation API. The Node example still builds a shared library
-and generates bindings locally; the CLI release binary is not that library.
-Use the native Node workflow for ABI verification, not a released Docker image.
-`Dockerfile.source` is the source-testing image path when Docker tests are used.
+Main merged composable pre/post hooks
+([#266](https://github.com/r33drichards/mcp-js/pull/266)) on 2026-09-07, so the
+hook integration base this design waited for exists and the integration branch
+is rebased onto it. On that branch:
 
-[#253](https://github.com/r33drichards/mcp-js/pull/253), composable hooks, and
-[#263](https://github.com/r33drichards/mcp-js/pull/263), label-gated load tests,
-were merged into `claude/fuzz-on-label-knnaj9`, not main. Its enclosing
-[#261](https://github.com/r33drichards/mcp-js/pull/261) was closed without merging.
-The replacement #265 contains only `.github/workflows/fuzz.yml`; it does not
-carry the hooks or load-test changes onto main.
-Hook design below is based on merge commit
-`20d5d5bcb79cae4f7660ac1ad66216cc7ae6624e`, specifically
-`site-docs/concepts/hooks.md`. It is a pending integration dependency.
-Native npm packaging [#259](https://github.com/r33drichards/mcp-js/pull/259)
-and our constructor [#260](https://github.com/r33drichards/mcp-js/pull/260)
-are also still open. Do not treat their APIs or artifacts as available on main.
+- `Engine::create_with_filesystem` builds the filesystem `OperationPolicies`
+  with `build_hook_chain`, so `pre`, `stack`, and rewrites apply; a
+  configuration with no policies, pre hooks, or stack is rejected.
+- `fs::FsService` is the shared operation service below both the Deno ops and
+  the native `Engine::fs_*` methods; guest wire messages are unchanged and the
+  hooks end-to-end suite passes against it.
+- The native methods carry bytes as `bytes` and fail with
+  `RuntimeError::FileSystem { kind, message }`.
+- Ranged reads (`fs_read_file_range`) give the harness a bounded line reader.
+  Native reader/writer objects with explicit close are not implemented.
+- Overlay-backed engines are rejected by the native methods; the overlay must
+  run on the isolate's current-thread runtime.
+
+Native npm packaging ([#259](https://github.com/r33drichards/mcp-js/pull/259))
+is still separate and open; bindings are generated locally or in CI.
 
 ## Problem and target boundary
 
@@ -116,7 +116,7 @@ Output streaming for `run_js` is separate work: use execution IDs, bounded
 console pages, and cancellation APIs rather than assuming direct fs solves it.
 Verify the foreign-thread Tokio execution path before using submit APIs directly.
 
-## Revision and verification sequence
+## Verification sequence and status
 
 1. Wait for, or explicitly select, the hook integration base without silently
    rebasing shared PRs onto an unmerged feature branch.
@@ -130,6 +130,8 @@ Verify the foreign-thread Tokio execution path before using submit APIs directly
 5. Build real native bindings and run cross-language integration tests in CI.
    Mock adapter tests alone are not native integration proof.
 
-Current PRs remain prototypes until these changes and native verification are
-complete. The prior setup and limitations remain documented in
-[the pi prototype guide](https://github.com/r33drichards/pi/blob/openclaw/cool-claw/packages/agent/docs/mcp-js.md).
+Status: steps 1 through 4 are implemented on the integration branches. Step 5
+is `.github/workflows/pi-harness-e2e.yml`, which builds the shared library,
+generates bindings, checks out pi, and runs its file tools and `run_js` against
+the real engine (`node/pi-harness/tests/harness.test.ts`). The pi-side guide is
+[packages/agent/docs/mcp-js.md](https://github.com/r33drichards/pi/blob/claude/mcpjs-pi-integration-k1l3w7/packages/agent/docs/mcp-js.md).
