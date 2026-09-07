@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - "node/**"
+      - "LICENSE"
       - "server/**"
       - "mcp-v8-uniffi-python/**"
       - "Cargo.toml"
@@ -16,6 +17,7 @@ on:
     branches: [main]
     paths:
       - "node/**"
+      - "LICENSE"
       - "server/**"
       - "mcp-v8-uniffi-python/**"
       - "Cargo.toml"
@@ -70,7 +72,9 @@ jobs:
       - name: Build pinned UniFFI TypeScript generator
         run: nix develop --command bash node/scripts/build-bindgen.sh
       - name: Install locked Node runtime and test dependencies
-        run: npm ci --prefix node
+        run: npm ci --include=dev --prefix node
+      - name: Test packaging tooling (no native fixtures)
+        run: npm run test:unit --prefix node
       - name: Generate bindings from the real shared library
         run: |
           nix develop --command bash node/scripts/generate.sh \
@@ -79,3 +83,8 @@ jobs:
         run: npm run typecheck --prefix node
       - name: Run Node against the native engine (no server or Python)
         run: timeout 90s npm test --prefix node
+      - name: Compile relocatable npm package
+        run: npm run build --prefix node
+      - name: Pack and execute an isolated tarball consumer
+        # Runs outside nix develop: Nix-only or unresolved dynamic dependencies fail prepack.
+        run: timeout 240s npm run test:package --prefix node

@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "declaration": true,
+    "rootDir": "generated",
+    "outDir": "dist"
+  },
+  "include": ["generated/**/*.ts"]
+}
