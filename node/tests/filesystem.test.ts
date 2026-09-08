@@ -3,11 +3,11 @@ import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileS
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { Engine, FsEntryKind } from "../generated/index";
+import { Engine, type EngineLike, FsEntryKind } from "../generated/index";
 
 type RunResult = { output?: string; error?: string };
 
-function runner(engine: Engine): (code: string) => Promise<RunResult> {
+function runner(engine: EngineLike): (code: string) => Promise<RunResult> {
   return async (code) =>
     JSON.parse(await engine.callToolAsync("run_js", JSON.stringify({ code }), undefined, undefined));
 }
@@ -24,7 +24,7 @@ async function rejectsWith(promise: Promise<unknown>, pattern: RegExp): Promise<
   });
 }
 
-function release(engine: Engine): void {
+function release(engine: EngineLike): void {
   engine.close();
   if (Engine.instanceOf(engine)) engine.uniffiDestroy();
 }

@@ -1,10 +1,13 @@
 {
-  "name": "@mcp-js/node-uniffi-e2e",
-  "private": true,
+  "name": "@wholelottahoopla/mcp-js-node",
   "type": "module",
   "scripts": {
     "test": "node --import tsx --test --test-timeout=60000 tests/engine.test.ts tests/filesystem.test.ts tests/engine-config.test.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "build": "node scripts/build.mjs",
+    "prepack": "node scripts/prepack.mjs",
+    "test:unit": "node --test tests/packaging.test.mjs",
+    "test:package": "node scripts/test-package.mjs"
   },
   "dependencies": {
     "@ubjs/core": "0.31.0-5",
@@ -14,5 +17,40 @@
     "@types/node": "22.20.1",
     "tsx": "4.23.13",
     "typescript": "5.9.3"
+  },
+  "version": "0.1.0",
+  "description": "Native embedded mcp-js engine for Node.js (Linux x64 glibc)",
+  "license": "AGPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/r33drichards/mcp-js"
+  },
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "libc": [
+    "glibc"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "dist/",
+    "LICENSE",
+    "README.md"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

@@ -6,19 +6,27 @@ import { test } from "node:test";
 import {
   BlobStoreBuilder,
   Engine,
+  type EngineLike,
   EngineConfigBuilder,
   ExecutionLimitsBuilder,
   FilesystemAccessBuilder,
   StoreBackend,
 } from "../generated/index";
 
-function release(engine: Engine): void {
+function throwsWith(operation: () => unknown, pattern: RegExp): void {
+  assert.throws(operation, (error: unknown) => {
+    assert.match([String(error), JSON.stringify(error)].join(" "), pattern);
+    return true;
+  });
+}
+
+function release(engine: EngineLike): void {
   engine.close();
   if (Engine.instanceOf(engine)) engine.uniffiDestroy();
 }
 
 /** Submit through the execution API so the resulting heap hash is observable. */
-async function runToCompletion(engine: Engine, code: string, heap: string | undefined) {
+async function runToCompletion(engine: EngineLike, code: string, heap: string | undefined) {
   const id = await engine.submitExecution({
     code,
     file: undefined,
@@ -82,14 +90,18 @@ test("builders assemble an engine with heap persistence and filesystem access", 
         undefined,
       ),
     );
-    assert.equal(result.output?.trim(), "42");
+    assert.equal(typeof result.execution_id, "string");
+    const completed = await engine.awaitExecution(result.execution_id);
+    assert.equal(completed.status, "completed", completed.error);
+    const output = engine.getExecutionOutput(result.execution_id, undefined, undefined, undefined, undefined);
+    assert.equal(output.data.trim(), "42");
   } finally {
     release(engine);
     rmSync(dir, { recursive: true, force: true });
   }
 
-  assert.throws(() => new EngineConfigBuilder().build(), /EngineConfig is missing required field limits/);
-  assert.throws(
+  throwsWith(() => new EngineConfigBuilder().build(), /EngineConfig is missing required field limits/);
+  throwsWith(
     () => Engine.create(new EngineConfigBuilder().limits(limits).heapStore(new BlobStoreBuilder().backend(StoreBackend.S3).build()).build()),
     /bucket/,
   );

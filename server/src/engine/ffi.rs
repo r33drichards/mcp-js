@@ -735,25 +735,29 @@ impl Engine {
             })?;
         let mcp_headers = request.mcp_headers.map(mcp_headers_value);
 
-        let mut execution = self
-            .run_js(request.code)
-            .maybe_file(request.file)
-            .maybe_fs(request.fs)
-            .maybe_session(request.session)
-            .maybe_mcp_headers(mcp_headers);
-        if let Some(heap) = request.heap {
-            execution = execution.heap(heap);
-        }
-        if let Some(heap_memory_max_mb) = heap_memory_max_mb {
-            execution = execution.heap_memory_max_mb(heap_memory_max_mb);
-        }
-        if let Some(execution_timeout_secs) = request.execution_timeout_secs {
-            execution = execution.execution_timeout_secs(execution_timeout_secs);
-        }
-        if let Some(tags) = request.tags {
-            execution = execution.tags(tags);
-        }
-        execution.execute().await.map_err(operation_message)
+        let engine = self.clone();
+        self.on_runtime(async move {
+            let mut execution = engine
+                .run_js(request.code)
+                .maybe_file(request.file)
+                .maybe_fs(request.fs)
+                .maybe_session(request.session)
+                .maybe_mcp_headers(mcp_headers);
+            if let Some(heap) = request.heap {
+                execution = execution.heap(heap);
+            }
+            if let Some(heap_memory_max_mb) = heap_memory_max_mb {
+                execution = execution.heap_memory_max_mb(heap_memory_max_mb);
+            }
+            if let Some(execution_timeout_secs) = request.execution_timeout_secs {
+                execution = execution.execution_timeout_secs(execution_timeout_secs);
+            }
+            if let Some(tags) = request.tags {
+                execution = execution.tags(tags);
+            }
+            execution.execute().await.map_err(operation_message)
+        })
+        .await
     }
 
     pub fn get_execution(&self, execution_id: String) -> Result<ExecutionInfo, RuntimeError> {

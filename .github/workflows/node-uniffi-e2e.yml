@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - "node/**"
+      - "LICENSE"
       - "server/**"
       - "mcp-v8-uniffi-python/**"
       - "Cargo.toml"
@@ -16,6 +17,7 @@ on:
     branches: [main]
     paths:
       - "node/**"
+      - "LICENSE"
       - "server/**"
       - "mcp-v8-uniffi-python/**"
       - "Cargo.toml"
@@ -24,6 +26,11 @@ on:
       - "flake.lock"
       - ".github/workflows/node-uniffi-e2e.yml"
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Shared repository version to stage into both bootstrap artifacts"
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -33,6 +40,41 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  npm-client-nix-e2e:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: clients/typescript/package-lock.json
+      - name: Stage and record the HTTP package version
+        id: package-version
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          version="${REQUESTED_VERSION:-$(node -p 'require("./clients/typescript/package.json").version')}"
+          node node/scripts/release-tag.mjs "v$version" >/dev/null
+          node node/scripts/release-tag.mjs --stage clients/typescript "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: DeterminateSystems/nix-installer-action@main
+      - name: Build the HTTP npm tarball as a Nix derivation
+        run: nix build .#npm-client
+      - name: Verify the exact Nix tarball with an outside-Nix consumer
+        run: |
+          npm ci --include=dev --prefix clients/typescript
+          timeout 180s node clients/typescript/scripts-test-package.mjs result/*.tgz
+      - name: Upload the exact validated HTTP tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-tarball-client-${{ steps.package-version.outputs.version }}
+          path: result/*.tgz
+          if-no-files-found: error
+          retention-days: 7
+
   node-library-e2e:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
@@ -43,6 +85,16 @@ jobs:
           node-version: "22"
           cache: npm
           cache-dependency-path: node/package-lock.json
+      - name: Stage and record the native package version
+        id: package-version
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          version="${REQUESTED_VERSION:-$(node -p 'require("./node/package.json").version')}"
+          node node/scripts/release-tag.mjs "v$version" >/dev/null
+          node node/scripts/release-tag.mjs --stage node "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
       - uses: DeterminateSystems/nix-installer-action@main
       - name: Restore native library build cache
         uses: actions/cache@v4
@@ -51,7 +103,9 @@ jobs:
             ~/.cargo/git
             ~/.cargo/registry
             target/python-uniffi
-          key: python-uniffi-v8-145-shared-v2-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'server/**', 'mcp-v8-uniffi-python/**') }}
+          key: python-uniffi-v8-145-e6a88b35-shared-v3-${{ runner.os }}-${{ hashFiles('flake.lock', 'mcp-v8-uniffi-python/cargo-config.toml') }}
+          restore-keys: |
+            python-uniffi-v8-145-shared-v2-${{ runner.os }}-
       - name: Restore Node generator build cache
         uses: actions/cache@v4
         with:
@@ -67,15 +121,54 @@ jobs:
             cargo build -p mcp-v8-uniffi-python --release \
               --config mcp-v8-uniffi-python/cargo-config.toml
           '
+      - name: Save source-V8 build cache before later package checks
+        if: success()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/git
+            ~/.cargo/registry
+            target/python-uniffi
+          key: python-uniffi-v8-145-e6a88b35-shared-v3-${{ runner.os }}-${{ hashFiles('flake.lock', 'mcp-v8-uniffi-python/cargo-config.toml') }}
       - name: Build pinned UniFFI TypeScript generator
         run: nix develop --command bash node/scripts/build-bindgen.sh
       - name: Install locked Node runtime and test dependencies
-        run: npm ci --prefix node
+        run: npm ci --include=dev --prefix node
+      - name: Test packaging tooling (no native fixtures)
+        run: npm run test:unit --prefix node
       - name: Generate bindings from the real shared library
         run: |
           nix develop --command bash node/scripts/generate.sh \
             target/python-uniffi/release/libmcp_v8_uniffi.so
+      - name: Build the native npm tarball as a Nix derivation
+        run: |
+          stage="$(mktemp -d)"
+          tar --exclude=node/node_modules --exclude=node/dist -cf - LICENSE node | tar -C "$stage" -xf -
+          NATIVE_NPM_SOURCE="$stage" nix build --impure --expr '
+            let
+              flake = builtins.getFlake (toString ./.);
+              pkgs = flake.inputs.nixpkgs.legacyPackages.${builtins.currentSystem};
+            in import ./nix/npm-native.nix {
+              inherit pkgs;
+              src = builtins.path {
+                path = /. + builtins.getEnv "NATIVE_NPM_SOURCE";
+                name = "mcp-js-node-source";
+              };
+            }
+          '
       - name: Typecheck the Node program
         run: npm run typecheck --prefix node
       - name: Run Node against the native engine (no server or Python)
         run: timeout 90s npm test --prefix node
+      - name: Compile relocatable npm package
+        run: nix develop --command npm run build --prefix node
+      - name: Pack and execute an isolated tarball consumer
+        # Runs outside nix develop: Nix-only or unresolved dynamic dependencies fail prepack.
+        run: timeout 240s node node/scripts/test-package.mjs result/*.tgz
+      - name: Upload the exact validated native tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-tarball-node-${{ steps.package-version.outputs.version }}
+          path: result/*.tgz
+          if-no-files-found: error
+          retention-days: 7
