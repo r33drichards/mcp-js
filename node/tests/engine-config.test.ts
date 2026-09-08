@@ -6,19 +6,20 @@ import { test } from "node:test";
 import {
   BlobStoreBuilder,
   Engine,
+  type EngineLike,
   EngineConfigBuilder,
   ExecutionLimitsBuilder,
   FilesystemAccessBuilder,
   StoreBackend,
 } from "../generated/index";
 
-function release(engine: Engine): void {
+function release(engine: EngineLike): void {
   engine.close();
   if (Engine.instanceOf(engine)) engine.uniffiDestroy();
 }
 
 /** Submit through the execution API so the resulting heap hash is observable. */
-async function runToCompletion(engine: Engine, code: string, heap: string | undefined) {
+async function runToCompletion(engine: EngineLike, code: string, heap: string | undefined) {
   const id = await engine.submitExecution({
     code,
     file: undefined,
