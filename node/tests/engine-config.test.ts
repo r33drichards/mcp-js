@@ -13,6 +13,13 @@ import {
   StoreBackend,
 } from "../generated/index";
 
+function throwsWith(operation: () => unknown, pattern: RegExp): void {
+  assert.throws(operation, (error: unknown) => {
+    assert.match([String(error), JSON.stringify(error)].join(" "), pattern);
+    return true;
+  });
+}
+
 function release(engine: EngineLike): void {
   engine.close();
   if (Engine.instanceOf(engine)) engine.uniffiDestroy();
@@ -93,8 +100,8 @@ test("builders assemble an engine with heap persistence and filesystem access", 
     rmSync(dir, { recursive: true, force: true });
   }
 
-  assert.throws(() => new EngineConfigBuilder().build(), /EngineConfig is missing required field limits/);
-  assert.throws(
+  throwsWith(() => new EngineConfigBuilder().build(), /EngineConfig is missing required field limits/);
+  throwsWith(
     () => Engine.create(new EngineConfigBuilder().limits(limits).heapStore(new BlobStoreBuilder().backend(StoreBackend.S3).build()).build()),
     /bucket/,
   );
