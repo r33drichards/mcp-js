@@ -83,7 +83,11 @@ test("builders assemble an engine with heap persistence and filesystem access", 
         undefined,
       ),
     );
-    assert.equal(result.output?.trim(), "42");
+    assert.equal(typeof result.execution_id, "string");
+    const completed = await engine.awaitExecution(result.execution_id);
+    assert.equal(completed.status, "completed", completed.error);
+    const output = engine.getExecutionOutput(result.execution_id, undefined, undefined, undefined, undefined);
+    assert.equal(output.data.trim(), "42");
   } finally {
     release(engine);
     rmSync(dir, { recursive: true, force: true });
