@@ -3,8 +3,7 @@ name: Publish npm Packages
 on:
   push:
     tags:
-      - "node-v*"
-      - "client-v*"
+      - "v*.*.*"
   workflow_dispatch:
     inputs:
       package:
@@ -13,17 +12,13 @@ on:
         default: both
         type: choice
         options: [both, node, client]
-      node_version:
-        description: "Exact mcp-js-node version when node is selected"
-        required: false
-        type: string
-      client_version:
-        description: "Exact mcp-js-client version when client is selected"
-        required: false
+      version:
+        description: "Version to stage into selected package artifacts"
+        required: true
         type: string
 
-# Manual runs only produce artifacts. Only protected node-v*/client-v* tag
-# pushes can reach the environment-gated OIDC publisher.
+# Manual runs only produce artifacts. Only protected v*.*.* tag pushes can
+# publish both packages through the environment-gated OIDC publisher.
 permissions:
   contents: read
 
@@ -52,7 +47,7 @@ jobs:
           PACKAGE_SELECTION: ${{ inputs.package }}
           PACKAGE_ID: ${{ matrix.id }}
         run: |
-          if { [ "$EVENT_NAME" = push ] && [[ "$TAG_NAME" == "$PACKAGE_ID"-v* ]]; } ||
+          if [ "$EVENT_NAME" = push ] ||
              { [ "$EVENT_NAME" = workflow_dispatch ] && { [ "$PACKAGE_SELECTION" = both ] || [ "$PACKAGE_SELECTION" = "$PACKAGE_ID" ]; }; }; then
             echo selected=true >> "$GITHUB_OUTPUT"
           else
@@ -68,28 +63,24 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           TAG_NAME: ${{ github.ref_name }}
           PACKAGE_ID: ${{ matrix.id }}
-          NODE_VERSION: ${{ inputs.node_version }}
-          CLIENT_VERSION: ${{ inputs.client_version }}
+          REQUESTED_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
           git fetch --no-tags origin main
           if [ "$EVENT_NAME" = push ]; then
             release="$(node node/scripts/release-tag.mjs "$TAG_NAME")"
-            test "$(node -p "JSON.parse(process.argv[1]).packageId" "$release")" = "$PACKAGE_ID"
             requested_version="$(node -p "JSON.parse(process.argv[1]).version" "$release")"
             tag_commit="$(git rev-list -n 1 "$TAG_NAME")"
             test "$tag_commit" = "$GITHUB_SHA"
             git merge-base --is-ancestor "$tag_commit" origin/main
           else
             test "$GITHUB_REF" = refs/heads/main
-            if [ "$PACKAGE_ID" = node ]; then
-              requested_version="$NODE_VERSION"
-            else
-              requested_version="$CLIENT_VERSION"
-            fi
-            release="$(node node/scripts/release-tag.mjs "$PACKAGE_ID-v$requested_version")"
+            requested_version="$REQUESTED_VERSION"
+            release="$(node node/scripts/release-tag.mjs "v$requested_version")"
           fi
+          node node/scripts/release-tag.mjs --stage '${{ matrix.directory }}' "$requested_version"
           test "$(node -p "require('./${{ matrix.directory }}/package.json').version")" = "$requested_version"
+          test "$(node -p "require('./${{ matrix.directory }}/package-lock.json').version")" = "$requested_version"
       - uses: DeterminateSystems/nix-installer-action@main
         if: steps.select.outputs.selected == 'true'
       - uses: actions/setup-node@v4
@@ -189,9 +180,9 @@ jobs:
           retention-days: 7
 
   publish:
-    name: Publish tagged npm package
+    name: Publish both tagged npm packages
     needs: build-tarballs
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
     environment: npm-publish
     permissions:
@@ -208,14 +199,16 @@ jobs:
         run: |
           set -euo pipefail
           release="$(node node/scripts/release-tag.mjs "$TAG_NAME")"
-          echo "package_id=$(node -p "JSON.parse(process.argv[1]).packageId" "$release")" >> "$GITHUB_OUTPUT"
-          echo "package_name=$(node -p "JSON.parse(process.argv[1]).packageName" "$release")" >> "$GITHUB_OUTPUT"
           echo "version=$(node -p "JSON.parse(process.argv[1]).version" "$release")" >> "$GITHUB_OUTPUT"
           echo "npm_tag=$(node -p "JSON.parse(process.argv[1]).npmTag" "$release")" >> "$GITHUB_OUTPUT"
       - uses: actions/download-artifact@v4
         with:
-          name: npm-tarball-${{ steps.release.outputs.package_id }}
-          path: release-artifacts
+          name: npm-tarball-node
+          path: release-artifacts/node
+      - uses: actions/download-artifact@v4
+        with:
+          name: npm-tarball-client
+          path: release-artifacts/client
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
@@ -229,18 +222,20 @@ jobs:
           if (nodeMajor < 22 || (nodeMajor === 22 && nodeMinor < 14)) throw new Error('Node.js 22.14.0 or newer is required');
           if (npmMajor < 11 || (npmMajor === 11 && (npmMinor < 5 || (npmMinor === 5 && npmPatch < 1)))) throw new Error('npm CLI 11.5.1 or newer is required');
           NODE
-      - name: Verify tagged tarball identity and payload
+      - name: Verify tagged tarball identities and payloads
         env:
-          EXPECTED_NAME: ${{ steps.release.outputs.package_name }}
           EXPECTED_VERSION: ${{ steps.release.outputs.version }}
         run: |
           set -euo pipefail
-          tarball="$(find release-artifacts -type f -name '*.tgz' -print -quit)"
-          test -n "$tarball"
-          test "$(find release-artifacts -type f -name '*.tgz' | wc -l)" = 1
-          mkdir unpacked
-          tar -xzf "$tarball" -C unpacked
-          node - "$EXPECTED_NAME" "$EXPECTED_VERSION" <<'NODE'
+          verify() {
+            id="$1" expected_name="$2"
+            tarball="$(find "release-artifacts/$id" -type f -name '*.tgz' -print -quit)"
+            test -n "$tarball"
+            test "$(find "release-artifacts/$id" -type f -name '*.tgz' | wc -l)" = 1
+            rm -rf unpacked
+            mkdir unpacked
+            tar -xzf "$tarball" -C unpacked
+            node - "$expected_name" "$EXPECTED_VERSION" <<'NODE'
           const fs = require('fs');
           const [expectedName, expectedVersion] = process.argv.slice(2);
           const manifest = JSON.parse(fs.readFileSync('unpacked/package/package.json', 'utf8'));
@@ -248,10 +243,15 @@ jobs:
             throw new Error(`tarball identity mismatch: ${manifest.name}@${manifest.version}`);
           }
           NODE
-          tar -tzf "$tarball" | sort > contents.txt
-          grep -qx 'package/package.json' contents.txt
-          grep -qx 'package/README.md' contents.txt
-      - name: Publish with npm trusted publishing and provenance
+            tar -tzf "$tarball" | sort > contents.txt
+            grep -qx 'package/package.json' contents.txt
+            grep -qx 'package/README.md' contents.txt
+          }
+          verify node '@wholelottahoopla/mcp-js-node'
+          verify client '@wholelottahoopla/mcp-js-client'
+      - name: Publish both packages with npm trusted publishing and provenance
         env:
           NPM_TAG: ${{ steps.release.outputs.npm_tag }}
-        run: npm publish "$(find release-artifacts -type f -name '*.tgz' -print -quit)" --access public --provenance --tag "$NPM_TAG"
+        run: |
+          npm publish "$(find release-artifacts/node -type f -name '*.tgz' -print -quit)" --access public --provenance --tag "$NPM_TAG"
+          npm publish "$(find release-artifacts/client -type f -name '*.tgz' -print -quit)" --access public --provenance --tag "$NPM_TAG"

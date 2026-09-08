@@ -1,17 +1,33 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { checkDependencies, checkElf, checkTarball, packResult } from '../scripts/packaging.mjs';
 
-test('release tags route packages and prereleases without changing latest', async () => {
+test('repository release tags route stable and prerelease npm dist-tags', async () => {
   const { parseReleaseTag } = await import('../scripts/release-tag.mjs');
-  assert.deepEqual(parseReleaseTag('node-v1.2.3'), {
-    packageId: 'node', version: '1.2.3', npmTag: 'latest', packageName: '@wholelottahoopla/mcp-js-node',
-  });
-  assert.deepEqual(parseReleaseTag('client-v2.0.0-rc.1'), {
-    packageId: 'client', version: '2.0.0-rc.1', npmTag: 'next', packageName: '@wholelottahoopla/mcp-js-client',
-  });
-  for (const tag of ['v1.2.3', 'node-v01.2.3', 'client-v1.2', 'node-v1.2.3-', 'other-v1.2.3']) {
+  assert.deepEqual(parseReleaseTag('v1.2.3'), { version: '1.2.3', npmTag: 'latest' });
+  assert.deepEqual(parseReleaseTag('v2.0.0-rc.1'), { version: '2.0.0-rc.1', npmTag: 'next' });
+  assert.deepEqual(parseReleaseTag('v0.19.0-rc2'), { version: '0.19.0-rc2', npmTag: 'next' });
+  for (const tag of ['node-v1.2.3', 'v01.2.3', 'v1.2', 'v1.2.3-', 'release-v1.2.3']) {
     assert.throws(() => parseReleaseTag(tag));
+  }
+});
+
+test('release staging updates package and lockfile root versions together', async () => {
+  const { stagePackageVersion } = await import('../scripts/release-tag.mjs');
+  const directory = mkdtempSync(join(tmpdir(), 'npm-version-'));
+  try {
+    writeFileSync(join(directory, 'package.json'), '{"name":"example","version":"0.1.0"}\n');
+    writeFileSync(join(directory, 'package-lock.json'), '{"name":"example","version":"0.1.0","packages":{"":{"name":"example","version":"0.1.0"}}}\n');
+    stagePackageVersion(directory, '1.2.3-rc.1');
+    assert.equal(JSON.parse(readFileSync(join(directory, 'package.json'))).version, '1.2.3-rc.1');
+    const lock = JSON.parse(readFileSync(join(directory, 'package-lock.json')));
+    assert.equal(lock.version, '1.2.3-rc.1');
+    assert.equal(lock.packages[''].version, '1.2.3-rc.1');
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
   }
 });
 
