@@ -74,8 +74,8 @@ import { Engine } from '@wholelottahoopla/mcp-js-node';
 
 const engine = Engine.createStateless(64n, 1n);
 try {
-  const result = JSON.parse(engine.callTool(
-    'run_js', JSON.stringify({ code: 'console.log(6 * 7)' }),
+  const result = JSON.parse(await engine.callToolAsync(
+    "run_js", JSON.stringify({ code: "console.log(6 * 7)" }),
     undefined, undefined,
   ));
   console.log(result.output); // 42
@@ -85,9 +85,11 @@ try {
 }
 ```
 
-`callTool` is synchronous and blocks the Node event loop. Use a dedicated worker
-where the host thread must remain responsive. The engine awaits guest Promises.
-Execution errors and deadlines are returned in JSON; native API failures throw.
+`callToolAsync` returns a Promise and does not block the Node event loop. The
+same positional arguments are accepted by synchronous `callTool`, which is
+useful in scripts but blocks the host thread. The native engine awaits Promises
+in the executed JavaScript. Execution errors and deadlines are returned in
+JSON; native API failures reject the Promise (or throw from `callTool`).
 
 ## Generator compatibility and licensing
 

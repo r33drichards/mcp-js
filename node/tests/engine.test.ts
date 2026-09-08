@@ -18,6 +18,10 @@ test("Node executes JavaScript through the native UniFFI engine", async () => {
     assert.ok(Engine.instanceOf(engine), "constructor must return a native Engine");
     const run = (code: string): { output: string; error?: string } =>
       JSON.parse(engine.callTool("run_js", JSON.stringify({ code }), undefined, undefined));
+    const runAsync = async (code: string): Promise<{ output: string; error?: string }> =>
+      JSON.parse(await engine.callToolAsync(
+        "run_js", JSON.stringify({ code }), undefined, undefined,
+      ));
 
     try {
       assert.equal(engine.lifecycleState(), RuntimeLifecycleState.Running);
@@ -25,6 +29,13 @@ test("Node executes JavaScript through the native UniFFI engine", async () => {
       assert.equal(result.error, undefined);
       assert.equal(result.output.trim(), "42");
       assert.equal(run('console.log(await Promise.resolve("awaited"))').output.trim(), "awaited");
+      let hostTimerRan = false;
+      const pending = runAsync(
+        'await new Promise(resolve => setTimeout(resolve, 50)); console.log("async")',
+      );
+      setTimeout(() => { hostTimerRan = true; }, 0);
+      assert.equal((await pending).output.trim(), "async");
+      assert.equal(hostTimerRan, true, "callToolAsync must not block the Node event loop");
       assert.match(run('throw new Error("node-uniffi-probe")').error ?? "", /node-uniffi-probe/);
       assert.ok(run("while (true) {}").error, "nonterminating JavaScript must time out");
       assert.equal(run('console.log("recovered")').output.trim(), "recovered");
@@ -32,6 +43,7 @@ test("Node executes JavaScript through the native UniFFI engine", async () => {
       assert.equal(engine.lifecycleState(), RuntimeLifecycleState.Shutdown);
       assert.equal(engine.close().alreadyShutdown, true);
       assert.throws(() => run("console.log(1)"));
+      await assert.rejects(() => runAsync("console.log(1)"));
     } finally {
       engine.close();
       engine.uniffiDestroy();
@@ -40,7 +52,7 @@ test("Node executes JavaScript through the native UniFFI engine", async () => {
     for (const [memory, timeout] of [[0n, 1n], [64n, 0n], [4097n, 1n], [64n, 301n]]) {
       assert.throws(() => Engine.createStateless(memory, timeout));
     }
-    console.log("Node native UniFFI E2E passed: 42, await, error, timeout recovery, shutdown");
+    console.log("Node native UniFFI E2E passed: sync, async, await, error, timeout recovery, shutdown");
   } finally {
     methods.forEach((name, i) => Object.assign(childProcess, { [name]: originals[i] }));
     syncBuiltinESMExports();

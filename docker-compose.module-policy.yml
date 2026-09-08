@@ -15,7 +15,9 @@ services:
       - ./policies:/policies:ro
 
   mcp-default:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile.source
     command:
       - --http-port=3000
       - --heap-store=dir
@@ -27,7 +29,9 @@ services:
       - "3001:3000"
 
   mcp-opa-policy:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile.source
     command:
       - --http-port=3000
       - --heap-store=dir

@@ -1,11 +1,15 @@
 name: Build and Push Docker Image
 
+# The Dockerfile installs a prebuilt server binary from GitHub Releases, so the
+# image for a version tag can only be built once "Release Rust Server" has
+# uploaded that tag's assets. Tag pushes therefore do not build here directly;
+# the release workflow's completion does (workflow_run below), checking out the
+# tag and passing it to the Dockerfile. Pushes to main rebuild `latest` from
+# the newest release so Dockerfile changes ship without waiting for a tag.
 on:
   push:
     branches:
       - main
-    tags:
-      - 'v*.*.*'
   pull_request:
     branches:
       - main
@@ -14,14 +18,79 @@ on:
       - '**.md'
       - 'mkdocs.yml'
       - '.lychee.toml'
+  workflow_run:
+    workflows: ["Release Rust Server"]
+    types: [completed]
   workflow_dispatch:
+    inputs:
+      version:
+        description: >-
+          Release tag to package (e.g. v0.20.1). Leave empty to package the
+          latest release and only refresh the `latest` image tag.
+        required: false
+        type: string
 
 jobs:
   docker:
     runs-on: ubuntu-latest
+    # A release-workflow run counts only when it succeeded for a version tag;
+    # workflow_dispatch runs of the release workflow (from a branch) publish no
+    # assets and are ignored.
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       startsWith(github.event.workflow_run.head_branch, 'v'))
+    outputs:
+      version: ${{ steps.rel.outputs.tag }}
+      is_release: ${{ steps.rel.outputs.is_release }}
     steps:
+      - name: Resolve release to package
+        id: rel
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          RUN_TAG: ${{ github.event.workflow_run.head_branch }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          is_release=false
+          if [ "$EVENT_NAME" = "workflow_run" ]; then
+            tag="$RUN_TAG"
+            is_release=true
+          elif [ -n "$INPUT_VERSION" ]; then
+            tag="$INPUT_VERSION"
+            case "$tag" in v*) ;; *) tag="v$tag" ;; esac
+            is_release=true
+          else
+            # Pin the concrete tag rather than passing "latest" so the
+            # Dockerfile's download layer is keyed by version and the GHA
+            # layer cache cannot serve a stale binary after a new release.
+            tag=$(curl --fail --silent --show-error --location --retry 3 \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/latest" \
+              | jq -r '.tag_name')
+          fi
+          [ -n "$tag" ] && [ "$tag" != "null" ] || { echo "could not resolve a release tag" >&2; exit 1; }
+          push_latest=false
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            push_latest=true
+          fi
+          echo "Packaging release $tag (is_release=$is_release, push_latest=$push_latest)"
+          {
+            echo "tag=$tag"
+            echo "is_release=$is_release"
+            echo "push_latest=$push_latest"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          # For a release, build from the Dockerfile at that tag.
+          ref: ${{ steps.rel.outputs.is_release == 'true' && format('refs/tags/{0}', steps.rel.outputs.tag) || github.ref }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -38,18 +107,26 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: wholelottahoopla/mcp-js
+          flavor: |
+            latest=false
           tags: |
-            type=sha,prefix=,format=short
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
+            type=ref,event=pr
+            type=raw,value=latest,enable=${{ steps.rel.outputs.push_latest }}
+            type=semver,pattern={{version}},value=${{ steps.rel.outputs.tag }},enable=${{ steps.rel.outputs.is_release }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ steps.rel.outputs.tag }},enable=${{ steps.rel.outputs.is_release }}
+            type=semver,pattern={{major}},value=${{ steps.rel.outputs.tag }},enable=${{ steps.rel.outputs.is_release }}
+          labels: |
+            org.opencontainers.image.version=${{ steps.rel.outputs.tag }}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
           context: .
           file: ./Dockerfile
+          # The release ships both Linux binaries, so the image is multi-arch.
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            MCP_V8_VERSION=${{ steps.rel.outputs.tag }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -58,7 +135,7 @@ jobs:
 
   publish-mcp:
     needs: docker
-    if: startsWith(github.ref, 'refs/tags/v') && github.event_name != 'pull_request'
+    if: needs.docker.outputs.is_release == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -66,11 +143,15 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ needs.docker.outputs.version }}
 
       - name: Set registry release version
         shell: bash
+        env:
+          TAG: ${{ needs.docker.outputs.version }}
         run: |
-          VERSION=${GITHUB_REF#refs/tags/v}
+          VERSION=${TAG#v}
           jq --arg version "$VERSION" \
             '.version = $version | .packages[0].identifier = ("docker.io/wholelottahoopla/mcp-js:" + $version)' \
             server.json > server.tmp

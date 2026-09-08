@@ -22,7 +22,9 @@ services:
 
   # ── MCP-JS cluster nodes ─────────────────────────────────────────────
   node1:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile.source
     command:
       - --http-port=3000
       - --heap-store=dir
@@ -41,7 +43,9 @@ services:
       - "4000"
 
   node2:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile.source
     command:
       - --http-port=3000
       - --heap-store=dir
@@ -60,7 +64,9 @@ services:
       - "4000"
 
   node3:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile.source
     command:
       - --http-port=3000
       - --heap-store=dir
