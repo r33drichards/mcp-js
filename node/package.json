@@ -2,7 +2,7 @@
   "name": "@wholelottahoopla/mcp-js-node",
   "type": "module",
   "scripts": {
-    "test": "node --import tsx --test --test-timeout=60000 tests/engine.test.ts",
+    "test": "node --import tsx --test --test-timeout=60000 tests/engine.test.ts tests/filesystem.test.ts tests/engine-config.test.ts",
     "typecheck": "tsc --noEmit",
     "build": "node scripts/build.mjs",
     "prepack": "node scripts/prepack.mjs",

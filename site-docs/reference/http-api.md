@@ -86,6 +86,39 @@ stored mime type as `Content-Type` — no base64, unlike the MCP tool.
 Authentication: none.
 
 
+## Server
+
+
+### Which per-session state this server offers.
+
+
+<a id="opIdcapabilities_handler"></a>
+
+`GET /api/capabilities`
+
+> Example responses
+
+> 200 Response
+
+```json
+{
+  "filesystem": true,
+  "heap": true,
+  "sessions": true
+}
+```
+
+<a id="which-per-session-state-this-server-offers.-responses"></a>
+#### Responses
+
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Capabilities|[Capabilities](#schemacapabilities)|
+
+Authentication: none.
+
+
 ## CLI
 
 
@@ -646,6 +679,337 @@ Authentication: none.
 Authentication: none.
 
 
+## Sessions
+
+
+### Names of a directory's direct children in a session's filesystem snapshot.
+
+
+<a id="opIdsession_dir_handler"></a>
+
+`GET /api/sessions/{session}/dir/{path}`
+
+<a id="names-of-a-directory's-direct-children-in-a-session's-filesystem-snapshot.-parameters"></a>
+#### Parameters
+
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|session|path|string|true|Engine session name|
+|path|path|string|true|Directory path inside the snapshot, without the leading slash|
+
+> Example responses
+
+> 200 Response
+
+```json
+{
+  "names": [
+    "string"
+  ]
+}
+```
+
+<a id="names-of-a-directory's-direct-children-in-a-session's-filesystem-snapshot.-responses"></a>
+#### Responses
+
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Directory listing|[SessionDirListing](#schemasessiondirlisting)|
+|404|[Not Found](https://tools.ietf.org/html/rfc7231#section-6.5.4)|Not found|[ApiError](#schemaapierror)|
+
+Authentication: none.
+
+
+### Metadata for a path in a session's filesystem snapshot.
+
+
+<a id="opIdsession_entry_handler"></a>
+
+`GET /api/sessions/{session}/entries/{path}`
+
+<a id="metadata-for-a-path-in-a-session's-filesystem-snapshot.-parameters"></a>
+#### Parameters
+
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|session|path|string|true|Engine session name|
+|path|path|string|true|Path inside the snapshot, without the leading slash|
+|follow|query|boolean|false|Follow a final symlink (Node `fs.stat`); `false` is `fs.lstat`.|
+
+> Example responses
+
+> 200 Response
+
+```json
+{
+  "kind": "string",
+  "mode": 0,
+  "modified_ms": 0.1,
+  "readonly": true,
+  "size": 0
+}
+```
+
+<a id="metadata-for-a-path-in-a-session's-filesystem-snapshot.-responses"></a>
+#### Responses
+
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Entry metadata|[SessionFileEntry](#schemasessionfileentry)|
+|404|[Not Found](https://tools.ietf.org/html/rfc7231#section-6.5.4)|Not found|[ApiError](#schemaapierror)|
+
+Authentication: none.
+
+
+### Read a file from a session's filesystem snapshot.
+
+
+<a id="opIdsession_file_get_handler"></a>
+
+`GET /api/sessions/{session}/files/{path}`
+
+<a id="read-a-file-from-a-session's-filesystem-snapshot.-parameters"></a>
+#### Parameters
+
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|session|path|string|true|Engine session name|
+|path|path|string|true|Path inside the snapshot, without the leading slash|
+|offset|query|integer(int64)|false|Start reading at this byte offset (with `max_bytes`).|
+|max_bytes|query|integer(int64)|false|Read at most this many bytes; fewer are returned only at end of file.|
+
+> Example responses
+
+> 200 Response
+
+> 403 Response
+
+```json
+{
+  "error": "string"
+}
+```
+
+<a id="read-a-file-from-a-session's-filesystem-snapshot.-responses"></a>
+#### Responses
+
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|File bytes|string|
+|403|[Forbidden](https://tools.ietf.org/html/rfc7231#section-6.5.3)|Denied by the filesystem hook chain|[ApiError](#schemaapierror)|
+|404|[Not Found](https://tools.ietf.org/html/rfc7231#section-6.5.4)|Not found|[ApiError](#schemaapierror)|
+
+Authentication: none.
+
+
+### Create, replace, or append to a file in a session's filesystem snapshot.
+
+
+<a id="opIdsession_file_put_handler"></a>
+
+`PUT /api/sessions/{session}/files/{path}`
+
+The raw request body is the file content.
+
+> Body parameter
+
+```yaml
+string
+
+```
+
+<a id="create,-replace,-or-append-to-a-file-in-a-session's-filesystem-snapshot.-parameters"></a>
+#### Parameters
+
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|session|path|string|true|Engine session name|
+|path|path|string|true|Path inside the snapshot, without the leading slash|
+|append|query|boolean|false|Append to the file instead of replacing it.|
+|body|body|string(binary)|true|none|
+
+> Example responses
+
+> 403 Response
+
+```json
+{
+  "error": "string"
+}
+```
+
+<a id="create,-replace,-or-append-to-a-file-in-a-session's-filesystem-snapshot.-responses"></a>
+#### Responses
+
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|204|[No Content](https://tools.ietf.org/html/rfc7231#section-6.3.5)|Written|None|
+|403|[Forbidden](https://tools.ietf.org/html/rfc7231#section-6.5.3)|Denied by the filesystem hook chain|[ApiError](#schemaapierror)|
+
+Authentication: none.
+
+
+### Remove a file or directory from a session's filesystem snapshot.
+
+
+<a id="opIdsession_file_delete_handler"></a>
+
+`DELETE /api/sessions/{session}/files/{path}`
+
+<a id="remove-a-file-or-directory-from-a-session's-filesystem-snapshot.-parameters"></a>
+#### Parameters
+
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|session|path|string|true|Engine session name|
+|path|path|string|true|Path inside the snapshot, without the leading slash|
+|recursive|query|boolean|false|Remove a directory and its contents.|
+
+> Example responses
+
+> 404 Response
+
+```json
+{
+  "error": "string"
+}
+```
+
+<a id="remove-a-file-or-directory-from-a-session's-filesystem-snapshot.-responses"></a>
+#### Responses
+
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|204|[No Content](https://tools.ietf.org/html/rfc7231#section-6.3.5)|Removed|None|
+|404|[Not Found](https://tools.ietf.org/html/rfc7231#section-6.5.4)|Not found|[ApiError](#schemaapierror)|
+
+Authentication: none.
+
+
+### Filesystem operations on a session snapshot that carry no file bytes:
+
+
+<a id="opIdsession_fs_op_handler"></a>
+
+`POST /api/sessions/{session}/fs`
+
+`mkdir`, `rename`, `exists`, `readlink`, and `canonical`.
+
+> Body parameter
+
+```json
+{
+  "op": "string",
+  "path": "string",
+  "recursive": true,
+  "to": "string"
+}
+```
+
+<a id="filesystem-operations-on-a-session-snapshot-that-carry-no-file-bytes:-parameters"></a>
+#### Parameters
+
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|session|path|string|true|Engine session name|
+|body|body|[SessionFsOpRequest](#schemasessionfsoprequest)|true|none|
+
+> Example responses
+
+> 400 Response
+
+```json
+{
+  "error": "string"
+}
+```
+
+<a id="filesystem-operations-on-a-session-snapshot-that-carry-no-file-bytes:-responses"></a>
+#### Responses
+
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Operation result|None|
+|400|[Bad Request](https://tools.ietf.org/html/rfc7231#section-6.5.1)|Unknown operation|[ApiError](#schemaapierror)|
+|404|[Not Found](https://tools.ietf.org/html/rfc7231#section-6.5.4)|Not found|[ApiError](#schemaapierror)|
+
+Authentication: none.
+
+
+### The session log: every run and native mutation recorded for a session,
+
+
+<a id="opIdsession_snapshots_handler"></a>
+
+`GET /api/sessions/{session}/snapshots`
+
+oldest first, with the heap and filesystem snapshot each produced.
+
+<a id="the-session-log:-every-run-and-native-mutation-recorded-for-a-session,-parameters"></a>
+#### Parameters
+
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|session|path|string|true|Engine session name|
+
+> Example responses
+
+> 200 Response
+
+```json
+[
+  {
+    "code": "string",
+    "index": 0,
+    "input_heap": "string",
+    "output_fs": "string",
+    "output_heap": "string",
+    "timestamp": "string"
+  }
+]
+```
+
+<a id="the-session-log:-every-run-and-native-mutation-recorded-for-a-session,-responses"></a>
+#### Responses
+
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Session log entries|Inline|
+|400|[Bad Request](https://tools.ietf.org/html/rfc7231#section-6.5.1)|Sessions are not configured|[ApiError](#schemaapierror)|
+
+<a id="the-session-log:-every-run-and-native-mutation-recorded-for-a-session,-responseschema"></a>
+#### Response Schema
+
+
+Status Code **200**
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|*anonymous*|[[SessionSnapshotEntry](#schemasessionsnapshotentry)]|false|none|[One session-log entry.]|
+|» code|string|true|none|none|
+|» index|integer(int64)|true|none|none|
+|» input_heap|string¦null|false|none|none|
+|» output_fs|string¦null|false|none|none|
+|» output_heap|string|true|none|none|
+|» timestamp|string|true|none|none|
+
+Authentication: none.
+
+
 ## Meta
 
 
@@ -774,6 +1138,32 @@ Result of a cancel request.
 |---|---|---|---|---|
 |error|string¦null|false|none|none|
 |ok|boolean|true|none|none|
+
+<h2 id="tocS_Capabilities">Capabilities</h2>
+<!-- backwards compatibility -->
+<a id="schemacapabilities"></a>
+<a id="schema_Capabilities"></a>
+<a id="tocScapabilities"></a>
+<a id="tocscapabilities"></a>
+
+```json
+{
+  "filesystem": true,
+  "heap": true,
+  "sessions": true
+}
+
+```
+
+Runtime capabilities of this server.
+
+### Properties
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|filesystem|boolean|true|none|Filesystem snapshots are configured.|
+|heap|boolean|true|none|Heap persistence is configured.|
+|sessions|boolean|true|none|Per-session state (heap and/or filesystem) is available.|
 
 <h2 id="tocS_CliAsset">CliAsset</h2>
 <!-- backwards compatibility -->
@@ -1196,3 +1586,208 @@ Optional pagination query parameters for console output.
 |byte_offset|integer(int64)¦null|false|none|Return output starting at this byte offset.|
 |line_limit|integer(int64)¦null|false|none|Maximum number of lines to return.|
 |line_offset|integer(int64)¦null|false|none|Return output starting at this line number (0-indexed).|
+
+<h2 id="tocS_SessionDirListing">SessionDirListing</h2>
+<!-- backwards compatibility -->
+<a id="schemasessiondirlisting"></a>
+<a id="schema_SessionDirListing"></a>
+<a id="tocSsessiondirlisting"></a>
+<a id="tocssessiondirlisting"></a>
+
+```json
+{
+  "names": [
+    "string"
+  ]
+}
+
+```
+
+Names of a directory's direct children.
+
+### Properties
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|names|[string]|true|none|none|
+
+<h2 id="tocS_SessionEntryQuery">SessionEntryQuery</h2>
+<!-- backwards compatibility -->
+<a id="schemasessionentryquery"></a>
+<a id="schema_SessionEntryQuery"></a>
+<a id="tocSsessionentryquery"></a>
+<a id="tocssessionentryquery"></a>
+
+```json
+{
+  "follow": true
+}
+
+```
+
+Query for `GET /api/sessions/{session}/entries/{path}`.
+
+### Properties
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|follow|boolean|false|none|Follow a final symlink (Node `fs.stat`); `false` is `fs.lstat`.|
+
+<h2 id="tocS_SessionFileEntry">SessionFileEntry</h2>
+<!-- backwards compatibility -->
+<a id="schemasessionfileentry"></a>
+<a id="schema_SessionFileEntry"></a>
+<a id="tocSsessionfileentry"></a>
+<a id="tocssessionfileentry"></a>
+
+```json
+{
+  "kind": "string",
+  "mode": 0,
+  "modified_ms": 0.1,
+  "readonly": true,
+  "size": 0
+}
+
+```
+
+Metadata for one path in a session snapshot.
+
+### Properties
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|kind|string|true|none|`file`, `directory`, `symlink`, or `other`.|
+|mode|integer(int32)|true|none|Unix mode bits, type bits included.|
+|modified_ms|number(double)¦null|false|none|Modification time in milliseconds since the Unix epoch, when known.|
+|readonly|boolean|true|none|none|
+|size|integer(int64)|true|none|none|
+
+<h2 id="tocS_SessionFileReadQuery">SessionFileReadQuery</h2>
+<!-- backwards compatibility -->
+<a id="schemasessionfilereadquery"></a>
+<a id="schema_SessionFileReadQuery"></a>
+<a id="tocSsessionfilereadquery"></a>
+<a id="tocssessionfilereadquery"></a>
+
+```json
+{
+  "max_bytes": 0,
+  "offset": 0
+}
+
+```
+
+Query for `GET /api/sessions/{session}/files/{path}`.
+
+### Properties
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|max_bytes|integer(int64)¦null|false|none|Read at most this many bytes; fewer are returned only at end of file.|
+|offset|integer(int64)¦null|false|none|Start reading at this byte offset (with `max_bytes`).|
+
+<h2 id="tocS_SessionFileRemoveQuery">SessionFileRemoveQuery</h2>
+<!-- backwards compatibility -->
+<a id="schemasessionfileremovequery"></a>
+<a id="schema_SessionFileRemoveQuery"></a>
+<a id="tocSsessionfileremovequery"></a>
+<a id="tocssessionfileremovequery"></a>
+
+```json
+{
+  "recursive": true
+}
+
+```
+
+Query for `DELETE /api/sessions/{session}/files/{path}`.
+
+### Properties
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|recursive|boolean|false|none|Remove a directory and its contents.|
+
+<h2 id="tocS_SessionFileWriteQuery">SessionFileWriteQuery</h2>
+<!-- backwards compatibility -->
+<a id="schemasessionfilewritequery"></a>
+<a id="schema_SessionFileWriteQuery"></a>
+<a id="tocSsessionfilewritequery"></a>
+<a id="tocssessionfilewritequery"></a>
+
+```json
+{
+  "append": true
+}
+
+```
+
+Query for `PUT /api/sessions/{session}/files/{path}`.
+
+### Properties
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|append|boolean|false|none|Append to the file instead of replacing it.|
+
+<h2 id="tocS_SessionFsOpRequest">SessionFsOpRequest</h2>
+<!-- backwards compatibility -->
+<a id="schemasessionfsoprequest"></a>
+<a id="schema_SessionFsOpRequest"></a>
+<a id="tocSsessionfsoprequest"></a>
+<a id="tocssessionfsoprequest"></a>
+
+```json
+{
+  "op": "string",
+  "path": "string",
+  "recursive": true,
+  "to": "string"
+}
+
+```
+
+Request body for `POST /api/sessions/{session}/fs`: the operations that
+carry no file bytes.
+
+### Properties
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|op|string|true|none|`mkdir`, `rename`, `exists`, `readlink`, or `canonical`.|
+|path|string|true|none|none|
+|recursive|boolean|false|none|`mkdir` only: create missing parents.|
+|to|string¦null|false|none|`rename` only: the destination path.|
+
+<h2 id="tocS_SessionSnapshotEntry">SessionSnapshotEntry</h2>
+<!-- backwards compatibility -->
+<a id="schemasessionsnapshotentry"></a>
+<a id="schema_SessionSnapshotEntry"></a>
+<a id="tocSsessionsnapshotentry"></a>
+<a id="tocssessionsnapshotentry"></a>
+
+```json
+{
+  "code": "string",
+  "index": 0,
+  "input_heap": "string",
+  "output_fs": "string",
+  "output_heap": "string",
+  "timestamp": "string"
+}
+
+```
+
+One session-log entry.
+
+### Properties
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|code|string|true|none|none|
+|index|integer(int64)|true|none|none|
+|input_heap|string¦null|false|none|none|
+|output_fs|string¦null|false|none|none|
+|output_heap|string|true|none|none|
+|timestamp|string|true|none|none|

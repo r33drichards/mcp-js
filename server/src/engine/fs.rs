@@ -65,6 +65,14 @@ impl FsMountHandle {
     }
 }
 
+/// Hook capabilities of the filesystem executor: pre hooks may rewrite
+/// `path`/`destination` (the effective values are what the operation
+/// executes); there is no hookable output, so post hooks are rejected.
+pub const HOOK_CAPS: super::hooks::HookCaps = super::hooks::HookCaps {
+    input_mutation: true,
+    post: false,
+};
+
 /// Configuration for the fs module. Stored in deno_core's `OpState`.
 #[derive(Clone, Debug)]
 pub struct FsConfig {
@@ -141,406 +149,645 @@ struct FsPolicyInput {
     mcp_headers: Option<serde_json::Value>,
 }
 
-// ── Async deno_core ops ──────────────────────────────────────────────────
+// ── Shared operation service ─────────────────────────────────────────────
+//
+// Every filesystem operation, whether issued by guest JavaScript through the
+// deno ops below or by a native caller through the UniFFI `Engine` methods,
+// runs through [`FsService`]: the hook chain evaluates the operation input,
+// the effective (possibly rewritten) path and destination are what execute,
+// and the same backend selection (session overlay or host filesystem)
+// applies. The deno ops only adapt arguments and errors; they add no behavior.
 
-/// Read a file as UTF-8 text.
-#[op2(async)]
-#[string]
-async fn op_fs_read_file_text(
-    state: Rc<RefCell<OpState>>,
-    #[string] path: String,
-) -> Result<String, JsErrorBox> {
-    let config = extract_config(&state)?;
-    let mount = extract_mount(&state);
-
-    // Mount-backed reads must run on the current-thread isolate runtime: the
-    // CAS overlay uses deno_unsync, which asserts a current-thread flavor.
-    // tokio::spawn would move the work onto the multi-thread runtime and abort
-    // the process. Only the real-filesystem path is offloaded via spawn.
-    if let Some(m) = mount {
-        let path = check_policy(&config.hooks, "readFile", &path, None, None, Some("utf8"), config.mcp_headers.as_ref())
-            .await
-            .map_err(JsErrorBox::generic)?
-            .path;
-        if let Some(content) = m.0.lock().await.read_opt(Path::new(&path)).await
-            .map_err(|e| JsErrorBox::generic(format!("fs.readFile: {}: {}", path, e)))?
-        {
-            return String::from_utf8(content)
-                .map_err(|e| JsErrorBox::generic(format!("fs.readFile: invalid UTF-8 in {}: {}", path, e)));
-        }
-        // Overlay miss. With passthrough off (default) the overlay is the whole
-        // fs view, so this is ENOENT. With passthrough on, fall through to the
-        // real filesystem as a read-only lower layer (already policy-gated above)
-        // so bundled paths like /opt/languages resolve while /work stays the
-        // per-session overlay.
-        if !config.passthrough {
-            return Err(JsErrorBox::generic(format!("fs.readFile: {}: ENOENT", path)));
-        }
-        let content = std::fs::read(&path)
-            .map_err(|e| JsErrorBox::generic(io_err("readFile", &path, &e)))?;
-        return String::from_utf8(content)
-            .map_err(|e| JsErrorBox::generic(format!("fs.readFile: invalid UTF-8 in {}: {}", path, e)));
-    }
-
-    tokio::spawn(async move {
-        let path = check_policy(&config.hooks, "readFile", &path, None, None, Some("utf8"), config.mcp_headers.as_ref()).await?.path;
-
-        let content = tokio::fs::read(&path).await
-            .map_err(|e| io_err("readFile", &path, &e))?;
-
-        String::from_utf8(content)
-            .map_err(|e| format!("fs.readFile: invalid UTF-8 in {}: {}", path, e))
-    })
-    .await
-    .map_err(|e| JsErrorBox::generic(format!("fs task join error: {}", e)))?
-    .map_err(|e: String| JsErrorBox::generic(e))
+/// Classification of a filesystem failure, stable across backends and
+/// transports. The message keeps the guest-visible text, including its
+/// Node-style code token, so the JS wrapper and native callers see the same
+/// string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FsErrorKind {
+    NotFound,
+    PermissionDenied,
+    AlreadyExists,
+    NotDirectory,
+    IsDirectory,
+    NotEmpty,
+    InvalidData,
+    NotSupported,
+    Other,
 }
 
-/// Read a file as raw bytes, returned as a Uint8Array to JavaScript.
-#[op2(async)]
-#[buffer]
-async fn op_fs_read_file_buffer(
-    state: Rc<RefCell<OpState>>,
-    #[string] path: String,
-) -> Result<Vec<u8>, JsErrorBox> {
-    let config = extract_config(&state)?;
-    let mount = extract_mount(&state);
+#[derive(Debug, Clone)]
+pub struct FsError {
+    pub kind: FsErrorKind,
+    pub message: String,
+}
 
-    // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
-    if let Some(m) = mount {
-        let path = check_policy(&config.hooks, "readFile", &path, None, None, Some("buffer"), config.mcp_headers.as_ref())
-            .await
-            .map_err(JsErrorBox::generic)?
-            .path;
-        if let Some(content) = m.0.lock().await.read_opt(Path::new(&path)).await
-            .map_err(|e| JsErrorBox::generic(format!("fs.readFile: {}: {}", path, e)))?
-        {
-            return Ok(content);
+impl std::fmt::Display for FsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for FsError {}
+
+impl FsError {
+    /// A hook-chain failure: a denial, or a chain error that fails closed.
+    fn gate(message: String) -> Self {
+        let kind = if message.contains(" denied by ") {
+            FsErrorKind::PermissionDenied
+        } else {
+            FsErrorKind::Other
+        };
+        Self { kind, message }
+    }
+
+    fn io(op: &str, path: &str, e: &std::io::Error) -> Self {
+        Self { kind: io_kind(e), message: io_err(op, path, e) }
+    }
+
+    fn io2(op: &str, from: &str, to: &str, e: &std::io::Error) -> Self {
+        Self { kind: io_kind(e), message: io_err2(op, from, to, e) }
+    }
+
+    /// An overlay error. The overlay reports Node-style codes as a leading
+    /// `CODE:` token, which is preserved and classified.
+    fn overlay(op: &str, path: &str, e: impl std::fmt::Display) -> Self {
+        let message = format!("fs.{op}: {path}: {e}");
+        Self { kind: message_kind(&message), message }
+    }
+
+    fn overlay2(op: &str, from: &str, to: &str, e: impl std::fmt::Display) -> Self {
+        let message = format!("fs.{op}: {from} -> {to}: {e}");
+        Self { kind: message_kind(&message), message }
+    }
+
+    fn not_found(op: &str, path: &str) -> Self {
+        Self { kind: FsErrorKind::NotFound, message: format!("fs.{op}: {path}: ENOENT") }
+    }
+
+    fn invalid_utf8(op: &str, path: &str, e: &std::string::FromUtf8Error) -> Self {
+        Self {
+            kind: FsErrorKind::InvalidData,
+            message: format!("fs.{op}: invalid UTF-8 in {path}: {e}"),
         }
-        // Overlay miss: ENOENT unless passthrough is on, in which case fall
-        // through to the real filesystem (policy-gated above) so bundled
-        // read-only paths (e.g. /opt/languages) resolve.
-        if !config.passthrough {
-            return Err(JsErrorBox::generic(format!("fs.readFile: {}: ENOENT", path)));
+    }
+
+    fn js(self) -> JsErrorBox {
+        JsErrorBox::generic(self.message)
+    }
+}
+
+fn io_kind(e: &std::io::Error) -> FsErrorKind {
+    use std::io::ErrorKind::*;
+    match e.kind() {
+        NotFound => FsErrorKind::NotFound,
+        PermissionDenied => FsErrorKind::PermissionDenied,
+        AlreadyExists => FsErrorKind::AlreadyExists,
+        NotADirectory => FsErrorKind::NotDirectory,
+        IsADirectory => FsErrorKind::IsDirectory,
+        DirectoryNotEmpty => FsErrorKind::NotEmpty,
+        InvalidData => FsErrorKind::InvalidData,
+        Unsupported => FsErrorKind::NotSupported,
+        _ => FsErrorKind::Other,
+    }
+}
+
+/// Classify a message by the Node-style code token it carries.
+fn message_kind(message: &str) -> FsErrorKind {
+    let has = |code: &str| {
+        message
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|token| token == code)
+    };
+    if has("ENOENT") {
+        FsErrorKind::NotFound
+    } else if has("EACCES") || has("EPERM") {
+        FsErrorKind::PermissionDenied
+    } else if has("EEXIST") {
+        FsErrorKind::AlreadyExists
+    } else if has("ENOTDIR") {
+        FsErrorKind::NotDirectory
+    } else if has("EISDIR") {
+        FsErrorKind::IsDirectory
+    } else if has("ENOTEMPTY") {
+        FsErrorKind::NotEmpty
+    } else if has("ENOSYS") {
+        FsErrorKind::NotSupported
+    } else {
+        FsErrorKind::Other
+    }
+}
+
+/// Metadata for a path, shared by the host and overlay backends. The JS
+/// wrapper turns [`FsStat::to_json`] into a Node `fs.Stats`-like object.
+#[derive(Debug, Clone)]
+pub struct FsStat {
+    pub size: u64,
+    pub is_file: bool,
+    pub is_directory: bool,
+    pub is_symlink: bool,
+    pub readonly: bool,
+    pub mode: u32,
+    pub ino: u64,
+    pub dev: u64,
+    pub nlink: u64,
+    pub uid: u32,
+    pub gid: u32,
+    pub mtime_ms: Option<f64>,
+    pub atime_ms: Option<f64>,
+    pub ctime_ms: Option<f64>,
+    pub birthtime_ms: Option<f64>,
+}
+
+impl FsStat {
+    fn from_metadata(metadata: &std::fs::Metadata) -> Self {
+        let to_ms = |t: std::io::Result<std::time::SystemTime>| {
+            t.ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as f64)
+        };
+        let modified = to_ms(metadata.modified());
+        let accessed = to_ms(metadata.accessed());
+        let created = to_ms(metadata.created());
+
+        // Unix metadata carries the fields Node consumers read (mode/ino/uid/…);
+        // elsewhere synthesize a plausible mode from the file type so callers that
+        // derive type from `mode` still classify the entry correctly.
+        #[cfg(unix)]
+        let (mode, ino, dev, nlink, uid, gid, ctime_ms) = {
+            use std::os::unix::fs::MetadataExt;
+            let ctime_ms = metadata.ctime() as f64 * 1000.0 + metadata.ctime_nsec() as f64 / 1.0e6;
+            (
+                metadata.mode(),
+                metadata.ino(),
+                metadata.dev(),
+                metadata.nlink(),
+                metadata.uid(),
+                metadata.gid(),
+                Some(ctime_ms),
+            )
+        };
+        #[cfg(not(unix))]
+        let (mode, ino, dev, nlink, uid, gid, ctime_ms): (u32, u64, u64, u64, u32, u32, Option<f64>) = {
+            let mode = if metadata.is_dir() {
+                0o040755
+            } else if metadata.file_type().is_symlink() {
+                0o120777
+            } else {
+                0o100644
+            };
+            (mode, 0, 0, 1, 0, 0, modified)
+        };
+
+        Self {
+            size: metadata.len(),
+            is_file: metadata.is_file(),
+            is_directory: metadata.is_dir(),
+            is_symlink: metadata.file_type().is_symlink(),
+            readonly: metadata.permissions().readonly(),
+            mode,
+            ino,
+            dev,
+            nlink,
+            uid,
+            gid,
+            mtime_ms: modified,
+            atime_ms: accessed,
+            ctime_ms,
+            birthtime_ms: created,
         }
-        return std::fs::read(&path)
-            .map_err(|e| JsErrorBox::generic(io_err("readFile", &path, &e)));
     }
 
-    tokio::spawn(async move {
-        let path = check_policy(&config.hooks, "readFile", &path, None, None, Some("buffer"), config.mcp_headers.as_ref()).await?.path;
+    fn from_mount(s: &super::fs_mount::Stat) -> Self {
+        let is_symlink = s.symlink.is_some();
+        // Synthesize a mode with the file-type bits set so consumers that derive
+        // type from `mode` (e.g. git tree builders) classify it correctly.
+        let mode = if s.is_dir {
+            0o040000 | (s.mode & 0o777)
+        } else if is_symlink {
+            0o120000 | (s.mode & 0o777)
+        } else {
+            0o100000 | (s.mode & 0o777)
+        };
+        Self {
+            size: s.size,
+            is_file: !s.is_dir && !is_symlink,
+            is_directory: s.is_dir,
+            is_symlink,
+            readonly: false,
+            mode,
+            ino: 0,
+            dev: 0,
+            nlink: 1,
+            uid: 0,
+            gid: 0,
+            mtime_ms: None,
+            atime_ms: None,
+            ctime_ms: None,
+            birthtime_ms: None,
+        }
+    }
 
-        tokio::fs::read(&path).await
-            .map_err(|e| io_err("readFile", &path, &e))
-    })
-    .await
-    .map_err(|e| JsErrorBox::generic(format!("fs task join error: {}", e)))?
-    .map_err(|e: String| JsErrorBox::generic(e))
+    /// The JSON stat blob `fs.stat` / `fs.lstat` return to the guest.
+    pub fn to_json(&self) -> String {
+        deno_core::serde_json::json!({
+            "size": self.size,
+            "isFile": self.is_file,
+            "isDirectory": self.is_directory,
+            "isSymlink": self.is_symlink,
+            "readonly": self.readonly,
+            "mode": self.mode,
+            "ino": self.ino,
+            "dev": self.dev,
+            "nlink": self.nlink,
+            "uid": self.uid,
+            "gid": self.gid,
+            "mtimeMs": self.mtime_ms,
+            "atimeMs": self.atime_ms,
+            "ctimeMs": self.ctime_ms,
+            "birthtimeMs": self.birthtime_ms,
+        })
+        .to_string()
+    }
 }
 
-/// Write a file from a UTF-8 string.
-#[op2(async)]
-#[string]
-async fn op_fs_write_file_text(
-    state: Rc<RefCell<OpState>>,
-    #[string] path: String,
-    #[string] data: String,
-) -> Result<String, JsErrorBox> {
-    let config = extract_config(&state)?;
-    let mount = extract_mount(&state);
-
-    // Mount-backed writes must run on the current-thread isolate runtime (the
-    // CAS overlay uses deno_unsync, which asserts a current-thread flavor).
-    // tokio::spawn would move the work onto the multi-thread runtime and abort.
-    if let Some(m) = mount {
-        let path = check_policy(&config.hooks, "writeFile", &path, None, None, None, config.mcp_headers.as_ref())
-            .await
-            .map_err(JsErrorBox::generic)?
-            .path;
-        m.0.lock().await.write(Path::new(&path), data.as_bytes()).await
-            .map_err(|e| JsErrorBox::generic(format!("fs.writeFile: {}: {}", path, e)))?;
-        return Ok("{}".to_string());
-    }
-
-    tokio::spawn(async move {
-        let path = check_policy(&config.hooks, "writeFile", &path, None, None, None, config.mcp_headers.as_ref()).await?.path;
-
-        tokio::fs::write(&path, data.as_bytes()).await
-            .map_err(|e| io_err("writeFile", &path, &e))?;
-
-        Ok("{}".to_string())
-    })
-    .await
-    .map_err(|e| JsErrorBox::generic(format!("fs task join error: {}", e)))?
-    .map_err(|e: String| JsErrorBox::generic(e))
+/// One filesystem namespace: the hook chain plus the backend it authorizes.
+///
+/// Overlay-backed services must be driven from the current-thread isolate
+/// runtime (the CAS overlay uses deno_unsync); host-backed services may run on
+/// any runtime.
+#[derive(Clone)]
+pub struct FsService {
+    config: FsConfig,
+    mount: Option<FsMountHandle>,
 }
 
-/// Write a file from raw bytes (Uint8Array from JavaScript).
-#[op2(async)]
-#[string]
-async fn op_fs_write_file_buffer(
-    state: Rc<RefCell<OpState>>,
-    #[string] path: String,
-    #[buffer(copy)] data: Vec<u8>,
-) -> Result<String, JsErrorBox> {
-    let config = extract_config(&state)?;
-    let mount = extract_mount(&state);
-
-    // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
-    if let Some(m) = mount {
-        let path = check_policy(&config.hooks, "writeFile", &path, None, None, None, config.mcp_headers.as_ref())
-            .await
-            .map_err(JsErrorBox::generic)?
-            .path;
-        m.0.lock().await.write(Path::new(&path), &data).await
-            .map_err(|e| JsErrorBox::generic(format!("fs.writeFile: {}: {}", path, e)))?;
-        return Ok("{}".to_string());
+impl FsService {
+    pub fn new(config: FsConfig, mount: Option<FsMountHandle>) -> Self {
+        Self { config, mount }
     }
 
-    tokio::spawn(async move {
-        let path = check_policy(&config.hooks, "writeFile", &path, None, None, None, config.mcp_headers.as_ref()).await?.path;
-
-        tokio::fs::write(&path, &data).await
-            .map_err(|e| io_err("writeFile", &path, &e))?;
-
-        Ok("{}".to_string())
-    })
-    .await
-    .map_err(|e| JsErrorBox::generic(format!("fs task join error: {}", e)))?
-    .map_err(|e: String| JsErrorBox::generic(e))
-}
-
-/// Append to a file.
-#[op2(async)]
-#[string]
-async fn op_fs_append_file(
-    state: Rc<RefCell<OpState>>,
-    #[string] path: String,
-    #[string] data: String,
-) -> Result<String, JsErrorBox> {
-    let config = extract_config(&state)?;
-    let mount = extract_mount(&state);
-
-    // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
-    if let Some(m) = mount {
-        let path = check_policy(&config.hooks, "appendFile", &path, None, None, None, config.mcp_headers.as_ref())
-            .await
-            .map_err(JsErrorBox::generic)?
-            .path;
-        let mut guard = m.0.lock().await;
-        let mut existing = guard.read(Path::new(&path)).await.unwrap_or_default();
-        existing.extend_from_slice(data.as_bytes());
-        guard.write(Path::new(&path), &existing).await
-            .map_err(|e| JsErrorBox::generic(format!("fs.appendFile: {}: {}", path, e)))?;
-        return Ok("{}".to_string());
+    /// A service over the host filesystem only.
+    pub fn host(config: FsConfig) -> Self {
+        Self::new(config, None)
     }
 
-    tokio::spawn(async move {
-        let path = check_policy(&config.hooks, "appendFile", &path, None, None, None, config.mcp_headers.as_ref()).await?.path;
+    pub fn has_mount(&self) -> bool {
+        self.mount.is_some()
+    }
 
+    async fn gate(
+        &self,
+        op: &str,
+        path: &str,
+        destination: Option<&str>,
+        recursive: Option<bool>,
+        encoding: Option<&str>,
+    ) -> Result<FsEffective, FsError> {
+        check_policy(
+            &self.config.hooks,
+            op,
+            path,
+            destination,
+            recursive,
+            encoding,
+            self.config.mcp_headers.as_ref(),
+        )
+        .await
+        .map_err(FsError::gate)
+    }
+
+    /// Gate a two-path operation and return the effective `(path, destination)`.
+    /// `check_policy` fails closed if a hook dropped `destination`, so the
+    /// fallback never rewrites the operation.
+    async fn gate2(&self, op: &str, from: &str, to: &str) -> Result<(String, String), FsError> {
+        let eff = self.gate(op, from, Some(to), None, None).await?;
+        Ok((eff.path, eff.destination.unwrap_or_else(|| to.to_string())))
+    }
+
+    /// Read a file as bytes. `encoding` is the policy input's encoding field
+    /// (`"utf8"` or `"buffer"`). Returns the effective path with the content.
+    async fn read_bytes(&self, path: &str, encoding: &str) -> Result<(String, Vec<u8>), FsError> {
+        let path = self.gate("readFile", path, None, None, Some(encoding)).await?.path;
+        if let Some(m) = &self.mount {
+            if let Some(content) = m
+                .0
+                .lock()
+                .await
+                .read_opt(Path::new(&path))
+                .await
+                .map_err(|e| FsError::overlay("readFile", &path, e))?
+            {
+                return Ok((path, content));
+            }
+            // Overlay miss. With passthrough off (default) the overlay is the whole
+            // fs view, so this is ENOENT. With passthrough on, fall through to the
+            // real filesystem as a read-only lower layer (already policy-gated above)
+            // so bundled paths like /opt/languages resolve while /work stays the
+            // per-session overlay.
+            if !self.config.passthrough {
+                return Err(FsError::not_found("readFile", &path));
+            }
+            let content = std::fs::read(&path).map_err(|e| FsError::io("readFile", &path, &e))?;
+            return Ok((path, content));
+        }
+        let content = tokio::fs::read(&path)
+            .await
+            .map_err(|e| FsError::io("readFile", &path, &e))?;
+        Ok((path, content))
+    }
+
+    pub async fn read_file(&self, path: &str) -> Result<Vec<u8>, FsError> {
+        Ok(self.read_bytes(path, "buffer").await?.1)
+    }
+
+    pub async fn read_text(&self, path: &str) -> Result<String, FsError> {
+        let (path, content) = self.read_bytes(path, "utf8").await?;
+        String::from_utf8(content).map_err(|e| FsError::invalid_utf8("readFile", &path, &e))
+    }
+
+    /// Read at most `max_bytes` bytes starting at `offset`, gated as a
+    /// `readFile`. Returns fewer bytes only at end of file. Lets a caller page
+    /// through a large file without loading it whole; the overlay backend has
+    /// no partial read, so it slices the full content.
+    pub async fn read_range(&self, path: &str, offset: u64, max_bytes: u64) -> Result<Vec<u8>, FsError> {
+        let path = self.gate("readFile", path, None, None, Some("buffer")).await?.path;
+        let max = usize::try_from(max_bytes).unwrap_or(usize::MAX);
+        if let Some(m) = &self.mount {
+            let content = m
+                .0
+                .lock()
+                .await
+                .read_opt(Path::new(&path))
+                .await
+                .map_err(|e| FsError::overlay("readFile", &path, e))?;
+            let content = match content {
+                Some(content) => content,
+                None if self.config.passthrough => {
+                    std::fs::read(&path).map_err(|e| FsError::io("readFile", &path, &e))?
+                }
+                None => return Err(FsError::not_found("readFile", &path)),
+            };
+            let start = usize::try_from(offset).unwrap_or(usize::MAX).min(content.len());
+            let end = start.saturating_add(max).min(content.len());
+            return Ok(content[start..end].to_vec());
+        }
+        use tokio::io::{AsyncReadExt, AsyncSeekExt};
+        let mut file = tokio::fs::File::open(&path)
+            .await
+            .map_err(|e| FsError::io("readFile", &path, &e))?;
+        if file.metadata().await.map_err(|e| FsError::io("readFile", &path, &e))?.is_dir() {
+            let e = std::io::Error::from(std::io::ErrorKind::IsADirectory);
+            return Err(FsError::io("readFile", &path, &e));
+        }
+        file.seek(std::io::SeekFrom::Start(offset))
+            .await
+            .map_err(|e| FsError::io("readFile", &path, &e))?;
+        let mut out = Vec::new();
+        file.take(max as u64)
+            .read_to_end(&mut out)
+            .await
+            .map_err(|e| FsError::io("readFile", &path, &e))?;
+        Ok(out)
+    }
+
+    /// The canonical path of an existing path, resolving symlinks. Gated as a
+    /// `stat`, which is the guest operation with the same follow semantics.
+    pub async fn canonical_path(&self, path: &str) -> Result<String, FsError> {
+        let path = self.gate("stat", path, None, None, None).await?.path;
+        if let Some(m) = &self.mount {
+            // The overlay has no symlink resolution; it reports the stat'ed path.
+            m.0.lock()
+                .await
+                .stat(Path::new(&path))
+                .await
+                .map_err(|e| FsError::overlay("stat", &path, e))?;
+            return Ok(path);
+        }
+        let canonical = tokio::fs::canonicalize(&path)
+            .await
+            .map_err(|e| FsError::io("stat", &path, &e))?;
+        Ok(canonical.to_string_lossy().into_owned())
+    }
+
+    pub async fn write_file(&self, path: &str, data: &[u8]) -> Result<(), FsError> {
+        let path = self.gate("writeFile", path, None, None, None).await?.path;
+        if let Some(m) = &self.mount {
+            return m
+                .0
+                .lock()
+                .await
+                .write(Path::new(&path), data)
+                .await
+                .map_err(|e| FsError::overlay("writeFile", &path, e));
+        }
+        tokio::fs::write(&path, data)
+            .await
+            .map_err(|e| FsError::io("writeFile", &path, &e))
+    }
+
+    pub async fn append_file(&self, path: &str, data: &[u8]) -> Result<(), FsError> {
+        let path = self.gate("appendFile", path, None, None, None).await?.path;
+        if let Some(m) = &self.mount {
+            let mut guard = m.0.lock().await;
+            let mut existing = guard.read(Path::new(&path)).await.unwrap_or_default();
+            existing.extend_from_slice(data);
+            return guard
+                .write(Path::new(&path), &existing)
+                .await
+                .map_err(|e| FsError::overlay("appendFile", &path, e));
+        }
         use tokio::io::AsyncWriteExt;
         let mut file = tokio::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&path)
             .await
-            .map_err(|e| io_err("appendFile", &path, &e))?;
-
-        file.write_all(data.as_bytes()).await
-            .map_err(|e| io_err("appendFile", &path, &e))?;
-
-        Ok("{}".to_string())
-    })
-    .await
-    .map_err(|e| JsErrorBox::generic(format!("fs task join error: {}", e)))?
-    .map_err(|e: String| JsErrorBox::generic(e))
-}
-
-/// Read a directory. Returns JSON array of entry names.
-#[op2(async)]
-#[string]
-async fn op_fs_readdir(
-    state: Rc<RefCell<OpState>>,
-    #[string] path: String,
-) -> Result<String, JsErrorBox> {
-    let config = extract_config(&state)?;
-    let mount = extract_mount(&state);
-
-    // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
-    if let Some(m) = mount {
-        let path = check_policy(&config.hooks, "readdir", &path, None, None, None, config.mcp_headers.as_ref())
+            .map_err(|e| FsError::io("appendFile", &path, &e))?;
+        file.write_all(data)
             .await
-            .map_err(JsErrorBox::generic)?
-            .path;
-        let names = m.0.lock().await.readdir(Path::new(&path)).await
-            .map_err(|e| JsErrorBox::generic(format!("fs.readdir: {}: {}", path, e)))?;
-        return Ok(deno_core::serde_json::json!(names).to_string());
+            .map_err(|e| FsError::io("appendFile", &path, &e))?;
+        // tokio's File buffers writes; without a flush the append may still be
+        // in flight when this returns and an immediate read sees the old file.
+        file.flush()
+            .await
+            .map_err(|e| FsError::io("appendFile", &path, &e))
     }
 
-    tokio::spawn(async move {
-        let path = check_policy(&config.hooks, "readdir", &path, None, None, None, config.mcp_headers.as_ref()).await?.path;
-
+    pub async fn readdir(&self, path: &str) -> Result<Vec<String>, FsError> {
+        let path = self.gate("readdir", path, None, None, None).await?.path;
+        if let Some(m) = &self.mount {
+            return m
+                .0
+                .lock()
+                .await
+                .readdir(Path::new(&path))
+                .await
+                .map_err(|e| FsError::overlay("readdir", &path, e));
+        }
         let mut entries = Vec::new();
-        let mut dir = tokio::fs::read_dir(&path).await
-            .map_err(|e| io_err("readdir", &path, &e))?;
-
-        while let Some(entry) = dir.next_entry().await
-            .map_err(|e| io_err("readdir", &path, &e))? {
+        let mut dir = tokio::fs::read_dir(&path)
+            .await
+            .map_err(|e| FsError::io("readdir", &path, &e))?;
+        while let Some(entry) = dir
+            .next_entry()
+            .await
+            .map_err(|e| FsError::io("readdir", &path, &e))?
+        {
             if let Some(name) = entry.file_name().to_str() {
                 entries.push(name.to_string());
             }
         }
-
-        let result = deno_core::serde_json::json!(entries);
-        Ok(result.to_string())
-    })
-    .await
-    .map_err(|e| JsErrorBox::generic(format!("fs task join error: {}", e)))?
-    .map_err(|e: String| JsErrorBox::generic(e))
-}
-
-/// Stat a path. Returns JSON with size, isFile, isDirectory, etc.
-#[op2(async)]
-#[string]
-async fn op_fs_stat(
-    state: Rc<RefCell<OpState>>,
-    #[string] path: String,
-) -> Result<String, JsErrorBox> {
-    let config = extract_config(&state)?;
-    let mount = extract_mount(&state);
-
-    // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
-    if let Some(m) = mount {
-        let path = check_policy(&config.hooks, "stat", &path, None, None, None, config.mcp_headers.as_ref())
-            .await
-            .map_err(JsErrorBox::generic)?
-            .path;
-        let s = m.0.lock().await.stat(Path::new(&path)).await
-            .map_err(|e| JsErrorBox::generic(format!("fs.stat: {}: {}", path, e)))?;
-        return Ok(mount_stat_json(&s));
+        Ok(entries)
     }
 
-    tokio::spawn(async move {
-        let path = check_policy(&config.hooks, "stat", &path, None, None, None, config.mcp_headers.as_ref()).await?.path;
-
-        let metadata = tokio::fs::metadata(&path).await
-            .map_err(|e| io_err("stat", &path, &e))?;
-
-        Ok(metadata_stat_json(&metadata))
-    })
-    .await
-    .map_err(|e| JsErrorBox::generic(format!("fs task join error: {}", e)))?
-    .map_err(|e: String| JsErrorBox::generic(e))
-}
-
-/// Stat a path **without** following a final symlink (Node `fs.lstat`).
-#[op2(async)]
-#[string]
-async fn op_fs_lstat(
-    state: Rc<RefCell<OpState>>,
-    #[string] path: String,
-) -> Result<String, JsErrorBox> {
-    let config = extract_config(&state)?;
-    let mount = extract_mount(&state);
-
-    // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
-    // The overlay never follows symlinks, so its stat already has lstat semantics.
-    if let Some(m) = mount {
-        let path = check_policy(&config.hooks, "lstat", &path, None, None, None, config.mcp_headers.as_ref())
-            .await
-            .map_err(JsErrorBox::generic)?
-            .path;
-        let s = m.0.lock().await.stat(Path::new(&path)).await
-            .map_err(|e| JsErrorBox::generic(format!("fs.lstat: {}: {}", path, e)))?;
-        return Ok(mount_stat_json(&s));
+    /// Metadata for a path. `follow` selects Node `stat` (follow a final
+    /// symlink) versus `lstat`; the overlay never follows symlinks, so its
+    /// stat already has lstat semantics.
+    pub async fn stat(&self, path: &str, follow: bool) -> Result<FsStat, FsError> {
+        let op = if follow { "stat" } else { "lstat" };
+        let path = self.gate(op, path, None, None, None).await?.path;
+        if let Some(m) = &self.mount {
+            let s = m
+                .0
+                .lock()
+                .await
+                .stat(Path::new(&path))
+                .await
+                .map_err(|e| FsError::overlay(op, &path, e))?;
+            return Ok(FsStat::from_mount(&s));
+        }
+        let metadata = if follow {
+            tokio::fs::metadata(&path).await
+        } else {
+            tokio::fs::symlink_metadata(&path).await
+        }
+        .map_err(|e| FsError::io(op, &path, &e))?;
+        Ok(FsStat::from_metadata(&metadata))
     }
 
-    tokio::spawn(async move {
-        let path = check_policy(&config.hooks, "lstat", &path, None, None, None, config.mcp_headers.as_ref()).await?.path;
-
-        let metadata = tokio::fs::symlink_metadata(&path).await
-            .map_err(|e| io_err("lstat", &path, &e))?;
-
-        Ok(metadata_stat_json(&metadata))
-    })
-    .await
-    .map_err(|e| JsErrorBox::generic(format!("fs task join error: {}", e)))?
-    .map_err(|e: String| JsErrorBox::generic(e))
-}
-
-/// Read a symlink's target, returned as a string.
-#[op2(async)]
-#[string]
-async fn op_fs_readlink(
-    state: Rc<RefCell<OpState>>,
-    #[string] path: String,
-) -> Result<String, JsErrorBox> {
-    let config = extract_config(&state)?;
-    let mount = extract_mount(&state);
-
-    // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
-    if let Some(m) = mount {
-        let path = check_policy(&config.hooks, "readlink", &path, None, None, None, config.mcp_headers.as_ref())
+    pub async fn readlink(&self, path: &str) -> Result<String, FsError> {
+        let path = self.gate("readlink", path, None, None, None).await?.path;
+        if let Some(m) = &self.mount {
+            let target = m
+                .0
+                .lock()
+                .await
+                .readlink(Path::new(&path))
+                .await
+                .map_err(|e| FsError::overlay("readlink", &path, e))?;
+            return Ok(target.to_string_lossy().into_owned());
+        }
+        let target = tokio::fs::read_link(&path)
             .await
-            .map_err(JsErrorBox::generic)?
-            .path;
-        let target = m.0.lock().await.readlink(Path::new(&path)).await
-            .map_err(|e| JsErrorBox::generic(format!("fs.readlink: {}: {}", path, e)))?;
-        return Ok(target.to_string_lossy().into_owned());
-    }
-
-    tokio::spawn(async move {
-        let path = check_policy(&config.hooks, "readlink", &path, None, None, None, config.mcp_headers.as_ref()).await?.path;
-
-        let target = tokio::fs::read_link(&path).await
-            .map_err(|e| io_err("readlink", &path, &e))?;
-
+            .map_err(|e| FsError::io("readlink", &path, &e))?;
         Ok(target.to_string_lossy().into_owned())
-    })
-    .await
-    .map_err(|e| JsErrorBox::generic(format!("fs task join error: {}", e)))?
-    .map_err(|e: String| JsErrorBox::generic(e))
-}
-
-/// Create a symlink at `link` pointing to `target` (Node `fs.symlink(target, path)`).
-#[op2(async)]
-#[string]
-async fn op_fs_symlink(
-    state: Rc<RefCell<OpState>>,
-    #[string] target: String,
-    #[string] link: String,
-) -> Result<String, JsErrorBox> {
-    let config = extract_config(&state)?;
-    let mount = extract_mount(&state);
-
-    // The policy gates on the link path being created; the target is carried as
-    // the destination so a policy can constrain both sides.
-    if let Some(m) = mount {
-        let eff = check_policy(&config.hooks, "symlink", &link, Some(&target), None, None, config.mcp_headers.as_ref())
-            .await
-            .map_err(JsErrorBox::generic)?;
-        // check_policy fails closed if a hook dropped `destination`, so this
-        // fallback never rewrites the operation.
-        let (link, target) = (eff.path, eff.destination.unwrap_or(target));
-        m.0.lock().await.symlink(Path::new(&target), Path::new(&link)).await
-            .map_err(|e| JsErrorBox::generic(format!("fs.symlink: {} -> {}: {}", link, target, e)))?;
-        return Ok("{}".to_string());
     }
 
-    tokio::spawn(async move {
-        let eff = check_policy(&config.hooks, "symlink", &link, Some(&target), None, None, config.mcp_headers.as_ref()).await?;
-        // check_policy fails closed if a hook dropped `destination`, so this
-        // fallback never rewrites the operation.
-        let (link, target) = (eff.path, eff.destination.unwrap_or(target));
+    /// Create a symlink at `link` pointing to `target` (Node `fs.symlink(target, path)`).
+    /// The policy gates on the link path being created; the target is carried as
+    /// the destination so a policy can constrain both sides.
+    pub async fn symlink(&self, target: &str, link: &str) -> Result<(), FsError> {
+        let (link, target) = self.gate2("symlink", link, target).await?;
+        if let Some(m) = &self.mount {
+            return m
+                .0
+                .lock()
+                .await
+                .symlink(Path::new(&target), Path::new(&link))
+                .await
+                .map_err(|e| FsError::overlay2("symlink", &link, &target, e));
+        }
+        symlink_impl(&target, &link)
+            .await
+            .map_err(|e| FsError::io2("symlink", &link, &target, &e))
+    }
 
-        symlink_impl(&target, &link).await
-            .map_err(|e| io_err2("symlink", &link, &target, &e))?;
+    pub async fn mkdir(&self, path: &str, recursive: bool) -> Result<(), FsError> {
+        let path = self.gate("mkdir", path, None, Some(recursive), None).await?.path;
+        if let Some(m) = &self.mount {
+            return m
+                .0
+                .lock()
+                .await
+                .mkdir(Path::new(&path))
+                .await
+                .map_err(|e| FsError::overlay("mkdir", &path, e));
+        }
+        if recursive {
+            tokio::fs::create_dir_all(&path).await
+        } else {
+            tokio::fs::create_dir(&path).await
+        }
+        .map_err(|e| FsError::io("mkdir", &path, &e))
+    }
 
-        Ok("{}".to_string())
-    })
-    .await
-    .map_err(|e| JsErrorBox::generic(format!("fs task join error: {}", e)))?
-    .map_err(|e: String| JsErrorBox::generic(e))
+    pub async fn rm(&self, path: &str, recursive: bool) -> Result<(), FsError> {
+        let path = self.gate("rm", path, None, Some(recursive), None).await?.path;
+        if let Some(m) = &self.mount {
+            return m
+                .0
+                .lock()
+                .await
+                .remove(Path::new(&path), recursive)
+                .await
+                .map_err(|e| FsError::overlay("rm", &path, e));
+        }
+        let metadata = tokio::fs::metadata(&path)
+            .await
+            .map_err(|e| FsError::io("rm", &path, &e))?;
+        if metadata.is_dir() {
+            if recursive {
+                tokio::fs::remove_dir_all(&path).await
+            } else {
+                tokio::fs::remove_dir(&path).await
+            }
+        } else {
+            tokio::fs::remove_file(&path).await
+        }
+        .map_err(|e| FsError::io("rm", &path, &e))
+    }
+
+    pub async fn rename(&self, from: &str, to: &str) -> Result<(), FsError> {
+        let (from, to) = self.gate2("rename", from, to).await?;
+        if let Some(m) = &self.mount {
+            return m
+                .0
+                .lock()
+                .await
+                .rename(Path::new(&from), Path::new(&to))
+                .await
+                .map_err(|e| FsError::overlay2("rename", &from, &to, e));
+        }
+        tokio::fs::rename(&from, &to)
+            .await
+            .map_err(|e| FsError::io2("rename", &from, &to, &e))
+    }
+
+    pub async fn copy_file(&self, from: &str, to: &str) -> Result<(), FsError> {
+        let (from, to) = self.gate2("copyFile", from, to).await?;
+        if let Some(m) = &self.mount {
+            // Copy by reference: clones the content-addressed entry, no rechunk.
+            return m
+                .0
+                .lock()
+                .await
+                .copy(Path::new(&from), Path::new(&to))
+                .await
+                .map_err(|e| FsError::overlay2("copyFile", &from, &to, e));
+        }
+        tokio::fs::copy(&from, &to)
+            .await
+            .map(|_| ())
+            .map_err(|e| FsError::io2("copyFile", &from, &to, &e))
+    }
+
+    pub async fn exists(&self, path: &str) -> Result<bool, FsError> {
+        let path = self.gate("exists", path, None, None, None).await?.path;
+        if let Some(m) = &self.mount {
+            return Ok(m.0.lock().await.exists(Path::new(&path)).await);
+        }
+        Ok(tokio::fs::try_exists(&path).await.unwrap_or(false))
+    }
 }
 
 #[cfg(unix)]
@@ -556,6 +803,160 @@ async fn symlink_impl(_target: &str, _link: &str) -> std::io::Result<()> {
     ))
 }
 
+// ── Async deno_core ops ──────────────────────────────────────────────────
+//
+// Each op resolves the session's service and runs one operation. Overlay-backed
+// services run inline: the CAS overlay uses deno_unsync, which asserts the
+// current-thread isolate runtime, and tokio::spawn would move the work onto the
+// multi-thread runtime and abort the process. Host-backed services are
+// offloaded so blocking-ish host I/O does not stall the isolate.
+
+fn service(state: &Rc<RefCell<OpState>>) -> Result<FsService, JsErrorBox> {
+    Ok(FsService::new(extract_config(state)?, extract_mount(state)))
+}
+
+async fn run_op<T, F, Fut>(state: &Rc<RefCell<OpState>>, op: F) -> Result<T, JsErrorBox>
+where
+    T: Send + 'static,
+    F: FnOnce(FsService) -> Fut,
+    Fut: std::future::Future<Output = Result<T, FsError>> + Send + 'static,
+{
+    let service = service(state)?;
+    if service.has_mount() {
+        return op(service).await.map_err(FsError::js);
+    }
+    tokio::spawn(op(service))
+        .await
+        .map_err(|e| JsErrorBox::generic(format!("fs task join error: {}", e)))?
+        .map_err(FsError::js)
+}
+
+const EMPTY_OBJECT: &str = "{}";
+
+/// Read a file as UTF-8 text.
+#[op2(async)]
+#[string]
+async fn op_fs_read_file_text(
+    state: Rc<RefCell<OpState>>,
+    #[string] path: String,
+) -> Result<String, JsErrorBox> {
+    run_op(&state, |fs| async move { fs.read_text(&path).await }).await
+}
+
+/// Read a file as raw bytes, returned as a Uint8Array to JavaScript.
+#[op2(async)]
+#[buffer]
+async fn op_fs_read_file_buffer(
+    state: Rc<RefCell<OpState>>,
+    #[string] path: String,
+) -> Result<Vec<u8>, JsErrorBox> {
+    run_op(&state, |fs| async move { fs.read_file(&path).await }).await
+}
+
+/// Write a file from a UTF-8 string.
+#[op2(async)]
+#[string]
+async fn op_fs_write_file_text(
+    state: Rc<RefCell<OpState>>,
+    #[string] path: String,
+    #[string] data: String,
+) -> Result<String, JsErrorBox> {
+    run_op(&state, |fs| async move {
+        fs.write_file(&path, data.as_bytes()).await?;
+        Ok(EMPTY_OBJECT.to_string())
+    })
+    .await
+}
+
+/// Write a file from raw bytes (Uint8Array from JavaScript).
+#[op2(async)]
+#[string]
+async fn op_fs_write_file_buffer(
+    state: Rc<RefCell<OpState>>,
+    #[string] path: String,
+    #[buffer(copy)] data: Vec<u8>,
+) -> Result<String, JsErrorBox> {
+    run_op(&state, |fs| async move {
+        fs.write_file(&path, &data).await?;
+        Ok(EMPTY_OBJECT.to_string())
+    })
+    .await
+}
+
+/// Append to a file.
+#[op2(async)]
+#[string]
+async fn op_fs_append_file(
+    state: Rc<RefCell<OpState>>,
+    #[string] path: String,
+    #[string] data: String,
+) -> Result<String, JsErrorBox> {
+    run_op(&state, |fs| async move {
+        fs.append_file(&path, data.as_bytes()).await?;
+        Ok(EMPTY_OBJECT.to_string())
+    })
+    .await
+}
+
+/// Read a directory. Returns JSON array of entry names.
+#[op2(async)]
+#[string]
+async fn op_fs_readdir(
+    state: Rc<RefCell<OpState>>,
+    #[string] path: String,
+) -> Result<String, JsErrorBox> {
+    run_op(&state, |fs| async move {
+        let names = fs.readdir(&path).await?;
+        Ok(deno_core::serde_json::json!(names).to_string())
+    })
+    .await
+}
+
+/// Stat a path. Returns JSON with size, isFile, isDirectory, etc.
+#[op2(async)]
+#[string]
+async fn op_fs_stat(
+    state: Rc<RefCell<OpState>>,
+    #[string] path: String,
+) -> Result<String, JsErrorBox> {
+    run_op(&state, |fs| async move { Ok(fs.stat(&path, true).await?.to_json()) }).await
+}
+
+/// Stat a path **without** following a final symlink (Node `fs.lstat`).
+#[op2(async)]
+#[string]
+async fn op_fs_lstat(
+    state: Rc<RefCell<OpState>>,
+    #[string] path: String,
+) -> Result<String, JsErrorBox> {
+    run_op(&state, |fs| async move { Ok(fs.stat(&path, false).await?.to_json()) }).await
+}
+
+/// Read a symlink's target, returned as a string.
+#[op2(async)]
+#[string]
+async fn op_fs_readlink(
+    state: Rc<RefCell<OpState>>,
+    #[string] path: String,
+) -> Result<String, JsErrorBox> {
+    run_op(&state, |fs| async move { fs.readlink(&path).await }).await
+}
+
+/// Create a symlink at `link` pointing to `target` (Node `fs.symlink(target, path)`).
+#[op2(async)]
+#[string]
+async fn op_fs_symlink(
+    state: Rc<RefCell<OpState>>,
+    #[string] target: String,
+    #[string] link: String,
+) -> Result<String, JsErrorBox> {
+    run_op(&state, |fs| async move {
+        fs.symlink(&target, &link).await?;
+        Ok(EMPTY_OBJECT.to_string())
+    })
+    .await
+}
+
 /// Create a directory.
 #[op2(async)]
 #[string]
@@ -564,35 +965,11 @@ async fn op_fs_mkdir(
     #[string] path: String,
     #[smi] recursive: i32,
 ) -> Result<String, JsErrorBox> {
-    let config = extract_config(&state)?;
-    let mount = extract_mount(&state);
-    let recursive = recursive != 0;
-
-    // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
-    if let Some(m) = mount {
-        let path = check_policy(&config.hooks, "mkdir", &path, None, Some(recursive), None, config.mcp_headers.as_ref())
-            .await
-            .map_err(JsErrorBox::generic)?
-            .path;
-        m.0.lock().await.mkdir(Path::new(&path)).await
-            .map_err(|e| JsErrorBox::generic(format!("fs.mkdir: {}: {}", path, e)))?;
-        return Ok("{}".to_string());
-    }
-
-    tokio::spawn(async move {
-        let path = check_policy(&config.hooks, "mkdir", &path, None, Some(recursive), None, config.mcp_headers.as_ref()).await?.path;
-
-        if recursive {
-            tokio::fs::create_dir_all(&path).await
-        } else {
-            tokio::fs::create_dir(&path).await
-        }.map_err(|e| io_err("mkdir", &path, &e))?;
-
-        Ok("{}".to_string())
+    run_op(&state, |fs| async move {
+        fs.mkdir(&path, recursive != 0).await?;
+        Ok(EMPTY_OBJECT.to_string())
     })
     .await
-    .map_err(|e| JsErrorBox::generic(format!("fs task join error: {}", e)))?
-    .map_err(|e: String| JsErrorBox::generic(e))
 }
 
 /// Remove a file or directory.
@@ -603,42 +980,11 @@ async fn op_fs_rm(
     #[string] path: String,
     #[smi] recursive: i32,
 ) -> Result<String, JsErrorBox> {
-    let config = extract_config(&state)?;
-    let mount = extract_mount(&state);
-    let recursive = recursive != 0;
-
-    // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
-    if let Some(m) = mount {
-        let path = check_policy(&config.hooks, "rm", &path, None, Some(recursive), None, config.mcp_headers.as_ref())
-            .await
-            .map_err(JsErrorBox::generic)?
-            .path;
-        m.0.lock().await.remove(Path::new(&path), recursive).await
-            .map_err(|e| JsErrorBox::generic(format!("fs.rm: {}: {}", path, e)))?;
-        return Ok("{}".to_string());
-    }
-
-    tokio::spawn(async move {
-        let path = check_policy(&config.hooks, "rm", &path, None, Some(recursive), None, config.mcp_headers.as_ref()).await?.path;
-
-        let metadata = tokio::fs::metadata(&path).await
-            .map_err(|e| io_err("rm", &path, &e))?;
-
-        if metadata.is_dir() {
-            if recursive {
-                tokio::fs::remove_dir_all(&path).await
-            } else {
-                tokio::fs::remove_dir(&path).await
-            }
-        } else {
-            tokio::fs::remove_file(&path).await
-        }.map_err(|e| io_err("rm", &path, &e))?;
-
-        Ok("{}".to_string())
+    run_op(&state, |fs| async move {
+        fs.rm(&path, recursive != 0).await?;
+        Ok(EMPTY_OBJECT.to_string())
     })
     .await
-    .map_err(|e| JsErrorBox::generic(format!("fs task join error: {}", e)))?
-    .map_err(|e: String| JsErrorBox::generic(e))
 }
 
 /// Rename (move) a file or directory.
@@ -649,36 +995,11 @@ async fn op_fs_rename(
     #[string] from: String,
     #[string] to: String,
 ) -> Result<String, JsErrorBox> {
-    let config = extract_config(&state)?;
-    let mount = extract_mount(&state);
-
-    // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
-    if let Some(m) = mount {
-        let eff = check_policy(&config.hooks, "rename", &from, Some(&to), None, None, config.mcp_headers.as_ref())
-            .await
-            .map_err(JsErrorBox::generic)?;
-        // check_policy fails closed if a hook dropped `destination`, so this
-        // fallback never rewrites the operation.
-        let (from, to) = (eff.path, eff.destination.unwrap_or(to));
-        m.0.lock().await.rename(Path::new(&from), Path::new(&to)).await
-            .map_err(|e| JsErrorBox::generic(format!("fs.rename: {} -> {}: {}", from, to, e)))?;
-        return Ok("{}".to_string());
-    }
-
-    tokio::spawn(async move {
-        let eff = check_policy(&config.hooks, "rename", &from, Some(&to), None, None, config.mcp_headers.as_ref()).await?;
-        // check_policy fails closed if a hook dropped `destination`, so this
-        // fallback never rewrites the operation.
-        let (from, to) = (eff.path, eff.destination.unwrap_or(to));
-
-        tokio::fs::rename(&from, &to).await
-            .map_err(|e| io_err2("rename", &from, &to, &e))?;
-
-        Ok("{}".to_string())
+    run_op(&state, |fs| async move {
+        fs.rename(&from, &to).await?;
+        Ok(EMPTY_OBJECT.to_string())
     })
     .await
-    .map_err(|e| JsErrorBox::generic(format!("fs task join error: {}", e)))?
-    .map_err(|e: String| JsErrorBox::generic(e))
 }
 
 /// Copy a file.
@@ -689,37 +1010,11 @@ async fn op_fs_copy_file(
     #[string] from: String,
     #[string] to: String,
 ) -> Result<String, JsErrorBox> {
-    let config = extract_config(&state)?;
-    let mount = extract_mount(&state);
-
-    // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
-    if let Some(m) = mount {
-        let eff = check_policy(&config.hooks, "copyFile", &from, Some(&to), None, None, config.mcp_headers.as_ref())
-            .await
-            .map_err(JsErrorBox::generic)?;
-        // check_policy fails closed if a hook dropped `destination`, so this
-        // fallback never rewrites the operation.
-        let (from, to) = (eff.path, eff.destination.unwrap_or(to));
-        // Copy by reference: clones the content-addressed entry, no rechunk.
-        m.0.lock().await.copy(Path::new(&from), Path::new(&to)).await
-            .map_err(|e| JsErrorBox::generic(format!("fs.copyFile: {} -> {}: {}", from, to, e)))?;
-        return Ok("{}".to_string());
-    }
-
-    tokio::spawn(async move {
-        let eff = check_policy(&config.hooks, "copyFile", &from, Some(&to), None, None, config.mcp_headers.as_ref()).await?;
-        // check_policy fails closed if a hook dropped `destination`, so this
-        // fallback never rewrites the operation.
-        let (from, to) = (eff.path, eff.destination.unwrap_or(to));
-
-        tokio::fs::copy(&from, &to).await
-            .map_err(|e| io_err2("copyFile", &from, &to, &e))?;
-
-        Ok("{}".to_string())
+    run_op(&state, |fs| async move {
+        fs.copy_file(&from, &to).await?;
+        Ok(EMPTY_OBJECT.to_string())
     })
     .await
-    .map_err(|e| JsErrorBox::generic(format!("fs task join error: {}", e)))?
-    .map_err(|e: String| JsErrorBox::generic(e))
 }
 
 /// Check if a path exists.
@@ -729,28 +1024,10 @@ async fn op_fs_exists(
     state: Rc<RefCell<OpState>>,
     #[string] path: String,
 ) -> Result<String, JsErrorBox> {
-    let config = extract_config(&state)?;
-    let mount = extract_mount(&state);
-
-    // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
-    if let Some(m) = mount {
-        let path = check_policy(&config.hooks, "exists", &path, None, None, None, config.mcp_headers.as_ref())
-            .await
-            .map_err(JsErrorBox::generic)?
-            .path;
-        let exists = m.0.lock().await.exists(Path::new(&path)).await;
-        return Ok(if exists { "true" } else { "false" }.to_string());
-    }
-
-    tokio::spawn(async move {
-        let path = check_policy(&config.hooks, "exists", &path, None, None, None, config.mcp_headers.as_ref()).await?.path;
-
-        let exists = tokio::fs::try_exists(&path).await.unwrap_or(false);
-        Ok(if exists { "true" } else { "false" }.to_string())
+    run_op(&state, |fs| async move {
+        Ok(if fs.exists(&path).await? { "true" } else { "false" }.to_string())
     })
     .await
-    .map_err(|e| JsErrorBox::generic(format!("fs task join error: {}", e)))?
-    .map_err(|e: String| JsErrorBox::generic(e))
 }
 
 // ── Streaming writes ─────────────────────────────────────────────────────
@@ -1193,99 +1470,6 @@ fn io_err2(op: &str, from: &str, to: &str, e: &std::io::Error) -> String {
     }
 }
 
-/// Build the JSON stat blob fs.stat / fs.lstat return, from host metadata. The
-/// JS wrapper turns this into a Node `fs.Stats`-like object (with `isFile()` etc.).
-fn metadata_stat_json(metadata: &std::fs::Metadata) -> String {
-    let to_ms = |t: std::io::Result<std::time::SystemTime>| {
-        t.ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_millis() as f64)
-    };
-    let modified = to_ms(metadata.modified());
-    let accessed = to_ms(metadata.accessed());
-    let created = to_ms(metadata.created());
-
-    // Unix metadata carries the fields Node consumers read (mode/ino/uid/…);
-    // elsewhere synthesize a plausible mode from the file type so callers that
-    // derive type from `mode` still classify the entry correctly.
-    #[cfg(unix)]
-    let (mode, ino, dev, nlink, uid, gid, ctime_ms) = {
-        use std::os::unix::fs::MetadataExt;
-        let ctime_ms = metadata.ctime() as f64 * 1000.0 + metadata.ctime_nsec() as f64 / 1.0e6;
-        (
-            metadata.mode(),
-            metadata.ino(),
-            metadata.dev(),
-            metadata.nlink(),
-            metadata.uid(),
-            metadata.gid(),
-            Some(ctime_ms),
-        )
-    };
-    #[cfg(not(unix))]
-    let (mode, ino, dev, nlink, uid, gid, ctime_ms): (u32, u64, u64, u64, u32, u32, Option<f64>) = {
-        let mode = if metadata.is_dir() {
-            0o040755
-        } else if metadata.file_type().is_symlink() {
-            0o120777
-        } else {
-            0o100644
-        };
-        (mode, 0, 0, 1, 0, 0, modified)
-    };
-
-    deno_core::serde_json::json!({
-        "size": metadata.len(),
-        "isFile": metadata.is_file(),
-        "isDirectory": metadata.is_dir(),
-        "isSymlink": metadata.file_type().is_symlink(),
-        "readonly": metadata.permissions().readonly(),
-        "mode": mode,
-        "ino": ino,
-        "dev": dev,
-        "nlink": nlink,
-        "uid": uid,
-        "gid": gid,
-        "mtimeMs": modified,
-        "atimeMs": accessed,
-        "ctimeMs": ctime_ms,
-        "birthtimeMs": created,
-    })
-    .to_string()
-}
-
-/// Build the JSON stat blob fs.stat returns, from overlay metadata.
-fn mount_stat_json(s: &super::fs_mount::Stat) -> String {
-    let is_symlink = s.symlink.is_some();
-    // Synthesize a mode with the file-type bits set so consumers that derive
-    // type from `mode` (e.g. git tree builders) classify it correctly.
-    let mode = if s.is_dir {
-        0o040000 | (s.mode & 0o777)
-    } else if is_symlink {
-        0o120000 | (s.mode & 0o777)
-    } else {
-        0o100000 | (s.mode & 0o777)
-    };
-    deno_core::serde_json::json!({
-        "size": s.size,
-        "isFile": !s.is_dir && !is_symlink,
-        "isDirectory": s.is_dir,
-        "isSymlink": is_symlink,
-        "readonly": false,
-        "mode": mode,
-        "ino": 0,
-        "dev": 0,
-        "nlink": 1,
-        "uid": 0,
-        "gid": 0,
-        "mtimeMs": null,
-        "atimeMs": null,
-        "ctimeMs": null,
-        "birthtimeMs": null,
-    })
-    .to_string()
-}
-
 /// The fields a pre hook may have mutated, extracted back out of the
 /// effective hook-chain input. Only `path` and `destination` feed back into
 /// the operation; other input fields are context.
@@ -1396,6 +1580,67 @@ mod tests {
         let json = serde_json::to_string(&input).unwrap();
         assert!(json.contains("\"mcp_headers\""));
         assert!(json.contains("abc-123"));
+    }
+
+    #[test]
+    fn io_errors_classify_by_kind_and_keep_the_node_code_token() {
+        let e = std::io::Error::from(std::io::ErrorKind::NotFound);
+        let err = FsError::io("readFile", "/tmp/x", &e);
+        assert_eq!(err.kind, FsErrorKind::NotFound);
+        assert!(err.message.starts_with("fs.readFile: /tmp/x: ENOENT: "), "{}", err.message);
+        let e = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        assert_eq!(FsError::io2("rename", "/a", "/b", &e).kind, FsErrorKind::PermissionDenied);
+        assert_eq!(FsError::io("mkdir", "/a", &std::io::Error::other("x")).kind, FsErrorKind::Other);
+    }
+
+    #[test]
+    fn overlay_errors_classify_by_leading_code_token() {
+        let err = FsError::overlay("rm", "/work/dir", "ENOTEMPTY: /work/dir");
+        assert_eq!(err.kind, FsErrorKind::NotEmpty);
+        assert_eq!(err.message, "fs.rm: /work/dir: ENOTEMPTY: /work/dir");
+        assert_eq!(FsError::overlay("readlink", "/f", "EINVAL: /f is not a symlink").kind, FsErrorKind::Other);
+        assert_eq!(FsError::not_found("readFile", "/missing").kind, FsErrorKind::NotFound);
+        assert_eq!(FsError::not_found("readFile", "/missing").message, "fs.readFile: /missing: ENOENT");
+        // A path that merely contains a code-like word is not a code token.
+        assert_eq!(message_kind("fs.rm: /home/ENOENTish/file: boom"), FsErrorKind::Other);
+    }
+
+    #[test]
+    fn gate_errors_only_count_denials_as_permission_failures() {
+        let denied = FsError::gate("fs.readFile denied by policy: /x is not allowed".into());
+        assert_eq!(denied.kind, FsErrorKind::PermissionDenied);
+        let hook = FsError::gate("fs.readFile denied by pre hook (quota): /x is not allowed".into());
+        assert_eq!(hook.kind, FsErrorKind::PermissionDenied);
+        let chain = FsError::gate("fs.readFile: hook chain error: timeout".into());
+        assert_eq!(chain.kind, FsErrorKind::Other);
+    }
+
+    #[test]
+    fn stat_json_keeps_the_guest_wire_shape() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("f.txt");
+        std::fs::write(&file, b"abc").unwrap();
+        let stat = FsStat::from_metadata(&std::fs::metadata(&file).unwrap());
+        assert!(stat.is_file && !stat.is_directory && !stat.is_symlink);
+        assert_eq!(stat.size, 3);
+        let json: serde_json::Value = serde_json::from_str(&stat.to_json()).unwrap();
+        for key in [
+            "size", "isFile", "isDirectory", "isSymlink", "readonly", "mode", "ino", "dev", "nlink",
+            "uid", "gid", "mtimeMs", "atimeMs", "ctimeMs", "birthtimeMs",
+        ] {
+            assert!(json.get(key).is_some(), "missing {key}");
+        }
+        assert_eq!(json["size"], 3);
+        assert_eq!(json["isFile"], true);
+        let overlay = FsStat::from_mount(&super::super::fs_mount::Stat {
+            mode: 0o644,
+            size: 9,
+            is_dir: false,
+            symlink: None,
+        });
+        let json: serde_json::Value = serde_json::from_str(&overlay.to_json()).unwrap();
+        assert_eq!(json["mode"], 0o100644);
+        assert_eq!(json["mtimeMs"], serde_json::Value::Null);
     }
 
     #[test]

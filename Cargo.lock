@@ -4684,9 +4684,11 @@ dependencies = [
  "tokio-tungstenite",
  "tokio-util",
  "toml 0.8.23",
+ "tower",
  "tracing",
  "tracing-subscriber",
  "uniffi",
+ "uniffi-builder-derive",
  "url",
  "urlpattern",
  "utoipa",
@@ -6204,6 +6206,15 @@ dependencies = [
  "uniffi_core",
  "uniffi_macros",
  "uniffi_pipeline",
+]
+
+[[package]]
+name = "uniffi-builder-derive"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]
