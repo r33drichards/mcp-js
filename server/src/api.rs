@@ -1207,7 +1207,7 @@ fn session_view(runtime: Arc<Engine>, session: &str) -> Result<Arc<FsView>, Resp
         SessionFileReadQuery,
     ),
     responses(
-        (status = 200, description = "File bytes", content_type = "application/octet-stream"),
+        (status = 200, description = "File bytes", body = Vec<u8>, content_type = "application/octet-stream"),
         (status = 404, description = "Not found", body = ApiError),
         (status = 403, description = "Denied by the filesystem hook chain", body = ApiError),
     ),
@@ -1245,7 +1245,7 @@ async fn session_file_get_handler(
         ("path" = String, Path, description = "Path inside the snapshot, without the leading slash"),
         SessionFileWriteQuery,
     ),
-    request_body(content = String, content_type = "application/octet-stream"),
+    request_body(content = Vec<u8>, content_type = "application/octet-stream"),
     responses(
         (status = 204, description = "Written"),
         (status = 403, description = "Denied by the filesystem hook chain", body = ApiError),

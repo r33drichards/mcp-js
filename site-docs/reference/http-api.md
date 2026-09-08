@@ -785,6 +785,8 @@ Authentication: none.
 
 > Example responses
 
+> 200 Response
+
 > 403 Response
 
 ```json
@@ -799,7 +801,7 @@ Authentication: none.
 
 |Status|Meaning|Description|Schema|
 |---|---|---|---|
-|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|File bytes|None|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|File bytes|string|
 |403|[Forbidden](https://tools.ietf.org/html/rfc7231#section-6.5.3)|Denied by the filesystem hook chain|[ApiError](#schemaapierror)|
 |404|[Not Found](https://tools.ietf.org/html/rfc7231#section-6.5.4)|Not found|[ApiError](#schemaapierror)|
 
@@ -831,7 +833,7 @@ string
 |session|path|string|true|Engine session name|
 |path|path|string|true|Path inside the snapshot, without the leading slash|
 |append|query|boolean|false|Append to the file instead of replacing it.|
-|body|body|string|true|none|
+|body|body|string(binary)|true|none|
 
 > Example responses
 
