@@ -168,7 +168,7 @@ jobs:
         if: steps.select.outputs.selected == 'true'
         run: |
           set -euo pipefail
-          test "$(find result -maxdepth 1 -type f -name '*.tgz' | wc -l)" = 1
+          test "$(find -L result -maxdepth 1 -type f -name '*.tgz' | wc -l)" = 1
           mkdir release-artifacts
           cp result/*.tgz release-artifacts/
       - uses: actions/upload-artifact@v4

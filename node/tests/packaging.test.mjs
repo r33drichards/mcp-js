@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { checkDependencies, checkElf, checkTarball, packResult } from '../scripts/packaging.mjs';
 
@@ -87,4 +88,21 @@ test('ESM conversion fixes imports and exports without changing data or package 
   const source = `import x from './engine';\nexport * from "./types";\nimport('@ubjs/node');\nimport('./engine');\nconst data = './unchanged';\nexport * from './ready.js';`;
   assert.equal(esmImports(source, 'index.js'), `import x from './engine.js';\nexport * from "./types.js";\nimport('@ubjs/node');\nimport('./engine.js');\nconst data = './unchanged';\nexport * from './ready.js';`);
   assert.equal(esmImports('export { Engine } from "./engine";', 'index.d.ts'), 'export { Engine } from "./engine.js";');
+});
+
+test('release artifact staging follows the Nix result symlink', () => {
+  const workflow = readFileSync(new URL('../../.github/workflows/npm-publish.yml', import.meta.url), 'utf8');
+  const match = workflow.match(/- name: Stage exact tested tarball\n[\s\S]*?        run: \|\n((?:          .*\n)+)/);
+  assert.ok(match, 'Missing release artifact staging script');
+  const script = match[1].replace(/^          /gm, '');
+  const directory = mkdtempSync(join(tmpdir(), 'npm-release-staging-'));
+  try {
+    mkdirSync(join(directory, 'nix-output'));
+    writeFileSync(join(directory, 'nix-output', 'package.tgz'), 'validated tarball');
+    symlinkSync('nix-output', join(directory, 'result'));
+    execFileSync('bash', ['-e', '-c', script], { cwd: directory });
+    assert.equal(readFileSync(join(directory, 'release-artifacts', 'package.tgz'), 'utf8'), 'validated tarball');
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
