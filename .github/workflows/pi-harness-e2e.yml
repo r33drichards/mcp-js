@@ -103,7 +103,9 @@ jobs:
         run: |
           npm ci --ignore-scripts --prefix pi-checkout
           npm run build --prefix pi-checkout
-      - name: Install the pi agent package into the harness test
-        run: npm install --prefix node/pi-harness
+      - name: Install the harness test runner and link the pi agent package
+        run: |
+          npm ci --prefix node/pi-harness
+          npm run link-pi --prefix node/pi-harness
       - name: Run pi tools against the native engine
         run: timeout 300s npm test --prefix node/pi-harness

@@ -12,4 +12,3 @@ site/
 .mcpregistry*
 pi-checkout/
 node/pi-harness/node_modules/
-node/pi-harness/package-lock.json
