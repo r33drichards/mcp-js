@@ -142,6 +142,18 @@ without blocking a Tokio worker. Per-call execution options retain the existing
 `run_js` semantics; factory limits are defaults, not a security boundary against
 the embedding Python application.
 
+### Builder-assembled engine configuration
+
+`Engine.create(config)` is the general constructor. `EngineConfig` and its
+nested records (`ExecutionLimits`, `FilesystemAccess`, `BlobStore`) derive a
+UniFFI builder: each generated language gets a `<Record>Builder` object with
+chainable setters and a `build()` that fails with
+`RuntimeError::MissingRequiredField { record_type, field }` for the first
+unset required field. Limits are required; hook-gated filesystem access, heap
+persistence, and filesystem snapshots are independent optional axes, with
+directory or S3 blob stores under an optional `data_dir`. `create_stateless`
+and `create_with_filesystem` are conveniences over `create`.
+
 ### Host filesystem access from native callers
 
 `Engine.create_with_filesystem(heap_mb, timeout_secs, filesystem_json)` builds

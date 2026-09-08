@@ -55,6 +55,34 @@ useful in scripts but blocks the host thread. The native engine awaits Promises
 in the executed JavaScript. Execution errors and deadlines are returned in
 JSON; native API failures reject the Promise (or throw from `callTool`).
 
+## Configuring an engine
+
+`Engine.create(config)` takes an `EngineConfig` assembled with builders. Every
+configuration record has a `<Record>Builder` with chainable setters and a
+`build()` that throws `RuntimeError.MissingRequiredField` naming the first
+unset required field, the same shape in every generated language:
+
+```ts
+const config = new EngineConfigBuilder()
+  .limits(new ExecutionLimitsBuilder().heapMemoryMaxMb(64n).executionTimeoutSecs(5n).build())
+  .dataDir("/var/lib/pi/mcp-js")                         // omit for a temporary directory
+  .filesystem(new FilesystemAccessBuilder().policiesJson(policies).build())
+  .heapStore(new BlobStoreBuilder().backend(StoreBackend.Directory).build())
+  .fsSnapshotStore(new BlobStoreBuilder().backend(StoreBackend.Directory).build())
+  .build();
+const engine = Engine.create(config);
+```
+
+The axes are independent, as they are for the server: limits are required;
+`filesystem` enables hook-gated `fs.*` and the native `fs*` methods; `heapStore`
+enables V8 heap persistence (`run_js` accepts and reports content-addressed
+`heap` hashes); `fsSnapshotStore` enables content-addressed filesystem
+snapshots with labels. Directory stores default to paths under `dataDir`; S3
+stores take a `bucket` and an optional cache `path`, and both axes must share
+them. WASM modules cannot be combined with heap persistence.
+`createStateless(...)` and `createWithFilesystem(...)` remain as conveniences
+over `create`.
+
 ## Host filesystem access
 
 `Engine.createWithFilesystem(heapMb, timeoutSecs, filesystemJson)` enables

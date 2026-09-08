@@ -7,6 +7,7 @@ pub mod execution;
 pub mod fetch;
 pub mod fetch_auth;
 pub mod ffi;
+pub mod ffi_config;
 pub mod fs;
 pub mod fs_chunker;
 pub mod fs_content_merge;

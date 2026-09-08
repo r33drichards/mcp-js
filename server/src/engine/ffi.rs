@@ -6,6 +6,11 @@
 //! Everything here is re-exported from `crate::engine`.
 
 use super::*;
+use super::ffi_config::{BlobStore, EngineConfig, ExecutionLimits, FilesystemAccess, StoreBackend};
+use crate::bootstrap::{
+    build_storage_engine, CapabilityBootstrapConfig, PolicyBootstrapConfig, StorageBootstrapConfig,
+};
+use crate::cli::StoreKind;
 
 /// Runtime clones can be released on a Tokio worker when an execution ends.
 /// Nonblocking teardown avoids Tokio's panic when the last owner drops there.
@@ -176,6 +181,24 @@ pub enum RuntimeError {
     /// `fs.*` wrapper would surface for the failure.
     #[error("filesystem operation failed: {message}")]
     FileSystem { kind: FsErrorKind, message: String },
+    /// A configuration builder's `build()` found a required field unset.
+    #[error("{message}")]
+    MissingRequiredField {
+        record_type: String,
+        field: String,
+        message: String,
+    },
+}
+
+impl RuntimeError {
+    /// The error a `<Record>Builder::build()` reports for an unset required field.
+    pub fn missing(record_type: &str, field: &str) -> Self {
+        Self::MissingRequiredField {
+            record_type: record_type.to_string(),
+            field: field.to_string(),
+            message: format!("{record_type} is missing required field {field}"),
+        }
+    }
 }
 
 impl From<fs::FsError> for RuntimeError {
@@ -194,48 +217,72 @@ impl RuntimeError {
             | Self::Initialization { message }
             | Self::ToolCall { message }
             | Self::Operation { message } => message,
-            Self::InvalidJson { message, .. } | Self::FileSystem { message, .. } => message,
+            Self::InvalidJson { message, .. }
+            | Self::FileSystem { message, .. }
+            | Self::MissingRequiredField { message, .. } => message,
+        }
+    }
+}
+
+/// A blob store record resolved into the bootstrap's per-axis fields.
+struct BlobStoreParts {
+    kind: StoreKind,
+    dir: Option<String>,
+    /// `(bucket, cache_dir)` for S3 stores.
+    s3: Option<(Option<String>, Option<String>)>,
+}
+
+fn blob_store_parts(store: Option<&BlobStore>, default_dir: &str) -> Result<BlobStoreParts, RuntimeError> {
+    let Some(store) = store else {
+        return Ok(BlobStoreParts { kind: StoreKind::None, dir: None, s3: None });
+    };
+    match store.backend {
+        StoreBackend::Directory => Ok(BlobStoreParts {
+            kind: StoreKind::Dir,
+            dir: Some(store.path.clone().unwrap_or_else(|| default_dir.to_string())),
+            s3: None,
+        }),
+        StoreBackend::S3 => {
+            let bucket = store.bucket.clone().filter(|b| !b.is_empty()).ok_or_else(|| {
+                RuntimeError::InvalidConfig {
+                    message: "an S3 blob store requires a bucket".into(),
+                }
+            })?;
+            Ok(BlobStoreParts {
+                kind: StoreKind::S3,
+                dir: None,
+                s3: Some((Some(bucket), store.path.clone())),
+            })
         }
     }
 }
 
 #[uniffi::export]
 impl Engine {
-    /// Enable hook/policy-gated host filesystem access without enabling subprocesses.
-    /// The JSON is one `OperationPolicies` object (the `filesystem` entry of
-    /// `--policies-json`), so `policies`, `pre`, `post`, and `stack` are all
-    /// interpreted exactly as the server interprets them.
+    /// Enable hook/policy-gated host filesystem access without enabling
+    /// subprocesses. Equivalent to `create` with only `limits` and
+    /// `filesystem` set; `filesystem_policy_json` is `FilesystemAccess::policies_json`.
     #[uniffi::constructor]
     pub fn create_with_filesystem(
         heap_memory_max_mb: u64,
         execution_timeout_secs: u64,
         filesystem_policy_json: String,
     ) -> Result<Arc<Self>, RuntimeError> {
-        let config: opa::OperationPolicies = serde_json::from_str(&filesystem_policy_json)
-            .map_err(|error| RuntimeError::InvalidConfig { message: error.to_string() })?;
-        // An empty chain permits everything: require explicitly configured authority.
-        if config.policies.is_empty() && config.pre.is_empty() && config.stack.is_empty() {
-            return Err(RuntimeError::InvalidConfig {
-                message: "filesystem configuration must declare policies, pre hooks, or a stack".into(),
-            });
-        }
-        let chain = hooks::build_hook_chain(
-            "filesystem",
-            &config,
-            "mcp/filesystem",
-            "data.mcp.filesystem.allow",
-            fs::HOOK_CAPS,
-        )
-        .map_err(|message| RuntimeError::InvalidConfig {
-            message: format!("failed to build filesystem hook chain: {message}"),
-        })?;
-        let mut engine = Self::create_stateless(heap_memory_max_mb, execution_timeout_secs)?;
-        Arc::get_mut(&mut engine)
-            .ok_or_else(|| RuntimeError::Initialization {
-                message: "new embedded engine unexpectedly shared".into(),
-            })?
-            .fs_config = Some(Arc::new(fs::FsConfig::new_with_hooks(Arc::new(chain))));
-        Ok(engine)
+        Self::create(EngineConfig {
+            limits: ExecutionLimits {
+                heap_memory_max_mb,
+                execution_timeout_secs,
+                max_concurrent_executions: None,
+            },
+            data_dir: None,
+            filesystem: Some(FilesystemAccess {
+                policies_json: filesystem_policy_json,
+                passthrough: None,
+            }),
+            heap_store: None,
+            fs_snapshot_store: None,
+            fs_labels_db: None,
+        })
     }
 
     /// True when this engine was constructed with a filesystem hook chain, so
@@ -321,24 +368,113 @@ impl Engine {
         self.native_fs(|fs| async move { fs.exists(&path).await }).await
     }
 
-    /// Construct a local, capability-restricted engine for synchronous foreign callers.
+    /// Construct a local, capability-restricted engine for synchronous foreign
+    /// callers. Equivalent to `create` with only `limits` set.
     #[uniffi::constructor]
     pub fn create_stateless(
         heap_memory_max_mb: u64,
         execution_timeout_secs: u64,
     ) -> Result<Arc<Self>, RuntimeError> {
-        if !(16..=4096).contains(&heap_memory_max_mb)
-            || !(1..=300).contains(&execution_timeout_secs)
+        Self::create(EngineConfig {
+            limits: ExecutionLimits {
+                heap_memory_max_mb,
+                execution_timeout_secs,
+                max_concurrent_executions: None,
+            },
+            data_dir: None,
+            filesystem: None,
+            heap_store: None,
+            fs_snapshot_store: None,
+            fs_labels_db: None,
+        })
+    }
+
+    /// Construct an engine from a builder-assembled [`EngineConfig`]. Each axis
+    /// is independent: limits, hook-gated filesystem access, heap persistence,
+    /// and filesystem snapshots. Storage lives under `data_dir`, or under a
+    /// temporary directory removed with the engine. The engine owns a Tokio
+    /// runtime, so synchronous foreign callers need no executor of their own.
+    #[uniffi::constructor]
+    pub fn create(config: EngineConfig) -> Result<Arc<Self>, RuntimeError> {
+        let limits = config.limits;
+        if !(16..=4096).contains(&limits.heap_memory_max_mb)
+            || !(1..=300).contains(&limits.execution_timeout_secs)
         {
             return Err(RuntimeError::InvalidConfig {
                 message: "heap_memory_max_mb must be 16..=4096 and execution_timeout_secs must be 1..=300".into(),
             });
         }
-        let bytes = usize::try_from(heap_memory_max_mb * 1024 * 1024).map_err(|_| {
-            RuntimeError::InvalidConfig {
+        let max_concurrent = limits.max_concurrent_executions.unwrap_or(1);
+        if !(1..=64).contains(&max_concurrent) {
+            return Err(RuntimeError::InvalidConfig {
+                message: "max_concurrent_executions must be 1..=64".into(),
+            });
+        }
+        let heap_memory_max_bytes = usize::try_from(limits.heap_memory_max_mb * 1024 * 1024)
+            .map_err(|_| RuntimeError::InvalidConfig {
                 message: "heap limit exceeds platform capacity".into(),
+            })?;
+
+        // Filesystem authority is explicit: an empty chain would permit everything.
+        let filesystem = config
+            .filesystem
+            .as_ref()
+            .map(|access| {
+                let policies: opa::OperationPolicies = serde_json::from_str(&access.policies_json)
+                    .map_err(|error| RuntimeError::InvalidConfig {
+                        message: format!("filesystem policies_json: {error}"),
+                    })?;
+                if policies.policies.is_empty() && policies.pre.is_empty() && policies.stack.is_empty() {
+                    return Err(RuntimeError::InvalidConfig {
+                        message: "filesystem configuration must declare policies, pre hooks, or a stack".into(),
+                    });
+                }
+                Ok(policies)
+            })
+            .transpose()?;
+
+        let (data_dir, ephemeral) = match config.data_dir {
+            Some(path) => (path, None),
+            None => {
+                let directory = tempfile::tempdir().map_err(|e| RuntimeError::Initialization {
+                    message: e.to_string(),
+                })?;
+                let path = directory.path().to_str().ok_or_else(|| RuntimeError::Initialization {
+                    message: "temporary path is not UTF-8".into(),
+                })?;
+                (path.to_string(), Some(directory))
             }
-        })?;
+        };
+
+        let heap = blob_store_parts(config.heap_store.as_ref(), &format!("{data_dir}/heaps"))?;
+        let fs = blob_store_parts(config.fs_snapshot_store.as_ref(), &format!("{data_dir}/fs-blobs"))?;
+        let (s3_bucket, cache_dir) = match (&heap.s3, &fs.s3) {
+            (Some(a), Some(b)) if a != b => {
+                return Err(RuntimeError::InvalidConfig {
+                    message: "heap_store and fs_snapshot_store must use the same S3 bucket and cache directory".into(),
+                });
+            }
+            (Some(a), _) | (None, Some(a)) => a.clone(),
+            (None, None) => (None, None),
+        };
+        let storage = StorageBootstrapConfig {
+            heap_store: heap.kind,
+            heap_dir: heap.dir,
+            fs_store: fs.kind,
+            fs_dir: fs.dir,
+            fs_labels_db: config.fs_labels_db,
+            s3_bucket,
+            cache_dir,
+            session_db_path: data_dir.clone(),
+            http_port: None,
+            execution_db_path: Some(format!("{data_dir}/executions")),
+            heap_memory_max_bytes,
+            execution_timeout_secs: limits.execution_timeout_secs,
+            max_concurrent_executions: usize::try_from(max_concurrent).unwrap_or(1),
+            session_id: None,
+            session_fork_from: None,
+        };
+
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -346,20 +482,63 @@ impl Engine {
             .map_err(|e| RuntimeError::Initialization {
                 message: e.to_string(),
             })?;
-        let directory = tempfile::tempdir().map_err(|e| RuntimeError::Initialization {
-            message: e.to_string(),
+        // The storage bootstrap is async (S3 clients capture the runtime they
+        // are built on). Drive it on the engine's own runtime from a helper
+        // thread so `create` works whether or not the caller is inside Tokio.
+        let bootstrap = std::thread::scope(|scope| {
+            scope
+                .spawn(|| runtime.block_on(build_storage_engine(storage, None)))
+                .join()
+                .map_err(|_| RuntimeError::Initialization {
+                    message: "storage bootstrap panicked".into(),
+                })
+        })?
+        .map_err(|error| RuntimeError::Initialization {
+            message: error.to_string(),
         })?;
-        initialize_v8();
-        let registry =
-            ExecutionRegistry::new(directory.path().join("executions").to_str().ok_or_else(
-                || RuntimeError::Initialization {
-                    message: "temporary path is not UTF-8".into(),
-                },
-            )?)
-            .map_err(|message| RuntimeError::Initialization { message })?;
-        let engine = Engine::new_stateless(bytes, execution_timeout_secs, 1)
-            .with_execution_registry(Arc::new(registry));
-        Ok(Self::wrap(engine, Some(runtime), Some(directory), None))
+        let bootstrap = bootstrap.with_policy_config(
+            PolicyBootstrapConfig {
+                filesystem,
+                ..PolicyBootstrapConfig::default()
+            },
+            CapabilityBootstrapConfig {
+                filesystem_passthrough: config
+                    .filesystem
+                    .as_ref()
+                    .and_then(|access| access.passthrough)
+                    .unwrap_or(false),
+                ..CapabilityBootstrapConfig::default()
+            },
+        )?;
+        let mut engine = bootstrap.build_with_runtime(runtime);
+        // The server bootstrap degrades gracefully when a store cannot be
+        // opened (a warning, then reduced capabilities). An embedded engine
+        // must instead fail: a caller that asked for persistence under a data
+        // directory would otherwise silently lose it, typically because another
+        // engine still holds the same directory.
+        let stateful = engine.heap_enabled() || engine.fs_enabled();
+        let unavailable = if engine.execution_registry.is_none() {
+            Some("execution registry")
+        } else if stateful && engine.session_log.is_none() {
+            Some("session log")
+        } else if engine.heap_enabled() && engine.heap_tag_store.is_none() {
+            Some("heap tag store")
+        } else {
+            None
+        };
+        if let Some(store) = unavailable {
+            return Err(RuntimeError::Initialization {
+                message: format!(
+                    "could not open the {store} under {data_dir}; is another engine using this data directory?"
+                ),
+            });
+        }
+        Arc::get_mut(&mut engine)
+            .ok_or_else(|| RuntimeError::Initialization {
+                message: "new embedded engine unexpectedly shared".into(),
+            })?
+            ._ephemeral_data_dir = ephemeral.map(Arc::new);
+        Ok(engine)
     }
 
     /// Synchronous counterpart of shutdown for Python callers.
@@ -1175,6 +1354,9 @@ fn parse_json_object(field: &str, json: &str) -> Result<Value, RuntimeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::ffi_config::{
+        BlobStoreBuilder, EngineConfigBuilder, ExecutionLimitsBuilder, FilesystemAccessBuilder,
+    };
 
     #[test]
     fn typed_mcp_headers_convert_to_policy_json() {
@@ -1320,6 +1502,130 @@ mod tests {
         engine.shutdown().await;
         let closed = engine.clone().fs_exists(root).await.unwrap_err();
         assert!(closed.to_string().contains("runtime is Shutdown"), "{closed}");
+    }
+
+    async fn run_to_completion(engine: &Arc<Engine>, code: &str, heap: Option<String>) -> ExecutionInfo {
+        let id = engine
+            .submit_execution(ExecutionRequest {
+                code: code.to_string(),
+                file: None,
+                heap,
+                fs: None,
+                session: Some("pi-session".to_string()),
+                heap_memory_max_mb: None,
+                execution_timeout_secs: None,
+                tags: None,
+                mcp_headers: None,
+            })
+            .await
+            .unwrap();
+        loop {
+            let info = engine.get_execution(id.clone()).unwrap();
+            match info.status.as_str() {
+                "completed" => return info,
+                "pending" | "running" => tokio::time::sleep(std::time::Duration::from_millis(20)).await,
+                other => panic!("execution {other}: {:?}", info.error),
+            }
+        }
+    }
+
+    fn output_of(engine: &Arc<Engine>, id: &str) -> String {
+        engine
+            .get_execution_output(id.to_string(), None, Some(u64::MAX), None, None)
+            .unwrap()
+            .data
+            .trim()
+            .to_string()
+    }
+
+    #[test]
+    fn builders_report_the_first_missing_required_field() {
+        match EngineConfigBuilder::new().build().unwrap_err() {
+            RuntimeError::MissingRequiredField { record_type, field, message } => {
+                assert_eq!(record_type, "EngineConfig");
+                assert_eq!(field, "limits");
+                assert_eq!(message, "EngineConfig is missing required field limits");
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+        let limits = ExecutionLimitsBuilder::new()
+            .heap_memory_max_mb(64)
+            .execution_timeout_secs(5)
+            .build()
+            .unwrap();
+        assert_eq!(limits.max_concurrent_executions, None);
+        let bucketless = EngineConfigBuilder::new()
+            .limits(limits.clone())
+            .heap_store(BlobStoreBuilder::new().backend(StoreBackend::S3).build().unwrap())
+            .build()
+            .unwrap();
+        assert!(matches!(Engine::create(bucketless), Err(RuntimeError::InvalidConfig { .. })));
+        let empty_authority = EngineConfigBuilder::new()
+            .limits(limits)
+            .filesystem(FilesystemAccessBuilder::new().policies_json("{}".into()).build().unwrap())
+            .build()
+            .unwrap();
+        let error = match Engine::create(empty_authority) {
+            Ok(_) => panic!("empty filesystem authority must be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("must declare"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn builder_config_persists_heaps_across_engines_in_a_data_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let policy = dir.path().join("policy.rego");
+        std::fs::write(&policy, "package mcp.filesystem\ndefault allow = false\n").unwrap();
+        let config = EngineConfigBuilder::new()
+            .limits(
+                ExecutionLimitsBuilder::new()
+                    .heap_memory_max_mb(64)
+                    .execution_timeout_secs(5)
+                    .build()
+                    .unwrap(),
+            )
+            .data_dir(dir.path().to_str().unwrap().to_string())
+            .filesystem(
+                FilesystemAccessBuilder::new()
+                    .policies_json(
+                        serde_json::json!({"policies": [{"url": format!("file://{}", policy.display())}]})
+                            .to_string(),
+                    )
+                    .build()
+                    .unwrap(),
+            )
+            .heap_store(BlobStoreBuilder::new().backend(StoreBackend::Directory).build().unwrap())
+            .build()
+            .unwrap();
+
+        let engine = Engine::create(config.clone()).unwrap();
+        let capabilities = engine.capabilities();
+        assert!(capabilities.heap && capabilities.sessions && !capabilities.filesystem);
+        assert!(engine.host_filesystem_enabled());
+        assert!(matches!(engine.mode(), RuntimeMode::LocalStateful));
+        let first = run_to_completion(&engine, "globalThis.counter = 41;", None).await;
+        let heap = first.heap.expect("a stateful execution reports its heap");
+        assert!(dir.path().join("heaps").is_dir());
+        engine.shutdown().await;
+
+        // While the first engine still holds the data directory, a second one
+        // fails instead of silently running without persistence.
+        let error = match Engine::create(config.clone()) {
+            Ok(_) => panic!("a data directory in use must be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("another engine"), "{error}");
+        drop(engine);
+
+        // A second engine over the same data directory resumes the heap by hash.
+        let engine = Engine::create(config).unwrap();
+        let second = run_to_completion(&engine, "console.log(++globalThis.counter)", Some(heap.clone())).await;
+        assert_eq!(output_of(&engine, &second.id), "42");
+        assert_ne!(second.heap.as_deref(), Some(heap.as_str()));
+        let snapshots = engine.list_session_snapshots("pi-session".to_string()).await.unwrap();
+        assert_eq!(snapshots.len(), 2);
+        engine.shutdown().await;
     }
 
     #[tokio::test]

@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --import tsx --test --test-timeout=60000 tests/engine.test.ts tests/filesystem.test.ts",
+    "test": "node --import tsx --test --test-timeout=60000 tests/engine.test.ts tests/filesystem.test.ts tests/engine-config.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
