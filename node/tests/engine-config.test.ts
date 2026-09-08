@@ -94,3 +94,53 @@ test("builders assemble an engine with heap persistence and filesystem access", 
     /bucket/,
   );
 });
+
+test("session file views share the snapshot with guest runs", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "mcp-session-view-"));
+  const policy = join(dir, "policy.rego");
+  writeFileSync(policy, 'package mcp.filesystem\ndefault allow = false\nallow if { startswith(input.path, "/work") }\n');
+  const config = new EngineConfigBuilder()
+    .limits(new ExecutionLimitsBuilder().heapMemoryMaxMb(64n).executionTimeoutSecs(5n).build())
+    .dataDir(dir)
+    .filesystem(
+      new FilesystemAccessBuilder()
+        .policiesJson(JSON.stringify({ policies: [{ url: `file://${policy}` }] }))
+        .build(),
+    )
+    .fsSnapshotStore(new BlobStoreBuilder().backend(StoreBackend.Directory).build())
+    .heapStore(new BlobStoreBuilder().backend(StoreBackend.Directory).build())
+    .build();
+  const engine = Engine.create(config);
+  // A stateful engine answers run_js with an execution id: await it, then read
+  // the console output, the way an embedding host does.
+  const runInSession = async (code: string): Promise<{ output?: string; error?: string }> => {
+    const answer = JSON.parse(await engine.callToolAsync("run_js", JSON.stringify({ code }), "s1", undefined));
+    if (typeof answer.execution_id !== "string") return answer;
+    const info = await engine.awaitExecution(answer.execution_id);
+    const page = engine.getExecutionOutput(answer.execution_id, undefined, undefined, undefined, undefined);
+    return { output: page.data, error: info.status === "completed" ? undefined : (info.error ?? info.status) };
+  };
+  try {
+    assert.equal(engine.capabilities().filesystem, true);
+    const view = engine.fsView("s1");
+    assert.equal(view.session(), "s1");
+    await view.writeFile("/work/a.txt", new TextEncoder().encode("hello").buffer);
+    assert.equal(await view.readTextFile("/work/a.txt"), "hello");
+    const guest = await runInSession("globalThis.seen = await fs.readFile('/work/a.txt', 'utf8'); console.log(seen)");
+    assert.equal(guest.output?.trim(), "hello", JSON.stringify(guest));
+    await runInSession("await fs.writeFile('/work/b.txt', 'from guest')");
+    assert.deepEqual((await view.readDir("/work")).sort(), ["a.txt", "b.txt"]);
+    assert.equal(await view.readTextFile("/work/b.txt"), "from guest");
+    const heapCheck = await runInSession("console.log(globalThis.seen)");
+    assert.equal(heapCheck.output?.trim(), "hello", "the heap survives native mutations in between");
+    const host = engine.fsView(undefined);
+    assert.equal(host.session(), undefined);
+    assert.equal(await host.exists("/work/a.txt"), false);
+    const snapshots = await engine.listSessionSnapshots("s1");
+    assert.equal(snapshots.length, 4);
+    assert.match(snapshots[0].code, /^\/\/ native fs\.writeFile/);
+  } finally {
+    release(engine);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

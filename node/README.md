@@ -77,9 +77,11 @@ The axes are independent, as they are for the server: limits are required;
 `filesystem` enables hook-gated `fs.*` and the native `fs*` methods; `heapStore`
 enables V8 heap persistence (`run_js` accepts and reports content-addressed
 `heap` hashes); `fsSnapshotStore` enables content-addressed filesystem
-snapshots with labels. Directory stores default to paths under `dataDir`; S3
+snapshots with labels; `wasmModules` pre-loads WebAssembly modules as globals. Directory stores default to paths under `dataDir`; S3
 stores take a `bucket` and an optional cache `path`, and both axes must share
-them. WASM modules cannot be combined with heap persistence.
+them. WASM modules cannot be combined with heap persistence: heap snapshots
+bake compiled modules in, so `create` rejects `wasmModules` together with
+`heapStore`.
 `createStateless(...)` and `createWithFilesystem(...)` remain as conveniences
 over `create`.
 
@@ -123,6 +125,24 @@ token. Engines created with `createStateless` reject native filesystem calls;
 
 `tests/filesystem.test.ts` covers policy denial, hook-only configuration with a
 path rewrite, guest/native parity on the same bytes, and each typed failure.
+
+### Session file views
+
+`engine.fsView(session)` returns an `FsView` with the same methods (`readFile`,
+`readFileRange`, `readTextFile`, `writeFile`, `appendFile`, `stat`, `lstat`,
+`readDir`, `readLink`, `canonicalPath`, `makeDir`, `remove`, `rename`,
+`exists`). `fsView(undefined)` is the host filesystem; the engine's `fs*`
+methods are shortcuts for it. `fsView("my-session")` is that session's
+filesystem snapshot on an engine with `fsSnapshotStore`: the same snapshot
+`run_js` mounts when called with that session id (the third `callToolAsync`
+argument), so a native write is visible to the next run and a guest write to
+the next native read. Each mutating call folds the change into a new snapshot
+recorded in the session log with the session's current heap, exactly as a run
+does; `listSessionSnapshots(session)` shows the chain. Binding a client session
+to engine state therefore needs only the session name: `run_js` resumes the
+latest heap and snapshot from the session log, and `awaitExecution(id)` returns
+the heap and fs ids an execution produced when a caller submits through the
+execution API instead.
 
 ## Generator compatibility
 

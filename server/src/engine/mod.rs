@@ -1581,6 +1581,10 @@ pub struct Engine {
     /// This mutex serializes stateful V8 execution while stateless
     /// requests proceed in full parallelism.
     snapshot_mutex: Arc<tokio::sync::Mutex<()>>,
+    /// Serializes native (UniFFI) file operations on a session's fs snapshot,
+    /// so two concurrent native writes cannot both fold from the same base and
+    /// lose one another's changes.
+    native_fs_session_lock: Arc<tokio::sync::Mutex<()>>,
     /// Default max native memory (bytes) for WASM modules without a per-module limit.
     wasm_default_max_bytes: usize,
     /// WASM modules to inject as globals before every execution.
@@ -1790,6 +1794,7 @@ impl Engine {
             execution_timeout_secs,
             v8_semaphore: Arc::new(Semaphore::new(max_concurrent)),
             snapshot_mutex: Arc::new(tokio::sync::Mutex::new(())),
+            native_fs_session_lock: Arc::new(tokio::sync::Mutex::new(())),
             wasm_default_max_bytes: DEFAULT_WASM_MAX_BYTES,
             wasm_modules: Arc::new(Vec::new()),
             wasm_stub_config: wasm_stub::WasmStubConfig::default(),
@@ -1836,6 +1841,7 @@ impl Engine {
             execution_timeout_secs,
             v8_semaphore: Arc::new(Semaphore::new(max_concurrent)),
             snapshot_mutex: Arc::new(tokio::sync::Mutex::new(())),
+            native_fs_session_lock: Arc::new(tokio::sync::Mutex::new(())),
             wasm_default_max_bytes: DEFAULT_WASM_MAX_BYTES,
             wasm_modules: Arc::new(Vec::new()),
             wasm_stub_config: wasm_stub::WasmStubConfig::default(),

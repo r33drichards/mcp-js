@@ -7,12 +7,14 @@ pub use server::engine::session_log::SessionSnapshotView;
 pub use server::engine::ffi_config::{
     BlobStore, BlobStoreBuilder, EngineConfig, EngineConfigBuilder, ExecutionLimits,
     ExecutionLimitsBuilder, FilesystemAccess, FilesystemAccessBuilder, StoreBackend,
+    WasmModuleFile, WasmModuleFileBuilder,
 };
 pub use server::engine::{
     FsLabelView, FsMergeConflictView, FsMergeResult, FsPushOutcome, FsRefLogView,
 };
 pub use server::engine::{
     DEFAULT_EXECUTION_TIMEOUT_SECS, DEFAULT_MCP_STUB_PREFIX, DEFAULT_WASM_STUB_PREFIX, Engine,
-    ExecutionRequest, McpRequestHeaders, RuntimeCapabilities, RuntimeError, RuntimeLifecycleState,
-    RuntimeMode, RuntimeShutdownResult, ToolCallRequest, ToolDefinition,
+    ExecutionRequest, FsEntryKind, FsErrorKind, FsMetadata, FsView, McpRequestHeaders,
+    RuntimeCapabilities, RuntimeError, RuntimeLifecycleState, RuntimeMode, RuntimeShutdownResult,
+    ToolCallRequest, ToolDefinition,
 };

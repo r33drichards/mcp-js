@@ -65,6 +65,22 @@ pub struct FilesystemAccess {
     pub passthrough: Option<bool>,
 }
 
+/// A WebAssembly module to pre-load as a global. WASM modules are engine-level
+/// and cannot be combined with a heap store, because heap snapshots bake the
+/// compiled modules in.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record, UniffiBuilder)]
+#[uniffi_builder(RuntimeError)]
+pub struct WasmModuleFile {
+    /// Global name the module's exports are bound to.
+    pub name: String,
+    /// Path to the `.wasm` file.
+    pub path: String,
+    /// Cap on the module's native memory in bytes (linear memory and tables).
+    pub max_memory_bytes: Option<u64>,
+    /// Description shown for the module's MCP stub tool.
+    pub description: Option<String>,
+}
+
 /// Everything `Engine::create` needs.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record, UniffiBuilder)]
 #[uniffi_builder(RuntimeError)]
@@ -83,4 +99,6 @@ pub struct EngineConfig {
     /// Label database for filesystem snapshots (defaults to a path under the
     /// data directory).
     pub fs_labels_db: Option<String>,
+    /// WebAssembly modules to pre-load. Incompatible with `heap_store`.
+    pub wasm_modules: Option<Vec<WasmModuleFile>>,
 }

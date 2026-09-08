@@ -7,8 +7,11 @@
 
 use super::*;
 use super::ffi_config::{BlobStore, EngineConfig, ExecutionLimits, FilesystemAccess, StoreBackend};
+use super::fs_mount::SessionMount;
+use super::session_log::SessionLogEntry;
 use crate::bootstrap::{
-    build_storage_engine, CapabilityBootstrapConfig, PolicyBootstrapConfig, StorageBootstrapConfig,
+    build_storage_engine, CapabilityBootstrapConfig, FeatureBootstrapConfig, PolicyBootstrapConfig,
+    RuntimeBootstrap, StorageBootstrapConfig,
 };
 use crate::cli::StoreKind;
 
@@ -282,90 +285,140 @@ impl Engine {
             heap_store: None,
             fs_snapshot_store: None,
             fs_labels_db: None,
+            wasm_modules: None,
         })
     }
 
     /// True when this engine was constructed with a filesystem hook chain, so
-    /// both guest `fs.*` calls and the native `fs_*` methods are available.
+    /// guest `fs.*` calls and native file views are available.
     pub fn host_filesystem_enabled(&self) -> bool {
         self.fs_config.is_some()
     }
 
-    /// Read a file as bytes through the filesystem hook chain.
-    pub async fn fs_read_file(self: Arc<Self>, path: String) -> Result<Vec<u8>, RuntimeError> {
-        self.native_fs(|fs| async move { fs.read_file(&path).await }).await
+    /// A native file view. `None` is the host filesystem behind the engine's
+    /// hook chain. `Some(session)` is that session's filesystem snapshot: the
+    /// same snapshot `run_js` mounts for the session, so native writes are
+    /// visible to the next run and guest writes to the next native read. Each
+    /// mutating call folds the change into a new snapshot recorded in the
+    /// session log, exactly as a run does.
+    pub fn fs_view(self: Arc<Self>, session: Option<String>) -> Result<Arc<FsView>, RuntimeError> {
+        if self.fs_config.is_none() {
+            return Err(RuntimeError::Operation {
+                message: "filesystem access is not configured; set EngineConfig.filesystem".into(),
+            });
+        }
+        if let Some(session) = &session {
+            if session.is_empty() {
+                return Err(RuntimeError::InvalidConfig {
+                    message: "session name must not be empty".into(),
+                });
+            }
+            if self.fs_store.is_none() || self.session_log.is_none() {
+                return Err(RuntimeError::Operation {
+                    message: "session file views require filesystem snapshots; set EngineConfig.fs_snapshot_store".into(),
+                });
+            }
+        }
+        Ok(Arc::new(FsView {
+            engine: self,
+            session,
+        }))
     }
 
-    /// Read at most `max_bytes` bytes of a file starting at `offset`; fewer
-    /// bytes are returned only at end of file. Gated as a read of the file.
+    /// Wait for an execution to reach a terminal status and return its record,
+    /// including the heap and filesystem snapshot ids it produced.
+    pub async fn await_execution(
+        self: Arc<Self>,
+        execution_id: String,
+    ) -> Result<ExecutionInfo, RuntimeError> {
+        let engine = self.clone();
+        self.on_runtime(async move {
+            loop {
+                let info = engine.get_execution(execution_id.clone())?;
+                match info.status.as_str() {
+                    "pending" | "running" => {
+                        tokio::time::sleep(std::time::Duration::from_millis(25)).await
+                    }
+                    _ => return Ok(info),
+                }
+            }
+        })
+        .await
+    }
+
+    /// Read a file on the host filesystem; see `fs_view(None)`.
+    pub async fn fs_read_file(self: Arc<Self>, path: String) -> Result<Vec<u8>, RuntimeError> {
+        self.fs_view(None)?.read_file(path).await
+    }
+
+    /// Read at most `max_bytes` bytes of a host file starting at `offset`.
     pub async fn fs_read_file_range(
         self: Arc<Self>,
         path: String,
         offset: u64,
         max_bytes: u64,
     ) -> Result<Vec<u8>, RuntimeError> {
-        self.native_fs(|fs| async move { fs.read_range(&path, offset, max_bytes).await }).await
+        self.fs_view(None)?.read_file_range(path, offset, max_bytes).await
     }
 
-    /// The canonical path of an existing path, resolving symlinks. Gated as a
-    /// `stat` of the path.
+    /// The canonical path of an existing host path.
     pub async fn fs_canonical_path(self: Arc<Self>, path: String) -> Result<String, RuntimeError> {
-        self.native_fs(|fs| async move { fs.canonical_path(&path).await }).await
+        self.fs_view(None)?.canonical_path(path).await
     }
 
-    /// Read a file as UTF-8 text; invalid UTF-8 is an `InvalidData` failure.
+    /// Read a host file as UTF-8 text.
     pub async fn fs_read_text_file(self: Arc<Self>, path: String) -> Result<String, RuntimeError> {
-        self.native_fs(|fs| async move { fs.read_text(&path).await }).await
+        self.fs_view(None)?.read_text_file(path).await
     }
 
-    /// Create or replace a file with `data`.
+    /// Create or replace a host file.
     pub async fn fs_write_file(self: Arc<Self>, path: String, data: Vec<u8>) -> Result<(), RuntimeError> {
-        self.native_fs(|fs| async move { fs.write_file(&path, &data).await }).await
+        self.fs_view(None)?.write_file(path, data).await
     }
 
-    /// Append `data` to a file, creating it when missing.
+    /// Append to a host file.
     pub async fn fs_append_file(self: Arc<Self>, path: String, data: Vec<u8>) -> Result<(), RuntimeError> {
-        self.native_fs(|fs| async move { fs.append_file(&path, &data).await }).await
+        self.fs_view(None)?.append_file(path, data).await
     }
 
-    /// Metadata for a path, following a final symlink (Node `fs.stat`).
+    /// Metadata for a host path, following a final symlink.
     pub async fn fs_stat(self: Arc<Self>, path: String) -> Result<FsMetadata, RuntimeError> {
-        self.native_fs(|fs| async move { fs.stat(&path, true).await.map(FsMetadata::from) }).await
+        self.fs_view(None)?.stat(path).await
     }
 
-    /// Metadata for a path without following a final symlink (Node `fs.lstat`).
+    /// Metadata for a host path without following a final symlink.
     pub async fn fs_lstat(self: Arc<Self>, path: String) -> Result<FsMetadata, RuntimeError> {
-        self.native_fs(|fs| async move { fs.stat(&path, false).await.map(FsMetadata::from) }).await
+        self.fs_view(None)?.lstat(path).await
     }
 
-    /// Names of a directory's direct children.
+    /// Names of a host directory's direct children.
     pub async fn fs_read_dir(self: Arc<Self>, path: String) -> Result<Vec<String>, RuntimeError> {
-        self.native_fs(|fs| async move { fs.readdir(&path).await }).await
+        self.fs_view(None)?.read_dir(path).await
     }
 
-    /// The target of a symlink.
+    /// The target of a host symlink.
     pub async fn fs_read_link(self: Arc<Self>, path: String) -> Result<String, RuntimeError> {
-        self.native_fs(|fs| async move { fs.readlink(&path).await }).await
+        self.fs_view(None)?.read_link(path).await
     }
 
-    /// Create a directory, and its missing parents when `recursive` is set.
+    /// Create a host directory.
     pub async fn fs_make_dir(self: Arc<Self>, path: String, recursive: bool) -> Result<(), RuntimeError> {
-        self.native_fs(|fs| async move { fs.mkdir(&path, recursive).await }).await
+        self.fs_view(None)?.make_dir(path, recursive).await
     }
 
-    /// Remove a file, or a directory (its contents too when `recursive` is set).
+    /// Remove a host file or directory.
     pub async fn fs_remove(self: Arc<Self>, path: String, recursive: bool) -> Result<(), RuntimeError> {
-        self.native_fs(|fs| async move { fs.rm(&path, recursive).await }).await
+        self.fs_view(None)?.remove(path, recursive).await
     }
 
-    /// Rename `from` to `to`, replacing an existing destination file.
+    /// Rename a host path.
     pub async fn fs_rename(self: Arc<Self>, from: String, to: String) -> Result<(), RuntimeError> {
-        self.native_fs(|fs| async move { fs.rename(&from, &to).await }).await
+        self.fs_view(None)?.rename(from, to).await
     }
 
-    /// Whether a path exists. Only the hook chain can fail this call.
+    /// Whether a host path exists.
     pub async fn fs_exists(self: Arc<Self>, path: String) -> Result<bool, RuntimeError> {
-        self.native_fs(|fs| async move { fs.exists(&path).await }).await
+        self.fs_view(None)?.exists(path).await
     }
 
     /// Construct a local, capability-restricted engine for synchronous foreign
@@ -386,6 +439,7 @@ impl Engine {
             heap_store: None,
             fs_snapshot_store: None,
             fs_labels_db: None,
+            wasm_modules: None,
         })
     }
 
@@ -414,6 +468,38 @@ impl Engine {
             .map_err(|_| RuntimeError::InvalidConfig {
                 message: "heap limit exceeds platform capacity".into(),
             })?;
+
+        // WASM modules are engine-level: heap snapshots bake the compiled
+        // modules in, so an engine has either a heap store or modules.
+        let wasm_modules = config
+            .wasm_modules
+            .unwrap_or_default()
+            .into_iter()
+            .map(|module| {
+                let bytes = std::fs::read(&module.path).map_err(|e| RuntimeError::InvalidConfig {
+                    message: format!("failed to read WASM module '{}' from {}: {e}", module.name, module.path),
+                })?;
+                let max_memory_bytes = module
+                    .max_memory_bytes
+                    .map(usize::try_from)
+                    .transpose()
+                    .map_err(|_| RuntimeError::InvalidConfig {
+                        message: format!("WASM module '{}': max_memory_bytes is too large", module.name),
+                    })?;
+                Ok(WasmModule {
+                    name: module.name,
+                    bytes,
+                    max_memory_bytes,
+                    description: module.description,
+                })
+            })
+            .collect::<Result<Vec<_>, RuntimeError>>()?;
+        if config.heap_store.is_some() && !wasm_modules.is_empty() {
+            return Err(RuntimeError::InvalidConfig {
+                message: "wasm_modules cannot be combined with heap_store: heap snapshots bake compiled modules in"
+                    .into(),
+            });
+        }
 
         // Filesystem authority is explicit: an empty chain would permit everything.
         let filesystem = config
@@ -482,34 +568,51 @@ impl Engine {
             .map_err(|e| RuntimeError::Initialization {
                 message: e.to_string(),
             })?;
+        let filesystem_passthrough = config
+            .filesystem
+            .as_ref()
+            .and_then(|access| access.passthrough)
+            .unwrap_or(false);
         // The storage bootstrap is async (S3 clients capture the runtime they
         // are built on). Drive it on the engine's own runtime from a helper
         // thread so `create` works whether or not the caller is inside Tokio.
-        let bootstrap = std::thread::scope(|scope| {
-            scope
-                .spawn(|| runtime.block_on(build_storage_engine(storage, None)))
-                .join()
-                .map_err(|_| RuntimeError::Initialization {
-                    message: "storage bootstrap panicked".into(),
-                })
-        })?
-        .map_err(|error| RuntimeError::Initialization {
-            message: error.to_string(),
-        })?;
-        let bootstrap = bootstrap.with_policy_config(
-            PolicyBootstrapConfig {
-                filesystem,
-                ..PolicyBootstrapConfig::default()
-            },
-            CapabilityBootstrapConfig {
-                filesystem_passthrough: config
-                    .filesystem
-                    .as_ref()
-                    .and_then(|access| access.passthrough)
-                    .unwrap_or(false),
-                ..CapabilityBootstrapConfig::default()
-            },
-        )?;
+        let bootstrap = (|| -> Result<RuntimeBootstrap, RuntimeError> {
+            let bootstrap = std::thread::scope(|scope| {
+                scope
+                    .spawn(|| runtime.block_on(build_storage_engine(storage, None)))
+                    .join()
+                    .map_err(|_| RuntimeError::Initialization {
+                        message: "storage bootstrap panicked".into(),
+                    })
+            })?
+            .map_err(|error| RuntimeError::Initialization {
+                message: error.to_string(),
+            })?;
+            bootstrap
+                .with_feature_config(FeatureBootstrapConfig {
+                    wasm_modules,
+                    ..FeatureBootstrapConfig::default()
+                })?
+                .with_policy_config(
+                    PolicyBootstrapConfig {
+                        filesystem,
+                        ..PolicyBootstrapConfig::default()
+                    },
+                    CapabilityBootstrapConfig {
+                        filesystem_passthrough,
+                        ..CapabilityBootstrapConfig::default()
+                    },
+                )
+        })();
+        let bootstrap = match bootstrap {
+            Ok(bootstrap) => bootstrap,
+            Err(error) => {
+                // A bare runtime must not be dropped inside an async caller;
+                // release it the way OwnedRuntime does.
+                runtime.shutdown_background();
+                return Err(error);
+            }
+        };
         let mut engine = bootstrap.build_with_runtime(runtime);
         // The server bootstrap degrades gracefully when a store cannot be
         // opened (a warning, then reduced capabilities). An embedded engine
@@ -1149,54 +1252,120 @@ impl Engine {
         Ok(result)
     }
 
-    /// The filesystem service native callers share with guest `fs.*` calls:
-    /// the same hook chain, headers, and host backend.
-    ///
-    /// Overlay-backed engines are rejected: the CAS overlay must run on the
-    /// current-thread isolate runtime, which foreign callers do not have.
-    fn native_fs_service(&self) -> Result<fs::FsService, RuntimeError> {
-        let config = self.fs_config.as_ref().ok_or_else(|| RuntimeError::Operation {
-            message: "filesystem access is not configured; construct the engine with create_with_filesystem"
-                .into(),
-        })?;
-        if self.fs_store.is_some() {
-            return Err(RuntimeError::Operation {
-                message: "native filesystem calls are not supported on overlay-backed engines".into(),
-            });
-        }
-        Ok(fs::FsService::host((**config).clone()))
-    }
-
-    /// Run one native filesystem operation, on the caller's runtime when there
-    /// is one and otherwise on the library-created runtime, without blocking the
-    /// foreign host thread. Shutdown waits for in-flight operations, as it does
-    /// for tool calls.
-    async fn native_fs<T, F, Fut>(self: Arc<Self>, op: F) -> Result<T, RuntimeError>
+    /// Run a future on the caller's runtime when there is one and otherwise on
+    /// the library-created runtime, without blocking the foreign host thread.
+    async fn on_runtime<T, Fut>(&self, operation: Fut) -> Result<T, RuntimeError>
     where
         T: Send + 'static,
-        F: FnOnce(fs::FsService) -> Fut,
-        Fut: std::future::Future<Output = Result<T, fs::FsError>> + Send + 'static,
+        Fut: std::future::Future<Output = Result<T, RuntimeError>> + Send + 'static,
     {
-        let _lifecycle_guard = self.shutdown_lock.lock().await;
-        self.ensure_running()?;
-        let operation = op(self.native_fs_service()?);
         if tokio::runtime::Handle::try_current().is_ok() {
-            return operation.await.map_err(RuntimeError::from);
+            return operation.await;
         }
         let tokio_runtime = self
             .tokio_runtime
             .as_ref()
             .ok_or_else(|| RuntimeError::Initialization {
-                message: "native filesystem calls require an active or library-created runtime"
-                    .to_string(),
+                message: "native calls require an active or library-created runtime".to_string(),
             })?;
         tokio_runtime
             .spawn(operation)
             .await
             .map_err(|error| RuntimeError::Operation {
-                message: format!("native filesystem task failed: {error}"),
+                message: format!("native task failed: {error}"),
             })?
-            .map_err(RuntimeError::from)
+    }
+
+    /// Run one native filesystem operation under the lifecycle guard, so
+    /// shutdown waits for it as it does for tool calls.
+    async fn run_native<T, Fut>(&self, operation: Fut) -> Result<T, RuntimeError>
+    where
+        T: Send + 'static,
+        Fut: std::future::Future<Output = Result<T, RuntimeError>> + Send + 'static,
+    {
+        let _lifecycle_guard = self.shutdown_lock.lock().await;
+        self.ensure_running()?;
+        self.on_runtime(operation).await
+    }
+
+    /// The host filesystem service native callers share with guest `fs.*`
+    /// calls: the same hook chain and headers.
+    fn host_fs_service(&self) -> Result<fs::FsService, RuntimeError> {
+        let config = self.fs_config.as_ref().ok_or_else(|| RuntimeError::Operation {
+            message: "filesystem access is not configured; set EngineConfig.filesystem".into(),
+        })?;
+        Ok(fs::FsService::host((**config).clone()))
+    }
+
+    /// Run one native operation on a session's filesystem snapshot: mount the
+    /// session's latest snapshot (or an empty overlay), run the operation
+    /// through the shared service, and for a mutation fold the overlay into a
+    /// new snapshot recorded in the session log with the session's current
+    /// heap, so the next `run_js` in the session resumes both.
+    async fn session_fs_run<T, F, Fut>(
+        &self,
+        session: String,
+        mutation: Option<String>,
+        op: F,
+    ) -> Result<T, RuntimeError>
+    where
+        F: FnOnce(fs::FsService) -> Fut,
+        Fut: std::future::Future<Output = Result<T, fs::FsError>>,
+    {
+        let store = self.fs_store.clone().ok_or_else(|| RuntimeError::Operation {
+            message: "filesystem snapshots are not configured".into(),
+        })?;
+        let log = self.session_log.as_ref().ok_or_else(|| RuntimeError::Operation {
+            message: "session log is not configured".into(),
+        })?;
+        let config = self.fs_config.clone().ok_or_else(|| RuntimeError::Operation {
+            message: "filesystem access is not configured".into(),
+        })?;
+        let _serial = self.native_fs_session_lock.lock().await;
+        let latest = log.get_latest(&session).await.map_err(operation_message)?;
+        let base = latest.as_ref().and_then(|entry| entry.output_fs.clone());
+        self.check_fs_snapshot_policy("pull", Some(&session), base.as_deref())
+            .await
+            .map_err(operation_message)?;
+        let mount = match base.as_deref().and_then(parse_ca_hex) {
+            Some(id) => SessionMount::pull((*store).clone(), blake3::Hash::from_bytes(id))
+                .await
+                .map_err(|e| operation_message(format!("fs mount: pull {}: {e}", base.as_deref().unwrap_or(""))))?,
+            None => SessionMount::empty((*store).clone()),
+        };
+        let handle = fs::FsMountHandle::new(mount);
+        let value = op(fs::FsService::new((*config).clone(), Some(handle.clone()))).await?;
+        if let Some(description) = mutation {
+            let root = handle
+                .0
+                .lock()
+                .await
+                .push()
+                .await
+                .map_err(|e| operation_message(format!("fs snapshot flush failed: {e}")))?;
+            let output_fs = ca_to_hex(root.as_bytes());
+            // A no-op mutation (a mkdir on the overlay, say) folds to the same
+            // root and needs no log entry.
+            if base.as_deref() != Some(output_fs.as_str()) {
+                self.check_fs_snapshot_policy("push", Some(&session), Some(&output_fs))
+                    .await
+                    .map_err(operation_message)?;
+                let output_heap = latest.as_ref().map(|entry| entry.output_heap.clone()).unwrap_or_default();
+                log.append(
+                    &session,
+                    SessionLogEntry {
+                        input_heap: Some(output_heap.clone()).filter(|heap| !heap.is_empty()),
+                        output_heap,
+                        output_fs: Some(output_fs),
+                        code: description,
+                        timestamp: chrono::Utc::now().to_rfc3339(),
+                    },
+                )
+                .await
+                .map_err(operation_message)?;
+            }
+        }
+        Ok(value)
     }
 
     /// Wrap a fully configured runtime for Rust transports without creating a
@@ -1351,11 +1520,129 @@ fn parse_json_object(field: &str, json: &str) -> Result<Value, RuntimeError> {
     Ok(value)
 }
 
+/// A filesystem namespace for native callers: the host filesystem behind the
+/// engine's hook chain, or one session's content-addressed snapshot. Obtained
+/// from `Engine::fs_view`. Bytes cross the boundary as `bytes`; failures are
+/// `RuntimeError::FileSystem` with the same message the guest wrapper reports.
+#[derive(uniffi::Object)]
+pub struct FsView {
+    engine: Arc<Engine>,
+    session: Option<String>,
+}
+
+impl FsView {
+    async fn run<T, F, Fut>(self: Arc<Self>, mutation: Option<String>, op: F) -> Result<T, RuntimeError>
+    where
+        T: Send + 'static,
+        F: FnOnce(fs::FsService) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<T, fs::FsError>> + Send + 'static,
+    {
+        let engine = self.engine.clone();
+        match self.session.clone() {
+            None => {
+                let service = engine.host_fs_service()?;
+                engine
+                    .run_native(async move { op(service).await.map_err(RuntimeError::from) })
+                    .await
+            }
+            Some(session) => {
+                let inner = engine.clone();
+                engine
+                    .run_native(async move { inner.session_fs_run(session, mutation, op).await })
+                    .await
+            }
+        }
+    }
+}
+
+#[uniffi::export]
+impl FsView {
+    /// The session this view is bound to; `None` for the host filesystem.
+    pub fn session(&self) -> Option<String> {
+        self.session.clone()
+    }
+
+    pub async fn read_file(self: Arc<Self>, path: String) -> Result<Vec<u8>, RuntimeError> {
+        self.run(None, |fs| async move { fs.read_file(&path).await }).await
+    }
+
+    /// Read at most `max_bytes` bytes starting at `offset`; fewer bytes are
+    /// returned only at end of file.
+    pub async fn read_file_range(
+        self: Arc<Self>,
+        path: String,
+        offset: u64,
+        max_bytes: u64,
+    ) -> Result<Vec<u8>, RuntimeError> {
+        self.run(None, move |fs| async move { fs.read_range(&path, offset, max_bytes).await }).await
+    }
+
+    /// Read a file as UTF-8 text; invalid UTF-8 is an `InvalidData` failure.
+    pub async fn read_text_file(self: Arc<Self>, path: String) -> Result<String, RuntimeError> {
+        self.run(None, |fs| async move { fs.read_text(&path).await }).await
+    }
+
+    pub async fn write_file(self: Arc<Self>, path: String, data: Vec<u8>) -> Result<(), RuntimeError> {
+        let note = format!("// native fs.writeFile {path}");
+        self.run(Some(note), |fs| async move { fs.write_file(&path, &data).await }).await
+    }
+
+    pub async fn append_file(self: Arc<Self>, path: String, data: Vec<u8>) -> Result<(), RuntimeError> {
+        let note = format!("// native fs.appendFile {path}");
+        self.run(Some(note), |fs| async move { fs.append_file(&path, &data).await }).await
+    }
+
+    /// Metadata following a final symlink (Node `fs.stat`).
+    pub async fn stat(self: Arc<Self>, path: String) -> Result<FsMetadata, RuntimeError> {
+        self.run(None, |fs| async move { fs.stat(&path, true).await.map(FsMetadata::from) }).await
+    }
+
+    /// Metadata without following a final symlink (Node `fs.lstat`).
+    pub async fn lstat(self: Arc<Self>, path: String) -> Result<FsMetadata, RuntimeError> {
+        self.run(None, |fs| async move { fs.stat(&path, false).await.map(FsMetadata::from) }).await
+    }
+
+    pub async fn read_dir(self: Arc<Self>, path: String) -> Result<Vec<String>, RuntimeError> {
+        self.run(None, |fs| async move { fs.readdir(&path).await }).await
+    }
+
+    pub async fn read_link(self: Arc<Self>, path: String) -> Result<String, RuntimeError> {
+        self.run(None, |fs| async move { fs.readlink(&path).await }).await
+    }
+
+    /// The canonical path of an existing path, gated as a `stat`. A snapshot
+    /// has no symlink resolution and returns the path itself.
+    pub async fn canonical_path(self: Arc<Self>, path: String) -> Result<String, RuntimeError> {
+        self.run(None, |fs| async move { fs.canonical_path(&path).await }).await
+    }
+
+    pub async fn make_dir(self: Arc<Self>, path: String, recursive: bool) -> Result<(), RuntimeError> {
+        let note = format!("// native fs.mkdir {path}");
+        self.run(Some(note), move |fs| async move { fs.mkdir(&path, recursive).await }).await
+    }
+
+    pub async fn remove(self: Arc<Self>, path: String, recursive: bool) -> Result<(), RuntimeError> {
+        let note = format!("// native fs.rm {path}");
+        self.run(Some(note), move |fs| async move { fs.rm(&path, recursive).await }).await
+    }
+
+    pub async fn rename(self: Arc<Self>, from: String, to: String) -> Result<(), RuntimeError> {
+        let note = format!("// native fs.rename {from} -> {to}");
+        self.run(Some(note), |fs| async move { fs.rename(&from, &to).await }).await
+    }
+
+    /// Whether a path exists. Only the hook chain can fail this call.
+    pub async fn exists(self: Arc<Self>, path: String) -> Result<bool, RuntimeError> {
+        self.run(None, |fs| async move { fs.exists(&path).await }).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::engine::ffi_config::{
         BlobStoreBuilder, EngineConfigBuilder, ExecutionLimitsBuilder, FilesystemAccessBuilder,
+        WasmModuleFileBuilder,
     };
 
     #[test]
@@ -1519,14 +1806,9 @@ mod tests {
             })
             .await
             .unwrap();
-        loop {
-            let info = engine.get_execution(id.clone()).unwrap();
-            match info.status.as_str() {
-                "completed" => return info,
-                "pending" | "running" => tokio::time::sleep(std::time::Duration::from_millis(20)).await,
-                other => panic!("execution {other}: {:?}", info.error),
-            }
-        }
+        let info = engine.clone().await_execution(id).await.unwrap();
+        assert_eq!(info.status, "completed", "{:?}", info.error);
+        info
     }
 
     fn output_of(engine: &Arc<Engine>, id: &str) -> String {
@@ -1626,6 +1908,176 @@ mod tests {
         let snapshots = engine.list_session_snapshots("pi-session".to_string()).await.unwrap();
         assert_eq!(snapshots.len(), 2);
         engine.shutdown().await;
+    }
+
+    fn snapshot_engine(dir: &std::path::Path, heap: bool) -> Arc<Engine> {
+        let policy = dir.join("policy.rego");
+        std::fs::write(
+            &policy,
+            "package mcp.filesystem\ndefault allow = false\nallow if { startswith(input.path, \"/work\") }\n",
+        )
+        .unwrap();
+        let mut builder = EngineConfigBuilder::new()
+            .limits(
+                ExecutionLimitsBuilder::new()
+                    .heap_memory_max_mb(64)
+                    .execution_timeout_secs(5)
+                    .build()
+                    .unwrap(),
+            )
+            .data_dir(dir.to_str().unwrap().to_string())
+            .filesystem(
+                FilesystemAccessBuilder::new()
+                    .policies_json(
+                        serde_json::json!({"policies": [{"url": format!("file://{}", policy.display())}]})
+                            .to_string(),
+                    )
+                    .build()
+                    .unwrap(),
+            )
+            .fs_snapshot_store(BlobStoreBuilder::new().backend(StoreBackend::Directory).build().unwrap());
+        if heap {
+            builder = builder.heap_store(BlobStoreBuilder::new().backend(StoreBackend::Directory).build().unwrap());
+        }
+        Engine::create(builder.build().unwrap()).unwrap()
+    }
+
+    /// Stateful engines answer `run_js` with an execution id; await it and
+    /// return the console output, the way an embedding host does.
+    async fn run_js_in_session(engine: &Arc<Engine>, session: &str, code: &str) -> String {
+        let result = engine
+            .clone()
+            .call_tool_async(
+                "run_js".to_string(),
+                serde_json::json!({ "code": code }).to_string(),
+                Some(session.to_string()),
+                None,
+            )
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_str(&result).unwrap();
+        let id = value["execution_id"].as_str().unwrap_or_else(|| panic!("{value}")).to_string();
+        let info = engine.clone().await_execution(id.clone()).await.unwrap();
+        assert_eq!(info.status, "completed", "{:?}", info.error);
+        output_of(engine, &id)
+    }
+
+    #[tokio::test]
+    async fn session_file_views_share_the_snapshot_with_guest_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = snapshot_engine(dir.path(), true);
+        assert!(engine.capabilities().filesystem && engine.capabilities().heap);
+
+        // A native write lands in the session's snapshot; the next run mounts it.
+        let view = engine.clone().fs_view(Some("s1".to_string())).unwrap();
+        assert_eq!(view.session().as_deref(), Some("s1"));
+        view.clone().write_file("/work/a.txt".into(), b"hello".to_vec()).await.unwrap();
+        assert_eq!(view.clone().read_text_file("/work/a.txt".into()).await.unwrap(), "hello");
+        let guest = run_js_in_session(
+            &engine,
+            "s1",
+            "globalThis.seen = await fs.readFile('/work/a.txt', 'utf8'); console.log(seen)",
+        )
+        .await;
+        assert_eq!(guest, "hello");
+
+        // A guest write lands in the same snapshot; the next native read sees it,
+        // and the session's heap survives the native mutation in between.
+        run_js_in_session(&engine, "s1", "await fs.writeFile('/work/b.txt', 'from guest')").await;
+        view.clone().append_file("/work/a.txt".into(), b" world".to_vec()).await.unwrap();
+        let mut names = view.clone().read_dir("/work".into()).await.unwrap();
+        names.sort();
+        assert_eq!(names, vec!["a.txt".to_string(), "b.txt".to_string()]);
+        assert_eq!(view.clone().read_text_file("/work/b.txt".into()).await.unwrap(), "from guest");
+        let stat = view.clone().stat("/work/a.txt".into()).await.unwrap();
+        assert_eq!(stat.kind, FsEntryKind::File);
+        assert_eq!(stat.size, "hello world".len() as u64);
+        let heap_check = run_js_in_session(&engine, "s1", "console.log(globalThis.seen)").await;
+        assert_eq!(heap_check, "hello");
+
+        // A no-op mutation adds no log entry; real ones do, carrying the heap forward.
+        view.clone().make_dir("/work/empty".into(), true).await.unwrap();
+        let snapshots = engine.list_session_snapshots("s1".to_string()).await.unwrap();
+        let codes: Vec<&str> = snapshots.iter().map(|entry| entry.code.as_str()).collect();
+        assert_eq!(snapshots.len(), 5, "{codes:?}");
+        assert!(codes[0].starts_with("// native fs.writeFile"), "{codes:?}");
+        assert!(snapshots.iter().all(|entry| entry.output_fs.is_some()));
+        assert_eq!(snapshots[3].output_heap, snapshots[2].output_heap, "native mutation keeps the heap");
+
+        // The policy applies to the snapshot namespace too, and views are explicit
+        // about which namespace they address.
+        let denied = view.clone().read_file("/etc/hostname".into()).await.unwrap_err();
+        assert!(matches!(denied, RuntimeError::FileSystem { kind: FsErrorKind::PermissionDenied, .. }), "{denied}");
+        let missing = view.clone().read_file("/work/missing".into()).await.unwrap_err();
+        assert!(matches!(missing, RuntimeError::FileSystem { kind: FsErrorKind::NotFound, .. }), "{missing}");
+        let host = engine.clone().fs_view(None).unwrap();
+        assert!(host.session().is_none());
+        assert!(!host.exists("/work/a.txt".into()).await.unwrap(), "host view addresses the host filesystem");
+        assert!(engine.clone().fs_view(Some(String::new())).is_err());
+        engine.shutdown().await;
+
+        // Without a snapshot store, only the host view exists.
+        let policies = serde_json::json!({"policies": [{"url": format!("file://{}", dir.path().join("policy.rego").display())}]});
+        let stateless = Engine::create_with_filesystem(64, 1, policies.to_string()).unwrap();
+        assert!(stateless.clone().fs_view(Some("s1".to_string())).is_err());
+        assert!(stateless.clone().fs_view(None).is_ok());
+        stateless.shutdown().await;
+    }
+
+    #[test]
+    fn wasm_modules_are_engine_level_and_exclusive_with_heaps() {
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("empty.wasm");
+        std::fs::write(&module, b"\0asm\x01\0\0\0").unwrap();
+        let limits = ExecutionLimitsBuilder::new()
+            .heap_memory_max_mb(64)
+            .execution_timeout_secs(5)
+            .build()
+            .unwrap();
+        let wasm = WasmModuleFileBuilder::new()
+            .name("empty".into())
+            .path(module.to_str().unwrap().to_string())
+            .build()
+            .unwrap();
+        let conflict = EngineConfigBuilder::new()
+            .limits(limits.clone())
+            .heap_store(BlobStoreBuilder::new().backend(StoreBackend::Directory).build().unwrap())
+            .wasm_modules(vec![wasm.clone()])
+            .build()
+            .unwrap();
+        match Engine::create(conflict) {
+            Err(RuntimeError::InvalidConfig { message }) => assert!(message.contains("heap"), "{message}"),
+            Err(other) => panic!("unexpected error: {other}"),
+            Ok(_) => panic!("heap store and wasm modules must be rejected together"),
+        }
+        let missing = EngineConfigBuilder::new()
+            .limits(limits.clone())
+            .wasm_modules(vec![WasmModuleFileBuilder::new()
+                .name("nope".into())
+                .path(dir.path().join("nope.wasm").to_str().unwrap().to_string())
+                .build()
+                .unwrap()])
+            .build()
+            .unwrap();
+        assert!(matches!(Engine::create(missing), Err(RuntimeError::InvalidConfig { .. })));
+        let engine = Engine::create(
+            EngineConfigBuilder::new()
+                .limits(limits)
+                .wasm_modules(vec![wasm])
+                .build()
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(!engine.capabilities().heap);
+        let result = engine.call_tool(
+            "run_js".to_string(),
+            r#"{"code":"console.log(typeof empty)"}"#.to_string(),
+            None,
+            None,
+        );
+        let value: Value = serde_json::from_str(&result.unwrap()).unwrap();
+        assert_eq!(value["output"].as_str().unwrap().trim(), "object", "{value}");
+        engine.close().unwrap();
     }
 
     #[tokio::test]
