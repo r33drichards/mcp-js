@@ -21,6 +21,10 @@
   "version": "0.1.0",
   "description": "Native embedded mcp-js engine for Node.js (Linux x64 glibc)",
   "license": "AGPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/r33drichards/mcp-js"
+  },
   "os": [
     "linux"
   ],

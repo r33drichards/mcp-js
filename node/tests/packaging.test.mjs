@@ -5,6 +5,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { checkDependencies, checkElf, checkTarball, packResult } from '../scripts/packaging.mjs';
 
+test('both npm packages identify the trusted publishing repository', () => {
+  for (const path of ['../package.json', '../../clients/typescript/package.json']) {
+    const manifest = JSON.parse(readFileSync(new URL(path, import.meta.url), 'utf8'));
+    assert.equal(manifest.repository?.type, 'git');
+    assert.equal(manifest.repository?.url, 'https://github.com/r33drichards/mcp-js');
+  }
+});
+
 test('repository release tags route stable and prerelease npm dist-tags', async () => {
   const { parseReleaseTag } = await import('../scripts/release-tag.mjs');
   assert.deepEqual(parseReleaseTag('v1.2.3'), { version: '1.2.3', npmTag: 'latest' });
