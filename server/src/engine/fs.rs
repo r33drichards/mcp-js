@@ -605,6 +605,11 @@ impl FsService {
             .map_err(|e| FsError::io("appendFile", &path, &e))?;
         file.write_all(data)
             .await
+            .map_err(|e| FsError::io("appendFile", &path, &e))?;
+        // tokio's File buffers writes; without a flush the append may still be
+        // in flight when this returns and an immediate read sees the old file.
+        file.flush()
+            .await
             .map_err(|e| FsError::io("appendFile", &path, &e))
     }
 
