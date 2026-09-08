@@ -26,6 +26,11 @@ on:
       - "flake.lock"
       - ".github/workflows/node-uniffi-e2e.yml"
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Shared repository version to stage into both bootstrap artifacts"
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -45,6 +50,16 @@ jobs:
           node-version: "22"
           cache: npm
           cache-dependency-path: clients/typescript/package-lock.json
+      - name: Stage and record the HTTP package version
+        id: package-version
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          version="${REQUESTED_VERSION:-$(node -p 'require("./clients/typescript/package.json").version')}"
+          node node/scripts/release-tag.mjs "v$version" >/dev/null
+          node node/scripts/release-tag.mjs --stage clients/typescript "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
       - uses: DeterminateSystems/nix-installer-action@main
       - name: Build the HTTP npm tarball as a Nix derivation
         run: nix build .#npm-client
@@ -52,6 +67,13 @@ jobs:
         run: |
           npm ci --include=dev --prefix clients/typescript
           timeout 180s node clients/typescript/scripts-test-package.mjs result/*.tgz
+      - name: Upload the exact validated HTTP tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-tarball-client-${{ steps.package-version.outputs.version }}
+          path: result/*.tgz
+          if-no-files-found: error
+          retention-days: 7
 
   node-library-e2e:
     runs-on: ubuntu-24.04
@@ -63,6 +85,16 @@ jobs:
           node-version: "22"
           cache: npm
           cache-dependency-path: node/package-lock.json
+      - name: Stage and record the native package version
+        id: package-version
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          version="${REQUESTED_VERSION:-$(node -p 'require("./node/package.json").version')}"
+          node node/scripts/release-tag.mjs "v$version" >/dev/null
+          node node/scripts/release-tag.mjs --stage node "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
       - uses: DeterminateSystems/nix-installer-action@main
       - name: Restore native library build cache
         uses: actions/cache@v4
@@ -133,3 +165,10 @@ jobs:
       - name: Pack and execute an isolated tarball consumer
         # Runs outside nix develop: Nix-only or unresolved dynamic dependencies fail prepack.
         run: timeout 240s node node/scripts/test-package.mjs result/*.tgz
+      - name: Upload the exact validated native tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-tarball-node-${{ steps.package-version.outputs.version }}
+          path: result/*.tgz
+          if-no-files-found: error
+          retention-days: 7
