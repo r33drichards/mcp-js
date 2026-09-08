@@ -2,6 +2,19 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { checkDependencies, checkElf, checkTarball, packResult } from '../scripts/packaging.mjs';
 
+test('release tags route packages and prereleases without changing latest', async () => {
+  const { parseReleaseTag } = await import('../scripts/release-tag.mjs');
+  assert.deepEqual(parseReleaseTag('node-v1.2.3'), {
+    packageId: 'node', version: '1.2.3', npmTag: 'latest', packageName: '@wholelottahoopla/mcp-js-node',
+  });
+  assert.deepEqual(parseReleaseTag('client-v2.0.0-rc.1'), {
+    packageId: 'client', version: '2.0.0-rc.1', npmTag: 'next', packageName: '@wholelottahoopla/mcp-js-client',
+  });
+  for (const tag of ['v1.2.3', 'node-v01.2.3', 'client-v1.2', 'node-v1.2.3-', 'other-v1.2.3']) {
+    assert.throws(() => parseReleaseTag(tag));
+  }
+});
+
 test('npm pack JSON supports npm <=11 arrays and npm 12 keyed objects', () => {
   const result = { filename: 'mcp-js-node-0.1.0.tgz', files: [] };
   assert.equal(packResult([result]), result);

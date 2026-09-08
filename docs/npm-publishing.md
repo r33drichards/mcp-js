@@ -9,8 +9,9 @@ This repository has two public npm package candidates:
 
 Do not publish either package until every gate in this document is satisfied.
 The repository's [`npm-publish.yml`](../.github/workflows/npm-publish.yml) is
-intentionally release/manual-only; pull requests and pushes cannot publish.
-It has no npm token fallback. The only job granted `id-token: write` is the
+intentionally tag/manual-only. Manual runs only validate artifacts; only
+protected `node-v*` and `client-v*` tag pushes can publish. It has no npm token
+fallback. The only job granted `id-token: write` is the
 GitHub Environment-protected `publish` job.
 
 ## Licensing split
@@ -33,7 +34,7 @@ attribution is grounded in the repository's pre-AGPL license commit
    workspace references in runtime loader metadata. The full native build and installed-tarball execution
    must pass on GitHub's Ubuntu runner; a local Nix build is not sufficient proof.
 2. **First-publication bootstrap is manual.** npm trusted-publisher settings
-   are configured in an existing package's npm settings. Because both scoped
+   can only be configured in an existing package's npm settings. Because both scoped
    package names are currently absent from npm, an owner must perform the first
    approved public release manually before OIDC can be attached. Do not add an
    npm token to GitHub Actions to bypass this limitation.
@@ -54,10 +55,11 @@ Perform these steps separately for **each** package on npmjs.com:
    - Allowed action: permit direct `npm publish` (the release workflow uses
      direct publication, not staged publishing).
 3. In the GitHub repository, create the `npm-publish` Environment. Require
-   approval from the owner/release managers, restrict deployment branches/tags
-   to protected `main` and release tags, and do not add npm credentials to that
-   environment. Configure branch and tag protection so only authorized people
-   can create a release from `main`.
+   approval from the owner/release managers, allow deployment tags matching
+   only `node-v*` and `client-v*`, and do not add npm credentials to that
+   environment. Add repository tag rules for those patterns that restrict tag
+   creation, update, and deletion to release managers. Tags must target a commit
+   already contained in protected `main`; the workflow verifies this again.
 4. On npm, after OIDC publishing has succeeded, set Publishing access to
    **Require two-factor authentication and disallow tokens**, then revoke any
    legacy automation tokens. This blocks long-lived token publishing while
@@ -141,18 +143,30 @@ and executes an installed tarball.
 
 ## Release checklist after OIDC setup
 
-The packages can release independently through the manual workflow:
+The packages release independently from protected tags:
 
 1. Set and commit the selected package version on protected `main`.
-2. First run **Publish npm Packages** in `validate` mode with the selected
-   package and exact version input. Review the successful checks and downloaded
-   artifact without approving any deployment.
-3. Rerun it on the same `main` commit with mode `publish`, the same package and
-   version inputs, and **Confirm publish** checked. Approve the protected
-   `npm-publish` Environment deployment. The workflow downloads the already
-   validated Nix artifact for that matrix job, verifies name/version/payload,
-   and invokes `npm publish --access public --provenance` using OIDC only.
-4. Verify the selected result:
+2. Optionally run **Publish npm Packages** manually on `main` to build and
+   inspect artifacts without publishing. Manual dispatch has no publish mode.
+3. Create and push one annotated tag at that exact `main` commit:
+
+   ```sh
+   git tag -a node-vVERSION -m "Release @wholelottahoopla/mcp-js-node VERSION"
+   git push origin node-vVERSION
+   # Or, independently:
+   git tag -a client-vVERSION -m "Release @wholelottahoopla/mcp-js-client VERSION"
+   git push origin client-vVERSION
+   ```
+
+   The tag prefix selects exactly one package. Its semver must exactly match
+   that package manifest, and its peeled commit must equal the workflow SHA and
+   be an ancestor of `origin/main`. Stable versions publish under npm `latest`;
+   prerelease versions such as `client-v1.2.0-rc.1` publish under `next`, so a
+   prerelease cannot replace `latest` accidentally.
+4. Approve the protected `npm-publish` Environment deployment. The workflow
+   publishes only the exact Nix tarball that passed its outside-Nix consumer,
+   identity, and payload gates, using OIDC with provenance.
+5. Verify the selected result:
 
    ```sh
    npm view @wholelottahoopla/mcp-js-node@VERSION version dist.integrity
@@ -168,10 +182,6 @@ The packages can release independently through the manual workflow:
 
    Run only checks for packages released in this invocation. Run native checks
    on supported Linux x64 glibc and confirm npm's package page shows provenance.
-
-A GitHub release tag `vVERSION` remains an atomic convenience path: it builds
-and publishes **both** packages and therefore requires both manifests to equal
-`VERSION`. Use manual package selection whenever versions differ.
 
 ## Rollback and incident response
 
