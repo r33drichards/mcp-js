@@ -42,9 +42,9 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Until the pi integration branch merges, test against it; override per run
-  # with the workflow_dispatch input.
-  PI_REF_DEFAULT: claude/mcpjs-pi-integration-k1l3w7
+  # The pi integration (r33drichards/pi#2) is merged; test against main and
+  # override per run with the workflow_dispatch input.
+  PI_REF_DEFAULT: main
 
 jobs:
   pi-harness-e2e:

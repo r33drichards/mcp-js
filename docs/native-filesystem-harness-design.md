@@ -1,7 +1,7 @@
 # Direct native filesystem design
 
-Status: implemented on the `claude/mcpjs-pi-integration-k1l3w7` branches of
-[pi](https://github.com/r33drichards/pi) and this repository as of 2026-09-07.
+Status: implemented on `main` of [pi](https://github.com/r33drichards/pi)
+(merged as r33drichards/pi#2) and this repository as of 2026-09-07.
 This document records the design; `node/README.md` documents the shipped native
 filesystem API.
 
@@ -134,4 +134,4 @@ Status: steps 1 through 4 are implemented on the integration branches. Step 5
 is `.github/workflows/pi-harness-e2e.yml`, which builds the shared library,
 generates bindings, checks out pi, and runs its file tools and `run_js` against
 the real engine (`node/pi-harness/tests/harness.test.ts`). The pi-side guide is
-[packages/agent/docs/mcp-js.md](https://github.com/r33drichards/pi/blob/claude/mcpjs-pi-integration-k1l3w7/packages/agent/docs/mcp-js.md).
+[packages/agent/docs/mcp-js.md](https://github.com/r33drichards/pi/blob/main/packages/agent/docs/mcp-js.md).
