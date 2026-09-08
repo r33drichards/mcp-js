@@ -26,9 +26,8 @@ attribution is grounded in the repository's pre-AGPL license commit
 
 ## Current release blockers
 
-1. **Revalidate the exact release head.** The native Linux portability gate has
-   passed on PR head `5532fcb3` in CI run `34160872507`; any later release
-   change must pass the same exact Nix-tarball consumer gate. The native package's `prepack`
+1. **Validate the exact release head.** Every release change must pass the
+   native Linux exact-Nix-tarball consumer gate on its final commit. The native package's `prepack`
    rejects missing/non-x64 ELF files, RPATH/RUNPATH, absolute `DT_NEEDED`,
    unresolved libraries, Nix-store dependency resolutions, and Nix-store or CI
    workspace references in runtime loader metadata. The full native build and installed-tarball execution
