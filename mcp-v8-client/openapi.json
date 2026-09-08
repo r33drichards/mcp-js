@@ -76,6 +76,27 @@
         }
       }
     },
+    "/api/capabilities": {
+      "get": {
+        "tags": [
+          "server"
+        ],
+        "summary": "Which per-session state this server offers.",
+        "operationId": "capabilities_handler",
+        "responses": {
+          "200": {
+            "description": "Capabilities",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Capabilities"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/cli": {
       "get": {
         "tags": [
@@ -583,6 +604,419 @@
         }
       }
     },
+    "/api/sessions/{session}/dir/{path}": {
+      "get": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Names of a directory's direct children in a session's filesystem snapshot.",
+        "operationId": "session_dir_handler",
+        "parameters": [
+          {
+            "name": "session",
+            "in": "path",
+            "description": "Engine session name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "path",
+            "description": "Directory path inside the snapshot, without the leading slash",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Directory listing",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionDirListing"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{session}/entries/{path}": {
+      "get": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Metadata for a path in a session's filesystem snapshot.",
+        "operationId": "session_entry_handler",
+        "parameters": [
+          {
+            "name": "session",
+            "in": "path",
+            "description": "Engine session name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "path",
+            "description": "Path inside the snapshot, without the leading slash",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "follow",
+            "in": "query",
+            "description": "Follow a final symlink (Node `fs.stat`); `false` is `fs.lstat`.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Entry metadata",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionFileEntry"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{session}/files/{path}": {
+      "get": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Read a file from a session's filesystem snapshot.",
+        "operationId": "session_file_get_handler",
+        "parameters": [
+          {
+            "name": "session",
+            "in": "path",
+            "description": "Engine session name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "path",
+            "description": "Path inside the snapshot, without the leading slash",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "Start reading at this byte offset (with `max_bytes`).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "nullable": true,
+              "minimum": 0
+            }
+          },
+          {
+            "name": "max_bytes",
+            "in": "query",
+            "description": "Read at most this many bytes; fewer are returned only at end of file.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "nullable": true,
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "File bytes",
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Denied by the filesystem hook chain",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Create, replace, or append to a file in a session's filesystem snapshot.",
+        "description": "The raw request body is the file content.",
+        "operationId": "session_file_put_handler",
+        "parameters": [
+          {
+            "name": "session",
+            "in": "path",
+            "description": "Engine session name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "path",
+            "description": "Path inside the snapshot, without the leading slash",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "append",
+            "in": "query",
+            "description": "Append to the file instead of replacing it.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Written"
+          },
+          "403": {
+            "description": "Denied by the filesystem hook chain",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Remove a file or directory from a session's filesystem snapshot.",
+        "operationId": "session_file_delete_handler",
+        "parameters": [
+          {
+            "name": "session",
+            "in": "path",
+            "description": "Engine session name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "path",
+            "description": "Path inside the snapshot, without the leading slash",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "recursive",
+            "in": "query",
+            "description": "Remove a directory and its contents.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Removed"
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{session}/fs": {
+      "post": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Filesystem operations on a session snapshot that carry no file bytes:",
+        "description": "`mkdir`, `rename`, `exists`, `readlink`, and `canonical`.",
+        "operationId": "session_fs_op_handler",
+        "parameters": [
+          {
+            "name": "session",
+            "in": "path",
+            "description": "Engine session name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionFsOpRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Operation result"
+          },
+          "400": {
+            "description": "Unknown operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{session}/snapshots": {
+      "get": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "The session log: every run and native mutation recorded for a session,",
+        "description": "oldest first, with the heap and filesystem snapshot each produced.",
+        "operationId": "session_snapshots_handler",
+        "parameters": [
+          {
+            "name": "session",
+            "in": "path",
+            "description": "Engine session name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Session log entries",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SessionSnapshotEntry"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Sessions are not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/version": {
       "get": {
         "tags": [
@@ -675,6 +1109,29 @@
           },
           "ok": {
             "type": "boolean"
+          }
+        }
+      },
+      "Capabilities": {
+        "type": "object",
+        "description": "Runtime capabilities of this server.",
+        "required": [
+          "heap",
+          "filesystem",
+          "sessions"
+        ],
+        "properties": {
+          "filesystem": {
+            "type": "boolean",
+            "description": "Filesystem snapshots are configured."
+          },
+          "heap": {
+            "type": "boolean",
+            "description": "Heap persistence is configured."
+          },
+          "sessions": {
+            "type": "boolean",
+            "description": "Per-session state (heap and/or filesystem) is available."
           }
         }
       },
@@ -1112,6 +1569,167 @@
             "description": "Return output starting at this line number (0-indexed).",
             "nullable": true,
             "minimum": 0
+          }
+        }
+      },
+      "SessionDirListing": {
+        "type": "object",
+        "description": "Names of a directory's direct children.",
+        "required": [
+          "names"
+        ],
+        "properties": {
+          "names": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "SessionEntryQuery": {
+        "type": "object",
+        "description": "Query for `GET /api/sessions/{session}/entries/{path}`.",
+        "properties": {
+          "follow": {
+            "type": "boolean",
+            "description": "Follow a final symlink (Node `fs.stat`); `false` is `fs.lstat`."
+          }
+        }
+      },
+      "SessionFileEntry": {
+        "type": "object",
+        "description": "Metadata for one path in a session snapshot.",
+        "required": [
+          "kind",
+          "size",
+          "readonly",
+          "mode"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "description": "`file`, `directory`, `symlink`, or `other`."
+          },
+          "mode": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Unix mode bits, type bits included.",
+            "minimum": 0
+          },
+          "modified_ms": {
+            "type": "number",
+            "format": "double",
+            "description": "Modification time in milliseconds since the Unix epoch, when known.",
+            "nullable": true
+          },
+          "readonly": {
+            "type": "boolean"
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "SessionFileReadQuery": {
+        "type": "object",
+        "description": "Query for `GET /api/sessions/{session}/files/{path}`.",
+        "properties": {
+          "max_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Read at most this many bytes; fewer are returned only at end of file.",
+            "nullable": true,
+            "minimum": 0
+          },
+          "offset": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Start reading at this byte offset (with `max_bytes`).",
+            "nullable": true,
+            "minimum": 0
+          }
+        }
+      },
+      "SessionFileRemoveQuery": {
+        "type": "object",
+        "description": "Query for `DELETE /api/sessions/{session}/files/{path}`.",
+        "properties": {
+          "recursive": {
+            "type": "boolean",
+            "description": "Remove a directory and its contents."
+          }
+        }
+      },
+      "SessionFileWriteQuery": {
+        "type": "object",
+        "description": "Query for `PUT /api/sessions/{session}/files/{path}`.",
+        "properties": {
+          "append": {
+            "type": "boolean",
+            "description": "Append to the file instead of replacing it."
+          }
+        }
+      },
+      "SessionFsOpRequest": {
+        "type": "object",
+        "description": "Request body for `POST /api/sessions/{session}/fs`: the operations that\ncarry no file bytes.",
+        "required": [
+          "op",
+          "path"
+        ],
+        "properties": {
+          "op": {
+            "type": "string",
+            "description": "`mkdir`, `rename`, `exists`, `readlink`, or `canonical`."
+          },
+          "path": {
+            "type": "string"
+          },
+          "recursive": {
+            "type": "boolean",
+            "description": "`mkdir` only: create missing parents."
+          },
+          "to": {
+            "type": "string",
+            "description": "`rename` only: the destination path.",
+            "nullable": true
+          }
+        }
+      },
+      "SessionSnapshotEntry": {
+        "type": "object",
+        "description": "One session-log entry.",
+        "required": [
+          "index",
+          "output_heap",
+          "code",
+          "timestamp"
+        ],
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "index": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "input_heap": {
+            "type": "string",
+            "nullable": true
+          },
+          "output_fs": {
+            "type": "string",
+            "nullable": true
+          },
+          "output_heap": {
+            "type": "string"
+          },
+          "timestamp": {
+            "type": "string"
           }
         }
       }

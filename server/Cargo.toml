@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 cli-derive = { path = "cli-derive" }
+uniffi-builder-derive = { path = "uniffi-builder-derive" }
 anyhow = "1.0.98"
 axum = { version = "0.8.4", features = ["ws"] }
 base64 = "0.22"
@@ -104,6 +105,7 @@ urlpattern = "0.6.0"
 nono = { version = "0.53", default-features = false }
 
 [dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
 tokio-test = "0.4"
 reqwest = { version = "0.12", features = ["json", "cookies", "stream", "rustls-tls", "http2"], default-features = false }
 uuid = { version = "1.0", features = ["v4"] }
