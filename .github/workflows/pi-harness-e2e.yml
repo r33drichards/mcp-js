@@ -102,10 +102,7 @@ jobs:
       - name: Install and build pi
         run: |
           npm ci --ignore-scripts --prefix pi-checkout
-          # build:offline compiles against pi's committed model data. The
-          # default build regenerates it from live provider catalogs first,
-          # which breaks this job whenever a provider disappears upstream.
-          npm run build:offline --prefix pi-checkout
+          npm run build --prefix pi-checkout
       - name: Install the harness test runner and link the pi agent package
         run: |
           npm ci --prefix node/pi-harness
