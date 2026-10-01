@@ -244,16 +244,17 @@ Parameters:
 ### `put_artifact`
 <a id="heap+fs-put-artifact"></a>
 
-Upload a file as an artifact so run_js code can use it. Pass the payload as `text` (UTF-8) or `data_base64` (binary), with its mime type; max 16 MiB, same key overwrites. Inside run_js, `artifact.get(key)` returns { key, mime_type, size_bytes, created_at, bytes: Uint8Array } (null if missing) and `artifact.list()` lists metadata. Returns the stored metadata.
+Upload a file as an artifact so run_js code can use it. Pass the payload as exactly one of `text` (UTF-8), `data_base64` (binary), or `file_path` (a path on the server's own filesystem; rejected unless the server allows it via --allow-run-js-file or a run_js_file policy), with its mime type; max 16 MiB, same key overwrites. Inside run_js, `artifact.get(key)` returns { key, mime_type, size_bytes, created_at, bytes: Uint8Array } (null if missing) and `artifact.list()` lists metadata. Returns the stored metadata.
 
 Parameters:
 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
-| `data_base64` | `string | null` | no | Payload as base64 (standard alphabet), decoded to raw bytes — use for binary files. Provide this or `text`. |
+| `data_base64` | `string | null` | no | Payload as base64 (standard alphabet), decoded to raw bytes — use for binary files. |
+| `file_path` | `string | null` | no | Path to a file **on the server's own filesystem** to store as the payload (not uploaded from the client). Disabled by default: the server must be started with `--allow-run-js-file` or a `run_js_file` policy that allows the path. |
 | `key` | `string` | yes | Key to store the artifact under (same key overwrites). run_js code reads it back with `artifact.get(key)`. |
 | `mime_type` | `string` | yes | Mime type of the payload, e.g. "application/pdf" or "text/csv". |
-| `text` | `string | null` | no | Payload as plain text, stored as UTF-8. Provide this or `data_base64`. |
+| `text` | `string | null` | no | Payload as plain text, stored as UTF-8. Provide exactly one of `text`, `data_base64`, or `file_path`. |
 
 ### `query_heaps_by_tags`
 <a id="heap+fs-query-heaps-by-tags"></a>
@@ -448,16 +449,17 @@ Parameters:
 ### `put_artifact`
 <a id="stateless-put-artifact"></a>
 
-Upload a file as an artifact so run_js code can use it. Pass the payload as `text` (UTF-8) or `data_base64` (binary), with its mime type; max 16 MiB, same key overwrites. Inside run_js, `artifact.get(key)` returns { key, mime_type, size_bytes, created_at, bytes: Uint8Array } (null if missing) and `artifact.list()` lists metadata. Returns the stored metadata.
+Upload a file as an artifact so run_js code can use it. Pass the payload as exactly one of `text` (UTF-8), `data_base64` (binary), or `file_path` (a path on the server's own filesystem; rejected unless the server allows it via --allow-run-js-file or a run_js_file policy), with its mime type; max 16 MiB, same key overwrites. Inside run_js, `artifact.get(key)` returns { key, mime_type, size_bytes, created_at, bytes: Uint8Array } (null if missing) and `artifact.list()` lists metadata. Returns the stored metadata.
 
 Parameters:
 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
-| `data_base64` | `string | null` | no | Payload as base64 (standard alphabet), decoded to raw bytes — use for binary files. Provide this or `text`. |
+| `data_base64` | `string | null` | no | Payload as base64 (standard alphabet), decoded to raw bytes — use for binary files. |
+| `file_path` | `string | null` | no | Path to a file **on the server's own filesystem** to store as the payload (not uploaded from the client). Disabled by default: the server must be started with `--allow-run-js-file` or a `run_js_file` policy that allows the path. |
 | `key` | `string` | yes | Key to store the artifact under (same key overwrites). run_js code reads it back with `artifact.get(key)`. |
 | `mime_type` | `string` | yes | Mime type of the payload, e.g. "application/pdf" or "text/csv". |
-| `text` | `string | null` | no | Payload as plain text, stored as UTF-8. Provide this or `data_base64`. |
+| `text` | `string | null` | no | Payload as plain text, stored as UTF-8. Provide exactly one of `text`, `data_base64`, or `file_path`. |
 
 ### `run_js`
 <a id="stateless-run-js"></a>

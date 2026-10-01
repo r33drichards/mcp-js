@@ -55,6 +55,44 @@ impl RunJsFilePolicy {
         path: &str,
         mcp_headers: Option<&serde_json::Value>,
     ) -> Result<String, String> {
+        let effective_path = self.authorize(path, mcp_headers).await?;
+        tokio::fs::read_to_string(&effective_path)
+            .await
+            .map_err(|e| format!("run_js file '{}': {}", effective_path, e))
+    }
+
+    /// Authorize and read `path` as raw bytes, refusing files larger than
+    /// `max_bytes` before reading them. Used by `put_artifact`'s `file_path`,
+    /// which is the same kind of caller-driven host read as a `run_js` file.
+    pub async fn read_bytes(
+        &self,
+        path: &str,
+        mcp_headers: Option<&serde_json::Value>,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, String> {
+        let effective_path = self.authorize(path, mcp_headers).await?;
+        let len = tokio::fs::metadata(&effective_path)
+            .await
+            .map_err(|e| format!("file '{}': {}", effective_path, e))?
+            .len();
+        if len > max_bytes as u64 {
+            return Err(format!(
+                "file '{}' exceeds {} bytes (got {})",
+                effective_path, max_bytes, len
+            ));
+        }
+        tokio::fs::read(&effective_path)
+            .await
+            .map_err(|e| format!("file '{}': {}", effective_path, e))
+    }
+
+    /// Canonicalize `path` and run it through the policy, returning the path
+    /// that may be read (a pre hook can rewrite it).
+    async fn authorize(
+        &self,
+        path: &str,
+        mcp_headers: Option<&serde_json::Value>,
+    ) -> Result<String, String> {
         // Canonicalize first so policies (and our own checks) see the real,
         // symlink-resolved path rather than caller-controlled `..` segments.
         // This also surfaces a clear not-found error before policy evaluation.
@@ -128,9 +166,7 @@ impl RunJsFilePolicy {
             }
         }
 
-        tokio::fs::read_to_string(&effective_path)
-            .await
-            .map_err(|e| format!("run_js file '{}': {}", effective_path, e))
+        Ok(effective_path)
     }
 }
 

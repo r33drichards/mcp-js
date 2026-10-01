@@ -1480,7 +1480,9 @@ impl Engine {
         } else if name == "get_artifact" {
             crate::mcp_dispatch::get_artifact(self, arguments)
         } else if name == "put_artifact" {
-            crate::mcp_dispatch::put_artifact(self, arguments).into()
+            crate::mcp_dispatch::put_artifact(self, mcp_headers, arguments)
+                .await
+                .into()
         } else if name == "list_artifacts" {
             crate::mcp_dispatch::list_artifacts(self).into()
         } else {

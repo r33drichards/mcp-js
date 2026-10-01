@@ -283,13 +283,20 @@ pub struct PutArtifactArgs {
     pub key: String,
     /// Mime type of the payload, e.g. "application/pdf" or "text/csv".
     pub mime_type: String,
-    /// Payload as plain text, stored as UTF-8. Provide this or `data_base64`.
+    /// Payload as plain text, stored as UTF-8. Provide exactly one of
+    /// `text`, `data_base64`, or `file_path`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
     /// Payload as base64 (standard alphabet), decoded to raw bytes — use for
-    /// binary files. Provide this or `text`.
+    /// binary files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_base64: Option<String>,
+    /// Path to a file **on the server's own filesystem** to store as the
+    /// payload (not uploaded from the client). Disabled by default: the
+    /// server must be started with `--allow-run-js-file` or a `run_js_file`
+    /// policy that allows the path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
@@ -550,7 +557,7 @@ impl McpService {
     }
 
     #[tool(
-        description = "Upload a file as an artifact so run_js code can use it. Pass the payload as `text` (UTF-8) or `data_base64` (binary), with its mime type; max 16 MiB, same key overwrites. Inside run_js, `artifact.get(key)` returns { key, mime_type, size_bytes, created_at, bytes: Uint8Array } (null if missing) and `artifact.list()` lists metadata. Returns the stored metadata."
+        description = "Upload a file as an artifact so run_js code can use it. Pass the payload as exactly one of `text` (UTF-8), `data_base64` (binary), or `file_path` (a path on the server's own filesystem; rejected unless the server allows it via --allow-run-js-file or a run_js_file policy), with its mime type; max 16 MiB, same key overwrites. Inside run_js, `artifact.get(key)` returns { key, mime_type, size_bytes, created_at, bytes: Uint8Array } (null if missing) and `artifact.list()` lists metadata. Returns the stored metadata."
     )]
     pub async fn put_artifact(
         &self,
@@ -868,7 +875,7 @@ impl StatelessMcpService {
     }
 
     #[tool(
-        description = "Upload a file as an artifact so run_js code can use it. Pass the payload as `text` (UTF-8) or `data_base64` (binary), with its mime type; max 16 MiB, same key overwrites. Inside run_js, `artifact.get(key)` returns { key, mime_type, size_bytes, created_at, bytes: Uint8Array } (null if missing) and `artifact.list()` lists metadata. Returns the stored metadata."
+        description = "Upload a file as an artifact so run_js code can use it. Pass the payload as exactly one of `text` (UTF-8), `data_base64` (binary), or `file_path` (a path on the server's own filesystem; rejected unless the server allows it via --allow-run-js-file or a run_js_file policy), with its mime type; max 16 MiB, same key overwrites. Inside run_js, `artifact.get(key)` returns { key, mime_type, size_bytes, created_at, bytes: Uint8Array } (null if missing) and `artifact.list()` lists metadata. Returns the stored metadata."
     )]
     pub async fn put_artifact(
         &self,

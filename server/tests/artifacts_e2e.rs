@@ -535,8 +535,10 @@ async fn test_put_artifact_then_read_from_js() {
     wrapped.insert(4, '\n');
     let put = server::mcp_dispatch::put_artifact(
         &engine,
+        None,
         &json!({ "key": "upload.png", "mime_type": "image/png", "data_base64": wrapped }),
-    );
+    )
+    .await;
     assert!(put["error"].is_null(), "put failed: {:?}", put);
     assert_eq!(put["key"], "upload.png");
     assert_eq!(put["mime_type"], "image/png");
@@ -544,8 +546,10 @@ async fn test_put_artifact_then_read_from_js() {
 
     let put = server::mcp_dispatch::put_artifact(
         &engine,
+        None,
         &json!({ "key": "notes.txt", "mime_type": "text/plain", "text": "héllo" }),
-    );
+    )
+    .await;
     assert!(put["error"].is_null(), "put failed: {:?}", put);
 
     let resp = run_js(
@@ -590,22 +594,26 @@ async fn test_put_artifact_then_read_from_js() {
 async fn test_put_artifact_errors() {
     ensure_v8();
     let engine = create_test_engine();
-    let put = |args: Value| server::mcp_dispatch::put_artifact(&engine, &args);
+    let put = async |args: Value| server::mcp_dispatch::put_artifact(&engine, None, &args).await;
 
-    let neither = put(json!({ "key": "k", "mime_type": "text/plain" }));
+    let neither = put(json!({ "key": "k", "mime_type": "text/plain" })).await;
     assert!(neither["error"].as_str().unwrap().contains("exactly one"));
 
-    let both = put(json!({ "key": "k", "mime_type": "text/plain", "text": "a", "data_base64": "YQ==" }));
+    let both = put(json!({ "key": "k", "mime_type": "text/plain", "text": "a", "data_base64": "YQ==" })).await;
     assert!(both["error"].as_str().unwrap().contains("exactly one"));
 
-    let bad = put(json!({ "key": "k", "mime_type": "text/plain", "data_base64": "not base64!" }));
+    let bad = put(json!({ "key": "k", "mime_type": "text/plain", "data_base64": "not base64!" })).await;
     assert!(bad["error"].as_str().unwrap().contains("not valid base64"));
 
-    let bad_mime = put(json!({ "key": "k", "mime_type": "plain", "text": "a" }));
+    let bad_mime = put(json!({ "key": "k", "mime_type": "plain", "text": "a" })).await;
     assert!(bad_mime["error"].as_str().unwrap().contains("mime"));
 
-    let no_key = put(json!({ "mime_type": "text/plain", "text": "a" }));
+    let no_key = put(json!({ "mime_type": "text/plain", "text": "a" })).await;
     assert!(no_key["error"].as_str().unwrap().contains("key"));
+
+    // file_path is a host-side read: refused unless the server opts in.
+    let file = put(json!({ "key": "k", "mime_type": "text/plain", "file_path": "/etc/hosts" })).await;
+    assert!(file["error"].as_str().unwrap().contains("disabled"));
 
     assert!(engine.list_artifacts().unwrap().is_empty());
 }
@@ -691,4 +699,48 @@ async fn test_artifact_rest_upload() -> Result<(), Box<dyn std::error::Error>> {
 
     server.stop().await;
     Ok(())
+}
+
+/// With file-path reads enabled, put_artifact stores a file from the server's
+/// filesystem byte-for-byte; a missing path and an oversized file are errors.
+#[tokio::test]
+async fn test_put_artifact_from_file_path() {
+    ensure_v8();
+    let engine = create_test_engine()
+        .with_run_js_file_policy(server::engine::run_js_file::RunJsFilePolicy::AllowAll);
+    let dir = tempfile::tempdir().unwrap();
+
+    let path = dir.path().join("form.pdf");
+    std::fs::write(&path, PNG_BYTES).unwrap();
+    let put = server::mcp_dispatch::put_artifact(
+        &engine,
+        None,
+        &json!({ "key": "form.pdf", "mime_type": "application/pdf", "file_path": path.to_str().unwrap() }),
+    )
+    .await;
+    assert!(put["error"].is_null(), "put failed: {:?}", put);
+    assert_eq!(put["size_bytes"], PNG_BYTES.len() as u64);
+    assert_eq!(engine.get_artifact("form.pdf").unwrap().bytes, PNG_BYTES);
+
+    let missing = server::mcp_dispatch::put_artifact(
+        &engine,
+        None,
+        &json!({ "key": "x", "mime_type": "text/plain", "file_path": dir.path().join("nope").to_str().unwrap() }),
+    )
+    .await;
+    assert!(missing["error"].is_string());
+
+    let big = dir.path().join("big.bin");
+    std::fs::File::create(&big)
+        .unwrap()
+        .set_len(16 * 1024 * 1024 + 1)
+        .unwrap();
+    let too_big = server::mcp_dispatch::put_artifact(
+        &engine,
+        None,
+        &json!({ "key": "x", "mime_type": "application/octet-stream", "file_path": big.to_str().unwrap() }),
+    )
+    .await;
+    assert!(too_big["error"].as_str().unwrap().contains("exceeds"));
+    assert!(engine.get_artifact("x").is_err());
 }

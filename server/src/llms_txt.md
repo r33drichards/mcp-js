@@ -32,7 +32,7 @@ mcp-v8 exposes a V8 JavaScript runtime as MCP tools. Agents can run JS/TS code, 
 - In JS, `artifact(key, mime, bytes)` stores a typed payload (same key overwrites; max 16 MiB; `bytes`: Uint8Array/TypedArray/ArrayBuffer/string).
 - `get_artifact(key)` returns the payload as an MCP content block: `image/*` as an image block (visible to the model), `audio/*` as audio, UTF-8 as text, other binary as base64 text.
 - `list_artifacts()` lists stored artifact metadata; `get_execution` includes an `artifacts` field with what that execution emitted.
-- `put_artifact(key, mime_type, text | data_base64)` uploads a file as an artifact; JS reads it with `artifact.get(key)` (`{ key, mime_type, size_bytes, created_at, bytes: Uint8Array }` or `null`) and `artifact.list()`.
+- `put_artifact(key, mime_type, text | data_base64 | file_path)` uploads a file as an artifact (`file_path` is a server-side path, gated like `run_js` `file`); JS reads it with `artifact.get(key)` (`{ key, mime_type, size_bytes, created_at, bytes: Uint8Array }` or `null`) and `artifact.list()`.
 - Stateless `run_js` attaches emitted artifacts inline to its result (up to 8 MiB), and also exposes `get_artifact`/`put_artifact`/`list_artifacts`.
 
 ### Additional tools (stateful mode only)

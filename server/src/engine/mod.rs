@@ -2700,6 +2700,30 @@ impl Engine {
         self.artifact_store()?.put(key, mime_type, bytes, None)
     }
 
+    /// Store a file from the server's own filesystem as an artifact. This is
+    /// a host-side read driven by caller input, so it is authorized exactly
+    /// like a `run_js` `file` (off unless `--allow-run-js-file` or a
+    /// `run_js_file` policy allows the path).
+    pub async fn put_artifact_from_file(
+        &self,
+        key: &str,
+        mime_type: &str,
+        path: &str,
+        mcp_headers: Option<&serde_json::Value>,
+    ) -> Result<ArtifactMeta, String> {
+        let policy = self.run_js_file_policy.as_ref().ok_or_else(|| {
+            "put_artifact file_path reads are disabled. Enable them with \
+             --allow-run-js-file or configure a `run_js_file` policy in \
+             --policies-json."
+                .to_string()
+        })?;
+        let bytes = policy
+            .read_bytes(path, mcp_headers, artifacts::MAX_ARTIFACT_BYTES)
+            .await
+            .map_err(|e| format!("put_artifact: {e}"))?;
+        self.put_artifact(key, mime_type, &bytes)
+    }
+
     /// List metadata for all stored artifacts.
     pub fn list_artifacts(&self) -> Result<Vec<ArtifactMeta>, String> {
         self.artifact_store()?.list()

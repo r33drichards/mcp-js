@@ -83,8 +83,8 @@ running in `run_js` reads it back — useful when the model has a file (a PDF to
 attach to a form, a CSV to process) and the sandbox has no other way to
 receive it.
 
-Over MCP, call `put_artifact` with the payload as `text` (stored as UTF-8) or
-`data_base64` (decoded to raw bytes) — exactly one of the two:
+Over MCP, call `put_artifact` with the payload as exactly one of `text`
+(stored as UTF-8), `data_base64` (decoded to raw bytes), or `file_path`:
 
 ```json
 { "tool": "put_artifact",
@@ -93,6 +93,22 @@ Over MCP, call `put_artifact` with the payload as `text` (stored as UTF-8) or
 // Response: { "key": "form.pdf", "mime_type": "application/pdf",
 //             "size_bytes": 48213, "created_at": "…" }
 ```
+
+`file_path` names a file **on the server's own filesystem** — nothing is
+uploaded from the client — so it suits a local (stdio) server that shares a
+disk with the agent. It is the same kind of host-side read as `run_js`'s
+`file` parameter and is gated the same way: rejected unless the server runs
+with `--allow-run-js-file` or a `run_js_file` policy allows the path.
+
+```json
+{ "tool": "put_artifact",
+  "arguments": { "key": "form.pdf", "mime_type": "application/pdf",
+                 "file_path": "/home/me/Downloads/form.pdf" } }
+```
+
+MCP has no streaming or chunked upload, so `text` and `data_base64` travel
+inline in the tool call. For anything large, or when the client is remote, use
+the REST endpoint instead.
 
 Over REST, `PUT` the raw bytes; the request's `Content-Type` becomes the mime
 type:
