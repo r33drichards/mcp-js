@@ -529,6 +529,7 @@ async fn list_artifacts_handler(
     responses(
         (status = 200, description = "Artifact stored", body = ArtifactMeta),
         (status = 400, description = "Invalid key, mime type, or payload size", body = ApiError),
+        (status = 500, description = "Artifact store unavailable", body = ApiError),
     ),
     tag = "artifacts"
 )]
@@ -547,13 +548,33 @@ async fn put_artifact_handler(
         .map(str::trim)
         .filter(|v| !v.is_empty())
         .unwrap_or("application/octet-stream");
-    match engine.put_artifact(&key, mime_type, &body) {
-        Ok(meta) => (StatusCode::OK, Json(serde_json::json!(meta))),
-        Err(e) => (
+    store_uploaded_artifact(&engine, &key, mime_type, &body).unwrap_or_else(|rejected| rejected)
+}
+
+type JsonReply = (StatusCode, Json<serde_json::Value>);
+
+/// Store an uploaded artifact, separating a bad request (400) from a store
+/// failure (500): the input is validated first, so whatever `put_artifact`
+/// then reports is the server's fault and worth retrying.
+fn store_uploaded_artifact(
+    engine: &Engine,
+    key: &str,
+    mime_type: &str,
+    body: &[u8],
+) -> Result<JsonReply, JsonReply> {
+    crate::engine::artifacts::validate(key, mime_type, body.len()).map_err(|e| {
+        (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": e })),
-        ),
-    }
+        )
+    })?;
+    let meta = engine.put_artifact(key, mime_type, body).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e })),
+        )
+    })?;
+    Ok((StatusCode::OK, Json(serde_json::json!(meta))))
 }
 
 /// Upload a file to a one-time URL from the `get_artifact_upload_url` tool.
@@ -561,7 +582,9 @@ async fn put_artifact_handler(
 /// The token in the path is the only credential — this route is not behind
 /// bearer auth. The request body is stored verbatim under the key the URL
 /// was issued for; the mime type is the one fixed at issue time, else the
-/// request's `Content-Type`. A token works once and expires.
+/// request's `Content-Type`. A token stores one upload and expires; while
+/// an upload is in flight, other requests with the same token get 404, and
+/// an upload that is rejected or abandoned leaves the token usable.
 #[utoipa::path(
     put,
     path = "/api/artifact-uploads/{token}",
@@ -572,8 +595,9 @@ async fn put_artifact_handler(
     responses(
         (status = 200, description = "Artifact stored", body = ArtifactMeta),
         (status = 400, description = "Invalid mime type", body = ApiError),
-        (status = 404, description = "Unknown, expired, or already-used token", body = ApiError),
+        (status = 404, description = "Unknown, expired, already-used, or in-use token", body = ApiError),
         (status = 413, description = "Payload exceeds the artifact size limit", body = ApiError),
+        (status = 500, description = "Artifact store unavailable", body = ApiError),
     ),
     tag = "artifacts"
 )]
@@ -588,10 +612,13 @@ async fn redeem_artifact_upload_handler(
             Json(serde_json::json!({ "error": "upload URL is unknown, expired, or already used" })),
         )
     };
-    // Check the token before reading the body: this route is unauthenticated.
-    if !engine.artifact_upload_is_live(&token) {
+    // Claim the token before reading the body: this route is unauthenticated,
+    // so neither a bogus token nor a second request racing a valid one may
+    // make the server buffer an upload. Every early return below drops the
+    // reservation, which hands the URL back for a retry.
+    let Some(reservation) = engine.reserve_artifact_upload(&token) else {
         return gone();
-    }
+    };
     let content_type = request
         .headers()
         .get(header::CONTENT_TYPE)
@@ -615,13 +642,18 @@ async fn redeem_artifact_upload_handler(
             })),
         );
     };
-    match engine.redeem_artifact_upload(&token, content_type.as_deref(), &body) {
-        Ok(Some(meta)) => (StatusCode::OK, Json(serde_json::json!(meta))),
-        Ok(None) => gone(),
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": e })),
-        ),
+    let grant = reservation.grant();
+    let mime_type = grant
+        .mime_type
+        .as_deref()
+        .or(content_type.as_deref())
+        .unwrap_or("application/octet-stream");
+    match store_uploaded_artifact(&engine, &grant.key, mime_type, &body) {
+        Ok(stored) => {
+            reservation.complete();
+            stored
+        }
+        Err(rejected) => rejected,
     }
 }
 

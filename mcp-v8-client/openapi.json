@@ -15,7 +15,7 @@
           "artifacts"
         ],
         "summary": "Upload a file to a one-time URL from the `get_artifact_upload_url` tool.",
-        "description": "The token in the path is the only credential — this route is not behind\nbearer auth. The request body is stored verbatim under the key the URL\nwas issued for; the mime type is the one fixed at issue time, else the\nrequest's `Content-Type`. A token works once and expires.",
+        "description": "The token in the path is the only credential — this route is not behind\nbearer auth. The request body is stored verbatim under the key the URL\nwas issued for; the mime type is the one fixed at issue time, else the\nrequest's `Content-Type`. A token stores one upload and expires; while\nan upload is in flight, other requests with the same token get 404, and\nan upload that is rejected or abandoned leaves the token usable.",
         "operationId": "redeem_artifact_upload_handler",
         "parameters": [
           {
@@ -62,7 +62,7 @@
             }
           },
           "404": {
-            "description": "Unknown, expired, or already-used token",
+            "description": "Unknown, expired, already-used, or in-use token",
             "content": {
               "application/json": {
                 "schema": {
@@ -73,6 +73,16 @@
           },
           "413": {
             "description": "Payload exceeds the artifact size limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Artifact store unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -193,6 +203,16 @@
           },
           "400": {
             "description": "Invalid key, mime type, or payload size",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Artifact store unavailable",
             "content": {
               "application/json": {
                 "schema": {

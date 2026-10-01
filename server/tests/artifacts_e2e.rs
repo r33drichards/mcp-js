@@ -680,7 +680,8 @@ async fn test_upload_url_roundtrip_is_single_use() {
 }
 
 /// Without an issue-time mime type the upload's Content-Type is used; bogus
-/// tokens are 404; an oversized body is 413 and leaves the URL usable; and a
+/// tokens are 404; an oversized or invalid upload is rejected and leaves the
+/// URL usable; and a
 /// configured public URL yields an absolute `url`.
 #[tokio::test]
 async fn test_upload_url_mime_fallback_limits_and_public_url() {
@@ -712,6 +713,18 @@ async fn test_upload_url_mime_fallback_limits_and_public_url() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 413);
+    assert!(engine.get_artifact("data.csv").is_err());
+
+    // A rejected upload (here: a Content-Type that isn't a mime type) is the
+    // client's error and, like the 413 above, doesn't burn the URL.
+    let resp = client
+        .put(&url)
+        .header("content-type", "nope")
+        .body("a,b\n")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
     assert!(engine.get_artifact("data.csv").is_err());
 
     let resp = client

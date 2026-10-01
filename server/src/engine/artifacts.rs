@@ -14,6 +14,7 @@
 //! mimeType, the spec's way to put images/audio in front of a model), UTF-8
 //! payloads → `TextContent`, and other binary → base64 text.
 
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use base64::Engine as _;
@@ -152,15 +153,7 @@ impl ArtifactStore {
         bytes: &[u8],
         execution_id: Option<&str>,
     ) -> Result<ArtifactMeta, String> {
-        validate_key(key)?;
-        validate_mime(mime_type)?;
-        if bytes.len() > MAX_ARTIFACT_BYTES {
-            return Err(format!(
-                "artifact: payload exceeds {} bytes (got {})",
-                MAX_ARTIFACT_BYTES,
-                bytes.len()
-            ));
-        }
+        validate(key, mime_type, bytes.len())?;
 
         let header = StoredHeader {
             mime_type: mime_type.to_string(),
@@ -216,6 +209,22 @@ impl ArtifactStore {
         }
         Ok(out)
     }
+}
+
+/// Check a prospective artifact against the store's rules. `put` runs this
+/// itself; callers that need to tell a bad request from a storage failure
+/// (the REST upload handlers) run it first, so anything `put` then reports
+/// is the store's fault.
+pub fn validate(key: &str, mime_type: &str, size_bytes: usize) -> Result<(), String> {
+    validate_key(key)?;
+    validate_mime(mime_type)?;
+    if size_bytes > MAX_ARTIFACT_BYTES {
+        return Err(format!(
+            "artifact: payload exceeds {} bytes (got {})",
+            MAX_ARTIFACT_BYTES, size_bytes
+        ));
+    }
+    Ok(())
 }
 
 fn validate_key(key: &str) -> Result<(), String> {
@@ -286,10 +295,17 @@ pub const DEFAULT_UPLOAD_TTL_SECS: u64 = 600;
 /// Longest lifetime an upload URL may be given.
 pub const MAX_UPLOAD_TTL_SECS: u64 = 3600;
 
+/// Minimum gap between sweeps for expired grants. Issuing a grant must not
+/// scan the whole tree every time, or N outstanding URLs cost O(N²).
+const UPLOAD_SWEEP_INTERVAL_SECS: i64 = 60;
+
+/// Unix seconds of the last expired-grant sweep (process-wide).
+static LAST_UPLOAD_SWEEP: AtomicI64 = AtomicI64::new(0);
+
 /// Permission to upload one artifact, handed out as an unguessable token by
 /// the `get_artifact_upload_url` tool and redeemed once over plain HTTP — so
 /// a file's bytes travel out-of-band instead of through a tool call.
-#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize)]
 pub struct UploadGrant {
     /// Key the upload will be stored under.
     pub key: String,
@@ -299,6 +315,10 @@ pub struct UploadGrant {
     pub mime_type: Option<String>,
     /// Unix seconds after which the grant is dead.
     pub expires_at: i64,
+    /// Set while an upload is in flight, so a second request with the same
+    /// token is turned away before its body is read.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reserved: bool,
 }
 
 /// Sled-backed store of outstanding upload grants, keyed by token.
@@ -325,12 +345,13 @@ impl UploadGrants {
             validate_mime(mime_type)?;
         }
         let now = chrono::Utc::now().timestamp();
-        self.purge_expired(now);
+        self.sweep_if_due(now);
 
         let grant = UploadGrant {
             key: key.to_string(),
             mime_type: mime_type.map(str::to_string),
             expires_at: now + ttl_secs.clamp(1, MAX_UPLOAD_TTL_SECS) as i64,
+            reserved: false,
         };
         // 256 bits from the OS: the token is the only credential on the
         // upload route.
@@ -338,30 +359,50 @@ impl UploadGrants {
         rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut raw);
         let token: String = raw.iter().map(|b| format!("{:02x}", b)).collect();
 
-        let value = serde_json::to_vec(&grant)
-            .map_err(|e| format!("artifact upload: failed to encode grant: {}", e))?;
         self.tree
-            .insert(token.as_bytes(), value)
+            .insert(token.as_bytes(), encode_grant(&grant)?)
             .map_err(|e| format!("artifact upload: failed to store grant: {}", e))?;
         Ok((token, grant))
     }
 
-    /// Look up a live grant without consuming it.
-    pub fn peek(&self, token: &str) -> Option<UploadGrant> {
-        let value = self.tree.get(token.as_bytes()).ok()??;
-        Self::live(&value)
+    /// Claim a live grant for one in-flight upload. The claim is an atomic
+    /// compare-and-swap, so of any number of concurrent requests with the
+    /// same token exactly one gets a reservation; the rest see `None`, as do
+    /// unknown, expired, and already-used tokens.
+    ///
+    /// The reservation hands the grant back when dropped, unless
+    /// [`UploadReservation::complete`] consumed it — so an upload that is
+    /// rejected or abandoned mid-body leaves the URL usable.
+    pub fn reserve(&self, token: &str) -> Option<UploadReservation> {
+        let current = self.tree.get(token.as_bytes()).ok()??;
+        let grant: UploadGrant = serde_json::from_slice(&current).ok()?;
+        if grant.reserved || grant.expires_at <= chrono::Utc::now().timestamp() {
+            return None;
+        }
+        let claimed = encode_grant(&UploadGrant { reserved: true, ..grant.clone() }).ok()?;
+        self.tree
+            .compare_and_swap(token.as_bytes(), Some(current), Some(claimed))
+            .ok()?
+            .ok()?;
+        Some(UploadReservation {
+            grants: self.clone(),
+            token: token.to_string(),
+            grant,
+            completed: false,
+        })
     }
 
-    /// Consume a grant. The removal is atomic, so of two concurrent uploads
-    /// with the same token only one gets it.
-    pub fn take(&self, token: &str) -> Option<UploadGrant> {
-        let value = self.tree.remove(token.as_bytes()).ok()??;
-        Self::live(&value)
-    }
-
-    fn live(value: &[u8]) -> Option<UploadGrant> {
-        let grant: UploadGrant = serde_json::from_slice(value).ok()?;
-        (grant.expires_at > chrono::Utc::now().timestamp()).then_some(grant)
+    /// Drop expired grants, at most once per `UPLOAD_SWEEP_INTERVAL_SECS`.
+    fn sweep_if_due(&self, now: i64) {
+        let last = LAST_UPLOAD_SWEEP.load(Ordering::Relaxed);
+        if now - last < UPLOAD_SWEEP_INTERVAL_SECS
+            || LAST_UPLOAD_SWEEP
+                .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+                .is_err()
+        {
+            return;
+        }
+        self.purge_expired(now);
     }
 
     /// Drop grants that expired unused, so abandoned URLs don't accumulate.
@@ -373,6 +414,45 @@ impl UploadGrants {
             if expired {
                 let _ = self.tree.remove(token);
             }
+        }
+    }
+}
+
+fn encode_grant(grant: &UploadGrant) -> Result<Vec<u8>, String> {
+    serde_json::to_vec(grant).map_err(|e| format!("artifact upload: failed to encode grant: {}", e))
+}
+
+/// One in-flight upload's exclusive hold on a grant. See
+/// [`UploadGrants::reserve`].
+pub struct UploadReservation {
+    grants: UploadGrants,
+    token: String,
+    grant: UploadGrant,
+    completed: bool,
+}
+
+impl UploadReservation {
+    /// The grant being redeemed.
+    pub fn grant(&self) -> &UploadGrant {
+        &self.grant
+    }
+
+    /// Consume the grant for good: the upload was stored.
+    pub fn complete(mut self) {
+        let _ = self.grants.tree.remove(self.token.as_bytes());
+        self.completed = true;
+    }
+}
+
+impl Drop for UploadReservation {
+    fn drop(&mut self) {
+        if self.completed {
+            return;
+        }
+        // Hand the grant back. (If it expired meanwhile it stays dead:
+        // `reserve` checks the expiry.)
+        if let Ok(value) = encode_grant(&self.grant) {
+            let _ = self.grants.tree.insert(self.token.as_bytes(), value);
         }
     }
 }
@@ -638,11 +718,46 @@ mod tests {
         assert_eq!(token.len(), 64);
         assert_eq!(grant.key, "form.pdf");
 
-        assert_eq!(grants.peek(&token).unwrap().key, "form.pdf");
-        assert_eq!(grants.take(&token).unwrap().mime_type.as_deref(), Some("application/pdf"));
-        assert!(grants.take(&token).is_none());
-        assert!(grants.peek(&token).is_none());
-        assert!(grants.take("not-a-token").is_none());
+        let reservation = grants.reserve(&token).unwrap();
+        assert_eq!(reservation.grant().mime_type.as_deref(), Some("application/pdf"));
+        reservation.complete();
+        assert!(grants.reserve(&token).is_none());
+        assert!(grants.reserve("not-a-token").is_none());
+    }
+
+    #[test]
+    fn upload_reservation_is_exclusive_and_released_on_drop() {
+        let grants = temp_grants();
+        let (token, grant) = grants.issue("k", None, 60).unwrap();
+
+        // While one upload holds the grant, a second request is turned away.
+        let first = grants.reserve(&token).unwrap();
+        assert!(grants.reserve(&token).is_none());
+
+        // An upload that ends without completing hands the grant back intact.
+        drop(first);
+        let again = grants.reserve(&token).unwrap();
+        assert_eq!(again.grant(), &grant);
+    }
+
+    #[test]
+    fn upload_reservation_has_one_winner_under_contention() {
+        let grants = temp_grants();
+        let (token, _) = grants.issue("k", None, 60).unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(16));
+        let held: Vec<_> = (0..16)
+            .map(|_| {
+                let (grants, token, barrier) = (grants.clone(), token.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    grants.reserve(&token)
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+        assert_eq!(held.iter().filter(|r| r.is_some()).count(), 1);
     }
 
     #[test]
@@ -651,16 +766,37 @@ mod tests {
         assert!(grants.issue("", None, 60).is_err());
         assert!(grants.issue("k", Some("pdf"), 60).is_err());
 
-        // A grant already past its expiry is neither usable nor kept around.
-        let stale = UploadGrant { key: "k".into(), mime_type: None, expires_at: 1 };
+        // A grant already past its expiry can't be reserved, and a sweep
+        // removes it while leaving live grants alone.
+        let stale = UploadGrant { key: "k".into(), mime_type: None, expires_at: 1, reserved: false };
         grants.tree.insert("stale", serde_json::to_vec(&stale).unwrap()).unwrap();
-        assert!(grants.peek("stale").is_none());
-        grants.issue("k", None, 60).unwrap();
+        assert!(grants.reserve("stale").is_none());
+        let (live, _) = grants.issue("k", None, 60).unwrap();
+        grants.purge_expired(chrono::Utc::now().timestamp());
         assert!(grants.tree.get("stale").unwrap().is_none());
+        assert!(grants.reserve(&live).is_some());
 
         // The lifetime is capped.
         let (_, grant) = grants.issue("k", None, u64::MAX).unwrap();
         assert!(grant.expires_at <= chrono::Utc::now().timestamp() + MAX_UPLOAD_TTL_SECS as i64);
+    }
+
+    #[test]
+    fn upload_sweep_is_time_gated() {
+        let grants = temp_grants();
+        let stale = UploadGrant { key: "k".into(), mime_type: None, expires_at: 1, reserved: false };
+        let insert_stale =
+            || grants.tree.insert("stale", serde_json::to_vec(&stale).unwrap()).unwrap();
+
+        // Far enough past any real sweep that this one is due; an immediate
+        // second call is inside the interval and must not scan again.
+        let now = chrono::Utc::now().timestamp() + 10 * UPLOAD_SWEEP_INTERVAL_SECS;
+        insert_stale();
+        grants.sweep_if_due(now);
+        assert!(grants.tree.get("stale").unwrap().is_none());
+        insert_stale();
+        grants.sweep_if_due(now + 1);
+        assert!(grants.tree.get("stale").unwrap().is_some());
     }
 
     #[test]

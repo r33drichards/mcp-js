@@ -66,6 +66,7 @@ use tokio::sync::Semaphore;
 
 use self::artifacts::{
     Artifact, ArtifactMeta, ArtifactState, ArtifactStore, UploadGrant, UploadGrants,
+    UploadReservation,
 };
 use self::console::ConsoleLogState;
 use self::execution::{
@@ -2727,7 +2728,7 @@ impl Engine {
     }
 
     /// Issue a one-time upload grant for `key`; the returned token is
-    /// redeemed with [`Engine::redeem_artifact_upload`].
+    /// claimed with [`Engine::reserve_artifact_upload`].
     pub fn issue_artifact_upload(
         &self,
         key: &str,
@@ -2737,32 +2738,13 @@ impl Engine {
         self.upload_grants()?.issue(key, mime_type, ttl_secs)
     }
 
-    /// Whether `token` names a live upload grant (checked before reading an
-    /// upload body, so unauthenticated callers can't make the server buffer
-    /// bytes it will discard).
-    pub fn artifact_upload_is_live(&self, token: &str) -> bool {
-        self.upload_grants()
-            .map(|grants| grants.peek(token).is_some())
-            .unwrap_or(false)
-    }
-
-    /// Consume an upload grant and store `bytes` under its key. `Ok(None)`
-    /// when the token is unknown, expired, or already used.
-    pub fn redeem_artifact_upload(
-        &self,
-        token: &str,
-        content_type: Option<&str>,
-        bytes: &[u8],
-    ) -> Result<Option<ArtifactMeta>, String> {
-        let Some(grant) = self.upload_grants()?.take(token) else {
-            return Ok(None);
-        };
-        let mime_type = grant
-            .mime_type
-            .as_deref()
-            .or(content_type)
-            .unwrap_or("application/octet-stream");
-        self.put_artifact(&grant.key, mime_type, bytes).map(Some)
+    /// Claim `token` for one in-flight upload. `None` when it is unknown,
+    /// expired, already used, or another upload currently holds it — checked
+    /// before an upload body is read, so an unauthenticated caller can't
+    /// make the server buffer bytes it will discard. Dropping the
+    /// reservation without completing it leaves the URL usable.
+    pub fn reserve_artifact_upload(&self, token: &str) -> Option<UploadReservation> {
+        self.upload_grants().ok()?.reserve(token)
     }
 
     /// List metadata for all stored artifacts.

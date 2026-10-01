@@ -19,7 +19,9 @@ OpenAPI description.
 The token in the path is the only credential — this route is not behind
 bearer auth. The request body is stored verbatim under the key the URL
 was issued for; the mime type is the one fixed at issue time, else the
-request's `Content-Type`. A token works once and expires.
+request's `Content-Type`. A token stores one upload and expires; while
+an upload is in flight, other requests with the same token get 404, and
+an upload that is rejected or abandoned leaves the token usable.
 
 > Body parameter
 
@@ -59,8 +61,9 @@ string
 |---|---|---|---|
 |200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Artifact stored|[ArtifactMeta](#schemaartifactmeta)|
 |400|[Bad Request](https://tools.ietf.org/html/rfc7231#section-6.5.1)|Invalid mime type|[ApiError](#schemaapierror)|
-|404|[Not Found](https://tools.ietf.org/html/rfc7231#section-6.5.4)|Unknown, expired, or already-used token|[ApiError](#schemaapierror)|
+|404|[Not Found](https://tools.ietf.org/html/rfc7231#section-6.5.4)|Unknown, expired, already-used, or in-use token|[ApiError](#schemaapierror)|
 |413|[Payload Too Large](https://tools.ietf.org/html/rfc7231#section-6.5.11)|Payload exceeds the artifact size limit|[ApiError](#schemaapierror)|
+|500|[Internal Server Error](https://tools.ietf.org/html/rfc7231#section-6.6.1)|Artifact store unavailable|[ApiError](#schemaapierror)|
 
 Authentication: none.
 
@@ -192,6 +195,7 @@ string
 |---|---|---|---|
 |200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Artifact stored|[ArtifactMeta](#schemaartifactmeta)|
 |400|[Bad Request](https://tools.ietf.org/html/rfc7231#section-6.5.1)|Invalid key, mime type, or payload size|[ApiError](#schemaapierror)|
+|500|[Internal Server Error](https://tools.ietf.org/html/rfc7231#section-6.6.1)|Artifact store unavailable|[ApiError](#schemaapierror)|
 
 Authentication: none.
 
