@@ -1483,6 +1483,8 @@ impl Engine {
             crate::mcp_dispatch::put_artifact(self, mcp_headers, arguments)
                 .await
                 .into()
+        } else if name == "get_artifact_upload_url" {
+            crate::mcp_dispatch::get_artifact_upload_url(self, arguments).into()
         } else if name == "list_artifacts" {
             crate::mcp_dispatch::list_artifacts(self).into()
         } else {

@@ -7,7 +7,8 @@
 //! later with the `get_artifact` MCP tool. The flow also runs the other way:
 //! a client uploads a file with the `put_artifact` MCP tool (or
 //! `PUT /api/artifacts/{key}`) and JS reads it back with `artifact.get(key)`
-//! / `artifact.list()`. The MCP layer renders each
+//! / `artifact.list()`. For files too big to inline in a tool call,
+//! `get_artifact_upload_url` issues a one-time URL to send the bytes to. The MCP layer renders each
 //! artifact as the closest MCP-spec content block for its mime type —
 //! `image/*` → `ImageContent` and `audio/*` → `AudioContent` (base64 data +
 //! mimeType, the spec's way to put images/audio in front of a model), UTF-8
@@ -151,35 +152,8 @@ impl ArtifactStore {
         bytes: &[u8],
         execution_id: Option<&str>,
     ) -> Result<ArtifactMeta, String> {
-        if key.is_empty() {
-            return Err("artifact: key must be a non-empty string".to_string());
-        }
-        if key.len() > MAX_KEY_BYTES {
-            return Err(format!(
-                "artifact: key exceeds {} bytes (got {})",
-                MAX_KEY_BYTES,
-                key.len()
-            ));
-        }
-        // Also restrict to visible ASCII: the mime type is script-controlled
-        // and is served back verbatim as an HTTP Content-Type header, so
-        // whitespace/control bytes must never reach it.
-        if mime_type.is_empty()
-            || !mime_type.contains('/')
-            || !mime_type.bytes().all(|b| (0x21..=0x7e).contains(&b))
-        {
-            return Err(format!(
-                "artifact: mime must look like \"type/subtype\" (e.g. \"image/png\"), got {:?}",
-                mime_type
-            ));
-        }
-        if mime_type.len() > MAX_MIME_BYTES {
-            return Err(format!(
-                "artifact: mime exceeds {} bytes (got {})",
-                MAX_MIME_BYTES,
-                mime_type.len()
-            ));
-        }
+        validate_key(key)?;
+        validate_mime(mime_type)?;
         if bytes.len() > MAX_ARTIFACT_BYTES {
             return Err(format!(
                 "artifact: payload exceeds {} bytes (got {})",
@@ -244,6 +218,43 @@ impl ArtifactStore {
     }
 }
 
+fn validate_key(key: &str) -> Result<(), String> {
+    if key.is_empty() {
+        return Err("artifact: key must be a non-empty string".to_string());
+    }
+    if key.len() > MAX_KEY_BYTES {
+        return Err(format!(
+            "artifact: key exceeds {} bytes (got {})",
+            MAX_KEY_BYTES,
+            key.len()
+        ));
+    }
+    Ok(())
+}
+
+fn validate_mime(mime_type: &str) -> Result<(), String> {
+    // Also restrict to visible ASCII: the mime type is script-controlled
+    // and is served back verbatim as an HTTP Content-Type header, so
+    // whitespace/control bytes must never reach it.
+    if mime_type.is_empty()
+        || !mime_type.contains('/')
+        || !mime_type.bytes().all(|b| (0x21..=0x7e).contains(&b))
+    {
+        return Err(format!(
+            "artifact: mime must look like \"type/subtype\" (e.g. \"image/png\"), got {:?}",
+            mime_type
+        ));
+    }
+    if mime_type.len() > MAX_MIME_BYTES {
+        return Err(format!(
+            "artifact: mime exceeds {} bytes (got {})",
+            MAX_MIME_BYTES,
+            mime_type.len()
+        ));
+    }
+    Ok(())
+}
+
 fn decode_header(key: &str, value: &[u8]) -> Result<(ArtifactMeta, usize), String> {
     if value.len() < 4 {
         return Err(format!("artifact: corrupt entry for '{}'", key));
@@ -265,6 +276,106 @@ fn decode_header(key: &str, value: &[u8]) -> Result<(ArtifactMeta, usize), Strin
         },
         payload_start,
     ))
+}
+
+// ── Upload grants ────────────────────────────────────────────────────────
+
+/// Default lifetime of an upload URL.
+pub const DEFAULT_UPLOAD_TTL_SECS: u64 = 600;
+
+/// Longest lifetime an upload URL may be given.
+pub const MAX_UPLOAD_TTL_SECS: u64 = 3600;
+
+/// Permission to upload one artifact, handed out as an unguessable token by
+/// the `get_artifact_upload_url` tool and redeemed once over plain HTTP — so
+/// a client can send a file's bytes out-of-band instead of inline (base64)
+/// in a tool call.
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+pub struct UploadGrant {
+    /// Key the upload will be stored under.
+    pub key: String,
+    /// Mime type fixed when the URL was issued; `None` takes the upload
+    /// request's `Content-Type`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    /// Unix seconds after which the grant is dead.
+    pub expires_at: i64,
+}
+
+/// Sled-backed store of outstanding upload grants, keyed by token.
+#[derive(Clone)]
+pub struct UploadGrants {
+    tree: sled::Tree,
+}
+
+impl UploadGrants {
+    pub fn new(tree: sled::Tree) -> Self {
+        Self { tree }
+    }
+
+    /// Issue a grant for `key`, returning its token. The key and mime type
+    /// are validated now so a bad request fails before any bytes are sent.
+    pub fn issue(
+        &self,
+        key: &str,
+        mime_type: Option<&str>,
+        ttl_secs: u64,
+    ) -> Result<(String, UploadGrant), String> {
+        validate_key(key)?;
+        if let Some(mime_type) = mime_type {
+            validate_mime(mime_type)?;
+        }
+        let now = chrono::Utc::now().timestamp();
+        self.purge_expired(now);
+
+        let grant = UploadGrant {
+            key: key.to_string(),
+            mime_type: mime_type.map(str::to_string),
+            expires_at: now + ttl_secs.clamp(1, MAX_UPLOAD_TTL_SECS) as i64,
+        };
+        // 256 bits from the OS: the token is the only credential on the
+        // upload route.
+        let mut raw = [0u8; 32];
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut raw);
+        let token: String = raw.iter().map(|b| format!("{:02x}", b)).collect();
+
+        let value = serde_json::to_vec(&grant)
+            .map_err(|e| format!("artifact upload: failed to encode grant: {}", e))?;
+        self.tree
+            .insert(token.as_bytes(), value)
+            .map_err(|e| format!("artifact upload: failed to store grant: {}", e))?;
+        Ok((token, grant))
+    }
+
+    /// Look up a live grant without consuming it.
+    pub fn peek(&self, token: &str) -> Option<UploadGrant> {
+        let value = self.tree.get(token.as_bytes()).ok()??;
+        Self::live(&value)
+    }
+
+    /// Consume a grant. The removal is atomic, so of two concurrent uploads
+    /// with the same token only one gets it.
+    pub fn take(&self, token: &str) -> Option<UploadGrant> {
+        let value = self.tree.remove(token.as_bytes()).ok()??;
+        Self::live(&value)
+    }
+
+    fn live(value: &[u8]) -> Option<UploadGrant> {
+        let grant: UploadGrant = serde_json::from_slice(value).ok()?;
+        (grant.expires_at > chrono::Utc::now().timestamp()).then_some(grant)
+    }
+
+    /// Drop grants that expired unused, so abandoned URLs don't accumulate.
+    fn purge_expired(&self, now: i64) {
+        for (token, value) in self.tree.iter().flatten() {
+            let expired = serde_json::from_slice::<UploadGrant>(&value)
+                .map(|grant| grant.expires_at <= now)
+                .unwrap_or(true);
+            if expired {
+                let _ = self.tree.remove(token);
+            }
+        }
+    }
 }
 
 // ── Per-execution OpState entry ──────────────────────────────────────────
@@ -514,6 +625,43 @@ mod tests {
         let b = store.get("b").unwrap().unwrap();
         assert!(matches!(b.content(), ArtifactContent::Base64(_)));
         assert_eq!(b.encoding(), "base64");
+    }
+
+    fn temp_grants() -> UploadGrants {
+        let db = sled::Config::new().temporary(true).open().unwrap();
+        UploadGrants::new(db.open_tree("artifact_uploads").unwrap())
+    }
+
+    #[test]
+    fn upload_grant_is_single_use() {
+        let grants = temp_grants();
+        let (token, grant) = grants.issue("form.pdf", Some("application/pdf"), 60).unwrap();
+        assert_eq!(token.len(), 64);
+        assert_eq!(grant.key, "form.pdf");
+
+        assert_eq!(grants.peek(&token).unwrap().key, "form.pdf");
+        assert_eq!(grants.take(&token).unwrap().mime_type.as_deref(), Some("application/pdf"));
+        assert!(grants.take(&token).is_none());
+        assert!(grants.peek(&token).is_none());
+        assert!(grants.take("not-a-token").is_none());
+    }
+
+    #[test]
+    fn upload_grant_validates_and_expires() {
+        let grants = temp_grants();
+        assert!(grants.issue("", None, 60).is_err());
+        assert!(grants.issue("k", Some("pdf"), 60).is_err());
+
+        // A grant already past its expiry is neither usable nor kept around.
+        let stale = UploadGrant { key: "k".into(), mime_type: None, expires_at: 1 };
+        grants.tree.insert("stale", serde_json::to_vec(&stale).unwrap()).unwrap();
+        assert!(grants.peek("stale").is_none());
+        grants.issue("k", None, 60).unwrap();
+        assert!(grants.tree.get("stale").unwrap().is_none());
+
+        // The lifetime is capped.
+        let (_, grant) = grants.issue("k", None, u64::MAX).unwrap();
+        assert!(grant.expires_at <= chrono::Utc::now().timestamp() + MAX_UPLOAD_TTL_SECS as i64);
     }
 
     #[test]

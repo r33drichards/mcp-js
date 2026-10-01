@@ -27,6 +27,7 @@ These tools execute in isolated runs and return output directly.
 - [`fs_push`](#heap+fs-fs-push)
 - [`fs_reset`](#heap+fs-fs-reset)
 - [`get_artifact`](#heap+fs-get-artifact)
+- [`get_artifact_upload_url`](#heap+fs-get-artifact-upload-url)
 - [`get_execution`](#heap+fs-get-execution)
 - [`get_execution_output`](#heap+fs-get-execution-output)
 - [`get_heap_tags`](#heap+fs-get-heap-tags)
@@ -162,6 +163,19 @@ Parameters:
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
 | `key` | `string` | yes | Artifact key, as passed to `artifact(key, mime, bytes)` in JS. |
+
+### `get_artifact_upload_url`
+<a id="heap+fs-get-artifact-upload-url"></a>
+
+Get a one-time URL for uploading a file as an artifact over plain HTTP, so the file's bytes never pass through a tool call. Use this instead of put_artifact for anything but small files. Returns { url, method: "PUT", expires_at, max_bytes }: send the raw file as the request body, e.g. `curl -fsS -T ./file '<url>'`. The URL needs no other credentials, works once, and expires (default 10 minutes); max 16 MiB. Afterwards run_js code reads the file with `artifact.get(key)`. If `url` is absent the server has no public URL configured: append the returned `path` to the origin you reach the server at.
+
+Parameters:
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `expires_in_secs` | `integer | null` | no | How long the URL stays valid, in seconds (default 600, max 3600). |
+| `key` | `string` | yes | Key the uploaded file will be stored under (same key overwrites). |
+| `mime_type` | `string | null` | no | Mime type to store, e.g. "application/pdf". When omitted, the upload request's Content-Type is used ("application/octet-stream" if none). |
 
 ### `get_execution`
 <a id="heap+fs-get-execution"></a>
@@ -347,7 +361,7 @@ artifact("chart", "image/png", png);
 - A completed execution lists what it emitted (`key`, `mime_type`, `size_bytes`) in the `artifacts` field of `get_execution`.
 - Fetch a payload with the `get_artifact(key)` tool. `image/*` artifacts come back as an MCP image content block — the model can actually see the image — `audio/*` as an audio block, UTF-8 payloads as text, and other binary as base64 text. `list_artifacts` lists everything stored.
 - Artifacts persist across executions and are also downloadable raw (no base64) via `GET /api/artifacts/{key}` on the REST API.
-- Artifacts also work as input: a file uploaded with the `put_artifact` tool (or `PUT /api/artifacts/{key}`) is readable here with `artifact.get(key)` → `{ key, mime_type, size_bytes, created_at, bytes: Uint8Array }` (`null` if the key doesn't exist). `artifact.list()` returns metadata for everything stored.
+- Artifacts also work as input: a file uploaded with the `put_artifact` tool or a `get_artifact_upload_url` URL (or `PUT /api/artifacts/{key}`) is readable here with `artifact.get(key)` → `{ key, mime_type, size_bytes, created_at, bytes: Uint8Array }` (`null` if the key doesn't exist). `artifact.list()` returns metadata for everything stored.
 
 #### Importing Packages
 
@@ -421,6 +435,7 @@ These tools execute in isolated runs and return output directly.
 ### Tools
 
 - [`get_artifact`](#stateless-get-artifact)
+- [`get_artifact_upload_url`](#stateless-get-artifact-upload-url)
 - [`list_artifacts`](#stateless-list-artifacts)
 - [`put_artifact`](#stateless-put-artifact)
 - [`run_js`](#stateless-run-js)
@@ -435,6 +450,19 @@ Parameters:
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
 | `key` | `string` | yes | Artifact key, as passed to `artifact(key, mime, bytes)` in JS. |
+
+### `get_artifact_upload_url`
+<a id="stateless-get-artifact-upload-url"></a>
+
+Get a one-time URL for uploading a file as an artifact over plain HTTP, so the file's bytes never pass through a tool call. Use this instead of put_artifact for anything but small files. Returns { url, method: "PUT", expires_at, max_bytes }: send the raw file as the request body, e.g. `curl -fsS -T ./file '<url>'`. The URL needs no other credentials, works once, and expires (default 10 minutes); max 16 MiB. Afterwards run_js code reads the file with `artifact.get(key)`. If `url` is absent the server has no public URL configured: append the returned `path` to the origin you reach the server at.
+
+Parameters:
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `expires_in_secs` | `integer | null` | no | How long the URL stays valid, in seconds (default 600, max 3600). |
+| `key` | `string` | yes | Key the uploaded file will be stored under (same key overwrites). |
+| `mime_type` | `string | null` | no | Mime type to store, e.g. "application/pdf". When omitted, the upload request's Content-Type is used ("application/octet-stream" if none). |
 
 ### `list_artifacts`
 <a id="stateless-list-artifacts"></a>
@@ -514,7 +542,7 @@ artifact("chart", "image/png", png);
 - `artifact(key, mime, bytes)` — store an artifact under a caller-chosen key (same key overwrites). `bytes` may be a Uint8Array, TypedArray, ArrayBuffer, or string (UTF-8 encoded). Max 16 MiB per artifact.
 - Emitted artifacts are attached directly to this tool's result as content blocks: `image/*` as an MCP image block (the model can actually see the image), `audio/*` as audio, UTF-8 payloads as text, other binary as base64 text. Up to 8 MiB of payloads are attached inline; anything larger stays retrievable via the `get_artifact(key)` tool.
 - The result JSON lists each emitted artifact (`key`, `mime_type`, `size_bytes`, `inline`).
-- Artifacts also work as input: a file uploaded with the `put_artifact` tool is readable here with `artifact.get(key)` → `{ key, mime_type, size_bytes, created_at, bytes: Uint8Array }` (`null` if the key doesn't exist). `artifact.list()` returns metadata for everything stored.
+- Artifacts also work as input: a file uploaded with the `put_artifact` tool or a `get_artifact_upload_url` URL is readable here with `artifact.get(key)` → `{ key, mime_type, size_bytes, created_at, bytes: Uint8Array }` (`null` if the key doesn't exist). `artifact.list()` returns metadata for everything stored.
 
 #### Importing Packages
 

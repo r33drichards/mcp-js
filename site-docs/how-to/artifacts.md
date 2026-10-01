@@ -107,10 +107,42 @@ with `--allow-run-js-file` or a `run_js_file` policy allows the path.
 ```
 
 MCP has no streaming or chunked upload, so `text` and `data_base64` travel
-inline in the tool call. For anything large, or when the client is remote, use
-the REST endpoint instead.
+inline in the tool call — every byte passes through the model. For anything
+but small files, upload out-of-band instead.
 
-Over REST, `PUT` the raw bytes; the request's `Content-Type` becomes the mime
+### Upload with a one-time URL
+
+`get_artifact_upload_url` returns a URL the client can `PUT` the raw file to.
+The bytes go straight to the server over HTTP and never appear in a tool call:
+
+```json
+{ "tool": "get_artifact_upload_url",
+  "arguments": { "key": "form.pdf", "mime_type": "application/pdf" } }
+// Response: { "key": "form.pdf", "method": "PUT",
+//             "url": "https://mcp.example.com/api/artifact-uploads/3f9c…",
+//             "path": "/api/artifact-uploads/3f9c…",
+//             "expires_at": "…", "max_bytes": 16777216, "single_use": true }
+```
+
+```bash
+curl -fsS -T ./form.pdf 'https://mcp.example.com/api/artifact-uploads/3f9c…'
+```
+
+- The token in the URL is the only credential: the route is **not** behind
+  bearer auth, so a sandbox with no access token can use it. Treat the URL
+  like a password until it is used.
+- A URL works once and expires (`expires_in_secs`, default 600, max 3600).
+- `mime_type` is optional; without it the upload's `Content-Type` is stored
+  (`application/octet-stream` if there is none).
+- The server only knows its own public address if you tell it: set
+  `--public-url` (`MCP_V8_PUBLIC_URL`), e.g. `https://mcp.example.com`.
+  Without it the tool returns just `path`, to be appended to whatever origin
+  the client reaches the server at.
+
+### Upload with your own credentials
+
+A client that already holds the server's credentials can skip the URL step and
+`PUT` the raw bytes directly; the request's `Content-Type` becomes the mime
 type:
 
 ```bash

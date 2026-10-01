@@ -18,7 +18,9 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use serde_json::{Value, json};
 
 use crate::engine::Engine;
-use crate::engine::artifacts::{ArtifactContent, ArtifactMeta};
+use crate::engine::artifacts::{
+    ArtifactContent, ArtifactMeta, DEFAULT_UPLOAD_TTL_SECS, MAX_ARTIFACT_BYTES,
+};
 use crate::engine::heap_tags::HeapTagEntry;
 
 /// Transport-agnostic tool result: a JSON body plus extra content blocks
@@ -59,6 +61,7 @@ pub async fn call_tool(
             .into(),
         "get_artifact" => get_artifact(runtime, args),
         "put_artifact" => put_artifact(runtime, mcp_headers, args).await.into(),
+        "get_artifact_upload_url" => get_artifact_upload_url(runtime, args).into(),
         "list_artifacts" => list_artifacts(runtime).into(),
         "get_heap_tags" => get_heap_tags(runtime, args).await.into(),
         "set_heap_tags" => set_heap_tags(runtime, args).await.into(),
@@ -316,6 +319,46 @@ pub async fn put_artifact(runtime: &Engine, mcp_headers: Option<&Value>, args: &
         }),
         Err(e) => json!({ "error": e }),
     }
+}
+
+/// Issue a one-time URL the client can `PUT` a file's raw bytes to, storing
+/// them as an artifact without passing them through a tool call.
+pub fn get_artifact_upload_url(runtime: &Engine, args: &Value) -> Value {
+    let key = string_arg(args, "key").unwrap_or_default();
+    let ttl_secs = args
+        .get("expires_in_secs")
+        .and_then(Value::as_u64)
+        .unwrap_or(DEFAULT_UPLOAD_TTL_SECS);
+    let (token, grant) =
+        match runtime.issue_artifact_upload(&key, str_arg(args, "mime_type"), ttl_secs) {
+            Ok(issued) => issued,
+            Err(e) => return json!({ "error": e }),
+        };
+
+    let path = format!("/api/artifact-uploads/{token}");
+    let mut out = json!({
+        "key": grant.key,
+        "method": "PUT",
+        "path": path,
+        "expires_at": chrono::DateTime::from_timestamp(grant.expires_at, 0)
+            .map(|t| t.to_rfc3339()),
+        "max_bytes": MAX_ARTIFACT_BYTES,
+        "single_use": true,
+    });
+    match runtime.public_url() {
+        Some(base) => {
+            let url = format!("{base}{path}");
+            out["upload_example"] = json!(format!("curl -fsS -T ./file '{url}'"));
+            out["url"] = json!(url);
+        }
+        None => {
+            out["note"] = json!(
+                "No --public-url is configured, so only `path` is returned: \
+                 append it to the origin you reach this server at."
+            );
+        }
+    }
+    out
 }
 
 /// List metadata for all stored artifacts.

@@ -256,6 +256,7 @@ pub struct FsLogQuery {
         list_artifacts_handler,
         get_artifact_handler,
         put_artifact_handler,
+        redeem_artifact_upload_handler,
         cli_index_handler,
         cli_download_handler,
         fs_labels_handler,
@@ -553,6 +554,87 @@ async fn put_artifact_handler(
             Json(serde_json::json!({ "error": e })),
         ),
     }
+}
+
+/// Upload a file to a one-time URL from the `get_artifact_upload_url` tool.
+///
+/// The token in the path is the only credential — this route is not behind
+/// bearer auth. The request body is stored verbatim under the key the URL
+/// was issued for; the mime type is the one fixed at issue time, else the
+/// request's `Content-Type`. A token works once and expires.
+#[utoipa::path(
+    put,
+    path = "/api/artifact-uploads/{token}",
+    params(
+        ("token" = String, Path, description = "One-time upload token")
+    ),
+    request_body(content = Vec<u8>, description = "Raw artifact bytes (max 16 MiB)", content_type = "application/octet-stream"),
+    responses(
+        (status = 200, description = "Artifact stored", body = ArtifactMeta),
+        (status = 400, description = "Invalid mime type", body = ApiError),
+        (status = 404, description = "Unknown, expired, or already-used token", body = ApiError),
+        (status = 413, description = "Payload exceeds the artifact size limit", body = ApiError),
+    ),
+    tag = "artifacts"
+)]
+async fn redeem_artifact_upload_handler(
+    State(engine): State<Arc<Engine>>,
+    Path(token): Path<String>,
+    request: Request,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let gone = || {
+        (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "upload URL is unknown, expired, or already used" })),
+        )
+    };
+    // Check the token before reading the body: this route is unauthenticated.
+    if !engine.artifact_upload_is_live(&token) {
+        return gone();
+    }
+    let content_type = request
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(';').next())
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+    let Ok(body) = axum::body::to_bytes(
+        request.into_body(),
+        crate::engine::artifacts::MAX_ARTIFACT_BYTES,
+    )
+    .await
+    else {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(serde_json::json!({
+                "error": format!(
+                    "payload exceeds {} bytes",
+                    crate::engine::artifacts::MAX_ARTIFACT_BYTES
+                )
+            })),
+        );
+    };
+    match engine.redeem_artifact_upload(&token, content_type.as_deref(), &body) {
+        Ok(Some(meta)) => (StatusCode::OK, Json(serde_json::json!(meta))),
+        Ok(None) => gone(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": e })),
+        ),
+    }
+}
+
+/// Router for one-time artifact upload URLs. Kept separate from
+/// [`api_router`] because it must sit outside the bearer-auth layer.
+pub fn artifact_upload_router(runtime: Arc<Engine>) -> Router {
+    Router::new()
+        .route(
+            "/api/artifact-uploads/{token}",
+            axum::routing::put(redeem_artifact_upload_handler)
+                .layer(DefaultBodyLimit::disable()),
+        )
+        .with_state(runtime)
 }
 
 /// Download an artifact's raw payload bytes.

@@ -64,7 +64,9 @@ use swc_core::ecma::visit::swc_ecma_ast::Pass;
 
 use tokio::sync::Semaphore;
 
-use self::artifacts::{Artifact, ArtifactMeta, ArtifactState, ArtifactStore};
+use self::artifacts::{
+    Artifact, ArtifactMeta, ArtifactState, ArtifactStore, UploadGrant, UploadGrants,
+};
 use self::console::ConsoleLogState;
 use self::execution::{
     ConsoleOutputPage, ExecutionId, ExecutionInfo, ExecutionRegistry, ExecutionSummary,
@@ -1616,6 +1618,9 @@ pub struct Engine {
     /// Optional override for the `run_js` tool description advertised in
     /// `tools/list`. When `None`, the compiled-in description is used.
     run_js_description_override: Option<Arc<str>>,
+    /// Externally reachable base URL of this server (`--public-url`), used to
+    /// build absolute artifact upload URLs.
+    public_url: Option<Arc<str>>,
     /// Controls whether `run_js` may read its code from a file on the server's
     /// own filesystem (the `file` parameter). `None` disables it entirely (the
     /// default); `Some` either allows all paths or gates them behind a policy.
@@ -1812,6 +1817,7 @@ impl Engine {
             subprocess_config: None,
             instructions_override: None,
             run_js_description_override: None,
+            public_url: None,
             run_js_file_policy: None,
             fs_store: None,
             label_store: None,
@@ -1859,6 +1865,7 @@ impl Engine {
             subprocess_config: None,
             instructions_override: None,
             run_js_description_override: None,
+            public_url: None,
             run_js_file_policy: None,
             fs_store: None,
             label_store: None,
@@ -1993,6 +2000,17 @@ impl Engine {
     /// Get the MCP server `instructions` override, if one was configured.
     pub fn instructions_override(&self) -> Option<Arc<str>> {
         self.instructions_override.clone()
+    }
+
+    /// Set the externally reachable base URL of this server.
+    pub fn with_public_url(mut self, url: String) -> Self {
+        self.public_url = Some(Arc::from(url.trim_end_matches('/')));
+        self
+    }
+
+    /// The configured public base URL (no trailing slash), if any.
+    pub fn public_url(&self) -> Option<Arc<str>> {
+        self.public_url.clone()
     }
 
     /// Override the `run_js` tool description advertised in `tools/list`.
@@ -2722,6 +2740,53 @@ impl Engine {
             .await
             .map_err(|e| format!("put_artifact: {e}"))?;
         self.put_artifact(key, mime_type, &bytes)
+    }
+
+    fn upload_grants(&self) -> Result<UploadGrants, String> {
+        let registry = self
+            .execution_registry
+            .as_ref()
+            .ok_or_else(|| "Execution registry not configured".to_string())?;
+        Ok(UploadGrants::new(registry.artifact_uploads_tree()?))
+    }
+
+    /// Issue a one-time upload grant for `key`; the returned token is
+    /// redeemed with [`Engine::redeem_artifact_upload`].
+    pub fn issue_artifact_upload(
+        &self,
+        key: &str,
+        mime_type: Option<&str>,
+        ttl_secs: u64,
+    ) -> Result<(String, UploadGrant), String> {
+        self.upload_grants()?.issue(key, mime_type, ttl_secs)
+    }
+
+    /// Whether `token` names a live upload grant (checked before reading an
+    /// upload body, so unauthenticated callers can't make the server buffer
+    /// bytes it will discard).
+    pub fn artifact_upload_is_live(&self, token: &str) -> bool {
+        self.upload_grants()
+            .map(|grants| grants.peek(token).is_some())
+            .unwrap_or(false)
+    }
+
+    /// Consume an upload grant and store `bytes` under its key. `Ok(None)`
+    /// when the token is unknown, expired, or already used.
+    pub fn redeem_artifact_upload(
+        &self,
+        token: &str,
+        content_type: Option<&str>,
+        bytes: &[u8],
+    ) -> Result<Option<ArtifactMeta>, String> {
+        let Some(grant) = self.upload_grants()?.take(token) else {
+            return Ok(None);
+        };
+        let mime_type = grant
+            .mime_type
+            .as_deref()
+            .or(content_type)
+            .unwrap_or("application/octet-stream");
+        self.put_artifact(&grant.key, mime_type, bytes).map(Some)
     }
 
     /// List metadata for all stored artifacts.

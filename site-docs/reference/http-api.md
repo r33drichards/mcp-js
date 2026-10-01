@@ -9,6 +9,62 @@ OpenAPI description.
 ## Artifacts
 
 
+### Upload a file to a one-time URL from the `get_artifact_upload_url` tool.
+
+
+<a id="opIdredeem_artifact_upload_handler"></a>
+
+`PUT /api/artifact-uploads/{token}`
+
+The token in the path is the only credential — this route is not behind
+bearer auth. The request body is stored verbatim under the key the URL
+was issued for; the mime type is the one fixed at issue time, else the
+request's `Content-Type`. A token works once and expires.
+
+> Body parameter
+
+```yaml
+string
+
+```
+
+<a id="upload-a-file-to-a-one-time-url-from-the-`get_artifact_upload_url`-tool.-parameters"></a>
+#### Parameters
+
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|token|path|string|true|One-time upload token|
+|body|body|string(binary)|true|Raw artifact bytes (max 16 MiB)|
+
+> Example responses
+
+> 200 Response
+
+```json
+{
+  "created_at": "string",
+  "execution_id": "string",
+  "key": "string",
+  "mime_type": "string",
+  "size_bytes": 0
+}
+```
+
+<a id="upload-a-file-to-a-one-time-url-from-the-`get_artifact_upload_url`-tool.-responses"></a>
+#### Responses
+
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Artifact stored|[ArtifactMeta](#schemaartifactmeta)|
+|400|[Bad Request](https://tools.ietf.org/html/rfc7231#section-6.5.1)|Invalid mime type|[ApiError](#schemaapierror)|
+|404|[Not Found](https://tools.ietf.org/html/rfc7231#section-6.5.4)|Unknown, expired, or already-used token|[ApiError](#schemaapierror)|
+|413|[Payload Too Large](https://tools.ietf.org/html/rfc7231#section-6.5.11)|Payload exceeds the artifact size limit|[ApiError](#schemaapierror)|
+
+Authentication: none.
+
+
 ### List metadata for all stored artifacts.
 
 

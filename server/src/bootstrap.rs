@@ -35,6 +35,7 @@ pub struct FeatureBootstrapConfig {
     pub wasm_stubs: WasmStubConfig,
     pub instructions_override: Option<String>,
     pub run_js_description_override: Option<String>,
+    pub public_url: Option<String>,
 }
 
 impl Default for FeatureBootstrapConfig {
@@ -46,6 +47,7 @@ impl Default for FeatureBootstrapConfig {
             wasm_stubs: WasmStubConfig::default(),
             instructions_override: None,
             run_js_description_override: None,
+            public_url: None,
         }
     }
 }
@@ -129,6 +131,9 @@ impl RuntimeBootstrap {
         }
         if let Some(text) = config.run_js_description_override {
             self.engine = self.engine.with_run_js_description_override(text);
+        }
+        if let Some(url) = config.public_url {
+            self.engine = self.engine.with_public_url(url);
         }
         Ok(self)
     }

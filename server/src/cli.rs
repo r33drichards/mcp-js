@@ -371,6 +371,19 @@ pub struct Cli {
     )]
     pub instructions: Option<String>,
 
+    /// Externally reachable base URL of this server, e.g.
+    /// `https://mcp.example.com`. Used to build the absolute upload URLs
+    /// returned by the `get_artifact_upload_url` tool; without it the tool
+    /// returns only a path for the client to resolve against the server's
+    /// address.
+    #[arg(
+        long = "public-url",
+        env = "MCP_V8_PUBLIC_URL",
+        value_name = "URL",
+        help_heading = "Core"
+    )]
+    pub public_url: Option<String>,
+
     /// Override the description advertised for the `run_js` tool in `tools/list`.
     /// The value is used verbatim as inline text, unless it begins with `@`, in
     /// which case the remainder is treated as a path to a file whose contents are

@@ -300,6 +300,19 @@ pub struct PutArtifactArgs {
 }
 
 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
+pub struct ArtifactUploadUrlArgs {
+    /// Key the uploaded file will be stored under (same key overwrites).
+    pub key: String,
+    /// Mime type to store, e.g. "application/pdf". When omitted, the upload
+    /// request's Content-Type is used ("application/octet-stream" if none).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    /// How long the URL stays valid, in seconds (default 600, max 3600).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_in_secs: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct HeapArg {
     pub heap: String,
 }
@@ -554,6 +567,16 @@ impl McpService {
         Parameters(args): Parameters<ArtifactKeyArg>,
     ) -> Result<CallToolResult, McpError> {
         self.dispatch("get_artifact", &args).await
+    }
+
+    #[tool(
+        description = "Get a one-time URL for uploading a file as an artifact over plain HTTP, so the file's bytes never pass through a tool call. Use this instead of put_artifact for anything but small files. Returns { url, method: \"PUT\", expires_at, max_bytes }: send the raw file as the request body, e.g. `curl -fsS -T ./file '<url>'`. The URL needs no other credentials, works once, and expires (default 10 minutes); max 16 MiB. Afterwards run_js code reads the file with `artifact.get(key)`. If `url` is absent the server has no public URL configured: append the returned `path` to the origin you reach the server at."
+    )]
+    pub async fn get_artifact_upload_url(
+        &self,
+        Parameters(args): Parameters<ArtifactUploadUrlArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        self.dispatch("get_artifact_upload_url", &args).await
     }
 
     #[tool(
@@ -866,6 +889,24 @@ impl StatelessMcpService {
         let result = invoke_runtime_tool(
             &self.runtime,
             "get_artifact",
+            serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string()),
+            None,
+            self.mcp_headers.get(),
+        )
+        .await;
+        tool_result(result)
+    }
+
+    #[tool(
+        description = "Get a one-time URL for uploading a file as an artifact over plain HTTP, so the file's bytes never pass through a tool call. Use this instead of put_artifact for anything but small files. Returns { url, method: \"PUT\", expires_at, max_bytes }: send the raw file as the request body, e.g. `curl -fsS -T ./file '<url>'`. The URL needs no other credentials, works once, and expires (default 10 minutes); max 16 MiB. Afterwards run_js code reads the file with `artifact.get(key)`. If `url` is absent the server has no public URL configured: append the returned `path` to the origin you reach the server at."
+    )]
+    pub async fn get_artifact_upload_url(
+        &self,
+        Parameters(args): Parameters<ArtifactUploadUrlArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = invoke_runtime_tool(
+            &self.runtime,
+            "get_artifact_upload_url",
             serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string()),
             None,
             self.mcp_headers.get(),

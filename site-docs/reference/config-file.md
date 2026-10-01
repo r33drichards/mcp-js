@@ -265,6 +265,13 @@ Path to the sled database for the session log (per-session heap+fs history) and 
 - Environment: `MCP_V8_SESSION_DB_PATH`
 - Default: `/tmp/mcp-v8-sessions`
 
+### `public_url`
+
+Externally reachable base URL of this server, e.g. `https://mcp.example.com`. Used to build the absolute upload URLs returned by the `get_artifact_upload_url` tool; without it the tool returns only a path for the client to resolve against the server's address
+
+- CLI flag: `--public-url`
+- Environment: `MCP_V8_PUBLIC_URL`
+
 ## Fetch
 
 ### `fetch_header_config`

@@ -9,6 +9,81 @@
     "version": "0.1.0"
   },
   "paths": {
+    "/api/artifact-uploads/{token}": {
+      "put": {
+        "tags": [
+          "artifacts"
+        ],
+        "summary": "Upload a file to a one-time URL from the `get_artifact_upload_url` tool.",
+        "description": "The token in the path is the only credential — this route is not behind\nbearer auth. The request body is stored verbatim under the key the URL\nwas issued for; the mime type is the one fixed at issue time, else the\nrequest's `Content-Type`. A token works once and expires.",
+        "operationId": "redeem_artifact_upload_handler",
+        "parameters": [
+          {
+            "name": "token",
+            "in": "path",
+            "description": "One-time upload token",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Raw artifact bytes (max 16 MiB)",
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Artifact stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArtifactMeta"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid mime type",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown, expired, or already-used token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Payload exceeds the artifact size limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/artifacts": {
       "get": {
         "tags": [

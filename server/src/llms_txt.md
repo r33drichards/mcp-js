@@ -33,7 +33,8 @@ mcp-v8 exposes a V8 JavaScript runtime as MCP tools. Agents can run JS/TS code, 
 - `get_artifact(key)` returns the payload as an MCP content block: `image/*` as an image block (visible to the model), `audio/*` as audio, UTF-8 as text, other binary as base64 text.
 - `list_artifacts()` lists stored artifact metadata; `get_execution` includes an `artifacts` field with what that execution emitted.
 - `put_artifact(key, mime_type, text | data_base64 | file_path)` uploads a file as an artifact (`file_path` is a server-side path, gated like `run_js` `file`); JS reads it with `artifact.get(key)` (`{ key, mime_type, size_bytes, created_at, bytes: Uint8Array }` or `null`) and `artifact.list()`.
-- Stateless `run_js` attaches emitted artifacts inline to its result (up to 8 MiB), and also exposes `get_artifact`/`put_artifact`/`list_artifacts`.
+- `get_artifact_upload_url(key, mime_type?, expires_in_secs?)` returns a one-time URL: `PUT` the raw file to it (`curl -T file '<url>'`, no other credentials) to store it as an artifact without sending bytes through a tool call. Prefer it over `put_artifact` for anything but small files.
+- Stateless `run_js` attaches emitted artifacts inline to its result (up to 8 MiB), and also exposes `get_artifact`/`put_artifact`/`get_artifact_upload_url`/`list_artifacts`.
 
 ### Additional tools (stateful mode only)
 
@@ -124,6 +125,7 @@ In stateful mode, pass the returned `heap` hash back to `run_js` to resume that 
 | GET | /api/artifacts | List stored artifact metadata |
 | GET | /api/artifacts/{key} | Download raw artifact bytes (Content-Type = stored mime) |
 | PUT | /api/artifacts/{key} | Upload raw bytes as an artifact (mime = request Content-Type) |
+| PUT | /api/artifact-uploads/{token} | Upload raw bytes to a one-time URL from `get_artifact_upload_url` (no bearer auth) |
 | GET | /api-doc/openapi.json | OpenAPI 3.0 spec |
 | GET | /docs | Full documentation |
 | GET | /llms.txt | This file |
