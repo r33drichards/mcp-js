@@ -5,10 +5,10 @@
 //! under a caller-chosen key. Artifacts land in a sled tree (`"artifacts"`)
 //! in the execution db, so they survive across executions and can be fetched
 //! later with the `get_artifact` MCP tool. The flow also runs the other way:
-//! a client uploads a file with the `put_artifact` MCP tool (or
-//! `PUT /api/artifacts/{key}`) and JS reads it back with `artifact.get(key)`
-//! / `artifact.list()`. For files too big to inline in a tool call,
-//! `get_artifact_upload_url` issues a one-time URL to send the bytes to. The MCP layer renders each
+//! a client asks the `get_artifact_upload_url` MCP tool for a one-time URL,
+//! sends a file's bytes to it over plain HTTP (or uses
+//! `PUT /api/artifacts/{key}` with its own credentials), and JS reads the
+//! file back with `artifact.get(key)` / `artifact.list()`. The MCP layer renders each
 //! artifact as the closest MCP-spec content block for its mime type —
 //! `image/*` → `ImageContent` and `audio/*` → `AudioContent` (base64 data +
 //! mimeType, the spec's way to put images/audio in front of a model), UTF-8
@@ -288,8 +288,7 @@ pub const MAX_UPLOAD_TTL_SECS: u64 = 3600;
 
 /// Permission to upload one artifact, handed out as an unguessable token by
 /// the `get_artifact_upload_url` tool and redeemed once over plain HTTP — so
-/// a client can send a file's bytes out-of-band instead of inline (base64)
-/// in a tool call.
+/// a file's bytes travel out-of-band instead of through a tool call.
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct UploadGrant {
     /// Key the upload will be stored under.
@@ -496,8 +495,8 @@ pub fn inject_artifact_snapshot(
 /// Accepts a Uint8Array/TypedArray/ArrayBuffer payload, or a string (which is
 /// UTF-8 encoded). Same key overwrites.
 ///
-/// `artifact.get(key)` — read an artifact back (e.g. a file uploaded with the
-/// `put_artifact` tool): `{ key, mime_type, size_bytes, created_at,
+/// `artifact.get(key)` — read an artifact back (e.g. a file uploaded through
+/// a `get_artifact_upload_url` URL): `{ key, mime_type, size_bytes, created_at,
 /// execution_id?, bytes: Uint8Array }`, or `null` when the key doesn't exist.
 /// `artifact.list()` — metadata for every stored artifact.
 const ARTIFACT_JS_WRAPPER: &str = r#"

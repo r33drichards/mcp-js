@@ -13,8 +13,6 @@
 
 use std::collections::HashMap;
 
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD as BASE64;
 use serde_json::{Value, json};
 
 use crate::engine::Engine;
@@ -60,7 +58,6 @@ pub async fn call_tool(
             .await
             .into(),
         "get_artifact" => get_artifact(runtime, args),
-        "put_artifact" => put_artifact(runtime, mcp_headers, args).await.into(),
         "get_artifact_upload_url" => get_artifact_upload_url(runtime, args).into(),
         "list_artifacts" => list_artifacts(runtime).into(),
         "get_heap_tags" => get_heap_tags(runtime, args).await.into(),
@@ -276,48 +273,6 @@ pub fn get_artifact(runtime: &Engine, args: &Value) -> ToolResponse {
             }
         }
         Err(e) => json!({ "error": e }).into(),
-    }
-}
-
-/// Upload an artifact from the client. The payload is exactly one of `text`
-/// (stored as UTF-8), `data_base64` (decoded to raw bytes), or `file_path` (a
-/// policy-gated read from the server's filesystem). run_js code reads it back
-/// with `artifact.get(key)`.
-pub async fn put_artifact(runtime: &Engine, mcp_headers: Option<&Value>, args: &Value) -> Value {
-    let key = string_arg(args, "key").unwrap_or_default();
-    let mime_type = string_arg(args, "mime_type").unwrap_or_default();
-    let stored = match (
-        str_arg(args, "text"),
-        str_arg(args, "data_base64"),
-        str_arg(args, "file_path"),
-    ) {
-        (Some(text), None, None) => runtime.put_artifact(&key, &mime_type, text.as_bytes()),
-        (None, Some(data), None) => {
-            // Tolerate the line breaks `base64` CLIs and MIME encoders insert.
-            let compact: String = data.chars().filter(|c| !c.is_ascii_whitespace()).collect();
-            match BASE64.decode(compact) {
-                Ok(bytes) => runtime.put_artifact(&key, &mime_type, &bytes),
-                Err(e) => Err(format!("put_artifact: data_base64 is not valid base64: {e}")),
-            }
-        }
-        (None, None, Some(path)) => {
-            runtime
-                .put_artifact_from_file(&key, &mime_type, path, mcp_headers)
-                .await
-        }
-        _ => Err(
-            "put_artifact: provide exactly one of `text`, `data_base64`, or `file_path`"
-                .to_string(),
-        ),
-    };
-    match stored {
-        Ok(meta) => json!({
-            "key": meta.key,
-            "mime_type": meta.mime_type,
-            "size_bytes": meta.size_bytes,
-            "created_at": meta.created_at,
-        }),
-        Err(e) => json!({ "error": e }),
     }
 }
 

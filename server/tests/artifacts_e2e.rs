@@ -521,102 +521,7 @@ async fn test_canonical_invocation_preserves_artifact_content() {
     );
 }
 
-// ── Upload (put_artifact) and JS read-back ───────────────────────────────
-
-/// A file uploaded with put_artifact (binary via data_base64, text via text)
-/// is readable from run_js with artifact.get, and listed by artifact.list.
-#[tokio::test]
-async fn test_put_artifact_then_read_from_js() {
-    ensure_v8();
-    let engine = create_test_engine();
-
-    // Line-wrapped base64, as `base64` CLIs emit it.
-    let mut wrapped = BASE64.encode(PNG_BYTES);
-    wrapped.insert(4, '\n');
-    let put = server::mcp_dispatch::put_artifact(
-        &engine,
-        None,
-        &json!({ "key": "upload.png", "mime_type": "image/png", "data_base64": wrapped }),
-    )
-    .await;
-    assert!(put["error"].is_null(), "put failed: {:?}", put);
-    assert_eq!(put["key"], "upload.png");
-    assert_eq!(put["mime_type"], "image/png");
-    assert_eq!(put["size_bytes"], PNG_BYTES.len() as u64);
-
-    let put = server::mcp_dispatch::put_artifact(
-        &engine,
-        None,
-        &json!({ "key": "notes.txt", "mime_type": "text/plain", "text": "héllo" }),
-    )
-    .await;
-    assert!(put["error"].is_null(), "put failed: {:?}", put);
-
-    let resp = run_js(
-        &engine,
-        r#"
-        const png = artifact.get("upload.png");
-        const txt = artifact.get("notes.txt");
-        console.log(JSON.stringify({
-            isU8: png.bytes instanceof Uint8Array,
-            bytes: Array.from(png.bytes),
-            mime: png.mime_type,
-            size: png.size_bytes,
-            text: new TextDecoder().decode(txt.bytes),
-            missing: artifact.get("nope"),
-            keys: artifact.list().map((a) => a.key),
-        }));
-        "#,
-    )
-    .await;
-    assert!(resp.json["error"].is_null(), "run failed: {:?}", resp.json);
-    let out: Value = serde_json::from_str(resp.json["output"].as_str().unwrap().trim()).unwrap();
-    assert_eq!(out["isU8"], true);
-    assert_eq!(out["bytes"], json!(PNG_BYTES));
-    assert_eq!(out["mime"], "image/png");
-    assert_eq!(out["size"], PNG_BYTES.len() as u64);
-    assert_eq!(out["text"], "héllo");
-    assert!(out["missing"].is_null());
-    assert_eq!(out["keys"], json!(["notes.txt", "upload.png"]));
-
-    // Reading an upload doesn't make it an artifact this execution emitted.
-    assert!(resp.json["artifacts"].is_null());
-    assert!(resp.artifacts.is_empty());
-
-    // The upload is also visible to the existing fetch tool.
-    let got = server::mcp_dispatch::get_artifact(&engine, &json!({ "key": "upload.png" }));
-    assert!(matches!(&got.artifacts[0], ArtifactContent::Image { .. }));
-}
-
-/// put_artifact rejects a missing/ambiguous payload, bad base64, and
-/// anything the store's validation rejects.
-#[tokio::test]
-async fn test_put_artifact_errors() {
-    ensure_v8();
-    let engine = create_test_engine();
-    let put = async |args: Value| server::mcp_dispatch::put_artifact(&engine, None, &args).await;
-
-    let neither = put(json!({ "key": "k", "mime_type": "text/plain" })).await;
-    assert!(neither["error"].as_str().unwrap().contains("exactly one"));
-
-    let both = put(json!({ "key": "k", "mime_type": "text/plain", "text": "a", "data_base64": "YQ==" })).await;
-    assert!(both["error"].as_str().unwrap().contains("exactly one"));
-
-    let bad = put(json!({ "key": "k", "mime_type": "text/plain", "data_base64": "not base64!" })).await;
-    assert!(bad["error"].as_str().unwrap().contains("not valid base64"));
-
-    let bad_mime = put(json!({ "key": "k", "mime_type": "plain", "text": "a" })).await;
-    assert!(bad_mime["error"].as_str().unwrap().contains("mime"));
-
-    let no_key = put(json!({ "mime_type": "text/plain", "text": "a" })).await;
-    assert!(no_key["error"].as_str().unwrap().contains("key"));
-
-    // file_path is a host-side read: refused unless the server opts in.
-    let file = put(json!({ "key": "k", "mime_type": "text/plain", "file_path": "/etc/hosts" })).await;
-    assert!(file["error"].as_str().unwrap().contains("disabled"));
-
-    assert!(engine.list_artifacts().unwrap().is_empty());
-}
+// ── Uploads and JS read-back ─────────────────────────────────────────────
 
 /// `PUT /api/artifacts/{key}` stores the raw body with the request's
 /// Content-Type (parameters dropped); a script then reads it with
@@ -701,50 +606,6 @@ async fn test_artifact_rest_upload() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// With file-path reads enabled, put_artifact stores a file from the server's
-/// filesystem byte-for-byte; a missing path and an oversized file are errors.
-#[tokio::test]
-async fn test_put_artifact_from_file_path() {
-    ensure_v8();
-    let engine = create_test_engine()
-        .with_run_js_file_policy(server::engine::run_js_file::RunJsFilePolicy::AllowAll);
-    let dir = tempfile::tempdir().unwrap();
-
-    let path = dir.path().join("form.pdf");
-    std::fs::write(&path, PNG_BYTES).unwrap();
-    let put = server::mcp_dispatch::put_artifact(
-        &engine,
-        None,
-        &json!({ "key": "form.pdf", "mime_type": "application/pdf", "file_path": path.to_str().unwrap() }),
-    )
-    .await;
-    assert!(put["error"].is_null(), "put failed: {:?}", put);
-    assert_eq!(put["size_bytes"], PNG_BYTES.len() as u64);
-    assert_eq!(engine.get_artifact("form.pdf").unwrap().bytes, PNG_BYTES);
-
-    let missing = server::mcp_dispatch::put_artifact(
-        &engine,
-        None,
-        &json!({ "key": "x", "mime_type": "text/plain", "file_path": dir.path().join("nope").to_str().unwrap() }),
-    )
-    .await;
-    assert!(missing["error"].is_string());
-
-    let big = dir.path().join("big.bin");
-    std::fs::File::create(&big)
-        .unwrap()
-        .set_len(16 * 1024 * 1024 + 1)
-        .unwrap();
-    let too_big = server::mcp_dispatch::put_artifact(
-        &engine,
-        None,
-        &json!({ "key": "x", "mime_type": "application/octet-stream", "file_path": big.to_str().unwrap() }),
-    )
-    .await;
-    assert!(too_big["error"].as_str().unwrap().contains("exceeds"));
-    assert!(engine.get_artifact("x").is_err());
-}
-
 // ── One-time upload URLs ─────────────────────────────────────────────────
 
 /// Serve only the upload router for `engine` on an ephemeral port.
@@ -794,9 +655,18 @@ async fn test_upload_url_roundtrip_is_single_use() {
 
     let resp = run_js(
         &engine,
-        r#"const f = artifact.get("form.pdf"); console.log(f.mime_type, Array.from(f.bytes).join(","));"#,
+        r#"
+        const f = artifact.get("form.pdf");
+        if (!(f.bytes instanceof Uint8Array)) throw new Error("bytes is not a Uint8Array");
+        if (artifact.get("nope") !== null) throw new Error("missing key should be null");
+        if (artifact.list().map((a) => a.key).join() !== "form.pdf") throw new Error("list");
+        console.log(f.mime_type, Array.from(f.bytes).join(","));
+        "#,
     )
     .await;
+    assert!(resp.json["error"].is_null(), "run failed: {:?}", resp.json);
+    // Reading an upload doesn't make it an artifact this execution emitted.
+    assert!(resp.json["artifacts"].is_null());
     let expected = format!(
         "application/pdf {}",
         PNG_BYTES.iter().map(|b| b.to_string()).collect::<Vec<_>>().join(",")

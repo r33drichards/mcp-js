@@ -83,37 +83,14 @@ running in `run_js` reads it back — useful when the model has a file (a PDF to
 attach to a form, a CSV to process) and the sandbox has no other way to
 receive it.
 
-Over MCP, call `put_artifact` with the payload as exactly one of `text`
-(stored as UTF-8), `data_base64` (decoded to raw bytes), or `file_path`:
-
-```json
-{ "tool": "put_artifact",
-  "arguments": { "key": "form.pdf", "mime_type": "application/pdf",
-                 "data_base64": "JVBERi0xLjcK…" } }
-// Response: { "key": "form.pdf", "mime_type": "application/pdf",
-//             "size_bytes": 48213, "created_at": "…" }
-```
-
-`file_path` names a file **on the server's own filesystem** — nothing is
-uploaded from the client — so it suits a local (stdio) server that shares a
-disk with the agent. It is the same kind of host-side read as `run_js`'s
-`file` parameter and is gated the same way: rejected unless the server runs
-with `--allow-run-js-file` or a `run_js_file` policy allows the path.
-
-```json
-{ "tool": "put_artifact",
-  "arguments": { "key": "form.pdf", "mime_type": "application/pdf",
-                 "file_path": "/home/me/Downloads/form.pdf" } }
-```
-
-MCP has no streaming or chunked upload, so `text` and `data_base64` travel
-inline in the tool call — every byte passes through the model. For anything
-but small files, upload out-of-band instead.
+MCP has no streaming or file-upload mechanism, and tool arguments are JSON, so
+sending a file *through* a tool call would mean the model emitting every byte
+as base64. Uploads therefore go out-of-band: the tool hands out a URL and the
+bytes travel over plain HTTP.
 
 ### Upload with a one-time URL
 
-`get_artifact_upload_url` returns a URL the client can `PUT` the raw file to.
-The bytes go straight to the server over HTTP and never appear in a tool call:
+`get_artifact_upload_url` returns a URL the client can `PUT` the raw file to:
 
 ```json
 { "tool": "get_artifact_upload_url",
@@ -150,7 +127,7 @@ curl -X PUT --data-binary @form.pdf -H 'Content-Type: application/pdf' \
   http://localhost:8080/api/artifacts/form.pdf
 ```
 
-Then read it in JavaScript:
+### Read the upload in JavaScript
 
 ```js
 const file = artifact.get("form.pdf");   // null if the key doesn't exist

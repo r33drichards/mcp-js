@@ -1479,10 +1479,6 @@ impl Engine {
             crate::mcp_dispatch::run_js_blocking(self, mcp_headers, arguments).await
         } else if name == "get_artifact" {
             crate::mcp_dispatch::get_artifact(self, arguments)
-        } else if name == "put_artifact" {
-            crate::mcp_dispatch::put_artifact(self, mcp_headers, arguments)
-                .await
-                .into()
         } else if name == "get_artifact_upload_url" {
             crate::mcp_dispatch::get_artifact_upload_url(self, arguments).into()
         } else if name == "list_artifacts" {

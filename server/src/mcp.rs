@@ -277,29 +277,6 @@ pub struct ArtifactKeyArg {
 }
 
 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
-pub struct PutArtifactArgs {
-    /// Key to store the artifact under (same key overwrites). run_js code
-    /// reads it back with `artifact.get(key)`.
-    pub key: String,
-    /// Mime type of the payload, e.g. "application/pdf" or "text/csv".
-    pub mime_type: String,
-    /// Payload as plain text, stored as UTF-8. Provide exactly one of
-    /// `text`, `data_base64`, or `file_path`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub text: Option<String>,
-    /// Payload as base64 (standard alphabet), decoded to raw bytes — use for
-    /// binary files.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub data_base64: Option<String>,
-    /// Path to a file **on the server's own filesystem** to store as the
-    /// payload (not uploaded from the client). Disabled by default: the
-    /// server must be started with `--allow-run-js-file` or a `run_js_file`
-    /// policy that allows the path.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub file_path: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
 pub struct ArtifactUploadUrlArgs {
     /// Key the uploaded file will be stored under (same key overwrites).
     pub key: String,
@@ -570,23 +547,13 @@ impl McpService {
     }
 
     #[tool(
-        description = "Get a one-time URL for uploading a file as an artifact over plain HTTP, so the file's bytes never pass through a tool call. Use this instead of put_artifact for anything but small files. Returns { url, method: \"PUT\", expires_at, max_bytes }: send the raw file as the request body, e.g. `curl -fsS -T ./file '<url>'`. The URL needs no other credentials, works once, and expires (default 10 minutes); max 16 MiB. Afterwards run_js code reads the file with `artifact.get(key)`. If `url` is absent the server has no public URL configured: append the returned `path` to the origin you reach the server at."
+        description = "Get a one-time URL for uploading a file as an artifact over plain HTTP, so the file's bytes never pass through a tool call. Returns { url, method: \"PUT\", expires_at, max_bytes }: send the raw file as the request body, e.g. `curl -fsS -T ./file '<url>'`. The URL needs no other credentials, works once, and expires (default 10 minutes); max 16 MiB. Afterwards run_js code reads the file with `artifact.get(key)`. If `url` is absent the server has no public URL configured: append the returned `path` to the origin you reach the server at."
     )]
     pub async fn get_artifact_upload_url(
         &self,
         Parameters(args): Parameters<ArtifactUploadUrlArgs>,
     ) -> Result<CallToolResult, McpError> {
         self.dispatch("get_artifact_upload_url", &args).await
-    }
-
-    #[tool(
-        description = "Upload a file as an artifact so run_js code can use it. Pass the payload as exactly one of `text` (UTF-8), `data_base64` (binary), or `file_path` (a path on the server's own filesystem; rejected unless the server allows it via --allow-run-js-file or a run_js_file policy), with its mime type; max 16 MiB, same key overwrites. Inside run_js, `artifact.get(key)` returns { key, mime_type, size_bytes, created_at, bytes: Uint8Array } (null if missing) and `artifact.list()` lists metadata. Returns the stored metadata."
-    )]
-    pub async fn put_artifact(
-        &self,
-        Parameters(args): Parameters<PutArtifactArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        self.dispatch("put_artifact", &args).await
     }
 
     #[tool(
@@ -898,7 +865,7 @@ impl StatelessMcpService {
     }
 
     #[tool(
-        description = "Get a one-time URL for uploading a file as an artifact over plain HTTP, so the file's bytes never pass through a tool call. Use this instead of put_artifact for anything but small files. Returns { url, method: \"PUT\", expires_at, max_bytes }: send the raw file as the request body, e.g. `curl -fsS -T ./file '<url>'`. The URL needs no other credentials, works once, and expires (default 10 minutes); max 16 MiB. Afterwards run_js code reads the file with `artifact.get(key)`. If `url` is absent the server has no public URL configured: append the returned `path` to the origin you reach the server at."
+        description = "Get a one-time URL for uploading a file as an artifact over plain HTTP, so the file's bytes never pass through a tool call. Returns { url, method: \"PUT\", expires_at, max_bytes }: send the raw file as the request body, e.g. `curl -fsS -T ./file '<url>'`. The URL needs no other credentials, works once, and expires (default 10 minutes); max 16 MiB. Afterwards run_js code reads the file with `artifact.get(key)`. If `url` is absent the server has no public URL configured: append the returned `path` to the origin you reach the server at."
     )]
     pub async fn get_artifact_upload_url(
         &self,
@@ -907,24 +874,6 @@ impl StatelessMcpService {
         let result = invoke_runtime_tool(
             &self.runtime,
             "get_artifact_upload_url",
-            serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string()),
-            None,
-            self.mcp_headers.get(),
-        )
-        .await;
-        tool_result(result)
-    }
-
-    #[tool(
-        description = "Upload a file as an artifact so run_js code can use it. Pass the payload as exactly one of `text` (UTF-8), `data_base64` (binary), or `file_path` (a path on the server's own filesystem; rejected unless the server allows it via --allow-run-js-file or a run_js_file policy), with its mime type; max 16 MiB, same key overwrites. Inside run_js, `artifact.get(key)` returns { key, mime_type, size_bytes, created_at, bytes: Uint8Array } (null if missing) and `artifact.list()` lists metadata. Returns the stored metadata."
-    )]
-    pub async fn put_artifact(
-        &self,
-        Parameters(args): Parameters<PutArtifactArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        let result = invoke_runtime_tool(
-            &self.runtime,
-            "put_artifact",
             serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string()),
             None,
             self.mcp_headers.get(),

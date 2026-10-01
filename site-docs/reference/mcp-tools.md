@@ -35,7 +35,6 @@ These tools execute in isolated runs and return output directly.
 - [`list_executions`](#heap+fs-list-executions)
 - [`list_session_snapshots`](#heap+fs-list-session-snapshots)
 - [`list_sessions`](#heap+fs-list-sessions)
-- [`put_artifact`](#heap+fs-put-artifact)
 - [`query_heaps_by_tags`](#heap+fs-query-heaps-by-tags)
 - [`run_js`](#heap+fs-run-js)
 - [`set_heap_tags`](#heap+fs-set-heap-tags)
@@ -167,7 +166,7 @@ Parameters:
 ### `get_artifact_upload_url`
 <a id="heap+fs-get-artifact-upload-url"></a>
 
-Get a one-time URL for uploading a file as an artifact over plain HTTP, so the file's bytes never pass through a tool call. Use this instead of put_artifact for anything but small files. Returns { url, method: "PUT", expires_at, max_bytes }: send the raw file as the request body, e.g. `curl -fsS -T ./file '<url>'`. The URL needs no other credentials, works once, and expires (default 10 minutes); max 16 MiB. Afterwards run_js code reads the file with `artifact.get(key)`. If `url` is absent the server has no public URL configured: append the returned `path` to the origin you reach the server at.
+Get a one-time URL for uploading a file as an artifact over plain HTTP, so the file's bytes never pass through a tool call. Returns { url, method: "PUT", expires_at, max_bytes }: send the raw file as the request body, e.g. `curl -fsS -T ./file '<url>'`. The URL needs no other credentials, works once, and expires (default 10 minutes); max 16 MiB. Afterwards run_js code reads the file with `artifact.get(key)`. If `url` is absent the server has no public URL configured: append the returned `path` to the origin you reach the server at.
 
 Parameters:
 
@@ -254,21 +253,6 @@ Parameters:
 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
-
-### `put_artifact`
-<a id="heap+fs-put-artifact"></a>
-
-Upload a file as an artifact so run_js code can use it. Pass the payload as exactly one of `text` (UTF-8), `data_base64` (binary), or `file_path` (a path on the server's own filesystem; rejected unless the server allows it via --allow-run-js-file or a run_js_file policy), with its mime type; max 16 MiB, same key overwrites. Inside run_js, `artifact.get(key)` returns { key, mime_type, size_bytes, created_at, bytes: Uint8Array } (null if missing) and `artifact.list()` lists metadata. Returns the stored metadata.
-
-Parameters:
-
-| Parameter | Type | Required | Description |
-| --- | --- | --- | --- |
-| `data_base64` | `string | null` | no | Payload as base64 (standard alphabet), decoded to raw bytes — use for binary files. |
-| `file_path` | `string | null` | no | Path to a file **on the server's own filesystem** to store as the payload (not uploaded from the client). Disabled by default: the server must be started with `--allow-run-js-file` or a `run_js_file` policy that allows the path. |
-| `key` | `string` | yes | Key to store the artifact under (same key overwrites). run_js code reads it back with `artifact.get(key)`. |
-| `mime_type` | `string` | yes | Mime type of the payload, e.g. "application/pdf" or "text/csv". |
-| `text` | `string | null` | no | Payload as plain text, stored as UTF-8. Provide exactly one of `text`, `data_base64`, or `file_path`. |
 
 ### `query_heaps_by_tags`
 <a id="heap+fs-query-heaps-by-tags"></a>
@@ -361,7 +345,7 @@ artifact("chart", "image/png", png);
 - A completed execution lists what it emitted (`key`, `mime_type`, `size_bytes`) in the `artifacts` field of `get_execution`.
 - Fetch a payload with the `get_artifact(key)` tool. `image/*` artifacts come back as an MCP image content block — the model can actually see the image — `audio/*` as an audio block, UTF-8 payloads as text, and other binary as base64 text. `list_artifacts` lists everything stored.
 - Artifacts persist across executions and are also downloadable raw (no base64) via `GET /api/artifacts/{key}` on the REST API.
-- Artifacts also work as input: a file uploaded with the `put_artifact` tool or a `get_artifact_upload_url` URL (or `PUT /api/artifacts/{key}`) is readable here with `artifact.get(key)` → `{ key, mime_type, size_bytes, created_at, bytes: Uint8Array }` (`null` if the key doesn't exist). `artifact.list()` returns metadata for everything stored.
+- Artifacts also work as input: a file uploaded through a `get_artifact_upload_url` URL (or `PUT /api/artifacts/{key}`) is readable here with `artifact.get(key)` → `{ key, mime_type, size_bytes, created_at, bytes: Uint8Array }` (`null` if the key doesn't exist). `artifact.list()` returns metadata for everything stored.
 
 #### Importing Packages
 
@@ -437,7 +421,6 @@ These tools execute in isolated runs and return output directly.
 - [`get_artifact`](#stateless-get-artifact)
 - [`get_artifact_upload_url`](#stateless-get-artifact-upload-url)
 - [`list_artifacts`](#stateless-list-artifacts)
-- [`put_artifact`](#stateless-put-artifact)
 - [`run_js`](#stateless-run-js)
 
 ### `get_artifact`
@@ -454,7 +437,7 @@ Parameters:
 ### `get_artifact_upload_url`
 <a id="stateless-get-artifact-upload-url"></a>
 
-Get a one-time URL for uploading a file as an artifact over plain HTTP, so the file's bytes never pass through a tool call. Use this instead of put_artifact for anything but small files. Returns { url, method: "PUT", expires_at, max_bytes }: send the raw file as the request body, e.g. `curl -fsS -T ./file '<url>'`. The URL needs no other credentials, works once, and expires (default 10 minutes); max 16 MiB. Afterwards run_js code reads the file with `artifact.get(key)`. If `url` is absent the server has no public URL configured: append the returned `path` to the origin you reach the server at.
+Get a one-time URL for uploading a file as an artifact over plain HTTP, so the file's bytes never pass through a tool call. Returns { url, method: "PUT", expires_at, max_bytes }: send the raw file as the request body, e.g. `curl -fsS -T ./file '<url>'`. The URL needs no other credentials, works once, and expires (default 10 minutes); max 16 MiB. Afterwards run_js code reads the file with `artifact.get(key)`. If `url` is absent the server has no public URL configured: append the returned `path` to the origin you reach the server at.
 
 Parameters:
 
@@ -473,21 +456,6 @@ Parameters:
 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
-
-### `put_artifact`
-<a id="stateless-put-artifact"></a>
-
-Upload a file as an artifact so run_js code can use it. Pass the payload as exactly one of `text` (UTF-8), `data_base64` (binary), or `file_path` (a path on the server's own filesystem; rejected unless the server allows it via --allow-run-js-file or a run_js_file policy), with its mime type; max 16 MiB, same key overwrites. Inside run_js, `artifact.get(key)` returns { key, mime_type, size_bytes, created_at, bytes: Uint8Array } (null if missing) and `artifact.list()` lists metadata. Returns the stored metadata.
-
-Parameters:
-
-| Parameter | Type | Required | Description |
-| --- | --- | --- | --- |
-| `data_base64` | `string | null` | no | Payload as base64 (standard alphabet), decoded to raw bytes — use for binary files. |
-| `file_path` | `string | null` | no | Path to a file **on the server's own filesystem** to store as the payload (not uploaded from the client). Disabled by default: the server must be started with `--allow-run-js-file` or a `run_js_file` policy that allows the path. |
-| `key` | `string` | yes | Key to store the artifact under (same key overwrites). run_js code reads it back with `artifact.get(key)`. |
-| `mime_type` | `string` | yes | Mime type of the payload, e.g. "application/pdf" or "text/csv". |
-| `text` | `string | null` | no | Payload as plain text, stored as UTF-8. Provide exactly one of `text`, `data_base64`, or `file_path`. |
 
 ### `run_js`
 <a id="stateless-run-js"></a>
@@ -542,7 +510,7 @@ artifact("chart", "image/png", png);
 - `artifact(key, mime, bytes)` — store an artifact under a caller-chosen key (same key overwrites). `bytes` may be a Uint8Array, TypedArray, ArrayBuffer, or string (UTF-8 encoded). Max 16 MiB per artifact.
 - Emitted artifacts are attached directly to this tool's result as content blocks: `image/*` as an MCP image block (the model can actually see the image), `audio/*` as audio, UTF-8 payloads as text, other binary as base64 text. Up to 8 MiB of payloads are attached inline; anything larger stays retrievable via the `get_artifact(key)` tool.
 - The result JSON lists each emitted artifact (`key`, `mime_type`, `size_bytes`, `inline`).
-- Artifacts also work as input: a file uploaded with the `put_artifact` tool or a `get_artifact_upload_url` URL is readable here with `artifact.get(key)` → `{ key, mime_type, size_bytes, created_at, bytes: Uint8Array }` (`null` if the key doesn't exist). `artifact.list()` returns metadata for everything stored.
+- Artifacts also work as input: a file uploaded through a `get_artifact_upload_url` URL is readable here with `artifact.get(key)` → `{ key, mime_type, size_bytes, created_at, bytes: Uint8Array }` (`null` if the key doesn't exist). `artifact.list()` returns metadata for everything stored.
 
 #### Importing Packages
 
