@@ -64,7 +64,10 @@ use swc_core::ecma::visit::swc_ecma_ast::Pass;
 
 use tokio::sync::Semaphore;
 
-use self::artifacts::{Artifact, ArtifactMeta, ArtifactState, ArtifactStore};
+use self::artifacts::{
+    Artifact, ArtifactMeta, ArtifactState, ArtifactStore, UploadGrant, UploadGrants,
+    UploadReservation,
+};
 use self::console::ConsoleLogState;
 use self::execution::{
     ConsoleOutputPage, ExecutionId, ExecutionInfo, ExecutionRegistry, ExecutionSummary,
@@ -1616,6 +1619,9 @@ pub struct Engine {
     /// Optional override for the `run_js` tool description advertised in
     /// `tools/list`. When `None`, the compiled-in description is used.
     run_js_description_override: Option<Arc<str>>,
+    /// Externally reachable base URL of this server (`--public-url`), used to
+    /// build absolute artifact upload URLs.
+    public_url: Option<Arc<str>>,
     /// Controls whether `run_js` may read its code from a file on the server's
     /// own filesystem (the `file` parameter). `None` disables it entirely (the
     /// default); `Some` either allows all paths or gates them behind a policy.
@@ -1812,6 +1818,7 @@ impl Engine {
             subprocess_config: None,
             instructions_override: None,
             run_js_description_override: None,
+            public_url: None,
             run_js_file_policy: None,
             fs_store: None,
             label_store: None,
@@ -1859,6 +1866,7 @@ impl Engine {
             subprocess_config: None,
             instructions_override: None,
             run_js_description_override: None,
+            public_url: None,
             run_js_file_policy: None,
             fs_store: None,
             label_store: None,
@@ -1993,6 +2001,17 @@ impl Engine {
     /// Get the MCP server `instructions` override, if one was configured.
     pub fn instructions_override(&self) -> Option<Arc<str>> {
         self.instructions_override.clone()
+    }
+
+    /// Set the externally reachable base URL of this server.
+    pub fn with_public_url(mut self, url: String) -> Self {
+        self.public_url = Some(Arc::from(url.trim_end_matches('/')));
+        self
+    }
+
+    /// The configured public base URL (no trailing slash), if any.
+    pub fn public_url(&self) -> Option<Arc<str>> {
+        self.public_url.clone()
     }
 
     /// Override the `run_js` tool description advertised in `tools/list`.
@@ -2686,6 +2705,46 @@ impl Engine {
         self.artifact_store()?
             .get(key)?
             .ok_or_else(|| format!("artifact '{}' not found", key))
+    }
+
+    /// Store (or overwrite) an artifact from outside a script — the upload
+    /// path behind `get_artifact_upload_url` and `PUT /api/artifacts/{key}`.
+    /// JS reads it back with `artifact.get(key)`.
+    pub fn put_artifact(
+        &self,
+        key: &str,
+        mime_type: &str,
+        bytes: &[u8],
+    ) -> Result<ArtifactMeta, String> {
+        self.artifact_store()?.put(key, mime_type, bytes, None)
+    }
+
+    fn upload_grants(&self) -> Result<UploadGrants, String> {
+        let registry = self
+            .execution_registry
+            .as_ref()
+            .ok_or_else(|| "Execution registry not configured".to_string())?;
+        Ok(UploadGrants::new(registry.artifact_uploads_tree()?))
+    }
+
+    /// Issue a one-time upload grant for `key`; the returned token is
+    /// claimed with [`Engine::reserve_artifact_upload`].
+    pub fn issue_artifact_upload(
+        &self,
+        key: &str,
+        mime_type: Option<&str>,
+        ttl_secs: u64,
+    ) -> Result<(String, UploadGrant), String> {
+        self.upload_grants()?.issue(key, mime_type, ttl_secs)
+    }
+
+    /// Claim `token` for one in-flight upload. `None` when it is unknown,
+    /// expired, already used, or another upload currently holds it — checked
+    /// before an upload body is read, so an unauthenticated caller can't
+    /// make the server buffer bytes it will discard. Dropping the
+    /// reservation without completing it leaves the URL usable.
+    pub fn reserve_artifact_upload(&self, token: &str) -> Option<UploadReservation> {
+        self.upload_grants().ok()?.reserve(token)
     }
 
     /// List metadata for all stored artifacts.

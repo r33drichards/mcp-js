@@ -520,3 +520,229 @@ async fn test_canonical_invocation_preserves_artifact_content() {
             .is_err()
     );
 }
+
+// ── Uploads and JS read-back ─────────────────────────────────────────────
+
+/// `PUT /api/artifacts/{key}` stores the raw body with the request's
+/// Content-Type (parameters dropped); a script then reads it with
+/// artifact.get and GET serves the same bytes back.
+#[tokio::test]
+async fn test_artifact_rest_upload() -> Result<(), Box<dyn std::error::Error>> {
+    let mut server = HttpServer::start().await?;
+    let client = Client::new();
+    let url = format!("{}/api/artifacts/rest-upload", server.base_url);
+
+    let resp = client
+        .put(&url)
+        .header("content-type", "application/pdf; name=form.pdf")
+        .body(PNG_BYTES.to_vec())
+        .send()
+        .await?;
+    assert_eq!(resp.status(), 200);
+    let meta: Value = resp.json().await?;
+    assert_eq!(meta["key"], "rest-upload");
+    assert_eq!(meta["mime_type"], "application/pdf");
+    assert_eq!(meta["size_bytes"], PNG_BYTES.len() as u64);
+
+    let resp = client.get(&url).send().await?;
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        resp.headers().get("content-type").unwrap().to_str()?,
+        "application/pdf"
+    );
+    assert_eq!(resp.bytes().await?.as_ref(), PNG_BYTES);
+
+    // A script sees the upload.
+    let resp = client
+        .post(format!("{}/api/exec", server.base_url))
+        .json(&json!({ "code": r#"console.log(artifact.get("rest-upload").bytes.length);"# }))
+        .send()
+        .await?;
+    let id = resp.json::<Value>().await?["execution_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let output = timeout(Duration::from_secs(10), async {
+        loop {
+            let exec: Value = client
+                .get(format!("{}/api/executions/{}", server.base_url, id))
+                .send()
+                .await
+                .expect("GET execution failed")
+                .json()
+                .await
+                .expect("Invalid JSON");
+            if exec["status"] != "running" {
+                assert_eq!(exec["status"], "completed", "execution failed: {:?}", exec);
+                break;
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+        client
+            .get(format!("{}/api/executions/{}/output", server.base_url, id))
+            .send()
+            .await
+            .expect("GET output failed")
+            .json::<Value>()
+            .await
+            .expect("Invalid JSON")
+    })
+    .await?;
+    assert_eq!(output["data"].as_str().unwrap().trim(), PNG_BYTES.len().to_string());
+
+    // No Content-Type → application/octet-stream; over the cap → rejected.
+    let resp = client.put(&url).body(vec![1u8, 2, 3]).send().await?;
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.json::<Value>().await?["mime_type"], "application/octet-stream");
+
+    let resp = client
+        .put(&url)
+        .body(vec![0u8; 16 * 1024 * 1024 + 1])
+        .send()
+        .await?;
+    assert_eq!(resp.status(), 400);
+
+    server.stop().await;
+    Ok(())
+}
+
+// ── One-time upload URLs ─────────────────────────────────────────────────
+
+/// Serve only the upload router for `engine` on an ephemeral port.
+async fn serve_upload_router(engine: Arc<Engine>) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let router = server::api::artifact_upload_router(engine);
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    base
+}
+
+/// get_artifact_upload_url hands out a URL; PUTting raw bytes to it stores
+/// the artifact for scripts to read, and the URL then stops working.
+#[tokio::test]
+async fn test_upload_url_roundtrip_is_single_use() {
+    ensure_v8();
+    let engine = Arc::new(create_test_engine());
+    let base = serve_upload_router(engine.clone()).await;
+    let client = Client::new();
+
+    let issued = server::mcp_dispatch::get_artifact_upload_url(
+        &engine,
+        &json!({ "key": "form.pdf", "mime_type": "application/pdf" }),
+    );
+    assert!(issued["error"].is_null(), "issue failed: {:?}", issued);
+    assert_eq!(issued["method"], "PUT");
+    assert_eq!(issued["key"], "form.pdf");
+    assert_eq!(issued["max_bytes"], 16 * 1024 * 1024);
+    // No --public-url on this engine: path only, with a note.
+    assert!(issued["url"].is_null());
+    assert!(issued["note"].is_string());
+    let url = format!("{}{}", base, issued["path"].as_str().unwrap());
+
+    // The issue-time mime type wins over the request's Content-Type.
+    let resp = client
+        .put(&url)
+        .header("content-type", "text/plain")
+        .body(PNG_BYTES.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let meta: Value = resp.json().await.unwrap();
+    assert_eq!(meta["key"], "form.pdf");
+    assert_eq!(meta["mime_type"], "application/pdf");
+    assert_eq!(meta["size_bytes"], PNG_BYTES.len() as u64);
+
+    let resp = run_js(
+        &engine,
+        r#"
+        const f = artifact.get("form.pdf");
+        if (!(f.bytes instanceof Uint8Array)) throw new Error("bytes is not a Uint8Array");
+        if (artifact.get("nope") !== null) throw new Error("missing key should be null");
+        if (artifact.list().map((a) => a.key).join() !== "form.pdf") throw new Error("list");
+        console.log(f.mime_type, Array.from(f.bytes).join(","));
+        "#,
+    )
+    .await;
+    assert!(resp.json["error"].is_null(), "run failed: {:?}", resp.json);
+    // Reading an upload doesn't make it an artifact this execution emitted.
+    assert!(resp.json["artifacts"].is_null());
+    let expected = format!(
+        "application/pdf {}",
+        PNG_BYTES.iter().map(|b| b.to_string()).collect::<Vec<_>>().join(",")
+    );
+    assert_eq!(resp.json["output"].as_str().unwrap().trim(), expected);
+
+    // Second use of the same URL is refused and changes nothing.
+    let resp = client.put(&url).body(vec![9u8]).send().await.unwrap();
+    assert_eq!(resp.status(), 404);
+    assert_eq!(engine.get_artifact("form.pdf").unwrap().bytes, PNG_BYTES);
+}
+
+/// Without an issue-time mime type the upload's Content-Type is used; bogus
+/// tokens are 404; an oversized or invalid upload is rejected and leaves the
+/// URL usable; and a
+/// configured public URL yields an absolute `url`.
+#[tokio::test]
+async fn test_upload_url_mime_fallback_limits_and_public_url() {
+    ensure_v8();
+    let engine = Arc::new(create_test_engine().with_public_url("https://mcp.example.com/".into()));
+    let base = serve_upload_router(engine.clone()).await;
+    let client = Client::new();
+
+    let issued =
+        server::mcp_dispatch::get_artifact_upload_url(&engine, &json!({ "key": "data.csv" }));
+    let path = issued["path"].as_str().unwrap();
+    assert_eq!(issued["url"], format!("https://mcp.example.com{path}"));
+    assert!(issued["upload_example"].as_str().unwrap().contains("curl"));
+    assert!(issued["note"].is_null());
+    let url = format!("{base}{path}");
+
+    let resp = client
+        .put(format!("{base}/api/artifact-uploads/{}", "0".repeat(64)))
+        .body("x")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+
+    let resp = client
+        .put(&url)
+        .body(vec![0u8; 16 * 1024 * 1024 + 1])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 413);
+    assert!(engine.get_artifact("data.csv").is_err());
+
+    // A rejected upload (here: a Content-Type that isn't a mime type) is the
+    // client's error and, like the 413 above, doesn't burn the URL.
+    let resp = client
+        .put(&url)
+        .header("content-type", "nope")
+        .body("a,b\n")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    assert!(engine.get_artifact("data.csv").is_err());
+
+    let resp = client
+        .put(&url)
+        .header("content-type", "text/csv; charset=utf-8")
+        .body("a,b\n")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.json::<Value>().await.unwrap()["mime_type"], "text/csv");
+
+    // Invalid requests fail at issue time, before anything is uploaded.
+    let bad = server::mcp_dispatch::get_artifact_upload_url(&engine, &json!({ "key": "" }));
+    assert!(bad["error"].is_string());
+    let bad = server::mcp_dispatch::get_artifact_upload_url(
+        &engine,
+        &json!({ "key": "k", "mime_type": "nope" }),
+    );
+    assert!(bad["error"].is_string());
+}

@@ -76,6 +76,70 @@ curl http://localhost:8080/api/artifacts          # metadata list
 curl http://localhost:8080/api/artifacts/chart -o chart.png
 ```
 
+## Upload a file for your code to use
+
+Artifacts also carry input. A client uploads a file under a key, and code
+running in `run_js` reads it back — useful when the model has a file (a PDF to
+attach to a form, a CSV to process) and the sandbox has no other way to
+receive it.
+
+MCP has no streaming or file-upload mechanism, and tool arguments are JSON, so
+sending a file *through* a tool call would mean the model emitting every byte
+as base64. Uploads therefore go out-of-band: the tool hands out a URL and the
+bytes travel over plain HTTP.
+
+### Upload with a one-time URL
+
+`get_artifact_upload_url` returns a URL the client can `PUT` the raw file to:
+
+```json
+{ "tool": "get_artifact_upload_url",
+  "arguments": { "key": "form.pdf", "mime_type": "application/pdf" } }
+// Response: { "key": "form.pdf", "method": "PUT",
+//             "url": "https://mcp.example.com/api/artifact-uploads/3f9c…",
+//             "path": "/api/artifact-uploads/3f9c…",
+//             "expires_at": "…", "max_bytes": 16777216, "single_use": true }
+```
+
+```bash
+curl -fsS -T ./form.pdf 'https://mcp.example.com/api/artifact-uploads/3f9c…'
+```
+
+- The token in the URL is the only credential: the route is **not** behind
+  bearer auth, so a sandbox with no access token can use it. Treat the URL
+  like a password until it is used.
+- A URL works once and expires (`expires_in_secs`, default 600, max 3600).
+- `mime_type` is optional; without it the upload's `Content-Type` is stored
+  (`application/octet-stream` if there is none).
+- The server only knows its own public address if you tell it: set
+  `--public-url` (`MCP_V8_PUBLIC_URL`), e.g. `https://mcp.example.com`.
+  Without it the tool returns just `path`, to be appended to whatever origin
+  the client reaches the server at.
+
+### Upload with your own credentials
+
+A client that already holds the server's credentials can skip the URL step and
+`PUT` the raw bytes directly; the request's `Content-Type` becomes the mime
+type:
+
+```bash
+curl -X PUT --data-binary @form.pdf -H 'Content-Type: application/pdf' \
+  http://localhost:8080/api/artifacts/form.pdf
+```
+
+### Read the upload in JavaScript
+
+```js
+const file = artifact.get("form.pdf");   // null if the key doesn't exist
+console.log(file.mime_type, file.size_bytes);
+const bytes = file.bytes;                // Uint8Array
+artifact.list();                         // [{ key, mime_type, size_bytes, created_at }, …]
+```
+
+The same limits apply as for `artifact()`: 16 MiB per artifact, keys ≤ 256
+bytes, and the same key overwrites. Uploads share the one global key
+namespace with artifacts written from JavaScript.
+
 ## Sizing images for models
 
 Model providers cap image inputs (Claude, for example, rejects images over

@@ -9,6 +9,65 @@ OpenAPI description.
 ## Artifacts
 
 
+### Upload a file to a one-time URL from the `get_artifact_upload_url` tool.
+
+
+<a id="opIdredeem_artifact_upload_handler"></a>
+
+`PUT /api/artifact-uploads/{token}`
+
+The token in the path is the only credential — this route is not behind
+bearer auth. The request body is stored verbatim under the key the URL
+was issued for; the mime type is the one fixed at issue time, else the
+request's `Content-Type`. A token stores one upload and expires; while
+an upload is in flight, other requests with the same token get 404, and
+an upload that is rejected or abandoned leaves the token usable.
+
+> Body parameter
+
+```yaml
+string
+
+```
+
+<a id="upload-a-file-to-a-one-time-url-from-the-`get_artifact_upload_url`-tool.-parameters"></a>
+#### Parameters
+
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|token|path|string|true|One-time upload token|
+|body|body|string(binary)|true|Raw artifact bytes (max 16 MiB)|
+
+> Example responses
+
+> 200 Response
+
+```json
+{
+  "created_at": "string",
+  "execution_id": "string",
+  "key": "string",
+  "mime_type": "string",
+  "size_bytes": 0
+}
+```
+
+<a id="upload-a-file-to-a-one-time-url-from-the-`get_artifact_upload_url`-tool.-responses"></a>
+#### Responses
+
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Artifact stored|[ArtifactMeta](#schemaartifactmeta)|
+|400|[Bad Request](https://tools.ietf.org/html/rfc7231#section-6.5.1)|Invalid mime type|[ApiError](#schemaapierror)|
+|404|[Not Found](https://tools.ietf.org/html/rfc7231#section-6.5.4)|Unknown, expired, already-used, or in-use token|[ApiError](#schemaapierror)|
+|413|[Payload Too Large](https://tools.ietf.org/html/rfc7231#section-6.5.11)|Payload exceeds the artifact size limit|[ApiError](#schemaapierror)|
+|500|[Internal Server Error](https://tools.ietf.org/html/rfc7231#section-6.6.1)|Artifact store unavailable|[ApiError](#schemaapierror)|
+
+Authentication: none.
+
+
 ### List metadata for all stored artifacts.
 
 
@@ -82,6 +141,61 @@ stored mime type as `Content-Type` — no base64, unlike the MCP tool.
 |---|---|---|---|
 |200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Raw artifact bytes (Content-Type = stored mime type)|None|
 |404|[Not Found](https://tools.ietf.org/html/rfc7231#section-6.5.4)|Artifact not found|[ApiError](#schemaapierror)|
+
+Authentication: none.
+
+
+### Upload a file as an artifact.
+
+
+<a id="opIdput_artifact_handler"></a>
+
+`PUT /api/artifacts/{key}`
+
+The request body is stored verbatim as the payload and the request's
+`Content-Type` becomes its mime type (`application/octet-stream` when
+absent). The same key overwrites. Scripts read it back with
+`artifact.get(key)`.
+
+> Body parameter
+
+```yaml
+string
+
+```
+
+<a id="upload-a-file-as-an-artifact.-parameters"></a>
+#### Parameters
+
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|key|path|string|true|Key to store the artifact under|
+|body|body|string(binary)|true|Raw artifact bytes (max 16 MiB)|
+
+> Example responses
+
+> 200 Response
+
+```json
+{
+  "created_at": "string",
+  "execution_id": "string",
+  "key": "string",
+  "mime_type": "string",
+  "size_bytes": 0
+}
+```
+
+<a id="upload-a-file-as-an-artifact.-responses"></a>
+#### Responses
+
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Artifact stored|[ArtifactMeta](#schemaartifactmeta)|
+|400|[Bad Request](https://tools.ietf.org/html/rfc7231#section-6.5.1)|Invalid key, mime type, or payload size|[ApiError](#schemaapierror)|
+|500|[Internal Server Error](https://tools.ietf.org/html/rfc7231#section-6.6.1)|Artifact store unavailable|[ApiError](#schemaapierror)|
 
 Authentication: none.
 

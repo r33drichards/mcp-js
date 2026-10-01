@@ -447,6 +447,7 @@ async fn async_main(cli: Cli) -> Result<()> {
         },
         instructions_override,
         run_js_description_override,
+        public_url: cli.public_url.clone(),
     };
     let runtime_builder = runtime_builder.with_feature_config(feature_config)?;
 
@@ -612,7 +613,11 @@ where
     let protected = axum::Router::new()
         .nest_service("/mcp", mcp_service)
         .merge(api::api_router(runtime.clone()));
-    let app = apply_auth_enforcement(protected, &verifier).merge(openapi_route);
+    // Upload URLs carry their own one-time token, so they stay outside the
+    // bearer-auth layer: the uploader is whoever was handed the URL.
+    let app = apply_auth_enforcement(protected, &verifier)
+        .merge(openapi_route)
+        .merge(api::artifact_upload_router(runtime.clone()));
 
     let listener = tokio::net::TcpListener::bind(bind).await?;
     tracing::info!("Streamable HTTP server listening on {}", bind);
@@ -670,7 +675,9 @@ async fn start_sse_server(
     );
 
     let protected = sse_router.merge(api::api_router(runtime.clone()));
-    let app = apply_auth_enforcement(protected, &verifier).merge(openapi_route);
+    let app = apply_auth_enforcement(protected, &verifier)
+        .merge(openapi_route)
+        .merge(api::artifact_upload_router(runtime.clone()));
 
     let listener = tokio::net::TcpListener::bind(sse_server.config.bind).await?;
     tracing::info!("SSE server listening on {}", sse_server.config.bind);

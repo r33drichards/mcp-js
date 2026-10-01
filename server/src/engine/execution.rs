@@ -125,6 +125,13 @@ impl ExecutionRegistry {
         Ok(tree)
     }
 
+    /// Open the tree of outstanding artifact upload grants.
+    pub fn artifact_uploads_tree(&self) -> Result<sled::Tree, String> {
+        self.db
+            .open_tree("artifact_uploads")
+            .map_err(|e| format!("Failed to open artifact uploads tree: {}", e))
+    }
+
     /// Open the shared keyed artifact tree (`"artifacts"`) in the execution db.
     pub fn artifacts_tree(&self) -> Result<sled::Tree, String> {
         self.db

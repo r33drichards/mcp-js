@@ -1,6 +1,7 @@
 use axum::{
-    extract::{Path, Query, Request, State},
-    http::{header, StatusCode},
+    body::Bytes,
+    extract::{DefaultBodyLimit, Path, Query, Request, State},
+    http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -254,6 +255,8 @@ pub struct FsLogQuery {
         cancel_execution_handler,
         list_artifacts_handler,
         get_artifact_handler,
+        put_artifact_handler,
+        redeem_artifact_upload_handler,
         cli_index_handler,
         cli_download_handler,
         fs_labels_handler,
@@ -508,6 +511,162 @@ async fn list_artifacts_handler(
             Json(serde_json::json!({ "error": e })),
         ),
     }
+}
+
+/// Upload a file as an artifact.
+///
+/// The request body is stored verbatim as the payload and the request's
+/// `Content-Type` becomes its mime type (`application/octet-stream` when
+/// absent). The same key overwrites. Scripts read it back with
+/// `artifact.get(key)`.
+#[utoipa::path(
+    put,
+    path = "/api/artifacts/{key}",
+    params(
+        ("key" = String, Path, description = "Key to store the artifact under")
+    ),
+    request_body(content = Vec<u8>, description = "Raw artifact bytes (max 16 MiB)", content_type = "application/octet-stream"),
+    responses(
+        (status = 200, description = "Artifact stored", body = ArtifactMeta),
+        (status = 400, description = "Invalid key, mime type, or payload size", body = ApiError),
+        (status = 500, description = "Artifact store unavailable", body = ApiError),
+    ),
+    tag = "artifacts"
+)]
+async fn put_artifact_handler(
+    State(engine): State<Arc<Engine>>,
+    Path(key): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> (StatusCode, Json<serde_json::Value>) {
+    // Drop parameters ("; charset=utf-8", multipart boundaries): the stored
+    // mime type is a bare "type/subtype".
+    let mime_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(';').next())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or("application/octet-stream");
+    store_uploaded_artifact(&engine, &key, mime_type, &body).unwrap_or_else(|rejected| rejected)
+}
+
+type JsonReply = (StatusCode, Json<serde_json::Value>);
+
+/// Store an uploaded artifact, separating a bad request (400) from a store
+/// failure (500): the input is validated first, so whatever `put_artifact`
+/// then reports is the server's fault and worth retrying.
+fn store_uploaded_artifact(
+    engine: &Engine,
+    key: &str,
+    mime_type: &str,
+    body: &[u8],
+) -> Result<JsonReply, JsonReply> {
+    crate::engine::artifacts::validate(key, mime_type, body.len()).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": e })),
+        )
+    })?;
+    let meta = engine.put_artifact(key, mime_type, body).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e })),
+        )
+    })?;
+    Ok((StatusCode::OK, Json(serde_json::json!(meta))))
+}
+
+/// Upload a file to a one-time URL from the `get_artifact_upload_url` tool.
+///
+/// The token in the path is the only credential — this route is not behind
+/// bearer auth. The request body is stored verbatim under the key the URL
+/// was issued for; the mime type is the one fixed at issue time, else the
+/// request's `Content-Type`. A token stores one upload and expires; while
+/// an upload is in flight, other requests with the same token get 404, and
+/// an upload that is rejected or abandoned leaves the token usable.
+#[utoipa::path(
+    put,
+    path = "/api/artifact-uploads/{token}",
+    params(
+        ("token" = String, Path, description = "One-time upload token")
+    ),
+    request_body(content = Vec<u8>, description = "Raw artifact bytes (max 16 MiB)", content_type = "application/octet-stream"),
+    responses(
+        (status = 200, description = "Artifact stored", body = ArtifactMeta),
+        (status = 400, description = "Invalid mime type", body = ApiError),
+        (status = 404, description = "Unknown, expired, already-used, or in-use token", body = ApiError),
+        (status = 413, description = "Payload exceeds the artifact size limit", body = ApiError),
+        (status = 500, description = "Artifact store unavailable", body = ApiError),
+    ),
+    tag = "artifacts"
+)]
+async fn redeem_artifact_upload_handler(
+    State(engine): State<Arc<Engine>>,
+    Path(token): Path<String>,
+    request: Request,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let gone = || {
+        (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "upload URL is unknown, expired, or already used" })),
+        )
+    };
+    // Claim the token before reading the body: this route is unauthenticated,
+    // so neither a bogus token nor a second request racing a valid one may
+    // make the server buffer an upload. Every early return below drops the
+    // reservation, which hands the URL back for a retry.
+    let Some(reservation) = engine.reserve_artifact_upload(&token) else {
+        return gone();
+    };
+    let content_type = request
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(';').next())
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+    let Ok(body) = axum::body::to_bytes(
+        request.into_body(),
+        crate::engine::artifacts::MAX_ARTIFACT_BYTES,
+    )
+    .await
+    else {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(serde_json::json!({
+                "error": format!(
+                    "payload exceeds {} bytes",
+                    crate::engine::artifacts::MAX_ARTIFACT_BYTES
+                )
+            })),
+        );
+    };
+    let grant = reservation.grant();
+    let mime_type = grant
+        .mime_type
+        .as_deref()
+        .or(content_type.as_deref())
+        .unwrap_or("application/octet-stream");
+    match store_uploaded_artifact(&engine, &grant.key, mime_type, &body) {
+        Ok(stored) => {
+            reservation.complete();
+            stored
+        }
+        Err(rejected) => rejected,
+    }
+}
+
+/// Router for one-time artifact upload URLs. Kept separate from
+/// [`api_router`] because it must sit outside the bearer-auth layer.
+pub fn artifact_upload_router(runtime: Arc<Engine>) -> Router {
+    Router::new()
+        .route(
+            "/api/artifact-uploads/{token}",
+            axum::routing::put(redeem_artifact_upload_handler)
+                .layer(DefaultBodyLimit::disable()),
+        )
+        .with_state(runtime)
 }
 
 /// Download an artifact's raw payload bytes.
@@ -1514,7 +1673,16 @@ pub fn api_router(runtime: Arc<Engine>) -> Router {
         .route("/api/executions/{id}/output", get(get_execution_output_handler))
         .route("/api/executions/{id}/cancel", post(cancel_execution_handler))
         .route("/api/artifacts", get(list_artifacts_handler))
-        .route("/api/artifacts/{key}", get(get_artifact_handler))
+        .route(
+            "/api/artifacts/{key}",
+            get(get_artifact_handler)
+                .put(put_artifact_handler)
+                // Let a full-size artifact through axum's 2 MiB default; the
+                // store enforces the exact cap.
+                .layer(DefaultBodyLimit::max(
+                    crate::engine::artifacts::MAX_ARTIFACT_BYTES + 1,
+                )),
+        )
         .route("/api/cli", get(cli_index_handler))
         .route("/api/cli/{platform}", get(cli_download_handler))
         .route("/api/fs/labels", get(fs_labels_handler).post(fs_set_label_handler))
