@@ -86,6 +86,60 @@ stored mime type as `Content-Type` — no base64, unlike the MCP tool.
 Authentication: none.
 
 
+### Upload a file as an artifact.
+
+
+<a id="opIdput_artifact_handler"></a>
+
+`PUT /api/artifacts/{key}`
+
+The request body is stored verbatim as the payload and the request's
+`Content-Type` becomes its mime type (`application/octet-stream` when
+absent). The same key overwrites. Scripts read it back with
+`artifact.get(key)`.
+
+> Body parameter
+
+```yaml
+string
+
+```
+
+<a id="upload-a-file-as-an-artifact.-parameters"></a>
+#### Parameters
+
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|key|path|string|true|Key to store the artifact under|
+|body|body|string(binary)|true|Raw artifact bytes (max 16 MiB)|
+
+> Example responses
+
+> 200 Response
+
+```json
+{
+  "created_at": "string",
+  "execution_id": "string",
+  "key": "string",
+  "mime_type": "string",
+  "size_bytes": 0
+}
+```
+
+<a id="upload-a-file-as-an-artifact.-responses"></a>
+#### Responses
+
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Artifact stored|[ArtifactMeta](#schemaartifactmeta)|
+|400|[Bad Request](https://tools.ietf.org/html/rfc7231#section-6.5.1)|Invalid key, mime type, or payload size|[ApiError](#schemaapierror)|
+
+Authentication: none.
+
+
 ## Server
 
 

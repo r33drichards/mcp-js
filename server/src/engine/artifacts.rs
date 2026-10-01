@@ -4,7 +4,10 @@
 //! JS calls `artifact(key, mime, bytes)` to store (or overwrite) an artifact
 //! under a caller-chosen key. Artifacts land in a sled tree (`"artifacts"`)
 //! in the execution db, so they survive across executions and can be fetched
-//! later with the `get_artifact` MCP tool. The MCP layer renders each
+//! later with the `get_artifact` MCP tool. The flow also runs the other way:
+//! a client uploads a file with the `put_artifact` MCP tool (or
+//! `PUT /api/artifacts/{key}`) and JS reads it back with `artifact.get(key)`
+//! / `artifact.list()`. The MCP layer renders each
 //! artifact as the closest MCP-spec content block for its mime type —
 //! `image/*` → `ImageContent` and `audio/*` → `AudioContent` (base64 data +
 //! mimeType, the spec's way to put images/audio in front of a model), UTF-8
@@ -308,11 +311,48 @@ fn op_artifact_write(
     Ok(())
 }
 
+/// Sync op: metadata for one artifact as a JSON string (`"null"` when the key
+/// doesn't exist). Backs `artifact.get(key)`.
+#[op2]
+#[string]
+fn op_artifact_meta(state: &mut OpState, #[string] key: &str) -> Result<String, JsErrorBox> {
+    let artifact_state = state.borrow::<ArtifactState>();
+    let meta = artifact_state
+        .store
+        .get(key)
+        .map_err(JsErrorBox::generic)?
+        .map(|artifact| artifact.meta);
+    serde_json::to_string(&meta).map_err(|e| JsErrorBox::generic(e.to_string()))
+}
+
+/// Sync op: payload bytes for one artifact. Backs `artifact.get(key)`.
+#[op2]
+#[buffer]
+fn op_artifact_read(state: &mut OpState, #[string] key: &str) -> Result<Vec<u8>, JsErrorBox> {
+    let artifact_state = state.borrow::<ArtifactState>();
+    artifact_state
+        .store
+        .get(key)
+        .map_err(JsErrorBox::generic)?
+        .map(|artifact| artifact.bytes)
+        .ok_or_else(|| JsErrorBox::generic(format!("artifact '{}' not found", key)))
+}
+
+/// Sync op: metadata for all stored artifacts as a JSON array string. Backs
+/// `artifact.list()`.
+#[op2]
+#[string]
+fn op_artifact_list(state: &mut OpState) -> Result<String, JsErrorBox> {
+    let artifact_state = state.borrow::<ArtifactState>();
+    let metas = artifact_state.store.list().map_err(JsErrorBox::generic)?;
+    serde_json::to_string(&metas).map_err(|e| JsErrorBox::generic(e.to_string()))
+}
+
 // ── Extension registration ───────────────────────────────────────────────
 
 deno_core::extension!(
     artifacts_ext,
-    ops = [op_artifact_write],
+    ops = [op_artifact_write, op_artifact_meta, op_artifact_read, op_artifact_list],
 );
 
 /// Create the artifacts extension for use in `RuntimeOptions::extensions`.
@@ -344,6 +384,11 @@ pub fn inject_artifact_snapshot(
 /// `artifact(key, mime, bytes)` — store an artifact for the MCP client.
 /// Accepts a Uint8Array/TypedArray/ArrayBuffer payload, or a string (which is
 /// UTF-8 encoded). Same key overwrites.
+///
+/// `artifact.get(key)` — read an artifact back (e.g. a file uploaded with the
+/// `put_artifact` tool): `{ key, mime_type, size_bytes, created_at,
+/// execution_id?, bytes: Uint8Array }`, or `null` when the key doesn't exist.
+/// `artifact.list()` — metadata for every stored artifact.
 const ARTIFACT_JS_WRAPPER: &str = r#"
 (function() {
     globalThis.artifact = function artifact(key, mime, bytes) {
@@ -366,6 +411,18 @@ const ARTIFACT_JS_WRAPPER: &str = r#"
             throw new TypeError('artifact: bytes must be a Uint8Array, TypedArray, ArrayBuffer, or string');
         }
         Deno.core.ops.op_artifact_write(key, mime, u8);
+    };
+    globalThis.artifact.get = function get(key) {
+        if (typeof key !== 'string' || key.length === 0) {
+            throw new TypeError('artifact.get: key must be a non-empty string');
+        }
+        var meta = JSON.parse(Deno.core.ops.op_artifact_meta(key));
+        if (meta === null) return null;
+        meta.bytes = Deno.core.ops.op_artifact_read(key);
+        return meta;
+    };
+    globalThis.artifact.list = function list() {
+        return JSON.parse(Deno.core.ops.op_artifact_list());
     };
 })();
 "#;

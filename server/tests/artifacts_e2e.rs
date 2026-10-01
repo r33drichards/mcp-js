@@ -520,3 +520,175 @@ async fn test_canonical_invocation_preserves_artifact_content() {
             .is_err()
     );
 }
+
+// ── Upload (put_artifact) and JS read-back ───────────────────────────────
+
+/// A file uploaded with put_artifact (binary via data_base64, text via text)
+/// is readable from run_js with artifact.get, and listed by artifact.list.
+#[tokio::test]
+async fn test_put_artifact_then_read_from_js() {
+    ensure_v8();
+    let engine = create_test_engine();
+
+    // Line-wrapped base64, as `base64` CLIs emit it.
+    let mut wrapped = BASE64.encode(PNG_BYTES);
+    wrapped.insert(4, '\n');
+    let put = server::mcp_dispatch::put_artifact(
+        &engine,
+        &json!({ "key": "upload.png", "mime_type": "image/png", "data_base64": wrapped }),
+    );
+    assert!(put["error"].is_null(), "put failed: {:?}", put);
+    assert_eq!(put["key"], "upload.png");
+    assert_eq!(put["mime_type"], "image/png");
+    assert_eq!(put["size_bytes"], PNG_BYTES.len() as u64);
+
+    let put = server::mcp_dispatch::put_artifact(
+        &engine,
+        &json!({ "key": "notes.txt", "mime_type": "text/plain", "text": "héllo" }),
+    );
+    assert!(put["error"].is_null(), "put failed: {:?}", put);
+
+    let resp = run_js(
+        &engine,
+        r#"
+        const png = artifact.get("upload.png");
+        const txt = artifact.get("notes.txt");
+        console.log(JSON.stringify({
+            isU8: png.bytes instanceof Uint8Array,
+            bytes: Array.from(png.bytes),
+            mime: png.mime_type,
+            size: png.size_bytes,
+            text: new TextDecoder().decode(txt.bytes),
+            missing: artifact.get("nope"),
+            keys: artifact.list().map((a) => a.key),
+        }));
+        "#,
+    )
+    .await;
+    assert!(resp.json["error"].is_null(), "run failed: {:?}", resp.json);
+    let out: Value = serde_json::from_str(resp.json["output"].as_str().unwrap().trim()).unwrap();
+    assert_eq!(out["isU8"], true);
+    assert_eq!(out["bytes"], json!(PNG_BYTES));
+    assert_eq!(out["mime"], "image/png");
+    assert_eq!(out["size"], PNG_BYTES.len() as u64);
+    assert_eq!(out["text"], "héllo");
+    assert!(out["missing"].is_null());
+    assert_eq!(out["keys"], json!(["notes.txt", "upload.png"]));
+
+    // Reading an upload doesn't make it an artifact this execution emitted.
+    assert!(resp.json["artifacts"].is_null());
+    assert!(resp.artifacts.is_empty());
+
+    // The upload is also visible to the existing fetch tool.
+    let got = server::mcp_dispatch::get_artifact(&engine, &json!({ "key": "upload.png" }));
+    assert!(matches!(&got.artifacts[0], ArtifactContent::Image { .. }));
+}
+
+/// put_artifact rejects a missing/ambiguous payload, bad base64, and
+/// anything the store's validation rejects.
+#[tokio::test]
+async fn test_put_artifact_errors() {
+    ensure_v8();
+    let engine = create_test_engine();
+    let put = |args: Value| server::mcp_dispatch::put_artifact(&engine, &args);
+
+    let neither = put(json!({ "key": "k", "mime_type": "text/plain" }));
+    assert!(neither["error"].as_str().unwrap().contains("exactly one"));
+
+    let both = put(json!({ "key": "k", "mime_type": "text/plain", "text": "a", "data_base64": "YQ==" }));
+    assert!(both["error"].as_str().unwrap().contains("exactly one"));
+
+    let bad = put(json!({ "key": "k", "mime_type": "text/plain", "data_base64": "not base64!" }));
+    assert!(bad["error"].as_str().unwrap().contains("not valid base64"));
+
+    let bad_mime = put(json!({ "key": "k", "mime_type": "plain", "text": "a" }));
+    assert!(bad_mime["error"].as_str().unwrap().contains("mime"));
+
+    let no_key = put(json!({ "mime_type": "text/plain", "text": "a" }));
+    assert!(no_key["error"].as_str().unwrap().contains("key"));
+
+    assert!(engine.list_artifacts().unwrap().is_empty());
+}
+
+/// `PUT /api/artifacts/{key}` stores the raw body with the request's
+/// Content-Type (parameters dropped); a script then reads it with
+/// artifact.get and GET serves the same bytes back.
+#[tokio::test]
+async fn test_artifact_rest_upload() -> Result<(), Box<dyn std::error::Error>> {
+    let mut server = HttpServer::start().await?;
+    let client = Client::new();
+    let url = format!("{}/api/artifacts/rest-upload", server.base_url);
+
+    let resp = client
+        .put(&url)
+        .header("content-type", "application/pdf; name=form.pdf")
+        .body(PNG_BYTES.to_vec())
+        .send()
+        .await?;
+    assert_eq!(resp.status(), 200);
+    let meta: Value = resp.json().await?;
+    assert_eq!(meta["key"], "rest-upload");
+    assert_eq!(meta["mime_type"], "application/pdf");
+    assert_eq!(meta["size_bytes"], PNG_BYTES.len() as u64);
+
+    let resp = client.get(&url).send().await?;
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        resp.headers().get("content-type").unwrap().to_str()?,
+        "application/pdf"
+    );
+    assert_eq!(resp.bytes().await?.as_ref(), PNG_BYTES);
+
+    // A script sees the upload.
+    let resp = client
+        .post(format!("{}/api/exec", server.base_url))
+        .json(&json!({ "code": r#"console.log(artifact.get("rest-upload").bytes.length);"# }))
+        .send()
+        .await?;
+    let id = resp.json::<Value>().await?["execution_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let output = timeout(Duration::from_secs(10), async {
+        loop {
+            let exec: Value = client
+                .get(format!("{}/api/executions/{}", server.base_url, id))
+                .send()
+                .await
+                .expect("GET execution failed")
+                .json()
+                .await
+                .expect("Invalid JSON");
+            if exec["status"] != "running" {
+                assert_eq!(exec["status"], "completed", "execution failed: {:?}", exec);
+                break;
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+        client
+            .get(format!("{}/api/executions/{}/output", server.base_url, id))
+            .send()
+            .await
+            .expect("GET output failed")
+            .json::<Value>()
+            .await
+            .expect("Invalid JSON")
+    })
+    .await?;
+    assert_eq!(output["data"].as_str().unwrap().trim(), PNG_BYTES.len().to_string());
+
+    // No Content-Type → application/octet-stream; over the cap → rejected.
+    let resp = client.put(&url).body(vec![1u8, 2, 3]).send().await?;
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.json::<Value>().await?["mime_type"], "application/octet-stream");
+
+    let resp = client
+        .put(&url)
+        .body(vec![0u8; 16 * 1024 * 1024 + 1])
+        .send()
+        .await?;
+    assert_eq!(resp.status(), 400);
+
+    server.stop().await;
+    Ok(())
+}

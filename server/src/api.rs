@@ -1,6 +1,7 @@
 use axum::{
-    extract::{Path, Query, Request, State},
-    http::{header, StatusCode},
+    body::Bytes,
+    extract::{DefaultBodyLimit, Path, Query, Request, State},
+    http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -254,6 +255,7 @@ pub struct FsLogQuery {
         cancel_execution_handler,
         list_artifacts_handler,
         get_artifact_handler,
+        put_artifact_handler,
         cli_index_handler,
         cli_download_handler,
         fs_labels_handler,
@@ -505,6 +507,49 @@ async fn list_artifacts_handler(
         ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e })),
+        ),
+    }
+}
+
+/// Upload a file as an artifact.
+///
+/// The request body is stored verbatim as the payload and the request's
+/// `Content-Type` becomes its mime type (`application/octet-stream` when
+/// absent). The same key overwrites. Scripts read it back with
+/// `artifact.get(key)`.
+#[utoipa::path(
+    put,
+    path = "/api/artifacts/{key}",
+    params(
+        ("key" = String, Path, description = "Key to store the artifact under")
+    ),
+    request_body(content = Vec<u8>, description = "Raw artifact bytes (max 16 MiB)", content_type = "application/octet-stream"),
+    responses(
+        (status = 200, description = "Artifact stored", body = ArtifactMeta),
+        (status = 400, description = "Invalid key, mime type, or payload size", body = ApiError),
+    ),
+    tag = "artifacts"
+)]
+async fn put_artifact_handler(
+    State(engine): State<Arc<Engine>>,
+    Path(key): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> (StatusCode, Json<serde_json::Value>) {
+    // Drop parameters ("; charset=utf-8", multipart boundaries): the stored
+    // mime type is a bare "type/subtype".
+    let mime_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(';').next())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or("application/octet-stream");
+    match engine.put_artifact(&key, mime_type, &body) {
+        Ok(meta) => (StatusCode::OK, Json(serde_json::json!(meta))),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": e })),
         ),
     }
@@ -1514,7 +1559,16 @@ pub fn api_router(runtime: Arc<Engine>) -> Router {
         .route("/api/executions/{id}/output", get(get_execution_output_handler))
         .route("/api/executions/{id}/cancel", post(cancel_execution_handler))
         .route("/api/artifacts", get(list_artifacts_handler))
-        .route("/api/artifacts/{key}", get(get_artifact_handler))
+        .route(
+            "/api/artifacts/{key}",
+            get(get_artifact_handler)
+                .put(put_artifact_handler)
+                // Let a full-size artifact through axum's 2 MiB default; the
+                // store enforces the exact cap.
+                .layer(DefaultBodyLimit::max(
+                    crate::engine::artifacts::MAX_ARTIFACT_BYTES + 1,
+                )),
+        )
         .route("/api/cli", get(cli_index_handler))
         .route("/api/cli/{platform}", get(cli_download_handler))
         .route("/api/fs/labels", get(fs_labels_handler).post(fs_set_label_handler))

@@ -2688,6 +2688,18 @@ impl Engine {
             .ok_or_else(|| format!("artifact '{}' not found", key))
     }
 
+    /// Store (or overwrite) an artifact from outside a script — the upload
+    /// path behind the `put_artifact` tool and `PUT /api/artifacts/{key}`.
+    /// JS reads it back with `artifact.get(key)`.
+    pub fn put_artifact(
+        &self,
+        key: &str,
+        mime_type: &str,
+        bytes: &[u8],
+    ) -> Result<ArtifactMeta, String> {
+        self.artifact_store()?.put(key, mime_type, bytes, None)
+    }
+
     /// List metadata for all stored artifacts.
     pub fn list_artifacts(&self) -> Result<Vec<ArtifactMeta>, String> {
         self.artifact_store()?.list()

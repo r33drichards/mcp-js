@@ -76,6 +76,45 @@ curl http://localhost:8080/api/artifacts          # metadata list
 curl http://localhost:8080/api/artifacts/chart -o chart.png
 ```
 
+## Upload a file for your code to use
+
+Artifacts also carry input. A client uploads a file under a key, and code
+running in `run_js` reads it back — useful when the model has a file (a PDF to
+attach to a form, a CSV to process) and the sandbox has no other way to
+receive it.
+
+Over MCP, call `put_artifact` with the payload as `text` (stored as UTF-8) or
+`data_base64` (decoded to raw bytes) — exactly one of the two:
+
+```json
+{ "tool": "put_artifact",
+  "arguments": { "key": "form.pdf", "mime_type": "application/pdf",
+                 "data_base64": "JVBERi0xLjcK…" } }
+// Response: { "key": "form.pdf", "mime_type": "application/pdf",
+//             "size_bytes": 48213, "created_at": "…" }
+```
+
+Over REST, `PUT` the raw bytes; the request's `Content-Type` becomes the mime
+type:
+
+```bash
+curl -X PUT --data-binary @form.pdf -H 'Content-Type: application/pdf' \
+  http://localhost:8080/api/artifacts/form.pdf
+```
+
+Then read it in JavaScript:
+
+```js
+const file = artifact.get("form.pdf");   // null if the key doesn't exist
+console.log(file.mime_type, file.size_bytes);
+const bytes = file.bytes;                // Uint8Array
+artifact.list();                         // [{ key, mime_type, size_bytes, created_at }, …]
+```
+
+The same limits apply as for `artifact()`: 16 MiB per artifact, keys ≤ 256
+bytes, and the same key overwrites. Uploads share the one global key
+namespace with artifacts written from JavaScript.
+
 ## Sizing images for models
 
 Model providers cap image inputs (Claude, for example, rejects images over

@@ -74,6 +74,59 @@
             }
           }
         }
+      },
+      "put": {
+        "tags": [
+          "artifacts"
+        ],
+        "summary": "Upload a file as an artifact.",
+        "description": "The request body is stored verbatim as the payload and the request's\n`Content-Type` becomes its mime type (`application/octet-stream` when\nabsent). The same key overwrites. Scripts read it back with\n`artifact.get(key)`.",
+        "operationId": "put_artifact_handler",
+        "parameters": [
+          {
+            "name": "key",
+            "in": "path",
+            "description": "Key to store the artifact under",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Raw artifact bytes (max 16 MiB)",
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Artifact stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArtifactMeta"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid key, mime type, or payload size",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/api/capabilities": {

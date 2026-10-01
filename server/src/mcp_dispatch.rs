@@ -13,6 +13,8 @@
 
 use std::collections::HashMap;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use serde_json::{Value, json};
 
 use crate::engine::Engine;
@@ -56,6 +58,7 @@ pub async fn call_tool(
             .await
             .into(),
         "get_artifact" => get_artifact(runtime, args),
+        "put_artifact" => put_artifact(runtime, args).into(),
         "list_artifacts" => list_artifacts(runtime).into(),
         "get_heap_tags" => get_heap_tags(runtime, args).await.into(),
         "set_heap_tags" => set_heap_tags(runtime, args).await.into(),
@@ -270,6 +273,39 @@ pub fn get_artifact(runtime: &Engine, args: &Value) -> ToolResponse {
             }
         }
         Err(e) => json!({ "error": e }).into(),
+    }
+}
+
+/// Upload an artifact from the client. The payload is exactly one of `text`
+/// (stored as UTF-8) or `data_base64` (decoded to raw bytes). run_js code
+/// reads it back with `artifact.get(key)`.
+pub fn put_artifact(runtime: &Engine, args: &Value) -> Value {
+    let key = string_arg(args, "key").unwrap_or_default();
+    let mime_type = string_arg(args, "mime_type").unwrap_or_default();
+    let bytes = match (str_arg(args, "text"), str_arg(args, "data_base64")) {
+        (Some(text), None) => text.as_bytes().to_vec(),
+        (None, Some(data)) => {
+            // Tolerate the line breaks `base64` CLIs and MIME encoders insert.
+            let compact: String = data.chars().filter(|c| !c.is_ascii_whitespace()).collect();
+            match BASE64.decode(compact) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    return json!({ "error": format!("put_artifact: data_base64 is not valid base64: {e}") });
+                }
+            }
+        }
+        _ => {
+            return json!({ "error": "put_artifact: provide exactly one of `text` or `data_base64`" });
+        }
+    };
+    match runtime.put_artifact(&key, &mime_type, &bytes) {
+        Ok(meta) => json!({
+            "key": meta.key,
+            "mime_type": meta.mime_type,
+            "size_bytes": meta.size_bytes,
+            "created_at": meta.created_at,
+        }),
+        Err(e) => json!({ "error": e }),
     }
 }
 

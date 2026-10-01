@@ -34,6 +34,7 @@ These tools execute in isolated runs and return output directly.
 - [`list_executions`](#heap+fs-list-executions)
 - [`list_session_snapshots`](#heap+fs-list-session-snapshots)
 - [`list_sessions`](#heap+fs-list-sessions)
+- [`put_artifact`](#heap+fs-put-artifact)
 - [`query_heaps_by_tags`](#heap+fs-query-heaps-by-tags)
 - [`run_js`](#heap+fs-run-js)
 - [`set_heap_tags`](#heap+fs-set-heap-tags)
@@ -240,6 +241,20 @@ Parameters:
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
 
+### `put_artifact`
+<a id="heap+fs-put-artifact"></a>
+
+Upload a file as an artifact so run_js code can use it. Pass the payload as `text` (UTF-8) or `data_base64` (binary), with its mime type; max 16 MiB, same key overwrites. Inside run_js, `artifact.get(key)` returns { key, mime_type, size_bytes, created_at, bytes: Uint8Array } (null if missing) and `artifact.list()` lists metadata. Returns the stored metadata.
+
+Parameters:
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `data_base64` | `string | null` | no | Payload as base64 (standard alphabet), decoded to raw bytes — use for binary files. Provide this or `text`. |
+| `key` | `string` | yes | Key to store the artifact under (same key overwrites). run_js code reads it back with `artifact.get(key)`. |
+| `mime_type` | `string` | yes | Mime type of the payload, e.g. "application/pdf" or "text/csv". |
+| `text` | `string | null` | no | Payload as plain text, stored as UTF-8. Provide this or `data_base64`. |
+
 ### `query_heaps_by_tags`
 <a id="heap+fs-query-heaps-by-tags"></a>
 
@@ -331,6 +346,7 @@ artifact("chart", "image/png", png);
 - A completed execution lists what it emitted (`key`, `mime_type`, `size_bytes`) in the `artifacts` field of `get_execution`.
 - Fetch a payload with the `get_artifact(key)` tool. `image/*` artifacts come back as an MCP image content block — the model can actually see the image — `audio/*` as an audio block, UTF-8 payloads as text, and other binary as base64 text. `list_artifacts` lists everything stored.
 - Artifacts persist across executions and are also downloadable raw (no base64) via `GET /api/artifacts/{key}` on the REST API.
+- Artifacts also work as input: a file uploaded with the `put_artifact` tool (or `PUT /api/artifacts/{key}`) is readable here with `artifact.get(key)` → `{ key, mime_type, size_bytes, created_at, bytes: Uint8Array }` (`null` if the key doesn't exist). `artifact.list()` returns metadata for everything stored.
 
 #### Importing Packages
 
@@ -405,6 +421,7 @@ These tools execute in isolated runs and return output directly.
 
 - [`get_artifact`](#stateless-get-artifact)
 - [`list_artifacts`](#stateless-list-artifacts)
+- [`put_artifact`](#stateless-put-artifact)
 - [`run_js`](#stateless-run-js)
 
 ### `get_artifact`
@@ -427,6 +444,20 @@ Parameters:
 
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
+
+### `put_artifact`
+<a id="stateless-put-artifact"></a>
+
+Upload a file as an artifact so run_js code can use it. Pass the payload as `text` (UTF-8) or `data_base64` (binary), with its mime type; max 16 MiB, same key overwrites. Inside run_js, `artifact.get(key)` returns { key, mime_type, size_bytes, created_at, bytes: Uint8Array } (null if missing) and `artifact.list()` lists metadata. Returns the stored metadata.
+
+Parameters:
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `data_base64` | `string | null` | no | Payload as base64 (standard alphabet), decoded to raw bytes — use for binary files. Provide this or `text`. |
+| `key` | `string` | yes | Key to store the artifact under (same key overwrites). run_js code reads it back with `artifact.get(key)`. |
+| `mime_type` | `string` | yes | Mime type of the payload, e.g. "application/pdf" or "text/csv". |
+| `text` | `string | null` | no | Payload as plain text, stored as UTF-8. Provide this or `data_base64`. |
 
 ### `run_js`
 <a id="stateless-run-js"></a>
@@ -481,6 +512,7 @@ artifact("chart", "image/png", png);
 - `artifact(key, mime, bytes)` — store an artifact under a caller-chosen key (same key overwrites). `bytes` may be a Uint8Array, TypedArray, ArrayBuffer, or string (UTF-8 encoded). Max 16 MiB per artifact.
 - Emitted artifacts are attached directly to this tool's result as content blocks: `image/*` as an MCP image block (the model can actually see the image), `audio/*` as audio, UTF-8 payloads as text, other binary as base64 text. Up to 8 MiB of payloads are attached inline; anything larger stays retrievable via the `get_artifact(key)` tool.
 - The result JSON lists each emitted artifact (`key`, `mime_type`, `size_bytes`, `inline`).
+- Artifacts also work as input: a file uploaded with the `put_artifact` tool is readable here with `artifact.get(key)` → `{ key, mime_type, size_bytes, created_at, bytes: Uint8Array }` (`null` if the key doesn't exist). `artifact.list()` returns metadata for everything stored.
 
 #### Importing Packages
 

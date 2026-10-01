@@ -48,6 +48,7 @@ artifact("chart", "image/png", png);
 - `artifact(key, mime, bytes)` — store an artifact under a caller-chosen key (same key overwrites). `bytes` may be a Uint8Array, TypedArray, ArrayBuffer, or string (UTF-8 encoded). Max 16 MiB per artifact.
 - Emitted artifacts are attached directly to this tool's result as content blocks: `image/*` as an MCP image block (the model can actually see the image), `audio/*` as audio, UTF-8 payloads as text, other binary as base64 text. Up to 8 MiB of payloads are attached inline; anything larger stays retrievable via the `get_artifact(key)` tool.
 - The result JSON lists each emitted artifact (`key`, `mime_type`, `size_bytes`, `inline`).
+- Artifacts also work as input: a file uploaded with the `put_artifact` tool is readable here with `artifact.get(key)` → `{ key, mime_type, size_bytes, created_at, bytes: Uint8Array }` (`null` if the key doesn't exist). `artifact.list()` returns metadata for everything stored.
 
 ## Importing Packages
 
