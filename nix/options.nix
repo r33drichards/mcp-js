@@ -255,6 +255,11 @@
     default = null;
     description = "Fixed session id for this process, used when no X-MCP-Session-Id header is available (i.e. the stdio transport). Keys per-session heap+fs state so a process spawned for a given logical session (e.g. one per thread) resumes that session's stateful heap+fs. Over HTTP the header still wins. Config-file key for the `--session-id` flag. Environment variable: `MCP_V8_SESSION_ID`.";
   };
+  skills_dir = lib.mkOption {
+    type = lib.types.nullOr lib.types.str;
+    default = null;
+    description = "Publish Agent Skills from named subfolders containing SKILL.md. Loaded at startup; restart to publish edits. Supported on stdio and Streamable HTTP. Config-file key for the `--skills-dir` flag. Environment variable: `MCP_V8_SKILLS_DIR`.";
+  };
   sse_port = lib.mkOption {
     type = lib.types.nullOr lib.types.port;
     default = null;

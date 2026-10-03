@@ -108,6 +108,13 @@ Load configuration from a single TOML or JSON file (format chosen by extension).
 - Environment: `MCP_V8_CONFIG`
 - Value: `PATH`
 
+### `--skills-dir`
+
+Publish Agent Skills from named subfolders containing SKILL.md. Loaded at startup; restart to publish edits. Supported on stdio and Streamable HTTP
+
+- Environment: `MCP_V8_SKILLS_DIR`
+- Value: `SKILLS_DIR`
+
 ### `--print-openapi`
 
 Print the OpenAPI JSON specification to stdout and exit. Use this to regenerate openapi.json: `./server --print-openapi > openapi.json`

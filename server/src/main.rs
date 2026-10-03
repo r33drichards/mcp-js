@@ -118,6 +118,7 @@ async fn async_main(cli: Cli) -> Result<()> {
             ("--policies-json", cli.policies_json.is_some()),
             ("--mcp-server", !cli.mcp_servers.is_empty()),
             ("--mcp-config", cli.mcp_config.is_some()),
+            ("--skills-dir", cli.skills_dir.is_some()),
             ("--allow-run-js-file", cli.allow_run_js_file),
             ("--allow-external-modules", cli.allow_external_modules),
             ("--instructions", cli.instructions.is_some()),
@@ -135,6 +136,14 @@ async fn async_main(cli: Cli) -> Result<()> {
             );
         }
     }
+
+    if cli.skills_dir.is_some() && cli.sse_port.is_some() {
+        anyhow::bail!("--skills-dir requires stdio or --http-port; legacy SSE does not support the Skills extension");
+    }
+    let skills = Arc::new(match &cli.skills_dir {
+        Some(path) => server::skills::SkillCatalog::load(std::path::Path::new(path))?,
+        None => server::skills::SkillCatalog::default(),
+    });
 
     // Parse peer list (supports both "host:port" and "id@host:port" formats).
     let (peer_addrs_list, peer_addrs_map) = ClusterConfig::parse_peers(&cli.peers);
@@ -491,7 +500,7 @@ async fn async_main(cli: Cli) -> Result<()> {
                 allowed_hosts,
                 allowed_origins,
                 session_verifier.clone(),
-                move |e| McpService::new(e, verifier.clone()),
+                move |e| McpService::new(e, verifier.clone()).with_skills(skills.clone()),
             )
             .await
         } else {
@@ -503,7 +512,7 @@ async fn async_main(cli: Cli) -> Result<()> {
                 allowed_hosts,
                 allowed_origins,
                 session_verifier.clone(),
-                move |e| StatelessMcpService::new(e, verifier.clone()),
+                move |e| StatelessMcpService::new(e, verifier.clone()).with_skills(skills.clone()),
             )
             .await
         }
@@ -521,6 +530,7 @@ async fn async_main(cli: Cli) -> Result<()> {
         if runtime.session_capable() {
             async {
                 let service = McpService::new(runtime.clone(), None)
+                    .with_skills(skills.clone())
                     .with_session_id(cli.session_id.clone())
                     .serve(stdio())
                     .await
@@ -533,6 +543,7 @@ async fn async_main(cli: Cli) -> Result<()> {
         } else {
             async {
                 let service = StatelessMcpService::new(runtime.clone(), None)
+                    .with_skills(skills.clone())
                     .serve(stdio())
                     .await
                     .inspect_err(|e| {

@@ -175,6 +175,13 @@ Comma-separated list of seed peer addresses. Peers can also join dynamically via
 
 ## Core
 
+### `skills_dir`
+
+Publish Agent Skills from named subfolders containing SKILL.md. Loaded at startup; restart to publish edits. Supported on stdio and Streamable HTTP
+
+- CLI flag: `--skills-dir`
+- Environment: `MCP_V8_SKILLS_DIR`
+
 ### `jwks_url`
 
 JWKS endpoint URL for fetching public keys (e.g., Keycloak OIDC certs URL). When set, the HTTP transports ENFORCE auth: every request to /mcp and the HTTP API (/api/*) must carry a valid `Authorization: Bearer <jwt>` (or `agent-session` header) verified against this JWKS, else it is rejected with 401. Leaving it unset keeps the server open (no auth). The openapi spec route and CORS preflight (OPTIONS) are exempt

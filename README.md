@@ -376,3 +376,17 @@ Comparison of single-node vs 3-node cluster at various request rates.
 - **HTTP Req/s**: Total HTTP requests per second (1 per iteration)
 - **Dropped**: Iterations k6 couldn't schedule because VUs were exhausted (indicates server saturation)
 - **Topology**: `single` = 1 MCP-V8 node; `cluster` = 3 MCP-V8 nodes with Raft
+
+## User-supplied skills over MCP
+
+Publish your own `SKILL.md` bundles and supporting files:
+
+```bash
+mcp-v8 --skills-dir ./examples/skills
+```
+
+Set `MCP_V8_SKILLS_DIR` or the `skills_dir` TOML/JSON configuration key instead
+if preferred. Skills are available on stdio and Streamable HTTP through
+`skills/list`, `skills/get`, and `resources/read`; restart to publish edits.
+See the [Skills over MCP reference](site-docs/reference/skills.md) for the
+folder format, examples, limits, and pinned upstream SDK branch.

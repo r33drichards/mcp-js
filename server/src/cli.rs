@@ -58,6 +58,11 @@ pub struct Cli {
     )]
     pub config: Option<String>,
 
+    /// Publish Agent Skills from named subfolders containing SKILL.md.
+    /// Loaded at startup; restart to publish edits. Supported on stdio and Streamable HTTP.
+    #[arg(long, env = "MCP_V8_SKILLS_DIR", help_heading = "Core")]
+    pub skills_dir: Option<String>,
+
     /// Print the OpenAPI JSON specification to stdout and exit.
     /// Use this to regenerate openapi.json: `./server --print-openapi > openapi.json`
     #[arg(long, help_heading = "Core")]

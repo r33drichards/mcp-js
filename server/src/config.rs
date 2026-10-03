@@ -307,6 +307,14 @@ mod tests {
     }
 
     #[test]
+    fn skills_directory_config_and_cli_precedence() {
+        let cli = parse_with_config("skills_dir = '/srv/skills'", &[]);
+        assert_eq!(cli.skills_dir.as_deref(), Some("/srv/skills"));
+        let cli = parse_with_config("skills_dir = '/srv/skills'", &["--skills-dir", "/tmp/skills"]);
+        assert_eq!(cli.skills_dir.as_deref(), Some("/tmp/skills"));
+    }
+
+    #[test]
     fn scalar_keys_map_to_flags() {
         let cli = parse_with_config(
             r#"
