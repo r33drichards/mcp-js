@@ -11,3 +11,5 @@ pub mod session;
 pub mod sandbox;
 
 uniffi::setup_scaffolding!();
+
+pub mod skills;

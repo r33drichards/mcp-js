@@ -438,6 +438,7 @@ fn filter_tools_by_capability(tools: &mut Vec<Tool>, heap: bool, fs: bool) {
 #[derive(Clone)]
 pub struct McpService {
     runtime: Arc<Engine>,
+    skills: Arc<crate::skills::SkillCatalog>,
     verifier: Option<Arc<SessionVerifier>>,
     /// Set once during `initialize` from X-MCP-Session-Id header.
     session_id: Arc<OnceLock<String>>,
@@ -475,6 +476,7 @@ impl McpService {
     pub fn new(runtime: Arc<Engine>, verifier: Option<Arc<SessionVerifier>>) -> Self {
         Self {
             runtime,
+            skills: Arc::new(crate::skills::SkillCatalog::default()),
             verifier,
             session_id: Arc::new(OnceLock::new()),
             mcp_headers: Arc::new(OnceLock::new()),
@@ -692,6 +694,14 @@ impl McpService {
 
 #[task_handler]
 impl ServerHandler for McpService {
+    async fn on_custom_request(
+        &self,
+        request: CustomRequest,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<CustomResult, McpError> {
+        self.skills.request(request)
+    }
+
     fn get_info(&self) -> ServerInfo {
         let instructions = self.runtime.instructions_override()
             .map(|s| s.to_string())
@@ -715,6 +725,7 @@ impl ServerHandler for McpService {
             .enable_resources()
             .enable_tasks()
             .build();
+        self.skills.advertise(&mut info.capabilities);
         info
     }
 
@@ -725,7 +736,10 @@ impl ServerHandler for McpService {
     ) -> Result<ListResourcesResult, McpError> {
         Ok(ListResourcesResult {
             next_cursor: None,
-            resources: doc_resources(self.runtime.heap_enabled(), self.runtime.fs_enabled()),
+            resources: doc_resources(self.runtime.heap_enabled(), self.runtime.fs_enabled())
+                .into_iter()
+                .chain(self.skills.resources())
+                .collect(),
             meta: None,
         })
     }
@@ -735,6 +749,9 @@ impl ServerHandler for McpService {
         request: ReadResourceRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResult, McpError> {
+        if let Some(result) = self.skills.read(&request.uri) {
+            return Ok(result);
+        }
         read_doc_resource(
             &request.uri,
             self.runtime.heap_enabled(),
@@ -809,6 +826,7 @@ impl ServerHandler for McpService {
 #[derive(Clone)]
 pub struct StatelessMcpService {
     runtime: Arc<Engine>,
+    skills: Arc<crate::skills::SkillCatalog>,
     verifier: Option<Arc<SessionVerifier>>,
     /// X-MCP-* headers from the initialize request, available for policy evaluation.
     mcp_headers: Arc<OnceLock<McpRequestHeaders>>,
@@ -821,6 +839,7 @@ impl StatelessMcpService {
     pub fn new(runtime: Arc<Engine>, verifier: Option<Arc<SessionVerifier>>) -> Self {
         Self {
             runtime,
+            skills: Arc::new(crate::skills::SkillCatalog::default()),
             verifier,
             mcp_headers: Arc::new(OnceLock::new()),
             tool_router: Self::tool_router(),
@@ -900,6 +919,14 @@ impl StatelessMcpService {
 
 #[task_handler]
 impl ServerHandler for StatelessMcpService {
+    async fn on_custom_request(
+        &self,
+        request: CustomRequest,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<CustomResult, McpError> {
+        self.skills.request(request)
+    }
+
     fn get_info(&self) -> ServerInfo {
         let instructions = self
             .runtime
@@ -918,6 +945,7 @@ impl ServerHandler for StatelessMcpService {
             .enable_resources()
             .enable_tasks()
             .build();
+        self.skills.advertise(&mut info.capabilities);
         info
     }
 
@@ -928,7 +956,10 @@ impl ServerHandler for StatelessMcpService {
     ) -> Result<ListResourcesResult, McpError> {
         Ok(ListResourcesResult {
             next_cursor: None,
-            resources: doc_resources(false, false),
+            resources: doc_resources(false, false)
+                .into_iter()
+                .chain(self.skills.resources())
+                .collect(),
             meta: None,
         })
     }
@@ -938,6 +969,9 @@ impl ServerHandler for StatelessMcpService {
         request: ReadResourceRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResult, McpError> {
+        if let Some(result) = self.skills.read(&request.uri) {
+            return Ok(result);
+        }
         read_doc_resource(&request.uri, false, false).ok_or_else(|| {
             McpError::resource_not_found(format!("Unknown resource URI: {}", request.uri), None)
         })
@@ -1163,5 +1197,19 @@ mod tests {
         assert!(n.contains(&"get_heap_tags".to_string()));
         assert!(n.contains(&"fs_ls".to_string()));
         assert!(run_js_props(&tools).contains(&"heap".to_string()));
+    }
+}
+
+impl McpService {
+    pub fn with_skills(mut self, skills: Arc<crate::skills::SkillCatalog>) -> Self {
+        self.skills = skills;
+        self
+    }
+}
+
+impl StatelessMcpService {
+    pub fn with_skills(mut self, skills: Arc<crate::skills::SkillCatalog>) -> Self {
+        self.skills = skills;
+        self
     }
 }

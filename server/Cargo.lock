@@ -3999,6 +3999,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "rmcp"
+version = "3.3.0"
+source = "git+https://github.com/branben/rust-sdk?rev=ff211dd82c488ff80669a8e13c3f82a64ced5309#ff211dd82c488ff80669a8e13c3f82a64ced5309"
+dependencies = [
+ "chrono",
+ "futures",
+ "indexmap",
+ "pin-project-lite",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "rmcp-macros"
 version = "0.1.5"
 source = "git+https://github.com/modelcontextprotocol/rust-sdk?rev=787cc015b719773f66d4ac32e695b9a0079e12ef#787cc015b719773f66d4ac32e695b9a0079e12ef"
@@ -4525,8 +4542,10 @@ dependencies = [
  "reqwest 0.12.28",
  "rmcp 0.1.5",
  "rmcp 1.7.0",
+ "rmcp 3.3.0",
  "serde",
  "serde_json",
+ "serde_yaml",
  "sha1",
  "sha2 0.10.9",
  "sled",
