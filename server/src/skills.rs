@@ -187,6 +187,36 @@ impl SkillCatalog {
         Self::from_files(files)
     }
 
+    /// Combine sources without allowing a later source to replace any skill
+    /// or supporting resource. Validate before changing the current catalog.
+    pub fn merge(&mut self, source: Self) -> Result<()> {
+        for uri in source.skills.keys() {
+            ensure!(
+                !self.skills.contains_key(uri),
+                "duplicate skill URI across sources: {uri}"
+            );
+        }
+        for uri in source.files.keys() {
+            ensure!(
+                !self.files.contains_key(uri),
+                "duplicate skill resource URI across sources: {uri}"
+            );
+        }
+        let total: usize = self
+            .files
+            .values()
+            .chain(source.files.values())
+            .map(Vec::len)
+            .sum();
+        ensure!(
+            total <= MAX_CATALOG_BYTES,
+            "combined skills catalog exceeds 64 MiB"
+        );
+        self.skills.extend(source.skills);
+        self.files.extend(source.files);
+        Ok(())
+    }
+
     /// Bridge the branch's typed extension messages into the stable SDK's
     /// extension hook; this avoids changing the transport and tasks lifecycle.
     pub fn request(&self, request: CustomRequest) -> Result<CustomResult, ErrorData> {
@@ -422,6 +452,36 @@ mod tests {
     }
 
     #[test]
+    fn merges_distinct_sources_and_rejects_collisions_atomically() {
+        let dir = fixture();
+        let mut catalog = SkillCatalog::load(dir.path()).unwrap();
+        let other = tempfile::tempdir().unwrap();
+        fs::create_dir(other.path().join("workflow")).unwrap();
+        fs::write(
+            other.path().join("workflow/SKILL.md"),
+            "---\nname: workflow\ndescription: Other source\n---\n",
+        )
+        .unwrap();
+        catalog
+            .merge(SkillCatalog::load(other.path()).unwrap())
+            .unwrap();
+        assert_eq!(catalog.list(None).unwrap().skills.len(), 2);
+        assert!(catalog.read("skill://workflow/SKILL.md").is_some());
+        assert!(
+            catalog
+                .merge(SkillCatalog::load(dir.path()).unwrap())
+                .is_err()
+        );
+        assert_eq!(catalog.list(None).unwrap().skills.len(), 2);
+        let mut oversized = SkillCatalog::default();
+        oversized
+            .files
+            .insert("skill://large/data.bin".into(), vec![0; MAX_CATALOG_BYTES]);
+        assert!(catalog.merge(oversized).is_err());
+        assert!(catalog.read("skill://large/data.bin").is_none());
+    }
+
+    #[test]
     fn s3_locations_and_paths() {
         assert_eq!(
             s3_location("s3://bucket/catalog").unwrap(),
@@ -543,6 +603,11 @@ mod tests {
                 .frontmatter["name"],
             "workflow"
         );
+        let local_dir = fixture();
+        let mut mixed = SkillCatalog::load(local_dir.path()).unwrap();
+        mixed.merge(prefix_catalog).unwrap();
+        assert!(mixed.get("skill://workflow/SKILL.md").is_ok());
+        assert!(mixed.get("skill://acme/refunds/SKILL.md").is_ok());
         assert!(
             SkillCatalog::load_s3_with_client(&client, "s3://denied/catalog/")
                 .await

@@ -309,17 +309,27 @@ mod tests {
     #[test]
     fn skills_directory_config_and_cli_precedence() {
         let cli = parse_with_config("skills_dir = '/srv/skills'", &[]);
-        assert_eq!(cli.skills_dir.as_deref(), Some("/srv/skills"));
+        assert_eq!(cli.skills_dir, vec!["/srv/skills"]);
         let cli = parse_with_config("skills_dir = '/srv/skills'", &["--skills-dir", "/tmp/skills"]);
-        assert_eq!(cli.skills_dir.as_deref(), Some("/tmp/skills"));
+        assert_eq!(cli.skills_dir, vec!["/tmp/skills"]);
     }
 
     #[test]
     fn skills_s3_uri_config_and_cli_precedence() {
         let cli = parse_with_config("skills_s3_uri = 's3://bucket/skills'", &[]);
-        assert_eq!(cli.skills_s3_uri.as_deref(), Some("s3://bucket/skills"));
+        assert_eq!(cli.skills_s3_uri, vec!["s3://bucket/skills"]);
         let cli = parse_with_config("skills_s3_uri = 's3://bucket/skills'", &["--skills-s3-uri", "s3://other/workflow/SKILL.md"]);
-        assert_eq!(cli.skills_s3_uri.as_deref(), Some("s3://other/workflow/SKILL.md"));
+        assert_eq!(cli.skills_s3_uri, vec!["s3://other/workflow/SKILL.md"]);
+    }
+
+    #[test]
+    fn multiple_local_and_s3_skills_sources() {
+        let cli = parse_with_config("skills_dir = ['/srv/a', '/srv/b']\nskills_s3_uri = ['s3://one/skills', 's3://two/skills']", &[]);
+        assert_eq!(cli.skills_dir, vec!["/srv/a", "/srv/b"]);
+        assert_eq!(cli.skills_s3_uri, vec!["s3://one/skills", "s3://two/skills"]);
+        let cli = parse_with_config("skills_dir = ['/srv/a', '/srv/b']", &["--skills-dir", "/tmp/one", "--skills-dir", "/tmp/two", "--skills-s3-uri", "s3://bucket/a", "--skills-s3-uri", "s3://bucket/b"]);
+        assert_eq!(cli.skills_dir, vec!["/tmp/one", "/tmp/two"]);
+        assert_eq!(cli.skills_s3_uri, vec!["s3://bucket/a", "s3://bucket/b"]);
     }
 
     #[test]

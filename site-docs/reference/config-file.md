@@ -177,17 +177,19 @@ Comma-separated list of seed peer addresses. Peers can also join dynamically via
 
 ### `skills_dir`
 
-Publish Agent Skills from named subfolders containing SKILL.md. Loaded at startup; restart to publish edits. Supported on stdio and Streamable HTTP
+Publish Agent Skills from named subfolders containing SKILL.md. Repeat for multiple directories; may be combined with --skills-s3-uri. Loaded at startup; restart to publish edits. Supported on stdio and Streamable HTTP
 
 - CLI flag: `--skills-dir`
 - Environment: `MCP_V8_SKILLS_DIR`
+- Type: array (one element per flag repetition)
 
 ### `skills_s3_uri`
 
-Publish Agent Skills from an S3 bucket/prefix or a SKILL.md object URI. Uses AWS credentials; loaded at startup. Conflicts with --skills-dir
+Publish Agent Skills from an S3 bucket/prefix or a SKILL.md object URI. Repeat for multiple locations; may be combined with --skills-dir. Uses AWS credentials; loaded at startup
 
 - CLI flag: `--skills-s3-uri`
 - Environment: `MCP_V8_SKILLS_S3_URI`
+- Type: array (one element per flag repetition)
 
 ### `jwks_url`
 

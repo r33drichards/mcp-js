@@ -387,6 +387,7 @@ mcp-v8 --skills-dir ./examples/skills
 mcp-v8 --skills-s3-uri s3://my-bucket/skills/
 ```
 
+Repeat `--skills-dir` and `--skills-s3-uri` to combine multiple sources.
 Set `MCP_V8_SKILLS_DIR` or the `skills_dir` TOML/JSON configuration key instead
 if preferred. Skills are available on stdio and Streamable HTTP through
 `skills/list`, `skills/get`, and `resources/read`; restart to publish edits.

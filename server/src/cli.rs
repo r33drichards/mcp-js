@@ -59,14 +59,16 @@ pub struct Cli {
     pub config: Option<String>,
 
     /// Publish Agent Skills from named subfolders containing SKILL.md.
+    /// Repeat for multiple directories; may be combined with --skills-s3-uri.
     /// Loaded at startup; restart to publish edits. Supported on stdio and Streamable HTTP.
-    #[arg(long, env = "MCP_V8_SKILLS_DIR", conflicts_with = "skills_s3_uri", help_heading = "Core")]
-    pub skills_dir: Option<String>,
+    #[arg(long, env = "MCP_V8_SKILLS_DIR", value_delimiter = ',', help_heading = "Core")]
+    pub skills_dir: Vec<String>,
 
     /// Publish Agent Skills from an S3 bucket/prefix or a SKILL.md object URI.
-    /// Uses AWS credentials; loaded at startup. Conflicts with --skills-dir.
-    #[arg(long, env = "MCP_V8_SKILLS_S3_URI", conflicts_with = "skills_dir", help_heading = "Core")]
-    pub skills_s3_uri: Option<String>,
+    /// Repeat for multiple locations; may be combined with --skills-dir.
+    /// Uses AWS credentials; loaded at startup.
+    #[arg(long, env = "MCP_V8_SKILLS_S3_URI", value_delimiter = ',', help_heading = "Core")]
+    pub skills_s3_uri: Vec<String>,
 
     /// Print the OpenAPI JSON specification to stdout and exit.
     /// Use this to regenerate openapi.json: `./server --print-openapi > openapi.json`

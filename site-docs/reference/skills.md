@@ -14,6 +14,33 @@ mcp-v8 --http-port 8080 --skills-dir /srv/mcp-skills
 skills_dir = "/srv/mcp-skills"
 ```
 
+### Multiple sources
+
+Repeat either option to combine any number of local directories and S3 locations:
+
+```bash
+mcp-v8 \
+  --skills-dir /srv/team-skills \
+  --skills-dir /srv/personal-skills \
+  --skills-s3-uri s3://team-bucket/skills/ \
+  --skills-s3-uri s3://shared-bucket/skills/workflow/SKILL.md
+```
+
+Configuration keys accept arrays (a single string remains supported):
+
+```toml
+skills_dir = ["/srv/team-skills", "/srv/personal-skills"]
+skills_s3_uri = ["s3://team-bucket/skills/", "s3://shared-bucket/skills/"]
+```
+
+`MCP_V8_SKILLS_DIR` and `MCP_V8_SKILLS_S3_URI` accept comma-separated lists.
+Explicit CLI values replace environment/config values for that source option.
+All sources feed one catalog. Duplicate skill or resource URIs fail startup
+instead of overwriting an earlier source. Use distinct skill folder paths (for
+example `team/workflow` and `personal/workflow`) to avoid collisions. The combined
+published catalog must fit within 64 MiB, and each source must also fit the loader
+limit. All sources are loaded before the server starts accepting connections.
+
 ### S3 bucket and key
 
 Use an S3 prefix containing skill folders, or an exact `SKILL.md` key to publish
@@ -28,8 +55,8 @@ mcp-v8 --skills-s3-uri s3://my-bucket/skills/javascript-workflow/SKILL.md
 skills_s3_uri = "s3://my-bucket/skills/"
 ```
 
-The environment equivalent is `MCP_V8_SKILLS_S3_URI`. Choose either the S3 source
-or `skills_dir`; combining them fails startup. Prefixes are matched at folder
+The environment equivalent is `MCP_V8_SKILLS_S3_URI`. Local directories and S3
+locations may be combined. Prefixes are matched at folder
 boundaries. For a catalog prefix, `skills/javascript-workflow/SKILL.md` becomes
 `skill://javascript-workflow/SKILL.md`. An exact entrypoint key retains its
 parent skill folder's name and includes every supporting object under that folder.

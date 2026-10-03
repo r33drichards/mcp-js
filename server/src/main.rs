@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::CommandFactory;
 use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
@@ -118,8 +118,8 @@ async fn async_main(cli: Cli) -> Result<()> {
             ("--policies-json", cli.policies_json.is_some()),
             ("--mcp-server", !cli.mcp_servers.is_empty()),
             ("--mcp-config", cli.mcp_config.is_some()),
-            ("--skills-dir", cli.skills_dir.is_some()),
-            ("--skills-s3-uri", cli.skills_s3_uri.is_some()),
+            ("--skills-dir", !cli.skills_dir.is_empty()),
+            ("--skills-s3-uri", !cli.skills_s3_uri.is_empty()),
             ("--allow-run-js-file", cli.allow_run_js_file),
             ("--allow-external-modules", cli.allow_external_modules),
             ("--instructions", cli.instructions.is_some()),
@@ -138,17 +138,24 @@ async fn async_main(cli: Cli) -> Result<()> {
         }
     }
 
-    if cli.skills_dir.is_some() && cli.skills_s3_uri.is_some() {
-        anyhow::bail!("--skills-dir and --skills-s3-uri cannot be combined");
-    }
-    if (cli.skills_dir.is_some() || cli.skills_s3_uri.is_some()) && cli.sse_port.is_some() {
+    if (!cli.skills_dir.is_empty() || !cli.skills_s3_uri.is_empty()) && cli.sse_port.is_some() {
         anyhow::bail!("Skills require stdio or --http-port; legacy SSE does not support the Skills extension");
     }
-    let skills = Arc::new(match (&cli.skills_dir, &cli.skills_s3_uri) {
-        (Some(path), _) => server::skills::SkillCatalog::load(std::path::Path::new(path))?,
-        (_, Some(uri)) => server::skills::SkillCatalog::load_s3(uri).await?,
-        _ => server::skills::SkillCatalog::default(),
-    });
+    let mut skills = server::skills::SkillCatalog::default();
+    for path in &cli.skills_dir {
+        let source = server::skills::SkillCatalog::load(std::path::Path::new(path))
+            .with_context(|| format!("loading skills directory {path}"))?;
+        skills
+            .merge(source)
+            .with_context(|| format!("adding skills directory {path}"))?;
+    }
+    for uri in &cli.skills_s3_uri {
+        let source = server::skills::SkillCatalog::load_s3(uri).await?;
+        skills
+            .merge(source)
+            .with_context(|| format!("adding skills from {uri}"))?;
+    }
+    let skills = Arc::new(skills);
 
     // Parse peer list (supports both "host:port" and "id@host:port" formats).
     let (peer_addrs_list, peer_addrs_map) = ClusterConfig::parse_peers(&cli.peers);

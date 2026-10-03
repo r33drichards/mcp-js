@@ -110,17 +110,21 @@ Load configuration from a single TOML or JSON file (format chosen by extension).
 
 ### `--skills-dir`
 
-Publish Agent Skills from named subfolders containing SKILL.md. Loaded at startup; restart to publish edits. Supported on stdio and Streamable HTTP
+Publish Agent Skills from named subfolders containing SKILL.md. Repeat for multiple directories; may be combined with --skills-s3-uri. Loaded at startup; restart to publish edits. Supported on stdio and Streamable HTTP
 
 - Environment: `MCP_V8_SKILLS_DIR`
 - Value: `SKILLS_DIR`
+- Delimiter: `,`
+- Repeatable: yes
 
 ### `--skills-s3-uri`
 
-Publish Agent Skills from an S3 bucket/prefix or a SKILL.md object URI. Uses AWS credentials; loaded at startup. Conflicts with --skills-dir
+Publish Agent Skills from an S3 bucket/prefix or a SKILL.md object URI. Repeat for multiple locations; may be combined with --skills-dir. Uses AWS credentials; loaded at startup
 
 - Environment: `MCP_V8_SKILLS_S3_URI`
 - Value: `SKILLS_S3_URI`
+- Delimiter: `,`
+- Repeatable: yes
 
 ### `--print-openapi`
 
