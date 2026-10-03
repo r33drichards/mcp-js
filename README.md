@@ -383,6 +383,8 @@ Publish your own `SKILL.md` bundles and supporting files:
 
 ```bash
 mcp-v8 --skills-dir ./examples/skills
+# Or load from S3:
+mcp-v8 --skills-s3-uri s3://my-bucket/skills/
 ```
 
 Set `MCP_V8_SKILLS_DIR` or the `skills_dir` TOML/JSON configuration key instead

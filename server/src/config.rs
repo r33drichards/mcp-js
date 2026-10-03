@@ -315,6 +315,14 @@ mod tests {
     }
 
     #[test]
+    fn skills_s3_uri_config_and_cli_precedence() {
+        let cli = parse_with_config("skills_s3_uri = 's3://bucket/skills'", &[]);
+        assert_eq!(cli.skills_s3_uri.as_deref(), Some("s3://bucket/skills"));
+        let cli = parse_with_config("skills_s3_uri = 's3://bucket/skills'", &["--skills-s3-uri", "s3://other/workflow/SKILL.md"]);
+        assert_eq!(cli.skills_s3_uri.as_deref(), Some("s3://other/workflow/SKILL.md"));
+    }
+
+    #[test]
     fn scalar_keys_map_to_flags() {
         let cli = parse_with_config(
             r#"

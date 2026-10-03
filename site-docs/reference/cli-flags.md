@@ -115,6 +115,13 @@ Publish Agent Skills from named subfolders containing SKILL.md. Loaded at startu
 - Environment: `MCP_V8_SKILLS_DIR`
 - Value: `SKILLS_DIR`
 
+### `--skills-s3-uri`
+
+Publish Agent Skills from an S3 bucket/prefix or a SKILL.md object URI. Uses AWS credentials; loaded at startup. Conflicts with --skills-dir
+
+- Environment: `MCP_V8_SKILLS_S3_URI`
+- Value: `SKILLS_S3_URI`
+
 ### `--print-openapi`
 
 Print the OpenAPI JSON specification to stdout and exit. Use this to regenerate openapi.json: `./server --print-openapi > openapi.json`

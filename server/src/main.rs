@@ -119,6 +119,7 @@ async fn async_main(cli: Cli) -> Result<()> {
             ("--mcp-server", !cli.mcp_servers.is_empty()),
             ("--mcp-config", cli.mcp_config.is_some()),
             ("--skills-dir", cli.skills_dir.is_some()),
+            ("--skills-s3-uri", cli.skills_s3_uri.is_some()),
             ("--allow-run-js-file", cli.allow_run_js_file),
             ("--allow-external-modules", cli.allow_external_modules),
             ("--instructions", cli.instructions.is_some()),
@@ -137,12 +138,16 @@ async fn async_main(cli: Cli) -> Result<()> {
         }
     }
 
-    if cli.skills_dir.is_some() && cli.sse_port.is_some() {
-        anyhow::bail!("--skills-dir requires stdio or --http-port; legacy SSE does not support the Skills extension");
+    if cli.skills_dir.is_some() && cli.skills_s3_uri.is_some() {
+        anyhow::bail!("--skills-dir and --skills-s3-uri cannot be combined");
     }
-    let skills = Arc::new(match &cli.skills_dir {
-        Some(path) => server::skills::SkillCatalog::load(std::path::Path::new(path))?,
-        None => server::skills::SkillCatalog::default(),
+    if (cli.skills_dir.is_some() || cli.skills_s3_uri.is_some()) && cli.sse_port.is_some() {
+        anyhow::bail!("Skills require stdio or --http-port; legacy SSE does not support the Skills extension");
+    }
+    let skills = Arc::new(match (&cli.skills_dir, &cli.skills_s3_uri) {
+        (Some(path), _) => server::skills::SkillCatalog::load(std::path::Path::new(path))?,
+        (_, Some(uri)) => server::skills::SkillCatalog::load_s3(uri).await?,
+        _ => server::skills::SkillCatalog::default(),
     });
 
     // Parse peer list (supports both "host:port" and "id@host:port" formats).

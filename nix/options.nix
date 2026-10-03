@@ -260,6 +260,11 @@
     default = null;
     description = "Publish Agent Skills from named subfolders containing SKILL.md. Loaded at startup; restart to publish edits. Supported on stdio and Streamable HTTP. Config-file key for the `--skills-dir` flag. Environment variable: `MCP_V8_SKILLS_DIR`.";
   };
+  skills_s3_uri = lib.mkOption {
+    type = lib.types.nullOr lib.types.str;
+    default = null;
+    description = "Publish Agent Skills from an S3 bucket/prefix or a SKILL.md object URI. Uses AWS credentials; loaded at startup. Conflicts with --skills-dir. Config-file key for the `--skills-s3-uri` flag. Environment variable: `MCP_V8_SKILLS_S3_URI`.";
+  };
   sse_port = lib.mkOption {
     type = lib.types.nullOr lib.types.port;
     default = null;

@@ -27,10 +27,14 @@ impl SkillCatalog {
             "skills directory is not a directory: {}",
             root.display()
         );
-        let mut catalog = Self::default();
         let mut files = BTreeMap::new();
         let mut total = 0;
         collect_files(root, root, &mut files, &mut total)?;
+        Self::from_files(files)
+    }
+
+    fn from_files(files: BTreeMap<String, Vec<u8>>) -> Result<Self> {
+        let mut catalog = Self::default();
         for (path, bytes) in &files {
             if !path.ends_with("/SKILL.md") && path != "SKILL.md" {
                 continue;
@@ -92,6 +96,95 @@ impl SkillCatalog {
             catalog.skills.insert(uri, skill);
         }
         Ok(catalog)
+    }
+
+    /// Fetch a startup snapshot using the standard AWS credential chain.
+    pub async fn load_s3(uri: &str) -> Result<Self> {
+        s3_location(uri)?;
+        let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .load()
+            .await;
+        let mut builder = aws_sdk_s3::config::Builder::from(&config);
+        if let Ok(endpoint) = std::env::var("AWS_ENDPOINT_URL") {
+            if !endpoint.is_empty() {
+                builder = builder.endpoint_url(endpoint);
+            }
+        }
+        if std::env::var("AWS_S3_FORCE_PATH_STYLE").is_ok_and(|v| v == "true" || v == "1") {
+            builder = builder.force_path_style(true);
+        }
+        Self::load_s3_with_client(&aws_sdk_s3::Client::from_conf(builder.build()), uri).await
+    }
+
+    async fn load_s3_with_client(client: &aws_sdk_s3::Client, uri: &str) -> Result<Self> {
+        let (bucket, root_prefix, list_prefix) = s3_location(uri)?;
+        let mut token = None;
+        let mut files = BTreeMap::new();
+        let mut total = 0usize;
+        loop {
+            let page = client
+                .list_objects_v2()
+                .bucket(&bucket)
+                .prefix(&list_prefix)
+                .set_continuation_token(token.clone())
+                .send()
+                .await
+                .with_context(|| format!("listing skills in {uri}"))?;
+            for object in page.contents() {
+                let key = object.key().context("S3 object has no key")?;
+                if key.ends_with('/') {
+                    continue;
+                } // S3 folder markers
+                let path = key
+                    .strip_prefix(&root_prefix)
+                    .context("S3 key is outside the requested prefix")?;
+                ensure!(
+                    key.starts_with(&list_prefix),
+                    "S3 key is outside the requested prefix"
+                );
+                validate_path(path)?;
+                ensure!(
+                    object
+                        .size()
+                        .is_some_and(|n| n >= 0 && n as u64 <= (MAX_CATALOG_BYTES - total) as u64),
+                    "skills catalog exceeds 64 MiB or S3 object size is missing"
+                );
+                let mut response = client
+                    .get_object()
+                    .bucket(&bucket)
+                    .key(key)
+                    .if_match(object.e_tag().context("S3 object has no ETag")?)
+                    .send()
+                    .await
+                    .with_context(|| format!("reading skill object {key}"))?;
+                let mut bytes = Vec::new();
+                while let Some(chunk) = response.body.next().await {
+                    let chunk = chunk.with_context(|| format!("reading skill object {key}"))?;
+                    ensure!(
+                        chunk.len() <= MAX_CATALOG_BYTES - total,
+                        "skills catalog exceeds 64 MiB"
+                    );
+                    total += chunk.len();
+                    bytes.extend_from_slice(&chunk);
+                }
+                ensure!(
+                    files.insert(path.to_owned(), bytes).is_none(),
+                    "duplicate S3 skill object: {key}"
+                );
+            }
+            if !page.is_truncated().unwrap_or(false) {
+                break;
+            }
+            let next = page
+                .next_continuation_token()
+                .context("truncated S3 listing has no continuation token")?;
+            ensure!(
+                token.as_deref() != Some(next),
+                "S3 listing repeated its continuation token"
+            );
+            token = Some(next.to_owned());
+        }
+        Self::from_files(files)
     }
 
     /// Bridge the branch's typed extension messages into the stable SDK's
@@ -211,6 +304,50 @@ impl SkillCatalog {
     }
 }
 
+/// A prefix selects a catalog; an exact SKILL.md key selects its enclosing
+/// skill folder, retaining that folder's name in the public skill URI.
+fn s3_location(uri: &str) -> Result<(String, String, String)> {
+    let location = uri
+        .strip_prefix("s3://")
+        .context("skills S3 URI must start with s3://")?;
+    let (bucket, key) = location.split_once('/').unwrap_or((location, ""));
+    ensure!(
+        !bucket.is_empty() && !location.contains(['?', '#']),
+        "invalid skills S3 URI"
+    );
+    if key.ends_with("/SKILL.md") {
+        let folder = key.strip_suffix("/SKILL.md").unwrap();
+        let root = folder
+            .rsplit_once('/')
+            .map(|(parent, _)| format!("{parent}/"))
+            .unwrap_or_default();
+        return Ok((bucket.into(), root, format!("{folder}/")));
+    }
+    ensure!(
+        key != "SKILL.md",
+        "S3 SKILL.md must be inside a named skill folder"
+    );
+    let prefix = if key.is_empty() {
+        String::new()
+    } else {
+        format!("{}/", key.trim_end_matches('/'))
+    };
+    Ok((bucket.into(), prefix.clone(), prefix))
+}
+
+fn validate_path(path: &str) -> Result<()> {
+    ensure!(
+        !path.is_empty()
+            && path.split('/').all(|s| !s.is_empty()
+                && s != "."
+                && s != ".."
+                && s.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))),
+        "skill paths must use URI-safe letters, digits, hyphens, underscores and dots: {path}"
+    );
+    Ok(())
+}
+
 fn invalid_cursor() -> ErrorData {
     ErrorData::invalid_params("Invalid skills cursor", None)
 }
@@ -249,13 +386,7 @@ fn collect_files(
                 .iter()
                 .map(|s| s.to_str().context("skill paths must be UTF-8"))
                 .collect::<Result<_>>()?;
-            ensure!(
-                segments.iter().all(|s| s
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))),
-                "skill paths must use URI-safe letters, digits, hyphens, underscores and dots: {}",
-                path.display()
-            );
+            validate_path(&segments.join("/"))?;
             ensure!(
                 entry.metadata()?.len() <= (MAX_CATALOG_BYTES - *total) as u64,
                 "skills catalog exceeds 64 MiB"
@@ -288,6 +419,136 @@ mod tests {
         fs::write(dir.path().join("acme/refunds/image.bin"), [0xff, 0x00]).unwrap();
         fs::write(dir.path().join("private.txt"), "not a skill file").unwrap();
         dir
+    }
+
+    #[test]
+    fn s3_locations_and_paths() {
+        assert_eq!(
+            s3_location("s3://bucket/catalog").unwrap(),
+            ("bucket".into(), "catalog/".into(), "catalog/".into())
+        );
+        assert_eq!(
+            s3_location("s3://bucket/catalog/workflow/SKILL.md").unwrap(),
+            (
+                "bucket".into(),
+                "catalog/".into(),
+                "catalog/workflow/".into()
+            )
+        );
+        assert_eq!(
+            s3_location("s3://bucket").unwrap(),
+            ("bucket".into(), "".into(), "".into())
+        );
+        for uri in [
+            "https://bucket/skills",
+            "s3:///skills",
+            "s3://bucket/SKILL.md",
+            "s3://bucket/skills?version=1",
+        ] {
+            assert!(s3_location(uri).is_err());
+        }
+        for path in [
+            "../secret",
+            "skill/../secret",
+            "skill//file",
+            "skill/%2e%2e/file",
+        ] {
+            assert!(validate_path(path).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn s3_fetches_paginated_objects_and_builds_the_same_manifest() {
+        use aws_sdk_s3::config::{BehaviorVersion, Credentials, Region};
+        use axum::{
+            Router,
+            body::Body,
+            http::{Request, Response},
+            routing::get,
+        };
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let recorded = calls.clone();
+        let app = Router::new().fallback(get(move |request: Request<Body>| {
+            let calls = recorded.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                let uri = request.uri();
+                if uri.path().starts_with("/denied/") {
+                    return Response::builder().status(403).body(Body::from("<Error><Code>AccessDenied</Code><Message>Denied</Message></Error>")).unwrap();
+                }
+                let body = if uri.query().is_some_and(|q| q.contains("list-type=")) {
+                    let query: BTreeMap<_, _> = url::form_urlencoded::parse(uri.query().unwrap().as_bytes()).into_owned().collect();
+                    assert!(matches!(query.get("prefix").map(String::as_str), Some("catalog/workflow/" | "catalog/")));
+                    if query.contains_key("continuation-token") {
+                        assert_eq!(query.get("continuation-token").unwrap(), "page-2");
+                        "<ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>catalog/workflow/references/rules.md</Key><Size>5</Size><ETag>&quot;v2&quot;</ETag></Contents></ListBucketResult>".to_owned()
+                    } else {
+                        "<ListBucketResult><IsTruncated>true</IsTruncated><NextContinuationToken>page-2</NextContinuationToken><Contents><Key>catalog/workflow/SKILL.md</Key><Size>61</Size><ETag>&quot;v1&quot;</ETag></Contents></ListBucketResult>".to_owned()
+                    }
+                } else if uri.path().ends_with("/SKILL.md") {
+                    assert_eq!(request.headers()["if-match"], "\"v1\"");
+                    "---\nname: workflow\ndescription: S3 workflow\n---\nRead rules.\n".to_owned()
+                } else {
+                    assert!(uri.path().ends_with("/references/rules.md"));
+                    assert_eq!(request.headers()["if-match"], "\"v2\"");
+                    "Rules".to_owned()
+                };
+                Response::builder().status(200).body(Body::from(body)).unwrap()
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = aws_sdk_s3::Client::from_conf(
+            aws_sdk_s3::config::Builder::new()
+                .behavior_version(BehaviorVersion::latest())
+                .region(Region::new("us-east-1"))
+                .credentials_provider(Credentials::new("test", "test", None, None, "test"))
+                .endpoint_url(endpoint)
+                .force_path_style(true)
+                .build(),
+        );
+        let catalog =
+            SkillCatalog::load_s3_with_client(&client, "s3://bucket/catalog/workflow/SKILL.md")
+                .await
+                .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
+        let skill = catalog.get("skill://workflow/SKILL.md").unwrap().skill;
+        assert_eq!(skill.frontmatter["description"], "S3 workflow");
+        let files = skill.resources.unwrap();
+        let files = files.as_files().unwrap();
+        assert_eq!(files.len(), 2);
+        assert_eq!(
+            files[1].digest,
+            format!("sha256:{:x}", Sha256::digest(b"Rules"))
+        );
+        assert!(
+            catalog
+                .read("skill://workflow/references/rules.md")
+                .is_some()
+        );
+        assert!(catalog.read("skill://catalog/workflow/SKILL.md").is_none());
+        let prefix_catalog = SkillCatalog::load_s3_with_client(&client, "s3://bucket/catalog/")
+            .await
+            .unwrap();
+        assert_eq!(
+            prefix_catalog
+                .get("skill://workflow/SKILL.md")
+                .unwrap()
+                .skill
+                .frontmatter["name"],
+            "workflow"
+        );
+        assert!(
+            SkillCatalog::load_s3_with_client(&client, "s3://denied/catalog/")
+                .await
+                .is_err()
+        );
+        server.abort();
     }
 
     #[test]
