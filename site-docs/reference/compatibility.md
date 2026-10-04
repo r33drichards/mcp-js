@@ -106,14 +106,15 @@ served by the module loader:
 | `node:buffer` | feross/buffer (the npm Buffer polyfill) |
 | `node:console` | the global console, plus a `Console` class over writable streams |
 | `node:crypto` | hash/HMAC/randomness subset over the sandbox crypto ops |
+| `node:dgram` | loopback UDP sockets over sandbox ops |
 | `node:dns` | pass-through resolver (resolution happens host-side in the transports) |
 | `node:events` | Node's own lib source over a primordials shim |
-| `node:fs` (+`/promises`) | import-compatible stubs; the real surface is the policy-gated `fs` global |
-| `node:http` | import-compatible stub; HTTP/1 is `fetch()` |
+| `node:fs` (+`/promises`) | Node-style async and sync operations over the policy-gated `fs` global |
+| `node:http` | partial HTTP/1 client/server over loopback TCP; use `fetch()` for external HTTP |
 | `node:http2` | client subset over the policy-gated http2 ops (gRPC transport) |
 | `node:https` | import-compatible stub; use `fetch()` or `node:http2` |
 | `node:module` | `createRequire`/`builtinModules` over the builtin registry |
-| `node:net` | address helpers; sockets are inert (transports are policy-gated) |
+| `node:net` | address helpers and loopback TCP client/server; external sockets unsupported |
 | `node:os` | fixed sandbox values |
 | `node:path` | Node's own lib source over a primordials shim |
 | `node:perf_hooks` | user timing, observers, and function timing over the shared performance timeline |

@@ -304,7 +304,7 @@ fn install_headless_browser(
     let bin_dir = directory.join("bin");
     std::fs::create_dir(&bin_dir)?;
     let capture_path = directory.join("authorization-url");
-    let opener = bin_dir.join("xdg-open");
+    let opener = bin_dir.join(if cfg!(target_os = "macos") { "open" } else { "xdg-open" });
     std::fs::write(
         &opener,
         "#!/bin/sh\nprintf '%s\\n' \"$1\" >> \"$MCP_OAUTH_CAPTURE\"\n",
