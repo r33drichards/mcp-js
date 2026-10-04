@@ -578,6 +578,17 @@
     Object.defineProperty(EventTarget.prototype, Symbol.toStringTag, {
         value: 'EventTarget', configurable: true,
     });
+    // Non-standard helper mirroring Node: events.listenerCount(target, type)
+    // defers to a listenerCount method when the emitter has one, which is
+    // how counting works on EventTargets (AbortSignal in particular).
+    Object.defineProperty(EventTarget.prototype, 'listenerCount', {
+        value: function listenerCount(type) {
+            var d = targetData.get(this);
+            var list = d && d.get(String(type));
+            return list ? list.length : 0;
+        },
+        writable: true, enumerable: false, configurable: true,
+    });
     globalThis.EventTarget = EventTarget;
 
     // Event handler IDL attributes (onabort, onmessage, ...) — shared with

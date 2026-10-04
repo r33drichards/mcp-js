@@ -275,6 +275,16 @@ exports.INSPECT_MAX_BYTES = 50
 const K_MAX_LENGTH = 0x7fffffff
 exports.kMaxLength = K_MAX_LENGTH
 
+function nodeError (ErrorType, code, message) {
+  const error = new ErrorType(message)
+  error.code = code
+  return error
+}
+
+function unknownEncodingError (encoding) {
+  return nodeError(TypeError, 'ERR_UNKNOWN_ENCODING', 'Unknown encoding: ' + encoding)
+}
+
 /**
  * If `Buffer.TYPED_ARRAY_SUPPORT`:
  *   === true    Use Uint8Array implementation (fastest)
@@ -434,9 +444,19 @@ Object.setPrototypeOf(Buffer, Uint8Array)
 
 function assertSize (size) {
   if (typeof size !== 'number') {
-    throw new TypeError('"size" argument must be of type number')
-  } else if (size < 0) {
-    throw new RangeError('The value "' + size + '" is invalid for option "size"')
+    throw nodeError(
+      TypeError,
+      'ERR_INVALID_ARG_TYPE',
+      'The "size" argument must be of type number. Received type ' + typeof size
+    )
+  }
+  if (!Number.isFinite(size) || size < 0 || size > K_MAX_LENGTH) {
+    throw nodeError(
+      RangeError,
+      'ERR_OUT_OF_RANGE',
+      'The value of "size" is out of range. It must be >= 0 && <= ' +
+        K_MAX_LENGTH + '. Received ' + size
+    )
   }
 }
 
@@ -488,7 +508,7 @@ function fromString (string, encoding) {
   }
 
   if (!Buffer.isEncoding(encoding)) {
-    throw new TypeError('Unknown encoding: ' + encoding)
+    throw unknownEncodingError(encoding)
   }
 
   const length = byteLength(string, encoding) | 0
@@ -583,10 +603,7 @@ function checked (length) {
 }
 
 function SlowBuffer (length) {
-  if (+length != length) { // eslint-disable-line eqeqeq
-    length = 0
-  }
-  return Buffer.alloc(+length)
+  return Buffer.alloc(length)
 }
 
 Buffer.isBuffer = function isBuffer (b) {
@@ -594,14 +611,28 @@ Buffer.isBuffer = function isBuffer (b) {
     b !== Buffer.prototype // so Buffer.isBuffer(Buffer.prototype) will be false
 }
 
-Buffer.compare = function compare (a, b) {
-  if (isInstance(a, Uint8Array)) a = Buffer.from(a, a.offset, a.byteLength)
-  if (isInstance(b, Uint8Array)) b = Buffer.from(b, b.offset, b.byteLength)
-  if (!Buffer.isBuffer(a) || !Buffer.isBuffer(b)) {
-    throw new TypeError(
-      'The "buf1", "buf2" arguments must be one of type Buffer or Uint8Array'
+function formatReceived (value) {
+  if (typeof value === 'string') return `type string ('${value}')`
+  if (value === null) return 'null'
+  return `type ${typeof value} (${String(value)})`
+}
+
+function validateBufferArgument (value, name) {
+  if (!Buffer.isBuffer(value) && !isInstance(value, Uint8Array)) {
+    throw nodeError(
+      TypeError,
+      'ERR_INVALID_ARG_TYPE',
+      `The "${name}" argument must be an instance of Buffer or Uint8Array. ` +
+        `Received ${formatReceived(value)}`
     )
   }
+}
+
+Buffer.compare = function compare (a, b) {
+  validateBufferArgument(a, 'buf1')
+  validateBufferArgument(b, 'buf2')
+  if (isInstance(a, Uint8Array)) a = Buffer.from(a, a.offset, a.byteLength)
+  if (isInstance(b, Uint8Array)) b = Buffer.from(b, b.offset, b.byteLength)
 
   if (a === b) return 0
 
@@ -622,7 +653,8 @@ Buffer.compare = function compare (a, b) {
 }
 
 Buffer.isEncoding = function isEncoding (encoding) {
-  switch (String(encoding).toLowerCase()) {
+  if (typeof encoding !== 'string') return false
+  switch (encoding.toLowerCase()) {
     case 'hex':
     case 'utf8':
     case 'utf-8':
@@ -630,6 +662,7 @@ Buffer.isEncoding = function isEncoding (encoding) {
     case 'latin1':
     case 'binary':
     case 'base64':
+    case 'base64url':
     case 'ucs2':
     case 'ucs-2':
     case 'utf16le':
@@ -719,6 +752,7 @@ function byteLength (string, encoding) {
       case 'hex':
         return len >>> 1
       case 'base64':
+      case 'base64url':
         return base64ToBytes(string).length
       default:
         if (loweredCase) {
@@ -787,6 +821,9 @@ function slowToString (encoding, start, end) {
       case 'base64':
         return base64Slice(this, start, end)
 
+      case 'base64url':
+        return base64urlSlice(this, start, end)
+
       case 'ucs2':
       case 'ucs-2':
       case 'utf16le':
@@ -794,7 +831,7 @@ function slowToString (encoding, start, end) {
         return utf16leSlice(this, start, end)
 
       default:
-        if (loweredCase) throw new TypeError('Unknown encoding: ' + encoding)
+        if (loweredCase) throw unknownEncodingError(encoding)
         encoding = (encoding + '').toLowerCase()
         loweredCase = true
     }
@@ -862,17 +899,31 @@ Buffer.prototype.toString = function toString () {
 Buffer.prototype.toLocaleString = Buffer.prototype.toString
 
 Buffer.prototype.equals = function equals (b) {
-  if (!Buffer.isBuffer(b)) throw new TypeError('Argument must be a Buffer')
+  validateBufferArgument(b, 'otherBuffer')
   if (this === b) return true
   return Buffer.compare(this, b) === 0
 }
 
-Buffer.prototype.inspect = function inspect () {
-  let str = ''
+Buffer.prototype.inspect = function inspect (_depth, options, inspectValue) {
   const max = exports.INSPECT_MAX_BYTES
-  str = this.toString('hex', 0, max).replace(/(.{2})/g, '$1 ').trim()
-  if (this.length > max) str += ' ... '
-  return '<Buffer ' + str + '>'
+  const type = Buffer.isBuffer(this) ? 'Buffer' : 'Uint8Array'
+  let bytes = hexSlice(this, 0, max).replace(/(.{2})/g, '$1 ').trim()
+  if (this.length > max) {
+    const remaining = this.length - max
+    bytes += (bytes ? ' ' : '') + '... ' + remaining + ' more byte' +
+      (remaining === 1 ? '' : 's')
+  }
+
+  const props = Object.keys(this)
+    .filter((key) => !/^(0|[1-9]\d*)$/.test(key))
+    .map((key) => {
+      const value = typeof inspectValue === 'function'
+        ? inspectValue(this[key], options)
+        : String(this[key])
+      return key + ': ' + value
+    })
+  const contents = [bytes].concat(props).filter(Boolean).join(', ')
+  return '<' + type + ' ' + contents + '>'
 }
 if (customInspectSymbol) {
   Buffer.prototype[customInspectSymbol] = Buffer.prototype.inspect
@@ -882,12 +933,7 @@ Buffer.prototype.compare = function compare (target, start, end, thisStart, this
   if (isInstance(target, Uint8Array)) {
     target = Buffer.from(target, target.offset, target.byteLength)
   }
-  if (!Buffer.isBuffer(target)) {
-    throw new TypeError(
-      'The "target" argument must be one of type Buffer or Uint8Array. ' +
-      'Received type ' + (typeof target)
-    )
-  }
+  validateBufferArgument(target, 'target')
 
   if (start === undefined) {
     start = 0
@@ -1031,7 +1077,8 @@ function arrayIndexOf (arr, val, byteOffset, encoding, dir) {
     if (indexSize === 1) {
       return buf[i]
     } else {
-      return buf.readUInt16BE(i * indexSize)
+      const offset = i * indexSize
+      return (buf[offset] << 8) | buf[offset + 1]
     }
   }
 
@@ -1065,7 +1112,7 @@ function arrayIndexOf (arr, val, byteOffset, encoding, dir) {
 }
 
 Buffer.prototype.includes = function includes (val, byteOffset, encoding) {
-  return this.indexOf(val, byteOffset, encoding) !== -1
+  return Buffer.prototype.indexOf.call(this, val, byteOffset, encoding) !== -1
 }
 
 Buffer.prototype.indexOf = function indexOf (val, byteOffset, encoding) {
@@ -1170,6 +1217,7 @@ Buffer.prototype.write = function write (string, offset, length, encoding) {
         return asciiWrite(this, string, offset, length)
 
       case 'base64':
+      case 'base64url':
         // Warning: maxLength not taken into account in base64Write
         return base64Write(this, string, offset, length)
 
@@ -1180,7 +1228,7 @@ Buffer.prototype.write = function write (string, offset, length, encoding) {
         return ucs2Write(this, string, offset, length)
 
       default:
-        if (loweredCase) throw new TypeError('Unknown encoding: ' + encoding)
+        if (loweredCase) throw unknownEncodingError(encoding)
         encoding = ('' + encoding).toLowerCase()
         loweredCase = true
     }
@@ -1200,6 +1248,13 @@ function base64Slice (buf, start, end) {
   } else {
     return base64.fromByteArray(buf.slice(start, end))
   }
+}
+
+function base64urlSlice (buf, start, end) {
+  return base64Slice(buf, start, end)
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '')
 }
 
 function utf8Slice (buf, start, end) {
@@ -1344,6 +1399,54 @@ function utf16leSlice (buf, start, end) {
   return res
 }
 
+Buffer.prototype.asciiSlice = function asciiSliceMethod (start, end) {
+  return asciiSlice(this, start, end)
+}
+Buffer.prototype.base64Slice = function base64SliceMethod (start, end) {
+  return base64Slice(this, start, end)
+}
+Buffer.prototype.base64urlSlice = function base64urlSliceMethod (start, end) {
+  return base64urlSlice(this, start, end)
+}
+Buffer.prototype.latin1Slice = function latin1SliceMethod (start, end) {
+  return latin1Slice(this, start, end)
+}
+Buffer.prototype.hexSlice = function hexSliceMethod (start, end) {
+  return hexSlice(this, start, end)
+}
+Buffer.prototype.ucs2Slice = function ucs2SliceMethod (start, end) {
+  return utf16leSlice(this, start, end)
+}
+Buffer.prototype.utf8Slice = function utf8SliceMethod (start, end) {
+  return utf8Slice(this, start, end)
+}
+Buffer.prototype.asciiWrite = function asciiWriteMethod (string, offset, length) {
+  return asciiWrite(this, string, offset, length)
+}
+Buffer.prototype.base64Write = function base64WriteMethod (string, offset, length) {
+  return base64Write(this, string, offset, length)
+}
+Buffer.prototype.base64urlWrite = function base64urlWriteMethod (string, offset, length) {
+  return base64Write(this, string, offset, length)
+}
+Buffer.prototype.latin1Write = function latin1WriteMethod (string, offset, length) {
+  return asciiWrite(this, string, offset, length)
+}
+Buffer.prototype.hexWrite = function hexWriteMethod (string, offset, length) {
+  return hexWrite(this, string, offset, length)
+}
+Buffer.prototype.ucs2Write = function ucs2WriteMethod (string, offset, length) {
+  return ucs2Write(this, string, offset, length)
+}
+Buffer.prototype.utf8Write = function utf8WriteMethod (string, offset, length) {
+  return utf8Write(this, string, offset, length)
+}
+Buffer.prototype.subarray = function subarray (start, end) {
+  const view = Uint8Array.prototype.subarray.call(this, start, end)
+  Object.setPrototypeOf(view, Buffer.prototype)
+  return view
+}
+
 Buffer.prototype.slice = function slice (start, end) {
   const len = this.length
   start = ~~start
@@ -1365,11 +1468,7 @@ Buffer.prototype.slice = function slice (start, end) {
 
   if (end < start) end = start
 
-  const newBuf = this.subarray(start, end)
-  // Return an augmented `Uint8Array` instance
-  Object.setPrototypeOf(newBuf, Buffer.prototype)
-
-  return newBuf
+  return this.subarray(start, end)
 }
 
 /*
@@ -1644,7 +1743,7 @@ Buffer.prototype.readDoubleBE = function readDoubleBE (offset, noAssert) {
 }
 
 function checkInt (buf, value, offset, ext, max, min) {
-  if (!Buffer.isBuffer(buf)) throw new TypeError('"buffer" argument must be a Buffer instance')
+  if (!isInstance(buf, Uint8Array)) throw new TypeError('"buffer" argument must be a Buffer instance')
   if (value > max || value < min) throw new RangeError('"value" argument is out of bounds')
   if (offset + ext > buf.length) throw new RangeError('Index out of range')
 }
@@ -1941,7 +2040,7 @@ Buffer.prototype.writeDoubleBE = function writeDoubleBE (value, offset, noAssert
 
 // copy(targetBuffer, targetStart=0, sourceStart=0, sourceEnd=buffer.length)
 Buffer.prototype.copy = function copy (target, targetStart, start, end) {
-  if (!Buffer.isBuffer(target)) throw new TypeError('argument should be a Buffer')
+  if (!isInstance(target, Uint8Array)) throw new TypeError('argument should be a Buffer')
   if (!start) start = 0
   if (!end && end !== 0) end = this.length
   if (targetStart >= target.length) targetStart = target.length
@@ -2000,7 +2099,7 @@ Buffer.prototype.fill = function fill (val, start, end, encoding) {
       throw new TypeError('encoding must be a string')
     }
     if (typeof encoding === 'string' && !Buffer.isEncoding(encoding)) {
-      throw new TypeError('Unknown encoding: ' + encoding)
+      throw unknownEncodingError(encoding)
     }
     if (val.length === 1) {
       const code = val.charCodeAt(0)
@@ -2366,4 +2465,10 @@ export const SlowBuffer = __buf.SlowBuffer;
 export const INSPECT_MAX_BYTES = __buf.INSPECT_MAX_BYTES;
 export const kMaxLength = __buf.kMaxLength;
 export const constants = { MAX_LENGTH: __buf.kMaxLength, MAX_STRING_LENGTH: (1 << 29) - 24 };
-export default { Buffer, SlowBuffer, INSPECT_MAX_BYTES, kMaxLength, constants };
+const bufferModule = { Buffer, SlowBuffer, kMaxLength, constants };
+Object.defineProperty(bufferModule, 'INSPECT_MAX_BYTES', {
+  enumerable: true,
+  get() { return __buf.INSPECT_MAX_BYTES; },
+  set(value) { __buf.INSPECT_MAX_BYTES = value; },
+});
+export default bufferModule;

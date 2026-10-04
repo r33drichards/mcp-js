@@ -407,6 +407,33 @@ allow if {{
     .await;
     assert_eq!(out, "hello from the real path");
 
+    // Synchronous Node operations use the same rewriting and policy service.
+    let out = eval(
+        &engine,
+        r#"(() => { fs.writeFileSync("/virtual/sync.txt", "rewritten"); return "written"; })()"#
+            .to_string(),
+    )
+    .await;
+    assert_eq!(out, "written");
+    assert_eq!(
+        std::fs::read_to_string(data_dir.join("sync.txt")).unwrap(),
+        "rewritten"
+    );
+    let forbidden = dir.path().join("forbidden.txt");
+    let out = eval(
+        &engine,
+        format!(
+            "(() => {{ fs.writeFileSync({}, 'denied'); return 'unexpected'; }})()",
+            serde_json::to_string(&forbidden.to_string_lossy()).unwrap()
+        ),
+    )
+    .await;
+    assert!(
+        out.starts_with("ERROR:") && out.contains("denied by policy"),
+        "got: {out}"
+    );
+    assert!(!forbidden.exists());
+
     // A path outside both the virtual prefix and the data dir is denied.
     let out = eval(&engine, r#"fs.readFile("/etc/hostname", "utf8")"#.to_string()).await;
     assert!(

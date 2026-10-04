@@ -21,12 +21,14 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::process::Stdio;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use deno_core::{JsRuntime, OpState, op2};
 use deno_error::JsErrorBox;
 use serde::Serialize;
+use tokio::io::AsyncWriteExt;
 
 use super::hooks::{HookChain, PostOutcome, PreOutcome};
 use super::opa::PolicyChain;
@@ -37,17 +39,43 @@ use super::opa::PolicyChain;
 #[derive(Clone, Debug)]
 pub struct SubprocessConfig {
     pub hooks: Arc<HookChain>,
+    pub timeout: Option<std::time::Duration>,
 }
 
 impl SubprocessConfig {
     /// Create from a full [`HookChain`] (used with `--policies-json`).
     pub fn new_with_hooks(hooks: Arc<HookChain>) -> Self {
-        Self { hooks }
+        Self {
+            hooks,
+            timeout: None,
+        }
     }
 
     /// Create from a bare [`PolicyChain`], wrapped as the sole pre hook.
     pub fn new(chain: Arc<PolicyChain>) -> Self {
         Self::new_with_hooks(Arc::new(HookChain::from_policy("subprocess", chain)))
+    }
+
+    pub fn with_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
+}
+
+async fn await_with_timeout<T>(
+    label: &str,
+    command: &str,
+    timeout: Option<std::time::Duration>,
+    task: impl std::future::Future<Output = Result<T, String>>,
+) -> Result<T, String> {
+    match timeout {
+        Some(limit) => tokio::time::timeout(limit, task).await.map_err(|_| {
+            format!(
+                "{label}: '{command}' timed out after {} seconds",
+                limit.as_secs()
+            )
+        })?,
+        None => task.await,
     }
 }
 
@@ -67,6 +95,7 @@ struct SubprocessPolicyInput {
     /// Environment variables (if specified).
     #[serde(skip_serializing_if = "Option::is_none")]
     env: Option<HashMap<String, String>>,
+    stdin: Option<Vec<u8>>,
 }
 
 // ── Async deno_core ops ──────────────────────────────────────────────────
@@ -74,7 +103,7 @@ struct SubprocessPolicyInput {
 /// Async op: Run a command to completion (Deno.Command.output() equivalent).
 /// Called from JS via `Deno.core.ops.op_subprocess_output(command, args_json, options_json)`.
 /// Returns a JSON string with {code, stdout, stderr}.
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_subprocess_output(
     state: Rc<RefCell<OpState>>,
@@ -83,31 +112,81 @@ async fn op_subprocess_output(
     #[string] options_json: String,
 ) -> Result<String, JsErrorBox> {
     let hooks = extract_hooks(&state)?;
+    let timeout = state.borrow().borrow::<SubprocessConfig>().timeout;
 
     tokio::spawn(async move {
-        let args: Vec<String> = serde_json::from_str(&args_json)
-            .map_err(|e| format!("subprocess: invalid args JSON: {}", e))?;
-        let options: SubprocessOptions = serde_json::from_str(&options_json)
-            .map_err(|e| format!("subprocess: invalid options JSON: {}", e))?;
+        let display = command.clone();
+        await_with_timeout("subprocess", &display, timeout, async move {
+            let args: Vec<String> = serde_json::from_str(&args_json)
+                .map_err(|e| format!("subprocess: invalid args JSON: {}", e))?;
+            let options: SubprocessOptions = serde_json::from_str(&options_json)
+                .map_err(|e| format!("subprocess: invalid options JSON: {}", e))?;
 
-        if hooks.has_stack() {
-            return run_stack_mode(&hooks, "command_output", &command, &args, &options).await;
-        }
+            if hooks.has_stack() {
+                return run_stack_mode(&hooks, "command_output", &command, &args, &options).await;
+            }
 
-        let (eff, eff_input) =
-            run_pre_hooks(&hooks, "command_output", &command, &args, &options).await?;
-        let result = execute_subprocess_effective(eff_input.clone(), None).await?;
-        run_post_hooks(&hooks, "command_output", &eff.command, &eff_input, result).await
+            let (eff, eff_input) =
+                run_pre_hooks(&hooks, "command_output", &command, &args, &options).await?;
+            let result = execute_subprocess_effective(eff_input.clone(), None).await?;
+            run_post_hooks(&hooks, "command_output", &eff.command, &eff_input, result).await
+        })
+        .await
     })
     .await
     .map_err(|e| JsErrorBox::generic(format!("subprocess task join error: {}", e)))?
     .map_err(|e: String| JsErrorBox::generic(e))
 }
 
+/// Sync op: Run a command to completion (Deno.Command.outputSync() equivalent).
+#[op2]
+#[string]
+fn op_subprocess_output_sync(
+    state: &mut OpState,
+    #[string] command: String,
+    #[string] args_json: String,
+    #[string] options_json: String,
+) -> Result<String, JsErrorBox> {
+    let config = state.try_borrow::<SubprocessConfig>().ok_or_else(|| {
+        JsErrorBox::generic("subprocess: internal error — no subprocess config available")
+    })?;
+    let hooks = config.hooks.clone();
+    let timeout = config.timeout;
+    let args: Vec<String> = serde_json::from_str(&args_json)
+        .map_err(|e| JsErrorBox::generic(format!("subprocess: invalid args JSON: {e}")))?;
+    let options: SubprocessOptions = serde_json::from_str(&options_json)
+        .map_err(|e| JsErrorBox::generic(format!("subprocess: invalid options JSON: {e}")))?;
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("subprocess: failed to create synchronous runtime: {e}"))?;
+        let display = command.clone();
+        runtime.block_on(await_with_timeout(
+            "subprocess",
+            &display,
+            timeout,
+            async move {
+                if hooks.has_stack() {
+                    return run_stack_mode(&hooks, "command_output", &command, &args, &options)
+                        .await;
+                }
+                let (eff, input) =
+                    run_pre_hooks(&hooks, "command_output", &command, &args, &options).await?;
+                let result = execute_subprocess_effective(input.clone(), None).await?;
+                run_post_hooks(&hooks, "command_output", &eff.command, &input, result).await
+            },
+        ))
+    })
+    .join()
+    .map_err(|_| JsErrorBox::generic("subprocess: synchronous thread panicked"))?
+    .map_err(JsErrorBox::generic)
+}
+
 /// Async op: Execute a shell command (Node.js child_process.exec equivalent).
 /// Called from JS via `Deno.core.ops.op_subprocess_exec(command, options_json)`.
 /// Returns a JSON string with {code, stdout, stderr}.
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_subprocess_exec(
     state: Rc<RefCell<OpState>>,
@@ -115,41 +194,59 @@ async fn op_subprocess_exec(
     #[string] options_json: String,
 ) -> Result<String, JsErrorBox> {
     let hooks = extract_hooks(&state)?;
+    let timeout = state.borrow().borrow::<SubprocessConfig>().timeout;
 
     tokio::spawn(async move {
-        let options: SubprocessOptions = serde_json::from_str(&options_json)
-            .map_err(|e| format!("subprocess.exec: invalid options JSON: {}", e))?;
+        let display = command.clone();
+        await_with_timeout("subprocess", &display, timeout, async move {
+            let options: SubprocessOptions = serde_json::from_str(&options_json)
+                .map_err(|e| format!("subprocess.exec: invalid options JSON: {}", e))?;
 
-        // For exec(), the command is run via shell. We pass it as a single
-        // string to the shell, so args in the policy input is the full command.
-        let shell = if cfg!(target_os = "windows") { "cmd" } else { "/bin/sh" };
-        let shell_arg = if cfg!(target_os = "windows") { "/C" } else { "-c" };
+            // For exec(), the command is run via shell. We pass it as a single
+            // string to the shell, so args in the policy input is the full command.
+            let shell = if cfg!(target_os = "windows") {
+                "cmd"
+            } else {
+                "/bin/sh"
+            };
+            let shell_arg = if cfg!(target_os = "windows") {
+                "/C"
+            } else {
+                "-c"
+            };
 
-        if hooks.has_stack() {
-            return run_stack_mode(
+            if hooks.has_stack() {
+                return run_stack_mode(
+                    &hooks,
+                    "exec",
+                    shell,
+                    &[shell_arg.to_string(), command.clone()],
+                    &options,
+                )
+                .await;
+            }
+
+            let (eff, eff_input) = run_pre_hooks(
                 &hooks,
                 "exec",
                 shell,
                 &[shell_arg.to_string(), command.clone()],
                 &options,
             )
-            .await;
-        }
+            .await?;
+            let encoding = options.encoding.as_deref().unwrap_or("utf8").to_string();
+            let result = execute_subprocess_effective(eff_input.clone(), Some(&encoding)).await?;
 
-        let (eff, eff_input) = run_pre_hooks(
-            &hooks,
-            "exec",
-            shell,
-            &[shell_arg.to_string(), command.clone()],
-            &options,
-        ).await?;
-        let encoding = options.encoding.as_deref().unwrap_or("utf8").to_string();
-        let result = execute_subprocess_effective(eff_input.clone(), Some(&encoding)).await?;
-
-        // Post-hook messages name what actually ran: the effective shell
-        // command a pre hook may have rewritten, not the original string.
-        let effective_display = eff.args.get(1).cloned().unwrap_or_else(|| eff.command.clone());
-        run_post_hooks(&hooks, "exec", &effective_display, &eff_input, result).await
+            // Post-hook messages name what actually ran: the effective shell
+            // command a pre hook may have rewritten, not the original string.
+            let effective_display = eff
+                .args
+                .get(1)
+                .cloned()
+                .unwrap_or_else(|| eff.command.clone());
+            run_post_hooks(&hooks, "exec", &effective_display, &eff_input, result).await
+        })
+        .await
     })
     .await
     .map_err(|e| JsErrorBox::generic(format!("subprocess task join error: {}", e)))?
@@ -160,7 +257,11 @@ async fn op_subprocess_exec(
 
 deno_core::extension!(
     subprocess_ext,
-    ops = [op_subprocess_output, op_subprocess_exec],
+    ops = [
+        op_subprocess_output,
+        op_subprocess_output_sync,
+        op_subprocess_exec
+    ],
 );
 
 pub fn create_extension() -> deno_core::Extension {
@@ -229,6 +330,7 @@ const SUBPROCESS_JS_WRAPPER: &str = r#"
         var optionsJson = JSON.stringify({
             cwd: this._options.cwd || null,
             env: this._options.env || null,
+            stdin: this._options.stdin || null,
         });
 
         var rawResult = await Deno.core.ops.op_subprocess_output(
@@ -246,7 +348,27 @@ const SUBPROCESS_JS_WRAPPER: &str = r#"
     };
 
     DenoCommand.prototype.outputSync = function() {
-        throw new Error('Deno.Command.outputSync() is not supported; use output() instead');
+        var args = this._options.args || [];
+        if (!Array.isArray(args)) {
+            throw new TypeError('Deno.Command: args must be an array');
+        }
+        var argsJson = JSON.stringify(args.map(String));
+        var optionsJson = JSON.stringify({
+            cwd: this._options.cwd || null,
+            env: this._options.env || null,
+            stdin: this._options.stdin || null,
+        });
+        var rawResult = Deno.core.ops.op_subprocess_output_sync(
+            this._command, argsJson, optionsJson
+        );
+        var result = JSON.parse(rawResult);
+        return {
+            code: result.code,
+            success: result.success,
+            stdout: base64ToUint8Array(result.stdout),
+            stderr: base64ToUint8Array(result.stderr),
+            signal: null,
+        };
     };
 
     DenoCommand.prototype.spawn = function() {
@@ -306,7 +428,7 @@ const SUBPROCESS_JS_WRAPPER: &str = r#"
 
 // ── Helpers ──────────────────────────────────────────────────────────────
 
-#[derive(serde::Deserialize)]
+#[derive(Clone, serde::Deserialize)]
 struct SubprocessOptions {
     #[serde(default)]
     cwd: Option<String>,
@@ -317,12 +439,15 @@ struct SubprocessOptions {
     #[allow(dead_code)]
     #[serde(default)]
     timeout: Option<u64>,
+    #[serde(default)]
+    stdin: Option<Vec<u8>>,
 }
 
 fn extract_hooks(state: &Rc<RefCell<OpState>>) -> Result<Arc<HookChain>, JsErrorBox> {
     let state = state.borrow();
-    let config = state.try_borrow::<SubprocessConfig>()
-        .ok_or_else(|| JsErrorBox::generic("subprocess: internal error — no subprocess config available"))?;
+    let config = state.try_borrow::<SubprocessConfig>().ok_or_else(|| {
+        JsErrorBox::generic("subprocess: internal error — no subprocess config available")
+    })?;
     Ok(config.hooks.clone())
 }
 
@@ -330,6 +455,8 @@ fn extract_hooks(state: &Rc<RefCell<OpState>>) -> Result<Arc<HookChain>, JsError
 /// the effective hook-chain input.
 #[derive(serde::Deserialize)]
 struct EffectiveSubprocess {
+    #[serde(default)]
+    stdin: Option<Vec<u8>>,
     command: String,
     #[serde(default)]
     args: Vec<String>,
@@ -352,6 +479,7 @@ async fn execute_subprocess_effective(
 
     let mut cmd = tokio::process::Command::new(&eff.command);
     cmd.args(&eff.args);
+    cmd.kill_on_drop(true);
     if let Some(ref cwd) = eff.cwd {
         cmd.current_dir(cwd);
     }
@@ -359,10 +487,28 @@ async fn execute_subprocess_effective(
         cmd.envs(env);
     }
 
-    let output = cmd
-        .output()
-        .await
-        .map_err(|e| format!("subprocess: failed to execute '{}': {}", eff.command, e))?;
+    let output = if let Some(input) = eff.stdin {
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| format!("subprocess: failed to execute '{}': {}", eff.command, e))?;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(&input)
+                .await
+                .map_err(|e| format!("subprocess: failed to write stdin: {e}"))?;
+        }
+        child
+            .wait_with_output()
+            .await
+            .map_err(|e| format!("subprocess: failed to wait: {e}"))?
+    } else {
+        cmd.output()
+            .await
+            .map_err(|e| format!("subprocess: failed to execute '{}': {}", eff.command, e))?
+    };
 
     let mut result = match encoding {
         // exec: honor the caller's encoding and echo it for the JS wrapper.
@@ -404,23 +550,29 @@ async fn run_stack_mode(
         args: args.to_vec(),
         cwd: options.cwd.clone(),
         env: options.env.clone(),
+        stdin: options.stdin.clone(),
     };
     let input_value = serde_json::to_value(&input)
         .map_err(|e| format!("subprocess.{}: failed to serialize input: {}", operation, e))?;
     // exec honors the caller's encoding; command_output is always base64.
     let encoding: Option<String> = if operation == "exec" {
-        Some(options.encoding.clone().unwrap_or_else(|| "utf8".to_string()))
+        Some(
+            options
+                .encoding
+                .clone()
+                .unwrap_or_else(|| "utf8".to_string()),
+        )
     } else {
         None
     };
     let executor: super::hooks::StackExecutor = std::sync::Arc::new(move |effective| {
         let encoding = encoding.clone();
-        Box::pin(async move {
-            execute_subprocess_effective(effective, encoding.as_deref()).await
-        })
+        Box::pin(async move { execute_subprocess_effective(effective, encoding.as_deref()).await })
             as std::pin::Pin<Box<dyn std::future::Future<Output = _> + Send>>
     });
-    let output = hooks.run_stack_full(input_value, |_| Ok(()), executor).await?;
+    let output = hooks
+        .run_stack_full(input_value, |_| Ok(()), executor)
+        .await?;
     Ok(output.to_string())
 }
 
@@ -440,10 +592,15 @@ async fn run_pre_hooks(
         args: args.to_vec(),
         cwd: options.cwd.clone(),
         env: options.env.clone(),
+        stdin: options.stdin.clone(),
     };
 
-    let input_value = serde_json::to_value(&input)
-        .map_err(|e| format!("subprocess.{}: failed to serialize policy input: {}", operation, e))?;
+    let input_value = serde_json::to_value(&input).map_err(|e| {
+        format!(
+            "subprocess.{}: failed to serialize policy input: {}",
+            operation, e
+        )
+    })?;
 
     let effective = match hooks
         .run_pre(input_value)
@@ -462,8 +619,12 @@ async fn run_pre_hooks(
         }
     };
 
-    let eff: EffectiveSubprocess = serde_json::from_value(effective.clone())
-        .map_err(|e| format!("subprocess.{}: invalid effective input after pre hooks: {}", operation, e))?;
+    let eff: EffectiveSubprocess = serde_json::from_value(effective.clone()).map_err(|e| {
+        format!(
+            "subprocess.{}: invalid effective input after pre hooks: {}",
+            operation, e
+        )
+    })?;
     Ok((eff, effective))
 }
 
@@ -520,6 +681,7 @@ mod tests {
     #[test]
     fn test_subprocess_policy_input_serialization() {
         let input = SubprocessPolicyInput {
+            stdin: None,
             operation: "command_output".to_string(),
             command: "echo".to_string(),
             args: vec!["hello".to_string(), "world".to_string()],
@@ -539,6 +701,7 @@ mod tests {
         let mut env = HashMap::new();
         env.insert("PATH".to_string(), "/usr/bin".to_string());
         let input = SubprocessPolicyInput {
+            stdin: None,
             operation: "exec".to_string(),
             command: "/bin/sh".to_string(),
             args: vec!["-c".to_string(), "ls".to_string()],

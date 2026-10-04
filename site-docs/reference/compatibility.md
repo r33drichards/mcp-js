@@ -97,7 +97,7 @@ changelog.
 
 ## Node.js core tests (node v22.14.0)
 
-**35 / 35 vendored tests passing.** The `node:` modules
+**45 / 45 vendored runnable tests passing.** The `node:` modules
 served by the module loader:
 
 | Module | Implementation |
@@ -106,17 +106,19 @@ served by the module loader:
 | `node:buffer` | feross/buffer (the npm Buffer polyfill) |
 | `node:console` | the global console, plus a `Console` class over writable streams |
 | `node:crypto` | hash/HMAC/randomness subset over the sandbox crypto ops |
+| `node:dgram` | loopback UDP sockets over sandbox ops |
 | `node:dns` | pass-through resolver (resolution happens host-side in the transports) |
 | `node:events` | Node's own lib source over a primordials shim |
-| `node:fs` (+`/promises`) | import-compatible stubs; the real surface is the policy-gated `fs` global |
-| `node:http` | import-compatible stub; HTTP/1 is `fetch()` |
+| `node:fs` (+`/promises`) | Node-style async and sync operations over the policy-gated `fs` global |
+| `node:http` | partial HTTP/1 client/server over loopback TCP; use `fetch()` for external HTTP |
 | `node:http2` | client subset over the policy-gated http2 ops (gRPC transport) |
 | `node:https` | import-compatible stub; use `fetch()` or `node:http2` |
 | `node:module` | `createRequire`/`builtinModules` over the builtin registry |
-| `node:net` | address helpers; sockets are inert (transports are policy-gated) |
+| `node:net` | address helpers and loopback TCP client/server; external sockets unsupported |
 | `node:os` | fixed sandbox values |
 | `node:path` | Node's own lib source over a primordials shim |
-| `node:process` | fixed sandbox values; no host env |
+| `node:perf_hooks` | user timing, observers, and function timing over the shared performance timeline |
+| `node:process` | fixed sandbox values plus active timer/immediate resource snapshots; no host env |
 | `node:querystring` | Node's own lib source over a primordials shim |
 | `node:stream` | purpose-written subset (legacy `Stream` base + Readable/Writable/Duplex/Transform) |
 | `node:stream/web` | the runtime's WHATWG streams globals re-exported |
@@ -124,12 +126,12 @@ served by the module loader:
 | `node:tls` | option plumbing; TLS terminates host-side in the transports |
 | `node:url` | WHATWG URL + file-URL helpers |
 | `node:util` | purpose-written subset |
-| `node:zlib` | one-shot gzip/deflate over CompressionStream / DecompressionStream |
+| `node:zlib` | CRC32, callback and synchronous gzip/deflate, plus legacy Deflate/Inflate streams (partial options/backpressure) |
 
-Skipped tests (with reasons):
+Classified non-runnable tests (with reasons):
 
-- `test-events-once.js` — pokes node-internal module internal/event_target
-- `test-path-resolve.js` — requires child_process for cwd checks
+- `test-events-once.js` — `harness_missing` / `pure`: requires node-internal module internal/event_target
+- `test-path-resolve.js` — `policy_required` / `subprocess`: requires child_process to verify cwd-dependent resolution
 
 ## Known limitations
 
