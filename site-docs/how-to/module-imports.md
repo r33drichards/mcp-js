@@ -113,3 +113,26 @@ The `url` entry delegates every module-allow decision to the remote OPA server. 
 - [How-to: Security policies](../how-to/policies.md)
 - [How-to: WebAssembly modules](../how-to/wasm-modules.md)
 - [How-to: Running JavaScript & TypeScript](../how-to/js-execution.md)
+
+## Node-dependent npm packages
+
+For esm.sh's canonical `https://esm.sh/node/<builtin>.mjs` imports, the
+runtime serves its embedded `node:` compatibility module after module-policy
+evaluation. This avoids incomplete CDN browser shims. It does not provide a
+full Node.js installation; unsupported built-ins and native addons still need
+another runtime. Version-pinned `pngjs` supports synchronous and asynchronous
+PNG round trips:
+
+```js
+const { PNG } = await import("npm:pngjs@7.0.0");
+const pixels = new Uint8Array([255, 0, 0, 255]);
+const bytes = PNG.sync.write({ width: 1, height: 1, data: pixels });
+const image = PNG.sync.read(bytes);
+artifact("red-pixel", "image/png", bytes);
+```
+
+The `node:zlib` implementation supports sync gzip/deflate and the legacy
+Deflate/Inflate surface used by this package. Advanced tuning options, full
+stream backpressure, and undocumented Node internals are not fully implemented.
+The regression tests exercise both the pinned offline package and its live CDN
+build (`cargo test --test pngjs -- --ignored`).

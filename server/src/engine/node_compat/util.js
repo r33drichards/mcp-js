@@ -31,7 +31,13 @@ function inspectValue(value, depth, maxDepth, seen) {
     seen = seen.concat([value]);
     const next = depth + 1;
     if (typeof value[inspect.custom] === 'function') {
-        try { return String(value[inspect.custom](maxDepth - depth, {})); } catch { /* fall through */ }
+        try {
+            return String(value[inspect.custom](
+                maxDepth - depth,
+                {},
+                (nested, nestedOptions) => inspect(nested, nestedOptions),
+            ));
+        } catch { /* fall through */ }
     }
     if (Array.isArray(value)) {
         const items = value.slice(0, 100).map((v) => inspectValue(v, next, maxDepth, seen));
@@ -45,7 +51,9 @@ function inspectValue(value, depth, maxDepth, seen) {
         const tag = value.constructor.name;
         const shown = Array.from(value.subarray ? value.subarray(0, 100) : value).map(String);
         if (value.length > 100) shown.push(`... ${value.length - 100} more items`);
-        return `${tag}(${value.length}) [ ${shown.join(', ')} ]`;
+        return shown.length === 0
+            ? `${tag}(${value.length}) []`
+            : `${tag}(${value.length}) [ ${shown.join(', ')} ]`;
     }
     if (value instanceof Map) {
         const entries = [];
@@ -173,6 +181,12 @@ const types = {
     isAsyncFunction: (v) => typeof v === 'function' && v.constructor && v.constructor.name === 'AsyncFunction',
     isGeneratorFunction: (v) => typeof v === 'function' && v.constructor && v.constructor.name === 'GeneratorFunction',
     isProxy: () => false,
+    isModuleNamespaceObject: (v) => {
+        if (v === null || typeof v !== 'object') return false;
+        const tag = Object.getOwnPropertyDescriptor(v, Symbol.toStringTag);
+        return tag !== undefined && tag.value === 'Module' &&
+            tag.writable === false && tag.configurable === false;
+    },
     isBoxedPrimitive: (v) => {
         const t = Object.prototype.toString.call(v);
         return typeof v === 'object' && v !== null &&
@@ -186,6 +200,23 @@ const util = {
     TextEncoder: globalThis.TextEncoder,
     TextDecoder: globalThis.TextDecoder,
 };
+
+// V8 stack-trace-backed approximation of util.getCallSites (Node 22+).
+export function getCallSites(frameCount = 10) {
+    const stack = String(new Error().stack || '').split('\n').slice(2, 2 + frameCount);
+    return stack.map((line) => {
+        const match = /at (?:(.+?) \()?([^()]+?):(\d+):(\d+)\)?\s*$/.exec(line);
+        return {
+            functionName: (match && match[1]) || '',
+            scriptName: (match && match[2]) || '',
+            scriptId: '0',
+            lineNumber: match ? Number(match[3]) : 0,
+            column: match ? Number(match[4]) : 0,
+            columnNumber: match ? Number(match[4]) : 0,
+        };
+    });
+}
+util.getCallSites = getCallSites;
 
 export { format, inspect, promisify, callbackify, inherits, deprecate, debuglog, types };
 export const TextEncoder = globalThis.TextEncoder;

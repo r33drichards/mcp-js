@@ -475,7 +475,7 @@ pub type NextRequest = (Value, tokio::sync::oneshot::Sender<Result<Value, String
 #[derive(Clone)]
 struct NextSender(tokio::sync::mpsc::UnboundedSender<NextRequest>);
 
-#[deno_core::op2(async)]
+#[deno_core::op2]
 #[string]
 async fn op_hook_next(
     state: Rc<RefCell<OpState>>,

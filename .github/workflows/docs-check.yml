@@ -18,11 +18,13 @@ jobs:
         run: nix build .#packages.x86_64-linux.docs --print-build-logs -L
       - name: Check generated docs drift
         run: nix build .#checks.x86_64-linux.docs-generated-check --print-build-logs --no-link -L
-      - name: Check compatibility matrix is regenerated
+      - name: Check compatibility tooling and generated reports
         run: |
+          python3 -m unittest tools/compat/tests/test_node_compat_tools.py -v
+          python3 tools/compat/gen-node-compat-report.py --check
           python3 tools/compat/gen-compat-docs.py
           git diff --exit-code site-docs/reference/compatibility.md \
-            || { echo "::error::site-docs/reference/compatibility.md is stale — run tools/compat/gen-compat-docs.py after updating compat baselines"; exit 1; }
+            || { echo "::error::compatibility docs are stale — run tools/compat/node-compat.sh report"; exit 1; }
       - name: Check OAuth documentation contract
         run: scripts/check-oauth-docs.sh
       - name: Check docs links

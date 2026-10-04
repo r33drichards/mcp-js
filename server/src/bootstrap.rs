@@ -269,6 +269,10 @@ impl RuntimeBootstrap {
             crate::engine::module_loader::ModuleLoaderConfig {
                 allow_external: capabilities.allow_external_modules,
                 hooks: modules_hooks,
+
+                virtual_modules: None,
+                virtual_commonjs_modules: None,
+                virtual_files: None,
             },
         );
         if let Some(chain) = subprocess_hooks {

@@ -89,7 +89,11 @@ pub struct FsConfig {
 impl FsConfig {
     /// Create from a full [`HookChain`] (used with `--policies-json`).
     pub fn new_with_hooks(hooks: Arc<HookChain>) -> Self {
-        Self { hooks, mcp_headers: None, passthrough: false }
+        Self {
+            hooks,
+            mcp_headers: None,
+            passthrough: false,
+        }
     }
 
     /// Create from a bare [`PolicyChain`], wrapped as the sole pre hook.
@@ -201,27 +205,42 @@ impl FsError {
     }
 
     fn io(op: &str, path: &str, e: &std::io::Error) -> Self {
-        Self { kind: io_kind(e), message: io_err(op, path, e) }
+        Self {
+            kind: io_kind(e),
+            message: io_err(op, path, e),
+        }
     }
 
     fn io2(op: &str, from: &str, to: &str, e: &std::io::Error) -> Self {
-        Self { kind: io_kind(e), message: io_err2(op, from, to, e) }
+        Self {
+            kind: io_kind(e),
+            message: io_err2(op, from, to, e),
+        }
     }
 
     /// An overlay error. The overlay reports Node-style codes as a leading
     /// `CODE:` token, which is preserved and classified.
     fn overlay(op: &str, path: &str, e: impl std::fmt::Display) -> Self {
         let message = format!("fs.{op}: {path}: {e}");
-        Self { kind: message_kind(&message), message }
+        Self {
+            kind: message_kind(&message),
+            message,
+        }
     }
 
     fn overlay2(op: &str, from: &str, to: &str, e: impl std::fmt::Display) -> Self {
         let message = format!("fs.{op}: {from} -> {to}: {e}");
-        Self { kind: message_kind(&message), message }
+        Self {
+            kind: message_kind(&message),
+            message,
+        }
     }
 
     fn not_found(op: &str, path: &str) -> Self {
-        Self { kind: FsErrorKind::NotFound, message: format!("fs.{op}: {path}: ENOENT") }
+        Self {
+            kind: FsErrorKind::NotFound,
+            message: format!("fs.{op}: {path}: ENOENT"),
+        }
     }
 
     fn invalid_utf8(op: &str, path: &str, e: &std::string::FromUtf8Error) -> Self {
@@ -327,7 +346,15 @@ impl FsStat {
             )
         };
         #[cfg(not(unix))]
-        let (mode, ino, dev, nlink, uid, gid, ctime_ms): (u32, u64, u64, u64, u32, u32, Option<f64>) = {
+        let (mode, ino, dev, nlink, uid, gid, ctime_ms): (
+            u32,
+            u64,
+            u64,
+            u64,
+            u32,
+            u32,
+            Option<f64>,
+        ) = {
             let mode = if metadata.is_dir() {
                 0o040755
             } else if metadata.file_type().is_symlink() {
@@ -467,15 +494,17 @@ impl FsService {
     /// Read a file as bytes. `encoding` is the policy input's encoding field
     /// (`"utf8"` or `"buffer"`). Returns the effective path with the content.
     async fn read_bytes(&self, path: &str, encoding: &str) -> Result<(String, Vec<u8>), FsError> {
-        let path = self.gate("readFile", path, None, None, Some(encoding)).await?.path;
+        let path = self
+            .gate("readFile", path, None, None, Some(encoding))
+            .await?
+            .path;
         if let Some(m) = &self.mount {
-            if let Some(content) = m
-                .0
-                .lock()
-                .await
-                .read_opt(Path::new(&path))
-                .await
-                .map_err(|e| FsError::overlay("readFile", &path, e))?
+            if let Some(content) =
+                m.0.lock()
+                    .await
+                    .read_opt(Path::new(&path))
+                    .await
+                    .map_err(|e| FsError::overlay("readFile", &path, e))?
             {
                 return Ok((path, content));
             }
@@ -509,17 +538,24 @@ impl FsService {
     /// `readFile`. Returns fewer bytes only at end of file. Lets a caller page
     /// through a large file without loading it whole; the overlay backend has
     /// no partial read, so it slices the full content.
-    pub async fn read_range(&self, path: &str, offset: u64, max_bytes: u64) -> Result<Vec<u8>, FsError> {
-        let path = self.gate("readFile", path, None, None, Some("buffer")).await?.path;
+    pub async fn read_range(
+        &self,
+        path: &str,
+        offset: u64,
+        max_bytes: u64,
+    ) -> Result<Vec<u8>, FsError> {
+        let path = self
+            .gate("readFile", path, None, None, Some("buffer"))
+            .await?
+            .path;
         let max = usize::try_from(max_bytes).unwrap_or(usize::MAX);
         if let Some(m) = &self.mount {
-            let content = m
-                .0
-                .lock()
-                .await
-                .read_opt(Path::new(&path))
-                .await
-                .map_err(|e| FsError::overlay("readFile", &path, e))?;
+            let content =
+                m.0.lock()
+                    .await
+                    .read_opt(Path::new(&path))
+                    .await
+                    .map_err(|e| FsError::overlay("readFile", &path, e))?;
             let content = match content {
                 Some(content) => content,
                 None if self.config.passthrough => {
@@ -527,7 +563,9 @@ impl FsService {
                 }
                 None => return Err(FsError::not_found("readFile", &path)),
             };
-            let start = usize::try_from(offset).unwrap_or(usize::MAX).min(content.len());
+            let start = usize::try_from(offset)
+                .unwrap_or(usize::MAX)
+                .min(content.len());
             let end = start.saturating_add(max).min(content.len());
             return Ok(content[start..end].to_vec());
         }
@@ -535,7 +573,12 @@ impl FsService {
         let mut file = tokio::fs::File::open(&path)
             .await
             .map_err(|e| FsError::io("readFile", &path, &e))?;
-        if file.metadata().await.map_err(|e| FsError::io("readFile", &path, &e))?.is_dir() {
+        if file
+            .metadata()
+            .await
+            .map_err(|e| FsError::io("readFile", &path, &e))?
+            .is_dir()
+        {
             let e = std::io::Error::from(std::io::ErrorKind::IsADirectory);
             return Err(FsError::io("readFile", &path, &e));
         }
@@ -647,13 +690,12 @@ impl FsService {
         let op = if follow { "stat" } else { "lstat" };
         let path = self.gate(op, path, None, None, None).await?.path;
         if let Some(m) = &self.mount {
-            let s = m
-                .0
-                .lock()
-                .await
-                .stat(Path::new(&path))
-                .await
-                .map_err(|e| FsError::overlay(op, &path, e))?;
+            let s =
+                m.0.lock()
+                    .await
+                    .stat(Path::new(&path))
+                    .await
+                    .map_err(|e| FsError::overlay(op, &path, e))?;
             return Ok(FsStat::from_mount(&s));
         }
         let metadata = if follow {
@@ -668,13 +710,12 @@ impl FsService {
     pub async fn readlink(&self, path: &str) -> Result<String, FsError> {
         let path = self.gate("readlink", path, None, None, None).await?.path;
         if let Some(m) = &self.mount {
-            let target = m
-                .0
-                .lock()
-                .await
-                .readlink(Path::new(&path))
-                .await
-                .map_err(|e| FsError::overlay("readlink", &path, e))?;
+            let target =
+                m.0.lock()
+                    .await
+                    .readlink(Path::new(&path))
+                    .await
+                    .map_err(|e| FsError::overlay("readlink", &path, e))?;
             return Ok(target.to_string_lossy().into_owned());
         }
         let target = tokio::fs::read_link(&path)
@@ -703,7 +744,10 @@ impl FsService {
     }
 
     pub async fn mkdir(&self, path: &str, recursive: bool) -> Result<(), FsError> {
-        let path = self.gate("mkdir", path, None, Some(recursive), None).await?.path;
+        let path = self
+            .gate("mkdir", path, None, Some(recursive), None)
+            .await?
+            .path;
         if let Some(m) = &self.mount {
             return m
                 .0
@@ -722,7 +766,10 @@ impl FsService {
     }
 
     pub async fn rm(&self, path: &str, recursive: bool) -> Result<(), FsError> {
-        let path = self.gate("rm", path, None, Some(recursive), None).await?.path;
+        let path = self
+            .gate("rm", path, None, Some(recursive), None)
+            .await?
+            .path;
         if let Some(m) = &self.mount {
             return m
                 .0
@@ -831,10 +878,150 @@ where
         .map_err(FsError::js)
 }
 
+fn sync_service(state: &mut OpState) -> Result<FsService, JsErrorBox> {
+    let config = state
+        .try_borrow::<FsConfig>()
+        .ok_or_else(|| JsErrorBox::generic("fs: no filesystem config"))?
+        .clone();
+    let mount = state.try_borrow::<FsMountHandle>().cloned();
+    Ok(FsService::new(config, mount))
+}
+fn run_sync_op<T, F, Fut>(service: FsService, op: F) -> Result<T, JsErrorBox>
+where
+    T: Send + 'static,
+    F: FnOnce(FsService) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<T, FsError>> + 'static,
+{
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("fs: failed to create synchronous runtime: {e}"))?;
+        runtime.block_on(op(service)).map_err(|e| e.to_string())
+    })
+    .join()
+    .map_err(|_| JsErrorBox::generic("fs: synchronous operation thread panicked"))?
+    .map_err(JsErrorBox::generic)
+}
+#[op2(fast)]
+fn op_fs_write_file_text_sync(
+    state: &mut OpState,
+    #[string] path: String,
+    #[string] data: String,
+) -> Result<(), JsErrorBox> {
+    run_sync_op(sync_service(state)?, move |fs| async move {
+        fs.write_file(&path, data.as_bytes()).await
+    })
+}
+#[op2(fast)]
+fn op_fs_symlink_sync(
+    state: &mut OpState,
+    #[string] target: String,
+    #[string] link: String,
+) -> Result<(), JsErrorBox> {
+    run_sync_op(sync_service(state)?, move |fs| async move {
+        fs.symlink(&target, &link).await
+    })
+}
+
+#[op2]
+#[buffer]
+fn op_fs_read_file_sync(
+    state: &mut OpState,
+    #[string] path: String,
+) -> Result<Vec<u8>, JsErrorBox> {
+    run_sync_op(sync_service(state)?, move |fs| async move {
+        fs.read_file(&path).await
+    })
+}
+
+#[op2(fast)]
+fn op_fs_write_file_buffer_sync(
+    state: &mut OpState,
+    #[string] path: String,
+    #[buffer(copy)] data: Vec<u8>,
+) -> Result<(), JsErrorBox> {
+    run_sync_op(sync_service(state)?, move |fs| async move {
+        fs.write_file(&path, &data).await
+    })
+}
+
+#[op2(fast)]
+fn op_fs_mkdir_sync(
+    state: &mut OpState,
+    #[string] path: String,
+    #[smi] recursive: i32,
+) -> Result<(), JsErrorBox> {
+    run_sync_op(sync_service(state)?, move |fs| async move {
+        fs.mkdir(&path, recursive != 0).await
+    })
+}
+
+#[op2]
+#[string]
+fn op_fs_stat_sync(
+    state: &mut OpState,
+    #[string] path: String,
+    #[smi] follow_symlinks: i32,
+) -> Result<String, JsErrorBox> {
+    run_sync_op(sync_service(state)?, move |fs| async move {
+        Ok(fs.stat(&path, follow_symlinks != 0).await?.to_json())
+    })
+}
+
+#[op2]
+#[string]
+fn op_fs_readdir_sync(state: &mut OpState, #[string] path: String) -> Result<String, JsErrorBox> {
+    run_sync_op(sync_service(state)?, move |fs| async move {
+        Ok(serde_json::json!(fs.readdir(&path).await?).to_string())
+    })
+}
+
+#[op2(fast)]
+fn op_fs_rm_sync(
+    state: &mut OpState,
+    #[string] path: String,
+    #[smi] recursive: i32,
+) -> Result<(), JsErrorBox> {
+    run_sync_op(sync_service(state)?, move |fs| async move {
+        fs.rm(&path, recursive != 0).await
+    })
+}
+
+#[op2(fast)]
+fn op_fs_rename_sync(
+    state: &mut OpState,
+    #[string] from: String,
+    #[string] to: String,
+) -> Result<(), JsErrorBox> {
+    run_sync_op(sync_service(state)?, move |fs| async move {
+        fs.rename(&from, &to).await
+    })
+}
+
+#[op2(fast)]
+fn op_fs_copy_file_sync(
+    state: &mut OpState,
+    #[string] from: String,
+    #[string] to: String,
+) -> Result<(), JsErrorBox> {
+    run_sync_op(sync_service(state)?, move |fs| async move {
+        fs.copy_file(&from, &to).await
+    })
+}
+
+#[op2]
+#[string]
+fn op_fs_readlink_sync(state: &mut OpState, #[string] path: String) -> Result<String, JsErrorBox> {
+    run_sync_op(sync_service(state)?, move |fs| async move {
+        fs.readlink(&path).await
+    })
+}
+
 const EMPTY_OBJECT: &str = "{}";
 
 /// Read a file as UTF-8 text.
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_fs_read_file_text(
     state: Rc<RefCell<OpState>>,
@@ -844,7 +1031,7 @@ async fn op_fs_read_file_text(
 }
 
 /// Read a file as raw bytes, returned as a Uint8Array to JavaScript.
-#[op2(async)]
+#[op2]
 #[buffer]
 async fn op_fs_read_file_buffer(
     state: Rc<RefCell<OpState>>,
@@ -854,7 +1041,7 @@ async fn op_fs_read_file_buffer(
 }
 
 /// Write a file from a UTF-8 string.
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_fs_write_file_text(
     state: Rc<RefCell<OpState>>,
@@ -869,7 +1056,7 @@ async fn op_fs_write_file_text(
 }
 
 /// Write a file from raw bytes (Uint8Array from JavaScript).
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_fs_write_file_buffer(
     state: Rc<RefCell<OpState>>,
@@ -884,7 +1071,7 @@ async fn op_fs_write_file_buffer(
 }
 
 /// Append to a file.
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_fs_append_file(
     state: Rc<RefCell<OpState>>,
@@ -899,7 +1086,7 @@ async fn op_fs_append_file(
 }
 
 /// Read a directory. Returns JSON array of entry names.
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_fs_readdir(
     state: Rc<RefCell<OpState>>,
@@ -913,27 +1100,33 @@ async fn op_fs_readdir(
 }
 
 /// Stat a path. Returns JSON with size, isFile, isDirectory, etc.
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_fs_stat(
     state: Rc<RefCell<OpState>>,
     #[string] path: String,
 ) -> Result<String, JsErrorBox> {
-    run_op(&state, |fs| async move { Ok(fs.stat(&path, true).await?.to_json()) }).await
+    run_op(&state, |fs| async move {
+        Ok(fs.stat(&path, true).await?.to_json())
+    })
+    .await
 }
 
 /// Stat a path **without** following a final symlink (Node `fs.lstat`).
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_fs_lstat(
     state: Rc<RefCell<OpState>>,
     #[string] path: String,
 ) -> Result<String, JsErrorBox> {
-    run_op(&state, |fs| async move { Ok(fs.stat(&path, false).await?.to_json()) }).await
+    run_op(&state, |fs| async move {
+        Ok(fs.stat(&path, false).await?.to_json())
+    })
+    .await
 }
 
 /// Read a symlink's target, returned as a string.
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_fs_readlink(
     state: Rc<RefCell<OpState>>,
@@ -943,7 +1136,7 @@ async fn op_fs_readlink(
 }
 
 /// Create a symlink at `link` pointing to `target` (Node `fs.symlink(target, path)`).
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_fs_symlink(
     state: Rc<RefCell<OpState>>,
@@ -958,7 +1151,7 @@ async fn op_fs_symlink(
 }
 
 /// Create a directory.
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_fs_mkdir(
     state: Rc<RefCell<OpState>>,
@@ -973,7 +1166,7 @@ async fn op_fs_mkdir(
 }
 
 /// Remove a file or directory.
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_fs_rm(
     state: Rc<RefCell<OpState>>,
@@ -988,7 +1181,7 @@ async fn op_fs_rm(
 }
 
 /// Rename (move) a file or directory.
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_fs_rename(
     state: Rc<RefCell<OpState>>,
@@ -1003,7 +1196,7 @@ async fn op_fs_rename(
 }
 
 /// Copy a file.
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_fs_copy_file(
     state: Rc<RefCell<OpState>>,
@@ -1018,14 +1211,19 @@ async fn op_fs_copy_file(
 }
 
 /// Check if a path exists.
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_fs_exists(
     state: Rc<RefCell<OpState>>,
     #[string] path: String,
 ) -> Result<String, JsErrorBox> {
     run_op(&state, |fs| async move {
-        Ok(if fs.exists(&path).await? { "true" } else { "false" }.to_string())
+        Ok(if fs.exists(&path).await? {
+            "true"
+        } else {
+            "false"
+        }
+        .to_string())
     })
     .await
 }
@@ -1035,7 +1233,7 @@ async fn op_fs_exists(
 /// Open a streaming write to `path`, returning a small integer handle. Bytes are
 /// fed incrementally (chunked on the fly), so a multi-GB file never has to exist
 /// in memory all at once.
-#[op2(async)]
+#[op2]
 #[smi]
 async fn op_fs_write_stream_open(
     state: Rc<RefCell<OpState>>,
@@ -1047,12 +1245,23 @@ async fn op_fs_write_stream_open(
 
     // Mount branch runs inline (current-thread isolate runtime; deno_unsync needs it).
     if let Some(m) = mount {
-        let path = check_policy(&config.hooks, "writeFile", &path, None, None, None, config.mcp_headers.as_ref())
-            .await
-            .map_err(JsErrorBox::generic)?
-            .path;
+        let path = check_policy(
+            &config.hooks,
+            "writeFile",
+            &path,
+            None,
+            None,
+            None,
+            config.mcp_headers.as_ref(),
+        )
+        .await
+        .map_err(JsErrorBox::generic)?
+        .path;
         let store = m.0.lock().await.store_handle();
-        let ow = OpenWrite::Overlay { path: path.clone(), writer: FileWriter::new(store) };
+        let ow = OpenWrite::Overlay {
+            path: path.clone(),
+            writer: FileWriter::new(store),
+        };
         let mut g = writers.0.lock().await;
         let id = g.next;
         g.next = g.next.wrapping_add(1);
@@ -1061,9 +1270,20 @@ async fn op_fs_write_stream_open(
     }
 
     tokio::spawn(async move {
-        let path = check_policy(&config.hooks, "writeFile", &path, None, None, None, config.mcp_headers.as_ref()).await?.path;
+        let path = check_policy(
+            &config.hooks,
+            "writeFile",
+            &path,
+            None,
+            None,
+            None,
+            config.mcp_headers.as_ref(),
+        )
+        .await?
+        .path;
 
-        let f = tokio::fs::File::create(&path).await
+        let f = tokio::fs::File::create(&path)
+            .await
             .map_err(|e| io_err("createWriteStream", &path, &e))?;
         let ow = OpenWrite::Real(f);
         let mut g = writers.0.lock().await;
@@ -1078,7 +1298,7 @@ async fn op_fs_write_stream_open(
 }
 
 /// Feed a chunk of bytes to an open write stream.
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_fs_write_stream_chunk_buffer(
     state: Rc<RefCell<OpState>>,
@@ -1088,11 +1308,13 @@ async fn op_fs_write_stream_chunk_buffer(
     let writers = extract_writers(&state)?;
     // Run inline: the overlay FileWriter uses deno_unsync, which requires the
     // current-thread isolate runtime; tokio::spawn would abort the process.
-    feed_stream(&writers, id, &data).await.map_err(JsErrorBox::generic)
+    feed_stream(&writers, id, &data)
+        .await
+        .map_err(JsErrorBox::generic)
 }
 
 /// Feed a chunk of text to an open write stream.
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_fs_write_stream_chunk_text(
     state: Rc<RefCell<OpState>>,
@@ -1102,11 +1324,13 @@ async fn op_fs_write_stream_chunk_text(
     let writers = extract_writers(&state)?;
     // Run inline: the overlay FileWriter uses deno_unsync, which requires the
     // current-thread isolate runtime; tokio::spawn would abort the process.
-    feed_stream(&writers, id, data.as_bytes()).await.map_err(JsErrorBox::generic)
+    feed_stream(&writers, id, data.as_bytes())
+        .await
+        .map_err(JsErrorBox::generic)
 }
 
 /// Finish an open write stream: flush the final chunk and install the file.
-#[op2(async)]
+#[op2]
 #[string]
 async fn op_fs_write_stream_close(
     state: Rc<RefCell<OpState>>,
@@ -1125,14 +1349,19 @@ async fn op_fs_write_stream_close(
         .ok_or_else(|| JsErrorBox::generic("fs write stream: invalid handle".to_string()))?;
     match ow {
         OpenWrite::Overlay { path, writer } => {
-            let entry = writer.finish().await.map_err(|e| JsErrorBox::generic(e.to_string()))?;
+            let entry = writer
+                .finish()
+                .await
+                .map_err(|e| JsErrorBox::generic(e.to_string()))?;
             if let Some(m) = mount {
                 m.0.lock().await.put_entry(Path::new(&path), entry);
             }
         }
         OpenWrite::Real(mut f) => {
             use tokio::io::AsyncWriteExt;
-            f.flush().await.map_err(|e| JsErrorBox::generic(e.to_string()))?;
+            f.flush()
+                .await
+                .map_err(|e| JsErrorBox::generic(e.to_string()))?;
         }
     }
     Ok("{}".to_string())
@@ -1168,6 +1397,17 @@ deno_core::extension!(
         op_fs_read_file_text,
         op_fs_read_file_buffer,
         op_fs_write_file_text,
+        op_fs_write_file_text_sync,
+        op_fs_symlink_sync,
+        op_fs_read_file_sync,
+        op_fs_write_file_buffer_sync,
+        op_fs_mkdir_sync,
+        op_fs_stat_sync,
+        op_fs_readdir_sync,
+        op_fs_rm_sync,
+        op_fs_rename_sync,
+        op_fs_copy_file_sync,
+        op_fs_readlink_sync,
         op_fs_write_file_buffer,
         op_fs_append_file,
         op_fs_readdir,
@@ -1296,6 +1536,111 @@ const FS_JS_WRAPPER: &str = r#"
         }
     }
 
+    function callSync(name, ...args) {
+        try {
+            return ops[name](...args);
+        } catch (e) {
+            throw tagError(e);
+        }
+    }
+
+    function writeFileSync(path, data) {
+        if (typeof path !== 'string') throw new TypeError('fs.writeFileSync: path must be a string');
+        if (typeof data === 'string') {
+            callSync('op_fs_write_file_text_sync', path, data);
+        } else if (data instanceof Uint8Array) {
+            callSync('op_fs_write_file_buffer_sync', path, data);
+        } else if (ArrayBuffer.isView(data)) {
+            callSync('op_fs_write_file_buffer_sync', path,
+                new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+        } else if (data instanceof ArrayBuffer) {
+            callSync('op_fs_write_file_buffer_sync', path, new Uint8Array(data));
+        } else {
+            callSync('op_fs_write_file_text_sync', path, String(data));
+        }
+    }
+
+    function symlinkSync(target, link) {
+        if (typeof target !== 'string' || typeof link !== 'string') {
+            throw new TypeError('fs.symlinkSync: target and path must be strings');
+        }
+        callSync('op_fs_symlink_sync', target, link);
+    }
+
+    function readFileSync(path, options) {
+        if (typeof path !== 'string') throw new TypeError('fs.readFileSync: path must be a string');
+        const bytes = callSync('op_fs_read_file_sync', path);
+        const enc = readEncoding(options);
+        if (enc && enc !== 'buffer') return new TextDecoder(enc).decode(bytes);
+        return bytes;
+    }
+
+    function mkdirSync(path, options) {
+        if (typeof path !== 'string') throw new TypeError('fs.mkdirSync: path must be a string');
+        callSync('op_fs_mkdir_sync', path, (options && options.recursive) ? 1 : 0);
+    }
+
+    function statSync(path) {
+        if (typeof path !== 'string') throw new TypeError('fs.statSync: path must be a string');
+        return makeStats(JSON.parse(callSync('op_fs_stat_sync', path, 1)));
+    }
+
+    function lstatSync(path) {
+        if (typeof path !== 'string') throw new TypeError('fs.lstatSync: path must be a string');
+        return makeStats(JSON.parse(callSync('op_fs_stat_sync', path, 0)));
+    }
+
+    function readdirSync(path) {
+        if (typeof path !== 'string') throw new TypeError('fs.readdirSync: path must be a string');
+        return JSON.parse(callSync('op_fs_readdir_sync', path));
+    }
+
+    function rmSync(path, options) {
+        if (typeof path !== 'string') throw new TypeError('fs.rmSync: path must be a string');
+        try {
+            callSync('op_fs_rm_sync', path, (options && options.recursive) ? 1 : 0);
+        } catch (e) {
+            if (options && options.force && e && e.code === 'ENOENT') return;
+            throw e;
+        }
+    }
+
+    function rmdirSync(path, options) {
+        if (typeof path !== 'string') throw new TypeError('fs.rmdirSync: path must be a string');
+        callSync('op_fs_rm_sync', path, (options && options.recursive) ? 1 : 0);
+    }
+
+    function unlinkSync(path) {
+        if (typeof path !== 'string') throw new TypeError('fs.unlinkSync: path must be a string');
+        callSync('op_fs_rm_sync', path, 0);
+    }
+
+    function renameSync(oldPath, newPath) {
+        if (typeof oldPath !== 'string') throw new TypeError('fs.renameSync: oldPath must be a string');
+        if (typeof newPath !== 'string') throw new TypeError('fs.renameSync: newPath must be a string');
+        callSync('op_fs_rename_sync', oldPath, newPath);
+    }
+
+    function copyFileSync(src, dest) {
+        if (typeof src !== 'string') throw new TypeError('fs.copyFileSync: src must be a string');
+        if (typeof dest !== 'string') throw new TypeError('fs.copyFileSync: dest must be a string');
+        callSync('op_fs_copy_file_sync', src, dest);
+    }
+
+    function readlinkSync(path) {
+        if (typeof path !== 'string') throw new TypeError('fs.readlinkSync: path must be a string');
+        return callSync('op_fs_readlink_sync', path);
+    }
+
+    function existsSync(path) {
+        try {
+            statSync(String(path));
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
     async function appendFile(path, data) {
         if (typeof path !== 'string') throw new TypeError('fs.appendFile: path must be a string');
         await call('op_fs_append_file', path, String(data));
@@ -1401,7 +1746,7 @@ const FS_JS_WRAPPER: &str = r#"
     };
 
     globalThis.fs = {
-        readFile, writeFile, appendFile, readdir, stat, lstat, mkdir, rm, rmdir,
+        readFile, writeFile, writeFileSync, symlinkSync, readFileSync, mkdirSync, statSync, lstatSync, readdirSync, rmSync, rmdirSync, unlinkSync, renameSync, copyFileSync, readlinkSync, existsSync,  appendFile, readdir, stat, lstat, mkdir, rm, rmdir,
         unlink, rename, copyFile, readlink, symlink, exists, createWriteStream,
         promises,
     };
@@ -1412,7 +1757,8 @@ const FS_JS_WRAPPER: &str = r#"
 
 fn extract_config(state: &Rc<RefCell<OpState>>) -> Result<FsConfig, JsErrorBox> {
     let state = state.borrow();
-    let config = state.try_borrow::<FsConfig>()
+    let config = state
+        .try_borrow::<FsConfig>()
         .ok_or_else(|| JsErrorBox::generic("fs: internal error — no fs config available"))?;
     Ok(config.clone())
 }
@@ -1527,8 +1873,12 @@ async fn check_policy(
 
     super::hooks::verify_operation(&effective, operation, &format!("fs.{}", operation))?;
 
-    let eff: FsEffective = serde_json::from_value(effective)
-        .map_err(|e| format!("fs.{}: invalid effective input after pre hooks: {}", operation, e))?;
+    let eff: FsEffective = serde_json::from_value(effective).map_err(|e| {
+        format!(
+            "fs.{}: invalid effective input after pre hooks: {}",
+            operation, e
+        )
+    })?;
 
     // Fail closed on a hook that drops the destination of a two-path
     // operation (rename/copyFile/symlink): silently falling back to the
@@ -1587,10 +1937,20 @@ mod tests {
         let e = std::io::Error::from(std::io::ErrorKind::NotFound);
         let err = FsError::io("readFile", "/tmp/x", &e);
         assert_eq!(err.kind, FsErrorKind::NotFound);
-        assert!(err.message.starts_with("fs.readFile: /tmp/x: ENOENT: "), "{}", err.message);
+        assert!(
+            err.message.starts_with("fs.readFile: /tmp/x: ENOENT: "),
+            "{}",
+            err.message
+        );
         let e = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
-        assert_eq!(FsError::io2("rename", "/a", "/b", &e).kind, FsErrorKind::PermissionDenied);
-        assert_eq!(FsError::io("mkdir", "/a", &std::io::Error::other("x")).kind, FsErrorKind::Other);
+        assert_eq!(
+            FsError::io2("rename", "/a", "/b", &e).kind,
+            FsErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            FsError::io("mkdir", "/a", &std::io::Error::other("x")).kind,
+            FsErrorKind::Other
+        );
     }
 
     #[test]
@@ -1598,18 +1958,31 @@ mod tests {
         let err = FsError::overlay("rm", "/work/dir", "ENOTEMPTY: /work/dir");
         assert_eq!(err.kind, FsErrorKind::NotEmpty);
         assert_eq!(err.message, "fs.rm: /work/dir: ENOTEMPTY: /work/dir");
-        assert_eq!(FsError::overlay("readlink", "/f", "EINVAL: /f is not a symlink").kind, FsErrorKind::Other);
-        assert_eq!(FsError::not_found("readFile", "/missing").kind, FsErrorKind::NotFound);
-        assert_eq!(FsError::not_found("readFile", "/missing").message, "fs.readFile: /missing: ENOENT");
+        assert_eq!(
+            FsError::overlay("readlink", "/f", "EINVAL: /f is not a symlink").kind,
+            FsErrorKind::Other
+        );
+        assert_eq!(
+            FsError::not_found("readFile", "/missing").kind,
+            FsErrorKind::NotFound
+        );
+        assert_eq!(
+            FsError::not_found("readFile", "/missing").message,
+            "fs.readFile: /missing: ENOENT"
+        );
         // A path that merely contains a code-like word is not a code token.
-        assert_eq!(message_kind("fs.rm: /home/ENOENTish/file: boom"), FsErrorKind::Other);
+        assert_eq!(
+            message_kind("fs.rm: /home/ENOENTish/file: boom"),
+            FsErrorKind::Other
+        );
     }
 
     #[test]
     fn gate_errors_only_count_denials_as_permission_failures() {
         let denied = FsError::gate("fs.readFile denied by policy: /x is not allowed".into());
         assert_eq!(denied.kind, FsErrorKind::PermissionDenied);
-        let hook = FsError::gate("fs.readFile denied by pre hook (quota): /x is not allowed".into());
+        let hook =
+            FsError::gate("fs.readFile denied by pre hook (quota): /x is not allowed".into());
         assert_eq!(hook.kind, FsErrorKind::PermissionDenied);
         let chain = FsError::gate("fs.readFile: hook chain error: timeout".into());
         assert_eq!(chain.kind, FsErrorKind::Other);
@@ -1625,8 +1998,21 @@ mod tests {
         assert_eq!(stat.size, 3);
         let json: serde_json::Value = serde_json::from_str(&stat.to_json()).unwrap();
         for key in [
-            "size", "isFile", "isDirectory", "isSymlink", "readonly", "mode", "ino", "dev", "nlink",
-            "uid", "gid", "mtimeMs", "atimeMs", "ctimeMs", "birthtimeMs",
+            "size",
+            "isFile",
+            "isDirectory",
+            "isSymlink",
+            "readonly",
+            "mode",
+            "ino",
+            "dev",
+            "nlink",
+            "uid",
+            "gid",
+            "mtimeMs",
+            "atimeMs",
+            "ctimeMs",
+            "birthtimeMs",
         ] {
             assert!(json.get(key).is_some(), "missing {key}");
         }

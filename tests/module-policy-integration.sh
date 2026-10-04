@@ -121,6 +121,22 @@ run_js() {
 echo "==> Starting docker-compose services..."
 docker compose -f "$COMPOSE_FILE" up -d --build
 
+# Check OPA itself so an unavailable policy server cannot look like an
+# acceptable external CDN fetch failure in the allowlisted-package test.
+opa_ready=false
+for attempt in $(seq 1 60); do
+  if curl -sf 'http://localhost:8181/health?bundles' >/dev/null; then
+    opa_ready=true
+    break
+  fi
+  sleep 2
+done
+if [ "$opa_ready" != true ]; then
+  docker compose -f "$COMPOSE_FILE" logs opa
+  echo "ERROR: OPA did not become healthy" >&2
+  exit 1
+fi
+
 wait_for_ready "$DEFAULT_URL" "mcp-default"
 wait_for_ready "$OPA_URL" "mcp-opa-policy"
 

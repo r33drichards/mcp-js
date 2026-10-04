@@ -191,8 +191,34 @@ fn op_compression_new(
     #[string] format: String,
     decompress: bool,
 ) -> Result<u32, JsErrorBox> {
-    let level = Compression::default();
-    let ctx = match (format.as_str(), decompress) {
+    new_compression(state, &format, decompress, Compression::default())
+}
+
+#[op2(fast)]
+fn op_node_zlib_new(
+    state: &mut OpState,
+    #[string] format: String,
+    decompress: bool,
+    level: i32,
+) -> Result<u32, JsErrorBox> {
+    if !(-1..=9).contains(&level) {
+        return Err(JsErrorBox::range_error("Invalid compression level"));
+    }
+    let level = if level == -1 {
+        Compression::default()
+    } else {
+        Compression::new(level as u32)
+    };
+    new_compression(state, &format, decompress, level)
+}
+
+fn new_compression(
+    state: &mut OpState,
+    format: &str,
+    decompress: bool,
+    level: Compression,
+) -> Result<u32, JsErrorBox> {
+    let ctx = match (format, decompress) {
         ("gzip", false) => Ctx::GzEnc(GzEncoder::new(Vec::new(), level)),
         ("deflate", false) => Ctx::ZlibEnc(ZlibEncoder::new(Vec::new(), level)),
         ("deflate-raw", false) => Ctx::RawEnc(DeflateEncoder::new(Vec::new(), level)),
@@ -205,10 +231,7 @@ fn op_compression_new(
             5,
             22,
         ))),
-        ("brotli", true) => Ctx::BrDec(Box::new(brotli::DecompressorWriter::new(
-            Vec::new(),
-            4096,
-        ))),
+        ("brotli", true) => Ctx::BrDec(Box::new(brotli::DecompressorWriter::new(Vec::new(), 4096))),
         _ => {
             return Err(JsErrorBox::type_error(format!(
                 "Unsupported compression format: '{}'",
@@ -276,6 +299,7 @@ deno_core::extension!(
     compression_ext,
     ops = [
         op_compression_new,
+        op_node_zlib_new,
         op_compression_write,
         op_compression_finish,
         op_compression_has_junk,
