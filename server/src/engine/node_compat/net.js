@@ -921,7 +921,9 @@ class SocketImpl extends Duplex {
         return {
             address: this.localAddress,
             port: this.localPort,
-            family: this.remoteFamily || 'IPv4',
+            // This reports the LOCAL bound address, so its family is the local
+            // family — not the remote peer's.
+            family: this.localFamily || 'IPv4',
         };
     }
 
