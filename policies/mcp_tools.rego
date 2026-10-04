@@ -15,23 +15,23 @@ default allow = false
 # Add entries as {"server": "<name>", "tool": "<name>"} objects.
 # Use "*" as tool name to allow all tools on a server.
 
-allowed_tools := {
-    # Example: allow all tools on a server named "math"
-    # {"server": "math", "tool": "*"},
-    # Example: allow a specific tool on a specific server
-    # {"server": "db", "tool": "query"},
-}
+#
+# Empty by default — written `set()` because `{}` is an empty *object*.
+# Replace it with a set literal, e.g.
+#
+#   allowed_tools := {
+#       {"server": "math", "tool": "*"},     # all tools on server "math"
+#       {"server": "db", "tool": "query"},   # one tool on one server
+#   }
+#
+# The rules below test membership with `in` rather than iterating the set:
+# OPA (1.21+) rejects iteration over a set it can prove is empty, which would
+# stop the server loading this file while the list is still empty.
+
+allowed_tools := set()
 
 # Exact server + tool match
-allow if {
-    some entry in allowed_tools
-    entry.server == input.server
-    entry.tool == input.tool
-}
+allow if {"server": input.server, "tool": input.tool} in allowed_tools
 
 # Wildcard: allow all tools on a server
-allow if {
-    some entry in allowed_tools
-    entry.server == input.server
-    entry.tool == "*"
-}
+allow if {"server": input.server, "tool": "*"} in allowed_tools

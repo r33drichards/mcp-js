@@ -20,7 +20,7 @@ fn run(code: &str, config: &ModuleLoaderConfig) {
 fn config() -> ModuleLoaderConfig {
     ModuleLoaderConfig {
         allow_external: true,
-        policy_chain: None,
+        hooks: None,
         virtual_modules: None,
         virtual_commonjs_modules: None,
         virtual_files: None,
@@ -90,9 +90,12 @@ fn esm_sh_builtin_bridge_preserves_module_policy() {
     let evaluator =
         LocalPolicyEvaluator::from_file(&policy, "data.mcp.modules.allow".into()).unwrap();
     let mut config = config();
-    config.policy_chain = Some(Arc::new(PolicyChain::new(
-        vec![PolicyEvaluatorKind::Local(evaluator)],
-        EvalMode::All,
+    config.hooks = Some(Arc::new(server::engine::hooks::HookChain::from_policy(
+        "module",
+        Arc::new(PolicyChain::new(
+            vec![PolicyEvaluatorKind::Local(evaluator)],
+            EvalMode::All,
+        )),
     )));
     INIT.call_once(initialize_v8);
     let (result, _) = execute_stateless(

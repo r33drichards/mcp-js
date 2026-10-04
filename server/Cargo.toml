@@ -13,8 +13,10 @@ path = "src/main.rs"
 
 [dependencies]
 cli-derive = { path = "cli-derive" }
+uniffi-builder-derive = { path = "uniffi-builder-derive" }
 anyhow = "1.0.98"
 axum = { version = "0.8.4", features = ["ws"] }
+base64 = "0.22"
 rmcp = { version = "1.7", features = ["server", "client", "macros", "schemars", "server-side-http", "transport-streamable-http-server", "transport-io", "transport-child-process", "client-side-sse", "transport-streamable-http-client-reqwest", "reqwest", "auth"] }
 # Legacy rmcp pinned ONLY for its standalone HTTP+SSE server transport, which
 # rmcp 1.x dropped. Renamed so it coexists with the primary `rmcp` 1.x above;
@@ -95,6 +97,9 @@ zstd = "0.13"
 blake3 = "1"
 bincode = "1"
 diffy = "0.4"
+tempfile = "3"
+thiserror = "2"
+uniffi = { version = "0.32.0", default-features = false }
 urlpattern = "0.6.0"
 
 # OS-level sandboxing layer (--sandbox-manifest): Landlock on Linux, Seatbelt on macOS.
@@ -107,6 +112,7 @@ nono = { version = "0.53", default-features = false }
 [dev-dependencies]
 deno_ast = { version = "0.52", features = ["cjs"] }
 merve = "1.2.2"
+tower = { version = "0.5", features = ["util"] }
 tokio-test = "0.4"
 reqwest = { version = "0.12", features = ["json", "cookies", "stream", "rustls-tls", "http2"], default-features = false }
 uuid = { version = "1.0", features = ["v4"] }

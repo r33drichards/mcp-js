@@ -22,6 +22,7 @@ end-to-end, build-something-real walkthroughs, see the
 - [OS sandboxing (--sandbox-manifest)](os-sandbox.md) — confine the whole process with a nono capability manifest (Landlock/Seatbelt).
 - [Authentication (JWT/JWKS)](authentication.md) — enable JWKS verification, use Keycloak.
 - [Clustering & replication (Raft)](clustering.md) — configure nodes, join, load-balance.
+- [Generate native UniFFI bindings](generate-uniffi-bindings.md) — build the static library and generate Swift, Kotlin, Python, or Ruby wrappers.
 
 ## See also
 

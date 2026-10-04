@@ -2330,7 +2330,7 @@ fn run_node_compat_cli_with_stdin(
     let process_exit_state = ProcessExitState::default();
     let module_loader = ModuleLoaderConfig {
         allow_external: true,
-        policy_chain: None,
+        hooks: None,
         virtual_modules: Some(modules.esm.clone()),
         virtual_commonjs_modules: Some(modules.commonjs.clone()),
         virtual_files: Some(modules.files.clone()),
@@ -2573,7 +2573,7 @@ fn run(
     virtual_files.insert(file_root);
     let module_loader = ModuleLoaderConfig {
         allow_external: true,
-        policy_chain: None,
+        hooks: None,
         virtual_modules: Some(Arc::new(virtual_modules)),
         virtual_commonjs_modules: Some(Arc::new(virtual_commonjs_modules)),
         virtual_files: Some(Arc::new(virtual_files)),

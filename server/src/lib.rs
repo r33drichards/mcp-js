@@ -6,5 +6,8 @@ pub mod mcp;
 pub mod mcp_dispatch;
 pub mod mcp_sse;
 pub mod api;
-pub mod sandbox;
+pub mod bootstrap;
 pub mod session;
+pub mod sandbox;
+
+uniffi::setup_scaffolding!();

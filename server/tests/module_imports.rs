@@ -1,22 +1,21 @@
+use server::engine::execution::ExecutionRegistry;
+use server::engine::module_loader::ModuleLoaderConfig;
+use server::engine::{Engine, initialize_v8};
 /// Tests for ES module import support — verifies that `npm:`, `jsr:`, and
 /// URL imports are resolved via the network module loader and executed.
 ///
 /// Network-dependent tests are marked `#[ignore]` because they require
 /// unrestricted HTTP access to esm.sh. Run them with:
 ///   cargo test --test module_imports -- --ignored
-
 use std::sync::{Arc, Once};
-use server::engine::{initialize_v8, Engine};
-use server::engine::execution::ExecutionRegistry;
-use server::engine::module_loader::ModuleLoaderConfig;
 
 // ── Module specifier resolution unit tests ──────────────────────────────
 
 #[test]
 fn test_npm_specifier_resolves() {
+    use deno_core::ModuleLoader;
     use deno_core::ResolutionKind;
     use server::engine::module_loader::NetworkModuleLoader;
-    use deno_core::ModuleLoader;
 
     let loader = NetworkModuleLoader::new();
     let result = loader.resolve(
@@ -30,9 +29,9 @@ fn test_npm_specifier_resolves() {
 
 #[test]
 fn test_jsr_specifier_resolves() {
+    use deno_core::ModuleLoader;
     use deno_core::ResolutionKind;
     use server::engine::module_loader::NetworkModuleLoader;
-    use deno_core::ModuleLoader;
 
     let loader = NetworkModuleLoader::new();
     let result = loader.resolve(
@@ -49,9 +48,9 @@ fn test_jsr_specifier_resolves() {
 
 #[test]
 fn test_url_specifier_resolves() {
+    use deno_core::ModuleLoader;
     use deno_core::ResolutionKind;
     use server::engine::module_loader::NetworkModuleLoader;
-    use deno_core::ModuleLoader;
 
     let loader = NetworkModuleLoader::new();
     let result = loader.resolve(
@@ -60,17 +59,14 @@ fn test_url_specifier_resolves() {
         ResolutionKind::Import,
     );
     assert!(result.is_ok(), "URL specifier should resolve: {:?}", result);
-    assert_eq!(
-        result.unwrap().as_str(),
-        "https://deno.land/x/case/mod.ts"
-    );
+    assert_eq!(result.unwrap().as_str(), "https://deno.land/x/case/mod.ts");
 }
 
 #[test]
 fn test_relative_specifier_resolves() {
+    use deno_core::ModuleLoader;
     use deno_core::ResolutionKind;
     use server::engine::module_loader::NetworkModuleLoader;
-    use deno_core::ModuleLoader;
 
     let loader = NetworkModuleLoader::new();
     let result = loader.resolve(
@@ -105,8 +101,7 @@ fn create_test_engine() -> Engine {
     ));
     let registry =
         ExecutionRegistry::new(tmp.to_str().unwrap()).expect("Failed to create test registry");
-    Engine::new_stateless(16 * 1024 * 1024, 60, 4)
-        .with_execution_registry(Arc::new(registry))
+    Engine::new_stateless(16 * 1024 * 1024, 60, 4).with_execution_registry(Arc::new(registry))
 }
 
 /// Create an engine with external modules explicitly allowed (for network-dependent tests).
@@ -121,7 +116,7 @@ fn create_test_engine_with_external_modules() -> Engine {
     Engine::new_stateless(16 * 1024 * 1024, 60, 4)
         .with_module_loader_config(ModuleLoaderConfig {
             allow_external: true,
-            policy_chain: None,
+            hooks: None,
             virtual_modules: None,
             virtual_commonjs_modules: None,
             virtual_files: None,
@@ -141,7 +136,7 @@ fn create_test_engine_modules_blocked() -> Engine {
     Engine::new_stateless(16 * 1024 * 1024, 60, 4)
         .with_module_loader_config(ModuleLoaderConfig {
             allow_external: false,
-            policy_chain: None,
+            hooks: None,
             virtual_modules: None,
             virtual_commonjs_modules: None,
             virtual_files: None,
@@ -165,7 +160,7 @@ async fn run_and_wait(engine: &Engine, code: &str) -> Result<String, String> {
         .await?;
     for _ in 0..1200 {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        if let Ok(info) = engine.get_execution(&exec_id) {
+        if let Ok(info) = engine.get_execution(exec_id.clone()) {
             match info.status.as_str() {
                 "completed" => return info.result.ok_or_else(|| "No result".to_string()),
                 "failed" => {
@@ -185,7 +180,7 @@ async fn run_and_wait(engine: &Engine, code: &str) -> Result<String, String> {
 #[tokio::test]
 async fn test_top_level_await_resolves() {
     ensure_v8();
-    let engine = create_test_engine();
+    let engine = Engine::from_engine(create_test_engine());
 
     let code = r#"
 const result = await Promise.resolve(42);
@@ -193,13 +188,17 @@ console.log("got", result);
 "#;
 
     let result = run_and_wait(&engine, code).await;
-    assert!(result.is_ok(), "Top-level await should succeed: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "Top-level await should succeed: {:?}",
+        result
+    );
 }
 
 #[tokio::test]
 async fn test_top_level_await_with_async_iife_also_works() {
     ensure_v8();
-    let engine = create_test_engine();
+    let engine = Engine::from_engine(create_test_engine());
 
     // The old workaround should still work
     let code = r#"
@@ -210,7 +209,11 @@ console.log("got", result);
 "#;
 
     let result = run_and_wait(&engine, code).await;
-    assert!(result.is_ok(), "Top-level await with IIFE should succeed: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "Top-level await with IIFE should succeed: {:?}",
+        result
+    );
 }
 
 // ── Plain JS unaffected ─────────────────────────────────────────────────
@@ -218,7 +221,7 @@ console.log("got", result);
 #[tokio::test]
 async fn test_plain_js_unaffected_by_module_support() {
     ensure_v8();
-    let engine = create_test_engine();
+    let engine = Engine::from_engine(create_test_engine());
 
     let result = run_and_wait(&engine, "console.log(1 + 2);").await;
     assert!(result.is_ok(), "Plain JS should still work: {:?}", result);
@@ -227,10 +230,14 @@ async fn test_plain_js_unaffected_by_module_support() {
 #[tokio::test]
 async fn test_plain_js_with_dynamic_import_keyword() {
     ensure_v8();
-    let engine = create_test_engine();
+    let engine = Engine::from_engine(create_test_engine());
 
     let result = run_and_wait(&engine, r#"const x = "import foo"; console.log(x);"#).await;
-    assert!(result.is_ok(), "String with 'import' should work: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "String with 'import' should work: {:?}",
+        result
+    );
 }
 
 // ── npm imports (network required) ──────────────────────────────────────
@@ -239,7 +246,7 @@ async fn test_plain_js_with_dynamic_import_keyword() {
 #[ignore]
 async fn test_npm_import_lodash_es() {
     ensure_v8();
-    let engine = create_test_engine_with_external_modules();
+    let engine = Engine::from_engine(create_test_engine_with_external_modules());
 
     let code = r#"
 import camelCase from "npm:lodash-es@4.17.21/camelCase";
@@ -261,7 +268,7 @@ console.log(camelCase("hello_world"));
 #[ignore]
 async fn test_jsr_import_cases() {
     ensure_v8();
-    let engine = create_test_engine_with_external_modules();
+    let engine = Engine::from_engine(create_test_engine_with_external_modules());
 
     let code = r#"
 import { camelCase } from "jsr:@luca/cases@1.0.0";
@@ -283,7 +290,7 @@ console.log(camelCase("hello_world"));
 #[ignore]
 async fn test_url_import() {
     ensure_v8();
-    let engine = create_test_engine_with_external_modules();
+    let engine = Engine::from_engine(create_test_engine_with_external_modules());
 
     let code = r#"
 import { camelCase } from "https://esm.sh/jsr/@luca/cases@1.0.0";
@@ -305,7 +312,7 @@ console.log(camelCase("foo_bar"));
 #[ignore]
 async fn test_module_console_log() {
     ensure_v8();
-    let engine = create_test_engine_with_external_modules();
+    let engine = Engine::from_engine(create_test_engine_with_external_modules());
 
     let code = r#"
 import camelCase from "npm:lodash-es@4.17.21/camelCase";
@@ -322,11 +329,11 @@ console.log("Result:", result);
 
     for _ in 0..1200 {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        if let Ok(info) = engine.get_execution(&exec_id) {
+        if let Ok(info) = engine.get_execution(exec_id.clone()) {
             if info.status == "completed" {
                 assert_eq!(info.result.as_deref(), Some(""));
                 let output = engine
-                    .get_execution_output(&exec_id, None, None, None, None)
+                    .get_execution_output(exec_id.clone(), None, None, None, None)
                     .expect("should get output");
                 assert!(
                     output.data.contains("fooBarBaz"),
@@ -351,7 +358,7 @@ console.log("Result:", result);
 #[ignore]
 async fn test_npm_cowsay() {
     ensure_v8();
-    let engine = create_test_engine_with_external_modules();
+    let engine = Engine::from_engine(create_test_engine_with_external_modules());
 
     let code = r#"
 import { say } from "npm:cowsay@1.6.0";
@@ -368,10 +375,10 @@ console.log(result);
 
     for _ in 0..1200 {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        if let Ok(info) = engine.get_execution(&exec_id) {
+        if let Ok(info) = engine.get_execution(exec_id.clone()) {
             if info.status == "completed" {
                 let output = engine
-                    .get_execution_output(&exec_id, None, None, None, None)
+                    .get_execution_output(exec_id.clone(), None, None, None, None)
                     .expect("should get output");
                 assert!(
                     output.data.contains("Hello from mcp-js!"),
@@ -401,7 +408,7 @@ console.log(result);
 #[ignore]
 async fn test_url_import_typescript() {
     ensure_v8();
-    let engine = create_test_engine_with_external_modules();
+    let engine = Engine::from_engine(create_test_engine_with_external_modules());
 
     let code = r#"
 import { pascalCase } from "https://deno.land/x/case/mod.ts";
@@ -417,10 +424,10 @@ console.log(pascalCase("hello_world"));
 
     for _ in 0..1200 {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        if let Ok(info) = engine.get_execution(&exec_id) {
+        if let Ok(info) = engine.get_execution(exec_id.clone()) {
             if info.status == "completed" {
                 let output = engine
-                    .get_execution_output(&exec_id, None, None, None, None)
+                    .get_execution_output(exec_id.clone(), None, None, None, None)
                     .expect("should get output");
                 assert!(
                     output.data.contains("HelloWorld"),
@@ -445,7 +452,7 @@ console.log(pascalCase("hello_world"));
 
 #[test]
 fn test_data_url_source_preserves_query_characters() {
-    use server::engine::{execute_stateless, ExecutionConfig};
+    use server::engine::{ExecutionConfig, execute_stateless};
 
     ensure_v8();
     let code = r#"
@@ -456,15 +463,14 @@ fn test_data_url_source_preserves_query_characters() {
     "#;
     let (result, _) = execute_stateless(
         code,
-        ExecutionConfig::new(64 * 1024 * 1024)
-            .main_module_specifier("file:///main.mjs"),
+        ExecutionConfig::new(64 * 1024 * 1024).main_module_specifier("file:///main.mjs"),
     );
     assert!(result.is_ok(), "data URL source was truncated: {result:?}");
 }
 
 #[test]
 fn test_data_url_unknown_format_uses_node_error_code() {
-    use server::engine::{execute_stateless, ExecutionConfig};
+    use server::engine::{ExecutionConfig, execute_stateless};
 
     ensure_v8();
     let code = r#"
@@ -479,16 +485,18 @@ fn test_data_url_unknown_format_uses_node_error_code() {
     "#;
     let (result, _) = execute_stateless(
         code,
-        ExecutionConfig::new(64 * 1024 * 1024)
-            .main_module_specifier("file:///main.mjs"),
+        ExecutionConfig::new(64 * 1024 * 1024).main_module_specifier("file:///main.mjs"),
     );
-    assert!(result.is_ok(), "data URL import failed incorrectly: {result:?}");
+    assert!(
+        result.is_ok(),
+        "data URL import failed incorrectly: {result:?}"
+    );
 }
 
 #[test]
 fn test_virtual_module_rejects_unsupported_type_attribute() {
+    use server::engine::{ExecutionConfig, execute_stateless};
     use std::collections::HashMap;
-    use server::engine::{execute_stateless, ExecutionConfig};
 
     ensure_v8();
     let modules = Arc::new(HashMap::from([(
@@ -497,7 +505,7 @@ fn test_virtual_module_rejects_unsupported_type_attribute() {
     )]));
     let loader = ModuleLoaderConfig {
         allow_external: false,
-        policy_chain: None,
+        hooks: None,
         virtual_modules: Some(modules),
         virtual_commonjs_modules: None,
         virtual_files: None,
@@ -518,13 +526,16 @@ fn test_virtual_module_rejects_unsupported_type_attribute() {
             .module_loader_config(&loader)
             .main_module_specifier("file:///main.mjs"),
     );
-    assert!(result.is_ok(), "virtual module accepted invalid type: {result:?}");
+    assert!(
+        result.is_ok(),
+        "virtual module accepted invalid type: {result:?}"
+    );
 }
 
 #[test]
 fn test_virtual_json_module_preserves_json_type() {
+    use server::engine::{ExecutionConfig, execute_stateless};
     use std::collections::HashMap;
-    use server::engine::{execute_stateless, ExecutionConfig};
 
     ensure_v8();
     let modules = Arc::new(HashMap::from([(
@@ -533,7 +544,7 @@ fn test_virtual_json_module_preserves_json_type() {
     )]));
     let loader = ModuleLoaderConfig {
         allow_external: false,
-        policy_chain: None,
+        hooks: None,
         virtual_modules: Some(modules),
         virtual_commonjs_modules: None,
         virtual_files: None,
@@ -553,8 +564,8 @@ fn test_virtual_json_module_preserves_json_type() {
 
 #[test]
 fn test_virtual_package_exports_import() {
+    use server::engine::{ExecutionConfig, execute_stateless};
     use std::collections::HashMap;
-    use server::engine::{execute_stateless, ExecutionConfig};
 
     ensure_v8();
     let modules = Arc::new(HashMap::from([
@@ -569,7 +580,7 @@ fn test_virtual_package_exports_import() {
     ]));
     let loader = ModuleLoaderConfig {
         allow_external: false,
-        policy_chain: None,
+        hooks: None,
         virtual_modules: Some(modules),
         virtual_commonjs_modules: None,
         virtual_files: None,
@@ -589,8 +600,8 @@ fn test_virtual_package_exports_import() {
 
 #[test]
 fn test_virtual_package_exports_reject_hidden_subpath() {
+    use server::engine::{ExecutionConfig, execute_stateless};
     use std::collections::HashMap;
-    use server::engine::{execute_stateless, ExecutionConfig};
 
     ensure_v8();
     let modules = Arc::new(HashMap::from([
@@ -609,7 +620,7 @@ fn test_virtual_package_exports_reject_hidden_subpath() {
     ]));
     let loader = ModuleLoaderConfig {
         allow_external: false,
-        policy_chain: None,
+        hooks: None,
         virtual_modules: Some(modules),
         virtual_commonjs_modules: None,
         virtual_files: None,
@@ -627,22 +638,25 @@ fn test_virtual_package_exports_reject_hidden_subpath() {
             .module_loader_config(&loader)
             .main_module_specifier("file:///app/main.mjs"),
     );
-    assert!(result.is_ok(), "hidden package export was not rejected: {result:?}");
+    assert!(
+        result.is_ok(),
+        "hidden package export was not rejected: {result:?}"
+    );
 }
 
 #[test]
 fn test_virtual_unknown_extension_uses_node_error() {
+    use server::engine::{ExecutionConfig, execute_stateless};
     use std::collections::{HashMap, HashSet};
-    use server::engine::{execute_stateless, ExecutionConfig};
 
     ensure_v8();
     let loader = ModuleLoaderConfig {
         allow_external: false,
-        policy_chain: None,
+        hooks: None,
         virtual_modules: Some(Arc::new(HashMap::new())),
         virtual_commonjs_modules: None,
         virtual_files: Some(Arc::new(HashSet::from([
-            "file:///app/file.unknown".to_owned(),
+            "file:///app/file.unknown".to_owned()
         ]))),
     };
     let code = r#"
@@ -658,18 +672,21 @@ fn test_virtual_unknown_extension_uses_node_error() {
             .module_loader_config(&loader)
             .main_module_specifier("file:///app/main.mjs"),
     );
-    assert!(result.is_ok(), "unknown extension used the wrong error: {result:?}");
+    assert!(
+        result.is_ok(),
+        "unknown extension used the wrong error: {result:?}"
+    );
 }
 
 #[test]
 fn test_virtual_missing_package_uses_node_error() {
+    use server::engine::{ExecutionConfig, execute_stateless};
     use std::collections::HashMap;
-    use server::engine::{execute_stateless, ExecutionConfig};
 
     ensure_v8();
     let loader = ModuleLoaderConfig {
         allow_external: false,
-        policy_chain: None,
+        hooks: None,
         virtual_modules: Some(Arc::new(HashMap::new())),
         virtual_commonjs_modules: None,
         virtual_files: None,
@@ -687,13 +704,16 @@ fn test_virtual_missing_package_uses_node_error() {
             .module_loader_config(&loader)
             .main_module_specifier("file:///app/main.mjs"),
     );
-    assert!(result.is_ok(), "missing package used the wrong error: {result:?}");
+    assert!(
+        result.is_ok(),
+        "missing package used the wrong error: {result:?}"
+    );
 }
 
 #[test]
 fn test_virtual_package_exports_reject_missing_target() {
+    use server::engine::{ExecutionConfig, execute_stateless};
     use std::collections::HashMap;
-    use server::engine::{execute_stateless, ExecutionConfig};
 
     ensure_v8();
     let modules = Arc::new(HashMap::from([(
@@ -702,7 +722,7 @@ fn test_virtual_package_exports_reject_missing_target() {
     )]));
     let loader = ModuleLoaderConfig {
         allow_external: false,
-        policy_chain: None,
+        hooks: None,
         virtual_modules: Some(modules),
         virtual_commonjs_modules: None,
         virtual_files: None,
@@ -720,13 +740,16 @@ fn test_virtual_package_exports_reject_missing_target() {
             .module_loader_config(&loader)
             .main_module_specifier("file:///app/main.mjs"),
     );
-    assert!(result.is_ok(), "missing package target was not rejected: {result:?}");
+    assert!(
+        result.is_ok(),
+        "missing package target was not rejected: {result:?}"
+    );
 }
 
 #[test]
 fn test_concurrent_virtual_package_errors_reject_independently() {
+    use server::engine::{ExecutionConfig, execute_stateless};
     use std::collections::HashMap;
-    use server::engine::{execute_stateless, ExecutionConfig};
 
     ensure_v8();
     let modules = Arc::new(HashMap::from([
@@ -753,7 +776,7 @@ fn test_concurrent_virtual_package_errors_reject_independently() {
     ]));
     let loader = ModuleLoaderConfig {
         allow_external: false,
-        policy_chain: None,
+        hooks: None,
         virtual_modules: Some(modules),
         virtual_commonjs_modules: None,
         virtual_files: None,
@@ -780,13 +803,16 @@ fn test_concurrent_virtual_package_errors_reject_independently() {
             .module_loader_config(&loader)
             .main_module_specifier("file:///app/main.mjs"),
     );
-    assert!(result.is_ok(), "concurrent package errors failed: {result:?}");
+    assert!(
+        result.is_ok(),
+        "concurrent package errors failed: {result:?}"
+    );
 }
 
 #[test]
 fn test_create_require_enforces_package_exports() {
+    use server::engine::{ExecutionConfig, execute_stateless};
     use std::collections::HashMap;
-    use server::engine::{execute_stateless, ExecutionConfig};
 
     ensure_v8();
     let modules = Arc::new(HashMap::from([
@@ -815,7 +841,7 @@ fn test_create_require_enforces_package_exports() {
     ]));
     let loader = ModuleLoaderConfig {
         allow_external: false,
-        policy_chain: None,
+        hooks: None,
         virtual_modules: Some(modules),
         virtual_commonjs_modules: Some(commonjs_modules),
         virtual_files: None,
@@ -840,13 +866,16 @@ fn test_create_require_enforces_package_exports() {
             .module_loader_config(&loader)
             .main_module_specifier("file:///app/main.mjs"),
     );
-    assert!(result.is_ok(), "createRequire exports enforcement failed: {result:?}");
+    assert!(
+        result.is_ok(),
+        "createRequire exports enforcement failed: {result:?}"
+    );
 }
 
 #[test]
 fn test_create_require_resolves_package_imports() {
+    use server::engine::{ExecutionConfig, execute_stateless};
     use std::collections::HashMap;
-    use server::engine::{execute_stateless, ExecutionConfig};
 
     ensure_v8();
     let modules = Arc::new(HashMap::from([
@@ -860,14 +889,26 @@ fn test_create_require_resolves_package_imports() {
         ),
     ]));
     let commonjs_modules = Arc::new(HashMap::from([
-        ("file:///app/test.js".to_string(), "module.exports = 'test';".to_string()),
-        ("file:///app/require.js".to_string(), "module.exports = 'require';".to_string()),
-        ("file:///app/src/item.js".to_string(), "module.exports = 'item';".to_string()),
-        ("file:///app/node_modules/dep/value.js".to_string(), "module.exports = 'external';".to_string()),
+        (
+            "file:///app/test.js".to_string(),
+            "module.exports = 'test';".to_string(),
+        ),
+        (
+            "file:///app/require.js".to_string(),
+            "module.exports = 'require';".to_string(),
+        ),
+        (
+            "file:///app/src/item.js".to_string(),
+            "module.exports = 'item';".to_string(),
+        ),
+        (
+            "file:///app/node_modules/dep/value.js".to_string(),
+            "module.exports = 'external';".to_string(),
+        ),
     ]));
     let loader = ModuleLoaderConfig {
         allow_external: false,
-        policy_chain: None,
+        hooks: None,
         virtual_modules: Some(modules),
         virtual_commonjs_modules: Some(commonjs_modules),
         virtual_files: None,
@@ -891,8 +932,8 @@ fn test_create_require_resolves_package_imports() {
 
 #[test]
 fn test_package_import_deprecation_uses_node_test_flags() {
+    use server::engine::{ExecutionConfig, execute_stateless};
     use std::collections::HashMap;
-    use server::engine::{execute_stateless, ExecutionConfig};
 
     ensure_v8();
     let modules = Arc::new(HashMap::from([(
@@ -901,7 +942,7 @@ fn test_package_import_deprecation_uses_node_test_flags() {
     )]));
     let loader = ModuleLoaderConfig {
         allow_external: false,
-        policy_chain: None,
+        hooks: None,
         virtual_modules: Some(modules),
         virtual_commonjs_modules: Some(Arc::new(HashMap::new())),
         virtual_files: None,
@@ -932,11 +973,10 @@ fn test_package_import_deprecation_uses_node_test_flags() {
     assert!(result.is_ok(), "package imports warning failed: {result:?}");
 }
 
-
 #[test]
 fn test_dynamic_import_legacy_package_main_warnings() {
-    use std::collections::HashMap;
     use server::engine::{ExecutionConfig, execute_stateless};
+    use std::collections::HashMap;
 
     ensure_v8();
     let modules = Arc::new(HashMap::from([
@@ -961,7 +1001,7 @@ fn test_dynamic_import_legacy_package_main_warnings() {
     ]));
     let loader = ModuleLoaderConfig {
         allow_external: false,
-        policy_chain: None,
+        hooks: None,
         virtual_modules: Some(modules),
         virtual_commonjs_modules: Some(commonjs_modules),
         virtual_files: None,
@@ -992,8 +1032,8 @@ fn test_dynamic_import_legacy_package_main_warnings() {
 
 #[test]
 fn test_create_require_resolves_hash_prefixed_legacy_package() {
+    use server::engine::{ExecutionConfig, execute_stateless};
     use std::collections::HashMap;
-    use server::engine::{execute_stateless, ExecutionConfig};
 
     ensure_v8();
     let commonjs_modules = Arc::new(HashMap::from([(
@@ -1002,7 +1042,7 @@ fn test_create_require_resolves_hash_prefixed_legacy_package() {
     )]));
     let loader = ModuleLoaderConfig {
         allow_external: false,
-        policy_chain: None,
+        hooks: None,
         virtual_modules: Some(Arc::new(HashMap::new())),
         virtual_commonjs_modules: Some(commonjs_modules),
         virtual_files: None,
@@ -1019,13 +1059,16 @@ fn test_create_require_resolves_hash_prefixed_legacy_package() {
             .module_loader_config(&loader)
             .main_module_specifier("file:///app/main.mjs"),
     );
-    assert!(result.is_ok(), "hash-prefixed package require failed: {result:?}");
+    assert!(
+        result.is_ok(),
+        "hash-prefixed package require failed: {result:?}"
+    );
 }
 
 #[test]
 fn test_create_require_virtual_package_exports() {
+    use server::engine::{ExecutionConfig, execute_stateless};
     use std::collections::HashMap;
-    use server::engine::{execute_stateless, ExecutionConfig};
 
     ensure_v8();
     let modules = Arc::new(HashMap::from([(
@@ -1038,7 +1081,7 @@ fn test_create_require_virtual_package_exports() {
     )]));
     let loader = ModuleLoaderConfig {
         allow_external: false,
-        policy_chain: None,
+        hooks: None,
         virtual_modules: Some(modules),
         virtual_commonjs_modules: Some(commonjs_modules),
         virtual_files: None,
@@ -1058,11 +1101,10 @@ fn test_create_require_virtual_package_exports() {
     assert!(result.is_ok(), "virtual package require failed: {result:?}");
 }
 
-
 #[test]
 fn test_internal_legacy_main_resolve_uses_virtual_files() {
+    use server::engine::{ExecutionConfig, execute_stateless};
     use std::collections::{HashMap, HashSet};
-    use server::engine::{execute_stateless, ExecutionConfig};
 
     ensure_v8();
     let modules = Arc::new(HashMap::from([
@@ -1085,7 +1127,7 @@ fn test_internal_legacy_main_resolve_uses_virtual_files() {
     ]));
     let loader = ModuleLoaderConfig {
         allow_external: false,
-        policy_chain: None,
+        hooks: None,
         virtual_modules: Some(modules),
         virtual_commonjs_modules: Some(Arc::new(HashMap::new())),
         virtual_files: Some(files),
@@ -1160,24 +1202,34 @@ fn test_internal_legacy_main_resolve_uses_virtual_files() {
             .module_loader_config(&loader)
             .main_module_specifier("file:///app/main.mjs"),
     );
-    assert!(result.is_ok(), "legacyMainResolve compatibility failed: {result:?}");
+    assert!(
+        result.is_ok(),
+        "legacyMainResolve compatibility failed: {result:?}"
+    );
 }
 
 #[test]
 fn test_resolve_npm_blocked_when_external_disabled() {
+    use deno_core::ModuleLoader;
     use deno_core::ResolutionKind;
     use server::engine::module_loader::NetworkModuleLoader;
-    use deno_core::ModuleLoader;
 
     let loader = NetworkModuleLoader::with_config(ModuleLoaderConfig {
         allow_external: false,
-        policy_chain: None,
+        hooks: None,
         virtual_modules: None,
         virtual_commonjs_modules: None,
         virtual_files: None,
     });
-    let result = loader.resolve("npm:lodash-es@4.17.21", "file:///main.js", ResolutionKind::Import);
-    assert!(result.is_err(), "npm specifier should be rejected when external modules disabled");
+    let result = loader.resolve(
+        "npm:lodash-es@4.17.21",
+        "file:///main.js",
+        ResolutionKind::Import,
+    );
+    assert!(
+        result.is_err(),
+        "npm specifier should be rejected when external modules disabled"
+    );
     let err = result.unwrap_err().to_string();
     assert!(
         err.contains("External module imports are disabled"),
@@ -1188,32 +1240,43 @@ fn test_resolve_npm_blocked_when_external_disabled() {
 
 #[test]
 fn test_resolve_jsr_blocked_when_external_disabled() {
+    use deno_core::ModuleLoader;
     use deno_core::ResolutionKind;
     use server::engine::module_loader::NetworkModuleLoader;
-    use deno_core::ModuleLoader;
 
     let loader = NetworkModuleLoader::with_config(ModuleLoaderConfig {
         allow_external: false,
-        policy_chain: None,
+        hooks: None,
         virtual_modules: None,
         virtual_commonjs_modules: None,
         virtual_files: None,
     });
-    let result = loader.resolve("jsr:@luca/cases@1.0.0", "file:///main.js", ResolutionKind::Import);
-    assert!(result.is_err(), "jsr specifier should be rejected when external modules disabled");
+    let result = loader.resolve(
+        "jsr:@luca/cases@1.0.0",
+        "file:///main.js",
+        ResolutionKind::Import,
+    );
+    assert!(
+        result.is_err(),
+        "jsr specifier should be rejected when external modules disabled"
+    );
     let err = result.unwrap_err().to_string();
-    assert!(err.contains("External module imports are disabled"), "got: {}", err);
+    assert!(
+        err.contains("External module imports are disabled"),
+        "got: {}",
+        err
+    );
 }
 
 #[test]
 fn test_resolve_url_blocked_when_external_disabled() {
+    use deno_core::ModuleLoader;
     use deno_core::ResolutionKind;
     use server::engine::module_loader::NetworkModuleLoader;
-    use deno_core::ModuleLoader;
 
     let loader = NetworkModuleLoader::with_config(ModuleLoaderConfig {
         allow_external: false,
-        policy_chain: None,
+        hooks: None,
         virtual_modules: None,
         virtual_commonjs_modules: None,
         virtual_files: None,
@@ -1223,20 +1286,27 @@ fn test_resolve_url_blocked_when_external_disabled() {
         "file:///main.js",
         ResolutionKind::Import,
     );
-    assert!(result.is_err(), "URL specifier should be rejected when external modules disabled");
+    assert!(
+        result.is_err(),
+        "URL specifier should be rejected when external modules disabled"
+    );
     let err = result.unwrap_err().to_string();
-    assert!(err.contains("External module imports are disabled"), "got: {}", err);
+    assert!(
+        err.contains("External module imports are disabled"),
+        "got: {}",
+        err
+    );
 }
 
 #[test]
 fn test_resolve_relative_allowed_when_external_disabled() {
+    use deno_core::ModuleLoader;
     use deno_core::ResolutionKind;
     use server::engine::module_loader::NetworkModuleLoader;
-    use deno_core::ModuleLoader;
 
     let loader = NetworkModuleLoader::with_config(ModuleLoaderConfig {
         allow_external: false,
-        policy_chain: None,
+        hooks: None,
         virtual_modules: None,
         virtual_commonjs_modules: None,
         virtual_files: None,
@@ -1246,24 +1316,36 @@ fn test_resolve_relative_allowed_when_external_disabled() {
         "https://esm.sh/cowsay@1.6.0/index.js",
         ResolutionKind::Import,
     );
-    assert!(result.is_ok(), "Relative specifier should resolve even when external disabled: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "Relative specifier should resolve even when external disabled: {:?}",
+        result
+    );
 }
 
 #[test]
 fn test_resolve_npm_allowed_when_external_enabled() {
+    use deno_core::ModuleLoader;
     use deno_core::ResolutionKind;
     use server::engine::module_loader::NetworkModuleLoader;
-    use deno_core::ModuleLoader;
 
     let loader = NetworkModuleLoader::with_config(ModuleLoaderConfig {
         allow_external: true,
-        policy_chain: None,
+        hooks: None,
         virtual_modules: None,
         virtual_commonjs_modules: None,
         virtual_files: None,
     });
-    let result = loader.resolve("npm:lodash-es@4.17.21", "file:///main.js", ResolutionKind::Import);
-    assert!(result.is_ok(), "npm specifier should resolve when external enabled: {:?}", result);
+    let result = loader.resolve(
+        "npm:lodash-es@4.17.21",
+        "file:///main.js",
+        ResolutionKind::Import,
+    );
+    assert!(
+        result.is_ok(),
+        "npm specifier should resolve when external enabled: {:?}",
+        result
+    );
     assert_eq!(result.unwrap().as_str(), "https://esm.sh/lodash-es@4.17.21");
 }
 
@@ -1274,13 +1356,16 @@ fn test_resolve_npm_allowed_when_external_enabled() {
 #[tokio::test]
 async fn test_engine_blocks_npm_import_by_default() {
     ensure_v8();
-    let engine = create_test_engine_modules_blocked();
+    let engine = Engine::from_engine(create_test_engine_modules_blocked());
 
     let code = r#"import { camelCase } from "npm:lodash-es@4.17.21";
 camelCase("hello_world");"#;
 
     let result = run_and_wait(&engine, code).await;
-    assert!(result.is_err(), "npm import should fail when external modules blocked");
+    assert!(
+        result.is_err(),
+        "npm import should fail when external modules blocked"
+    );
     let err = result.unwrap_err();
     assert!(
         err.contains("External module imports are disabled"),
@@ -1292,50 +1377,75 @@ camelCase("hello_world");"#;
 #[tokio::test]
 async fn test_engine_blocks_jsr_import_by_default() {
     ensure_v8();
-    let engine = create_test_engine_modules_blocked();
+    let engine = Engine::from_engine(create_test_engine_modules_blocked());
 
     let code = r#"import { camelCase } from "jsr:@luca/cases@1.0.0";
 camelCase("hello_world");"#;
 
     let result = run_and_wait(&engine, code).await;
-    assert!(result.is_err(), "jsr import should fail when external modules blocked");
+    assert!(
+        result.is_err(),
+        "jsr import should fail when external modules blocked"
+    );
     let err = result.unwrap_err();
-    assert!(err.contains("External module imports are disabled"), "got: {}", err);
+    assert!(
+        err.contains("External module imports are disabled"),
+        "got: {}",
+        err
+    );
 }
 
 #[tokio::test]
 async fn test_engine_blocks_url_import_by_default() {
     ensure_v8();
-    let engine = create_test_engine_modules_blocked();
+    let engine = Engine::from_engine(create_test_engine_modules_blocked());
 
     let code = r#"import { camelCase } from "https://esm.sh/jsr/@luca/cases@1.0.0";
 camelCase("hello_world");"#;
 
     let result = run_and_wait(&engine, code).await;
-    assert!(result.is_err(), "URL import should fail when external modules blocked");
+    assert!(
+        result.is_err(),
+        "URL import should fail when external modules blocked"
+    );
     let err = result.unwrap_err();
-    assert!(err.contains("External module imports are disabled"), "got: {}", err);
+    assert!(
+        err.contains("External module imports are disabled"),
+        "got: {}",
+        err
+    );
 }
 
 #[tokio::test]
 async fn test_engine_plain_js_works_when_modules_blocked() {
     ensure_v8();
-    let engine = create_test_engine_modules_blocked();
+    let engine = Engine::from_engine(create_test_engine_modules_blocked());
 
     let result = run_and_wait(&engine, "console.log(1 + 2);").await;
-    assert!(result.is_ok(), "Plain JS should work when external modules blocked: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "Plain JS should work when external modules blocked: {:?}",
+        result
+    );
 }
 
 #[tokio::test]
 async fn test_default_engine_blocks_external_modules() {
     ensure_v8();
-    let engine = create_test_engine(); // uses default (blocked)
+    let engine = Engine::from_engine(create_test_engine()); // uses default (blocked)
 
     let code = r#"import { camelCase } from "npm:lodash-es@4.17.21";
 camelCase("hello_world");"#;
 
     let result = run_and_wait(&engine, code).await;
-    assert!(result.is_err(), "Default engine should block external modules");
+    assert!(
+        result.is_err(),
+        "Default engine should block external modules"
+    );
     let err = result.unwrap_err();
-    assert!(err.contains("External module imports are disabled"), "got: {}", err);
+    assert!(
+        err.contains("External module imports are disabled"),
+        "got: {}",
+        err
+    );
 }

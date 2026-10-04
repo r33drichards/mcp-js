@@ -176,7 +176,7 @@ async fn run_js(engine: &Engine, code: String) -> Result<String, String> {
 
     for _ in 0..600 {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        if let Ok(info) = engine.get_execution(&exec_id) {
+        if let Ok(info) = engine.get_execution(exec_id.clone()) {
             match info.status.as_str() {
                 "completed" => return Ok(info.result.unwrap_or_default()),
                 "failed" => return Err(info.error.unwrap_or_default()),
@@ -422,6 +422,11 @@ async fn websocket_constructor_validation_matches_spec() {
     ensure_v8();
     let engine = build_engine(WebSocketConfig::new_with_chain(allow_all_chain()));
 
+    // A closed loopback port fails promptly; a broadcast address can remain
+    // pending until the execution timeout on some hosts.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
     let code = r#"
         function assertThrowsDom(fn, name, label) {
             try {
@@ -439,8 +444,8 @@ async fn websocket_constructor_validation_matches_spec() {
         assertThrowsDom(() => new WebSocket("ws://example.com/", ["bad protocol"]), "SyntaxError", "invalid protocol token");
 
         // http(s) map onto ws(s) without connecting anywhere real.
-        const ws = new WebSocket("http://255.255.255.255:9/");
-        if (ws.url !== "ws://255.255.255.255:9/") throw new Error("http should map to ws: " + ws.url);
+        const ws = new WebSocket("http://127.0.0.1:__PORT__/");
+        if (ws.url !== "ws://127.0.0.1:__PORT__/") throw new Error("http should map to ws: " + ws.url);
         if (ws.readyState !== WebSocket.CONNECTING) throw new Error("should start CONNECTING");
         assertThrowsDom(() => ws.send("x"), "InvalidStateError", "send while CONNECTING");
         try { ws.close(1005); throw new Error("close(1005) should throw"); }
@@ -448,7 +453,7 @@ async fn websocket_constructor_validation_matches_spec() {
         ws.close();
         await new Promise((resolve) => { ws.onclose = resolve; });
     "#
-    .to_string();
+    .replace("__PORT__", &port.to_string());
 
     run_js(&engine, code).await.expect("constructor validation should pass");
 }

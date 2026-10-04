@@ -3,8 +3,12 @@ name: Load Test
 on:
   push:
     branches: [main]
+  # On pull requests, load testing is opt-in: apply the `load-test` label to
+  # run it. The `labeled` type triggers a run the moment the label is added;
+  # every push to main still benchmarks unconditionally.
   pull_request:
     branches: [main]
+    types: [ opened, synchronize, reopened, labeled ]
     paths-ignore:
       - 'site-docs/**'
       - '**.md'
@@ -26,6 +30,7 @@ concurrency:
 jobs:
   load-test:
     name: Benchmark (${{ matrix.topology }}-${{ matrix.mode }})
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'load-test')
     runs-on: [self-hosted, railway]
     timeout-minutes: 120
 
@@ -325,7 +330,7 @@ jobs:
     name: Generate Comparison Report
     runs-on: [self-hosted, railway]
     needs: load-test
-    if: always()
+    if: always() && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'load-test'))
     permissions:
       pull-requests: write
     steps:

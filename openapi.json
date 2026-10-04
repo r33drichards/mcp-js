@@ -9,6 +9,242 @@
     "version": "0.1.0"
   },
   "paths": {
+    "/api/artifact-uploads/{token}": {
+      "put": {
+        "tags": [
+          "artifacts"
+        ],
+        "summary": "Upload a file to a one-time URL from the `get_artifact_upload_url` tool.",
+        "description": "The token in the path is the only credential — this route is not behind\nbearer auth. The request body is stored verbatim under the key the URL\nwas issued for; the mime type is the one fixed at issue time, else the\nrequest's `Content-Type`. A token stores one upload and expires; while\nan upload is in flight, other requests with the same token get 404, and\nan upload that is rejected or abandoned leaves the token usable.",
+        "operationId": "redeem_artifact_upload_handler",
+        "parameters": [
+          {
+            "name": "token",
+            "in": "path",
+            "description": "One-time upload token",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Raw artifact bytes (max 16 MiB)",
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Artifact stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArtifactMeta"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid mime type",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown, expired, already-used, or in-use token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Payload exceeds the artifact size limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Artifact store unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/artifacts": {
+      "get": {
+        "tags": [
+          "artifacts"
+        ],
+        "summary": "List metadata for all stored artifacts.",
+        "operationId": "list_artifacts_handler",
+        "responses": {
+          "200": {
+            "description": "Artifact metadata list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArtifactList"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Artifact store unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/artifacts/{key}": {
+      "get": {
+        "tags": [
+          "artifacts"
+        ],
+        "summary": "Download an artifact's raw payload bytes.",
+        "description": "The response body is the artifact's payload verbatim, served with the\nstored mime type as `Content-Type` — no base64, unlike the MCP tool.",
+        "operationId": "get_artifact_handler",
+        "parameters": [
+          {
+            "name": "key",
+            "in": "path",
+            "description": "Artifact key, as passed to artifact(key, mime, bytes)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Raw artifact bytes (Content-Type = stored mime type)"
+          },
+          "404": {
+            "description": "Artifact not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "artifacts"
+        ],
+        "summary": "Upload a file as an artifact.",
+        "description": "The request body is stored verbatim as the payload and the request's\n`Content-Type` becomes its mime type (`application/octet-stream` when\nabsent). The same key overwrites. Scripts read it back with\n`artifact.get(key)`.",
+        "operationId": "put_artifact_handler",
+        "parameters": [
+          {
+            "name": "key",
+            "in": "path",
+            "description": "Key to store the artifact under",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Raw artifact bytes (max 16 MiB)",
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Artifact stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArtifactMeta"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid key, mime type, or payload size",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Artifact store unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/capabilities": {
+      "get": {
+        "tags": [
+          "server"
+        ],
+        "summary": "Which per-session state this server offers.",
+        "operationId": "capabilities_handler",
+        "responses": {
+          "200": {
+            "description": "Capabilities",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Capabilities"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/cli": {
       "get": {
         "tags": [
@@ -516,6 +752,419 @@
         }
       }
     },
+    "/api/sessions/{session}/dir/{path}": {
+      "get": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Names of a directory's direct children in a session's filesystem snapshot.",
+        "operationId": "session_dir_handler",
+        "parameters": [
+          {
+            "name": "session",
+            "in": "path",
+            "description": "Engine session name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "path",
+            "description": "Directory path inside the snapshot, without the leading slash",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Directory listing",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionDirListing"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{session}/entries/{path}": {
+      "get": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Metadata for a path in a session's filesystem snapshot.",
+        "operationId": "session_entry_handler",
+        "parameters": [
+          {
+            "name": "session",
+            "in": "path",
+            "description": "Engine session name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "path",
+            "description": "Path inside the snapshot, without the leading slash",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "follow",
+            "in": "query",
+            "description": "Follow a final symlink (Node `fs.stat`); `false` is `fs.lstat`.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Entry metadata",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionFileEntry"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{session}/files/{path}": {
+      "get": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Read a file from a session's filesystem snapshot.",
+        "operationId": "session_file_get_handler",
+        "parameters": [
+          {
+            "name": "session",
+            "in": "path",
+            "description": "Engine session name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "path",
+            "description": "Path inside the snapshot, without the leading slash",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "Start reading at this byte offset (with `max_bytes`).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "nullable": true,
+              "minimum": 0
+            }
+          },
+          {
+            "name": "max_bytes",
+            "in": "query",
+            "description": "Read at most this many bytes; fewer are returned only at end of file.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "nullable": true,
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "File bytes",
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Denied by the filesystem hook chain",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Create, replace, or append to a file in a session's filesystem snapshot.",
+        "description": "The raw request body is the file content.",
+        "operationId": "session_file_put_handler",
+        "parameters": [
+          {
+            "name": "session",
+            "in": "path",
+            "description": "Engine session name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "path",
+            "description": "Path inside the snapshot, without the leading slash",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "append",
+            "in": "query",
+            "description": "Append to the file instead of replacing it.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Written"
+          },
+          "403": {
+            "description": "Denied by the filesystem hook chain",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Remove a file or directory from a session's filesystem snapshot.",
+        "operationId": "session_file_delete_handler",
+        "parameters": [
+          {
+            "name": "session",
+            "in": "path",
+            "description": "Engine session name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "path",
+            "description": "Path inside the snapshot, without the leading slash",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "recursive",
+            "in": "query",
+            "description": "Remove a directory and its contents.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Removed"
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{session}/fs": {
+      "post": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "Filesystem operations on a session snapshot that carry no file bytes:",
+        "description": "`mkdir`, `rename`, `exists`, `readlink`, and `canonical`.",
+        "operationId": "session_fs_op_handler",
+        "parameters": [
+          {
+            "name": "session",
+            "in": "path",
+            "description": "Engine session name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionFsOpRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Operation result"
+          },
+          "400": {
+            "description": "Unknown operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{session}/snapshots": {
+      "get": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "The session log: every run and native mutation recorded for a session,",
+        "description": "oldest first, with the heap and filesystem snapshot each produced.",
+        "operationId": "session_snapshots_handler",
+        "parameters": [
+          {
+            "name": "session",
+            "in": "path",
+            "description": "Engine session name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Session log entries",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SessionSnapshotEntry"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Sessions are not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/version": {
       "get": {
         "tags": [
@@ -545,6 +1194,56 @@
           }
         }
       },
+      "ArtifactList": {
+        "type": "object",
+        "description": "List of stored artifacts.",
+        "required": [
+          "artifacts"
+        ],
+        "properties": {
+          "artifacts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ArtifactMeta"
+            }
+          }
+        }
+      },
+      "ArtifactMeta": {
+        "type": "object",
+        "description": "Metadata for one stored artifact (payload not included).",
+        "required": [
+          "key",
+          "mime_type",
+          "size_bytes",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "description": "ISO-8601 timestamp when the artifact was (last) written."
+          },
+          "execution_id": {
+            "type": "string",
+            "description": "Execution that (last) wrote this artifact, when known.",
+            "nullable": true
+          },
+          "key": {
+            "type": "string",
+            "description": "Caller-chosen key, as passed to `artifact(key, mime, bytes)`."
+          },
+          "mime_type": {
+            "type": "string",
+            "description": "Mime type, e.g. `image/png`."
+          },
+          "size_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Payload size in bytes.",
+            "minimum": 0
+          }
+        }
+      },
       "CancelResult": {
         "type": "object",
         "description": "Result of a cancel request.",
@@ -558,6 +1257,29 @@
           },
           "ok": {
             "type": "boolean"
+          }
+        }
+      },
+      "Capabilities": {
+        "type": "object",
+        "description": "Runtime capabilities of this server.",
+        "required": [
+          "heap",
+          "filesystem",
+          "sessions"
+        ],
+        "properties": {
+          "filesystem": {
+            "type": "boolean",
+            "description": "Filesystem snapshots are configured."
+          },
+          "heap": {
+            "type": "boolean",
+            "description": "Heap persistence is configured."
+          },
+          "sessions": {
+            "type": "boolean",
+            "description": "Per-session state (heap and/or filesystem) is available."
           }
         }
       },
@@ -673,9 +1395,17 @@
         "required": [
           "execution_id",
           "status",
-          "started_at"
+          "started_at",
+          "artifacts"
         ],
         "properties": {
+          "artifacts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ArtifactMeta"
+            },
+            "description": "Artifacts emitted via `artifact(key, mime, bytes)` during this\nexecution. Fetch payloads with `GET /api/artifacts/{key}`."
+          },
           "completed_at": {
             "type": "string",
             "description": "ISO-8601 timestamp when execution finished (absent while running).",
@@ -987,6 +1717,167 @@
             "description": "Return output starting at this line number (0-indexed).",
             "nullable": true,
             "minimum": 0
+          }
+        }
+      },
+      "SessionDirListing": {
+        "type": "object",
+        "description": "Names of a directory's direct children.",
+        "required": [
+          "names"
+        ],
+        "properties": {
+          "names": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "SessionEntryQuery": {
+        "type": "object",
+        "description": "Query for `GET /api/sessions/{session}/entries/{path}`.",
+        "properties": {
+          "follow": {
+            "type": "boolean",
+            "description": "Follow a final symlink (Node `fs.stat`); `false` is `fs.lstat`."
+          }
+        }
+      },
+      "SessionFileEntry": {
+        "type": "object",
+        "description": "Metadata for one path in a session snapshot.",
+        "required": [
+          "kind",
+          "size",
+          "readonly",
+          "mode"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "description": "`file`, `directory`, `symlink`, or `other`."
+          },
+          "mode": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Unix mode bits, type bits included.",
+            "minimum": 0
+          },
+          "modified_ms": {
+            "type": "number",
+            "format": "double",
+            "description": "Modification time in milliseconds since the Unix epoch, when known.",
+            "nullable": true
+          },
+          "readonly": {
+            "type": "boolean"
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "SessionFileReadQuery": {
+        "type": "object",
+        "description": "Query for `GET /api/sessions/{session}/files/{path}`.",
+        "properties": {
+          "max_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Read at most this many bytes; fewer are returned only at end of file.",
+            "nullable": true,
+            "minimum": 0
+          },
+          "offset": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Start reading at this byte offset (with `max_bytes`).",
+            "nullable": true,
+            "minimum": 0
+          }
+        }
+      },
+      "SessionFileRemoveQuery": {
+        "type": "object",
+        "description": "Query for `DELETE /api/sessions/{session}/files/{path}`.",
+        "properties": {
+          "recursive": {
+            "type": "boolean",
+            "description": "Remove a directory and its contents."
+          }
+        }
+      },
+      "SessionFileWriteQuery": {
+        "type": "object",
+        "description": "Query for `PUT /api/sessions/{session}/files/{path}`.",
+        "properties": {
+          "append": {
+            "type": "boolean",
+            "description": "Append to the file instead of replacing it."
+          }
+        }
+      },
+      "SessionFsOpRequest": {
+        "type": "object",
+        "description": "Request body for `POST /api/sessions/{session}/fs`: the operations that\ncarry no file bytes.",
+        "required": [
+          "op",
+          "path"
+        ],
+        "properties": {
+          "op": {
+            "type": "string",
+            "description": "`mkdir`, `rename`, `exists`, `readlink`, or `canonical`."
+          },
+          "path": {
+            "type": "string"
+          },
+          "recursive": {
+            "type": "boolean",
+            "description": "`mkdir` only: create missing parents."
+          },
+          "to": {
+            "type": "string",
+            "description": "`rename` only: the destination path.",
+            "nullable": true
+          }
+        }
+      },
+      "SessionSnapshotEntry": {
+        "type": "object",
+        "description": "One session-log entry.",
+        "required": [
+          "index",
+          "output_heap",
+          "code",
+          "timestamp"
+        ],
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "index": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "input_heap": {
+            "type": "string",
+            "nullable": true
+          },
+          "output_fs": {
+            "type": "string",
+            "nullable": true
+          },
+          "output_heap": {
+            "type": "string"
+          },
+          "timestamp": {
+            "type": "string"
           }
         }
       }

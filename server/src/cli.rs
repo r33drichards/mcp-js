@@ -1,7 +1,9 @@
 use clap::{CommandFactory, FromArgMatches, Parser};
 use cli_derive::StructuredArgs;
 
-use crate::engine::DEFAULT_EXECUTION_TIMEOUT_SECS;
+use crate::engine::{
+    DEFAULT_EXECUTION_TIMEOUT_SECS, DEFAULT_MCP_STUB_PREFIX, DEFAULT_WASM_STUB_PREFIX,
+};
 
 fn default_max_concurrent() -> usize {
     std::thread::available_parallelism()
@@ -38,7 +40,7 @@ impl std::fmt::Display for StoreKind {
 ///
 /// Every flag is also bindable from an `MCP_V8_*` environment variable
 /// (precedence: explicit CLI flag > env var > default).
-#[derive(Parser, StructuredArgs)]
+#[derive(Parser, StructuredArgs, Debug)]
 #[command(author, version, about, long_about = None)]
 pub struct Cli {
     /// Load configuration from a single TOML or JSON file (format chosen by
@@ -369,6 +371,19 @@ pub struct Cli {
     )]
     pub instructions: Option<String>,
 
+    /// Externally reachable base URL of this server, e.g.
+    /// `https://mcp.example.com`. Used to build the absolute upload URLs
+    /// returned by the `get_artifact_upload_url` tool; without it the tool
+    /// returns only a path for the client to resolve against the server's
+    /// address.
+    #[arg(
+        long = "public-url",
+        env = "MCP_V8_PUBLIC_URL",
+        value_name = "URL",
+        help_heading = "Core"
+    )]
+    pub public_url: Option<String>,
+
     /// Override the description advertised for the `run_js` tool in `tools/list`.
     /// The value is used verbatim as inline text, unless it begins with `@`, in
     /// which case the remainder is treated as a path to a file whose contents are
@@ -539,7 +554,7 @@ pub struct Cli {
     #[arg(
         long = "wasm-stub-prefix",
         env = "MCP_V8_WASM_STUB_PREFIX",
-        default_value = crate::engine::wasm_stub::DEFAULT_WASM_STUB_PREFIX,
+        default_value = DEFAULT_WASM_STUB_PREFIX,
         help_heading = "WASM"
     )]
     pub wasm_stub_prefix: String,
@@ -603,13 +618,21 @@ pub struct Cli {
     )]
     pub allow_run_js_file: bool,
 
-    /// JSON policy configuration (inline JSON or path to a JSON file).
-    /// Enables fetch() and/or module policy gating via local Rego files
-    /// and/or remote OPA servers.
+    /// JSON policy and hook configuration (inline JSON or path to a JSON
+    /// file). Enables per-operation gating (fetch, modules, filesystem, …)
+    /// via local Rego files and/or remote OPA servers, plus composable
+    /// pre/post hooks that can deny or mutate operation inputs and outputs.
+    /// Policies run as the final pre hook, so they always evaluate the
+    /// effective (post-mutation) input.
     ///
     /// Example: --policies-json '{"fetch":{"policies":[{"url":"file:///path/to/fetch.rego"}]}}'
     ///
-    /// Schema: { "fetch": { "mode": "all"|"any", "policies": [{"url": "...", "policy_path": "...", "rule": "..."}] }, "modules": { ... } }
+    /// Schema per operation: { "mode": "all"|"any", "policies": [{"url": "...", "policy_path": "...", "rule": "..."}], "pre": [{"url": "...", ...}], "post": [{"url": "...", ...}] }.
+    /// Hook sources: file://*.rego (Rego rule; "rule" names it), file://*.js (JavaScript in its own V8 isolate — "rule" names the function, default pre/post; "timeout_ms" bounds a call, default 5000; hooks may be async; "capabilities": ["fs","fetch"] grants the guest environment's APIs, ungated, for observing hooks like write-audit logs), or http(s):// (OPA-style REST).
+    /// A hook evaluates to a bool, or to {"allow": bool, "reason": "...", "input"|"output": {...}} to deny or rewrite; an undefined result abstains.
+    /// Input mutation applies to fetch, filesystem, subprocess, mcp_tools, and run_js_file; post hooks to fetch, subprocess, and mcp_tools.
+    /// Every operation also accepts "stack": an ordered layered form replacing pre/post — hook sources plus the built-ins "@inject" (fetch only), "@policy", and "@execute" (required, last); JS stack sources export handle(input, next). fetch/subprocess/mcp_tools run full mode (short-circuit, retry, response transforms); the other operations run gate mode (next resolves to null, layers gate/rewrite/observe, synthetic outputs fail closed).
+    /// The last stack entry may instead be {"execute": {"url": "file://*.js", ...}} — a virtual executor replacing "@execute": the file is called as handle(input) with no next and must return the operation's output document (full-mode operations only; mocked/recorded backends).
     #[arg(
         long = "policies-json",
         env = "MCP_V8_POLICIES_JSON",
@@ -676,7 +699,7 @@ pub struct Cli {
     #[arg(
         long = "mcp-stub-prefix",
         env = "MCP_V8_MCP_STUB_PREFIX",
-        default_value = crate::engine::mcp_client::DEFAULT_STUB_PREFIX,
+        default_value = DEFAULT_MCP_STUB_PREFIX,
         help_heading = "MCP Server Module"
     )]
     pub mcp_stub_prefix: String,
