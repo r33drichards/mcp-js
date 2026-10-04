@@ -71,7 +71,7 @@ jobs:
             ~/.cargo/git
             ~/.cargo/registry
             target/python-uniffi
-          key: python-uniffi-v8-145-shared-v2-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'server/**', 'mcp-v8-uniffi-python/**') }}
+          key: python-uniffi-v8-146-shared-v3-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'server/**', 'mcp-v8-uniffi-python/**') }}
       - name: Install UniFFI bindgen
         run: nix develop --command cargo install uniffi --version 0.32.0 --locked --features cli
       - name: Build Python-loadable UniFFI library
