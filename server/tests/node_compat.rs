@@ -181,6 +181,7 @@ enum Outcome {
 }
 
 fn run_file(test_path: &Path) -> Outcome {
+    ensure_v8();
     let source = match assemble(test_path) {
         Ok(s) => s,
         Err(e) => return Outcome::Fail(e),
@@ -199,8 +200,18 @@ fn run_file(test_path: &Path) -> Outcome {
 
     let fetch_config =
         FetchConfig::new_with_chain(Arc::new(PolicyChain::new(vec![], EvalMode::All)));
+    // The Node test prelude intentionally exercises internal resolution helpers.
+    // Expose them only to this harness, with an empty virtual-file namespace.
+    let module_loader = server::engine::module_loader::ModuleLoaderConfig {
+        allow_external: false,
+        hooks: None,
+        virtual_modules: None,
+        virtual_commonjs_modules: None,
+        virtual_files: Some(Arc::new(std::collections::HashSet::new())),
+    };
     let config = ExecutionConfig::new(256 * 1024 * 1024)
         .console_tree(tree.clone())
+        .module_loader_config(&module_loader)
         .fetch_config(&fetch_config);
     let isolate_handle = config.isolate_handle.clone();
 
