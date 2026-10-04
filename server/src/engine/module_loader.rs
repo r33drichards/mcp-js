@@ -1251,6 +1251,34 @@ impl ModuleLoader for NetworkModuleLoader {
                 }
             }
 
+            // esm.sh rewrites Node builtins to browser shim URLs. Those shims
+            // are often stubs (and stream's default export is not a constructor).
+            // Serve our embedded builtins instead, after the same module policy
+            // check as any other external URL. Keep the URL as module identity.
+            if specifier.scheme() == "https"
+                && specifier.host_str() == Some("esm.sh")
+                && specifier.port().is_none()
+                && specifier.username().is_empty()
+                && specifier.password().is_none()
+                && specifier.query().is_none()
+                && specifier.fragment().is_none()
+            {
+                if let Some(name) = specifier.path()
+                    .strip_prefix("/node/")
+                    .and_then(|path| path.strip_suffix(".mjs"))
+                    .filter(|name| super::node_compat::NODE_MODULES.iter().any(|(n, _)| n == name))
+                {
+                    return Ok(ModuleSource::new(
+                        ModuleType::JavaScript,
+                        ModuleSourceCode::String(FastString::from(format!(
+                            "export * from 'node:{name}'; export {{ default }} from 'node:{name}';"
+                        ))),
+                        &specifier,
+                        None,
+                    ));
+                }
+            }
+
             let resp = client
                 .get(specifier.as_str())
                 .send()

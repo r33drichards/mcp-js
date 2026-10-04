@@ -125,7 +125,7 @@ served by the module loader:
 | `node:tls` | option plumbing; TLS terminates host-side in the transports |
 | `node:url` | WHATWG URL + file-URL helpers |
 | `node:util` | purpose-written subset |
-| `node:zlib` | CRC32 plus one-shot gzip/deflate over CompressionStream / DecompressionStream |
+| `node:zlib` | CRC32, callback and synchronous gzip/deflate, plus legacy Deflate/Inflate streams (partial options/backpressure) |
 
 Classified non-runnable tests (with reasons):
 
