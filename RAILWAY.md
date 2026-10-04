@@ -151,7 +151,7 @@ Ready-to-paste overview for the publish form, following Railway's
 >
 > Hosting mcp-v8 means running a single Rust binary that serves the MCP
 > Streamable HTTP endpoint at `/mcp` and a REST sidecar at `/api/exec`. This
-> template builds the server from source with Docker, attaches a volume at
+> template installs the latest server release binary with Docker, attaches a volume at
 > `/data` for heap snapshots, the persistent `/work` filesystem, and the
 > session database, and health-checks `/api/version`. Railway injects `PORT`
 > automatically; host-header protection is scoped to the service's Railway

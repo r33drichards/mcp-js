@@ -1,0 +1,813 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index eed21c0..4c9a9a0 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -94,11 +94,11 @@ dependencies = [
+ 
+ [[package]]
+ name = "askama"
+-version = "0.14.0"
++version = "0.16.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "f75363874b771be265f4ffe307ca705ef6f3baa19011c149da8674a87f1b75c4"
++checksum = "6024d73179f43f15ccd2b881bfea6fee7f3a46ec53f33b52210dea749ebebaa4"
+ dependencies = [
+- "askama_derive 0.14.0",
++ "askama_macros",
+  "itoa",
+  "percent-encoding",
+  "serde",
+@@ -124,19 +124,29 @@ dependencies = [
+ 
+ [[package]]
+ name = "askama_derive"
+-version = "0.14.0"
++version = "0.16.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "129397200fe83088e8a68407a8e2b1f826cf0086b21ccdb866a722c8bcd3a94f"
++checksum = "071ee5ebf2138e3ad180e0aacf6940c2cab5e6d8333741d9925c7bee2b153f39"
+ dependencies = [
+- "askama_parser 0.14.0",
++ "askama_parser 0.16.1",
+  "basic-toml",
++ "glob",
+  "memchr",
+  "proc-macro2",
+  "quote",
+  "rustc-hash",
+  "serde",
+  "serde_derive",
+- "syn 2.0.119",
++ "syn 3.0.3",
++]
++
++[[package]]
++name = "askama_macros"
++version = "0.16.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "643e1c7cbb6aec1d920332fe51a7c0d8219e273dcb8602db03f5263e4d16487b"
++dependencies = [
++ "askama_derive 0.16.1",
+ ]
+ 
+ [[package]]
+@@ -153,14 +163,15 @@ dependencies = [
+ 
+ [[package]]
+ name = "askama_parser"
+-version = "0.14.0"
++version = "0.16.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "d6ab5630b3d5eaf232620167977f95eb51f3432fc76852328774afbd242d4358"
++checksum = "2c5ae75772275d268b03ab8bdccdd12117b6169ee23256942b34e46c9f476583"
+ dependencies = [
+- "memchr",
++ "rustc-hash",
+  "serde",
+  "serde_derive",
+- "winnow 0.7.15",
++ "unicode-ident",
++ "winnow 1.0.4",
+ ]
+ 
+ [[package]]
+@@ -379,18 +390,19 @@ dependencies = [
+ 
+ [[package]]
+ name = "cargo-platform"
+-version = "0.1.9"
++version = "0.3.3"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "e35af189006b9c0f00a064685c727031e3ed2d8020f7ba284d78cc2671bd36ea"
++checksum = "dd0061da739915fae12ea00e16397555ed4371a6bb285431aab930f61b0aa4ba"
+ dependencies = [
+  "serde",
++ "serde_core",
+ ]
+ 
+ [[package]]
+ name = "cargo_metadata"
+-version = "0.19.2"
++version = "0.23.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "dd5eb614ed4c27c5d706420e4320fbe3216ab31fa1c33cd8246ac36dae4479ba"
++checksum = "ef987d17b0a113becdd19d3d0022d04d7ef41f9efe4f3fb63ac44ba61df3ade9"
+ dependencies = [
+  "camino",
+  "cargo-platform",
+@@ -684,9 +696,9 @@ dependencies = [
+ 
+ [[package]]
+ name = "fs-err"
+-version = "2.11.0"
++version = "3.3.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "88a41f105fe1d5b6b34b2055e3dc59bb79b46b48b2040b9e6c7b4b5de097aa41"
++checksum = "b91aa448ca50d7e79433bdf3ee8d99215430d2ec02ade5aefab2a073a1822e8a"
+ dependencies = [
+  "autocfg",
+ ]
+@@ -1939,9 +1951,9 @@ checksum = "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254"
+ 
+ [[package]]
+ name = "uniffi"
+-version = "0.31.2"
++version = "0.32.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "46eefd5468602930da46b1f49d3448c6dfc2e81295f93120f23f8174fd70267f"
++checksum = "a782a48d72cfd7a2d65cfc7c691dbf5375c43104b3c195f7eccc716dcc3540c8"
+ dependencies = [
+  "anyhow",
+  "camino",
+@@ -1949,7 +1961,7 @@ dependencies = [
+  "clap",
+  "uniffi_bindgen",
+  "uniffi_build",
+- "uniffi_core",
++ "uniffi_core 0.32.0",
+  "uniffi_macros",
+  "uniffi_pipeline",
+ ]
+@@ -2063,7 +2075,7 @@ dependencies = [
+  "ubrn_testing",
+  "uniffi",
+  "uniffi-runtime-wasm",
+- "uniffi_core",
++ "uniffi_core 0.32.0",
+ ]
+ 
+ [[package]]
+@@ -2080,7 +2092,7 @@ dependencies = [
+  "ubrn_testing",
+  "uniffi",
+  "uniffi-runtime-wasm",
+- "uniffi_core",
++ "uniffi_core 0.32.0",
+ ]
+ 
+ [[package]]
+@@ -2097,7 +2109,7 @@ dependencies = [
+  "ubrn_testing",
+  "uniffi",
+  "uniffi-runtime-wasm",
+- "uniffi_core",
++ "uniffi_core 0.32.0",
+ ]
+ 
+ [[package]]
+@@ -2114,7 +2126,7 @@ dependencies = [
+  "ubrn_testing",
+  "uniffi",
+  "uniffi-runtime-wasm",
+- "uniffi_core",
++ "uniffi_core 0.32.0",
+ ]
+ 
+ [[package]]
+@@ -2125,7 +2137,7 @@ dependencies = [
+  "ubrn_macros",
+  "uniffi",
+  "uniffi-runtime-wasm",
+- "uniffi_core",
++ "uniffi_core 0.32.0",
+ ]
+ 
+ [[package]]
+@@ -2137,7 +2149,7 @@ dependencies = [
+  "ubrn_macros",
+  "uniffi",
+  "uniffi-runtime-wasm",
+- "uniffi_core",
++ "uniffi_core 0.32.0",
+ ]
+ 
+ [[package]]
+@@ -2150,7 +2162,7 @@ dependencies = [
+  "ubrn_testing",
+  "uniffi",
+  "uniffi-runtime-wasm",
+- "uniffi_core",
++ "uniffi_core 0.32.0",
+  "wasm-bindgen-futures",
+ ]
+ 
+@@ -2164,7 +2176,7 @@ dependencies = [
+  "ubrn_macros",
+  "uniffi",
+  "uniffi-runtime-wasm",
+- "uniffi_core",
++ "uniffi_core 0.32.0",
+  "uniffi_meta",
+ ]
+ 
+@@ -2178,7 +2190,7 @@ dependencies = [
+  "ubrn_macros",
+  "uniffi",
+  "uniffi-runtime-wasm",
+- "uniffi_core",
++ "uniffi_core 0.32.0",
+ ]
+ 
+ [[package]]
+@@ -2199,7 +2211,7 @@ dependencies = [
+  "ubrn_macros",
+  "uniffi",
+  "uniffi-runtime-wasm",
+- "uniffi_core",
++ "uniffi_core 0.32.0",
+ ]
+ 
+ [[package]]
+@@ -2212,7 +2224,7 @@ dependencies = [
+  "ubrn_macros",
+  "uniffi",
+  "uniffi-runtime-wasm",
+- "uniffi_core",
++ "uniffi_core 0.32.0",
+ ]
+ 
+ [[package]]
+@@ -2230,7 +2242,7 @@ dependencies = [
+  "uniffi-fixture-ext-types-lib-one",
+  "uniffi-fixture-ext-types-sub-lib",
+  "uniffi-runtime-wasm",
+- "uniffi_core",
++ "uniffi_core 0.32.0",
+  "url",
+ ]
+ 
+@@ -2297,7 +2309,7 @@ dependencies = [
+  "ubrn_macros",
+  "uniffi",
+  "uniffi-runtime-wasm",
+- "uniffi_core",
++ "uniffi_core 0.32.0",
+ ]
+ 
+ [[package]]
+@@ -2311,7 +2323,7 @@ dependencies = [
+  "ubrn_macros",
+  "uniffi",
+  "uniffi-runtime-wasm",
+- "uniffi_core",
++ "uniffi_core 0.32.0",
+ ]
+ 
+ [[package]]
+@@ -2334,7 +2346,7 @@ dependencies = [
+  "ubrn_macros",
+  "uniffi",
+  "uniffi-runtime-wasm",
+- "uniffi_core",
++ "uniffi_core 0.32.0",
+ ]
+ 
+ [[package]]
+@@ -2347,7 +2359,7 @@ dependencies = [
+  "ubrn_macros",
+  "uniffi",
+  "uniffi-runtime-wasm",
+- "uniffi_core",
++ "uniffi_core 0.32.0",
+ ]
+ 
+ [[package]]
+@@ -2360,7 +2372,7 @@ dependencies = [
+  "ubrn_macros",
+  "uniffi",
+  "uniffi-runtime-wasm",
+- "uniffi_core",
++ "uniffi_core 0.32.0",
+ ]
+ 
+ [[package]]
+@@ -2371,7 +2383,7 @@ dependencies = [
+  "ubrn_macros",
+  "uniffi",
+  "uniffi-runtime-wasm",
+- "uniffi_core",
++ "uniffi_core 0.32.0",
+ ]
+ 
+ [[package]]
+@@ -2391,7 +2403,7 @@ dependencies = [
+ name = "uniffi-runtime-javascript"
+ version = "0.31.0-5"
+ dependencies = [
+- "uniffi_core",
++ "uniffi_core 0.31.2",
+  "wasm-bindgen",
+ ]
+ 
+@@ -2411,12 +2423,12 @@ version = "0.31.0-5"
+ 
+ [[package]]
+ name = "uniffi_bindgen"
+-version = "0.31.2"
++version = "0.32.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "c4a0c9b375d32e1365cdb2bdd7cb495eecf6fac851ddbad077412b4ee1888514"
++checksum = "533b0312c73e3b54eb78a4b257ceae390962dd4767995778309a74644643f9ac"
+ dependencies = [
+  "anyhow",
+- "askama 0.14.0",
++ "askama 0.16.1",
+  "camino",
+  "cargo_metadata",
+  "fs-err",
+@@ -2438,9 +2450,9 @@ dependencies = [
+ 
+ [[package]]
+ name = "uniffi_build"
+-version = "0.31.2"
++version = "0.32.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "744fe15bcd3e2b1712a4573a45ce749af19cf28d69027ca5789619014955668c"
++checksum = "763a19ad720fce8c9a98576e04c0ccc5d2d155aa6b953c864587073292c7ccfc"
+ dependencies = [
+  "anyhow",
+  "camino",
+@@ -2452,6 +2464,18 @@ name = "uniffi_core"
+ version = "0.31.2"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "eec017b112701681f6fbbe5d92014b5c468eb0b177a94389de03ceec40665095"
++dependencies = [
++ "anyhow",
++ "bytes",
++ "once_cell",
++ "static_assertions",
++]
++
++[[package]]
++name = "uniffi_core"
++version = "0.32.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "8e32e261c5b0dfaba6488f536e71957dddd6b1a498ac7eb791bee56b60a086be"
+ dependencies = [
+  "anyhow",
+  "async-compat",
+@@ -2462,9 +2486,9 @@ dependencies = [
+ 
+ [[package]]
+ name = "uniffi_internal_macros"
+-version = "0.31.2"
++version = "0.32.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "4641669b48fefbc5e80ff08c5004d9c7617fb91232131a6734ab6712779cb04c"
++checksum = "84ae78069a5e6772ef694fd5bdb628532c88d2c2f0e7142bf6a384636eadb1af"
+ dependencies = [
+  "anyhow",
+  "indexmap 2.14.0",
+@@ -2475,9 +2499,9 @@ dependencies = [
+ 
+ [[package]]
+ name = "uniffi_macros"
+-version = "0.31.2"
++version = "0.32.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "eeb8617ee814de22caf7417bf514715ba0b3f46bd9d5a5d794413fd8282cb737"
++checksum = "330be6770532e86320df31f54c70bb0be67588594e8e77fa56e9083a3fed5d0d"
+ dependencies = [
+  "camino",
+  "fs-err",
+@@ -2492,9 +2516,9 @@ dependencies = [
+ 
+ [[package]]
+ name = "uniffi_meta"
+-version = "0.31.2"
++version = "0.32.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "58d5b94fc92803d21b2928bd15c6f06e57609b95caf98ea561c99cda1b6d2a25"
++checksum = "78de021f5547e56ab16c665a49d67d4fd3d31e77422f7739a2e9359d328cd9e7"
+ dependencies = [
+  "anyhow",
+  "siphasher",
+@@ -2504,9 +2528,9 @@ dependencies = [
+ 
+ [[package]]
+ name = "uniffi_pipeline"
+-version = "0.31.2"
++version = "0.32.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "032739b3ec725576914c15899dedaf080163ced86b6934566c20ec2b20ce90ca"
++checksum = "3f8201bb1907ed8a42d80e11cbc25c8a033e7a31c3cff1d911f56eedb81d4948"
+ dependencies = [
+  "anyhow",
+  "heck",
+@@ -2517,9 +2541,9 @@ dependencies = [
+ 
+ [[package]]
+ name = "uniffi_testing"
+-version = "0.31.2"
++version = "0.32.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "39e87268aea540acf71f9b8ddd56e1a1604ccc55bd20e48dcd608e9c037db6a7"
++checksum = "fec91e7b3d258554335da3d4ecf3d055f7bb4a34aa52b89d28ad2380e10579a0"
+ dependencies = [
+  "anyhow",
+  "camino",
+@@ -2530,9 +2554,9 @@ dependencies = [
+ 
+ [[package]]
+ name = "uniffi_udl"
+-version = "0.31.2"
++version = "0.32.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "fc0a1d0a0252ce1af9e8ce78ba67ac0d8937fb2bedaf10cbddd43d3614d06ec6"
++checksum = "a6e57996bc58009cc29bf04845d627ae313c2547b87171c1c349d6c51a1656c0"
+ dependencies = [
+  "anyhow",
+  "textwrap",
+@@ -2953,6 +2977,9 @@ name = "winnow"
+ version = "1.0.4"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
++dependencies = [
++ "memchr",
++]
+ 
+ [[package]]
+ name = "winsafe"
+diff --git a/Cargo.toml b/Cargo.toml
+index f5f99d2..5ec47c7 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -16,7 +16,7 @@ resolver = "2"
+ anyhow = "1"
+ askama = "0.13.1"
+ camino = "1.1.6"
+-cargo_metadata = "0.19.2"
++cargo_metadata = "0.23.1"
+ clap = { version = "4.5.4", features = ["derive"] }
+ extend = "1.2.0"
+ heck = "0.5.0"
+@@ -24,10 +24,10 @@ paste = "1.0.14"
+ pathdiff = { version = "0.2.1", features = ["camino"] }
+ serde = { version = "1", features = ["derive"] }
+ toml = "0.8.22"
+-uniffi = "=0.31"
+-uniffi_bindgen = "=0.31"
+-uniffi_core = { version = "=0.31", default-features = false }
+-uniffi_meta = "=0.31"
++uniffi = "=0.32.0"
++uniffi_bindgen = "=0.32.0"
++uniffi_core = { version = "=0.32.0", default-features = false }
++uniffi_meta = "=0.32.0"
+ ubrn_fixture_testing = { path = "crates/ubrn_fixture_testing" }
+ ubrn_macros = { path = "crates/ubrn_macros" }
+ uniffi-runtime-wasm = { path = "runtimes/wasm/helper-crate" }
+diff --git a/crates/ubrn_bindgen/src/bindings/extensions.rs b/crates/ubrn_bindgen/src/bindings/extensions.rs
+index 7475652..ba98bd5 100644
+--- a/crates/ubrn_bindgen/src/bindings/extensions.rs
++++ b/crates/ubrn_bindgen/src/bindings/extensions.rs
+@@ -25,6 +25,7 @@ pub(crate) impl ComponentInterface {
+         let meta = uniffi_meta::FnMetadata {
+             module_path: "internal".to_string(),
+             name: "ffi__string_to_buffer".to_owned(),
++            orig_name: None,
+             is_async: false,
+             inputs: Default::default(),
+             return_type: None,
+@@ -45,6 +46,7 @@ pub(crate) impl ComponentInterface {
+         let meta = uniffi_meta::FnMetadata {
+             module_path: "internal".to_string(),
+             name: "ffi__string_from_buffer".to_owned(),
++            orig_name: None,
+             is_async: false,
+             inputs: Default::default(),
+             return_type: None,
+@@ -65,6 +67,7 @@ pub(crate) impl ComponentInterface {
+         let meta = uniffi_meta::FnMetadata {
+             module_path: "internal".to_string(),
+             name: "ffi__string_to_byte_length".to_owned(),
++            orig_name: None,
+             is_async: false,
+             inputs: Default::default(),
+             return_type: None,
+@@ -85,6 +88,7 @@ pub(crate) impl ComponentInterface {
+         let meta = uniffi_meta::FnMetadata {
+             module_path: "internal".to_string(),
+             name: "ffi__read_string_from_buffer".to_owned(),
++            orig_name: None,
+             is_async: false,
+             inputs: Default::default(),
+             return_type: None,
+@@ -146,6 +150,7 @@ pub(crate) impl Object {
+             module_path: "internal".to_string(),
+             self_name: self.name().to_string(),
+             name: "ffi__bless_pointer".to_owned(),
++            orig_name: None,
+             is_async: false,
+             inputs: Default::default(),
+             return_type: None,
+diff --git a/crates/ubrn_bindgen/src/bindings/gen_typescript/api_module/builders.rs b/crates/ubrn_bindgen/src/bindings/gen_typescript/api_module/builders.rs
+index bd3cd96..db8fdf2 100644
+--- a/crates/ubrn_bindgen/src/bindings/gen_typescript/api_module/builders.rs
++++ b/crates/ubrn_bindgen/src/bindings/gen_typescript/api_module/builders.rs
+@@ -82,7 +82,7 @@ pub(super) fn build_custom_type(config: &Config, custom: &general::CustomType) -
+     let ffi_converter_name = ffi_converter_name_for(config, &custom.self_type);
+     let builtin_type_name = type_label_for(config, &custom.builtin.ty);
+     let builtin_ffi_converter = ffi_converter_name_for(config, &custom.builtin);
+-    let ffi_type_name = ffi_type_to_ts_name(&custom.builtin.ffi_type.ty);
++    let ffi_type_name = ffi_type_to_ts_name(&custom.builtin.ffi_type);
+ 
+     let custom_config = config
+         .custom_types
+@@ -141,6 +141,7 @@ fn render_literal(config: &Config, lit: &general::Literal) -> String {
+             format!("{type_name}.{variant_name}")
+         }
+         general::Literal::EmptySequence => "[]".into(),
++        general::Literal::EmptySet => panic!("UniFFI Set is not supported by this Node generator"),
+         general::Literal::EmptyMap => "new Map()".into(),
+         general::Literal::None => "undefined".into(),
+         general::Literal::Some { inner } => render_default_value(config, inner),
+@@ -149,7 +150,7 @@ fn render_literal(config: &Config, lit: &general::Literal) -> String {
+ 
+ fn render_default_value(config: &Config, dv: &general::DefaultValue) -> String {
+     match dv {
+-        general::DefaultValue::Literal(lit_node) => render_literal(config, &lit_node.lit),
++        general::DefaultValue::Literal(lit_node) => render_literal(config, lit_node),
+         general::DefaultValue::Default(tn) => render_type_default(config, &tn.ty),
+     }
+ }
+@@ -162,6 +163,7 @@ fn render_type_default(_config: &Config, ty: &general::Type) -> String {
+     // are well-formed at the Rust side (e.g. Record only accepts the bare
+     // default if every field itself has a default).
+     match ty {
++        general::Type::Box { .. } | general::Type::Set { .. } => panic!("UniFFI Box/Set is not supported by this Node generator"),
+         general::Type::UInt8
+         | general::Type::UInt16
+         | general::Type::UInt32
+@@ -207,8 +209,8 @@ fn render_type_default(_config: &Config, ty: &general::Type) -> String {
+ 
+ /// Discriminants stay in JS (not sent across the FFI), so large integers
+ /// can be safely narrowed to JS numbers when they fit.
+-fn render_variant_discr(config: &Config, discr: &general::LiteralNode) -> String {
+-    match &discr.lit {
++fn render_variant_discr(config: &Config, discr: &general::Literal) -> String {
++    match discr {
+         general::Literal::String(s) => format!("\"{}\"", s),
+         general::Literal::UInt(n, _, type_node) => match &type_node.ty {
+             general::Type::Int64 | general::Type::UInt64 => {
+@@ -285,9 +287,7 @@ pub(super) fn build_variant(config: &Config, variant: &general::Variant) -> TsVa
+ 
+ /// `Some` only when Rust declares an explicit discriminant type (e.g. `#[repr(u8)]`).
+ fn discr_type_for(config: &Config, en: &general::Enum) -> Option<String> {
+-    en.meta_discr_type
+-        .as_ref()
+-        .map(|t| type_label_for(config, &t.ty))
++    Some(type_label_for(config, &en.discr_type.ty))
+ }
+ 
+ pub(super) fn build_enum(config: &Config, en: &general::Enum, flavor: &AbiFlavor) -> TsEnum {
+@@ -444,7 +444,7 @@ pub(super) fn build_callable(
+         .collect();
+     let return_type = callable.return_type.ty.as_ref().map(|tn| {
+         let ts_type = type_label_for(config, &tn.ty);
+-        let ffi_type = ffi_type_to_ts_name(&tn.ffi_type.ty);
++        let ffi_type = ffi_type_to_ts_name(&tn.ffi_type);
+         let is_rust_buffer = ffi_type == "Uint8Array";
+         TsReturnType {
+             ts_type,
+@@ -733,7 +733,7 @@ fn build_vtable_field(
+         false,
+     ));
+ 
+-    let general::FfiType::Function(ref ffi_fn_name) = vm.ffi_type.ty else {
++    let general::FfiType::Function(ref ffi_fn_name) = vm.ffi_type else {
+         return TsVtableField {
+             name,
+             method,
+@@ -769,7 +769,7 @@ fn build_foreign_future_result(callable: &general::Callable) -> Option<TsForeign
+                 .return_type
+                 .ty
+                 .as_ref()
+-                .map(|tn| ffi_default_value_for(&tn.ffi_type.ty))
++                .map(|tn| ffi_default_value_for(&tn.ffi_type))
+                 .unwrap_or_default(),
+         })
+ }
+@@ -788,7 +788,7 @@ fn build_closure_args(
+             .filter(|a| a.name != "uniffi_out_return" && a.name != "uniffi_out_dropped_callback")
+             .map(|a| TsFfiArg {
+                 name: arg_name(&a.name),
+-                ffi_type: ffi_type_to_ts_name(&a.ty.ty),
++                ffi_type: ffi_type_to_ts_name(&a.ty),
+             })
+             .collect();
+         (args, ffi_fn.has_rust_call_status_arg)
+@@ -799,7 +799,7 @@ fn build_closure_args(
+         }];
+         args.extend(callable.arguments.iter().map(|a| TsFfiArg {
+             name: arg_name(&a.name),
+-            ffi_type: ffi_type_to_ts_name(&a.ty.ffi_type.ty),
++            ffi_type: ffi_type_to_ts_name(&a.ty.ffi_type),
+         }));
+         (args, false)
+     }
+diff --git a/crates/ubrn_bindgen/src/bindings/gen_typescript/api_module/mod.rs b/crates/ubrn_bindgen/src/bindings/gen_typescript/api_module/mod.rs
+index 373a72e..0a1e44c 100644
+--- a/crates/ubrn_bindgen/src/bindings/gen_typescript/api_module/mod.rs
++++ b/crates/ubrn_bindgen/src/bindings/gen_typescript/api_module/mod.rs
+@@ -375,6 +375,7 @@ impl TsApiModule {
+ 
+         for td in &namespace.type_definitions {
+             match td {
++                general::TypeDefinition::Box(_) | general::TypeDefinition::Set(_) => panic!("UniFFI Box/Set is not supported by this Node generator"),
+                 general::TypeDefinition::Simple(node) => {
+                     if matches!(node.ty, general::Type::String) && !string_helper_emitted {
+                         string_helper_emitted = true;
+diff --git a/crates/ubrn_bindgen/src/bindings/gen_typescript/api_module/type_helpers.rs b/crates/ubrn_bindgen/src/bindings/gen_typescript/api_module/type_helpers.rs
+index f601930..5233973 100644
+--- a/crates/ubrn_bindgen/src/bindings/gen_typescript/api_module/type_helpers.rs
++++ b/crates/ubrn_bindgen/src/bindings/gen_typescript/api_module/type_helpers.rs
+@@ -54,6 +54,7 @@ pub(super) fn ffi_converter_name_for_type(config: &Config, ty: &general::Type) -
+ 
+ pub(super) fn type_label_for(config: &Config, ty: &general::Type) -> String {
+     match ty {
++        general::Type::Box { .. } | general::Type::Set { .. } => panic!("UniFFI Box/Set is not supported by this Node generator"),
+         general::Type::UInt8 => "number".into(),
+         general::Type::Int8 => "number".into(),
+         general::Type::UInt16 => "number".into(),
+diff --git a/crates/ubrn_bindgen/src/bindings/gen_typescript/ffi_module/builder.rs b/crates/ubrn_bindgen/src/bindings/gen_typescript/ffi_module/builder.rs
+index 5025079..53a0c35 100644
+--- a/crates/ubrn_bindgen/src/bindings/gen_typescript/ffi_module/builder.rs
++++ b/crates/ubrn_bindgen/src/bindings/gen_typescript/ffi_module/builder.rs
+@@ -115,7 +115,7 @@ impl TsFfiModule {
+             .iter()
+             .map(|arg| FfiArgDecl {
+                 name: arg.name.to_lower_camel_case(),
+-                type_name: type_mapper(&arg.ty.ty),
++                type_name: type_mapper(&arg.ty),
+             })
+             .collect();
+ 
+@@ -126,7 +126,7 @@ impl TsFfiModule {
+             });
+         }
+ 
+-        let return_type = func.return_type.ty.as_ref().map(|rt| type_mapper(&rt.ty));
++        let return_type = func.return_type.ty.as_ref().map(|rt| type_mapper(rt));
+ 
+         FfiFunctionDecl {
+             name: format!("ubrn_{}", func.name.0),
+@@ -249,7 +249,7 @@ impl TsFfiModule {
+             .filter(|a| a.name != "uniffi_out_return" && a.name != "uniffi_out_dropped_callback")
+             .map(|arg| FfiArgDecl {
+                 name: arg.name.to_lower_camel_case(),
+-                type_name: ffi_type_to_ts(&arg.ty.ty),
++                type_name: ffi_type_to_ts(&arg.ty),
+             })
+             .collect();
+ 
+@@ -266,10 +266,10 @@ impl TsFfiModule {
+                 .iter()
+                 .find(|a| a.name == "uniffi_out_return" || a.name == "uniffi_out_dropped_callback")
+                 .and_then(|a| {
+-                    if matches!(&a.ty.ty, general::FfiType::VoidPointer) {
++                    if matches!(&a.ty, general::FfiType::VoidPointer) {
+                         return None;
+                     }
+-                    let inner = match &a.ty.ty {
++                    let inner = match &a.ty {
+                         general::FfiType::Reference(t) | general::FfiType::MutReference(t) => t,
+                         t => return Some(ffi_type_to_ts(t)),
+                     };
+@@ -302,7 +302,7 @@ impl TsFfiModule {
+         let is_vtable = s
+             .fields
+             .iter()
+-            .any(|f| matches!(f.ty.ty, general::FfiType::Function(_)));
++            .any(|f| matches!(f.ty, general::FfiType::Function(_)));
+         let exported = is_vtable || is_foreign_future;
+ 
+         let fields = s
+@@ -310,7 +310,7 @@ impl TsFfiModule {
+             .iter()
+             .map(|f| FfiFieldDecl {
+                 name: f.name.clone(),
+-                type_name: ffi_type_to_ts(&f.ty.ty),
++                type_name: ffi_type_to_ts(&f.ty),
+             })
+             .collect();
+ 
+diff --git a/crates/ubrn_bindgen/src/bindings/gen_typescript/ffi_module_player/builder.rs b/crates/ubrn_bindgen/src/bindings/gen_typescript/ffi_module_player/builder.rs
+index 4d22565..da773ce 100644
+--- a/crates/ubrn_bindgen/src/bindings/gen_typescript/ffi_module_player/builder.rs
++++ b/crates/ubrn_bindgen/src/bindings/gen_typescript/ffi_module_player/builder.rs
+@@ -65,14 +65,14 @@ impl PlayerFfiModule {
+                     let args: Vec<String> = func
+                         .arguments
+                         .iter()
+-                        .map(|arg| ffi_type_to_player(&arg.ty.ty))
++                        .map(|arg| ffi_type_to_player(&arg.ty))
+                         .collect();
+ 
+                     let ret = func
+                         .return_type
+                         .ty
+                         .as_ref()
+-                        .map(|rt| ffi_type_to_player(&rt.ty))
++                        .map(|rt| ffi_type_to_player(rt))
+                         .unwrap_or_else(|| "FfiType.Void".into());
+ 
+                     result.push(PlayerFunctionDef {
+@@ -103,7 +103,7 @@ impl PlayerFfiModule {
+                     .filter(|a| {
+                         a.name != "uniffi_out_return" && a.name != "uniffi_out_dropped_callback"
+                     })
+-                    .map(|arg| ffi_type_to_player(&arg.ty.ty))
++                    .map(|arg| ffi_type_to_player(&arg.ty))
+                     .collect();
+ 
+                 let ret = if has_out_return {
+@@ -113,7 +113,7 @@ impl PlayerFfiModule {
+                             a.name == "uniffi_out_return" || a.name == "uniffi_out_dropped_callback"
+                         })
+                         .map(|a| {
+-                            let inner = match &a.ty.ty {
++                            let inner = match &a.ty {
+                                 general::FfiType::Reference(t)
+                                 | general::FfiType::MutReference(t) => t.as_ref(),
+                                 t => t,
+@@ -125,7 +125,7 @@ impl PlayerFfiModule {
+                     ft.return_type
+                         .ty
+                         .as_ref()
+-                        .map(|rt| ffi_type_to_player(&rt.ty))
++                        .map(|rt| ffi_type_to_player(rt))
+                         .unwrap_or_else(|| "FfiType.Void".into())
+                 };
+ 
+@@ -152,7 +152,7 @@ impl PlayerFfiModule {
+                     .iter()
+                     .map(|f| PlayerFieldDef {
+                         name: f.name.clone(),
+-                        type_expr: ffi_type_to_player(&f.ty.ty),
++                        type_expr: ffi_type_to_player(&f.ty),
+                     })
+                     .collect();
+ 
+@@ -204,7 +204,7 @@ impl PlayerFfiModule {
+             .iter()
+             .map(|arg| FfiArgDecl {
+                 name: arg.name.to_lower_camel_case(),
+-                type_name: ffi_type_to_ts(&arg.ty.ty),
++                type_name: ffi_type_to_ts(&arg.ty),
+             })
+             .collect();
+ 
+@@ -219,7 +219,7 @@ impl PlayerFfiModule {
+             .return_type
+             .ty
+             .as_ref()
+-            .map(|rt| ffi_type_to_ts(&rt.ty));
++            .map(|rt| ffi_type_to_ts(rt));
+ 
+         FfiFunctionDecl {
+             name: func.name.0.clone(),
+diff --git a/crates/ubrn_bindgen/src/cli.rs b/crates/ubrn_bindgen/src/cli.rs
+index e5c272a..241d7ef 100644
+--- a/crates/ubrn_bindgen/src/cli.rs
++++ b/crates/ubrn_bindgen/src/cli.rs
+@@ -214,15 +214,18 @@ impl BindingsArgs {
+ 
+     fn create_loader(&self, manifest_path: Option<&Utf8PathBuf>) -> Result<BindgenLoader> {
+         let mut bindgen_paths = BindgenPaths::default();
++        let mut config = uniffi_bindgen::GlobalConfig::default();
+         if let Some(config_path) = &self.source.config {
+-            bindgen_paths.add_config_override_layer(config_path.clone());
++            let (parsed, roots) = uniffi_bindgen::GlobalConfig::from_file(config_path)?;
++            config = parsed;
++            if let Some(roots) = roots { bindgen_paths.add_layer(roots); }
+         }
+         let cwd = Utf8PathBuf::from("Cargo.toml");
+         let manifest_path = manifest_path.unwrap_or(&cwd);
+         let cargo_metadata = CrateMetadata::cargo_metadata(manifest_path)?;
+         let config_supplier = CrateConfigSupplier::from(cargo_metadata);
+         bindgen_paths.add_layer(config_supplier);
+-        Ok(BindgenLoader::new(bindgen_paths))
++        Ok(BindgenLoader::new(bindgen_paths, config))
+     }
+ 
+     /// Create a loader for the pipeline that uses only per-crate configs.
+@@ -238,7 +241,7 @@ impl BindingsArgs {
+         let cargo_metadata = CrateMetadata::cargo_metadata(manifest_path)?;
+         let config_supplier = CrateConfigSupplier::from(cargo_metadata);
+         bindgen_paths.add_layer(config_supplier);
+-        Ok(BindgenLoader::new(bindgen_paths))
++        Ok(BindgenLoader::new(bindgen_paths, uniffi_bindgen::GlobalConfig::default()))
+     }
+ }
+ 
+diff --git a/crates/ubrn_common/src/rust_crate.rs b/crates/ubrn_common/src/rust_crate.rs
+index 299cad4..a8c985b 100644
+--- a/crates/ubrn_common/src/rust_crate.rs
++++ b/crates/ubrn_common/src/rust_crate.rs
+@@ -266,5 +266,5 @@ fn find_library_name(metadata: &Metadata, manifest_path: &Utf8Path) -> Option<St
+ }
+ 
+ fn find_package_name(metadata: &Metadata, manifest_path: &Utf8Path) -> Option<String> {
+-    find_package(metadata, manifest_path).map(|package| package.name.clone())
++    find_package(metadata, manifest_path).map(|package| package.name.to_string())
+ }

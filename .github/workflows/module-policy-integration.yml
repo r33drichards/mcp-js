@@ -3,7 +3,7 @@ name: Module Policy Integration Test
 on:
   pull_request:
     paths:
-      - Dockerfile
+      - Dockerfile.source
       - docker-compose.module-policy.yml
       - policies/**
       - tests/module-policy-integration.sh

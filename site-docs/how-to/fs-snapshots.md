@@ -182,28 +182,28 @@ mcp-v8-cli fs push 9f2c... --label main --expected 1a4b...
 
 If the label moved since you pulled, the push is **rejected** — over HTTP this is status **`409`** with a body reporting the label's `current` head. Re-pull, rebase or merge your snapshot onto the new head, and push again.
 
-Two explicit opt-outs of the safe default:
+Two explicit opt-outs of the safe default.
 
-- **`force`** moves the label unconditionally (still recording a reflog entry):
+**`force`** moves the label unconditionally (still recording a reflog entry):
 
-  ```bash
-  curl -s -X POST http://localhost:3000/api/fs/push \
-    -H "Content-Type: application/json" \
-    -d '{"ca_id":"9f2c...","label":"main","force":true}' | jq
+```bash
+curl -s -X POST http://localhost:3000/api/fs/push \
+  -H "Content-Type: application/json" \
+  -d '{"ca_id":"9f2c...","label":"main","force":true}' | jq
 
-  mcp-v8-cli fs push 9f2c... --label main --force
-  ```
+mcp-v8-cli fs push 9f2c... --label main --force
+```
 
-- **`detach`** touches no label and just echoes the CA id back (no `label` required):
+**`detach`** touches no label and just echoes the CA id back (no `label` required):
 
-  ```bash
-  curl -s -X POST http://localhost:3000/api/fs/push \
-    -H "Content-Type: application/json" \
-    -d '{"ca_id":"9f2c...","detach":true}' | jq
-  # => { "status": "detached", "ca_id": "9f2c..." }
+```bash
+curl -s -X POST http://localhost:3000/api/fs/push \
+  -H "Content-Type: application/json" \
+  -d '{"ca_id":"9f2c...","detach":true}' | jq
+# => { "status": "detached", "ca_id": "9f2c..." }
 
-  mcp-v8-cli fs push 9f2c... --detach
-  ```
+mcp-v8-cli fs push 9f2c... --detach
+```
 
 ## Reset: roll a label back
 

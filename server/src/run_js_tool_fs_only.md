@@ -21,3 +21,7 @@ Session identity comes from the `X-MCP-Session-Id` header during initialization,
 ## Console Output
 
 Use `console.log()` to produce output. `console.info`, `console.warn`, and `console.error` are also supported (with `[INFO]`, `[WARN]`, `[ERROR]` prefixes respectively).
+
+## Artifacts (returning images and other non-text content)
+
+Console output is text-only. To return an image — or any other typed payload (audio, CSV, arbitrary binary) — store it as an artifact with `artifact(key, mime, bytes)` (`bytes`: Uint8Array, TypedArray, ArrayBuffer, or string; same key overwrites; max 16 MiB). A completed execution lists what it emitted in the `artifacts` field of `get_execution`; fetch payloads with `get_artifact(key)` — `image/*` comes back as an MCP image block the model can see, `audio/*` as audio, UTF-8 as text, other binary as base64. Files uploaded through a `get_artifact_upload_url` URL are readable with `artifact.get(key)` (`{ key, mime_type, size_bytes, created_at, bytes: Uint8Array }` or `null`); `artifact.list()` returns metadata for everything stored.

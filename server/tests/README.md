@@ -371,3 +371,22 @@ tokio-test = "0.4"
 [dependencies]
 tokio = { version = "1.45.0", features = ["rt-multi-thread", "process"] }
 ```
+
+### python_framework_e2e.py
+
+Exercises a Python framework integration chain using the production server
+binary: FastAPI submits JavaScript through the HTTP API, mcp-js routes the tool
+call through its shared library facade, and a FastMCP stdio server executes the
+Python tool.
+
+Run with:
+
+```bash
+cargo build -p server --bin server
+uv run --no-project \
+  --with fastapi==0.140.0 \
+  --with fastmcp==2.14.7 \
+  --with httpx==0.28.1 \
+  --with uvicorn==0.51.0 \
+  python server/tests/python_framework_e2e.py target/debug/server
+```

@@ -1,5 +1,5 @@
 {
-  "name": "@mcp-v8/client",
+  "name": "@wholelottahoopla/mcp-js-client",
   "version": "0.1.0",
   "description": "TypeScript client for the mcp-v8 JavaScript execution server, generated from the OpenAPI spec.",
   "type": "module",
@@ -8,18 +8,28 @@
     "type": "git",
     "url": "https://github.com/r33drichards/mcp-js"
   },
-  "main": "./src/index.ts",
-  "types": "./src/index.ts",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
-    ".": "./src/index.ts",
-    "./schema": "./src/schema.d.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./schema": {
+      "types": "./dist/schema.d.ts"
+    }
   },
   "files": [
-    "src"
+    "dist/",
+    "LICENSE",
+    "README.md"
   ],
   "scripts": {
     "generate": "openapi-typescript ../../openapi.json --output ./src/schema.d.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "build": "node scripts-build.mjs",
+    "prepack": "node scripts-prepack.mjs",
+    "test:package": "node scripts-test-package.mjs"
   },
   "dependencies": {
     "openapi-fetch": "^0.13.4"
@@ -27,5 +37,11 @@
   "devDependencies": {
     "openapi-typescript": "^7.5.0",
     "typescript": "^5.6.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

@@ -38,7 +38,7 @@ fn create_test_engine() -> Engine {
 fn create_test_engine_with_internals() -> Engine {
     create_test_engine().with_module_loader_config(ModuleLoaderConfig {
         allow_external: false,
-        policy_chain: None,
+        hooks: None,
         virtual_modules: None,
         virtual_commonjs_modules: None,
         virtual_files: Some(Arc::new(HashSet::new())),
@@ -54,7 +54,7 @@ async fn run_js(engine: &Engine, code: &str) -> Result<String, String> {
 
     for _ in 0..600 {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        if let Ok(info) = engine.get_execution(&exec_id) {
+        if let Ok(info) = engine.get_execution(exec_id.clone()) {
             match info.status.as_str() {
                 "completed" => return Ok(info.result.unwrap_or_default()),
                 "failed" => return Err(info.error.unwrap_or_default()),
@@ -405,7 +405,6 @@ async fn create_require_serves_builtins() {
     )
     .await;
 }
-
 
 #[tokio::test]
 async fn async_local_storage_propagates_through_await_and_timers() {

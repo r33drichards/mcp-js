@@ -13,3 +13,6 @@ site/
 .cache/node-compat/
 __pycache__/
 *.pyc
+.mcpregistry*
+pi-checkout/
+node/pi-harness/node_modules/

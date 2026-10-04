@@ -38,6 +38,7 @@ nav:
       - Stateful sessions & heap snapshots: how-to/sessions-and-heaps.md
       - Heap storage backends: how-to/storage-backends.md
       - Asynchronous execution & output: how-to/async-execution.md
+      - Returning images & artifacts: how-to/artifacts.md
       - Transports (stdio, HTTP, SSE): how-to/transports.md
       - Network access with fetch: how-to/fetch.md
       - WebSocket connections: how-to/websocket.md
@@ -53,6 +54,7 @@ nav:
       - Authentication (JWT/JWKS): how-to/authentication.md
       - Clustering & replication (Raft): how-to/clustering.md
       - Customize prompt & tool descriptions: how-to/customize-mcp-surface.md
+      - Generate native UniFFI bindings: how-to/generate-uniffi-bindings.md
 
   - Concepts:
       - Overview: concepts/overview.md
@@ -68,6 +70,7 @@ nav:
       - WebAssembly modules: concepts/wasm-modules.md
       - ES module imports: concepts/module-imports.md
       - Calling upstream MCP servers: concepts/mcp-client.md
+      - Hooks (effect boundary): concepts/hooks.md
       - Security policies (OPA/Rego): concepts/policies.md
       - OS sandboxing: concepts/os-sandbox.md
       - Authentication (JWT/JWKS): concepts/authentication.md
@@ -79,6 +82,7 @@ nav:
       - Configuration file: reference/config-file.md
       - HTTP API: reference/http-api.md
       - MCP Tools: reference/mcp-tools.md
+      - Native UniFFI bindings: reference/uniffi-bindings.md
       - Web & Node.js compatibility: reference/compatibility.md
 markdown_extensions:
   - tables

@@ -27,6 +27,14 @@ mcp-v8 exposes a V8 JavaScript runtime as MCP tools. Agents can run JS/TS code, 
 - `code` vs `file`: pass inline `code`, or `file` to read the script from a path on the server's own filesystem (provide one, not both). `file` is off by default — the server must be started with `--allow-run-js-file` or a `run_js_file` policy.
 - Stateful MCP only: `cancel_execution(execution_id)` and `list_executions()`.
 
+### Artifacts (returning images and other non-text content)
+
+- In JS, `artifact(key, mime, bytes)` stores a typed payload (same key overwrites; max 16 MiB; `bytes`: Uint8Array/TypedArray/ArrayBuffer/string).
+- `get_artifact(key)` returns the payload as an MCP content block: `image/*` as an image block (visible to the model), `audio/*` as audio, UTF-8 as text, other binary as base64 text.
+- `list_artifacts()` lists stored artifact metadata; `get_execution` includes an `artifacts` field with what that execution emitted.
+- `get_artifact_upload_url(key, mime_type?, expires_in_secs?)` returns a one-time URL: `PUT` the raw file to it (`curl -T file '<url>'`, no other credentials) to store it as an artifact without sending bytes through a tool call.  JS reads it with `artifact.get(key)` (`{ key, mime_type, size_bytes, created_at, bytes: Uint8Array }` or `null`) and `artifact.list()`.
+- Stateless `run_js` attaches emitted artifacts inline to its result (up to 8 MiB), and also exposes `get_artifact`/`get_artifact_upload_url`/`list_artifacts`.
+
 ### Additional tools (stateful mode only)
 
 - `run_js` gains extra params: `heap` (SHA-256 to resume from), `session` (human-readable session name), `tags` (key-value metadata for the heap snapshot).
@@ -87,6 +95,7 @@ In stateful mode, pass the returned `heap` hash back to `run_js` to resume that 
 - TypeScript (type removal via SWC — not type-checked)
 - ES modules, top-level `await`
 - `console.log/info/warn/error` → readable via `get_execution_output`
+- `artifact(key, mime, bytes)` → return images or any typed payload; fetch via `get_artifact` (images arrive as MCP image blocks)
 - npm/JSR/URL imports via esm.sh (requires `--allow-external-modules`)
 - WebAssembly (`WebAssembly.Module`, `WebAssembly.Instance`)
 - Optional `fetch()` (OPA-gated, web-standard Fetch API)
@@ -112,6 +121,10 @@ In stateful mode, pass the returned `heap` hash back to `run_js` to resume that 
 | GET | /api/executions/{id} | Get execution status + result |
 | GET | /api/executions/{id}/output | Read paginated console output |
 | POST | /api/executions/{id}/cancel | Cancel a running execution |
+| GET | /api/artifacts | List stored artifact metadata |
+| GET | /api/artifacts/{key} | Download raw artifact bytes (Content-Type = stored mime) |
+| PUT | /api/artifacts/{key} | Upload raw bytes as an artifact (mime = request Content-Type) |
+| PUT | /api/artifact-uploads/{token} | Upload raw bytes to a one-time URL from `get_artifact_upload_url` (no bearer auth) |
 | GET | /api-doc/openapi.json | OpenAPI 3.0 spec |
 | GET | /docs | Full documentation |
 | GET | /llms.txt | This file |

@@ -20,7 +20,7 @@ use deno_error::{AdditionalProperties, JsErrorBox, JsErrorClass, PropertyValue};
 use futures::FutureExt;
 use serde::Serialize;
 
-use super::opa::PolicyChain;
+use super::hooks::{HookChain, PreOutcome};
 
 /// Per-request timeout for module fetches. Limits how long a single HTTP
 /// request (DNS + connect + transfer) can take. Prevents hanging on
@@ -138,8 +138,8 @@ fn decode_data_url(module_specifier: &ModuleSpecifier) -> Result<(String, Vec<u8
 pub struct ModuleLoaderConfig {
     /// When false, all external module imports (npm:, jsr:, URL) are rejected.
     pub allow_external: bool,
-    /// Optional policy chain for module auditing (from `--policies-json`).
-    pub policy_chain: Option<Arc<PolicyChain>>,
+    /// Optional gate-only hook chain for module auditing (from `--policies-json`).
+    pub hooks: Option<Arc<HookChain>>,
     /// Explicit in-memory ES modules used by internal harnesses.
     pub virtual_modules: Option<Arc<HashMap<String, String>>>,
     /// Raw CommonJS modules available to `createRequire()` in virtual packages.
@@ -161,8 +161,7 @@ fn allowed_file_path(config: &ModuleLoaderConfig, specifier: &ModuleSpecifier) -
         let Some(mapping) = marker.strip_prefix(FILE_MAP_PREFIX) else {
             continue;
         };
-        let Ok((virtual_specifier, host_path)) =
-            serde_json::from_str::<(String, PathBuf)>(mapping)
+        let Ok((virtual_specifier, host_path)) = serde_json::from_str::<(String, PathBuf)>(mapping)
         else {
             continue;
         };
@@ -247,7 +246,6 @@ enum PackageTarget {
     Invalid,
 }
 
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PackageWarning {
     code: &'static str,
@@ -281,12 +279,7 @@ fn node_error_module_source(code: &str, message: &str) -> String {
     )
 }
 
-
-fn package_target(
-    value: &serde_json::Value,
-    subpath: &str,
-    conditions: &[&str],
-) -> PackageTarget {
+fn package_target(value: &serde_json::Value, subpath: &str, conditions: &[&str]) -> PackageTarget {
     match value {
         serde_json::Value::String(target) => {
             if !target.starts_with("./") {
@@ -359,9 +352,14 @@ fn package_exports_target(
         .keys()
         .any(|key| key.parse::<u64>().is_ok() && key == &key.parse::<u64>().unwrap().to_string())
     {
-        return Err("Invalid package config: \"exports\" cannot contain numeric property keys".into());
+        return Err(
+            "Invalid package config: \"exports\" cannot contain numeric property keys".into(),
+        );
     }
-    let subpath_keys = exports_map.keys().filter(|key| key.starts_with('.')).count();
+    let subpath_keys = exports_map
+        .keys()
+        .filter(|key| key.starts_with('.'))
+        .count();
     if subpath_keys > 0 && subpath_keys != exports_map.len() {
         return Err(
             "Invalid package config: \"exports\" cannot contain some keys starting with '.' and some not. The exports object must either be an object of package subpath keys or an object of main entry condition name keys only."
@@ -528,7 +526,10 @@ fn resolve_package_json(
             let message = if package_subpath == "." {
                 format!("No \"exports\" main defined in {package_json}")
             } else {
-                format!("Package subpath '{}' is not defined by exports", package_subpath)
+                format!(
+                    "Package subpath '{}' is not defined by exports",
+                    package_subpath
+                )
             };
             return package_error_module("ERR_PACKAGE_PATH_NOT_EXPORTED", &message);
         }
@@ -540,8 +541,8 @@ fn resolve_package_json(
         }
     };
     if modules.contains_key(target_url.as_str()) {
-        let warning = warn_dep0151
-            .then(|| package_main_warning(package_json, referrer, main, &target_url));
+        let warning =
+            warn_dep0151.then(|| package_main_warning(package_json, referrer, main, &target_url));
         return mark_package_warning(target_url, warning.as_ref());
     }
     if !has_exports {
@@ -574,7 +575,10 @@ fn resolve_package_json(
         }
     }
     let directory_prefix = format!("{}/", target_url.as_str().trim_end_matches('/'));
-    if modules.keys().any(|specifier| specifier.starts_with(&directory_prefix)) {
+    if modules
+        .keys()
+        .any(|specifier| specifier.starts_with(&directory_prefix))
+    {
         return package_error_module(
             "ERR_UNSUPPORTED_DIR_IMPORT",
             &format!("Directory import '{}' is not supported", target_url.path()),
@@ -799,7 +803,7 @@ impl NetworkModuleLoader {
             client: Self::build_client(),
             config: ModuleLoaderConfig {
                 allow_external: true,
-                policy_chain: None,
+                hooks: None,
                 virtual_modules: None,
                 virtual_commonjs_modules: None,
                 virtual_files: None,
@@ -822,9 +826,17 @@ impl ModuleLoader for NetworkModuleLoader {
         referrer: &str,
         _kind: ResolutionKind,
     ) -> Result<ModuleSpecifier, JsErrorBox> {
-        if self.config.virtual_modules.as_ref().is_some_and(|modules| modules.contains_key(specifier)) {
+        if self
+            .config
+            .virtual_modules
+            .as_ref()
+            .is_some_and(|modules| modules.contains_key(specifier))
+        {
             return ModuleSpecifier::parse(specifier).map_err(|e| {
-                JsErrorBox::generic(format!("Bad virtual module specifier '{}': {}", specifier, e))
+                JsErrorBox::generic(format!(
+                    "Bad virtual module specifier '{}': {}",
+                    specifier, e
+                ))
             });
         }
 
@@ -849,9 +861,12 @@ impl ModuleLoader for NetworkModuleLoader {
             ) {
                 return resolved;
             }
-            if let Some(resolved) =
-                resolve_virtual_package(modules, specifier, referrer, &["import", "node", "default"])
-            {
+            if let Some(resolved) = resolve_virtual_package(
+                modules,
+                specifier,
+                referrer,
+                &["import", "node", "default"],
+            ) {
                 return resolved;
             }
             if let Some((package, _)) = package_specifier_parts(specifier) {
@@ -872,8 +887,9 @@ impl ModuleLoader for NetworkModuleLoader {
                 )));
             }
             let url = format!("https://esm.sh/{}", rest);
-            return ModuleSpecifier::parse(&url)
-                .map_err(|e| JsErrorBox::generic(format!("Bad npm specifier '{}': {}", specifier, e)));
+            return ModuleSpecifier::parse(&url).map_err(|e| {
+                JsErrorBox::generic(format!("Bad npm specifier '{}': {}", specifier, e))
+            });
         }
 
         // jsr:@luca/cases@1.0.0 → https://esm.sh/jsr/@luca/cases@1.0.0
@@ -886,8 +902,9 @@ impl ModuleLoader for NetworkModuleLoader {
                 )));
             }
             let url = format!("https://esm.sh/jsr/{}", rest);
-            return ModuleSpecifier::parse(&url)
-                .map_err(|e| JsErrorBox::generic(format!("Bad jsr specifier '{}': {}", specifier, e)));
+            return ModuleSpecifier::parse(&url).map_err(|e| {
+                JsErrorBox::generic(format!("Bad jsr specifier '{}': {}", specifier, e))
+            });
         }
 
         // Absolute URLs pass through directly.
@@ -948,11 +965,9 @@ impl ModuleLoader for NetworkModuleLoader {
             } else {
                 ("module", ModuleType::JavaScript)
             };
-            if let Some(error) = import_attribute_error(
-                module_specifier,
-                format,
-                &options.requested_module_type,
-            ) {
+            if let Some(error) =
+                import_attribute_error(module_specifier, format, &options.requested_module_type)
+            {
                 return ModuleLoadResponse::Sync(Err(JsErrorBox::from_err(error)));
             }
             return ModuleLoadResponse::Sync(Ok(ModuleSource::new(
@@ -964,7 +979,10 @@ impl ModuleLoader for NetworkModuleLoader {
         }
 
         let scheme = module_specifier.scheme();
-        if module_specifier.path().starts_with("/__mcp_v8_node_errors__/") {
+        if module_specifier
+            .path()
+            .starts_with("/__mcp_v8_node_errors__/")
+        {
             let mut code = "ERR_MODULE_NOT_FOUND".to_string();
             let mut message = "Module resolution failed".to_string();
             for (key, value) in module_specifier.query_pairs() {
@@ -983,11 +1001,9 @@ impl ModuleLoader for NetworkModuleLoader {
             )));
         }
         if scheme == "node" {
-            if let Some(error) = import_attribute_error(
-                module_specifier,
-                "module",
-                &options.requested_module_type,
-            ) {
+            if let Some(error) =
+                import_attribute_error(module_specifier, "module", &options.requested_module_type)
+            {
                 return ModuleLoadResponse::Sync(Err(JsErrorBox::from_err(error)));
             }
             let name = module_specifier.path();
@@ -1024,7 +1040,8 @@ impl ModuleLoader for NetworkModuleLoader {
                                     .collect::<HashMap<_, _>>()
                             })
                             .unwrap_or_default();
-                        let package_map = serde_json::to_string(&configured_package_map(&self.config)).unwrap();
+                        let package_map =
+                            serde_json::to_string(&configured_package_map(&self.config)).unwrap();
                         source = format!(
                             "globalThis.__mcpV8VirtualCommonJsModules={};\n\
                              globalThis.__mcpV8VirtualPackageJson={};\n\
@@ -1094,11 +1111,9 @@ impl ModuleLoader for NetworkModuleLoader {
                 Some("wasm") => ("wasm", ModuleType::Wasm),
                 _ => ("module", ModuleType::JavaScript),
             };
-            if let Some(error) = import_attribute_error(
-                module_specifier,
-                format,
-                &options.requested_module_type,
-            ) {
+            if let Some(error) =
+                import_attribute_error(module_specifier, format, &options.requested_module_type)
+            {
                 return ModuleLoadResponse::Sync(Err(JsErrorBox::from_err(error)));
             }
             let source = match module_type {
@@ -1134,22 +1149,18 @@ impl ModuleLoader for NetworkModuleLoader {
                 if javascript { "module" } else { "" }
             };
             if format.is_empty() {
-                return ModuleLoadResponse::Sync(Err(JsErrorBox::from_err(
-                    NodeModuleError {
-                        class: "RangeError",
-                        code: "ERR_UNKNOWN_MODULE_FORMAT",
-                        message: format!(
-                            "Unknown module format: {} for URL {}",
-                            mime, module_specifier
-                        ),
-                    },
-                )));
+                return ModuleLoadResponse::Sync(Err(JsErrorBox::from_err(NodeModuleError {
+                    class: "RangeError",
+                    code: "ERR_UNKNOWN_MODULE_FORMAT",
+                    message: format!(
+                        "Unknown module format: {} for URL {}",
+                        mime, module_specifier
+                    ),
+                })));
             }
-            if let Some(error) = import_attribute_error(
-                module_specifier,
-                format,
-                &options.requested_module_type,
-            ) {
+            if let Some(error) =
+                import_attribute_error(module_specifier, format, &options.requested_module_type)
+            {
                 return ModuleLoadResponse::Sync(Err(JsErrorBox::from_err(error)));
             }
             let module_type = match format {
@@ -1172,12 +1183,10 @@ impl ModuleLoader for NetworkModuleLoader {
         }
 
         if scheme != "https" && scheme != "http" {
-            return ModuleLoadResponse::Sync(Err(JsErrorBox::generic(
-                format!(
-                    "Cannot load module '{}': only https/http modules are supported",
-                    module_specifier
-                ),
-            )));
+            return ModuleLoadResponse::Sync(Err(JsErrorBox::generic(format!(
+                "Cannot load module '{}': only https/http modules are supported",
+                module_specifier
+            ))));
         }
 
         // Defense-in-depth: block network requests even if resolve() let something through.
@@ -1188,32 +1197,33 @@ impl ModuleLoader for NetworkModuleLoader {
                 module_specifier
             ))));
         }
-        if let Some(error) = import_attribute_error(
-            module_specifier,
-            "module",
-            &options.requested_module_type,
-        ) {
+        if let Some(error) =
+            import_attribute_error(module_specifier, "module", &options.requested_module_type)
+        {
             return ModuleLoadResponse::Sync(Err(JsErrorBox::from_err(error)));
         }
 
         let client = self.client.clone();
         let specifier = module_specifier.clone();
-        let policy_chain = self.config.policy_chain.clone();
+        let hooks = self.config.hooks.clone();
         let specifier_url_str = specifier.to_string();
 
         let fut = async move {
-            // Evaluate policy chain if configured.
-            if let Some(ref chain) = policy_chain {
+            // Evaluate the hook chain (pre hooks + policy) if configured.
+            if let Some(ref hooks) = hooks {
                 let parsed = url::Url::parse(specifier_url_str.as_str()).ok();
-                let url_parsed = parsed.as_ref().map(|p| ModuleUrlParsed {
-                    scheme: p.scheme().to_string(),
-                    host: p.host_str().unwrap_or("").to_string(),
-                    path: p.path().to_string(),
-                }).unwrap_or(ModuleUrlParsed {
-                    scheme: String::new(),
-                    host: String::new(),
-                    path: String::new(),
-                });
+                let url_parsed = parsed
+                    .as_ref()
+                    .map(|p| ModuleUrlParsed {
+                        scheme: p.scheme().to_string(),
+                        host: p.host_str().unwrap_or("").to_string(),
+                        path: p.path().to_string(),
+                    })
+                    .unwrap_or(ModuleUrlParsed {
+                        scheme: String::new(),
+                        host: String::new(),
+                        path: String::new(),
+                    });
 
                 let spec_type = if specifier_url_str.contains("esm.sh/jsr/") {
                     "jsr"
@@ -1230,37 +1240,38 @@ impl ModuleLoader for NetworkModuleLoader {
                     url_parsed,
                 };
 
-                let input_value = serde_json::to_value(&chain_input)
-                    .map_err(|e| JsErrorBox::generic(format!(
-                        "Failed to serialize module policy input: {}", e
-                    )))?;
+                let input_value = serde_json::to_value(&chain_input).map_err(|e| {
+                    JsErrorBox::generic(format!("Failed to serialize module policy input: {}", e))
+                })?;
 
-                let allowed = chain
-                    .evaluate(&input_value)
-                    .await
-                    .map_err(|e| JsErrorBox::generic(format!(
-                        "Module policy chain check failed for '{}': {}",
-                        specifier, e
-                    )))?;
-
-                if !allowed {
-                    return Err(JsErrorBox::generic(format!(
-                        "Module import denied by policy: '{}' is not allowed by the module policy",
-                        specifier
-                    )));
+                if hooks.has_stack() {
+                    hooks
+                        .run_stack_gate(input_value, |_| Ok(()))
+                        .await
+                        .map_err(|e| {
+                            JsErrorBox::generic(format!("Module import '{}': {}", specifier, e))
+                        })?;
+                } else {
+                    match hooks.run_pre(input_value).await.map_err(|e| {
+                        JsErrorBox::generic(format!(
+                            "Module hook chain check failed for '{}': {}",
+                            specifier, e
+                        ))
+                    })? {
+                        PreOutcome::Allow(_) => {}
+                        PreOutcome::Deny(deny) => {
+                            return Err(JsErrorBox::generic(format!(
+                                "Module import {}: '{}' is not allowed",
+                                deny, specifier
+                            )));
+                        }
+                    }
                 }
             }
 
-            let resp = client
-                .get(specifier.as_str())
-                .send()
-                .await
-                .map_err(|e| {
-                    JsErrorBox::generic(format!(
-                        "Failed to fetch module '{}': {}",
-                        specifier, e
-                    ))
-                })?;
+            let resp = client.get(specifier.as_str()).send().await.map_err(|e| {
+                JsErrorBox::generic(format!("Failed to fetch module '{}': {}", specifier, e))
+            })?;
 
             if !resp.status().is_success() {
                 return Err(JsErrorBox::generic(format!(
@@ -1272,20 +1283,14 @@ impl ModuleLoader for NetworkModuleLoader {
 
             let final_url = resp.url().clone();
             let text = resp.text().await.map_err(|e| {
-                JsErrorBox::generic(format!(
-                    "Failed to read module '{}': {}",
-                    specifier, e
-                ))
+                JsErrorBox::generic(format!("Failed to read module '{}': {}", specifier, e))
             })?;
 
             // Strip TypeScript types for .ts/.tsx URLs.
             let url_path = final_url.path();
             let code = if url_path.ends_with(".ts") || url_path.ends_with(".tsx") {
                 crate::engine::strip_typescript_types(&text).map_err(|e| {
-                    JsErrorBox::generic(format!(
-                        "Failed to transpile '{}': {}",
-                        specifier, e
-                    ))
+                    JsErrorBox::generic(format!("Failed to transpile '{}': {}", specifier, e))
                 })?
             } else {
                 text
@@ -1394,7 +1399,7 @@ mod tests {
         });
         let config = ModuleLoaderConfig {
             allow_external: true,
-            policy_chain: None,
+            hooks: None,
             virtual_modules: None,
             virtual_commonjs_modules: None,
             virtual_files: Some(Arc::new(HashSet::from([virtual_package_map(&package_map)]))),
@@ -1421,5 +1426,4 @@ mod tests {
         assert!(source.starts_with("export default undefined;"));
         assert!(source.contains("throw error;"));
     }
-
 }

@@ -45,7 +45,9 @@ fuzz_target!(|input: ModuleResolutionInput| {
     let mut specifier = input.specifier;
     if specifier.len() > 10000 {
         let mut end = 10000;
-        while !specifier.is_char_boundary(end) { end -= 1; }
+        while !specifier.is_char_boundary(end) {
+            end -= 1;
+        }
         specifier.truncate(end);
     }
 
@@ -102,14 +104,17 @@ try {{
     let handle = Arc::new(Mutex::new(None));
     let loader_config = ModuleLoaderConfig {
         allow_external: false,
-        policy_chain: None,
+        hooks: None,
         virtual_modules: None,
         virtual_commonjs_modules: None,
         virtual_files: None,
     };
-    let _ = server::engine::execute_stateless(&code, ExecutionConfig::new(max_bytes)
-        .isolate_handle(handle)
-        .module_loader_config(&loader_config));
+    let _ = server::engine::execute_stateless(
+        &code,
+        ExecutionConfig::new(max_bytes)
+            .isolate_handle(handle)
+            .module_loader_config(&loader_config),
+    );
 });
 
 /// Escape a string for safe inclusion in JavaScript code
