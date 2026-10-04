@@ -19,6 +19,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 
 use deno_core::{JsRuntime, OpState, op2};
 use deno_error::JsErrorBox;
@@ -210,13 +211,19 @@ async fn reconnect(server: &ServerConn) -> Result<(), String> {
 
 /// Spawn a detached task that periodically health-checks one server and
 /// reconnects it when the probe fails.
-fn spawn_liveness(server: Arc<ServerConn>) {
+fn spawn_liveness(server: Arc<ServerConn>, shutdown: CancellationToken) {
     tokio::spawn(async move {
         loop {
-            tokio::time::sleep(LIVENESS_INTERVAL).await;
+            tokio::select! {
+                _ = shutdown.cancelled() => break,
+                _ = tokio::time::sleep(LIVENESS_INTERVAL) => {}
+            }
             let peer = { server.live.read().await.peer.clone() };
             if is_healthy(&peer).await {
                 continue;
+            }
+            if shutdown.is_cancelled() {
+                break;
             }
             tracing::warn!(
                 "MCP server '{}' failed liveness check; reconnecting...",
@@ -276,6 +283,7 @@ pub struct McpClientManager {
     /// per-execution current-thread runtime would otherwise stall. Mirrors
     /// `S3HeapStorage`'s `runtime` handle. `None` for test-only constructors.
     runtime: Option<tokio::runtime::Handle>,
+    shutdown: CancellationToken,
 }
 
 impl McpClientManager {
@@ -283,6 +291,7 @@ impl McpClientManager {
     pub async fn connect(configs: Vec<McpServerConfig>) -> Result<Self, String> {
         let mut servers = HashMap::new();
         let mut tools_by_server: HashMap<String, Vec<Tool>> = HashMap::new();
+        let shutdown = CancellationToken::new();
 
         for config in configs {
             tracing::info!("Connecting to MCP server '{}'...", config.name);
@@ -312,7 +321,7 @@ impl McpClientManager {
             // Self-heal: probe this connection periodically and reconnect if the
             // downstream server restarts (the long-lived handshake otherwise
             // stays dead until MCPJS is restarted).
-            spawn_liveness(server.clone());
+            spawn_liveness(server.clone(), shutdown.clone());
             servers.insert(name, server);
         }
 
@@ -321,6 +330,7 @@ impl McpClientManager {
             servers: Arc::new(servers),
             stub_config: StubConfig::default(),
             runtime: Some(tokio::runtime::Handle::current()),
+            shutdown,
         })
     }
 
@@ -346,7 +356,20 @@ impl McpClientManager {
             servers: Arc::new(HashMap::new()),
             stub_config: StubConfig::default(),
             runtime: None,
+            shutdown: CancellationToken::new(),
         }
+    }
+
+    /// Stop liveness probes and close every live upstream connection.
+    pub async fn shutdown(&self) -> u64 {
+        if self.shutdown.is_cancelled() {
+            return 0;
+        }
+        self.shutdown.cancel();
+        for server in self.servers.values() {
+            server.live.read().await.keep_alive.abort();
+        }
+        self.servers.len() as u64
     }
 
     /// List connected server names.
@@ -427,6 +450,9 @@ impl McpClientManager {
         tool_name: &str,
         arguments: Option<serde_json::Map<String, serde_json::Value>>,
     ) -> Result<serde_json::Value, String> {
+        if self.shutdown.is_cancelled() {
+            return Err("MCP client manager is shut down".to_string());
+        }
         let server = self
             .servers
             .get(server_name)
@@ -792,8 +818,10 @@ fn is_oauth_unauthorized(error: &rmcp::service::ClientInitializeError) -> bool {
 #[derive(Clone)]
 pub struct McpConfig {
     pub client_manager: McpClientManager,
-    /// Optional OPA policy chain for gating `mcp.callTool()` calls.
-    pub policy_chain: Option<std::sync::Arc<super::opa::PolicyChain>>,
+    /// Optional hook chain for `mcp.callTool()` calls: pre hooks may deny or
+    /// mutate the call (server/tool/arguments), the policy gates the
+    /// effective call, post hooks may deny or mutate the tool result.
+    pub hooks: Option<std::sync::Arc<super::hooks::HookChain>>,
 }
 
 // ── Deno ops ─────────────────────────────────────────────────────────────
@@ -807,6 +835,16 @@ struct McpToolPolicyInput {
     arguments: serde_json::Value,
 }
 
+/// The call fields a pre hook may have mutated, extracted back out of the
+/// effective hook-chain input.
+#[derive(serde::Deserialize)]
+struct EffectiveMcpCall {
+    server: String,
+    tool: String,
+    #[serde(default)]
+    arguments: serde_json::Value,
+}
+
 /// Async op: call an MCP tool. Spawned on a separate tokio task to avoid
 /// RefCell re-entrancy issues (same pattern as op_fetch).
 #[op2]
@@ -817,12 +855,12 @@ async fn op_mcp_call_tool(
     #[string] tool_name: String,
     #[string] arguments_json: String,
 ) -> Result<String, JsErrorBox> {
-    let (manager, policy_chain) = {
+    let (manager, hooks) = {
         let state = state.borrow();
         let config = state
             .try_borrow::<McpConfig>()
             .ok_or_else(|| JsErrorBox::generic("mcp: internal error — no MCP config available"))?;
-        (config.client_manager.clone(), config.policy_chain.clone())
+        (config.client_manager.clone(), config.hooks.clone())
     };
 
     let arguments: Option<serde_json::Map<String, serde_json::Value>> = if arguments_json.is_empty()
@@ -837,8 +875,70 @@ async fn op_mcp_call_tool(
     // Spawn on separate tokio task (same pattern as fetch) to avoid
     // RefCell re-entrancy panic in deno_core's FuturesUnorderedDriver.
     tokio::spawn(async move {
-        // Evaluate OPA policy if configured.
-        if let Some(ref chain) = policy_chain {
+        let mut server_name = server_name;
+        let mut tool_name = tool_name;
+        let mut arguments = arguments;
+        let mut eff_input: Option<serde_json::Value> = None;
+
+        // Layered-stack mode: the tool call is the innermost layer; layers
+        // may rewrite the call, short-circuit with a synthetic result,
+        // retry, or transform the result.
+        if let Some(ref hooks) = hooks {
+            if hooks.has_stack() {
+                let policy_input = McpToolPolicyInput {
+                    operation: "mcp_call_tool",
+                    server: server_name.clone(),
+                    tool: tool_name.clone(),
+                    arguments: arguments
+                        .as_ref()
+                        .map(|a| serde_json::Value::Object(a.clone()))
+                        .unwrap_or(serde_json::Value::Null),
+                };
+                let input_value = serde_json::to_value(&policy_input).map_err(|e| {
+                    JsErrorBox::generic(format!(
+                        "mcp.callTool: failed to serialize input: {}",
+                        e
+                    ))
+                })?;
+                let manager = manager.clone();
+                let executor: super::hooks::StackExecutor =
+                    std::sync::Arc::new(move |effective: serde_json::Value| {
+                        let manager = manager.clone();
+                        Box::pin(async move {
+                            let eff: EffectiveMcpCall = serde_json::from_value(effective)
+                                .map_err(|e| {
+                                    format!("mcp.callTool: invalid effective input: {}", e)
+                                })?;
+                            let arguments = match eff.arguments {
+                                serde_json::Value::Object(map) => Some(map),
+                                serde_json::Value::Null => None,
+                                other => {
+                                    return Err(format!(
+                                        "mcp.callTool: layer produced non-object arguments: {}",
+                                        other
+                                    ));
+                                }
+                            };
+                            let result = manager
+                                .call_tool(&eff.server, &eff.tool, arguments)
+                                .await?;
+                            serde_json::to_value(&result)
+                                .map_err(|e| format!("mcp.callTool: serialization error: {}", e))
+                        })
+                            as std::pin::Pin<
+                                Box<dyn std::future::Future<Output = _> + Send>,
+                            >
+                    });
+                let output = hooks
+                    .run_stack_full(input_value, |_| Ok(()), executor)
+                    .await
+                    .map_err(|e| JsErrorBox::generic(e))?;
+                return Ok(output.to_string());
+            }
+        }
+
+        // Run pre hooks + policy if configured; a hook may rewrite the call.
+        if let Some(ref hooks) = hooks {
             let policy_input = McpToolPolicyInput {
                 operation: "mcp_call_tool",
                 server: server_name.clone(),
@@ -854,21 +954,68 @@ async fn op_mcp_call_tool(
                     e
                 ))
             })?;
-            let allowed = chain.evaluate(&input_value).await.map_err(|e| {
-                JsErrorBox::generic(format!("mcp.callTool: policy evaluation error: {}", e))
-            })?;
-            if !allowed {
-                return Err(JsErrorBox::generic(format!(
-                    "mcp.callTool denied by policy: {}.{} is not allowed",
-                    server_name, tool_name
-                )));
-            }
+            let effective = match hooks.run_pre(input_value).await.map_err(|e| {
+                JsErrorBox::generic(format!("mcp.callTool: hook chain error: {}", e))
+            })? {
+                super::hooks::PreOutcome::Allow(v) => {
+                    super::hooks::verify_operation(&v, "mcp_call_tool", "mcp.callTool")
+                        .map_err(JsErrorBox::generic)?;
+                    v
+                }
+                super::hooks::PreOutcome::Deny(deny) => {
+                    return Err(JsErrorBox::generic(format!(
+                        "mcp.callTool {}: {}.{} is not allowed",
+                        deny, server_name, tool_name
+                    )));
+                }
+            };
+
+            let eff: EffectiveMcpCall = serde_json::from_value(effective.clone())
+                .map_err(|e| {
+                    JsErrorBox::generic(format!(
+                        "mcp.callTool: invalid effective input after pre hooks: {}",
+                        e
+                    ))
+                })?;
+            server_name = eff.server;
+            tool_name = eff.tool;
+            arguments = match eff.arguments {
+                serde_json::Value::Object(map) => Some(map),
+                serde_json::Value::Null => None,
+                other => {
+                    return Err(JsErrorBox::generic(format!(
+                        "mcp.callTool: pre hook produced non-object arguments: {}",
+                        other
+                    )));
+                }
+            };
+            eff_input = Some(effective);
         }
 
         let result = manager
             .call_tool(&server_name, &tool_name, arguments)
             .await
             .map_err(|e| JsErrorBox::generic(e))?;
+
+        // Post hooks see {"input": <effective call>, "output": <tool result>}
+        // and may mutate or deny the result.
+        if let (Some(hooks), Some(eff_input)) = (hooks.as_ref(), eff_input.as_ref()) {
+            if hooks.has_post() {
+                let output = serde_json::to_value(&result).map_err(|e| {
+                    JsErrorBox::generic(format!("mcp.callTool: serialization error: {}", e))
+                })?;
+                return match hooks.run_post(eff_input, output).await.map_err(|e| {
+                    JsErrorBox::generic(format!("mcp.callTool: post hook error: {}", e))
+                })? {
+                    super::hooks::PostOutcome::Allow(v) => Ok(v.to_string()),
+                    super::hooks::PostOutcome::Deny(deny) => Err(JsErrorBox::generic(format!(
+                        "mcp.callTool result {}: {}.{}",
+                        deny, server_name, tool_name
+                    ))),
+                };
+            }
+        }
+
         serde_json::to_string(&result)
             .map_err(|e| JsErrorBox::generic(format!("mcp.callTool: serialization error: {}", e)))
     })

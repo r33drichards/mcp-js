@@ -1,7 +1,13 @@
+pub mod artifacts;
+pub mod compression;
 pub mod console;
+pub mod crypto;
+pub mod encoding;
 pub mod execution;
 pub mod fetch;
 pub mod fetch_auth;
+pub mod ffi;
+pub mod ffi_config;
 pub mod fs;
 pub mod fs_chunker;
 pub mod fs_content_merge;
@@ -13,6 +19,8 @@ pub mod fs_store;
 pub mod fs_tree;
 pub mod heap_storage;
 pub mod heap_tags;
+pub mod hooks;
+pub mod http2;
 pub mod mcp_client;
 pub mod mcp_oauth;
 pub mod module_loader;
@@ -21,13 +29,9 @@ pub mod opa;
 pub mod run_js_file;
 pub mod session_log;
 pub mod subprocess;
-pub mod compression;
-pub mod crypto;
-pub mod encoding;
 pub mod timers;
 pub mod url_support;
 pub mod urlpattern_support;
-pub mod http2;
 pub mod wasm_stub;
 pub mod web_compat;
 pub mod websocket;
@@ -35,7 +39,9 @@ pub mod websocket;
 pub use console::HardeningConfig;
 
 use deno_core::v8;
-use deno_core::{JsRuntime, JsRuntimeForSnapshot, ModuleSpecifier, RuntimeOptions};
+use deno_core::{
+    JsRuntime, JsRuntimeForSnapshot, ModuleSpecifier, RuntimeOptions as DenoRuntimeOptions,
+};
 use sha2::{Digest, Sha256};
 use std::alloc::{Layout, alloc, alloc_zeroed, dealloc};
 use std::collections::HashMap;
@@ -58,6 +64,10 @@ use swc_core::ecma::visit::swc_ecma_ast::Pass;
 
 use tokio::sync::Semaphore;
 
+use self::artifacts::{
+    Artifact, ArtifactMeta, ArtifactState, ArtifactStore, UploadGrant, UploadGrants,
+    UploadReservation,
+};
 use self::console::ConsoleLogState;
 use self::execution::{
     ConsoleOutputPage, ExecutionId, ExecutionInfo, ExecutionRegistry, ExecutionSummary,
@@ -67,6 +77,15 @@ use crate::engine::heap_storage::{AnyHeapStorage, HeapStorage};
 use crate::engine::heap_tags::{HeapTagEntry, HeapTagStore};
 use crate::engine::session_log::{SessionLog, SessionLogEntry};
 use wasmparser::Validator;
+
+use std::sync::atomic::AtomicU8;
+
+use serde::Serialize;
+use serde_json::{Value, json};
+
+use crate::cluster::ClusterNode;
+use crate::engine::fs_merge::Prefer;
+use crate::mcp::{ToolCatalog, built_in_tool_catalog};
 
 pub const DEFAULT_EXECUTION_TIMEOUT_SECS: u64 = 30;
 /// Default maximum native memory (bytes) a WASM module may declare when no
@@ -83,14 +102,8 @@ pub const MIN_HEAP_MEMORY_MB: usize = 16;
 
 // ── V8 initialization ───────────────────────────────────────────────────
 
-fn validate_node_import_attributes(
-    scope: &mut v8::PinScope,
-    attributes: &HashMap<String, String>,
-) {
-    let Some((attribute, value)) = attributes
-        .iter()
-        .find(|(key, _)| key.as_str() != "type")
-    else {
+fn validate_node_import_attributes(scope: &mut v8::PinScope, attributes: &HashMap<String, String>) {
+    let Some((attribute, value)) = attributes.iter().find(|(key, _)| key.as_str() != "type") else {
         return;
     };
     let message = v8::String::new(
@@ -443,14 +456,14 @@ fn refop_str(op: fs_labels::RefOp) -> &'static str {
 }
 
 /// A label and its current head CA id (hex), for API/CLI responses.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, uniffi::Record)]
 pub struct FsLabelView {
     pub name: String,
     pub ca_id: String,
 }
 
 /// One reflog entry, hex-rendered, for API/CLI responses.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, uniffi::Record)]
 pub struct FsRefLogView {
     pub at: i64,
     pub from: Option<String>,
@@ -462,7 +475,7 @@ pub struct FsRefLogView {
 }
 
 /// Outcome of an [`Engine::fs_push`].
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, uniffi::Enum)]
 #[serde(tag = "status", rename_all = "lowercase")]
 pub enum FsPushOutcome {
     /// The label now points at `ca_id`.
@@ -475,7 +488,7 @@ pub enum FsPushOutcome {
 }
 
 /// Result of an [`Engine::fs_merge`].
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, uniffi::Enum)]
 #[serde(tag = "status", rename_all = "lowercase")]
 pub enum FsMergeResult {
     /// A clean merge; the new snapshot has this CA id.
@@ -488,7 +501,7 @@ pub enum FsMergeResult {
 /// file is present on that side, or `null` when it is absent (delete). For text
 /// files the response also carries diff3 conflict markers and unified diffs so
 /// the caller can review and resolve at line level.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, uniffi::Record)]
 pub struct FsMergeConflictView {
     pub path: String,
     pub base: Option<String>,
@@ -809,15 +822,14 @@ pub enum CompileMode {
 }
 
 fn compile_commonjs(runtime: &mut JsRuntime, specifier: &str, source: &str) -> Result<(), String> {
-    let wrapped = format!(
-        "(function (exports, require, module, __filename, __dirname) {{\n{source}\n}});"
-    );
+    let wrapped =
+        format!("(function (exports, require, module, __filename, __dirname) {{\n{source}\n}});");
     deno_core::scope!(scope, runtime);
     let scope = std::pin::pin!(v8::TryCatch::new(scope));
     let scope = scope.init();
     let source = v8::String::new(&scope, &wrapped).ok_or("failed to allocate check source")?;
-    let resource_name = v8::String::new(&scope, specifier)
-        .ok_or("failed to allocate check specifier")?;
+    let resource_name =
+        v8::String::new(&scope, specifier).ok_or("failed to allocate check specifier")?;
     let origin = v8::ScriptOrigin::new(
         &scope,
         resource_name.into(),
@@ -846,8 +858,8 @@ fn compile_es_module(runtime: &mut JsRuntime, specifier: &str, source: &str) -> 
     let scope = std::pin::pin!(v8::TryCatch::new(scope));
     let scope = scope.init();
     let source = v8::String::new(&scope, source).ok_or("failed to allocate check source")?;
-    let resource_name = v8::String::new(&scope, specifier)
-        .ok_or("failed to allocate check specifier")?;
+    let resource_name =
+        v8::String::new(&scope, specifier).ok_or("failed to allocate check specifier")?;
     let origin = v8::ScriptOrigin::new(
         &scope,
         resource_name.into(),
@@ -938,10 +950,13 @@ fn execute_module(
     // `block_on` calls (where the ambient multi-thread runtime is current and
     // deno_unsync's op spawn would panic/deadlock).
     rt.block_on(async move {
-        let mod_id = runtime
-            .load_main_es_module_from_code(&main_url, code.to_string())
-            .await
-            .map_err(|e| format!("{}", e))?;
+        // Restored sessions may already contain a main module. Only native
+        // harnesses with an explicit entry URL designate a new main module.
+        let mod_id = if main_module_specifier.is_some() {
+            runtime.load_main_es_module_from_code(&main_url, code.to_string()).await
+        } else {
+            runtime.load_side_es_module_from_code(&main_url, code.to_string()).await
+        }.map_err(|e| format!("{}", e))?;
 
         let eval_future = runtime.mod_evaluate(mod_id);
 
@@ -989,6 +1004,9 @@ pub struct ExecutionConfig<'a> {
     pub mcp_config: Option<&'a mcp_client::McpConfig>,
     /// Per-mitigation sandbox hardening. Default is all-off (unhardened).
     pub hardening: console::HardeningConfig,
+    /// When present, the `artifact(key, mime, bytes)` global is available and
+    /// writes into this store, recording emitted keys for the execution.
+    pub artifact_state: Option<ArtifactState>,
 }
 
 impl<'a> ExecutionConfig<'a> {
@@ -1014,6 +1032,7 @@ impl<'a> ExecutionConfig<'a> {
             compile_module: None,
             mcp_config: None,
             hardening: console::HardeningConfig::default(),
+            artifact_state: None,
         }
     }
 
@@ -1130,6 +1149,11 @@ impl<'a> ExecutionConfig<'a> {
         self.mcp_config = config;
         self
     }
+
+    pub fn maybe_artifact_state(mut self, state: Option<ArtifactState>) -> Self {
+        self.artifact_state = state;
+        self
+    }
 }
 
 /// Stateless execution — creates a fresh JsRuntime (no snapshot).
@@ -1160,6 +1184,7 @@ pub fn execute_stateless(
         compile_module,
         mcp_config,
         hardening,
+        artifact_state,
     } = config;
     let oom_flag = Arc::new(AtomicBool::new(false));
 
@@ -1187,6 +1212,9 @@ pub fn execute_stateless(
         if mcp_config.is_some() {
             extensions.push(mcp_client::create_extension());
         }
+        if artifact_state.is_some() {
+            extensions.push(artifacts::create_extension());
+        }
         extensions.push(timers::create_extension());
         extensions.push(url_support::create_extension());
         extensions.push(encoding::create_extension());
@@ -1202,7 +1230,7 @@ pub fn execute_stateless(
             None => Rc::new(module_loader::NetworkModuleLoader::new()),
         };
 
-        let mut runtime = JsRuntime::new(RuntimeOptions {
+        let mut runtime = JsRuntime::new(DenoRuntimeOptions {
             create_params: Some(params),
             extensions,
             module_loader: Some(module_loader),
@@ -1251,7 +1279,6 @@ pub fn execute_stateless(
             if let Some(mount) = fs_mount.clone() {
                 runtime.op_state().borrow_mut().put(mount);
             }
-
         }
 
         // Put subprocess config in OpState if subprocess policies are configured.
@@ -1262,6 +1289,11 @@ pub fn execute_stateless(
         // Put MCP config in OpState if MCP servers are configured.
         if let Some(mc) = mcp_config {
             runtime.op_state().borrow_mut().put(mc.clone());
+        }
+
+        // Put artifact state in OpState if an artifact store is attached.
+        if let Some(ast) = &artifact_state {
+            runtime.op_state().borrow_mut().put(ast.clone());
         }
 
         // Publish handle immediately so caller can terminate us.
@@ -1312,6 +1344,12 @@ pub fn execute_stateless(
                     // Inject mcp JS wrapper if MCP servers are configured.
                     if mcp_config.is_some() {
                         if let Err(e) = mcp_client::inject_mcp(&mut runtime) {
+                            return Err(e);
+                        }
+                    }
+                    // Inject artifact() JS wrapper if an artifact store is attached.
+                    if artifact_state.is_some() {
+                        if let Err(e) = artifacts::inject_artifact(&mut runtime) {
                             return Err(e);
                         }
                     }
@@ -1422,6 +1460,7 @@ pub fn execute_stateful(
         compile_module,
         mcp_config,
         hardening,
+        artifact_state,
     } = config;
     let oom_flag = Arc::new(AtomicBool::new(false));
     let _ = compile_module;
@@ -1467,6 +1506,9 @@ pub fn execute_stateful(
         if mcp_config.is_some() {
             extensions.push(mcp_client::create_extension());
         }
+        if artifact_state.is_some() {
+            extensions.push(artifacts::create_extension());
+        }
         extensions.push(timers::create_extension());
         extensions.push(url_support::create_extension());
         extensions.push(encoding::create_extension());
@@ -1482,7 +1524,7 @@ pub fn execute_stateful(
             None => Rc::new(module_loader::NetworkModuleLoader::new()),
         };
 
-        let mut runtime = JsRuntimeForSnapshot::new(RuntimeOptions {
+        let mut runtime = JsRuntimeForSnapshot::new(DenoRuntimeOptions {
             create_params: Some(params),
             startup_snapshot,
             extensions,
@@ -1532,7 +1574,6 @@ pub fn execute_stateful(
             if let Some(mount) = fs_mount.clone() {
                 runtime.op_state().borrow_mut().put(mount);
             }
-
         }
 
         // Put subprocess config in OpState if subprocess policies are configured.
@@ -1543,6 +1584,11 @@ pub fn execute_stateful(
         // Put MCP config in OpState if MCP servers are configured.
         if let Some(mc) = mcp_config {
             runtime.op_state().borrow_mut().put(mc.clone());
+        }
+
+        // Put artifact state in OpState if an artifact store is attached.
+        if let Some(ast) = &artifact_state {
+            runtime.op_state().borrow_mut().put(ast.clone());
         }
 
         // Publish handle immediately so caller can terminate us.
@@ -1609,6 +1655,13 @@ pub fn execute_stateful(
                     // Inject mcp JS wrapper if MCP servers are configured.
                     if mcp_config.is_some() {
                         if let Err(e) = mcp_client::inject_mcp(&mut runtime) {
+                            return Err(e);
+                        }
+                    }
+                    // Inject artifact() JS wrapper if an artifact store is
+                    // attached. Baked into the snapshot for restored runs.
+                    if artifact_state.is_some() {
+                        if let Err(e) = artifacts::inject_artifact_snapshot(&mut runtime) {
                             return Err(e);
                         }
                     }
@@ -1729,7 +1782,7 @@ pub struct WasmModule {
     pub description: Option<String>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, uniffi::Object)]
 pub struct Engine {
     heap_storage: Option<AnyHeapStorage>,
     session_log: Option<SessionLog>,
@@ -1742,6 +1795,10 @@ pub struct Engine {
     /// This mutex serializes stateful V8 execution while stateless
     /// requests proceed in full parallelism.
     snapshot_mutex: Arc<tokio::sync::Mutex<()>>,
+    /// Serializes native (UniFFI) file operations on a session's fs snapshot,
+    /// so two concurrent native writes cannot both fold from the same base and
+    /// lose one another's changes.
+    native_fs_session_lock: Arc<tokio::sync::Mutex<()>>,
     /// Default max native memory (bytes) for WASM modules without a per-module limit.
     wasm_default_max_bytes: usize,
     /// WASM modules to inject as globals before every execution.
@@ -1761,8 +1818,9 @@ pub struct Engine {
     module_loader_config: Arc<module_loader::ModuleLoaderConfig>,
     /// MCP client manager for programmatic tool calling from JS.
     mcp_client_manager: Option<Arc<mcp_client::McpClientManager>>,
-    /// OPA policy chain for MCP tool calls (`mcp.callTool()`).
-    mcp_tools_policy_chain: Option<Arc<opa::PolicyChain>>,
+    /// Hook chain for MCP tool calls (`mcp.callTool()`): pre hooks + policy,
+    /// post hooks over the tool result.
+    mcp_tools_hooks: Option<Arc<hooks::HookChain>>,
     /// Policy-gated subprocess configuration. When Some, subprocess execution is injected into the JS runtime.
     subprocess_config: Option<Arc<subprocess::SubprocessConfig>>,
     /// Optional override for the MCP server `instructions` field (the "system
@@ -1772,6 +1830,9 @@ pub struct Engine {
     /// Optional override for the `run_js` tool description advertised in
     /// `tools/list`. When `None`, the compiled-in description is used.
     run_js_description_override: Option<Arc<str>>,
+    /// Externally reachable base URL of this server (`--public-url`), used to
+    /// build absolute artifact upload URLs.
+    public_url: Option<Arc<str>>,
     /// Controls whether `run_js` may read its code from a file on the server's
     /// own filesystem (the `file` parameter). `None` disables it entirely (the
     /// default); `Some` either allows all paths or gates them behind a policy.
@@ -1781,11 +1842,21 @@ pub struct Engine {
     fs_store: Option<Arc<fs_store::FsStore>>,
     /// Mutable label → manifest pointer store with reflog.
     label_store: Option<Arc<fs_labels::LabelStore>>,
-    /// Policy chain gating fs snapshot pointer moves (pull/push/reset/label).
-    fs_snapshot_policy_chain: Option<Arc<opa::PolicyChain>>,
+    /// Hook chain gating fs snapshot pointer moves (pull/push/reset/label).
+    /// Gate-only: pre hooks may deny a move but not mutate it.
+    fs_snapshot_hooks: Option<Arc<hooks::HookChain>>,
     /// Per-mitigation sandbox hardening. Default is all-off (unhardened); each
     /// mitigation is opt-in via the `--harden-*` CLI flags.
     hardening: console::HardeningConfig,
+    /// Owned Tokio executor for FFI hosts (None when a Rust host provides one).
+    tokio_runtime: Option<Arc<ffi::OwnedRuntime>>,
+    /// Cluster membership handle, shut down with the engine.
+    cluster_node: Option<Arc<ClusterNode>>,
+    /// Running / ShuttingDown / Shutdown, shared across clones.
+    lifecycle: Arc<AtomicU8>,
+    shutdown_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Keeps an ephemeral data directory alive for the engine's lifetime.
+    _ephemeral_data_dir: Option<Arc<tempfile::TempDir>>,
 }
 
 /// Builder for `Engine::run_js()`. Only `code` is required; everything else
@@ -1940,6 +2011,7 @@ impl Engine {
             execution_timeout_secs,
             v8_semaphore: Arc::new(Semaphore::new(max_concurrent)),
             snapshot_mutex: Arc::new(tokio::sync::Mutex::new(())),
+            native_fs_session_lock: Arc::new(tokio::sync::Mutex::new(())),
             wasm_default_max_bytes: DEFAULT_WASM_MAX_BYTES,
             wasm_modules: Arc::new(Vec::new()),
             wasm_stub_config: wasm_stub::WasmStubConfig::default(),
@@ -1950,21 +2022,27 @@ impl Engine {
             execution_registry: None,
             module_loader_config: Arc::new(module_loader::ModuleLoaderConfig {
                 allow_external: false,
-                policy_chain: None,
+                hooks: None,
                 virtual_modules: None,
                 virtual_commonjs_modules: None,
                 virtual_files: None,
             }),
             mcp_client_manager: None,
-            mcp_tools_policy_chain: None,
+            mcp_tools_hooks: None,
             subprocess_config: None,
             instructions_override: None,
             run_js_description_override: None,
+            public_url: None,
             run_js_file_policy: None,
             fs_store: None,
             label_store: None,
-            fs_snapshot_policy_chain: None,
+            fs_snapshot_hooks: None,
             hardening: console::HardeningConfig::default(),
+            tokio_runtime: None,
+            cluster_node: None,
+            lifecycle: Arc::new(AtomicU8::new(RuntimeLifecycleState::Running as u8)),
+            shutdown_lock: Arc::new(tokio::sync::Mutex::new(())),
+            _ephemeral_data_dir: None,
         }
     }
 
@@ -1984,6 +2062,7 @@ impl Engine {
             execution_timeout_secs,
             v8_semaphore: Arc::new(Semaphore::new(max_concurrent)),
             snapshot_mutex: Arc::new(tokio::sync::Mutex::new(())),
+            native_fs_session_lock: Arc::new(tokio::sync::Mutex::new(())),
             wasm_default_max_bytes: DEFAULT_WASM_MAX_BYTES,
             wasm_modules: Arc::new(Vec::new()),
             wasm_stub_config: wasm_stub::WasmStubConfig::default(),
@@ -1994,21 +2073,27 @@ impl Engine {
             execution_registry: None,
             module_loader_config: Arc::new(module_loader::ModuleLoaderConfig {
                 allow_external: false,
-                policy_chain: None,
+                hooks: None,
                 virtual_modules: None,
                 virtual_commonjs_modules: None,
                 virtual_files: None,
             }),
             mcp_client_manager: None,
-            mcp_tools_policy_chain: None,
+            mcp_tools_hooks: None,
             subprocess_config: None,
             instructions_override: None,
             run_js_description_override: None,
+            public_url: None,
             run_js_file_policy: None,
             fs_store: None,
             label_store: None,
-            fs_snapshot_policy_chain: None,
+            fs_snapshot_hooks: None,
             hardening: console::HardeningConfig::default(),
+            tokio_runtime: None,
+            cluster_node: None,
+            lifecycle: Arc::new(AtomicU8::new(RuntimeLifecycleState::Running as u8)),
+            shutdown_lock: Arc::new(tokio::sync::Mutex::new(())),
+            _ephemeral_data_dir: None,
         }
     }
 
@@ -2104,10 +2189,16 @@ impl Engine {
         self.mcp_client_manager.clone()
     }
 
-    /// Set OPA policy chain for MCP tool calls (`mcp.callTool()`).
-    pub fn with_mcp_tools_policy_chain(mut self, chain: Arc<opa::PolicyChain>) -> Self {
-        self.mcp_tools_policy_chain = Some(chain);
+    /// Set the hook chain (pre hooks + policy + post hooks) for MCP tool
+    /// calls (`mcp.callTool()`).
+    pub fn with_mcp_tools_hooks(mut self, hooks: Arc<hooks::HookChain>) -> Self {
+        self.mcp_tools_hooks = Some(hooks);
         self
+    }
+
+    /// Set an OPA policy chain for MCP tool calls, wrapped as the sole pre hook.
+    pub fn with_mcp_tools_policy_chain(self, chain: Arc<opa::PolicyChain>) -> Self {
+        self.with_mcp_tools_hooks(Arc::new(hooks::HookChain::from_policy("mcp_tools", chain)))
     }
 
     /// Submit code for async execution. Returns an execution ID immediately.
@@ -2127,6 +2218,17 @@ impl Engine {
     /// Get the MCP server `instructions` override, if one was configured.
     pub fn instructions_override(&self) -> Option<Arc<str>> {
         self.instructions_override.clone()
+    }
+
+    /// Set the externally reachable base URL of this server.
+    pub fn with_public_url(mut self, url: String) -> Self {
+        self.public_url = Some(Arc::from(url.trim_end_matches('/')));
+        self
+    }
+
+    /// The configured public base URL (no trailing slash), if any.
+    pub fn public_url(&self) -> Option<Arc<str>> {
+        self.public_url.clone()
     }
 
     /// Override the `run_js` tool description advertised in `tools/list`.
@@ -2161,13 +2263,23 @@ impl Engine {
         self
     }
 
-    /// Gate fs snapshot pointer moves (pull/push/reset/label) behind a policy.
-    pub fn with_fs_snapshot_policy(mut self, chain: Arc<opa::PolicyChain>) -> Self {
-        self.fs_snapshot_policy_chain = Some(chain);
+    /// Gate fs snapshot pointer moves (pull/push/reset/label) behind a hook
+    /// chain (pre hooks + policy; gate-only).
+    pub fn with_fs_snapshot_hooks(mut self, hooks: Arc<hooks::HookChain>) -> Self {
+        self.fs_snapshot_hooks = Some(hooks);
         self
     }
 
-    /// Evaluate the fs-snapshot policy for an operation, if a chain is set.
+    /// Gate fs snapshot pointer moves behind a bare policy chain, wrapped as
+    /// the sole pre hook.
+    pub fn with_fs_snapshot_policy(self, chain: Arc<opa::PolicyChain>) -> Self {
+        self.with_fs_snapshot_hooks(Arc::new(hooks::HookChain::from_policy(
+            "fs_snapshot",
+            chain,
+        )))
+    }
+
+    /// Evaluate the fs-snapshot hook chain for an operation, if one is set.
     /// Input: `{ "op": ..., "label": ..., "ca_id": ... }`.
     async fn check_fs_snapshot_policy(
         &self,
@@ -2175,20 +2287,27 @@ impl Engine {
         label: Option<&str>,
         ca_id: Option<&str>,
     ) -> Result<(), String> {
-        let Some(chain) = &self.fs_snapshot_policy_chain else {
+        let Some(chain) = &self.fs_snapshot_hooks else {
             return Ok(());
         };
         let input = serde_json::json!({ "op": op, "label": label, "ca_id": ca_id });
-        let allowed = chain
-            .evaluate(&input)
-            .await
-            .map_err(|e| format!("fs_snapshot policy error: {e}"))?;
-        if !allowed {
-            return Err(format!(
-                "fs_snapshot {op} denied by policy (label={label:?}, ca_id={ca_id:?})"
-            ));
+        if chain.has_stack() {
+            return chain
+                .run_stack_gate(input, |_| Ok(()))
+                .await
+                .map(|_| ())
+                .map_err(|e| format!("fs_snapshot: {e}"));
         }
-        Ok(())
+        match chain
+            .run_pre(input)
+            .await
+            .map_err(|e| format!("fs_snapshot hook chain error: {e}"))?
+        {
+            hooks::PreOutcome::Allow(_) => Ok(()),
+            hooks::PreOutcome::Deny(deny) => Err(format!(
+                "fs_snapshot {op} {deny} (label={label:?}, ca_id={ca_id:?})"
+            )),
+        }
     }
 
     /// The fs object store, if configured.
@@ -2433,273 +2552,6 @@ impl Engine {
             .ok_or_else(|| "fs snapshots are not configured on this server".to_string())
     }
 
-    /// Three-way merge two snapshots into a new one. `base` (the common
-    /// ancestor the two sides diverged from — typically the label head both
-    /// were mounted from) is optional: with it, only paths both sides changed
-    /// conflict; without it, the merge is 2-way. `prefer` auto-resolves
-    /// conflicts to one side. A clean merge yields the new snapshot's CA id;
-    /// otherwise the conflicting paths are reported. The merge produces a normal
-    /// pure manifest and does NOT move any label (push it explicitly).
-    pub async fn fs_merge(
-        &self,
-        ours: &str,
-        theirs: &str,
-        base: Option<String>,
-        prefer: fs_merge::Prefer,
-    ) -> Result<FsMergeResult, String> {
-        self.check_fs_snapshot_policy("merge", None, None).await?;
-        let store = self.fs_store_or_err()?;
-
-        let load = |hex: &str| -> Result<[u8; 32], String> {
-            parse_ca_hex(hex).ok_or_else(|| format!("invalid CA id: {hex}"))
-        };
-        let base_root = match &base {
-            Some(b) => Some(load(b)?),
-            None => None,
-        };
-
-        // Structural per-path 3-way merge over the trees: equal subtrees are
-        // pruned by hash (never loaded), clean parts land in the merged tree,
-        // divergent paths come back as conflicts.
-        let structural = fs_merge::merge_trees(
-            store,
-            base_root,
-            Some(load(ours)?),
-            Some(load(theirs)?),
-            prefer,
-        )
-        .await
-        .map_err(|e| format!("fs_merge: {e}"))?;
-        let merged_root = structural.root;
-
-        // Content-merge pass: give a type-aware merger a shot at each conflict
-        // before reporting it. Clean text merges resolve silently and are patched
-        // back into the merged tree; the rest are surfaced with diffs/markers.
-        let mergers = fs_content_merge::default_mergers();
-        let mut conflict_views = Vec::new();
-        let mut resolved: Vec<(Vec<String>, Option<fs_store::Entry>)> = Vec::new();
-        for c in structural.conflicts {
-            let view = match (&c.ours, &c.theirs) {
-                (Some(oe), Some(te)) => {
-                    let ours_b = store
-                        .read_file(oe)
-                        .await
-                        .map_err(|e| format!("fs_merge: read ours {}: {e}", c.path.display()))?;
-                    let theirs_b = store
-                        .read_file(te)
-                        .await
-                        .map_err(|e| format!("fs_merge: read theirs {}: {e}", c.path.display()))?;
-                    let base_b = match &c.base {
-                        Some(be) => Some(store.read_file(be).await.map_err(|e| {
-                            format!("fs_merge: read base {}: {e}", c.path.display())
-                        })?),
-                        None => None,
-                    };
-                    match fs_content_merge::merge_content(
-                        &mergers,
-                        base_b.as_deref(),
-                        &ours_b,
-                        &theirs_b,
-                    ) {
-                        fs_content_merge::ContentMergeResult::Clean(bytes) => {
-                            let entry = store.put_file(&bytes).await.map_err(|e| {
-                                format!("fs_merge: store merged {}: {e}", c.path.display())
-                            })?;
-                            resolved.push((fs_tree::components_of(&c.path), Some(entry)));
-                            continue; // resolved — not a conflict
-                        }
-                        fs_content_merge::ContentMergeResult::Conflict(cc) => FsMergeConflictView {
-                            path: c.path.to_string_lossy().to_string(),
-                            base: c.base.as_ref().map(entry_content_id),
-                            ours: c.ours.as_ref().map(entry_content_id),
-                            theirs: c.theirs.as_ref().map(entry_content_id),
-                            kind: cc.kind.as_str().to_string(),
-                            markers: cc.markers,
-                            diff_ours: cc.diff_ours,
-                            diff_theirs: cc.diff_theirs,
-                        },
-                    }
-                }
-                // A modify/delete (or add on one side): no content to reconcile.
-                _ => FsMergeConflictView {
-                    path: c.path.to_string_lossy().to_string(),
-                    base: c.base.as_ref().map(entry_content_id),
-                    ours: c.ours.as_ref().map(entry_content_id),
-                    theirs: c.theirs.as_ref().map(entry_content_id),
-                    kind: "modify/delete".to_string(),
-                    markers: None,
-                    diff_ours: None,
-                    diff_theirs: None,
-                },
-            };
-            conflict_views.push(view);
-        }
-
-        if conflict_views.is_empty() {
-            // Patch the content-merge resolutions onto the structurally-merged
-            // tree (writing only the touched spine).
-            let final_root = if resolved.is_empty() {
-                merged_root
-            } else {
-                store
-                    .build_root(Some(merged_root), resolved)
-                    .await
-                    .map_err(|e| format!("fs_merge: store result: {e}"))?
-            };
-            Ok(FsMergeResult::Merged {
-                ca_id: ca_to_hex(&final_root),
-            })
-        } else {
-            Ok(FsMergeResult::Conflict {
-                conflicts: conflict_views,
-            })
-        }
-    }
-
-    /// List every label and its current head CA id (hex).
-    pub async fn fs_list_labels(&self) -> Result<Vec<FsLabelView>, String> {
-        let labels = self.labels_or_err()?;
-        Ok(labels
-            .list()
-            .await?
-            .into_iter()
-            .map(|(name, id)| FsLabelView {
-                name,
-                ca_id: ca_to_hex(&id),
-            })
-            .collect())
-    }
-
-    /// Resolve a label to its current head CA id (hex), if it exists.
-    pub async fn fs_resolve_label(&self, name: &str) -> Result<Option<String>, String> {
-        let labels = self.labels_or_err()?;
-        Ok(labels.resolve(name).await?.map(|id| ca_to_hex(&id)))
-    }
-
-    /// Create a label, or repoint an existing one, to a CA id. `message` is an
-    /// optional human note recorded on the reflog entry.
-    pub async fn fs_set_label(
-        &self,
-        name: &str,
-        ca_hex: &str,
-        message: Option<String>,
-    ) -> Result<(), String> {
-        self.check_fs_snapshot_policy("label", Some(name), Some(ca_hex))
-            .await?;
-        let labels = self.labels_or_err()?;
-        let id = parse_ca_hex(ca_hex).ok_or_else(|| format!("invalid CA id: {ca_hex}"))?;
-        match labels.resolve(name).await? {
-            Some(_) => labels.force(name, id, message).await,
-            None => labels.create(name, id, message).await,
-        }
-    }
-
-    /// The reflog for a label (hex-rendered), oldest first. When `limit` is
-    /// given, only the most recent `limit` entries are read and returned —
-    /// bounding the scan over very long histories.
-    pub async fn fs_label_log(
-        &self,
-        name: &str,
-        limit: Option<usize>,
-    ) -> Result<Vec<FsRefLogView>, String> {
-        let labels = self.labels_or_err()?;
-        let entries = match limit {
-            Some(n) => labels.log_recent(name, n).await?,
-            None => labels.log(name).await?,
-        };
-        Ok(entries
-            .into_iter()
-            .map(|e| FsRefLogView {
-                at: e.at,
-                from: e.from.as_ref().map(ca_to_hex),
-                to: ca_to_hex(&e.to),
-                op: refop_str(e.op).to_string(),
-                message: e.message,
-            })
-            .collect())
-    }
-
-    /// Advance a label to a CA id. Default is reject-and-rebase: the move only
-    /// succeeds if the label's current head equals `expected` (or the label does
-    /// not yet exist and `expected` is `None`). `force` skips the check.
-    pub async fn fs_push(
-        &self,
-        label: &str,
-        ca_hex: &str,
-        expected: Option<String>,
-        force: bool,
-        message: Option<String>,
-    ) -> Result<FsPushOutcome, String> {
-        self.check_fs_snapshot_policy("push", Some(label), Some(ca_hex))
-            .await?;
-        let labels = self.labels_or_err()?;
-        let new = parse_ca_hex(ca_hex).ok_or_else(|| format!("invalid CA id: {ca_hex}"))?;
-
-        if force {
-            labels.force(label, new, message).await?;
-            return Ok(FsPushOutcome::Advanced {
-                label: label.to_string(),
-                ca_id: ca_hex.to_string(),
-            });
-        }
-
-        let expected = match expected {
-            Some(h) => {
-                Some(parse_ca_hex(&h).ok_or_else(|| format!("invalid expected CA id: {h}"))?)
-            }
-            None => None,
-        };
-        let current = labels.resolve(label).await?;
-        let advanced = if current.is_none() && expected.is_none() {
-            labels.create(label, new, message).await?;
-            true
-        } else {
-            labels.cas(label, expected, new, message).await?
-        };
-
-        if advanced {
-            Ok(FsPushOutcome::Advanced {
-                label: label.to_string(),
-                ca_id: ca_hex.to_string(),
-            })
-        } else {
-            Ok(FsPushOutcome::Rejected {
-                label: label.to_string(),
-                current: current.as_ref().map(ca_to_hex),
-            })
-        }
-    }
-
-    /// Reset a label to an earlier CA id from its reflog (the rollback verb).
-    /// Unless `allow_unlogged` is set, the target must appear in the label's
-    /// reflog so resets stay within recorded history.
-    pub async fn fs_reset(
-        &self,
-        label: &str,
-        ca_hex: &str,
-        allow_unlogged: bool,
-        message: Option<String>,
-    ) -> Result<(), String> {
-        self.check_fs_snapshot_policy("reset", Some(label), Some(ca_hex))
-            .await?;
-        let labels = self.labels_or_err()?;
-        let target = parse_ca_hex(ca_hex).ok_or_else(|| format!("invalid CA id: {ca_hex}"))?;
-        if !allow_unlogged {
-            let in_log = labels
-                .log(label)
-                .await?
-                .iter()
-                .any(|e| e.to == target || e.from == Some(target));
-            if !in_log {
-                return Err(format!(
-                    "CA id {ca_hex} is not in the reflog for label '{label}'; \
-                     pass allow_unlogged to reset anyway"
-                ));
-            }
-        }
-        labels.force(label, target, message).await
-    }
-
     /// Flush a session's overlay mount into a new pure manifest and return its
     /// CA id (hex). This is the durable fs artifact recorded on completion; it
     /// does NOT advance any label (pushing a label is the explicit `fs_push`
@@ -2769,6 +2621,20 @@ impl Engine {
 
         let isolate_handle: Arc<Mutex<Option<v8::IsolateHandle>>> = Arc::new(Mutex::new(None));
 
+        // Attach the shared keyed artifact store so `artifact(key, mime, bytes)`
+        // is available to the script; whatever it emits is filed on the
+        // execution record after the run (regardless of final status).
+        let artifact_state = match registry.artifacts_tree() {
+            Ok(tree) => Some(ArtifactState::new(
+                ArtifactStore::new(tree),
+                Some(id.clone()),
+            )),
+            Err(e) => {
+                tracing::warn!("artifact store unavailable for execution {}: {}", id, e);
+                None
+            }
+        };
+
         match &self.heap_storage {
             None => {
                 // Stateless mode
@@ -2789,9 +2655,10 @@ impl Engine {
                     .as_ref()
                     .map(|m| mcp_client::McpConfig {
                         client_manager: (**m).clone(),
-                        policy_chain: self.mcp_tools_policy_chain.clone(),
+                        hooks: self.mcp_tools_hooks.clone(),
                     });
                 let fm = fs_mount.clone();
+                let ast = artifact_state.clone();
                 // Cloned for the post-run session-log entry, since `code` is
                 // moved into the spawn_blocking closure below.
                 let code_for_log = code.clone();
@@ -2812,7 +2679,8 @@ impl Engine {
                             .maybe_subprocess_config(sc.as_deref())
                             .console_tree(ct)
                             .module_loader_config(&mlc)
-                            .maybe_mcp_config(mc.as_ref()),
+                            .maybe_mcp_config(mc.as_ref())
+                            .maybe_artifact_state(ast),
                     )
                 });
 
@@ -2848,6 +2716,13 @@ impl Engine {
                         Err("Execution timed out: script exceeded the time limit.".to_string())
                     }
                 };
+
+                // File whatever artifacts the script emitted before marking a
+                // terminal status, so a client that stops polling on the first
+                // terminal status cannot miss them.
+                if let Some(ast) = &artifact_state {
+                    registry.set_artifacts(&id, ast.emitted.lock().unwrap().clone());
+                }
 
                 match result {
                     Ok(js_result) => {
@@ -2905,11 +2780,12 @@ impl Engine {
                     .as_ref()
                     .map(|m| mcp_client::McpConfig {
                         client_manager: (**m).clone(),
-                        policy_chain: self.mcp_tools_policy_chain.clone(),
+                        hooks: self.mcp_tools_hooks.clone(),
                     });
 
                 let snap_mutex = self.snapshot_mutex.clone();
                 let fm = fs_mount.clone();
+                let ast = artifact_state.clone();
                 let mut join_handle = tokio::task::spawn_blocking(move || {
                     let _guard = snap_mutex.blocking_lock();
                     execute_stateful(
@@ -2929,7 +2805,8 @@ impl Engine {
                             .maybe_subprocess_config(sc.as_deref())
                             .console_tree(ct)
                             .module_loader_config(&mlc)
-                            .maybe_mcp_config(mc.as_ref()),
+                            .maybe_mcp_config(mc.as_ref())
+                            .maybe_artifact_state(ast),
                     )
                 });
 
@@ -2963,6 +2840,13 @@ impl Engine {
                         Err("Execution timed out: script exceeded the time limit.".to_string())
                     }
                 };
+
+                // File whatever artifacts the script emitted before marking a
+                // terminal status, so a client that stops polling on the first
+                // terminal status cannot miss them.
+                if let Some(ast) = &artifact_state {
+                    registry.set_artifacts(&id, ast.emitted.lock().unwrap().clone());
+                }
 
                 match v8_result {
                     Ok((output, startup_data, content_hash)) => {
@@ -3014,107 +2898,79 @@ impl Engine {
         drop(permit);
     }
 
-    // ── Query / cancel methods ───────────────────────────────────────────
+    /// Stop background work owned by the engine (executions + MCP clients).
+    async fn shutdown_background_tasks(&self) -> (u64, u64) {
+        let cancelled_executions = self
+            .execution_registry
+            .as_ref()
+            .map(|registry| registry.cancel_all())
+            .unwrap_or(0);
+        let closed_mcp_connections = match &self.mcp_client_manager {
+            Some(manager) => manager.shutdown().await,
+            None => 0,
+        };
+        (cancelled_executions, closed_mcp_connections)
+    }
 
-    /// Get execution status and result.
-    pub fn get_execution(&self, id: &str) -> Result<ExecutionInfo, String> {
+    fn artifact_store(&self) -> Result<ArtifactStore, String> {
         let registry = self
             .execution_registry
             .as_ref()
             .ok_or_else(|| "Execution registry not configured".to_string())?;
-        registry
-            .get(id)
-            .ok_or_else(|| format!("Execution '{}' not found", id))
+        Ok(ArtifactStore::new(registry.artifacts_tree()?))
     }
 
-    /// Get paginated console output for an execution.
-    pub fn get_execution_output(
+    /// Fetch an artifact stored via the `artifact(key, mime, bytes)` global.
+    pub fn get_artifact(&self, key: &str) -> Result<Artifact, String> {
+        self.artifact_store()?
+            .get(key)?
+            .ok_or_else(|| format!("artifact '{}' not found", key))
+    }
+
+    /// Store (or overwrite) an artifact from outside a script — the upload
+    /// path behind `get_artifact_upload_url` and `PUT /api/artifacts/{key}`.
+    /// JS reads it back with `artifact.get(key)`.
+    pub fn put_artifact(
         &self,
-        id: &str,
-        line_offset: Option<u64>,
-        line_limit: Option<u64>,
-        byte_offset: Option<u64>,
-        byte_limit: Option<u64>,
-    ) -> Result<ConsoleOutputPage, String> {
+        key: &str,
+        mime_type: &str,
+        bytes: &[u8],
+    ) -> Result<ArtifactMeta, String> {
+        self.artifact_store()?.put(key, mime_type, bytes, None)
+    }
+
+    fn upload_grants(&self) -> Result<UploadGrants, String> {
         let registry = self
             .execution_registry
             .as_ref()
             .ok_or_else(|| "Execution registry not configured".to_string())?;
-        registry.get_console_output(id, line_offset, line_limit, byte_offset, byte_limit)
+        Ok(UploadGrants::new(registry.artifact_uploads_tree()?))
     }
 
-    /// Cancel a running execution.
-    pub fn cancel_execution(&self, id: &str) -> Result<(), String> {
-        let registry = self
-            .execution_registry
-            .as_ref()
-            .ok_or_else(|| "Execution registry not configured".to_string())?;
-        registry.cancel(id)
-    }
-
-    /// List all executions.
-    pub fn list_executions(&self) -> Result<Vec<ExecutionSummary>, String> {
-        let registry = self
-            .execution_registry
-            .as_ref()
-            .ok_or_else(|| "Execution registry not configured".to_string())?;
-        Ok(registry.list())
-    }
-
-    pub async fn list_sessions(&self) -> Result<Vec<String>, String> {
-        match &self.session_log {
-            Some(log) => log.list_sessions().await,
-            None => Err("Session log not configured".to_string()),
-        }
-    }
-
-    pub async fn list_session_snapshots(
+    /// Issue a one-time upload grant for `key`; the returned token is
+    /// claimed with [`Engine::reserve_artifact_upload`].
+    pub fn issue_artifact_upload(
         &self,
-        session: String,
-        fields: Option<Vec<String>>,
-    ) -> Result<Vec<serde_json::Value>, String> {
-        match &self.session_log {
-            Some(log) => log.list_entries(&session, fields).await,
-            None => Err("Session log not configured".to_string()),
-        }
+        key: &str,
+        mime_type: Option<&str>,
+        ttl_secs: u64,
+    ) -> Result<(String, UploadGrant), String> {
+        self.upload_grants()?.issue(key, mime_type, ttl_secs)
     }
 
-    pub async fn get_heap_tags(&self, heap: String) -> Result<HashMap<String, String>, String> {
-        match &self.heap_tag_store {
-            Some(store) => store.get_tags(&heap).await,
-            None => Err("Heap tag store not configured".to_string()),
-        }
+    /// Claim `token` for one in-flight upload. `None` when it is unknown,
+    /// expired, already used, or another upload currently holds it — checked
+    /// before an upload body is read, so an unauthenticated caller can't
+    /// make the server buffer bytes it will discard. Dropping the
+    /// reservation without completing it leaves the URL usable.
+    pub fn reserve_artifact_upload(&self, token: &str) -> Option<UploadReservation> {
+        self.upload_grants().ok()?.reserve(token)
     }
 
-    pub async fn set_heap_tags(
-        &self,
-        heap: String,
-        tags: HashMap<String, String>,
-    ) -> Result<(), String> {
-        match &self.heap_tag_store {
-            Some(store) => store.set_tags(&heap, tags).await,
-            None => Err("Heap tag store not configured".to_string()),
-        }
-    }
-
-    pub async fn delete_heap_tags(
-        &self,
-        heap: String,
-        keys: Option<Vec<String>>,
-    ) -> Result<(), String> {
-        match &self.heap_tag_store {
-            Some(store) => store.delete_tags(&heap, keys).await,
-            None => Err("Heap tag store not configured".to_string()),
-        }
-    }
-
-    pub async fn query_heaps_by_tags(
-        &self,
-        filter: HashMap<String, String>,
-    ) -> Result<Vec<HeapTagEntry>, String> {
-        match &self.heap_tag_store {
-            Some(store) => store.query_by_tags(filter).await,
-            None => Err("Heap tag store not configured".to_string()),
-        }
+    /// List metadata for all stored artifacts.
+    pub fn list_artifacts(&self) -> Result<Vec<ArtifactMeta>, String> {
+        self.artifact_store()?.list()
     }
 }
+
+pub use ffi::*;

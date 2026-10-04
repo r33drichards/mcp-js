@@ -38,7 +38,7 @@ fn tmp_dir(tag: &str) -> String {
 }
 
 struct Harness {
-    engine: Engine,
+    engine: Arc<Engine>,
     store: Arc<FsStore>,
 }
 
@@ -46,10 +46,10 @@ fn build_harness() -> Harness {
     let registry = ExecutionRegistry::new(&tmp_dir("reg")).expect("registry");
     let fs_config = FsConfig::new(Arc::new(PolicyChain::new(vec![], EvalMode::All)));
     let store = Arc::new(FsStore::in_memory());
-    let engine = Engine::new_stateless(64 * 1024 * 1024, 30, 4)
+    let engine = Engine::from_engine(Engine::new_stateless(64 * 1024 * 1024, 30, 4)
         .with_fs_config(fs_config)
         .with_execution_registry(Arc::new(registry))
-        .with_fs_snapshots(store.clone(), Arc::new(LabelStore::in_memory()));
+        .with_fs_snapshots(store.clone(), Arc::new(LabelStore::in_memory())));
     Harness { engine, store }
 }
 
@@ -72,7 +72,7 @@ async fn run(engine: &Engine, code: &str, fs: Option<&str>) -> Option<String> {
 
     for _ in 0..600 {
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        if let Ok(info) = engine.get_execution(&exec_id) {
+        if let Ok(info) = engine.get_execution(exec_id.clone()) {
             match info.status.as_str() {
                 "completed" => return info.fs,
                 "failed" => panic!("execution failed: {:?}", info.error),

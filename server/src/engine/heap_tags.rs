@@ -6,7 +6,7 @@ use crate::cluster::ClusterNode;
 
 const HT_PREFIX: &str = "ht:";
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, uniffi::Record)]
 pub struct HeapTagEntry {
     pub heap: String,
     pub tags: HashMap<String, String>,

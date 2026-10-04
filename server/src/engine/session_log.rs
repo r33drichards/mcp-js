@@ -17,6 +17,33 @@ pub struct SessionLogEntry {
     pub timestamp: String, // ISO 8601 UTC
 }
 
+/// One session-log entry with its position in the log, for API/FFI/CLI
+/// responses. This is the typed shape `list_entries` returns; the MCP tool
+/// layer serializes it to JSON (and applies any `fields` projection) itself.
+#[derive(Debug, Clone, Serialize, uniffi::Record)]
+pub struct SessionSnapshotView {
+    pub index: u64,
+    pub input_heap: Option<String>,
+    pub output_heap: String,
+    /// Resulting filesystem snapshot CA id (hex), independent of the heap.
+    pub output_fs: Option<String>,
+    pub code: String,
+    pub timestamp: String,
+}
+
+impl SessionSnapshotView {
+    fn new(index: u64, entry: SessionLogEntry) -> Self {
+        Self {
+            index,
+            input_heap: entry.input_heap,
+            output_heap: entry.output_heap,
+            output_fs: entry.output_fs,
+            code: entry.code,
+            timestamp: entry.timestamp,
+        }
+    }
+}
+
 /// Result of [`SessionLog::fork`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ForkOutcome {
@@ -162,12 +189,11 @@ impl SessionLog {
         Ok(names)
     }
 
-    /// List all entries for a session, optionally filtering to specific fields.
+    /// List all entries for a session, oldest first.
     pub async fn list_entries(
         &self,
         session: &str,
-        fields: Option<Vec<String>>,
-    ) -> Result<Vec<serde_json::Value>, String> {
+    ) -> Result<Vec<SessionSnapshotView>, String> {
         if let Some(ref cluster) = self.cluster_node {
             let prefix = Self::entry_prefix_for_session(session);
             let pairs = cluster.scan_prefix(&prefix)?;
@@ -175,8 +201,7 @@ impl SessionLog {
             for (idx, (_key, val)) in pairs.into_iter().enumerate() {
                 let entry: SessionLogEntry = serde_json::from_str(&val)
                     .map_err(|e| format!("Failed to deserialize entry: {}", e))?;
-                let value = Self::format_entry(idx as u64, &entry, &fields);
-                results.push(value);
+                results.push(SessionSnapshotView::new(idx as u64, entry));
             }
             return Ok(results);
         }
@@ -202,8 +227,7 @@ impl SessionLog {
             let entry: SessionLogEntry = serde_json::from_slice(&val_bytes)
                 .map_err(|e| format!("Failed to deserialize entry: {}", e))?;
 
-            let value = Self::format_entry(index, &entry, &fields);
-            results.push(value);
+            results.push(SessionSnapshotView::new(index, entry));
         }
 
         Ok(results)
@@ -283,83 +307,6 @@ impl SessionLog {
     // Shared formatting helper
     // --------------------------------------------------------------------
 
-    fn format_entry(
-        index: u64,
-        entry: &SessionLogEntry,
-        fields: &Option<Vec<String>>,
-    ) -> serde_json::Value {
-        match fields {
-            Some(field_list) => {
-                let mut obj = serde_json::Map::new();
-                for field in field_list {
-                    match field.as_str() {
-                        "index" => {
-                            obj.insert(
-                                "index".to_string(),
-                                serde_json::Value::Number(index.into()),
-                            );
-                        }
-                        "input_heap" => {
-                            obj.insert(
-                                "input_heap".to_string(),
-                                match &entry.input_heap {
-                                    Some(h) => serde_json::Value::String(h.clone()),
-                                    None => serde_json::Value::Null,
-                                },
-                            );
-                        }
-                        "output_heap" => {
-                            obj.insert(
-                                "output_heap".to_string(),
-                                serde_json::Value::String(entry.output_heap.clone()),
-                            );
-                        }
-                        "code" => {
-                            obj.insert(
-                                "code".to_string(),
-                                serde_json::Value::String(entry.code.clone()),
-                            );
-                        }
-                        "timestamp" => {
-                            obj.insert(
-                                "timestamp".to_string(),
-                                serde_json::Value::String(entry.timestamp.clone()),
-                            );
-                        }
-                        _ => {}
-                    }
-                }
-                serde_json::Value::Object(obj)
-            }
-            None => {
-                let mut obj = serde_json::Map::new();
-                obj.insert(
-                    "index".to_string(),
-                    serde_json::Value::Number(index.into()),
-                );
-                obj.insert(
-                    "input_heap".to_string(),
-                    match &entry.input_heap {
-                        Some(h) => serde_json::Value::String(h.clone()),
-                        None => serde_json::Value::Null,
-                    },
-                );
-                obj.insert(
-                    "output_heap".to_string(),
-                    serde_json::Value::String(entry.output_heap.clone()),
-                );
-                obj.insert(
-                    "code".to_string(),
-                    serde_json::Value::String(entry.code.clone()),
-                );
-                obj.insert(
-                    "timestamp".to_string(),
-                    serde_json::Value::String(entry.timestamp.clone()),
-                );
-                serde_json::Value::Object(obj)
-            }
-        }
-    }
 }
 
 #[cfg(test)]

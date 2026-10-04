@@ -36,10 +36,29 @@ struct OpaResultBody {
     allow: Option<bool>,
 }
 
+/// How long one request to OPA may take, connection included.
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+/// How long connecting may take. Far shorter than the request: an address
+/// that does not answer (a replica that is gone, or not reachable yet) must
+/// leave time to try another.
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Why a request to OPA gave no decision.
+enum Failure {
+    /// Nothing answered, or what answered was not OPA deciding: the request
+    /// could not be sent, timed out, or a gateway said the server is away.
+    /// Another replica may answer.
+    Transport(String),
+    /// OPA answered, and the answer is not a decision. Asking again would
+    /// get the same.
+    Answer(String),
+}
+
 impl OpaClient {
     pub fn new(base_url: String) -> Self {
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(5))
+            .timeout(REQUEST_TIMEOUT)
+            .connect_timeout(CONNECT_TIMEOUT)
             .build()
             .expect("Failed to create OPA HTTP client");
         Self { base_url, client }
@@ -50,26 +69,47 @@ impl OpaClient {
     ///
     /// `policy_path` is appended to `/v1/data/` — e.g. `"mcp/fetch"` becomes
     /// `POST {base_url}/v1/data/mcp/fetch`.
+    ///
+    /// A request that fails in transport is made once more, on a new
+    /// connection: behind a load balancer a replica being replaced must not
+    /// turn into a denial while another is serving. A decision is never
+    /// asked for twice: an answer from OPA, allow or deny, is final.
     pub async fn evaluate<T: Serialize>(&self, policy_path: &str, input: &T) -> Result<bool, String> {
         let url = format!("{}/v1/data/{}", self.base_url.trim_end_matches('/'), policy_path);
         let body = OpaRequest { input };
 
+        match self.ask(&url, &body).await {
+            Ok(allow) => Ok(allow),
+            Err(Failure::Answer(message)) => Err(message),
+            Err(Failure::Transport(first)) => match self.ask(&url, &body).await {
+                Ok(allow) => Ok(allow),
+                Err(Failure::Answer(message)) => Err(message),
+                Err(Failure::Transport(second)) => Err(format!("{} (and again: {})", first, second)),
+            },
+        }
+    }
+
+    async fn ask<T: Serialize>(&self, url: &str, body: &OpaRequest<&T>) -> Result<bool, Failure> {
         let resp = self
             .client
-            .post(&url)
-            .json(&body)
+            .post(url)
+            .json(body)
             .send()
             .await
-            .map_err(|e| format!("OPA request failed: {}", e))?;
+            .map_err(|e| Failure::Transport(format!("OPA request failed: {}", e)))?;
 
-        if !resp.status().is_success() {
-            return Err(format!("OPA returned HTTP {}", resp.status()));
+        let status = resp.status();
+        if matches!(status.as_u16(), 502 | 503 | 504) {
+            return Err(Failure::Transport(format!("OPA returned HTTP {}", status)));
+        }
+        if !status.is_success() {
+            return Err(Failure::Answer(format!("OPA returned HTTP {}", status)));
         }
 
         let opa_resp: OpaResponse = resp
             .json()
             .await
-            .map_err(|e| format!("Failed to parse OPA response: {}", e))?;
+            .map_err(|e| Failure::Answer(format!("Failed to parse OPA response: {}", e)))?;
 
         Ok(opa_resp
             .result
@@ -286,14 +326,37 @@ pub struct PoliciesConfig {
     pub run_js_file: Option<OperationPolicies>,
 }
 
-/// Per-operation policy configuration.
-#[derive(Debug, Clone, Deserialize)]
+/// Per-operation policy and hook configuration.
+///
+/// `policies` is the deny/allow gate; `pre` and `post` are composable hooks
+/// (see [`super::hooks`]). Internally the policies are themselves run as the
+/// *final* pre hook, so they always evaluate the effective (post-mutation)
+/// operation input.
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct OperationPolicies {
-    /// Evaluation mode: `"all"` (default) or `"any"`.
+    /// Evaluation mode for `policies`: `"all"` (default) or `"any"`.
     #[serde(default)]
     pub mode: EvalMode,
     /// Ordered list of policy sources.
+    #[serde(default)]
     pub policies: Vec<PolicySource>,
+    /// Ordered pre hooks: run before the operation (and before `policies`),
+    /// each seeing the operation input; a hook may deny or mutate it.
+    #[serde(default)]
+    pub pre: Vec<super::hooks::HookSource>,
+    /// Ordered post hooks: run after the operation, each seeing the input and
+    /// output; a hook may deny the result or mutate the output. Only
+    /// supported for operations that produce a hookable output.
+    #[serde(default)]
+    pub post: Vec<super::hooks::HookSource>,
+    /// Layered stack (v2): an explicit ordered list of layers wrapping the
+    /// operation's executor, mutually exclusive with `pre`/`post`. Entries
+    /// are hook sources or the built-ins `"@inject"`, `"@policy"` (places
+    /// the `policies` chain), and `"@execute"` (the real executor; required,
+    /// last). JS sources in a stack use the layered contract
+    /// `handle(input, next)`. Currently supported for `fetch` only.
+    #[serde(default)]
+    pub stack: Vec<super::hooks::StackEntry>,
 }
 
 /// A single policy source — either a remote OPA server or a local Rego file/directory.
@@ -552,6 +615,7 @@ allow if { input.admin == true }
                 policy_path: None,
                 rule: None,
             }],
+            ..Default::default()
         };
         let chain = build_policy_chain(&op, "mcp/fetch", "data.mcp.test.allow").unwrap();
         assert_eq!(chain.evaluators.len(), 1);
@@ -569,6 +633,7 @@ allow if { input.admin == true }
                 policy_path: None,
                 rule: None,
             }],
+            ..Default::default()
         };
         let chain = build_policy_chain(&op, "mcp/fetch", "data.mcp.test.allow").unwrap();
         assert_eq!(chain.evaluators.len(), 1);
@@ -583,6 +648,7 @@ allow if { input.admin == true }
                 policy_path: Some("custom/path".to_string()),
                 rule: None,
             }],
+            ..Default::default()
         };
         let chain = build_policy_chain(&op, "mcp/fetch", "data.mcp.fetch.allow").unwrap();
         assert_eq!(chain.evaluators.len(), 1);
@@ -598,6 +664,7 @@ allow if { input.admin == true }
                 policy_path: None,
                 rule: None,
             }],
+            ..Default::default()
         };
         let result = build_policy_chain(&op, "mcp/fetch", "data.mcp.fetch.allow");
         assert!(result.is_err());
@@ -684,6 +751,7 @@ allow if { input.admin == true }
                 policy_path: None,
                 rule: None, // will use default
             }],
+            ..Default::default()
         };
         let chain = build_policy_chain(&op, "mcp/fetch", "data.mcp.fetch.allow").unwrap();
 
@@ -725,6 +793,7 @@ allow if {
                 policy_path: None,
                 rule: None,
             }],
+            ..Default::default()
         };
         let chain = build_policy_chain(&op, "mcp/tools", "data.mcp.tools.allow").unwrap();
 
@@ -759,6 +828,7 @@ allow if {
                 policy_path: None,
                 rule: None,
             }],
+            ..Default::default()
         };
         let chain = build_policy_chain(&op, "mcp/tools", "data.mcp.tools.allow").unwrap();
 
@@ -868,6 +938,7 @@ allow if {
                 policy_path: None,
                 rule: None,
             }],
+            ..Default::default()
         };
         let chain = build_policy_chain(&op, "mcp/subprocess", "data.mcp.subprocess.allow").unwrap();
 
@@ -900,6 +971,7 @@ allow if {
                 policy_path: None,
                 rule: None,
             }],
+            ..Default::default()
         };
         let chain = build_policy_chain(&op, "mcp/subprocess", "data.mcp.subprocess.allow").unwrap();
 
@@ -918,5 +990,140 @@ allow if {
             "args": ["-c", "rm -rf /"]
         });
         assert!(!chain.evaluate(&input).await.unwrap());
+    }
+
+    // ── Remote evaluator: transport failures ─────────────────────────────
+
+    /// What the stand-in OPA does with each connection it accepts, in order.
+    /// After the list, it keeps doing the last.
+    #[derive(Clone, Copy)]
+    enum Reply {
+        /// Read the request, then close without answering.
+        Hang,
+        /// Answer with this status and body.
+        Http(u16, &'static str),
+    }
+
+    /// A stand-in OPA on a local port: its URL and how many requests it got.
+    async fn stand_in(replies: Vec<Reply>) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = seen.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else { return };
+                let n = count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let reply = replies[n.min(replies.len() - 1)];
+                tokio::spawn(async move {
+                    // The whole request: headers, then a body of Content-Length.
+                    let mut buf = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    loop {
+                        let Ok(read) = socket.read(&mut chunk).await else { return };
+                        if read == 0 {
+                            return;
+                        }
+                        buf.extend_from_slice(&chunk[..read]);
+                        let text = String::from_utf8_lossy(&buf).to_lowercase();
+                        if let Some(end) = text.find("\r\n\r\n") {
+                            let length = text[..end]
+                                .lines()
+                                .find_map(|l| l.strip_prefix("content-length:"))
+                                .and_then(|v| v.trim().parse::<usize>().ok())
+                                .unwrap_or(0);
+                            if buf.len() >= end + 4 + length {
+                                break;
+                            }
+                        }
+                    }
+                    if let Reply::Http(status, body) = reply {
+                        let response = format!(
+                            "HTTP/1.1 {} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            status,
+                            body.len(),
+                            body
+                        );
+                        let _ = socket.write_all(response.as_bytes()).await;
+                    }
+                    // Dropping the socket closes it: for Hang, with no answer.
+                });
+            }
+        });
+        (url, seen)
+    }
+
+    const ALLOW: &str = r#"{"result":{"allow":true}}"#;
+    const DENY: &str = r#"{"result":{"allow":false}}"#;
+
+    async fn ask(replies: Vec<Reply>) -> (Result<bool, String>, usize) {
+        let (url, seen) = stand_in(replies).await;
+        let result = OpaClient::new(url).evaluate("mcp/test", &serde_json::json!({"tool": "x"})).await;
+        (result, seen.load(std::sync::atomic::Ordering::SeqCst))
+    }
+
+    #[tokio::test]
+    async fn test_remote_connection_closed_without_an_answer_is_asked_once_more() {
+        let (result, requests) = ask(vec![Reply::Hang, Reply::Http(200, ALLOW)]).await;
+        assert_eq!(result, Ok(true));
+        assert_eq!(requests, 2);
+    }
+
+    #[tokio::test]
+    async fn test_remote_server_away_is_asked_once_more() {
+        for status in [502, 503, 504] {
+            let (result, requests) = ask(vec![Reply::Http(status, ""), Reply::Http(200, ALLOW)]).await;
+            assert_eq!(result, Ok(true), "after a {}", status);
+            assert_eq!(requests, 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_remote_second_failure_is_the_answer() {
+        let (result, requests) = ask(vec![Reply::Hang]).await;
+        let message = result.unwrap_err();
+        assert!(message.contains("OPA request failed") && message.contains("and again"), "{}", message);
+        assert_eq!(requests, 2);
+
+        let (result, requests) = ask(vec![Reply::Hang, Reply::Http(503, "")]).await;
+        assert!(result.unwrap_err().contains("HTTP 503"));
+        assert_eq!(requests, 2);
+    }
+
+    #[tokio::test]
+    async fn test_remote_decision_is_never_asked_for_twice() {
+        // A denial is an answer. So is an allow, an undefined result, and an
+        // error of OPA's own: none is a reason to ask another replica.
+        let (result, requests) = ask(vec![Reply::Http(200, DENY), Reply::Http(200, ALLOW)]).await;
+        assert_eq!((result, requests), (Ok(false), 1));
+
+        let (result, requests) = ask(vec![Reply::Http(200, ALLOW), Reply::Http(200, DENY)]).await;
+        assert_eq!((result, requests), (Ok(true), 1));
+
+        let (result, requests) = ask(vec![Reply::Http(200, "{}"), Reply::Http(200, ALLOW)]).await;
+        assert_eq!((result, requests), (Ok(false), 1));
+
+        for status in [400, 401, 404, 500] {
+            let (result, requests) = ask(vec![Reply::Http(status, "{}"), Reply::Http(200, ALLOW)]).await;
+            assert!(result.unwrap_err().contains(&format!("HTTP {}", status)));
+            assert_eq!(requests, 1, "after a {}", status);
+        }
+
+        let (result, requests) = ask(vec![Reply::Http(200, "not json"), Reply::Http(200, ALLOW)]).await;
+        assert!(result.unwrap_err().contains("Failed to parse OPA response"));
+        assert_eq!(requests, 1);
+    }
+
+    #[tokio::test]
+    async fn test_remote_nothing_listening_fails_fast_twice() {
+        // A port nothing listens on: refused at once, both times.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        let started = std::time::Instant::now();
+        let result = OpaClient::new(url).evaluate("mcp/test", &serde_json::json!({})).await;
+        assert!(result.unwrap_err().contains("and again"));
+        assert!(started.elapsed() < std::time::Duration::from_secs(3));
     }
 }

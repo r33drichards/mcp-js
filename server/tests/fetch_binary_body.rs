@@ -155,7 +155,7 @@ async fn run_js(engine: &Engine, code: String) -> serde_json::Value {
     let mut args = serde_json::Map::new();
     args.insert("code".into(), serde_json::Value::String(code));
     args.insert("execution_timeout_secs".into(), serde_json::json!(30));
-    server::mcp_dispatch::run_js_blocking(engine, None, &serde_json::Value::Object(args)).await
+    server::mcp_dispatch::run_js_blocking(engine, None, &serde_json::Value::Object(args)).await.json
 }
 
 /// Run an async JS expression and return what it resolved to, by logging the

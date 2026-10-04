@@ -1,0 +1,7 @@
+__pycache__/
+*.egg-info/
+build/
+dist/
+mcp_js/_bindings.py
+mcp_js/*.so
+mcp_js/*.dylib

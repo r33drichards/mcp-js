@@ -20,26 +20,27 @@ pieces one at a time and see why each is needed.
   created in your Modal workspace settings. Modal is a cloud platform — there is
   no offline mode; the calls really hit `api.modal.com`.
 - **A deployed Modal Function to call.** The JS SDK invokes Functions that are
-  *defined in Python* and already deployed — it does not define them. If you
-  don't have one, deploy this minimal example first (with the Python `modal`
-  CLI, `pip install modal && modal setup`):
+  *defined in Python* and already deployed — it does not define them.
 
-  ```python
-  # echo.py
-  import modal
+If you don't have a deployed Function, deploy this minimal example first (with
+the Python `modal` CLI, `pip install modal && modal setup`):
 
-  app = modal.App("my-app")
+```python
+# echo.py
+import modal
 
-  @app.function()
-  def my_fn(name: str) -> str:
-      return f"hello {name}"
-  ```
+app = modal.App("my-app")
 
-  ```bash
-  modal deploy echo.py
-  ```
+@app.function()
+def my_fn(name: str) -> str:
+    return f"hello {name}"
+```
 
-  That publishes Function `my-fn` in app `my-app` — the names Step 3 looks up.
+```bash
+modal deploy echo.py
+```
+
+That publishes Function `my-fn` in app `my-app` — the names Step 3 looks up.
 
 ## Why this needs four things turned on
 

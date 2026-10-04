@@ -8,6 +8,11 @@
       cacert
       openssl
       pkg-config
+      glib
+      ninja
+      patchelf
+      python3
+      curl
       # Provides libstdc++.so.6 needed by ASAN-instrumented fuzz targets
       stdenv.cc.cc.lib
     ];

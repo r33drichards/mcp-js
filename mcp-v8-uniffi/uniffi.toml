@@ -1,0 +1,7 @@
+[bindings.kotlin]
+package_name = "dev.mcpv8"
+cdylib_name = "mcp_v8_uniffi"
+
+[bindings.swift]
+module_name = "McpV8"
+ffi_module_name = "McpV8FFI"

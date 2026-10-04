@@ -112,7 +112,7 @@ async fn run_js(engine: &Engine, code: String) -> Result<String, String> {
 
     for _ in 0..400 {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        if let Ok(info) = engine.get_execution(&exec_id) {
+        if let Ok(info) = engine.get_execution(exec_id.clone()) {
             match info.status.as_str() {
                 "completed" => return Ok(info.result.unwrap_or_default()),
                 "failed" => return Err(info.error.unwrap_or_default()),

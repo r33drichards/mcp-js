@@ -23,7 +23,9 @@ services:
       - ./policies:/policies:ro
 
   mcp-js:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile.source
     environment:
       - JWKS_URL=http://keycloak:8080/realms/mcp/protocol/openid-connect/certs
     command:

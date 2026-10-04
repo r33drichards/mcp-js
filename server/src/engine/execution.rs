@@ -10,6 +10,8 @@ use dashmap::DashMap;
 use deno_core::v8;
 use serde::Serialize;
 
+use super::artifacts::ArtifactMeta;
+
 // ── Types ────────────────────────────────────────────────────────────────
 
 pub type ExecutionId = String;
@@ -48,10 +50,12 @@ pub struct ExecutionRecord {
     pub error: Option<String>,
     pub started_at: String,
     pub completed_at: Option<String>,
+    /// Artifacts emitted by this execution via `artifact(key, mime, bytes)`.
+    pub artifacts: Vec<ArtifactMeta>,
 }
 
 /// Summary returned by `list()`.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, uniffi::Record)]
 pub struct ExecutionSummary {
     #[serde(rename = "execution_id")]
     pub id: ExecutionId,
@@ -61,7 +65,7 @@ pub struct ExecutionSummary {
 }
 
 /// A page of console output, including both line and byte coordinates.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, uniffi::Record)]
 pub struct ConsoleOutputPage {
     pub data: String,
 
@@ -114,10 +118,32 @@ impl ExecutionRegistry {
             error: None,
             started_at: chrono::Utc::now().to_rfc3339(),
             completed_at: None,
+            artifacts: Vec::new(),
         };
         self.executions.insert(id.to_string(), record);
 
         Ok(tree)
+    }
+
+    /// Open the tree of outstanding artifact upload grants.
+    pub fn artifact_uploads_tree(&self) -> Result<sled::Tree, String> {
+        self.db
+            .open_tree("artifact_uploads")
+            .map_err(|e| format!("Failed to open artifact uploads tree: {}", e))
+    }
+
+    /// Open the shared keyed artifact tree (`"artifacts"`) in the execution db.
+    pub fn artifacts_tree(&self) -> Result<sled::Tree, String> {
+        self.db
+            .open_tree("artifacts")
+            .map_err(|e| format!("Failed to open artifacts tree: {}", e))
+    }
+
+    /// Record the artifacts an execution emitted via `artifact()`.
+    pub fn set_artifacts(&self, id: &str, artifacts: Vec<ArtifactMeta>) {
+        if let Some(mut record) = self.executions.get_mut(id) {
+            record.artifacts = artifacts;
+        }
     }
 
     /// Store the V8 isolate handle for cancellation support.
@@ -137,6 +163,9 @@ impl ExecutionRegistry {
     /// Mark execution as completed with its result.
     pub fn complete(&self, id: &str, output: String, heap: Option<String>) {
         if let Some(mut record) = self.executions.get_mut(id) {
+            if !matches!(record.status, ExecutionStatus::Running) {
+                return;
+            }
             record.status = ExecutionStatus::Completed;
             record.result = Some(output);
             record.heap = heap;
@@ -155,6 +184,9 @@ impl ExecutionRegistry {
     /// Mark execution as failed.
     pub fn fail(&self, id: &str, error: String) {
         if let Some(mut record) = self.executions.get_mut(id) {
+            if !matches!(record.status, ExecutionStatus::Running) {
+                return;
+            }
             record.status = ExecutionStatus::Failed;
             record.error = Some(error);
             record.isolate_handle = None;
@@ -165,6 +197,9 @@ impl ExecutionRegistry {
     /// Mark execution as timed out.
     pub fn timed_out(&self, id: &str) {
         if let Some(mut record) = self.executions.get_mut(id) {
+            if !matches!(record.status, ExecutionStatus::Running) {
+                return;
+            }
             record.status = ExecutionStatus::TimedOut;
             record.error = Some("Execution timed out".to_string());
             record.isolate_handle = None;
@@ -195,6 +230,15 @@ impl ExecutionRegistry {
         }
     }
 
+    /// Cancel every currently running execution. Returns the number cancelled.
+    pub fn cancel_all(&self) -> u64 {
+        let running: Vec<ExecutionId> = self.executions.iter()
+            .filter(|entry| matches!(entry.value().status, ExecutionStatus::Running))
+            .map(|entry| entry.key().clone())
+            .collect();
+        running.iter().filter(|id| self.cancel(id).is_ok()).count() as u64
+    }
+
     /// Get execution status and result.
     pub fn get(&self, id: &str) -> Option<ExecutionInfo> {
         self.executions.get(id).map(|r| ExecutionInfo {
@@ -206,6 +250,7 @@ impl ExecutionRegistry {
             error: r.error.clone(),
             started_at: r.started_at.clone(),
             completed_at: r.completed_at.clone(),
+            artifacts: r.artifacts.clone(),
         })
     }
 
@@ -325,7 +370,7 @@ impl ExecutionRegistry {
 }
 
 /// Execution info returned to callers.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, uniffi::Record)]
 pub struct ExecutionInfo {
     pub id: ExecutionId,
     pub status: String,
@@ -336,4 +381,28 @@ pub struct ExecutionInfo {
     pub error: Option<String>,
     pub started_at: String,
     pub completed_at: Option<String>,
+    /// Artifacts emitted by this execution via `artifact(key, mime, bytes)`.
+    pub artifacts: Vec<ArtifactMeta>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ExecutionRegistry;
+
+    #[test]
+    fn cancel_all_only_cancels_running_executions() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = ExecutionRegistry::new(dir.path().to_str().unwrap()).unwrap();
+        registry.register("running").unwrap();
+        registry.register("completed").unwrap();
+        registry.complete("completed", "done".to_string(), None);
+
+        assert_eq!(registry.cancel_all(), 1);
+        assert_eq!(registry.get_status("running").as_deref(), Some("cancelled"));
+        assert_eq!(registry.get_status("completed").as_deref(), Some("completed"));
+        registry.fail("running", "late failure".to_string());
+        registry.complete("running", "late completion".to_string(), None);
+        assert_eq!(registry.get_status("running").as_deref(), Some("cancelled"));
+        assert_eq!(registry.cancel_all(), 0);
+    }
 }
