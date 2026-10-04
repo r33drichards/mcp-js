@@ -14,7 +14,6 @@
 /// official case list. Network-dependent tests are `#[ignore]`d, matching
 /// this repo's convention (see module_imports.rs); run them with
 /// `cargo test --test grpc_interop -- --ignored`.
-
 use std::sync::{Arc, Once};
 
 use bytes::Bytes;
@@ -84,15 +83,21 @@ fn proto_fields<'a>(buf: &'a [u8]) -> Vec<(u64, ProtoValue<'a>)> {
     let mut fields = Vec::new();
     let mut pos = 0;
     while pos < buf.len() {
-        let Some(key) = read_varint(buf, &mut pos) else { break };
+        let Some(key) = read_varint(buf, &mut pos) else {
+            break;
+        };
         let field = key >> 3;
         match key & 0x7 {
             0 => {
-                let Some(v) = read_varint(buf, &mut pos) else { break };
+                let Some(v) = read_varint(buf, &mut pos) else {
+                    break;
+                };
                 fields.push((field, ProtoValue::Varint(v)));
             }
             2 => {
-                let Some(len) = read_varint(buf, &mut pos) else { break };
+                let Some(len) = read_varint(buf, &mut pos) else {
+                    break;
+                };
                 let len = len as usize;
                 if pos + len > buf.len() {
                     break;
@@ -273,9 +278,13 @@ async fn start_test_service() -> String {
 
     tokio::spawn(async move {
         loop {
-            let Ok((tcp, _)) = listener.accept().await else { break };
+            let Ok((tcp, _)) = listener.accept().await else {
+                break;
+            };
             tokio::spawn(async move {
-                let Ok(mut conn) = h2::server::handshake(tcp).await else { return };
+                let Ok(mut conn) = h2::server::handshake(tcp).await else {
+                    return;
+                };
                 while let Some(Ok((request, respond))) = conn.accept().await {
                     tokio::spawn(handle_stream(request, respond));
                 }
@@ -352,7 +361,10 @@ async fn handle_stream(
                 for message in reader.feed(&chunk) {
                     match path.as_str() {
                         "/grpc.testing.TestService/EmptyCall" => {
-                            if send_all_data(&mut send, grpc_frame(&[]), false).await.is_err() {
+                            if send_all_data(&mut send, grpc_frame(&[]), false)
+                                .await
+                                .is_err()
+                            {
                                 return;
                             }
                             let _ = send.send_trailers(trailers(0, "", echo_trailing.as_deref()));
@@ -369,7 +381,10 @@ async fn handle_stream(
                                 return;
                             }
                             let reply = encode_payload_message(1, size);
-                            if send_all_data(&mut send, grpc_frame(&reply), false).await.is_err() {
+                            if send_all_data(&mut send, grpc_frame(&reply), false)
+                                .await
+                                .is_err()
+                            {
                                 return;
                             }
                             let _ = send.send_trailers(trailers(0, "", echo_trailing.as_deref()));
@@ -423,7 +438,10 @@ async fn handle_stream(
             // StreamingInputCallResponse { int32 aggregated_payload_size = 1; }
             let mut reply = Vec::new();
             write_varint_field(&mut reply, 1, input_total as u64);
-            if send_all_data(&mut send, grpc_frame(&reply), false).await.is_err() {
+            if send_all_data(&mut send, grpc_frame(&reply), false)
+                .await
+                .is_err()
+            {
                 return;
             }
             let _ = send.send_trailers(trailers(0, "", echo_trailing.as_deref()));
@@ -455,6 +473,9 @@ fn build_engine(allow_external_modules: bool) -> Engine {
         .with_module_loader_config(ModuleLoaderConfig {
             allow_external: allow_external_modules,
             hooks: None,
+            virtual_modules: None,
+            virtual_commonjs_modules: None,
+            virtual_files: None,
         })
         .with_execution_registry(Arc::new(registry))
 }
@@ -559,7 +580,9 @@ async fn node_compat_shims_smoke() {
     "#
     .to_string();
 
-    run_js(&engine, code).await.expect("node compat shims should work");
+    run_js(&engine, code)
+        .await
+        .expect("node compat shims should work");
 }
 
 // ── The official interop cases with stock @grpc/grpc-js ─────────────────
@@ -921,6 +944,8 @@ async fn grpc_interop_official_cases_with_stock_grpc_js() {
              unimplemented_method, server_streaming, client_streaming, ping_pong, \
              empty_stream, cancel_after_begin, timeout_on_sleeping_server)"
         ),
-        Err(error) => panic!("official interop cases should pass with stock @grpc/grpc-js: {error}"),
+        Err(error) => {
+            panic!("official interop cases should pass with stock @grpc/grpc-js: {error}")
+        }
     }
 }

@@ -3,5 +3,18 @@
     "tag": "v22.14.0",
     "repository": "https://github.com/nodejs/node",
     "vendored_by": "tools/compat/vendor-node-tests.sh"
+  },
+  "deno_node_test": {
+    "repository": "https://github.com/denoland/node_test",
+    "commit": "f287abd897685505b021996828004a917f715a0f",
+    "node_version": "26.5.1",
+    "archive_url": "https://codeload.github.com/denoland/node_test/tar.gz/f287abd897685505b021996828004a917f715a0f",
+    "sha256": "9ad1bdd6b546a8cbb0be30743dae2b20a2215abda8d125418ffa7c3c41104c92"
+  },
+  "citgm": {
+    "repository": "https://github.com/nodejs/citgm",
+    "commit": "09ca92bb5f1ed77e1aec3bed129285c1568797eb",
+    "archive_url": "https://codeload.github.com/nodejs/citgm/tar.gz/09ca92bb5f1ed77e1aec3bed129285c1568797eb",
+    "sha256": "d56c70ea7f4f8f3522c77c7b21788629a1b63c6a220e9108eea6d5c1f7f0b4b1"
   }
 }

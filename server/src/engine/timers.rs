@@ -12,7 +12,7 @@ use deno_error::JsErrorBox;
 /// Async op: sleeps for `delay_ms` milliseconds. Called from JS via
 /// `Deno.core.ops.op_timer_sleep(delay_ms)`.
 /// Returns a Promise that resolves after the delay.
-#[op2(async)]
+#[op2]
 async fn op_timer_sleep(#[number] delay_ms: u64) -> Result<(), JsErrorBox> {
     tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
     Ok(())
@@ -20,10 +20,7 @@ async fn op_timer_sleep(#[number] delay_ms: u64) -> Result<(), JsErrorBox> {
 
 // ── Extension registration ──────────────────────────────────────────────
 
-deno_core::extension!(
-    timers_ext,
-    ops = [op_timer_sleep],
-);
+deno_core::extension!(timers_ext, ops = [op_timer_sleep],);
 
 /// Create the timers extension for use in `RuntimeOptions::extensions`.
 pub fn create_extension() -> deno_core::Extension {
@@ -88,13 +85,19 @@ const TIMERS_JS_WRAPPER: &str = r#"
     };
     Timeout.prototype.hasRef = function hasRef() { return this._timer.refed; };
     Timeout.prototype.refresh = function refresh() { return this; };
+    // Node exposes `_destroyed` on the handle; it flips true once the timer is
+    // cleared/unenrolled. Mirrors the cancelled flag on our internal record.
+    Object.defineProperty(Timeout.prototype, '_destroyed', {
+        get: function () { return this._timer.cancelled; },
+        configurable: true, enumerable: false,
+    });
     Timeout.prototype.valueOf = function valueOf() { return this._id; };
     Timeout.prototype.toString = function toString() { return String(this._id); };
     Timeout.prototype[Symbol.toPrimitive] = function (hint) {
         return hint === 'string' ? String(this._id) : this._id;
     };
 
-    function scheduleTimer(handler, timeout, args, repeat) {
+    function scheduleTimer(handler, timeout, args, repeat, resourceType) {
         var handlerFn, code;
         if (typeof handler === 'function') {
             handlerFn = handler;
@@ -108,7 +111,10 @@ const TIMERS_JS_WRAPPER: &str = r#"
         if (ms < 0) ms = 0;
 
         var id = _nextId++;
-        var timer = { cancelled: false, nesting: _nestingLevel + 1, refed: true, promise: null };
+        var timer = {
+            cancelled: false, nesting: _nestingLevel + 1, refed: true,
+            promise: null, resourceType: resourceType, resourceTracked: true,
+        };
         _active.set(id, timer);
 
         function run(delay) {
@@ -119,6 +125,8 @@ const TIMERS_JS_WRAPPER: &str = r#"
             if (!timer.refed && _unrefOp) _unrefOp(pending);
             pending.then(function () {
                 if (timer.cancelled) return;
+                // Node no longer reports an Immediate once its callback starts.
+                if (!repeat && timer.resourceType === 'Immediate') _active.delete(id);
                 var prevNesting = _nestingLevel;
                 _nestingLevel = timer.nesting;
                 try {
@@ -161,7 +169,7 @@ const TIMERS_JS_WRAPPER: &str = r#"
             throw new TypeError(
                 "Failed to execute 'setTimeout': 1 argument required, but only 0 present.");
         }
-        return scheduleTimer(handler, timeout, Array.prototype.slice.call(arguments, 2), false);
+        return scheduleTimer(handler, timeout, Array.prototype.slice.call(arguments, 2), false, 'Timeout');
     };
 
     globalThis.setInterval = function setInterval(handler, timeout) {
@@ -169,7 +177,7 @@ const TIMERS_JS_WRAPPER: &str = r#"
             throw new TypeError(
                 "Failed to execute 'setInterval': 1 argument required, but only 0 present.");
         }
-        return scheduleTimer(handler, timeout, Array.prototype.slice.call(arguments, 2), true);
+        return scheduleTimer(handler, timeout, Array.prototype.slice.call(arguments, 2), true, 'Timeout');
     };
 
     // The spec gives clearTimeout and clearInterval one shared ID space.
@@ -177,11 +185,30 @@ const TIMERS_JS_WRAPPER: &str = r#"
     globalThis.clearTimeout = function clearTimeout(id) { clearTimer(Number(id) | 0); };
     globalThis.clearInterval = function clearInterval(id) { clearTimer(Number(id) | 0); };
 
+    Object.defineProperty(globalThis, '__mcpV8GetActiveResourcesInfo', {
+        value: function getActiveResourcesInfo() {
+            var resources = [];
+            _active.forEach(function (timer) {
+                if (!timer.cancelled && timer.refed && timer.resourceTracked) {
+                    resources.push(timer.resourceType);
+                }
+            });
+            return resources;
+        },
+        writable: false, enumerable: false, configurable: false,
+    });
+    Object.defineProperty(globalThis, '__mcpV8SetTimerResourceTracked', {
+        value: function setTimerResourceTracked(handle, tracked) {
+            if (handle && handle._timer) handle._timer.resourceTracked = Boolean(tracked);
+        },
+        writable: false, enumerable: false, configurable: false,
+    });
+
     // Node-flavored extras (used by npm packages targeting Node, e.g.
     // @grpc/grpc-js). setImmediate shares the timer ID space; queueMicrotask
     // is only defined when the runtime doesn't already provide it.
     globalThis.setImmediate = function setImmediate(handler) {
-        return scheduleTimer(handler, 0, Array.prototype.slice.call(arguments, 1), false);
+        return scheduleTimer(handler, 0, Array.prototype.slice.call(arguments, 1), false, 'Immediate');
     };
     globalThis.clearImmediate = function clearImmediate(id) { clearTimer(Number(id) | 0); };
     if (typeof globalThis.queueMicrotask !== 'function') {

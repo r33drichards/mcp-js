@@ -4,7 +4,8 @@ on:
   push:
     branches: [ main ]
   pull_request:
-    branches: [ main ]
+    # Also gate pngjs's stacked PR before the Node compatibility branch lands.
+    branches: [ main, claude/branch-status-xnlqaq ]
 
 jobs:
   test:

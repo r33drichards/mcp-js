@@ -255,6 +255,16 @@
     default = null;
     description = "Fixed session id for this process, used when no X-MCP-Session-Id header is available (i.e. the stdio transport). Keys per-session heap+fs state so a process spawned for a given logical session (e.g. one per thread) resumes that session's stateful heap+fs. Over HTTP the header still wins. Config-file key for the `--session-id` flag. Environment variable: `MCP_V8_SESSION_ID`.";
   };
+  skills_dir = lib.mkOption {
+    type = lib.types.nullOr (lib.types.listOf lib.types.str);
+    default = null;
+    description = "Publish Agent Skills from named subfolders containing SKILL.md. Repeat for multiple directories; may be combined with --skills-s3-uri. Loaded at startup; restart to publish edits. Supported on stdio and Streamable HTTP. Config-file key for the `--skills-dir` flag. Environment variable: `MCP_V8_SKILLS_DIR`.";
+  };
+  skills_s3_uri = lib.mkOption {
+    type = lib.types.nullOr (lib.types.listOf lib.types.str);
+    default = null;
+    description = "Publish Agent Skills from an S3 bucket/prefix or a SKILL.md object URI. Repeat for multiple locations; may be combined with --skills-dir. Uses AWS credentials; loaded at startup. Config-file key for the `--skills-s3-uri` flag. Environment variable: `MCP_V8_SKILLS_S3_URI`.";
+  };
   sse_port = lib.mkOption {
     type = lib.types.nullOr lib.types.port;
     default = null;

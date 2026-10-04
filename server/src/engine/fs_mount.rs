@@ -213,6 +213,9 @@ impl SessionMount {
     /// so the symlink survives a `push` and round-trips through the content
     /// store like any other file.
     pub async fn symlink(&mut self, target: &Path, link: &Path) -> anyhow::Result<()> {
+        if self.exists(link).await {
+            anyhow::bail!("EEXIST: {}", link.display());
+        }
         let target_bytes = target.to_string_lossy().into_owned().into_bytes();
         let entry = Entry {
             mode: 0o120777,
