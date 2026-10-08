@@ -66,6 +66,11 @@ jobs:
             ~/.cargo/registry
             target/python-uniffi
           key: python-uniffi-v8-146-shared-v3-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'server/**', 'mcp-v8-uniffi-python/**') }}
+          # Any server or lockfile change misses the exact key; without this
+          # fallback the job rebuilds V8 from source (~80 min) instead of
+          # recompiling only the changed crates on top of a recent cache.
+          restore-keys: |
+            python-uniffi-v8-146-shared-v3-${{ runner.os }}-
       - name: Restore Node generator build cache
         uses: actions/cache@v4
         with:
