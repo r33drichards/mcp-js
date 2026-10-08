@@ -1,0 +1,79 @@
+name: Cut Release
+
+# One-dispatch patch releases: creates the vX.Y.Z tag, publishes the GitHub
+# release (notes now, binaries attached by the release workflow), and
+# dispatches "Release Rust Server" on the new tag.
+#
+# Why the explicit dispatch: a tag created with GITHUB_TOKEN does not fire
+# tag-push triggered workflows (GitHub's anti-recursion rule), but
+# workflow_dispatch is exempt from that rule. The release workflow's own
+# release job runs on any tag ref, and Docker publication chains off its
+# completion as usual. npm publication stays gated on protected tag *pushes*
+# and is intentionally NOT triggered by this path; crates.io publication
+# (push-gated in release.yml) is likewise skipped.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Tag to create, e.g. v0.22.0 (must not already exist)"
+        required: true
+        type: string
+      sha:
+        description: "Commit to tag (default: HEAD of the dispatched ref)"
+        required: false
+        type: string
+      notes:
+        description: "Release notes (Markdown). Empty = auto-generated notes."
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  cut-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] \
+            || { echo "::error::version must look like v1.2.3 or v1.2.3-rc.1, got '$VERSION'"; exit 1; }
+
+      - name: Create tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          SHA: ${{ inputs.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${GITHUB_REPOSITORY}/git/refs" \
+            -f ref="refs/tags/${VERSION}" -f sha="${SHA}"
+
+      - name: Create release with notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          NOTES: ${{ inputs.notes }}
+        run: |
+          set -euo pipefail
+          if [ -n "$NOTES" ]; then
+            gh release create "$VERSION" --repo "$GITHUB_REPOSITORY" \
+              --title "$VERSION" --notes "$NOTES" --verify-tag
+          else
+            gh release create "$VERSION" --repo "$GITHUB_REPOSITORY" \
+              --title "$VERSION" --generate-notes --verify-tag
+          fi
+
+      - name: Dispatch binary release build
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref "$VERSION"
+          echo "Dispatched Release Rust Server on refs/tags/${VERSION}; it will attach binaries to the release."
