@@ -20,7 +20,7 @@
 //! The stub is intentionally not an executable proxy — WASM exports have no
 //! MCP-level schema, so the agent drives them through `run_js`.
 
-use rmcp::model::{CallToolResult, Content, Tool};
+use rmcp::model::{CallToolResult, ContentBlock, Tool};
 use serde_json::json;
 use std::sync::Arc;
 
@@ -276,7 +276,7 @@ pub fn stub_call_response(
     }
     let module_name = parse_wasm_stub_tool_name(&config.prefix, name)?;
     let module = modules.iter().find(|m| m.name == module_name)?;
-    Some(CallToolResult::success(vec![Content::text(
+    Some(CallToolResult::success(vec![ContentBlock::text(
         wasm_stub_instructions(module, arguments),
     )]))
 }

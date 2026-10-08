@@ -307,10 +307,12 @@ impl SkillCatalog {
             .values()
             .map(|skill| {
                 let mut resource =
-                    RawResource::new(&skill.uri, skill.frontmatter["name"].as_str().unwrap());
-                resource.description = skill.frontmatter["description"].as_str().map(str::to_owned);
-                resource.mime_type = Some("text/markdown".into());
-                resource.no_annotation()
+                    Resource::new(&skill.uri, skill.frontmatter["name"].as_str().unwrap())
+                        .with_mime_type("text/markdown");
+                if let Some(description) = skill.frontmatter["description"].as_str() {
+                    resource = resource.with_description(description);
+                }
+                resource
             })
             .collect()
     }

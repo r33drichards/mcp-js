@@ -1,10 +1,10 @@
 //! Legacy HTTP+SSE transport handler.
 //!
-//! rmcp 1.x dropped the standalone HTTP+SSE server transport (GET /sse + POST
-//! /message), so to keep `--sse-port` working this module is served by the
-//! vendored rmcp 0.1.5 SSE server (`rmcp_legacy`). It is a hand-written 0.1.5
-//! `ServerHandler` (no tool macros — the renamed crate's macros would emit
-//! `::rmcp::` paths that resolve to the 1.x crate) that delegates tool calls to
+//! rmcp dropped the standalone HTTP+SSE server transport (GET /sse + POST
+//! /message) after 0.1.x, so to keep `--sse-port` working this module is served
+//! by the vendored rmcp 0.1.5 SSE server (`rmcp_legacy`). It is a hand-written
+//! 0.1.5 `ServerHandler` (no tool macros — the renamed crate's macros would emit
+//! `::rmcp::` paths that resolve to the primary crate) that delegates tool calls to
 //! the shared, transport-agnostic `Engine`. The tool list mirrors the
 //! primary handler's core surface (converted to 0.1.5 `Tool`s).
 //!
@@ -51,7 +51,7 @@ impl SseService {
     }
 }
 
-/// Convert a primary (rmcp 1.x) tool descriptor to a legacy (0.1.5) one. The
+/// Convert a primary rmcp tool descriptor to a legacy (0.1.5) one. The
 /// input schema is a plain `serde_json::Map` in both, so it transfers directly.
 fn to_legacy_tool(tool: &rmcp::model::Tool) -> Tool {
     Tool {

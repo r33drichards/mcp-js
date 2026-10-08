@@ -26,10 +26,6 @@ path = ".."
 git = "https://github.com/r33drichards/deno_core"
 rev = "4a09194d0fb8dbe062fe066d82d7ad6bcaa4f39a"
 
-# Override rmcp to use the same git source as the server crate
-[patch.crates-io]
-rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", rev = "787cc015b719773f66d4ac32e695b9a0079e12ef" }
-
 # Prevent this from interfering with workspaces
 [workspace]
 members = ["."]

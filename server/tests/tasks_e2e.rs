@@ -1,17 +1,21 @@
-//! End-to-end tests for native MCP **tasks** support (rmcp 1.x, SEP-1319) over
-//! the Streamable HTTP transport.
+//! End-to-end tests for native MCP **tasks** support (SEP-2663, the
+//! `io.modelcontextprotocol/tasks` extension) over the Streamable HTTP
+//! transport.
 //!
 //! These spawn the real server binary with `--http-port` (stateless mode) and
 //! drive the `/mcp` endpoint with raw JSON-RPC, exercising the native task
-//! flow: capability advertisement on `initialize`, a task-augmented `run_js`
-//! `tools/call` (which returns a `CreateTaskResult`), and
-//! `tasks/get` / `tasks/result` / `tasks/list` / `tasks/cancel`.
+//! flow: extension advertisement on `initialize`, task execution of `run_js`
+//! for clients that declare the extension (`tools/call` returns a
+//! `CreateTaskResult`), and `tasks/get` / `tasks/cancel`.
 
 use reqwest::Client;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::process::Stdio;
 use tokio::process::Command;
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
+
+/// Extension id clients and servers declare for SEP-2663 tasks.
+const TASKS_EXTENSION_ID: &str = "io.modelcontextprotocol/tasks";
 
 // ── Server harness ─────────────────────────────────────────────────────────
 
@@ -41,7 +45,10 @@ impl HttpServer {
                 .await
                 .is_ok()
             {
-                return Ok(Self { child: Some(child), base_url });
+                return Ok(Self {
+                    child: Some(child),
+                    base_url,
+                });
             }
             sleep(Duration::from_millis(100)).await;
         }
@@ -103,8 +110,14 @@ fn parse_rpc(body: &str) -> Value {
     }
 }
 
-/// Initialize an MCP session; return (session_id, initialize_result_json).
-async fn initialize(client: &Client, url: &str) -> (String, Value) {
+/// Client capabilities declaring the SEP-2663 tasks extension.
+fn tasks_capabilities() -> Value {
+    json!({ "extensions": { TASKS_EXTENSION_ID: {} } })
+}
+
+/// Initialize an MCP session with the given client capabilities; return
+/// (session_id, initialize_result_json).
+async fn initialize_with(client: &Client, url: &str, capabilities: Value) -> (String, Value) {
     let resp = client
         .post(url)
         .header("Accept", ACCEPT)
@@ -114,14 +127,18 @@ async fn initialize(client: &Client, url: &str) -> (String, Value) {
             "method": "initialize",
             "params": {
                 "protocolVersion": "2025-06-18",
-                "capabilities": {},
+                "capabilities": capabilities,
                 "clientInfo": { "name": "tasks-e2e", "version": "1.0.0" }
             }
         }))
         .send()
         .await
         .expect("initialize request");
-    assert!(resp.status().is_success(), "initialize status: {}", resp.status());
+    assert!(
+        resp.status().is_success(),
+        "initialize status: {}",
+        resp.status()
+    );
     let session_id = resp
         .headers()
         .get("mcp-session-id")
@@ -160,32 +177,53 @@ async fn rpc(client: &Client, url: &str, session: &str, message: Value) -> Value
     parse_rpc(&body)
 }
 
+/// Poll `tasks/get` until the task reaches a terminal status; return the final
+/// `tasks/get` response.
+async fn poll_until_terminal(client: &Client, url: &str, session: &str, task_id: &str) -> Value {
+    for _ in 0..200 {
+        let got = rpc(
+            client,
+            url,
+            session,
+            json!({ "jsonrpc": "2.0", "id": 4, "method": "tasks/get",
+                    "params": { "taskId": task_id } }),
+        )
+        .await;
+        let status = got["result"]["status"].as_str().unwrap_or("");
+        if matches!(status, "completed" | "failed" | "cancelled") {
+            return got;
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    panic!("task {task_id} did not reach a terminal status within 10s");
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────
 
-/// `initialize` advertises the `tasks` server capability.
+/// `initialize` advertises the tasks extension in `capabilities.extensions`.
 #[tokio::test]
 async fn advertises_tasks_capability() {
     let mut server = HttpServer::start().await.expect("server start");
     let c = client();
 
-    let (_session, init) = initialize(&c, &server.mcp_url()).await;
+    let (_session, init) = initialize_with(&c, &server.mcp_url(), tasks_capabilities()).await;
     assert!(
-        !init["result"]["capabilities"]["tasks"].is_null(),
-        "capabilities.tasks should be advertised: {init}"
+        init["result"]["capabilities"]["extensions"][TASKS_EXTENSION_ID].is_object(),
+        "capabilities.extensions should advertise {TASKS_EXTENSION_ID}: {init}"
     );
 
     server.stop().await;
 }
 
-/// Full happy path: a task-augmented run_js returns a working task that
-/// progresses to completion; `tasks/result` yields the output and `tasks/list`
-/// includes the task.
+/// Full happy path: for a tasks-capable client, run_js returns a
+/// `CreateTaskResult` that progresses to completion; the completed `tasks/get`
+/// carries the tool result inline.
 #[tokio::test]
-async fn task_augmented_call_completes_and_returns_result() {
+async fn task_call_completes_and_returns_result() {
     let mut server = HttpServer::start().await.expect("server start");
     let c = client();
     let url = server.mcp_url();
-    let (session, _) = initialize(&c, &url).await;
+    let (session, _) = initialize_with(&c, &url, tasks_capabilities()).await;
 
     let create = rpc(
         &c,
@@ -197,75 +235,47 @@ async fn task_augmented_call_completes_and_returns_result() {
             "method": "tools/call",
             "params": {
                 "name": "run_js",
-                "arguments": { "code": "console.log(6 * 7)" },
-                "task": {}
+                "arguments": { "code": "console.log(6 * 7)" }
             }
         }),
     )
     .await;
 
-    let task = &create["result"]["task"];
-    assert!(task.is_object(), "expected result.task (CreateTaskResult), got {create}");
-    let task_id = task["taskId"].as_str().expect("taskId").to_string();
+    // CreateTaskResult: resultType "task" with the seed Task flattened in.
+    assert_eq!(
+        create["result"]["resultType"], "task",
+        "expected a CreateTaskResult, got {create}"
+    );
+    let task_id = create["result"]["taskId"]
+        .as_str()
+        .expect("taskId")
+        .to_string();
+    assert_eq!(create["result"]["status"], "working", "seed status: {create}");
 
-    // tasks/list includes the freshly-created task (checked before tasks/result,
-    // which retrieves and consumes the task's payload).
-    let list = rpc(
-        &c,
-        &url,
-        &session,
-        json!({ "jsonrpc": "2.0", "id": 3, "method": "tasks/list" }),
-    )
-    .await;
-    let listed = list["result"]["tasks"]
-        .as_array()
-        .map(|arr| arr.iter().any(|t| t["taskId"] == task_id.as_str()))
-        .unwrap_or(false);
-    assert!(listed, "tasks/list should include the task: {list}");
+    let done = poll_until_terminal(&c, &url, &session, &task_id).await;
+    assert_eq!(
+        done["result"]["status"], "completed",
+        "task should complete: {done}"
+    );
 
-    // Poll tasks/get until terminal.
-    let mut final_status = String::new();
-    for _ in 0..200 {
-        let got = rpc(
-            &c,
-            &url,
-            &session,
-            json!({ "jsonrpc": "2.0", "id": 4, "method": "tasks/get",
-                    "params": { "taskId": task_id } }),
-        )
-        .await;
-        let status = got["result"]["status"].as_str().unwrap_or("").to_string();
-        if matches!(status.as_str(), "completed" | "failed" | "cancelled") {
-            final_status = status;
-            break;
-        }
-        sleep(Duration::from_millis(50)).await;
-    }
-    assert_eq!(final_status, "completed", "task should complete");
-
-    // tasks/result returns the run_js tool result (output contains 42).
-    let result = rpc(
-        &c,
-        &url,
-        &session,
-        json!({ "jsonrpc": "2.0", "id": 5, "method": "tasks/result",
-                "params": { "taskId": task_id } }),
-    )
-    .await;
-    let text = serde_json::to_string(&result).unwrap_or_default();
-    assert!(text.contains("42"), "tasks/result should carry run_js output 42: {result}");
+    // The completed task carries the run_js tool result inline (output 42).
+    let text = serde_json::to_string(&done["result"]["result"]).unwrap_or_default();
+    assert!(
+        text.contains("42"),
+        "completed tasks/get should carry run_js output 42: {done}"
+    );
 
     server.stop().await;
 }
 
-/// A normal (non-augmented) run_js call still returns its result directly and
-/// does not create a task.
+/// A client that does not declare the tasks extension gets a synchronous
+/// result and no task.
 #[tokio::test]
 async fn plain_tool_call_creates_no_task() {
     let mut server = HttpServer::start().await.expect("server start");
     let c = client();
     let url = server.mcp_url();
-    let (session, _) = initialize(&c, &url).await;
+    let (session, _) = initialize_with(&c, &url, json!({})).await;
 
     let resp = rpc(
         &c,
@@ -280,21 +290,18 @@ async fn plain_tool_call_creates_no_task() {
     )
     .await;
     // A normal call returns a CallToolResult (content), not a CreateTaskResult.
-    assert!(resp["result"]["task"].is_null(), "plain call must not be a task: {resp}");
+    assert_ne!(
+        resp["result"]["resultType"], "task",
+        "plain call must not be a task: {resp}"
+    );
+    assert!(
+        resp["result"]["taskId"].is_null(),
+        "plain call must not create a task: {resp}"
+    );
     let text = serde_json::to_string(&resp).unwrap_or_default();
-    assert!(text.contains("123"), "plain call should return output 123: {resp}");
-
-    let list = rpc(
-        &c,
-        &url,
-        &session,
-        json!({ "jsonrpc": "2.0", "id": 3, "method": "tasks/list" }),
-    )
-    .await;
-    assert_eq!(
-        list["result"]["tasks"].as_array().map(Vec::len),
-        Some(0),
-        "no tasks should have been created: {list}"
+    assert!(
+        text.contains("123"),
+        "plain call should return output 123: {resp}"
     );
 
     server.stop().await;
@@ -306,7 +313,7 @@ async fn cancel_transitions_task_to_cancelled() {
     let mut server = HttpServer::start().await.expect("server start");
     let c = client();
     let url = server.mcp_url();
-    let (session, _) = initialize(&c, &url).await;
+    let (session, _) = initialize_with(&c, &url, tasks_capabilities()).await;
 
     let create = rpc(
         &c,
@@ -318,13 +325,12 @@ async fn cancel_transitions_task_to_cancelled() {
             "method": "tools/call",
             "params": {
                 "name": "run_js",
-                "arguments": { "code": "while (true) {}", "execution_timeout_secs": 5 },
-                "task": {}
+                "arguments": { "code": "while (true) {}", "execution_timeout_secs": 5 }
             }
         }),
     )
     .await;
-    let task_id = create["result"]["task"]["taskId"]
+    let task_id = create["result"]["taskId"]
         .as_str()
         .expect("taskId")
         .to_string();
@@ -337,8 +343,17 @@ async fn cancel_transitions_task_to_cancelled() {
                 "params": { "taskId": task_id } }),
     )
     .await;
-    // CancelTaskResult carries the (now cancelled) task state.
-    assert_eq!(cancel["result"]["status"], "cancelled", "cancel result: {cancel}");
+    assert!(
+        cancel["error"].is_null(),
+        "tasks/cancel should succeed: {cancel}"
+    );
+
+    // Cancellation is cooperative: the task settles as cancelled.
+    let done = poll_until_terminal(&c, &url, &session, &task_id).await;
+    assert_eq!(
+        done["result"]["status"], "cancelled",
+        "task should settle as cancelled: {done}"
+    );
 
     server.stop().await;
 }

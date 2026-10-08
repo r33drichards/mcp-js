@@ -4,7 +4,7 @@ An explanation of how mcp-v8 resolves and fetches ES modules, why external impor
 
 ## Why imports are disabled by default
 
-Every ES module import is a network request to an external host. In the context of an AI-agent workload, code is generated dynamically — the server operator may not know in advance what packages an agent will try to import. Allowing unrestricted network fetches at import time creates two related problems:
+External ES modules can require network requests to external hosts. Embedded `node:` modules are supplied by the runtime. In the context of an AI-agent workload, code is generated dynamically — the server operator may not know in advance what packages an agent will try to import. Allowing unrestricted network fetches at import time creates two related problems:
 
 - **Data exfiltration**: a crafted `import` URL can be used to send data to an attacker-controlled host via the URL itself or the HTTP headers of the request.
 - **Supply-chain compromise**: a typosquatted or malicious package fetched live can execute arbitrary code inside the V8 isolate.
@@ -13,22 +13,23 @@ Setting `allow_external` to `false` by default means the server is safe out of t
 
 ## Specifier resolution
 
-The module loader handles four specifier forms, checked in order during the `resolve` phase:
+The module loader resolves these public specifier forms:
 
 | Specifier form | `allow_external` gate | Resolves to |
 |---|---|---|
 | `npm:<rest>` | yes — blocked if disabled | `https://esm.sh/<rest>` |
 | `jsr:<rest>` | yes — blocked if disabled | `https://esm.sh/jsr/<rest>` |
 | `https://…` or `http://…` | yes — blocked if disabled | URL as-is |
-| Relative (`./foo.js`) | no gate applied | resolved against referrer URL |
+| Relative (`./foo.js`) | checked when an HTTP/HTTPS module is loaded | resolved against referrer URL |
+| `node:<name>` | no external gate | supported embedded Node builtin |
 
-`npm:` and `jsr:` specifiers are a developer-convenience layer: they are translated to `https://esm.sh/…` before any network activity occurs. The `esm.sh` CDN serves ES-module-compatible builds of npm and JSR packages. This means that at the policy and network level, all external imports ultimately appear as `https://esm.sh/…` URLs, regardless of the specifier form used in source code.
+`npm:` and `jsr:` specifiers are a developer-convenience layer: they are translated to `https://esm.sh/…` before any network activity occurs. The `esm.sh` CDN serves ES-module-compatible builds of npm and JSR packages. Package specifiers appear to the module policy as `https://esm.sh/…` URLs. Explicit HTTP/HTTPS URLs retain their original host.
 
-Relative specifiers are resolved using standard URL-relative resolution (`resolve_import` from `deno_core`) against the URL of the importing module. They do not trigger the `allow_external` gate and are not subject to policy evaluation; they are resolved and fetched as part of the same HTTP module graph.
+Relative specifiers are resolved using standard URL-relative resolution (`resolve_import` from `deno_core`) against the URL of the importing module. Resolution itself does not apply the external gate. Loading the resolved HTTP/HTTPS URL checks `allow_external` and the module hook/policy chain, including dependencies in the same module graph.
 
 ## Module loading and fetch
 
-After resolution, the loader's `load` phase fetches the module source over HTTP. Only `https` and `http` schemes are supported; attempts to load from any other scheme (e.g. `file://`) are rejected with a synchronous error.
+After resolution, the loader's `load` phase fetches the module source over HTTP. External network loading supports `https` and `http`. Supported `node:` builtins are loaded from embedded source; `file://` imports are rejected.
 
 Fetch parameters are fixed:
 
@@ -59,6 +60,14 @@ sequenceDiagram
     end
 ```
 
+## Node builtins used by npm packages
+
+esm.sh can rewrite a package's Node builtin imports to URLs such as `https://esm.sh/node/stream.mjs`. For supported builtins, mcp-v8 serves a small module at that URL which re-exports its embedded `node:stream` implementation. This keeps builtin dependencies in the same runtime as direct `node:` imports.
+
+The bridge applies only to canonical HTTPS `esm.sh/node/<supported-name>.mjs` URLs, without credentials, a non-default port, a query, or a fragment. The external-import gate and module hook/policy checks run before the bridge is used. Unsupported URLs follow normal network loading.
+
+This enables packages such as `npm:pngjs@7.0.0` to use the embedded stream and zlib implementations. Node compatibility remains partial: importing a package successfully does not establish that all of its APIs work. See the [compatibility reference](../reference/compatibility.md) for supported surfaces and the [import how-to](../how-to/module-imports.md) for a PNG example.
+
 ## Policy gating
 
 When a `modules` policy chain is configured, it is evaluated inside the `load` phase, after `allow_external` has already been confirmed but before the HTTP request is sent. This means:
@@ -87,7 +96,7 @@ The policy receives an `input` document with the following shape:
 - `"jsr"` — resolved URL contains `esm.sh/jsr/`
 - `"url"` — any other HTTP/HTTPS URL
 
-The policy entrypoint is `data.mcp.modules.allow`. A `false` or undefined result blocks the fetch; the execution receives a `Module import denied by policy` error.
+The policy entrypoint is `data.mcp.modules.allow`. A `false` or undefined result blocks loading; the execution receives a module import denial error.
 
 ## Supply-chain risk considerations
 
