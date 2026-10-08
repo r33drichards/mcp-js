@@ -26,7 +26,7 @@ use deno_error::JsErrorBox;
 use serde::{Deserialize, Serialize};
 
 use rmcp::RoleClient;
-use rmcp::model::{CallToolRequestParams, CallToolResult, Content, Tool};
+use rmcp::model::{CallToolRequestParams, CallToolResult, ContentBlock, Tool};
 use rmcp::service::Peer;
 
 // ── Configuration ────────────────────────────────────────────────────────
@@ -438,7 +438,7 @@ impl McpClientManager {
         if !tools.iter().any(|t| t.name.as_ref() == tool) {
             return None;
         }
-        Some(CallToolResult::success(vec![Content::text(
+        Some(CallToolResult::success(vec![ContentBlock::text(
             stub_call_instructions(&server, &tool, arguments),
         )]))
     }
@@ -474,8 +474,7 @@ impl McpClientManager {
         // (safe to poll from any runtime) — mirrors S3HeapStorage::*_blocking.
         let call = async move {
             let make_req = || {
-                let mut req = CallToolRequestParams::default();
-                req.name = tool_name.clone().into();
+                let mut req = CallToolRequestParams::new(tool_name.clone());
                 req.arguments = arguments.clone();
                 req
             };
