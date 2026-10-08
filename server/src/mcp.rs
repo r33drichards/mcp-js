@@ -188,10 +188,20 @@ fn tool_result(response: crate::mcp_dispatch::ToolResponse) -> Result<CallToolRe
     Ok(CallToolResult::success(contents))
 }
 
+/// Retention bound for `run_js` tasks on the shared `TaskManager`: a task
+/// (and its held result) is discarded this long after creation, so results
+/// cannot accumulate in the long-lived manager. rmcp sweeps expired entries
+/// on every task-store access.
+const RUN_JS_TASK_TTL_MS: u64 = 300_000;
+
+/// Suggested `tasks/get` polling interval advertised to clients.
+const RUN_JS_TASK_POLL_INTERVAL_MS: u64 = 1_000;
+
 /// Execute a `run_js` call as an SEP-2663 task on the shared `TaskManager`,
 /// returning the seed task state for a `CreateTaskResult`. Cancellation is
 /// cooperative: `tasks/cancel` settles the task as `cancelled`, while the
-/// underlying V8 execution stays bounded by the engine's execution timeout.
+/// underlying V8 execution stays bounded by the engine's execution timeout
+/// and its `--max-concurrent-executions` semaphore.
 fn spawn_run_js_task(
     tasks: &TaskManager,
     runtime: Arc<Engine>,
@@ -199,7 +209,10 @@ fn spawn_run_js_task(
     session_id: Option<String>,
     mcp_headers: Option<McpRequestHeaders>,
 ) -> Task {
-    tasks.spawn(TaskOptions::default(), move |ctx| {
+    let options = TaskOptions::new()
+        .with_ttl_ms(RUN_JS_TASK_TTL_MS)
+        .with_poll_interval_ms(RUN_JS_TASK_POLL_INTERVAL_MS);
+    tasks.spawn(options, move |ctx| {
         Box::pin(async move {
             let invoke = async {
                 runtime
@@ -1133,7 +1146,15 @@ pub(crate) async fn capture_mcp_headers(
     };
     let request_headers = &http_request_part.headers;
     let request_uri = &http_request_part.uri;
-    tracing::debug!(?request_headers, %request_uri, "capturing MCP request headers");
+    // Log header NAMES only: values can carry credentials (Authorization,
+    // Cookie, agent-session), which must not reach logs at any level.
+    let request_header_names: Vec<&str> =
+        request_headers.keys().map(|name| name.as_str()).collect();
+    tracing::debug!(
+        ?request_header_names,
+        %request_uri,
+        "capturing MCP request headers"
+    );
 
     if let Some(verifier) = verifier {
         let token = http_request_part

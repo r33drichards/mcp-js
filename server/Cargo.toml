@@ -110,6 +110,10 @@ urlpattern = "0.6.0"
 nono = { version = "0.53", default-features = false }
 
 [dev-dependencies]
+# Mints HS256 test tokens for the JWKS auth e2e test (same versions as the
+# main dependencies used by the verifier).
+jsonwebtoken = "9"
+base64 = "0.22"
 deno_ast = { version = "0.52", features = ["cjs"] }
 merve = "1.2.2"
 tower = { version = "0.5", features = ["util"] }
