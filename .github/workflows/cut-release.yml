@@ -1,16 +1,28 @@
 name: Cut Release
 
-# One-dispatch patch releases: creates the vX.Y.Z tag, publishes the GitHub
+# One-step patch releases: creates the vX.Y.Z tag, publishes the GitHub
 # release (notes now, binaries attached by the release workflow), and
 # dispatches "Release Rust Server" on the new tag.
 #
+# Two ways to cut a release:
+#   1. workflow_dispatch with a `version` input (and optional sha/notes).
+#   2. Push a branch named `cut-release/vX.Y.Z` (e.g. at main's HEAD).
+#      The version comes from the branch name, the tagged commit is the
+#      branch tip, and the trigger branch is deleted afterwards. This path
+#      exists for automation whose credentials can push branches but can
+#      neither push tags nor dispatch workflows.
+#
+# Release notes resolution order: the `notes` input, else the file
+# `.github/release-notes/<version>.md` at the tagged commit, else
+# GitHub-generated notes.
+#
 # Why the explicit dispatch: a tag created with GITHUB_TOKEN does not fire
 # tag-push triggered workflows (GitHub's anti-recursion rule), but
-# workflow_dispatch is exempt from that rule. The release workflow's own
-# release job runs on any tag ref, and Docker publication chains off its
-# completion as usual. npm publication stays gated on protected tag *pushes*
-# and is intentionally NOT triggered by this path; crates.io publication
-# (push-gated in release.yml) is likewise skipped.
+# workflow_dispatch is exempt. The release workflow's release job runs on
+# any tag ref, and Docker publication chains off its completion as usual.
+# npm publication stays gated on protected tag *pushes* and is intentionally
+# NOT triggered by this path; crates.io publication (push-gated in
+# release.yml) is likewise skipped.
 
 on:
   workflow_dispatch:
@@ -24,9 +36,12 @@ on:
         required: false
         type: string
       notes:
-        description: "Release notes (Markdown). Empty = auto-generated notes."
+        description: "Release notes (Markdown). Empty = notes file or auto-generated."
         required: false
         type: string
+  push:
+    branches:
+      - "cut-release/v*"
 
 permissions:
   contents: write
@@ -36,19 +51,35 @@ jobs:
   cut-release:
     runs-on: ubuntu-latest
     steps:
-      - name: Validate version
+      - name: Resolve version and commit
         env:
-          VERSION: ${{ inputs.version }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          EVENT_SHA: ${{ github.sha }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_SHA: ${{ inputs.sha }}
         run: |
           set -euo pipefail
+          if [ "$EVENT_NAME" = "push" ]; then
+            VERSION="${REF_NAME#cut-release/}"
+            SHA="$EVENT_SHA"
+          else
+            VERSION="$INPUT_VERSION"
+            SHA="${INPUT_SHA:-$EVENT_SHA}"
+          fi
           [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] \
             || { echo "::error::version must look like v1.2.3 or v1.2.3-rc.1, got '$VERSION'"; exit 1; }
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "SHA=$SHA" >> "$GITHUB_ENV"
+
+      - name: Checkout tagged commit (for the notes file)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SHA }}
 
       - name: Create tag
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ inputs.version }}
-          SHA: ${{ inputs.sha || github.sha }}
         run: |
           set -euo pipefail
           gh api "repos/${GITHUB_REPOSITORY}/git/refs" \
@@ -57,13 +88,16 @@ jobs:
       - name: Create release with notes
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ inputs.version }}
           NOTES: ${{ inputs.notes }}
         run: |
           set -euo pipefail
+          NOTES_FILE=".github/release-notes/${VERSION}.md"
           if [ -n "$NOTES" ]; then
             gh release create "$VERSION" --repo "$GITHUB_REPOSITORY" \
               --title "$VERSION" --notes "$NOTES" --verify-tag
+          elif [ -f "$NOTES_FILE" ]; then
+            gh release create "$VERSION" --repo "$GITHUB_REPOSITORY" \
+              --title "$VERSION" --notes-file "$NOTES_FILE" --verify-tag
           else
             gh release create "$VERSION" --repo "$GITHUB_REPOSITORY" \
               --title "$VERSION" --generate-notes --verify-tag
@@ -72,8 +106,17 @@ jobs:
       - name: Dispatch binary release build
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
           gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref "$VERSION"
           echo "Dispatched Release Rust Server on refs/tags/${VERSION}; it will attach binaries to the release."
+
+      - name: Delete trigger branch
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          gh api -X DELETE "repos/${GITHUB_REPOSITORY}/git/refs/heads/${REF_NAME}" \
+            || echo "::warning::could not delete branch ${REF_NAME}; remove it manually"
