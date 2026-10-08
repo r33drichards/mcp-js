@@ -1,6 +1,6 @@
 //! Transport-agnostic MCP tool dispatch.
 //!
-//! Both the primary rmcp 1.x handler (`mcp.rs`, Streamable HTTP + stdio + native
+//! Both the primary rmcp handler (`mcp.rs`, Streamable HTTP + stdio + native
 //! tasks) and the legacy SSE handler (`mcp_sse.rs`, backed by the vendored rmcp
 //! 0.1.5 SSE server transport) route tool calls through here, so the actual
 //! tool logic lives in exactly one place regardless of which rmcp version

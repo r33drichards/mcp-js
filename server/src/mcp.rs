@@ -4,15 +4,13 @@ use rmcp::{
     model::*,
     schemars,
     service::RequestContext,
-    task_handler,
-    task_manager::OperationProcessor,
+    task_manager::{TaskExit, TaskManager, TaskOptions},
     tool, tool_router,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
-use tokio::sync::Mutex;
 
 use crate::engine::{Engine, McpRequestHeaders, ToolCallRequest};
 use crate::session::SessionVerifier;
@@ -92,38 +90,24 @@ pub fn mode_tool_list(engine: &Engine) -> Vec<Tool> {
 /// Build the list of static documentation resources exposed via MCP.
 fn doc_resources(_heap: bool, _fs: bool) -> Vec<Resource> {
     vec![
-        Annotated::new(
-            RawResource::new("docs://readme", "README")
-                .with_description(
-                    "Full mcp-v8 README with usage, CLI flags, and examples (Markdown)",
-                )
-                .with_mime_type("text/markdown")
-                .with_size(README_MD.len() as u32),
-            None,
-        ),
-        Annotated::new(
-            RawResource::new("docs://llms-txt", "llms.txt")
-                .with_description(
-                    "Machine-readable agent guide: connection options, tools, REST API (Markdown)",
-                )
-                .with_mime_type("text/markdown")
-                .with_size(LLMS_TXT.len() as u32),
-            None,
-        ),
-        Annotated::new(
-            RawResource::new("docs://openapi", "OpenAPI spec")
-                .with_description(
-                    "OpenAPI 3.0 JSON spec for the REST API (/api/exec, /api/executions/*, etc.)",
-                )
-                .with_mime_type("application/json"),
-            None,
-        ),
-        Annotated::new(
-            RawResource::new("docs://tools", "MCP tool list")
-                .with_description("JSON list of available MCP tools with descriptions, mode-aware")
-                .with_mime_type("application/json"),
-            None,
-        ),
+        Resource::new("docs://readme", "README")
+            .with_description("Full mcp-v8 README with usage, CLI flags, and examples (Markdown)")
+            .with_mime_type("text/markdown")
+            .with_size(README_MD.len() as u64),
+        Resource::new("docs://llms-txt", "llms.txt")
+            .with_description(
+                "Machine-readable agent guide: connection options, tools, REST API (Markdown)",
+            )
+            .with_mime_type("text/markdown")
+            .with_size(LLMS_TXT.len() as u64),
+        Resource::new("docs://openapi", "OpenAPI spec")
+            .with_description(
+                "OpenAPI 3.0 JSON spec for the REST API (/api/exec, /api/executions/*, etc.)",
+            )
+            .with_mime_type("application/json"),
+        Resource::new("docs://tools", "MCP tool list")
+            .with_description("JSON list of available MCP tools with descriptions, mode-aware")
+            .with_mime_type("application/json"),
     ]
 }
 
@@ -178,36 +162,82 @@ async fn invoke_runtime_tool(
 /// Map a rendered artifact payload to the matching rmcp content block:
 /// image/* → `ImageContent`, audio/* → `AudioContent` (the MCP-spec blocks
 /// for returning media to the model), everything else → `TextContent`.
-fn artifact_block(artifact: crate::engine::artifacts::ArtifactContent) -> Content {
+fn artifact_block(artifact: crate::engine::artifacts::ArtifactContent) -> ContentBlock {
     use crate::engine::artifacts::ArtifactContent as AC;
     match artifact {
         AC::Image {
             data_base64,
             mime_type,
-        } => Content::image(data_base64, mime_type),
+        } => ContentBlock::image(data_base64, mime_type),
         AC::Audio {
             data_base64,
             mime_type,
-        } => Annotated::new(
-            RawContent::Audio(RawAudioContent {
-                data: data_base64,
-                mime_type,
-            }),
-            None,
-        ),
-        AC::Text(text) | AC::Base64(text) => Content::text(text),
+        } => ContentBlock::audio(data_base64, mime_type),
+        AC::Text(text) | AC::Base64(text) => ContentBlock::text(text),
     }
 }
 
 /// Wrap a dispatch `ToolResponse` as a successful `CallToolResult`: the JSON
 /// body first, then one content block per rendered artifact.
 fn tool_result(response: crate::mcp_dispatch::ToolResponse) -> Result<CallToolResult, McpError> {
-    let mut contents = vec![match Content::json(response.json) {
+    let mut contents = vec![match ContentBlock::json(response.json) {
         Ok(content) => content,
-        Err(e) => Content::text(format!("Failed to serialize response: {e}")),
+        Err(e) => ContentBlock::text(format!("Failed to serialize response: {e}")),
     }];
     contents.extend(response.artifacts.into_iter().map(artifact_block));
     Ok(CallToolResult::success(contents))
+}
+
+/// Retention bound for `run_js` tasks on the shared `TaskManager`: a task
+/// (and its held result) is discarded this long after creation, so results
+/// cannot accumulate in the long-lived manager. rmcp sweeps expired entries
+/// on every task-store access.
+const RUN_JS_TASK_TTL_MS: u64 = 300_000;
+
+/// Suggested `tasks/get` polling interval advertised to clients.
+const RUN_JS_TASK_POLL_INTERVAL_MS: u64 = 1_000;
+
+/// Execute a `run_js` call as an SEP-2663 task on the shared `TaskManager`,
+/// returning the seed task state for a `CreateTaskResult`. Cancellation is
+/// cooperative: `tasks/cancel` settles the task as `cancelled`, while the
+/// underlying V8 execution stays bounded by the engine's execution timeout
+/// and its `--max-concurrent-executions` semaphore.
+fn spawn_run_js_task(
+    tasks: &TaskManager,
+    runtime: Arc<Engine>,
+    arguments_json: String,
+    session_id: Option<String>,
+    mcp_headers: Option<McpRequestHeaders>,
+) -> Task {
+    let options = TaskOptions::new()
+        .with_ttl_ms(RUN_JS_TASK_TTL_MS)
+        .with_poll_interval_ms(RUN_JS_TASK_POLL_INTERVAL_MS);
+    tasks.spawn(options, move |ctx| {
+        Box::pin(async move {
+            let invoke = async {
+                runtime
+                    .invoke_tool_response(ToolCallRequest {
+                        name: "run_js".to_string(),
+                        arguments_json,
+                        session_id,
+                        mcp_headers,
+                    })
+                    .await
+                    .unwrap_or_else(|error| json!({ "error": error.to_string() }).into())
+            };
+            tokio::select! {
+                _ = ctx.cancelled() => Err(TaskExit::Cancelled),
+                response = invoke => tool_result(response).map_err(TaskExit::Error),
+            }
+        })
+    })
+}
+
+/// Serialize `tools/call` arguments for the dispatcher.
+fn arguments_to_json(arguments: Option<&JsonObject>) -> String {
+    arguments
+        .map(|args| serde_json::Value::Object(args.clone()).to_string())
+        .unwrap_or_else(|| "{}".to_string())
 }
 
 // ── Tool argument structs ─────────────────────────────────────────────────
@@ -445,8 +475,10 @@ pub struct McpService {
     mcp_headers: Arc<OnceLock<McpRequestHeaders>>,
     /// Tool registry generated by `#[tool_router]`.
     tool_router: ToolRouter<McpService>,
-    /// Backing store for asynchronous task execution (`#[task_handler]`).
-    processor: Arc<Mutex<OperationProcessor>>,
+    /// Backing store for asynchronous task execution (SEP-2663). Shared
+    /// across service instances (see `with_task_manager`) so session-less
+    /// clients can poll `tasks/get` from later requests.
+    tasks: TaskManager,
 }
 
 impl McpService {
@@ -479,7 +511,7 @@ impl McpService {
             session_id: Arc::new(OnceLock::new()),
             mcp_headers: Arc::new(OnceLock::new()),
             tool_router: Self::tool_router(),
-            processor: Arc::new(Mutex::new(OperationProcessor::new())),
+            tasks: TaskManager::new(),
         }
     }
 
@@ -494,8 +526,18 @@ impl McpService {
         self
     }
 
+    /// Share a `TaskManager` across service instances. The Streamable HTTP
+    /// transport creates a fresh service per session — and per request for
+    /// session-less (2026-07-28) clients — so task state must live outside
+    /// the instance for `tasks/get` to find a task created by an earlier
+    /// request.
+    pub fn with_task_manager(mut self, tasks: TaskManager) -> Self {
+        self.tasks = tasks;
+        self
+    }
+
     #[doc = include_str!("run_js_tool_description.md")]
-    #[tool(execution(task_support = "optional"))]
+    #[tool]
     pub async fn run_js(
         &self,
         Parameters(args): Parameters<RunJsArgs>,
@@ -690,9 +732,8 @@ impl McpService {
     }
 }
 
-#[task_handler]
 impl ServerHandler for McpService {
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         let instructions = self.runtime.instructions_override()
             .map(|s| s.to_string())
             .unwrap_or_else(|| {
@@ -708,14 +749,14 @@ impl ServerHandler for McpService {
                      docs://llms-txt, docs://openapi, and docs://tools before calling tools."
                 )
             });
-        let mut info = ServerInfo::default();
-        info.instructions = Some(instructions);
-        info.capabilities = ServerCapabilities::builder()
-            .enable_tools()
-            .enable_resources()
-            .enable_tasks()
-            .build();
-        info
+        ServerConfig::new(
+            ServerCapabilities::builder()
+                .enable_tools()
+                .enable_resources()
+                .enable_tasks()
+                .build(),
+        )
+        .with_instructions(instructions)
     }
 
     async fn list_resources(
@@ -723,23 +764,23 @@ impl ServerHandler for McpService {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
-        Ok(ListResourcesResult {
-            next_cursor: None,
-            resources: doc_resources(self.runtime.heap_enabled(), self.runtime.fs_enabled()),
-            meta: None,
-        })
+        Ok(ListResourcesResult::with_all_items(doc_resources(
+            self.runtime.heap_enabled(),
+            self.runtime.fs_enabled(),
+        )))
     }
 
     async fn read_resource(
         &self,
         request: ReadResourceRequestParams,
         _context: RequestContext<RoleServer>,
-    ) -> Result<ReadResourceResult, McpError> {
+    ) -> Result<ReadResourceResponse, McpError> {
         read_doc_resource(
             &request.uri,
             self.runtime.heap_enabled(),
             self.runtime.fs_enabled(),
         )
+        .map(Into::into)
         .ok_or_else(|| {
             McpError::resource_not_found(format!("Unknown resource URI: {}", request.uri), None)
         })
@@ -750,11 +791,7 @@ impl ServerHandler for McpService {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        Ok(ListToolsResult {
-            next_cursor: None,
-            tools: self.runtime.mcp_tools(),
-            meta: None,
-        })
+        Ok(ListToolsResult::with_all_items(self.runtime.mcp_tools()))
     }
 
     fn get_tool(&self, name: &str) -> Option<Tool> {
@@ -765,28 +802,81 @@ impl ServerHandler for McpService {
         &self,
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, McpError> {
+    ) -> Result<CallToolResponse, McpError> {
+        // Session-less (2026-07-28) clients never send `initialize`, but each
+        // of their requests gets a fresh service instance, so first-call
+        // capture here sees that request's own headers.
+        if self.mcp_headers.get().is_none() && self.session_id.get().is_none() {
+            capture_mcp_headers(
+                &context,
+                Some(&self.session_id),
+                &self.mcp_headers,
+                self.verifier.as_ref(),
+            )
+            .await;
+        }
         if let Some(result) = self
             .runtime
             .upstream_mcp_stub_call_response(&request.name, request.arguments.as_ref())
         {
-            return Ok(result);
+            return Ok(result.into());
         }
         // WASM module stubs return run_js usage instructions instead of dispatching.
         if let Some(result) = self
             .runtime
             .wasm_stub_call_response(&request.name, request.arguments.as_ref())
         {
-            return Ok(result);
+            return Ok(result.into());
+        }
+        // SEP-2663: run_js (the long-running tool) executes as a task when
+        // the client declared the tasks extension capability.
+        if request.name.as_ref() == "run_js"
+            && context
+                .client_capabilities()
+                .is_some_and(|caps| caps.supports_tasks())
+        {
+            let task = spawn_run_js_task(
+                &self.tasks,
+                self.runtime.clone(),
+                arguments_to_json(request.arguments.as_ref()),
+                self.session_id.get().cloned(),
+                self.mcp_headers.get().cloned(),
+            );
+            return Ok(CallToolResponse::Task(CreateTaskResult::new(task)));
         }
         self.tool_router
             .call(ToolCallContext::new(self, request, context))
             .await
     }
 
+    async fn get_task(
+        &self,
+        request: GetTaskParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<GetTaskResult, McpError> {
+        Ok(GetTaskResult::new(self.tasks.get_task(&request.task_id)?))
+    }
+
+    async fn update_task(
+        &self,
+        request: UpdateTaskParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<(), McpError> {
+        self.tasks
+            .update_task(&request.task_id, request.input_responses)
+    }
+
+    async fn cancel_task(
+        &self,
+        request: CancelTaskParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<(), McpError> {
+        self.tasks.cancel_task(&request.task_id)
+    }
+
     async fn initialize(
         &self,
-        _request: InitializeRequestParams,
+        request: InitializeRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<InitializeResult, McpError> {
         capture_mcp_headers(
@@ -796,7 +886,8 @@ impl ServerHandler for McpService {
             self.verifier.as_ref(),
         )
         .await;
-        Ok(self.get_info())
+        context.peer.set_peer_info(request.clone());
+        self.negotiate_initialize(&request)
     }
 }
 
@@ -813,7 +904,9 @@ pub struct StatelessMcpService {
     /// X-MCP-* headers from the initialize request, available for policy evaluation.
     mcp_headers: Arc<OnceLock<McpRequestHeaders>>,
     tool_router: ToolRouter<StatelessMcpService>,
-    processor: Arc<Mutex<OperationProcessor>>,
+    /// Backing store for asynchronous task execution (SEP-2663). Shared
+    /// across service instances (see `with_task_manager`).
+    tasks: TaskManager,
 }
 
 #[tool_router]
@@ -824,12 +917,19 @@ impl StatelessMcpService {
             verifier,
             mcp_headers: Arc::new(OnceLock::new()),
             tool_router: Self::tool_router(),
-            processor: Arc::new(Mutex::new(OperationProcessor::new())),
+            tasks: TaskManager::new(),
         }
     }
 
+    /// Share a `TaskManager` across service instances (see
+    /// `McpService::with_task_manager`).
+    pub fn with_task_manager(mut self, tasks: TaskManager) -> Self {
+        self.tasks = tasks;
+        self
+    }
+
     #[doc = include_str!("run_js_tool_stateless.md")]
-    #[tool(execution(task_support = "optional"))]
+    #[tool]
     pub async fn run_js(
         &self,
         Parameters(args): Parameters<StatelessRunJsArgs>,
@@ -898,9 +998,8 @@ impl StatelessMcpService {
     }
 }
 
-#[task_handler]
 impl ServerHandler for StatelessMcpService {
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         let instructions = self
             .runtime
             .instructions_override()
@@ -911,14 +1010,14 @@ impl ServerHandler for StatelessMcpService {
                  docs://llms-txt, docs://openapi, and docs://tools before calling tools."
                     .to_string()
             });
-        let mut info = ServerInfo::default();
-        info.instructions = Some(instructions);
-        info.capabilities = ServerCapabilities::builder()
-            .enable_tools()
-            .enable_resources()
-            .enable_tasks()
-            .build();
-        info
+        ServerConfig::new(
+            ServerCapabilities::builder()
+                .enable_tools()
+                .enable_resources()
+                .enable_tasks()
+                .build(),
+        )
+        .with_instructions(instructions)
     }
 
     async fn list_resources(
@@ -926,21 +1025,21 @@ impl ServerHandler for StatelessMcpService {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
-        Ok(ListResourcesResult {
-            next_cursor: None,
-            resources: doc_resources(false, false),
-            meta: None,
-        })
+        Ok(ListResourcesResult::with_all_items(doc_resources(
+            false, false,
+        )))
     }
 
     async fn read_resource(
         &self,
         request: ReadResourceRequestParams,
         _context: RequestContext<RoleServer>,
-    ) -> Result<ReadResourceResult, McpError> {
-        read_doc_resource(&request.uri, false, false).ok_or_else(|| {
-            McpError::resource_not_found(format!("Unknown resource URI: {}", request.uri), None)
-        })
+    ) -> Result<ReadResourceResponse, McpError> {
+        read_doc_resource(&request.uri, false, false)
+            .map(Into::into)
+            .ok_or_else(|| {
+                McpError::resource_not_found(format!("Unknown resource URI: {}", request.uri), None)
+            })
     }
 
     async fn list_tools(
@@ -948,11 +1047,7 @@ impl ServerHandler for StatelessMcpService {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        Ok(ListToolsResult {
-            next_cursor: None,
-            tools: self.runtime.mcp_tools(),
-            meta: None,
-        })
+        Ok(ListToolsResult::with_all_items(self.runtime.mcp_tools()))
     }
 
     fn get_tool(&self, name: &str) -> Option<Tool> {
@@ -963,31 +1058,78 @@ impl ServerHandler for StatelessMcpService {
         &self,
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, McpError> {
+    ) -> Result<CallToolResponse, McpError> {
+        // Session-less (2026-07-28) clients never send `initialize`; capture
+        // this request's headers on the fresh per-request service instance.
+        if self.mcp_headers.get().is_none() {
+            capture_mcp_headers(&context, None, &self.mcp_headers, self.verifier.as_ref()).await;
+        }
         if let Some(result) = self
             .runtime
             .upstream_mcp_stub_call_response(&request.name, request.arguments.as_ref())
         {
-            return Ok(result);
+            return Ok(result.into());
         }
         if let Some(result) = self
             .runtime
             .wasm_stub_call_response(&request.name, request.arguments.as_ref())
         {
-            return Ok(result);
+            return Ok(result.into());
+        }
+        // SEP-2663: run_js executes as a task when the client declared the
+        // tasks extension capability.
+        if request.name.as_ref() == "run_js"
+            && context
+                .client_capabilities()
+                .is_some_and(|caps| caps.supports_tasks())
+        {
+            let task = spawn_run_js_task(
+                &self.tasks,
+                self.runtime.clone(),
+                arguments_to_json(request.arguments.as_ref()),
+                None,
+                self.mcp_headers.get().cloned(),
+            );
+            return Ok(CallToolResponse::Task(CreateTaskResult::new(task)));
         }
         self.tool_router
             .call(ToolCallContext::new(self, request, context))
             .await
     }
 
+    async fn get_task(
+        &self,
+        request: GetTaskParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<GetTaskResult, McpError> {
+        Ok(GetTaskResult::new(self.tasks.get_task(&request.task_id)?))
+    }
+
+    async fn update_task(
+        &self,
+        request: UpdateTaskParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<(), McpError> {
+        self.tasks
+            .update_task(&request.task_id, request.input_responses)
+    }
+
+    async fn cancel_task(
+        &self,
+        request: CancelTaskParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<(), McpError> {
+        self.tasks.cancel_task(&request.task_id)
+    }
+
     async fn initialize(
         &self,
-        _request: InitializeRequestParams,
+        request: InitializeRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<InitializeResult, McpError> {
         capture_mcp_headers(&context, None, &self.mcp_headers, self.verifier.as_ref()).await;
-        Ok(self.get_info())
+        context.peer.set_peer_info(request.clone());
+        self.negotiate_initialize(&request)
     }
 }
 
@@ -1002,9 +1144,17 @@ pub(crate) async fn capture_mcp_headers(
     let Some(http_request_part) = context.extensions.get::<axum::http::request::Parts>() else {
         return;
     };
-    let initialize_headers = &http_request_part.headers;
-    let initialize_uri = &http_request_part.uri;
-    tracing::info!(?initialize_headers, %initialize_uri, "initialize from http server");
+    let request_headers = &http_request_part.headers;
+    let request_uri = &http_request_part.uri;
+    // Log header NAMES only: values can carry credentials (Authorization,
+    // Cookie, agent-session), which must not reach logs at any level.
+    let request_header_names: Vec<&str> =
+        request_headers.keys().map(|name| name.as_str()).collect();
+    tracing::debug!(
+        ?request_header_names,
+        %request_uri,
+        "capturing MCP request headers"
+    );
 
     if let Some(verifier) = verifier {
         let token = http_request_part
@@ -1031,7 +1181,7 @@ pub(crate) async fn capture_mcp_headers(
     }
 
     let mut mcp_header_map = HashMap::new();
-    for (name, value) in initialize_headers.iter() {
+    for (name, value) in request_headers.iter() {
         if let Some(key) = name.as_str().strip_prefix("x-mcp-") {
             if let Ok(v) = value.to_str() {
                 mcp_header_map.insert(key.to_string(), v.to_string());

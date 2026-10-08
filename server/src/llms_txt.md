@@ -47,26 +47,28 @@ mcp-v8 exposes a V8 JavaScript runtime as MCP tools. Agents can run JS/TS code, 
 
 ## MCP Tasks (long-running tool calls)
 
-This server natively supports the MCP **tasks** utility (spec `2025-11-25` /
-SEP-1319) via rmcp. Task-enabled clients see a `tasks` capability in the
-`initialize` result; `run_js` is task-augmentable, so a client may run it as a
-task by adding a `task` object to the request `params`:
+This server natively supports the MCP **tasks** extension
+(`io.modelcontextprotocol/tasks`, SEP-2663) via rmcp. The server advertises
+the extension under `capabilities.extensions` in the `initialize` result. A
+client that declares the same extension in its own capabilities
+(`capabilities.extensions["io.modelcontextprotocol/tasks"] = {}`) gets task
+execution for `run_js`:
 
 ```
-1. tools/call { name: "run_js", arguments: {...}, task: { ttl: 300000 } }
-   → result.task = { taskId, status: "working", ... }
+1. tools/call { name: "run_js", arguments: {...} }
+   → result = { resultType: "task", task: { taskId, status: "working", ... } }
 
-2. tasks/get { taskId }      → current Task (status working→completed/failed/cancelled)
-3. tasks/result { taskId }   → blocks until terminal, then returns the tool's
-                               result exactly as a normal tools/call would
-4. tasks/list                → all known tasks
-5. tasks/cancel { taskId }   → transitions a running task to cancelled
+2. tasks/get { taskId }    → current task state (working → completed/failed/
+                             cancelled); a completed task carries the tool's
+                             result inline
+3. tasks/cancel { taskId } → requests cooperative cancellation; the task
+                             settles as cancelled
 ```
 
 This is ideal for long-running `run_js` calls: the client gets an immediate
-`taskId` instead of a blocked connection, then polls. A `tools/call` without a
-`task` field behaves exactly as before (synchronous result). Tasks work over
-both the Streamable HTTP and stdio transports.
+`taskId` instead of a blocked connection, then polls. Clients that do not
+declare the tasks extension get a synchronous result, exactly as before.
+Tasks work over both the Streamable HTTP and stdio transports.
 
 ## Typical agent workflow
 

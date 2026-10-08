@@ -482,6 +482,10 @@ async fn async_main(cli: Cli) -> Result<()> {
         } else {
             tracing::info!("Origin header allowlist: {}", allowed_origins.join(", "));
         }
+        // One TaskManager for the whole transport: services are created per
+        // session — and per request for session-less (2026-07-28) clients —
+        // so SEP-2663 task state must outlive any single service instance.
+        let tasks = rmcp::task_manager::TaskManager::new();
         if runtime.session_capable() {
             let verifier = session_verifier.clone();
             start_streamable_http(
@@ -491,7 +495,7 @@ async fn async_main(cli: Cli) -> Result<()> {
                 allowed_hosts,
                 allowed_origins,
                 session_verifier.clone(),
-                move |e| McpService::new(e, verifier.clone()),
+                move |e| McpService::new(e, verifier.clone()).with_task_manager(tasks.clone()),
             )
             .await
         } else {
@@ -503,7 +507,9 @@ async fn async_main(cli: Cli) -> Result<()> {
                 allowed_hosts,
                 allowed_origins,
                 session_verifier.clone(),
-                move |e| StatelessMcpService::new(e, verifier.clone()),
+                move |e| {
+                    StatelessMcpService::new(e, verifier.clone()).with_task_manager(tasks.clone())
+                },
             )
             .await
         }
@@ -578,10 +584,14 @@ where
     let bind: std::net::SocketAddr = resolve_bind_addr(&host, port)?;
     let ct = CancellationToken::new();
 
-    // The Streamable HTTP transport (rmcp 1.x) is a tower service mounted at
-    // /mcp. It natively serves the MCP `tasks/*` utility (SEP-1319) for tools
-    // marked `execution(task_support = ...)` — here, `run_js`. A fresh service
-    // (and thus a fresh per-connection session id) is created per session.
+    // The Streamable HTTP transport is a tower service mounted at /mcp. With
+    // `legacy_session_mode` (the default) it serves BOTH legacy stateful
+    // sessions (protocol < 2026-07-28, `Mcp-Session-Id` header) and
+    // session-less per-request-negotiated POSTs (protocol 2026-07-28, per
+    // SEP-2567/SEP-2575) on the same endpoint. The MCP tasks extension
+    // (SEP-2663) backs task execution of `run_js` (see `mcp.rs`). A fresh
+    // service is created per session — and per request for session-less
+    // clients.
     let factory_runtime = runtime.clone();
     let mcp_service = StreamableHttpService::new(
         move || Ok(make_service(factory_runtime.clone())),
