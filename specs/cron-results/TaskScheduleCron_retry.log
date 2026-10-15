@@ -1,0 +1,60 @@
+TLC2 Version 2026.10.13.164326 (rev: 210df3a)
+Running breadth-first search Model-Checking with fp 0 and seed 1 with 1 worker on 9 cores with 1820MB heap and 64MB offheap memory [pid: 97] (Linux 6.18.44 amd64, Debian 21.0.12.1 64bit, MSBDiskFPSet, DiskStateQueue).
+Parsing file /workspace/scratch/206ec0fa793e/mcp-js-cron-policy/specs/TaskScheduleCron.tla
+Parsing file /tmp/tlc-6918216868113057447/Naturals.tla (jar:file:/workspace/scratch/206ec0fa793e/mcp-js-failure-ambiguity/specs/tla2tools.jar!/tla2sany/StandardModules/Naturals.tla)
+Parsing file /tmp/tlc-6918216868113057447/Sequences.tla (jar:file:/workspace/scratch/206ec0fa793e/mcp-js-failure-ambiguity/specs/tla2tools.jar!/tla2sany/StandardModules/Sequences.tla)
+Parsing file /tmp/tlc-6918216868113057447/FiniteSets.tla (jar:file:/workspace/scratch/206ec0fa793e/mcp-js-failure-ambiguity/specs/tla2tools.jar!/tla2sany/StandardModules/FiniteSets.tla)
+Semantic processing of module Naturals
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+Semantic processing of module TaskScheduleCron
+Linting of module TaskScheduleCron
+Starting... (2026-10-15 06:38:06)
+Computing initial states...
+Finished computing initial states: 1 distinct state generated at 2026-10-15 06:38:07.
+Error: Invariant NoAutomaticRetry is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ fires = <<>>
+/\ nextDue = [once |-> 13, periodic |-> 13]
+/\ now = 0
+/\ running = [once |-> 0, periodic |-> 0]
+/\ enabled = [once |-> FALSE, periodic |-> FALSE]
+/\ created = [once |-> FALSE, periodic |-> FALSE]
+
+State 2: <Create("once") line 34, col 5 to line 38, col 40 of module TaskScheduleCron>
+/\ fires = <<>>
+/\ nextDue = [once |-> 2, periodic |-> 13]
+/\ now = 0
+/\ running = [once |-> 0, periodic |-> 0]
+/\ enabled = [once |-> TRUE, periodic |-> FALSE]
+/\ created = [once |-> TRUE, periodic |-> FALSE]
+
+State 3: <Advance(2) line 76, col 5 to line 83, col 53 of module TaskScheduleCron>
+/\ fires = <<>>
+/\ nextDue = [once |-> 2, periodic |-> 13]
+/\ now = 2
+/\ running = [once |-> 0, periodic |-> 0]
+/\ enabled = [once |-> TRUE, periodic |-> FALSE]
+/\ created = [once |-> TRUE, periodic |-> FALSE]
+
+State 4: <Fire("once") line 48, col 5 to line 54, col 42 of module TaskScheduleCron>
+/\ fires = <<[schedule |-> "once", due |-> 2, at |-> 2, allowed |-> TRUE]>>
+/\ nextDue = [once |-> 2, periodic |-> 13]
+/\ now = 2
+/\ running = [once |-> 1, periodic |-> 0]
+/\ enabled = [once |-> TRUE, periodic |-> FALSE]
+/\ created = [once |-> TRUE, periodic |-> FALSE]
+
+State 5: <Fire("once") line 48, col 5 to line 54, col 42 of module TaskScheduleCron>
+/\ fires = << [schedule |-> "once", due |-> 2, at |-> 2, allowed |-> TRUE],
+   [schedule |-> "once", due |-> 2, at |-> 2, allowed |-> TRUE] >>
+/\ nextDue = [once |-> 2, periodic |-> 13]
+/\ now = 2
+/\ running = [once |-> 2, periodic |-> 0]
+/\ enabled = [once |-> TRUE, periodic |-> FALSE]
+/\ created = [once |-> TRUE, periodic |-> FALSE]
+
+108 states generated, 58 distinct states found, 26 states left on queue.
+The depth of the complete state graph search is 5.
+Finished in 01s at (2026-10-15 06:38:07)

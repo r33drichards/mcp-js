@@ -69,7 +69,10 @@ The fix in `cluster.rs` (`cas_with` / `put_with` carrying `extra` writes applied
 via a single `apply_batch`) and `fs_labels.rs` (using them for `create`/`cas`/
 `force` in cluster mode) implements the `combined` design.
 
-## TaskSchedule
+## TaskSchedule (earlier non-overlap design)
+
+The selected revision is [TaskScheduleCron](TaskScheduleCron.md), which permits
+overlap and does not retry occurrences. The model below is retained for comparison.
 
 Design model for a **proposed scheduling layer over existing MCP Tasks**.
 A one-time schedule creates one task; a periodic schedule creates a task for
@@ -179,3 +182,10 @@ temporal properties. TLC was run using the jar from the v1.8.0 release URL above
 | `TaskSchedule_duplicate.cfg` | `NoDuplicateFire` violated: fire one-time tick 2, finish, fire tick 2 again |
 
 These are bounded design checks, not verification of a scheduler implementation.
+
+## TaskScheduleCron
+
+The [simple cron-style revision](TaskScheduleCron.md) dispatches each new occurrence
+independently, allows overlap, drops missed periodic slots, and never automatically
+retries an occurrence. It has separate configs and actual TLC outputs. The earlier
+`TaskSchedule` model remains unchanged for comparison.
