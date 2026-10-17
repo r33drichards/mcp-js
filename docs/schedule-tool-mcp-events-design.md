@@ -84,41 +84,44 @@ Keep the same conceptual separation:
 | Host action | Host decides what to do with an event under its own authority |
 
 This comparison informs interface shape only. It does not import either
-product's catch-up, retry, overlap, session, or delivery policies. Calendar cron,
-agent orchestration, dependencies between jobs, and automatic workflow recovery
-are outside the minimal first version.
+product's catch-up, retry, overlap, session, or delivery policies. One-shot
+timestamps, fixed-duration intervals, agent orchestration, dependencies between
+jobs, and automatic workflow recovery are outside the minimal first version.
 
 ## Proposed tool surface
 
-The initial discussion is **JavaScript + when + optional name**, returning an ID
+The initial discussion is **JavaScript + cron + optional name**, returning an ID
 that can be inspected, disabled, or deleted. Exact names and schemas remain OPEN.
 A concrete candidate for `schedule` is:
 
 ```json
 {
   "code": "console.log('scheduled check')",
-  "when": { "at": "2026-10-16T09:00:00Z" },
+  "cron": "0 9 * * *",
+  "timezone": "UTC",
   "name": "scheduled-check"
 }
 ```
 
-A recurring candidate replaces `when` with:
-
-```json
-{ "every_seconds": 3600, "start_at": "2026-10-16T09:00:00Z" }
-```
+The initial surface uses one five-field cron expression for recurring wall-clock
+slots. It does not add separate `at`, `when`, or fixed-duration `every`
+variants. If one-shot scheduling is required, design it separately rather than
+embedding a second timing language in this tool.
 
 Proposed constraints:
 
-- Exactly one timing form; positive bounded interval; explicit-offset RFC 3339
-  timestamps normalized to UTC. Do not silently use the server's local timezone.
+- Require one standard five-field cron expression and an explicit IANA timezone;
+  reject unsupported extensions at creation. Do not silently use the server's
+  local timezone.
 - Start with inline code captured at creation. File references, heap/filesystem
-  snapshots, runtime-limit overrides, and cron syntax require separate decisions.
+  snapshots, runtime-limit overrides, and the exact cron parser/dialect require
+  separate decisions.
 - A name is a label, not an ownership key or unique identifier.
 - No callback URL, signing secret, owner ID, bearer token, or host chat ID in
   model-facing schedule arguments.
-- Return `schedule_id` on accepted creation. Returning normalized `when`,
-  `next_run_at`, `enabled`, and `revision` is useful but still proposed. Creation
+- Return `schedule_id` on accepted creation. Returning normalized `cron` and
+  `timezone`, `next_run_at`, `enabled`, and `revision` is useful but still
+  proposed. Creation
   means the definition was recorded, not that code ran or delivery was arranged.
 
 Proposed lifecycle capabilities, whether separate tools or actions on one tool:
@@ -302,10 +305,11 @@ Requirements for any implemented webhook adapter:
 
 ## Decisions required before implementation
 
-1. Final tool name, `when` format, return fields, and separate tools versus
-   action-based lifecycle; create-response deduplication.
-2. Late one-time behavior, timer precision/grace, clock jumps, and bounded
-   capacity handling. Preserve fixed cadence and dropped periodic backlog.
+1. Final tool name, cron dialect/field count, timezone and daylight-saving
+   behavior, return fields, and separate tools versus action-based lifecycle;
+   create-response deduplication.
+2. Scheduler tick precision/grace, clock jumps, and bounded capacity handling.
+   Preserve cron cadence and drop missed-slot backlog.
 3. Durable store, single-owner enforcement, trusted execution authority, and
    schedule/result retention. Choose payload/state binding without implicit
    continuation or privilege growth.
