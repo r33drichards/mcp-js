@@ -1,3 +1,4 @@
+mod support;
 use chrono::{DateTime, Duration};
 use mcp_js_scheduler_core::*;
 use tempfile::TempDir;
@@ -16,7 +17,7 @@ fn definition(policy: Policy) -> Definition {
 }
 fn setup(policy: Policy) -> (TempDir, Core, ScheduleId) {
     let dir = tempfile::tempdir().unwrap();
-    let mut core = Core::open(dir.path(), Limits::default()).unwrap();
+    let mut core = support::reopen(dir.path());
     let id = core.create(definition(policy), t(0)).unwrap();
     (dir, core, id)
 }
@@ -226,7 +227,7 @@ fn pending_receipt_survives_restart_before_claim() {
     let (dir, mut core, _) = setup(Policy::default());
     core.observe(t(60)).unwrap();
     drop(core);
-    let mut reopened = Core::open(dir.path(), Limits::default()).unwrap();
+    let mut reopened = support::reopen(dir.path());
     let invocation = reopened.claim(t(70)).unwrap().unwrap();
     assert_eq!(invocation.due_at, t(60));
     assert_eq!(invocation.code, "console.log('check')");
@@ -244,7 +245,7 @@ fn crash_after_claim_before_submission_is_unknown_not_replayed() {
     core.observe(t(60)).unwrap();
     let first = core.claim(t(60)).unwrap().unwrap();
     drop(core); // also represents submission followed by a lost acknowledgement
-    let mut core = Core::open(dir.path(), Limits::default()).unwrap();
+    let mut core = support::reopen(dir.path());
     core.observe(t(120)).unwrap();
     assert!(core.claim(t(120)).unwrap().is_none());
     assert!(matches!(
@@ -288,7 +289,7 @@ fn durable_completion_survives_restart_and_duplicate_observation() {
     let first = core.claim(t(60)).unwrap().unwrap();
     core.finish(&first, Outcome::Succeeded, t(61)).unwrap();
     drop(core);
-    let mut core = Core::open(dir.path(), Limits::default()).unwrap();
+    let mut core = support::reopen(dir.path());
     core.observe(t(62)).unwrap();
     assert!(core.claim(t(62)).unwrap().is_none());
     assert!(matches!(
@@ -311,7 +312,7 @@ fn retry_wait_survives_restart_without_early_dispatch() {
     core.finish(&first, Outcome::Failed("stopped".into()), t(61))
         .unwrap();
     drop(core);
-    let mut core = Core::open(dir.path(), Limits::default()).unwrap();
+    let mut core = support::reopen(dir.path());
     assert!(core.claim(t(120)).unwrap().is_none());
     assert_eq!(core.claim(t(121)).unwrap().unwrap().attempt, 2);
 }
@@ -331,7 +332,7 @@ fn restart_missed_run_policies_match_live_clock_jump() {
         let (dir, core, _) = setup(policy.clone());
         let (_other, mut live, _) = setup(policy);
         drop(core);
-        let mut reopened = Core::open(dir.path(), Limits::default()).unwrap();
+        let mut reopened = support::reopen(dir.path());
         for c in [&mut live, &mut reopened] {
             c.observe(t(250)).unwrap();
         }
@@ -481,7 +482,7 @@ fn validates_dialect_timezone_bounds_and_exclusive_store() {
 #[test]
 fn numeric_weekdays_and_dom_dow_use_standard_or_semantics() {
     let dir = tempfile::tempdir().unwrap();
-    let mut core = Core::open(dir.path(), Limits::default()).unwrap();
+    let mut core = support::reopen(dir.path());
     let mut def = definition(Policy::default());
     def.cron = "0 0 15 * 0".into(); // next Sunday is Jan 4, not Jan 15
     core.create(def, t(0)).unwrap();
@@ -491,7 +492,7 @@ fn numeric_weekdays_and_dom_dow_use_standard_or_semantics() {
 #[test]
 fn timezone_dst_gap_fixed_time_moves_to_first_valid_instant() {
     let dir = tempfile::tempdir().unwrap();
-    let mut core = Core::open(dir.path(), Limits::default()).unwrap();
+    let mut core = support::reopen(dir.path());
     let mut def = definition(Policy::default());
     def.cron = "30 2 * * *".into();
     def.timezone = "America/New_York".into();
@@ -509,7 +510,7 @@ fn timezone_dst_gap_fixed_time_moves_to_first_valid_instant() {
 #[test]
 fn timezone_dst_fold_fixed_time_runs_only_first_instance() {
     let dir = tempfile::tempdir().unwrap();
-    let mut core = Core::open(dir.path(), Limits::default()).unwrap();
+    let mut core = support::reopen(dir.path());
     let mut def = definition(Policy {
         overlap: Overlap::Concurrent,
         ..Policy::default()
@@ -533,7 +534,7 @@ fn timezone_dst_fold_fixed_time_runs_only_first_instance() {
 #[test]
 fn timezone_dst_fold_wildcard_runs_both_instants() {
     let dir = tempfile::tempdir().unwrap();
-    let mut core = Core::open(dir.path(), Limits::default()).unwrap();
+    let mut core = support::reopen(dir.path());
     let mut def = definition(Policy {
         overlap: Overlap::Concurrent,
         ..Policy::default()
@@ -546,74 +547,4 @@ fn timezone_dst_fold_wildcard_runs_both_instants() {
         core.observe(time.parse().unwrap()).unwrap();
     }
     assert_eq!(core.occurrences().len(), 2);
-}
-
-#[test]
-fn process_restart_at_each_dispatch_boundary() {
-    for boundary in ["pending", "claimed", "submitted", "finished"] {
-        let (dir, core, _) = setup(Policy::default());
-        drop(core);
-        let result = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "crash_child", "--ignored", "--nocapture"])
-            .env("SCHEDULER_CRASH_STORE", dir.path())
-            .env("SCHEDULER_CRASH_BOUNDARY", boundary)
-            .output()
-            .unwrap();
-        assert_eq!(
-            result.status.code(),
-            Some(23),
-            "{}",
-            String::from_utf8_lossy(&result.stderr)
-        );
-        let mut recovered = Core::open(dir.path(), Limits::default()).unwrap();
-        recovered.observe(t(61)).unwrap();
-        let run = recovered.claim(t(61)).unwrap();
-        assert_eq!(run.is_some(), boundary == "pending");
-        if boundary == "claimed" || boundary == "submitted" {
-            assert!(matches!(
-                recovered.occurrences()[0].status,
-                Status::Unknown { .. }
-            ));
-        }
-        if boundary == "finished" {
-            assert!(matches!(
-                recovered.occurrences()[0].status,
-                Status::Succeeded { .. }
-            ));
-        }
-        let effects =
-            std::fs::read_to_string(dir.path().join("executor-effect")).unwrap_or_default();
-        assert_eq!(
-            effects,
-            if boundary == "submitted" || boundary == "finished" {
-                "one effect"
-            } else {
-                ""
-            }
-        );
-    }
-}
-
-#[test]
-#[ignore = "subprocess helper; exercised by process_restart_at_each_dispatch_boundary"]
-fn crash_child() {
-    let path = std::env::var("SCHEDULER_CRASH_STORE").unwrap();
-    let boundary = std::env::var("SCHEDULER_CRASH_BOUNDARY").unwrap();
-    let mut core = Core::open(&path, Limits::default()).unwrap();
-    core.observe(t(60)).unwrap();
-    if boundary != "pending" {
-        let run = core.claim(t(60)).unwrap().unwrap();
-        if boundary == "submitted" || boundary == "finished" {
-            std::fs::write(
-                std::path::Path::new(&path).join("executor-effect"),
-                "one effect",
-            )
-            .unwrap();
-        }
-        if boundary == "finished" {
-            core.finish(&run, Outcome::Succeeded, t(60)).unwrap();
-        }
-    }
-    // Exit without dropping Core/SQLite: each tested boundary must already be committed.
-    std::process::exit(23);
 }

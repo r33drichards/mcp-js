@@ -69,13 +69,29 @@ See [Croner's source and DST tests](https://docs.rs/croner/4.0.1/src/croner/lib.
 
 ## Persistence and execution boundary
 
-`Core::open(directory, limits)` takes an exclusive OS file lock and opens SQLite.
-Use a private local directory whose lock file is not removed or replaced while
-running. Network filesystems, multiple replicas, takeover, and malicious local
-writers are outside this core's contract. The database uses rollback journaling
-and `synchronous=EXTRA`; one atomic statement stores each bounded state snapshot.
-SQLite and the filesystem supply durability, not the timer library. See
-[SQLite's synchronous modes](https://www.sqlite.org/pragma.html#pragma_synchronous).
+`Core::open(directory, limits)` opens a dedicated sled 0.34.7 database and the
+reserved `scheduler_state` tree. `Core::from_config` accepts `sled::Config`, following
+[SessionLog's constructor](../server/src/engine/session_log.rs); named trees and JSON
+records follow the existing [label store](../server/src/engine/fs_labels.rs).
+Other trees in the database are left alone. This core is standalone; it does not
+route writes through the repository's Raft cluster path or attach to a live server.
+
+The complete bounded snapshot is one `state` key. A sled compare-and-swap atomically
+replaces schedule cursors, occurrence receipts, IDs, and outcomes, rejecting an
+unexpected writer. Every successful transition then explicitly calls `Db::flush`
+before returning. Atomic visibility alone is not a durability acknowledgement.
+The default constructor disables periodic flushing because every transition already
+flushes; custom configurations may enable it without weakening the explicit boundary.
+See [sled's flush contract](https://docs.rs/sled/0.34.7/sled/struct.Db.html#method.flush).
+
+Sled owns the database's process lock. Keep exactly one core per database and do
+not mutate its reserved tree externally. Use private local storage; network
+filesystems, replicas, takeover, and malicious local writers are outside the contract.
+After the last handle drops, sled background I/O may briefly retain its file lock;
+a same-process reopen can return a lock error and should be retried after release.
+Tests bound that release wait separately from their explicit scheduler clock.
+Old SQLite prototype stores are rejected rather than silently replaced with empty
+state; this revision does not implement a migration or delete old files.
 
 The transition sequence is:
 
@@ -94,8 +110,9 @@ Unknown receipts hold both overlap and global capacity slots. After separately
 establishing that execution stopped, `acknowledge_stopped` makes a receipt
 `Abandoned`, releases its slot, and never retries it. Its effect outcome remains
 unresolved. Failure to persist any transition poisons the instance, preventing
-further claims until it is reopened. The fault tests cover a failed write and a
-committed write whose application acknowledgement is lost.
+further claims until it is reopened. The fault tests cover a failed write and an
+atomic write whose flush fails but whose bytes subsequently reach disk. These fault
+injections exercise conservative recovery; they do not simulate every device failure.
 
 Disabling or deleting stops future admission atomically relative to `observe`.
 Already-admitted work, including queued work and configured retries, may continue.
@@ -133,7 +150,8 @@ A future server adapter must preserve the existing Engine's authorization, hooks
 resource bounds, and actual completion observation. No such adapter is enabled here.
 
 This is a small-workload prototype: state transitions clone and serialize bounded
-snapshots, and synchronous SQLite commits can block a runtime worker. It has no
+snapshots, and synchronous sled writes and flushes can block a runtime worker. It has
+no
 throughput benchmark, distributed guarantees, encryption, schema migration, result
 payload archive, delivery/replay system, or production authority integration.
 
@@ -150,7 +168,7 @@ The design branch and its model are unchanged.
 
 ## Run and compare
 
-From either branch, with Rust 1.99.0 and a C compiler for bundled SQLite:
+From either branch, with Rust 1.99.0:
 
 ```sh
 cargo test --manifest-path scheduler-core/Cargo.toml --locked
@@ -169,5 +187,6 @@ invoked by the subprocess test, not omitted coverage.
 
 The runner tests check the executor interface, graceful stop, cancellation, panic,
 and exclusive runner ownership. The real native pulse test uses wall time with a
-five-second timeout; deterministic policy tests do not sleep or depend on wall time.
+five-second timeout; policy decisions use explicit timestamps, not timer sleeps.
+Store-reopen tests may wait briefly for sled to release its file lock.
 The same CI workflow runs on both comparison branches and stacked PRs.
