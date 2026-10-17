@@ -1,5 +1,10 @@
 # Scheduler core comparison
 
+> Apalis branch update: [`../scheduler-runner/README.md`](../scheduler-runner/README.md)
+> adds an optional runner-only, fixed-voter Raft adapter. The local core described
+> below retains its policy contract and acceptance tests. Only this branch adds
+> checkpoint staging and the distributed adapter; PR285 remains the local comparison.
+
 This experimental crate compares Apalis and tokio-cron-scheduler as timer drivers
 for the same durable scheduling policy. It exposes an executor interface; it does
 not register MCP tools, execute JavaScript itself, create unattended authority,

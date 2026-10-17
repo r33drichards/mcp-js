@@ -1,0 +1,16 @@
+{
+  "node_id": "runner-1",
+  "advertise_addr": "127.0.0.1:4401",
+  "cluster_port": 4401,
+  "peers": [],
+  "data_dir": "./runner-1-data",
+  "schedules": [],
+  "remote": {
+    "url": "https://worker.example.com",
+    "bearer_env": "MCP_SCHEDULER_WORKER_TOKEN",
+    "expires_at": "2030-01-01T00:00:00Z",
+    "session": "operator-scheduler",
+    "timeout_seconds": 30,
+    "heap_mb": 128
+  }
+}

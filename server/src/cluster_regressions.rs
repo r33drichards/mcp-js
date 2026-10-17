@@ -236,16 +236,11 @@ async fn pending_companion_write_participates_in_cas_compare() {
         n.persist_log_entry(&e).unwrap();
         s.log.push(e);
     }
-    assert_eq!(
-        n.cas("second".into(), None, "wrong".into()).await.unwrap(),
-        false
-    );
-    assert_eq!(
-        n.cas("second".into(), Some("before".into()), "wrong".into())
-            .await
-            .unwrap(),
-        false
-    );
+    assert!(!n.cas("second".into(), None, "wrong".into()).await.unwrap());
+    assert!(!n
+        .cas("second".into(), Some("before".into()), "wrong".into())
+        .await
+        .unwrap());
 }
 #[tokio::test]
 async fn fixed_voters_are_durable_and_only_learners_may_churn() {
@@ -277,8 +272,10 @@ async fn fixed_voters_are_durable_and_only_learners_may_churn() {
         .vote_granted
     );
     drop(n);
-    let mut changed = ClusterConfig::default();
-    changed.advertise_addr = Some("different:1".into());
+    let changed = ClusterConfig {
+        advertise_addr: Some("different:1".into()),
+        ..Default::default()
+    };
     assert!(ClusterNode::new_fixed(changed, db.clone()).is_err());
     let n = ClusterNode::new(ClusterConfig::default(), db);
     assert!(
@@ -331,4 +328,24 @@ async fn fixed_heartbeat_cannot_promote_learner_or_change_voter() {
     req.learner_addrs = Some(vec!["host:3".into(), "127.0.0.1:4000".into()]);
     assert!(!n.handle_append_entries(req).await.success);
     assert_eq!(n.state.read().await.learners.len(), 1);
+}
+
+#[tokio::test]
+async fn scheduler_proposal_checks_expected_term_under_append_lock() {
+    let n = ClusterNode::new_fixed(
+        ClusterConfig::default(),
+        sled::Config::new().temporary(true).open().unwrap(),
+    )
+    .unwrap();
+    {
+        let mut s = n.state.write().await;
+        s.role = Role::Leader;
+        s.current_term = 3;
+    }
+    assert!(n
+        .scheduler_cas(1, "scheduler/test".into(), None, "stale".into())
+        .await
+        .is_err());
+    assert!(n.scheduler_barrier(1).await.is_err());
+    assert!(n.state.read().await.log.is_empty());
 }

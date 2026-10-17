@@ -1,0 +1,19 @@
+name: Apalis replicated runner
+on:
+  pull_request:
+    paths: ['scheduler-runner/**', 'scheduler-core/**', 'server/src/cluster*', '.github/workflows/scheduler-runner.yml']
+  push:
+    paths: ['scheduler-runner/**', 'scheduler-core/**', 'server/src/cluster*', '.github/workflows/scheduler-runner.yml']
+permissions:
+  contents: read
+jobs:
+  runner:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.99.0
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --manifest-path scheduler-runner/Cargo.toml --check
+      - run: cargo test --manifest-path scheduler-runner/Cargo.toml --locked
+      - run: cargo clippy --manifest-path scheduler-runner/Cargo.toml --locked --all-targets -- -D warnings

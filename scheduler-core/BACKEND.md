@@ -34,3 +34,8 @@ See [Apalis 1.0 documentation](https://docs.rs/apalis/1.0.0/apalis/) and
 This is an implementation comparison, not a performance benchmark or a comparison
 of native persistence backends. No exactly-once, lossless replay, or distributed
 execution property is supplied or claimed by either adapter.
+
+The later `scheduler-runner` extension uses the repository's hardened Raft path
+for authoritative checkpoints. It is application integration, not an Apalis
+persistent backend. PR285 does not include that extension. See the runner README
+for scope, fresh fixed-voter requirements, consume-before-send losses and limitations.

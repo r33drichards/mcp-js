@@ -240,6 +240,12 @@ pub struct RaftState {
     pub learners: std::collections::HashSet<String>,
 }
 
+impl Default for RaftState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RaftState {
     pub fn new() -> Self {
         Self {
@@ -448,8 +454,8 @@ impl ClusterNode {
         {
             return Err("fixed voters require unique id@address peers".into());
         }
-        if !config.learner {
-            if voters
+        if !config.learner
+            && voters
                 .insert(
                     config.node_id.clone(),
                     config
@@ -458,9 +464,8 @@ impl ClusterNode {
                         .unwrap_or_else(|| format!("127.0.0.1:{}", config.cluster_port)),
                 )
                 .is_some()
-            {
-                return Err("self must not appear in peers".into());
-            }
+        {
+            return Err("self must not appear in peers".into());
         }
         let unique: std::collections::HashSet<_> = voters.values().collect();
         if unique.len() != voters.len() || voters.is_empty() {
@@ -489,6 +494,54 @@ impl ClusterNode {
         db.flush().map_err(|e| e.to_string())?;
         let node = Self::new(config, db);
         Ok(node)
+    }
+
+    pub fn has_fixed_voters(&self) -> bool {
+        self.fixed_voters.is_some()
+    }
+
+    /// In-process scheduler authority. The generic HTTP data API cannot mutate
+    /// this namespace. Raft RPCs still require a trusted internal network.
+    pub async fn scheduler_cas(
+        &self,
+        expected_term: u64,
+        key: String,
+        expected: Option<String>,
+        new: String,
+    ) -> Result<bool, String> {
+        if !self.has_fixed_voters() || !key.starts_with("scheduler/") {
+            return Err("fixed-voter scheduler namespace required".into());
+        }
+        self.cas_internal(key, expected, new, vec![], Some(expected_term))
+            .await
+    }
+
+    /// Commit a current-term barrier before loading an authoritative checkpoint.
+    /// This also commits any surviving prior-term suffix; a stale local read
+    /// followed only by CAS could otherwise mismatch that suffix forever.
+    pub async fn scheduler_barrier(&self, expected_term: u64) -> Result<(), String> {
+        let entry = {
+            let mut state = self.state.write().await;
+            self.healthy()?;
+            if !self.has_fixed_voters()
+                || state.role != Role::Leader
+                || state.current_term != expected_term
+            {
+                return Err("scheduler leadership changed".into());
+            }
+            let entry = LogEntry {
+                term: expected_term,
+                index: state.last_log_index() + 1,
+                key: "scheduler/barrier".into(),
+                value: expected_term.to_string(),
+                extra: vec![],
+            };
+            self.persist_meta(&state)?;
+            self.persist_log_entry(&entry)?;
+            state.log.push(entry.clone());
+            entry
+        };
+        self.await_commit(&entry).await
     }
 
     /// Start background tasks (election timer, heartbeat sender) and the
@@ -680,7 +733,8 @@ impl ClusterNode {
 
         // Only voting members count toward the election quorum. Learners are
         // sent RequestVote (harmless) but refuse, so they cannot inflate votes.
-        let majority = (voter_count + 1) / 2 + 1;
+        let total_voters = voter_count + 1;
+        let majority = total_voters / 2 + 1;
         let mut votes: usize = 1; // vote for self
 
         // Send RequestVote RPCs to all peers in parallel
@@ -923,7 +977,8 @@ impl ClusterNode {
         // still replicated to (they remain in `peers`), but a write commits as
         // soon as a majority of voters — including the leader — has it.
         let voter_peers = state.voter_peers();
-        let majority = (voter_peers.len() + 1) / 2 + 1;
+        let total_voters = voter_peers.len() + 1;
+        let majority = total_voters / 2 + 1;
 
         // Find the highest N such that a majority of match_index[i] >= N
         // and log[N].term == currentTerm
@@ -935,14 +990,14 @@ impl ClusterNode {
                     replication_count += 1;
                 }
             }
-            if replication_count >= majority {
-                if let Some(entry) = state.log.get((n - 1) as usize) {
-                    if entry.term == state.current_term {
-                        state.commit_index = n;
-                        self.commit_notify.notify_waiters();
-                        break;
-                    }
-                }
+            if replication_count >= majority
+                && state
+                    .log
+                    .get((n - 1) as usize)
+                    .is_some_and(|entry| entry.term == state.current_term)
+            {
+                state.commit_index = n;
+                break;
             }
         }
 
@@ -1033,10 +1088,14 @@ impl ClusterNode {
             {
                 return reject(state.current_term);
             }
-            if let Some(old) = state.log.get((entry.index - 1) as usize) {
-                if old != entry && (entry.index <= state.commit_index || old.term == entry.term) {
-                    return reject(state.current_term);
-                }
+            if state
+                .log
+                .get((entry.index - 1) as usize)
+                .is_some_and(|old| {
+                    old != entry && (entry.index <= state.commit_index || old.term == entry.term)
+                })
+            {
+                return reject(state.current_term);
             }
         }
         for entry in &req.entries {
@@ -1172,7 +1231,10 @@ impl ClusterNode {
         extra: Vec<(String, String)>,
     ) -> Result<(), String> {
         self.healthy()?;
-        if !Self::valid_keys(&key, &extra) {
+        if !Self::valid_keys(&key, &extra)
+            || key.starts_with("scheduler/")
+            || extra.iter().any(|(key, _)| key.starts_with("scheduler/"))
+        {
             return Err("reserved consensus key".into());
         }
         let entry = {
@@ -1216,7 +1278,10 @@ impl ClusterNode {
         extra: Vec<(String, String)>,
     ) -> Result<(), String> {
         self.healthy()?;
-        if !Self::valid_keys(&key, &extra) {
+        if !Self::valid_keys(&key, &extra)
+            || key.starts_with("scheduler/")
+            || extra.iter().any(|(key, _)| key.starts_with("scheduler/"))
+        {
             return Err("reserved consensus key".into());
         }
         let (is_leader, leader_id, leader_addr) = {
@@ -1284,12 +1349,29 @@ impl ClusterNode {
         extra: Vec<(String, String)>,
     ) -> Result<bool, String> {
         self.healthy()?;
-        if !Self::valid_keys(&key, &extra) {
+        if !Self::valid_keys(&key, &extra)
+            || key.starts_with("scheduler/")
+            || extra.iter().any(|(key, _)| key.starts_with("scheduler/"))
+        {
             return Err("reserved consensus key".into());
         }
+        self.cas_internal(key, expected, new, extra, None).await
+    }
+
+    async fn cas_internal(
+        &self,
+        key: String,
+        expected: Option<String>,
+        new: String,
+        extra: Vec<(String, String)>,
+        expected_term: Option<u64>,
+    ) -> Result<bool, String> {
+        self.healthy()?;
         let entry = {
             let mut state = self.state.write().await;
-            if state.role != Role::Leader {
+            if state.role != Role::Leader
+                || expected_term.is_some_and(|term| term != state.current_term)
+            {
                 return Err(format!(
                     "not the leader; current leader: {:?}",
                     state.leader_id
@@ -1350,7 +1432,10 @@ impl ClusterNode {
         extra: Vec<(String, String)>,
     ) -> Result<bool, String> {
         self.healthy()?;
-        if !Self::valid_keys(&key, &extra) {
+        if !Self::valid_keys(&key, &extra)
+            || key.starts_with("scheduler/")
+            || extra.iter().any(|(key, _)| key.starts_with("scheduler/"))
+        {
             return Err("reserved consensus key".into());
         }
         let (is_leader, leader_id, leader_addr) = {

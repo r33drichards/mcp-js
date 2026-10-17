@@ -283,6 +283,39 @@ impl Core {
         Ok(core)
     }
 
+    /// Build a disposable planner from a trusted checkpoint. Its local writes
+    /// are provisional: an external consensus adapter must commit checkpoint()
+    /// before exposing any returned invocation. Recovery converts Running to Unknown.
+    pub fn from_checkpoint(
+        checkpoint: Option<&str>,
+        limits: Limits,
+        recover: bool,
+    ) -> Result<Self> {
+        let mut core = Self::from_config(sled::Config::new().temporary(true), limits.clone())?;
+        if let Some(checkpoint) = checkpoint {
+            let state: State = serde_json::from_str(checkpoint).map_err(|e| e.to_string())?;
+            if state.version != 1
+                || serde_json::to_value(&state.limits).unwrap()
+                    != serde_json::to_value(&limits).unwrap()
+            {
+                return Err("checkpoint version or limits mismatch".into());
+            }
+            core.commit(state)?;
+        }
+        if recover {
+            core.interrupt_running()?;
+        }
+        Ok(core)
+    }
+
+    /// Opaque checkpoint for an external atomic persistence adapter.
+    pub fn checkpoint(&self) -> Result<String> {
+        if self.poisoned {
+            return Err("store poisoned".into());
+        }
+        serde_json::to_string(&self.state).map_err(|e| e.to_string())
+    }
+
     pub(crate) fn interrupt_running(&mut self) -> Result<()> {
         let mut state = self.state.clone();
         for occurrence in state.occurrences.values_mut() {
