@@ -1,0 +1,23 @@
+name: Cluster consensus regressions
+on:
+  pull_request:
+    paths:
+      - 'server/src/cluster*'
+      - 'server/tests/cluster*'
+      - 'server/cluster-tests/**'
+      - '.github/workflows/cluster-consensus.yml'
+  push:
+    paths:
+      - 'server/src/cluster*'
+      - 'server/tests/cluster*'
+      - 'server/cluster-tests/**'
+      - '.github/workflows/cluster-consensus.yml'
+jobs:
+  consensus:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.99.0'
+      - run: cargo test --manifest-path server/cluster-tests/Cargo.toml --locked -- --test-threads=1
