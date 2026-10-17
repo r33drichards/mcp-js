@@ -26,7 +26,7 @@ See [Apalis 1.0 documentation](https://docs.rs/apalis/1.0.0/apalis/) and
 | Native integration | Worker over a cron backend | One async job in `JobScheduler` |
 | Native execution retry | No retry layer installed | No application retries delegated to driver |
 | Native persistence in this configuration | Ephemeral cron backend | Default in-memory scheduler stores |
-| Durable policy storage | Shared application SQLite snapshot | Same |
+| Durable policy storage | Shared application sled snapshot | Same |
 | Missed/overlap/retry decisions | Shared application core | Same |
 | Future expansion | Worker middleware and queue backends | Job lifecycle and optional storage adapters |
 | Tradeoff | Broader worker abstraction for a small timer role | Smaller conceptual timer interface; native scheduler has internal actors |

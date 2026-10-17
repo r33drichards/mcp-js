@@ -31,7 +31,7 @@ impl Drop for Lease {
 /// Run one driver per core. Shutdown stops admission, then drains executing futures.
 /// There is no forced termination deadline; aborting this future makes its in-flight
 /// receipts Unknown. Unknown work holds overlap/capacity slots until explicitly resolved.
-/// SQLite commits are synchronous; this comparison core targets small local workloads.
+/// Sled writes and flushes are synchronous; this comparison core targets small local workloads.
 pub async fn run_until(
     core: Arc<Mutex<Core>>,
     executor: Arc<dyn Executor>,
