@@ -1,0 +1,28 @@
+name: Scheduler core comparison
+on:
+  pull_request:
+    paths:
+      - 'scheduler-core/**'
+      - '.github/workflows/scheduler-core.yml'
+  push:
+    branches: ['impl/scheduler-*']
+    paths:
+      - 'scheduler-core/**'
+      - '.github/workflows/scheduler-core.yml'
+permissions:
+  contents: read
+jobs:
+  core:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: scheduler-core
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.99.0
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --check
+      - run: cargo test --locked
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo run --locked --example inspect
