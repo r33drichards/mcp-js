@@ -17,7 +17,7 @@ are parsed by the common Croner 4.0.1 layer, not this driver's internal parser.
 The library provides cron/one-shot/repeated jobs, async callbacks, job lifecycle
 notifications, and optional persistence adapters. None of those is used here as
 proof of execution completion, no-overlap, recovery replay, or external-effect
-deduplication. The core's SQLite receipts and executor outcomes supply those
+deduplication. The core's sled receipts and executor outcomes supply those
 application decisions. See [tokio-cron-scheduler 0.15.1](https://docs.rs/tokio-cron-scheduler/0.15.1/tokio_cron_scheduler/).
 
 | Comparison | Apalis branch | tokio-cron branch |
@@ -25,7 +25,7 @@ application decisions. See [tokio-cron-scheduler 0.15.1](https://docs.rs/tokio-c
 | Native integration | Worker over a cron backend | One async job in `JobScheduler` |
 | Native execution retry | No retry layer installed | No application retries delegated to driver |
 | Native persistence in this configuration | Ephemeral cron backend | Default in-memory scheduler stores |
-| Durable policy storage | Shared application SQLite snapshot | Same |
+| Durable policy storage | Shared application sled snapshot | Same |
 | Missed/overlap/retry decisions | Shared application core | Same |
 | Future expansion | Worker middleware and queue backends | Job lifecycle and optional storage adapters |
 | Tradeoff | Broader worker abstraction for a small timer role | Smaller conceptual timer interface; native scheduler has internal actors |
