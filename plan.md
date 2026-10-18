@@ -1,5 +1,12 @@
 # Dynamic JavaScript HTTP functions — implementation plan
 
+## Authorized implementation update
+
+Robert requested implementation and table-based integration tests, then explicitly rejected additional feature restrictions. The implementation therefore inherits the existing transport authentication rules, without an operator allowlist, new roles, or owner-based restrictions. This supersedes the separate-principal/authority gates proposed below; existing runtime policies and deployment limits still apply. Deployment remains out of scope.
+
+Work in progress: `server/src/http_functions.rs` contains dispatcher, conditional durable registry, Engine adapter, response validation, and table-driven HTTP tests. Validation has not passed yet; do not treat this as complete or deployable. Cluster failover/quorum and authorization regression evidence remain outstanding.
+
+
 ## Scope and stack
 
 Plan-only PR stacked on #284, base branch impl/scheduler-apalis, inspected at 8677390325b1769a715bd889bcaa22bd1167cf9f. No implementation or deployment included. Keep this PR based on that branch until #284 merges; then rebase/retarget to main and verify only this plan remains in the diff.

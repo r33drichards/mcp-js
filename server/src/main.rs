@@ -633,7 +633,8 @@ where
     } else {
         let protected = axum::Router::new()
             .nest_service("/mcp", mcp_service)
-            .merge(api::api_router(runtime.clone()));
+            .merge(api::api_router(runtime.clone()))
+            .merge(server::http_functions::configured_router(runtime.clone()).map_err(anyhow::Error::msg)?);
         apply_auth_enforcement(protected, &verifier)
             .merge(openapi_route)
             .merge(api::artifact_upload_router(runtime.clone()))
@@ -694,7 +695,8 @@ async fn start_sse_server(
         }),
     );
 
-    let protected = sse_router.merge(api::api_router(runtime.clone()));
+    let protected = sse_router.merge(api::api_router(runtime.clone()))
+            .merge(server::http_functions::configured_router(runtime.clone()).map_err(anyhow::Error::msg)?);
     let app = apply_auth_enforcement(protected, &verifier)
         .merge(openapi_route)
         .merge(api::artifact_upload_router(runtime.clone()));
