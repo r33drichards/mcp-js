@@ -1,0 +1,51 @@
+name: Scheduler model and deterministic replay
+on:
+  pull_request:
+    paths: ['specs/runner/**', 'scheduler-runner/**', 'scheduler-core/**', 'server/src/cluster*', 'server/src/scheduled*', 'server/cluster-tests/**', '.github/workflows/scheduler-model.yml']
+  push:
+    paths: ['specs/runner/**', 'scheduler-runner/**', 'scheduler-core/**', 'server/src/cluster*', 'server/src/scheduled*', 'server/cluster-tests/**', '.github/workflows/scheduler-model.yml']
+  workflow_dispatch:
+    inputs:
+      deep:
+        description: 'Deeper ownership (16/3) and admission (14 transitions) bounds'
+        type: boolean
+        default: true
+permissions:
+  contents: read
+jobs:
+  model:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/model-tests
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Download pinned TLC (checksum verified by checker)
+        run: curl --fail --location --retry 3 https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar -o /tmp/tla2tools.jar
+      - name: Generate bounded state witnesses and counterexamples
+        env:
+          DEEP: ${{ inputs.deep }}
+        run: |
+          args=()
+          if [ "$DEEP" = true ]; then args+=(--deep); fi
+          python3 specs/runner/check.py --jar /tmp/tla2tools.jar --out /tmp/runner-model/ownership "${args[@]}"
+          python3 specs/runner/check_admission.py --jar /tmp/tla2tools.jar --out /tmp/runner-model/admission "${args[@]}"
+      - name: Replay generated states against production transitions
+        env:
+          SCHEDULER_MODEL_TRACES: /tmp/runner-model/ownership
+          SCHEDULER_ADMISSION_TRACES: /tmp/runner-model/admission
+        run: cargo test --locked --manifest-path scheduler-runner/Cargo.toml --lib model_replay -- --nocapture
+      - name: Detect source mutations in disposable copies
+        run: |
+          python3 specs/runner/mutations.py
+          python3 specs/runner/admission_mutations.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: runner-model-traces
+          path: /tmp/runner-model

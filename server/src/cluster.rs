@@ -17,6 +17,8 @@ use tokio::sync::{Notify, RwLock};
 use tokio::time::{sleep, Instant};
 use tokio_util::sync::CancellationToken;
 
+const APPLIED_KEY: &[u8] = b"\0raft_applied";
+
 // ============================================================================
 // Types
 // ============================================================================
@@ -28,7 +30,7 @@ pub enum Role {
     Candidate,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LogEntry {
     pub term: u64,
     pub index: u64,
@@ -110,7 +112,7 @@ pub struct PutRequest {
     pub extra: Vec<(String, String)>,
 }
 
-/// Linearizable compare-and-set, forwarded to the leader. Advances `key` to
+/// Compare-and-set, forwarded to the leader. Advances `key` to
 /// `new` only if its current committed/pending value equals `expected`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CasRequest {
@@ -238,6 +240,12 @@ pub struct RaftState {
     pub learners: std::collections::HashSet<String>,
 }
 
+impl Default for RaftState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RaftState {
     pub fn new() -> Self {
         Self {
@@ -287,31 +295,64 @@ pub struct ClusterNode {
     heartbeat_notify: Arc<Notify>,
     commit_notify: Arc<Notify>,
     shutdown: CancellationToken,
+    fixed_voters: Option<HashMap<String, String>>,
+    #[cfg(test)]
+    fail_flush: std::sync::atomic::AtomicBool,
 }
 
 impl ClusterNode {
     pub fn new(config: ClusterConfig, db: sled::Db) -> Arc<Self> {
         let mut raft_state = RaftState::new();
 
-        // Restore persisted state from sled
-        if let Ok(Some(data)) = db.get("raft_meta") {
-            if let Ok(meta) = serde_json::from_slice::<serde_json::Value>(&data) {
-                raft_state.current_term = meta["current_term"].as_u64().unwrap_or(0);
-                raft_state.voted_for = meta["voted_for"].as_str().map(|s| s.to_string());
-            }
+        // A corrupt/unreadable consensus store must never bootstrap an empty voter.
+        if let Some(data) = db.get("raft_meta").expect("read Raft metadata") {
+            let meta: serde_json::Value =
+                serde_json::from_slice(&data).expect("decode Raft metadata");
+            raft_state.current_term = meta["current_term"].as_u64().expect("Raft term");
+            raft_state.voted_for =
+                serde_json::from_value(meta["voted_for"].clone()).expect("Raft vote");
         }
-
-        // Restore log entries
-        if let Ok(log_tree) = db.open_tree("raft_log") {
-            for item in log_tree.iter() {
-                if let Ok((_key, val)) = item {
-                    if let Ok(entry) = serde_json::from_slice::<LogEntry>(&val) {
-                        raft_state.log.push(entry);
-                    }
-                }
-            }
-            raft_state.log.sort_by_key(|e| e.index);
+        let log_tree = db.open_tree("raft_log").expect("open Raft log");
+        for item in log_tree.iter() {
+            let (key, val) = item.expect("read Raft log");
+            let entry: LogEntry = serde_json::from_slice(&val).expect("decode Raft log");
+            assert_eq!(
+                entry.index,
+                raft_state.log.len() as u64 + 1,
+                "noncontiguous Raft log"
+            );
+            assert_eq!(
+                key.as_ref(),
+                entry.index.to_be_bytes(),
+                "invalid Raft log key"
+            );
+            assert!(
+                entry.term <= raft_state.current_term,
+                "log exceeds durable term"
+            );
+            raft_state.log.push(entry);
         }
+        let data = db.open_tree("data").expect("open Raft data");
+        if let Some(marker) = data.get(APPLIED_KEY).expect("read applied marker") {
+            let (index, term): (u64, u64) =
+                serde_json::from_slice(&marker).expect("decode applied marker");
+            assert!(
+                index > 0
+                    && raft_state
+                        .log
+                        .get((index - 1) as usize)
+                        .is_some_and(|e| e.term == term),
+                "applied marker missing from log"
+            );
+            raft_state.commit_index = index;
+            raft_state.last_applied = index;
+        }
+        let fixed_voters = db
+            .get("raft_fixed_voters")
+            .expect("read fixed voters")
+            .map(|v| {
+                serde_json::from_slice::<HashMap<String, String>>(&v).expect("decode fixed voters")
+            });
 
         // Initialize peer set: start with CLI seed peers, then merge any
         // persisted peers (from previous dynamic joins).
@@ -327,27 +368,58 @@ impl ClusterNode {
             .peer_addrs
             .insert(config.node_id.clone(), self_addr);
 
-        if let Ok(Some(data)) = db.get("raft_peers") {
-            if let Ok(persisted) =
-                serde_json::from_slice::<HashMap<String, String>>(&data)
-            {
-                for (id, addr) in persisted {
-                    if !raft_state.peer_addrs.values().any(|a| a == &addr)
-                        && !raft_state.peers.contains(&addr)
-                    {
-                        raft_state.peers.push(addr.clone());
-                    }
-                    raft_state.peer_addrs.entry(id).or_insert(addr);
-                }
+        if let Some(data) = db.get("raft_peers").expect("read persisted peers") {
+            let persisted: HashMap<String, String> =
+                serde_json::from_slice(&data).expect("decode persisted peers");
+            for (id, addr) in persisted {
+                raft_state.peer_addrs.entry(id).or_insert(addr);
             }
         }
-
-        // Restore persisted learner addresses.
-        if let Ok(Some(data)) = db.get("raft_learners") {
-            if let Ok(persisted) = serde_json::from_slice::<Vec<String>>(&data) {
-                raft_state.learners = persisted.into_iter().collect();
-            }
+        if let Some(data) = db.get("raft_learners").expect("read persisted learners") {
+            raft_state.learners = serde_json::from_slice(&data).expect("decode persisted learners");
         }
+        if let Some(voters) = &fixed_voters {
+            let active: HashMap<_, _> = raft_state
+                .peer_addrs
+                .iter()
+                .filter(|(id, addr)| {
+                    !(raft_state.learners.contains(*addr)
+                        || (config.learner && *id == &config.node_id))
+                })
+                .map(|(id, addr)| (id.clone(), addr.clone()))
+                .collect();
+            assert_eq!(
+                &active, voters,
+                "configured membership differs from sealed voters"
+            );
+            assert_eq!(
+                voters.contains_key(&config.node_id),
+                !config.learner,
+                "cannot change voter role"
+            );
+        }
+        if fixed_voters.is_some() {
+            assert!(
+                config
+                    .peers
+                    .iter()
+                    .all(|addr| raft_state.peer_addrs.values().any(|known| known == addr)),
+                "unknown address in sealed configuration"
+            );
+            raft_state.peers.clear();
+        }
+        // Count each peer once; never count self as a second vote.
+        let own_addr = raft_state.peer_addrs.get(&config.node_id).cloned().unwrap();
+        raft_state.peers.extend(
+            raft_state
+                .peer_addrs
+                .iter()
+                .filter(|(id, _)| *id != &config.node_id)
+                .map(|(_, addr)| addr.clone()),
+        );
+        raft_state.peers.retain(|addr| addr != &own_addr);
+        raft_state.peers.sort();
+        raft_state.peers.dedup();
 
         let http_client = reqwest::Client::builder()
             .timeout(Duration::from_millis(500))
@@ -363,7 +435,111 @@ impl ClusterNode {
             heartbeat_notify: Arc::new(Notify::new()),
             commit_notify: Arc::new(Notify::new()),
             shutdown: CancellationToken::new(),
+            fixed_voters,
+            #[cfg(test)]
+            fail_flush: std::sync::atomic::AtomicBool::new(false),
         })
+    }
+
+    /// Opt-in fixed voter set for scheduler fencing. All voters must use the
+    /// same explicit id@address map. The durable seal prevents restart from
+    /// silently reverting to dynamic membership. Learners may still join/leave.
+    pub fn new_fixed(config: ClusterConfig, db: sled::Db) -> Result<Arc<Self>, String> {
+        let mut voters = config.peer_addrs.clone();
+        if config.peers.len() != voters.len()
+            || config
+                .peers
+                .iter()
+                .any(|addr| !voters.values().any(|v| v == addr))
+        {
+            return Err("fixed voters require unique id@address peers".into());
+        }
+        if !config.learner
+            && voters
+                .insert(
+                    config.node_id.clone(),
+                    config
+                        .advertise_addr
+                        .clone()
+                        .unwrap_or_else(|| format!("127.0.0.1:{}", config.cluster_port)),
+                )
+                .is_some()
+        {
+            return Err("self must not appear in peers".into());
+        }
+        let unique: std::collections::HashSet<_> = voters.values().collect();
+        if unique.len() != voters.len() || voters.is_empty() {
+            return Err("voter addresses must be unique and nonempty".into());
+        }
+        if let Some(old) = db.get("raft_fixed_voters").map_err(|e| e.to_string())? {
+            let old: HashMap<String, String> =
+                serde_json::from_slice(&old).map_err(|e| e.to_string())?;
+            if old != voters {
+                return Err("cannot change sealed voters".into());
+            }
+        }
+        // Never silently seal an existing dynamic cluster: membership and legacy
+        // commit progress must be migrated with all voters offline by an operator.
+        else {
+            for name in db.tree_names() {
+                if !db.open_tree(name).map_err(|e| e.to_string())?.is_empty() {
+                    return Err("fixed-voter mode requires a fresh consensus store".into());
+                }
+            }
+        }
+        db.insert("raft_fixed_voters", serde_json::to_vec(&voters).unwrap())
+            .map_err(|e| e.to_string())?;
+        db.flush().map_err(|e| e.to_string())?;
+        let node = Self::new(config, db);
+        Ok(node)
+    }
+
+    pub fn has_fixed_voters(&self) -> bool {
+        self.fixed_voters.is_some()
+    }
+
+    /// In-process scheduler authority. The generic HTTP data API cannot mutate
+    /// this namespace. Raft RPCs still require a trusted internal network.
+    pub async fn scheduler_cas(
+        &self,
+        expected_term: u64,
+        key: String,
+        expected: Option<String>,
+        new: String,
+    ) -> Result<bool, String> {
+        if !self.has_fixed_voters() || !key.starts_with("scheduler/") {
+            return Err("fixed-voter scheduler namespace required".into());
+        }
+        self.cas_internal(key, expected, new, vec![], Some(expected_term))
+            .await
+    }
+
+    /// Commit a current-term barrier before loading an authoritative checkpoint.
+    /// This also commits any surviving prior-term suffix; a stale local read
+    /// followed only by CAS could otherwise mismatch that suffix forever.
+    pub async fn scheduler_barrier(&self, expected_term: u64) -> Result<(), String> {
+        let entry = {
+            let mut state = self.state.write().await;
+            self.healthy()?;
+            if !self.has_fixed_voters()
+                || state.role != Role::Leader
+                || state.current_term != expected_term
+            {
+                return Err("scheduler leadership changed".into());
+            }
+            let entry = LogEntry {
+                term: expected_term,
+                index: state.last_log_index() + 1,
+                key: "scheduler/barrier".into(),
+                value: expected_term.to_string(),
+                extra: vec![],
+            };
+            self.persist_meta(&state)?;
+            self.persist_log_entry(&entry)?;
+            state.log.push(entry.clone());
+            entry
+        };
+        self.await_commit(&entry).await
     }
 
     /// Start background tasks (election timer, heartbeat sender) and the
@@ -389,53 +565,138 @@ impl ClusterNode {
         );
     }
 
+    // Deterministic test transport: production handlers/commit logic, no sockets
+    // or background timers. Election result installation is the explicit model
+    // abstraction; the harness obtains votes through handle_request_vote first.
+    #[cfg(test)]
+    pub(crate) async fn sim_install_elected_leader(&self, term: u64) {
+        let mut state = self.state.write().await;
+        assert_eq!(state.current_term, term);
+        state.role = Role::Leader;
+        state.leader_id = Some(self.config.node_id.clone());
+        state.match_index.clear();
+        state.next_index.clear();
+    }
+    #[cfg(test)]
+    pub(crate) async fn sim_response(
+        &self,
+        peer: &str,
+        term: u64,
+        matched: u64,
+        response: AppendEntriesResponse,
+    ) {
+        self.accept_append_response(peer, term, 0, matched, response)
+            .await;
+    }
+    #[cfg(test)]
+    pub(crate) async fn sim_commit(self: &Arc<Self>) {
+        self.update_commit_index().await;
+    }
+    #[cfg(test)]
+    pub(crate) fn sim_storage_failure(&self, fail: bool) {
+        self.fail_flush
+            .store(fail, std::sync::atomic::Ordering::SeqCst);
+    }
+
     pub fn shutdown(&self) {
         self.shutdown.cancel();
     }
 
     // --- Persistence helpers ------------------------------------------------
 
-    fn persist_peers(&self, state: &RaftState) {
-        let _ = self.db.insert(
-            "raft_peers",
-            serde_json::to_vec(&state.peer_addrs).unwrap().as_slice(),
-        );
-        // Learner classification is persisted alongside the peer set so a
-        // restarting leader does not mistakenly treat a learner as a voter.
-        let learners: Vec<String> = state.learners.iter().cloned().collect();
-        let _ = self.db.insert(
-            "raft_learners",
-            serde_json::to_vec(&learners).unwrap().as_slice(),
-        );
-    }
-
-    fn persist_meta(&self, state: &RaftState) {
-        let meta = serde_json::json!({
-            "current_term": state.current_term,
-            "voted_for": state.voted_for,
-        });
-        let _ = self
-            .db
-            .insert("raft_meta", serde_json::to_vec(&meta).unwrap().as_slice());
-    }
-
-    fn persist_log_entry(&self, entry: &LogEntry) {
-        if let Ok(log_tree) = self.db.open_tree("raft_log") {
-            let key = entry.index.to_be_bytes();
-            let _ = log_tree.insert(key, serde_json::to_vec(entry).unwrap().as_slice());
+    fn healthy(&self) -> Result<(), String> {
+        if self.shutdown.is_cancelled() {
+            Err("cluster stopped or storage failed; outcome may be unknown".into())
+        } else {
+            Ok(())
         }
     }
 
-    fn truncate_log_from(&self, from_index: u64) {
-        if let Ok(log_tree) = self.db.open_tree("raft_log") {
-            // Remove entries with index >= from_index
-            let start = from_index.to_be_bytes();
-            for item in log_tree.range(start..) {
-                if let Ok((key, _)) = item {
-                    let _ = log_tree.remove(key);
-                }
+    fn durable<T>(&self, result: sled::Result<T>) -> Result<T, String> {
+        #[cfg(test)]
+        let result = if self.fail_flush.load(std::sync::atomic::Ordering::SeqCst) {
+            Err(sled::Error::Unsupported("injected flush failure".into()))
+        } else {
+            result
+        };
+        match result.and_then(|value| self.db.flush().map(|_| value)) {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                self.shutdown.cancel();
+                self.commit_notify.notify_waiters();
+                tracing::error!("Raft storage failure; node stopped: {error}");
+                Err(format!("Raft storage failed: {error}"))
             }
         }
+    }
+
+    fn persist_peers(&self, state: &RaftState) -> Result<(), String> {
+        let mut batch = sled::Batch::default();
+        batch.insert("raft_peers", serde_json::to_vec(&state.peer_addrs).unwrap());
+        batch.insert(
+            "raft_learners",
+            serde_json::to_vec(&state.learners).unwrap(),
+        );
+        self.durable(self.db.apply_batch(batch))
+    }
+
+    fn persist_meta(&self, state: &RaftState) -> Result<(), String> {
+        let meta =
+            serde_json::json!({"current_term": state.current_term, "voted_for": state.voted_for});
+        self.durable(
+            self.db
+                .insert("raft_meta", serde_json::to_vec(&meta).unwrap()),
+        )
+        .map(|_| ())
+    }
+
+    fn persist_log_entry(&self, entry: &LogEntry) -> Result<(), String> {
+        self.durable(self.db.open_tree("raft_log").and_then(|tree| {
+            tree.insert(
+                entry.index.to_be_bytes(),
+                serde_json::to_vec(entry).unwrap(),
+            )
+        }))
+        .map(|_| ())
+    }
+
+    fn truncate_log_from(&self, from_index: u64) -> Result<(), String> {
+        self.durable((|| {
+            let tree = self.db.open_tree("raft_log")?;
+            let mut batch = sled::Batch::default();
+            for item in tree.range(from_index.to_be_bytes()..) {
+                batch.remove(item?.0);
+            }
+            tree.apply_batch(batch)
+        })())
+    }
+
+    fn valid_keys(key: &str, extra: &[(String, String)]) -> bool {
+        !key.starts_with('\0') && extra.iter().all(|(key, _)| !key.starts_with('\0'))
+    }
+
+    async fn await_commit(&self, entry: &LogEntry) -> Result<(), String> {
+        for _ in 0..100 {
+            self.healthy()?;
+            {
+                let state = self.state.read().await;
+                if state.role != Role::Leader || state.current_term != entry.term {
+                    return Err("lost proposal leadership; outcome may be unknown".into());
+                }
+                if state.log.get((entry.index - 1) as usize) != Some(entry) {
+                    return Err("proposal replaced".into());
+                }
+                if state.last_applied >= entry.index {
+                    return Ok(());
+                }
+            }
+            tokio::select! {
+                _ = self.commit_notify.notified() => {},
+                _ = sleep(Duration::from_millis(50)) => {},
+                _ = self.shutdown.cancelled() => {},
+            }
+        }
+        Err("timeout waiting for durable commit; outcome may be unknown".into())
     }
 
     // --- Election -----------------------------------------------------------
@@ -483,12 +744,14 @@ impl ClusterNode {
             state.role = Role::Candidate;
             state.voted_for = Some(self.config.node_id.clone());
             state.leader_id = None;
-            self.persist_meta(&state);
+            if self.healthy().is_err() || self.persist_meta(&state).is_err() {
+                return;
+            }
             (
                 state.current_term,
                 state.last_log_index(),
                 state.last_log_term(),
-                state.peers.clone(),
+                state.voter_peers(),
                 state.voter_peers().len(),
             )
         };
@@ -501,7 +764,8 @@ impl ClusterNode {
 
         // Only voting members count toward the election quorum. Learners are
         // sent RequestVote (harmless) but refuse, so they cannot inflate votes.
-        let majority = (voter_count + 1) / 2 + 1;
+        let total_voters = voter_count + 1;
+        let majority = total_voters / 2 + 1;
         let mut votes: usize = 1; // vote for self
 
         // Send RequestVote RPCs to all peers in parallel
@@ -528,16 +792,23 @@ impl ClusterNode {
 
         for handle in handles {
             if let Ok(Some(resp)) = handle.await {
-                if resp.vote_granted {
-                    votes += 1;
-                }
-                if resp.term > term {
-                    let mut state = self.state.write().await;
+                let mut state = self.state.write().await;
+                if resp.term > state.current_term {
                     state.current_term = resp.term;
                     state.role = Role::Follower;
                     state.voted_for = None;
-                    self.persist_meta(&state);
+                    state.leader_id = None;
+                    let _ = self.persist_meta(&state);
                     return;
+                }
+                if self.healthy().is_err()
+                    || state.current_term != term
+                    || state.role != Role::Candidate
+                {
+                    return;
+                }
+                if resp.term == term && resp.vote_granted {
+                    votes += 1;
                 }
             }
         }
@@ -552,7 +823,9 @@ impl ClusterNode {
                     state.next_index.insert(peer.clone(), last_index + 1);
                     state.match_index.insert(peer.clone(), 0);
                 }
-                self.persist_meta(&state);
+                if self.persist_meta(&state).is_err() {
+                    return;
+                }
                 tracing::info!(
                     "[{}] Won election for term {} ({}/{} voter votes)",
                     self.config.node_id,
@@ -669,27 +942,14 @@ impl ClusterNode {
         match resp {
             Ok(r) => {
                 if let Ok(ae_resp) = r.json::<AppendEntriesResponse>().await {
-                    let mut state = self.state.write().await;
-                    if ae_resp.term > state.current_term {
-                        state.current_term = ae_resp.term;
-                        state.role = Role::Follower;
-                        state.voted_for = None;
-                        state.leader_id = None;
-                        self.persist_meta(&state);
-                        return;
-                    }
-                    if ae_resp.success {
-                        if let Some(last) = entries.last() {
-                            state.next_index.insert(peer.to_string(), last.index + 1);
-                            state.match_index.insert(peer.to_string(), last.index);
-                        }
-                    } else {
-                        // Decrement next_index and retry next heartbeat
-                        let ni = state.next_index.get(peer).copied().unwrap_or(1);
-                        if ni > 1 {
-                            state.next_index.insert(peer.to_string(), ni - 1);
-                        }
-                    }
+                    self.accept_append_response(
+                        peer,
+                        term,
+                        prev_log_index,
+                        entries.last().map_or(prev_log_index, |e| e.index),
+                        ae_resp,
+                    )
+                    .await;
                 }
             }
             Err(_) => {
@@ -698,9 +958,49 @@ impl ClusterNode {
         }
     }
 
+    async fn accept_append_response(
+        &self,
+        peer: &str,
+        term: u64,
+        prev_log_index: u64,
+        matched_index: u64,
+        ae_resp: AppendEntriesResponse,
+    ) {
+        let mut state = self.state.write().await;
+        if ae_resp.term > state.current_term {
+            state.current_term = ae_resp.term;
+            state.role = Role::Follower;
+            state.voted_for = None;
+            state.leader_id = None;
+            let _ = self.persist_meta(&state);
+            return;
+        }
+        if self.healthy().is_err()
+            || state.role != Role::Leader
+            || state.current_term != term
+            || ae_resp.term != term
+        {
+            return;
+        }
+        let matched = matched_index;
+        if ae_resp.success {
+            let old = state.match_index.get(peer).copied().unwrap_or(0);
+            state.match_index.insert(peer.to_string(), old.max(matched));
+            let next = state.next_index.get(peer).copied().unwrap_or(1);
+            state
+                .next_index
+                .insert(peer.to_string(), next.max(matched + 1));
+        } else {
+            let next = state.next_index.get(peer).copied().unwrap_or(1);
+            if next == prev_log_index + 1 && next > 1 {
+                state.next_index.insert(peer.to_string(), next - 1);
+            }
+        }
+    }
+
     async fn update_commit_index(self: &Arc<Self>) {
         let mut state = self.state.write().await;
-        if state.role != Role::Leader {
+        if self.healthy().is_err() || state.role != Role::Leader {
             return;
         }
 
@@ -708,7 +1008,8 @@ impl ClusterNode {
         // still replicated to (they remain in `peers`), but a write commits as
         // soon as a majority of voters — including the leader — has it.
         let voter_peers = state.voter_peers();
-        let majority = (voter_peers.len() + 1) / 2 + 1;
+        let total_voters = voter_peers.len() + 1;
+        let majority = total_voters / 2 + 1;
 
         // Find the highest N such that a majority of match_index[i] >= N
         // and log[N].term == currentTerm
@@ -720,174 +1021,157 @@ impl ClusterNode {
                     replication_count += 1;
                 }
             }
-            if replication_count >= majority {
-                if let Some(entry) = state.log.get((n - 1) as usize) {
-                    if entry.term == state.current_term {
-                        state.commit_index = n;
-                        self.commit_notify.notify_waiters();
-                        break;
-                    }
-                }
+            if replication_count >= majority
+                && state
+                    .log
+                    .get((n - 1) as usize)
+                    .is_some_and(|entry| entry.term == state.current_term)
+            {
+                state.commit_index = n;
+                break;
             }
         }
 
-        // Apply committed entries to the state machine
-        while state.last_applied < state.commit_index {
-            state.last_applied += 1;
-            if let Some(entry) = state.log.get((state.last_applied - 1) as usize) {
-                self.apply_log_entry(entry);
-            }
+        if self.apply_committed(&mut state).is_ok() {
+            self.commit_notify.notify_waiters();
         }
     }
 
-    /// Apply one committed log entry to the state-machine tree. The primary
-    /// write and any `extra` companion writes land in a single sled batch so a
-    /// combined entry (e.g. a label head move plus its reflog append) is
-    /// all-or-nothing on the node, matching the atomicity the entry was
-    /// replicated with.
-    fn apply_log_entry(&self, entry: &LogEntry) {
-        let Ok(data_tree) = self.db.open_tree("data") else {
-            return;
-        };
-        if entry.extra.is_empty() {
-            let _ = data_tree.insert(entry.key.as_bytes(), entry.value.as_bytes());
-            return;
+    fn apply_committed(&self, state: &mut RaftState) -> Result<(), String> {
+        while state.last_applied < state.commit_index {
+            let entry = &state.log[state.last_applied as usize];
+            self.apply_log_entry(entry)?;
+            state.last_applied += 1;
         }
-        let mut batch = sled::Batch::default();
-        batch.insert(entry.key.as_bytes(), entry.value.as_bytes());
-        for (k, v) in &entry.extra {
-            batch.insert(k.as_bytes(), v.as_bytes());
-        }
-        let _ = data_tree.apply_batch(batch);
+        Ok(())
+    }
+
+    // The progress marker and all companion writes are one atomic batch.
+    // A successful ACK requires a durable flush of both data and marker.
+    fn apply_log_entry(&self, entry: &LogEntry) -> Result<(), String> {
+        self.durable((|| {
+            let tree = self.db.open_tree("data")?;
+            let mut batch = sled::Batch::default();
+            batch.insert(entry.key.as_bytes(), entry.value.as_bytes());
+            for (key, value) in &entry.extra {
+                batch.insert(key.as_bytes(), value.as_bytes());
+            }
+            batch.insert(
+                APPLIED_KEY,
+                serde_json::to_vec(&(entry.index, entry.term)).unwrap(),
+            );
+            tree.apply_batch(batch)
+        })())
     }
 
     // --- RPC Handlers -------------------------------------------------------
 
     pub async fn handle_append_entries(&self, req: AppendEntriesRequest) -> AppendEntriesResponse {
         let mut state = self.state.write().await;
-
-        // Reply false if term < currentTerm
-        if req.term < state.current_term {
-            return AppendEntriesResponse {
-                term: state.current_term,
-                success: false,
-            };
+        let reject = |term| AppendEntriesResponse {
+            term,
+            success: false,
+        };
+        if self.healthy().is_err() || req.term < state.current_term {
+            return reject(state.current_term);
         }
-
-        // Update term if needed
+        if let Some(voters) = &self.fixed_voters {
+            if !voters.contains_key(&req.leader_id) {
+                return reject(state.current_term);
+            }
+            if let Some(peers) = &req.peer_addrs {
+                let learners = req.learner_addrs.clone().unwrap_or_default();
+                let incoming: HashMap<_, _> = peers
+                    .iter()
+                    .filter(|(_, addr)| !learners.contains(addr))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                if &incoming != voters {
+                    return reject(state.current_term);
+                }
+            }
+        }
         if req.term > state.current_term {
             state.current_term = req.term;
             state.voted_for = None;
         }
-
         state.role = Role::Follower;
         state.leader_id = Some(req.leader_id.clone());
+        if self.persist_meta(&state).is_err() {
+            return reject(state.current_term);
+        }
         state.last_heartbeat = Instant::now();
         self.heartbeat_notify.notify_one();
-
-        // Apply peer set from the leader if provided
-        if let Some(leader_peer_addrs) = &req.peer_addrs {
-            let mut changed = false;
-            for (id, addr) in leader_peer_addrs {
-                // Skip self
-                if id == &self.config.node_id {
-                    continue;
-                }
-                if !state.peer_addrs.contains_key(id) {
-                    state.peers.push(addr.clone());
-                    state.peer_addrs.insert(id.clone(), addr.clone());
-                    changed = true;
-                } else if state.peer_addrs.get(id) != Some(addr) {
-                    // Address changed
-                    if let Some(old_addr) = state.peer_addrs.insert(id.clone(), addr.clone()) {
-                        state.peers.retain(|p| p != &old_addr);
-                    }
-                    state.peers.push(addr.clone());
-                    changed = true;
-                }
+        if (req.prev_log_index == 0 && req.prev_log_term != 0)
+            || (req.prev_log_index > 0
+                && !state
+                    .log
+                    .get((req.prev_log_index - 1) as usize)
+                    .is_some_and(|e| e.term == req.prev_log_term))
+        {
+            return reject(state.current_term);
+        }
+        for (offset, entry) in req.entries.iter().enumerate() {
+            if req.prev_log_index.checked_add(offset as u64 + 1) != Some(entry.index)
+                || entry.term > req.term
+                || entry.term == 0
+                || !Self::valid_keys(&entry.key, &entry.extra)
+            {
+                return reject(state.current_term);
             }
-            // Remove peers that the leader no longer has (excluding self)
-            let leader_ids: std::collections::HashSet<&String> = leader_peer_addrs.keys().collect();
-            let local_ids: Vec<String> = state.peer_addrs.keys().cloned().collect();
-            for id in local_ids {
-                if id != self.config.node_id && !leader_ids.contains(&id) {
-                    if let Some(addr) = state.peer_addrs.remove(&id) {
-                        state.peers.retain(|p| p != &addr);
-                        changed = true;
-                    }
-                }
-            }
-            if changed {
-                self.persist_peers(&state);
+            if state
+                .log
+                .get((entry.index - 1) as usize)
+                .is_some_and(|old| {
+                    old != entry && (entry.index <= state.commit_index || old.term == entry.term)
+                })
+            {
+                return reject(state.current_term);
             }
         }
-
-        // Adopt the leader's learner set so this node computes the same voting
-        // membership (matters if it ever becomes a candidate/leader).
-        if let Some(leader_learners) = &req.learner_addrs {
-            let incoming: std::collections::HashSet<String> =
-                leader_learners.iter().cloned().collect();
-            if incoming != state.learners {
-                state.learners = incoming;
-                self.persist_peers(&state);
-            }
-        }
-
-        // Log consistency check
-        if req.prev_log_index > 0 {
-            match state.log.get((req.prev_log_index - 1) as usize) {
-                Some(entry) if entry.term != req.prev_log_term => {
-                    // Conflicting entry, truncate
-                    state.log.truncate((req.prev_log_index - 1) as usize);
-                    self.truncate_log_from(req.prev_log_index);
-                    self.persist_meta(&state);
-                    return AppendEntriesResponse {
-                        term: state.current_term,
-                        success: false,
-                    };
-                }
-                None if req.prev_log_index > state.log.len() as u64 => {
-                    // Missing entries
-                    self.persist_meta(&state);
-                    return AppendEntriesResponse {
-                        term: state.current_term,
-                        success: false,
-                    };
-                }
-                _ => {}
-            }
-        }
-
-        // Append new entries
         for entry in &req.entries {
-            let idx = (entry.index - 1) as usize;
-            if idx < state.log.len() {
-                if state.log[idx].term != entry.term {
-                    state.log.truncate(idx);
-                    self.truncate_log_from(entry.index);
-                    state.log.push(entry.clone());
-                    self.persist_log_entry(entry);
+            let index = (entry.index - 1) as usize;
+            if state
+                .log
+                .get(index)
+                .is_some_and(|old| old.term != entry.term)
+            {
+                if self.truncate_log_from(entry.index).is_err() {
+                    return reject(state.current_term);
                 }
-            } else {
+                state.log.truncate(index);
+            }
+            if index == state.log.len() {
+                if self.persist_log_entry(entry).is_err() {
+                    return reject(state.current_term);
+                }
                 state.log.push(entry.clone());
-                self.persist_log_entry(entry);
             }
         }
-
-        // Update commit index
-        if req.leader_commit > state.commit_index {
-            state.commit_index = std::cmp::min(req.leader_commit, state.last_log_index());
+        // Do not commit an unvalidated local suffix on a short heartbeat.
+        let matched = req.prev_log_index + req.entries.len() as u64;
+        state.commit_index = state.commit_index.max(req.leader_commit.min(matched));
+        if self.apply_committed(&mut state).is_err() {
+            return reject(state.current_term);
         }
-
-        // Apply committed entries to state machine
-        while state.last_applied < state.commit_index {
-            state.last_applied += 1;
-            if let Some(entry) = state.log.get((state.last_applied - 1) as usize) {
-                self.apply_log_entry(entry);
+        // Legacy dynamic membership remains available outside fixed-voter mode.
+        if let Some(peers) = req.peer_addrs {
+            state.peer_addrs = peers;
+            state.peers = state
+                .peer_addrs
+                .iter()
+                .filter(|(id, _)| *id != &self.config.node_id)
+                .map(|(_, addr)| addr.clone())
+                .collect();
+            state.peers.sort();
+            state.peers.dedup();
+            if let Some(learners) = req.learner_addrs {
+                state.learners = learners.into_iter().collect();
+            }
+            if self.persist_peers(&state).is_err() {
+                return reject(state.current_term);
             }
         }
-
-        self.persist_meta(&state);
         AppendEntriesResponse {
             term: state.current_term,
             success: true,
@@ -897,6 +1181,17 @@ impl ClusterNode {
     pub async fn handle_request_vote(&self, req: RequestVoteRequest) -> RequestVoteResponse {
         let mut state = self.state.write().await;
 
+        if self.healthy().is_err()
+            || self
+                .fixed_voters
+                .as_ref()
+                .is_some_and(|voters| !voters.contains_key(&req.candidate_id))
+        {
+            return RequestVoteResponse {
+                term: state.current_term,
+                vote_granted: false,
+            };
+        }
         // Learners are non-voting: they never grant votes, so a candidate that
         // (incorrectly) counted a learner's vote could not reach quorum from it.
         if self.config.learner {
@@ -904,7 +1199,7 @@ impl ClusterNode {
             if req.term > state.current_term {
                 state.current_term = req.term;
                 state.voted_for = None;
-                self.persist_meta(&state);
+                let _ = self.persist_meta(&state);
             }
             return RequestVoteResponse {
                 term: state.current_term,
@@ -937,13 +1232,13 @@ impl ClusterNode {
             state.voted_for = Some(req.candidate_id.clone());
             state.last_heartbeat = Instant::now();
             self.heartbeat_notify.notify_one();
-            self.persist_meta(&state);
+            let durable = self.persist_meta(&state).is_ok();
             RequestVoteResponse {
                 term: state.current_term,
-                vote_granted: true,
+                vote_granted: durable,
             }
         } else {
-            self.persist_meta(&state);
+            let _ = self.persist_meta(&state);
             RequestVoteResponse {
                 term: state.current_term,
                 vote_granted: false,
@@ -966,6 +1261,13 @@ impl ClusterNode {
         value: String,
         extra: Vec<(String, String)>,
     ) -> Result<(), String> {
+        self.healthy()?;
+        if !Self::valid_keys(&key, &extra)
+            || key.starts_with("scheduler/")
+            || extra.iter().any(|(key, _)| key.starts_with("scheduler/"))
+        {
+            return Err("reserved consensus key".into());
+        }
         let entry = {
             let mut state = self.state.write().await;
             if state.role != Role::Leader {
@@ -981,28 +1283,13 @@ impl ClusterNode {
                 value,
                 extra,
             };
+            self.persist_meta(&state)?;
+            self.persist_log_entry(&entry)?;
             state.log.push(entry.clone());
-            self.persist_log_entry(&entry);
             entry
         };
 
-        // Wait for the entry to be committed (replicated to majority)
-        let target_index = entry.index;
-        for _ in 0..100 {
-            tokio::select! {
-                _ = self.commit_notify.notified() => {}
-                _ = sleep(Duration::from_millis(50)) => {}
-            }
-            let state = self.state.read().await;
-            if state.commit_index >= target_index {
-                return Ok(());
-            }
-            if state.role != Role::Leader {
-                return Err("lost leadership during replication".to_string());
-            }
-        }
-
-        Err("timeout waiting for commit".to_string())
+        self.await_commit(&entry).await
     }
 
     /// Write a key-value pair, forwarding to the leader if this node is a
@@ -1021,6 +1308,13 @@ impl ClusterNode {
         value: String,
         extra: Vec<(String, String)>,
     ) -> Result<(), String> {
+        self.healthy()?;
+        if !Self::valid_keys(&key, &extra)
+            || key.starts_with("scheduler/")
+            || extra.iter().any(|(key, _)| key.starts_with("scheduler/"))
+        {
+            return Err("reserved consensus key".into());
+        }
         let (is_leader, leader_id, leader_addr) = {
             let state = self.state.read().await;
             let lid = state.leader_id.clone();
@@ -1040,11 +1334,7 @@ impl ClusterNode {
                 let leader_addr = leader_addr
                     .ok_or_else(|| format!("unknown leader address for node '{}'", id))?;
                 let url = format!("http://{}/data/put", leader_addr);
-                let req = PutRequest {
-                    key,
-                    value,
-                    extra,
-                };
+                let req = PutRequest { key, value, extra };
                 let resp = self
                     .http_client
                     .post(&url)
@@ -1063,11 +1353,12 @@ impl ClusterNode {
         }
     }
 
-    /// Leader-only linearizable compare-and-set. The compare is made under the
+    /// Leader-only compare-and-set. The compare is made under the
     /// state lock against the latest *pending or committed* value of `key` (so
     /// two concurrent CAS serialize correctly: the first to append shifts the
     /// value the second sees). Returns `Ok(true)` when the new value was
-    /// appended and committed, `Ok(false)` when the compare did not match.
+    /// appended and durably applied. `Ok(false)` is a provisional mismatch
+    /// against pending state, not a linearizable read or proof of ownership.
     pub async fn cas(
         &self,
         key: String,
@@ -1077,7 +1368,7 @@ impl ClusterNode {
         self.cas_with(key, expected, new, Vec::new()).await
     }
 
-    /// Linearizable compare-and-set that, when the compare matches, also applies
+    /// Compare-and-set that, when the compare matches, also applies
     /// `extra` key/value writes in the same committed entry. The compare is made
     /// against `key` only; `extra` writes are unconditional companions (e.g. a
     /// reflog append that must land atomically with the head move it records).
@@ -1088,20 +1379,49 @@ impl ClusterNode {
         new: String,
         extra: Vec<(String, String)>,
     ) -> Result<bool, String> {
+        self.healthy()?;
+        if !Self::valid_keys(&key, &extra)
+            || key.starts_with("scheduler/")
+            || extra.iter().any(|(key, _)| key.starts_with("scheduler/"))
+        {
+            return Err("reserved consensus key".into());
+        }
+        self.cas_internal(key, expected, new, extra, None).await
+    }
+
+    async fn cas_internal(
+        &self,
+        key: String,
+        expected: Option<String>,
+        new: String,
+        extra: Vec<(String, String)>,
+        expected_term: Option<u64>,
+    ) -> Result<bool, String> {
+        self.healthy()?;
         let entry = {
             let mut state = self.state.write().await;
-            if state.role != Role::Leader {
-                return Err(format!("not the leader; current leader: {:?}", state.leader_id));
+            if state.role != Role::Leader
+                || expected_term.is_some_and(|term| term != state.current_term)
+            {
+                return Err(format!(
+                    "not the leader; current leader: {:?}",
+                    state.leader_id
+                ));
             }
             // Latest value = most recent log entry for the key (covers
             // appended-but-not-yet-committed writes), else the applied value.
-            let current = state
-                .log
-                .iter()
-                .rev()
-                .find(|e| e.key == key)
-                .map(|e| e.value.clone())
-                .or_else(|| self.read_applied(&key));
+            let current = state.log.iter().rev().find_map(|e| {
+                e.extra
+                    .iter()
+                    .rev()
+                    .find(|(k, _)| k == &key)
+                    .map(|(_, v)| v.clone())
+                    .or_else(|| (e.key == key).then(|| e.value.clone()))
+            });
+            let current = match current {
+                Some(value) => Some(value),
+                None => self.read_applied(&key)?,
+            };
             if current.as_deref() != expected.as_deref() {
                 return Ok(false);
             }
@@ -1112,27 +1432,13 @@ impl ClusterNode {
                 value: new,
                 extra,
             };
+            self.persist_meta(&state)?;
+            self.persist_log_entry(&entry)?;
             state.log.push(entry.clone());
-            self.persist_log_entry(&entry);
             entry
         };
 
-        // Wait for the entry to commit (replicated to a majority).
-        let target_index = entry.index;
-        for _ in 0..100 {
-            tokio::select! {
-                _ = self.commit_notify.notified() => {}
-                _ = sleep(Duration::from_millis(50)) => {}
-            }
-            let state = self.state.read().await;
-            if state.commit_index >= target_index {
-                return Ok(true);
-            }
-            if state.role != Role::Leader {
-                return Err("lost leadership during replication".to_string());
-            }
-        }
-        Err("timeout waiting for commit".to_string())
+        self.await_commit(&entry).await.map(|_| true)
     }
 
     /// Compare-and-set, forwarding to the leader when this node is a follower.
@@ -1142,7 +1448,8 @@ impl ClusterNode {
         expected: Option<String>,
         new: String,
     ) -> Result<bool, String> {
-        self.cas_with_or_forward(key, expected, new, Vec::new()).await
+        self.cas_with_or_forward(key, expected, new, Vec::new())
+            .await
     }
 
     /// `cas_with`, forwarding to the leader when this node is a follower. The
@@ -1155,10 +1462,19 @@ impl ClusterNode {
         new: String,
         extra: Vec<(String, String)>,
     ) -> Result<bool, String> {
+        self.healthy()?;
+        if !Self::valid_keys(&key, &extra)
+            || key.starts_with("scheduler/")
+            || extra.iter().any(|(key, _)| key.starts_with("scheduler/"))
+        {
+            return Err("reserved consensus key".into());
+        }
         let (is_leader, leader_id, leader_addr) = {
             let state = self.state.read().await;
             let lid = state.leader_id.clone();
-            let addr = lid.as_ref().and_then(|id| state.peer_addrs.get(id).cloned());
+            let addr = lid
+                .as_ref()
+                .and_then(|id| state.peer_addrs.get(id).cloned());
             (state.role == Role::Leader, lid, addr)
         };
 
@@ -1171,7 +1487,12 @@ impl ClusterNode {
                 let leader_addr = leader_addr
                     .ok_or_else(|| format!("unknown leader address for node '{}'", id))?;
                 let url = format!("http://{}/data/cas", leader_addr);
-                let req = CasRequest { key, expected, new, extra };
+                let req = CasRequest {
+                    key,
+                    expected,
+                    new,
+                    extra,
+                };
                 let resp = self
                     .http_client
                     .post(&url)
@@ -1195,11 +1516,19 @@ impl ClusterNode {
     }
 
     /// Read the applied (committed) value of a key from the state-machine tree.
-    fn read_applied(&self, key: &str) -> Option<String> {
-        let tree = self.db.open_tree("data").ok()?;
-        match tree.get(key.as_bytes()) {
-            Ok(Some(v)) => Some(String::from_utf8_lossy(&v).to_string()),
-            _ => None,
+    fn read_applied(&self, key: &str) -> Result<Option<String>, String> {
+        let result = self
+            .db
+            .open_tree("data")
+            .and_then(|tree| tree.get(key.as_bytes()));
+        match result {
+            Ok(value) => value
+                .map(|v| String::from_utf8(v.to_vec()).map_err(|e| e.to_string()))
+                .transpose(),
+            Err(error) => {
+                self.shutdown.cancel();
+                Err(error.to_string())
+            }
         }
     }
 
@@ -1215,6 +1544,7 @@ impl ClusterNode {
         addr: String,
         as_learner: bool,
     ) -> Result<(), String> {
+        self.healthy()?;
         let mut state = self.state.write().await;
         if state.role != Role::Leader {
             return Err(format!(
@@ -1223,6 +1553,17 @@ impl ClusterNode {
             ));
         }
 
+        if node_id == self.config.node_id
+            || state
+                .peer_addrs
+                .iter()
+                .any(|(id, old)| id != &node_id && old == &addr)
+        {
+            return Err("duplicate peer identity/address".into());
+        }
+        if self.fixed_voters.is_some() && !as_learner {
+            return Err("fixed voter membership; only learner joins allowed".into());
+        }
         // Idempotent: skip if already present
         if state.peer_addrs.contains_key(&node_id) {
             return Ok(());
@@ -1239,7 +1580,7 @@ impl ClusterNode {
         state.next_index.insert(addr.clone(), last_index + 1);
         state.match_index.insert(addr.clone(), 0);
 
-        self.persist_peers(&state);
+        self.persist_peers(&state)?;
         tracing::info!(
             "[{}] Added {} {}@{}",
             self.config.node_id,
@@ -1252,6 +1593,7 @@ impl ClusterNode {
 
     /// Remove a peer from the cluster.  Must be called on the leader.
     pub async fn remove_peer(&self, node_id: String) -> Result<(), String> {
+        self.healthy()?;
         let mut state = self.state.write().await;
         if state.role != Role::Leader {
             return Err(format!(
@@ -1260,12 +1602,19 @@ impl ClusterNode {
             ));
         }
 
+        if self
+            .fixed_voters
+            .as_ref()
+            .is_some_and(|voters| voters.contains_key(&node_id))
+        {
+            return Err("cannot remove a fixed voter".into());
+        }
         if let Some(addr) = state.peer_addrs.remove(&node_id) {
             state.peers.retain(|p| p != &addr);
             state.learners.remove(&addr);
             state.next_index.remove(&addr);
             state.match_index.remove(&addr);
-            self.persist_peers(&state);
+            self.persist_peers(&state)?;
             tracing::info!(
                 "[{}] Removed peer {}@{}",
                 self.config.node_id,
@@ -1281,6 +1630,7 @@ impl ClusterNode {
     /// Handle a join request.  If this node is the leader it adds the peer
     /// directly; otherwise it forwards to the leader.
     pub async fn handle_join(&self, req: JoinRequest) -> Result<(), String> {
+        self.healthy()?;
         {
             let state = self.state.read().await;
             if state.role == Role::Leader {
@@ -1310,17 +1660,6 @@ impl ClusterNode {
                     .await
                     .map_err(|e| format!("failed to forward join to leader: {}", e))?;
                 if resp.status().is_success() {
-                    // Also update our own peer set locally so we don't wait
-                    // for the next heartbeat to discover the new peer.
-                    let mut state = self.state.write().await;
-                    if !state.peer_addrs.contains_key(&req.node_id) {
-                        state.peers.push(req.addr.clone());
-                        state.peer_addrs.insert(req.node_id, req.addr.clone());
-                        if req.as_learner {
-                            state.learners.insert(req.addr);
-                        }
-                        self.persist_peers(&state);
-                    }
                     Ok(())
                 } else {
                     let body = resp.text().await.unwrap_or_default();
@@ -1334,6 +1673,7 @@ impl ClusterNode {
     /// Handle a leave request.  If this node is the leader it removes the
     /// peer directly; otherwise it forwards to the leader.
     pub async fn handle_leave(&self, req: LeaveRequest) -> Result<(), String> {
+        self.healthy()?;
         {
             let state = self.state.read().await;
             if state.role == Role::Leader {
@@ -1363,12 +1703,6 @@ impl ClusterNode {
                     .await
                     .map_err(|e| format!("failed to forward leave to leader: {}", e))?;
                 if resp.status().is_success() {
-                    // Remove from local peer set too
-                    let mut state = self.state.write().await;
-                    if let Some(addr) = state.peer_addrs.remove(&req.node_id) {
-                        state.peers.retain(|p| p != &addr);
-                        self.persist_peers(&state);
-                    }
                     Ok(())
                 } else {
                     let body = resp.text().await.unwrap_or_default();
@@ -1467,119 +1801,121 @@ async fn route(
     let method = req.method().clone();
     let path = req.uri().path().to_string();
 
-    let response = match (method, path.as_str()) {
-        (Method::POST, "/raft/append-entries") => {
-            match read_body(req).await.and_then(|b| {
-                serde_json::from_slice::<AppendEntriesRequest>(&b).map_err(|e| e.to_string())
-            }) {
-                Ok(ae_req) => {
-                    let resp = node.handle_append_entries(ae_req).await;
-                    json_response(200, &resp)
+    let response =
+        match (method, path.as_str()) {
+            (Method::POST, "/raft/append-entries") => {
+                match read_body(req).await.and_then(|b| {
+                    serde_json::from_slice::<AppendEntriesRequest>(&b).map_err(|e| e.to_string())
+                }) {
+                    Ok(ae_req) => {
+                        let resp = node.handle_append_entries(ae_req).await;
+                        json_response(200, &resp)
+                    }
+                    Err(e) => error_response(400, &e),
                 }
-                Err(e) => error_response(400, &e),
             }
-        }
 
-        (Method::POST, "/raft/request-vote") => {
-            match read_body(req).await.and_then(|b| {
-                serde_json::from_slice::<RequestVoteRequest>(&b).map_err(|e| e.to_string())
-            }) {
-                Ok(rv_req) => {
-                    let resp = node.handle_request_vote(rv_req).await;
-                    json_response(200, &resp)
+            (Method::POST, "/raft/request-vote") => {
+                match read_body(req).await.and_then(|b| {
+                    serde_json::from_slice::<RequestVoteRequest>(&b).map_err(|e| e.to_string())
+                }) {
+                    Ok(rv_req) => {
+                        let resp = node.handle_request_vote(rv_req).await;
+                        json_response(200, &resp)
+                    }
+                    Err(e) => error_response(400, &e),
                 }
-                Err(e) => error_response(400, &e),
             }
-        }
 
-        (Method::GET, "/raft/status") => {
-            let status = node.status().await;
-            json_response(200, &status)
-        }
-
-        (Method::POST, "/raft/join") => {
-            match read_body(req).await.and_then(|b| {
-                serde_json::from_slice::<JoinRequest>(&b).map_err(|e| e.to_string())
-            }) {
-                Ok(join_req) => match node.handle_join(join_req).await {
-                    Ok(()) => json_response(200, &serde_json::json!({"ok": true})),
-                    Err(e) => error_response(503, &e),
-                },
-                Err(e) => error_response(400, &e),
+            (Method::GET, "/raft/status") => {
+                let status = node.status().await;
+                json_response(200, &status)
             }
-        }
 
-        (Method::POST, "/raft/leave") => {
-            match read_body(req).await.and_then(|b| {
-                serde_json::from_slice::<LeaveRequest>(&b).map_err(|e| e.to_string())
-            }) {
-                Ok(leave_req) => match node.handle_leave(leave_req).await {
-                    Ok(()) => json_response(200, &serde_json::json!({"ok": true})),
-                    Err(e) => error_response(503, &e),
-                },
-                Err(e) => error_response(400, &e),
+            (Method::POST, "/raft/join") => {
+                match read_body(req).await.and_then(|b| {
+                    serde_json::from_slice::<JoinRequest>(&b).map_err(|e| e.to_string())
+                }) {
+                    Ok(join_req) => match node.handle_join(join_req).await {
+                        Ok(()) => json_response(200, &serde_json::json!({"ok": true})),
+                        Err(e) => error_response(503, &e),
+                    },
+                    Err(e) => error_response(400, &e),
+                }
             }
-        }
 
-        (Method::POST, "/data/put") => {
-            match read_body(req).await.and_then(|b| {
-                serde_json::from_slice::<PutRequest>(&b).map_err(|e| e.to_string())
-            }) {
-                Ok(put_req) => match node
-                    .put_with_or_forward(put_req.key, put_req.value, put_req.extra)
-                    .await
-                {
-                    Ok(()) => json_response(200, &serde_json::json!({"ok": true})),
-                    Err(e) => error_response(503, &e),
-                },
-                Err(e) => error_response(400, &e),
+            (Method::POST, "/raft/leave") => {
+                match read_body(req).await.and_then(|b| {
+                    serde_json::from_slice::<LeaveRequest>(&b).map_err(|e| e.to_string())
+                }) {
+                    Ok(leave_req) => match node.handle_leave(leave_req).await {
+                        Ok(()) => json_response(200, &serde_json::json!({"ok": true})),
+                        Err(e) => error_response(503, &e),
+                    },
+                    Err(e) => error_response(400, &e),
+                }
             }
-        }
 
-        (Method::POST, "/data/cas") => {
-            match read_body(req).await.and_then(|b| {
-                serde_json::from_slice::<CasRequest>(&b).map_err(|e| e.to_string())
-            }) {
-                Ok(cas_req) => {
-                    match node
-                        .cas_with_or_forward(
-                            cas_req.key,
-                            cas_req.expected,
-                            cas_req.new,
-                            cas_req.extra,
-                        )
+            (Method::POST, "/data/put") => {
+                match read_body(req).await.and_then(|b| {
+                    serde_json::from_slice::<PutRequest>(&b).map_err(|e| e.to_string())
+                }) {
+                    Ok(put_req) => match node
+                        .put_with_or_forward(put_req.key, put_req.value, put_req.extra)
                         .await
                     {
-                        Ok(applied) => json_response(200, &CasResponse { applied }),
+                        Ok(()) => json_response(200, &serde_json::json!({"ok": true})),
                         Err(e) => error_response(503, &e),
-                    }
-                }
-                Err(e) => error_response(400, &e),
-            }
-        }
-
-        (ref m, p) if *m == Method::GET && p.starts_with("/data/get/") => {
-            let key = &p["/data/get/".len()..];
-            match node.get(key).await {
-                Ok(value) => json_response(
-                    200,
-                    &GetResponse {
-                        key: key.to_string(),
-                        value,
                     },
-                ),
-                Err(e) => error_response(500, &e),
+                    Err(e) => error_response(400, &e),
+                }
             }
-        }
 
-        _ => error_response(404, "not found"),
-    };
+            (Method::POST, "/data/cas") => {
+                match read_body(req).await.and_then(|b| {
+                    serde_json::from_slice::<CasRequest>(&b).map_err(|e| e.to_string())
+                }) {
+                    Ok(cas_req) => {
+                        match node
+                            .cas_with_or_forward(
+                                cas_req.key,
+                                cas_req.expected,
+                                cas_req.new,
+                                cas_req.extra,
+                            )
+                            .await
+                        {
+                            Ok(applied) => json_response(200, &CasResponse { applied }),
+                            Err(e) => error_response(503, &e),
+                        }
+                    }
+                    Err(e) => error_response(400, &e),
+                }
+            }
+
+            (ref m, p) if *m == Method::GET && p.starts_with("/data/get/") => {
+                let key = &p["/data/get/".len()..];
+                match node.get(key).await {
+                    Ok(value) => json_response(
+                        200,
+                        &GetResponse {
+                            key: key.to_string(),
+                            value,
+                        },
+                    ),
+                    Err(e) => error_response(500, &e),
+                }
+            }
+
+            _ => error_response(404, "not found"),
+        };
 
     Ok(response)
 }
 
-pub async fn start_cluster_server(node: Arc<ClusterNode>) -> Result<(), Box<dyn std::error::Error>>
-{
+pub async fn start_cluster_server(
+    node: Arc<ClusterNode>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let addr = format!("0.0.0.0:{}", node.config.cluster_port);
     let tcp_listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!(
@@ -1616,3 +1952,7 @@ pub async fn start_cluster_server(node: Arc<ClusterNode>) -> Result<(), Box<dyn 
         }
     }
 }
+
+#[cfg(test)]
+#[path = "cluster_regressions.rs"]
+mod regressions;

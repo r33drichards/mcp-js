@@ -1,0 +1,171 @@
+{
+  "tlc_sha256": "15d103b7e5617780bcc904c0af12f1ad242e2b345c0301136c5be4588f17edac",
+  "model_sha256": "2264f8a86a9570507084b858d79b7fa1f3b8946b218d9ecc2864460c43adb53e",
+  "seed": 1,
+  "max_steps": 12,
+  "max_faults": 2,
+  "cases": [
+    {
+      "case": "safe",
+      "expected": "safe",
+      "generated": 12286,
+      "distinct": 4214
+    },
+    {
+      "case": "witness_tick",
+      "expected": "WitnessAbsent",
+      "generated": 2,
+      "distinct": 2
+    },
+    {
+      "case": "witness_acquire",
+      "expected": "WitnessAbsent",
+      "generated": 4,
+      "distinct": 4
+    },
+    {
+      "case": "witness_propose",
+      "expected": "WitnessAbsent",
+      "generated": 41,
+      "distinct": 41
+    },
+    {
+      "case": "witness_commit",
+      "expected": "WitnessAbsent",
+      "generated": 170,
+      "distinct": 124
+    },
+    {
+      "case": "witness_ack",
+      "expected": "WitnessAbsent",
+      "generated": 457,
+      "distinct": 266
+    },
+    {
+      "case": "witness_lose_ack",
+      "expected": "WitnessAbsent",
+      "generated": 172,
+      "distinct": 126
+    },
+    {
+      "case": "witness_send",
+      "expected": "WitnessAbsent",
+      "generated": 885,
+      "distinct": 461
+    },
+    {
+      "case": "witness_deliver_post",
+      "expected": "WitnessAbsent",
+      "generated": 1402,
+      "distinct": 706
+    },
+    {
+      "case": "witness_finish",
+      "expected": "WitnessAbsent",
+      "generated": 2001,
+      "distinct": 1015
+    },
+    {
+      "case": "witness_deliver_done",
+      "expected": "WitnessAbsent",
+      "generated": 2763,
+      "distinct": 1408
+    },
+    {
+      "case": "witness_deliver_done_lost_ack",
+      "expected": "WitnessAbsent",
+      "generated": 2764,
+      "distinct": 1409
+    },
+    {
+      "case": "witness_drop",
+      "expected": "WitnessAbsent",
+      "generated": 1403,
+      "distinct": 707
+    },
+    {
+      "case": "witness_duplicate",
+      "expected": "WitnessAbsent",
+      "generated": 1404,
+      "distinct": 708
+    },
+    {
+      "case": "witness_partition",
+      "expected": "WitnessAbsent",
+      "generated": 3,
+      "distinct": 3
+    },
+    {
+      "case": "witness_heal",
+      "expected": "WitnessAbsent",
+      "generated": 14,
+      "distinct": 14
+    },
+    {
+      "case": "witness_elect",
+      "expected": "WitnessAbsent",
+      "generated": 6,
+      "distinct": 6
+    },
+    {
+      "case": "witness_crash",
+      "expected": "WitnessAbsent",
+      "generated": 5,
+      "distinct": 5
+    },
+    {
+      "case": "witness_restart",
+      "expected": "WitnessAbsent",
+      "generated": 24,
+      "distinct": 24
+    },
+    {
+      "case": "witness_recovered_lost_ack",
+      "expected": "WitnessAbsent",
+      "generated": 468,
+      "distinct": 273
+    },
+    {
+      "case": "witness_recovered_restart",
+      "expected": "WitnessAbsent",
+      "generated": 1099,
+      "distinct": 582
+    },
+    {
+      "case": "witness_healed_pending_claim",
+      "expected": "WitnessAbsent",
+      "generated": 447,
+      "distinct": 256
+    },
+    {
+      "case": "witness_stale_completion",
+      "expected": "WitnessAbsent",
+      "generated": 3913,
+      "distinct": 1911
+    },
+    {
+      "case": "diagnostic_stale_start",
+      "expected": "NoStaleAdmissionDiagnostic",
+      "generated": 2023,
+      "distinct": 1032
+    },
+    {
+      "case": "diagnostic_duplicate_delivery",
+      "expected": "NoDuplicateAdmissionDiagnostic",
+      "generated": 2805,
+      "distinct": 1430
+    },
+    {
+      "case": "mutant_replay",
+      "expected": "NoAutomaticReplay",
+      "generated": 13568,
+      "distinct": 5149
+    },
+    {
+      "case": "mutant_index_ack",
+      "expected": "NoFalseClaimAck",
+      "generated": 899,
+      "distinct": 475
+    }
+  ]
+}
