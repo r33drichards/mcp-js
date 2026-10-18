@@ -423,6 +423,30 @@ mod tests {
     }
 
     #[test]
+    fn toml_mcp_server_bearer_file_config_parses() {
+        let cli = parse_with_config(
+            r#"
+            [[mcp_servers]]
+            name = "weechat"
+            transport = "http"
+            url = "http://weechat-mcp:8080/mcp"
+            [mcp_servers.auth]
+            type = "bearer"
+            token_file = "/var/run/secrets/weechat/token"
+            "#,
+            &[],
+        );
+        let configs: Vec<crate::engine::mcp_client::McpServerConfig> =
+            serde_json::from_str(cli.mcp_config.as_deref().unwrap()).unwrap();
+        configs[0].validate_for_connection().unwrap();
+        assert!(matches!(
+            &configs[0].auth,
+            Some(crate::engine::mcp_client::McpServerAuth::Bearer { token_file })
+                if token_file == "/var/run/secrets/weechat/token"
+        ));
+    }
+
+    #[test]
     fn unknown_keys_are_rejected_with_the_accepted_list() {
         let err = config_error("htpp_port = 8080");
         assert!(err.contains("unknown key: htpp_port"), "got: {err}");

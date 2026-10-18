@@ -662,6 +662,11 @@ pub struct Cli {
     /// `oauth_browser` is supported for HTTP only through `--mcp-config` and
     /// structured JSON/TOML `mcp_servers` configuration; compact `--mcp-server`
     /// syntax does not support it.
+    /// `bearer` is also supported for HTTP with auth: {"type": "bearer",
+    /// "token_file": "/absolute/path/to/token"}. The file is read on connection
+    /// and reconnect, contains only a token (optional final LF/CRLF), and is
+    /// never included in rendered config. Missing or invalid files fail closed.
+    /// Bearer requests never follow redirects; use HTTPS outside trusted networks.
     /// Protected-resource and discovered OAuth endpoints require HTTPS unless
     /// loopback. It prints an authorization URL only when no cached credential
     /// can provide a token; cached refresh tokens renew access on connection or
