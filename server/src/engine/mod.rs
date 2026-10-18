@@ -1998,6 +1998,16 @@ impl<'a> RunJsRequest<'a> {
 }
 
 impl Engine {
+    /// Deployment ceilings for HTTP-function per-invocation limits.
+    pub fn http_functions_limits(&self) -> (u64, u64) {
+        ((self.heap_memory_max_bytes / (1024 * 1024)) as u64, self.execution_timeout_secs)
+    }
+
+    /// Shared consensus backend for dynamically registered HTTP functions.
+    pub fn http_functions_cluster(&self) -> Option<Arc<ClusterNode>> {
+        self.cluster_node.clone()
+    }
+
     pub fn is_stateful(&self) -> bool {
         self.heap_storage.is_some()
     }
