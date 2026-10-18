@@ -63,27 +63,37 @@ async fn three_real_binaries_manage_dispatch_and_preserve_unknown_after_leader_d
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let worker_url = format!("http://{}", listener.local_addr().unwrap());
     let posts = Arc::new(AtomicUsize::new(0));
+    let (dispatch_tx, mut dispatch_rx) = tokio::sync::mpsc::unbounded_channel();
     let counter = posts.clone();
     let worker = tokio::spawn(async move {
         loop {
             let (socket, _) = listener.accept().await.unwrap();
             let counter = counter.clone();
+            let dispatch_tx = dispatch_tx.clone();
             tokio::spawn(async move {
                 let _ = http1::Builder::new()
                     .serve_connection(
                         TokioIo::new(socket),
                         service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
                             let counter = counter.clone();
+                            let dispatch_tx = dispatch_tx.clone();
                             async move {
                                 assert!(req.headers().contains_key("authorization"));
                                 let (status, body) = if req.method() == hyper::Method::POST {
-                                    counter.fetch_add(1, Ordering::SeqCst);
                                     let bytes = req.into_body().collect().await.unwrap().to_bytes();
-                                    assert_eq!(
-                                        serde_json::from_slice::<Value>(&bytes).unwrap()["payload"]
-                                            ["code"],
-                                        "1+1"
-                                    );
+                                    let dispatch: Value = serde_json::from_slice(&bytes).unwrap();
+                                    assert_eq!(dispatch["payload"]["code"], "1+1");
+                                    let sender = dispatch["owner"]
+                                        .as_str()
+                                        .unwrap()
+                                        .strip_prefix('r')
+                                        .unwrap()
+                                        .parse::<usize>()
+                                        .unwrap();
+                                    dispatch_tx
+                                        .send((sender, dispatch["occurrence_id"].clone()))
+                                        .unwrap();
+                                    counter.fetch_add(1, Ordering::SeqCst);
                                     (202, r#"{"execution_id":"work-1"}"#)
                                 } else {
                                     (200, r#"{"execution_id":"work-1","status":"running"}"#)
@@ -140,24 +150,38 @@ async fn three_real_binaries_manage_dispatch_and_preserve_unknown_after_leader_d
         1
     );
     // Real Apalis pulse and real minute cron boundary, bounded by one minute + grace.
-    tokio::time::timeout(Duration::from_secs(75), async {
-        while posts.load(Ordering::SeqCst) == 0 {
+    // Leadership may change while waiting for the cron boundary. Kill the
+    // owner recorded in the actual dispatched payload, not the startup leader.
+    let (killed, occurrence_id) = tokio::time::timeout(Duration::from_secs(75), dispatch_rx.recv())
+        .await
+        .expect("scheduled HTTP submission")
+        .unwrap();
+    runners[killed].child.kill().await.unwrap();
+    runners[killed].child.wait().await.unwrap();
+    let second = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            for (i, runner) in runners.iter_mut().enumerate() {
+                if i == killed {
+                    continue;
+                }
+                let status = runner.request(json!({"action":"status"})).await;
+                if status["cluster"]["role"] != "Leader" || status["owner_acquired"] != true {
+                    continue;
+                }
+                let view = runner.request(json!({"action":"list"})).await;
+                if view["occurrences"].as_array().is_some_and(|occurrences| {
+                    occurrences
+                        .iter()
+                        .any(|o| o["id"] == occurrence_id && o["status"].get("Unknown").is_some())
+                }) {
+                    return i;
+                }
+            }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     })
     .await
-    .expect("scheduled HTTP submission");
-    runners[first].child.kill().await.unwrap();
-    runners[first].child.wait().await.unwrap();
-    let second = owner(&mut runners, Some(first)).await;
-    let view = runners[second].request(json!({"action":"list"})).await;
-    assert!(
-        view["occurrences"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|o| o["status"].get("Unknown").is_some())
-    );
+    .expect("takeover must recover the exact dispatched occurrence as Unknown");
     assert_eq!(
         runners[second]
             .request(json!({"action":"disable","id":id}))
@@ -178,7 +202,7 @@ async fn three_real_binaries_manage_dispatch_and_preserve_unknown_after_leader_d
         "takeover replayed the consumed attempt"
     );
     for (i, r) in runners.iter_mut().enumerate() {
-        if i != first {
+        if i != killed {
             r.child.kill().await.unwrap();
             r.child.wait().await.unwrap();
         }

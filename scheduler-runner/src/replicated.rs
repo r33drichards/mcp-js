@@ -111,6 +111,9 @@ impl Replicated {
             valid: true,
         })
     }
+    pub fn is_valid(&self) -> bool {
+        self.valid
+    }
     pub fn term(&self) -> u64 {
         self.envelope.term
     }

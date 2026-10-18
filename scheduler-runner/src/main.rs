@@ -148,7 +148,11 @@ async fn main() -> Result<(), String> {
                     Some(line) => {
                         let response = match serde_json::from_str::<Command>(&line) {
                             Err(error) => Err(error.to_string()),
-                            Ok(Command::Status) => Ok(serde_json::json!({"cluster":node.status().await,"owner_acquired":owner.is_some()})),
+                            Ok(Command::Status) => {
+                                let status=node.status().await;
+                                let acquired=status.role==Role::Leader && owner.as_ref().is_some_and(|active|active.is_valid() && active.term()==status.term);
+                                Ok(serde_json::json!({"cluster":status,"owner_acquired":acquired}))
+                            },
                             Ok(command) => match owner.as_mut() {
                                 None => Err("no acquired leader; send command to current leader".into()),
                                 Some(active) => match command {
