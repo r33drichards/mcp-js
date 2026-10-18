@@ -1,192 +1,160 @@
-# Apalis runner-only Raft integration
+# Apalis runner and fenced scheduled worker
 
-Experimental, operator-owned standalone runner. It compiles the repository's
-existing `server/src/cluster.rs` directly and has **no Engine, Deno or V8 dependency**.
-Apalis supplies timer pulses. The shared application core decides missed runs,
-overlap, retries and retention; the existing sled-backed Raft implementation
-commits the authoritative checkpoint. No consensus library replacement is added.
+PR284 adds an experimental no-V8 runner using the existing Raft implementation.
+Apalis supplies timer pulses; the application implements persistence, recovery,
+missed-run/overlap/retry policy and worker admission. PR285 remains unchanged.
 
-This extends only PR284. PR285 remains the local tokio-cron comparison. The common
-policy acceptance suite remains unchanged; this distributed adapter is not a
-claim that Apalis itself supplies distributed persistence or failover.
+The approved contract is **reject stale admissions after committed takeover,
+prevent duplicate engine submissions per invocation attempt, and allow already
+admitted work to launch or finish afterward**. Admission is not an atomic
+transaction with external effects. This is not exactly-once execution, lossless
+replay, automatic cancellation, or a production-readiness claim.
 
-## Run and manage
+## Protocol and durable boundary
 
-```sh
-cargo build --manifest-path scheduler-runner/Cargo.toml --locked
-cargo run --manifest-path scheduler-runner/Cargo.toml --locked -- scheduler-runner/example.json
-```
+1. The leader commits a current-term barrier, then acquires a checkpoint with a
+   monotonically increasing ownership epoch. Reacquisition in the same Raft term
+   also advances this epoch. Old Running occurrences become Unknown.
+2. Claiming consumes an occurrence and stores its exact versioned Dispatch:
+   namespace, schedule/occurrence/attempt, owner/epoch, worker identity, payload
+   digest and execution-authority binding. The runner sends one POST to
+   `/api/scheduled/v1/exec`. It never falls back to `/api/exec`.
+3. The worker authenticates the request and durably reserves the invocation in
+   its local store before making any admission RPC. Duplicate delivery, aborted
+   requests and restart never replay that local reservation.
+4. The worker submits the bound request plus its process incarnation to
+   `/scheduler/v1/admit`. The current runner validates Running/attempt, owner,
+   epoch, exact claim, expiry and absence of prior admission inside **one
+   checkpoint CAS**, committing the permission before returning it. Ownership and
+   admission cannot race through separate keys.
+5. Deduplication identity excludes ownership epoch. A fresh store or another
+   worker incarnation cannot obtain a second quorum permit for the invocation.
+   The permit binds worker incarnation, payload and authority. The worker consumes
+   its local launch permission with a durable CAS before obtaining a non-cloneable
+   launch capability. That capability calls the actual Engine once.
+6. HTTP 202 is engine acceptance, not completion. The runner polls
+   `/api/scheduled/v1/executions/{id}`. Lost ACKs, ambiguous status or observation
+   timeout remain Unknown and retain overlap/capacity reservations.
 
-Adapt the example to an existing worker and an existing credential reference;
-it contains no credential and creates no schedules. The operator supplies the
-referenced environment variable outside the replicated store. HTTPS is required
-except for loopback testing. Redirects and HTTP client retries are disabled.
-Worker requests retain the ordinary bearer-authentication path and specify
-execution/heap limits. The session field is a logging tag, not authenticated identity.
-The worker must enforce its normal authentication and execution policies.
+Takeover is the committed ownership transition, not merely a leader-election
+notification. An admission ordered before takeover remains valid afterward. Grant
+expiry is checked during reservation/admission validation; the admission CAS may
+finish later. Already admitted work may launch after expiry or takeover. This is
+intentional. External resources need their own fencing/idempotency to constrain
+later effects; confirmed-failure retries may repeat partial effects.
 
-For three voters, give each a unique node ID, address, port and data directory,
-and list the other two as `id@host:port` peers. All voters must use the same
-identities/addresses and hardened code. This prototype requires **fresh consensus
-stores** and refuses automatic migration of existing clusters. Nonempty unsealed
-stores (including a local scheduler_state tree), SQLite prototypes and unrelated
-nonempty directories are rejected without resetting their contents. Only learner
-membership may change after the voter map is sealed. Keep cluster ports on the
-existing trusted internal network: Raft RPC authentication is not implemented.
+Quorum loss, timeout, malformed/mismatched ACK or cancellation while obtaining
+admission yields no new launch permission. Previously admitted work may still launch. The admission itself may nevertheless have committed. A crash
+between reservation, admission, local consumption and Engine submission can lose
+work. Unknown is never automatically replayed. Worker records and Raft admissions
+are retained without compaction. Preserve stores; do not clone an active worker
+incarnation or use restored stale consensus snapshots as a new authoritative cluster.
 
-Send newline-delimited JSON to the current leader's stdin. This is an operator
-interface, **not an MCP transport or a multi-tenant authorization boundary**:
+## Compatibility and configuration
+
+This changes the experimental runner checkpoint schema to **version 2** and the
+worker wire protocol to **version 1**. Existing pre-admission checkpoints fail
+closed; there is no automatic migration. Use fresh fixed-voter consensus stores,
+a fresh dedicated worker admission store, and a unique namespace for a new cluster.
+Do not reset an existing store to bypass a version or identity rejection.
+
+The worker is a dedicated mode of the actual server binary. Set
+`MCP_SCHEDULED_WORKER_CONFIG` to an operator-supplied JSON file and use `--http-port`.
+In this mode the server mounts only the two scheduled routes: no `/api/exec`,
+`/mcp`, SSE or stdio execution path. It uses the configured bearer reference for
+these routes, with existing JWKS enforcement also applied if configured. Existing deployments without this mode keep their existing APIs;
+legacy workers cannot service the new runner. The session field remains a logging
+tag, not a principal identity. This operator-owned prototype does not implement
+multi-tenant principal-to-grant binding or MCP management.
+
+Example worker config (no token values are stored):
 
 ```json
-{"action":"create","definition":{"name":"example","code":"console.log('scheduled')","cron":"* * * * *","timezone":"UTC","policy":{"missed":"Skip","overlap":"Skip","retry":{"max_retries":0,"delay_seconds":0}}}}
+{
+  "namespace": "operator-scheduler-1",
+  "worker_id": "worker-1",
+  "data_dir": "/tmp/scheduled-worker-admissions",
+  "bearer_env": "MCP_SCHEDULER_WORKER_TOKEN",
+  "admission_bearer_env": "MCP_SCHEDULER_ADMISSION_TOKEN",
+  "admission_urls": ["http://127.0.0.1:4501", "http://127.0.0.1:4502", "http://127.0.0.1:4503"]
+}
+```
+
+Supply existing credential values through those environment references. Never put
+values in config, snapshots or command arguments. Runner replicas share the
+admission credential; the worker shares it for callback authentication. The
+scheduled-worker credential is used only at the dedicated worker port. This work
+creates no credentials and changes no deployed security settings.
+
+```sh
+cargo build --locked -p server
+MCP_SCHEDULED_WORKER_CONFIG=/path/to/worker.json target/debug/server --http-port 8080
+cargo build --manifest-path scheduler-runner/Cargo.toml --locked
+```
+
+Adapt [example.json](example.json). For three replicas use node IDs `runner-1..3`,
+cluster ports `4401..4403`, admission addresses `127.0.0.1:4501..4503`, unique data
+directories and the other two fixed voters as `id@host:port` peers. Every replica
+must have the same remote config, limits and initial definitions. Match its remote
+namespace/worker ID to the worker config and set `remote.url` to the dedicated
+worker origin (`http://127.0.0.1:8080` locally). Run each in its own terminal:
+
+```sh
+scheduler-runner/target/debug/mcp-js-scheduler-runner /path/to/runner-1.json
+scheduler-runner/target/debug/mcp-js-scheduler-runner /path/to/runner-2.json
+scheduler-runner/target/debug/mcp-js-scheduler-runner /path/to/runner-3.json
+```
+
+The runner admission listener serves HTTP; use an existing authenticated TLS
+termination arrangement for remote access. Both worker and callback clients require
+HTTPS except loopback HTTP. Redirects/retries are disabled. Callback endpoints are
+tried in configured order only after a definitive 409 (no acquired owner). Any
+network ambiguity or other error stops the attempt. An offline first endpoint can
+therefore cause lost work even if another leader is available; this is conservative
+failure behavior, not robust leader discovery. Raft RPCs still require the trusted
+internal network and fixed voter map; no new Raft authentication is claimed.
+
+## Local management
+
+Use stdin `status` on any runner to find the acquired leader, then send commands
+to that leader's terminal. EOF leaves scheduling active. Ctrl-C drains bounded
+observation tasks; it does not cancel accepted remote effects.
+
+```json
 {"action":"status"}
+{"action":"create","definition":{"name":"example","code":"console.log('scheduled')","cron":"* * * * *","timezone":"UTC","policy":{"missed":"Skip","overlap":"Skip","retry":{"max_retries":0,"delay_seconds":0}}}}
 {"action":"list"}
 {"action":"disable","id":1}
 {"action":"delete","id":1}
 {"action":"acknowledge_stopped","occurrence_id":2,"dispatcher_and_work_quiesced":true}
 ```
 
-Status works on every node and reports its current role, leader ID and addresses;
-use it to choose the leader's terminal. List explicitly returns a stale local view.
-Mutations require committed quorum acknowledgements. Acknowledge stopped requires
-an explicit operator attestation that **the old dispatcher can no longer submit,
-all in-flight submissions are resolved, and external execution has ended**. Merely
-seeing no running worker execution is insufficient: a delayed submission could
-still arrive. This assertion is not a technical proof. It releases an Unknown
-overlap/capacity reservation. EOF closes
-management input but leaves scheduling active. Ctrl-C stops admission and drains
-remote observation futures (bounded by their observation deadline). No operation
-cancels arbitrary remote effects.
+List is a stale local view. Mutations require quorum. Acknowledge-stopped requires
+operator evidence that dispatch and accepted work are quiesced; it releases an
+Unknown capacity reservation and does not cancel a previously admitted permit.
+Unadmitted terminal/abandoned occurrences cannot obtain a permit. Creation has no
+request deduplication, so inspect state after an uncertain management result.
 
-Initial schedules, limits and the grant reference/expiry are bound in the
-replicated execution contract. They must match on every replica and restart.
-Changing that contract requires an explicit future migration; it is not silently
-adopted. Local create/delete changes remain in Raft across restart. Token content
-is never stored in snapshots; expired grants stop new claims. Revocation at the
-worker remains authoritative. An uncertain management result may have committed;
-inspect state before repeating creation (no creation-request deduplication yet).
-
-## Ownership and execution boundary
-
-1. A leader commits a current-term barrier, bringing any inherited prefix into
-   the applied state before loading its checkpoint.
-2. Acquisition CAS commits a new revision/owner/term, converting old Running
-   receipts to Unknown. Expected term is checked under the proposal append lock.
-3. Each change runs in a disposable local planner. Only a successful exact-revision
-   Raft CAS exposes its result. Cancellation or error invalidates the planner.
-4. A claim is durably consumed before the single HTTP POST. Neither failover nor
-   restart replays it. Missing quorum means no invocation is released.
-5. HTTP 202 is acceptance only. The adapter polls the returned execution ID.
-   Completed means success; confirmed failed permits the configured bounded retry.
-   Lost/malformed acknowledgements, absent status, observation deadline, cancellation
-   and timeout become Unknown, retaining overlap/capacity reservations.
-
-Generic cluster put/CAS operations reject the scheduler namespace, including
-companion writes. This does not protect against malicious Raft peers: the cluster
-transport still assumes trusted peers and network isolation.
-
-A crash between consume and send can lose work. A stale runner may still send an
-already consumed request after leadership changes; takeover preserves it as Unknown
-and never submits it again. There is **no worker-side fencing/idempotency endpoint**,
-atomic transaction with external effects, lossless replay or exactly-once guarantee.
-The conservative protocol trades availability for avoiding automatic duplicate
-submission. Confirmed-failure retries can repeat partial external effects.
-
-## Validation and limits
-
-Run:
+## Validation and remaining limits
 
 ```sh
-cargo test --manifest-path scheduler-runner/Cargo.toml --locked
-cargo clippy --manifest-path scheduler-runner/Cargo.toml --locked --all-targets -- -D warnings
-cargo test --manifest-path server/cluster-tests/Cargo.toml --locked -- --test-threads=1
-cargo test --manifest-path scheduler-core/Cargo.toml --locked
+cargo test --locked --manifest-path scheduler-runner/Cargo.toml
+cargo clippy --locked --manifest-path scheduler-runner/Cargo.toml --all-targets -- -D warnings
+cargo test --locked -p server --lib scheduled_runtime_tests
+cargo test --locked --manifest-path server/cluster-tests/Cargo.toml
+cargo test --locked --manifest-path scheduler-core/Cargo.toml
 ```
 
-Tests cover fixed-voter three-node failover/quorum loss, stale-owner rejection,
-node reconstruction, abrupt subprocess exit after durable consumption, namespace
-protection, accepted-versus-completed HTTP responses, lost/malformed ACKs, terminal
-status classification and expired grants. The shared 33-test core suite covers
-policy combinations and four subprocess crash boundaries. Mock HTTP tests exercise
-the real worker API shapes; they do not certify a deployed worker's authentication
-or external effects. Process exit is not a power-loss durability test.
+[Admission model and replay](../specs/runner/ADMISSION.md) records bounds, generated
+traces, negative controls and mapping limits. Real HTTP tests compose the production
+worker gate, actual single-voter Raft admission and a counting mock runtime. The
+separate real Engine adapter test executes JavaScript. Binary tests exercise three
+actual runner processes and a mock worker at a real minute boundary; those tests
+measure submission/failover, not actual Engine admission. Process exit and injected
+flush errors are not power-loss tests.
 
-This is not production ready. It has no MCP management/authentication binding,
-Events delivery, existing-store migration, worker-side execution permits, throughput
-benchmark, Raft snapshotting/log compaction, or automatic resolution of Unknown
-work. Full checkpoints are written to an unbounded consensus log; synchronous sled
-flushes and temporary planner creation suit small experiments, not sustained load.
-No production service or security settings are changed.
-
-## Reproduce the tested topology
-
-The self-contained binary integration test starts **three actual runner processes**
-with unique IDs, dynamically allocated loopback ports and separate fresh sled
-stores. Every process knows the other two fixed voters. A fourth loopback HTTP
-process acts as the worker. The test sends stdin status/create/list, waits for a
-real minute-cron dispatch, kills the active leader after the worker accepts it,
-then verifies Unknown on takeover, disable/delete and exactly one automatic POST.
-The mock deliberately keeps execution running; no real credential is created.
-
-```sh
-cargo test --manifest-path scheduler-runner/Cargo.toml --locked --test binary -- --nocapture
-```
-
-This test takes up to approximately 75 seconds because it exercises a real minute
-boundary. Deterministic clock/restart/overlap tests are in the other suites.
-
-For an existing authenticated worker, generate three local configurations below.
-Set `WORKER_ORIGIN` to that worker's HTTPS origin and make the **existing**
-`MCP_SCHEDULER_WORKER_TOKEN` available in each runner terminal. The generator never
-reads or stores its value. It writes empty initial schedules and a one-hour grant.
-
-```sh
-cargo build --manifest-path scheduler-runner/Cargo.toml --locked
-export RUNNER_DEMO_DIR="$(mktemp -d /tmp/mcp-runner-demo.XXXXXX)"
-python3 - <<'PYCONFIG'
-import datetime, json, os, pathlib
-root = pathlib.Path(os.environ["RUNNER_DEMO_DIR"])
-expiry = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=1)).isoformat()
-remote = {"url": os.environ["WORKER_ORIGIN"], "bearer_env": "MCP_SCHEDULER_WORKER_TOKEN",
-          "expires_at": expiry, "session": "operator-scheduler", "timeout_seconds": 30, "heap_mb": 128}
-for i in range(1, 4):
-    config = {"node_id": f"runner-{i}", "advertise_addr": f"127.0.0.1:{4400+i}",
-              "cluster_port": 4400+i, "peers": [f"runner-{j}@127.0.0.1:{4400+j}" for j in range(1, 4) if j != i],
-              "data_dir": str(root / f"data-{i}"), "schedules": [], "remote": remote}
-    (root / f"runner-{i}.json").write_text(json.dumps(config))
-print(root)
-PYCONFIG
-```
-
-In three terminals, substitute the same printed directory for `DEMO_DIR`:
-
-```sh
-scheduler-runner/target/debug/mcp-js-scheduler-runner DEMO_DIR/runner-1.json
-scheduler-runner/target/debug/mcp-js-scheduler-runner DEMO_DIR/runner-2.json
-scheduler-runner/target/debug/mcp-js-scheduler-runner DEMO_DIR/runner-3.json
-```
-
-Each line above runs in its own terminal; enter the status JSON there, then the
-management examples on the leader. If `CARGO_TARGET_DIR` is set, use its `debug/`
-binary path instead. Do not reuse these directories to change voter membership.
-
-## Safety scope requiring a decision
-
-The current invariant is **at most one automatic application-level submission
-per occurrence attempt by these non-Byzantine runners**. Stale owners cannot claim
-new work or commit completion receipts. A previously consumed request may still
-start or continue after takeover. This is not worker-start fencing.
-
-If the required contract is instead “reject an old owner's request at worker
-admission,” the worker API must participate: carry occurrence/attempt identity and
-owner epoch, then atomically validate and consume/deduplicate the permit through
-consensus. A runner-only check immediately before POST cannot close that race.
-Preventing effects after admission additionally needs cancellation or fencing at
-the affected resource. Those semantics are an architectural decision, not a
-capability claimed by this prototype. MCP management would likewise need the
-authenticated principal-to-schedule/grant binding left open by the design; the
-implemented usable management path is explicitly local operator stdin.
-
-Bounded ownership validation and deterministic generated-trace replay are documented
-in [specs/runner](../specs/runner/README.md), including expected stale-admission
-counterexamples, source-mutation controls, and explicit model-to-code limits.
+Independent admission review covers both takeover orderings, duplicate requests,
+old-incarnation and payload binding, lost ACK, restart, terminal state and flush
+failures. Full checkpoints and retained admission records grow without bound. No
+Events delivery, schema migration, multi-tenant authorization, creation deduplication,
+Raft compaction, throughput benchmark or automatic Unknown resolution is provided.

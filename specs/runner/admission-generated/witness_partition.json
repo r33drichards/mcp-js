@@ -1,0 +1,62 @@
+{
+  "format": 1,
+  "model": "RunnerAdmission",
+  "name": "witness_partition",
+  "seed": 1,
+  "max_steps": 10,
+  "max_faults": 0,
+  "expected_violation": "WitnessAbsent",
+  "mutation": null,
+  "states": [
+    {
+      "epoch": 1,
+      "attempted": [],
+      "badAdmission": false,
+      "ready": [],
+      "active": true,
+      "grants": [],
+      "consumed": [],
+      "net": 0,
+      "event": {
+        "op": "init",
+        "worker": 0
+      },
+      "launches": 0,
+      "step": 0,
+      "quorum": true,
+      "reserved": [],
+      "lateLaunch": false,
+      "up": [
+        1,
+        2
+      ],
+      "claimed": false,
+      "admitted": []
+    },
+    {
+      "epoch": 1,
+      "attempted": [],
+      "badAdmission": false,
+      "ready": [],
+      "active": true,
+      "grants": [],
+      "consumed": [],
+      "net": 0,
+      "event": {
+        "op": "partition",
+        "worker": 0
+      },
+      "launches": 0,
+      "step": 1,
+      "quorum": false,
+      "reserved": [],
+      "lateLaunch": false,
+      "up": [
+        1,
+        2
+      ],
+      "claimed": false,
+      "admitted": []
+    }
+  ]
+}

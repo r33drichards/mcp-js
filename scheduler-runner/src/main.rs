@@ -1,5 +1,5 @@
 use chrono::Utc;
-use mcp_js_scheduler_core::{Definition, Executor, Limits, PulseSource};
+use mcp_js_scheduler_core::{Definition, Limits, PulseSource};
 use mcp_js_scheduler_runner::{
     RemoteConfig, RemoteExecutor, Replicated,
     cluster::{ClusterConfig, ClusterNode, Role},
@@ -19,6 +19,8 @@ struct Config {
     cluster_port: u16,
     peers: Vec<String>,
     data_dir: String,
+    admission_addr: String,
+    admission_bearer_env: String,
     #[serde(default)]
     limits: Limits,
     #[serde(default)]
@@ -58,6 +60,21 @@ async fn main() -> Result<(), String> {
         .ok_or("usage: mcp-js-scheduler-runner CONFIG.json")?;
     let config: Config = serde_json::from_slice(&std::fs::read(path).map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
+    let admission_token =
+        mcp_js_scheduler_runner::scheduled_worker::secret(&config.admission_bearer_env)?;
+    let (admission_tx, mut admission_rx) = tokio::sync::mpsc::channel::<AdmissionCall>(64);
+    let admission_listener = tokio::net::TcpListener::bind(&config.admission_addr)
+        .await
+        .map_err(|e| e.to_string())?;
+    let admission_router = axum::Router::new()
+        .route(
+            "/scheduler/v1/admit",
+            axum::routing::post(admission_handler),
+        )
+        .layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024))
+        .with_state((admission_token, admission_tx));
+    let admission_server =
+        tokio::spawn(async move { axum::serve(admission_listener, admission_router).await });
     let executor = Arc::new(RemoteExecutor::new(config.remote.clone())?);
     // All replicas must use the same grant reference/expiry, limits and initial definitions.
     let contract = serde_json::to_string(&Contract {
@@ -110,6 +127,13 @@ async fn main() -> Result<(), String> {
             break;
         }
         tokio::select! {
+            Some((request,reply))=admission_rx.recv(), if !stopping => {
+                let result=match owner.as_mut() {
+                    Some(active)=>active.admit(request,Utc::now()).await.map_err(|e|(axum::http::StatusCode::SERVICE_UNAVAILABLE,e)),
+                    None=>Err((axum::http::StatusCode::CONFLICT,"no acquired owner".into())),
+                };
+                let _=reply.send(result);
+            }
             _ = tokio::signal::ctrl_c(), if !stopping => { stopping = true; }
             completed = running.join_next(), if !running.is_empty() => {
                 if let Some(Ok((term, invocation, outcome))) = completed
@@ -156,10 +180,10 @@ async fn main() -> Result<(), String> {
                 let active = owner.as_mut().unwrap();
                 if let Err(error) = active.observe(Utc::now()).await { eprintln!("observation uncertain: {error}"); owner = None; continue; }
                 loop {
-                    match active.claim(Utc::now()).await {
-                        Ok(Some(invocation)) => {
+                    match active.claim_for_worker(Utc::now(), &config.remote).await {
+                        Ok(Some((invocation,dispatch))) => {
                             let executor = executor.clone(); let term = active.term();
-                            running.spawn(async move { let outcome = executor.execute(invocation.clone()).await; (term, invocation, outcome) });
+                            running.spawn(async move { let outcome = executor.execute_authorized(dispatch).await; (term, invocation, outcome) });
                         }
                         Ok(None) => break,
                         Err(error) => { eprintln!("claim unavailable: {error}"); owner = None; break; }
@@ -169,6 +193,53 @@ async fn main() -> Result<(), String> {
         }
     }
     source.shutdown().await?;
+    admission_server.abort();
     node.shutdown();
     Ok(())
+}
+
+type AdmissionCall = (
+    mcp_js_scheduler_runner::scheduled_protocol::Admission,
+    tokio::sync::oneshot::Sender<
+        Result<
+            mcp_js_scheduler_runner::scheduled_protocol::Permit,
+            (axum::http::StatusCode, String),
+        >,
+    >,
+);
+async fn admission_handler(
+    axum::extract::State((token, tx)): axum::extract::State<(
+        String,
+        tokio::sync::mpsc::Sender<AdmissionCall>,
+    )>,
+    headers: axum::http::HeaderMap,
+    axum::Json(request): axum::Json<mcp_js_scheduler_runner::scheduled_protocol::Admission>,
+) -> (axum::http::StatusCode, axum::Json<serde_json::Value>) {
+    use axum::http::StatusCode;
+    if headers.get("authorization").and_then(|h| h.to_str().ok())
+        != Some(format!("Bearer {token}").as_str())
+    {
+        return (
+            StatusCode::UNAUTHORIZED,
+            axum::Json(serde_json::json!({"error":"unauthorized"})),
+        );
+    }
+    let (reply, rx) = tokio::sync::oneshot::channel();
+    if tx.send((request, reply)).await.is_err() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            axum::Json(serde_json::json!({"error":"runner stopped"})),
+        );
+    }
+    match rx.await {
+        Ok(Ok(permit)) => (
+            StatusCode::CREATED,
+            axum::Json(serde_json::to_value(permit).unwrap()),
+        ),
+        Ok(Err((status, error))) => (status, axum::Json(serde_json::json!({"error":error}))),
+        Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            axum::Json(serde_json::json!({"error":"admission uncertain"})),
+        ),
+    }
 }

@@ -2,7 +2,7 @@ use chrono::{Duration as Delta, Utc};
 use http_body_util::{BodyExt, Full};
 use hyper::{Response, body::Bytes, server::conn::http1, service::service_fn};
 use hyper_util::rt::TokioIo;
-use mcp_js_scheduler_core::{Executor, Invocation, Outcome};
+use mcp_js_scheduler_core::Outcome;
 use mcp_js_scheduler_runner::{RemoteConfig, RemoteExecutor};
 use std::{
     convert::Infallible,
@@ -12,18 +12,34 @@ use std::{
     },
 };
 
-fn invocation() -> Invocation {
-    Invocation {
-        occurrence_id: 1,
-        schedule_id: 1,
-        due_at: Utc::now(),
-        attempt: 0,
+fn invocation() -> mcp_js_scheduler_runner::scheduled_protocol::Dispatch {
+    use mcp_js_scheduler_runner::scheduled_protocol::*;
+    let payload = Payload {
         code: "1+1".into(),
+        session: "operator-test".into(),
+        timeout_seconds: 1,
+        heap_mb: 32,
+        expires_at: Utc::now() + Delta::hours(1),
+    };
+    Dispatch {
+        version: 1,
+        namespace: "test".into(),
+        worker_id: "worker".into(),
+        owner: "n1".into(),
+        epoch: 1,
+        authority: "test".into(),
+        schedule_id: 1,
+        occurrence_id: 1,
+        attempt: 1,
+        payload_digest: digest(&payload),
+        payload,
     }
 }
 fn config(url: String) -> RemoteConfig {
     RemoteConfig {
         url,
+        namespace: "test".into(),
+        worker_id: "worker".into(),
         bearer_env: "PATH".into(),
         expires_at: Utc::now() + Delta::hours(1),
         session: "operator-test".into(),
@@ -51,11 +67,12 @@ async fn accepted_is_not_completion_and_submission_is_never_repeated() {
                             async move {
                                 assert!(req.headers().contains_key("authorization"));
                                 let (status, body) = if req.method() == hyper::Method::POST {
+                                    assert_eq!(req.uri().path(), "/api/scheduled/v1/exec");
                                     p.fetch_add(1, Ordering::SeqCst);
                                     let body = req.into_body().collect().await.unwrap().to_bytes();
                                     let value: serde_json::Value =
                                         serde_json::from_slice(&body).unwrap();
-                                    assert_eq!(value["code"], "1+1");
+                                    assert_eq!(value["payload"]["code"], "1+1");
                                     (202, r#"{"execution_id":"work-1"}"#)
                                 } else if g.fetch_add(1, Ordering::SeqCst) == 0 {
                                     (200, r#"{"execution_id":"work-1","status":"running"}"#)
@@ -78,7 +95,7 @@ async fn accepted_is_not_completion_and_submission_is_never_repeated() {
     });
     let executor = RemoteExecutor::new(config(url)).unwrap();
     assert!(matches!(
-        executor.execute(invocation()).await,
+        executor.execute_authorized(invocation()).await,
         Outcome::Succeeded
     ));
     assert_eq!(posts.load(Ordering::SeqCst), 1);
@@ -103,7 +120,7 @@ async fn lost_submission_response_is_unknown_without_retry() {
     assert!(matches!(
         RemoteExecutor::new(config(url))
             .unwrap()
-            .execute(invocation())
+            .execute_authorized(invocation())
             .await,
         Outcome::Unknown(_)
     ));
@@ -115,7 +132,10 @@ async fn expired_grant_never_contacts_worker() {
     let mut c = config("http://127.0.0.1:1".into());
     c.expires_at = Utc::now() - Delta::seconds(1);
     assert!(matches!(
-        RemoteExecutor::new(c).unwrap().execute(invocation()).await,
+        RemoteExecutor::new(c)
+            .unwrap()
+            .execute_authorized(invocation())
+            .await,
         Outcome::Failed(_)
     ));
 }
@@ -182,7 +202,7 @@ async fn terminal_status_and_malformed_ack_classification() {
         });
         let result = RemoteExecutor::new(config(url))
             .unwrap()
-            .execute(invocation())
+            .execute_authorized(invocation())
             .await;
         assert!(
             match expected {

@@ -1,4 +1,13 @@
-# Bounded ownership model and deterministic replay
+# Validation models
+
+The current worker protocol is covered by [atomic admission validation](ADMISSION.md).
+The ownership model below retains the historical unfenced worker abstraction for
+regression/comparison. Its stale-admission and duplicate-delivery counterexamples
+are not behavior of the new scheduled-only worker endpoint. The new admission model
+instead requires stale-admission rejection and retains only the deliberately allowed
+already-admitted late-launch counterexample.
+
+# Historical ownership model and deterministic replay
 
 This validates the experimental Apalis runner in PR284. It does not change the
 comparison branch, replace Raft, prove exactly-once execution, or fence the worker.

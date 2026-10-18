@@ -1,0 +1,164 @@
+{
+  "tlc_sha256": "15d103b7e5617780bcc904c0af12f1ad242e2b345c0301136c5be4588f17edac",
+  "model_sha256": "8c82dfe52c96d45c561acb185648dda276e8ff59b6528501e27bc9792d8ee8fa",
+  "seed": 1,
+  "max_steps": 10,
+  "cases": [
+    {
+      "case": "safe",
+      "expected": "safe",
+      "generated": 53698,
+      "distinct": 15748
+    },
+    {
+      "case": "witness_claim",
+      "expected": "WitnessAbsent",
+      "generated": 2,
+      "distinct": 2
+    },
+    {
+      "case": "witness_send",
+      "expected": "WitnessAbsent",
+      "generated": 8,
+      "distinct": 8
+    },
+    {
+      "case": "witness_duplicate",
+      "expected": "WitnessAbsent",
+      "generated": 38,
+      "distinct": 38
+    },
+    {
+      "case": "witness_drop",
+      "expected": "WitnessAbsent",
+      "generated": 39,
+      "distinct": 39
+    },
+    {
+      "case": "witness_reserve",
+      "expected": "WitnessAbsent",
+      "generated": 43,
+      "distinct": 43
+    },
+    {
+      "case": "witness_reject_duplicate",
+      "expected": "WitnessAbsent",
+      "generated": 639,
+      "distinct": 355
+    },
+    {
+      "case": "witness_admit",
+      "expected": "WitnessAbsent",
+      "generated": 222,
+      "distinct": 165
+    },
+    {
+      "case": "witness_lost_ack",
+      "expected": "WitnessAbsent",
+      "generated": 223,
+      "distinct": 166
+    },
+    {
+      "case": "witness_uncertain",
+      "expected": "WitnessAbsent",
+      "generated": 736,
+      "distinct": 422
+    },
+    {
+      "case": "witness_consume",
+      "expected": "WitnessAbsent",
+      "generated": 875,
+      "distinct": 516
+    },
+    {
+      "case": "witness_launch",
+      "expected": "WitnessAbsent",
+      "generated": 2843,
+      "distinct": 1262
+    },
+    {
+      "case": "witness_crash",
+      "expected": "WitnessAbsent",
+      "generated": 6,
+      "distinct": 6
+    },
+    {
+      "case": "witness_restart",
+      "expected": "WitnessAbsent",
+      "generated": 30,
+      "distinct": 30
+    },
+    {
+      "case": "witness_partition",
+      "expected": "WitnessAbsent",
+      "generated": 3,
+      "distinct": 3
+    },
+    {
+      "case": "witness_heal",
+      "expected": "WitnessAbsent",
+      "generated": 14,
+      "distinct": 14
+    },
+    {
+      "case": "witness_takeover",
+      "expected": "WitnessAbsent",
+      "generated": 4,
+      "distinct": 4
+    },
+    {
+      "case": "witness_owner_crash",
+      "expected": "WitnessAbsent",
+      "generated": 5,
+      "distinct": 5
+    },
+    {
+      "case": "witness_late_launch",
+      "expected": "WitnessAbsent",
+      "generated": 6931,
+      "distinct": 2665
+    },
+    {
+      "case": "witness_stale_rejected",
+      "expected": "WitnessAbsent",
+      "generated": 787,
+      "distinct": 461
+    },
+    {
+      "case": "witness_lost_ack_takeover",
+      "expected": "WitnessAbsent",
+      "generated": 879,
+      "distinct": 520
+    },
+    {
+      "case": "witness_consumed_crash",
+      "expected": "WitnessAbsent",
+      "generated": 2844,
+      "distinct": 1263
+    },
+    {
+      "case": "witness_reserved_restart",
+      "expected": "WitnessAbsent",
+      "generated": 885,
+      "distinct": 526
+    },
+    {
+      "case": "diagnostic_late_launch",
+      "expected": "NoLateLaunchDiagnostic",
+      "generated": 6931,
+      "distinct": 2665
+    },
+    {
+      "case": "mutant_skip_epoch",
+      "expected": "NoStaleAdmission",
+      "generated": 787,
+      "distinct": 461
+    },
+    {
+      "case": "mutant_skip_dedup",
+      "expected": "OneAdmission",
+      "generated": 5085,
+      "distinct": 2147
+    }
+  ]
+}

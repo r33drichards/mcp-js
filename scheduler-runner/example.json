@@ -11,6 +11,10 @@
     "expires_at": "2030-01-01T00:00:00Z",
     "session": "operator-scheduler",
     "timeout_seconds": 30,
-    "heap_mb": 128
-  }
+    "heap_mb": 128,
+    "namespace": "operator-scheduler-1",
+    "worker_id": "worker-1"
+  },
+  "admission_addr": "127.0.0.1:4501",
+  "admission_bearer_env": "MCP_SCHEDULER_ADMISSION_TOKEN"
 }

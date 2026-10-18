@@ -1,9 +1,9 @@
 name: Apalis replicated runner
 on:
   pull_request:
-    paths: ['scheduler-runner/**', 'scheduler-core/**', 'server/src/cluster*', '.github/workflows/scheduler-runner.yml']
+    paths: ['scheduler-runner/**', 'scheduler-core/**', 'server/src/cluster*', 'server/src/scheduled*', 'server/src/api.rs', 'server/src/main.rs', '.github/workflows/scheduler-runner.yml']
   push:
-    paths: ['scheduler-runner/**', 'scheduler-core/**', 'server/src/cluster*', '.github/workflows/scheduler-runner.yml']
+    paths: ['scheduler-runner/**', 'scheduler-core/**', 'server/src/cluster*', 'server/src/scheduled*', 'server/src/api.rs', 'server/src/main.rs', '.github/workflows/scheduler-runner.yml']
 permissions:
   contents: read
 jobs:
@@ -17,3 +17,14 @@ jobs:
       - run: cargo fmt --manifest-path scheduler-runner/Cargo.toml --check
       - run: cargo test --manifest-path scheduler-runner/Cargo.toml --locked
       - run: cargo clippy --manifest-path scheduler-runner/Cargo.toml --locked --all-targets -- -D warnings
+
+  engine-adapter:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.99.0
+      - run: cargo test --locked -p server --lib scheduled_runtime_tests -- --nocapture
+      - run: cargo check --locked -p server --bin server

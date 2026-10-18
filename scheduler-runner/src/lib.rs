@@ -10,3 +10,8 @@ pub use replicated::*;
 
 #[cfg(test)]
 mod model_replay;
+
+#[path = "../../server/src/scheduled_protocol.rs"]
+pub mod scheduled_protocol;
+#[path = "../../server/src/scheduled_worker.rs"]
+pub mod scheduled_worker;

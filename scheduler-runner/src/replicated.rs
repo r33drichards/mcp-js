@@ -1,11 +1,19 @@
 use crate::cluster::{ClusterNode, Role};
+use crate::{
+    RemoteConfig,
+    scheduled_protocol::{Admission, Dispatch, Payload, Permit, digest},
+};
 use mcp_js_scheduler_core::{Core, Definition, Invocation, Limits, Outcome, Result, Time};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 const KEY: &str = "scheduler/state/v1";
 #[derive(Serialize, Deserialize)]
 struct Envelope {
+    version: u32,
+    epoch: u64,
+    claims: BTreeMap<String, Dispatch>,
+    admissions: BTreeMap<String, Permit>,
     revision: u64,
     owner: String,
     term: u64,
@@ -47,7 +55,9 @@ impl Replicated {
             .as_deref()
             .map(serde_json::from_str)
             .transpose()
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| {
+                format!("unsupported scheduler checkpoint; explicit migration required: {e}")
+            })?;
         if old.as_ref().is_some_and(|old| old.contract != contract) {
             return Err("persisted execution contract differs; explicit migration required".into());
         }
@@ -61,7 +71,20 @@ impl Replicated {
                 core.create(definition.clone(), now)?;
             }
         }
+        if old.as_ref().is_some_and(|e| e.version != 2) {
+            return Err("explicit scheduler schema migration required".into());
+        }
         let envelope = Envelope {
+            version: 2,
+            epoch: old
+                .as_ref()
+                .map_or(Some(1), |e| e.epoch.checked_add(1))
+                .ok_or("epoch exhausted")?,
+            claims: old.as_ref().map(|e| e.claims.clone()).unwrap_or_default(),
+            admissions: old
+                .as_ref()
+                .map(|e| e.admissions.clone())
+                .unwrap_or_default(),
             revision: old
                 .as_ref()
                 .map_or(Some(1), |e| e.revision.checked_add(1))
@@ -94,7 +117,16 @@ impl Replicated {
     pub fn view(&self) -> &Core {
         &self.core
     }
+    pub fn epoch(&self) -> u64 {
+        self.envelope.epoch
+    }
     async fn transition<T>(&mut self, action: impl FnOnce(&mut Core) -> Result<T>) -> Result<T> {
+        self.transition_state(|core, _| action(core)).await
+    }
+    async fn transition_state<T>(
+        &mut self,
+        action: impl FnOnce(&mut Core, &mut Envelope) -> Result<T>,
+    ) -> Result<T> {
         if !self.valid {
             return Err("owner invalidated; reacquire".into());
         }
@@ -105,13 +137,18 @@ impl Replicated {
         }
         let mut staged =
             Core::from_checkpoint(Some(&self.envelope.checkpoint), self.limits.clone(), false)?;
-        let result = action(&mut staged)?;
+        let mut next: Envelope = serde_json::from_str(&self.expected).map_err(|e| e.to_string())?;
+        let result = action(&mut staged, &mut next)?;
         let revision = self
             .envelope
             .revision
             .checked_add(1)
             .ok_or("revision exhausted")?;
         let envelope = Envelope {
+            version: 2,
+            epoch: next.epoch,
+            claims: next.claims,
+            admissions: next.admissions,
             revision,
             owner: self.envelope.owner.clone(),
             term: self.envelope.term,
@@ -144,6 +181,75 @@ impl Replicated {
     }
     pub async fn claim(&mut self, now: Time) -> Result<Option<Invocation>> {
         self.transition(|core| core.claim(now)).await
+    }
+    pub async fn claim_for_worker(
+        &mut self,
+        now: Time,
+        remote: &RemoteConfig,
+    ) -> Result<Option<(Invocation, Dispatch)>> {
+        self.transition_state(|core, envelope| {
+            let Some(invocation) = core.claim(now)? else {
+                return Ok(None);
+            };
+            let payload = Payload {
+                code: invocation.code.clone(),
+                session: remote.session.clone(),
+                timeout_seconds: remote.timeout_seconds,
+                heap_mb: remote.heap_mb,
+                expires_at: remote.expires_at,
+            };
+            let dispatch = Dispatch {
+                version: 1,
+                namespace: remote.namespace.clone(),
+                schedule_id: invocation.schedule_id,
+                occurrence_id: invocation.occurrence_id,
+                attempt: invocation.attempt,
+                owner: envelope.owner.clone(),
+                epoch: envelope.epoch,
+                worker_id: remote.worker_id.clone(),
+                authority: digest(&envelope.contract),
+                payload_digest: digest(&payload),
+                payload,
+            };
+            dispatch.validate()?;
+            if envelope.claims.contains_key(&dispatch.key())
+                || envelope.admissions.contains_key(&dispatch.key())
+            {
+                return Err("invocation identity already consumed".into());
+            }
+            envelope.claims.insert(dispatch.key(), dispatch.clone());
+            Ok(Some((invocation, dispatch)))
+        })
+        .await
+    }
+    pub async fn admit(&mut self, request: Admission, now: Time) -> Result<Permit> {
+        self.transition_state(|core, envelope| {
+            request.dispatch.validate()?;
+            let running = core.occurrences().iter().any(|o| {
+                o.id == request.dispatch.occurrence_id
+                    && o.schedule_id == request.dispatch.schedule_id
+                    && o.status
+                        == mcp_js_scheduler_core::Status::Running {
+                            attempt: request.dispatch.attempt,
+                        }
+            });
+            if !running
+                || request.worker_incarnation.is_empty()
+                || request.dispatch.epoch != envelope.epoch
+                || request.dispatch.owner != envelope.owner
+                || now >= request.dispatch.payload.expires_at
+                || envelope.claims.get(&request.dispatch.key()) != Some(&request.dispatch)
+                || envelope.admissions.contains_key(&request.dispatch.key())
+            {
+                return Err("stale, duplicate, expired or mismatched admission".into());
+            }
+            let permit = request.permit();
+            envelope
+                .admissions
+                .insert(request.dispatch.key(), permit.clone());
+            Ok(permit)
+        })
+        .await
     }
     pub async fn finish(
         &mut self,

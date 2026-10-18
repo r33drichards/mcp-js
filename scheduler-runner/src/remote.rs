@@ -1,13 +1,16 @@
+use crate::scheduled_protocol::Dispatch;
 use chrono::{DateTime, Utc};
-use mcp_js_scheduler_core::{Executor, Invocation, Outcome, Result};
+use mcp_js_scheduler_core::{Outcome, Result};
 use serde::{Deserialize, Serialize};
-use std::{future::Future, pin::Pin, time::Duration};
+use std::time::Duration;
 
 /// Operator-owned execution authority; only the credential reference is durable.
 /// The worker still validates its usual bearer credential and execution policies.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RemoteConfig {
     pub url: String,
+    pub namespace: String,
+    pub worker_id: String,
     pub bearer_env: String,
     pub expires_at: DateTime<Utc>,
     pub session: String,
@@ -35,7 +38,9 @@ impl RemoteExecutor {
         {
             return Err("worker URL must be an origin without credentials".into());
         }
-        if config.bearer_env.is_empty()
+        if config.namespace.is_empty()
+            || config.worker_id.is_empty()
+            || config.bearer_env.is_empty()
             || config.session.is_empty()
             || config.timeout_seconds == 0
             || config.timeout_seconds > 300
@@ -52,7 +57,13 @@ impl RemoteExecutor {
             .map_err(|e| e.to_string())?;
         Ok(Self { config, client })
     }
-    async fn submit(&self, invocation: Invocation) -> Outcome {
+    pub async fn execute_authorized(&self, dispatch: Dispatch) -> Outcome {
+        if dispatch.validate().is_err()
+            || dispatch.namespace != self.config.namespace
+            || dispatch.worker_id != self.config.worker_id
+        {
+            return Outcome::Failed("invalid scheduled dispatch binding".into());
+        }
         if Utc::now() >= self.config.expires_at {
             return Outcome::Failed("operator grant expired before submission".into());
         }
@@ -67,10 +78,13 @@ impl RemoteExecutor {
         let origin = self.config.url.trim_end_matches('/');
         // Exactly one submission attempt. Transport errors, non-202 and malformed
         // responses are ambiguous, never a signal to retry an external execution.
-        let response = self.client.post(format!("{origin}/api/exec")).bearer_auth(&token).json(&serde_json::json!({
-            "code": invocation.code, "session": self.config.session,
-            "execution_timeout_secs": self.config.timeout_seconds, "heap_memory_max_mb": self.config.heap_mb,
-        })).send().await;
+        let response = self
+            .client
+            .post(format!("{origin}/api/scheduled/v1/exec"))
+            .bearer_auth(&token)
+            .json(&dispatch)
+            .send()
+            .await;
         let Ok(response) = response else {
             return Outcome::Unknown("submission response lost".into());
         };
@@ -102,7 +116,10 @@ impl RemoteExecutor {
             }
             let response = self
                 .client
-                .get(format!("{origin}/api/executions/{}", accepted.execution_id))
+                .get(format!(
+                    "{origin}/api/scheduled/v1/executions/{}",
+                    accepted.execution_id
+                ))
                 .bearer_auth(&token)
                 .send()
                 .await;
@@ -131,13 +148,5 @@ impl RemoteExecutor {
                 _ => return Outcome::Unknown("worker reported an uncertain termination".into()),
             }
         }
-    }
-}
-impl Executor for RemoteExecutor {
-    fn execute(
-        &self,
-        invocation: Invocation,
-    ) -> Pin<Box<dyn Future<Output = Outcome> + Send + '_>> {
-        Box::pin(self.submit(invocation))
     }
 }

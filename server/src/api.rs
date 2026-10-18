@@ -1717,7 +1717,7 @@ mod session_view_tests {
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
-    fn engine(dir: &std::path::Path) -> Arc<Engine> {
+    pub(super) fn engine(dir: &std::path::Path) -> Arc<Engine> {
         let policy = dir.join("policy.rego");
         std::fs::write(
             &policy,
@@ -1873,6 +1873,68 @@ mod session_view_tests {
         let entries = snapshots.as_array().unwrap();
         assert!(entries.len() >= 5, "{snapshots}");
         assert!(entries.iter().all(|entry| entry["output_fs"].is_string()));
+        engine.shutdown().await;
+    }
+}
+
+struct ScheduledRuntime(Arc<Engine>);
+impl crate::scheduled_worker::Runtime for ScheduledRuntime {
+    fn submit(
+        &self,
+        payload: crate::scheduled_protocol::Payload,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send + '_>>
+    {
+        Box::pin(async move {
+            self.0
+                .submit_execution(ExecutionRequest {
+                    code: payload.code,
+                    file: None,
+                    heap: None,
+                    fs: None,
+                    session: Some(payload.session),
+                    heap_memory_max_mb: Some(payload.heap_mb as u64),
+                    execution_timeout_secs: Some(payload.timeout_seconds),
+                    tags: None,
+                    mcp_headers: None,
+                })
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+    fn status(&self, id: String) -> Result<serde_json::Value, String> {
+        let info = self
+            .0
+            .get_execution(id.clone())
+            .map_err(|e| e.to_string())?;
+        Ok(serde_json::json!({"execution_id":id,"status":info.status}))
+    }
+}
+pub fn scheduled_router(runtime: Arc<Engine>) -> Result<Router, String> {
+    Ok(crate::scheduled_worker::from_environment()?.router(Arc::new(ScheduledRuntime(runtime))))
+}
+
+#[cfg(test)]
+mod scheduled_runtime_tests {
+    use super::*;
+    #[tokio::test]
+    async fn scheduled_launch_calls_real_engine() {
+        use crate::scheduled_worker::Runtime;
+        let dir = tempfile::tempdir().unwrap();
+        let engine = session_view_tests::engine(dir.path());
+        let runtime = ScheduledRuntime(engine.clone());
+        let id = runtime
+            .submit(crate::scheduled_protocol::Payload {
+                code: "1+1".into(),
+                session: "scheduled-test".into(),
+                heap_mb: 32,
+                timeout_seconds: 5,
+                expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+            })
+            .await
+            .unwrap();
+        let info = engine.clone().await_execution(id.clone()).await.unwrap();
+        assert_eq!(info.status, "completed");
+        assert_eq!(runtime.status(id).unwrap()["status"], "completed");
         engine.shutdown().await;
     }
 }

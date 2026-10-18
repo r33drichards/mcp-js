@@ -1,13 +1,13 @@
 name: Scheduler model and deterministic replay
 on:
   pull_request:
-    paths: ['specs/runner/**', 'scheduler-runner/**', 'scheduler-core/**', 'server/src/cluster*', 'server/cluster-tests/**', '.github/workflows/scheduler-model.yml']
+    paths: ['specs/runner/**', 'scheduler-runner/**', 'scheduler-core/**', 'server/src/cluster*', 'server/src/scheduled*', 'server/cluster-tests/**', '.github/workflows/scheduler-model.yml']
   push:
-    paths: ['specs/runner/**', 'scheduler-runner/**', 'scheduler-core/**', 'server/src/cluster*', 'server/cluster-tests/**', '.github/workflows/scheduler-model.yml']
+    paths: ['specs/runner/**', 'scheduler-runner/**', 'scheduler-core/**', 'server/src/cluster*', 'server/src/scheduled*', 'server/cluster-tests/**', '.github/workflows/scheduler-model.yml']
   workflow_dispatch:
     inputs:
       deep:
-        description: 'Explore 16 transitions and 3 faults (default: 12 and 2)'
+        description: 'Deeper ownership (16/3) and admission (14 transitions) bounds'
         type: boolean
         default: true
 permissions:
@@ -33,13 +33,17 @@ jobs:
         run: |
           args=()
           if [ "$DEEP" = true ]; then args+=(--deep); fi
-          python3 specs/runner/check.py --jar /tmp/tla2tools.jar --out /tmp/runner-model "${args[@]}"
+          python3 specs/runner/check.py --jar /tmp/tla2tools.jar --out /tmp/runner-model/ownership "${args[@]}"
+          python3 specs/runner/check_admission.py --jar /tmp/tla2tools.jar --out /tmp/runner-model/admission "${args[@]}"
       - name: Replay generated states against production transitions
         env:
-          SCHEDULER_MODEL_TRACES: /tmp/runner-model
+          SCHEDULER_MODEL_TRACES: /tmp/runner-model/ownership
+          SCHEDULER_ADMISSION_TRACES: /tmp/runner-model/admission
         run: cargo test --locked --manifest-path scheduler-runner/Cargo.toml --lib model_replay -- --nocapture
       - name: Detect source mutations in disposable copies
-        run: python3 specs/runner/mutations.py
+        run: |
+          python3 specs/runner/mutations.py
+          python3 specs/runner/admission_mutations.py
       - uses: actions/upload-artifact@v4
         if: always()
         with:

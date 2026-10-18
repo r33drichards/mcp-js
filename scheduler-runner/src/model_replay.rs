@@ -439,3 +439,6 @@ async fn deterministic_flush_failure_cannot_release_generated_claim() {
     assert!(owner.claim(now(1)).await.is_err());
     assert!(owner.claim(now(1)).await.is_err());
 }
+
+#[path = "admission_replay.rs"]
+mod admission_replay;

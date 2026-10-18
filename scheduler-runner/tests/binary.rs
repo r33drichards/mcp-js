@@ -55,7 +55,7 @@ async fn owner(runners: &mut [Runner], excluded: Option<usize>) -> usize {
     .expect("acquired leader")
 }
 fn remote(url: &str) -> Value {
-    json!({"url":url,"bearer_env":"PATH","expires_at": Utc::now()+Delta::hours(1),"session":"test-operator","timeout_seconds":30,"heap_mb":32})
+    json!({"url":url,"namespace":"binary-test","worker_id":"worker","bearer_env":"PATH","expires_at": Utc::now()+Delta::hours(1),"session":"test-operator","timeout_seconds":30,"heap_mb":32})
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn three_real_binaries_manage_dispatch_and_preserve_unknown_after_leader_death() {
@@ -80,7 +80,8 @@ async fn three_real_binaries_manage_dispatch_and_preserve_unknown_after_leader_d
                                     counter.fetch_add(1, Ordering::SeqCst);
                                     let bytes = req.into_body().collect().await.unwrap().to_bytes();
                                     assert_eq!(
-                                        serde_json::from_slice::<Value>(&bytes).unwrap()["code"],
+                                        serde_json::from_slice::<Value>(&bytes).unwrap()["payload"]
+                                            ["code"],
                                         "1+1"
                                     );
                                     (202, r#"{"execution_id":"work-1"}"#)
@@ -111,7 +112,7 @@ async fn three_real_binaries_manage_dispatch_and_preserve_unknown_after_leader_d
     let authority = remote(&worker_url); // Exactly the same immutable contract on all voters.
     let mut runners = Vec::new();
     for i in 0..3 {
-        let config = json!({"node_id":format!("r{i}"),"advertise_addr":format!("127.0.0.1:{}",ports[i]),"cluster_port":ports[i],"peers":(0..3).filter(|j| *j!=i).map(|j| format!("r{j}@127.0.0.1:{}",ports[j])).collect::<Vec<_>>(),"data_dir":directory.path().join(format!("data-{i}")),"schedules":[],"remote":authority});
+        let config = json!({"node_id":format!("r{i}"),"advertise_addr":format!("127.0.0.1:{}",ports[i]),"cluster_port":ports[i],"peers":(0..3).filter(|j| *j!=i).map(|j| format!("r{j}@127.0.0.1:{}",ports[j])).collect::<Vec<_>>(),"admission_addr":"127.0.0.1:0","admission_bearer_env":"PATH","data_dir":directory.path().join(format!("data-{i}")),"schedules":[],"remote":authority});
         let path = directory.path().join(format!("config-{i}.json"));
         std::fs::write(&path, config.to_string()).unwrap();
         let mut child = Command::new(env!("CARGO_BIN_EXE_mcp-js-scheduler-runner"))
@@ -200,7 +201,7 @@ fn existing_unsealed_or_foreign_store_is_rejected_without_reset() {
         } else {
             std::fs::write(data.join("state.sqlite3"), "preserved").unwrap();
         }
-        let config = json!({"node_id":"r","advertise_addr":"127.0.0.1:4401","cluster_port":4401,"peers":[],"data_dir":data,"remote":remote("http://127.0.0.1:1")});
+        let config = json!({"node_id":"r","advertise_addr":"127.0.0.1:4401","cluster_port":4401,"peers":[],"admission_addr":"127.0.0.1:0","admission_bearer_env":"PATH","data_dir":data,"remote":remote("http://127.0.0.1:1")});
         let path = directory.path().join("config.json");
         std::fs::write(&path, config.to_string()).unwrap();
         let output = std::process::Command::new(env!("CARGO_BIN_EXE_mcp-js-scheduler-runner"))
