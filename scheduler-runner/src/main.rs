@@ -34,11 +34,21 @@ struct Contract<'a> {
 #[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 enum Command {
+    Status,
     List,
-    Create { definition: Definition },
-    Disable { id: u64 },
-    Delete { id: u64 },
-    AcknowledgeStopped { occurrence_id: u64 },
+    Create {
+        definition: Definition,
+    },
+    Disable {
+        id: u64,
+    },
+    Delete {
+        id: u64,
+    },
+    AcknowledgeStopped {
+        occurrence_id: u64,
+        dispatcher_and_work_quiesced: bool,
+    },
 }
 
 #[tokio::main]
@@ -57,6 +67,26 @@ async fn main() -> Result<(), String> {
     })
     .map_err(|e| e.to_string())?;
     let (peers, peer_addrs) = ClusterConfig::parse_peers(&config.peers);
+    let path = std::path::Path::new(&config.data_dir);
+    let existing = path.exists()
+        && std::fs::read_dir(path)
+            .map_err(|e| e.to_string())?
+            .next()
+            .is_some();
+    if existing && !path.join("conf").is_file() {
+        return Err("existing data directory is not a supported sealed Raft store; explicit migration required".into());
+    }
+    let db = sled::open(path).map_err(|e| e.to_string())?;
+    if existing
+        && db
+            .get("raft_fixed_voters")
+            .map_err(|e| e.to_string())?
+            .is_none()
+    {
+        return Err(
+            "existing store is not sealed for fixed voters; explicit migration required".into(),
+        );
+    }
     let node = ClusterNode::new_fixed(
         ClusterConfig {
             node_id: config.node_id,
@@ -66,7 +96,7 @@ async fn main() -> Result<(), String> {
             cluster_port: config.cluster_port,
             ..Default::default()
         },
-        sled::open(config.data_dir).map_err(|e| e.to_string())?,
+        db,
     )?;
     node.start().await;
     let mut source = PulseSource::start().await?;
@@ -94,14 +124,17 @@ async fn main() -> Result<(), String> {
                     Some(line) => {
                         let response = match serde_json::from_str::<Command>(&line) {
                             Err(error) => Err(error.to_string()),
+                            Ok(Command::Status) => Ok(serde_json::json!({"cluster":node.status().await,"owner_acquired":owner.is_some()})),
                             Ok(command) => match owner.as_mut() {
                                 None => Err("no acquired leader; send command to current leader".into()),
                                 Some(active) => match command {
+                                    Command::Status => unreachable!(),
                                     Command::List => Ok(serde_json::json!({"schedules": active.view().schedules(), "occurrences": active.view().occurrences(), "stale_local_view": true})),
                                     Command::Create { definition } => active.create(definition, Utc::now()).await.map(|id| serde_json::json!({"id":id})),
                                     Command::Disable { id } => active.disable(id).await.map(|_| serde_json::json!({"ok":true})),
                                     Command::Delete { id } => active.delete(id).await.map(|_| serde_json::json!({"ok":true})),
-                                    Command::AcknowledgeStopped { occurrence_id } => active.acknowledge_stopped(occurrence_id).await.map(|_| serde_json::json!({"ok":true})),
+                                    Command::AcknowledgeStopped { occurrence_id, dispatcher_and_work_quiesced: true } => active.acknowledge_stopped(occurrence_id).await.map(|_| serde_json::json!({"ok":true})),
+                                    Command::AcknowledgeStopped { .. } => Err("must establish old dispatcher cannot submit and in-flight work is resolved".into()),
                                 }
                             }
                         };

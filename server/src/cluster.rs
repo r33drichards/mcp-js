@@ -480,14 +480,12 @@ impl ClusterNode {
         }
         // Never silently seal an existing dynamic cluster: membership and legacy
         // commit progress must be migrated with all voters offline by an operator.
-        else if !db.is_empty()
-            || !db
-                .open_tree("raft_log")
-                .map_err(|e| e.to_string())?
-                .is_empty()
-            || !db.open_tree("data").map_err(|e| e.to_string())?.is_empty()
-        {
-            return Err("fixed-voter mode requires a fresh consensus store".into());
+        else {
+            for name in db.tree_names() {
+                if !db.open_tree(name).map_err(|e| e.to_string())?.is_empty() {
+                    return Err("fixed-voter mode requires a fresh consensus store".into());
+                }
+            }
         }
         db.insert("raft_fixed_voters", serde_json::to_vec(&voters).unwrap())
             .map_err(|e| e.to_string())?;

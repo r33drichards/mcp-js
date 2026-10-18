@@ -349,3 +349,16 @@ async fn scheduler_proposal_checks_expected_term_under_append_lock() {
     assert!(n.scheduler_barrier(1).await.is_err());
     assert!(n.state.read().await.log.is_empty());
 }
+
+#[test]
+fn fixed_mode_rejects_nonempty_foreign_state_tree_without_resetting_it() {
+    let db = sled::Config::new().temporary(true).open().unwrap();
+    let tree = db.open_tree("scheduler_state").unwrap();
+    tree.insert("state", "existing local schedules").unwrap();
+    assert!(ClusterNode::new_fixed(ClusterConfig::default(), db.clone()).is_err());
+    assert_eq!(
+        tree.get("state").unwrap().unwrap().as_ref(),
+        b"existing local schedules"
+    );
+    assert!(db.get("raft_fixed_voters").unwrap().is_none());
+}

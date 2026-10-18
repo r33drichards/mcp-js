@@ -28,7 +28,9 @@ The worker must enforce its normal authentication and execution policies.
 For three voters, give each a unique node ID, address, port and data directory,
 and list the other two as `id@host:port` peers. All voters must use the same
 identities/addresses and hardened code. This prototype requires **fresh consensus
-stores** and refuses automatic migration of existing clusters. Only learner
+stores** and refuses automatic migration of existing clusters. Nonempty unsealed
+stores (including a local scheduler_state tree), SQLite prototypes and unrelated
+nonempty directories are rejected without resetting their contents. Only learner
 membership may change after the voter map is sealed. Keep cluster ports on the
 existing trusted internal network: Raft RPC authentication is not implemented.
 
@@ -37,15 +39,21 @@ interface, **not an MCP transport or a multi-tenant authorization boundary**:
 
 ```json
 {"action":"create","definition":{"name":"example","code":"console.log('scheduled')","cron":"* * * * *","timezone":"UTC","policy":{"missed":"Skip","overlap":"Skip","retry":{"max_retries":0,"delay_seconds":0}}}}
+{"action":"status"}
 {"action":"list"}
 {"action":"disable","id":1}
 {"action":"delete","id":1}
-{"action":"acknowledge_stopped","occurrence_id":2}
+{"action":"acknowledge_stopped","occurrence_id":2,"dispatcher_and_work_quiesced":true}
 ```
 
-List explicitly returns a stale local view. Mutations require committed quorum
-acknowledgements. Acknowledge stopped only after independently establishing that
-execution ended; it releases an Unknown overlap/capacity reservation. EOF closes
+Status works on every node and reports its current role, leader ID and addresses;
+use it to choose the leader's terminal. List explicitly returns a stale local view.
+Mutations require committed quorum acknowledgements. Acknowledge stopped requires
+an explicit operator attestation that **the old dispatcher can no longer submit,
+all in-flight submissions are resolved, and external execution has ended**. Merely
+seeing no running worker execution is insufficient: a delayed submission could
+still arrive. This assertion is not a technical proof. It releases an Unknown
+overlap/capacity reservation. EOF closes
 management input but leaves scheduling active. Ctrl-C stops admission and drains
 remote observation futures (bounded by their observation deadline). No operation
 cancels arbitrary remote effects.
@@ -109,3 +117,72 @@ benchmark, Raft snapshotting/log compaction, or automatic resolution of Unknown
 work. Full checkpoints are written to an unbounded consensus log; synchronous sled
 flushes and temporary planner creation suit small experiments, not sustained load.
 No production service or security settings are changed.
+
+## Reproduce the tested topology
+
+The self-contained binary integration test starts **three actual runner processes**
+with unique IDs, dynamically allocated loopback ports and separate fresh sled
+stores. Every process knows the other two fixed voters. A fourth loopback HTTP
+process acts as the worker. The test sends stdin status/create/list, waits for a
+real minute-cron dispatch, kills the active leader after the worker accepts it,
+then verifies Unknown on takeover, disable/delete and exactly one automatic POST.
+The mock deliberately keeps execution running; no real credential is created.
+
+```sh
+cargo test --manifest-path scheduler-runner/Cargo.toml --locked --test binary -- --nocapture
+```
+
+This test takes up to approximately 75 seconds because it exercises a real minute
+boundary. Deterministic clock/restart/overlap tests are in the other suites.
+
+For an existing authenticated worker, generate three local configurations below.
+Set `WORKER_ORIGIN` to that worker's HTTPS origin and make the **existing**
+`MCP_SCHEDULER_WORKER_TOKEN` available in each runner terminal. The generator never
+reads or stores its value. It writes empty initial schedules and a one-hour grant.
+
+```sh
+cargo build --manifest-path scheduler-runner/Cargo.toml --locked
+export RUNNER_DEMO_DIR="$(mktemp -d /tmp/mcp-runner-demo.XXXXXX)"
+python3 - <<'PYCONFIG'
+import datetime, json, os, pathlib
+root = pathlib.Path(os.environ["RUNNER_DEMO_DIR"])
+expiry = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=1)).isoformat()
+remote = {"url": os.environ["WORKER_ORIGIN"], "bearer_env": "MCP_SCHEDULER_WORKER_TOKEN",
+          "expires_at": expiry, "session": "operator-scheduler", "timeout_seconds": 30, "heap_mb": 128}
+for i in range(1, 4):
+    config = {"node_id": f"runner-{i}", "advertise_addr": f"127.0.0.1:{4400+i}",
+              "cluster_port": 4400+i, "peers": [f"runner-{j}@127.0.0.1:{4400+j}" for j in range(1, 4) if j != i],
+              "data_dir": str(root / f"data-{i}"), "schedules": [], "remote": remote}
+    (root / f"runner-{i}.json").write_text(json.dumps(config))
+print(root)
+PYCONFIG
+```
+
+In three terminals, substitute the same printed directory for `DEMO_DIR`:
+
+```sh
+scheduler-runner/target/debug/mcp-js-scheduler-runner DEMO_DIR/runner-1.json
+scheduler-runner/target/debug/mcp-js-scheduler-runner DEMO_DIR/runner-2.json
+scheduler-runner/target/debug/mcp-js-scheduler-runner DEMO_DIR/runner-3.json
+```
+
+Each line above runs in its own terminal; enter the status JSON there, then the
+management examples on the leader. If `CARGO_TARGET_DIR` is set, use its `debug/`
+binary path instead. Do not reuse these directories to change voter membership.
+
+## Safety scope requiring a decision
+
+The current invariant is **at most one automatic application-level submission
+per occurrence attempt by these non-Byzantine runners**. Stale owners cannot claim
+new work or commit completion receipts. A previously consumed request may still
+start or continue after takeover. This is not worker-start fencing.
+
+If the required contract is instead “reject an old owner's request at worker
+admission,” the worker API must participate: carry occurrence/attempt identity and
+owner epoch, then atomically validate and consume/deduplicate the permit through
+consensus. A runner-only check immediately before POST cannot close that race.
+Preventing effects after admission additionally needs cancellation or fencing at
+the affected resource. Those semantics are an architectural decision, not a
+capability claimed by this prototype. MCP management would likewise need the
+authenticated principal-to-schedule/grant binding left open by the design; the
+implemented usable management path is explicitly local operator stdin.
