@@ -7,3 +7,6 @@ mod remote;
 mod replicated;
 pub use remote::*;
 pub use replicated::*;
+
+#[cfg(test)]
+mod model_replay;

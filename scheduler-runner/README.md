@@ -186,3 +186,7 @@ the affected resource. Those semantics are an architectural decision, not a
 capability claimed by this prototype. MCP management would likewise need the
 authenticated principal-to-schedule/grant binding left open by the design; the
 implemented usable management path is explicitly local operator stdin.
+
+Bounded ownership validation and deterministic generated-trace replay are documented
+in [specs/runner](../specs/runner/README.md), including expected stale-admission
+counterexamples, source-mutation controls, and explicit model-to-code limits.

@@ -565,6 +565,39 @@ impl ClusterNode {
         );
     }
 
+    // Deterministic test transport: production handlers/commit logic, no sockets
+    // or background timers. Election result installation is the explicit model
+    // abstraction; the harness obtains votes through handle_request_vote first.
+    #[cfg(test)]
+    pub(crate) async fn sim_install_elected_leader(&self, term: u64) {
+        let mut state = self.state.write().await;
+        assert_eq!(state.current_term, term);
+        state.role = Role::Leader;
+        state.leader_id = Some(self.config.node_id.clone());
+        state.match_index.clear();
+        state.next_index.clear();
+    }
+    #[cfg(test)]
+    pub(crate) async fn sim_response(
+        &self,
+        peer: &str,
+        term: u64,
+        matched: u64,
+        response: AppendEntriesResponse,
+    ) {
+        self.accept_append_response(peer, term, 0, matched, response)
+            .await;
+    }
+    #[cfg(test)]
+    pub(crate) async fn sim_commit(self: &Arc<Self>) {
+        self.update_commit_index().await;
+    }
+    #[cfg(test)]
+    pub(crate) fn sim_storage_failure(&self, fail: bool) {
+        self.fail_flush
+            .store(fail, std::sync::atomic::Ordering::SeqCst);
+    }
+
     pub fn shutdown(&self) {
         self.shutdown.cancel();
     }
