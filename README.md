@@ -3,6 +3,7 @@
 [![Docs](https://img.shields.io/badge/docs-mkdocs-blue)](https://r33drichards.github.io/mcp-js/)
 [![Release](https://img.shields.io/github/v/release/r33drichards/mcp-js)](https://github.com/r33drichards/mcp-js/releases)
 [![License: AGPL v3](https://img.shields.io/badge/license-AGPL--3.0-blue)](./LICENSE)
+[![Discord](https://img.shields.io/badge/Discord-Join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/BqjerAUDzC)
 
 [![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/mcp-js?referralCode=cj5P6Z&utm_medium=integration&utm_source=template&utm_campaign=generic)
 
@@ -38,6 +39,11 @@ from [`site-docs/`](./site-docs)) — tutorials, how-to guides, concept
 explanations, and complete reference for the [CLI flags](https://r33drichards.github.io/mcp-js/reference/cli-flags/),
 [HTTP API](https://r33drichards.github.io/mcp-js/reference/http-api/), and
 [MCP tools](https://r33drichards.github.io/mcp-js/reference/mcp-tools/).
+
+## Community
+
+Join the [mcp-js Discord community](https://discord.gg/BqjerAUDzC) for questions,
+examples, and project discussion.
 
 ## Quick start
 
