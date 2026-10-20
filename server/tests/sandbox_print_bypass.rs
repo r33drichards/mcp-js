@@ -23,21 +23,36 @@
 //! error from `execute_script` (failing the test).
 
 use server::engine::console;
+use server::engine::console::ConsoleLogState;
 
-use deno_core::Extension;
 use deno_core::JsRuntime;
 use deno_core::RuntimeOptions;
 
+fn counter() -> u64 {
+    static C: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    C.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+}
 /// Build a minimal JsRuntime with only the console extension, then run the
 /// default neutralization pass — the same ordering `execute_stateless` uses
 /// before any user code runs. No `harden_runtime` call (default config).
 fn neutralized_runtime() -> JsRuntime {
+    // op_console_write borrows ConsoleLogState from OpState; provide a
+    // throwaway sled-backed sink so the safe print path works in tests.
+    let db = sled::open(
+        std::env::temp_dir().join(format!("mcp279-test-{}-{}", std::process::id(), counter())),
+    )
+    .expect("sled open");
+    let tree = db.open_tree("console").expect("sled tree");
+    std::mem::forget(db);
     let mut runtime = JsRuntime::new(RuntimeOptions {
-        extensions: vec![Extension::with_ops("mcp_console", || {
-            console::create_extension()
-        })],
+        extensions: vec![console::create_extension()],
         ..Default::default()
     });
+
+    runtime
+        .op_state()
+        .borrow_mut()
+        .put(ConsoleLogState::new(tree));
 
     console::inject_console(&mut runtime)
         .expect("inject_console failed");
@@ -49,15 +64,20 @@ fn neutralized_runtime() -> JsRuntime {
 
 /// Drive any pending microtasks/timers to completion after a script.
 fn drain(runtime: &mut JsRuntime) {
-    runtime
-        .run_event_loop(false)
+    // deno_core 0.387-era run_event_loop is async and takes
+    // RunEventLoopOptions; drive it on a current-thread tokio runtime.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("failed to build tokio runtime");
+    rt.block_on(runtime.run_event_loop(Default::default()))
         .expect("event loop failed");
 }
 
 /// Execute `code` (which asserts internally by throwing on failure) and drain.
-fn assert_script(runtime: &mut JsRuntime, label: &str, code: &str) {
+fn assert_script(runtime: &mut JsRuntime, label: &'static str, code: &str) {
     runtime
-        .execute_script(label.to_string(), code.to_string())
+        .execute_script(label, code.to_string())
         .unwrap_or_else(|e| panic!("{label} failed: {e}"));
     drain(runtime);
 }
