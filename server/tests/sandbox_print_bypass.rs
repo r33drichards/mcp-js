@@ -92,7 +92,7 @@ fn bootstrap_core_print_is_neutralized_by_default() {
         (function () {
             var bDesc = Object.getOwnPropertyDescriptor(globalThis, '__bootstrap');
             if (!bDesc) throw new Error("FAIL: globalThis.__bootstrap was removed");
-            if (bDesc.configurable) throw new Error("FAIL: __bootstrap is configurable");
+            if (!bDesc.configurable) throw new Error("FAIL: __bootstrap not configurable - harden remove_bootstrap could not delete it");
             if (bDesc.writable) throw new Error("FAIL: __bootstrap is writable");
 
             var bc = globalThis.__bootstrap.core;
