@@ -94,6 +94,17 @@ as a null-prototype copy whose `core.print` is the same safe `safePrint`
 (falling back to `delete globalThis.__bootstrap` on error). See
 `https://github.com/r33drichards/mcp-js/pull/289/files`.
 
+**Ordering subtlety found by CI:** the replaced `globalThis.__bootstrap`
+property must stay `configurable: true` (while remaining `writable: false`).
+Safety comes from the ORIGINAL frozen core being unreachable through the
+replacement — not from locking the global. If it were non-configurable, the
+opt-in `--harden-remove-bootstrap` could no longer `delete` it, which
+regressed `agentic_glue_boundary::opt_in_hardening_closes_the_introspection_glue`
+on the PR's first CI run. Current head of #289 includes that correction, the
+aligned PoC assertion, and test-harness fixes (async `run_event_loop` via a
+current-thread tokio runtime, `&'static str` script labels,
+`console::create_extension()`, and a sled `ConsoleLogState` in `OpState`).
+
 The PR also adds a regression test at `server/tests/sandbox_print_bypass.rs`.
 
 ## 5. Rebuild and VERIFY the fix (expected: NOT vulnerable)
@@ -109,11 +120,14 @@ Pass criteria:
 2. The forged text, if emitted at all, is now routed through the safe print
    (console capture) instead of fd 1 — it can no longer reach the client as a
    protocol message.
-3. Regression test green:
+3. Regression tests green (both the bypass tests and the glue-boundary suite
+   that guards `--harden-remove-bootstrap` compatibility):
 
 ```sh
-cargo test -p server --test sandbox_print_bypass
+cargo test -p server --test sandbox_print_bypass --test agentic_glue_boundary
 ```
+
+Locally on 2026-10-20: 3/3 + 8/8 passed.
 
 ## 6. Live validation performed here
 
