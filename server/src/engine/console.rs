@@ -347,7 +347,13 @@ const SANDBOX_SETUP_JS: &str = r#"
                 });
             }
             Object.defineProperty(globalThis, '__bootstrap', {
-                value: newBootstrap, writable: false, configurable: false, enumerable: true,
+                // configurable: true is intentional — it lets the opt-in
+                // --harden-remove-bootstrap mitigation still delete the
+                // property later (agentic_glue_boundary expects full removal).
+                // Safety does NOT depend on locking this property: the
+                // ORIGINAL frozen core is already unreachable through it.
+                // writable: false still blocks casual reassignment.
+                value: newBootstrap, writable: false, configurable: true, enumerable: true,
             });
         }
     } catch (e) {
