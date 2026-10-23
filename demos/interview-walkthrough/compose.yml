@@ -1,0 +1,192 @@
+name: ${DEMO_ID:-mcp-js-interview}
+x-owned: &owned
+  labels:
+    mcp-js-demo-owner: ${DEMO_ID:-mcp-js-interview}
+x-env: &localenv
+  NO_PROXY: '*'
+  no_proxy: '*'
+  HTTP_PROXY: ''
+  HTTPS_PROXY: ''
+  http_proxy: ''
+  https_proxy: ''
+x-engine: &engine
+  <<: *owned
+  image: ${RUNTIME_IMAGE:-mcp-js-interview:local}
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  mem_limit: 768m
+  pids_limit: 128
+  environment: &engineenv
+    <<: *localenv
+    AWS_ENDPOINT_URL: http://objects:9000
+    AWS_S3_FORCE_PATH_STYLE: 'true'
+    AWS_ACCESS_KEY_ID: demo-only
+    AWS_SECRET_ACCESS_KEY: demo-only
+    AWS_REGION: us-east-1
+    AWS_EC2_METADATA_DISABLED: 'true'
+    AWS_REQUEST_CHECKSUM_CALCULATION: WHEN_REQUIRED
+    AWS_RESPONSE_CHECKSUM_VALIDATION: WHEN_REQUIRED
+  healthcheck:
+    test: [CMD, /usr/bin/python3, -c, "import urllib.request;urllib.request.urlopen('http://127.0.0.1:3000/api/version',timeout=2)"]
+    interval: 3s
+    timeout: 3s
+    retries: 20
+services:
+  objects:
+    <<: *owned
+    container_name: ${DEMO_ID:-mcp-js-interview}-objects
+    image: ${RUNTIME_IMAGE:-mcp-js-interview:local}
+    entrypoint: [/usr/bin/python3, /object-store.py]
+    networks: [demo]
+    environment: *localenv
+    volumes: [objects:/data]
+    healthcheck:
+      test: [CMD, /usr/bin/python3, -c, "import socket;s=socket.create_connection(('127.0.0.1',9000),2);s.close()"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+  node1:
+    <<: *engine
+    networks: [demo]
+    container_name: ${DEMO_ID:-mcp-js-interview}-1
+    command: [--http-port, '3000', --bind-host, 0.0.0.0, --cluster-port, '4000', --node-id, node1, --advertise-addr, 'node1:4000', --peers, 'node2@node2:4000,node3@node3:4000', --session-db-path, /data/sessions, --heap-store, none, --fs-store, s3, --s3-bucket, demo, --cache-dir, /data/cache, --policies-json, /policies.json, --heap-memory-max, '64']
+    volumes: [node1:/data]
+    depends_on: {objects: {condition: service_healthy}}
+  node2:
+    <<: *engine
+    networks: [demo]
+    container_name: ${DEMO_ID:-mcp-js-interview}-2
+    command: [--http-port, '3000', --bind-host, 0.0.0.0, --cluster-port, '4000', --node-id, node2, --advertise-addr, 'node2:4000', --peers, 'node1@node1:4000,node3@node3:4000', --session-db-path, /data/sessions, --heap-store, none, --fs-store, s3, --s3-bucket, demo, --cache-dir, /data/cache, --policies-json, /policies.json, --heap-memory-max, '64']
+    volumes: [node2:/data]
+    depends_on: {objects: {condition: service_healthy}}
+  node3:
+    <<: *engine
+    networks: [demo]
+    container_name: ${DEMO_ID:-mcp-js-interview}-3
+    command: [--http-port, '3000', --bind-host, 0.0.0.0, --cluster-port, '4000', --node-id, node3, --advertise-addr, 'node3:4000', --peers, 'node1@node1:4000,node2@node2:4000', --session-db-path, /data/sessions, --heap-store, none, --fs-store, s3, --s3-bucket, demo, --cache-dir, /data/cache, --policies-json, /policies.json, --heap-memory-max, '64']
+    volumes: [node3:/data]
+    depends_on: {objects: {condition: service_healthy}}
+  app:
+    <<: *owned
+    container_name: ${DEMO_ID:-mcp-js-interview}-app
+    image: ${RUNTIME_IMAGE:-mcp-js-interview:local}
+    entrypoint: [/usr/bin/python3, /app.py]
+    networks: [demo]
+    volumes: ['./synthetic-app.py:/app.py:ro', './fixtures/ec2_cpu_utilization_825cc2.csv:/data.csv:ro']
+    environment: *localenv
+    healthcheck:
+      test: [CMD, /usr/bin/python3, -c, "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/metrics')"]
+      interval: 2s
+      timeout: 3s
+      retries: 10
+  prometheus:
+    <<: *owned
+    container_name: ${DEMO_ID:-mcp-js-interview}-prometheus
+    image: prom/prometheus@sha256:23031bfe0e74a13004252caaa74eccd0d62b6c6e7a04711d5b8bf5b7e113adc7
+    networks: [demo]
+    command: [--config.file=/etc/prometheus/demo.yml, --storage.tsdb.path=/prometheus, --storage.tsdb.retention.time=1h]
+    volumes: ['./prometheus.yml:/etc/prometheus/demo.yml:ro', 'prometheus:/prometheus']
+    environment: *localenv
+    depends_on: {app: {condition: service_healthy}}
+    healthcheck:
+      test: [CMD, wget, -qO-, 'http://127.0.0.1:9090/-/ready']
+      interval: 3s
+      timeout: 3s
+      retries: 20
+  grafana:
+    <<: *owned
+    container_name: ${DEMO_ID:-mcp-js-interview}-grafana
+    image: grafana/grafana@sha256:70d9599b186ce287be0d2c5ba9a78acb2e86c1a68c9c41449454d0fc3eeb84e8
+    networks: [demo]
+    ports: ['127.0.0.1:38300:3000']
+    environment:
+      <<: *localenv
+      GF_AUTH_ANONYMOUS_ENABLED: 'true'
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_AUTH_DISABLE_LOGIN_FORM: 'true'
+      GF_SECURITY_DISABLE_INITIAL_ADMIN_CREATION: 'true'
+      GF_ANALYTICS_REPORTING_ENABLED: 'false'
+      GF_ANALYTICS_CHECK_FOR_UPDATES: 'false'
+      GF_PLUGINS_PREINSTALL_DISABLED: 'true'
+      GF_SERVER_ROOT_URL: http://127.0.0.1:38300/
+    volumes: ['grafana:/var/lib/grafana', 'dashboards:/var/lib/grafana/dashboards:ro', './provisioning:/etc/grafana/provisioning:ro']
+    depends_on: {prometheus: {condition: service_healthy}}
+    healthcheck:
+      test: [CMD, wget, -qO-, 'http://127.0.0.1:3000/api/health']
+      interval: 3s
+      timeout: 3s
+      retries: 30
+  grafana-mcp:
+    <<: *owned
+    container_name: ${DEMO_ID:-mcp-js-interview}-grafana-mcp
+    image: grafana/mcp-grafana@sha256:71a3f4e6f412d253611314233df709ec2571fb50e39742d23fa2940f670646dc
+    command: [--transport, streamable-http, --address, '0.0.0.0:8000', --allowed-hosts, 'grafana-mcp:8000', --enabled-tools, 'prometheus,datasource', --disable-write, --usage-stats, disabled]
+    networks: [demo]
+    environment: {<<: *localenv, GRAFANA_URL: 'http://grafana:3000', DO_NOT_TRACK: '1'}
+    depends_on: {grafana: {condition: service_healthy}}
+  # Browser and query worker share loopback without weakening the upstream Host/Origin guard.
+  query-network:
+    <<: *owned
+    container_name: ${DEMO_ID:-mcp-js-interview}-query-network
+    image: ${RUNTIME_IMAGE:-mcp-js-interview:local}
+    entrypoint: [/usr/bin/python3, -c, 'import time;time.sleep(86400)']
+    networks: [demo]
+    ports: ['127.0.0.1:38081:3000']
+  query:
+    <<: *engine
+    container_name: ${DEMO_ID:-mcp-js-interview}-4
+    network_mode: service:query-network
+    command: [--http-port, '3000', --bind-host, 0.0.0.0, --heap-store, none, --fs-store, s3, --s3-bucket, demo, --cache-dir, /data/cache, --session-db-path, /data/sessions, --policies-json, /analysis-policies.json, --mcp-config, /mcp.json, --heap-memory-max, '64']
+    volumes: ['query:/data', './analysis-policies.json:/analysis-policies.json:ro', './filesystem.rego:/filesystem.rego:ro', './mcp-tools.rego:/mcp-tools.rego:ro', '${MCP_CONFIG_FILE:-./mcp-grafana.json}:/mcp.json:ro']
+    depends_on: {objects: {condition: service_healthy}, grafana-mcp: {condition: service_started}, query-network: {condition: service_started}}
+  browser:
+    <<: *owned
+    profiles: [browser]
+    container_name: ${DEMO_ID:-mcp-js-interview}-browser
+    image: mcp-interview-browser:63bab526
+    build:
+      context: ${BROWSER_CONTEXT:-./.state/computer-use/images/browser}
+      dockerfile: Dockerfile
+    network_mode: service:query-network
+    environment: {<<: *localenv, SESSION_MODE: '1', DATA_DIR: /data}
+    shm_size: 1gb
+    mem_limit: 2g
+    volumes: [browser:/data]
+    depends_on: {query-network: {condition: service_started}}
+  publisher:
+    <<: *owned
+    container_name: ${DEMO_ID:-mcp-js-interview}-publisher
+    image: ${RUNTIME_IMAGE:-mcp-js-interview:local}
+    entrypoint: [/usr/bin/python3, -c, 'import time;time.sleep(86400)']
+    network_mode: none
+    cap_drop: [ALL]
+    volumes: [dashboards:/dashboards]
+  # Model calls are opt-in. No host credentials or Docker socket are mounted.
+  pi:
+    <<: *owned
+    profiles: [agent]
+    build: {context: ./pi, dockerfile: Dockerfile}
+    network_mode: host
+    stdin_open: true
+    tty: true
+    environment:
+      PI_CODING_AGENT_DIR: /state/agent
+      MCP_JS_DEMO_URL: http://127.0.0.1:38080
+      MCP_JS_DEMO_TOKEN: ${MCP_JS_DEMO_TOKEN:-}
+    volumes: [pi:/state]
+networks:
+  demo:
+    name: ${DEMO_ID:-mcp-js-interview}
+    internal: true
+    labels: {mcp-js-demo-owner: '${DEMO_ID:-mcp-js-interview}'}
+volumes:
+  objects: {labels: {mcp-js-demo-owner: '${DEMO_ID:-mcp-js-interview}'}}
+  node1: {labels: {mcp-js-demo-owner: '${DEMO_ID:-mcp-js-interview}'}}
+  node2: {labels: {mcp-js-demo-owner: '${DEMO_ID:-mcp-js-interview}'}}
+  node3: {labels: {mcp-js-demo-owner: '${DEMO_ID:-mcp-js-interview}'}}
+  query: {labels: {mcp-js-demo-owner: '${DEMO_ID:-mcp-js-interview}'}}
+  grafana: {labels: {mcp-js-demo-owner: '${DEMO_ID:-mcp-js-interview}'}}
+  prometheus: {labels: {mcp-js-demo-owner: '${DEMO_ID:-mcp-js-interview}'}}
+  dashboards: {labels: {mcp-js-demo-owner: '${DEMO_ID:-mcp-js-interview}'}}
+  browser: {labels: {mcp-js-demo-owner: '${DEMO_ID:-mcp-js-interview}'}}
+  pi: {labels: {mcp-js-demo-owner: '${DEMO_ID:-mcp-js-interview}'}}

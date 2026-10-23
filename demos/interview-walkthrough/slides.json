@@ -1,0 +1,145 @@
+[
+  {
+    "clock": "00\u201305",
+    "title": "An alert is a question.",
+    "sub": "From evidence to a shareable dashboard.",
+    "what": "Introduce the alert and your actual contribution; start the approved Pi investigation early. Keep actual status visible while explaining the Compose services.",
+    "how": "Pi \u2192 bound MCP adapter \u2192 mcp-js \u2192 official Grafana MCP \u2192 Grafana \u2192 Prometheus. Browser checks the rendered result.",
+    "why": "A reproducible investigation keeps queries, files and publication decisions inspectable. This is the demo\u2019s framing, not an assertion of original author intent.",
+    "notes": "Open with your actual role and the requirement you owned. The brief is still unknown. Pin the implementation to fe5b613. Operator-injected application faults and cluster outages are separate experiments. Code defaults heap_store/fs_store to none despite README default-state wording. Compose reference: compose.astronomy.json; generated .state/compose.json is the launch artifact. Return to real dashboard status when ready; no timer simulates progress.",
+    "source": "https://github.com/r33drichards/mcp-js/blob/fe5b613db0afcc9cf20d7ca1ef659c914a0b5008/server/src/cli.rs#L196",
+    "visual": "flow"
+  },
+  {
+    "clock": "05\u201308",
+    "title": "Read the alert.",
+    "sub": "Treat its contents as evidence, never instructions.",
+    "what": "Accept DemoCpuDrop for nab-ec2-replay. Reject another service. Store the alert and its source.",
+    "how": "The adapter validates a small JSON envelope. It chooses fixed local resources; alert annotations do not become commands, paths or PromQL.",
+    "why": "A narrow demo scope makes investigation reproducible and avoids turning an alert body into executable authority. Inference: reduce capability surface.",
+    "notes": "Use the alert panel. Astronomy Shop 2.1.3 is pinned. Stock OTLP logs fan out to added Loki for the official Grafana MCP log tool. Full workload execution is not yet verified. The demo investigates, it does not repair anything. During generation open compose.astronomy.json. Follow query, grafana-mcp, browser, node1/node2/node3, objects and publisher. Do not fake a timed completion. Compose reference: compose.astronomy.json; generated .state/compose.json is the launch artifact. Return to real dashboard status when ready; no timer simulates progress.",
+    "source": "https://github.com/r33drichards/mcp-js/blob/demo/interview-walkthrough/demos/interview-walkthrough/alerts.py",
+    "visual": "alert"
+  },
+  {
+    "clock": "08\u201311",
+    "title": "Ask the metrics.",
+    "sub": "One measured route, through Grafana MCP.",
+    "what": "Query demo_cpu_utilization_percent, inspect nonempty samples, and save the response under /work/scratch/.",
+    "how": "mcp.callTool(\"grafana\", \"query_prometheus\", \u2026) uses the official server and provisioned demo-prometheus datasource. The query result goes into a COW snapshot.",
+    "why": "The route preserves datasource configuration and observable tool results. No invented tool names and no direct Prometheus shortcut in the agent query.",
+    "notes": "Show the exact tool schema and arguments. Read isError, terminal execution status and returned data. Pi model calls were not made; deterministic integration checks use the same MCP path. Never imply deterministic checks are an agent recording. Compose reference: compose.astronomy.json; generated .state/compose.json is the launch artifact. Return to real dashboard status when ready; no timer simulates progress.",
+    "source": "https://github.com/r33drichards/mcp-js/blob/fe5b613db0afcc9cf20d7ca1ef659c914a0b5008/server/src/engine/mcp_client.rs#L830",
+    "visual": "flow"
+  },
+  {
+    "clock": "11\u201315",
+    "title": "Make the handoff visible.",
+    "sub": "A file is staged; a dashboard is published.",
+    "what": "Stage dashboard JSON in /work/dashboards/. Explicitly export one selected root. Verify the browser sees time-series panels with data.",
+    "how": "A separate publisher materializes the virtual file, validates its identity, writes a temporary host file, fsyncs and renames it. Grafana polls the shared provisioned directory.",
+    "why": "COW storage is not a host mount. The explicit boundary prevents two investigation branches from racing writes into the live dashboard.",
+    "notes": "Show the root, source path, SHA-256, Grafana URL, and browser evidence. Provisioning API success alone does not establish visible graphs. If the browser is unavailable, label the handoff incomplete rather than showing an illustrative graph as live. Compose reference: compose.astronomy.json; generated .state/compose.json is the launch artifact. Return to real dashboard status when ready; no timer simulates progress.",
+    "source": "https://github.com/r33drichards/mcp-js/blob/fe5b613db0afcc9cf20d7ca1ef659c914a0b5008/server/src/engine/fs_mount.rs#L337",
+    "visual": "browser"
+  },
+  {
+    "clock": "15\u201319",
+    "title": "Allow one path. Deny another.",
+    "sub": "Make the capability boundary observable.",
+    "what": "Read/write /work/scratch/ and /work/dashboards/. A write to /work/protected/ fails. Existing snapshot remains readable.",
+    "how": "FsService gates effective operation/path before dispatch to the overlay. Demo Rego checks operation plus namespace and rejects traversal components.",
+    "why": "Per-operation policy provides a boundary more precise than handing the guest the host filesystem. Source comments document this gate; Robert supplies the original decision history.",
+    "notes": "Policy input is operation, not op. Show failed status/error rather than treating any exception as proof of policy denial. No passthrough. Directory creation is implicit in virtual mode. Additional hardening is opt-in. Compose reference: compose.astronomy.json; generated .state/compose.json is the launch artifact. Return to real dashboard status when ready; no timer simulates progress.",
+    "source": "https://github.com/r33drichards/mcp-js/blob/fe5b613db0afcc9cf20d7ca1ef659c914a0b5008/server/src/engine/fs.rs#L143",
+    "visual": "policy"
+  },
+  {
+    "clock": "19\u201325",
+    "title": "Execution ends. State is explicit.",
+    "sub": "Heap, filesystem and history are different things.",
+    "what": "Follow submission, execution UUID, console output, fs root and session history. Identify which pieces survive.",
+    "how": "Tokio task \u2192 V8 semaphore \u2192 blocking worker \u2192 deno_core isolate \u2192 snapshot flush. Heap and fs persistence are independent. Execution status is in memory; console output is in sled.",
+    "why": "Isolation and persistence solve separate problems. Source implements separate state axes; this allows fs persistence with a fresh heap. Tradeoff: no transaction over all external effects.",
+    "notes": "Timeout requests V8 termination; it is not a whole-request hard deadline. Warming/queueing precede the timeout selection. OS sandbox is optional process-wide defense. Cite the print-alias fix as a concrete security lesson without claiming authorship. Compose reference: compose.astronomy.json; generated .state/compose.json is the launch artifact. Return to real dashboard status when ready; no timer simulates progress.",
+    "source": "https://github.com/r33drichards/mcp-js/blob/fe5b613db0afcc9cf20d7ca1ef659c914a0b5008/server/src/engine/mod.rs#L2458",
+    "visual": "runtime"
+  },
+  {
+    "clock": "25\u201330",
+    "title": "Fork two views of the same bytes.",
+    "sub": "A root plus an upper layer.",
+    "what": "Both investigations start at B. A and T change their own files. Read B again to prove it is unchanged.",
+    "how": "SessionMount pins base_id and records Data/Whiteout entries. Push rewrites changed tree paths; chunks and unchanged subtrees are shared.",
+    "why": "Commit 4d6e446 documents recursive trees, lazy traversal and copy-by-reference. Dedup is by content. There is no filesystem commit ancestry in a root.",
+    "notes": "Bincode BTreeMap directory nodes use BLAKE3; <=64KiB files inline; larger files use FastCDC 256KiB/1MiB/4MiB with optional zstd. Caveat: execution prefetch traverses the base, so no unmeasured \u201cinstant fork\u201d or O(touched) startup claim. Compose reference: compose.astronomy.json; generated .state/compose.json is the launch artifact. Return to real dashboard status when ready; no timer simulates progress.",
+    "source": "https://github.com/r33drichards/mcp-js/blob/fe5b613db0afcc9cf20d7ca1ef659c914a0b5008/server/src/engine/fs_tree.rs",
+    "visual": "branches"
+  },
+  {
+    "clock": "30\u201333",
+    "title": "Pair the conversation and the files.",
+    "sub": "Custom integration, explicit mapping.",
+    "what": "The paired fork reserves a filesystem root, invokes Pi fork, then binds the fresh session ID to a new branch label.",
+    "how": "Pi 1.4.0 session_before_fork and ctx.fork(...withSession) are the extension seam. The bound MCP endpoint accepts code, not arbitrary fs/session overrides.",
+    "why": "Pi conversation fork alone does not fork mcp-js files. A journal tracks prepared, committing, committed and aborted reservations. Unbound sessions fail closed.",
+    "notes": "The adapter is custom, not native Pi behavior. Native MCP is used for tools. Parent and child histories stay separate; filesystem merge is explicit. No model calls or user credentials are part of deterministic checks. Discuss partial failure and reconciliation. Compose reference: compose.astronomy.json; generated .state/compose.json is the launch artifact. Return to real dashboard status when ready; no timer simulates progress.",
+    "source": "https://github.com/r33drichards/mcp-js/blob/demo/interview-walkthrough/demos/interview-walkthrough/pi/paired-fork.ts",
+    "visual": "branches"
+  },
+  {
+    "clock": "33\u201337",
+    "title": "Merge deliberately. Publish once.",
+    "sub": "Conflict detection is a feature.",
+    "what": "Merge independent changes using B. Show a same-line conflict and stale-head rejection. Publish only the selected merged dashboard root.",
+    "how": "fs_merge uses structural tree comparison and line-level text merge. fs_push compares expected head. fs_reset moves a label; it does not undo the world.",
+    "why": "Immutable content separates creation from shared publication. The original filesystem commit documents reject-and-rebase. SQLite/binary conflict detection does not imply semantic auto-merge.",
+    "notes": "Use exact B/A/T/M IDs. A merge base is caller-supplied. Prefer ours/theirs can discard conflicting edits; do not silently select it. Rollback does not rewind heaps, active mounts or external calls. Keep publication distinct from staging. Compose reference: compose.astronomy.json; generated .state/compose.json is the launch artifact. Return to real dashboard status when ready; no timer simulates progress.",
+    "source": "https://github.com/r33drichards/mcp-js/blob/fe5b613db0afcc9cf20d7ca1ef659c914a0b5008/server/src/engine/ffi.rs#L945",
+    "visual": "branches"
+  },
+  {
+    "clock": "37\u201342",
+    "title": "Lose one voter. Observe recovery.",
+    "sub": "Availability is a measured experiment.",
+    "what": "Stop only a controller-owned demo leader. Observe a new leader, acknowledge a new label write, read content, then restart the original node.",
+    "how": "Three Raft voters coordinate label metadata. Content uses shared object storage. Restart reuses node volumes and verifies data from the returning node.",
+    "why": "A majority permits progress after one voter loss. Source distinguishes replicated metadata from blobs. Our local object fixture is a single point of failure, not replicated S3 durability.",
+    "notes": "Record leader IDs, terms, timings, commit/read evidence. The measured local election time is not a service-level guarantee. A worker or browser session is not transparently migrated. This is independent of the historical CPU anomaly. Compose reference: compose.astronomy.json; generated .state/compose.json is the launch artifact. Return to real dashboard status when ready; no timer simulates progress.",
+    "source": "https://github.com/r33drichards/mcp-js/blob/fe5b613db0afcc9cf20d7ca1ef659c914a0b5008/server/src/cluster.rs#L701",
+    "visual": "cluster"
+  },
+  {
+    "clock": "42\u201347",
+    "title": "Lose quorum. Do not retry blindly.",
+    "sub": "A timeout can still commit later.",
+    "what": "Stop two of three owned voters. A publication cannot be acknowledged. Restore quorum and inspect that same label before any retry.",
+    "how": "The leader waits for majority replication, then can time out while an entry remains in its log. Reads use locally committed data; they are not a quorum read.",
+    "why": "The observed test demonstrates uncertain write outcomes. Distinguish durability, request availability, and recovery rather than saying \u201cfault tolerant\u201d as one guarantee.",
+    "notes": "Our local test observed the timed-out write become visible after quorum returned. Never retry a denied operation or an uncertain write blindly. Discuss single-node persistence versus replicated availability and crash consistency limits. Compose reference: compose.astronomy.json; generated .state/compose.json is the launch artifact. Return to real dashboard status when ready; no timer simulates progress.",
+    "source": "https://github.com/r33drichards/mcp-js/blob/fe5b613db0afcc9cf20d7ca1ef659c914a0b5008/server/src/cluster.rs#L989",
+    "visual": "cluster"
+  },
+  {
+    "clock": "47\u201352",
+    "title": "Defend the boundaries.",
+    "sub": "What the source proves\u2014and what it does not.",
+    "what": "Choose one real design decision, one test, one limitation, and the next measurement. State Robert\u2019s actual contribution.",
+    "how": "Tests cover snapshot readback, subtree sharing, merge/CAS and cluster behavior. GC exists as a label/reflog-rooted library collector; no server pruning endpoint was found.",
+    "why": "Documented history explains tree/streaming changes. Other rationales must be labeled inference. Suggested improvement: measure warm-up costs or design crash-safe publication.",
+    "notes": "Limitations: full-base warming; whole-file reads/merge; local writes lack explicit atomic replacement; GC excludes active/session-only roots; S3 lacks GC list/delete. Test presence is not evidence a test ran; use the bundled verification report. Compose reference: compose.astronomy.json; generated .state/compose.json is the launch artifact. Return to real dashboard status when ready; no timer simulates progress.",
+    "source": "https://github.com/r33drichards/mcp-js/blob/fe5b613db0afcc9cf20d7ca1ef659c914a0b5008/server/src/engine/fs_gc.rs",
+    "visual": "limits"
+  },
+  {
+    "clock": "52\u201360",
+    "title": "Questions.",
+    "sub": "Pick an invariant and challenge it.",
+    "what": "What happens if two agents publish? If the process dies after saving blobs? If the alert contains instructions? If only one voter is left?",
+    "how": "Answer with the exact request path, stored state and test evidence. Distinguish implemented behavior, local observation, inference and unknown history.",
+    "why": "A defensible answer names its scope. \u201cI have not verified that path; here is the test I would run\u201d is better than inventing a guarantee.",
+    "notes": "Reserve all eight minutes. Do not fill them with a file tour. Strong answers: explicit merge base, CAS conflict, timeout uncertainty, content-vs-pointer planes, browser render verification, and evidence-backed personal contribution. Compose reference: compose.astronomy.json; generated .state/compose.json is the launch artifact. Return to real dashboard status when ready; no timer simulates progress.",
+    "source": "https://github.com/r33drichards/mcp-js/blob/fe5b613db0afcc9cf20d7ca1ef659c914a0b5008/server/tests/fs_snapshot_e2e.rs",
+    "visual": "qa"
+  }
+]

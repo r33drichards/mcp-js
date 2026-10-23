@@ -1,0 +1,9 @@
+{
+  "labels": {
+    "alertname": "CheckoutErrors",
+    "service": "checkout"
+  },
+  "annotations": {
+    "summary": "Checkout errors increased in local Astronomy Shop. Investigate and build a dashboard; do not remediate."
+  }
+}

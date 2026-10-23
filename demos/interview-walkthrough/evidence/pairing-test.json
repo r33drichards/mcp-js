@@ -1,0 +1,12 @@
+{
+  "passed": true,
+  "checks": [
+    "Pi 1.4 SessionManager fork",
+    "native MCP handshake/list/call",
+    "child write isolates parent",
+    "root override rejected",
+    "cancel journal",
+    "explicit FS merge preserves conversations"
+  ],
+  "limitation": "No model or interactive extension event dispatch was exercised."
+}

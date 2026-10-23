@@ -1,0 +1,270 @@
+{
+  "seed": {
+    "label": "walkthrough-34aa2c62",
+    "B": "4212201309c586927dbe77289d8cd5e03c4fb9f9c59225c0abf9d695db449b54",
+    "base_text": "alpha\nbeta\ngamma\n"
+  },
+  "policy": {
+    "allowed": "read/write /work/allowed/notes.txt",
+    "denied": {
+      "execution_id": "031e22d1-44ea-4386-8352-7f34e3c8aca1",
+      "status": "failed",
+      "result": null,
+      "heap": null,
+      "fs": null,
+      "error": "Error: fs.writeFile denied by policy: /work/denied/secret.txt is not allowed\n    at call (<fs-setup>:21:35)\n    at Object.writeFile (<fs-setup>:90:19)\n    at file:///main_2.js:2:14\n    at file:///main_2.js:4:3",
+      "started_at": "2026-10-23T08:57:03.652785219+00:00",
+      "completed_at": "2026-10-23T08:57:03.674963963+00:00",
+      "artifacts": [],
+      "console": {
+        "execution_id": "031e22d1-44ea-4386-8352-7f34e3c8aca1",
+        "data": "",
+        "start_line": 0,
+        "end_line": 0,
+        "next_line_offset": 1,
+        "total_lines": 0,
+        "start_byte": 0,
+        "end_byte": 0,
+        "next_byte_offset": 0,
+        "total_bytes": 0,
+        "has_more": false,
+        "status": "failed"
+      },
+      "elapsed_ms": 130.46,
+      "node": 1
+    },
+    "base_unchanged": true
+  },
+  "branches": {
+    "label": "walkthrough-34aa2c62",
+    "B": "4212201309c586927dbe77289d8cd5e03c4fb9f9c59225c0abf9d695db449b54",
+    "base_text": "alpha\nbeta\ngamma\n",
+    "A": "6000722679893c3c85d652b1ef2ffabd13b63adaff6f6bb8f0d633ab66d53bc1",
+    "T": "6f467b9ab5efea31a81b2efdf7e84d2e33221db36d80bca7c27061b096165d0d",
+    "branch_elapsed_ms": 814.82
+  },
+  "merge": {
+    "label": "walkthrough-34aa2c62",
+    "B": "4212201309c586927dbe77289d8cd5e03c4fb9f9c59225c0abf9d695db449b54",
+    "base_text": "alpha\nbeta\ngamma\n",
+    "A": "6000722679893c3c85d652b1ef2ffabd13b63adaff6f6bb8f0d633ab66d53bc1",
+    "T": "6f467b9ab5efea31a81b2efdf7e84d2e33221db36d80bca7c27061b096165d0d",
+    "branch_elapsed_ms": 814.82,
+    "M": "1cde7720dadece57d84ceacfa068e16260d1fe6b871aa55e8df4ac2305a4da39",
+    "merge_ms": 31.58,
+    "cas_rejection": {
+      "status": "rejected",
+      "label": "walkthrough-34aa2c62",
+      "current": "1cde7720dadece57d84ceacfa068e16260d1fe6b871aa55e8df4ac2305a4da39"
+    }
+  },
+  "conflict": {
+    "status": "conflict",
+    "conflicts": [
+      {
+        "path": "work/allowed/notes.txt",
+        "base": "7918da6eb352f9df1aea9e1b7d72ac82abb658f5d20f7f6173251801a3414984",
+        "ours": "7a5270aa9cea1646b27a54853cb27135f8ba2ac3f5084bce92494ed7e35128a7",
+        "theirs": "9641f25edabdb8a903fcd6b991329ff29b84839bf6177652057b2d4e9d6b1902",
+        "kind": "text",
+        "markers": "alpha\n<<<<<<< ours\nOURS\n||||||| original\nbeta\n=======\nTHEIRS\n>>>>>>> theirs\ngamma\n",
+        "diff_ours": "--- original\n+++ modified\n@@ -1,3 +1,3 @@\n alpha\n-beta\n+OURS\n gamma\n",
+        "diff_theirs": "--- original\n+++ modified\n@@ -1,3 +1,3 @@\n alpha\n-beta\n+THEIRS\n gamma\n"
+      }
+    ]
+  },
+  "reset": {
+    "label": "walkthrough-34aa2c62",
+    "ca_id": "4212201309c586927dbe77289d8cd5e03c4fb9f9c59225c0abf9d695db449b54"
+  },
+  "outage": {
+    "stopped_node": 1,
+    "new_leader": 3,
+    "observed_election_ms": 478.67,
+    "committed_write": {
+      "status": "advanced",
+      "label": "after-outage-9afe8cfd",
+      "ca_id": "4212201309c586927dbe77289d8cd5e03c4fb9f9c59225c0abf9d695db449b54"
+    },
+    "before": [
+      {
+        "node_id": "node1",
+        "role": "Leader",
+        "term": 568,
+        "leader_id": "node1",
+        "commit_index": 3,
+        "last_applied": 3,
+        "log_length": 3,
+        "peers": [
+          "node2:4000",
+          "node3:4000"
+        ],
+        "peer_addrs": {
+          "node1": "node1:4000",
+          "node2": "node2:4000",
+          "node3": "node3:4000"
+        },
+        "learners": [],
+        "is_learner": false,
+        "node": 1
+      },
+      {
+        "node_id": "node2",
+        "role": "Follower",
+        "term": 568,
+        "leader_id": "node1",
+        "commit_index": 3,
+        "last_applied": 3,
+        "log_length": 3,
+        "peers": [
+          "node1:4000",
+          "node3:4000"
+        ],
+        "peer_addrs": {
+          "node1": "node1:4000",
+          "node2": "node2:4000",
+          "node3": "node3:4000"
+        },
+        "learners": [],
+        "is_learner": false,
+        "node": 2
+      },
+      {
+        "node_id": "node3",
+        "role": "Follower",
+        "term": 568,
+        "leader_id": "node1",
+        "commit_index": 3,
+        "last_applied": 3,
+        "log_length": 3,
+        "peers": [
+          "node1:4000",
+          "node2:4000"
+        ],
+        "peer_addrs": {
+          "node2": "node2:4000",
+          "node3": "node3:4000",
+          "node1": "node1:4000"
+        },
+        "learners": [],
+        "is_learner": false,
+        "node": 3
+      }
+    ],
+    "during": [
+      {
+        "node": 1,
+        "role": "unreachable",
+        "error": "demo node stopped"
+      },
+      {
+        "node_id": "node2",
+        "role": "Follower",
+        "term": 569,
+        "leader_id": "node3",
+        "commit_index": 4,
+        "last_applied": 4,
+        "log_length": 4,
+        "peers": [
+          "node1:4000",
+          "node3:4000"
+        ],
+        "peer_addrs": {
+          "node1": "node1:4000",
+          "node2": "node2:4000",
+          "node3": "node3:4000"
+        },
+        "learners": [],
+        "is_learner": false,
+        "node": 2
+      },
+      {
+        "node_id": "node3",
+        "role": "Leader",
+        "term": 569,
+        "leader_id": "node3",
+        "commit_index": 4,
+        "last_applied": 4,
+        "log_length": 4,
+        "peers": [
+          "node1:4000",
+          "node2:4000"
+        ],
+        "peer_addrs": {
+          "node2": "node2:4000",
+          "node3": "node3:4000",
+          "node1": "node1:4000"
+        },
+        "learners": [],
+        "is_learner": false,
+        "node": 3
+      }
+    ],
+    "recovered_label": {
+      "label": "after-outage-9afe8cfd",
+      "ca_id": "4212201309c586927dbe77289d8cd5e03c4fb9f9c59225c0abf9d695db449b54"
+    },
+    "after": [
+      {
+        "node": 1,
+        "role": "unreachable",
+        "error": "<urlopen error [Errno 111] Connection refused>"
+      },
+      {
+        "node_id": "node2",
+        "role": "Follower",
+        "term": 569,
+        "leader_id": "node3",
+        "commit_index": 4,
+        "last_applied": 4,
+        "log_length": 4,
+        "peers": [
+          "node1:4000",
+          "node3:4000"
+        ],
+        "peer_addrs": {
+          "node1": "node1:4000",
+          "node2": "node2:4000",
+          "node3": "node3:4000"
+        },
+        "learners": [],
+        "is_learner": false,
+        "node": 2
+      },
+      {
+        "node_id": "node3",
+        "role": "Leader",
+        "term": 569,
+        "leader_id": "node3",
+        "commit_index": 4,
+        "last_applied": 4,
+        "log_length": 4,
+        "peers": [
+          "node1:4000",
+          "node2:4000"
+        ],
+        "peer_addrs": {
+          "node2": "node2:4000",
+          "node3": "node3:4000",
+          "node1": "node1:4000"
+        },
+        "learners": [],
+        "is_learner": false,
+        "node": 3
+      }
+    ]
+  },
+  "quorum": {
+    "status": 400,
+    "response": {
+      "error": "operation failed: timeout waiting for commit"
+    },
+    "elapsed_ms": 5159.25,
+    "label": "uncertain-f8a124b4",
+    "warning": "A timeout is an uncertain outcome; it may commit after quorum returns. No automatic retry.",
+    "after_recovery_observation": {
+      "label": "uncertain-f8a124b4",
+      "ca_id": "4212201309c586927dbe77289d8cd5e03c4fb9f9c59225c0abf9d695db449b54"
+    }
+  }
+}

@@ -1,0 +1,2209 @@
+{
+  "name": "${DEMO_ID:-mcp-js-interview}",
+  "networks": {
+    "demo": {
+      "name": "${DEMO_ID:-mcp-js-interview}",
+      "ipam": {},
+      "internal": true,
+      "labels": {
+        "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
+      }
+    }
+  },
+  "services": {
+    "browser": {
+      "profiles": [
+        "browser"
+      ],
+      "build": {
+        "context": "${BROWSER_SOURCE:-./.state/computer-use}/images/browser",
+        "dockerfile": "Dockerfile"
+      },
+      "command": null,
+      "container_name": "${DEMO_ID:-mcp-js-interview}-browser",
+      "depends_on": {
+        "query-network": {
+          "condition": "service_started",
+          "required": true
+        }
+      },
+      "entrypoint": null,
+      "environment": {
+        "DATA_DIR": "/data",
+        "HTTPS_PROXY": "",
+        "HTTP_PROXY": "",
+        "NO_PROXY": "*",
+        "SESSION_MODE": "1",
+        "http_proxy": "",
+        "https_proxy": "",
+        "no_proxy": "*"
+      },
+      "image": "mcp-interview-browser:63bab526",
+      "labels": {
+        "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
+      },
+      "mem_limit": "2147483648",
+      "network_mode": "service:query-network",
+      "shm_size": "1073741824",
+      "volumes": [
+        {
+          "type": "volume",
+          "source": "browser",
+          "target": "/data",
+          "volume": {}
+        }
+      ],
+      "healthcheck": {
+        "test": [
+          "CMD",
+          "/bin/bash",
+          "-c",
+          "echo > /dev/tcp/127.0.0.1/8081"
+        ],
+        "interval": "3s",
+        "timeout": "3s",
+        "retries": 40
+      }
+    },
+    "grafana": {
+      "command": null,
+      "container_name": "${DEMO_ID:-mcp-js-interview}-grafana",
+      "depends_on": {
+        "prometheus": {
+          "condition": "service_started"
+        }
+      },
+      "entrypoint": null,
+      "environment": {
+        "GF_ANALYTICS_CHECK_FOR_UPDATES": "false",
+        "GF_ANALYTICS_REPORTING_ENABLED": "false",
+        "GF_AUTH_ANONYMOUS_ENABLED": "true",
+        "GF_AUTH_ANONYMOUS_ORG_ROLE": "Viewer",
+        "GF_AUTH_DISABLE_LOGIN_FORM": "true",
+        "GF_PLUGINS_PREINSTALL_DISABLED": "true",
+        "GF_SECURITY_DISABLE_INITIAL_ADMIN_CREATION": "true",
+        "GF_SERVER_ROOT_URL": "http://127.0.0.1:38300/",
+        "HTTPS_PROXY": "",
+        "HTTP_PROXY": "",
+        "NO_PROXY": "*",
+        "http_proxy": "",
+        "https_proxy": "",
+        "no_proxy": "*"
+      },
+      "healthcheck": {
+        "test": [
+          "CMD",
+          "wget",
+          "-qO-",
+          "http://127.0.0.1:3000/api/health"
+        ],
+        "timeout": "3s",
+        "interval": "3s",
+        "retries": 30
+      },
+      "image": "grafana/grafana@sha256:70d9599b186ce287be0d2c5ba9a78acb2e86c1a68c9c41449454d0fc3eeb84e8",
+      "labels": {
+        "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
+      },
+      "networks": {
+        "demo": null
+      },
+      "ports": [
+        {
+          "mode": "ingress",
+          "host_ip": "127.0.0.1",
+          "target": 3000,
+          "published": "38300",
+          "protocol": "tcp"
+        }
+      ],
+      "volumes": [
+        {
+          "type": "volume",
+          "source": "grafana",
+          "target": "/var/lib/grafana",
+          "volume": {}
+        },
+        {
+          "type": "volume",
+          "source": "dashboards",
+          "target": "/var/lib/grafana/dashboards",
+          "read_only": true,
+          "volume": {}
+        },
+        {
+          "type": "bind",
+          "source": "${DEMO_STATE:-./.state}/provisioning",
+          "target": "/etc/grafana/provisioning",
+          "read_only": true,
+          "bind": {
+            "create_host_path": true
+          }
+        },
+        {
+          "type": "bind",
+          "source": "${DEMO_STATE:-./.state}/datasources.yml",
+          "target": "/etc/grafana/provisioning/datasources/astronomy.yml",
+          "read_only": true
+        }
+      ]
+    },
+    "grafana-mcp": {
+      "command": [
+        "--transport",
+        "streamable-http",
+        "--address",
+        "0.0.0.0:8000",
+        "--allowed-hosts",
+        "grafana-mcp:8000",
+        "--enabled-tools",
+        "prometheus,datasource,loki",
+        "--disable-write",
+        "--usage-stats",
+        "disabled"
+      ],
+      "container_name": "${DEMO_ID:-mcp-js-interview}-grafana-mcp",
+      "depends_on": {
+        "grafana": {
+          "condition": "service_healthy",
+          "required": true
+        }
+      },
+      "entrypoint": null,
+      "environment": {
+        "DO_NOT_TRACK": "1",
+        "GRAFANA_URL": "http://grafana:3000",
+        "HTTPS_PROXY": "",
+        "HTTP_PROXY": "",
+        "NO_PROXY": "*",
+        "http_proxy": "",
+        "https_proxy": "",
+        "no_proxy": "*"
+      },
+      "image": "grafana/mcp-grafana@sha256:71a3f4e6f412d253611314233df709ec2571fb50e39742d23fa2940f670646dc",
+      "labels": {
+        "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
+      },
+      "networks": {
+        "demo": null
+      }
+    },
+    "node1": {
+      "cap_drop": [
+        "ALL"
+      ],
+      "command": [
+        "--http-port",
+        "3000",
+        "--bind-host",
+        "0.0.0.0",
+        "--cluster-port",
+        "4000",
+        "--node-id",
+        "node1",
+        "--advertise-addr",
+        "node1:4000",
+        "--peers",
+        "node2@node2:4000,node3@node3:4000",
+        "--session-db-path",
+        "/data/sessions",
+        "--heap-store",
+        "none",
+        "--fs-store",
+        "s3",
+        "--s3-bucket",
+        "demo",
+        "--cache-dir",
+        "/data/cache",
+        "--policies-json",
+        "/policies.json",
+        "--heap-memory-max",
+        "64"
+      ],
+      "container_name": "${DEMO_ID:-mcp-js-interview}-1",
+      "depends_on": {
+        "objects": {
+          "condition": "service_healthy",
+          "required": true
+        }
+      },
+      "entrypoint": null,
+      "environment": {
+        "AWS_ACCESS_KEY_ID": "demo-only",
+        "AWS_EC2_METADATA_DISABLED": "true",
+        "AWS_ENDPOINT_URL": "http://objects:9000",
+        "AWS_REGION": "us-east-1",
+        "AWS_REQUEST_CHECKSUM_CALCULATION": "WHEN_REQUIRED",
+        "AWS_RESPONSE_CHECKSUM_VALIDATION": "WHEN_REQUIRED",
+        "AWS_S3_FORCE_PATH_STYLE": "true",
+        "AWS_SECRET_ACCESS_KEY": "demo-only",
+        "HTTPS_PROXY": "",
+        "HTTP_PROXY": "",
+        "NO_PROXY": "*",
+        "http_proxy": "",
+        "https_proxy": "",
+        "no_proxy": "*"
+      },
+      "healthcheck": {
+        "test": [
+          "CMD",
+          "/usr/bin/python3",
+          "-c",
+          "import urllib.request;urllib.request.urlopen('http://127.0.0.1:3000/api/version',timeout=2)"
+        ],
+        "timeout": "3s",
+        "interval": "3s",
+        "retries": 20
+      },
+      "image": "${DEMO_ID:-mcp-js-interview}:local",
+      "labels": {
+        "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
+      },
+      "mem_limit": "805306368",
+      "networks": {
+        "demo": null
+      },
+      "pids_limit": 128,
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "volumes": [
+        {
+          "type": "volume",
+          "source": "node1",
+          "target": "/data",
+          "volume": {}
+        }
+      ]
+    },
+    "node2": {
+      "cap_drop": [
+        "ALL"
+      ],
+      "command": [
+        "--http-port",
+        "3000",
+        "--bind-host",
+        "0.0.0.0",
+        "--cluster-port",
+        "4000",
+        "--node-id",
+        "node2",
+        "--advertise-addr",
+        "node2:4000",
+        "--peers",
+        "node1@node1:4000,node3@node3:4000",
+        "--session-db-path",
+        "/data/sessions",
+        "--heap-store",
+        "none",
+        "--fs-store",
+        "s3",
+        "--s3-bucket",
+        "demo",
+        "--cache-dir",
+        "/data/cache",
+        "--policies-json",
+        "/policies.json",
+        "--heap-memory-max",
+        "64"
+      ],
+      "container_name": "${DEMO_ID:-mcp-js-interview}-2",
+      "depends_on": {
+        "objects": {
+          "condition": "service_healthy",
+          "required": true
+        }
+      },
+      "entrypoint": null,
+      "environment": {
+        "AWS_ACCESS_KEY_ID": "demo-only",
+        "AWS_EC2_METADATA_DISABLED": "true",
+        "AWS_ENDPOINT_URL": "http://objects:9000",
+        "AWS_REGION": "us-east-1",
+        "AWS_REQUEST_CHECKSUM_CALCULATION": "WHEN_REQUIRED",
+        "AWS_RESPONSE_CHECKSUM_VALIDATION": "WHEN_REQUIRED",
+        "AWS_S3_FORCE_PATH_STYLE": "true",
+        "AWS_SECRET_ACCESS_KEY": "demo-only",
+        "HTTPS_PROXY": "",
+        "HTTP_PROXY": "",
+        "NO_PROXY": "*",
+        "http_proxy": "",
+        "https_proxy": "",
+        "no_proxy": "*"
+      },
+      "healthcheck": {
+        "test": [
+          "CMD",
+          "/usr/bin/python3",
+          "-c",
+          "import urllib.request;urllib.request.urlopen('http://127.0.0.1:3000/api/version',timeout=2)"
+        ],
+        "timeout": "3s",
+        "interval": "3s",
+        "retries": 20
+      },
+      "image": "${DEMO_ID:-mcp-js-interview}:local",
+      "labels": {
+        "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
+      },
+      "mem_limit": "805306368",
+      "networks": {
+        "demo": null
+      },
+      "pids_limit": 128,
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "volumes": [
+        {
+          "type": "volume",
+          "source": "node2",
+          "target": "/data",
+          "volume": {}
+        }
+      ]
+    },
+    "node3": {
+      "cap_drop": [
+        "ALL"
+      ],
+      "command": [
+        "--http-port",
+        "3000",
+        "--bind-host",
+        "0.0.0.0",
+        "--cluster-port",
+        "4000",
+        "--node-id",
+        "node3",
+        "--advertise-addr",
+        "node3:4000",
+        "--peers",
+        "node1@node1:4000,node2@node2:4000",
+        "--session-db-path",
+        "/data/sessions",
+        "--heap-store",
+        "none",
+        "--fs-store",
+        "s3",
+        "--s3-bucket",
+        "demo",
+        "--cache-dir",
+        "/data/cache",
+        "--policies-json",
+        "/policies.json",
+        "--heap-memory-max",
+        "64"
+      ],
+      "container_name": "${DEMO_ID:-mcp-js-interview}-3",
+      "depends_on": {
+        "objects": {
+          "condition": "service_healthy",
+          "required": true
+        }
+      },
+      "entrypoint": null,
+      "environment": {
+        "AWS_ACCESS_KEY_ID": "demo-only",
+        "AWS_EC2_METADATA_DISABLED": "true",
+        "AWS_ENDPOINT_URL": "http://objects:9000",
+        "AWS_REGION": "us-east-1",
+        "AWS_REQUEST_CHECKSUM_CALCULATION": "WHEN_REQUIRED",
+        "AWS_RESPONSE_CHECKSUM_VALIDATION": "WHEN_REQUIRED",
+        "AWS_S3_FORCE_PATH_STYLE": "true",
+        "AWS_SECRET_ACCESS_KEY": "demo-only",
+        "HTTPS_PROXY": "",
+        "HTTP_PROXY": "",
+        "NO_PROXY": "*",
+        "http_proxy": "",
+        "https_proxy": "",
+        "no_proxy": "*"
+      },
+      "healthcheck": {
+        "test": [
+          "CMD",
+          "/usr/bin/python3",
+          "-c",
+          "import urllib.request;urllib.request.urlopen('http://127.0.0.1:3000/api/version',timeout=2)"
+        ],
+        "timeout": "3s",
+        "interval": "3s",
+        "retries": 20
+      },
+      "image": "${DEMO_ID:-mcp-js-interview}:local",
+      "labels": {
+        "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
+      },
+      "mem_limit": "805306368",
+      "networks": {
+        "demo": null
+      },
+      "pids_limit": 128,
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "volumes": [
+        {
+          "type": "volume",
+          "source": "node3",
+          "target": "/data",
+          "volume": {}
+        }
+      ]
+    },
+    "objects": {
+      "command": null,
+      "container_name": "${DEMO_ID:-mcp-js-interview}-objects",
+      "entrypoint": [
+        "/usr/bin/python3",
+        "/object-store.py"
+      ],
+      "environment": {
+        "HTTPS_PROXY": "",
+        "HTTP_PROXY": "",
+        "NO_PROXY": "*",
+        "http_proxy": "",
+        "https_proxy": "",
+        "no_proxy": "*"
+      },
+      "healthcheck": {
+        "test": [
+          "CMD",
+          "/usr/bin/python3",
+          "-c",
+          "import socket;s=socket.create_connection(('127.0.0.1',9000),2);s.close()"
+        ],
+        "timeout": "3s",
+        "interval": "2s",
+        "retries": 15
+      },
+      "image": "${DEMO_ID:-mcp-js-interview}:local",
+      "labels": {
+        "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
+      },
+      "networks": {
+        "demo": null
+      },
+      "volumes": [
+        {
+          "type": "volume",
+          "source": "objects",
+          "target": "/data",
+          "volume": {}
+        }
+      ]
+    },
+    "pi": {
+      "profiles": [
+        "agent"
+      ],
+      "build": {
+        "context": "./pi",
+        "dockerfile": "Dockerfile"
+      },
+      "command": null,
+      "entrypoint": null,
+      "environment": {
+        "MCP_JS_DEMO_TOKEN": "${MCP_JS_DEMO_TOKEN:-}",
+        "MCP_JS_DEMO_URL": "http://127.0.0.1:38080",
+        "PI_CODING_AGENT_DIR": "/state/agent"
+      },
+      "labels": {
+        "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
+      },
+      "network_mode": "host",
+      "stdin_open": true,
+      "tty": true,
+      "volumes": [
+        {
+          "type": "volume",
+          "source": "pi",
+          "target": "/state",
+          "volume": {}
+        }
+      ]
+    },
+    "publisher": {
+      "cap_drop": [
+        "ALL"
+      ],
+      "command": null,
+      "container_name": "${DEMO_ID:-mcp-js-interview}-publisher",
+      "entrypoint": [
+        "/usr/bin/python3",
+        "-c",
+        "import time;time.sleep(86400)"
+      ],
+      "image": "${DEMO_ID:-mcp-js-interview}:local",
+      "labels": {
+        "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
+      },
+      "network_mode": "none",
+      "volumes": [
+        {
+          "type": "volume",
+          "source": "dashboards",
+          "target": "/dashboards",
+          "volume": {}
+        }
+      ]
+    },
+    "query": {
+      "cap_drop": [
+        "ALL"
+      ],
+      "command": [
+        "--http-port",
+        "3000",
+        "--bind-host",
+        "0.0.0.0",
+        "--heap-store",
+        "none",
+        "--fs-store",
+        "s3",
+        "--s3-bucket",
+        "demo",
+        "--cache-dir",
+        "/data/cache",
+        "--session-db-path",
+        "/data/sessions",
+        "--policies-json",
+        "/analysis-policies.json",
+        "--mcp-config",
+        "/mcp.json",
+        "--heap-memory-max",
+        "64"
+      ],
+      "container_name": "${DEMO_ID:-mcp-js-interview}-4",
+      "depends_on": {
+        "grafana-mcp": {
+          "condition": "service_started",
+          "required": true
+        },
+        "objects": {
+          "condition": "service_healthy",
+          "required": true
+        },
+        "query-network": {
+          "condition": "service_started",
+          "required": true
+        },
+        "browser": {
+          "condition": "service_healthy"
+        }
+      },
+      "entrypoint": null,
+      "environment": {
+        "AWS_ACCESS_KEY_ID": "demo-only",
+        "AWS_EC2_METADATA_DISABLED": "true",
+        "AWS_ENDPOINT_URL": "http://objects:9000",
+        "AWS_REGION": "us-east-1",
+        "AWS_REQUEST_CHECKSUM_CALCULATION": "WHEN_REQUIRED",
+        "AWS_RESPONSE_CHECKSUM_VALIDATION": "WHEN_REQUIRED",
+        "AWS_S3_FORCE_PATH_STYLE": "true",
+        "AWS_SECRET_ACCESS_KEY": "demo-only",
+        "HTTPS_PROXY": "",
+        "HTTP_PROXY": "",
+        "NO_PROXY": "*",
+        "http_proxy": "",
+        "https_proxy": "",
+        "no_proxy": "*"
+      },
+      "healthcheck": {
+        "test": [
+          "CMD",
+          "/usr/bin/python3",
+          "-c",
+          "import urllib.request;urllib.request.urlopen('http://127.0.0.1:3000/api/version',timeout=2)"
+        ],
+        "timeout": "3s",
+        "interval": "3s",
+        "retries": 20
+      },
+      "image": "${DEMO_ID:-mcp-js-interview}:local",
+      "labels": {
+        "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
+      },
+      "mem_limit": "805306368",
+      "network_mode": "service:query-network",
+      "pids_limit": 128,
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "volumes": [
+        {
+          "type": "volume",
+          "source": "query",
+          "target": "/data",
+          "volume": {}
+        },
+        {
+          "type": "bind",
+          "source": "./analysis-policies.json",
+          "target": "/analysis-policies.json",
+          "read_only": true,
+          "bind": {
+            "create_host_path": true
+          }
+        },
+        {
+          "type": "bind",
+          "source": "./filesystem.rego",
+          "target": "/filesystem.rego",
+          "read_only": true,
+          "bind": {
+            "create_host_path": true
+          }
+        },
+        {
+          "type": "bind",
+          "source": "./mcp-tools.rego",
+          "target": "/mcp-tools.rego",
+          "read_only": true,
+          "bind": {
+            "create_host_path": true
+          }
+        },
+        {
+          "type": "bind",
+          "source": "./mcp-full.json",
+          "target": "/mcp.json",
+          "read_only": true,
+          "bind": {
+            "create_host_path": true
+          }
+        }
+      ]
+    },
+    "query-network": {
+      "command": null,
+      "container_name": "${DEMO_ID:-mcp-js-interview}-query-network",
+      "entrypoint": [
+        "/usr/bin/python3",
+        "-c",
+        "import time;time.sleep(86400)"
+      ],
+      "image": "${DEMO_ID:-mcp-js-interview}:local",
+      "labels": {
+        "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
+      },
+      "networks": {
+        "demo": null
+      },
+      "ports": [
+        {
+          "mode": "ingress",
+          "host_ip": "127.0.0.1",
+          "target": 3000,
+          "published": "38081",
+          "protocol": "tcp"
+        }
+      ]
+    },
+    "accounting": {
+      "command": null,
+      "container_name": "${DEMO_ID:-mcp-js-interview}-accounting",
+      "depends_on": {
+        "kafka": {
+          "condition": "service_healthy",
+          "required": true
+        },
+        "otel-collector": {
+          "condition": "service_started",
+          "required": true
+        }
+      },
+      "deploy": {
+        "resources": {
+          "limits": {
+            "memory": "125829120"
+          }
+        },
+        "placement": {}
+      },
+      "entrypoint": null,
+      "environment": {
+        "DB_CONNECTION_STRING": "Host=postgresql;Username=otelu;Password=otelp;Database=otel",
+        "KAFKA_ADDR": "kafka:9092",
+        "OTEL_DOTNET_AUTO_TRACES_ENTITYFRAMEWORKCORE_INSTRUMENTATION_ENABLED": "false",
+        "OTEL_EXPORTER_OTLP_ENDPOINT": "http://otel-collector:4318",
+        "OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE": "cumulative",
+        "OTEL_RESOURCE_ATTRIBUTES": "service.namespace=opentelemetry-demo,service.version=2.1.3",
+        "OTEL_SERVICE_NAME": "accounting"
+      },
+      "image": "ghcr.io/open-telemetry/demo:latest-accounting",
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-file": "2",
+          "max-size": "5m",
+          "tag": "{{.Name}}"
+        }
+      },
+      "networks": {
+        "demo": null
+      },
+      "restart": "no",
+      "labels": {
+        "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
+      },
+      "volumes": []
+    },
+    "ad": {
+      "command": null,
+      "container_name": "${DEMO_ID:-mcp-js-interview}-ad",
+      "depends_on": {
+        "flagd": {
+          "condition": "service_started",
+          "required": true
+        },
+        "otel-collector": {
+          "condition": "service_started",
+          "required": true
+        }
+      },
+      "deploy": {
+        "resources": {
+          "limits": {
+            "memory": "314572800"
+          }
+        },
+        "placement": {}
+      },
+      "entrypoint": null,
+      "environment": {
+        "AD_PORT": "9555",
+        "FLAGD_HOST": "flagd",
+        "FLAGD_PORT": "8013",
+        "OTEL_EXPORTER_OTLP_ENDPOINT": "http://otel-collector:4318",
+        "OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE": "cumulative",
+        "OTEL_LOGS_EXPORTER": "otlp",
+        "OTEL_RESOURCE_ATTRIBUTES": "service.namespace=opentelemetry-demo,service.version=2.1.3",
+        "OTEL_SERVICE_NAME": "ad",
+        "_JAVA_OPTIONS": null
+      },
+      "image": "ghcr.io/open-telemetry/demo:latest-ad",
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-file": "2",
+          "max-size": "5m",
+          "tag": "{{.Name}}"
+        }
+      },
+      "networks": {
+        "demo": null
+      },
+      "restart": "no",
+      "labels": {
+        "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
+      },
+      "volumes": []
+    },
+    "cart": {
+      "command": null,
+      "container_name": "${DEMO_ID:-mcp-js-interview}-cart",
+      "depends_on": {
+        "flagd": {
+          "condition": "service_started",
+          "required": true
+        },
+        "otel-collector": {
+          "condition": "service_started",
+          "required": true
+        },
+        "valkey-cart": {
+          "condition": "service_started",
+          "required": true
+        }
+      },
+      "deploy": {
+        "resources": {
+          "limits": {
+            "memory": "167772160"
+          }
+        },
+        "placement": {}
+      },
+      "entrypoint": null,
+      "environment": {
+        "ASPNETCORE_URLS": "http://*:7070",
+        "CART_PORT": "7070",
+        "FLAGD_HOST": "flagd",
+        "FLAGD_PORT": "8013",
+        "OTEL_EXPORTER_OTLP_ENDPOINT": "http://otel-collector:4317",
+        "OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE": "cumulative",
+        "OTEL_RESOURCE_ATTRIBUTES": "service.namespace=opentelemetry-demo,service.version=2.1.3",
+        "OTEL_SERVICE_NAME": "cart",
+        "VALKEY_ADDR": "valkey-cart:6379"
+      },
+      "image": "ghcr.io/open-telemetry/demo:latest-cart",
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-file": "2",
+          "max-size": "5m",
+          "tag": "{{.Name}}"
+        }
+      },
+      "networks": {
+        "demo": null
+      },
+      "restart": "no",
+      "labels": {
+        "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
+      },
+      "volumes": []
+    },
+    "checkout": {
+      "command": null,
+      "container_name": "${DEMO_ID:-mcp-js-interview}-checkout",
+      "depends_on": {
+        "cart": {
+          "condition": "service_started",
+          "required": true
+        },
+        "currency": {
+          "condition": "service_started",
+          "required": true
+        },
+        "email": {
+          "condition": "service_started",
+          "required": true
+        },
+        "flagd": {
+          "condition": "service_started",
+          "required": true
+        },
+        "kafka": {
+          "condition": "service_healthy",
+          "required": true
+        },
+        "otel-collector": {
+          "condition": "service_started",
+          "required": true
+        },
+        "payment": {
+          "condition": "service_started",
+          "required": true
+        },
+        "product-catalog": {
+          "condition": "service_started",
+          "required": true
+        },
+        "shipping": {
+          "condition": "service_started",
+          "required": true
+        }
+      },
+      "deploy": {
+        "resources": {
+          "limits": {
+            "memory": "20971520"
+          }
+        },
+        "placement": {}
+      },
+      "entrypoint": null,
+      "environment": {
+        "CART_ADDR": "cart:7070",
+        "CHECKOUT_PORT": "5050",
+        "CURRENCY_ADDR": "currency:7001",
+        "EMAIL_ADDR": "http://email:6060",
+        "FLAGD_HOST": "flagd",
+        "FLAGD_PORT": "8013",
+        "GOMEMLIMIT": "16MiB",
+        "KAFKA_ADDR": "kafka:9092",
+        "OTEL_EXPORTER_OTLP_ENDPOINT": "http://otel-collector:4317",
+        "OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE": "cumulative",
+        "OTEL_RESOURCE_ATTRIBUTES": "service.namespace=opentelemetry-demo,service.version=2.1.3",
+        "OTEL_SERVICE_NAME": "checkout",
+        "PAYMENT_ADDR": "payment:50051",
+        "PRODUCT_CATALOG_ADDR": "product-catalog:3550",
+        "SHIPPING_ADDR": "http://shipping:50050"
+      },
+      "image": "ghcr.io/open-telemetry/demo:latest-checkout",
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-file": "2",
+          "max-size": "5m",
+          "tag": "{{.Name}}"
+        }
+      },
+      "networks": {
+        "demo": null
+      },
+      "restart": "no",
+      "labels": {
+        "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
+      },
+      "volumes": []
+    },
+    "currency": {
+      "command": null,
+      "container_name": "${DEMO_ID:-mcp-js-interview}-currency",
+      "depends_on": {
+        "otel-collector": {
+          "condition": "service_started",
+          "required": true
+        }
+      },
+      "deploy": {
+        "resources": {
+          "limits": {
+            "memory": "20971520"
+          }
+        },
+        "placement": {}
+      },
+      "entrypoint": null,
+      "environment": {
+        "CURRENCY_PORT": "7001",
+        "OTEL_EXPORTER_OTLP_ENDPOINT": "http://otel-collector:4317",
+        "OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE": "cumulative",
+        "OTEL_RESOURCE_ATTRIBUTES": "service.namespace=opentelemetry-demo,service.version=2.1.3",
+        "OTEL_SERVICE_NAME": "currency",
+        "VERSION": "2.1.3"
+      },
+      "image": "ghcr.io/open-telemetry/demo:latest-currency",
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-file": "2",
+          "max-size": "5m",
+          "tag": "{{.Name}}"
+        }
+      },
+      "networks": {
+        "demo": null
+      },
+      "restart": "no",
+      "labels": {
+        "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
+      },
+      "volumes": []
+    },
+    "email": {
+      "command": null,
+      "container_name": "${DEMO_ID:-mcp-js-interview}-email",
+      "depends_on": {
+        "otel-collector": {
+          "condition": "service_started",
+          "required": true
+        }
+      },
+      "deploy": {
+        "resources": {
+          "limits": {
+            "memory": "104857600"
+          }
+        },
+        "placement": {}
+      },
+      "entrypoint": null,
+      "environment": {
+        "APP_ENV": "production",
+        "EMAIL_PORT": "6060",
+        "FLAGD_HOST": "flagd",
+        "FLAGD_PORT": "8013",
+        "OTEL_EXPORTER_OTLP_ENDPOINT": "http://otel-collector:4318",
+        "OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE": "cumulative",
+        "OTEL_RESOURCE_ATTRIBUTES": "service.namespace=opentelemetry-demo,service.version=2.1.3",
+        "OTEL_SERVICE_NAME": "email"
+      },
+      "image": "ghcr.io/open-telemetry/demo:latest-email",
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-file": "2",
+          "max-size": "5m",
+          "tag": "{{.Name}}"
+        }
+      },
+      "networks": {
+        "demo": null
+      },
+      "restart": "no",
+      "labels": {
+        "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
+      },
+      "volumes": []
+    },
+    "flagd": {
+      "command": [
+        "start",
+        "--uri",
+        "file:./etc/flagd/demo.flagd.json"
+      ],
+      "container_name": "${DEMO_ID:-mcp-js-interview}-flagd",
+      "deploy": {
+        "resources": {
+          "limits": {
+            "memory": "78643200"
+          }
+        },
+        "placement": {}
+      },
+      "entrypoint": null,
+      "environment": {
+        "FLAGD_METRICS_EXPORTER": "otel",
+        "FLAGD_OTEL_COLLECTOR_URI": "otel-collector:4317",
+        "GOMEMLIMIT": "60MiB",
+        "OTEL_RESOURCE_ATTRIBUTES": "service.namespace=opentelemetry-demo,service.version=2.1.3",
+        "OTEL_SERVICE_NAME": "flagd"
+      },
+      "image": "ghcr.io/open-feature/flagd:v0.12.8",
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-file": "2",
+          "max-size": "5m",
+          "tag": "{{.Name}}"
+        }
+      },
+      "networks": {
+        "demo": null
+      },
+      "restart": "no",
+      "volumes": [
+        {
+          "type": "bind",
+          "source": "${DEMO_STATE:-./.state}/flagd",
+          "target": "/etc/flagd",
+          "bind": {
+            "create_host_path": true
+          }
+        }
+      ],
+      "labels": {
+        "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
+      }
+    },
+    "flagd-ui": {
+      "command": null,
+      "container_name": "${DEMO_ID:-mcp-js-interview}-flagd-ui",
+      "depends_on": {
+        "flagd": {
+          "condition": "service_started",
+          "required": true
+        },
+        "otel-collector": {
+          "condition": "service_started",
+          "required": true
+        }
+      },
+      "deploy": {
+        "resources": {
+          "limits": {
+            "memory": "209715200"
+          }
+        },
+        "placement": {}
+      },
+      "entrypoint": null,
+      "environment": {
+        "FLAGD_UI_PORT": "4000",
+        "OTEL_EXPORTER_OTLP_ENDPOINT": "http://otel-collector:4318",
+        "OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE": "cumulative",
+        "OTEL_RESOURCE_ATTRIBUTES": "service.namespace=opentelemetry-demo,service.version=2.1.3",
+        "OTEL_SERVICE_NAME": "flagd-ui",
+        "PHX_HOST": "localhost",
+        "SECRET_KEY_BASE": "yYrECL4qbNwleYInGJYvVnSkwJuSQJ4ijPTx5tirGUXrbznFIBFVJdPl5t6O9ASw"
+      },
+      "image": "ghcr.io/open-telemetry/demo:latest-flagd-ui",
+      "networks": {
+        "demo": null
+      },
+      "restart": "no",
+      "volumes": [
+        {
+          "type": "bind",
+          "source": "${ASTRONOMY_SOURCE:-./.state/astronomy}/src/flagd",
+          "target": "/app/data",
+          "bind": {
+            "create_host_path": true
+          }
+        }
+      ],
+      "labels": {
+        "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
+      }
+    },
+    "fraud-detection": {
+      "command": null,
+      "container_name": "${DEMO_ID:-mcp-js-interview}-fraud-detection",
+      "depends_on": {
+        "kafka": {
+          "condition": "service_healthy",
+          "required": true
+        },
+        "otel-collector": {
+          "condition": "service_started",
+          "required": true
+        }
+      },
+      "deploy": {
+        "resources": {
+          "limits": {
+            "memory": "314572800"
+          }
+        },
+        "placement": {}
+      },
+      "entrypoint": null,
+      "environment": {
+        "FLAGD_HOST": "flagd",
+        "FLAGD_PORT": "8013",
+        "KAFKA_ADDR": "kafka:9092",
+        "OTEL_EXPORTER_OTLP_ENDPOINT": "http://otel-collector:4318",
+        "OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE": "cumulative",
+        "OTEL_INSTRUMENTATION_KAFKA_EXPERIMENTAL_SPAN_ATTRIBUTES": "true",
+        "OTEL_INSTRUMENTATION_MESSAGING_EXPERIMENTAL_RECEIVE_TELEMETRY_ENABLED": "true",
+        "OTEL_RESOURCE_ATTRIBUTES": "service.namespace=opentelemetry-demo,service.version=2.1.3",
+        "OTEL_SERVICE_NAME": "fraud-detection"
+      },
+      "image": "ghcr.io/open-telemetry/demo:latest-fraud-detection",
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-file": "2",
+          "max-size": "5m",
+          "tag": "{{.Name}}"
+        }
+      },
+      "networks": {
+        "demo": null
+      },
+      "restart": "no",
+      "labels": {
+        "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
+      },
+      "volumes": []
+    },
+    "frontend": {
+      "command": null,
+      "container_name": "${DEMO_ID:-mcp-js-interview}-frontend",
+      "depends_on": {
+        "ad": {
+          "condition": "service_started",
+          "required": true
+        },
+        "cart": {
+          "condition": "service_started",
+          "required": true
+        },
+        "checkout": {
+          "condition": "service_started",
+          "required": true
+        },
+        "currency": {
+          "condition": "service_started",
+          "required": true
+        },
+        "flagd": {
+          "condition": "service_started",
+          "required": true
+        },
+        "image-provider": {
+          "condition": "service_started",
+          "required": true
+        },
+        "otel-collector": {
+          "condition": "service_started",
+          "required": true
+        },
+        "product-catalog": {
+          "condition": "service_started",
+          "required": true
+        },
+        "quote": {
+          "condition": "service_started",
+          "required": true
+        },
+        "recommendation": {
+          "condition": "service_started",
+          "required": true
+        },
+        "shipping": {
+          "condition": "service_started",
+          "required": true
+        }
+      },
+      "deploy": {
+        "resources": {
+          "limits": {
+            "memory": "262144000"
+          }
+        },
+        "placement": {}
+      },
+      "entrypoint": null,
+      "environment": {
+        "AD_ADDR": "ad:9555",
+        "CART_ADDR": "cart:7070",
+        "CHECKOUT_ADDR": "checkout:5050",
+        "CURRENCY_ADDR": "currency:7001",
+        "ENV_PLATFORM": "local",
+        "FLAGD_HOST": "flagd",
+        "FLAGD_PORT": "8013",
+        "FRONTEND_ADDR": "frontend:8080",
+        "OTEL_COLLECTOR_HOST": "otel-collector",
+        "OTEL_EXPORTER_OTLP_ENDPOINT": "http://otel-collector:4317",
+        "OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE": "cumulative",
+        "OTEL_RESOURCE_ATTRIBUTES": "service.namespace=opentelemetry-demo,service.version=2.1.3",
+        "OTEL_SERVICE_NAME": "frontend",
+        "PORT": "8080",
+        "PRODUCT_CATALOG_ADDR": "product-catalog:3550",
+        "PUBLIC_OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": "http://localhost:8080/otlp-http/v1/traces",
+        "RECOMMENDATION_ADDR": "recommendation:9001",
+        "SHIPPING_ADDR": "http://shipping:50050",
+        "WEB_OTEL_SERVICE_NAME": "frontend-web"
+      },
+      "image": "ghcr.io/open-telemetry/demo:latest-frontend",
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-file": "2",
+          "max-size": "5m",
+          "tag": "{{.Name}}"
+        }
+      },
+      "networks": {
+        "demo": null
+      },
+      "restart": "no",
+      "labels": {
+        "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
+      },
+      "volumes": []
+    },
+    "frontend-proxy": {
+      "command": null,
+      "container_name": "${DEMO_ID:-mcp-js-interview}-frontend-proxy",
+      "depends_on": {
+        "flagd-ui": {
+          "condition": "service_started",
+          "required": true
+        },
+        "frontend": {
+          "condition": "service_started",
+          "required": true
+        },
+        "jaeger": {
+          "condition": "service_started",
+          "required": true
+        },
+        "load-generator": {
+          "condition": "service_started",
+          "required": true
+        }
+      },
+      "deploy": {
+        "resources": {
+          "limits": {
+            "memory": "68157440"
+          }
+        },
+        "placement": {}
+      },
+      "dns_search": [
+        ""
+      ],
+      "entrypoint": null,
+      "environment": {
+        "ENVOY_ADMIN_PORT": "10000",
+        "ENVOY_PORT": "8080",
+        "FLAGD_HOST": "flagd",
+        "FLAGD_PORT": "8013",
+        "FLAGD_UI_HOST": "flagd-ui",
+        "FLAGD_UI_PORT": "4000",
+        "FRONTEND_HOST": "frontend",
+        "FRONTEND_PORT": "8080",
+        "GRAFANA_HOST": "grafana",
+        "GRAFANA_PORT": "3000",
+        "IMAGE_PROVIDER_HOST": "image-provider",
+        "IMAGE_PROVIDER_PORT": "8081",
+        "JAEGER_HOST": "jaeger",
+        "JAEGER_UI_PORT": "16686",
+        "LOCUST_WEB_HOST": "load-generator",
+        "LOCUST_WEB_PORT": "8089",
+        "OTEL_COLLECTOR_HOST": "otel-collector",
+        "OTEL_COLLECTOR_PORT_GRPC": "4317",
+        "OTEL_COLLECTOR_PORT_HTTP": "4318",
+        "OTEL_RESOURCE_ATTRIBUTES": "service.namespace=opentelemetry-demo,service.version=2.1.3",
+        "OTEL_SERVICE_NAME": "frontend-proxy"
+      },
+      "image": "ghcr.io/open-telemetry/demo:latest-frontend-proxy",
+      "networks": {
+        "demo": null
+      },
+      "restart": "no",
+      "labels": {
+        "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
+      },
+      "volumes": [],
+      "ports": [
+        {
+          "target": 8080,
+          "published": "38880",
+          "host_ip": "127.0.0.1",
+          "protocol": "tcp"
+        }
+      ]
+    },
+    "image-provider": {
+      "command": null,
+      "container_name": "${DEMO_ID:-mcp-js-interview}-image-provider",
+      "depends_on": {
+        "otel-collector": {
+          "condition": "service_started",
+          "required": true
+        }
+      },
+      "deploy": {
+        "resources": {
+          "limits": {
+            "memory": "125829120"
+          }
+        },
+        "placement": {}
+      },
+      "entrypoint": null,
+      "environment": {
+        "IMAGE_PROVIDER_PORT": "8081",
+        "OTEL_COLLECTOR_HOST": "otel-collector",
+        "OTEL_COLLECTOR_PORT_GRPC": "4317",
+        "OTEL_RESOURCE_ATTRIBUTES": "service.namespace=opentelemetry-demo,service.version=2.1.3",
+        "OTEL_SERVICE_NAME": "image-provider"
+      },
+      "image": "ghcr.io/open-telemetry/demo:latest-image-provider",
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-file": "2",
+          "max-size": "5m",
+          "tag": "{{.Name}}"
+        }
+      },
+      "networks": {
+        "demo": null
+      },
+      "restart": "no",
+      "labels": {
+        "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
+      },
+      "volumes": []
+    },
+    "jaeger": {
+      "command": [
+        "--config=file:/etc/jaeger/config.yml"
+      ],
+      "container_name": "${DEMO_ID:-mcp-js-interview}-jaeger",
+      "deploy": {
+        "resources": {
+          "limits": {
+            "memory": "1258291200"
+          }
+        },
+        "placement": {}
+      },
+      "entrypoint": null,
+      "environment": {
+        "JAEGER_GRPC_PORT": "4317",
+        "JAEGER_HOST": "jaeger",
+        "MEMORY_MAX_TRACES": "25000",
+        "OTEL_COLLECTOR_HOST": "otel-collector",
+        "OTEL_COLLECTOR_PORT_HTTP": "4318",
+        "PROMETHEUS_ADDR": "prometheus:9090"
+      },
+      "image": "jaegertracing/jaeger:2.10.0",
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-file": "2",
+          "max-size": "5m",
+          "tag": "{{.Name}}"
+        }
+      },
+      "networks": {
+        "demo": null
+      },
+      "restart": "no",
+      "volumes": [
+        {
+          "type": "bind",
+          "source": "${ASTRONOMY_SOURCE:-./.state/astronomy}/src/jaeger/config.yml",
+          "target": "/etc/jaeger/config.yml",
+          "bind": {
+            "create_host_path": true
+          }
+        }
+      ],
+      "labels": {
+        "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
+      }
+    },
+    "kafka": {
+      "command": null,
+      "container_name": "${DEMO_ID:-mcp-js-interview}-kafka",
+      "deploy": {
+        "resources": {
+          "limits": {
+            "memory": "650117120"
+          }
+        },
+        "placement": {}
+      },
+      "entrypoint": null,
+      "environment": {
+        "KAFKA_ADVERTISED_LISTENERS": "PLAINTEXT://kafka:9092",
+        "KAFKA_CONTROLLER_QUORUM_VOTERS": "1@kafka:9093",
+        "KAFKA_HEAP_OPTS": "-Xmx400m -Xms400m",
+        "KAFKA_LISTENERS": "PLAINTEXT://kafka:9092,CONTROLLER://kafka:9093",
+        "OTEL_EXPORTER_OTLP_ENDPOINT": "http://otel-collector:4318",
+        "OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE": "cumulative",
+        "OTEL_RESOURCE_ATTRIBUTES": "service.namespace=opentelemetry-demo,service.version=2.1.3",
+        "OTEL_SERVICE_NAME": "kafka",
+        "_JAVA_OPTIONS": null
+      },
+      "healthcheck": {
+        "test": [
+          "CMD-SHELL",
+          "nc -z kafka 9092"
+        ],
+        "timeout": "10s",
+        "interval": "5s",
+        "retries": 10,
+        "start_period": "10s"
+      },
+      "image": "ghcr.io/open-telemetry/demo:latest-kafka",
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-file": "2",
+          "max-size": "5m",
+          "tag": "{{.Name}}"
+        }
+      },
+      "networks": {
+        "demo": null
+      },
+      "restart": "no",
+      "labels": {
+        "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
+      },
+      "volumes": []
+    },
+    "load-generator": {
+      "command": null,
+      "container_name": "${DEMO_ID:-mcp-js-interview}-load-generator",
+      "depends_on": {
+        "flagd": {
+          "condition": "service_started",
+          "required": true
+        },
+        "frontend": {
+          "condition": "service_started",
+          "required": true
+        }
+      },
+      "deploy": {
+        "resources": {
+          "limits": {
+            "memory": "1572864000"
+          }
+        },
+        "placement": {}
+      },
+      "entrypoint": null,
+      "environment": {
+        "FLAGD_HOST": "flagd",
+        "FLAGD_OFREP_PORT": "8016",
+        "FLAGD_PORT": "8013",
+        "LOCUST_AUTOSTART": "true",
+        "LOCUST_BROWSER_TRAFFIC_ENABLED": "true",
+        "LOCUST_HEADLESS": "false",
+        "LOCUST_HOST": "http://frontend-proxy:8080",
+        "LOCUST_USERS": "5",
+        "LOCUST_WEB_HOST": "0.0.0.0",
+        "LOCUST_WEB_PORT": "8089",
+        "OTEL_EXPORTER_OTLP_ENDPOINT": "http://otel-collector:4317",
+        "OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE": "cumulative",
+        "OTEL_RESOURCE_ATTRIBUTES": "service.namespace=opentelemetry-demo,service.version=2.1.3",
+        "OTEL_SERVICE_NAME": "load-generator",
+        "PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION": "python"
+      },
+      "image": "ghcr.io/open-telemetry/demo:latest-load-generator",
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-file": "2",
+          "max-size": "5m",
+          "tag": "{{.Name}}"
+        }
+      },
+      "networks": {
+        "demo": null
+      },
+      "restart": "no",
+      "labels": {
+        "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
+      },
+      "volumes": []
+    },
+    "opensearch": {
+      "command": null,
+      "container_name": "${DEMO_ID:-mcp-js-interview}-opensearch",
+      "deploy": {
+        "resources": {
+          "limits": {
+            "memory": "838860800"
+          }
+        },
+        "placement": {}
+      },
+      "entrypoint": null,
+      "environment": {
+        "DISABLE_INSTALL_DEMO_CONFIG": "true",
+        "DISABLE_SECURITY_PLUGIN": "true",
+        "OPENSEARCH_JAVA_OPTS": "-Xms400m -Xmx400m",
+        "_JAVA_OPTIONS": null,
+        "bootstrap.memory_lock": "true",
+        "cluster.name": "demo-cluster",
+        "discovery.type": "single-node",
+        "node.name": "demo-node"
+      },
+      "healthcheck": {
+        "test": [
+          "CMD-SHELL",
+          "curl -s http://localhost:9200/_cluster/health | grep -E '\"status\":\"(green|yellow)\"'"
+        ],
+        "timeout": "10s",
+        "interval": "5s",
+        "retries": 10,
+        "start_period": "10s"
+      },
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-file": "2",
+          "max-size": "5m",
+          "tag": "{{.Name}}"
+        }
+      },
+      "networks": {
+        "demo": null
+      },
+      "restart": "no",
+      "ulimits": {
+        "memlock": {
+          "soft": -1,
+          "hard": -1
+        },
+        "nofile": {
+          "soft": 65536,
+          "hard": 65536
+        }
+      },
+      "image": "${DEMO_ID:-mcp-js-interview}-opensearch:91356a39",
+      "build": {
+        "context": "${ASTRONOMY_SOURCE:-./.state/astronomy}",
+        "dockerfile": "./src/opensearch/Dockerfile",
+        "cache_from": [
+          "ghcr.io/open-telemetry/demo:2.1.3-opensearch"
+        ]
+      },
+      "labels": {
+        "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
+      },
+      "volumes": []
+    },
+    "otel-collector": {
+      "command": [
+        "--config=/etc/otelcol-config.yml",
+        "--config=/etc/otelcol-config-extras.yml"
+      ],
+      "container_name": "${DEMO_ID:-mcp-js-interview}-otel-collector",
+      "depends_on": {
+        "jaeger": {
+          "condition": "service_started",
+          "required": true
+        },
+        "opensearch": {
+          "condition": "service_healthy",
+          "required": true
+        }
+      },
+      "deploy": {
+        "resources": {
+          "limits": {
+            "memory": "209715200"
+          }
+        },
+        "placement": {}
+      },
+      "entrypoint": null,
+      "environment": {
+        "FRONTEND_PROXY_ADDR": "frontend-proxy:8080",
+        "GOMEMLIMIT": "160MiB",
+        "HOST_FILESYSTEM": "/",
+        "IMAGE_PROVIDER_HOST": "image-provider",
+        "IMAGE_PROVIDER_PORT": "8081",
+        "OTEL_COLLECTOR_HOST": "otel-collector",
+        "OTEL_COLLECTOR_PORT_GRPC": "4317",
+        "OTEL_COLLECTOR_PORT_HTTP": "4318",
+        "POSTGRES_HOST": "postgresql",
+        "POSTGRES_PASSWORD": "otel",
+        "POSTGRES_PORT": "5432"
+      },
+      "image": "ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-contrib:0.133.0",
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-file": "2",
+          "max-size": "5m",
+          "tag": "{{.Name}}"
+        }
+      },
+      "networks": {
+        "demo": null
+      },
+      "restart": "no",
+      "user": "0:0",
+      "volumes": [
+        {
+          "type": "bind",
+          "source": "${DEMO_STATE:-./.state}/collector.yml",
+          "target": "/etc/otelcol-config.yml",
+          "bind": {
+            "create_host_path": true
+          }
+        },
+        {
+          "type": "bind",
+          "source": "${ASTRONOMY_SOURCE:-./.state/astronomy}/src/otel-collector/otelcol-config-extras.yml",
+          "target": "/etc/otelcol-config-extras.yml",
+          "bind": {
+            "create_host_path": true
+          }
+        }
+      ],
+      "labels": {
+        "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
+      }
+    },
+    "payment": {
+      "command": null,
+      "container_name": "${DEMO_ID:-mcp-js-interview}-payment",
+      "depends_on": {
+        "flagd": {
+          "condition": "service_started",
+          "required": true
+        },
+        "otel-collector": {
+          "condition": "service_started",
+          "required": true
+        }
+      },
+      "deploy": {
+        "resources": {
+          "limits": {
+            "memory": "125829120"
+          }
+        },
+        "placement": {}
+      },
+      "entrypoint": null,
+      "environment": {
+        "FLAGD_HOST": "flagd",
+        "FLAGD_PORT": "8013",
+        "OTEL_EXPORTER_OTLP_ENDPOINT": "http://otel-collector:4317",
+        "OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE": "cumulative",
+        "OTEL_RESOURCE_ATTRIBUTES": "service.namespace=opentelemetry-demo,service.version=2.1.3",
+        "OTEL_SERVICE_NAME": "payment",
+        "PAYMENT_PORT": "50051"
+      },
+      "image": "ghcr.io/open-telemetry/demo:latest-payment",
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-file": "2",
+          "max-size": "5m",
+          "tag": "{{.Name}}"
+        }
+      },
+      "networks": {
+        "demo": null
+      },
+      "restart": "no",
+      "labels": {
+        "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
+      },
+      "volumes": []
+    },
+    "postgresql": {
+      "command": null,
+      "container_name": "${DEMO_ID:-mcp-js-interview}-postgresql",
+      "deploy": {
+        "resources": {
+          "limits": {
+            "memory": "83886080"
+          }
+        },
+        "placement": {}
+      },
+      "entrypoint": null,
+      "environment": {
+        "POSTGRES_DB": "otel",
+        "POSTGRES_PASSWORD": "otel",
+        "POSTGRES_USER": "root"
+      },
+      "image": "ghcr.io/open-telemetry/demo:latest-postgresql",
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-file": "2",
+          "max-size": "5m",
+          "tag": "{{.Name}}"
+        }
+      },
+      "networks": {
+        "demo": null
+      },
+      "restart": "no",
+      "labels": {
+        "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
+      },
+      "volumes": []
+    },
+    "product-catalog": {
+      "command": null,
+      "container_name": "${DEMO_ID:-mcp-js-interview}-product-catalog",
+      "depends_on": {
+        "flagd": {
+          "condition": "service_started",
+          "required": true
+        },
+        "otel-collector": {
+          "condition": "service_started",
+          "required": true
+        }
+      },
+      "deploy": {
+        "resources": {
+          "limits": {
+            "memory": "20971520"
+          }
+        },
+        "placement": {}
+      },
+      "entrypoint": null,
+      "environment": {
+        "FLAGD_HOST": "flagd",
+        "FLAGD_PORT": "8013",
+        "GOMEMLIMIT": "16MiB",
+        "OTEL_EXPORTER_OTLP_ENDPOINT": "http://otel-collector:4317",
+        "OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE": "cumulative",
+        "OTEL_RESOURCE_ATTRIBUTES": "service.namespace=opentelemetry-demo,service.version=2.1.3",
+        "OTEL_SERVICE_NAME": "product-catalog",
+        "PRODUCT_CATALOG_PORT": "3550",
+        "PRODUCT_CATALOG_RELOAD_INTERVAL": "10"
+      },
+      "image": "ghcr.io/open-telemetry/demo:latest-product-catalog",
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-file": "2",
+          "max-size": "5m",
+          "tag": "{{.Name}}"
+        }
+      },
+      "networks": {
+        "demo": null
+      },
+      "restart": "no",
+      "volumes": [
+        {
+          "type": "bind",
+          "source": "${ASTRONOMY_SOURCE:-./.state/astronomy}/src/product-catalog/products",
+          "target": "/usr/src/app/products",
+          "bind": {
+            "create_host_path": true
+          }
+        }
+      ],
+      "labels": {
+        "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
+      }
+    },
+    "prometheus": {
+      "command": [
+        "--web.console.templates=/etc/prometheus/consoles",
+        "--web.console.libraries=/etc/prometheus/console_libraries",
+        "--storage.tsdb.retention.time=1h",
+        "--config.file=/etc/prometheus/prometheus-config.yaml",
+        "--storage.tsdb.path=/prometheus",
+        "--web.enable-lifecycle",
+        "--web.route-prefix=/",
+        "--web.enable-otlp-receiver",
+        "--enable-feature=exemplar-storage"
+      ],
+      "container_name": "${DEMO_ID:-mcp-js-interview}-prometheus",
+      "deploy": {
+        "resources": {
+          "limits": {
+            "memory": "314572800"
+          }
+        },
+        "placement": {}
+      },
+      "entrypoint": null,
+      "image": "quay.io/prometheus/prometheus:v3.5.0",
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-file": "2",
+          "max-size": "5m",
+          "tag": "{{.Name}}"
+        }
+      },
+      "networks": {
+        "demo": null
+      },
+      "restart": "no",
+      "volumes": [
+        {
+          "type": "bind",
+          "source": "${ASTRONOMY_SOURCE:-./.state/astronomy}/src/prometheus/prometheus-config.yaml",
+          "target": "/etc/prometheus/prometheus-config.yaml",
+          "bind": {
+            "create_host_path": true
+          }
+        }
+      ],
+      "labels": {
+        "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
+      }
+    },
+    "quote": {
+      "command": null,
+      "container_name": "${DEMO_ID:-mcp-js-interview}-quote",
+      "depends_on": {
+        "otel-collector": {
+          "condition": "service_started",
+          "required": true
+        }
+      },
+      "deploy": {
+        "resources": {
+          "limits": {
+            "memory": "41943040"
+          }
+        },
+        "placement": {}
+      },
+      "entrypoint": null,
+      "environment": {
+        "OTEL_EXPORTER_OTLP_ENDPOINT": "http://otel-collector:4318",
+        "OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE": "cumulative",
+        "OTEL_PHP_AUTOLOAD_ENABLED": "true",
+        "OTEL_PHP_INTERNAL_METRICS_ENABLED": "true",
+        "OTEL_RESOURCE_ATTRIBUTES": "service.namespace=opentelemetry-demo,service.version=2.1.3",
+        "OTEL_SERVICE_NAME": "quote",
+        "QUOTE_PORT": "8090"
+      },
+      "image": "ghcr.io/open-telemetry/demo:latest-quote",
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-file": "2",
+          "max-size": "5m",
+          "tag": "{{.Name}}"
+        }
+      },
+      "networks": {
+        "demo": null
+      },
+      "restart": "no",
+      "labels": {
+        "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
+      },
+      "volumes": []
+    },
+    "recommendation": {
+      "command": null,
+      "container_name": "${DEMO_ID:-mcp-js-interview}-recommendation",
+      "depends_on": {
+        "flagd": {
+          "condition": "service_started",
+          "required": true
+        },
+        "otel-collector": {
+          "condition": "service_started",
+          "required": true
+        },
+        "product-catalog": {
+          "condition": "service_started",
+          "required": true
+        }
+      },
+      "deploy": {
+        "resources": {
+          "limits": {
+            "memory": "524288000"
+          }
+        },
+        "placement": {}
+      },
+      "entrypoint": null,
+      "environment": {
+        "FLAGD_HOST": "flagd",
+        "FLAGD_PORT": "8013",
+        "OTEL_EXPORTER_OTLP_ENDPOINT": "http://otel-collector:4317",
+        "OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE": "cumulative",
+        "OTEL_PYTHON_LOG_CORRELATION": "true",
+        "OTEL_RESOURCE_ATTRIBUTES": "service.namespace=opentelemetry-demo,service.version=2.1.3",
+        "OTEL_SERVICE_NAME": "recommendation",
+        "PRODUCT_CATALOG_ADDR": "product-catalog:3550",
+        "PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION": "python",
+        "RECOMMENDATION_PORT": "9001"
+      },
+      "image": "ghcr.io/open-telemetry/demo:latest-recommendation",
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-file": "2",
+          "max-size": "5m",
+          "tag": "{{.Name}}"
+        }
+      },
+      "networks": {
+        "demo": null
+      },
+      "restart": "no",
+      "labels": {
+        "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
+      },
+      "volumes": []
+    },
+    "shipping": {
+      "command": null,
+      "container_name": "${DEMO_ID:-mcp-js-interview}-shipping",
+      "depends_on": {
+        "otel-collector": {
+          "condition": "service_started",
+          "required": true
+        }
+      },
+      "deploy": {
+        "resources": {
+          "limits": {
+            "memory": "20971520"
+          }
+        },
+        "placement": {}
+      },
+      "entrypoint": null,
+      "environment": {
+        "OTEL_EXPORTER_OTLP_ENDPOINT": "http://otel-collector:4317",
+        "OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE": "cumulative",
+        "OTEL_RESOURCE_ATTRIBUTES": "service.namespace=opentelemetry-demo,service.version=2.1.3",
+        "OTEL_SERVICE_NAME": "shipping",
+        "QUOTE_ADDR": "http://quote:8090",
+        "SHIPPING_PORT": "50050"
+      },
+      "image": "ghcr.io/open-telemetry/demo:latest-shipping",
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-file": "2",
+          "max-size": "5m",
+          "tag": "{{.Name}}"
+        }
+      },
+      "networks": {
+        "demo": null
+      },
+      "restart": "no",
+      "labels": {
+        "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
+      },
+      "volumes": []
+    },
+    "valkey-cart": {
+      "command": null,
+      "container_name": "${DEMO_ID:-mcp-js-interview}-valkey-cart",
+      "deploy": {
+        "resources": {
+          "limits": {
+            "memory": "20971520"
+          }
+        },
+        "placement": {}
+      },
+      "entrypoint": null,
+      "image": "valkey/valkey:8.1.3-alpine",
+      "logging": {
+        "driver": "json-file",
+        "options": {
+          "max-file": "2",
+          "max-size": "5m",
+          "tag": "{{.Name}}"
+        }
+      },
+      "networks": {
+        "demo": null
+      },
+      "restart": "no",
+      "user": "valkey",
+      "labels": {
+        "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
+      },
+      "volumes": []
+    },
+    "loki": {
+      "image": "grafana/loki:3.5.7",
+      "container_name": "${DEMO_ID:-mcp-js-interview}-loki",
+      "networks": {
+        "demo": null
+      },
+      "labels": {
+        "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
+      },
+      "command": [
+        "-config.file=/etc/loki/local-config.yaml"
+      ],
+      "volumes": [
+        {
+          "type": "volume",
+          "source": "loki",
+          "target": "/loki"
+        }
+      ]
+    }
+  },
+  "volumes": {
+    "browser": {
+      "name": "${DEMO_ID:-mcp-js-interview}-browser",
+      "labels": {
+        "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
+      }
+    },
+    "dashboards": {
+      "name": "${DEMO_ID:-mcp-js-interview}-dashboards",
+      "labels": {
+        "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
+      }
+    },
+    "grafana": {
+      "name": "${DEMO_ID:-mcp-js-interview}-grafana",
+      "labels": {
+        "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
+      }
+    },
+    "node1": {
+      "name": "${DEMO_ID:-mcp-js-interview}-node1",
+      "labels": {
+        "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
+      }
+    },
+    "node2": {
+      "name": "${DEMO_ID:-mcp-js-interview}-node2",
+      "labels": {
+        "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
+      }
+    },
+    "node3": {
+      "name": "${DEMO_ID:-mcp-js-interview}-node3",
+      "labels": {
+        "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
+      }
+    },
+    "objects": {
+      "name": "${DEMO_ID:-mcp-js-interview}-objects",
+      "labels": {
+        "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
+      }
+    },
+    "pi": {
+      "name": "${DEMO_ID:-mcp-js-interview}-pi",
+      "labels": {
+        "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
+      }
+    },
+    "prometheus": {
+      "name": "${DEMO_ID:-mcp-js-interview}-prometheus",
+      "labels": {
+        "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
+      }
+    },
+    "query": {
+      "name": "${DEMO_ID:-mcp-js-interview}-query",
+      "labels": {
+        "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
+      }
+    },
+    "loki": {
+      "labels": {
+        "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
+      },
+      "name": "${DEMO_ID:-mcp-js-interview}-loki"
+    }
+  },
+  "x-engine": {
+    "cap_drop": [
+      "ALL"
+    ],
+    "environment": {
+      "AWS_ACCESS_KEY_ID": "demo-only",
+      "AWS_EC2_METADATA_DISABLED": "true",
+      "AWS_ENDPOINT_URL": "http://objects:9000",
+      "AWS_REGION": "us-east-1",
+      "AWS_REQUEST_CHECKSUM_CALCULATION": "WHEN_REQUIRED",
+      "AWS_RESPONSE_CHECKSUM_VALIDATION": "WHEN_REQUIRED",
+      "AWS_S3_FORCE_PATH_STYLE": "true",
+      "AWS_SECRET_ACCESS_KEY": "demo-only",
+      "HTTPS_PROXY": "",
+      "HTTP_PROXY": "",
+      "NO_PROXY": "*",
+      "http_proxy": "",
+      "https_proxy": "",
+      "no_proxy": "*"
+    },
+    "healthcheck": {
+      "interval": "3s",
+      "retries": 20,
+      "test": [
+        "CMD",
+        "/usr/bin/python3",
+        "-c",
+        "import urllib.request;urllib.request.urlopen('http://127.0.0.1:3000/api/version',timeout=2)"
+      ],
+      "timeout": "3s"
+    },
+    "image": "${DEMO_ID:-mcp-js-interview}:local",
+    "labels": {
+      "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
+    },
+    "mem_limit": "768m",
+    "pids_limit": 128,
+    "security_opt": [
+      "no-new-privileges:true"
+    ]
+  },
+  "x-env": {
+    "HTTPS_PROXY": "",
+    "HTTP_PROXY": "",
+    "NO_PROXY": "*",
+    "http_proxy": "",
+    "https_proxy": "",
+    "no_proxy": "*"
+  },
+  "x-owned": {
+    "labels": {
+      "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
+    }
+  }
+}

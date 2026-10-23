@@ -1,0 +1,11 @@
+{
+  "source": "Numenta Anomaly Benchmark",
+  "commit": "ea702d75cc2258d9d7dd35ca8e5e2539d71f3140",
+  "file": "data/realAWSCloudwatch/ec2_cpu_utilization_825cc2.csv",
+  "url": "https://raw.githubusercontent.com/numenta/NAB/ea702d75cc2258d9d7dd35ca8e5e2539d71f3140/data/realAWSCloudwatch/ec2_cpu_utilization_825cc2.csv",
+  "sha256": "d768419037c9db269343822957314f57ee21a7d9a4d41df2add0d1ba45ba84de",
+  "rows": 4032,
+  "timezone": "Source timestamps have no timezone offset; do not label them UTC.",
+  "interpretation": "Benchmark anomaly, not a verified outage or diagnosed root cause.",
+  "replay": "Present scrape time; original timestamp and row supplied separately by the exporter. Labels not supplied to the agent."
+}

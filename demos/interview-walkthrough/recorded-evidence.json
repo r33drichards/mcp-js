@@ -1,0 +1,21 @@
+{
+  "mode": "RECORDED COMPONENT CHECKS, not current live state",
+  "base": "fe5b613db0afcc9cf20d7ca1ef659c914a0b5008",
+  "passed": [
+    "Rust build from base",
+    "three-node seed/policy/branch/merge/conflict/reset",
+    "leader stop/restart",
+    "quorum timeout and later commit observation",
+    "official Grafana MCP query and COW publication on earlier synthetic fixture",
+    "upstream browser_execute through mcp-js rendered earlier Grafana data points",
+    "Pi 1.4 real SessionManager fork + MCP branch isolation/cancel/merge"
+  ],
+  "not_verified": [
+    "full Astronomy workload",
+    "Loki log export and fault-specific log coverage",
+    "interactive Pi extension hooks/model-driven flow",
+    "full Nix desktop browser image",
+    "single Compose full launch"
+  ],
+  "earlier_screenshot": "evidence/earlier-component-dashboard.png"
+}

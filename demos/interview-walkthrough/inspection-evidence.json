@@ -1,0 +1,17 @@
+{
+  "inspection_date_utc": "2026-10-23",
+  "repository": "/workspace/mcp-js",
+  "remote": "https://github.com/r33drichards/mcp-js.git",
+  "head": "fe5b613db0afcc9cf20d7ca1ef659c914a0b5008",
+  "reference_commit": "fe5b613db0afcc9cf20d7ca1ef659c914a0b5008",
+  "status_porcelain": "",
+  "commit": "fe5b613db0afcc9cf20d7ca1ef659c914a0b5008\n2026-10-20T04:21:40Z\nfix(#279): neutralize __bootstrap.core.print in default sandbox setup (#289)",
+  "scope": "Read-only source inspection. No install, build, server execution, test execution, fetch, commit, push, deploy, or external messaging. Upstream latest HEAD not asserted.",
+  "audience": "Interviewers evaluating Robert\u2019s work (confirmed by parent update).",
+  "unknowns": [
+    "Challenge brief",
+    "Robert\u2019s actual contribution and decision history",
+    "Interview calendar date/time",
+    "Live demo environment and authorization"
+  ]
+}

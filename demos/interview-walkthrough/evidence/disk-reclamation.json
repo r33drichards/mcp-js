@@ -1,0 +1,20 @@
+{
+  "at": 1792747685.447014,
+  "before": {
+    "total": 33770192896,
+    "used": 27769528320,
+    "free": 4265902080
+  },
+  "after": {
+    "total": 33770192896,
+    "used": 27122495488,
+    "free": 4912934912
+  },
+  "removed_rebuildable_directories": [
+    "/workspace/mcp-js/target/debug/incremental",
+    "/workspace/mcp-js/target/debug/deps",
+    "/workspace/mcp-js-walkthrough-prep/runtime/image/rootfs",
+    "/workspace/mcp-js-walkthrough-prep/npm-cache/_cacache"
+  ],
+  "preserved": "source/git, current server binary, runtime image, journals, volumes, test outputs"
+}
