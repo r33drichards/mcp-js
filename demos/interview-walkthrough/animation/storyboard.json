@@ -1,0 +1,171 @@
+{
+  "total_minutes": 45,
+  "voice": "Easton",
+  "chapters": [
+    {
+      "id": "01-route",
+      "title": "Follow one question",
+      "slot": "03\u201312",
+      "checkpoint": "Show the real agent status. Open compose.astronomy.json and inspect query, grafana-mcp, grafana, prometheus and loki. Resume only when ready.",
+      "nodes": [
+        "pi",
+        "query",
+        "grafana-mcp",
+        "grafana",
+        "prometheus / loki"
+      ],
+      "beats": [
+        {
+          "focus": 0,
+          "caption": "The alert is evidence, not an instruction.",
+          "speech": "An alert gives us a question. It does not give us permission to run commands hidden in its text. We keep the investigation inside the disposable Astronomy Shop."
+        },
+        {
+          "focus": 1,
+          "caption": "A session chooses a branch; code uses bounded capabilities.",
+          "speech": "Pi calls the bound m c p j s tool. The controller chooses the filesystem root for this conversation. The agent cannot replace that root with another session\u2019s branch."
+        },
+        {
+          "focus": 3,
+          "caption": "Ask through the configured datasource.",
+          "speech": "The query worker calls the official Grafana M C P server. Grafana routes the request to Prometheus or the added Loki datasource. The returned samples, log lines, and time window become evidence."
+        }
+      ],
+      "source": "https://github.com/r33drichards/mcp-js/blob/fe5b613db0afcc9cf20d7ca1ef659c914a0b5008/server/src/engine/mcp_client.rs",
+      "kind": "EXPLANATORY ANIMATION \u2014 not a live recording",
+      "rationale": "Suggested explanation from implementation; no personal motivation attributed."
+    },
+    {
+      "id": "02-publish",
+      "title": "From a private tree to a visible graph",
+      "slot": "12\u201318",
+      "checkpoint": "Show one allowed write, one denied write, then inspect actual data-bearing Grafana panels through browser_execute. Empty graphs mean the handoff is incomplete.",
+      "nodes": [
+        "query",
+        "COW root",
+        "publisher",
+        "dashboards volume",
+        "grafana / browser"
+      ],
+      "beats": [
+        {
+          "focus": 0,
+          "caption": "Policy checks the operation and path.",
+          "speech": "The filesystem policy permits our scratch and dashboard directories. A write to the protected directory should fail. This is a capability boundary, not a claim that every external side effect rolls back."
+        },
+        {
+          "focus": 1,
+          "caption": "A virtual snapshot is not a host mount.",
+          "speech": "The copy on write tree stores content by hash. Our dashboard first lives inside a selected snapshot. Grafana cannot read that virtual tree as an ordinary host directory."
+        },
+        {
+          "focus": 2,
+          "caption": "Publish one selected root explicitly.",
+          "speech": "The publisher reads the selected file, validates it, then replaces a file in the shared volume. Grafana provisions that file. The browser must show actual plotted samples before we call the handoff complete."
+        }
+      ],
+      "source": "https://github.com/r33drichards/mcp-js/blob/fe5b613db0afcc9cf20d7ca1ef659c914a0b5008/server/src/engine/fs_mount.rs",
+      "kind": "EXPLANATORY ANIMATION \u2014 not a live recording",
+      "rationale": "Suggested explanation from implementation; no personal motivation attributed."
+    },
+    {
+      "id": "03-fork",
+      "title": "Share the past, separate the edits",
+      "slot": "18\u201328",
+      "checkpoint": "Use /paired-fork in Pi. Compare branch_info for both sessions, perform independent writes, then an explicit clean merge and a conflicting merge.",
+      "nodes": [
+        "base B",
+        "Pi session A / root A",
+        "Pi session B / root B",
+        "explicit merge",
+        "selected root M"
+      ],
+      "beats": [
+        {
+          "focus": 0,
+          "caption": "Identical roots can share immutable content.",
+          "speech": "Imagine two investigations starting from the same tree. Their base root names the same immutable content. Creating another reference does not require copying every file."
+        },
+        {
+          "focus": 2,
+          "caption": "Conversation fork plus filesystem binding is custom integration.",
+          "speech": "Our extension pairs a new Pi conversation with a filesystem branch. A reservation journal tracks the binding. Unbound sessions fail closed. The histories remain separate, even after filesystem changes merge."
+        },
+        {
+          "focus": 3,
+          "caption": "Merge needs a base and a conflict policy.",
+          "speech": "A merge compares two roots against an explicit base. Compatible text edits can combine. Conflicts remain visible. Expected head checks prevent a stale writer from quietly replacing a newer label. We do not claim instant execution or automatic ancestry."
+        }
+      ],
+      "source": "https://github.com/r33drichards/mcp-js/blob/fe5b613db0afcc9cf20d7ca1ef659c914a0b5008/server/src/engine/ffi.rs#L1031",
+      "kind": "EXPLANATORY ANIMATION \u2014 not a live recording",
+      "rationale": "Suggested explanation from implementation; no personal motivation attributed."
+    },
+    {
+      "id": "04-recovery",
+      "title": "Availability has boundaries",
+      "slot": "28\u201335",
+      "checkpoint": "Check ownership and healthy baseline. Stop only a disposable voter, observe results, restore it. For quorum loss, inspect timed-out writes after recovery before retrying.",
+      "nodes": [
+        "node1",
+        "node2",
+        "node3",
+        "objects",
+        "persistent volumes"
+      ],
+      "beats": [
+        {
+          "focus": 0,
+          "caption": "The stopped node is an injected event.",
+          "speech": "Now we change the infrastructure, not the application diagnosis. We stop one disposable voter. Watch election state and request outcomes. A successful recovery test is evidence for that test, not continuous availability under every failure."
+        },
+        {
+          "focus": 2,
+          "caption": "A majority is needed for writes.",
+          "speech": "When a majority is unavailable, writes cannot be assumed to succeed. A timeout is not proof that a write never committed. After recovery, inspect the request and label state before retrying."
+        },
+        {
+          "focus": 3,
+          "caption": "Shared objects are a separate failure domain.",
+          "speech": "The three voters do not make our shared object fixture highly available. Content storage, consensus metadata, and local execution status are different promises. Keep those failure boundaries separate."
+        }
+      ],
+      "source": "https://github.com/r33drichards/mcp-js/blob/fe5b613db0afcc9cf20d7ca1ef659c914a0b5008/server/src/engine/fs_labels.rs",
+      "kind": "EXPLANATORY ANIMATION \u2014 not a live recording",
+      "rationale": "Suggested explanation from implementation; no personal motivation attributed."
+    },
+    {
+      "id": "05-tradeoffs",
+      "title": "Defend the claim you can measure",
+      "slot": "35\u201339",
+      "checkpoint": "Robert supplies actual contribution and decision history. Reserve 39\u201345 for questions. Do not extend the presentation to finish a slow demo.",
+      "nodes": [
+        "implementation",
+        "history",
+        "measurement",
+        "limitation",
+        "next test"
+      ],
+      "beats": [
+        {
+          "focus": 0,
+          "caption": "Implementation evidence is not personal intent.",
+          "speech": "Explain what the code does first. Use documented history when it explains a design choice. When the reason is an inference, say so. Robert supplies his actual contribution and decision history."
+        },
+        {
+          "focus": 2,
+          "caption": "Measure before saying fast or durable.",
+          "speech": "A root reference can be cheap while execution still warms a tree. A stored label can survive a restart while an external action remains outside rollback. Measure the claim at the boundary that matters."
+        },
+        {
+          "focus": 4,
+          "caption": "A useful answer ends with a concrete test.",
+          "speech": "If a guarantee is not verified, name the uncertainty and the next test. The goal is a defensible engineering explanation, backed by inspectable evidence."
+        }
+      ],
+      "source": "https://github.com/r33drichards/mcp-js/blob/fe5b613db0afcc9cf20d7ca1ef659c914a0b5008/server/src/engine/mod.rs#L2372",
+      "kind": "EXPLANATORY ANIMATION \u2014 not a live recording",
+      "rationale": "Suggested explanation from implementation; no personal motivation attributed."
+    }
+  ]
+}

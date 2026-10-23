@@ -235,11 +235,14 @@ def serve(port):
             if self.path=='/api/state': return self.reply(200,{'state':state_data(),'nodes':statuses(),'mode':'LIVE local controller','token':c['token']})
             if self.path=='/api/evidence':
                 p=STATE/'events.jsonl'; return self.reply(200,[json.loads(x) for x in p.read_text().splitlines()] if p.exists() else [])
-            files={'/':'slides.html','/slides.html':'slides.html','/recorded-evidence.json':'recorded-evidence.json'}
+            files={'/animation/player.html':'animation/player.html','/animation/storyboard.json':'animation/storyboard.json','/animation/output/player-manifest.json':'animation/output/player-manifest.json','/':'slides.html','/slides.html':'slides.html','/recorded-evidence.json':'recorded-evidence.json'}
+            if self.path.startswith('/animation/output/') and self.path.endswith('.mp4'):
+                filename=self.path.rsplit('/',1)[1]
+                if filename and all(c.isalnum() or c in '-_.' for c in filename) and '..' not in filename:files[self.path]='animation/output/'+filename
             if self.path not in files: return self.reply(404,{'error':'not found'})
             p=HERE/files[self.path]
             if not p.exists(): return self.reply(404,{'error':'not found'})
-            data=p.read_bytes(); self.send_response(200); self.send_header('Content-Type','text/html; charset=utf-8' if p.suffix=='.html' else 'application/json'); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data)
+            data=p.read_bytes(); self.send_response(200); self.send_header('Content-Type','text/html; charset=utf-8' if p.suffix=='.html' else ('video/mp4' if p.suffix=='.mp4' else 'application/json')); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data)
         def do_POST(self):
             if self.headers.get('Host') not in ('127.0.0.1:'+str(port),'localhost:'+str(port)): return self.reply(403,{'error':'loopback Host required'})
             if self.path.startswith('/mcp/') or self.path.startswith('/api/pair/'):

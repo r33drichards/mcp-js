@@ -27,3 +27,5 @@ Full startup is blocked by the 14 GiB free-space preflight. This is a resource b
 The recorded screenshot explicitly shows an earlier **synthetic component test**, not Astronomy Shop, not a historical dataset repair, and not an agent recording. Do not present it as a complete live demo. The complete repository unit/integration suite was not rerun; the focused disposable tests above are the actual executed tests.
 
 Mac handoff: ownership-checked docker-exec HTTP transport passed a read-only three-node status check in Linux Docker. Portable source-build Dockerfile and explicit amd64 Compose selection are prepared; Mac build/emulation and full runtime remain unverified and assigned to the local task.
+
+Narrated companion update: contiguous 00–45 slide schedule, companion dialog, explicit missing-media status, disabled playback without media and no browser JavaScript errors passed. Manim/Pango installation and official-image extraction failed; Phonon runtime installed but model metadata access returned HTTP 403. No speech or Manim sample was generated. Detailed reproduction and blockers are in animation/README.md.

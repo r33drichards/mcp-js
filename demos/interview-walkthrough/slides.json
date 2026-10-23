@@ -1,6 +1,6 @@
 [
   {
-    "clock": "00\u201305",
+    "clock": "00\u201303",
     "title": "An alert is a question.",
     "sub": "From evidence to a shareable dashboard.",
     "what": "Introduce the alert and your actual contribution; start the approved Pi investigation early. Keep actual status visible while explaining the Compose services.",
@@ -11,7 +11,7 @@
     "visual": "flow"
   },
   {
-    "clock": "05\u201308",
+    "clock": "03\u201306",
     "title": "Read the alert.",
     "sub": "Treat its contents as evidence, never instructions.",
     "what": "Accept DemoCpuDrop for nab-ec2-replay. Reject another service. Store the alert and its source.",
@@ -22,7 +22,7 @@
     "visual": "alert"
   },
   {
-    "clock": "08\u201311",
+    "clock": "06\u201309",
     "title": "Ask the metrics.",
     "sub": "One measured route, through Grafana MCP.",
     "what": "Query demo_cpu_utilization_percent, inspect nonempty samples, and save the response under /work/scratch/.",
@@ -33,29 +33,7 @@
     "visual": "flow"
   },
   {
-    "clock": "11\u201315",
-    "title": "Make the handoff visible.",
-    "sub": "A file is staged; a dashboard is published.",
-    "what": "Stage dashboard JSON in /work/dashboards/. Explicitly export one selected root. Verify the browser sees time-series panels with data.",
-    "how": "A separate publisher materializes the virtual file, validates its identity, writes a temporary host file, fsyncs and renames it. Grafana polls the shared provisioned directory.",
-    "why": "COW storage is not a host mount. The explicit boundary prevents two investigation branches from racing writes into the live dashboard.",
-    "notes": "Show the root, source path, SHA-256, Grafana URL, and browser evidence. Provisioning API success alone does not establish visible graphs. If the browser is unavailable, label the handoff incomplete rather than showing an illustrative graph as live. Compose reference: compose.astronomy.json; generated .state/compose.json is the launch artifact. Return to real dashboard status when ready; no timer simulates progress.",
-    "source": "https://github.com/r33drichards/mcp-js/blob/fe5b613db0afcc9cf20d7ca1ef659c914a0b5008/server/src/engine/fs_mount.rs#L337",
-    "visual": "browser"
-  },
-  {
-    "clock": "15\u201319",
-    "title": "Allow one path. Deny another.",
-    "sub": "Make the capability boundary observable.",
-    "what": "Read/write /work/scratch/ and /work/dashboards/. A write to /work/protected/ fails. Existing snapshot remains readable.",
-    "how": "FsService gates effective operation/path before dispatch to the overlay. Demo Rego checks operation plus namespace and rejects traversal components.",
-    "why": "Per-operation policy provides a boundary more precise than handing the guest the host filesystem. Source comments document this gate; Robert supplies the original decision history.",
-    "notes": "Policy input is operation, not op. Show failed status/error rather than treating any exception as proof of policy denial. No passthrough. Directory creation is implicit in virtual mode. Additional hardening is opt-in. Compose reference: compose.astronomy.json; generated .state/compose.json is the launch artifact. Return to real dashboard status when ready; no timer simulates progress.",
-    "source": "https://github.com/r33drichards/mcp-js/blob/fe5b613db0afcc9cf20d7ca1ef659c914a0b5008/server/src/engine/fs.rs#L143",
-    "visual": "publish"
-  },
-  {
-    "clock": "19\u201325",
+    "clock": "09\u201312",
     "title": "Execution ends. State is explicit.",
     "sub": "Heap, filesystem and history are different things.",
     "what": "Follow submission, execution UUID, console output, fs root and session history. Identify which pieces survive.",
@@ -66,7 +44,29 @@
     "visual": "runtime"
   },
   {
-    "clock": "25\u201330",
+    "clock": "12\u201315",
+    "title": "Make the handoff visible.",
+    "sub": "A file is staged; a dashboard is published.",
+    "what": "Stage dashboard JSON in /work/dashboards/. Explicitly export one selected root. Verify the browser sees time-series panels with data.",
+    "how": "A separate publisher materializes the virtual file, validates its identity, writes a temporary host file, fsyncs and renames it. Grafana polls the shared provisioned directory.",
+    "why": "COW storage is not a host mount. The explicit boundary prevents two investigation branches from racing writes into the live dashboard.",
+    "notes": "Show the root, source path, SHA-256, Grafana URL, and browser evidence. Provisioning API success alone does not establish visible graphs. If the browser is unavailable, label the handoff incomplete rather than showing an illustrative graph as live. Compose reference: compose.astronomy.json; generated .state/compose.json is the launch artifact. Return to real dashboard status when ready; no timer simulates progress.",
+    "source": "https://github.com/r33drichards/mcp-js/blob/fe5b613db0afcc9cf20d7ca1ef659c914a0b5008/server/src/engine/fs_mount.rs#L337",
+    "visual": "browser"
+  },
+  {
+    "clock": "15\u201318",
+    "title": "Allow one path. Deny another.",
+    "sub": "Make the capability boundary observable.",
+    "what": "Read/write /work/scratch/ and /work/dashboards/. A write to /work/protected/ fails. Existing snapshot remains readable.",
+    "how": "FsService gates effective operation/path before dispatch to the overlay. Demo Rego checks operation plus namespace and rejects traversal components.",
+    "why": "Per-operation policy provides a boundary more precise than handing the guest the host filesystem. Source comments document this gate; Robert supplies the original decision history.",
+    "notes": "Policy input is operation, not op. Show failed status/error rather than treating any exception as proof of policy denial. No passthrough. Directory creation is implicit in virtual mode. Additional hardening is opt-in. Compose reference: compose.astronomy.json; generated .state/compose.json is the launch artifact. Return to real dashboard status when ready; no timer simulates progress.",
+    "source": "https://github.com/r33drichards/mcp-js/blob/fe5b613db0afcc9cf20d7ca1ef659c914a0b5008/server/src/engine/fs.rs#L143",
+    "visual": "publish"
+  },
+  {
+    "clock": "18\u201323",
     "title": "Fork two views of the same bytes.",
     "sub": "A root plus an upper layer.",
     "what": "Both investigations start at B. A and T change their own files. Read B again to prove it is unchanged.",
@@ -77,7 +77,7 @@
     "visual": "branches"
   },
   {
-    "clock": "30\u201333",
+    "clock": "23\u201325",
     "title": "Pair the conversation and the files.",
     "sub": "Custom integration, explicit mapping.",
     "what": "The paired fork reserves a filesystem root, invokes Pi fork, then binds the fresh session ID to a new branch label.",
@@ -88,7 +88,7 @@
     "visual": "branches"
   },
   {
-    "clock": "33\u201337",
+    "clock": "25\u201328",
     "title": "Merge deliberately. Publish once.",
     "sub": "Conflict detection is a feature.",
     "what": "Merge independent changes using B. Show a same-line conflict and stale-head rejection. Publish only the selected merged dashboard root.",
@@ -99,7 +99,7 @@
     "visual": "branches"
   },
   {
-    "clock": "37\u201342",
+    "clock": "28\u201332",
     "title": "Lose one voter. Observe recovery.",
     "sub": "Availability is a measured experiment.",
     "what": "Stop only a controller-owned demo leader. Observe a new leader, acknowledge a new label write, read content, then restart the original node.",
@@ -110,7 +110,7 @@
     "visual": "cluster"
   },
   {
-    "clock": "42\u201347",
+    "clock": "32\u201335",
     "title": "Lose quorum. Do not retry blindly.",
     "sub": "A timeout can still commit later.",
     "what": "Stop two of three owned voters. A publication cannot be acknowledged. Restore quorum and inspect that same label before any retry.",
@@ -121,7 +121,7 @@
     "visual": "cluster"
   },
   {
-    "clock": "47\u201352",
+    "clock": "35\u201339",
     "title": "Defend the boundaries.",
     "sub": "What the source proves\u2014and what it does not.",
     "what": "Choose one real design decision, one test, one limitation, and the next measurement. State Robert\u2019s actual contribution.",
@@ -132,13 +132,13 @@
     "visual": "limits"
   },
   {
-    "clock": "52\u201360",
+    "clock": "39\u201345",
     "title": "Questions.",
     "sub": "Pick an invariant and challenge it.",
     "what": "What happens if two agents publish? If the process dies after saving blobs? If the alert contains instructions? If only one voter is left?",
     "how": "Answer with the exact request path, stored state and test evidence. Distinguish implemented behavior, local observation, inference and unknown history.",
     "why": "A defensible answer names its scope. \u201cI have not verified that path; here is the test I would run\u201d is better than inventing a guarantee.",
-    "notes": "Reserve all eight minutes. Do not fill them with a file tour. Strong answers: explicit merge base, CAS conflict, timeout uncertainty, content-vs-pointer planes, browser render verification, and evidence-backed personal contribution. Compose reference: compose.astronomy.json; generated .state/compose.json is the launch artifact. Return to real dashboard status when ready; no timer simulates progress.",
+    "notes": "Reserve all six minutes. Do not fill them with a file tour. Strong answers: explicit merge base, CAS conflict, timeout uncertainty, content-vs-pointer planes, browser render verification, and evidence-backed personal contribution. Compose reference: compose.astronomy.json; generated .state/compose.json is the launch artifact. Return to real dashboard status when ready; no timer simulates progress.",
     "source": "https://github.com/r33drichards/mcp-js/blob/fe5b613db0afcc9cf20d7ca1ef659c914a0b5008/server/tests/fs_snapshot_e2e.rs",
     "visual": "qa"
   }

@@ -1,6 +1,6 @@
 # Interview walkthrough and disposable demo
 
-Start with [slides.html](slides.html) (self-contained, arrow-key navigation, N presenter notes, A agenda) and [presenter-guide.md](presenter-guide.md). Audience: interviewers evaluating Robert’s work; challenge brief unknown. Exactly 60 minutes including eight minutes Q&A.
+Start with [slides.html](slides.html) (self-contained, arrow-key navigation, N presenter notes, A agenda) and [presenter-guide.md](presenter-guide.md). Audience: interviewers evaluating Robert’s work; challenge brief unknown. Exactly 45 minutes including six minutes Q&A.
 
 **Status:** current mcp-js core and several integration components were exercised. The complete Astronomy Shop → logs/metrics → paired Pi investigation → dashboard/browser flow has **not** passed end to end. Read [verification.md](verification.md) before presenting anything as live. No model calls or credentials were used.
 
@@ -85,3 +85,7 @@ Browser evidence must show nonempty time-series graphs, not just API success. `v
 Cleanup only owned resources: `./launch.sh down` keeps volumes/journals; `./launch.sh reset` deletes owned volumes too, preserving the journal. Use a new state directory after reset. Never run blanket prune. Test data, blobs, labels and partial fork journals remain available for recovery inspection until explicit reset.
 
 See [source-map.md](source-map.md), [architecture-reference.md](architecture-reference.md), and [THIRD_PARTY.md](THIRD_PARTY.md).
+
+## Narrated companion
+
+The five-chapter [Manim/Phonon source and player](animation/README.md) fit inside the 45-minute agenda. Use the Narrated companion button. Each chapter waits for presenter resume at live-demo checkpoints. Cloud rendering is blocked by Pango development dependencies, image-extraction disk space, and model-download HTTP 403; no narrated media is claimed complete.

@@ -2,3 +2,6 @@
 node_modules/
 __pycache__/
 *.pyc
+/animation/.venv/
+/animation/output/
+/animation/media/

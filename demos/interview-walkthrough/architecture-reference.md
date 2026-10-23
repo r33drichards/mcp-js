@@ -244,9 +244,9 @@ When a question exceeds the evidence: “I haven’t verified that path. The rel
 
 **Fallback B: server/policy mismatch.** Stop after 30 seconds, show the failed status, and explain which prerequisite failed. Do not change policies broadly, enable host passthrough, install a new version, or debug unrelated setup during the hour. Continue with the same B/A/T/M diagram.
 
-**Fallback C: time pressure.** Keep the 60-minute clock. Skip live merge, use the exact test `text_edits_to_different_lines_auto_merge_through_engine`, then explain expected-head CAS and reset. Leave at least the reserved 8 minutes for Q&A.
+**Fallback C: time pressure.** Keep the 45-minute clock. Skip live merge, use the exact test `text_edits_to_different_lines_auto_merge_through_engine`, then explain expected-head CAS and reset. Leave at least the reserved 6 minutes for Q&A.
 
-**Rehearsal passes:** first speak the outline without code; second navigate only the six anchor views (CLI defaults, dispatch, background execution, mount/tree, label/merge, tests); third answer five hard questions in 60–90 seconds each. Use a timer at 04, 12, 21, 33, 41, 47, 50, and 60 minutes. Replace every bracketed personal-history field before presenting.
+**Rehearsal passes:** first speak the outline without code; second navigate only the six anchor views (CLI defaults, dispatch, background execution, mount/tree, label/merge, tests); third answer five hard questions in 60–90 seconds each. Use the 45-minute presenter guide: checkpoints at 03, 12, 18, 28, 35, 39 and 45 minutes. Replace every bracketed personal-history field before presenting.
 
 Before any later authorized live rehearsal, use a disposable known build pinned to this commit, verify the independent storage settings and narrow filesystem policy, choose a fresh label, and save actual input/output captures. Subsequent component rehearsals are recorded in verification.md. No interview event or calendar date was inferred from “tomorrow.”
 
