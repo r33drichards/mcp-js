@@ -179,14 +179,21 @@ def outage():
 def quorum():
     if config().get('node_ids',[1,2,3]) != [1,2,3]: raise RuntimeError('This action requires the explicit three-voter cluster phase; single-node investigation is not HA')
     s=state_data() or seed(); keep=leader(); removed=[i for i in (1,2,3) if i!=keep]
-    for i in removed: kill_node(i)
+    attempted=[]
     label='uncertain-'+uuid.uuid4().hex[:8]
     try:
+        for i in removed:
+            attempted.append(i)  # A failed stop can have an uncertain outcome.
+            kill_node(i)
         start=time.monotonic(); code,r=request(keep,'/api/fs/push',{'label':label,'ca_id':s['B']},timeout=12)
         if code==200: raise RuntimeError('STOP: unexpected acknowledged write with one of three voters')
         result={'status':code,'response':r,'elapsed_ms':round((time.monotonic()-start)*1000,2),'label':label,'warning':'A timeout is an uncertain outcome; it may commit after quorum returns. No automatic retry.'}
     finally:
-        for i in removed: restart_node(i)
+        failures=[]
+        for i in attempted:
+            try: restart_node(i)
+            except Exception as error: failures.append((i,str(error)))
+        if failures: raise RuntimeError("Restore all attempted demo nodes manually: "+str(failures))
     time.sleep(1); n=leader(); _,r=request(n,'/api/fs/labels/'+label)
     result['after_recovery_observation']=r
     return record('quorum_loss',result)

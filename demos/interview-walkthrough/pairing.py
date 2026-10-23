@@ -69,9 +69,17 @@ class Pairing:
         return result
     def merge(self,args):
         s=self.load(); target=s['sessions'][args['target']]; other=s['sessions'][args['other']]
-        # Only direct siblings from the same explicit base are allowed in this demo.
-        if target['base']!=other['base']: raise RuntimeError('Different bases; this adapter requires an explicit external reconciliation')
-        code,r=self.d.request(self.d.leader(),'/api/fs/merge',{'ours':target['root'],'theirs':other['root'],'base':target['base']})
+        # A direct child records the parent's root at fork time, even if the
+        # parent has written since init. Never substitute the parent's init base.
+        if other.get('parent')==args['target']:
+            base=other['base']
+        elif target.get('parent')==args['other']:
+            base=target['base']
+        elif target['base']==other['base']:
+            base=target['base']
+        else:
+            raise RuntimeError('Different bases; this adapter requires an explicit external reconciliation')
+        code,r=self.d.request(self.d.leader(),'/api/fs/merge',{'ours':target['root'],'theirs':other['root'],'base':base})
         if r.get('status')=='conflict': return r
         if code!=200 or 'ca_id' not in r: raise RuntimeError('Merge failed '+str(r))
         code,p=self.d.request(self.d.leader(),'/api/fs/push',{'label':target['label'],'ca_id':r['ca_id'],'expected':target['root']})

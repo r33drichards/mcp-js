@@ -41,4 +41,4 @@ A previously tested debug Linux amd64 server binary is available in the cloud sc
 
 Five actual Manim silent previews and the 45-minute presenter-controlled player are already in Git. They are not narrated media. Cloud model metadata resolution at `https://huggingface.co/api/models/gradium/phonon-31m-en` was rejected by the configured proxy during CONNECT with HTTP 403. No model weights or speech were generated.
 
-On EC2, if ordinary authorized Hugging Face access succeeds, use `animation/README.md`: isolated pinned dependencies, resolve/save an immutable Apache-2.0 model revision, synthesize one stock Easton sample, inspect it, then render full narrated chapters. No proxy bypass, mirror, voice substitution, or credential expansion is required by this plan. If access remains denied, preserve the silent-preview label and report the blocker.
+Narration is no longer on the critical path. Use the live slides and notebook; silent previews remain optional. Do not spend rehearsal setup time downloading speech models or rendering chapters.

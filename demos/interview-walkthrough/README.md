@@ -71,7 +71,7 @@ This tests actual Pi session files and MCP transport; it does not substitute for
 
 ## Publication boundary and supporting tests
 
-The virtual COW tree is not a host directory. `observability.py` explicitly reads one selected COW root, validates the fixed dashboard UID, local datasource and timeseries panel types, writes/fsyncs a temporary file in a scoped shared volume, and renames it. Grafana polls that directory. Branches cannot directly modify the live Grafana volume. After paired merge, select that merged root as `dashboard_root` through the operator selection command before publishing; do not publish an unmerged branch by accident.
+The virtual COW tree is not a host directory. `observability.py` explicitly reads one selected COW root, validates the fixed dashboard UID, local datasource and timeseries panel types, writes/fsyncs a temporary file in a scoped shared volume, and renames it. Grafana polls that directory. Branches cannot directly modify the live Grafana volume. After paired merge, select that merged root as `dashboard_root` through the operator selection command before publishing; the first handoff may explicitly select a single-root preview, followed by an explicitly selected merged replacement. Never publish a branch implicitly.
 
 ```sh
 python3 select-root.py SESSION_ID
@@ -103,3 +103,9 @@ Cargo defaults to one build job. This limits parallelism, **not peak linker/comp
 ## EC2 rehearsal
 
 The separate deployment task owns the approved USD 20 / 24-hour EC2 rehearsal and shutdown. [ec2-handoff.md](ec2-handoff.md) gives the fixed-snapshot build, loopback access boundaries, acceptance order and narration steps. No AWS resources were created by this preparation task.
+
+## Jupyter live companion
+
+Open [walkthrough.ipynb](walkthrough.ipynb) from this directory or the repo root. Install pinned `notebook-requirements.txt` in an isolated environment and use its Python kernel. Run All performs offline checks and renders manual controls; it does not start Docker, invoke a model, stop nodes or reset state. Every operator control requires the exact owned project ID and a fresh confirmation. The transparent six-turn OpenAI Responses/MCP loop is optional and requires approved credentials, data transfer and budget; no paid execution was performed during preparation. Pi pairing remains a separate demonstration.
+
+Do not reseed or run `demo.py test` mid-rehearsal. Preserve evidence; turn the disposable payment fault off and verify healthy checkout before reinjection. Notebook code outputs are intentionally empty in Git and Library. See evidence/notebook-checks.md for actual validation.

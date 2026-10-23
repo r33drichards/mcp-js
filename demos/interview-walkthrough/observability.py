@@ -90,9 +90,17 @@ class Observability:
   for _ in range(40):
    try:
     result=json.loads(self.http('grafana',3000,'/api/dashboards/uid/mcp-anomaly'))
-    if result.get('dashboard',{}).get('title')==dashboard['title']:break
+    if dashboard_projection(result.get('dashboard',{}))==dashboard_projection(dashboard):break
    except Exception:pass
    time.sleep(.25)
   else:raise RuntimeError('Grafana did not provision dashboard within deadline')
   handoff={'root':root,'sha256':hashlib.sha256(raw).hexdigest(),'path':'/work/dashboards/anomaly.json','provisioned':True,'dashboard_url':'http://127.0.0.1:38300/d/mcp-anomaly','browser_render_verified':False,'note':'API provisioning verified; browser rendering is a separate required check.'}
   d.save(d.STATE/'handoff.json',handoff);return d.record('dashboard_published',handoff)
+
+
+def dashboard_projection(dashboard):
+ # Grafana may assign id/version and add defaults. Compare the identity and every
+ # submitted panel's query/data-source/layout content, not just unchanged title.
+ keys=('id','type','title','datasource','targets','gridPos','fieldConfig')
+ return {'uid':dashboard.get('uid'),'title':dashboard.get('title'),
+         'panels':[{k:p[k] for k in keys if k in p} for p in dashboard.get('panels',[])]}
