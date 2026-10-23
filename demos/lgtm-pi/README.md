@@ -7,7 +7,25 @@ cd /opt/mcp-interview/lgtm-pi-minimal/demos/lgtm-pi
 ./agent.sh
 ```
 
-That is the agent startup command. It discovers the installed Node runtime, loads Pi 1.4.0 and connects `dashboards` and `scratch` MCP namespaces. It defaults to the previously approved Bedrock Nova Micro profile in us-west-2 using the instance role. No credentials are embedded. No model call is made until you send a prompt. Interactive requests are billed; the existing instance shutdown and IAM expiry still apply. This launcher does not implement an account-wide dollar cap.
+That command discovers the installed Node runtime, loads Pi 1.4.0 and connects the `dashboards` and `scratch` MCP namespaces. The launcher does not force a provider or model.
+
+Inside Pi:
+
+1. Run `/login openai`.
+2. Choose **Sign in with ChatGPT** (the installed provider is `openai`, not an assumed `openai-codex` alias).
+3. Complete the browser sign-in yourself. If the remote SSH callback cannot reach Pi, paste the final redirect URL or authorization code into your own Pi terminal when it asks. Do not paste credentials into shared chat.
+4. Run `/model` and select an OpenAI model shown as available for your subscription. Pi filters unsupported models after login; no guessed latest model ID is hard-coded here.
+5. Send your dashboard investigation prompt.
+
+We have not initiated OAuth or authenticated on your behalf. Login and model entitlement are still yours to complete. No credentials are embedded or exported. Saved model choice can persist between sessions; check `/model` before sending the first prompt.
+
+Optional explicit Bedrock route, using the existing scoped instance role:
+
+```sh
+./agent.sh --provider amazon-bedrock --model us.amazon.nova-micro-v1:0
+```
+
+From the main repo use `./demos/lgtm-pi/demo.sh agent --provider amazon-bedrock --model us.amazon.nova-micro-v1:0`. This is optional and billed to AWS; Qwen is not granted. Existing instance shutdown and IAM expiry remain unchanged.
 
 From your Mac, open the Grafana tunnel:
 

@@ -6,4 +6,4 @@ if ! command -v node >/dev/null; then
 fi
 command -v node >/dev/null || { echo 'Node required; install the approved Node runtime first.'; exit 1; }
 export AWS_REGION="${AWS_REGION:-us-west-2}"
-exec ./node_modules/.bin/pi --tools codemode --extension ./agent.ts --provider amazon-bedrock --model us.amazon.nova-micro-v1:0 --append-system-prompt "$(cat agent-prompt.md)" "$@"
+exec ./node_modules/.bin/pi --tools codemode --extension ./agent.ts --append-system-prompt "$(cat agent-prompt.md)" "$@"
