@@ -82,6 +82,21 @@ class BudgetTests(unittest.IsolatedAsyncioTestCase):
 class NovaRequestBudgetTests(unittest.IsolatedAsyncioTestCase):
  async def asyncSetUp(self):
   self.env=patch.dict(os.environ,{'BEDROCK_MODEL_ID':'us.amazon.nova-micro-v1:0','BEDROCK_BUDGET_MODE':'nova-request-bounds'});self.env.start();self.addCleanup(self.env.stop)
+ async def test_continuation_preserves_prior_attempt_and_byte_reservations(self):
+  m=Model();events=[]
+  await loop(m,Session(),ALERT,'system',events.append,prior_attempts=2,prior_request_bytes=8159)
+  self.assertEqual(len(m.calls),4)
+  reservations=[e for e in events if 'inference_attempt' in e]
+  self.assertEqual([e['inference_attempt'] for e in reservations],[3,4,5,6])
+  self.assertEqual(reservations[-1]['submitted_request_bytes'],8159+sum(len(json.dumps(c,ensure_ascii=True).encode()) for c in m.calls))
+ async def test_continuation_exhausted_bytes_sends_nothing(self):
+  m=Model()
+  with self.assertRaisesRegex(RuntimeError,'Cumulative request byte'):
+   await loop(m,Session(),ALERT,'system',lambda x:None,prior_attempts=2,prior_request_bytes=98304)
+  self.assertEqual(m.calls,[])
+ async def test_continuation_exhausted_attempts_sends_nothing(self):
+  m=Model();await loop(m,Session(),ALERT,'system',lambda x:None,prior_attempts=6)
+  self.assertEqual(m.calls,[])
  async def test_nova_uses_no_counttokens_and_logs_unknown_count(self):
   m=Model();events=[];await loop(m,Session(),ALERT,'system',events.append,max_steps=1)
   self.assertEqual(m.count_inputs,[]);self.assertEqual(len(m.calls),1)

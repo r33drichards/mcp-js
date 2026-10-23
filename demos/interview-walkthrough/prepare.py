@@ -98,4 +98,8 @@ def prepare(binary,astro_source=None,browser_source=None,skip_build=False):
  if not skip_build:subprocess.run([sys.executable,str(d.HERE/'build-image.py'),'--binary',str(Path(binary).resolve()),'--context',str(out/'image'),'--tag',ident+':local'],check=True)
  print(out/'compose.json')
 if __name__=='__main__':
- p=argparse.ArgumentParser();p.add_argument('--binary',required=True);p.add_argument('--astronomy-source');p.add_argument('--browser-source');p.add_argument('--skip-build',action='store_true');a=p.parse_args();prepare(a.binary,a.astronomy_source,a.browser_source,a.skip_build)
+ p=argparse.ArgumentParser();p.add_argument('--binary',default=None);p.add_argument('--astronomy-source');p.add_argument('--browser-source');p.add_argument('--skip-build',action='store_true');a=p.parse_args()
+ if not a.binary and not a.skip_build:
+  a.binary=next((str(p) for p in [d.HERE.parents[1]/'target/release/server',d.HERE.parents[1]/'target/debug/server'] if p.is_file()),None)
+  if not a.binary:p.error('No built server found. Run ./launch.sh prepare --skip-build then ./build-portable.sh, or supply --binary PATH.')
+ prepare(a.binary,a.astronomy_source,a.browser_source,a.skip_build)

@@ -2,7 +2,32 @@
 
 Start with [slides.html](slides.html) (self-contained, arrow-key navigation, N presenter notes, A agenda) and [presenter-guide.md](presenter-guide.md). Audience: interviewers evaluating Robert’s work; challenge brief unknown. Exactly 45 minutes including six minutes Q&A.
 
-**Status:** current mcp-js core and several integration components were exercised. The complete Astronomy Shop → logs/metrics → paired Pi investigation → dashboard/browser flow has **not** passed end to end. Read [verification.md](verification.md) before presenting anything as live. No model calls or credentials were used.
+## Start the existing EC2 demo (no build or path lookup)
+
+On the demo instance, use this exact directory:
+
+```sh
+cd /opt/mcp-interview/repo/demos/interview-walkthrough
+./launch.sh doctor
+```
+
+The stack and slide controller are already running. Do not run prepare, up, seed, reset or test to resume a walkthrough. The fresh state was prepared for Robert; existing historical telemetry is retained.
+
+From your Mac, keep this tunnel open:
+
+```sh
+ssh -i ~/.ssh/id_ed25519 -L 38080:127.0.0.1:38080 -L 38300:127.0.0.1:38300 -L 38880:127.0.0.1:38880 ubuntu@54.200.10.22
+```
+
+Open slides http://127.0.0.1:38080, Grafana http://127.0.0.1:38300 and Shop http://127.0.0.1:38880. For Pi use `./launch.sh pi`, then `/demo-init` in a fresh conversation; this wrapper reads the demo token internally without printing it. Provider/model choice still requires the approved setup. To run an operator script with the installed Python environment use `sudo ./launch.sh python operator-fault.py on` (and `off` to restore). Paste `example-alert.json` in the slides after exercising checkout. The notebook operator panels automatically fill the owned project and state path; rendering does not execute them. A Jupyter web server is not installed on this instance.
+
+The deterministic telemetry, dashboard, browser and fork/recovery paths passed. The paid Nova investigation remains incomplete after a tool-argument error; do not represent it as a passed model E2E.
+
+## Dashboard staging and publication paths
+
+The deployed Compose file is `/opt/mcp-interview/repo/demos/interview-walkthrough/.state/compose.json`. Its logical named volume `dashboards` is mounted in `publisher` at `/dashboards` and in `grafana` read-only at `/var/lib/grafana/dashboards`. This is a Docker-managed volume, not a host directory bind.
+
+The agent first writes `/work/dashboards/anomaly.json` inside its COW filesystem. After the operator selects that session root with `sudo ./launch.sh python select-root.py SESSION_ID`, `sudo ./launch.sh python demo.py publish` calls `Observability.publish()` in `observability.py`. It exports the selected COW file atomically into the publisher container at `/dashboards/anomaly.json`. Grafana sees that same file at `/var/lib/grafana/dashboards/anomaly.json`; `.state/provisioning/dashboards/demo.yml` configures its file provider. Publication checks the loaded dashboard through the read API; it does not use a dashboard-write API. Replace `SESSION_ID` only with the session shown by `/demo-init` or the completed paired merge, never a guessed root.
 
 ## Prerequisites and startup
 
@@ -11,7 +36,7 @@ Linux x86_64; Docker Engine + Compose v2; Python 3.12+ with PyYAML; a trusted Li
 From this directory:
 
 ```sh
-./launch.sh prepare --binary /absolute/path/to/current/server
+./launch.sh prepare  # discovers target/release/server or target/debug/server
 ./launch.sh up
 ./launch.sh serve
 ```
@@ -47,19 +72,19 @@ Use a separate clone of branch `demo/interview-walkthrough`. Install no cloud cr
 
 ```sh
 cd demos/interview-walkthrough
-./launch.sh prepare --binary /unused --skip-build
+./launch.sh prepare --skip-build
 ./build-portable.sh
 ./launch.sh up
 ./launch.sh serve
 ```
 
-`--skip-build` only prepares configuration; `/unused` is never read. The portable script builds this checkout through `Dockerfile.source`, then adds Python and the demo object/policy fixture. It does not use the default Dockerfile’s latest release. Source compilation and original browser Nix build require working public build networking. This path is prepared but **not tested on a Mac**; the local task owns that validation. No Railway deployment is needed.
+`--skip-build` only prepares configuration and requires no binary. The portable script builds this checkout through `Dockerfile.source`, then adds Python and the demo object/policy fixture. It does not use the default Dockerfile’s latest release. Source compilation and original browser Nix build require working public build networking. This path is prepared but **not tested on a Mac**; the local task owns that validation. No Railway deployment is needed.
 
 ## Pi paired conversation/filesystem forks
 
 Pi is pinned to `@earendil-works/pi-coding-agent@1.4.0`. The custom extension registers native MCP per session, cancels unpaired native forks, reserves an FS base, commits a binding to the newly forked Pi session, and tracks cancelled/uncertain states. It does not merge conversation histories. Unbound sessions and `fs`/session overrides fail closed.
 
-Use a separately approved model setup; none is bundled or inferred from host credentials. Install the pinned package with `npm ci --ignore-scripts` in `pi/`, or explicitly run the optional Compose `agent` profile after model setup. Default container command is `--help`; startup does not make paid calls. Set `MCP_JS_DEMO_TOKEN` to the ephemeral token in your own `.state/ownership.json` without pasting it into shared terminals/logs. Then start Pi with `--tools codemode --extension ./paired-fork.ts` from `pi/`. Use `/demo-init`, add a synthetic investigation message, `/paired-fork`, and `/paired-merge OTHER_SESSION_ID`. Check `branch_info` before every write. The two branch roots must share an explicit base.
+Use a separately approved model setup; none is bundled or inferred from host credentials. Install the pinned package with `npm ci --ignore-scripts` in `pi/`, or explicitly run the optional Compose `agent` profile after model setup. Default container command is `--help`; startup does not make paid calls. Run `./launch.sh pi` from this directory; it discovers state and injects the token without printing it. Use `/demo-init`, add a synthetic investigation message, `/paired-fork`, and `/paired-merge OTHER_SESSION_ID`. Check `branch_info` before every write. The two branch roots must share an explicit base.
 
 Run the no-model test while the controller and query worker are running:
 

@@ -31,7 +31,9 @@ def panel(actions):
     import ipywidgets as w
     from IPython.display import display
     state=w.Text(value=os.environ.get('MCP_JS_DEMO_STATE',str(HERE/'.state')),description='State path:')
-    project=w.Text(description='Project ID:')
+    try: project_id=json.loads((Path(state.value)/'ownership.json').read_text())['id']
+    except (OSError,ValueError,KeyError): project_id=''
+    project=w.Text(value=project_id,description='Project ID:')
     alert=w.Textarea(value=(HERE/'example-alert.json').read_text(),description='Alert JSON:') if 'alert' in actions else (w.Text(description='Session ID:') if 'select-root' in actions else None)
     confirm=w.Checkbox(value=False,description='Execute one selected action on this owned demo')
     out=w.Output();buttons=[]
