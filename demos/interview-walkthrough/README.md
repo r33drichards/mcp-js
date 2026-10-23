@@ -86,9 +86,9 @@ Cleanup only owned resources: `./launch.sh down` keeps volumes/journals; `./laun
 
 See [source-map.md](source-map.md), [architecture-reference.md](architecture-reference.md), and [THIRD_PARTY.md](THIRD_PARTY.md).
 
-## Narrated companion
+## Optional illustrations
 
-The five-chapter [Manim/Phonon source and player](animation/README.md) fit inside the 45-minute agenda. Use the Narrated companion button. Each chapter waits for presenter resume at live-demo checkpoints. Five real silent Manim visual previews are included. Phonon narration remains blocked by model-download HTTP 403; no narrated media is claimed complete.
+The main path is a live presentation, not a video. The collapsed Optional illustrations control opens five short silent Manim previews only on request. They are conceptual illustrations, not recordings of successful execution, and are optional within the existing time budget. Existing [animation sources](animation/README.md) remain available; narration is not required for the walkthrough.
 
 ## Constrained-memory rehearsal
 
