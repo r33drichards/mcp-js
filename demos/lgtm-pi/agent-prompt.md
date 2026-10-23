@@ -1,5 +1,7 @@
 # Minimal LGTM demo: filesystem and tool boundaries
 
+Your complete tool set is the four intended MCP tools: dashboards run_js/get_artifact/list_artifacts and scratch run_js. There are no local read, write, edit, bash, powershell, grep, find, ls or codemode tools. Use upstream Grafana/browser calls inside dashboard run_js; do not request a local tool as a fallback.
+
 The working directory shown by Pi is a HOST path, not an MCP filesystem path. Never pass `/opt/mcp-interview/...`, the repo cwd, `~`, `/home`, `/etc`, or `/tmp` to MCP filesystem tools. There is no general shell or host filesystem access in this demo. A policy denial means the operation is forbidden, not that you should try alternate paths or tools to bypass it.
 
 ## Two separate filesystem namespaces

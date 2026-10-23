@@ -72,3 +72,16 @@ Official image source: https://github.com/grafana/docker-otel-lgtm . Browser sou
 Pi supports project `.pi/APPEND_SYSTEM.md` and `--append-system-prompt`. This demo uses the latter: `agent.sh` reads the complete `agent-prompt.md` on every launch and adds it to Pi's system instructions. It explicitly separates host cwd, shared dashboard files, and COW scratch; dashboard directory listing remains forbidden by policy.
 
 After updating the instructions, exit Pi and restart with `./demos/lgtm-pi/demo.sh agent` from `/opt/mcp-interview/repo`. Start a fresh conversation if the old one still contains misleading path assumptions. No re-login is needed solely for this prompt change. The launcher reads the file at startup; an already-running session does not automatically acquire edited CLI prompt text. `node verify-instructions.mjs` tests the installed Pi resource loader without a model call.
+
+## MCP-only agent tools
+
+Following [CUSE's explicit tool allowlist](https://github.com/r33drichards/cuse/blob/main/src/channel-session.ts), this launcher uses Pi's supported `--no-builtin-tools`, disables automatic extension/skill/context discovery, explicitly loads the MCP extension and this demo extension, and allowlists only:
+
+- `mcp__dashboards__run_js`
+- `mcp__dashboards__get_artifact`
+- `mcp__dashboards__list_artifacts`
+- `mcp__scratch__run_js`
+
+The MCP servers use `exposure: direct`, so these tools reach the model without Pi's local codemode tool. Grafana and browser tools are called inside dashboard `run_js`; the existing server-side policies still apply. The full Pi agent wire catalog was checked: no built-in read/write/edit/bash/powershell/find/grep/ls, codemode, or other aliases are exposed. This configures the model's tools; it does **not** OS-sandbox the Pi process, its extensions, or manual user commands.
+
+Exit and restart Pi with `./demos/lgtm-pi/demo.sh agent` from the main repository to receive this configuration. Your current conversation and ChatGPT authentication are not modified. `PI_OFFLINE=1 node verify-tool-catalog.mjs` checks an isolated no-model session using empty test auth storage, without reading your auth file.
