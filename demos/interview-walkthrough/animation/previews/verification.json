@@ -1,0 +1,93 @@
+{
+  "kind": "Actual Manim Community renders; silent explanatory previews, not live recordings",
+  "manim": "0.22.0",
+  "sample_resource_measurement": {
+    "exit_code": 0,
+    "elapsed_seconds": 4.327590534000592,
+    "maxrss_KiB_linux": 322600,
+    "kind": "silent Manim visual sample, no audio synthesis"
+  },
+  "chapters": [
+    {
+      "file": "04-recovery-silent-preview.mp4",
+      "programs": [],
+      "stream_groups": [],
+      "streams": [
+        {
+          "codec_type": "video",
+          "width": 854,
+          "height": 480
+        }
+      ],
+      "format": {
+        "duration": "17.666667",
+        "size": "180571"
+      }
+    },
+    {
+      "file": "02-publish-silent-preview.mp4",
+      "programs": [],
+      "stream_groups": [],
+      "streams": [
+        {
+          "codec_type": "video",
+          "width": 854,
+          "height": 480
+        }
+      ],
+      "format": {
+        "duration": "17.666667",
+        "size": "195132"
+      }
+    },
+    {
+      "file": "03-fork-silent-preview.mp4",
+      "programs": [],
+      "stream_groups": [],
+      "streams": [
+        {
+          "codec_type": "video",
+          "width": 854,
+          "height": 480
+        }
+      ],
+      "format": {
+        "duration": "17.666667",
+        "size": "224546"
+      }
+    },
+    {
+      "file": "05-tradeoffs-silent-preview.mp4",
+      "programs": [],
+      "stream_groups": [],
+      "streams": [
+        {
+          "codec_type": "video",
+          "width": 854,
+          "height": 480
+        }
+      ],
+      "format": {
+        "duration": "17.666667",
+        "size": "196484"
+      }
+    },
+    {
+      "file": "01-route-silent-preview.mp4",
+      "programs": [],
+      "stream_groups": [],
+      "streams": [
+        {
+          "codec_type": "video",
+          "width": 854,
+          "height": 480
+        }
+      ],
+      "format": {
+        "duration": "17.666667",
+        "size": "180269"
+      }
+    }
+  ],
+  "audio": "No audio stream; Phonon model metadata blocked by HTTP403"
+}

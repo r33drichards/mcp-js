@@ -1,4 +1,4 @@
-# Narrated Manim companion — source prepared, rendering blocked here
+# Manim companion — visual chapters rendered; narration pending
 
 Five concise chapters accompany the **45-minute total** presentation. Narration is part of the allocated sections, not extra runtime. The player stops at every chapter and waits for the presenter. It never pretends to monitor Pi or advances after a fixed silence. Use Pause at any time during a chapter. Model-generated diagrams/dots are labeled explanatory animation; recorded component tests stay separate.
 
@@ -11,7 +11,7 @@ Install the system prerequisites for Manim Community on the chosen machine (Pang
 ```sh
 cd demos/interview-walkthrough/animation
 python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
+.venv/bin/pip install -r requirements.lock
 # Resolve and save one immutable model revision before downloading weights.
 .venv/bin/python narrate.py --output output --resolve-model --sample
 .venv/bin/python render.py --output output --sample
@@ -43,8 +43,12 @@ Serve through `python3 ../demo.py serve` and use the slide companion button, or 
 
 - `ptts==0.4.1` installed in an isolated cloud venv; package metadata reports MIT OR Apache-2.0. No model synthesis occurred.
 - Model card identifies `gradium/phonon-31m-en`, Apache-2.0, English 24 kHz mono, q8 weights 64.5 MB excluding tokenizer. Direct model metadata access returned proxy **HTTP 403**. No proxy bypass, alternate voice, credentials or `trust_remote_code` was used.
-- Manim Python installation failed because `pangocairo >= 1.30.0` development metadata is missing.
-- The official `manimcommunity/manim:v0.22.0` image pull reached layer extraction but failed **no space left on device**. No sample render completed. The primary demo source/state was preserved.
-- Python sources and player behavior can be checked independently; rendering and audio quality require the Mac or another adequately provisioned host. These are dependency/network/disk blockers, not a successful narrated demo.
+- Initial Manim installation failed on missing Pango development metadata. This was resolved by extracting official Debian development packages into task scratch space and compiling the bindings there, without altering system libraries. Manim 0.22.0 installed successfully.
+- The official `manimcommunity/manim:v0.22.0` image pull reached layer extraction but failed **no space left on device**. The failed image approach was abandoned. The primary demo source/state was preserved.
+- Actual Manim sample: 5.8 seconds, 854×480, 89,151 bytes; 4.3 seconds render wall time, approximately 315 MiB peak process RSS. Five complete silent visual previews subsequently rendered, totaling 977,002 bytes. Frames were inspected for clipping/overlap. See previews/verification.json. Phonon model access and speech quality remain unverified; this is not a completed narrated result.
 
 Sources: [Phonon model card](https://huggingface.co/gradium/phonon-31m-en), [official ptts package](https://pypi.org/project/ptts/0.4.1/), [Manim Community](https://pypi.org/project/manim/0.22.0/). Preserve Apache-2.0 model notices and MIT Manim notices when packaging rendered outputs/dependencies.
+
+## Included visual previews
+
+Use **Load silent Manim previews** in the companion player. These are actual Manim renders with no audio stream, not placeholder animations or live recordings. Each ends at a presenter-controlled checkpoint. `previews/verification.json` contains measured format, duration, and sample resource evidence. To regenerate all silent chapters: `python render.py --output output --silent-preview`. The narrated path uses the same scene code with measured Phonon audio duration.

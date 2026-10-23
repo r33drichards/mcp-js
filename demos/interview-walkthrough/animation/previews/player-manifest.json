@@ -1,0 +1,40 @@
+{
+  "chapters": [
+    {
+      "id": "01-route",
+      "title": "Follow one question",
+      "src": "01-route-silent-preview.mp4",
+      "checkpoint": "Show the real agent status. Open compose.astronomy.json and inspect query, grafana-mcp, grafana, prometheus and loki. Resume only when ready.",
+      "kind": "SILENT MANIM VISUAL PREVIEW \u2014 NO NARRATION"
+    },
+    {
+      "id": "02-publish",
+      "title": "From a private tree to a visible graph",
+      "src": "02-publish-silent-preview.mp4",
+      "checkpoint": "Show one allowed write, one denied write, then inspect actual data-bearing Grafana panels through browser_execute. Empty graphs mean the handoff is incomplete.",
+      "kind": "SILENT MANIM VISUAL PREVIEW \u2014 NO NARRATION"
+    },
+    {
+      "id": "03-fork",
+      "title": "Share the past, separate the edits",
+      "src": "03-fork-silent-preview.mp4",
+      "checkpoint": "Use /paired-fork in Pi. Compare branch_info for both sessions, perform independent writes, then an explicit clean merge and a conflicting merge.",
+      "kind": "SILENT MANIM VISUAL PREVIEW \u2014 NO NARRATION"
+    },
+    {
+      "id": "04-recovery",
+      "title": "Availability has boundaries",
+      "src": "04-recovery-silent-preview.mp4",
+      "checkpoint": "Check ownership and healthy baseline. Stop only a disposable voter, observe results, restore it. For quorum loss, inspect timed-out writes after recovery before retrying.",
+      "kind": "SILENT MANIM VISUAL PREVIEW \u2014 NO NARRATION"
+    },
+    {
+      "id": "05-tradeoffs",
+      "title": "Defend the claim you can measure",
+      "src": "05-tradeoffs-silent-preview.mp4",
+      "checkpoint": "Robert supplies actual contribution and decision history. Reserve 39\u201345 for questions. Do not extend the presentation to finish a slow demo.",
+      "kind": "SILENT MANIM VISUAL PREVIEW \u2014 NO NARRATION"
+    }
+  ],
+  "sample": false
+}

@@ -88,7 +88,7 @@ See [source-map.md](source-map.md), [architecture-reference.md](architecture-ref
 
 ## Narrated companion
 
-The five-chapter [Manim/Phonon source and player](animation/README.md) fit inside the 45-minute agenda. Use the Narrated companion button. Each chapter waits for presenter resume at live-demo checkpoints. Cloud rendering is blocked by Pango development dependencies, image-extraction disk space, and model-download HTTP 403; no narrated media is claimed complete.
+The five-chapter [Manim/Phonon source and player](animation/README.md) fit inside the 45-minute agenda. Use the Narrated companion button. Each chapter waits for presenter resume at live-demo checkpoints. Five real silent Manim visual previews are included. Phonon narration remains blocked by model-download HTTP 403; no narrated media is claimed complete.
 
 ## Constrained-memory rehearsal
 
