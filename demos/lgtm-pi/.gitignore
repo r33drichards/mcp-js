@@ -1,0 +1,5 @@
+dashboards/*.json
+.evidence/
+node_modules/
+
+__pycache__/

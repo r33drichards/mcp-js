@@ -1,0 +1,11 @@
+apiVersion: 1
+providers:
+  - name: minimal-shared
+    orgId: 1
+    folder: Minimal
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 2
+    allowUiUpdates: false
+    options:
+      path: /dashboards

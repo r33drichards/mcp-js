@@ -1,0 +1,1 @@
+{"filesystem": {"policies": [{"url": "file:///minimal/filesystem.rego", "rule": "data.mcp.filesystem.allow"}]}, "mcp_tools": {"policies": [{"url": "file:///minimal/tools.rego", "rule": "data.mcp.tools.allow"}]}}

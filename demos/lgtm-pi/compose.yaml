@@ -1,0 +1,29 @@
+name: mcp-lgtm-minimal
+services:
+  lgtm:
+    image: grafana/otel-lgtm@sha256:75cdf892daffadf3763ef61c16a6d7f8586216fce0b40bba7874a0b053121084
+    ports: ["127.0.0.1:39300:3000", "127.0.0.1:39418:4318"]
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+    volumes:
+      - ./dashboards:/dashboards:ro
+      - ./provisioning.yaml:/otel-lgtm/grafana/conf/provisioning/dashboards/minimal.yaml:ro
+      - lgtm-data:/data
+    mem_limit: 4g
+  mcp-js:
+    build: .
+    ports: ["127.0.0.1:39301:3000", "127.0.0.1:39302:3001"]
+    environment:
+      GRAFANA_URL: http://lgtm:3000
+      DO_NOT_TRACK: "1"
+    volumes:
+      - ./dashboards:/dashboards
+      - scratch:/scratch
+    shm_size: 1g
+    mem_limit: 3g
+    depends_on: [lgtm]
+volumes:
+  lgtm-data:
+  scratch:

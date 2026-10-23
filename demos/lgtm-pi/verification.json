@@ -1,0 +1,18 @@
+{
+  "verified_at": "2026-10-23T18:41:42.906469+00:00",
+  "services": 2,
+  "metrics_and_logs_via_grafana_mcp": true,
+  "direct_fs_to_provisioning": true,
+  "browser_graph_visually_reviewed": true,
+  "graph_baseline_ms": [
+    80,
+    100
+  ],
+  "graph_spike_ms": 900,
+  "forbidden_host_write_denied": true,
+  "cow_parent_unchanged_after_child_write": true,
+  "cow_dashboard_write_denied": true,
+  "pi_extension_hook_and_mcp_connections": true,
+  "paid_model_calls": 0,
+  "clean_workspace": "Verification dashboard archived; telemetry remains seeded."
+}

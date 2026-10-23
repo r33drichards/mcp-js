@@ -1,0 +1,10 @@
+{
+  "images": {
+    "mcp-lgtm-engine:fe5b613": "sha256:a85b62c2f461d472188f0b5117d33c779cd140cd7a719d91a0687768147bb88f",
+    "mcp-lgtm-browser:63bab526": "sha256:b6b9cf82269a1f06dec0fbd4b7507063cee1a3185e708bcae43adfc4a62f56db"
+  },
+  "engine_core_commit": "fe5b613db0afcc9cf20d7ca1ef659c914a0b5008",
+  "engine_build_commit": "db83bfb8690c609450d8d7d9a16fc0ed3f995152",
+  "browser_source_commit": "63bab526d2a999af969657f70a342dfebe1cbb63",
+  "note": "Locally built verified runtimes reused as image layers, not old services. Dockerfile does not rebuild these source images; this checkout is ready on the prepared Ubuntu instance."
+}
