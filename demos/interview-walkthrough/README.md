@@ -6,7 +6,7 @@ Start with [slides.html](slides.html) (self-contained, arrow-key navigation, N p
 
 ## Prerequisites and startup
 
-Linux x86_64; Docker Engine + Compose v2; Python 3 with PyYAML; a trusted Linux mcp-js `server` binary built from base `fe5b613`; Git; network access to pinned public sources/images during preparation. Reserve at least 14 GiB free disk and 8 GiB RAM (more for the full desktop browser). This cloud environment has only about 4.6 GiB free after scoped cleanup. Do not run the full stack until the disk gate passes. On macOS the controller uses ownership-checked docker exec HTTP requests, avoiding Docker Desktop private-IP routing. On Linux this transport is opt-in with MCP_JS_DEMO_TRANSPORT=exec. The portable build and full Mac runtime remain unverified.
+Linux x86_64; Docker Engine + Compose v2; Python 3.12+ with PyYAML; a trusted Linux mcp-js `server` binary built from base `fe5b613`; Git; network access to pinned public sources/images during preparation. Reserve at least 14 GiB free disk and 8 GiB RAM (more for the full desktop browser). This cloud environment has only about 4.6 GiB free after scoped cleanup. Do not run the full stack until the disk gate passes. On macOS the controller uses ownership-checked docker exec HTTP requests, avoiding Docker Desktop private-IP routing. On Linux this transport is opt-in with MCP_JS_DEMO_TRANSPORT=exec. The portable build and full Mac runtime remain unverified.
 
 From this directory:
 
@@ -93,3 +93,9 @@ The five-chapter [Manim/Phonon source and player](animation/README.md) fit insid
 ## Constrained-memory rehearsal
 
 For the 7.65 GiB Docker VM, use [memory-profile.md](memory-profile.md) instead of the full launch command. It separates a real Astronomy investigation (single mcp-js voter) from a later three-voter failure demonstration. Static caps and dependency closure validate; runtime fit remains unverified.
+
+## Preparation/build safety fixes
+
+Preparation verifies both the pinned Git commit and materialized tracked files. A fresh or empty `--no-checkout` clone is checked out even when HEAD already matches; modified existing source is rejected without overwriting edits. Portable engine builds use a clean `git archive` of `MCP_JS_BUILD_COMMIT` (default HEAD), never the working tree. Sensitive paths are excluded even if tracked, and the root `.dockerignore` independently excludes demo state and credentials. The runtime build receives only three named files from that same export. Commit intended source changes before building. Local review reported no prior image build or token exposure.
+
+Cargo defaults to one build job. This limits parallelism, **not peak linker/compiler memory**. The source build has not been demonstrated within the Mac’s memory budget; avoid running it alongside the workload. A previously verified cloud Linux binary is available as a checksum-recorded scratch artifact for a separately coordinated transfer; it is not published or bundled into Git.

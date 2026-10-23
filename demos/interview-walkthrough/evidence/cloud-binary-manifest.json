@@ -1,0 +1,11 @@
+{
+  "base_commit": "fe5b613db0afcc9cf20d7ca1ef659c914a0b5008",
+  "platform": "linux/amd64",
+  "source": "current source built offline earlier in this task, not downloaded release",
+  "binary_sha256": "ad7bcf76a170f22d59b2e121aa84d99c5d4ed424b8142676ad4fc90d35e04e7f",
+  "archive_sha256": "bbed2fccaa110b9dc4958e64eda2850bde5137d1eb2d23ff17e84a1ad4746cc2",
+  "binary_bytes": 437959976,
+  "archive_bytes": 100161690,
+  "contains": "one server binary only; no demo state, tokens, user credentials or filesystem data",
+  "limitations": "debug build; verify ABI in target Linux container; transfer to Mac has not been performed"
+}

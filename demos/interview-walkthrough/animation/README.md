@@ -52,3 +52,9 @@ Sources: [Phonon model card](https://huggingface.co/gradium/phonon-31m-en), [off
 ## Included visual previews
 
 Use **Load silent Manim previews** in the companion player. These are actual Manim renders with no audio stream, not placeholder animations or live recordings. Each ends at a presenter-controlled checkpoint. `previews/verification.json` contains measured format, duration, and sample resource evidence. To regenerate all silent chapters: `python render.py --output output --silent-preview`. The narrated path uses the same scene code with measured Phonon audio duration.
+
+## Exact remaining Phonon blocker and next steps
+
+Target: `https://huggingface.co/api/models/gradium/phonon-31m-en`. Action: resolve the official model commit and file inventory before downloading weights. The configured cloud proxy returned `Tunnel connection failed: 403 Forbidden`; the request did not obtain model metadata. No model weights or voice audio were downloaded/generated. This is distinct from the model card, which was readable through the web research tool.
+
+Permitted next step: on the connected Mac or another authorized host with ordinary Hugging Face access, run `narrate.py --output output --resolve-model --sample`, inspect the resolved Apache-2.0 revision and sample, then render that narration with `render.py --output output`. No public-model login should be assumed necessary. If access is still denied, stop and report it; do not change proxies, use mirrors/tunnels, request broad credentials, or substitute a voice. Existing silent previews remain labeled silent.

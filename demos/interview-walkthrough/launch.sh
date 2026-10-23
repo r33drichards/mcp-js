@@ -2,7 +2,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 export MCP_JS_DEMO_STATE="${MCP_JS_DEMO_STATE:-$PWD/.state}"
-export DOCKER_CONFIG="$MCP_JS_DEMO_STATE/docker-config"
+export DOCKER_CONFIG="${DOCKER_CONFIG:-$MCP_JS_DEMO_STATE/docker-config}"
 case "${1:-}" in
  prepare) shift; exec python3 prepare.py "$@" ;;
  up)

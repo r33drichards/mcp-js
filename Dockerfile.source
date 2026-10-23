@@ -27,6 +27,10 @@ COPY . .
 # Install nightly toolchain as required by rust-toolchain file
 RUN rustup default nightly
 
+# Bound compilation parallelism; this does not cap the linker memory peak.
+ARG CARGO_BUILD_JOBS=1
+ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
+
 # Build the release binary
 RUN cargo build --release -p server \
     && cp target/release/server /mcp-v8 \

@@ -6,14 +6,28 @@ import yaml
 import demo as d
 ASTRO='91356a39d5a0dc601317b55339b7abfafd91b481'
 BROWSER='63bab526d2a999af969657f70a342dfebe1cbb63'
+def verify_source(root,commit):
+ actual=subprocess.check_output(['git','-C',str(root),'rev-parse','HEAD'],text=True).strip()
+ if actual!=commit:raise RuntimeError('Source pin mismatch: '+str(root))
+ tracked=subprocess.check_output(['git','-C',str(root),'ls-tree','-rz','--name-only',commit]).decode().split('\0')
+ missing=[name for name in tracked if name and not os.path.lexists(root/name)]
+ if missing:raise RuntimeError('Source checkout is not materialized: '+str(root)+'; missing '+missing[0])
+ for args in [('diff','--quiet'),('diff','--cached','--quiet')]:
+  if subprocess.run(['git','-C',str(root),*args]).returncode:raise RuntimeError('Source has tracked modifications; preserve and inspect: '+str(root))
 def checkout(name,url,commit):
  p=d.STATE/name
- if not p.exists():subprocess.run(['git','clone','--no-checkout',url,str(p)],check=True)
+ fresh=not p.exists()
+ if fresh:subprocess.run(['git','clone','--no-checkout',url,str(p)],check=True)
+ empty=not any(x.name!='.git' for x in p.iterdir())
  actual=subprocess.check_output(['git','-C',str(p),'rev-parse','HEAD'],text=True).strip()
  if actual!=commit:
+  if not empty:
+   for args in [('diff','--quiet'),('diff','--cached','--quiet')]:
+    if subprocess.run(['git','-C',str(p),*args]).returncode:raise RuntimeError('Refusing to replace modified source '+str(p))
   subprocess.run(['git','-C',str(p),'fetch','--depth','1','origin',commit],check=True)
-  subprocess.run(['git','-C',str(p),'checkout','--detach',commit],check=True)
- if subprocess.check_output(['git','-C',str(p),'rev-parse','HEAD'],text=True).strip()!=commit:raise RuntimeError('Source pin mismatch')
+ # Matching HEAD is not proof that clone --no-checkout populated the worktree.
+ if fresh or empty or actual!=commit:subprocess.run(['git','-C',str(p),'checkout','--detach',commit],check=True)
+ verify_source(p,commit)
  return p
 
 def render(path,env=None):
@@ -23,7 +37,7 @@ def prepare(binary,astro_source=None,browser_source=None,skip_build=False):
  astro=Path(astro_source).resolve() if astro_source else checkout('astronomy','https://github.com/open-telemetry/opentelemetry-demo.git',ASTRO)
  browser=Path(browser_source).resolve() if browser_source else checkout('computer-use','https://github.com/r33drichards/computer-use.git',BROWSER)
  for root,pin in [(astro,ASTRO),(browser,BROWSER)]:
-  if subprocess.check_output(['git','-C',str(root),'rev-parse','HEAD'],text=True).strip()!=pin:raise RuntimeError('Wrong source commit '+str(root))
+  verify_source(root,pin)
  env=dict(os.environ,DEMO_ID=ident,RUNTIME_IMAGE=ident+':local',BROWSER_CONTEXT=str(browser/'images/browser'),MCP_CONFIG_FILE=str(d.HERE/'mcp-full.json'))
  base=render(d.HERE/'compose.yml',env);upstream=render(astro/'docker-compose.yml')
  collector=yaml.safe_load((astro/'src/otel-collector/otelcol-config.yml').read_text())

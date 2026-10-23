@@ -36,3 +36,22 @@ Thumbs.db
 
 # media 
 site-docs/media/**
+
+# Demo state and local credentials must never enter image layers.
+**/.state
+**/.state/**
+**/.aws
+**/.aws/**
+**/.ssh
+**/.ssh/**
+**/.pi
+**/.pi/**
+**/.env
+**/.env.*
+**/credentials
+**/credentials.json
+**/auth.json
+**/id_rsa
+**/id_ed25519
+**/.venv
+**/node_modules
