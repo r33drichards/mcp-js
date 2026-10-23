@@ -38,6 +38,11 @@ class RehearsalTests(unittest.TestCase):
   scope={'json':json,'os':__import__('os')};exec(source,scope)
   class Model:
    def __init__(self):self.n=0
+   async def count_tokens(self,**kw):
+    from botocore.session import get_session
+    from botocore.validate import validate_parameters
+    validate_parameters(kw,get_session().get_service_model('bedrock-runtime').operation_model('CountTokens').input_shape)
+    return {'inputTokens':5}
    async def converse(self,**kw):
     self.n+=1
     from botocore.session import get_session
