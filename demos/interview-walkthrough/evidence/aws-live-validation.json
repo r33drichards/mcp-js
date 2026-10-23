@@ -1,0 +1,75 @@
+{
+  "source_runtime": "db83bfb8690c609450d8d7d9a16fc0ed3f995152",
+  "scripts": "da6480705b3134e5296bb53d8687216735e10026",
+  "astronomy_release": "2.1.3",
+  "baseline_checkout_statuses": [
+    200,
+    200,
+    200,
+    200,
+    200,
+    200,
+    200,
+    200
+  ],
+  "fault_checkout_statuses": [
+    500,
+    500,
+    500
+  ],
+  "restored_checkout_status": 200,
+  "query_route": "mcp-js -> official Grafana MCP -> Grafana datasource -> Prometheus",
+  "metric_series": [
+    {
+      "labels": {
+        "service_name": "checkout",
+        "status_code": "STATUS_CODE_ERROR"
+      },
+      "samples": 37
+    },
+    {
+      "labels": {
+        "service_name": "checkout",
+        "status_code": "STATUS_CODE_UNSET"
+      },
+      "samples": 277
+    }
+  ],
+  "logs_backend": "Loki via OTLP HTTP; stock OpenSearch and debug exports retained",
+  "pi_pairing": {
+    "passed": true,
+    "checks": [
+      "Pi 1.4 SessionManager fork",
+      "native MCP handshake/list/call",
+      "child write isolates parent",
+      "root override rejected",
+      "cancel journal",
+      "explicit FS merge preserves conversations"
+    ],
+    "limitation": "No model or interactive extension event dispatch was exercised."
+  },
+  "filesystem_checks": [
+    "branches",
+    "merge",
+    "conflict"
+  ],
+  "election_ms": 496.79,
+  "quorum": {
+    "status": 400,
+    "response": {
+      "error": "operation failed: timeout waiting for commit"
+    },
+    "elapsed_ms": 5142.05,
+    "label": "uncertain-c175d440",
+    "warning": "A timeout is an uncertain outcome; it may commit after quorum returns. No automatic retry.",
+    "after_recovery_observation": {
+      "label": "uncertain-c175d440",
+      "ca_id": "4212201309c586927dbe77289d8cd5e03c4fb9f9c59225c0abf9d695db449b54"
+    }
+  },
+  "voters_restored": 3,
+  "model_executed": false,
+  "evidence_directory": ".state/live-evidence",
+  "browser_review": "Baseline screenshot inspected: both graphs have fresh plotted data, no panel errors.",
+  "summary_created_utc": "2026-10-23T11:24:25.409354+00:00"
+}

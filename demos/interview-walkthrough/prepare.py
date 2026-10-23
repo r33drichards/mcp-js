@@ -4,6 +4,7 @@ import argparse,json,os,shutil,subprocess,sys
 from pathlib import Path
 import yaml
 import demo as d
+ASTRO_VERSION='2.1.3'
 ASTRO='91356a39d5a0dc601317b55339b7abfafd91b481'
 BROWSER='63bab526d2a999af969657f70a342dfebe1cbb63'
 def verify_source(root,commit):
@@ -39,7 +40,7 @@ def prepare(binary,astro_source=None,browser_source=None,skip_build=False):
  for root,pin in [(astro,ASTRO),(browser,BROWSER)]:
   verify_source(root,pin)
  env=dict(os.environ,DEMO_ID=ident,RUNTIME_IMAGE=ident+':local',BROWSER_CONTEXT=str(browser/'images/browser'),MCP_CONFIG_FILE=str(d.HERE/'mcp-full.json'))
- base=render(d.HERE/'compose.yml',env);upstream=render(astro/'docker-compose.yml')
+ base=render(d.HERE/'compose.yml',env);upstream=render(astro/'docker-compose.yml',dict(os.environ,DEMO_VERSION=ASTRO_VERSION))
  collector=yaml.safe_load((astro/'src/otel-collector/otelcol-config.yml').read_text())
  for key in ['docker_stats','hostmetrics']:collector['receivers'].pop(key,None)
  collector['processors']['resourcedetection']['detectors']=['env']
@@ -74,9 +75,10 @@ def prepare(binary,astro_source=None,browser_source=None,skip_build=False):
  services['grafana']['depends_on']={'prometheus':{'condition':'service_started'}}
  # Existing Grafana receives stock metrics; Loki is an explicit added log export.
  ds=out/'datasources.yml';ds.write_text(yaml.safe_dump({'apiVersion':1,'datasources':[{'name':'Demo Prometheus','uid':'demo-prometheus','type':'prometheus','url':'http://prometheus:9090','access':'proxy','isDefault':True},{'name':'Demo logs','uid':'demo-logs','type':'loki','url':'http://loki:3100','access':'proxy'}]}))
- services['grafana']['volumes'].append({'type':'bind','source':str(ds),'target':'/etc/grafana/provisioning/datasources/astronomy.yml','read_only':True})
  # Avoid duplicate UID in the original provisioning directory.
  prov=out/'provisioning';shutil.copytree(d.HERE/'provisioning',prov,dirs_exist_ok=True);(prov/'datasources/demo.yml').unlink(missing_ok=True)
+ shutil.copy2(ds,prov/'datasources/astronomy.yml')
+ for name in ['node1','node2','node3','query']:services[name]['user']='1000:1000'
  for m in services['grafana']['volumes']:
   if m['target']=='/etc/grafana/provisioning':m['source']=str(prov)
  services['grafana-mcp']['command']=[x.replace('prometheus,datasource','prometheus,datasource,loki') for x in services['grafana-mcp']['command']]
