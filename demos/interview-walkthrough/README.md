@@ -99,3 +99,7 @@ For the 7.65 GiB Docker VM, use [memory-profile.md](memory-profile.md) instead o
 Preparation verifies both the pinned Git commit and materialized tracked files. A fresh or empty `--no-checkout` clone is checked out even when HEAD already matches; modified existing source is rejected without overwriting edits. Portable engine builds use a clean `git archive` of `MCP_JS_BUILD_COMMIT` (default HEAD), never the working tree. Sensitive paths are excluded even if tracked, and the root `.dockerignore` independently excludes demo state and credentials. The runtime build receives only three named files from that same export. Commit intended source changes before building. Local review reported no prior image build or token exposure.
 
 Cargo defaults to one build job. This limits parallelism, **not peak linker/compiler memory**. The source build has not been demonstrated within the Mac’s memory budget; avoid running it alongside the workload. A previously verified cloud Linux binary is available as a checksum-recorded scratch artifact for a separately coordinated transfer; it is not published or bundled into Git.
+
+## EC2 rehearsal
+
+The separate deployment task owns the approved USD 20 / 24-hour EC2 rehearsal and shutdown. [ec2-handoff.md](ec2-handoff.md) gives the fixed-snapshot build, loopback access boundaries, acceptance order and narration steps. No AWS resources were created by this preparation task.
