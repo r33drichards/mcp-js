@@ -52,7 +52,7 @@
     "why": "Per-operation policy provides a boundary more precise than handing the guest the host filesystem. Source comments document this gate; Robert supplies the original decision history.",
     "notes": "Policy input is operation, not op. Show failed status/error rather than treating any exception as proof of policy denial. No passthrough. Directory creation is implicit in virtual mode. Additional hardening is opt-in. Compose reference: compose.astronomy.json; generated .state/compose.json is the launch artifact. Return to real dashboard status when ready; no timer simulates progress.",
     "source": "https://github.com/r33drichards/mcp-js/blob/fe5b613db0afcc9cf20d7ca1ef659c914a0b5008/server/src/engine/fs.rs#L143",
-    "visual": "policy"
+    "visual": "publish"
   },
   {
     "clock": "19\u201325",
