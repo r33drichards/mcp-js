@@ -23,7 +23,10 @@ def docker(*args,check=True):
     r=subprocess.run(['docker',*args],capture_output=True,text=True)
     if check and r.returncode: raise RuntimeError(r.stderr.strip() or r.stdout.strip())
     return r.stdout.strip()
-def name(n): return config()['id']+'-'+str(n)
+def name(n):
+    c=config()
+    if n==4: n=c.get('query_node',4)
+    return c['id']+'-'+str(n)
 def owned(kind,target):
     data=json.loads(docker(kind,'inspect',target))[0]
     labels=data.get('Config',{}).get('Labels',{}) if kind=='container' else data.get('Labels',{})
@@ -60,7 +63,7 @@ def record(event,data):
     return data
 def statuses():
     result=[]
-    for i in (1,2,3):
+    for i in config().get('node_ids',[1,2,3]):
         try:
             _,s=request(i,'/raft/status',raft=True,timeout=.8); s['node']=i
         except Exception as e: s={'node':i,'role':'unreachable','error':str(e)}
@@ -150,6 +153,7 @@ def kill_node(i):
 def restart_node(i):
     owned('container',name(i)); docker('start',name(i)); return record('node_restarted',{'node':i})
 def outage():
+    if config().get('node_ids',[1,2,3]) != [1,2,3]: raise RuntimeError('This action requires the explicit three-voter cluster phase; single-node investigation is not HA')
     s=state_data()
     if 'B' not in s: s=seed()
     old=leader(); before=statuses(); kill_node(old); start=time.monotonic()
@@ -173,6 +177,7 @@ def outage():
         time.sleep(.2)
     raise RuntimeError('Restart recovery not observed by deadline')
 def quorum():
+    if config().get('node_ids',[1,2,3]) != [1,2,3]: raise RuntimeError('This action requires the explicit three-voter cluster phase; single-node investigation is not HA')
     s=state_data() or seed(); keep=leader(); removed=[i for i in (1,2,3) if i!=keep]
     for i in removed: kill_node(i)
     label='uncertain-'+uuid.uuid4().hex[:8]
