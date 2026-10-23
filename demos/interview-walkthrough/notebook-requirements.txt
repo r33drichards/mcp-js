@@ -3,4 +3,4 @@ nbclient==0.10.2
 ipykernel==6.30.1
 ipywidgets==8.1.7
 mcp==1.30.0
-openai==2.54.0
+aiobotocore==3.10.0

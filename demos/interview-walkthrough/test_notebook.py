@@ -36,20 +36,20 @@ class RehearsalTests(unittest.TestCase):
   nb=json.loads((Path(__file__).parent/'walkthrough.ipynb').read_text())
   source=next(''.join(c['source']) for c in nb['cells'] if c['cell_type']=='code' and 'async def investigation_loop' in ''.join(c['source']))
   scope={'json':json,'os':__import__('os')};exec(source,scope)
-  class Item:
-   type='function_call';name='branch_info';arguments='{}';call_id='one'
-   def model_dump(self,**kw):return {'type':self.type,'name':self.name,'arguments':self.arguments,'call_id':self.call_id}
   class Model:
-   def __init__(self):self.responses=self;self.n=0
-   async def create(self,**kw):
+   def __init__(self):self.n=0
+   async def converse(self,**kw):
     self.n+=1
-    if self.n==2:assert kw['input'][-1]['type']=='function_call_output'
-    return NS(output=[Item()] if self.n==1 else [],output_text='MOCK ONLY')
+    from botocore.session import get_session
+    from botocore.validate import validate_parameters
+    validate_parameters(kw,get_session().get_service_model('bedrock-runtime').operation_model('Converse').input_shape)
+    if self.n==2:assert kw['messages'][-1]['content'][0]['toolResult']['toolUseId']=='one'
+    return {'output':{'message':{'role':'assistant','content':[{'toolUse':{'toolUseId':'one','name':'branch_info','input':{}}}] if self.n==1 else [{'text':'MOCK ONLY'}]}},'stopReason':'tool_use' if self.n==1 else 'end_turn','usage':{'inputTokens':5,'outputTokens':2,'totalTokens':7}}
   class Session:
    async def list_tools(self):return NS(tools=[NS(name=x,description='',inputSchema={'type':'object'}) for x in ['run_js','branch_info']])
    async def call_tool(self,name,arguments):return NS(isError=False,model_dump=lambda **kw:{'isError':False,'structuredContent':{'root':'MOCK'}})
-  with patch.dict('os.environ',{'OPENAI_MODEL':'offline-mock'}):
+  with patch.dict('os.environ',{'BEDROCK_MODEL_ID':'offline-mock'}):
    result=asyncio.run(scope['investigation_loop'](Model(),Session(),{'labels':{'service':'checkout','alertname':'CheckoutErrors'}},'test',lambda x:None))
-  self.assertEqual(result[-1]['call_id'],'one')
+  self.assertEqual(result[-2]['content'][0]['toolResult']['toolUseId'],'one')
 
 if __name__=='__main__':unittest.main()
