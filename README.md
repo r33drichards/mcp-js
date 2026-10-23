@@ -1,3 +1,31 @@
+# Run the minimal LGTM + Pi demo on Ubuntu
+
+```sh
+cd /opt/mcp-interview/repo
+./demos/lgtm-pi/demo.sh status
+./demos/lgtm-pi/demo.sh agent
+```
+
+More commands from this same directory:
+
+```sh
+./demos/lgtm-pi/demo.sh up
+./demos/lgtm-pi/demo.sh seed
+./demos/lgtm-pi/demo.sh reset
+```
+
+The launcher reuses the running minimal stack's existing directory, keeping its mounts and data intact. `reset` archives generated dashboards and reseeds synthetic metrics/logs; start a fresh Pi conversation for fresh COW scratch. The old Astronomy demo is stopped and preserved.
+
+From your Mac:
+
+```sh
+ssh -i ~/.ssh/id_ed25519 -L 39300:127.0.0.1:39300 ubuntu@54.200.10.22
+```
+
+Open http://127.0.0.1:39300. Pi defaults to **Amazon Bedrock / Nova Micro**, using the existing instance role. Qwen is not enabled. See [the complete minimal demo README](demos/lgtm-pi/README.md) for shared dashboard paths, COW semantics, verification and image prerequisites.
+
+---
+
 # mcp-v8 — a JavaScript/TypeScript runtime for AI agents
 
 [![Docs](https://img.shields.io/badge/docs-mkdocs-blue)](https://r33drichards.github.io/mcp-js/)
