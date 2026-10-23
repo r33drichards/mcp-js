@@ -78,4 +78,44 @@ class BudgetTests(unittest.IsolatedAsyncioTestCase):
   self.assertEqual(len(m.calls),6)
   self.assertTrue(all(c['inferenceConfig']['maxTokens']==1024 for c in m.calls))
 
+
+class NovaRequestBudgetTests(unittest.IsolatedAsyncioTestCase):
+ async def asyncSetUp(self):
+  self.env=patch.dict(os.environ,{'BEDROCK_MODEL_ID':'us.amazon.nova-micro-v1:0','BEDROCK_BUDGET_MODE':'nova-request-bounds'});self.env.start();self.addCleanup(self.env.stop)
+ async def test_nova_uses_no_counttokens_and_logs_unknown_count(self):
+  m=Model();events=[];await loop(m,Session(),ALERT,'system',events.append,max_steps=1)
+  self.assertEqual(m.count_inputs,[]);self.assertEqual(len(m.calls),1)
+  record=next(e for e in events if 'request_bytes' in e)
+  self.assertIsNone(record['input_tokens_before_call'])
+  self.assertEqual(record['request_bytes'],len(json.dumps(m.calls[0],ensure_ascii=True).encode('utf-8')))
+ async def test_schema_and_unicode_full_request_bounds(self):
+  for prompt,session in [('system',Session(schema_size=17000)),('\u2603'*7000,Session())]:
+   m=Model()
+   with self.assertRaisesRegex(RuntimeError,'Full request byte'):await loop(m,session,ALERT,prompt,lambda x:None)
+   self.assertEqual(m.calls,[]);self.assertEqual(m.count_inputs,[])
+ async def test_accumulated_history_stops_before_oversized_call(self):
+  m=Model()
+  with self.assertRaisesRegex(RuntimeError,'Full request byte'):await loop(m,Session(11000),ALERT,'x'*10000,lambda x:None)
+  self.assertEqual(len(m.calls),2)
+ async def test_cumulative_submitted_request_budget(self):
+  m=Model()
+  with self.assertRaisesRegex(RuntimeError,'Cumulative request byte'):await loop(m,Session(),ALERT,'x'*20000,lambda x:None)
+  self.assertEqual(len(m.calls),4)
+ async def test_large_tool_result_stops_without_second_inference(self):
+  m=Model()
+  with self.assertRaisesRegex(RuntimeError,'Tool result too large'):await loop(m,Session(17000),ALERT,'system',lambda x:None)
+  self.assertEqual(len(m.calls),1)
+ async def test_no_silent_other_model_fallback(self):
+  m=Model()
+  with patch.dict(os.environ,{'BEDROCK_MODEL_ID':'another-model'}):
+   with self.assertRaisesRegex(ValueError,'scoped'):await loop(m,Session(),ALERT,'system',lambda x:None)
+  self.assertEqual(m.calls,[])
+ async def test_cancelled_nova_attempt_keeps_bytes_and_no_retry(self):
+  m=Model();m.block='inference';events=[];task=asyncio.create_task(loop(m,Session(),ALERT,'system',events.append))
+  await m.entered.wait();task.cancel()
+  with self.assertRaises(asyncio.CancelledError):await task
+  self.assertEqual(len(m.calls),1);self.assertEqual(m.count_inputs,[])
+  reservation=next(e for e in events if 'inference_attempt' in e)
+  self.assertGreater(reservation['submitted_request_bytes'],0);self.assertIsNone(reservation['reserved_input_tokens'])
+
 if __name__=='__main__':unittest.main()
