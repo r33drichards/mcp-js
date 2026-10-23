@@ -53,6 +53,7 @@
           "volume": {}
         }
       ],
+      "platform": "linux/amd64",
       "healthcheck": {
         "test": [
           "CMD",
@@ -146,7 +147,8 @@
           "target": "/etc/grafana/provisioning/datasources/astronomy.yml",
           "read_only": true
         }
-      ]
+      ],
+      "platform": "linux/amd64"
     },
     "grafana-mcp": {
       "command": [
@@ -186,7 +188,8 @@
       },
       "networks": {
         "demo": null
-      }
+      },
+      "platform": "linux/amd64"
     },
     "node1": {
       "cap_drop": [
@@ -274,7 +277,8 @@
           "target": "/data",
           "volume": {}
         }
-      ]
+      ],
+      "platform": "linux/amd64"
     },
     "node2": {
       "cap_drop": [
@@ -362,7 +366,8 @@
           "target": "/data",
           "volume": {}
         }
-      ]
+      ],
+      "platform": "linux/amd64"
     },
     "node3": {
       "cap_drop": [
@@ -450,7 +455,8 @@
           "target": "/data",
           "volume": {}
         }
-      ]
+      ],
+      "platform": "linux/amd64"
     },
     "objects": {
       "command": null,
@@ -492,7 +498,8 @@
           "target": "/data",
           "volume": {}
         }
-      ]
+      ],
+      "platform": "linux/amd64"
     },
     "pi": {
       "profiles": [
@@ -522,7 +529,8 @@
           "target": "/state",
           "volume": {}
         }
-      ]
+      ],
+      "platform": "linux/amd64"
     },
     "publisher": {
       "cap_drop": [
@@ -547,7 +555,8 @@
           "target": "/dashboards",
           "volume": {}
         }
-      ]
+      ],
+      "platform": "linux/amd64"
     },
     "query": {
       "cap_drop": [
@@ -674,7 +683,8 @@
             "create_host_path": true
           }
         }
-      ]
+      ],
+      "platform": "linux/amd64"
     },
     "query-network": {
       "command": null,
@@ -699,7 +709,8 @@
           "published": "38081",
           "protocol": "tcp"
         }
-      ]
+      ],
+      "platform": "linux/amd64"
     },
     "accounting": {
       "command": null,
@@ -748,7 +759,8 @@
       "labels": {
         "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
       },
-      "volumes": []
+      "volumes": [],
+      "platform": "linux/amd64"
     },
     "ad": {
       "command": null,
@@ -799,7 +811,8 @@
       "labels": {
         "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
       },
-      "volumes": []
+      "volumes": [],
+      "platform": "linux/amd64"
     },
     "cart": {
       "command": null,
@@ -854,7 +867,8 @@
       "labels": {
         "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
       },
-      "volumes": []
+      "volumes": [],
+      "platform": "linux/amd64"
     },
     "checkout": {
       "command": null,
@@ -939,7 +953,8 @@
       "labels": {
         "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
       },
-      "volumes": []
+      "volumes": [],
+      "platform": "linux/amd64"
     },
     "currency": {
       "command": null,
@@ -983,7 +998,8 @@
       "labels": {
         "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
       },
-      "volumes": []
+      "volumes": [],
+      "platform": "linux/amd64"
     },
     "email": {
       "command": null,
@@ -1029,7 +1045,8 @@
       "labels": {
         "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
       },
-      "volumes": []
+      "volumes": [],
+      "platform": "linux/amd64"
     },
     "flagd": {
       "command": [
@@ -1079,7 +1096,8 @@
       ],
       "labels": {
         "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
-      }
+      },
+      "platform": "linux/amd64"
     },
     "flagd-ui": {
       "command": null,
@@ -1129,7 +1147,8 @@
       ],
       "labels": {
         "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
-      }
+      },
+      "platform": "linux/amd64"
     },
     "fraud-detection": {
       "command": null,
@@ -1180,7 +1199,8 @@
       "labels": {
         "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
       },
-      "volumes": []
+      "volumes": [],
+      "platform": "linux/amd64"
     },
     "frontend": {
       "command": null,
@@ -1277,7 +1297,8 @@
       "labels": {
         "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
       },
-      "volumes": []
+      "volumes": [],
+      "platform": "linux/amd64"
     },
     "frontend-proxy": {
       "command": null,
@@ -1351,7 +1372,8 @@
           "host_ip": "127.0.0.1",
           "protocol": "tcp"
         }
-      ]
+      ],
+      "platform": "linux/amd64"
     },
     "image-provider": {
       "command": null,
@@ -1394,7 +1416,8 @@
       "labels": {
         "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
       },
-      "volumes": []
+      "volumes": [],
+      "platform": "linux/amd64"
     },
     "jaeger": {
       "command": [
@@ -1443,7 +1466,8 @@
       ],
       "labels": {
         "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
-      }
+      },
+      "platform": "linux/amd64"
     },
     "kafka": {
       "command": null,
@@ -1494,7 +1518,8 @@
       "labels": {
         "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
       },
-      "volumes": []
+      "volumes": [],
+      "platform": "linux/amd64"
     },
     "load-generator": {
       "command": null,
@@ -1551,7 +1576,8 @@
       "labels": {
         "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
       },
-      "volumes": []
+      "volumes": [],
+      "platform": "linux/amd64"
     },
     "opensearch": {
       "command": null,
@@ -1618,7 +1644,8 @@
       "labels": {
         "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
       },
-      "volumes": []
+      "volumes": [],
+      "platform": "linux/amd64"
     },
     "otel-collector": {
       "command": [
@@ -1692,7 +1719,8 @@
       ],
       "labels": {
         "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
-      }
+      },
+      "platform": "linux/amd64"
     },
     "payment": {
       "command": null,
@@ -1741,7 +1769,8 @@
       "labels": {
         "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
       },
-      "volumes": []
+      "volumes": [],
+      "platform": "linux/amd64"
     },
     "postgresql": {
       "command": null,
@@ -1776,7 +1805,8 @@
       "labels": {
         "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
       },
-      "volumes": []
+      "volumes": [],
+      "platform": "linux/amd64"
     },
     "product-catalog": {
       "command": null,
@@ -1836,7 +1866,8 @@
       ],
       "labels": {
         "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
-      }
+      },
+      "platform": "linux/amd64"
     },
     "prometheus": {
       "command": [
@@ -1885,7 +1916,8 @@
       ],
       "labels": {
         "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
-      }
+      },
+      "platform": "linux/amd64"
     },
     "quote": {
       "command": null,
@@ -1930,7 +1962,8 @@
       "labels": {
         "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
       },
-      "volumes": []
+      "volumes": [],
+      "platform": "linux/amd64"
     },
     "recommendation": {
       "command": null,
@@ -1986,7 +2019,8 @@
       "labels": {
         "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
       },
-      "volumes": []
+      "volumes": [],
+      "platform": "linux/amd64"
     },
     "shipping": {
       "command": null,
@@ -2030,7 +2064,8 @@
       "labels": {
         "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
       },
-      "volumes": []
+      "volumes": [],
+      "platform": "linux/amd64"
     },
     "valkey-cart": {
       "command": null,
@@ -2061,7 +2096,8 @@
       "labels": {
         "mcp-js-demo-owner": "${DEMO_ID:-mcp-js-interview}"
       },
-      "volumes": []
+      "volumes": [],
+      "platform": "linux/amd64"
     },
     "loki": {
       "image": "grafana/loki:3.5.7",
@@ -2081,7 +2117,8 @@
           "source": "loki",
           "target": "/loki"
         }
-      ]
+      ],
+      "platform": "linux/amd64"
     }
   },
   "volumes": {

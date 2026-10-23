@@ -29,7 +29,15 @@ def owned(kind,target):
     labels=data.get('Config',{}).get('Labels',{}) if kind=='container' else data.get('Labels',{})
     if (labels or {}).get('mcp-js-demo-owner')!=config()['id']: raise RuntimeError('Refusing unowned resource '+target)
     return data
+def container_http(node,url,data=None,timeout=12,host='127.0.0.1'):
+    owned('container',name(node))
+    spec=json.dumps({'url':url,'data':data,'timeout':timeout,'host':host})
+    result=docker('exec',name(node),'/usr/bin/python3','-c',(HERE/'container-http.py').read_text(),spec)
+    return json.loads(result)
 def request(node,path,data=None,raft=False,timeout=12):
+    if os.environ.get('MCP_JS_DEMO_TRANSPORT')=='exec' or sys.platform=='darwin':
+        r=container_http(node,f'http://127.0.0.1:{4000 if raft else 3000}{path}',data,timeout)
+        return r['status'],json.loads(r['body'])
     port=(38200 if raft else 38100)+node
     info=owned('container',name(node))
     if not info['State']['Running']: raise RuntimeError('demo node stopped')

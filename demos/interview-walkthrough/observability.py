@@ -1,5 +1,5 @@
 """Actual Grafana MCP query and explicit COW -> Grafana file publication bridge."""
-import base64,json,time,urllib.request,urllib.error,subprocess,hashlib
+import base64,json,time,urllib.request,urllib.error,subprocess,hashlib,os,sys
 from pathlib import Path
 PROM='prom/prometheus@sha256:23031bfe0e74a13004252caaa74eccd0d62b6c6e7a04711d5b8bf5b7e113adc7'
 GRAFANA='grafana/grafana@sha256:70d9599b186ce287be0d2c5ba9a78acb2e86c1a68c9c41449454d0fc3eeb84e8'
@@ -9,6 +9,10 @@ class Observability:
  def url(self,service,port,path):
   info=self.d.owned('container',self.d.name(service));ip=next(iter(info['NetworkSettings']['Networks'].values()))['IPAddress'];return f'http://{ip}:{port}{path}'
  def http(self,service,port,path,data=None):
+  if os.environ.get('MCP_JS_DEMO_TRANSPORT')=='exec' or sys.platform=='darwin':
+   r=self.d.container_http(1,f'http://{service}:{port}{path}',data,15,host=f'{service}:{port}')
+   if r['status']>=400:raise RuntimeError('Service HTTP error '+str(r))
+   return r['body'].encode()
   req=urllib.request.Request(self.url(service,port,path),data=None if data is None else json.dumps(data).encode(),headers={'Content-Type':'application/json'})
   with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req,timeout=15) as r:return r.read()
  def create(self,service,image,args=(),env=None,extra=()):

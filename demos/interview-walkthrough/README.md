@@ -6,7 +6,7 @@ Start with [slides.html](slides.html) (self-contained, arrow-key navigation, N p
 
 ## Prerequisites and startup
 
-Linux x86_64; Docker Engine + Compose v2; Python 3 with PyYAML; a trusted Linux mcp-js `server` binary built from base `fe5b613`; Git; network access to pinned public sources/images during preparation. Reserve at least 14 GiB free disk and 8 GiB RAM (more for the full desktop browser). This cloud environment has only about 4.6 GiB free after scoped cleanup. Do not run the full stack until the disk gate passes. Docker Desktop host-to-container IP routing is not supported by this controller.
+Linux x86_64; Docker Engine + Compose v2; Python 3 with PyYAML; a trusted Linux mcp-js `server` binary built from base `fe5b613`; Git; network access to pinned public sources/images during preparation. Reserve at least 14 GiB free disk and 8 GiB RAM (more for the full desktop browser). This cloud environment has only about 4.6 GiB free after scoped cleanup. Do not run the full stack until the disk gate passes. On macOS the controller uses ownership-checked docker exec HTTP requests, avoiding Docker Desktop private-IP routing. On Linux this transport is opt-in with MCP_JS_DEMO_TRANSPORT=exec. The portable build and full Mac runtime remain unverified.
 
 From this directory:
 
@@ -39,6 +39,21 @@ python3 demo.py publish
 ```
 
 The agent stops at findings and dashboard handoff. `operator-fault.py` is a separate operator-only fixture control, not an MCP tool or remediation feature. `paymentFailure=100%` deterministically throws when the payment charge path is exercised; real traffic, pipeline delivery, status metrics and warning logs must still be verified.
+
+
+### Mac / Docker Desktop handoff
+
+Use a separate clone of branch `demo/interview-walkthrough`. Install no cloud credentials. The full desktop browser needs **linux/amd64**; on Apple Silicon enable Docker Desktop amd64 emulation and expect a slower source build. Generated services explicitly select amd64. Reserve at least 14 GiB runtime disk **plus Rust/Nix build headroom** (30+ GiB free recommended), and allocate at least 8–12 GiB RAM to Docker. Inspect the Mac resources before starting.
+
+```sh
+cd demos/interview-walkthrough
+./launch.sh prepare --binary /unused --skip-build
+./build-portable.sh
+./launch.sh up
+./launch.sh serve
+```
+
+`--skip-build` only prepares configuration; `/unused` is never read. The portable script builds this checkout through `Dockerfile.source`, then adds Python and the demo object/policy fixture. It does not use the default Dockerfile’s latest release. Source compilation and original browser Nix build require working public build networking. This path is prepared but **not tested on a Mac**; the local task owns that validation. No Railway deployment is needed.
 
 ## Pi paired conversation/filesystem forks
 

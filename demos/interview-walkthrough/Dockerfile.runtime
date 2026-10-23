@@ -1,0 +1,11 @@
+ARG ENGINE_IMAGE=mcp-interview-engine:source
+FROM ${ENGINE_IMAGE}
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends python3 && rm -rf /var/lib/apt/lists/*
+RUN ln -s /usr/local/bin/mcp-v8 /server
+COPY object-store.py /object-store.py
+COPY filesystem.rego /filesystem.rego
+RUN printf '%s' '{"filesystem":{"policies":[{"url":"file:///filesystem.rego","rule":"data.mcp.filesystem.allow"}]}}' > /policies.json
+ENV MCP_V8_ALLOWED_HOSTS=localhost,127.0.0.1
+ENTRYPOINT ["/server"]
+CMD []

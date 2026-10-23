@@ -72,6 +72,7 @@ def prepare(binary,astro_source=None,browser_source=None,skip_build=False):
  # No global upstream container/network names and no upstream host-port exposure.
  for key,vol in base['volumes'].items():vol['name']=ident+'-'+key
  base['name']=ident;base['networks']={'demo':base['networks']['demo']}
+ for service in services.values():service['platform']='linux/amd64'
  services['browser']['healthcheck']={'test':['CMD','/bin/bash','-c','echo > /dev/tcp/127.0.0.1/8081'],'interval':'3s','timeout':'3s','retries':40}
  services['query']['depends_on']['browser']={'condition':'service_healthy'}
  services['pi']['environment']['MCP_JS_DEMO_TOKEN']=c['token']
