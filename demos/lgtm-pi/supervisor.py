@@ -9,11 +9,11 @@ def stop(*_):
  sys.exit(0)
 signal.signal(signal.SIGTERM,stop);signal.signal(signal.SIGINT,stop)
 commands=[['/entrypoint'],['/minimal/mcp-grafana','--transport','streamable-http','--address','127.0.0.1:8000','--allowed-hosts','127.0.0.1:8000','--enabled-tools','prometheus,datasource,loki','--disable-write','--usage-stats','disabled']]
-for port,policy,extra in [('3000','host',['--fs-store','none']),('3001','scratch',['--fs-store','dir','--fs-dir','/scratch/blobs'])]:
- commands.append(['/server','--http-port',port,'--bind-host','0.0.0.0','--heap-store','none','--session-db-path','/scratch/sessions-'+port,'--policies-json','/minimal/'+policy+'-policies.json','--mcp-config','/minimal/mcp.json',*extra])
+for port,policy,extra in [('3001','scratch',['--fs-store','dir','--fs-dir','/scratch/blobs']),('3000','host',['--fs-store','none'])]:
+ commands.append(['/server','--http-port',port,'--bind-host','0.0.0.0','--heap-store','none','--session-db-path','/scratch/sessions-'+port,'--policies-json','/minimal/'+policy+'-policies.json','--mcp-config','/minimal/'+('host-mcp.json' if policy=='host' else 'mcp.json'),*extra])
 for command in commands:
  if command[0]=='/server':
-  for port in [8000,8081]:
+  for port in ([8000,8081,3001] if '3000' in command else [8000,8081]):
    for attempt in range(120):
     try:
      with socket.create_connection(('127.0.0.1',port),timeout=1):break

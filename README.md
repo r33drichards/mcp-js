@@ -22,7 +22,7 @@ From your Mac:
 ssh -i ~/.ssh/id_ed25519 -L 39300:127.0.0.1:39300 ubuntu@54.200.10.22
 ```
 
-Open http://127.0.0.1:39300. In Pi, run `/login openai`, choose **Sign in with ChatGPT**, and complete sign-in yourself. Then run `/model` and select an available OpenAI subscription model. This installed Pi build uses provider `openai` for ChatGPT login. No model/provider is forced by the launcher. The model receives only the four intended MCP tools; built-in shell/filesystem tools are disabled. If SSH cannot receive the browser callback, paste the final redirect URL/code only into your Pi terminal when prompted, never into chat. Qwen is not enabled. See [the complete minimal demo README](demos/lgtm-pi/README.md) for shared dashboard paths, COW semantics, verification and image prerequisites.
+Open http://127.0.0.1:39300. In Pi, run `/login openai`, choose **Sign in with ChatGPT**, and complete sign-in yourself. Then run `/model` and select an available OpenAI subscription model. This installed Pi build uses provider `openai` for ChatGPT login. No model/provider is forced by the launcher. The model receives only the three intended MCP tools (one run_js plus artifact retrieval); built-in shell/filesystem tools are disabled. If SSH cannot receive the browser callback, paste the final redirect URL/code only into your Pi terminal when prompted, never into chat. Qwen is not enabled. See [the complete minimal demo README](demos/lgtm-pi/README.md) for shared dashboard paths, COW semantics, verification and image prerequisites.
 
 ---
 

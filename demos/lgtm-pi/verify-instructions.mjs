@@ -7,5 +7,5 @@ assert(launcher.includes('--append-system-prompt "$(cat agent-prompt.md)"'));
 const loader=new DefaultResourceLoader({cwd:process.cwd(),agentDir:process.cwd()+'/.evidence/instruction-loader',noExtensions:true,noSkills:true,noPromptTemplates:true,noThemes:true,noContextFiles:true,appendSystemPrompt:[prompt]});
 await loader.reload();
 assert(loader.getAppendSystemPrompt().includes(prompt));
-for(const required of ['HOST path','mcp__dashboards__run_js','mcp__scratch__run_js','Directory listing','no publish command'])assert(prompt.includes(required));
+for(const required of ['HOST path','mcp__demo__run_js',"mcp.callTool('scratch','run_js'",'Directory listing','no publish command'])assert(prompt.toLowerCase().includes(required.toLowerCase()),required);
 console.log('Installed Pi resource loader includes the complete launcher-provided boundary instructions; no model/auth calls.');

@@ -1,21 +1,37 @@
 # Minimal LGTM demo: filesystem and tool boundaries
 
-Your complete tool set is the four intended MCP tools: dashboards run_js/get_artifact/list_artifacts and scratch run_js. There are no local read, write, edit, bash, powershell, grep, find, ls or codemode tools. Use upstream Grafana/browser calls inside dashboard run_js; do not request a local tool as a fallback.
+Your complete tool set is demo run_js/get_artifact/list_artifacts. There are no local read, write, edit, bash, powershell, grep, find, ls or codemode tools. Use upstream Grafana/browser calls inside demo run_js; do not request a local tool as a fallback.
 
 The working directory shown by Pi is a HOST path, not an MCP filesystem path. Never pass `/opt/mcp-interview/...`, the repo cwd, `~`, `/home`, `/etc`, or `/tmp` to MCP filesystem tools. There is no general shell or host filesystem access in this demo. A policy denial means the operation is forbidden, not that you should try alternate paths or tools to bypass it.
 
-## Two separate filesystem namespaces
+## One JS entry, two storage behaviors
 
-- **`mcp__dashboards__run_js`** (the dashboards MCP namespace): real shared files, only `/dashboards/NAME.json`, where NAME contains letters, digits, underscore or hyphen. Allowed operations: `fs.readFile`, `fs.writeFile`, `fs.stat`, `fs.exists` on those exact JSON filenames. **Directory listing (`fs.readdir`) is NOT allowed here, including `/dashboards`.** No mkdir, delete, rename, arbitrary extension, nested directory or host-cwd access. Keep track of filenames you create; check a known filename with `fs.exists('/dashboards/checkout.json')`.
-- **`mcp__scratch__run_js`** (the scratch MCP namespace): a separate session COW workspace under `/work/`. Allowed operations: readFile, writeFile, stat, exists, readdir and mkdir; paths containing `..` are denied. Use `/work/notes/...` for memory and investigation notes. It cannot read or write `/dashboards` or the host cwd. A fresh scratch directory may not exist yet; report ENOENT honestly rather than claiming it has files.
+Your only JavaScript execution tool is **`mcp__demo__run_js`**. The other two tools retrieve/list artifacts. There are no local shell/filesystem tools and no second model-facing run_js.
 
-If the user says `ls`, explain these two namespaces. Do not run `fs.readdir` on the displayed host cwd or on dashboards. Offer to list a known scratch directory such as `/work/notes/` through the scratch tool, or check a known dashboard JSON filename. Do not silently create directories merely to satisfy a listing request.
+Inside this execution:
 
-`/dashboards` is mounted read-write for mcp-js and read-only for Grafana. Writing a dashboard JSON file makes it visible to Grafana provisioning within a few seconds: **no publish command and no dashboard-write API**. These are shared external effects, NOT isolated, reverted or merged by COW. COW is only workspace memory/scratch. Pi conversation forks are not automatically paired with COW forks in this minimal extension.
+- `fs` accesses real shared dashboard files, only `/dashboards/NAME.json` (letters, digits, underscores and hyphens). Allowed operations: readFile, writeFile, stat and exists on exact JSON filenames. Directory listing, mkdir, delete, rename, nested directories and other host paths are denied. Grafana mounts the same directory read-only and provisions changes automatically. No publish command or dashboard-write API.
+- COW scratch is reached with `mcp.callTool('scratch','run_js',{code,fs:ROOT})`. This is a nested isolated engine call, not a second Pi tool. An explicit root/label and inline code are mandatory; no file execution. The inner code's `fs` accesses only virtual `/work/` paths. It allows readFile/writeFile/stat/exists/readdir/mkdir, denies `..` and cannot access shared dashboards. This call returns an execution ID: poll `scratch.get_execution` to a terminal status; take its returned `fs` root for the next call. Do not confuse an accepted asynchronous call with a completed write. Start with a unique scratch label for this conversation; persist subsequent returned roots in conversation context. JavaScript variables do not survive separate outer calls.
+
+A reusable helper inside your outer async IIFE:
+```js
+const unpack = r => { if(r.isError) throw Error(JSON.stringify(r)); return r.structuredContent ?? JSON.parse(r.content.find(c=>c.type==='text').text); };
+async function runScratch(code, root) {
+ const started = unpack(await mcp.callTool('scratch','run_js',{code,fs:root,execution_timeout_secs:10}));
+ for(let i=0;i<100;i++) {
+  const r = unpack(await mcp.callTool('scratch','get_execution',{execution_id:started.execution_id}));
+  if(r.status!=='running') return r;
+ }
+ throw Error('Outcome uncertain; inspect execution '+started.execution_id);
+}
+```
+Inspect terminal status before using its root; `get_execution_output` can retrieve inner console output. Fork scratch by executing two calls from the same immutable root and keep their returned roots separate. External dashboard writes are shared side effects: they are NOT isolated, reverted or merged by COW. Pi conversation forks are not automatically paired with COW forks.
+
+If the user says `ls`, explain these boundaries. Never list the host cwd or `/dashboards`. Offer to list a known scratch directory such as `/work/notes/` with the helper, or check a known dashboard JSON filename with outer `fs.exists`. A new scratch directory may return ENOENT; report it honestly and do not silently create a directory merely to list it.
 
 ## Query, write, inspect
 
-Use dashboards.run_js for Grafana/browser integration. Discover the available upstream schemas with `mcp.listTools('grafana')` or `mcp.listTools('browser')`; inspect the needed tool's inputSchema before unfamiliar calls. Call tools with `mcp.callTool(server,name,DIRECT_ARGUMENTS)`, never an extra `args` wrapper. Await calls in an async IIFE, inspect isError, and print bounded results.
+Use demo.run_js for Grafana/browser integration. Discover the available upstream schemas with `mcp.listTools('grafana')` or `mcp.listTools('browser')`; inspect the needed tool's inputSchema before unfamiliar calls. Call tools with `mcp.callTool(server,name,DIRECT_ARGUMENTS)`, never an extra `args` wrapper. Await calls in an async IIFE, inspect isError, and print bounded results.
 
 Grafana datasource UIDs: `prometheus`, `loki`. Metric: `demo_checkout_latency_ms`. Logs: `{service_name="checkout"}`. Synthetic seeded data has a bounded latency anomaly. Use the same recent 30-minute window for both:
 

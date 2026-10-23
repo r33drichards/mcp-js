@@ -8,5 +8,5 @@ COPY --from=engine /usr /usr
 COPY --from=engine /lib /lib
 COPY --from=engine /lib64 /lib64
 COPY --from=grafana_mcp /app/mcp-grafana /minimal/mcp-grafana
-COPY *.rego *-policies.json mcp.json supervisor.py /minimal/
+COPY *.rego *-policies.json mcp.json host-mcp.json supervisor.py /minimal/
 ENTRYPOINT ["/usr/bin/python3", "/minimal/supervisor.py"]

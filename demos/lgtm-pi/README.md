@@ -7,7 +7,7 @@ cd /opt/mcp-interview/lgtm-pi-minimal/demos/lgtm-pi
 ./agent.sh
 ```
 
-That command discovers the installed Node runtime, loads Pi 1.4.0 and connects the `dashboards` and `scratch` MCP namespaces. The launcher does not force a provider or model.
+That command discovers the installed Node runtime, loads Pi 1.4.0 and connects the single `demo` MCP namespace. The launcher does not force a provider or model.
 
 Inside Pi:
 
@@ -63,7 +63,7 @@ The stack is already up and seeded on this instance. `seed` sends exactly two OT
 
 LGTM and Grafana MCP images are pinned by digest. Pi dependencies are lockfile-pinned. `runtime-images.json` records exact IDs and source commits of the two locally built engine/browser base images. Those images are already available on the prepared Ubuntu host under independent minimal-demo tags. `docker compose up --build` rebuilds the small combined image. A fresh unrelated machine must first build or import those recorded base images; this is not claimed as a clean-machine bootstrap. No old running services or old demo files are required.
 
-`python3 verify.py` performs real Grafana MCP metric/log queries, direct filesystem write, provisioning readback, denied-path check and browser screenshot. It creates a test dashboard; archive it with `./demo.sh reset` afterward. `node verify-pi.mjs` loads the real Pi extension and tests both registered MCP connections without a model. The inspected screenshot showed the 900ms spike and 80–100ms baseline. COW isolation and denial of scratch-to-dashboard writes were separately verified. No paid model E2E was run for this minimal demo.
+`python3 verify.py` performs real Grafana MCP metric/log queries, direct filesystem write, provisioning readback, denied-path check and browser screenshot. It creates a test dashboard; archive it with `./demo.sh reset` afterward. `node verify-pi.mjs` loads the real Pi extension and tests the registered demo MCP connection without a model. The inspected screenshot showed the 900ms spike and 80–100ms baseline. COW isolation and denial of scratch-to-dashboard writes were separately verified. No paid model E2E was run for this minimal demo.
 
 Official image source: https://github.com/grafana/docker-otel-lgtm . Browser source: https://github.com/r33drichards/computeruse.site .
 
@@ -77,11 +77,18 @@ After updating the instructions, exit Pi and restart with `./demos/lgtm-pi/demo.
 
 Following [CUSE's explicit tool allowlist](https://github.com/r33drichards/cuse/blob/main/src/channel-session.ts), this launcher uses Pi's supported `--no-builtin-tools`, disables automatic extension/skill/context discovery, explicitly loads the MCP extension and this demo extension, and allowlists only:
 
-- `mcp__dashboards__run_js`
-- `mcp__dashboards__get_artifact`
-- `mcp__dashboards__list_artifacts`
-- `mcp__scratch__run_js`
+- `mcp__demo__run_js`
+- `mcp__demo__get_artifact`
+- `mcp__demo__list_artifacts`
 
-The MCP servers use `exposure: direct`, so these tools reach the model without Pi's local codemode tool. Grafana and browser tools are called inside dashboard `run_js`; the existing server-side policies still apply. The full Pi agent wire catalog was checked: no built-in read/write/edit/bash/powershell/find/grep/ls, codemode, or other aliases are exposed. This configures the model's tools; it does **not** OS-sandbox the Pi process, its extensions, or manual user commands.
+The MCP servers use `exposure: direct`, so these tools reach the model without Pi's local codemode tool. Grafana and browser tools are called inside demo `run_js`; the existing server-side policies still apply. The full Pi agent wire catalog was checked: no built-in read/write/edit/bash/powershell/find/grep/ls, codemode, or other aliases are exposed. This configures the model's tools; it does **not** OS-sandbox the Pi process, its extensions, or manual user commands.
 
 Exit and restart Pi with `./demos/lgtm-pi/demo.sh agent` from the main repository to receive this configuration. Your current conversation and ChatGPT authentication are not modified. `PI_OFFLINE=1 node verify-tool-catalog.mjs` checks an isolated no-model session using empty test auth storage, without reading your auth file.
+
+## Unified execution entry
+
+Pi exposes exactly one JS tool: `mcp__demo__run_js`. In the same outer JS execution, `fs.writeFile('/dashboards/name.json', ...)` changes shared files while `mcp.callTool('scratch','run_js',{code,fs:root})` executes an isolated COW operation. The nested call is asynchronous; poll `scratch.get_execution`, inspect terminal status and carry forward its returned root. See `agent-prompt.md` for the complete helper. This uses the existing sandboxed mcp-js MCP API; no model code is evaluated on the Ubuntu host.
+
+The two engine processes remain implementation details in the same container. Host-filesystem and COW semantics have not been conflated. Scratch tool policy requires inline code and an explicit root; filesystem policies are unchanged. `python3 verify-unified.py` verifies shared writes, COW child/base isolation, both denied paths, seeded Grafana data and browser navigation through the single outer entry. It archives only its temporary test dashboard.
+
+Restart Pi to load the unified namespace and prompt. An existing conversation is not killed or rewritten; a fresh conversation avoids stale two-tool examples. ChatGPT authentication is retained.
