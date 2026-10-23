@@ -1,0 +1,11 @@
+import fs from 'node:fs';
+import assert from 'node:assert/strict';
+import {DefaultResourceLoader} from '@earendil-works/pi-coding-agent';
+const prompt=fs.readFileSync(new URL('./agent-prompt.md',import.meta.url),'utf8');
+const launcher=fs.readFileSync(new URL('./agent.sh',import.meta.url),'utf8');
+assert(launcher.includes('--append-system-prompt "$(cat agent-prompt.md)"'));
+const loader=new DefaultResourceLoader({cwd:process.cwd(),agentDir:process.cwd()+'/.evidence/instruction-loader',noExtensions:true,noSkills:true,noPromptTemplates:true,noThemes:true,noContextFiles:true,appendSystemPrompt:[prompt]});
+await loader.reload();
+assert(loader.getAppendSystemPrompt().includes(prompt));
+for(const required of ['HOST path','mcp__dashboards__run_js','mcp__scratch__run_js','Directory listing','no publish command'])assert(prompt.includes(required));
+console.log('Installed Pi resource loader includes the complete launcher-provided boundary instructions; no model/auth calls.');

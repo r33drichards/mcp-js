@@ -66,3 +66,9 @@ LGTM and Grafana MCP images are pinned by digest. Pi dependencies are lockfile-p
 `python3 verify.py` performs real Grafana MCP metric/log queries, direct filesystem write, provisioning readback, denied-path check and browser screenshot. It creates a test dashboard; archive it with `./demo.sh reset` afterward. `node verify-pi.mjs` loads the real Pi extension and tests both registered MCP connections without a model. The inspected screenshot showed the 900ms spike and 80–100ms baseline. COW isolation and denial of scratch-to-dashboard writes were separately verified. No paid model E2E was run for this minimal demo.
 
 Official image source: https://github.com/grafana/docker-otel-lgtm . Browser source: https://github.com/r33drichards/computeruse.site .
+
+## Pi instructions and reload
+
+Pi supports project `.pi/APPEND_SYSTEM.md` and `--append-system-prompt`. This demo uses the latter: `agent.sh` reads the complete `agent-prompt.md` on every launch and adds it to Pi's system instructions. It explicitly separates host cwd, shared dashboard files, and COW scratch; dashboard directory listing remains forbidden by policy.
+
+After updating the instructions, exit Pi and restart with `./demos/lgtm-pi/demo.sh agent` from `/opt/mcp-interview/repo`. Start a fresh conversation if the old one still contains misleading path assumptions. No re-login is needed solely for this prompt change. The launcher reads the file at startup; an already-running session does not automatically acquire edited CLI prompt text. `node verify-instructions.mjs` tests the installed Pi resource loader without a model call.
