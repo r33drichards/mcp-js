@@ -15,6 +15,12 @@ class RehearsalTests(unittest.TestCase):
   with patch.object(demo,'config',return_value={}),patch.object(demo,'state_data',return_value={'B':'base'}),patch.object(demo,'leader',return_value=1),patch.object(demo,'kill_node',side_effect=stop),patch.object(demo,'restart_node',side_effect=restored.append):
    with self.assertRaisesRegex(RuntimeError,'stop failed'):demo.quorum()
   self.assertEqual(restored,[2,3])
+ def test_policy_captures_allowed_write_and_keeps_base(self):
+  with patch.object(demo,'state_data',return_value={'B':'base','base_text':'original'}),patch.object(demo,'ok_run',return_value={'fs':'allowed-root','status':'completed'}) as ok,patch.object(demo,'exec_js',return_value={'status':'failed','error':'policy denied'}),patch.object(demo,'record',side_effect=lambda event,data:data):
+   result=demo.policy()
+  self.assertEqual(result['allowed_write']['fs'],'allowed-root')
+  self.assertEqual(ok.call_args_list[1].args[1],'allowed-root')
+  self.assertEqual(ok.call_args_list[-1].args[1],'base')
  def test_same_title_changed_query_is_not_published(self):
   old={'uid':'mcp-anomaly','title':'same','panels':[{'id':1,'targets':[{'expr':'old'}]}]}
   new=json.loads(json.dumps(old));new['panels'][0]['targets'][0]['expr']='new'

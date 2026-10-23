@@ -107,6 +107,8 @@ def seed():
     save(STATE/'demo.json',s); return record('seed',s)
 def policy():
     s=state_data() or seed()
+    allowed=ok_run(write('policy allowed write\n'),s['B'])
+    ok_run(read('policy allowed write\n'),allowed['fs'])
     ok_run(read(s['base_text']),s['B'])
     r=exec_js(write('must not be written','/work/denied/secret.txt'),s['B'])
     if r['status']!='failed': raise RuntimeError('STOP: denied write did not fail')
@@ -114,7 +116,7 @@ def policy():
     err=str(r.get('error','')).lower()
     if 'den' not in err and 'policy' not in err: raise RuntimeError('Failure was not a policy denial: '+err)
     ok_run(read(s['base_text']),s['B'])
-    return record('policy',{'allowed':'read/write /work/allowed/notes.txt','denied':r,'base_unchanged':True})
+    return record('policy',{'allowed':'read/write /work/allowed/notes.txt','allowed_write':allowed,'denied':r,'base_unchanged':True})
 def branches():
     s=state_data() or seed(); start=time.monotonic()
     with concurrent.futures.ThreadPoolExecutor(2) as pool:
