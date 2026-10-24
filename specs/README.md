@@ -68,3 +68,124 @@ java -cp tla2tools.jar tlc2.TLC -deadlock \
 The fix in `cluster.rs` (`cas_with` / `put_with` carrying `extra` writes applied
 via a single `apply_batch`) and `fs_labels.rs` (using them for `create`/`cas`/
 `force` in cluster mode) implements the `combined` design.
+
+## TaskSchedule (earlier non-overlap design)
+
+The selected revision is [TaskScheduleCron](TaskScheduleCron.md), which permits
+overlap and does not retry occurrences. The model below is retained for comparison.
+
+Design model for a **proposed scheduling layer over existing MCP Tasks**.
+A one-time schedule creates one task; a periodic schedule creates a task for
+each observed, eligible occurrence. Tool names and arguments are immutable
+payloads and are abstracted away. No scheduler server code is implemented here.
+
+This replaces the earlier durable-worker proposal in this PR. Durable execution,
+worker leases/epochs, retries, heap or filesystem snapshots, session forks,
+transactional outboxes, and external-effect deduplication are outside this slice.
+MCP Tasks supplies the execution lifecycle; this model only decides task admission.
+
+### Scheduling behavior
+
+- `Create` registers a future (or currently due) one-time or periodic schedule.
+  An interval of zero means one-time. Positive intervals repeat on the original
+  cadence: `FirstDue + n * Interval`, not completion time plus interval.
+- `Fire` creates one logical task and consumes its occurrence in the same action.
+  This is an atomic local scheduler decision, not a distributed exactly-once
+  guarantee. Task transport, tool execution, and external effects are not modelled.
+- `Skip` consumes an occurrence if its schedule is disabled or already has an
+  active execution. It does not queue that occurrence for later.
+- `Disable` prevents future fires without cancelling an existing execution.
+- `Finish` releases the schedule's active slot when execution has ended. A
+  cooperative MCP cancellation acknowledgement alone is not proof of termination
+  and must not release this slot while the execution is still running.
+- `Advance` moves abstract scheduler observation time forward. Periodic slots
+  strictly before the new observation are skipped; an occurrence exactly at the
+  observation remains eligible. The next timestamp stays on the original cadence.
+
+For example, with hourly times at 1, 2, 3, and 4 PM, a gap from 12:30 to 2:30 PM
+skips 1 and 2 PM and leaves 3 PM next. If the 3 PM task is still active at 4 PM,
+the 4 PM occurrence is skipped; completing it later does not replay that slot.
+
+`now` is an abstract observation timestamp, not a wall-clock punctuality promise.
+The model processes due decisions before moving observation time again. Clock
+jumps describe omitted periodic slots; they do **not** model durable schedule
+storage, process restart, or recovery. Real timer jitter and task-start latency
+are abstracted away.
+
+**Overdue one-time behavior remains undecided.** To avoid silently selecting a
+policy, clock jumps cannot cross an enabled, pending one-time deadline in this
+model. This is a model scope restriction, not a runtime requirement. One-time
+schedules are checked when their deadline is observed.
+
+### Properties and bounds
+
+The committed safe config checks:
+
+| Property | Guarantee within the model |
+|---|---|
+| `TypeOK` | State remains well-formed |
+| `NoEarlyFire` | Admission is never before the scheduled occurrence |
+| `NoCatchUp` | Fires belong to the current observed slot, never a missed backlog |
+| `NoOverlap` | Each schedule has at most one active execution |
+| `NoDisabledFire` | Every fire was admitted while its schedule was enabled |
+| `NoDuplicateFire` | Each `(schedule, due time)` creates at most one task |
+| `OneTimeAtMostOnce` | A one-time schedule creates at most one task |
+| `CadencePreserved` | Periodic timestamps remain aligned with their original cadence |
+| `DueEventuallyProcessed` | Each observed due slot is eventually fired or skipped |
+| `TasksEventuallyFinish` | Active executions eventually release their slots |
+
+The last two properties use weak fairness of `Fire`, `Skip`, and `Finish`.
+Execution termination is an assumption of this abstraction, not a guarantee of
+MCP Tasks or arbitrary JavaScript. No schedule is required to fire if disabled,
+missed, or blocked by an active execution; no crash-recovery liveness is claimed.
+
+The fixture has two schedules: one one-time at tick 2, and one periodic starting
+at tick 1 with interval 2. Time is bounded at tick 6; the six-task audit bound
+exceeds the four possible eligible occurrences, so it does not limit safe runs.
+The clock may advance one tick or jump over multiple periodic slots, and task
+completion and disabling may interleave with admission.
+
+Three constants inject broken implementations for negative checks. They are
+**not proposed user-configurable policies**:
+
+- `AllowOverlap = TRUE`: removes the active-execution admission guard.
+- `KeepMissed = TRUE`: leaves past periodic slots pending after clock jumps.
+- `ConsumeOccurrence = FALSE`: creates a task without advancing its due slot.
+
+### Running and results
+
+Use the gitignored `tla2tools.jar` downloaded above. Run from `specs/`:
+
+```sh
+# All eight safety invariants and both conditional progress properties pass.
+java -cp tla2tools.jar tlc2.TLC -deadlock \
+  -config TaskSchedule_safe.cfg TaskSchedule.tla
+
+# Each faulty design must produce its named invariant violation.
+java -cp tla2tools.jar tlc2.TLC -deadlock \
+  -config TaskSchedule_overlap.cfg TaskSchedule.tla
+java -cp tla2tools.jar tlc2.TLC -deadlock \
+  -config TaskSchedule_catchup.cfg TaskSchedule.tla
+java -cp tla2tools.jar tlc2.TLC -deadlock \
+  -config TaskSchedule_duplicate.cfg TaskSchedule.tla
+```
+
+`-deadlock` disables deadlock reporting because finite observation time permits
+terminal states; `Spec` permits stuttering. The safe run still checks its explicit
+temporal properties. TLC was run using the jar from the v1.8.0 release URL above.
+
+| Config | Observed TLC result |
+|---|---|
+| `TaskSchedule_safe.cfg` | No error; 803 distinct states |
+| `TaskSchedule_overlap.cfg` | `NoOverlap` violated: periodic fires at ticks 1 and 3 without finishing |
+| `TaskSchedule_catchup.cfg` | `NoCatchUp` violated: jump to tick 2, then fire missed tick 1 |
+| `TaskSchedule_duplicate.cfg` | `NoDuplicateFire` violated: fire one-time tick 2, finish, fire tick 2 again |
+
+These are bounded design checks, not verification of a scheduler implementation.
+
+## TaskScheduleCron
+
+The [simple cron-style revision](TaskScheduleCron.md) dispatches each new occurrence
+independently, allows overlap, drops missed periodic slots, and never automatically
+retries an occurrence. It has separate configs and actual TLC outputs. The earlier
+`TaskSchedule` model remains unchanged for comparison.
