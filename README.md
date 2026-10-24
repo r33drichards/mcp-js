@@ -194,6 +194,35 @@ mcp-v8 --help            # all flags
 mcp-v8 --print-openapi   # print the REST OpenAPI spec
 ```
 
+### Bearer tokens from secret files
+
+For a downstream Streamable HTTP server with an existing bearer token, reference
+its mounted secret file. No token bytes belong in JSON/TOML, command-line flags,
+or the generated configuration:
+
+```json
+[{"name":"weechat","transport":"http","url":"http://weechat-mcp:8080/mcp",
+  "auth":{"type":"bearer","token_file":"/var/run/secrets/weechat/token"}}]
+```
+
+The same `auth` object works in a structured `mcp_servers` TOML configuration.
+`token_file` must be an absolute path to a readable regular file, including a
+Kubernetes projected-secret symlink. The file contains the token alone (without
+`Bearer `); one final LF or CRLF is permitted. Empty, missing, unreadable,
+invalid, or larger-than-64-KiB files fail the connection before network traffic.
+The process only reads this existing file; it does not call the Kubernetes API,
+create secrets, change permissions, or accept inline tokens. Mount it read-only
+and restrict file access to the process that needs it.
+
+Tokens are loaded on each connection/reconnect. Updating the file does not
+replace a token in an established transport; reconnect/restart after rotation.
+Bearer auth requires `transport: "http"`; SSE and stdio configurations fail
+closed. Requests never follow redirects, including same-origin redirects, and
+credentials stay scoped to the exact configured endpoint. HTTP is available
+for explicitly configured, trusted internal Services; it transmits the token
+in plaintext, so use HTTPS outside a trusted network. URLs with userinfo or
+fragments are rejected. Existing OAuth and unauthenticated configs are unchanged.
+
 ### Browser OAuth for upstream MCP servers
 
 Use `--mcp-config` to connect to a protected Streamable HTTP MCP server with

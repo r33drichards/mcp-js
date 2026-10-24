@@ -194,3 +194,52 @@ fn rejects_client_secret_without_client_id() {
     assert!(error.contains("client_secret"));
     assert!(error.contains("client_id"));
 }
+
+#[test]
+fn bearer_config_round_trips_only_a_file_reference() {
+    let source = serde_json::json!({
+        "name": "weechat", "transport": "http", "url": "http://weechat-mcp:8080/mcp",
+        "auth": {"type": "bearer", "token_file": "/var/run/secrets/weechat/token"}
+    });
+    let config: McpServerConfig = serde_json::from_value(source.clone()).unwrap();
+    // Validation does not need the secret mount to exist on this machine.
+    config.validate_for_connection().unwrap();
+    assert_eq!(serde_json::to_value(&config).unwrap(), source);
+    assert!(format!("{config:?}").contains("/var/run/secrets/weechat/token"));
+}
+
+#[test]
+fn bearer_requires_a_file_reference_and_http_transport() {
+    for auth in [
+        serde_json::json!({"type": "bearer"}),
+        serde_json::json!({"type": "bearer", "token": "inline-not-supported"}),
+    ] {
+        assert!(serde_json::from_value::<McpServerConfig>(serde_json::json!({
+            "name": "weechat", "transport": "http", "url": "http://weechat-mcp/mcp", "auth": auth,
+        })).is_err());
+    }
+    for transport in [
+        McpServerTransport::Sse {
+            url: "http://weechat-mcp/mcp".into(),
+        },
+        McpServerTransport::Stdio {
+            command: "unused".into(),
+            args: vec![],
+            env: Default::default(),
+        },
+    ] {
+        let config = McpServerConfig {
+            name: "weechat".into(),
+            transport,
+            auth: Some(McpServerAuth::Bearer {
+                token_file: "/token".into(),
+            }),
+        };
+        assert!(
+            config
+                .validate_for_connection()
+                .unwrap_err()
+                .contains("requires HTTP transport")
+        );
+    }
+}
