@@ -1044,6 +1044,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "sled",
+ "subtle",
  "tempfile",
  "tokio",
  "tokio-util",

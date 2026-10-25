@@ -171,6 +171,11 @@ impl Worker {
         Ok(admission)
     }
     pub async fn admit(&self, admission: &Admission) -> Result<Permit, String> {
+        self.admit_decision(admission)
+            .await?
+            .ok_or_else(|| "quorum confirmed not launched".into())
+    }
+    pub async fn admit_decision(&self, admission: &Admission) -> Result<Option<Permit>, String> {
         for origin in &self.config.admission_urls {
             let response = self
                 .client
@@ -186,6 +191,14 @@ impl Worker {
             if response.status() == reqwest::StatusCode::CONFLICT {
                 continue;
             }
+            if response.status() == reqwest::StatusCode::GONE {
+                let value: Value = response.json().await.map_err(|_| "invalid rejection ACK")?;
+                if value["not_launched"] == true && value["invocation"] == admission.dispatch.key()
+                {
+                    return Ok(None);
+                }
+                return Err("unbound rejection ACK".into());
+            }
             if response.status() != reqwest::StatusCode::CREATED {
                 return Err("admission unavailable or uncertain".into());
             }
@@ -193,7 +206,7 @@ impl Worker {
             if permit != admission.permit() {
                 return Err("admission ACK binding mismatch".into());
             }
-            return Ok(permit);
+            return Ok(Some(permit));
         }
         Err("no current owner admitted invocation".into())
     }
@@ -224,14 +237,16 @@ impl Worker {
             .route("/api/scheduled/v1/exec", post(execute))
             .route("/api/scheduled/v1/executions/{id}", get(status))
             .route("/api/scheduled/v1/cancel", post(cancel))
-            .layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024))
+            .layer(axum::extract::DefaultBodyLimit::max(
+                crate::scheduled_protocol::MAX_SCHEDULED_BODY_BYTES,
+            ))
             .with_state((self, runtime))
     }
     fn authorized(&self, headers: &HeaderMap) -> bool {
-        headers
-            .get("authorization")
-            .and_then(|h| h.to_str().ok())
-            .is_some_and(|h| h == format!("Bearer {}", self.bearer))
+        crate::cluster::bearer_matches(
+            headers.get("authorization").and_then(|h| h.to_str().ok()),
+            &self.bearer,
+        )
     }
 }
 type Shared = (Arc<Worker>, Arc<dyn Runtime>);
@@ -246,9 +261,12 @@ async fn execute(
             Json(json!({"error":"unauthorized"})),
         );
     }
+    let invocation = dispatch.key();
     let result = async {
         let admission = worker.reserve(dispatch)?;
-        let permit = worker.admit(&admission).await?;
+        let Some(permit) = worker.admit_decision(&admission).await? else {
+            return Ok(None);
+        };
         // Serializes cancellation with the entire consume -> submit -> receipt
         // boundary. A cancelled reservation can never expose a late launch.
         let _gate = worker.execution_gate.lock().await;
@@ -263,11 +281,15 @@ async fn execute(
             )
             .map_err(|e| e.to_string())?;
         worker.flush()?;
-        Ok::<_, String>(execution_id)
+        Ok::<_, String>(Some(execution_id))
     }
     .await;
     match result {
-        Ok(execution_id) => (
+        Ok(None) => (
+            StatusCode::GONE,
+            Json(json!({"not_launched":true,"invocation":invocation})),
+        ),
+        Ok(Some(execution_id)) => (
             StatusCode::ACCEPTED,
             Json(json!({"execution_id":execution_id})),
         ),

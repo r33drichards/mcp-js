@@ -105,7 +105,8 @@ class Cluster:
         self.probe = http.server.ThreadingHTTPServer(("127.0.0.1", 8090), Probe)
         threading.Thread(target=self.probe.serve_forever, daemon=True).start()
         self.env = dict(os.environ, MCP_SCHEDULER_WORKER_TOKEN="vm-only-worker",
-                        MCP_SCHEDULER_ADMISSION_TOKEN="vm-only-admission")
+                        MCP_SCHEDULER_ADMISSION_TOKEN="vm-only-admission",
+                        MCP_SCHEDULER_CLUSTER_TOKEN="vm-only-cluster")
         expires = (datetime.datetime.now(datetime.timezone.utc) +
                    datetime.timedelta(days=1)).isoformat()
         worker = {
@@ -145,6 +146,7 @@ allow if {
                 "data_dir": str(self.root / f"r{i}-store"),
                 "admission_addr": f"127.0.0.1:{4500+i}",
                 "admission_bearer_env": "MCP_SCHEDULER_ADMISSION_TOKEN",
+                "cluster_bearer_env": "MCP_SCHEDULER_CLUSTER_TOKEN",
                 "schedules": [],
                 "remote": {
                     "url": "http://127.0.0.1:8080", "namespace": "nixos-integration",
@@ -158,6 +160,20 @@ allow if {
             self.runners.append(runner)
             self.processes.append(runner.process)
         self.owner = eventually(self.find_owner)
+        # A caller that knows the voter IDs still cannot read private Raft
+        # metadata or inject a valid-looking leadership transition without auth.
+        for path, data in [("/raft/status", None), ("/raft/append-entries", {
+            "term": 666, "leader_id": "r1", "prev_log_index": 0,
+            "prev_log_term": 0, "entries": [], "leader_commit": 2**64 - 1,
+        })]:
+            request = urllib.request.Request("http://127.0.0.1:4401" + path,
+                data=None if data is None else json.dumps(data).encode(),
+                headers={"Content-Type": "application/json"})
+            try:
+                urllib.request.urlopen(request, timeout=2).close()
+                raise AssertionError("unauthenticated Raft request was accepted")
+            except urllib.error.HTTPError as error:
+                assert error.code == 401, error.code
 
     def write(self, name, value):
         path = self.root / name

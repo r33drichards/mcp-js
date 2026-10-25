@@ -4848,6 +4848,7 @@ dependencies = [
  "sha2 0.10.9",
  "shlex",
  "sled",
+ "subtle",
  "swc_core",
  "tempfile",
  "thiserror 2.0.18",

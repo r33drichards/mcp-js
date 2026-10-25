@@ -46,8 +46,8 @@ later effects; confirmed-failure retries may repeat partial effects.
 Quorum loss, timeout, malformed/mismatched ACK or cancellation while obtaining
 admission yields no new launch permission. Previously admitted work may still launch. The admission itself may nevertheless have committed. A crash
 between reservation, admission, local consumption and Engine submission can lose
-work. Unknown is never automatically replayed. Worker records and Raft admissions
-are retained without compaction. Preserve stores; do not clone an active worker
+work. Unknown is never automatically replayed. Worker receipts and the Raft log
+are retained without compaction; current checkpoint metadata is bounded as described below. Preserve stores; do not clone an active worker
 incarnation or use restored stale consensus snapshots as a new authoritative cluster.
 
 ## Compatibility and configuration
@@ -111,8 +111,19 @@ HTTPS except loopback HTTP. Redirects/retries are disabled. Callback endpoints a
 tried in configured order only after a definitive 409 (no acquired owner). Any
 network ambiguity or other error stops the attempt. An offline first endpoint can
 therefore cause lost work even if another leader is available; this is conservative
-failure behavior, not robust leader discovery. Raft RPCs still require the trusted
-internal network and fixed voter map; no new Raft authentication is claimed.
+failure behavior, not robust leader discovery. Fixed-voter scheduler networking now requires a shared cluster credential and
+binds the configured advertised address. Set `cluster_bearer_env` in each runner
+config to an environment reference (see `example.json`); provide the same secret
+on every voter. It is never persisted in the checkpoint, membership or log. All
+cluster HTTP routes, including status/data reads, require that bearer. Pure
+in-process model nodes can omit it, but cannot start a network listener/elections.
+Legacy dynamic cluster mode retains its existing network behavior.
+
+The shared bearer authenticates callers; it does not encrypt HTTP or make Raft
+Byzantine-tolerant. Keep cluster ports firewalled on a private network and use
+operator-supplied encrypted transport for remote links. The admission listener
+also speaks HTTP and requires existing TLS termination for remote use. This
+change creates no deployed credential and changes no deployed security setting.
 
 ## Local management
 
@@ -188,6 +199,36 @@ flush errors are not power-loss tests.
 
 Independent admission review covers both takeover orderings, duplicate requests,
 old-incarnation and payload binding, lost ACK, restart, terminal state and flush
-failures. Full checkpoints and retained admission records grow without bound. No
+failures. The planner loaded from a checkpoint is purely in memory; Raft supplies its
+durability. Claims keep metadata/digests rather than duplicate schedule code, and
+claim/admission records retire when their occurrence/attempt is no longer retained
+by Core. Eligibility still checks the exact live occurrence and non-reused ID, so
+pruning cannot re-admit retired work. Checkpoint JSON is capped at 4 MiB; transitions
+that would exceed that budget fail closed. This is an admission/storage budget,
+not a throughput guarantee or a migration mechanism.
+
+Scheduled execution/admission bodies are capped at 512 KiB (including worst-case
+JSON escaping of 64 KiB code); cluster bodies are capped at 16 MiB. Outgoing
+AppendEntries carries at most 32 entries / 12 MiB, and newly persisted entries
+must fit that replication budget. Followers backtrack logarithmically on prefix
+mismatch rather than one entry per heartbeat. Invalid extreme terms are rejected
+before persistence; elections use checked addition and fail closed at exhaustion.
+The absolute term bound avoids rejecting legitimately lagging peers merely for
+missing many elections.
+
+A definite no-launch response is emitted only after a quorum-backed terminal
+fence proves no permit exists and prevents any future admission for that attempt.
+Duplicate admissions with an existing permit, lost ACKs and quorum uncertainty
+remain Unknown and retain capacity. Graceful shutdown continues serving admitted
+callback work, drains both observation and cancellation futures, and does not wait
+for stdin EOF to let the Tokio runtime exit.
+
+The Engine's driver and blocking execution share a lifetime guard: a driver panic
+or abort does not confirm stopped while detached blocking execution remains alive.
+Handle-publishing polls are bounded. Named regression tests cover both immediate
+cancellation and cancellation after startup separately from ordinary execution.
+
+The Raft log and worker receipts still grow without automatic compaction, and
+deleting a schedule does not erase historical replicated code. No
 Events delivery, schema migration, multi-tenant authorization, creation deduplication,
 Raft compaction, throughput benchmark or automatic Unknown resolution is provided.

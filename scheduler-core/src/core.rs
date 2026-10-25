@@ -201,11 +201,12 @@ struct State {
     occurrences: BTreeMap<u64, Occurrence>,
 }
 
-/// Owns a sled database and its dedicated scheduler_state tree. All admission transitions are serialized through &mut self.
+/// Local durable store or pure-memory consensus planner. Admission transitions
+/// are serialized through &mut self.
 /// Persistence errors poison this instance: reopen and recover before further work.
 pub struct Core {
-    db: sled::Db,
-    tree: sled::Tree,
+    db: Option<sled::Db>,
+    tree: Option<sled::Tree>,
     persisted: Option<sled::IVec>,
     state: State,
     poisoned: bool,
@@ -268,8 +269,8 @@ impl Core {
             return Err("store limits differ; use its original limits".into());
         }
         let mut core = Self {
-            db,
-            tree,
+            db: Some(db),
+            tree: Some(tree),
             persisted,
             state,
             poisoned: false,
@@ -292,15 +293,34 @@ impl Core {
         Ok(core)
     }
 
-    /// Build a disposable planner from a trusted checkpoint. Its local writes
-    /// are provisional: an external consensus adapter must commit checkpoint()
+    /// Build a pure-memory planner from a trusted checkpoint; no sled database
+    /// is opened and no provisional fsync is performed: an external consensus adapter must commit checkpoint()
     /// before exposing any returned invocation. Recovery converts Running to Unknown.
     pub fn from_checkpoint(
         checkpoint: Option<&str>,
         limits: Limits,
         recover: bool,
     ) -> Result<Self> {
-        let mut core = Self::from_config(sled::Config::new().temporary(true), limits.clone())?;
+        limits.validate()?;
+        let mut core = Self {
+            db: None,
+            tree: None,
+            persisted: None,
+            state: State {
+                version: 1,
+                limits: limits.clone(),
+                next_id: 1,
+                watermark: None,
+                schedules: BTreeMap::new(),
+                occurrences: BTreeMap::new(),
+            },
+            poisoned: false,
+            runner_active: false,
+            #[cfg(test)]
+            fail_after_insert: false,
+            #[cfg(test)]
+            fail_before_insert: false,
+        };
         if let Some(checkpoint) = checkpoint {
             let state: State = serde_json::from_str(checkpoint).map_err(|e| e.to_string())?;
             if state.version != 1
@@ -346,6 +366,10 @@ impl Core {
         if self.poisoned {
             return Err("store is poisoned; reopen before continuing".into());
         }
+        if self.db.is_none() {
+            self.state = state;
+            return Ok(());
+        }
         let bytes = serde_json::to_vec(&state).map_err(|e| e.to_string())?;
         #[cfg(test)]
         if self.fail_before_insert {
@@ -354,9 +378,11 @@ impl Core {
         }
         // The entire bounded snapshot is one key: cursors, receipts, identities,
         // and outcomes change atomically. CAS also rejects an unexpected writer.
-        let write =
-            self.tree
-                .compare_and_swap(b"state", self.persisted.as_deref(), Some(bytes.as_slice()));
+        let write = self.tree.as_ref().expect("durable tree").compare_and_swap(
+            b"state",
+            self.persisted.as_deref(),
+            Some(bytes.as_slice()),
+        );
         match write {
             Ok(Ok(())) => (),
             Ok(Err(_)) => {
@@ -379,7 +405,7 @@ impl Core {
         }
         // Atomic visibility is not durability: do not return an invocation until
         // sled acknowledges the flush. Failure leaves the write's durability unknown.
-        if let Err(e) = self.db.flush() {
+        if let Err(e) = self.db.as_ref().expect("durable database").flush() {
             self.poisoned = true;
             return Err(format!(
                 "sled flush failed; no further dispatch permitted: {e}"
@@ -400,6 +426,26 @@ impl Core {
     }
     pub fn occurrences(&self) -> Vec<Occurrence> {
         self.state.occurrences.values().cloned().collect()
+    }
+    /// Includes deleted schedules, whose definitions remain needed by unresolved work.
+    pub fn definition(&self, id: ScheduleId) -> Option<&Definition> {
+        self.state.schedules.get(&id).map(|s| &s.definition)
+    }
+    /// Establish a durable no-future-admission fence for the exact attempt.
+    pub fn reject_unadmitted(&mut self, id: u64, attempt: u32) -> Result<()> {
+        let mut state = self.state.clone();
+        let occurrence = state.occurrences.get_mut(&id).ok_or("unknown occurrence")?;
+        occurrence.status = match occurrence.status {
+            Status::Running { attempt: a } | Status::Unknown { attempt: a, .. } if a == attempt => {
+                Status::Failed {
+                    attempt,
+                    detail: "quorum confirmed attempt was never admitted".into(),
+                }
+            }
+            Status::Cancelling { attempt: a } if a == attempt => Status::Cancelled { attempt },
+            _ => return Err("no matching unresolved attempt".into()),
+        };
+        self.commit(state)
     }
     pub fn limits(&self) -> &Limits {
         &self.state.limits
@@ -689,15 +735,22 @@ mod tests {
             .path(dir.path())
             .flush_every_ms(None);
         let core = Core::from_config(config, Limits::default()).unwrap();
-        let other = core.db.open_tree("session_log_fixture").unwrap();
+        let other = core
+            .db
+            .as_ref()
+            .unwrap()
+            .open_tree("session_log_fixture")
+            .unwrap();
         other.insert(b"entry", b"existing state").unwrap();
-        core.db.flush().unwrap();
-        assert!(core.tree.get(b"state").unwrap().is_some());
+        core.db.as_ref().unwrap().flush().unwrap();
+        assert!(core.tree.as_ref().unwrap().get(b"state").unwrap().is_some());
         drop(other);
         drop(core);
         let core = reopen(dir.path());
         assert_eq!(
             core.db
+                .as_ref()
+                .unwrap()
                 .open_tree("session_log_fixture")
                 .unwrap()
                 .get(b"entry")
@@ -715,13 +768,26 @@ mod tests {
         let mut other = core.state.clone();
         other.next_id = 100;
         let bytes = serde_json::to_vec(&other).unwrap();
-        core.tree.insert(b"state", bytes.clone()).unwrap();
+        core.tree
+            .as_ref()
+            .unwrap()
+            .insert(b"state", bytes.clone())
+            .unwrap();
         assert!(
             core.observe(DateTime::from_timestamp(1_767_225_600, 0).unwrap())
                 .is_err()
         );
         assert!(core.is_poisoned());
-        assert_eq!(core.tree.get(b"state").unwrap().unwrap().as_ref(), bytes);
+        assert_eq!(
+            core.tree
+                .as_ref()
+                .unwrap()
+                .get(b"state")
+                .unwrap()
+                .unwrap()
+                .as_ref(),
+            bytes
+        );
     }
 
     #[test]
@@ -800,7 +866,7 @@ mod tests {
         assert!(core.claim(now + Duration::minutes(1)).is_err());
         assert!(core.observe(now + Duration::minutes(2)).is_err());
         // A failed flush may still reach disk. Model that possible outcome explicitly.
-        core.db.flush().unwrap();
+        core.db.as_ref().unwrap().flush().unwrap();
         drop(core);
         let mut recovered = reopen(dir.path());
         assert!(matches!(
