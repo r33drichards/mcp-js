@@ -43,6 +43,93 @@ fn worker_config(path: &std::path::Path) -> Config {
         admission_urls: vec!["http://127.0.0.1:1".into()],
     }
 }
+
+#[tokio::test]
+async fn cancellation_fences_late_launch_and_keeps_ambiguous_consumption_unknown() {
+    for boundary in ["before_reserve", "reserved", "consumed"] {
+        let dir = tempfile::tempdir().unwrap();
+        let worker = Worker::new(worker_config(dir.path())).unwrap();
+        let payload = Payload {
+            code: "1+1".into(),
+            session: "operator".into(),
+            timeout_seconds: 30,
+            heap_mb: 32,
+            expires_at: remote().expires_at,
+        };
+        let dispatch = Dispatch {
+            version: 1,
+            namespace: "model".into(),
+            schedule_id: 1,
+            occurrence_id: 2,
+            attempt: 1,
+            owner: "runner".into(),
+            epoch: 1,
+            worker_id: "worker".into(),
+            authority: "grant".into(),
+            payload_digest: digest(&payload),
+            payload,
+        };
+        let reservation = if boundary == "before_reserve" {
+            None
+        } else {
+            Some(worker.reserve(dispatch.clone()).unwrap())
+        };
+        let permit = reservation.as_ref().map(Admission::permit);
+        if boundary == "consumed" {
+            // A crash/lost receipt after consumption cannot establish no launch.
+            drop(
+                worker
+                    .consume(reservation.clone().unwrap(), permit.clone().unwrap())
+                    .unwrap(),
+            );
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!(
+            "http://{}/api/scheduled/v1/cancel",
+            listener.local_addr().unwrap()
+        );
+        let router = worker.clone().router(Arc::new(Engine::default()));
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let client = reqwest::Client::new();
+        assert_eq!(
+            client
+                .post(&url)
+                .json(&dispatch)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            401
+        );
+        for _ in 0..2 {
+            let response = client
+                .post(&url)
+                .bearer_auth(std::env::var("PATH").unwrap())
+                .json(&dispatch)
+                .send()
+                .await
+                .unwrap();
+            if boundary == "consumed" {
+                assert_eq!(
+                    response.status(),
+                    503,
+                    "lost receipt must not confirm cancellation"
+                );
+            } else {
+                assert_eq!(response.status(), 200);
+                assert_eq!(response.json::<Value>().await.unwrap()["stopped"], true);
+            }
+        }
+        let reservation = reservation.unwrap_or_else(|| worker.reserve(dispatch).unwrap());
+        assert!(
+            worker
+                .consume(reservation.clone(), reservation.permit())
+                .is_err(),
+            "late launch after cancellation"
+        );
+        server.abort();
+    }
+}
 async fn owner(net: &mut Network) -> Replicated {
     let node = net.nodes[net.leader].clone();
     net.drive(Replicated::acquire(

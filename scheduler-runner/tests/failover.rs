@@ -143,16 +143,35 @@ async fn fixed_cluster_takeover_restart_and_no_quorum_do_not_replay_consumed_wor
     for n in &restarted {
         n.start().await;
     }
-    let third = leader(&restarted).await;
-    let mut c = Replicated::acquire(
-        restarted[third].clone(),
-        Limits::default(),
-        &definitions,
-        "grant-v1".into(),
-        now + Delta::minutes(10),
-    )
+    // Restarted peers can still advance their terms while re-establishing
+    // contact. Retry acquisition only: no work is released before it commits.
+    let mut c = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let third = leader(&restarted).await;
+            match Replicated::acquire(
+                restarted[third].clone(),
+                Limits::default(),
+                &definitions,
+                "grant-v1".into(),
+                now + Delta::minutes(10),
+            )
+            .await
+            {
+                Ok(owner) => break owner,
+                Err(error)
+                    if error.contains("leadership")
+                        || error.contains("leader")
+                        || error.contains("raced")
+                        || error.contains("term") =>
+                {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                Err(error) => panic!("restart acquisition failed: {error}"),
+            }
+        }
+    })
     .await
-    .unwrap();
+    .expect("stable acquired owner after restart");
     assert!(
         c.view()
             .occurrences()

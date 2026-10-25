@@ -139,6 +139,8 @@ pub struct Schedule {
 pub enum Status {
     Pending { attempt: u32, ready_at: Time },
     Running { attempt: u32 },
+    Cancelling { attempt: u32 },
+    Cancelled { attempt: u32 },
     Succeeded { attempt: u32 },
     Failed { attempt: u32, detail: String },
     Unknown { attempt: u32, detail: String },
@@ -149,11 +151,17 @@ impl Status {
     fn terminal(&self) -> bool {
         matches!(
             self,
-            Self::Succeeded { .. } | Self::Failed { .. } | Self::Abandoned { .. }
+            Self::Succeeded { .. }
+                | Self::Failed { .. }
+                | Self::Abandoned { .. }
+                | Self::Cancelled { .. }
         )
     }
     fn active(&self) -> bool {
-        matches!(self, Self::Running { .. } | Self::Unknown { .. })
+        matches!(
+            self,
+            Self::Running { .. } | Self::Unknown { .. } | Self::Cancelling { .. }
+        )
     }
 }
 
@@ -178,6 +186,7 @@ pub struct Invocation {
 #[derive(Clone, Debug)]
 pub enum Outcome {
     Succeeded,
+    Cancelled,
     Failed(String),
     Unknown(String),
 }
@@ -431,6 +440,21 @@ impl Core {
     pub fn disable(&mut self, id: ScheduleId) -> Result<()> {
         self.stop_schedule(id, false)
     }
+
+    /// Persist intent without changing schedule enablement or releasing active capacity.
+    /// Pending work has no launch authority and can be cancelled immediately.
+    pub fn request_cancel(&mut self, id: u64) -> Result<()> {
+        let mut state = self.state.clone();
+        let occurrence = state.occurrences.get_mut(&id).ok_or("unknown occurrence")?;
+        occurrence.status = match occurrence.status {
+            Status::Pending { attempt, .. } => Status::Cancelled { attempt },
+            Status::Running { attempt } | Status::Unknown { attempt, .. } => {
+                Status::Cancelling { attempt }
+            }
+            _ => return Ok(()),
+        };
+        self.commit(state)
+    }
     pub fn delete(&mut self, id: ScheduleId) -> Result<()> {
         self.stop_schedule(id, true)
     }
@@ -605,21 +629,22 @@ impl Core {
             .ok_or("unknown occurrence")?;
         if occurrence.schedule_id != invocation.schedule_id
             || occurrence.due_at != invocation.due_at
-            || occurrence.status
-                != (Status::Running {
-                    attempt: invocation.attempt,
-                })
+            || !matches!(occurrence.status,
+                Status::Running { attempt } | Status::Cancelling { attempt }
+                if attempt == invocation.attempt)
         {
             return Err("stale or mismatched execution completion".into());
         }
         let attempt = invocation.attempt;
+        let cancelling = matches!(occurrence.status, Status::Cancelling { .. });
         let retry = &state.schedules[&occurrence.schedule_id]
             .definition
             .policy
             .retry;
         occurrence.status = match outcome {
             Outcome::Succeeded => Status::Succeeded { attempt },
-            Outcome::Failed(_) if attempt <= retry.max_retries => Status::Pending {
+            Outcome::Cancelled => Status::Cancelled { attempt },
+            Outcome::Failed(_) if !cancelling && attempt <= retry.max_retries => Status::Pending {
                 attempt: attempt + 1,
                 ready_at: now
                     .checked_add_signed(Duration::seconds(retry.delay_seconds.into()))
@@ -629,6 +654,7 @@ impl Core {
                 attempt,
                 detail: detail(message),
             },
+            Outcome::Unknown(_) if cancelling => Status::Cancelling { attempt },
             Outcome::Unknown(message) => Status::Unknown {
                 attempt,
                 detail: detail(message),

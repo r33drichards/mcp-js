@@ -8,7 +8,7 @@ The approved contract is **reject stale admissions after committed takeover,
 prevent duplicate engine submissions per invocation attempt, and allow already
 admitted work to launch or finish afterward**. Admission is not an atomic
 transaction with external effects. This is not exactly-once execution, lossless
-replay, automatic cancellation, or a production-readiness claim.
+replay, automatic cancellation on takeover, or a production-readiness claim.
 
 ## Protocol and durable boundary
 
@@ -60,7 +60,7 @@ Do not reset an existing store to bypass a version or identity rejection.
 
 The worker is a dedicated mode of the actual server binary. Set
 `MCP_SCHEDULED_WORKER_CONFIG` to an operator-supplied JSON file and use `--http-port`.
-In this mode the server mounts only the two scheduled routes: no `/api/exec`,
+In this mode the server mounts only the three scheduled routes: no `/api/exec`,
 `/mcp`, SSE or stdio execution path. It uses the configured bearer reference for
 these routes, with existing JWKS enforcement also applied if configured. Existing deployments without this mode keep their existing APIs;
 legacy workers cannot service the new runner. The session field remains a logging
@@ -125,6 +125,7 @@ observation tasks; it does not cancel accepted remote effects.
 {"action":"create","definition":{"name":"example","code":"console.log('scheduled')","cron":"* * * * *","timezone":"UTC","policy":{"missed":"Skip","overlap":"Skip","retry":{"max_retries":0,"delay_seconds":0}}}}
 {"action":"list"}
 {"action":"disable","id":1}
+{"action":"cancel","occurrence_id":2}
 {"action":"delete","id":1}
 {"action":"acknowledge_stopped","occurrence_id":2,"dispatcher_and_work_quiesced":true}
 ```
@@ -134,6 +135,38 @@ operator evidence that dispatch and accepted work are quiesced; it releases an
 Unknown capacity reservation and does not cancel a previously admitted permit.
 Unadmitted terminal/abandoned occurrences cannot obtain a permit. Creation has no
 request deduplication, so inspect state after an uncertain management result.
+
+## Explicit execution cancellation
+
+The dedicated worker requires `--heap-store none` (the default). Cancelling a
+V8 SnapshotCreator with pending async references can abort the process, so heap
+snapshot mode is rejected at startup rather than exposed through this endpoint.
+Filesystem persistence is a separate axis and is not disabled by this restriction.
+
+`cancel` targets an occurrence independently of its schedule. Disabling a schedule
+prevents future occurrences and does not cancel accepted work. Operators can issue
+both commands explicitly; cancellation still works for a disabled schedule.
+
+The runner commits `Cancelling` before contacting the worker. That state survives
+restart/takeover and holds overlap/running capacity. Each owner reconciles it using
+`POST /api/scheduled/v1/cancel` with the original bound dispatch, even after grant
+expiry. Cancellation is idempotent; it never automatically retries the execution.
+Pending, unclaimed occurrences can become `Cancelled` immediately.
+
+The worker durably fences the invocation against future launches and serializes
+cancellation with consume/submit/receipt persistence. For submitted work it requests
+Engine cancellation, then confirms `Cancelled` only after the background task has
+joined V8. An acknowledgement alone does not establish stopped execution. Completion
+may win the race and retain its actual completed/failed outcome instead. Confirmed
+cancellation releases capacity and leaves future scheduled runs enabled.
+
+Unreachable workers, consumed launches without a durable execution receipt, or
+receipts from a previous worker incarnation remain uncertain and retain capacity.
+These are not false cancellation successes. Cancellation does not roll back
+external effects or establish that remote operations/subprocess effects stopped.
+Worker cancellation tombstones/receipts remain uncompacted. Older binaries cannot
+read the new `Cancelling`/`Cancelled` enum variants; do not roll back a live store
+with unresolved cancellation to such a binary.
 
 ## Validation and remaining limits
 

@@ -17,6 +17,9 @@ pub trait Runtime: Send + Sync + 'static {
         payload: Payload,
     ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + '_>>;
     fn status(&self, id: String) -> Result<Value, String>;
+    fn cancel(&self, _id: String) -> Result<(), String> {
+        Err("runtime does not support cancellation".into())
+    }
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -56,6 +59,7 @@ pub struct Worker {
     bearer: String,
     admission_bearer: String,
     client: reqwest::Client,
+    execution_gate: tokio::sync::Mutex<()>,
     #[cfg(test)]
     fail_flush: std::sync::atomic::AtomicBool,
 }
@@ -109,6 +113,7 @@ impl Worker {
             _ => (),
         }
         Ok(Arc::new(Self {
+            execution_gate: tokio::sync::Mutex::new(()),
             #[cfg(test)]
             fail_flush: std::sync::atomic::AtomicBool::new(false),
             config,
@@ -156,6 +161,12 @@ impl Worker {
             .compare_and_swap(key, None as Option<&[u8]>, Some(bytes))
             .map_err(|e| e.to_string())?
             .map_err(|_| "invocation already reserved; no replay".to_string())?;
+        self.db
+            .insert(
+                format!("dispatch/{}", admission.dispatch.key()),
+                serde_json::to_vec(&admission.dispatch).unwrap(),
+            )
+            .map_err(|e| e.to_string())?;
         self.flush()?;
         Ok(admission)
     }
@@ -187,6 +198,13 @@ impl Worker {
         Err("no current owner admitted invocation".into())
     }
     pub fn consume(&self, admission: Admission, permit: Permit) -> Result<Launch, String> {
+        if self
+            .db
+            .contains_key(format!("cancel/{}", admission.dispatch.key()))
+            .map_err(|e| e.to_string())?
+        {
+            return Err("invocation cancelled before launch".into());
+        }
         if permit != admission.permit() || admission.worker_incarnation != self.incarnation {
             return Err("wrong launch binding/incarnation".into());
         }
@@ -205,6 +223,7 @@ impl Worker {
         Router::new()
             .route("/api/scheduled/v1/exec", post(execute))
             .route("/api/scheduled/v1/executions/{id}", get(status))
+            .route("/api/scheduled/v1/cancel", post(cancel))
             .layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024))
             .with_state((self, runtime))
     }
@@ -230,8 +249,21 @@ async fn execute(
     let result = async {
         let admission = worker.reserve(dispatch)?;
         let permit = worker.admit(&admission).await?;
+        // Serializes cancellation with the entire consume -> submit -> receipt
+        // boundary. A cancelled reservation can never expose a late launch.
+        let _gate = worker.execution_gate.lock().await;
+        let key = admission.dispatch.key();
         let launch = worker.consume(admission, permit)?;
-        launch.run(runtime.as_ref()).await
+        let execution_id = launch.run(runtime.as_ref()).await?;
+        worker
+            .db
+            .insert(
+                format!("execution/{key}"),
+                serde_json::to_vec(&(&worker.incarnation, &execution_id)).unwrap(),
+            )
+            .map_err(|e| e.to_string())?;
+        worker.flush()?;
+        Ok::<_, String>(execution_id)
     }
     .await;
     match result {
@@ -239,6 +271,80 @@ async fn execute(
             StatusCode::ACCEPTED,
             Json(json!({"execution_id":execution_id})),
         ),
+        Err(error) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error":error})),
+        ),
+    }
+}
+
+async fn cancel(
+    State((worker, runtime)): State<Shared>,
+    headers: HeaderMap,
+    Json(dispatch): Json<Dispatch>,
+) -> (StatusCode, Json<Value>) {
+    if !worker.authorized(&headers) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error":"unauthorized"})),
+        );
+    }
+    let result = async {
+        dispatch.validate()?;
+        if dispatch.namespace != worker.config.namespace
+            || dispatch.worker_id != worker.config.worker_id
+        {
+            return Err("cancellation worker binding mismatch".to_string());
+        }
+        let _gate = worker.execution_gate.lock().await;
+        let key = dispatch.key();
+        if let Some(bound) = worker
+            .db
+            .get(format!("dispatch/{key}"))
+            .map_err(|e| e.to_string())?
+            && bound.as_ref() != serde_json::to_vec(&dispatch).unwrap()
+        {
+            return Err("cancellation dispatch binding mismatch".into());
+        }
+        // Durable intent is retained even if a runtime/status call fails.
+        worker
+            .db
+            .insert(format!("cancel/{key}"), b"cancelled")
+            .map_err(|e| e.to_string())?;
+        worker.flush()?;
+        if let Some(receipt) = worker
+            .db
+            .get(format!("execution/{key}"))
+            .map_err(|e| e.to_string())?
+        {
+            let (incarnation, id): (String, String) =
+                serde_json::from_slice(&receipt).map_err(|e| e.to_string())?;
+            if incarnation != worker.incarnation {
+                return Err("previous worker execution outcome remains unknown".into());
+            }
+            // Completion may have won. The runtime status below is authoritative;
+            // a cancellation request/acknowledgement alone never releases capacity.
+            let _ = runtime.cancel(id.clone());
+            let status = runtime.status(id)?;
+            if status.get("stopped").and_then(Value::as_bool) != Some(true) {
+                return Ok(json!({"status":"cancelling"}));
+            }
+            return Ok(status);
+        }
+        let record = worker
+            .db
+            .get(format!("invocation/{key}"))
+            .map_err(|e| e.to_string())?;
+        if record.is_some_and(|r| r.as_ref() == b"consumed") {
+            return Err(
+                "launch consumed without durable execution receipt; outcome unknown".into(),
+            );
+        }
+        Ok(json!({"status":"cancelled", "stopped":true}))
+    }
+    .await;
+    match result {
+        Ok(status) => (StatusCode::OK, Json(status)),
         Err(error) => (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({"error":error})),
