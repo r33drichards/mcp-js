@@ -21,7 +21,7 @@ from prevention of new scheduled occurrences.
   the NixOS checks in CI before marking the feature complete.
 - Add NixOS tests with actual runners and JavaScript execution. Initial tests in
   `tests/nixos/scheduler/` cover disable-only, cancel-only, and disable then cancel.
-  They are authored, not VM-validated. Cancellation tests require implementation.
+  All three were VM-validated in CI on `4b901c6`; re-run them after review fixes.
 - Extend cancellation tests to admission/launch/completion races, ownership
   takeover, worker loss, uncertain capacity retention and restart recovery.
 - Implement Events delivery with durable delivery identity, retries and consumer
@@ -37,3 +37,15 @@ from prevention of new scheduled occurrences.
   Record actual passing results and remaining limits before marking work complete.
 
 Do not merge or deploy as part of these tests.
+
+## Review remediation
+
+- Require fixed-voter RPC authentication, bind advertised addresses, bound terms
+  and request bodies, and batch lagging-follower replication.
+- Certify no-launch rejections only through a committed terminal fence with no
+  permit; existing permits and uncertain outcomes keep capacity reserved.
+- Plan checkpoints in memory, deduplicate code in claims, prune retired attempt
+  metadata and enforce a checkpoint byte budget. Full Raft/worker compaction and
+  historical data erasure remain separate unfinished work.
+- Keep admission callbacks active during shutdown and await cancellation tasks.
+  Confirm Engine stoppage through the actual blocking-execution lifetime.

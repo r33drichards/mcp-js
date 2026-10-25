@@ -154,6 +154,11 @@ unknown; this does not prove remote effects stopped. Panics also become unknown.
 A future server adapter must preserve the existing Engine's authorization, hooks,
 resource bounds, and actual completion observation. No such adapter is enabled here.
 
+`Core::from_checkpoint` creates a pure-memory planner without opening a temporary
+sled database or flushing provisional state; its caller must durably commit the
+resulting checkpoint before exposing a returned invocation. `Core::open` and
+`Core::from_config` retain the local sled durability boundary described above.
+
 This is a small-workload prototype: state transitions clone and serialize bounded
 snapshots, and synchronous sled writes and flushes can block a runtime worker. It has
 no

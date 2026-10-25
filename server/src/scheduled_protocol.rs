@@ -3,6 +3,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+pub const MAX_SCHEDULED_BODY_BYTES: usize = 512 * 1024;
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Payload {
@@ -45,7 +47,8 @@ impl Dispatch {
         .unwrap()
     }
     pub fn validate(&self) -> Result<(), String> {
-        if self.version != 1
+        if self.payload.code.len() > 65_536
+            || self.version != 1
             || self.namespace.is_empty()
             || self.worker_id.is_empty()
             || self.owner.is_empty()

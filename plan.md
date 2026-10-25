@@ -93,3 +93,39 @@ HTTP retries are new requests; no automatic replay after crash, disconnect, time
 - Run project checks identified in Cargo manifests/CI, including relevant server and scheduler-core/runner suites, formatting and diff audit. Add focused CI and real HTTP lifecycle tests. Record exact commands/results in the implementation PR.
 
 Done means implemented behavior and evidence for every criterion, not compilation alone. If shared Engine structured results, stable principals or linearizable lookup are unavailable, stop with the precise gap and required decision. Do not substitute an unrestricted runtime, weaken authentication or bypass scheduler admission.
+
+## Known #287 baseline test failures (2026-10-25)
+
+Despite its plan-oriented title, #287 already contains the partial HTTP-function
+implementation from `ca9b5338`. The scheduler-hardening integration leaves that
+implementation and its tests unchanged. A fresh full server-library run on the
+integrated #287 code passed **277 tests and failed two**:
+
+- `http_functions::tests::table_driven_handler_results`: HTTP 500 instead of 201.
+- `http_functions::tests::table_driven_http_lifecycle_and_real_engine`: HTTP 500
+  instead of 200.
+
+Both failures were reproduced on untouched #287 head
+`d18df1010ad20ea5b074c943933eca27726ef520`, before the new hardening merge:
+
+```sh
+git worktree add --detach /tmp/mcp-287-baseline d18df1010ad20ea5b074c943933eca27726ef520
+cd /tmp/mcp-287-baseline
+cargo test --locked -p server --lib http_functions::tests::table_driven -- --test-threads=1
+```
+
+That targeted baseline run produced **0 passed, 2 failed, 271 filtered out**.
+To reproduce the full integrated #287 check, run in a fresh checkout of that
+branch:
+
+```sh
+cargo test --locked -p server --lib -- --test-threads=1
+```
+
+Use a fresh Cargo target directory (or clean the `server` package) when comparing
+checkouts; a shared target cache can reuse an older local-package test binary.
+The partial Engine returns no structured handler result; #293 supplies that
+completion. No tests were disabled or assertions weakened to hide these baseline
+failures, and no completion code was moved backward into #287. This is a known
+intermediate-stack limitation, **not a clean full-server-test pass for #287**.
+Validate the completed HTTP-function layer on #293 and its descendants.

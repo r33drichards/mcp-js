@@ -71,7 +71,7 @@ async fn fixed_cluster_takeover_restart_and_no_quorum_do_not_replay_consumed_wor
     let nodes: Vec<_> = configs
         .iter()
         .zip(&dbs)
-        .map(|(c, d)| ClusterNode::new_fixed(c.clone(), d.clone()).unwrap())
+        .map(|(c, d)| authenticated_node(c.clone(), d.clone()).unwrap())
         .collect();
     for n in &nodes {
         n.start().await;
@@ -138,7 +138,7 @@ async fn fixed_cluster_takeover_restart_and_no_quorum_do_not_replay_consumed_wor
     let restarted: Vec<_> = configs
         .iter()
         .zip(&dbs)
-        .map(|(c, d)| ClusterNode::new_fixed(c.clone(), d.clone()).unwrap())
+        .map(|(c, d)| authenticated_node(c.clone(), d.clone()).unwrap())
         .collect();
     for n in &restarted {
         n.start().await;
@@ -191,7 +191,7 @@ async fn fixed_cluster_takeover_restart_and_no_quorum_do_not_replay_consumed_wor
 }
 #[tokio::test]
 async fn generic_api_cannot_rewrite_scheduler_authority() {
-    let n = ClusterNode::new_fixed(
+    let n = authenticated_node(
         ClusterConfig::default(),
         sled::Config::new().temporary(true).open().unwrap(),
     )
@@ -251,7 +251,7 @@ async fn durable_restart_helper() {
         .unwrap()
         .parse()
         .unwrap();
-    let node = ClusterNode::new_fixed(
+    let node = authenticated_node(
         ClusterConfig {
             cluster_port: port,
             advertise_addr: Some(format!("127.0.0.1:{port}")),
@@ -300,4 +300,11 @@ async fn durable_restart_helper() {
     }
     // Deliberately skip Rust destructors/graceful shutdown after durable ACK.
     std::process::exit(0);
+}
+
+fn authenticated_node(
+    config: ClusterConfig,
+    db: sled::Db,
+) -> std::result::Result<Arc<ClusterNode>, String> {
+    ClusterNode::new_fixed_authenticated(config, db, std::env::var("PATH").unwrap())
 }
