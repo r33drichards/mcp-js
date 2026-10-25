@@ -190,6 +190,20 @@
         packages.npm-client = npmClient;
         packages.widdershins = widdershins;
 
+        packages.scheduler-runner = rustPlatform.buildRustPackage {
+          pname = "mcp-js-scheduler-runner";
+          version = "0.1.0";
+          # The runner imports consensus and protocol source from ../server.
+          src = self;
+          postUnpack = ''sourceRoot="$sourceRoot/scheduler-runner"'';
+          cargoLock.lockFile = ./scheduler-runner/Cargo.lock;
+          nativeBuildInputs = [ pkgs.pkg-config ];
+          buildInputs = [ pkgs.openssl ];
+          # Socket/process integration belongs in the VM checks below.
+          doCheck = false;
+          meta.mainProgram = "mcp-js-scheduler-runner";
+        };
+
         packages.default = rustPlatform.buildRustPackage {
           pname = "mcp-js-server";
           version = "0.1.0";
@@ -273,6 +287,24 @@
             ]
           );
         in {
+          scheduler-disable-test = pkgs.nixosTest (import ./tests/nixos/scheduler.nix {
+            inherit pkgs;
+            mcp-js = self.packages.x86_64-linux.default;
+            scheduler-runner = self.packages.x86_64-linux.scheduler-runner;
+            scenario = "disable";
+          });
+          scheduler-cancellation-test = pkgs.nixosTest (import ./tests/nixos/scheduler.nix {
+            inherit pkgs;
+            mcp-js = self.packages.x86_64-linux.default;
+            scheduler-runner = self.packages.x86_64-linux.scheduler-runner;
+            scenario = "cancellation";
+          });
+          scheduler-disabled-cancellation-test = pkgs.nixosTest (import ./tests/nixos/scheduler.nix {
+            inherit pkgs;
+            mcp-js = self.packages.x86_64-linux.default;
+            scheduler-runner = self.packages.x86_64-linux.scheduler-runner;
+            scenario = "disabled-cancellation";
+          });
           cluster-test = pkgs.nixosTest (import ./tests/nixos/cluster.nix {
             inherit pkgs;
             mcp-js = self.packages.x86_64-linux.default;
