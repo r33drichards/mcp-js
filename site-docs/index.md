@@ -43,6 +43,11 @@ cluster** that replicates session metadata.
 - [Concepts](concepts/overview.md) — how and why it works.
 - [Reference](reference/overview.md) — flags, tools, APIs.
 
+## Community
+
+Join the [mcp-js Discord community](https://discord.gg/BqjerAUDzC) for questions,
+examples, and project discussion.
+
 ## Capabilities at a glance
 
 | Area | What it does |
