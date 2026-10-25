@@ -1841,6 +1841,20 @@ pub struct WasmModule {
     pub description: Option<String>,
 }
 
+// The async driver and each blocking V8 task share this lifetime. Unwinding
+// the driver cannot certify a detached blocking task stopped: its Arc keeps
+// this guard alive until the isolate has actually been dropped.
+struct ExecutionActivity {
+    registry: Arc<ExecutionRegistry>,
+    id: ExecutionId,
+}
+impl Drop for ExecutionActivity {
+    fn drop(&mut self) {
+        self.registry.fail(&self.id, "execution task ended without a terminal result".into());
+        self.registry.mark_stopped(&self.id);
+    }
+}
+
 #[derive(Clone, uniffi::Object)]
 pub struct Engine {
     heap_storage: Option<AnyHeapStorage>,
@@ -2594,11 +2608,16 @@ impl Engine {
 
         let engine = self.clone();
         let id_bg = id.clone();
+        let activity = Arc::new(ExecutionActivity {
+            registry: self.execution_registry.as_ref().expect("registered execution").clone(),
+            id: id.clone(),
+        });
 
         tokio::spawn(async move {
             engine
                 .execute_in_background(
-                    id_bg.clone(),
+                    id_bg,
+                    activity,
                     code,
                     heap,
                     fs,
@@ -2611,11 +2630,6 @@ impl Engine {
                     mcp_headers,
                 )
                 .await;
-            // Cancellation marks intent immediately. Confirm quiescence only
-            // after execute_in_background has awaited the blocking V8 task.
-            if let Some(registry) = &engine.execution_registry {
-                registry.mark_stopped(&id_bg);
-            }
         });
 
         Ok(id)
@@ -2665,6 +2679,7 @@ impl Engine {
     async fn execute_in_background(
         &self,
         id: ExecutionId,
+        activity: Arc<ExecutionActivity>,
         code: String,
         heap: Option<String>,
         fs: Option<String>,
@@ -2752,7 +2767,9 @@ impl Engine {
                 // Cloned for the post-run session-log entry, since `code` is
                 // moved into the spawn_blocking closure below.
                 let code_for_log = code.clone();
+                let blocking_activity = activity.clone();
                 let mut join_handle = tokio::task::spawn_blocking(move || {
+                    let _activity = blocking_activity;
                     execute_stateless(
                         &code,
                         ExecutionConfig::new(max_bytes)
@@ -2780,8 +2797,8 @@ impl Engine {
                 let reg_clone = registry.clone();
                 let id_clone = id.clone();
                 tokio::spawn(async move {
-                    // Poll briefly for handle to become available.
-                    loop {
+                    // Bounded even if the async driver unwinds before publishing.
+                    for _ in 0..timeout.saturating_add(1).min(300) * 200 {
                         tokio::time::sleep(Duration::from_millis(5)).await;
                         if reg_clone.is_stopped(&id_clone) { break; }
                         if let Some(h) = ih_clone.lock().unwrap().as_ref() {
@@ -2879,7 +2896,9 @@ impl Engine {
                 let snap_mutex = self.snapshot_mutex.clone();
                 let fm = fs_mount.clone();
                 let ast = artifact_state.clone();
+                let blocking_activity = activity.clone();
                 let mut join_handle = tokio::task::spawn_blocking(move || {
+                    let _activity = blocking_activity;
                     let _guard = snap_mutex.blocking_lock();
                     execute_stateful(
                         &code,
@@ -2909,7 +2928,7 @@ impl Engine {
                 let reg_clone = registry.clone();
                 let id_clone = id.clone();
                 tokio::spawn(async move {
-                    loop {
+                    for _ in 0..timeout.saturating_add(1).min(300) * 200 {
                         tokio::time::sleep(Duration::from_millis(5)).await;
                         if reg_clone.is_stopped(&id_clone) { break; }
                         if let Some(h) = ih_clone.lock().unwrap().as_ref() {
@@ -3069,3 +3088,39 @@ impl Engine {
 }
 
 pub use ffi::*;
+
+#[cfg(test)]
+mod execution_activity_tests {
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn panicking_or_aborted_driver_cannot_report_detached_execution_stopped() {
+        for abort in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let registry = Arc::new(ExecutionRegistry::new(dir.path().to_str().unwrap()).unwrap());
+            registry.register("detached").unwrap();
+            let activity = Arc::new(ExecutionActivity { registry: registry.clone(), id: "detached".into() });
+            let (started, started_rx) = tokio::sync::oneshot::channel();
+            let (release, released) = std::sync::mpsc::channel();
+            let driver = tokio::spawn(async move {
+                let blocking_activity = activity.clone();
+                let _blocking = tokio::task::spawn_blocking(move || {
+                    let _activity = blocking_activity;
+                    started.send(()).unwrap();
+                    released.recv().unwrap();
+                });
+                if abort { std::future::pending::<()>().await; }
+                panic!("injected driver failure while blocking execution remains active");
+            });
+            started_rx.await.unwrap();
+            if abort { driver.abort(); }
+            assert!(driver.await.is_err());
+            assert!(!registry.is_stopped("detached"), "detached blocking task still owns execution");
+            release.send(()).unwrap();
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while !registry.is_stopped("detached") { tokio::time::sleep(Duration::from_millis(5)).await; }
+            }).await.unwrap();
+            assert_eq!(registry.get_status("detached").as_deref(), Some("failed"));
+        }
+    }
+}

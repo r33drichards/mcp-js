@@ -12,6 +12,7 @@ name = "server"
 path = "src/main.rs"
 
 [dependencies]
+subtle = "2.6"
 cli-derive = { path = "cli-derive" }
 uniffi-builder-derive = { path = "uniffi-builder-derive" }
 anyhow = "1.0.98"
