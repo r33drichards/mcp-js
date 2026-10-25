@@ -70,10 +70,17 @@ impl Registry {
                 .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
                 .map(|v| String::from_utf8(v.to_vec()).map_err(|_| StatusCode::SERVICE_UNAVAILABLE))
                 .transpose()?,
-            Backend::Cluster(node) => node
-                .get(KEY)
-                .await
-                .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?,
+            Backend::Cluster(node) => {
+                // Commit a current-term entry before reading the CAS candidate.
+                // Otherwise an uncommitted prior-term registry suffix can keep
+                // disagreeing with the applied value after restart forever.
+                node.put("http-functions/v1/barrier".into(), String::new())
+                    .await
+                    .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+                node.get(KEY)
+                    .await
+                    .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+            }
         };
         let records = match &raw {
             Some(raw) => serde_json::from_str(raw).map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?,
@@ -682,6 +689,34 @@ mod tests {
         );
         assert_eq!(follower.get(KEY).await.unwrap(), committed);
         next_pump.abort();
+        // Leave a different registry value in the prior-term uncommitted tail.
+        // A CAS-only read cannot advance this suffix after the next election.
+        let mut pending: Records = serde_json::from_str(committed.as_ref().unwrap()).unwrap();
+        pending.insert(
+            "pending".into(),
+            Entry {
+                revision: uuid::Uuid::new_v4().to_string(),
+                definition: Some(
+                    serde_json::from_str(&definition(
+                        "function handler(){return {status:200,body:'pending'}}",
+                    ))
+                    .unwrap(),
+                ),
+            },
+        );
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(100),
+                follower.cas(
+                    KEY.into(),
+                    committed.clone(),
+                    serde_json::to_string(&pending).unwrap()
+                )
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(follower.get(KEY).await.unwrap(), committed);
         let restarted = ClusterNode::new(ClusterConfig::default(), follower.db.clone());
         assert_eq!(restarted.get(KEY).await.unwrap(), committed);
         let restored = Registry {
@@ -701,7 +736,12 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(1)).await;
             }
         });
-        assert!(restored.read().await.unwrap()["echo"].definition.is_none());
+        let recovered = tokio::time::timeout(Duration::from_secs(2), restored.read())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(recovered["echo"].definition.is_none());
+        assert!(recovered["pending"].definition.is_some());
         restored_pump.abort();
         assert_eq!(
             serde_json::from_str::<Records>(&committed.unwrap()).unwrap()["echo"].revision,

@@ -64,3 +64,16 @@ cargo fmt --manifest-path scheduler-core/Cargo.toml --check
 cargo fmt --manifest-path scheduler-runner/Cargo.toml --check
 git diff --check
 ```
+
+## NixOS VM integration tests
+
+```sh
+nix build .#checks.x86_64-linux.http-functions-test --no-link -L
+nix build .#checks.x86_64-linux.http-functions-cluster-test --no-link -L
+```
+
+The service test boots the NixOS module with JWKS authentication and fetch policies. It covers opt-in behavior, scheduled-worker isolation, registration and ETags, request serialization, module imports, binary responses, HTTP errors, timeouts, policy-controlled header injection, fresh globals, service restart, and VM reboot.
+
+The three-node test crashes the leader, verifies the replicated revision after election, removes quorum, restores service, and restarts the entire cluster. It checks that tombstones prevent stale ETags from becoming valid again. A separate current-term barrier commits surviving prior-term registry proposals before loading a CAS candidate, so an ambiguous write cannot stall reads after restart.
+
+The HTTP functions NixOS integration workflow runs both checks on pushes and pull requests, including stacked branches.

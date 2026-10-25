@@ -273,6 +273,14 @@
             ]
           );
         in {
+          http-functions-test = pkgs.nixosTest (import ./tests/nixos/http-functions.nix {
+            inherit pkgs;
+            mcp-js = self.packages.x86_64-linux.default;
+          });
+          http-functions-cluster-test = pkgs.nixosTest (import ./tests/nixos/http-functions-cluster.nix {
+            inherit pkgs;
+            mcp-js = self.packages.x86_64-linux.default;
+          });
           cluster-test = pkgs.nixosTest (import ./tests/nixos/cluster.nix {
             inherit pkgs;
             mcp-js = self.packages.x86_64-linux.default;
