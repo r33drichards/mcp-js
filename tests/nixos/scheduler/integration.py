@@ -63,6 +63,7 @@ class Probe(http.server.BaseHTTPRequestHandler):
 
 class Runner:
     def __init__(self, executable, config, env, root, number):
+        self.management_url = f"http://127.0.0.1:{4600+number}"
         self.stderr = (root / f"runner-{number}.stderr").open("w")
         self.transcript = (root / f"runner-{number}.jsonl").open("w")
         self.process = subprocess.Popen(
@@ -89,8 +90,32 @@ class Runner:
         assert line is not None, "runner stdout closed"
         return json.loads(line)
 
+    def management(self, action, token="vm-only-operator", mcp=False, **fields):
+        if mcp:
+            path = "/mcp"
+            body = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                    "params": {"name": "scheduler_" + action, "arguments": fields}}
+        else:
+            path = "/scheduler/v1/commands"
+            body = {"action": action, **fields}
+        request = urllib.request.Request(self.management_url + path,
+            data=json.dumps(body).encode(), headers={
+                "Authorization": "Bearer " + token,
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream"})
+        try:
+            with urllib.request.urlopen(request, timeout=15) as response:
+                result = json.load(response)
+        except urllib.error.HTTPError as error:
+            return {"error": json.load(error), "http_status": error.code}
+        if mcp:
+            assert "error" not in result, result
+            return json.loads(result["result"]["content"][0]["text"])
+        return result
+
     def mutate(self, action, **fields):
-        result = self.command(action, **fields)
+        # Exercise the new transports against actual Raft and Engine work.
+        result = self.management(action, mcp=action in {"list", "disable"}, **fields)
         assert "error" not in result, (action, result)
         return result
 
@@ -105,7 +130,9 @@ class Cluster:
         self.probe = http.server.ThreadingHTTPServer(("127.0.0.1", 8090), Probe)
         threading.Thread(target=self.probe.serve_forever, daemon=True).start()
         self.env = dict(os.environ, MCP_SCHEDULER_WORKER_TOKEN="vm-only-worker",
-                        MCP_SCHEDULER_ADMISSION_TOKEN="vm-only-admission")
+                        MCP_SCHEDULER_ADMISSION_TOKEN="vm-only-admission",
+                        MCP_SCHEDULER_OPERATOR_TOKEN="vm-only-operator",
+                        MCP_SCHEDULER_RECOVERY_TOKEN="vm-only-recovery")
         expires = (datetime.datetime.now(datetime.timezone.utc) +
                    datetime.timedelta(days=1)).isoformat()
         worker = {
@@ -145,6 +172,11 @@ allow if {
                 "data_dir": str(self.root / f"r{i}-store"),
                 "admission_addr": f"127.0.0.1:{4500+i}",
                 "admission_bearer_env": "MCP_SCHEDULER_ADMISSION_TOKEN",
+                "management": {
+                    "addr": f"127.0.0.1:{4600+i}",
+                    "bearer_env": "MCP_SCHEDULER_OPERATOR_TOKEN",
+                    "recovery_bearer_env": "MCP_SCHEDULER_RECOVERY_TOKEN",
+                },
                 "schedules": [],
                 "remote": {
                     "url": "http://127.0.0.1:8080", "namespace": "nixos-integration",
@@ -158,6 +190,14 @@ allow if {
             self.runners.append(runner)
             self.processes.append(runner.process)
         self.owner = eventually(self.find_owner)
+        assert self.owner.management("status", mcp=True)["owner_acquired"]
+        for mcp in (False, True):
+            for token in ("wrong", "vm-only-worker", "vm-only-admission"):
+                denied = self.owner.management("status", token=token, mcp=mcp)
+                assert denied["http_status"] == 401, denied
+            denied = self.owner.management("acknowledge_stopped", mcp=mcp,
+                occurrence_id=1, dispatcher_and_work_quiesced=True)
+            assert denied.get("http_status", denied.get("status")) == 403, denied
 
     def write(self, name, value):
         path = self.root / name
