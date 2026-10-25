@@ -143,7 +143,7 @@ observation tasks; it does not cancel accepted remote effects.
 
 List is a stale local view. Mutations require quorum. Acknowledge-stopped requires
 operator evidence that dispatch and accepted work are quiesced; it releases an
-Unknown capacity reservation and does not cancel a previously admitted permit.
+Unknown or Cancelling capacity reservation and does not cancel a previously admitted permit.
 Unadmitted terminal/abandoned occurrences cannot obtain a permit. Creation has no
 request deduplication, so inspect state after an uncertain management result.
 

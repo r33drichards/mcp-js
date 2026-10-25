@@ -709,13 +709,14 @@ impl Core {
         self.commit(state)
     }
 
-    /// Caller attests that execution has stopped. Release an unknown slot without retrying it.
+    /// Caller attests that execution has stopped. Release an unknown or cancelling slot without retrying it.
     /// This does not establish whether external side effects occurred.
     pub fn acknowledge_stopped(&mut self, id: u64) -> Result<()> {
         let mut state = self.state.clone();
         let occurrence = state.occurrences.get_mut(&id).ok_or("unknown occurrence")?;
-        let Status::Unknown { attempt, .. } = occurrence.status else {
-            return Err("occurrence is not unknown".into());
+        let (Status::Unknown { attempt, .. } | Status::Cancelling { attempt }) = occurrence.status
+        else {
+            return Err("occurrence is not unknown or cancelling".into());
         };
         occurrence.status = Status::Abandoned {
             attempt,

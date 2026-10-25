@@ -812,7 +812,12 @@ async fn only_bound_definite_rejection_crosses_both_http_hops_as_not_launched() 
             tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
         let dir = tempfile::tempdir().unwrap();
         let mut config = worker_config(dir.path());
-        config.admission_urls = vec![admission_url];
+        // A refused first runner must not prevent a healthy quorum endpoint
+        // from issuing the bound rejection below.
+        let refused = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let refused_url = format!("http://{}", refused.local_addr().unwrap());
+        drop(refused);
+        config.admission_urls = vec![refused_url, admission_url];
         let worker = Worker::new(config).unwrap();
         let engine = Arc::new(Engine::default());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -859,4 +864,51 @@ async fn only_bound_definite_rejection_crosses_both_http_hops_as_not_launched() 
         admission_server.abort();
         worker_server.abort();
     }
+}
+
+#[tokio::test]
+async fn admission_disconnect_after_request_does_not_try_another_endpoint() {
+    use tokio::io::AsyncReadExt;
+    let first = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let first_url = format!("http://{}", first.local_addr().unwrap());
+    let second = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let second_url = format!("http://{}", second.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = first.accept().await.unwrap();
+        let mut bytes = [0; 4096];
+        assert!(socket.read(&mut bytes).await.unwrap() > 0);
+        // The endpoint might have committed admission before losing its ACK.
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = worker_config(dir.path());
+    config.admission_urls = vec![first_url, second_url];
+    let worker = Worker::new(config).unwrap();
+    let payload = Payload {
+        code: "1+1".into(),
+        session: "operator".into(),
+        timeout_seconds: 30,
+        heap_mb: 32,
+        expires_at: remote().expires_at,
+    };
+    let dispatch = Dispatch {
+        version: 1,
+        namespace: "model".into(),
+        worker_id: "worker".into(),
+        owner: "runner".into(),
+        epoch: 1,
+        authority: "grant".into(),
+        schedule_id: 1,
+        occurrence_id: 1,
+        attempt: 1,
+        payload_digest: digest(&payload),
+        payload,
+    };
+    let admission = worker.reserve(dispatch).unwrap();
+    assert!(worker.admit_decision(&admission).await.is_err());
+    server.await.unwrap();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), second.accept())
+            .await
+            .is_err()
+    );
 }

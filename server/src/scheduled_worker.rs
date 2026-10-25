@@ -177,7 +177,7 @@ impl Worker {
     }
     pub async fn admit_decision(&self, admission: &Admission) -> Result<Option<Permit>, String> {
         for origin in &self.config.admission_urls {
-            let response = self
+            let response = match self
                 .client
                 .post(format!(
                     "{}/scheduler/v1/admit",
@@ -187,7 +187,13 @@ impl Worker {
                 .json(admission)
                 .send()
                 .await
-                .map_err(|_| "ambiguous admission response")?;
+            {
+                Ok(response) => response,
+                // No request reached this endpoint. Other errors may hide a
+                // committed permit, so never fail over after an ambiguous send.
+                Err(error) if error.is_connect() => continue,
+                Err(_) => return Err("ambiguous admission response".into()),
+            };
             if response.status() == reqwest::StatusCode::CONFLICT {
                 continue;
             }
