@@ -7,6 +7,7 @@ edition = "2024"
 [dependencies]
 axum = "0.8"
 sha2 = "0.10"
+subtle = "2"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
@@ -19,6 +20,7 @@ tokio-util = "0.7"
 reqwest = { version = "0.12", features = ["json"] }
 futures = "0.3"
 tracing = "0.1"
+rmcp = { version = "=3.5.1", features = ["server", "transport-streamable-http-server"] }
 
 mcp-js-scheduler-core = { path = "../scheduler-core" }
 chrono = { version = "0.4", features = ["serde"] }

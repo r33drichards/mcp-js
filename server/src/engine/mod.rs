@@ -1843,6 +1843,7 @@ pub struct WasmModule {
 
 #[derive(Clone, uniffi::Object)]
 pub struct Engine {
+    pub(crate) http_functions: Arc<std::sync::OnceLock<crate::http_functions::Management>>,
     heap_storage: Option<AnyHeapStorage>,
     session_log: Option<SessionLog>,
     heap_tag_store: Option<HeapTagStore>,
@@ -2100,6 +2101,7 @@ impl Engine {
             }),
             mcp_client_manager: None,
             mcp_tools_hooks: None,
+            http_functions: Arc::new(std::sync::OnceLock::new()),
             subprocess_config: None,
             instructions_override: None,
             run_js_description_override: None,
@@ -2152,6 +2154,7 @@ impl Engine {
             }),
             mcp_client_manager: None,
             mcp_tools_hooks: None,
+            http_functions: Arc::new(std::sync::OnceLock::new()),
             subprocess_config: None,
             instructions_override: None,
             run_js_description_override: None,

@@ -2,8 +2,8 @@
 
 Use a flake revision containing the features you need. The
 [status page](../reference/scheduler-http-status.md) identifies this documentation's
-#293 baseline and the newer #284 fixes still awaiting integration. The following
-module example describes #293. It is not evidence that the newer scheduler fixes
+management layer, inherited #293 runtime, and newer #284 fixes still awaiting
+integration. The following module example uses the inherited server module. It is not evidence that the newer scheduler fixes
 have been integrated or validated in the combined stack.
 
 ## Enable HTTP functions in the server module
@@ -57,7 +57,11 @@ and Raft network boundaries distinct; remote callback listeners need existing TL
 termination. The runner is packaged separately as
 `packages.x86_64-linux.scheduler-runner`; there is no automatic scheduler runner
 NixOS service or scheduling option in `services.mcp-js`. Operators must supply
-runner units/configuration and a managed stdin/control arrangement themselves.
+runner units/configuration and either managed stdin or the optional loopback
+HTTP/MCP management listener themselves. For the listener, supply distinct
+operator and optional recovery credentials through the protected environment
+file; the worker and admission credentials cannot authorize management. The
+management listener adds no firewall opening or NixOS module option.
 See [runner configuration](../reference/scheduler.md).
 
 Do not clone active worker stores, reset identity-bound state, or restore stale
@@ -95,7 +99,7 @@ loss durability, tenant isolation, or every cancellation/takeover race.
 ```sh
 cargo test --locked -p server --lib http_functions -- --test-threads=1
 cargo test --locked -p server --lib scheduled_runtime_tests
-cargo test --locked -p server --test jwks_auth_e2e -- --test-threads=1
+cargo test --locked -p server --test http_function_management_e2e --test jwks_auth_e2e -- --test-threads=1
 cargo test --locked --manifest-path scheduler-core/Cargo.toml
 cargo test --locked --manifest-path scheduler-runner/Cargo.toml
 nix build .#packages.x86_64-linux.docs --no-link -L

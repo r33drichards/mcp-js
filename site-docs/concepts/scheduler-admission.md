@@ -63,3 +63,20 @@ property of this base. This operator-owned prototype provides no tenant principa
 mapping, schema migration, log compaction, or exactly-once effects.
 
 For lookup details, see [calendar policies and limits](../reference/scheduler.md).
+
+## Management adapters preserve the durable boundary
+
+Stdin, operator HTTP, and operator MCP commands enter the same serialized runner
+loop. The adapters do not create a new scheduler, retry policy, ownership epoch,
+or cancellation state. A successful cancellation reply still precedes confirmed
+stoppage, and disabling a schedule remains independent of cancellation.
+
+Transport authentication separates routine operator access from human-attested
+recovery. The worker and admission credentials cannot issue management commands.
+A separately authorized recovery caller must supply the existing explicit
+quiescence attestation; possession of a credential cannot prove that statement.
+The MCP tool description instructs agents not to infer or auto-approve it.
+
+The extra listener is loopback-only, but the inherited Raft transport still
+requires isolation. These adapter checks do not replace the pending #284 fixes
+or make the stack production-ready. See the [authorization matrix](../reference/scheduler.md#authorization-matrix).

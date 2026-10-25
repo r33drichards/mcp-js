@@ -1,12 +1,14 @@
 # Scheduler and HTTP feature status
 
-These pages describe the experimental scheduler and dynamic HTTP functions at
+These pages describe the HTTP/MCP management layer stacked on
+[PR #295, commit `1eb74af`](https://github.com/r33drichards/mcp-js/commit/1eb74af4ace275bc803faf31d86c459433578495),
+which documents the runtime inherited from
 [PR #293, commit `5c52682`](https://github.com/r33drichards/mcp-js/commit/5c52682da519f0ced3035b2cab32b41868c9eb50).
 They do not imply that the feature stack has merged into `main`.
 
 ## Integration prerequisite
 
-The stack is `main → #281 → #282 → #284 → #287 → #293 → this documentation`.
+The stack is `main → #281 → #282 → #284 → #287 → #293 → #295 → management layer`.
 [PR #284](https://github.com/r33drichards/mcp-js/pull/284) has since advanced to
 [`ffe1195`](https://github.com/r33drichards/mcp-js/commit/ffe1195c81290eb03c4576d643be34a584c1bfe1).
 Its changes are **not integrated into this documentation's #293 base**.
@@ -32,10 +34,12 @@ and test results when integrating the newer scheduler commits.
 Implemented here: numeric five-field cron with IANA timezones, missed-run,
 overlap and retry policies, durable fixed-voter runner admission, dedicated
 scheduled workers, explicit cancellation, dynamic HTTP definition CRUD and
-invocation, conditional revisions, and NixOS integration tests.
+invocation, conditional revisions, and NixOS integration tests. The management
+layer adds dedicated HTTP-function MCP tools and opt-in scheduler HTTP/MCP
+operator access. Both transports reuse the existing operations and state model.
 
-The design documents also discuss future work. There is no scheduling MCP
-management tool, MCP Events delivery, multi-tenant principal-to-grant binding,
+The design documents also discuss future work. There is no MCP Events delivery,
+multi-tenant principal-to-grant binding,
 exactly-once external effects, automatic resolution of `Unknown`, schema
 migration, or production-readiness guarantee. Dynamic HTTP handlers have no
 per-definition owner/role model, wildcard routes, streaming, or upgrades.

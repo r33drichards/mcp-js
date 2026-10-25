@@ -1240,6 +1240,13 @@ impl Engine {
         &self,
         request: ToolCallRequest,
     ) -> Result<crate::mcp_dispatch::ToolResponse, RuntimeError> {
+        if crate::http_functions::is_management_tool(&request.name) {
+            self.ensure_running()?;
+            let arguments = parse_json_object("arguments_json", &request.arguments_json)?;
+            return Ok(crate::http_functions::call_tool(self, &request.name, arguments)
+                .await
+                .into());
+        }
         let _lifecycle_guard = self.shutdown_lock.lock().await;
         self.ensure_running()?;
         let arguments = parse_json_object("arguments_json", &request.arguments_json)?;
@@ -1449,7 +1456,11 @@ impl Engine {
     }
 
     pub fn core_mcp_tools(&self) -> Vec<rmcp::model::Tool> {
-        crate::mcp::mode_tool_list(self)
+        let mut tools = crate::mcp::mode_tool_list(self);
+        if self.http_functions.get().is_some() {
+            tools.extend(crate::http_functions::tools());
+        }
+        tools
     }
 
     pub fn mcp_tools(&self) -> Vec<rmcp::model::Tool> {

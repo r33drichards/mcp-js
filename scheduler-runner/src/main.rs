@@ -3,6 +3,7 @@ use mcp_js_scheduler_core::{Definition, Limits, PulseSource};
 use mcp_js_scheduler_runner::{
     RemoteConfig, RemoteExecutor, Replicated,
     cluster::{ClusterConfig, ClusterNode, Role},
+    management::{self, Command},
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -26,6 +27,8 @@ struct Config {
     #[serde(default)]
     schedules: Vec<Definition>,
     remote: RemoteConfig,
+    #[serde(default)]
+    management: Option<management::Config>,
 }
 #[derive(Serialize)]
 struct Contract<'a> {
@@ -33,29 +36,6 @@ struct Contract<'a> {
     schedules: &'a [Definition],
     remote: &'a RemoteConfig,
 }
-#[derive(Deserialize)]
-#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
-enum Command {
-    Status,
-    List,
-    Create {
-        definition: Definition,
-    },
-    Disable {
-        id: u64,
-    },
-    Cancel {
-        occurrence_id: u64,
-    },
-    Delete {
-        id: u64,
-    },
-    AcknowledgeStopped {
-        occurrence_id: u64,
-        dispatcher_and_work_quiesced: bool,
-    },
-}
-
 #[tokio::main]
 async fn main() -> Result<(), String> {
     let path = std::env::args()
@@ -78,6 +58,24 @@ async fn main() -> Result<(), String> {
         .with_state((admission_token, admission_tx));
     let admission_server =
         tokio::spawn(async move { axum::serve(admission_listener, admission_router).await });
+    let (management_tx, mut management_rx) = tokio::sync::mpsc::channel::<management::Call>(64);
+    let management_server = if let Some(settings) = &config.management {
+        let worker_token =
+            mcp_js_scheduler_runner::scheduled_worker::secret(&config.remote.bearer_env)?;
+        let admission_token =
+            mcp_js_scheduler_runner::scheduled_worker::secret(&config.admission_bearer_env)?;
+        let router =
+            management::Transport::new(settings, &admission_token, &worker_token, management_tx)?
+                .router();
+        let listener = tokio::net::TcpListener::bind(settings.addr)
+            .await
+            .map_err(|e| e.to_string())?;
+        Some(tokio::spawn(
+            async move { axum::serve(listener, router).await },
+        ))
+    } else {
+        None
+    };
     let executor = Arc::new(RemoteExecutor::new(config.remote.clone())?);
     // All replicas must use the same grant reference/expiry, limits and initial definitions.
     let contract = serde_json::to_string(&Contract {
@@ -155,6 +153,11 @@ async fn main() -> Result<(), String> {
                 };
                 let _=reply.send(result);
             }
+            Some((command, reply)) = management_rx.recv(), if !stopping => {
+                // Complete the committed transition even if the remote caller disconnects.
+                let result = management::execute(command, &node, &mut owner).await;
+                let _ = reply.send(result);
+            }
             _ = tokio::signal::ctrl_c(), if !stopping => { stopping = true; }
             completed = running.join_next(), if !running.is_empty() => {
                 if let Some(Ok((term, invocation, outcome))) = completed
@@ -172,24 +175,7 @@ async fn main() -> Result<(), String> {
                     Some(line) => {
                         let response = match serde_json::from_str::<Command>(&line) {
                             Err(error) => Err(error.to_string()),
-                            Ok(Command::Status) => {
-                                let status=node.status().await;
-                                let acquired=status.role==Role::Leader && owner.as_ref().is_some_and(|active|active.is_valid() && active.term()==status.term);
-                                Ok(serde_json::json!({"cluster":status,"owner_acquired":acquired}))
-                            },
-                            Ok(command) => match owner.as_mut() {
-                                None => Err("no acquired leader; send command to current leader".into()),
-                                Some(active) => match command {
-                                    Command::Status => unreachable!(),
-                                    Command::List => Ok(serde_json::json!({"schedules": active.view().schedules(), "occurrences": active.view().occurrences(), "stale_local_view": true})),
-                                    Command::Create { definition } => active.create(definition, Utc::now()).await.map(|id| serde_json::json!({"id":id})),
-                                    Command::Disable { id } => active.disable(id).await.map(|_| serde_json::json!({"ok":true})),
-                                    Command::Cancel { occurrence_id } => active.request_cancel(occurrence_id).await.map(|_| serde_json::json!({"ok":true,"cancellation_requested":true})),
-                                    Command::Delete { id } => active.delete(id).await.map(|_| serde_json::json!({"ok":true})),
-                                    Command::AcknowledgeStopped { occurrence_id, dispatcher_and_work_quiesced: true } => active.acknowledge_stopped(occurrence_id).await.map(|_| serde_json::json!({"ok":true})),
-                                    Command::AcknowledgeStopped { .. } => Err("must establish old dispatcher cannot submit and in-flight work is resolved".into()),
-                                }
-                            }
+                            Ok(command) => management::execute(command, &node, &mut owner).await,
                         };
                         println!("{}", match response { Ok(value) => value, Err(error) => serde_json::json!({"error":error}) });
                     }
@@ -234,6 +220,9 @@ async fn main() -> Result<(), String> {
     }
     source.shutdown().await?;
     admission_server.abort();
+    if let Some(server) = management_server {
+        server.abort();
+    }
     node.shutdown();
     Ok(())
 }
