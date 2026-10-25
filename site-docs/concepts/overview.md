@@ -33,3 +33,8 @@ policy-gated bridges. Everything else below is a facet of that idea.
 
 - [Tutorials](../tutorials/overview.md) — learn by doing.
 - [Reference](../reference/overview.md) — the exhaustive facts.
+
+## Scheduler and HTTP functions
+
+- [Scheduler admission and cancellation](scheduler-admission.md) — ownership, permission, and uncertain effects.
+- [HTTP revisions and execution lifetime](http-functions.md) — registry consistency and pinned calls.

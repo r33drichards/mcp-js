@@ -66,3 +66,10 @@ examples, and project discussion.
 | [Security policies (OPA/Rego)](concepts/policies.md) | Gate every capability with OPA or embedded Rego |
 | [Authentication (JWT/JWKS)](concepts/authentication.md) | Verify request tokens against a JWKS |
 | [Clustering & replication (Raft)](concepts/clustering.md) | Replicate session metadata across nodes |
+
+## Experimental scheduling and HTTP handlers
+
+Start with the [implemented feature status](reference/scheduler-http-status.md),
+then choose a tutorial, operational guide, reference, or explanation. These
+features belong to the scheduler/HTTP PR stack; the status page distinguishes
+its current baseline from newer parent changes awaiting integration.

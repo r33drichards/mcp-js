@@ -20,3 +20,8 @@ start with [Install](../install/overview.md).
   and connect Claude Code.
 
 _More end-to-end use cases are on the way._
+
+## Scheduler and HTTP functions
+
+- [Schedule your first run](first-schedule.md) — start a local runner and actual Engine worker.
+- [Create your first HTTP function](first-http-function.md) — register, invoke, and delete a handler.
