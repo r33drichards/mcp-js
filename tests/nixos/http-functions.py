@@ -1,12 +1,15 @@
 
+
 machine.start()
 for unit in ["http-functions-fixture", "mcp-js", "mcp-js-disabled", "mcp-js-scheduled"]:
     machine.wait_for_unit(unit + ".service")
 for port in [3000, 3001, 3002]:
     machine.wait_for_open_port(port)
 
+
 def call(method, path, body=None, headers=None):
     return http(machine, method, path, body, headers, token=bearer_token())
+
 
 management = "/api/http-functions/v1/definitions"
 
@@ -45,7 +48,7 @@ with subtest("live registration maps requests without leaking credentials or con
                        headers={"If-None-Match": "*"}), 412)
     payload = b"\x00\xff\"}); throw new Error('input injection'); //"
     reply = assert_status(call("POST", "/functions/v1/echo?a=1&a=2", payload,
-                                headers={"Cookie": "private-cookie", "Content-Type": "application/octet-stream"}), 201)
+                               headers={"Cookie": "private-cookie", "Content-Type": "application/octet-stream"}), 201)
     decoded = json.loads(reply["body"])
     assert decoded["imported"] == "module.txt"
     request = decoded["request"]

@@ -4,6 +4,9 @@ on:
     paths: ['tests/nixos/http-functions*', 'server/src/**', 'nix/**', 'flake.nix', 'flake.lock', '.github/workflows/http-functions-nixos.yml']
   push:
     paths: ['tests/nixos/http-functions*', 'server/src/**', 'nix/**', 'flake.nix', 'flake.lock', '.github/workflows/http-functions-nixos.yml']
+concurrency:
+  group: http-functions-nixos-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
 permissions:
   contents: read
 jobs:
