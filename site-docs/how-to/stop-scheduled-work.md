@@ -45,7 +45,7 @@ Cancellation survives runner takeover and is idempotent. It does not reverse
 network requests or establish that remote services or subprocess effects stopped.
 Future scheduled occurrences remain enabled unless you disable the schedule.
 
-## Resolve an Unknown occurrence
+## Resolve an uncertain occurrence
 
 First establish that the old dispatcher cannot submit and all in-flight work is
 quiescent. Reconcile external effects independently. Then attest explicitly:
@@ -54,23 +54,19 @@ quiescent. Reconcile external effects independently. Then attest explicitly:
 {"action":"acknowledge_stopped","occurrence_id":2,"dispatcher_and_work_quiesced":true}
 ```
 
-At the #293 baseline this accepts only `Unknown`, marking it `Abandoned` and
+This accepts `Unknown` or unresolved `Cancelling`, marking it `Abandoned` and
 releasing capacity without replay. It does not invalidate a previously admitted
 permit; the attestation requires evidence about both dispatch and work.
 
-**Baseline limitation:** a worker restart can leave a previous-incarnation
-receipt unresolved in `Cancelling`, and this command rejects that state. Preserve
-the records and keep capacity reserved. Do not clear stores or claim cancellation
-success to unblock it. PR #284 at `ffe1195` adds attested cleanup for unresolved
-`Cancelling`; it requires integration through the parent stack before use here.
+A worker restart can leave a previous-incarnation receipt unresolved in
+`Cancelling`. Keep capacity reserved until that evidence is established. Do not
+clear stores or claim cancellation success merely to unblock scheduling.
 
 ## Investigate unavailable admission
 
 Check matching namespace/worker identity, configured credential references,
-expiry, acquired leadership, quorum, and worker reachability. At this baseline,
-callback endpoints advance only after a definitive 409. A refused connection to
-the first endpoint stops admission even if another endpoint has a leader. The
-upstream fix permits failover on definite connection-establishment failure;
+expiry, acquired leadership, quorum, and worker reachability. Callback endpoints
+advance after a definitive 409 or definite connection-establishment failure;
 timeouts and ambiguous sends remain uncertain. Never replay an uncertain dispatch
 manually as if it were a fresh execution.
 

@@ -474,7 +474,7 @@ async fn generated_admission_traces_match_production() {
 async fn actual_http_gate_rejects_duplicate_legacy_and_lost_admission_ack() {
     use axum::{Json, Router, routing::post};
     for lose_ack in [false, true] {
-        let node = ClusterNode::new_fixed(
+        let node = authenticated_node(
             ClusterConfig {
                 cluster_port: 0,
                 advertise_addr: Some("127.0.0.1:0".into()),
@@ -667,5 +667,248 @@ async fn incompatible_checkpoint_and_foreign_worker_store_are_preserved() {
     assert_eq!(
         std::fs::read(dir.path().join("foreign.sqlite")).unwrap(),
         b"preserve"
+    );
+}
+
+fn authenticated_node(
+    config: ClusterConfig,
+    db: sled::Db,
+) -> std::result::Result<Arc<ClusterNode>, String> {
+    ClusterNode::new_fixed_authenticated(config, db, std::env::var("PATH").unwrap())
+}
+
+#[tokio::test(start_paused = true)]
+async fn same_term_reacquisition_fences_only_attempts_with_no_quorum_permit() {
+    for admitted in [false, true] {
+        let mut net = Network::new().await;
+        let mut first = owner(&mut net).await;
+        let dispatch = claimed(&mut net, &mut first).await;
+        let request = Admission {
+            dispatch: dispatch.clone(),
+            worker_incarnation: "worker-process".into(),
+        };
+        if admitted {
+            net.drive(first.admit(request.clone(), now(1)))
+                .await
+                .unwrap();
+        }
+        let mut second = owner(&mut net).await;
+        let result = net
+            .drive(second.admit_classified(request.clone(), now(1)))
+            .await;
+        if admitted {
+            assert!(
+                result.is_err(),
+                "an existing permit is never a no-launch proof"
+            );
+            assert!(matches!(
+                second.view().occurrences()[0].status,
+                mcp_js_scheduler_core::Status::Unknown { .. }
+            ));
+        } else {
+            assert!(matches!(
+                result.unwrap(),
+                crate::AdmissionDecision::NotLaunched
+            ));
+            assert!(matches!(
+                second.view().occurrences()[0].status,
+                mcp_js_scheduler_core::Status::Failed { .. }
+            ));
+            assert!(
+                net.drive(first.admit(request, now(1))).await.is_err(),
+                "old owner cannot resurrect fenced work"
+            );
+        }
+        net.drive(second.observe(now(2))).await.unwrap();
+        assert_eq!(
+            net.drive(second.claim(now(2))).await.unwrap().is_some(),
+            !admitted
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn checkpoints_bound_receipts_and_store_schedule_code_only_once() {
+    let mut net = Network::new().await;
+    let limits = Limits {
+        records: 2,
+        outstanding: 2,
+        running: 1,
+        ..Limits::default()
+    };
+    let mut definition = definition();
+    definition.code = format!("UNIQUE_CLAIM_CODE_{}", "x".repeat(16 * 1024));
+    let mut active = net
+        .drive(Replicated::acquire(
+            net.nodes[net.leader].clone(),
+            limits,
+            &[definition.clone()],
+            "growth-test".into(),
+            now(0),
+        ))
+        .await
+        .unwrap();
+    let mut oldest = None;
+    for minute in 1..=12 {
+        net.drive(active.observe(now(minute))).await.unwrap();
+        let (invocation, dispatch) = net
+            .drive(active.claim_for_worker(now(minute), &remote()))
+            .await
+            .unwrap()
+            .unwrap();
+        let request = Admission {
+            dispatch,
+            worker_incarnation: "worker-process".into(),
+        };
+        net.drive(active.admit(request.clone(), now(minute)))
+            .await
+            .unwrap();
+        if oldest.is_none() {
+            oldest = Some(request);
+        }
+        net.drive(active.finish(&invocation, Outcome::Succeeded, now(minute)))
+            .await
+            .unwrap();
+        let checkpoint = net.nodes[net.leader]
+            .get("scheduler/state/v1")
+            .await
+            .unwrap()
+            .unwrap();
+        let value: Value = serde_json::from_str(&checkpoint).unwrap();
+        assert!(value["claims"].as_object().unwrap().len() <= 2);
+        assert!(value["admissions"].as_object().unwrap().len() <= 2);
+        assert_eq!(checkpoint.matches("UNIQUE_CLAIM_CODE_").count(), 1);
+        assert!(
+            checkpoint.len() < definition.code.len() * 2,
+            "history inflated checkpoint: {}",
+            checkpoint.len()
+        );
+    }
+    assert!(
+        net.drive(active.admit(oldest.unwrap(), now(13)))
+            .await
+            .is_err(),
+        "pruned identity must remain ineligible"
+    );
+}
+
+#[tokio::test]
+async fn only_bound_definite_rejection_crosses_both_http_hops_as_not_launched() {
+    use axum::{Json, Router, routing::post};
+    for bound in [false, true] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let admission_url = format!("http://{}", listener.local_addr().unwrap());
+        let router = Router::new().route(
+            "/scheduler/v1/admit",
+            post(move |Json(request): Json<Admission>| async move {
+                (
+                    axum::http::StatusCode::GONE,
+                    Json(serde_json::json!({"not_launched":true,
+                "invocation":if bound {request.dispatch.key()} else {"wrong-invocation".into()}})),
+                )
+            }),
+        );
+        let admission_server =
+            tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = worker_config(dir.path());
+        // A refused first runner must not prevent a healthy quorum endpoint
+        // from issuing the bound rejection below.
+        let refused = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let refused_url = format!("http://{}", refused.local_addr().unwrap());
+        drop(refused);
+        config.admission_urls = vec![refused_url, admission_url];
+        let worker = Worker::new(config).unwrap();
+        let engine = Arc::new(Engine::default());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut authority = remote();
+        authority.url = format!("http://{}", listener.local_addr().unwrap());
+        let router = worker.router(engine.clone());
+        let worker_server =
+            tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let payload = Payload {
+            code: "1+1".into(),
+            session: authority.session.clone(),
+            heap_mb: 32,
+            timeout_seconds: 30,
+            expires_at: authority.expires_at,
+        };
+        let dispatch = Dispatch {
+            version: 1,
+            namespace: authority.namespace.clone(),
+            worker_id: authority.worker_id.clone(),
+            schedule_id: 1,
+            occurrence_id: 2,
+            attempt: 1,
+            owner: "runner".into(),
+            epoch: 1,
+            authority: "grant".into(),
+            payload_digest: digest(&payload),
+            payload,
+        };
+        let executor = crate::RemoteExecutor::new(authority).unwrap();
+        let result = executor.execute_authorized(dispatch.clone()).await;
+        if bound {
+            assert!(matches!(result, Outcome::Failed(_)))
+        } else {
+            assert!(matches!(result, Outcome::Unknown(_)))
+        }
+        assert!(
+            matches!(
+                executor.execute_authorized(dispatch).await,
+                Outcome::Unknown(_)
+            ),
+            "reservation must not rearm"
+        );
+        assert_eq!(engine.0.load(Ordering::SeqCst), 0);
+        admission_server.abort();
+        worker_server.abort();
+    }
+}
+
+#[tokio::test]
+async fn admission_disconnect_after_request_does_not_try_another_endpoint() {
+    use tokio::io::AsyncReadExt;
+    let first = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let first_url = format!("http://{}", first.local_addr().unwrap());
+    let second = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let second_url = format!("http://{}", second.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = first.accept().await.unwrap();
+        let mut bytes = [0; 4096];
+        assert!(socket.read(&mut bytes).await.unwrap() > 0);
+        // The endpoint might have committed admission before losing its ACK.
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = worker_config(dir.path());
+    config.admission_urls = vec![first_url, second_url];
+    let worker = Worker::new(config).unwrap();
+    let payload = Payload {
+        code: "1+1".into(),
+        session: "operator".into(),
+        timeout_seconds: 30,
+        heap_mb: 32,
+        expires_at: remote().expires_at,
+    };
+    let dispatch = Dispatch {
+        version: 1,
+        namespace: "model".into(),
+        worker_id: "worker".into(),
+        owner: "runner".into(),
+        epoch: 1,
+        authority: "grant".into(),
+        schedule_id: 1,
+        occurrence_id: 1,
+        attempt: 1,
+        payload_digest: digest(&payload),
+        payload,
+    };
+    let admission = worker.reserve(dispatch).unwrap();
+    assert!(worker.admit_decision(&admission).await.is_err());
+    server.await.unwrap();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), second.accept())
+            .await
+            .is_err()
     );
 }

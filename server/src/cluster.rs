@@ -17,6 +17,33 @@ use tokio::sync::{Notify, RwLock};
 use tokio::time::{sleep, Instant};
 use tokio_util::sync::CancellationToken;
 
+pub const MAX_RAFT_BODY_BYTES: usize = 16 * 1024 * 1024;
+const MAX_APPEND_BYTES: usize = 12 * 1024 * 1024;
+const MAX_APPEND_ENTRIES: usize = 32;
+const MAX_RAFT_TERM: u64 = (1 << 63) - 1;
+
+/// Length is public; equal-length credential bytes are compared in constant time.
+pub fn bearer_matches(header: Option<&str>, token: &str) -> bool {
+    use subtle::ConstantTimeEq;
+    header.and_then(|h| h.strip_prefix("Bearer "))
+        .is_some_and(|value| bool::from(value.as_bytes().ct_eq(token.as_bytes())))
+}
+
+fn rpc_client(token: Option<&str>) -> Result<reqwest::Client, String> {
+    let mut headers = reqwest::header::HeaderMap::new();
+    if let Some(token) = token {
+        if token.is_empty() { return Err("empty cluster credential".into()); }
+        let mut value = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
+            .map_err(|_| "invalid cluster credential")?;
+        value.set_sensitive(true);
+        headers.insert(reqwest::header::AUTHORIZATION, value);
+    }
+    reqwest::Client::builder().default_headers(headers)
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(5)).connect_timeout(Duration::from_millis(500))
+        .build().map_err(|e| e.to_string())
+}
+
 const APPLIED_KEY: &[u8] = b"\0raft_applied";
 
 // ============================================================================
@@ -296,6 +323,7 @@ pub struct ClusterNode {
     commit_notify: Arc<Notify>,
     shutdown: CancellationToken,
     fixed_voters: Option<HashMap<String, String>>,
+    rpc_bearer: Option<String>,
     #[cfg(test)]
     fail_flush: std::sync::atomic::AtomicBool,
 }
@@ -421,11 +449,7 @@ impl ClusterNode {
         raft_state.peers.sort();
         raft_state.peers.dedup();
 
-        let http_client = reqwest::Client::builder()
-            .timeout(Duration::from_millis(500))
-            .connect_timeout(Duration::from_millis(200))
-            .build()
-            .expect("Failed to build HTTP client");
+        let http_client = rpc_client(None).expect("Failed to build HTTP client");
 
         Arc::new(Self {
             config,
@@ -436,6 +460,7 @@ impl ClusterNode {
             commit_notify: Arc::new(Notify::new()),
             shutdown: CancellationToken::new(),
             fixed_voters,
+            rpc_bearer: None,
             #[cfg(test)]
             fail_flush: std::sync::atomic::AtomicBool::new(false),
         })
@@ -498,6 +523,16 @@ impl ClusterNode {
         self.fixed_voters.is_some()
     }
 
+    /// Credentials are process-local and never persisted with membership or logs.
+    pub fn new_fixed_authenticated(config: ClusterConfig, db: sled::Db, token: String) -> Result<Arc<Self>, String> {
+        let client = rpc_client(Some(&token))?;
+        let mut node = Self::new_fixed(config, db)?;
+        let exclusive = Arc::get_mut(&mut node).expect("unshared new node");
+        exclusive.rpc_bearer = Some(token);
+        exclusive.http_client = client;
+        Ok(node)
+    }
+
     /// In-process scheduler authority. The generic HTTP data API cannot mutate
     /// this namespace. Raft RPCs still require a trusted internal network.
     pub async fn scheduler_cas(
@@ -545,6 +580,10 @@ impl ClusterNode {
     /// Start background tasks (election timer, heartbeat sender) and the
     /// cluster HTTP server.
     pub async fn start(self: &Arc<Self>) {
+        if self.has_fixed_voters() && self.rpc_bearer.is_none() {
+            tracing::error!("fixed-voter networking requires a cluster credential");
+            return;
+        }
         let node = self.clone();
         tokio::spawn(async move { node.run_election_timer().await });
 
@@ -651,13 +690,11 @@ impl ClusterNode {
     }
 
     fn persist_log_entry(&self, entry: &LogEntry) -> Result<(), String> {
+        let bytes = serde_json::to_vec(entry).map_err(|e| e.to_string())?;
+        if bytes.len() > MAX_APPEND_BYTES { return Err("Raft entry exceeds replication budget".into()); }
         self.durable(self.db.open_tree("raft_log").and_then(|tree| {
-            tree.insert(
-                entry.index.to_be_bytes(),
-                serde_json::to_vec(entry).unwrap(),
-            )
-        }))
-        .map(|_| ())
+            tree.insert(entry.index.to_be_bytes(), bytes)
+        })).map(|_| ())
     }
 
     fn truncate_log_from(&self, from_index: u64) -> Result<(), String> {
@@ -740,7 +777,11 @@ impl ClusterNode {
     async fn start_election(self: &Arc<Self>) {
         let (term, last_log_index, last_log_term, peers, voter_count) = {
             let mut state = self.state.write().await;
-            state.current_term += 1;
+            let Some(next) = state.current_term.checked_add(1).filter(|t| *t <= MAX_RAFT_TERM) else {
+                self.shutdown.cancel();
+                return;
+            };
+            state.current_term = next;
             state.role = Role::Candidate;
             state.voted_for = Some(self.config.node_id.clone());
             state.leader_id = None;
@@ -792,6 +833,7 @@ impl ClusterNode {
 
         for handle in handles {
             if let Ok(Some(resp)) = handle.await {
+                if resp.term > MAX_RAFT_TERM { continue; }
                 let mut state = self.state.write().await;
                 if resp.term > state.current_term {
                     state.current_term = resp.term;
@@ -906,12 +948,14 @@ impl ClusterNode {
             } else {
                 0
             };
-            let entries: Vec<LogEntry> = state
-                .log
-                .iter()
-                .filter(|e| e.index >= next_idx)
-                .cloned()
-                .collect();
+            let mut bytes = 0;
+            let entries: Vec<LogEntry> = state.log.iter().filter(|e| e.index >= next_idx)
+                .take(MAX_APPEND_ENTRIES).take_while(|entry| {
+                    let size = serde_json::to_vec(entry).map_or(MAX_RAFT_BODY_BYTES, |b| b.len());
+                    if bytes + size > MAX_APPEND_BYTES { return false; }
+                    bytes += size;
+                    true
+                }).cloned().collect();
             // peer_addrs already includes self (set during initialization)
             (
                 state.current_term,
@@ -967,6 +1011,7 @@ impl ClusterNode {
         ae_resp: AppendEntriesResponse,
     ) {
         let mut state = self.state.write().await;
+        if ae_resp.term > MAX_RAFT_TERM { return; }
         if ae_resp.term > state.current_term {
             state.current_term = ae_resp.term;
             state.role = Role::Follower;
@@ -993,7 +1038,7 @@ impl ClusterNode {
         } else {
             let next = state.next_index.get(peer).copied().unwrap_or(1);
             if next == prev_log_index + 1 && next > 1 {
-                state.next_index.insert(peer.to_string(), next - 1);
+                state.next_index.insert(peer.to_string(), (next / 2).max(1));
             }
         }
     }
@@ -1072,7 +1117,8 @@ impl ClusterNode {
             term,
             success: false,
         };
-        if self.healthy().is_err() || req.term < state.current_term {
+        if self.healthy().is_err() || req.term > MAX_RAFT_TERM || req.term < state.current_term
+            || req.entries.iter().any(|entry| serde_json::to_vec(entry).map_or(true, |bytes| bytes.len() > MAX_APPEND_BYTES)) {
             return reject(state.current_term);
         }
         if let Some(voters) = &self.fixed_voters {
@@ -1182,6 +1228,7 @@ impl ClusterNode {
         let mut state = self.state.write().await;
 
         if self.healthy().is_err()
+            || req.term > MAX_RAFT_TERM || req.last_log_term > req.term
             || self
                 .fixed_voters
                 .as_ref()
@@ -1761,7 +1808,7 @@ impl ClusterNode {
 // ============================================================================
 
 async fn read_body(req: Request<Incoming>) -> Result<Vec<u8>, String> {
-    req.into_body()
+    http_body_util::Limited::new(req.into_body(), MAX_RAFT_BODY_BYTES)
         .collect()
         .await
         .map(|c| c.to_bytes().to_vec())
@@ -1789,6 +1836,17 @@ async fn route(
     node: Arc<ClusterNode>,
     req: Request<Incoming>,
 ) -> Result<Response<String>, Infallible> {
+    if let Some(token) = &node.rpc_bearer {
+        if !bearer_matches(req.headers().get("authorization").and_then(|h| h.to_str().ok()), token) {
+            return Ok(error_response(401, "unauthorized cluster request"));
+        }
+    } else if node.has_fixed_voters() {
+        return Ok(error_response(503, "cluster authentication unavailable"));
+    }
+    if req.headers().get("content-length").and_then(|h| h.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok()).is_some_and(|n| n > MAX_RAFT_BODY_BYTES as u64) {
+        return Ok(error_response(413, "cluster request exceeds body limit"));
+    }
     // Reject all requests on a shut-down node.  The TCP listener stops
     // accepting new connections on shutdown, but already-established HTTP/1.1
     // keep-alive connections (held by reqwest's connection pool) can still
@@ -1916,7 +1974,12 @@ async fn route(
 pub async fn start_cluster_server(
     node: Arc<ClusterNode>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let addr = format!("0.0.0.0:{}", node.config.cluster_port);
+    if node.has_fixed_voters() && node.rpc_bearer.is_none() {
+        return Err("fixed-voter networking requires a cluster credential".into());
+    }
+    let addr = if node.has_fixed_voters() {
+        node.config.advertise_addr.clone().unwrap_or_else(|| format!("127.0.0.1:{}", node.config.cluster_port))
+    } else { format!("0.0.0.0:{}", node.config.cluster_port) };
     let tcp_listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!(
         "[{}] Cluster HTTP server listening on {}",

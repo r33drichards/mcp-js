@@ -1,10 +1,10 @@
 # Schedule your first JavaScript run
 
 This lesson starts one experimental runner and one dedicated worker on loopback,
-then observes a minute-based occurrence. You need a checkout containing PR #293,
+then observes a minute-based occurrence. You need a checkout containing the integrated #284 hardening through #295,
 Rust, Python 3, and two terminals in the repository root. Allow up to two minutes.
 Read [feature status](../reference/scheduler-http-status.md): this is a local
-lesson for the documented baseline, not a deployment recipe for the newer #284.
+lesson for the integrated runtime, not a production deployment recipe.
 
 ## Prepare an isolated configuration
 
@@ -15,6 +15,7 @@ cargo build --locked -p server --bin server
 cargo build --locked --manifest-path scheduler-runner/Cargo.toml
 export MCP_SCHEDULER_WORKER_TOKEN=local-tutorial-worker
 export MCP_SCHEDULER_ADMISSION_TOKEN=local-tutorial-admission
+export MCP_SCHEDULER_CLUSTER_TOKEN=local-tutorial-cluster
 export MCP_SCHEDULE_LESSON="$(mktemp -d)"
 python3 - <<'PYTHON'
 import datetime, json, os
@@ -30,6 +31,7 @@ worker = {
 runner = {
     'node_id': 'lesson-runner', 'advertise_addr': '127.0.0.1:4401',
     'cluster_port': 4401, 'peers': [], 'data_dir': str(root / 'runner-store'),
+    'cluster_bearer_env': 'MCP_SCHEDULER_CLUSTER_TOKEN',
     'admission_addr': '127.0.0.1:4501',
     'admission_bearer_env': 'MCP_SCHEDULER_ADMISSION_TOKEN',
     'schedules': [],
@@ -49,7 +51,7 @@ PYTHON
 MCP_SCHEDULED_WORKER_CONFIG="$MCP_SCHEDULE_LESSON/worker.json"   ./target/debug/server --heap-store none --http-port 8080 --bind-host 127.0.0.1
 ```
 
-These two bearer values are disposable lesson constants. Keep this experiment on
+These three bearer values are disposable lesson constants. Keep this experiment on
 loopback; use existing managed credentials in a real installation. The worker
 exposes only scheduled routes, so `/api/exec` and HTTP functions are absent.
 
@@ -61,6 +63,7 @@ In terminal 2, set `MCP_SCHEDULE_LESSON` to the directory printed above:
 export MCP_SCHEDULE_LESSON=/tmp/REPLACE_WITH_PRINTED_DIRECTORY
 export MCP_SCHEDULER_WORKER_TOKEN=local-tutorial-worker
 export MCP_SCHEDULER_ADMISSION_TOKEN=local-tutorial-admission
+export MCP_SCHEDULER_CLUSTER_TOKEN=local-tutorial-cluster
 scheduler-runner/target/debug/mcp-js-scheduler-runner "$MCP_SCHEDULE_LESSON/runner.json"
 ```
 

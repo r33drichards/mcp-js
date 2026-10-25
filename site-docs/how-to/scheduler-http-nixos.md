@@ -2,9 +2,8 @@
 
 Use a flake revision containing the features you need. The
 [status page](../reference/scheduler-http-status.md) identifies this documentation's
-#293 baseline and the newer #284 fixes still awaiting integration. The following
-module example describes #293. It is not evidence that the newer scheduler fixes
-have been integrated or validated in the combined stack.
+integrated scheduler hardening boundary. The examples are configuration guidance,
+not evidence of passing combined-stack VM validation.
 
 ## Enable HTTP functions in the server module
 
@@ -35,8 +34,9 @@ an environment variable, not an invented Nix module option. Definitions persist
 in the service state directory in single-node mode.
 
 The module opens configured HTTP/SSE/cluster ports in the NixOS firewall. Check
-actual listener reachability and ingress policy for your deployment. At this
-baseline do not expose Raft to untrusted callers: its RPCs lack authentication.
+actual listener reachability and ingress policy for your deployment. The ordinary server
+uses legacy dynamic cluster networking; do not infer the scheduler runner's
+fixed-voter bearer protection applies to those ports. Keep them private.
 Cluster HTTP functions use replicated registry state, accept admission on the
 leader, and require quorum; setting the directory alone does not configure Raft.
 See [clustering setup](clustering.md).

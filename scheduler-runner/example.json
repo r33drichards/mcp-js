@@ -16,5 +16,6 @@
     "worker_id": "worker-1"
   },
   "admission_addr": "127.0.0.1:4501",
-  "admission_bearer_env": "MCP_SCHEDULER_ADMISSION_TOKEN"
+  "admission_bearer_env": "MCP_SCHEDULER_ADMISSION_TOKEN",
+  "cluster_bearer_env": "MCP_SCHEDULER_CLUSTER_TOKEN"
 }

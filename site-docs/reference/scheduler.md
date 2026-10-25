@@ -1,6 +1,6 @@
 # Scheduler reference
 
-Baseline: [PR #293 feature status and pending integration](scheduler-http-status.md).
+Baseline: [integrated runtime boundary](scheduler-http-status.md).
 The experimental runner is a separate Cargo workspace. It uses Apalis pulses,
 the shared durable policy core, fixed-voter Raft, and a dedicated actual-server
 worker. It provides an operator stdin interface, not scheduling MCP tools.
@@ -17,6 +17,7 @@ Run `mcp-js-scheduler-runner CONFIG.json`. Unknown runner fields are rejected.
 | `data_dir` | Dedicated durable runner store |
 | `admission_addr` | Callback HTTP listener address |
 | `admission_bearer_env` | Environment reference for shared callback credential |
+| `cluster_bearer_env` | Required environment reference for the same existing Raft bearer on every voter |
 | `limits` | Optional core limits below |
 | `schedules` | Initial definitions; default empty |
 | `remote` | Required worker/authority configuration below |
@@ -45,8 +46,9 @@ The worker reads JSON from `MCP_SCHEDULED_WORKER_CONFIG`:
 
 Namespace and worker ID must match the runner's remote configuration. Origins
 require HTTPS except loopback HTTP; embedded credentials, paths, queries, and
-fragments are rejected. Redirects and automatic retries are disabled. At this
-baseline callback fallback occurs only on HTTP 409. Tokens are resolved from the
+fragments are rejected. Redirects and automatic retries are disabled. Callback
+fallback occurs on HTTP 409 or a definite connection-establishment failure;
+ambiguous sends and other errors stop the attempt. Tokens are resolved from the
 named environment variables, not stored as config values.
 
 The actual server must use HTTP mode and `--heap-store none` (the default).
@@ -67,8 +69,8 @@ bearer credential and any existing JWKS enforcement. There is no fallback to
 `/api/exec`, MCP, SSE, or HTTP functions. The runner callback uses the admission
 credential. Dispatch binds version, namespace, schedule/occurrence/attempt,
 owner/epoch, worker, payload digest and execution authority. It is an internal
-runner protocol, not a replacement for operator management. At this baseline
-scheduled/admission routers allow 16 MiB bodies; upcoming #284 reduces this.
+runner protocol, not a replacement for operator management. Scheduled/admission
+routers cap bodies at 512 KiB, including JSON escaping.
 
 ## Definition and calendar policy
 
@@ -115,8 +117,11 @@ only confirmed `Failed` outcomes retry. Unknown never retries automatically.
 | `running` | 16 | Positive, no greater than outstanding |
 | `grace_seconds` | 5 | 0–59, inclusive grace window |
 
-These are policy limits, not a bound on the retained Raft log and claim/admission
-envelope at this baseline. No general compaction or history erasure is provided.
+Checkpoint JSON is capped at 4 MiB; oversized transitions fail closed. Claims
+and admission metadata retire when their occurrence/attempt leaves core retention.
+Cluster bodies are capped at 16 MiB; outgoing replication batches at 32 entries /
+12 MiB. The Raft log and worker receipts still grow: there is no general
+compaction or history erasure, and these budgets are not throughput guarantees.
 
 ## Operator commands and states
 
@@ -140,7 +145,9 @@ observation tasks; it does not cancel accepted external effects.
 States are `Pending`, `Running`, `Cancelling`, `Cancelled`, `Succeeded`, `Failed`,
 `Unknown`, `Abandoned`, each carrying attempt information. `Unknown` and
 `Cancelling` retain running/overlap reservations. `acknowledge_stopped` accepts
-only `Unknown` here; newer #284 extends this to unresolved `Cancelling`.
+`Unknown` or unresolved `Cancelling`, with explicit evidence that both the old
+dispatcher and accepted work are quiescent. It marks the occurrence `Abandoned`
+without replay; it does not cancel a previously admitted permit.
 Older binaries cannot read cancellation enum variants. Do not roll back a live
 store with unresolved cancellation to such a binary.
 

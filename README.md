@@ -391,5 +391,5 @@ Dynamic HTTP handlers can be registered without restart. See [HTTP functions](do
 
 The [Diátaxis documentation map](site-docs/reference/scheduler-http-status.md)
 links guided tutorials, operational how-to guides, reference, and explanations
-for the experimental scheduler and dynamic HTTP functions. It records the #293
-baseline and newer #284 fixes that still need integration through the stack.
+for the experimental scheduler and dynamic HTTP functions. It records the #284 hardening integrated
+through #287, #293, and #295, without implying a main merge or deployment.

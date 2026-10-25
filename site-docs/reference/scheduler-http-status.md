@@ -1,31 +1,29 @@
 # Scheduler and HTTP feature status
 
-These pages describe the experimental scheduler and dynamic HTTP functions at
-[PR #293, commit `5c52682`](https://github.com/r33drichards/mcp-js/commit/5c52682da519f0ced3035b2cab32b41868c9eb50).
-They do not imply that the feature stack has merged into `main`.
+These pages describe the experimental scheduler and dynamic HTTP functions with
+[PR #284 hardening at `ffe1195`](https://github.com/r33drichards/mcp-js/commit/ffe1195c81290eb03c4576d643be34a584c1bfe1)
+integrated through #287, #293, and #295. They do not imply that the feature stack
+has merged into `main`, been deployed, or passed fresh combined-stack validation.
 
-## Integration prerequisite
+## Integrated runtime boundary
 
-The stack is `main → #281 → #282 → #284 → #287 → #293 → this documentation`.
-[PR #284](https://github.com/r33drichards/mcp-js/pull/284) has since advanced to
-[`ffe1195`](https://github.com/r33drichards/mcp-js/commit/ffe1195c81290eb03c4576d643be34a584c1bfe1).
-Its changes are **not integrated into this documentation's #293 base**.
-Integrating and validating those fixes through #287 and #293 is a prerequisite
-for treating the full stack as current. This documentation does not update those
-parent branches.
+The stack is `main → #281 → #282 → #284 → #287 → #293 → #295`.
+Earlier documentation of #293 at `5c52682` described the pre-hardening runtime;
+those historical test results are not validation of this integrated revision.
 
-| Concern | Observed in #293 | Pending upstream in #284 |
-|---|---|---|
-| Scheduler Raft transport | Fixed voters on a trusted network; RPCs lack authentication | Required cluster bearer reference, authenticated fixed-voter RPCs and listener binding |
-| Resource bounds | Policy limits bound core records; retained claims/admissions and Raft log grow | Checkpoint/retained-record limits, smaller request bodies, bounded replication batches and checked terms; no general log compaction |
-| Admission refusal | Only a definitive HTTP 409 advances to the next endpoint; a connection error stops the attempt | Definite connection-establishment errors also advance; ambiguous sends still stop |
-| Rejected admission | Conservative uncertain outcome retains capacity | Bound, quorum-confirmed not-launched response distinguishes definite rejection |
-| Uncertain cancellation | `acknowledge_stopped` accepts only `Unknown`, not `Cancelling` | Explicit quiescence attestation can also abandon unresolved `Cancelling` |
-| Shutdown and Engine lifetime | Existing cancellation/join tracking; conservative uncertainty | Admission remains available during drain; additional panic/abort lifetime tracking |
+| Concern | Integrated behavior |
+|---|---|
+| Scheduler Raft transport | Required `cluster_bearer_env`; all fixed-voter HTTP routes authenticate the shared bearer and bind the configured advertised address |
+| Resource bounds | 4 MiB checkpoint cap; claim/admission metadata retires with core records; 512 KiB scheduled/admission bodies; bounded replication batches and checked terms; no general log compaction |
+| Admission refusal | HTTP 409 and definite connection-establishment errors advance to the next callback; ambiguous sends stop |
+| Rejected admission | Only a bound, quorum-confirmed terminal fence can establish not-launched; existing permits and uncertain outcomes retain capacity |
+| Uncertain cancellation | Explicit dispatcher-and-work quiescence attestation can abandon `Unknown` or unresolved `Cancelling`; never automatic |
+| Shutdown and Engine lifetime | Admission remains available during drain; driver panic/abort does not confirm stopped while blocking execution remains alive |
 
-Do not add the upcoming `cluster_bearer_env` key to the #293 runner config:
-its parser rejects unknown fields. Recheck configuration, recovery instructions,
-and test results when integrating the newer scheduler commits.
+Set `cluster_bearer_env` on every runner, resolving to the same existing secret on
+all voters. Bearer authentication does not encrypt HTTP or make Raft Byzantine-
+tolerant: keep private network boundaries and encrypted transport for remote links.
+Legacy dynamic cluster mode is not changed by this fixed-voter protection.
 
 ## Implemented and excluded scope
 
