@@ -43,6 +43,8 @@ pub struct ExecutionRecord {
     pub id: ExecutionId,
     pub status: ExecutionStatus,
     pub isolate_handle: Option<v8::IsolateHandle>,
+    /// True only after the background task has joined its V8 execution.
+    pub stopped: bool,
     pub result: Option<String>,
     pub heap: Option<String>,
     /// Resulting filesystem snapshot CA id (hex), independent of the heap.
@@ -112,6 +114,7 @@ impl ExecutionRegistry {
             id: id.to_string(),
             status: ExecutionStatus::Running,
             isolate_handle: None,
+            stopped: false,
             result: None,
             heap: None,
             fs: None,
@@ -149,8 +152,27 @@ impl ExecutionRegistry {
     /// Store the V8 isolate handle for cancellation support.
     pub fn set_isolate_handle(&self, id: &str, handle: v8::IsolateHandle) {
         if let Some(mut record) = self.executions.get_mut(id) {
+            if matches!(record.status, ExecutionStatus::Cancelled) {
+                // Cancel can race with startup, before a handle is published.
+                handle.terminate_execution();
+                return;
+            }
+            if record.stopped {
+                return;
+            }
             record.isolate_handle = Some(handle);
         }
+    }
+
+    pub fn mark_stopped(&self, id: &str) {
+        if let Some(mut record) = self.executions.get_mut(id) {
+            record.stopped = true;
+            record.isolate_handle = None;
+        }
+    }
+
+    pub fn is_stopped(&self, id: &str) -> bool {
+        self.executions.get(id).is_some_and(|record| record.stopped)
     }
 
     /// Clear the isolate handle (e.g., after execution completes).

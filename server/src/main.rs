@@ -35,6 +35,9 @@ fn main() -> Result<()> {
         .init();
 
     let cli = cli::parse();
+    if server::scheduled_worker::configured() && cli.heap_store != StoreKind::None {
+        anyhow::bail!("scheduled-only worker requires --heap-store none: cancelling SnapshotCreator executions is unsupported");
+    }
     if server::scheduled_worker::configured() && (cli.http_port.is_none() || cli.sse_port.is_some())
     {
         anyhow::bail!("scheduled-only worker requires --http-port and forbids SSE/stdio execution");

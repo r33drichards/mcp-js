@@ -269,6 +269,63 @@ impl Replicated {
     pub async fn disable(&mut self, id: u64) -> Result<()> {
         self.transition(|core| core.disable(id)).await
     }
+    pub async fn request_cancel(&mut self, id: u64) -> Result<()> {
+        self.transition(|core| core.request_cancel(id)).await
+    }
+    /// Reconcile durable intent after restart or takeover without replaying work.
+    pub fn cancellations(&self) -> Vec<Dispatch> {
+        self.core
+            .occurrences()
+            .iter()
+            .filter_map(|occurrence| {
+                let mcp_js_scheduler_core::Status::Cancelling { attempt } = occurrence.status
+                else {
+                    return None;
+                };
+                self.envelope
+                    .claims
+                    .values()
+                    .find(|dispatch| {
+                        dispatch.occurrence_id == occurrence.id && dispatch.attempt == attempt
+                    })
+                    .cloned()
+            })
+            .collect()
+    }
+    pub async fn finish_cancellation(
+        &mut self,
+        dispatch: &Dispatch,
+        outcome: Outcome,
+        now: Time,
+    ) -> Result<()> {
+        if !self.core.occurrences().iter().any(|o| {
+            o.id == dispatch.occurrence_id
+                && o.status
+                    == (mcp_js_scheduler_core::Status::Cancelling {
+                        attempt: dispatch.attempt,
+                    })
+        }) {
+            return Ok(()); // normal completion or another cancellation observation won
+        }
+        self.finish(
+            &Invocation {
+                occurrence_id: dispatch.occurrence_id,
+                schedule_id: dispatch.schedule_id,
+                attempt: dispatch.attempt,
+                due_at: self
+                    .core
+                    .occurrences()
+                    .iter()
+                    .find(|o| o.id == dispatch.occurrence_id)
+                    .unwrap()
+                    .due_at,
+                code: dispatch.payload.code.clone(),
+            },
+            outcome,
+            now,
+        )
+        .await
+    }
     pub async fn acknowledge_stopped(&mut self, id: u64) -> Result<()> {
         self.transition(|core| core.acknowledge_stopped(id)).await
     }

@@ -63,8 +63,7 @@ jobs:
           sudo udevadm trigger --name-match=kvm
           test -r /dev/kvm
           test -w /dev/kvm
-          mkdir -p artifacts "$RUNNER_TEMP/nix-build"
-          chmod 0755 "$RUNNER_TEMP/nix-build"
+          mkdir -p artifacts
 
       - name: Run NixOS VM test
         shell: bash
@@ -72,7 +71,6 @@ jobs:
           set -euo pipefail
           nix build '.#checks.x86_64-linux.${{ matrix.check }}' \
             --print-build-logs --keep-failed --out-link result \
-            --option build-dir "$RUNNER_TEMP/nix-build" \
             2>&1 | tee artifacts/build.log
 
       - name: Collect VM diagnostics
@@ -83,12 +81,13 @@ jobs:
           if [ -e result ]; then
             cp -RL result artifacts/vm-output
           fi
-          if [ -d "$RUNNER_TEMP/nix-build" ]; then
-            sudo find "$RUNNER_TEMP/nix-build" -type f \
+          for build_dir in /tmp/nix-*; do
+            [ -d "$build_dir" ] || continue
+            sudo find "$build_dir" -type f \
               \( -name '*.log' -o -name '*.stderr' -o -name '*.jsonl' -o -name log \) \
               -exec cp --parents '{}' "$GITHUB_WORKSPACE/artifacts/" \;
-            sudo chown -R "$(id -u):$(id -g)" artifacts
-          fi
+          done
+          sudo chown -R "$(id -u):$(id -g)" artifacts
 
       - uses: actions/upload-artifact@v4
         if: always()

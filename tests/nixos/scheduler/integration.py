@@ -97,7 +97,8 @@ class Runner:
 
 class Cluster:
     def __init__(self, args):
-        self.root = Path("/tmp/scheduler-integration")
+        self.root = Path(args.state_dir)
+        self.real_clock = args.real_clock
         self.root.mkdir(parents=True, exist_ok=False)
         self.processes = []
         self.runners = []
@@ -115,9 +116,24 @@ class Cluster:
             "admission_urls": [f"http://127.0.0.1:{4500+i}" for i in range(1, 4)],
         }
         self.write("worker.json", worker)
+        # Fetch is opt-in in the actual Engine. Authorize only the local probe;
+        # the test must not grant general network access to scheduled JavaScript.
+        policy = self.root / "probe.rego"
+        policy.write_text('''package mcp.fetch
+default allow = false
+allow if {
+    input.method == "GET"
+    input.url_parsed.scheme == "http"
+    input.url_parsed.host == "127.0.0.1"
+    input.url_parsed.port == 8090
+}
+''')
+        policies = self.write("policies.json", {
+            "fetch": {"policies": [{"url": policy.as_uri()}]},
+        })
         worker_env = dict(self.env, MCP_SCHEDULED_WORKER_CONFIG=str(self.root / "worker.json"))
         log = (self.root / "worker.log").open("w")
-        process = subprocess.Popen([args.server, "--http-port", "8080"], env=worker_env,
+        process = subprocess.Popen([args.server, "--http-port", "8080", "--policies-json", str(policies)], env=worker_env,
                                    stdout=log, stderr=subprocess.STDOUT, cwd=self.root)
         self.processes.append(process)
         eventually(lambda: self.http_status("/api/scheduled/v1/executions/not-found") == 404)
@@ -194,7 +210,10 @@ class Cluster:
     def tick(self):
         # Advance guest wall time to a real cron boundary; no fake runner clock.
         target = int(time.time() // 60 + 1) * 60 + 1
-        subprocess.run(["date", "-u", "-s", f"@{target}"], check=True)
+        if self.real_clock:
+            time.sleep(max(0, target - time.time()))
+        else:
+            subprocess.run(["date", "-u", "-s", f"@{target}"], check=True)
 
     def running(self, schedule_id, name, excluded=()):
         def started():
@@ -297,6 +316,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--server", required=True)
     parser.add_argument("--runner", required=True)
+    parser.add_argument("--state-dir", default="/tmp/scheduler-integration")
+    parser.add_argument("--real-clock", action="store_true",
+                        help="wait for cron boundaries without changing host time")
     parser.add_argument("--scenario", choices=["disable", "cancellation", "disabled-cancellation"], required=True)
     args = parser.parse_args()
     cluster = Cluster.__new__(Cluster)

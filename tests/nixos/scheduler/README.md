@@ -44,12 +44,17 @@ original execution's heartbeat separately. No external-effect rollback is implie
 
 ## Current implementation status
 
-PR head `8677390325b1769a715bd889bcaa22bd1167cf9f` has neither this command nor
-the terminal `Cancelled` state. The two cancellation checks are acceptance tests
-for the requested implementation and are expected to fail on that head. They
-are not skipped or marked expected-failure. The disable-only check exercises
-existing behavior. None of these VM checks has been executed in the authoring
-environment, which has no Nix installation or KVM device.
+The implementation now provides the cancellation command and durable
+`Cancelling`/`Cancelled` states. Local core and worker-gate tests cover uncertain
+capacity retention, restart preservation, late-launch rejection and consumed
+launches with lost receipts. Actual Engine tests cover cancellation before and
+after handle publication. The NixOS VM checks still require a CI result; local
+Python validation alone does not establish VM success.
+
+For a host without clock-setting permission, the same harness accepts
+`--real-clock --state-dir /path/to/fresh/directory`, waiting for actual cron
+boundaries instead of changing wall time. The worker uses a local Rego policy
+that permits only GET to the execution probe on loopback port 8090.
 
 Guest configurations, worker output and runner stderr/JSON responses are copied
 from `/tmp/scheduler-integration` into the test-driver output, including on failure.

@@ -16,8 +16,9 @@ from prevention of new scheduled occurrences.
 
 ## Work and acceptance gates
 
-- Implement independent occurrence cancellation across runner, admission store,
-  worker and Engine; add a terminal cancelled state without automatic retries.
+- Independent occurrence cancellation now spans runner intent, worker launch
+  fencing and confirmed Engine stop; terminal cancellations do not retry. Validate
+  the NixOS checks in CI before marking the feature complete.
 - Add NixOS tests with actual runners and JavaScript execution. Initial tests in
   `tests/nixos/scheduler/` cover disable-only, cancel-only, and disable then cancel.
   They are authored, not VM-validated. Cancellation tests require implementation.

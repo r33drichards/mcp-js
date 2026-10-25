@@ -1906,7 +1906,11 @@ impl crate::scheduled_worker::Runtime for ScheduledRuntime {
             .0
             .get_execution(id.clone())
             .map_err(|e| e.to_string())?;
-        Ok(serde_json::json!({"execution_id":id,"status":info.status}))
+        let stopped = self.0.scheduled_execution_stopped(&id);
+        Ok(serde_json::json!({"execution_id":id,"status":info.status,"stopped":stopped}))
+    }
+    fn cancel(&self, id: String) -> Result<(), String> {
+        self.0.cancel_execution(id).map_err(|e| e.to_string())
     }
 }
 pub fn scheduled_router(runtime: Arc<Engine>) -> Result<Router, String> {
@@ -1916,6 +1920,34 @@ pub fn scheduled_router(runtime: Arc<Engine>) -> Result<Router, String> {
 #[cfg(test)]
 mod scheduled_runtime_tests {
     use super::*;
+    async fn scheduled_cancellation_confirms_background_stop_including_startup_race() {
+        use crate::scheduled_worker::Runtime;
+        for wait_for_start in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let engine = Engine::create(crate::engine::ffi_config::EngineConfigBuilder::new()
+                .limits(crate::engine::ffi_config::ExecutionLimitsBuilder::new()
+                    .heap_memory_max_mb(64).execution_timeout_secs(15).build().unwrap())
+                .data_dir(dir.path().to_str().unwrap().to_string())
+                .build().unwrap()).unwrap();
+            let runtime = ScheduledRuntime(engine.clone());
+            let id = runtime.submit(crate::scheduled_protocol::Payload {
+                code: "while (true) { await new Promise(resolve => setTimeout(resolve, 10)); }".into(),
+                session: "scheduled-cancel-test".into(), heap_mb: 32,
+                timeout_seconds: 15, expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+            }).await.unwrap();
+            if wait_for_start { tokio::time::sleep(std::time::Duration::from_millis(200)).await; }
+            runtime.cancel(id.clone()).unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    let status = runtime.status(id.clone()).unwrap();
+                    assert_eq!(status["status"], "cancelled");
+                    if status["stopped"] == true { break; }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            }).await.expect("cancel must actually join the V8 execution before confirming stopped");
+            engine.shutdown().await;
+        }
+    }
     #[tokio::test]
     async fn scheduled_launch_calls_real_engine() {
         use crate::scheduled_worker::Runtime;
@@ -1936,5 +1968,6 @@ mod scheduled_runtime_tests {
         assert_eq!(info.status, "completed");
         assert_eq!(runtime.status(id).unwrap()["status"], "completed");
         engine.shutdown().await;
+        scheduled_cancellation_confirms_background_stop_including_startup_race().await;
     }
 }
