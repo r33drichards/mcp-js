@@ -752,6 +752,112 @@
         }
       }
     },
+    "/api/http-functions/v1/definitions": {
+      "get": {
+        "tags": [
+          "HTTP functions"
+        ],
+        "operationId": "list",
+        "responses": {
+          "200": {
+            "description": "Active definition metadata; source omitted"
+          },
+          "503": {
+            "description": "Registry unavailable"
+          }
+        }
+      }
+    },
+    "/api/http-functions/v1/definitions/{name}": {
+      "get": {
+        "tags": [
+          "HTTP functions"
+        ],
+        "operationId": "lookup",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Function name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Metadata with revision ETag"
+          },
+          "404": {
+            "description": "Missing function"
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "HTTP functions"
+        ],
+        "operationId": "put",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Function name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Definition"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Committed definition with ETag"
+          },
+          "412": {
+            "description": "Stale revision"
+          },
+          "428": {
+            "description": "Conditional header required"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "HTTP functions"
+        ],
+        "operationId": "delete",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Function name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Committed tombstone"
+          },
+          "412": {
+            "description": "Stale revision"
+          }
+        }
+      }
+    },
     "/api/sessions/{session}/dir/{path}": {
       "get": {
         "tags": [
@@ -1178,6 +1284,51 @@
           }
         }
       }
+    },
+    "/functions/v1/{name}": {
+      "post": {
+        "tags": [
+          "HTTP functions"
+        ],
+        "operationId": "invoke",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Function name; exact registered methods apply",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Validated handler response; handler chooses status and content type"
+          },
+          "404": {
+            "description": "Missing function"
+          },
+          "405": {
+            "description": "Method not registered"
+          },
+          "409": {
+            "description": "Invocation capacity exhausted"
+          },
+          "413": {
+            "description": "Input exceeds limit"
+          },
+          "500": {
+            "description": "Handler or response failed"
+          },
+          "503": {
+            "description": "Registry or Engine unavailable"
+          },
+          "504": {
+            "description": "Execution timed out"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1326,6 +1477,38 @@
             "description": "Server (and CLI) version string, e.g. `\"0.1.0\"`."
           }
         }
+      },
+      "Definition": {
+        "type": "object",
+        "required": [
+          "version",
+          "methods",
+          "source",
+          "export"
+        ],
+        "properties": {
+          "export": {
+            "type": "string"
+          },
+          "limits": {
+            "$ref": "#/components/schemas/Limits"
+          },
+          "methods": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "source": {
+            "type": "string"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
       },
       "ExecAccepted": {
         "type": "object",
@@ -1685,6 +1868,26 @@
             "nullable": true
           }
         }
+      },
+      "Limits": {
+        "type": "object",
+        "required": [
+          "timeout_seconds",
+          "heap_mb"
+        ],
+        "properties": {
+          "heap_mb": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "timeout_seconds": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
       },
       "OutputQuery": {
         "type": "object",

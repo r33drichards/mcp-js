@@ -295,6 +295,71 @@ const SANDBOX_SETUP_JS: &str = r#"
         configurable: false,
         enumerable: true,
     });
+
+    // CRITICAL FIX (issue #279): globalThis.__bootstrap.core still references
+    // the ORIGINAL frozen Deno.core object captured at bootstrap, whose
+    // print is a closure over the native op_print Rust function. Replacing
+    // Deno.core above does NOT affect __bootstrap.core, so untrusted code can
+    // call globalThis.__bootstrap.core.print(...) to write arbitrary raw bytes
+    // to stdout/stderr — on the default stdio transport that injects forged
+    // JSON-RPC messages into the protocol stream (CWE-693).
+    //
+    // deno_core's own bootstrap has already completed by the time this runs,
+    // so __bootstrap is no longer needed. We cannot redefine print on the
+    // frozen __bootstrap.core, so replace globalThis.__bootstrap with a copy
+    // whose core.print is the safe version (same technique used for Deno.core).
+    // If anything goes wrong, fall back to deleting __bootstrap entirely.
+    try {
+        var origBootstrap = globalThis.__bootstrap;
+        if (origBootstrap && typeof origBootstrap === 'object') {
+            var newBootstrap = Object.create(null);
+            var bNames = Object.getOwnPropertyNames(origBootstrap);
+            for (var i = 0; i < bNames.length; i++) {
+                var n = bNames[i];
+                if (n === 'core') continue; // rebuilt below
+                try {
+                    var d = Object.getOwnPropertyDescriptor(origBootstrap, n);
+                    if (d) Object.defineProperty(newBootstrap, n, d);
+                } catch (e) {
+                    try { newBootstrap[n] = origBootstrap[n]; } catch (_) {}
+                }
+            }
+            // Rebuild core with the safe print (no prototype chain to the
+            // original frozen core).
+            var origBCore = origBootstrap.core;
+            if (origBCore && typeof origBCore === 'object') {
+                var newBCore = Object.create(null);
+                var cNames = Object.getOwnPropertyNames(origBCore);
+                for (var i = 0; i < cNames.length; i++) {
+                    if (cNames[i] === 'print') continue;
+                    try {
+                        var d2 = Object.getOwnPropertyDescriptor(origBCore, cNames[i]);
+                        if (d2) Object.defineProperty(newBCore, cNames[i], d2);
+                    } catch (e) {
+                        try { newBCore[cNames[i]] = origBCore[cNames[i]]; } catch (_) {}
+                    }
+                }
+                Object.defineProperty(newBCore, 'print', {
+                    value: safePrint, writable: false, configurable: false, enumerable: true,
+                });
+                Object.defineProperty(newBootstrap, 'core', {
+                    value: newBCore, writable: false, configurable: false, enumerable: true,
+                });
+            }
+            Object.defineProperty(globalThis, '__bootstrap', {
+                // configurable: true is intentional — it lets the opt-in
+                // --harden-remove-bootstrap mitigation still delete the
+                // property later (agentic_glue_boundary expects full removal).
+                // Safety does NOT depend on locking this property: the
+                // ORIGINAL frozen core is already unreachable through it.
+                // writable: false still blocks casual reassignment.
+                value: newBootstrap, writable: false, configurable: true, enumerable: true,
+            });
+        }
+    } catch (e) {
+        // Last resort: remove __bootstrap entirely.
+        try { delete globalThis.__bootstrap; } catch (_) {}
+    }
 })();
 "#;
 

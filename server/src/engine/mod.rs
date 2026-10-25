@@ -928,7 +928,7 @@ fn execute_module(
     bootstrap_script: Option<&str>,
     main_module_specifier: Option<&str>,
     compile_module: Option<(&str, &str, CompileMode)>,
-) -> Result<(), String> {
+) -> Result<String, String> {
     if let Some(script) = bootstrap_script {
         runtime
             .execute_script("<mcp-v8-bootstrap>", script.to_owned())
@@ -954,10 +954,15 @@ fn execute_module(
         // Restored sessions may already contain a main module. Only native
         // harnesses with an explicit entry URL designate a new main module.
         let mod_id = if main_module_specifier.is_some() {
-            runtime.load_main_es_module_from_code(&main_url, code.to_string()).await
+            runtime
+                .load_main_es_module_from_code(&main_url, code.to_string())
+                .await
         } else {
-            runtime.load_side_es_module_from_code(&main_url, code.to_string()).await
-        }.map_err(|e| format!("{}", e))?;
+            runtime
+                .load_side_es_module_from_code(&main_url, code.to_string())
+                .await
+        }
+        .map_err(|e| format!("{}", e))?;
 
         let eval_future = runtime.mod_evaluate(mod_id);
 
@@ -972,7 +977,26 @@ fn execute_module(
             compile_source(runtime, specifier, source, mode)?;
         }
 
-        Ok(())
+        // A reserved module export carries structured results independently of logs.
+        // Ordinary modules without this export retain their empty result.
+        let namespace = runtime
+            .get_module_namespace(mod_id)
+            .map_err(|e| e.to_string())?;
+        deno_core::scope!(scope, runtime);
+        let namespace = v8::Local::new(scope, namespace);
+        let key = v8::String::new(scope, "__mcp_http_result").ok_or("result key allocation")?;
+        let value = namespace
+            .get(scope, key.into())
+            .ok_or("result lookup failed")?;
+        if value.is_undefined() {
+            return Ok(String::new());
+        }
+        let value =
+            v8::Local::<v8::String>::try_from(value).map_err(|_| "invalid structured result")?;
+        if value.length() > 2 * 1024 * 1024 {
+            return Err("structured result exceeds limit".into());
+        }
+        Ok(value.to_rust_string_lossy(scope))
     })
 }
 
@@ -1441,7 +1465,7 @@ pub fn execute_stateless(
 
     let oom = oom_flag.load(Ordering::SeqCst);
     match result {
-        Ok(Ok(())) => (Ok(String::new()), oom),
+        Ok(Ok(output)) => (Ok(output), oom),
         Ok(Err(e)) => (Err(classify_termination_error(&oom_flag, false, e)), oom),
         Err(_panic) => {
             *isolate_handle.lock().unwrap() = None;
@@ -1769,9 +1793,9 @@ pub fn execute_stateful(
         }
 
         match output_result {
-            Ok(()) => {
+            Ok(output) => {
                 let wrapped = wrap_snapshot(&snapshot_data);
-                Ok((String::new(), wrapped.data, wrapped.content_hash))
+                Ok((output, wrapped.data, wrapped.content_hash))
             }
             Err(e) => Err(e),
         }

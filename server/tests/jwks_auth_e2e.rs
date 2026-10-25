@@ -88,17 +88,42 @@ fn valid_token() -> String {
 struct HttpServer {
     child: Option<tokio::process::Child>,
     base_url: String,
+    _data: tempfile::TempDir,
 }
 
 impl HttpServer {
     async fn start(jwks_url: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::start_mode(jwks_url, false).await
+    }
+
+    async fn start_mode(
+        jwks_url: &str,
+        scheduled: bool,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let port = find_available_port();
-        let child = Command::new(env!("CARGO_BIN_EXE_server"))
+        let data = tempfile::tempdir()?;
+        let mut command = Command::new(env!("CARGO_BIN_EXE_server"));
+        command
             .args(["--http-port", &port.to_string(), "--jwks-url", jwks_url])
+            .env("MCP_V8_HTTP_FUNCTIONS_DIR", data.path().join("functions"))
+            .args(["--heap-store", "none", "--session-db-path"])
+            .arg(data.path().join("sessions"))
+            .kill_on_drop(true)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()?;
+            .stderr(Stdio::null());
+        if scheduled {
+            let config = data.path().join("worker.json");
+            std::fs::write(&config, json!({"namespace":"test", "worker_id":"test-worker",
+                "data_dir":data.path().join("worker"), "bearer_env":"HTTP_FUNCTION_TEST_WORKER_TOKEN",
+                "admission_bearer_env":"HTTP_FUNCTION_TEST_ADMISSION_TOKEN",
+                "admission_urls":["http://127.0.0.1:1"]}).to_string())?;
+            command
+                .env("MCP_SCHEDULED_WORKER_CONFIG", config)
+                .env("HTTP_FUNCTION_TEST_WORKER_TOKEN", "test-worker-token")
+                .env("HTTP_FUNCTION_TEST_ADMISSION_TOKEN", "test-admission-token");
+        }
+        let child = command.spawn()?;
 
         let base_url = format!("http://127.0.0.1:{}", port);
         let client = Client::new();
@@ -116,6 +141,7 @@ impl HttpServer {
                 return Ok(Self {
                     child: Some(child),
                     base_url,
+                    _data: data,
                 });
             }
             sleep(Duration::from_millis(100)).await;
@@ -242,6 +268,90 @@ async fn sessionless_requests_fail_closed_without_valid_token() {
         "authorized call should carry run_js output 42: {body}"
     );
 
+    let definition_url = format!("{}/api/http-functions/v1/definitions/echo", server.base_url);
+    let invoke_url = format!("{}/functions/v1/echo", server.base_url);
+    let definition = json!({"version":1,"methods":["POST"],"export":"handler",
+        "source":"async function handler(r) { return {status:200,body:r.method}; }"});
+    for token in [None, Some("not.a.jwt")] {
+        for (method, endpoint) in [
+            ("PUT", &definition_url),
+            ("GET", &definition_url),
+            ("DELETE", &definition_url),
+            ("POST", &invoke_url),
+        ] {
+            let mut request = client
+                .request(method.parse().unwrap(), endpoint)
+                .json(&definition);
+            if let Some(token) = token {
+                request = request.bearer_auth(token);
+            }
+            assert_eq!(
+                request.send().await.unwrap().status().as_u16(),
+                401,
+                "{method} {endpoint}"
+            );
+        }
+    }
+    let token = valid_token();
+    let registered = client
+        .put(&definition_url)
+        .bearer_auth(&token)
+        .header("if-none-match", "*")
+        .json(&definition)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(registered.status().as_u16(), 200);
+    let etag = registered.headers()["etag"].clone();
+    let invoked = client
+        .post(&invoke_url)
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(invoked.status().as_u16(), 200);
+    assert_eq!(invoked.text().await.unwrap(), "POST");
+    assert_eq!(
+        client
+            .delete(&definition_url)
+            .bearer_auth(&token)
+            .header("if-match", etag)
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .as_u16(),
+        200
+    );
+
+    server.stop().await;
+    jwks_task.abort();
+}
+
+#[tokio::test]
+async fn scheduled_only_transport_does_not_mount_function_or_legacy_routes() {
+    let (jwks_url, jwks_task) = start_jwks_server().await;
+    let mut server = HttpServer::start_mode(&jwks_url, true).await.unwrap();
+    let client = Client::new();
+    let token = valid_token();
+    for (method, path) in [
+        ("POST", "/functions/v1/echo"),
+        ("PUT", "/api/http-functions/v1/definitions/echo"),
+        ("GET", "/api/http-functions/v1/definitions"),
+        ("POST", "/api/exec"),
+        ("POST", "/mcp"),
+    ] {
+        let reply = client
+            .request(
+                method.parse().unwrap(),
+                format!("{}{path}", server.base_url),
+            )
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(reply.status().as_u16(), 404, "{method} {path}");
+    }
     server.stop().await;
     jwks_task.abort();
 }

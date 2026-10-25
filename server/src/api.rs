@@ -247,6 +247,11 @@ pub struct FsLogQuery {
         description = "HTTP API for the mcp-v8 JavaScript execution server"
     ),
     paths(
+        crate::http_functions::list,
+        crate::http_functions::lookup,
+        crate::http_functions::put,
+        crate::http_functions::delete,
+        crate::http_functions::invoke,
         version_handler,
         exec_handler,
         list_executions_handler,
@@ -276,6 +281,8 @@ pub struct FsLogQuery {
         session_snapshots_handler,
     ),
     components(schemas(
+        crate::http_functions::Definition,
+        crate::http_functions::Limits,
         ExecRequest,
         ExecAccepted,
         ExecutionInfo,
