@@ -64,7 +64,7 @@ jobs:
           test -r /dev/kvm
           test -w /dev/kvm
           mkdir -p artifacts "$RUNNER_TEMP/nix-build"
-          chmod 1777 "$RUNNER_TEMP/nix-build"
+          chmod 0755 "$RUNNER_TEMP/nix-build"
 
       - name: Run NixOS VM test
         shell: bash
