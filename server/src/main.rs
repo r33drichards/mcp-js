@@ -1233,6 +1233,7 @@ fn load_mcp_server_configs(
                 anyhow::bail!("--mcp-server stdio transport requires a command");
             }
             configs.push(McpServerConfig {
+                liveness: Default::default(),
                 name,
                 transport: McpServerTransport::Stdio {
                     command: parts[0].to_string(),
@@ -1243,6 +1244,7 @@ fn load_mcp_server_configs(
             });
         } else if let Some(url) = rest.strip_prefix("sse:") {
             configs.push(McpServerConfig {
+                liveness: Default::default(),
                 name,
                 transport: McpServerTransport::Sse {
                     url: url.to_string(),
@@ -1251,6 +1253,7 @@ fn load_mcp_server_configs(
             });
         } else if let Some(url) = rest.strip_prefix("http:") {
             configs.push(McpServerConfig {
+                liveness: Default::default(),
                 name,
                 transport: McpServerTransport::Http {
                     url: url.to_string(),

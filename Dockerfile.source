@@ -27,8 +27,16 @@ COPY . .
 # Install nightly toolchain as required by rust-toolchain file
 RUN rustup default nightly
 
+# The targeted Railway image runs its regression suite against this source.
+# Default source builds retain their existing behavior.
+ARG MCP_LIVENESS_TESTS=0
+RUN if [ "$MCP_LIVENESS_TESTS" = 1 ]; then \
+      cargo test --release --locked -p server --lib engine::mcp_client::tests \
+      && cargo test --release --locked -p server --test mcp_liveness --test mcp_oauth_browser_e2e; \
+    fi
+
 # Build the release binary
-RUN cargo build --release -p server \
+RUN cargo build --release --locked -p server \
     && cp target/release/server /mcp-v8 \
     && /mcp-v8 --version
 

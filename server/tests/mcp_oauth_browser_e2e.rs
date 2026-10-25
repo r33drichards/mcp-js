@@ -360,6 +360,7 @@ fn pkce_s256(verifier: &str) -> String {
 
 fn browser_oauth_config(server: &MockOAuthMcpServer, cache_path: &Path) -> McpServerConfig {
     McpServerConfig {
+        liveness: Default::default(),
         name: "protected".to_string(),
         transport: McpServerTransport::Http {
             url: server.mcp_url(),
