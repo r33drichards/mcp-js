@@ -1,6 +1,6 @@
 
 
-machine.start()
+machine.start(allow_reboot=True)
 for unit in ["http-functions-fixture", "mcp-js", "mcp-js-disabled", "mcp-js-scheduled"]:
     machine.wait_for_unit(unit + ".service")
 for port in [3000, 3001, 3002]:
@@ -120,9 +120,11 @@ with subtest("conditional replacements and tombstones survive service restart an
     assert new_revision != revision
     assert assert_status(call("POST", "/functions/v1/echo"), 200)["body"] == b"replacement"
     assert_status(call("DELETE", management + "/echo", headers={"If-Match": new_revision}), 200)
+    boot_id = machine.succeed("cat /proc/sys/kernel/random/boot_id").strip()
     machine.reboot()
     machine.wait_for_unit("mcp-js.service")
     machine.wait_for_open_port(3000)
+    assert machine.succeed("cat /proc/sys/kernel/random/boot_id").strip() != boot_id
     assert_status(call("POST", "/functions/v1/echo"), 404)
     assert_status(call("PUT", management + "/echo", replacement,
                        headers={"If-Match": new_revision}), 412)

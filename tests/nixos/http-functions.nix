@@ -32,6 +32,7 @@ let
   };
 in {
   name = "mcp-js-http-functions";
+  globalTimeout = 300;
   nodes.machine = { ... }: {
     imports = [ ../../nix/module.nix ];
     virtualisation.memorySize = 1536;
