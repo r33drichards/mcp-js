@@ -18,7 +18,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 
 use deno_core::{JsRuntime, OpState, op2};
@@ -105,6 +105,32 @@ pub struct McpServerConfig {
     pub transport: McpServerTransport,
     #[serde(default)]
     pub auth: Option<McpServerAuth>,
+    #[serde(default)]
+    pub liveness: McpLiveness,
+}
+
+/// Downstream health checks. Defaults preserve the historical 20-second probe.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum McpLiveness {
+    Periodic {
+        #[serde(default = "default_probe_interval")]
+        interval_secs: std::num::NonZeroU64,
+    },
+    /// No background probes. Check/reconnect only before dispatching a tool.
+    OnDemand {},
+}
+
+fn default_probe_interval() -> std::num::NonZeroU64 {
+    std::num::NonZeroU64::new(20).unwrap()
+}
+
+impl Default for McpLiveness {
+    fn default() -> Self {
+        Self::Periodic {
+            interval_secs: default_probe_interval(),
+        }
+    }
 }
 
 impl McpServerConfig {
@@ -178,6 +204,7 @@ struct LiveConn {
     peer: Peer<RoleClient>,
     /// Holds the RunningService alive; aborted when the connection is replaced.
     keep_alive: tokio::task::AbortHandle,
+    generation: u64,
 }
 
 /// A named downstream server: the config needed to reconnect, plus the current
@@ -186,10 +213,12 @@ struct LiveConn {
 struct ServerConn {
     config: McpServerConfig,
     live: RwLock<LiveConn>,
+    reconnect_lock: Mutex<()>,
 }
 
-/// How often the background liveness task probes each downstream connection.
-const LIVENESS_INTERVAL: Duration = Duration::from_secs(20);
+const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const DEMAND_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// A cheap round-trip that fails if the transport is disconnected. Used both as
 /// the periodic liveness probe and to tell a dead connection apart from a
@@ -200,26 +229,83 @@ async fn is_healthy(peer: &Peer<RoleClient>) -> bool {
 
 /// Re-run the handshake for a server and swap in the fresh peer, aborting the
 /// stale RunningService. Tools are intentionally left as first-connect values.
-async fn reconnect(server: &ServerConn) -> Result<(), String> {
-    let fresh = connect_one(&server.config).await?;
+async fn reconnect(server: &ServerConn, generation: u64) -> Result<(), String> {
+    // Only one caller replaces a particular failed connection. A waiter uses
+    // the connection already installed by the winner.
+    let _guard = server.reconnect_lock.lock().await;
+    if server.live.read().await.generation != generation {
+        return Ok(());
+    }
     let mut live = server.live.write().await;
+    let fresh = connect_with_policy(&server.config).await?;
     live.keep_alive.abort();
     live.peer = fresh.peer;
     live.keep_alive = fresh._keep_alive;
+    live.generation += 1;
     Ok(())
+}
+
+/// Only demand mode bounds and retries discovery/handshake. Existing installs
+/// retain their original connection and probe timing, including interactive OAuth.
+async fn connect_with_policy(config: &McpServerConfig) -> Result<ConnectedMcpServer, String> {
+    if config.liveness != (McpLiveness::OnDemand {}) {
+        return connect_one(config).await;
+    }
+    let mut last_error = String::new();
+    for attempt in 0..3 {
+        if attempt > 0 {
+            tokio::time::sleep(Duration::from_secs(1 << attempt)).await;
+        }
+        match tokio::time::timeout(CONNECT_TIMEOUT, connect_one(config)).await {
+            Ok(Ok(fresh)) => return Ok(fresh),
+            Ok(Err(error)) => last_error = error,
+            Err(_) => last_error = "MCP connection timed out".to_string(),
+        }
+    }
+    Err(last_error)
+}
+
+/// Retry only discovery/handshake, never a tool that might have executed.
+async fn prepare_on_demand(server: &ServerConn) -> Result<(), String> {
+    let prepare = async {
+        let (peer, generation) = {
+            let live = server.live.read().await;
+            (live.peer.clone(), live.generation)
+        };
+        if matches!(
+            tokio::time::timeout(PROBE_TIMEOUT, is_healthy(&peer)).await,
+            Ok(true)
+        ) {
+            return Ok(());
+        }
+        reconnect(server, generation).await
+    };
+    tokio::time::timeout(DEMAND_TIMEOUT, prepare)
+        .await
+        .map_err(|_| "MCP demand readiness timed out; tool was not dispatched".to_string())?
 }
 
 /// Spawn a detached task that periodically health-checks one server and
 /// reconnects it when the probe fails.
 fn spawn_liveness(server: Arc<ServerConn>, shutdown: CancellationToken) {
+    let McpLiveness::Periodic { interval_secs } = server.config.liveness else {
+        return;
+    };
     tokio::spawn(async move {
         loop {
             tokio::select! {
                 _ = shutdown.cancelled() => break,
-                _ = tokio::time::sleep(LIVENESS_INTERVAL) => {}
+                _ = tokio::time::sleep(Duration::from_secs(interval_secs.get())) => {}
             }
-            let peer = { server.live.read().await.peer.clone() };
-            if is_healthy(&peer).await {
+            let (peer, generation) = {
+                let live = server.live.read().await;
+                (live.peer.clone(), live.generation)
+            };
+            let healthy = tokio::select! {
+                _ = shutdown.cancelled() => break,
+                healthy = is_healthy(&peer) => healthy,
+            };
+            if healthy {
                 continue;
             }
             if shutdown.is_cancelled() {
@@ -229,7 +315,11 @@ fn spawn_liveness(server: Arc<ServerConn>, shutdown: CancellationToken) {
                 "MCP server '{}' failed liveness check; reconnecting...",
                 server.config.name
             );
-            match reconnect(&server).await {
+            let result = tokio::select! {
+                _ = shutdown.cancelled() => break,
+                result = reconnect(&server, generation) => result,
+            };
+            match result {
                 Ok(()) => tracing::info!("MCP server '{}' reconnected", server.config.name),
                 Err(e) => tracing::warn!(
                     "MCP server '{}' reconnect attempt failed: {} (will retry)",
@@ -295,7 +385,7 @@ impl McpClientManager {
 
         for config in configs {
             tracing::info!("Connecting to MCP server '{}'...", config.name);
-            let connected = connect_one(&config).await?;
+            let connected = connect_with_policy(&config).await?;
 
             tracing::info!(
                 "MCP server '{}': {} tool(s) available",
@@ -313,9 +403,11 @@ impl McpClientManager {
             tools_by_server.insert(name.clone(), connected.tools.clone());
             let server = Arc::new(ServerConn {
                 config,
+                reconnect_lock: Mutex::new(()),
                 live: RwLock::new(LiveConn {
                     peer: connected.peer,
                     keep_alive: connected._keep_alive,
+                    generation: 0,
                 }),
             });
             // Self-heal: probe this connection periodically and reconnect if the
@@ -472,6 +564,7 @@ impl McpClientManager {
         // current-thread runtime, from which awaiting the peer would stall, so run
         // the whole call on the connection's runtime and await the JoinHandle
         // (safe to poll from any runtime) — mirrors S3HeapStorage::*_blocking.
+        let shutdown = self.shutdown.clone();
         let call = async move {
             let make_req = || {
                 let mut req = CallToolRequestParams::default();
@@ -480,10 +573,29 @@ impl McpClientManager {
                 req
             };
 
-            let peer = { server.live.read().await.peer.clone() };
+            let on_demand = server.config.liveness == (McpLiveness::OnDemand {});
+            if on_demand {
+                tokio::select! {
+                    _ = shutdown.cancelled() => return Err("MCP client manager is shut down".to_string()),
+                    result = prepare_on_demand(&server) => result.map_err(|e| format!(
+                        "mcp.callTool({}.{}): readiness failed (tool not dispatched): {}",
+                        server_name, tool_name, e
+                    ))?,
+                }
+            }
+            let (peer, generation) = {
+                let live = server.live.read().await;
+                (live.peer.clone(), live.generation)
+            };
             let result = match peer.call_tool(make_req()).await {
                 Ok(r) => r,
                 Err(e) => {
+                    if on_demand {
+                        return Err(format!(
+                            "mcp.callTool({}.{}): {} (not replayed; execution outcome may be unknown)",
+                            server_name, tool_name, e
+                        ));
+                    }
                     // A call can fail because the tool errored OR because the
                     // downstream connection died (e.g. the server restarted).
                     // Probe to tell them apart: if the connection is still
@@ -500,7 +612,10 @@ impl McpClientManager {
                         server_name,
                         e
                     );
-                    reconnect(&server).await.map_err(|re| {
+                    tokio::select! {
+                        _ = shutdown.cancelled() => return Err("MCP client manager is shut down".to_string()),
+                        result = reconnect(&server, generation) => result,
+                    }.map_err(|re| {
                         format!(
                             "mcp.callTool({}.{}): reconnect failed: {}",
                             server_name, tool_name, re
@@ -641,6 +756,18 @@ fn emit_stdio_auth_warning(config: &McpServerConfig, emit: impl FnOnce(&'static 
     }
 }
 
+fn http_transport_config(
+    config: &McpServerConfig,
+    url: &str,
+) -> rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig {
+    rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::with_uri(
+        url.to_owned(),
+    )
+    // rmcp otherwise automatically replays the in-flight request on HTTP
+    // 404. Demand mode owns recovery before dispatch, including this case.
+    .reinit_on_expired_session(config.liveness != (McpLiveness::OnDemand {}))
+}
+
 async fn connect_one(config: &McpServerConfig) -> Result<ConnectedMcpServer, String> {
     use rmcp::ServiceExt;
 
@@ -684,7 +811,9 @@ async fn connect_one(config: &McpServerConfig) -> Result<ConnectedMcpServer, Str
             // The standalone SSE client transport was removed in rmcp 1.x; the
             // Streamable HTTP client transport is its replacement and speaks to
             // the same `/mcp`-style endpoints modern MCP servers expose.
-            let transport = rmcp::transport::StreamableHttpClientTransport::from_uri(url.clone());
+            let transport = rmcp::transport::StreamableHttpClientTransport::from_config(
+                http_transport_config(config, url),
+            );
 
             let service: rmcp::service::RunningService<RoleClient, ()> =
                 ().serve(transport).await.map_err(|e| {
@@ -746,18 +875,10 @@ async fn connect_one(config: &McpServerConfig) -> Result<ConnectedMcpServer, Str
                     } else {
                         None
                     };
-                let transport = match token {
-                    Some(token) => {
-                        use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
-                        let transport_config =
-                            StreamableHttpClientTransportConfig::with_uri(url.clone())
-                                .auth_header(token);
-                        rmcp::transport::StreamableHttpClientTransport::from_config(
-                            transport_config,
-                        )
-                    }
-                    None => rmcp::transport::StreamableHttpClientTransport::from_uri(url.clone()),
-                };
+                let mut transport_config = http_transport_config(config, url);
+                transport_config.auth_header = token;
+                let transport =
+                    rmcp::transport::StreamableHttpClientTransport::from_config(transport_config);
 
                 let service: rmcp::service::RunningService<RoleClient, ()> =
                     match ().serve(transport).await {
@@ -895,18 +1016,15 @@ async fn op_mcp_call_tool(
                         .unwrap_or(serde_json::Value::Null),
                 };
                 let input_value = serde_json::to_value(&policy_input).map_err(|e| {
-                    JsErrorBox::generic(format!(
-                        "mcp.callTool: failed to serialize input: {}",
-                        e
-                    ))
+                    JsErrorBox::generic(format!("mcp.callTool: failed to serialize input: {}", e))
                 })?;
                 let manager = manager.clone();
                 let executor: super::hooks::StackExecutor =
                     std::sync::Arc::new(move |effective: serde_json::Value| {
                         let manager = manager.clone();
                         Box::pin(async move {
-                            let eff: EffectiveMcpCall = serde_json::from_value(effective)
-                                .map_err(|e| {
+                            let eff: EffectiveMcpCall =
+                                serde_json::from_value(effective).map_err(|e| {
                                     format!("mcp.callTool: invalid effective input: {}", e)
                                 })?;
                             let arguments = match eff.arguments {
@@ -919,15 +1037,12 @@ async fn op_mcp_call_tool(
                                     ));
                                 }
                             };
-                            let result = manager
-                                .call_tool(&eff.server, &eff.tool, arguments)
-                                .await?;
+                            let result =
+                                manager.call_tool(&eff.server, &eff.tool, arguments).await?;
                             serde_json::to_value(&result)
                                 .map_err(|e| format!("mcp.callTool: serialization error: {}", e))
                         })
-                            as std::pin::Pin<
-                                Box<dyn std::future::Future<Output = _> + Send>,
-                            >
+                            as std::pin::Pin<Box<dyn std::future::Future<Output = _> + Send>>
                     });
                 let output = hooks
                     .run_stack_full(input_value, |_| Ok(()), executor)
@@ -970,13 +1085,12 @@ async fn op_mcp_call_tool(
                 }
             };
 
-            let eff: EffectiveMcpCall = serde_json::from_value(effective.clone())
-                .map_err(|e| {
-                    JsErrorBox::generic(format!(
-                        "mcp.callTool: invalid effective input after pre hooks: {}",
-                        e
-                    ))
-                })?;
+            let eff: EffectiveMcpCall = serde_json::from_value(effective.clone()).map_err(|e| {
+                JsErrorBox::generic(format!(
+                    "mcp.callTool: invalid effective input after pre hooks: {}",
+                    e
+                ))
+            })?;
             server_name = eff.server;
             tool_name = eff.tool;
             arguments = match eff.arguments {
@@ -1402,6 +1516,7 @@ mod tests {
     fn stdio_auth_warning_is_emitted_and_auth_is_ignored() {
         let config = McpServerConfig {
             name: "legacy".to_string(),
+            liveness: McpLiveness::default(),
             transport: McpServerTransport::Stdio {
                 command: "legacy-mcp".to_string(),
                 args: Vec::new(),

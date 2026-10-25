@@ -167,3 +167,48 @@ See the [policies concepts page](../concepts/policies.md) for the full policy co
 - [Concepts](../concepts/mcp-client.md)
 - [Security policies](../concepts/policies.md)
 - [MCP tools reference](../reference/mcp-tools.md)
+
+## Demand-aware liveness for sleeping upstreams
+
+Each structured `mcp_servers` / `--mcp-config` entry accepts `liveness`:
+
+```json
+[
+  {
+    "name": "browser",
+    "transport": "http",
+    "url": "http://browser.railway.internal:8081/mcp",
+    "liveness": { "mode": "on_demand" }
+  }
+]
+```
+
+Omitting `liveness` preserves periodic `tools/list` probes every 20 seconds,
+including the existing reconnect-and-retry behavior after a failed tool call.
+To change that interval, use
+`"liveness": { "mode": "periodic", "interval_secs": 120 }`. The interval must
+be a positive integer. Compact `--mcp-server` flags retain the default.
+
+`on_demand` creates no background liveness task. Startup still connects and
+caches the tool catalog. Before each tool call, a read-only `tools/list` probe
+checks the connection (five-second timeout). If needed, reconnect is serialized
+per server and deduplicated by connection generation. Startup and reconnect
+allow three handshake/discovery attempts, each with a ten-second timeout, with
+2- and 4-second delays. Demand readiness has a 45-second overall budget;
+shutdown cancels it. Calls waiting for a reconnect count toward that budget.
+These limits apply only to opt-in demand mode; they can be too short for a
+first-time interactive OAuth login, which should be completed before enabling it.
+
+Only discovery and connection setup are retried in demand mode. Once a tool is
+dispatched, a transport error is returned without replay: the operation might
+already have executed. Inspect the resulting browser/application state before
+retrying a mutation. A healthy MCP endpoint does not prove that a browser or
+other backing dependency is ready; its server must provide that guarantee.
+
+This removes MCPJS's scheduled probes, not all possible network traffic.
+Transport-level SSE reconnects, live browser pages, service workers, viewers,
+and other application traffic can still prevent sleep. Tool metadata remains
+cached from startup, as before. Demand mode does not save or restore tabs,
+JavaScript heaps, uploads, or login sessions, and does not enable hosting-platform
+serverless settings. Validate cold-wake and authentication separately before
+rollout.
