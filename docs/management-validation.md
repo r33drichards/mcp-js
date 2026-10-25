@@ -1,6 +1,8 @@
 # HTTP/MCP management validation
 
-Base: `1eb74af4ace275bc803faf31d86c459433578495` (#295).
+Historical base: `1eb74af4ace275bc803faf31d86c459433578495` (#295).
+Historical implementation: `1d395631` (#299 before stack hardening integration).
+The observations below belong to those revisions, not the newly integrated stack.
 The test-first requirement arrived after implementation had started. The unchanged
 new integration tests were then run against an isolated archive of that base to
 establish the missing-interface failures. This is baseline regression evidence,
@@ -8,13 +10,15 @@ not a claim that the implementation was developed test-first.
 
 ## Reproduce the failing baseline
 
-From the implementation checkout, with the repository Rust environment active:
+Use the historical test files, with the repository Rust environment active. Do
+not copy the current integrated tests: their required cluster configuration and
+assertions have changed.
 
 ```sh
 mkdir -p /tmp/mcp-management-baseline
 git archive 1eb74af4ace275bc803faf31d86c459433578495 | tar -x -C /tmp/mcp-management-baseline
-cp server/tests/http_function_management_e2e.rs /tmp/mcp-management-baseline/server/tests/
-cp scheduler-runner/tests/management.rs /tmp/mcp-management-baseline/scheduler-runner/tests/
+git show 1d395631:server/tests/http_function_management_e2e.rs > /tmp/mcp-management-baseline/server/tests/http_function_management_e2e.rs
+git show 1d395631:scheduler-runner/tests/management.rs > /tmp/mcp-management-baseline/scheduler-runner/tests/management.rs
 ```
 
 The server check used the shared target cache. Touching source timestamps forces
@@ -40,9 +44,10 @@ No production files in the archive were edited. The implementation checkout and
 all parent branches remained separate. Restore the implementation binaries before
 running the passing checks below when sharing target directories.
 
-## Passing local checks
+## Historical passing local checks
 
-Run from the implementation checkout:
+These commands and results describe the historical implementation checkout; rerun
+them against the final integrated commit before claiming current validation:
 
 ```sh
 cargo check --locked -p server --bin server
@@ -57,7 +62,7 @@ rustfmt --edition 2024 --check server/src/http_functions.rs server/tests/http_fu
 python3 -m mkdocs build --strict
 ```
 
-Verified locally: nine registry unit tests; three registry integration tests;
+Historically verified locally: nine registry unit tests; three registry integration tests;
 three JWKS integration tests; the actual Engine scheduled-runtime test; 40 scheduler tests (including both new management integration tests); scheduler Clippy; strict MkDocs; 7,040
 local documentation links/fragments; and 31 JSON examples in changed docs.
 
@@ -75,9 +80,16 @@ Affected NixOS tests exercise both transports in the existing single-node,
 cluster, disable, cancel, and disable-then-cancel scenarios. This local environment
 has neither Nix nor `/dev/kvm`; VM results must be verified in remote CI.
 
-The newer #284 fixes at `ffe1195` remain absent from this base. In particular,
-management adapters do not authenticate the inherited Raft transport, add its
-checkpoint bounds, or extend recovery to unresolved `Cancelling`. The new runner
-listener is loopback-only; operator/recovery credentials are distinct from worker
-and admission credentials. The stack still requires the integration work listed
-in [feature status](../site-docs/reference/scheduler-http-status.md).
+## Integrated stack validation boundary
+
+The #284 fixes at `ffe1195` are now integrated through #287, #293, #295, and
+#299. Fixed-voter Raft authentication, checkpoint bounds, and attested recovery
+for unresolved `Cancelling` come from that runtime hardening, not the management
+adapters. Runner configurations now require `cluster_bearer_env` even for a
+single voter. The management listener remains loopback-only; operator/recovery
+credentials must differ from worker, admission, and cluster credentials.
+
+Fresh combined-stack validation is separate from the historical counts above.
+Until a final integrated commit and its test results are recorded, do not treat
+those counts as current passes or imply NixOS VM, remote CI, deployment, or
+main-merge success. See [feature status](../site-docs/reference/scheduler-http-status.md).

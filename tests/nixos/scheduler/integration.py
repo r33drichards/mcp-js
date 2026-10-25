@@ -132,7 +132,8 @@ class Cluster:
         self.env = dict(os.environ, MCP_SCHEDULER_WORKER_TOKEN="vm-only-worker",
                         MCP_SCHEDULER_ADMISSION_TOKEN="vm-only-admission",
                         MCP_SCHEDULER_OPERATOR_TOKEN="vm-only-operator",
-                        MCP_SCHEDULER_RECOVERY_TOKEN="vm-only-recovery")
+                        MCP_SCHEDULER_RECOVERY_TOKEN="vm-only-recovery",
+                        MCP_SCHEDULER_CLUSTER_TOKEN="vm-only-cluster")
         expires = (datetime.datetime.now(datetime.timezone.utc) +
                    datetime.timedelta(days=1)).isoformat()
         worker = {
@@ -177,6 +178,7 @@ allow if {
                     "bearer_env": "MCP_SCHEDULER_OPERATOR_TOKEN",
                     "recovery_bearer_env": "MCP_SCHEDULER_RECOVERY_TOKEN",
                 },
+                "cluster_bearer_env": "MCP_SCHEDULER_CLUSTER_TOKEN",
                 "schedules": [],
                 "remote": {
                     "url": "http://127.0.0.1:8080", "namespace": "nixos-integration",
@@ -192,12 +194,26 @@ allow if {
         self.owner = eventually(self.find_owner)
         assert self.owner.management("status", mcp=True)["owner_acquired"]
         for mcp in (False, True):
-            for token in ("wrong", "vm-only-worker", "vm-only-admission"):
+            for token in ("wrong", "vm-only-worker", "vm-only-admission", "vm-only-cluster"):
                 denied = self.owner.management("status", token=token, mcp=mcp)
                 assert denied["http_status"] == 401, denied
             denied = self.owner.management("acknowledge_stopped", mcp=mcp,
                 occurrence_id=1, dispatcher_and_work_quiesced=True)
             assert denied.get("http_status", denied.get("status")) == 403, denied
+        # A caller that knows the voter IDs still cannot read private Raft
+        # metadata or inject a valid-looking leadership transition without auth.
+        for path, data in [("/raft/status", None), ("/raft/append-entries", {
+            "term": 666, "leader_id": "r1", "prev_log_index": 0,
+            "prev_log_term": 0, "entries": [], "leader_commit": 2**64 - 1,
+        })]:
+            request = urllib.request.Request("http://127.0.0.1:4401" + path,
+                data=None if data is None else json.dumps(data).encode(),
+                headers={"Content-Type": "application/json"})
+            try:
+                urllib.request.urlopen(request, timeout=2).close()
+                raise AssertionError("unauthenticated Raft request was accepted")
+            except urllib.error.HTTPError as error:
+                assert error.code == 401, error.code
 
     def write(self, name, value):
         path = self.root / name

@@ -12,13 +12,84 @@ const KEY: &str = "scheduler/state/v1";
 struct Envelope {
     version: u32,
     epoch: u64,
-    claims: BTreeMap<String, Dispatch>,
+    claims: BTreeMap<String, ClaimMetadata>,
     admissions: BTreeMap<String, Permit>,
     revision: u64,
     owner: String,
     term: u64,
     contract: String,
     checkpoint: String,
+}
+
+// Wire-compatible with existing v2 claims, but code is stored only in Core.
+// Old full claims deserialize safely into the compact form.
+#[derive(Clone, Serialize)]
+#[serde(transparent)]
+struct ClaimMetadata(Dispatch);
+impl<'de> Deserialize<'de> for ClaimMetadata {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        Ok(Self::new(Dispatch::deserialize(deserializer)?))
+    }
+}
+impl ClaimMetadata {
+    fn new(mut dispatch: Dispatch) -> Self {
+        dispatch.payload.code = String::new();
+        Self(dispatch)
+    }
+    fn matches(&self, dispatch: &Dispatch) -> bool {
+        self.0 == Self::new(dispatch.clone()).0
+    }
+    fn dispatch(&self, core: &Core) -> Result<Dispatch> {
+        let mut dispatch = self.0.clone();
+        dispatch.payload.code = core
+            .definition(dispatch.schedule_id)
+            .ok_or("missing claim definition")?
+            .code
+            .clone();
+        dispatch.validate()?;
+        Ok(dispatch)
+    }
+}
+const MAX_CHECKPOINT_BYTES: usize = 4 * 1024 * 1024;
+fn checked_envelope(envelope: &Envelope) -> Result<String> {
+    let json = serde_json::to_string(envelope).map_err(|e| e.to_string())?;
+    if json.len() > MAX_CHECKPOINT_BYTES {
+        return Err("scheduler checkpoint exceeds 4 MiB budget".into());
+    }
+    Ok(json)
+}
+fn prune_receipts(core: &Core, envelope: &mut Envelope) {
+    let retained: std::collections::BTreeSet<_> = core
+        .occurrences()
+        .iter()
+        .map(|o| {
+            use mcp_js_scheduler_core::Status;
+            let attempt = match o.status {
+                Status::Pending { attempt, .. }
+                | Status::Running { attempt }
+                | Status::Cancelling { attempt }
+                | Status::Cancelled { attempt }
+                | Status::Succeeded { attempt }
+                | Status::Failed { attempt, .. }
+                | Status::Unknown { attempt, .. }
+                | Status::Abandoned { attempt, .. } => attempt,
+            };
+            (o.id, attempt)
+        })
+        .collect();
+    envelope
+        .claims
+        .retain(|_, claim| retained.contains(&(claim.0.occurrence_id, claim.0.attempt)));
+    envelope
+        .admissions
+        .retain(|key, _| envelope.claims.contains_key(key));
+}
+#[derive(Debug)]
+pub enum AdmissionDecision {
+    Granted(Permit),
+    NotLaunched,
 }
 
 /// A term-scoped planner. Every mutation, including admission and completion,
@@ -74,7 +145,7 @@ impl Replicated {
         if old.as_ref().is_some_and(|e| e.version != 2) {
             return Err("explicit scheduler schema migration required".into());
         }
-        let envelope = Envelope {
+        let mut envelope = Envelope {
             version: 2,
             epoch: old
                 .as_ref()
@@ -94,7 +165,8 @@ impl Replicated {
             contract,
             checkpoint: core.checkpoint()?,
         };
-        let new = serde_json::to_string(&envelope).map_err(|e| e.to_string())?;
+        prune_receipts(&core, &mut envelope);
+        let new = checked_envelope(&envelope)?;
         // Exact revision compare plus current-term durable commit is the authority.
         if !node
             .scheduler_cas(status.term, KEY.into(), expected, new.clone())
@@ -147,7 +219,7 @@ impl Replicated {
             .revision
             .checked_add(1)
             .ok_or("revision exhausted")?;
-        let envelope = Envelope {
+        let mut envelope = Envelope {
             version: 2,
             epoch: next.epoch,
             claims: next.claims,
@@ -158,7 +230,8 @@ impl Replicated {
             contract: self.envelope.contract.clone(),
             checkpoint: staged.checkpoint()?,
         };
-        let new = serde_json::to_string(&envelope).map_err(|e| e.to_string())?;
+        prune_receipts(&staged, &mut envelope);
+        let new = checked_envelope(&envelope)?;
         // Set invalid BEFORE awaiting: cancellation must not leave a reusable owner.
         self.valid = false;
         if !self
@@ -220,7 +293,9 @@ impl Replicated {
             {
                 return Err("invocation identity already consumed".into());
             }
-            envelope.claims.insert(dispatch.key(), dispatch.clone());
+            envelope
+                .claims
+                .insert(dispatch.key(), ClaimMetadata::new(dispatch.clone()));
             Ok(Some((invocation, dispatch)))
         })
         .await
@@ -241,7 +316,10 @@ impl Replicated {
                 || request.dispatch.epoch != envelope.epoch
                 || request.dispatch.owner != envelope.owner
                 || now >= request.dispatch.payload.expires_at
-                || envelope.claims.get(&request.dispatch.key()) != Some(&request.dispatch)
+                || !envelope
+                    .claims
+                    .get(&request.dispatch.key())
+                    .is_some_and(|claim| claim.matches(&request.dispatch))
                 || envelope.admissions.contains_key(&request.dispatch.key())
             {
                 return Err("stale, duplicate, expired or mismatched admission".into());
@@ -251,6 +329,35 @@ impl Replicated {
                 .admissions
                 .insert(request.dispatch.key(), permit.clone());
             Ok(permit)
+        })
+        .await
+    }
+    /// Only a committed terminal fence with no existing permit can certify
+    /// "not launched". Duplicate/lost-ACK admissions stay uncertain.
+    pub async fn admit_classified(
+        &mut self,
+        request: Admission,
+        now: Time,
+    ) -> Result<AdmissionDecision> {
+        match self.admit(request.clone(), now).await {
+            Ok(permit) => return Ok(AdmissionDecision::Granted(permit)),
+            Err(error) if !self.valid => return Err(error),
+            Err(_) => (),
+        }
+        self.transition_state(|core, envelope| {
+            request.dispatch.validate()?;
+            let key = request.dispatch.key();
+            if request.worker_incarnation.is_empty()
+                || envelope.admissions.contains_key(&key)
+                || !envelope
+                    .claims
+                    .get(&key)
+                    .is_some_and(|claim| claim.matches(&request.dispatch))
+            {
+                return Err("admission outcome remains uncertain or binding differs".into());
+            }
+            core.reject_unadmitted(request.dispatch.occurrence_id, request.dispatch.attempt)?;
+            Ok(AdmissionDecision::NotLaunched)
         })
         .await
     }
@@ -286,9 +393,9 @@ impl Replicated {
                     .claims
                     .values()
                     .find(|dispatch| {
-                        dispatch.occurrence_id == occurrence.id && dispatch.attempt == attempt
+                        dispatch.0.occurrence_id == occurrence.id && dispatch.0.attempt == attempt
                     })
-                    .cloned()
+                    .and_then(|claim| claim.dispatch(&self.core).ok())
             })
             .collect()
     }

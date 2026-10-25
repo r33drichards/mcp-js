@@ -166,6 +166,7 @@ impl Transport {
         config: &Config,
         admission: &str,
         worker: &str,
+        cluster: &str,
         tx: mpsc::Sender<Call>,
     ) -> Result<Self, String> {
         let operator = secret(&config.bearer_env)?;
@@ -176,14 +177,15 @@ impl Transport {
             .transpose()?;
         if same(&operator, admission)
             || same(&operator, worker)
-            || recovery
-                .as_deref()
-                .is_some_and(|r| same(r, &operator) || same(r, admission) || same(r, worker))
+            || same(&operator, cluster)
+            || recovery.as_deref().is_some_and(|r| {
+                same(r, &operator) || same(r, admission) || same(r, worker) || same(r, cluster)
+            })
         {
-            return Err("management credentials must be separate from each other and worker/admission credentials".into());
+            return Err("management credentials must be separate from each other and worker/admission/cluster credentials".into());
         }
-        // The inherited Raft transport is unauthenticated. Never expose new operator
-        // authority on a public interface; authenticated TLS proxies may connect locally.
+        // Keep operator authority on loopback even with authenticated Raft.
+        // Authenticated TLS proxies may connect locally.
         if !config.addr.ip().is_loopback() {
             return Err("management listener must bind a loopback address".into());
         }
@@ -457,13 +459,16 @@ mod tests {
             bearer_env: "PATH".into(),
             recovery_bearer_env: None,
         };
-        assert!(Transport::new(&config, &value, "different", tx.clone()).is_err());
-        assert!(Transport::new(&config, "different", &value, tx.clone()).is_err());
+        assert!(Transport::new(&config, &value, "different", "cluster", tx.clone()).is_err());
+        assert!(Transport::new(&config, "different", &value, "cluster", tx.clone()).is_err());
+        assert!(Transport::new(&config, "different", "another", &value, tx.clone()).is_err());
         config.recovery_bearer_env = Some("PATH".into());
-        assert!(Transport::new(&config, "different", "another", tx.clone()).is_err());
+        assert!(Transport::new(&config, "different", "another", "cluster", tx.clone()).is_err());
+        config.bearer_env = "HOME".into();
+        assert!(Transport::new(&config, "different", "another", &value, tx.clone()).is_err());
         config.recovery_bearer_env = None;
         config.addr = "0.0.0.0:0".parse().unwrap();
-        assert!(Transport::new(&config, "different", "another", tx).is_err());
+        assert!(Transport::new(&config, "different", "another", "cluster", tx).is_err());
     }
 
     #[tokio::test]

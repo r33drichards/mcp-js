@@ -72,4 +72,4 @@ examples, and project discussion.
 Start with the [implemented feature status](reference/scheduler-http-status.md),
 then choose a tutorial, operational guide, reference, or explanation. These
 features belong to the scheduler/HTTP PR stack; the status page distinguishes
-its current baseline from newer parent changes awaiting integration.
+the integrated runtime boundary from historical validation and future work.

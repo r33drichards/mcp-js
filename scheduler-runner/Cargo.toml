@@ -5,9 +5,9 @@ version = "0.1.0"
 edition = "2024"
 [workspace]
 [dependencies]
+subtle = "2.6"
 axum = "0.8"
 sha2 = "0.10"
-subtle = "2"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }

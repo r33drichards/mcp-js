@@ -1927,6 +1927,7 @@ pub fn scheduled_router(runtime: Arc<Engine>) -> Result<Router, String> {
 #[cfg(test)]
 mod scheduled_runtime_tests {
     use super::*;
+    #[tokio::test]
     async fn scheduled_cancellation_confirms_background_stop_including_startup_race() {
         use crate::scheduled_worker::Runtime;
         for wait_for_start in [false, true] {
@@ -1975,6 +1976,5 @@ mod scheduled_runtime_tests {
         assert_eq!(info.status, "completed");
         assert_eq!(runtime.status(id).unwrap()["status"], "completed");
         engine.shutdown().await;
-        scheduled_cancellation_confirms_background_stop_including_startup_race().await;
     }
 }

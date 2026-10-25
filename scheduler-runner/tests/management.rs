@@ -19,7 +19,7 @@ impl Runner {
         let management = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = management.local_addr().unwrap();
         let cluster_addr = cluster.local_addr().unwrap();
-        let config = json!({"node_id":"test", "advertise_addr":cluster_addr.to_string(), "cluster_port":cluster_addr.port(), "peers":[], "data_dir":dir.path().join("data"), "admission_addr":"127.0.0.1:0", "admission_bearer_env":"TEST_ADMISSION", "management":{"addr":addr.to_string(),"bearer_env":"TEST_OPERATOR","recovery_bearer_env":"TEST_RECOVERY"}, "remote":{"url":"http://127.0.0.1:1","namespace":"test","worker_id":"test","bearer_env":"TEST_WORKER","expires_at":Utc::now()+Delta::hours(1),"session":"test","timeout_seconds":1,"heap_mb":32}});
+        let config = json!({"node_id":"test", "advertise_addr":cluster_addr.to_string(), "cluster_port":cluster_addr.port(), "peers":[], "data_dir":dir.path().join("data"), "admission_addr":"127.0.0.1:0", "admission_bearer_env":"TEST_ADMISSION", "cluster_bearer_env":"TEST_CLUSTER", "management":{"addr":addr.to_string(),"bearer_env":"TEST_OPERATOR","recovery_bearer_env":"TEST_RECOVERY"}, "remote":{"url":"http://127.0.0.1:1","namespace":"test","worker_id":"test","bearer_env":"TEST_WORKER","expires_at":Utc::now()+Delta::hours(1),"session":"test","timeout_seconds":1,"heap_mb":32}});
         let path = dir.path().join("config.json");
         std::fs::write(&path, config.to_string()).unwrap();
         drop(cluster);
@@ -30,6 +30,7 @@ impl Runner {
             .env("TEST_RECOVERY", RECOVERY)
             .env("TEST_WORKER", "disposable-test-worker")
             .env("TEST_ADMISSION", "disposable-test-admission")
+            .env("TEST_CLUSTER", "disposable-test-cluster")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())
@@ -128,6 +129,7 @@ async fn real_http_mcp_auth_validation_and_management() {
             "wrong",
             "disposable-test-admission",
             "disposable-test-worker",
+            "disposable-test-cluster",
         ] {
             let response = runner
                 .client
@@ -391,8 +393,8 @@ async fn cancellation_after_disable_and_explicit_recovery_keep_existing_semantic
             .unwrap()["enabled"],
         true
     );
-    // This stack deliberately does not import #284's newer Cancelling recovery semantics.
-    assert_eq!(runner.http(RECOVERY,json!({"action":"acknowledge_stopped","occurrence_id":first_occurrence,"dispatcher_and_work_quiesced":true})).await.0,503);
+    // Integrated recovery can abandon unresolved Cancelling only after explicit attestation.
+    assert_eq!(runner.http(RECOVERY,json!({"action":"acknowledge_stopped","occurrence_id":first_occurrence,"dispatcher_and_work_quiesced":true})).await.0,200);
     assert!(
         runner.list().await["occurrences"]
             .as_array()
@@ -400,7 +402,7 @@ async fn cancellation_after_disable_and_explicit_recovery_keep_existing_semantic
             .iter()
             .find(|o| o["id"] == first_occurrence)
             .unwrap()["status"]
-            .get("Cancelling")
+            .get("Abandoned")
             .is_some()
     );
     runner.child.kill().await.unwrap();

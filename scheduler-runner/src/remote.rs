@@ -125,6 +125,15 @@ impl RemoteExecutor {
         let Ok(response) = response else {
             return Outcome::Unknown("submission response lost".into());
         };
+        if response.status() == reqwest::StatusCode::GONE {
+            if let Ok(value) = response.json::<serde_json::Value>().await
+                && value["not_launched"] == true
+                && value["invocation"] == dispatch.key()
+            {
+                return Outcome::Failed("quorum fenced an attempt that was never admitted".into());
+            }
+            return Outcome::Unknown("unbound no-launch response".into());
+        }
         if response.status() != reqwest::StatusCode::ACCEPTED {
             return Outcome::Unknown("worker did not acknowledge submission".into());
         }

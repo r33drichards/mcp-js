@@ -1,6 +1,6 @@
 # Scheduler reference
 
-Baseline: [management layer and pending integration](scheduler-http-status.md).
+Baseline: [integrated runtime boundary](scheduler-http-status.md).
 The experimental runner is a separate Cargo workspace. It uses Apalis pulses,
 the shared durable policy core, fixed-voter Raft, and a dedicated actual-server
 worker. Operator commands are available through stdin and an opt-in, separately
@@ -18,6 +18,7 @@ Run `mcp-js-scheduler-runner CONFIG.json`. Unknown runner fields are rejected.
 | `data_dir` | Dedicated durable runner store |
 | `admission_addr` | Callback HTTP listener address |
 | `admission_bearer_env` | Environment reference for shared callback credential |
+| `cluster_bearer_env` | Required environment reference for the same existing Raft bearer on every voter |
 | `limits` | Optional core limits below |
 | `schedules` | Initial definitions; default empty |
 | `remote` | Required worker/authority configuration below |
@@ -47,8 +48,9 @@ The worker reads JSON from `MCP_SCHEDULED_WORKER_CONFIG`:
 
 Namespace and worker ID must match the runner's remote configuration. Origins
 require HTTPS except loopback HTTP; embedded credentials, paths, queries, and
-fragments are rejected. Redirects and automatic retries are disabled. At this
-baseline callback fallback occurs only on HTTP 409. Tokens are resolved from the
+fragments are rejected. Redirects and automatic retries are disabled. Callback
+fallback occurs on HTTP 409 or a definite connection-establishment failure;
+ambiguous sends and other errors stop the attempt. Tokens are resolved from the
 named environment variables, not stored as config values.
 
 The actual server must use HTTP mode and `--heap-store none` (the default).
@@ -69,8 +71,8 @@ bearer credential and any existing JWKS enforcement. There is no fallback to
 `/api/exec`, MCP, SSE, or HTTP functions. The runner callback uses the admission
 credential. Dispatch binds version, namespace, schedule/occurrence/attempt,
 owner/epoch, worker, payload digest and execution authority. It is an internal
-runner protocol, not a replacement for operator management. At this baseline
-scheduled/admission routers allow 16 MiB bodies; upcoming #284 reduces this.
+runner protocol, not a replacement for operator management. Scheduled/admission
+routers cap bodies at 512 KiB, including JSON escaping.
 
 The management request limit applies to serialized JSON (72 KiB), so heavily
 escaped source can exceed it even when the decoded source is below 64 KiB.
@@ -120,8 +122,11 @@ only confirmed `Failed` outcomes retry. Unknown never retries automatically.
 | `running` | 16 | Positive, no greater than outstanding |
 | `grace_seconds` | 5 | 0–59, inclusive grace window |
 
-These are policy limits, not a bound on the retained Raft log and claim/admission
-envelope at this baseline. No general compaction or history erasure is provided.
+Checkpoint JSON is capped at 4 MiB; oversized transitions fail closed. Claims
+and admission metadata retire when their occurrence/attempt leaves core retention.
+Cluster bodies are capped at 16 MiB; outgoing replication batches at 32 entries /
+12 MiB. The Raft log and worker receipts still grow: there is no general
+compaction or history erasure, and these budgets are not throughput guarantees.
 
 ## Operator commands and states
 
@@ -145,7 +150,9 @@ observation tasks; it does not cancel accepted external effects.
 States are `Pending`, `Running`, `Cancelling`, `Cancelled`, `Succeeded`, `Failed`,
 `Unknown`, `Abandoned`, each carrying attempt information. `Unknown` and
 `Cancelling` retain running/overlap reservations. `acknowledge_stopped` accepts
-only `Unknown` here; newer #284 extends this to unresolved `Cancelling`.
+`Unknown` or unresolved `Cancelling`, with explicit evidence that both the old
+dispatcher and accepted work are quiescent. It marks the occurrence `Abandoned`
+without replay; it does not cancel a previously admitted permit.
 Older binaries cannot read cancellation enum variants. Do not roll back a live
 store with unresolved cancellation to such a binary.
 
@@ -169,7 +176,7 @@ The runner accepts this optional top-level configuration object:
 `addr` must be a loopback socket address. `bearer_env` names an existing environment
 variable. `recovery_bearer_env` is optional; omitting it disables remote recovery.
 Resolved operator and recovery credentials must differ from each other and from
-the worker and admission credentials. Startup rejects reused credentials or a
+the worker, admission, and cluster credentials. Startup rejects reused credentials or a
 non-loopback management address. Credential values are never stored in the
 configuration or checkpoint. Management listener settings are per-node transport
 settings; they do not change the sealed scheduling contract.
@@ -192,24 +199,24 @@ The MCP endpoint uses per-request negotiation and authorization; it does not
 create legacy MCP sessions. Every request needs a bearer header. Management
 requests are limited to 72 KiB and enter a bounded queue of 64 commands. HTTP
 and MCP requests with an `Origin` header are rejected; this listener has no
-browser flow. The inherited Raft listener still requires the trusted-network
-boundary described in [feature status](scheduler-http-status.md). Loopback
-management authentication does not repair unauthenticated Raft.
+browser flow. Fixed-voter Raft separately requires its cluster bearer and private,
+encrypted remote network boundary as described in [feature status](scheduler-http-status.md).
+Management authentication neither encrypts Raft traffic nor grants cluster authority.
 
 ### Authorization matrix
 
 | Caller credential | Status, list, create, disable, cancel, delete | Acknowledge stopped |
 |---|---|---|
-| Missing, invalid, worker, or admission credential | Denied before body parsing | Denied before body parsing |
+| Missing, invalid, worker, admission, or cluster credential | Denied before body parsing | Denied before body parsing |
 | Management operator credential | Allowed | Denied; recovery tool omitted from discovery |
 | Separate management recovery credential | Allowed | Allowed only with explicit `dispatcher_and_work_quiesced: true` |
 | Local operator stdin | Existing process authority | Existing explicit attestation requirement |
 
 The recovery credential proves authorization, not quiescence. A human operator
 must first establish that the old dispatcher cannot submit and accepted work has
-stopped. An agent must not infer or automatically approve that attestation. At
-this inherited baseline, acknowledgement accepts only `Unknown`; unresolved
-`Cancelling` still retains capacity.
+stopped. An agent must not infer or automatically approve that attestation.
+Acknowledgement accepts `Unknown` or unresolved `Cancelling`; without explicit
+attestation and a committed transition, their capacity remains reserved.
 
 ### Error behavior
 

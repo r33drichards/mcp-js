@@ -44,7 +44,7 @@
         } {
           src = ./server;
           # Vendor hash for the merged server dependency graph (including UniFFI).
-          hash = "sha256-jppSjUUiJiV7aK4G7rSZtcFkLQr0haT0RCcb96GbaKs=";
+          hash = "sha256-UvHux//lf3MCggxUjSIPSdUYYe2al5m0PO0D3V1wr9g=";
         });
 
         docsPython = pkgs.python3.withPackages (

@@ -6,11 +6,9 @@ use mcp_js_scheduler_runner::{
     management::{self, Command},
 };
 use serde::{Deserialize, Serialize};
+use std::io::BufRead;
 use std::sync::Arc;
-use tokio::{
-    io::{AsyncBufReadExt, BufReader},
-    task::JoinSet,
-};
+use tokio::task::JoinSet;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -22,6 +20,7 @@ struct Config {
     data_dir: String,
     admission_addr: String,
     admission_bearer_env: String,
+    cluster_bearer_env: String,
     #[serde(default)]
     limits: Limits,
     #[serde(default)]
@@ -54,7 +53,9 @@ async fn main() -> Result<(), String> {
             "/scheduler/v1/admit",
             axum::routing::post(admission_handler),
         )
-        .layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024))
+        .layer(axum::extract::DefaultBodyLimit::max(
+            mcp_js_scheduler_runner::scheduled_protocol::MAX_SCHEDULED_BODY_BYTES,
+        ))
         .with_state((admission_token, admission_tx));
     let admission_server =
         tokio::spawn(async move { axum::serve(admission_listener, admission_router).await });
@@ -64,9 +65,16 @@ async fn main() -> Result<(), String> {
             mcp_js_scheduler_runner::scheduled_worker::secret(&config.remote.bearer_env)?;
         let admission_token =
             mcp_js_scheduler_runner::scheduled_worker::secret(&config.admission_bearer_env)?;
-        let router =
-            management::Transport::new(settings, &admission_token, &worker_token, management_tx)?
-                .router();
+        let cluster_token =
+            mcp_js_scheduler_runner::scheduled_worker::secret(&config.cluster_bearer_env)?;
+        let router = management::Transport::new(
+            settings,
+            &admission_token,
+            &worker_token,
+            &cluster_token,
+            management_tx,
+        )?
+        .router();
         let listener = tokio::net::TcpListener::bind(settings.addr)
             .await
             .map_err(|e| e.to_string())?;
@@ -105,7 +113,7 @@ async fn main() -> Result<(), String> {
             "existing store is not sealed for fixed voters; explicit migration required".into(),
         );
     }
-    let node = ClusterNode::new_fixed(
+    let node = ClusterNode::new_fixed_authenticated(
         ClusterConfig {
             node_id: config.node_id,
             peers,
@@ -115,6 +123,7 @@ async fn main() -> Result<(), String> {
             ..Default::default()
         },
         db,
+        mcp_js_scheduler_runner::scheduled_worker::secret(&config.cluster_bearer_env)?,
     )?;
     node.start().await;
     let mut source = PulseSource::start().await?;
@@ -129,11 +138,24 @@ async fn main() -> Result<(), String> {
         mcp_js_scheduler_core::Outcome,
     )> = JoinSet::new();
     let mut cancellation_pending = std::collections::HashSet::new();
-    let mut input = BufReader::new(tokio::io::stdin()).lines();
+    // Tokio's stdin reader occupies a blocking-pool thread until EOF, which
+    // prevents runtime shutdown while an operator pipe stays open. A detached
+    // OS reader can wait for input without holding the Tokio runtime alive.
+    let (input_tx, mut input) = tokio::sync::mpsc::channel(64);
+    std::thread::spawn(move || {
+        let stdin = std::io::stdin();
+        for line in stdin.lock().lines() {
+            if input_tx.blocking_send(line).is_err() {
+                break;
+            }
+        }
+    });
     let mut input_open = true;
     let mut stopping = false;
+    let shutdown_signal = tokio::signal::ctrl_c();
+    tokio::pin!(shutdown_signal);
     loop {
-        if stopping && running.is_empty() {
+        if stopping && running.is_empty() && cancelling.is_empty() {
             break;
         }
         tokio::select! {
@@ -146,9 +168,9 @@ async fn main() -> Result<(), String> {
                     }
                 }
             }
-            Some((request,reply))=admission_rx.recv(), if !stopping => {
+            Some((request,reply))=admission_rx.recv() => {
                 let result=match owner.as_mut() {
-                    Some(active)=>active.admit(request,Utc::now()).await.map_err(|e|(axum::http::StatusCode::SERVICE_UNAVAILABLE,e)),
+                    Some(active)=>active.admit_classified(request,Utc::now()).await.map_err(|e|(axum::http::StatusCode::SERVICE_UNAVAILABLE,e)),
                     None=>Err((axum::http::StatusCode::CONFLICT,"no acquired owner".into())),
                 };
                 let _=reply.send(result);
@@ -158,7 +180,7 @@ async fn main() -> Result<(), String> {
                 let result = management::execute(command, &node, &mut owner).await;
                 let _ = reply.send(result);
             }
-            _ = tokio::signal::ctrl_c(), if !stopping => { stopping = true; }
+            _ = &mut shutdown_signal, if !stopping => { stopping = true; eprintln!("draining accepted dispatches and cancellations"); }
             completed = running.join_next(), if !running.is_empty() => {
                 if let Some(Ok((term, invocation, outcome))) = completed
                     && let Some(active) = owner.as_mut().filter(|active| active.term() == term)
@@ -169,8 +191,8 @@ async fn main() -> Result<(), String> {
                     eprintln!("completion uncertain: {error}"); owner = None;
                 }
             }
-            line = input.next_line(), if input_open && !stopping => {
-                match line.map_err(|e| e.to_string())? {
+            line = input.recv(), if input_open && !stopping => {
+                match line.transpose().map_err(|e| e.to_string())? {
                     None => input_open = false,
                     Some(line) => {
                         let response = match serde_json::from_str::<Command>(&line) {
@@ -230,10 +252,7 @@ async fn main() -> Result<(), String> {
 type AdmissionCall = (
     mcp_js_scheduler_runner::scheduled_protocol::Admission,
     tokio::sync::oneshot::Sender<
-        Result<
-            mcp_js_scheduler_runner::scheduled_protocol::Permit,
-            (axum::http::StatusCode, String),
-        >,
+        Result<mcp_js_scheduler_runner::AdmissionDecision, (axum::http::StatusCode, String)>,
     >,
 );
 async fn admission_handler(
@@ -245,14 +264,16 @@ async fn admission_handler(
     axum::Json(request): axum::Json<mcp_js_scheduler_runner::scheduled_protocol::Admission>,
 ) -> (axum::http::StatusCode, axum::Json<serde_json::Value>) {
     use axum::http::StatusCode;
-    if headers.get("authorization").and_then(|h| h.to_str().ok())
-        != Some(format!("Bearer {token}").as_str())
-    {
+    if !mcp_js_scheduler_runner::cluster::bearer_matches(
+        headers.get("authorization").and_then(|h| h.to_str().ok()),
+        &token,
+    ) {
         return (
             StatusCode::UNAUTHORIZED,
             axum::Json(serde_json::json!({"error":"unauthorized"})),
         );
     }
+    let invocation = request.dispatch.key();
     let (reply, rx) = tokio::sync::oneshot::channel();
     if tx.send((request, reply)).await.is_err() {
         return (
@@ -261,7 +282,11 @@ async fn admission_handler(
         );
     }
     match rx.await {
-        Ok(Ok(permit)) => (
+        Ok(Ok(mcp_js_scheduler_runner::AdmissionDecision::NotLaunched)) => (
+            StatusCode::GONE,
+            axum::Json(serde_json::json!({"not_launched":true,"invocation":invocation})),
+        ),
+        Ok(Ok(mcp_js_scheduler_runner::AdmissionDecision::Granted(permit))) => (
             StatusCode::CREATED,
             axum::Json(serde_json::to_value(permit).unwrap()),
         ),

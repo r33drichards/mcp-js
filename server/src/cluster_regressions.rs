@@ -362,3 +362,110 @@ fn fixed_mode_rejects_nonempty_foreign_state_tree_without_resetting_it() {
     );
     assert!(db.get("raft_fixed_voters").unwrap().is_none());
 }
+
+#[tokio::test]
+async fn extreme_terms_never_mutate_durable_state_or_wrap_elections() {
+    let n = node();
+    assert!(!n.handle_request_vote(RequestVoteRequest {
+        term: u64::MAX, candidate_id: "node1".into(), last_log_index: 0, last_log_term: 0,
+    }).await.vote_granted);
+    assert!(!n.handle_append_entries(append(u64::MAX, 0, 0, vec![], 0)).await.success);
+    n.accept_append_response("peer", 0, 0, 0, AppendEntriesResponse { term: u64::MAX, success: true }).await;
+    assert_eq!(n.state.read().await.current_term, 0);
+    assert!(n.db.get("raft_meta").unwrap().is_none());
+    n.state.write().await.current_term = u64::MAX;
+    n.start_election().await;
+    assert_eq!(n.state.read().await.current_term, u64::MAX);
+    assert!(n.shutdown.is_cancelled());
+    assert!(n.db.get("raft_meta").unwrap().is_none());
+}
+
+#[tokio::test]
+async fn fixed_http_rejects_forged_peers_status_disclosure_and_large_bodies() {
+    let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = socket.local_addr().unwrap();
+    drop(socket);
+    let n = ClusterNode::new_fixed_authenticated(ClusterConfig {
+        cluster_port: address.port(), advertise_addr: Some(address.to_string()), ..Default::default()
+    }, sled::Config::new().temporary(true).open().unwrap(), "cluster-test-only".into()).unwrap();
+    let serving = n.clone();
+    let server = tokio::spawn(async move { start_cluster_server(serving).await.unwrap() });
+    let client = reqwest::Client::new();
+    let origin = format!("http://{address}");
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while client.get(format!("{origin}/raft/status")).send().await.is_err() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }).await.unwrap();
+    for token in [None, Some("wrong-token")] {
+        for path in ["/raft/status", "/data/get/scheduler/state/v1"] {
+            let mut request = client.get(format!("{origin}{path}"));
+            if let Some(token) = token { request = request.bearer_auth(token); }
+            assert_eq!(request.send().await.unwrap().status(), 401);
+        }
+        let mut request = client.post(format!("{origin}/raft/append-entries"))
+            .json(&append(1, 0, 0, vec![entry(1, 1, "forged")], u64::MAX));
+        if let Some(token) = token { request = request.bearer_auth(token); }
+        assert_eq!(request.send().await.unwrap().status(), 401);
+    }
+    assert!(n.state.read().await.log.is_empty());
+    assert_eq!(n.state.read().await.current_term, 0);
+    assert_eq!(client.get(format!("{origin}/raft/status")).bearer_auth("cluster-test-only").send().await.unwrap().status(), 200);
+    assert_eq!(client.post(format!("{origin}/raft/append-entries")).bearer_auth("cluster-test-only")
+        .body(vec![b'x'; MAX_RAFT_BODY_BYTES + 1]).send().await.unwrap().status(), 413);
+    n.shutdown(); server.abort();
+}
+
+#[tokio::test]
+async fn unauthenticated_fixed_node_cannot_start_networking_or_elections() {
+    let n = ClusterNode::new_fixed(ClusterConfig::default(), sled::Config::new().temporary(true).open().unwrap()).unwrap();
+    n.start().await;
+    assert!(start_cluster_server(n.clone()).await.is_err());
+    assert_eq!(n.state.read().await.role, Role::Follower);
+    assert_eq!(n.state.read().await.current_term, 0);
+    assert!(!bearer_matches(Some("Bearer prefix-secret"), "prefix-secrex"));
+    assert!(!bearer_matches(None, "secret"));
+    assert!(bearer_matches(Some("Bearer secret"), "secret"));
+}
+
+#[tokio::test]
+async fn lagging_follower_catches_up_in_bounded_authenticated_batches() {
+    let sockets: Vec<_> = (0..2).map(|_| std::net::TcpListener::bind("127.0.0.1:0").unwrap()).collect();
+    let addresses: Vec<_> = sockets.iter().map(|s| s.local_addr().unwrap()).collect();
+    drop(sockets);
+    let nodes: Vec<_> = (0..2).map(|i| {
+        ClusterNode::new_fixed_authenticated(ClusterConfig {
+            node_id: format!("n{i}"), cluster_port: addresses[i].port(),
+            advertise_addr: Some(addresses[i].to_string()),
+            peers: vec![addresses[1-i].to_string()],
+            peer_addrs: HashMap::from([(format!("n{}",1-i), addresses[1-i].to_string())]),
+            ..Default::default()
+        }, sled::Config::new().temporary(true).open().unwrap(), "batch-test-only".into()).unwrap()
+    }).collect();
+    let leader = &nodes[0];
+    {
+        let mut state = leader.state.write().await;
+        state.current_term = 1; state.role = Role::Leader;
+        leader.persist_meta(&state).unwrap();
+        for index in 1..=100 {
+            let record = entry(index, 1, &format!("value-{index}"));
+            leader.persist_log_entry(&record).unwrap(); state.log.push(record);
+        }
+        state.commit_index = 100;
+        leader.apply_committed(&mut state).unwrap();
+        state.next_index.insert(addresses[1].to_string(), 101);
+    }
+    let follower = nodes[1].clone();
+    let server = tokio::spawn(async move { start_cluster_server(follower).await.unwrap() });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    for _ in 0..20 {
+        let before = nodes[1].state.read().await.log.len();
+        leader.send_append_entries_to_peer(&addresses[1].to_string()).await;
+        let after = nodes[1].state.read().await.log.len();
+        assert!(after - before <= MAX_APPEND_ENTRIES);
+        if after == 100 { break; }
+    }
+    assert_eq!(nodes[1].state.read().await.log.len(), 100);
+    assert_eq!(nodes[1].get("claim").await.unwrap().as_deref(), Some("value-100"));
+    nodes[1].shutdown(); server.abort();
+}
