@@ -2598,7 +2598,7 @@ impl Engine {
         tokio::spawn(async move {
             engine
                 .execute_in_background(
-                    id_bg,
+                    id_bg.clone(),
                     code,
                     heap,
                     fs,
@@ -2611,9 +2611,18 @@ impl Engine {
                     mcp_headers,
                 )
                 .await;
+            // Cancellation marks intent immediately. Confirm quiescence only
+            // after execute_in_background has awaited the blocking V8 task.
+            if let Some(registry) = &engine.execution_registry {
+                registry.mark_stopped(&id_bg);
+            }
         });
 
         Ok(id)
+    }
+
+    pub(crate) fn scheduled_execution_stopped(&self, id: &str) -> bool {
+        self.execution_registry.as_ref().is_some_and(|registry| registry.is_stopped(id))
     }
 
     // ── fs snapshot label operations ─────────────────────────────────────
@@ -2772,8 +2781,9 @@ impl Engine {
                 let id_clone = id.clone();
                 tokio::spawn(async move {
                     // Poll briefly for handle to become available.
-                    for _ in 0..100 {
+                    loop {
                         tokio::time::sleep(Duration::from_millis(5)).await;
+                        if reg_clone.is_stopped(&id_clone) { break; }
                         if let Some(h) = ih_clone.lock().unwrap().as_ref() {
                             reg_clone.set_isolate_handle(&id_clone, h.clone());
                             break;
@@ -2899,8 +2909,9 @@ impl Engine {
                 let reg_clone = registry.clone();
                 let id_clone = id.clone();
                 tokio::spawn(async move {
-                    for _ in 0..100 {
+                    loop {
                         tokio::time::sleep(Duration::from_millis(5)).await;
+                        if reg_clone.is_stopped(&id_clone) { break; }
                         if let Some(h) = ih_clone.lock().unwrap().as_ref() {
                             reg_clone.set_isolate_handle(&id_clone, h.clone());
                             break;

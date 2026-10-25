@@ -44,6 +44,9 @@ enum Command {
     Disable {
         id: u64,
     },
+    Cancel {
+        occurrence_id: u64,
+    },
     Delete {
         id: u64,
     },
@@ -118,7 +121,16 @@ async fn main() -> Result<(), String> {
     node.start().await;
     let mut source = PulseSource::start().await?;
     let mut owner: Option<Replicated> = None;
-    let mut running = JoinSet::new();
+    let mut running: JoinSet<(
+        u64,
+        mcp_js_scheduler_core::Invocation,
+        mcp_js_scheduler_core::Outcome,
+    )> = JoinSet::new();
+    let mut cancelling: JoinSet<(
+        mcp_js_scheduler_runner::scheduled_protocol::Dispatch,
+        mcp_js_scheduler_core::Outcome,
+    )> = JoinSet::new();
+    let mut cancellation_pending = std::collections::HashSet::new();
     let mut input = BufReader::new(tokio::io::stdin()).lines();
     let mut input_open = true;
     let mut stopping = false;
@@ -127,6 +139,15 @@ async fn main() -> Result<(), String> {
             break;
         }
         tokio::select! {
+            Some(result) = cancelling.join_next(), if !cancelling.is_empty() => {
+                if let Ok((dispatch, outcome)) = result {
+                    cancellation_pending.remove(&dispatch.occurrence_id);
+                    if let Some(active) = owner.as_mut()
+                        && let Err(error) = active.finish_cancellation(&dispatch, outcome, Utc::now()).await {
+                        eprintln!("cancellation result uncertain: {error}"); owner = None;
+                    }
+                }
+            }
             Some((request,reply))=admission_rx.recv(), if !stopping => {
                 let result=match owner.as_mut() {
                     Some(active)=>active.admit(request,Utc::now()).await.map_err(|e|(axum::http::StatusCode::SERVICE_UNAVAILABLE,e)),
@@ -138,6 +159,9 @@ async fn main() -> Result<(), String> {
             completed = running.join_next(), if !running.is_empty() => {
                 if let Some(Ok((term, invocation, outcome))) = completed
                     && let Some(active) = owner.as_mut().filter(|active| active.term() == term)
+                    && active.view().occurrences().iter().any(|o| o.id == invocation.occurrence_id
+                        && matches!(o.status, mcp_js_scheduler_core::Status::Running { attempt }
+                            | mcp_js_scheduler_core::Status::Cancelling { attempt } if attempt == invocation.attempt))
                     && let Err(error) = active.finish(&invocation, outcome, Utc::now()).await {
                     eprintln!("completion uncertain: {error}"); owner = None;
                 }
@@ -160,6 +184,7 @@ async fn main() -> Result<(), String> {
                                     Command::List => Ok(serde_json::json!({"schedules": active.view().schedules(), "occurrences": active.view().occurrences(), "stale_local_view": true})),
                                     Command::Create { definition } => active.create(definition, Utc::now()).await.map(|id| serde_json::json!({"id":id})),
                                     Command::Disable { id } => active.disable(id).await.map(|_| serde_json::json!({"ok":true})),
+                                    Command::Cancel { occurrence_id } => active.request_cancel(occurrence_id).await.map(|_| serde_json::json!({"ok":true,"cancellation_requested":true})),
                                     Command::Delete { id } => active.delete(id).await.map(|_| serde_json::json!({"ok":true})),
                                     Command::AcknowledgeStopped { occurrence_id, dispatcher_and_work_quiesced: true } => active.acknowledge_stopped(occurrence_id).await.map(|_| serde_json::json!({"ok":true})),
                                     Command::AcknowledgeStopped { .. } => Err("must establish old dispatcher cannot submit and in-flight work is resolved".into()),
@@ -180,8 +205,19 @@ async fn main() -> Result<(), String> {
                         Err(error) => { eprintln!("acquisition unavailable: {error}"); continue; }
                     }
                 }
-                if Utc::now() >= config.remote.expires_at { continue; }
                 let active = owner.as_mut().unwrap();
+                // Cleanup remains available after grant expiry. Every owner
+                // retries durable cancellation intent; ambiguous results retain capacity.
+                for dispatch in active.cancellations() {
+                    if cancellation_pending.insert(dispatch.occurrence_id) {
+                        let executor = executor.clone();
+                        cancelling.spawn(async move {
+                            let outcome = executor.cancel(dispatch.clone()).await;
+                            (dispatch, outcome)
+                        });
+                    }
+                }
+                if Utc::now() >= config.remote.expires_at { continue; }
                 if let Err(error) = active.observe(Utc::now()).await { eprintln!("observation uncertain: {error}"); owner = None; continue; }
                 loop {
                     match active.claim_for_worker(Utc::now(), &config.remote).await {

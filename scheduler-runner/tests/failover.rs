@@ -31,7 +31,15 @@ async fn acquire_owner(
                 .await
                 {
                     Ok(owner) => return (i, owner),
-                    Err(error) => last_error = error,
+                    Err(error)
+                        if error.contains("leadership")
+                            || error.contains("leader")
+                            || error.contains("raced")
+                            || error.contains("term") =>
+                    {
+                        last_error = error;
+                    }
+                    Err(error) => panic!("owner acquisition failed: {error}"),
                 }
             }
             tokio::time::sleep(Duration::from_millis(25)).await;

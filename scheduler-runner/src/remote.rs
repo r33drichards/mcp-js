@@ -22,6 +22,43 @@ pub struct RemoteExecutor {
     client: reqwest::Client,
 }
 impl RemoteExecutor {
+    /// Cancel by the durable invocation binding, including when the submit ACK
+    /// was lost. Expiry prevents new admission, not cleanup of admitted work.
+    pub async fn cancel(&self, dispatch: Dispatch) -> Outcome {
+        let Ok(token) = std::env::var(&self.config.bearer_env) else {
+            return Outcome::Unknown("cancellation credential unavailable".into());
+        };
+        let response = self
+            .client
+            .post(format!(
+                "{}/api/scheduled/v1/cancel",
+                self.config.url.trim_end_matches('/')
+            ))
+            .bearer_auth(token)
+            .json(&dispatch)
+            .send()
+            .await;
+        let Ok(response) = response else {
+            return Outcome::Unknown("cancellation unavailable".into());
+        };
+        if !response.status().is_success() {
+            return Outcome::Unknown("cancellation not confirmed".into());
+        }
+        let Ok(status) = response.json::<serde_json::Value>().await else {
+            return Outcome::Unknown("invalid cancellation response".into());
+        };
+        if status.get("stopped").and_then(serde_json::Value::as_bool) != Some(true) {
+            return Outcome::Unknown("cancellation pending".into());
+        }
+        match status["status"].as_str() {
+            Some("cancelled") => Outcome::Cancelled,
+            Some("completed") => Outcome::Succeeded,
+            Some("failed" | "timed_out") => {
+                Outcome::Failed("worker confirmed stopped execution".into())
+            }
+            _ => Outcome::Unknown("unconfirmed cancellation status".into()),
+        }
+    }
     pub fn new(config: RemoteConfig) -> Result<Self> {
         let url = reqwest::Url::parse(&config.url).map_err(|e| e.to_string())?;
         if url.scheme() != "https"
@@ -133,6 +170,8 @@ impl RemoteExecutor {
             struct Status {
                 execution_id: String,
                 status: String,
+                #[serde(default)]
+                stopped: bool,
             }
             let Ok(status) = response.json::<Status>().await else {
                 return Outcome::Unknown("invalid execution status".into());
@@ -143,7 +182,10 @@ impl RemoteExecutor {
             match status.status.as_str() {
                 "completed" => return Outcome::Succeeded,
                 "failed" => return Outcome::Failed("worker confirmed execution failure".into()),
-                "running" => tokio::time::sleep(Duration::from_millis(250)).await,
+                "cancelled" if status.stopped => return Outcome::Cancelled,
+                "running" | "cancelling" | "cancelled" => {
+                    tokio::time::sleep(Duration::from_millis(250)).await
+                }
                 // Cancellation/timeouts do not establish that arbitrary external effects stopped.
                 _ => return Outcome::Unknown("worker reported an uncertain termination".into()),
             }
