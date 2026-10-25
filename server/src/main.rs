@@ -453,7 +453,7 @@ async fn async_main(cli: Cli) -> Result<()> {
 
     // ── Build session verifier (if --jwks-url) ─────────────────────────
     let session_verifier: Option<Arc<SessionVerifier>> = if let Some(ref jwks_url) = cli.jwks_url {
-        tracing::info!("Fetching JWKS keys from {}", jwks_url);
+        tracing::info!("Fetching JWKS keys");
         let key_store = JwksKeyStore::new(jwks_url.clone())
             .await
             .map_err(|e| anyhow::anyhow!("Failed to initialize JWKS key store: {}", e))?;

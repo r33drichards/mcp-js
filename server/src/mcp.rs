@@ -991,6 +991,15 @@ impl ServerHandler for StatelessMcpService {
     }
 }
 
+// Never log request header values or the URI: both can contain credentials,
+// including custom X-MCP-* policy inputs and query parameters.
+fn log_initialize_request(parts: &axum::http::request::Parts) {
+    tracing::info!(
+        header_count = parts.headers.len(),
+        "initialize from http server"
+    );
+}
+
 /// Shared initialize-time header handling: JWT verification (if configured),
 /// capturing X-MCP-* headers, and (optionally) the session id.
 pub(crate) async fn capture_mcp_headers(
@@ -1003,8 +1012,7 @@ pub(crate) async fn capture_mcp_headers(
         return;
     };
     let initialize_headers = &http_request_part.headers;
-    let initialize_uri = &http_request_part.uri;
-    tracing::info!(?initialize_headers, %initialize_uri, "initialize from http server");
+    log_initialize_request(http_request_part);
 
     if let Some(verifier) = verifier {
         let token = http_request_part
@@ -1041,16 +1049,13 @@ pub(crate) async fn capture_mcp_headers(
 
     if let Some(session_id) = session_id {
         if let Some(sid) = mcp_header_map.get("session-id") {
-            tracing::info!(
-                session_id = sid.as_str(),
-                "Session ID from X-MCP-Session-Id header"
-            );
+            tracing::info!("Session ID captured from X-MCP-Session-Id header");
             let _ = session_id.set(sid.clone());
         }
     }
 
     if !mcp_header_map.is_empty() {
-        tracing::info!(?mcp_header_map, "X-MCP-* headers captured");
+        tracing::info!(header_count = mcp_header_map.len(), "X-MCP-* headers captured");
         let _ = mcp_headers.set(McpRequestHeaders {
             values: mcp_header_map,
         });
@@ -1062,6 +1067,66 @@ mod tests {
     use super::apply_run_js_description_override;
     use rmcp::model::Tool;
     use std::sync::Arc;
+
+    #[test]
+    fn initialize_logging_omits_all_header_values_and_uri() {
+        use std::io::Write;
+        use std::sync::Mutex;
+
+        #[derive(Clone)]
+        struct LogWriter(Arc<Mutex<Vec<u8>>>);
+        impl Write for LogWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let mut request = axum::http::Request::builder()
+            .uri("/mcp?access_token=synthetic-query-secret")
+            .body(())
+            .unwrap();
+        // Case variants are intentional; no denylist should be able to miss a
+        // standard or custom credential header.
+        for name in [
+            "Authorization",
+            "Proxy-Authorization",
+            "Cookie",
+            "Set-Cookie",
+            "X-API-Key",
+            "Api-Key",
+            "Agent-Session",
+            "X-MCP-Session-Id",
+            "X-MCP-Api-Key",
+            "X-Custom-Credential",
+        ] {
+            request.headers_mut().insert(
+                axum::http::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                axum::http::HeaderValue::from_static("Bearer synthetic-header-secret"),
+            );
+        }
+        let (parts, _) = request.into_parts();
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let writer = LogWriter(output.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(move || writer.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            super::log_initialize_request(&parts);
+        });
+        let logged = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        assert!(logged.contains("initialize from http server"));
+        assert!(logged.contains("header_count=10"));
+        assert!(!logged.contains("synthetic-header-secret"));
+        assert!(!logged.contains("synthetic-query-secret"));
+        assert!(!logged.contains("access_token"));
+    }
 
     fn tool(name: &'static str, desc: &'static str) -> Tool {
         Tool::new(name, desc, Arc::new(serde_json::Map::new()))

@@ -33,11 +33,11 @@ impl JwksKeyStore {
             .get(url)
             .send()
             .await
-            .map_err(|e| format!("JWKS fetch failed: {}", e))?;
+            .map_err(|e| format!("JWKS fetch failed: {}", e.without_url()))?;
         let jwks: JwkSet = resp
             .json()
             .await
-            .map_err(|e| format!("JWKS parse failed: {}", e))?;
+            .map_err(|e| format!("JWKS parse failed: {}", e.without_url()))?;
 
         let mut map = HashMap::new();
         for jwk in &jwks.keys {
@@ -45,7 +45,7 @@ impl JwksKeyStore {
                 match DecodingKey::from_jwk(jwk) {
                     Ok(dk) => { map.insert(kid.clone(), dk); }
                     Err(e) => {
-                        tracing::warn!(kid, "Skipping JWK: {}", e);
+                        tracing::warn!("Skipping invalid JWK: {}", e);
                     }
                 }
             }
@@ -65,7 +65,7 @@ impl JwksKeyStore {
                 return Some(dk.clone());
             }
         }
-        tracing::info!(kid, "Unknown kid, refreshing JWKS keys");
+        tracing::info!("Unknown kid, refreshing JWKS keys");
         match Self::fetch_keys_inner(&self.client, &self.jwks_url).await {
             Ok(new_keys) => {
                 let result = new_keys.get(kid).cloned();
@@ -159,7 +159,6 @@ pub async fn enforce_bearer_auth(
     } else {
         tracing::warn!(
             method = %request.method(),
-            uri = %request.uri(),
             "rejecting request without a valid JWT (JWKS enforcement enabled)"
         );
         (

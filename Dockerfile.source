@@ -32,6 +32,8 @@ RUN rustup default nightly
 ARG MCP_LIVENESS_TESTS=0
 RUN if [ "$MCP_LIVENESS_TESTS" = 1 ]; then \
       cargo test --release --locked -p server --lib engine::mcp_client::tests \
+      && cargo test --release --locked -p server --lib mcp::tests \
+      && cargo test --release --locked -p server --lib session::tests \
       && cargo test --release --locked -p server --test mcp_liveness --test mcp_oauth_browser_e2e; \
     fi
 
