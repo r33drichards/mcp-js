@@ -31,6 +31,9 @@ MCP servers) are all **off by default** and unlocked only by explicit
 
 ## Documentation
 
+Maintainers: see [Codex PR reviews](./docs/codex-review.md) for subscription-based
+reviews triggered by the `review` label.
+
 Maintainers: see [Publishing to the MCP Registry](./docs/mcp-registry.md) for
 the Docker-backed registry manifest and automated release process.
 
