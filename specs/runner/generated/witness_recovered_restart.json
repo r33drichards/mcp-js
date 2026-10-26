@@ -1,0 +1,299 @@
+{
+  "format": 1,
+  "model": "RunnerOwnership",
+  "name": "witness_recovered_restart",
+  "seed": 1,
+  "max_steps": 12,
+  "max_faults": 2,
+  "expected_violation": "WitnessAbsent",
+  "mutation": null,
+  "states": [
+    {
+      "epoch": 1,
+      "leader": 1,
+      "committedTerm": 0,
+      "admissions": 0,
+      "pendingTerm": 0,
+      "work": [],
+      "committedOwner": 0,
+      "now": 0,
+      "faults": 0,
+      "receipt": "Pending",
+      "consumes": 0,
+      "tickets": [
+        0,
+        0
+      ],
+      "pending": 0,
+      "net": [],
+      "event": {
+        "node": 0,
+        "op": "init",
+        "arg": 0
+      },
+      "step": 0,
+      "quorum": true,
+      "staleAdmission": false,
+      "up": [
+        1,
+        2
+      ],
+      "posts": 0,
+      "waiting": [
+        0,
+        0
+      ],
+      "badAck": false,
+      "owned": [
+        0,
+        0
+      ]
+    },
+    {
+      "epoch": 1,
+      "leader": 1,
+      "committedTerm": 0,
+      "admissions": 0,
+      "pendingTerm": 0,
+      "work": [],
+      "committedOwner": 0,
+      "now": 1,
+      "faults": 0,
+      "receipt": "Pending",
+      "consumes": 0,
+      "tickets": [
+        0,
+        0
+      ],
+      "pending": 0,
+      "net": [],
+      "event": {
+        "node": 0,
+        "op": "tick",
+        "arg": 1
+      },
+      "step": 1,
+      "quorum": true,
+      "staleAdmission": false,
+      "up": [
+        1,
+        2
+      ],
+      "posts": 0,
+      "waiting": [
+        0,
+        0
+      ],
+      "badAck": false,
+      "owned": [
+        0,
+        0
+      ]
+    },
+    {
+      "epoch": 2,
+      "leader": 2,
+      "committedTerm": 0,
+      "admissions": 0,
+      "pendingTerm": 0,
+      "work": [],
+      "committedOwner": 0,
+      "now": 1,
+      "faults": 0,
+      "receipt": "Pending",
+      "consumes": 0,
+      "tickets": [
+        0,
+        0
+      ],
+      "pending": 0,
+      "net": [],
+      "event": {
+        "node": 2,
+        "op": "elect",
+        "arg": 2
+      },
+      "step": 2,
+      "quorum": true,
+      "staleAdmission": false,
+      "up": [
+        1,
+        2
+      ],
+      "posts": 0,
+      "waiting": [
+        0,
+        0
+      ],
+      "badAck": false,
+      "owned": [
+        0,
+        0
+      ]
+    },
+    {
+      "epoch": 2,
+      "leader": 2,
+      "committedTerm": 0,
+      "admissions": 0,
+      "pendingTerm": 0,
+      "work": [],
+      "committedOwner": 0,
+      "now": 1,
+      "faults": 0,
+      "receipt": "Pending",
+      "consumes": 0,
+      "tickets": [
+        0,
+        0
+      ],
+      "pending": 0,
+      "net": [],
+      "event": {
+        "node": 2,
+        "op": "acquire",
+        "arg": 2
+      },
+      "step": 3,
+      "quorum": true,
+      "staleAdmission": false,
+      "up": [
+        1,
+        2
+      ],
+      "posts": 0,
+      "waiting": [
+        0,
+        0
+      ],
+      "badAck": false,
+      "owned": [
+        0,
+        2
+      ]
+    },
+    {
+      "epoch": 2,
+      "leader": 2,
+      "committedTerm": 0,
+      "admissions": 0,
+      "pendingTerm": 2,
+      "work": [],
+      "committedOwner": 0,
+      "now": 1,
+      "faults": 0,
+      "receipt": "Pending",
+      "consumes": 0,
+      "tickets": [
+        0,
+        0
+      ],
+      "pending": 2,
+      "net": [],
+      "event": {
+        "node": 2,
+        "op": "propose",
+        "arg": 2
+      },
+      "step": 4,
+      "quorum": true,
+      "staleAdmission": false,
+      "up": [
+        1,
+        2
+      ],
+      "posts": 0,
+      "waiting": [
+        0,
+        2
+      ],
+      "badAck": false,
+      "owned": [
+        0,
+        2
+      ]
+    },
+    {
+      "epoch": 2,
+      "leader": 2,
+      "committedTerm": 0,
+      "admissions": 0,
+      "pendingTerm": 2,
+      "work": [],
+      "committedOwner": 0,
+      "now": 1,
+      "faults": 1,
+      "receipt": "Pending",
+      "consumes": 0,
+      "tickets": [
+        0,
+        0
+      ],
+      "pending": 2,
+      "net": [],
+      "event": {
+        "node": 2,
+        "op": "lose_ack",
+        "arg": 0
+      },
+      "step": 5,
+      "quorum": true,
+      "staleAdmission": false,
+      "up": [
+        1,
+        2
+      ],
+      "posts": 0,
+      "waiting": [
+        0,
+        0
+      ],
+      "badAck": false,
+      "owned": [
+        0,
+        0
+      ]
+    },
+    {
+      "epoch": 2,
+      "leader": 2,
+      "committedTerm": 2,
+      "admissions": 0,
+      "pendingTerm": 2,
+      "work": [],
+      "committedOwner": 2,
+      "now": 1,
+      "faults": 1,
+      "receipt": "Unknown",
+      "consumes": 1,
+      "tickets": [
+        0,
+        0
+      ],
+      "pending": 0,
+      "net": [],
+      "event": {
+        "node": 2,
+        "op": "acquire",
+        "arg": 2
+      },
+      "step": 6,
+      "quorum": true,
+      "staleAdmission": false,
+      "up": [
+        1,
+        2
+      ],
+      "posts": 0,
+      "waiting": [
+        0,
+        0
+      ],
+      "badAck": false,
+      "owned": [
+        0,
+        2
+      ]
+    }
+  ]
+}

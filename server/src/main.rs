@@ -35,6 +35,13 @@ fn main() -> Result<()> {
         .init();
 
     let cli = cli::parse();
+    if server::scheduled_worker::configured() && cli.heap_store != StoreKind::None {
+        anyhow::bail!("scheduled-only worker requires --heap-store none: cancelling SnapshotCreator executions is unsupported");
+    }
+    if server::scheduled_worker::configured() && (cli.http_port.is_none() || cli.sse_port.is_some())
+    {
+        anyhow::bail!("scheduled-only worker requires --http-port and forbids SSE/stdio execution");
+    }
 
     // ── --print-openapi: dump spec and exit ─────────────────────────────
     if cli.print_openapi {
@@ -620,14 +627,20 @@ where
     // Mount the MCP service at /mcp alongside the plain HTTP API. Both run
     // arbitrary JS, so when JWKS enforcement is active they sit behind the
     // bearer-auth layer; the openapi spec route stays public.
-    let protected = axum::Router::new()
-        .nest_service("/mcp", mcp_service)
-        .merge(api::api_router(runtime.clone()));
-    // Upload URLs carry their own one-time token, so they stay outside the
-    // bearer-auth layer: the uploader is whoever was handed the URL.
-    let app = apply_auth_enforcement(protected, &verifier)
-        .merge(openapi_route)
-        .merge(api::artifact_upload_router(runtime.clone()));
+    let app = if server::scheduled_worker::configured() {
+        // Dedicated mode: the scheduled credential has no legacy API/MCP path.
+        apply_auth_enforcement(
+            api::scheduled_router(runtime.clone()).map_err(anyhow::Error::msg)?,
+            &verifier,
+        )
+    } else {
+        let protected = axum::Router::new()
+            .nest_service("/mcp", mcp_service)
+            .merge(api::api_router(runtime.clone()));
+        apply_auth_enforcement(protected, &verifier)
+            .merge(openapi_route)
+            .merge(api::artifact_upload_router(runtime.clone()))
+    };
 
     let listener = tokio::net::TcpListener::bind(bind).await?;
     tracing::info!("Streamable HTTP server listening on {}", bind);

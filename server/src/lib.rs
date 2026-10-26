@@ -11,3 +11,6 @@ pub mod session;
 pub mod sandbox;
 
 uniffi::setup_scaffolding!();
+
+pub mod scheduled_protocol;
+pub mod scheduled_worker;

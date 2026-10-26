@@ -1,0 +1,4 @@
+generated/*.log
+generated/*.tlc.json
+admission-generated/*.log
+admission-generated/*.tlc.json
