@@ -218,7 +218,19 @@ jobs:
         run: cd mcp-v8-client && cargo package --list
 
       - name: Publish to crates.io
-        run: cd mcp-v8-client && cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        env:
+          TAG: ${{ github.ref_name }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          # The crate keeps its own stable version; an RC tag must not publish it.
+          policy=$(node scripts/release-policy.mjs classify "$TAG")
+          if [ "$(jq -r '.prerelease' <<< "$policy")" != false ]; then
+            echo "Skipping crates.io publication for prerelease $TAG"
+            exit 0
+          fi
+          cd mcp-v8-client
+          cargo publish --token "$CARGO_REGISTRY_TOKEN"
         continue-on-error: true
 
   # ── Assemble GitHub Release ────────────────────────────────────────────────
