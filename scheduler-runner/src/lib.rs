@@ -15,3 +15,5 @@ mod model_replay;
 pub mod scheduled_protocol;
 #[path = "../../server/src/scheduled_worker.rs"]
 pub mod scheduled_worker;
+
+pub mod management;

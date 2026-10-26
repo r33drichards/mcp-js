@@ -65,7 +65,8 @@ In this mode the server mounts only the three scheduled routes: no `/api/exec`,
 these routes, with existing JWKS enforcement also applied if configured. Existing deployments without this mode keep their existing APIs;
 legacy workers cannot service the new runner. The session field remains a logging
 tag, not a principal identity. This operator-owned prototype does not implement
-multi-tenant principal-to-grant binding or MCP management.
+multi-tenant principal-to-grant binding. The optional operator management listener
+below provides HTTP/MCP access to existing commands with separate credentials.
 
 Example worker config (no token values are stored):
 
@@ -231,3 +232,43 @@ The Raft log and worker receipts still grow without automatic compaction, and
 deleting a schedule does not erase historical replicated code. No
 Events delivery, schema migration, multi-tenant authorization, creation deduplication,
 Raft compaction, throughput benchmark or automatic Unknown resolution is provided.
+
+## Optional HTTP/MCP operator management
+
+Add `management` to the runner configuration to expose existing operator commands:
+
+```json
+{
+  "management": {
+    "addr": "127.0.0.1:4601",
+    "bearer_env": "MCP_SCHEDULER_OPERATOR_TOKEN",
+    "recovery_bearer_env": "MCP_SCHEDULER_RECOVERY_TOKEN"
+  }
+}
+```
+
+The listener requires loopback binding and a distinct operator credential.
+Operator and recovery credentials must differ from each other and from worker,
+admission, and cluster credentials. Without it, remote acknowledgement is disabled. Missing
+`management` leaves stdin as the sole management interface.
+
+Authenticated `GET /scheduler/v1/status` and `GET /scheduler/v1/schedules` execute
+`status` and `list`. `POST /scheduler/v1/commands` takes the same tagged JSON as
+stdin. The separate `/mcp` endpoint accepts sessionless protocol `2026-07-28` and
+exposes `scheduler_status`, `scheduler_list`, `scheduler_create`,
+`scheduler_disable`, `scheduler_cancel`, and `scheduler_delete`; arguments omit
+`action`. A separately authorized recovery caller can also discover and call
+`scheduler_acknowledge_stopped`. Every request is authenticated, bodies are bounded
+to 72 KiB, and requests carrying an `Origin` header are rejected.
+
+All commands share stdin's runner dispatcher and existing durable semantics.
+Cancellation stays independent of disablement. Recovery still requires a human's
+explicit quiescence attestation and accepts `Unknown` or unresolved `Cancelling`;
+it must never be inferred or auto-approved by an agent. The integrated fixed-voter
+Raft bearer is separate from management authority; keep cluster ports private and
+use encrypted transport for remote links.
+
+Remote errors redact internal details and conservatively report uncertain core
+failures. Never retry a mutation automatically after a lost reply or uncertain
+503. See the [operator API and authorization matrix](../site-docs/reference/scheduler.md#operator-http-and-mcp-transport)
+and [operational guide](../site-docs/how-to/stop-scheduled-work.md#use-the-authenticated-management-listener).

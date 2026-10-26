@@ -470,6 +470,10 @@ async fn async_main(cli: Cli) -> Result<()> {
     };
 
     let runtime = runtime_builder.build();
+    // Initialize once; HTTP and every MCP session share revisions and capacity.
+    if !server::scheduled_worker::configured() {
+        let _ = server::http_functions::configured_router(runtime.clone()).map_err(anyhow::Error::msg)?;
+    }
 
     // ── Start transport ─────────────────────────────────────────────────
     // McpService (session-capable) is used whenever any per-session state axis

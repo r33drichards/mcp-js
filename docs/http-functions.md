@@ -1,6 +1,6 @@
 # Dynamic JavaScript HTTP functions
 
-Set `MCP_V8_HTTP_FUNCTIONS_DIR` to enable registration and invocation in ordinary HTTP or SSE server mode. In single-node mode this directory holds the durable registry. Cluster mode uses the existing replicated store and accepts requests on the leader; followers and nodes without quorum return 503. Scheduled-only workers never mount these routes.
+Set `MCP_V8_HTTP_FUNCTIONS_DIR` to enable registration and invocation in ordinary HTTP or SSE server mode, and the dedicated MCP tools in HTTP, SSE, or stdio mode. In single-node mode this directory holds the durable registry. Cluster mode uses the existing replicated store and accepts requests on the leader; followers and nodes without quorum return 503. Scheduled-only workers never mount these routes.
 
 The routes inherit the transport's authentication: configuring `--jwks-url` requires a verified token for management and invocation. Without JWKS, they have the same access as `/api/exec`. Definitions introduce no additional roles, owners, or authority profiles. Handlers run through the ordinary Engine with its configured policies, capabilities, imports, and deployment ceilings.
 
@@ -50,11 +50,14 @@ A committed compare-and-set fences cluster reads before admission. Quorum loss c
 
 ## Validation
 
-The implementation passed 277 server library tests, 31 server integration tests, 33 scheduler-core tests, and 34 scheduler-runner tests. The scheduler suites each mark one subprocess helper ignored during discovery; parent tests invoke those helpers explicitly.
+The inherited registry implementation was validated before the management layer.
+Run the suites below for the current branch; historical counts are not evidence
+for new adapter changes. The scheduler suites each mark one subprocess helper
+ignored during discovery; parent tests invoke those helpers explicitly.
 
 ```sh
 cargo test --locked -p server --lib -- --test-threads=1
-cargo test --locked -p server --test jwks_auth_e2e --test base64_and_formdata \
+cargo test --locked -p server --test http_function_management_e2e --test jwks_auth_e2e --test base64_and_formdata \
   --test stdio_e2e --test sandbox_print_bypass -- --test-threads=1
 cargo test --locked --manifest-path scheduler-core/Cargo.toml
 cargo test --locked --manifest-path scheduler-runner/Cargo.toml
@@ -77,3 +80,19 @@ The service test boots the NixOS module with JWKS authentication and fetch polic
 The three-node test crashes the leader, verifies the replicated revision after election, removes quorum, restores service, and restarts the entire cluster. It checks that tombstones prevent stale ETags from becoming valid again. A separate current-term barrier commits surviving prior-term registry proposals before loading a CAS candidate, so an ambiguous write cannot stall reads after restart.
 
 The HTTP functions NixOS integration workflow runs both checks on pushes and pull requests, including stacked branches.
+
+## MCP management parity
+
+With the registry enabled, both MCP modes advertise `http_function_create`,
+`http_function_list`, `http_function_lookup`, `http_function_update`,
+`http_function_delete`, and `http_function_invoke`. These use the same registry,
+conditional revisions, handlers, and capacity as HTTP. Update/delete take the
+unquoted metadata `revision`; creation requires an absent active name. Tool errors
+set `isError` and return generic JSON `error`/`status` fields. Invocation returns
+HTTP `status`, `headers`, and standard-base64 `body_base64`.
+
+The [Diátaxis reference](../site-docs/reference/http-functions.md#mcp-management-tools)
+lists every argument and the authorization boundary. The [management guide](../site-docs/how-to/manage-http-functions.md#manage-the-same-revision-through-mcp)
+explains concurrent revisions and uncertain outcomes. Invocation capacity remains
+reserved until confirmed Engine stoppage, including after a timeout; ambiguous
+submission/observation failures quarantine capacity for the process.

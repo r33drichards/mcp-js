@@ -13,6 +13,7 @@ use axum::{
     routing::get,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use rmcp::schemars;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use tokio::sync::{Mutex, Semaphore};
@@ -24,7 +25,7 @@ const MAX_SOURCE: usize = 64 * 1024;
 const MAX_DEFINITIONS: usize = 32;
 type Failure = StatusCode;
 
-#[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Limits {
     pub timeout_seconds: u64,
@@ -38,7 +39,7 @@ impl Default for Limits {
         }
     }
 }
-#[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Definition {
     pub version: u32,
@@ -177,11 +178,28 @@ impl Registry {
     }
 }
 #[derive(Clone)]
+pub(crate) struct Management {
+    registry: Arc<Registry>,
+    slots: Arc<Semaphore>,
+}
+
+#[derive(Clone)]
 struct App {
     engine: Arc<Engine>,
     registry: Arc<Registry>,
     slots: Arc<Semaphore>,
 }
+// Dropping an observer is not proof that accepted work stopped. Quarantine its
+// slot on panic/submission uncertainty; only an observed Engine join releases it.
+struct ExecutionSlot(Option<tokio::sync::OwnedSemaphorePermit>);
+impl Drop for ExecutionSlot {
+    fn drop(&mut self) {
+        if let Some(permit) = self.0.take() {
+            permit.forget();
+        }
+    }
+}
+
 fn valid_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 64
@@ -437,7 +455,7 @@ async fn invoke(
     // Keep admission capacity through completion even if the caller disconnects.
     tokio::spawn(
         async move {
-            let _permit = permit;
+            let slot = ExecutionSlot(Some(permit));
             let id = app
                 .engine
                 .submit_execution(ExecutionRequest {
@@ -453,6 +471,17 @@ async fn invoke(
                 })
                 .await
                 .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+            // A detached watcher owns capacity until the Engine confirms its background
+            // execution has stopped. HTTP/MCP cancellation or timeout cannot release it.
+            let lifetime_engine = app.engine.clone();
+            let lifetime_id = id.clone();
+            tokio::spawn(async move {
+                let mut slot = slot;
+                while !lifetime_engine.scheduled_execution_stopped(&lifetime_id) {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                drop(slot.0.take());
+            });
             tracing::debug!(execution_id = %id, "HTTP function execution submitted");
             // Never resubmit, including after ambiguous submission or client disconnect.
             let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout + 1);
@@ -507,6 +536,9 @@ async fn request_diagnostics(request: Request, next: axum::middleware::Next) -> 
 /// Explicitly opt in using MCP_V8_HTTP_FUNCTIONS_DIR. Cluster nodes use the
 /// existing replicated data store; the directory is only used in single-node mode.
 pub fn configured_router(engine: Arc<Engine>) -> Result<Router, String> {
+    if let Some(management) = engine.http_functions.get() {
+        return Ok(management_router(engine.clone(), management.clone()));
+    }
     let Some(dir) = std::env::var_os("MCP_V8_HTTP_FUNCTIONS_DIR") else {
         return Ok(Router::new());
     };
@@ -521,15 +553,29 @@ pub fn configured_router(engine: Arc<Engine>) -> Result<Router, String> {
                 .map_err(|e| e.to_string())?,
         ),
     };
-    Ok(router(
-        engine,
-        Arc::new(Registry {
+    let management = Management {
+        registry: Arc::new(Registry {
             backend,
             lock: Mutex::new(()),
         }),
-    ))
+        slots: Arc::new(Semaphore::new(16)),
+    };
+    engine
+        .http_functions
+        .set(management.clone())
+        .map_err(|_| "HTTP registry already initialized")?;
+    Ok(management_router(engine, management))
 }
+#[cfg(test)]
 fn router(engine: Arc<Engine>, registry: Arc<Registry>) -> Router {
+    let management = Management {
+        registry,
+        slots: Arc::new(Semaphore::new(16)),
+    };
+    engine.http_functions.set(management.clone()).ok().unwrap();
+    management_router(engine, management)
+}
+fn management_router(engine: Arc<Engine>, management: Management) -> Router {
     Router::new()
         .route("/api/http-functions/v1/definitions", get(list))
         .route(
@@ -540,9 +586,228 @@ fn router(engine: Arc<Engine>, registry: Arc<Registry>) -> Router {
         .layer(axum::middleware::from_fn(request_diagnostics))
         .with_state(App {
             engine,
-            registry,
-            slots: Arc::new(Semaphore::new(16)),
+            registry: management.registry,
+            slots: management.slots,
         })
+}
+
+/// These names are reserved even when the registry is disabled, so an upstream
+/// stub cannot accidentally receive a management call.
+pub(crate) fn is_management_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "http_function_create"
+            | "http_function_list"
+            | "http_function_lookup"
+            | "http_function_update"
+            | "http_function_delete"
+            | "http_function_invoke"
+    )
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct NameArgs {
+    name: String,
+}
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct CreateArgs {
+    name: String,
+    definition: Definition,
+}
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct UpdateArgs {
+    name: String,
+    revision: String,
+    definition: Definition,
+}
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct DeleteArgs {
+    name: String,
+    revision: String,
+}
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct InvokeArgs {
+    name: String,
+    method: String,
+    #[serde(default)]
+    query: Vec<(String, String)>,
+    #[serde(default)]
+    headers: BTreeMap<String, String>,
+    #[serde(default)]
+    body_base64: String,
+}
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct EmptyArgs {}
+
+pub(crate) fn tools() -> Vec<rmcp::model::Tool> {
+    fn tool<T: schemars::JsonSchema>(
+        name: &'static str,
+        description: &'static str,
+    ) -> rmcp::model::Tool {
+        let schema = serde_json::to_value(schemars::schema_for!(T)).unwrap();
+        rmcp::model::Tool::new(
+            name,
+            description,
+            Arc::new(schema.as_object().unwrap().clone()),
+        )
+    }
+    vec![
+        tool::<CreateArgs>(
+            "http_function_create",
+            "Create an absent dynamic HTTP function. Same authority as HTTP registration; never executes source during registration. No automatic retry after uncertain errors.",
+        ),
+        tool::<EmptyArgs>(
+            "http_function_list",
+            "List active HTTP function metadata. Source omitted.",
+        ),
+        tool::<NameArgs>(
+            "http_function_lookup",
+            "Read HTTP function metadata and revision for conditional mutation. Source omitted.",
+        ),
+        tool::<UpdateArgs>(
+            "http_function_update",
+            "Replace a function only at the supplied revision (unquoted UUID). On 412 inspect current metadata and reconcile.",
+        ),
+        tool::<DeleteArgs>(
+            "http_function_delete",
+            "Delete a function only at the supplied revision (unquoted UUID). Already admitted calls continue.",
+        ),
+        tool::<InvokeArgs>(
+            "http_function_invoke",
+            "Invoke a registered HTTP function with its registered method, query pairs and base64 body. Headers accept only content-type, accept and user-agent. Returns HTTP status, headers and base64 body. Each call is a distinct execution; never automatically replay uncertain work.",
+        ),
+    ]
+}
+
+/// Both protocols enter the exact same validation, CAS and invocation handlers.
+/// The enclosing transport authenticates callers; definitions have no separate
+/// owner identity and MCP supplies no privileged credential or alternate Engine.
+pub(crate) async fn call_tool(
+    engine: &Engine,
+    name: &str,
+    args: serde_json::Value,
+) -> serde_json::Value {
+    let result = call_management(engine, name, args).await;
+    match result {
+        Ok(value) => value,
+        Err(status) => {
+            serde_json::json!({"error": status.canonical_reason().unwrap_or("request failed"), "status": status.as_u16()})
+        }
+    }
+}
+async fn call_management(
+    engine: &Engine,
+    name: &str,
+    args: serde_json::Value,
+) -> Result<serde_json::Value, Failure> {
+    fn parse<T: serde::de::DeserializeOwned>(args: serde_json::Value) -> Result<T, Failure> {
+        serde_json::from_value(args).map_err(|_| StatusCode::BAD_REQUEST)
+    }
+    fn revision(value: &str) -> Result<HeaderValue, Failure> {
+        uuid::Uuid::parse_str(value).map_err(|_| StatusCode::BAD_REQUEST)?;
+        HeaderValue::from_str(&format!("\"{value}\"")).map_err(|_| StatusCode::BAD_REQUEST)
+    }
+    let management = engine
+        .http_functions
+        .get()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let app = App {
+        engine: Arc::new(engine.clone()),
+        registry: management.registry.clone(),
+        slots: management.slots.clone(),
+    };
+    let response = match name {
+        "http_function_list" => {
+            let _: EmptyArgs = parse(args)?;
+            return Ok(serde_json::json!(list(State(app)).await?.0));
+        }
+        "http_function_lookup" => {
+            let args: NameArgs = parse(args)?;
+            lookup(State(app), Path(args.name)).await?
+        }
+        "http_function_create" | "http_function_update" => {
+            let (name, definition, condition, value) = if name == "http_function_create" {
+                let args: CreateArgs = parse(args)?;
+                (
+                    args.name,
+                    args.definition,
+                    "if-none-match",
+                    HeaderValue::from_static("*"),
+                )
+            } else {
+                let args: UpdateArgs = parse(args)?;
+                (
+                    args.name,
+                    args.definition,
+                    "if-match",
+                    revision(&args.revision)?,
+                )
+            };
+            let request = Request::builder()
+                .header(condition, value)
+                .body(Body::from(
+                    serde_json::to_vec(&definition).map_err(|_| StatusCode::BAD_REQUEST)?,
+                ))
+                .map_err(|_| StatusCode::BAD_REQUEST)?;
+            put(State(app), Path(name), request).await?
+        }
+        "http_function_delete" => {
+            let args: DeleteArgs = parse(args)?;
+            let mut headers = HeaderMap::new();
+            headers.insert("if-match", revision(&args.revision)?);
+            delete(State(app), Path(args.name), headers).await?
+        }
+        "http_function_invoke" => {
+            let args: InvokeArgs = parse(args)?;
+            if !valid_name(&args.name) || args.body_base64.len() > MAX_BODY.div_ceil(3) * 4 {
+                return Err(StatusCode::BAD_REQUEST);
+            }
+            let method =
+                Method::from_bytes(args.method.as_bytes()).map_err(|_| StatusCode::BAD_REQUEST)?;
+            let query = url::form_urlencoded::Serializer::new(String::new())
+                .extend_pairs(&args.query)
+                .finish();
+            let mut request = Request::builder()
+                .method(method)
+                .uri(format!("/functions/v1/{}?{}", args.name, query));
+            for (key, value) in args.headers {
+                if !["content-type", "accept", "user-agent"].contains(&key.as_str()) {
+                    return Err(StatusCode::BAD_REQUEST);
+                }
+                request = request.header(key, value);
+            }
+            let bytes = STANDARD
+                .decode(args.body_base64)
+                .map_err(|_| StatusCode::BAD_REQUEST)?;
+            let request = request
+                .body(Body::from(bytes))
+                .map_err(|_| StatusCode::BAD_REQUEST)?;
+            let response = invoke(State(app), Path(args.name), request).await?;
+            let (parts, body) = response.into_parts();
+            let bytes = to_bytes(body, MAX_BODY)
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            let headers: BTreeMap<_, _> = parts
+                .headers
+                .iter()
+                .filter_map(|(key, value)| value.to_str().ok().map(|value| (key.as_str(), value)))
+                .collect();
+            return Ok(
+                serde_json::json!({"status":parts.status.as_u16(), "headers":headers, "body_base64":STANDARD.encode(bytes)}),
+            );
+        }
+        _ => return Err(StatusCode::NOT_FOUND),
+    };
+    let bytes = to_bytes(response.into_body(), MAX_BODY)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    serde_json::from_slice(&bytes).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 #[cfg(test)]
@@ -596,6 +861,70 @@ mod tests {
     fn definition(source: &str) -> String {
         serde_json::json!({"version":1,"methods":["POST","HEAD"],"source":source,"export":"handler","limits":{"timeout_seconds":1,"heap_mb":32}}).to_string()
     }
+    #[tokio::test]
+    async fn uncertain_execution_slot_is_quarantined_until_confirmed_stopped() {
+        let slots = Arc::new(Semaphore::new(2));
+        let uncertain = ExecutionSlot(Some(slots.clone().acquire_owned().await.unwrap()));
+        drop(uncertain);
+        assert_eq!(slots.available_permits(), 1);
+        let mut confirmed = ExecutionSlot(Some(slots.clone().acquire_owned().await.unwrap()));
+        drop(confirmed.0.take());
+        drop(confirmed);
+        assert_eq!(slots.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn mcp_and_http_share_registry_and_concurrent_revision() {
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, _, app) = fixture(dir.path());
+        let def: serde_json::Value = serde_json::from_str(&definition(
+            "function handler(){return {status:200,body:'shared'}}",
+        ))
+        .unwrap();
+        let created = call_tool(
+            &engine,
+            "http_function_create",
+            serde_json::json!({"name":"shared","definition":def}),
+        )
+        .await;
+        let revision = created["revision"].as_str().unwrap();
+        let etag = format!("\"{revision}\"");
+        let (http, mcp) = tokio::join!(
+            send(
+                &app,
+                "PUT",
+                "/api/http-functions/v1/definitions/shared",
+                Some(("if-match", &etag)),
+                def.to_string()
+            ),
+            call_tool(
+                &engine,
+                "http_function_update",
+                serde_json::json!({"name":"shared","revision":revision,"definition":def})
+            )
+        );
+        assert!(
+            (http.status() == StatusCode::OK && mcp["status"] == 412)
+                || (http.status() == StatusCode::PRECONDITION_FAILED
+                    && mcp.get("revision").is_some())
+        );
+        let invalid = call_tool(
+            &engine,
+            "http_function_list",
+            serde_json::json!({"unexpected":true}),
+        )
+        .await;
+        assert_eq!(invalid["status"], 400);
+        let result = call_tool(
+            &engine,
+            "http_function_invoke",
+            serde_json::json!({"name":"shared","method":"POST"}),
+        )
+        .await;
+        assert_eq!(result["status"], 200);
+        assert_eq!(result["body_base64"], STANDARD.encode("shared"));
+    }
+
     #[tokio::test]
     async fn cluster_barrier_failover_and_quorum_loss() {
         use crate::cluster::{AppendEntriesRequest, ClusterConfig, Role};

@@ -277,7 +277,13 @@ impl ServerHandler for SseService {
             .invoke_tool_response(request)
             .await
             .unwrap_or_else(|error| json!({ "error": error.to_string() }).into());
-        Ok(ok_result(result))
+        let failed = crate::http_functions::is_management_tool(name)
+            && result.json.get("error").is_some();
+        let mut result = ok_result(result);
+        if failed {
+            result.is_error = Some(true);
+        }
+        Ok(result)
     }
 
     async fn initialize(

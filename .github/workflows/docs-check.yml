@@ -2,7 +2,7 @@ name: Docs Check
 
 on:
   pull_request:
-    branches: [ main, impl/dynamic-http-functions ]
+    branches: [ main, impl/dynamic-http-functions, docs/scheduler-http-diataxis ]
   workflow_dispatch:
 
 permissions:

@@ -1,13 +1,14 @@
 # Scheduler and HTTP feature status
 
-These pages describe the experimental scheduler and dynamic HTTP functions with
+These pages describe the HTTP/MCP management layer, experimental scheduler, and
+dynamic HTTP functions with
 [PR #284 hardening at `ffe1195`](https://github.com/r33drichards/mcp-js/commit/ffe1195c81290eb03c4576d643be34a584c1bfe1)
-integrated through #287, #293, and #295. They do not imply that the feature stack
+integrated through #287, #293, #295, and #299. They do not imply that the feature stack
 has merged into `main`, been deployed, or passed fresh combined-stack validation.
 
 ## Integrated runtime boundary
 
-The stack is `main → #281 → #282 → #284 → #287 → #293 → #295`.
+The stack is `main → #281 → #282 → #284 → #287 → #293 → #295 → #299 (management layer)`.
 Earlier documentation of #293 at `5c52682` described the pre-hardening runtime;
 those historical test results are not validation of this integrated revision.
 
@@ -30,10 +31,12 @@ Legacy dynamic cluster mode is not changed by this fixed-voter protection.
 Implemented here: numeric five-field cron with IANA timezones, missed-run,
 overlap and retry policies, durable fixed-voter runner admission, dedicated
 scheduled workers, explicit cancellation, dynamic HTTP definition CRUD and
-invocation, conditional revisions, and NixOS integration tests.
+invocation, conditional revisions, and NixOS integration tests. The management
+layer adds dedicated HTTP-function MCP tools and opt-in scheduler HTTP/MCP
+operator access. Both transports reuse the existing operations and state model.
 
-The design documents also discuss future work. There is no scheduling MCP
-management tool, MCP Events delivery, multi-tenant principal-to-grant binding,
+The design documents also discuss future work. There is no MCP Events delivery,
+multi-tenant principal-to-grant binding,
 exactly-once external effects, automatic resolution of `Unknown`, schema
 migration, or production-readiness guarantee. Dynamic HTTP handlers have no
 per-definition owner/role model, wildcard routes, streaming, or upgrades.
