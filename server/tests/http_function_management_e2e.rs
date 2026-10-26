@@ -128,6 +128,178 @@ fn definition() -> Value {
 }
 
 #[tokio::test]
+async fn escaped_source_limits_match_for_http_and_mcp_registration() {
+    const SOURCE_LIMIT: usize = 64 * 1024;
+    const ENVELOPE_LIMIT: usize = 6 * SOURCE_LIMIT + 4096;
+    let server = Server::start(true).await;
+    let handler = "function handler(){return {status:200,body:'escaped'}}";
+    let padding = SOURCE_LIMIT - handler.len() - 4;
+
+    for (label, character) in [("backslash", '\\'), ("control", '\u{0001}')] {
+        let mut def = definition();
+        let source = format!("/*{}*/{handler}", character.to_string().repeat(padding));
+        assert_eq!(source.len(), SOURCE_LIMIT);
+        def["source"] = json!(source);
+        assert!(def.to_string().len() > SOURCE_LIMIT + 4096);
+        assert!(def.to_string().len() < ENVELOPE_LIMIT);
+
+        let http_name = format!("http-{label}");
+        let http_url = format!(
+            "{}/api/http-functions/v1/definitions/{http_name}",
+            server.url
+        );
+        let created = server
+            .client
+            .put(&http_url)
+            .header("If-None-Match", "*")
+            .json(&def)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(created.status().as_u16(), 200, "HTTP create: {label}");
+        let created: Value = created.json().await.unwrap();
+        let updated = server
+            .call(
+                "http_function_update",
+                json!({
+                    "name":http_name,"revision":created["revision"],"definition":def
+                }),
+                false,
+            )
+            .await;
+        assert_ne!(created["revision"], updated["revision"]);
+
+        let mcp_name = format!("mcp-{label}");
+        let created = server
+            .call(
+                "http_function_create",
+                json!({
+                    "name":mcp_name,"definition":def
+                }),
+                false,
+            )
+            .await;
+        let updated = server
+            .client
+            .put(format!(
+                "{}/api/http-functions/v1/definitions/{mcp_name}",
+                server.url
+            ))
+            .header(
+                "If-Match",
+                format!("\"{}\"", created["revision"].as_str().unwrap()),
+            )
+            .json(&def)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(updated.status().as_u16(), 200, "HTTP update: {label}");
+        let updated: Value = updated.json().await.unwrap();
+        assert_ne!(created["revision"], updated["revision"]);
+        let invoked = server
+            .call(
+                "http_function_invoke",
+                json!({
+                    "name":mcp_name,"method":"POST"
+                }),
+                false,
+            )
+            .await;
+        assert_eq!(invoked["status"], 200);
+        assert_eq!(invoked["body_base64"], STANDARD.encode("escaped"));
+    }
+
+    // An envelope that fits must still obey the decoded 64 KiB source quota.
+    let mut oversized_source = definition();
+    oversized_source["source"] = json!(format!("/*{}*/{handler}", "\u{0001}".repeat(padding + 1)));
+    assert_eq!(
+        oversized_source["source"].as_str().unwrap().len(),
+        SOURCE_LIMIT + 1
+    );
+    assert!(oversized_source.to_string().len() < ENVELOPE_LIMIT);
+    let rejected = server
+        .client
+        .put(format!(
+            "{}/api/http-functions/v1/definitions/source-too-big",
+            server.url
+        ))
+        .header("If-None-Match", "*")
+        .json(&oversized_source)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rejected.status().as_u16(), 400);
+    let rejected = server
+        .call(
+            "http_function_create",
+            json!({
+                "name":"source-too-big","definition":oversized_source
+            }),
+            true,
+        )
+        .await;
+    assert_eq!(rejected["status"], 400);
+
+    let envelope_url = format!("{}/api/http-functions/v1/definitions/envelope", server.url);
+    let json = definition().to_string();
+    let exact_envelope = format!("{}{json}", " ".repeat(ENVELOPE_LIMIT - json.len()));
+    assert_eq!(exact_envelope.len(), ENVELOPE_LIMIT);
+    let accepted = server
+        .client
+        .put(&envelope_url)
+        .header("If-None-Match", "*")
+        .body(exact_envelope.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(accepted.status().as_u16(), 200);
+    let rejected = server
+        .client
+        .put(&envelope_url)
+        .header("If-None-Match", "*")
+        .body(format!(" {exact_envelope}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rejected.status().as_u16(), 413);
+    let rejected = server
+        .client
+        .put(&envelope_url)
+        .header("If-None-Match", "*")
+        .body("{malformed")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rejected.status().as_u16(), 400);
+
+    // MCP canonicalizes JSON before calling the same PUT operation. Oversized
+    // metadata must still hit its envelope bound, not reach source validation.
+    let mut oversized_envelope = definition();
+    oversized_envelope["export"] = json!("x".repeat(ENVELOPE_LIMIT));
+    let rejected = server
+        .call(
+            "http_function_create",
+            json!({
+                "name":"envelope-too-big","definition":oversized_envelope
+            }),
+            true,
+        )
+        .await;
+    assert_eq!(rejected["status"], 413);
+    let rejected = server
+        .call(
+            "http_function_create",
+            json!({
+                "name":"malformed","definition":{"version":1}
+            }),
+            true,
+        )
+        .await;
+    assert_eq!(rejected["status"], 400);
+    server.stop().await;
+}
+
+#[tokio::test]
 async fn http_and_mcp_share_revisions_validation_and_invocation() {
     let server = Server::start(true).await;
     let tools = server.rpc("tools/list", "", json!({})).await;

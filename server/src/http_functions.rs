@@ -22,6 +22,10 @@ use tracing::Instrument;
 const KEY: &str = "http-functions/v1/registry";
 const MAX_BODY: usize = 1024 * 1024;
 const MAX_SOURCE: usize = 64 * 1024;
+// One decoded source byte can require six JSON bytes (for example, \u0001).
+// Keep a finite allowance for the other definition fields and JSON framing;
+// validate() still enforces the decoded source and all existing field quotas.
+const MAX_DEFINITION_BODY: usize = 6 * MAX_SOURCE + 4096;
 const MAX_DEFINITIONS: usize = 32;
 type Failure = StatusCode;
 
@@ -301,7 +305,7 @@ async fn put(
         return Err(StatusCode::BAD_REQUEST);
     }
     let (parts, body) = request.into_parts();
-    let bytes = to_bytes(body, MAX_SOURCE + 4096)
+    let bytes = to_bytes(body, MAX_DEFINITION_BODY)
         .await
         .map_err(|_| StatusCode::PAYLOAD_TOO_LARGE)?;
     let def: Definition = serde_json::from_slice(&bytes).map_err(|_| StatusCode::BAD_REQUEST)?;
