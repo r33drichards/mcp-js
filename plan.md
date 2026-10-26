@@ -4,12 +4,14 @@
 
 Robert requested implementation and table-based integration tests, then explicitly rejected additional feature restrictions. The implementation therefore inherits the existing transport authentication rules, without an operator allowlist, new roles, or owner-based restrictions. This supersedes the separate-principal/authority gates proposed below; existing runtime policies and deployment limits still apply. Deployment remains out of scope.
 
-Work in progress: `server/src/http_functions.rs` contains dispatcher, conditional durable registry, Engine adapter, response validation, and table-driven HTTP tests. Validation has not passed yet; do not treat this as complete or deployable. Cluster failover/quorum and authorization regression evidence remain outstanding.
+Implementation: `server/src/http_functions.rs` provides the dispatcher, conditional durable registry, Engine adapter, response validation, and table-driven HTTP tests. The Engine captures the reserved module export `__mcp_http_result` independently of console output. Management and invocation inherit transport authentication. See `docs/http-functions.md` for the shipped contract and bounds. Tests cover real Engine execution, HTTP authentication, revision pinning, disconnects without replay, restart/tombstones, and consensus barriers across failover/quorum loss. Deployment remains out of scope.
+
+The proposal below records the original design. Its owner/authority model is superseded by the authentication update above. The shipped API uses exact names (no suffix wildcard), full dispatcher paths, metadata-only reads, a 32-name registry including tombstones, and 16 concurrent invocations per server. Cluster requests target the leader. Read barriers commit a CAS against the observed registry; a concurrent change can return 503 rather than admitting stale data.
 
 
 ## Scope and stack
 
-Plan-only PR stacked on #284, base branch impl/scheduler-apalis, inspected at 8677390325b1769a715bd889bcaa22bd1167cf9f. No implementation or deployment included. Keep this PR based on that branch until #284 merges; then rebase/retarget to main and verify only this plan remains in the diff.
+Implementation builds on #284 (impl/scheduler-apalis). The local integration preserves newer main-branch sandbox fixes. No deployment is included.
 
 Outcome: an authenticated operator can dynamically register, replace, list and delete named JavaScript HTTP handlers without restarting mcp-js. Requests run an immutable handler revision in the existing Engine/V8 environment used by ordinary and scheduled executions, not a second unrestricted runtime.
 

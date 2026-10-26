@@ -16,6 +16,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use tokio::sync::{Mutex, Semaphore};
+use tracing::Instrument;
 
 const KEY: &str = "http-functions/v1/registry";
 const MAX_BODY: usize = 1024 * 1024;
@@ -23,7 +24,7 @@ const MAX_SOURCE: usize = 64 * 1024;
 const MAX_DEFINITIONS: usize = 32;
 type Failure = StatusCode;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Limits {
     pub timeout_seconds: u64,
@@ -37,7 +38,7 @@ impl Default for Limits {
         }
     }
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Definition {
     pub version: u32,
@@ -69,15 +70,34 @@ impl Registry {
                 .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
                 .map(|v| String::from_utf8(v.to_vec()).map_err(|_| StatusCode::SERVICE_UNAVAILABLE))
                 .transpose()?,
-            Backend::Cluster(node) => node
-                .get(KEY)
-                .await
-                .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?,
+            Backend::Cluster(node) => {
+                // Commit a current-term entry before reading the CAS candidate.
+                // Otherwise an uncommitted prior-term registry suffix can keep
+                // disagreeing with the applied value after restart forever.
+                node.put("http-functions/v1/barrier".into(), String::new())
+                    .await
+                    .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+                node.get(KEY)
+                    .await
+                    .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+            }
         };
         let records = match &raw {
             Some(raw) => serde_json::from_str(raw).map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?,
             None => Records::new(),
         };
+        if records.len() > MAX_DEFINITIONS
+            || records.iter().any(|(name, entry)| {
+                !valid_name(name)
+                    || uuid::Uuid::parse_str(&entry.revision).is_err()
+                    || entry
+                        .definition
+                        .as_ref()
+                        .is_some_and(|def| validate(def).is_err())
+            })
+        {
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
+        }
         Ok((raw, records))
     }
     async fn cas(&self, old: Option<String>, records: &Records) -> Result<bool, Failure> {
@@ -176,6 +196,7 @@ fn valid_export(name: &str) -> bool {
         .next()
         .is_some_and(|c| c.is_ascii_alphabetic() || c == b'_')
         && chars.all(|c| c.is_ascii_alphanumeric() || c == b'_')
+        && name != "__mcp_http_result"
 }
 fn validate(def: &Definition) -> Result<(), Failure> {
     if def.version != 1
@@ -197,8 +218,15 @@ fn validate(def: &Definition) -> Result<(), Failure> {
         }
     }
     // Parser/transpiler only: never execute registration source.
-    crate::engine::strip_typescript_types(&def.source).map_err(|_| StatusCode::BAD_REQUEST)?;
+    handler_code(def, &serde_json::Value::Null).map_err(|_| StatusCode::BAD_REQUEST)?;
     Ok(())
+}
+fn handler_code(def: &Definition, input: &serde_json::Value) -> Result<String, String> {
+    crate::engine::strip_typescript_types(&format!(
+        "{source}\n; if (typeof {export} !== 'function') throw new Error('invalid export'); export const __mcp_http_result = JSON.stringify(await {export}({input}));",
+        source = def.source,
+        export = def.export,
+    ))
 }
 fn metadata(name: &str, entry: &Entry) -> serde_json::Value {
     let def = entry.definition.as_ref().expect("active entry");
@@ -217,6 +245,8 @@ fn entry_response(name: &str, entry: &Entry) -> Response {
     );
     response
 }
+#[utoipa::path(get, path = "/api/http-functions/v1/definitions", tag = "HTTP functions",
+    responses((status = 200, description = "Active definition metadata; source omitted"), (status = 503, description = "Registry unavailable")))]
 async fn list(State(app): State<App>) -> Result<Json<Vec<serde_json::Value>>, Failure> {
     let records = app.registry.read().await?;
     Ok(Json(
@@ -227,6 +257,9 @@ async fn list(State(app): State<App>) -> Result<Json<Vec<serde_json::Value>>, Fa
             .collect(),
     ))
 }
+#[utoipa::path(get, path = "/api/http-functions/v1/definitions/{name}", tag = "HTTP functions",
+    params(("name" = String, Path, description = "Function name")),
+    responses((status = 200, description = "Metadata with revision ETag"), (status = 404, description = "Missing function")))]
 async fn lookup(State(app): State<App>, Path(name): Path<String>) -> Result<Response, Failure> {
     if !valid_name(&name) {
         return Err(StatusCode::BAD_REQUEST);
@@ -238,6 +271,9 @@ async fn lookup(State(app): State<App>, Path(name): Path<String>) -> Result<Resp
         .ok_or(StatusCode::NOT_FOUND)?;
     Ok(entry_response(&name, entry))
 }
+#[utoipa::path(put, path = "/api/http-functions/v1/definitions/{name}", tag = "HTTP functions",
+    params(("name" = String, Path, description = "Function name")), request_body = Definition,
+    responses((status = 200, description = "Committed definition with ETag"), (status = 412, description = "Stale revision"), (status = 428, description = "Conditional header required")))]
 async fn put(
     State(app): State<App>,
     Path(name): Path<String>,
@@ -258,6 +294,9 @@ async fn put(
         .await?;
     Ok(entry_response(&name, &entry))
 }
+#[utoipa::path(delete, path = "/api/http-functions/v1/definitions/{name}", tag = "HTTP functions",
+    params(("name" = String, Path, description = "Function name")),
+    responses((status = 200, description = "Committed tombstone"), (status = 412, description = "Stale revision")))]
 async fn delete(
     State(app): State<App>,
     Path(name): Path<String>,
@@ -330,6 +369,13 @@ fn response(value: &str, method: &Method) -> Result<Response, Failure> {
         }))
         .map_err(|_| fail)
 }
+#[utoipa::path(post, path = "/functions/v1/{name}", tag = "HTTP functions",
+    params(("name" = String, Path, description = "Function name; exact registered methods apply")),
+    responses((status = 200, description = "Validated handler response; handler chooses status and content type"),
+        (status = 404, description = "Missing function"), (status = 405, description = "Method not registered"),
+        (status = 409, description = "Invocation capacity exhausted"), (status = 413, description = "Input exceeds limit"),
+        (status = 500, description = "Handler or response failed"), (status = 503, description = "Registry or Engine unavailable"),
+        (status = 504, description = "Execution timed out")))]
 async fn invoke(
     State(app): State<App>,
     Path(name): Path<String>,
@@ -350,6 +396,7 @@ async fn invoke(
         .remove(&name)
         .filter(|e| e.definition.is_some())
         .ok_or(StatusCode::NOT_FOUND)?;
+    tracing::debug!(function = %name, revision = %entry.revision, "HTTP function revision admitted");
     let def = entry.definition.unwrap();
     validate(&def).map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     if !def.methods.iter().any(|m| m == request.method().as_str()) {
@@ -381,64 +428,80 @@ async fn invoke(
             .into_owned()
             .collect();
     let input = serde_json::json!({"method":parts.method.as_str(),"path":parts.uri.path(),"query":query,"headers":headers,"body_base64":STANDARD.encode(bytes)});
-    let source = crate::engine::strip_typescript_types(&def.source)
-        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-    let code = format!(
-        "(async () => {{\n{source}\n; if (typeof {export} !== 'function') throw new Error('invalid export'); return await {export}({input});\n}})()",
-        export = def.export
-    );
+    let code = handler_code(&def, &input).map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     let (heap_ceiling, timeout_ceiling) = app.engine.http_functions_limits();
     let timeout = def.limits.timeout_seconds.min(timeout_ceiling);
     if heap_ceiling < 8 || timeout == 0 {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
     // Keep admission capacity through completion even if the caller disconnects.
-    tokio::spawn(async move {
-        let _permit = permit;
-        let id = app
-            .engine
-            .submit_execution(ExecutionRequest {
-                code,
-                file: None,
-                heap: None,
-                fs: None,
-                session: None,
-                heap_memory_max_mb: Some(def.limits.heap_mb.min(heap_ceiling)),
-                execution_timeout_secs: Some(timeout),
-                tags: None,
-                mcp_headers: None,
-            })
-            .await
-            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-        // Never resubmit, including after ambiguous submission or client disconnect.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout + 1);
-        loop {
-            let info = app
+    tokio::spawn(
+        async move {
+            let _permit = permit;
+            let id = app
                 .engine
-                .get_execution(id.clone())
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            match info.status.as_str() {
-                "completed" => {
-                    return response(
-                        info.result
-                            .as_deref()
-                            .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?,
-                        &parts.method,
-                    );
+                .submit_execution(ExecutionRequest {
+                    code,
+                    file: None,
+                    heap: None,
+                    fs: None,
+                    session: None,
+                    heap_memory_max_mb: Some(def.limits.heap_mb.min(heap_ceiling)),
+                    execution_timeout_secs: Some(timeout),
+                    tags: None,
+                    mcp_headers: None,
+                })
+                .await
+                .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+            tracing::debug!(execution_id = %id, "HTTP function execution submitted");
+            // Never resubmit, including after ambiguous submission or client disconnect.
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout + 1);
+            loop {
+                let info = app
+                    .engine
+                    .get_execution(id.clone())
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                match info.status.as_str() {
+                    "completed" => {
+                        return response(
+                            info.result
+                                .as_deref()
+                                .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?,
+                            &parts.method,
+                        );
+                    }
+                    "timed_out" => return Err(StatusCode::GATEWAY_TIMEOUT),
+                    "failed" | "cancelled" => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+                    _ => {}
                 }
-                "timed_out" => return Err(StatusCode::GATEWAY_TIMEOUT),
-                "failed" | "cancelled" => return Err(StatusCode::INTERNAL_SERVER_ERROR),
-                _ => {}
+                if tokio::time::Instant::now() >= deadline {
+                    let _ = app.engine.cancel_execution(id.clone());
+                    return Err(StatusCode::GATEWAY_TIMEOUT);
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            if tokio::time::Instant::now() >= deadline {
-                let _ = app.engine.cancel_execution(id.clone());
-                return Err(StatusCode::GATEWAY_TIMEOUT);
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
         }
-    })
+        .in_current_span(),
+    )
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+}
+
+async fn request_diagnostics(request: Request, next: axum::middleware::Next) -> Response {
+    let id = uuid::Uuid::new_v4().to_string();
+    let span = tracing::info_span!("http_function", request_id = %id);
+    let mut response = next.run(request).instrument(span.clone()).await;
+    response
+        .headers_mut()
+        .insert("x-request-id", HeaderValue::from_str(&id).unwrap());
+    if response.status().is_server_error() {
+        let _entered = span.enter();
+        tracing::warn!(
+            status = response.status().as_u16(),
+            "HTTP function request failed"
+        );
+    }
+    response
 }
 
 /// Explicitly opt in using MCP_V8_HTTP_FUNCTIONS_DIR. Cluster nodes use the
@@ -474,6 +537,7 @@ fn router(engine: Arc<Engine>, registry: Arc<Registry>) -> Router {
             get(lookup).put(put).delete(delete),
         )
         .route("/functions/v1/{name}", axum::routing::any(invoke))
+        .layer(axum::middleware::from_fn(request_diagnostics))
         .with_state(App {
             engine,
             registry,
@@ -532,6 +596,371 @@ mod tests {
     fn definition(source: &str) -> String {
         serde_json::json!({"version":1,"methods":["POST","HEAD"],"source":source,"export":"handler","limits":{"timeout_seconds":1,"heap_mb":32}}).to_string()
     }
+    #[tokio::test]
+    async fn cluster_barrier_failover_and_quorum_loss() {
+        use crate::cluster::{AppendEntriesRequest, ClusterConfig, Role};
+        let db = sled::Config::new().temporary(true).open().unwrap();
+        let leader = ClusterNode::new(ClusterConfig::default(), db.clone());
+        leader.state.write().await.current_term = 1;
+        leader.sim_install_elected_leader(1).await;
+        let pump_node = leader.clone();
+        let pump = tokio::spawn(async move {
+            loop {
+                pump_node.sim_commit().await;
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        });
+        let registry = Registry {
+            backend: Backend::Cluster(leader.clone()),
+            lock: Mutex::new(()),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("if-none-match", HeaderValue::from_static("*"));
+        let def = serde_json::from_str(&definition(
+            "function handler(){return {status:200,body:'ok'}}",
+        ))
+        .unwrap();
+        let original = registry
+            .change("echo".into(), &headers, Some(def))
+            .await
+            .unwrap();
+        let follower = ClusterNode::new(
+            ClusterConfig::default(),
+            sled::Config::new().temporary(true).open().unwrap(),
+        );
+        let entries = leader.state.read().await.log.clone();
+        let commit = leader.state.read().await.commit_index;
+        assert!(
+            follower
+                .handle_append_entries(AppendEntriesRequest {
+                    term: 1,
+                    leader_id: "leader".into(),
+                    prev_log_index: 0,
+                    prev_log_term: 0,
+                    entries,
+                    leader_commit: commit,
+                    peer_addrs: None,
+                    learner_addrs: None,
+                })
+                .await
+                .success
+        );
+        let next = Registry {
+            backend: Backend::Cluster(follower.clone()),
+            lock: Mutex::new(()),
+        };
+        assert_eq!(
+            next.read().await.err(),
+            Some(StatusCode::SERVICE_UNAVAILABLE)
+        );
+        follower.state.write().await.current_term = 2;
+        follower.sim_install_elected_leader(2).await;
+        let pump_node = follower.clone();
+        let next_pump = tokio::spawn(async move {
+            loop {
+                pump_node.sim_commit().await;
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        });
+        assert_eq!(
+            next.read().await.unwrap()["echo"].revision,
+            original.revision
+        );
+        headers.clear();
+        headers.insert(
+            "if-match",
+            HeaderValue::from_str(&format!("\"{}\"", original.revision)).unwrap(),
+        );
+        let deleted = next.change("echo".into(), &headers, None).await.unwrap();
+        assert!(next.read().await.unwrap()["echo"].definition.is_none());
+        // A retained stale cache cannot admit after losing leadership.
+        leader.state.write().await.role = Role::Follower;
+        assert_eq!(
+            registry.read().await.err(),
+            Some(StatusCode::SERVICE_UNAVAILABLE)
+        );
+        pump.abort();
+        let committed = follower.get(KEY).await.unwrap();
+        follower.state.write().await.peers = vec!["unreachable-a".into(), "unreachable-b".into()];
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), next.read())
+                .await
+                .is_err()
+        );
+        assert_eq!(follower.get(KEY).await.unwrap(), committed);
+        next_pump.abort();
+        // Leave a different registry value in the prior-term uncommitted tail.
+        // A CAS-only read cannot advance this suffix after the next election.
+        let mut pending: Records = serde_json::from_str(committed.as_ref().unwrap()).unwrap();
+        pending.insert(
+            "pending".into(),
+            Entry {
+                revision: uuid::Uuid::new_v4().to_string(),
+                definition: Some(
+                    serde_json::from_str(&definition(
+                        "function handler(){return {status:200,body:'pending'}}",
+                    ))
+                    .unwrap(),
+                ),
+            },
+        );
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(100),
+                follower.cas(
+                    KEY.into(),
+                    committed.clone(),
+                    serde_json::to_string(&pending).unwrap()
+                )
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(follower.get(KEY).await.unwrap(), committed);
+        let restarted = ClusterNode::new(ClusterConfig::default(), follower.db.clone());
+        assert_eq!(restarted.get(KEY).await.unwrap(), committed);
+        let restored = Registry {
+            backend: Backend::Cluster(restarted.clone()),
+            lock: Mutex::new(()),
+        };
+        assert_eq!(
+            restored.read().await.err(),
+            Some(StatusCode::SERVICE_UNAVAILABLE)
+        );
+        restarted.state.write().await.current_term = 3;
+        restarted.sim_install_elected_leader(3).await;
+        let pump_node = restarted.clone();
+        let restored_pump = tokio::spawn(async move {
+            loop {
+                pump_node.sim_commit().await;
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        });
+        let recovered = tokio::time::timeout(Duration::from_secs(2), restored.read())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(recovered["echo"].definition.is_none());
+        assert!(recovered["pending"].definition.is_some());
+        restored_pump.abort();
+        assert_eq!(
+            serde_json::from_str::<Records>(&committed.unwrap()).unwrap()["echo"].revision,
+            deleted.revision
+        );
+    }
+
+    #[tokio::test]
+    async fn module_imports_and_corrupt_registry_fail_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, registry, app) = fixture(dir.path());
+        let source = "import { basename } from 'node:path'; async function handler() { return {status:200,body:basename('/a/module.txt')}; }";
+        assert_eq!(
+            send(
+                &app,
+                "PUT",
+                "/api/http-functions/v1/definitions/module",
+                Some(("if-none-match", "*")),
+                definition(source)
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        let result = send(&app, "POST", "/functions/v1/module", None, String::new()).await;
+        assert_eq!(result.status(), StatusCode::OK);
+        assert_eq!(
+            to_bytes(result.into_body(), MAX_BODY)
+                .await
+                .unwrap()
+                .as_ref(),
+            b"module.txt"
+        );
+        if let Backend::Local(tree) = &registry.backend {
+            tree.insert(KEY, b"{invalid registry").unwrap();
+        }
+        assert_eq!(
+            send(&app, "POST", "/functions/v1/module", None, String::new())
+                .await
+                .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(engine.list_executions().unwrap().len(), 1);
+        engine.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn replacement_deletion_and_disconnect_do_not_replay_admitted_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, _, app) = fixture(dir.path());
+        let uri = "/api/http-functions/v1/definitions/pinned";
+        let old = definition(
+            "async function handler() { await new Promise(r=>setTimeout(r,250)); return {status:200,body:'old'}; }",
+        );
+        let created = send(&app, "PUT", uri, Some(("if-none-match", "*")), old).await;
+        let etag = created.headers()["etag"].to_str().unwrap().to_owned();
+        let request_app = app.clone();
+        let pending = tokio::spawn(async move {
+            send(
+                &request_app,
+                "POST",
+                "/functions/v1/pinned",
+                None,
+                String::new(),
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while engine.list_executions().unwrap().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let updated = send(
+            &app,
+            "PUT",
+            uri,
+            Some(("if-match", &etag)),
+            definition("function handler(){ return {status:200,body:'new'}; }"),
+        )
+        .await;
+        assert_eq!(updated.status(), StatusCode::OK);
+        let etag = updated.headers()["etag"].to_str().unwrap().to_owned();
+        assert_eq!(
+            send(
+                &app,
+                "DELETE",
+                uri,
+                Some(("if-match", &etag)),
+                String::new()
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            send(&app, "POST", "/functions/v1/pinned", None, String::new())
+                .await
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            to_bytes(pending.await.unwrap().into_body(), 100)
+                .await
+                .unwrap()
+                .as_ref(),
+            b"old"
+        );
+        assert_eq!(engine.list_executions().unwrap().len(), 1);
+        send(&app, "PUT", uri, Some(("if-none-match", "*")), definition("async function handler(){ await new Promise(r=>setTimeout(r,100)); return {status:200,body:'done'}; }")).await;
+        let request_app = app.clone();
+        let disconnected = tokio::spawn(async move {
+            send(
+                &request_app,
+                "POST",
+                "/functions/v1/pinned",
+                None,
+                String::new(),
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while engine.list_executions().unwrap().len() != 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        disconnected.abort();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while engine
+                .list_executions()
+                .unwrap()
+                .iter()
+                .any(|e| e.status == "running")
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(engine.list_executions().unwrap().len(), 2);
+        engine.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn validation_response_and_body_limits() {
+        for (value, method, expected) in [
+            (
+                serde_json::json!({"status":200,"body":"hello"}),
+                Method::HEAD,
+                200,
+            ),
+            (
+                serde_json::json!({"status":205,"body":"hello"}),
+                Method::GET,
+                205,
+            ),
+            (
+                serde_json::json!({"status":304,"body":"hello"}),
+                Method::GET,
+                304,
+            ),
+        ] {
+            let reply = response(&value.to_string(), &method).unwrap();
+            assert_eq!(reply.status().as_u16(), expected);
+            assert!(
+                to_bytes(reply.into_body(), MAX_BODY)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        assert!(
+            response(
+                &serde_json::json!({"status":200,"body":"x".repeat(MAX_BODY+1)}).to_string(),
+                &Method::GET
+            )
+            .is_err()
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, _, app) = fixture(dir.path());
+        for source in [
+            "function handler( {",
+            "throw new Error('registration executed')",
+        ] {
+            let result = send(
+                &app,
+                "PUT",
+                "/api/http-functions/v1/definitions/check",
+                Some(("if-none-match", "*")),
+                definition(source),
+            )
+            .await;
+            assert_eq!(
+                result.status().as_u16(),
+                if source.starts_with("throw") {
+                    200
+                } else {
+                    400
+                }
+            );
+        }
+        assert_eq!(
+            send(
+                &app,
+                "POST",
+                "/functions/v1/check",
+                None,
+                "x".repeat(MAX_BODY + 1)
+            )
+            .await
+            .status(),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+        engine.shutdown().await;
+    }
+
     #[tokio::test]
     async fn table_driven_http_lifecycle_and_real_engine() {
         let dir = tempfile::tempdir().unwrap();
@@ -708,7 +1137,7 @@ mod tests {
                 None,
             ),
             ("throw new Error('private stack')", 500, None),
-            ("await new Promise(() => {})", 504, None),
+            ("while (true) {}", 504, None),
         ]
         .iter()
         .enumerate()

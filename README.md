@@ -384,3 +384,5 @@ Comparison of single-node vs 3-node cluster at various request rates.
 - **HTTP Req/s**: Total HTTP requests per second (1 per iteration)
 - **Dropped**: Iterations k6 couldn't schedule because VUs were exhausted (indicates server saturation)
 - **Topology**: `single` = 1 MCP-V8 node; `cluster` = 3 MCP-V8 nodes with Raft
+
+Dynamic HTTP handlers can be registered without restart. See [HTTP functions](docs/http-functions.md) for opt-in setup, conditional updates, authentication, and the request/response contract.

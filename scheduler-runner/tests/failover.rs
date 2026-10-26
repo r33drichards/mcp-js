@@ -6,19 +6,47 @@ use mcp_js_scheduler_runner::{
 };
 use std::{sync::Arc, time::Duration};
 
-async fn leader(nodes: &[Arc<ClusterNode>]) -> usize {
-    tokio::time::timeout(Duration::from_secs(8), async {
+// A reported leader can lose its term while restarted peers catch up. Only a
+// committed acquisition establishes the owner used by the assertions below.
+async fn acquire_owner(
+    nodes: &[Arc<ClusterNode>],
+    definitions: &[Definition],
+    contract: &str,
+    now: chrono::DateTime<Utc>,
+) -> (usize, Replicated) {
+    let mut last_error = String::new();
+    let result = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             for (i, node) in nodes.iter().enumerate() {
-                if node.status().await.role == Role::Leader {
-                    return i;
+                if node.status().await.role != Role::Leader {
+                    continue;
+                }
+                match Replicated::acquire(
+                    node.clone(),
+                    Limits::default(),
+                    definitions,
+                    contract.into(),
+                    now,
+                )
+                .await
+                {
+                    Ok(owner) => return (i, owner),
+                    Err(error)
+                        if error.contains("leadership")
+                            || error.contains("leader")
+                            || error.contains("raced")
+                            || error.contains("term") =>
+                    {
+                        last_error = error;
+                    }
+                    Err(error) => panic!("owner acquisition failed: {error}"),
                 }
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
     })
-    .await
-    .expect("leader election")
+    .await;
+    result.unwrap_or_else(|_| panic!("committed owner acquisition: {last_error}"))
 }
 fn configs() -> Vec<ClusterConfig> {
     let sockets: Vec<_> = (0..3)
@@ -42,8 +70,8 @@ fn configs() -> Vec<ClusterConfig> {
                 cluster_port: ports[i],
                 advertise_addr: Some(format!("127.0.0.1:{}", ports[i])),
                 heartbeat_interval: Duration::from_millis(20),
-                election_timeout_min: Duration::from_millis(150),
-                election_timeout_max: Duration::from_millis(300),
+                election_timeout_min: Duration::from_millis(500),
+                election_timeout_max: Duration::from_millis(1000),
                 learner: false,
             }
         })
@@ -76,18 +104,9 @@ async fn fixed_cluster_takeover_restart_and_no_quorum_do_not_replay_consumed_wor
     for n in &nodes {
         n.start().await;
     }
-    let first = leader(&nodes).await;
     let now = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
     let definitions = vec![definition()];
-    let mut a = Replicated::acquire(
-        nodes[first].clone(),
-        Limits::default(),
-        &definitions,
-        "grant-v1".into(),
-        now,
-    )
-    .await
-    .unwrap();
+    let (first, mut a) = acquire_owner(&nodes, &definitions, "grant-v1", now).await;
     a.observe(now + Delta::minutes(1)).await.unwrap();
     let consumed = a.claim(now + Delta::minutes(1)).await.unwrap().unwrap();
     nodes[first].shutdown();
@@ -97,16 +116,8 @@ async fn fixed_cluster_takeover_restart_and_no_quorum_do_not_replay_consumed_wor
         .filter(|(i, _)| *i != first)
         .map(|(_, n)| n.clone())
         .collect();
-    let second = leader(&live).await;
-    let mut b = Replicated::acquire(
-        live[second].clone(),
-        Limits::default(),
-        &definitions,
-        "grant-v1".into(),
-        now + Delta::minutes(3),
-    )
-    .await
-    .unwrap();
+    let (second, mut b) =
+        acquire_owner(&live, &definitions, "grant-v1", now + Delta::minutes(3)).await;
     assert!(a.finish(&consumed, Outcome::Succeeded, now).await.is_err());
     let records = b.view().occurrences();
     assert!(
@@ -143,35 +154,13 @@ async fn fixed_cluster_takeover_restart_and_no_quorum_do_not_replay_consumed_wor
     for n in &restarted {
         n.start().await;
     }
-    // Restarted peers can still advance their terms while re-establishing
-    // contact. Retry acquisition only: no work is released before it commits.
-    let mut c = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            let third = leader(&restarted).await;
-            match Replicated::acquire(
-                restarted[third].clone(),
-                Limits::default(),
-                &definitions,
-                "grant-v1".into(),
-                now + Delta::minutes(10),
-            )
-            .await
-            {
-                Ok(owner) => break owner,
-                Err(error)
-                    if error.contains("leadership")
-                        || error.contains("leader")
-                        || error.contains("raced")
-                        || error.contains("term") =>
-                {
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                }
-                Err(error) => panic!("restart acquisition failed: {error}"),
-            }
-        }
-    })
-    .await
-    .expect("stable acquired owner after restart");
+    let (_, mut c) = acquire_owner(
+        &restarted,
+        &definitions,
+        "grant-v1",
+        now + Delta::minutes(10),
+    )
+    .await;
     assert!(
         c.view()
             .occurrences()
@@ -261,17 +250,14 @@ async fn durable_restart_helper() {
     )
     .unwrap();
     node.start().await;
-    leader(std::slice::from_ref(&node)).await;
     let now = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
-    let mut owner = Replicated::acquire(
-        node,
-        Limits::default(),
+    let (_, mut owner) = acquire_owner(
+        std::slice::from_ref(&node),
         &[definition()],
-        "subprocess-grant".into(),
+        "subprocess-grant",
         now,
     )
-    .await
-    .unwrap();
+    .await;
     if std::env::var("SCHEDULER_TEST_PHASE").unwrap() == "consume" {
         owner.observe(now + Delta::minutes(1)).await.unwrap();
         assert!(
