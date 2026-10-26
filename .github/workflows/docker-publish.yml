@@ -43,13 +43,23 @@ jobs:
     outputs:
       version: ${{ steps.rel.outputs.tag }}
       is_release: ${{ steps.rel.outputs.is_release }}
+      publish_mcp: ${{ steps.rel.outputs.publish_mcp }}
+      source_sha: ${{ steps.rel.outputs.source_sha }}
     steps:
+      # Resolve policy from this workflow's checkout, before switching to an
+      # older release tag that may not contain the policy helper.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
       - name: Resolve release to package
         id: rel
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           EVENT_NAME: ${{ github.event_name }}
           RUN_TAG: ${{ github.event.workflow_run.head_branch }}
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
           INPUT_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
@@ -72,22 +82,34 @@ jobs:
               | jq -r '.tag_name')
           fi
           [ -n "$tag" ] && [ "$tag" != "null" ] || { echo "could not resolve a release tag" >&2; exit 1; }
-          push_latest=false
-          if [ "$EVENT_NAME" != "pull_request" ]; then
-            push_latest=true
+          policy=$(node scripts/release-policy.mjs docker "$tag" "$EVENT_NAME" "$is_release")
+          source_sha="$GITHUB_SHA"
+          if [ "$is_release" = true ]; then
+            git fetch --no-tags origin "refs/tags/$tag"
+            source_sha=$(git rev-parse 'FETCH_HEAD^{commit}')
+            git fetch --no-tags origin main
+            git merge-base --is-ancestor "$source_sha" origin/main \
+              || { echo "::error::release tag must be contained in main"; exit 1; }
+            if [ "$EVENT_NAME" = workflow_run ] && [ "$source_sha" != "$RUN_SHA" ]; then
+              echo "::error::release tag no longer matches the completed binary workflow SHA"
+              exit 1
+            fi
           fi
-          echo "Packaging release $tag (is_release=$is_release, push_latest=$push_latest)"
+          echo "Packaging release $tag at $source_sha: $policy"
           {
             echo "tag=$tag"
             echo "is_release=$is_release"
-            echo "push_latest=$push_latest"
+            echo "source_sha=$source_sha"
+            echo "push_latest=$(jq -r '.push_latest' <<< "$policy")"
+            echo "stable_aliases=$(jq -r '.stable_aliases' <<< "$policy")"
+            echo "publish_mcp=$(jq -r '.publish_mcp' <<< "$policy")"
           } >> "$GITHUB_OUTPUT"
 
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          # For a release, build from the Dockerfile at that tag.
-          ref: ${{ steps.rel.outputs.is_release == 'true' && format('refs/tags/{0}', steps.rel.outputs.tag) || github.ref }}
+          # Pin the verified commit, not a tag that could move after validation.
+          ref: ${{ steps.rel.outputs.source_sha }}
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -113,8 +135,8 @@ jobs:
             type=ref,event=pr
             type=raw,value=latest,enable=${{ steps.rel.outputs.push_latest }}
             type=semver,pattern={{version}},value=${{ steps.rel.outputs.tag }},enable=${{ steps.rel.outputs.is_release }}
-            type=semver,pattern={{major}}.{{minor}},value=${{ steps.rel.outputs.tag }},enable=${{ steps.rel.outputs.is_release }}
-            type=semver,pattern={{major}},value=${{ steps.rel.outputs.tag }},enable=${{ steps.rel.outputs.is_release }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ steps.rel.outputs.tag }},enable=${{ steps.rel.outputs.stable_aliases }}
+            type=semver,pattern={{major}},value=${{ steps.rel.outputs.tag }},enable=${{ steps.rel.outputs.stable_aliases }}
           labels: |
             org.opencontainers.image.version=${{ steps.rel.outputs.tag }}
 
@@ -135,7 +157,8 @@ jobs:
 
   publish-mcp:
     needs: docker
-    if: needs.docker.outputs.is_release == 'true'
+    # An RC may publish a versioned image, never a stable registry listing.
+    if: needs.docker.outputs.publish_mcp == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -144,7 +167,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          ref: refs/tags/${{ needs.docker.outputs.version }}
+          ref: ${{ needs.docker.outputs.source_sha }}
 
       - name: Set registry release version
         shell: bash
