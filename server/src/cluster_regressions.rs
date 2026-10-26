@@ -469,3 +469,323 @@ async fn lagging_follower_catches_up_in_bounded_authenticated_batches() {
     assert_eq!(nodes[1].get("claim").await.unwrap().as_deref(), Some("value-100"));
     nodes[1].shutdown(); server.abort();
 }
+
+// Use the production authenticated RPC handler, but optionally hold a response
+// longer than the election timeout. A reachable but stalled voter differs from
+// an immediately refused connection: it must not gate the healthy majority.
+struct DelayedRpcServer {
+    requests: Arc<std::sync::atomic::AtomicUsize>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+#[derive(Default)]
+struct RpcReplyGate {
+    arrived: Notify,
+    release: Notify,
+}
+
+impl DelayedRpcServer {
+    fn start(listener: tokio::net::TcpListener, node: Arc<ClusterNode>, delay: Duration,
+        gate: Option<Arc<RpcReplyGate>>) -> Self {
+        let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let received = requests.clone();
+        let task = tokio::spawn(async move {
+            let mut connections = tokio::task::JoinSet::new();
+            loop {
+                tokio::select! {
+                    accepted = listener.accept() => {
+                        let (stream, _) = accepted.unwrap();
+                        let node = node.clone();
+                        let received = received.clone();
+                        let gate = gate.clone();
+                        connections.spawn(async move {
+                            let service = hyper::service::service_fn(move |request| {
+                                let node = node.clone();
+                                let received = received.clone();
+                                let gate = gate.clone();
+                                async move {
+                                    received.fetch_add(1, Ordering::SeqCst);
+                                    sleep(delay).await;
+                                    let response = route(node, request).await;
+                                    if let Some(gate) = gate {
+                                        gate.arrived.notify_one();
+                                        gate.release.notified().await;
+                                    }
+                                    response
+                                }
+                            });
+                            let _ = hyper::server::conn::http1::Builder::new()
+                                .serve_connection(TokioIo::new(stream), service).await;
+                        });
+                    }
+                    _ = connections.join_next(), if !connections.is_empty() => {}
+                }
+            }
+        });
+        Self { requests, task }
+    }
+}
+
+impl Drop for DelayedRpcServer {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+async fn delayed_voter_cluster(delay: Duration) -> (Vec<Arc<ClusterNode>>, Vec<DelayedRpcServer>) {
+    delayed_voter_cluster_with_gate(delay, None).await
+}
+
+async fn delayed_voter_cluster_with_gate(delay: Duration, gate: Option<Arc<RpcReplyGate>>)
+    -> (Vec<Arc<ClusterNode>>, Vec<DelayedRpcServer>) {
+    let mut listeners = Vec::new();
+    for _ in 0..3 {
+        listeners.push(tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap());
+    }
+    let addresses: Vec<_> = listeners.iter().map(|l| l.local_addr().unwrap().to_string()).collect();
+    let nodes: Vec<_> = (0..3).map(|i| {
+        ClusterNode::new_fixed_authenticated(ClusterConfig {
+            node_id: format!("n{i}"),
+            advertise_addr: Some(addresses[i].clone()),
+            peers: addresses.iter().enumerate().filter(|(j, _)| *j != i)
+                .map(|(_, address)| address.clone()).collect(),
+            peer_addrs: addresses.iter().enumerate().filter(|(j, _)| *j != i)
+                .map(|(j, address)| (format!("n{j}"), address.clone())).collect(),
+            heartbeat_interval: Duration::from_millis(40),
+            election_timeout_min: Duration::from_millis(300),
+            election_timeout_max: Duration::from_millis(500),
+            ..Default::default()
+        }, sled::Config::new().temporary(true).open().unwrap(), "slow-voter-test-only".into()).unwrap()
+    }).collect();
+    // Put the stalled voter first to also expose ordered JoinHandle awaiting.
+    nodes[0].state.write().await.peers = vec![addresses[2].clone(), addresses[1].clone()];
+    let servers = listeners.into_iter().enumerate().map(|(i, listener)| {
+        DelayedRpcServer::start(listener, nodes[i].clone(), if i == 2 { delay } else { Duration::ZERO },
+            if i == 2 { gate.clone() } else { None })
+    }).collect();
+    (nodes, servers)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn healthy_majority_elects_without_waiting_for_stalled_voter() {
+    let (nodes, _servers) = delayed_voter_cluster(Duration::from_secs(60)).await;
+    tokio::time::timeout(Duration::from_millis(750), nodes[0].start_election())
+        .await.expect("a healthy majority must elect without the stalled voter's response");
+    let state = nodes[0].state.read().await;
+    assert_eq!(state.role, Role::Leader);
+    assert_eq!(state.current_term, 1);
+    let metadata: serde_json::Value = serde_json::from_slice(&nodes[0].db.get("raft_meta").unwrap().unwrap()).unwrap();
+    assert_eq!(metadata["current_term"], 1);
+    assert_eq!(metadata["voted_for"], "n0");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn healthy_majority_keeps_heartbeats_and_commits_with_stalled_voter() {
+    let (nodes, servers) = delayed_voter_cluster(Duration::from_secs(60)).await;
+    let leader = &nodes[0];
+    {
+        let mut state = leader.state.write().await;
+        state.role = Role::Leader;
+        state.current_term = 1;
+        state.leader_id = Some("n0".into());
+        leader.persist_meta(&state).unwrap();
+    }
+    let heartbeat = tokio::spawn(leader.clone().run_heartbeat());
+    let election_timer = tokio::spawn(nodes[1].clone().run_election_timer());
+    let result = tokio::time::timeout(Duration::from_secs(2), async {
+        leader.put("healthy-majority".into(), "committed".into()).await.unwrap();
+        loop {
+            if nodes[1].get("healthy-majority").await.unwrap().as_deref() == Some("committed") {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+        // More than two maximum election timeouts: the healthy follower must
+        // keep receiving heartbeats, not merely the first replication RPC.
+        sleep(Duration::from_millis(1100)).await;
+        assert_eq!(nodes[1].state.read().await.current_term, 1);
+        assert_eq!(nodes[1].state.read().await.role, Role::Follower);
+        assert_eq!(leader.state.read().await.role, Role::Leader);
+        assert_eq!(servers[2].requests.load(Ordering::SeqCst), 1,
+            "do not start overlapping RPCs to a slow peer on every heartbeat");
+    }).await;
+    for node in &nodes { node.shutdown(); }
+    let stopped = tokio::time::timeout(Duration::from_millis(250), heartbeat).await;
+    election_timer.abort();
+    result.expect("the healthy majority must commit and maintain leadership without the stalled voter");
+    stopped.expect("shutdown must cancel in-flight replication").unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn delayed_voter_still_catches_up_without_restarting_its_rpc_every_tick() {
+    let (nodes, servers) = delayed_voter_cluster(Duration::from_millis(700)).await;
+    let leader = &nodes[0];
+    {
+        let mut state = leader.state.write().await;
+        state.role = Role::Leader;
+        state.current_term = 1;
+        state.leader_id = Some("n0".into());
+        leader.persist_meta(&state).unwrap();
+        let record = entry(1, 1, "delayed-durable-receipt");
+        leader.persist_log_entry(&record).unwrap();
+        state.log.push(record);
+    }
+    let heartbeat = tokio::spawn(leader.clone().run_heartbeat());
+    tokio::time::timeout(Duration::from_millis(500), async {
+        while leader.state.read().await.last_applied != 1 {
+            sleep(Duration::from_millis(10)).await;
+        }
+    }).await.expect("the healthy quorum must commit before the delayed response");
+    sleep(Duration::from_millis(150)).await;
+    assert_eq!(servers[2].requests.load(Ordering::SeqCst), 1);
+    assert_eq!(nodes[2].state.read().await.last_applied, 0);
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while nodes[2].get("claim").await.unwrap().as_deref() != Some("delayed-durable-receipt") {
+            sleep(Duration::from_millis(10)).await;
+        }
+    }).await.expect("slow durable replies must eventually advance catch-up");
+    let peer = nodes[2].config.advertise_addr.as_ref().unwrap();
+    assert_eq!(leader.state.read().await.match_index[peer], 1);
+    assert!(servers[2].requests.load(Ordering::SeqCst) >= 2);
+
+    // A later higher-term reply still makes the healthy leader step down.
+    {
+        let mut state = nodes[2].state.write().await;
+        state.current_term = 7;
+        nodes[2].persist_meta(&state).unwrap();
+    }
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while leader.state.read().await.current_term != 7 {
+            sleep(Duration::from_millis(10)).await;
+        }
+    }).await.expect("a delayed higher-term reply must not be discarded");
+    assert_eq!(leader.state.read().await.role, Role::Follower);
+    let metadata: serde_json::Value = serde_json::from_slice(&leader.db.get("raft_meta").unwrap().unwrap()).unwrap();
+    assert_eq!(metadata["current_term"], 7);
+    for node in &nodes { node.shutdown(); }
+    tokio::time::timeout(Duration::from_millis(250), heartbeat).await.unwrap().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn election_higher_term_reply_is_durable_without_waiting_for_stalled_voter() {
+    let (nodes, _servers) = delayed_voter_cluster(Duration::from_secs(60)).await;
+    {
+        let mut state = nodes[1].state.write().await;
+        state.current_term = 7;
+        nodes[1].persist_meta(&state).unwrap();
+    }
+    tokio::time::timeout(Duration::from_millis(750), nodes[0].start_election())
+        .await.expect("a higher term must not wait behind a stalled voter");
+    let state = nodes[0].state.read().await;
+    assert_eq!(state.role, Role::Follower);
+    assert_eq!(state.current_term, 7);
+    assert_eq!(state.voted_for, None);
+    let metadata: serde_json::Value = serde_json::from_slice(&nodes[0].db.get("raft_meta").unwrap().unwrap()).unwrap();
+    assert_eq!(metadata["current_term"], 7);
+    assert_eq!(metadata["voted_for"], serde_json::Value::Null);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn election_without_quorum_stays_candidate_and_cancels_on_shutdown() {
+    let (nodes, servers) = delayed_voter_cluster(Duration::from_secs(60)).await;
+    {
+        let mut state = nodes[1].state.write().await;
+        state.current_term = 1;
+        state.voted_for = Some("n1".into());
+        nodes[1].persist_meta(&state).unwrap();
+    }
+    let candidate = nodes[0].clone();
+    let election = tokio::spawn(async move { candidate.start_election().await });
+    tokio::time::timeout(Duration::from_millis(750), async {
+        while servers[2].requests.load(Ordering::SeqCst) == 0 {
+            sleep(Duration::from_millis(10)).await;
+        }
+    }).await.unwrap();
+    assert_eq!(nodes[0].state.read().await.role, Role::Candidate);
+    assert!(!election.is_finished());
+    nodes[0].shutdown();
+    tokio::time::timeout(Duration::from_millis(250), election).await
+        .expect("shutdown must cancel an election's pending RPCs").unwrap();
+    assert_ne!(nodes[0].state.read().await.role, Role::Leader);
+}
+
+#[tokio::test]
+async fn no_progress_commit_checks_do_not_consume_proposal_wait_budget() {
+    let n = node();
+    n.state.write().await.role = Role::Leader;
+    let notification = n.commit_notify.notified();
+    tokio::pin!(notification);
+    notification.as_mut().enable();
+    for _ in 0..200 {
+        n.update_commit_index().await;
+    }
+    assert!(tokio::time::timeout(Duration::from_millis(10), notification).await.is_err(),
+        "idle heartbeat/reply checks must not wake and exhaust await_commit's retry budget");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn new_leadership_term_cancels_old_in_flight_replication_slots() {
+    let (nodes, servers) = delayed_voter_cluster(Duration::from_secs(60)).await;
+    let leader = &nodes[0];
+    {
+        let mut state = leader.state.write().await;
+        state.role = Role::Leader;
+        state.current_term = 1;
+        leader.persist_meta(&state).unwrap();
+    }
+    let heartbeat = tokio::spawn(leader.clone().run_heartbeat());
+    tokio::time::timeout(Duration::from_millis(750), async {
+        while servers[2].requests.load(Ordering::SeqCst) == 0 {
+            sleep(Duration::from_millis(10)).await;
+        }
+    }).await.unwrap();
+    // Model winning a later term while the old term's slow RPC is outstanding.
+    {
+        let mut state = leader.state.write().await;
+        state.current_term = 2;
+        state.match_index.clear();
+        state.next_index.clear();
+        leader.persist_meta(&state).unwrap();
+    }
+    tokio::time::timeout(Duration::from_millis(750), async {
+        while servers[2].requests.load(Ordering::SeqCst) < 2
+            || nodes[1].state.read().await.current_term != 2 {
+            sleep(Duration::from_millis(10)).await;
+        }
+    }).await.expect("new-term heartbeats must not inherit old-term in-flight slots");
+    assert_eq!(leader.state.read().await.current_term, 2);
+    for node in &nodes { node.shutdown(); }
+    tokio::time::timeout(Duration::from_millis(250), heartbeat).await.unwrap().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn replication_reply_and_heartbeat_tick_do_not_deadlock_on_state_lock() {
+    let gate = Arc::new(RpcReplyGate::default());
+    let (nodes, _servers) = delayed_voter_cluster_with_gate(Duration::ZERO, Some(gate.clone())).await;
+    let leader = &nodes[0];
+    {
+        let mut state = leader.state.write().await;
+        state.role = Role::Leader;
+        state.current_term = 1;
+        leader.persist_meta(&state).unwrap();
+    }
+    let heartbeat = tokio::spawn(leader.clone().run_heartbeat());
+    tokio::time::timeout(Duration::from_millis(750), gate.arrived.notified()).await.unwrap();
+    let state = leader.state.write().await;
+    gate.release.notify_one();
+    // Both the returned RPC and periodic heartbeat contend on the held state
+    // lock. An RPC polled inside the heartbeat loop can own the first queued
+    // lock permit while that loop waits for the second, deadlocking forever.
+    sleep(Duration::from_millis(150)).await;
+    drop(state);
+    tokio::time::timeout(Duration::from_millis(750), async {
+        let peer = nodes[2].config.advertise_addr.as_ref().unwrap();
+        loop {
+            if leader.state.read().await.match_index.contains_key(peer) { break; }
+            sleep(Duration::from_millis(10)).await;
+        }
+    }).await.expect("completed replication and the heartbeat must both progress after lock contention");
+    for node in &nodes { node.shutdown(); }
+    tokio::time::timeout(Duration::from_millis(250), heartbeat).await
+        .expect("lock contention must not strand heartbeat shutdown").unwrap();
+}

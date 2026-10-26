@@ -4,12 +4,13 @@
 //! backed by sled. Each node runs an HTTP server for Raft RPCs and a simple
 //! data API.
 
+use futures::{stream::FuturesUnordered, StreamExt};
 use http_body_util::BodyExt;
 use hyper::{body::Incoming, Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
@@ -803,14 +804,15 @@ impl ClusterNode {
             term
         );
 
-        // Only voting members count toward the election quorum. Learners are
-        // sent RequestVote (harmless) but refuse, so they cannot inflate votes.
+        // Only voting members count toward the election quorum.
         let total_voters = voter_count + 1;
         let majority = total_voters / 2 + 1;
         let mut votes: usize = 1; // vote for self
 
-        // Send RequestVote RPCs to all peers in parallel
-        let mut handles = Vec::new();
+        // Poll replies in completion order, not peer order. These futures are
+        // owned by the election: reaching a quorum, stepping down or stopping
+        // drops outstanding RPCs rather than leaving detached tasks behind.
+        let mut requests = FuturesUnordered::new();
         for peer in &peers {
             let req = RequestVoteRequest {
                 term,
@@ -820,19 +822,28 @@ impl ClusterNode {
             };
             let client = self.http_client.clone();
             let url = format!("http://{}/raft/request-vote", peer);
-            handles.push(tokio::spawn(async move {
-                client
-                    .post(&url)
-                    .json(&req)
-                    .send()
-                    .await
-                    .ok()
-                    .and_then(|r| futures::executor::block_on(r.json::<RequestVoteResponse>()).ok())
-            }));
+            requests.push(async move {
+                client.post(&url).json(&req).send().await.ok()?
+                    .json::<RequestVoteResponse>().await.ok()
+            });
         }
 
-        for handle in handles {
-            if let Ok(Some(resp)) = handle.await {
+        while votes < majority {
+            let response = tokio::select! {
+                response = requests.next() => match response {
+                    Some(response) => response,
+                    None => break,
+                },
+                _ = self.shutdown.cancelled() => return,
+                _ = self.heartbeat_notify.notified() => {
+                    let state = self.state.read().await;
+                    if state.current_term != term || state.role != Role::Candidate {
+                        return;
+                    }
+                    continue;
+                }
+            };
+            if let Some(resp) = response {
                 if resp.term > MAX_RAFT_TERM { continue; }
                 let mut state = self.state.write().await;
                 if resp.term > state.current_term {
@@ -857,7 +868,7 @@ impl ClusterNode {
 
         if votes >= majority {
             let mut state = self.state.write().await;
-            if state.current_term == term && state.role == Role::Candidate {
+            if self.healthy().is_ok() && state.current_term == term && state.role == Role::Candidate {
                 state.role = Role::Leader;
                 state.leader_id = Some(self.config.node_id.clone());
                 let last_index = state.last_log_index();
@@ -882,44 +893,68 @@ impl ClusterNode {
     // --- Heartbeat / Replication --------------------------------------------
 
     async fn run_heartbeat(self: Arc<Self>) {
+        let mut ticks = tokio::time::interval(self.config.heartbeat_interval);
+        ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // Owned tasks can independently acquire state locks; polling such
+        // futures inside this task could strand a queued child lock waiter
+        // while the heartbeat loop awaits its own lock. The set is bounded to
+        // one RPC per peer, and dropping it aborts every outstanding task.
+        let mut requests = tokio::task::JoinSet::new();
+        let mut peers_by_task = HashMap::new();
+        let mut in_flight = HashSet::new();
+        let mut replication_term = None;
         loop {
             tokio::select! {
-                _ = sleep(self.config.heartbeat_interval) => {
-                    let is_leader = {
-                        let state = self.state.read().await;
-                        state.role == Role::Leader
-                    };
-                    if is_leader {
-                        self.send_append_entries_to_all().await;
+                _ = ticks.tick() => {
+                    let state = self.state.read().await;
+                    if state.role != Role::Leader {
+                        requests = tokio::task::JoinSet::new();
+                        peers_by_task.clear();
+                        in_flight.clear();
+                        replication_term = None;
+                        continue;
                     }
+                    if replication_term != Some(state.current_term) {
+                        // Never let an RPC from an old leadership term occupy
+                        // a peer's slot during the new term.
+                        requests = tokio::task::JoinSet::new();
+                        peers_by_task.clear();
+                        in_flight.clear();
+                        replication_term = Some(state.current_term);
+                    }
+                    let peers = state.peers.clone();
+                    drop(state);
+                    for peer in peers {
+                        if in_flight.insert(peer.clone()) {
+                            let node = self.clone();
+                            let target = peer.clone();
+                            let task = requests.spawn(async move {
+                                node.send_append_entries_to_peer(&target).await;
+                            });
+                            peers_by_task.insert(task.id(), peer);
+                        }
+                    }
+                    // Single-voter clusters have no peer completions.
+                    self.update_commit_index().await;
+                }
+                result = requests.join_next_with_id(), if !requests.is_empty() => {
+                    let id = match result {
+                        Some(Ok((id, ()))) => id,
+                        Some(Err(error)) => error.id(),
+                        None => continue,
+                    };
+                    if let Some(peer) = peers_by_task.remove(&id) {
+                        in_flight.remove(&peer);
+                    }
+                    // A slow voter must not delay committing a healthy quorum.
+                    self.update_commit_index().await;
                 }
                 _ = self.shutdown.cancelled() => {
+                    // Dropping the owned task set cancels all pending RPCs.
                     return;
                 }
             }
         }
-    }
-
-    async fn send_append_entries_to_all(self: &Arc<Self>) {
-        let peers = {
-            let state = self.state.read().await;
-            state.peers.clone()
-        };
-        let mut handles = Vec::new();
-
-        for peer in peers {
-            let node = self.clone();
-            handles.push(tokio::spawn(async move {
-                node.send_append_entries_to_peer(&peer).await
-            }));
-        }
-
-        for handle in handles {
-            let _ = handle.await;
-        }
-
-        // Update commit index based on match_index
-        self.update_commit_index().await;
     }
 
     async fn send_append_entries_to_peer(self: &Arc<Self>, peer: &str) {
@@ -1077,7 +1112,8 @@ impl ClusterNode {
             }
         }
 
-        if self.apply_committed(&mut state).is_ok() {
+        let last_applied = state.last_applied;
+        if self.apply_committed(&mut state).is_ok() && state.last_applied > last_applied {
             self.commit_notify.notify_waiters();
         }
     }
