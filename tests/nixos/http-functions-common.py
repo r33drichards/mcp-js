@@ -88,3 +88,31 @@ def committed_leader(candidates, management="/api/http-functions/v1/definitions"
                 pass
         time.sleep(0.5)
     raise AssertionError("No leader completed a registry read barrier")
+
+
+def mcp_call(node, name, arguments, token=None, port=3000):
+    body = {
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {
+            "name": name, "arguments": arguments,
+            "_meta": {
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientInfo": {"name": "nixos-management", "version": "1"},
+                "io.modelcontextprotocol/clientCapabilities": {},
+            },
+        },
+    }
+    headers = {"Accept": "application/json, text/event-stream",
+               "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/call", "Mcp-Name": name}
+    return http(node, "POST", "/mcp", body, headers, port=port, token=token)
+
+
+def mcp_result(response, error=False):
+    raw = assert_status(response, 200)["body"].decode()
+    if raw.startswith("event:") or raw.startswith("data:"):
+        raw = "".join(line[5:].strip() for line in raw.splitlines() if line.startswith("data:"))
+    reply = json.loads(raw)
+    assert "error" not in reply, reply
+    result = reply["result"]
+    assert result.get("isError", False) == error, result
+    return json.loads(result["content"][0]["text"])

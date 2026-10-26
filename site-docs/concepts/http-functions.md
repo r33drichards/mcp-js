@@ -44,3 +44,22 @@ that mutate remote state need idempotency or resource-side fencing.
 See the [handler contract](../reference/http-functions.md),
 [update guide](../how-to/manage-http-functions.md), and
 [NixOS verification guide](../how-to/scheduler-http-nixos.md).
+
+## Two protocols share one registry
+
+HTTP and MCP are adapters over the same management and invocation handlers. The
+registry and its invocation slots belong to the server, so opening another MCP
+session does not create a fresh registry or more capacity. A revision read over
+one protocol can condition a write over the other.
+
+Changing protocols does not change authority. Network MCP calls inherit the
+ordinary transport's authentication; stdio uses local process authority. The
+registry has no per-function owner or read-only role, and the scheduler's recovery
+credential grants no authority here.
+
+An invocation slot remains reserved until the Engine confirms its background
+execution stopped. Timeout and cancellation requests alone do not establish that
+fact. If submission or observation fails ambiguously, the slot is quarantined
+for that process rather than reused while work might still run. This conservative
+behavior can reduce available capacity and requires investigation; it provides
+no proof that external effects stopped or were undone.

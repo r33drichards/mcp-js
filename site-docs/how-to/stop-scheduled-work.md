@@ -1,6 +1,7 @@
 # Stop scheduled work and recover uncertain capacity
 
-Use the runner's operator stdin interface on its acquired leader. This guide
+Use the runner's operator stdin interface or configured HTTP/MCP management
+listener on its acquired leader. This guide
 assumes you have a configured runner and dedicated scheduled worker. Consult
 [feature status](../reference/scheduler-http-status.md) before applying it to a
 newer scheduler revision.
@@ -72,3 +73,42 @@ manually as if it were a fresh execution.
 
 See [scheduler reference](../reference/scheduler.md) for fields and
 [admission explanation](../concepts/scheduler-admission.md) for the durable boundary.
+
+## Use the authenticated management listener
+
+Enable the runner's optional [management configuration](../reference/scheduler.md#operator-http-and-mcp-transport)
+with separate existing operator and recovery credential references. Keep the
+listener on loopback. Query its status using the operator credential:
+
+```sh
+curl --fail-with-body http://127.0.0.1:4601/scheduler/v1/status \
+  -H "Authorization: Bearer $MCP_SCHEDULER_OPERATOR_TOKEN"
+curl --fail-with-body http://127.0.0.1:4601/scheduler/v1/schedules \
+  -H "Authorization: Bearer $MCP_SCHEDULER_OPERATOR_TOKEN"
+```
+
+Send the same command object used by stdin to the command endpoint. For example,
+to cancel occurrence 2 independently of its schedule's enabled state:
+
+```sh
+curl --fail-with-body http://127.0.0.1:4601/scheduler/v1/commands \
+  -H "Authorization: Bearer $MCP_SCHEDULER_OPERATOR_TOKEN" \
+  -H 'Content-Type: application/json' \
+  --data-binary '{"action":"cancel","occurrence_id":2}'
+```
+
+For MCP, connect a sessionless `2026-07-28` client to this runner's `/mcp`, supplying
+the operator bearer on every request. Use `scheduler_status`, `scheduler_list`,
+and `scheduler_cancel` with `{"occurrence_id":2}`. The ordinary server's `/mcp`
+and the dedicated worker do not forward scheduler management requests.
+
+Recovery requires the separately configured recovery credential over either
+transport. Complete the human investigation above before sending
+`acknowledge_stopped`, or its MCP equivalent `scheduler_acknowledge_stopped`.
+Never ask an agent to manufacture the required attestation. Omitting the recovery
+credential configuration keeps this operation local to operator stdin.
+
+After an uncertain result, inspect state and operator diagnostics. Neither a lost
+response nor a 503 establishes that a mutation did not commit. The management
+layer does not retry commands, cancel them on client disconnect, or automatically
+release uncertain capacity.

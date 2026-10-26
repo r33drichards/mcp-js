@@ -1,7 +1,7 @@
 # Create your first HTTP function
 
 In this lesson you will register a JavaScript handler, call it, and remove it.
-You need a checkout containing PR #293, Rust, Python 3, curl, and two terminals.
+You need this management-layer checkout, Rust, Python 3, curl, and two terminals.
 See [feature status](../reference/scheduler-http-status.md) for the exact baseline.
 All requests stay on loopback. This lesson uses an unauthenticated local server;
 use [authentication](../how-to/authentication.md) for a shared deployment.
@@ -47,6 +47,25 @@ curl --fail-with-body http://127.0.0.1:8080/functions/v1/greeting
 The response body is `Hello from /functions/v1/greeting`. The handler returns
 its response object directly; `console.log` would produce execution logs instead.
 A POST to this GET-only definition returns 405.
+
+## Invoke the same function through MCP
+
+Keep the server running. In terminal 2, send a sessionless MCP call:
+
+```sh
+curl --fail-with-body http://127.0.0.1:8080/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'MCP-Protocol-Version: 2026-07-28' \
+  -H 'Mcp-Method: tools/call' \
+  -H 'Mcp-Name: http_function_invoke' \
+  --data-binary '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"http_function_invoke","arguments":{"name":"greeting","method":"GET"},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"management-lesson","version":"1"},"io.modelcontextprotocol/clientCapabilities":{}}}}'
+```
+
+The MCP result contains a JSON content block with `status: 200`, response headers,
+and a base64 body. Decode `body_base64` to see the same greeting returned by HTTP.
+Both calls used the definition you registered above. MCP does not require a
+second registration or a separate registry directory.
 
 ## Inspect and remove it
 

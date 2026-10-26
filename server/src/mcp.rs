@@ -795,7 +795,12 @@ impl ServerHandler for McpService {
     }
 
     fn get_tool(&self, name: &str) -> Option<Tool> {
-        self.tool_router.get(name).cloned()
+        self.tool_router.get(name).cloned().or_else(|| {
+            self.runtime.http_functions.get()?;
+            crate::http_functions::tools()
+                .into_iter()
+                .find(|tool| tool.name.as_ref() == name)
+        })
     }
 
     async fn call_tool(
@@ -814,6 +819,20 @@ impl ServerHandler for McpService {
                 self.verifier.as_ref(),
             )
             .await;
+        }
+        if crate::http_functions::is_management_tool(&request.name) {
+            let args = request.arguments.clone()
+                .map(serde_json::Value::Object)
+                .unwrap_or_else(|| serde_json::json!({}));
+            let value = crate::http_functions::call_tool(&self.runtime, &request.name, args).await;
+            let failed = value.get("error").is_some();
+            let content = vec![ContentBlock::json(value)?];
+            let result = if failed {
+                CallToolResult::error(content)
+            } else {
+                CallToolResult::success(content)
+            };
+            return Ok(result.into());
         }
         if let Some(result) = self
             .runtime
@@ -1051,7 +1070,12 @@ impl ServerHandler for StatelessMcpService {
     }
 
     fn get_tool(&self, name: &str) -> Option<Tool> {
-        self.tool_router.get(name).cloned()
+        self.tool_router.get(name).cloned().or_else(|| {
+            self.runtime.http_functions.get()?;
+            crate::http_functions::tools()
+                .into_iter()
+                .find(|tool| tool.name.as_ref() == name)
+        })
     }
 
     async fn call_tool(
@@ -1063,6 +1087,20 @@ impl ServerHandler for StatelessMcpService {
         // this request's headers on the fresh per-request service instance.
         if self.mcp_headers.get().is_none() {
             capture_mcp_headers(&context, None, &self.mcp_headers, self.verifier.as_ref()).await;
+        }
+        if crate::http_functions::is_management_tool(&request.name) {
+            let args = request.arguments.clone()
+                .map(serde_json::Value::Object)
+                .unwrap_or_else(|| serde_json::json!({}));
+            let value = crate::http_functions::call_tool(&self.runtime, &request.name, args).await;
+            let failed = value.get("error").is_some();
+            let content = vec![ContentBlock::json(value)?];
+            let result = if failed {
+                CallToolResult::error(content)
+            } else {
+                CallToolResult::success(content)
+            };
+            return Ok(result.into());
         }
         if let Some(result) = self
             .runtime

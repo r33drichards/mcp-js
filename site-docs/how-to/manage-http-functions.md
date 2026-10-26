@@ -52,3 +52,22 @@ does not establish that the handler stopped; it can continue until Engine timeou
 Use application idempotency for external mutations. The server does not replay
 ambiguous submissions or roll back effects. See the
 [revision model](../concepts/http-functions.md) and [limits](../reference/http-functions.md).
+
+## Manage the same revision through MCP
+
+Connect an MCP client to the ordinary server, using the same transport authority
+as for HTTP. Call `http_function_lookup` with `{"name":"greeting"}`. Copy the
+returned unquoted `revision` into `http_function_update` alongside the name and
+your complete replacement definition. For deletion, call `http_function_delete`
+with the name and that current revision. `http_function_create` supplies the
+absent-name condition automatically.
+
+An HTTP update and MCP update race against the same revision: only one can win.
+If a tool returns `isError: true` with status 412, look up the current metadata and
+reconcile your intended change. Do not substitute an unconditional write. If the
+outcome is uncertain, inspect metadata before issuing another mutation.
+
+Call `http_function_invoke` with the registered method and optional standard-base64
+body. Its response contains the handler's HTTP status, headers, and base64 body.
+A lost MCP reply does not prove that execution failed or stopped. Treat invocation
+retries with the same care as HTTP retries.

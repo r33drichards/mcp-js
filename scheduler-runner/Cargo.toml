@@ -20,6 +20,7 @@ tokio-util = "0.7"
 reqwest = { version = "0.12", features = ["json"] }
 futures = "0.3"
 tracing = "0.1"
+rmcp = { version = "=3.5.1", features = ["server", "transport-streamable-http-server"] }
 
 mcp-js-scheduler-core = { path = "../scheduler-core" }
 chrono = { version = "0.4", features = ["serde"] }

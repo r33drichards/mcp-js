@@ -1,9 +1,9 @@
 name: Dynamic HTTP functions
 on:
   pull_request:
-    paths: ['server/src/**', 'server/tests/jwks_auth_e2e.rs', '.github/workflows/http-functions.yml']
+    paths: ['server/src/**', 'server/tests/jwks_auth_e2e.rs', 'server/tests/http_function_management_e2e.rs', '.github/workflows/http-functions.yml']
   push:
-    paths: ['server/src/**', 'server/tests/jwks_auth_e2e.rs', '.github/workflows/http-functions.yml']
+    paths: ['server/src/**', 'server/tests/jwks_auth_e2e.rs', 'server/tests/http_function_management_e2e.rs', '.github/workflows/http-functions.yml']
 permissions:
   contents: read
 jobs:
@@ -19,5 +19,5 @@ jobs:
           components: rustfmt
       - run: rustfmt --edition 2024 --check server/src/http_functions.rs
       - run: cargo test --locked -p server --lib http_functions -- --test-threads=1
-      - run: cargo test --locked -p server --test jwks_auth_e2e -- --test-threads=1
+      - run: cargo test --locked -p server --test jwks_auth_e2e --test http_function_management_e2e -- --test-threads=1
       - run: cargo test --locked -p server --lib scheduled_runtime_tests -- --test-threads=1

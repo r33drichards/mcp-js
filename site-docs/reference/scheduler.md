@@ -3,7 +3,8 @@
 Baseline: [integrated runtime boundary](scheduler-http-status.md).
 The experimental runner is a separate Cargo workspace. It uses Apalis pulses,
 the shared durable policy core, fixed-voter Raft, and a dedicated actual-server
-worker. It provides an operator stdin interface, not scheduling MCP tools.
+worker. Operator commands are available through stdin and an opt-in, separately
+authenticated HTTP/MCP listener. These interfaces share one command dispatcher.
 
 ## Configuration
 
@@ -21,6 +22,7 @@ Run `mcp-js-scheduler-runner CONFIG.json`. Unknown runner fields are rejected.
 | `limits` | Optional core limits below |
 | `schedules` | Initial definitions; default empty |
 | `remote` | Required worker/authority configuration below |
+| `management` | Optional operator listener configuration below; omitted means no listener |
 
 All replicas must share the same limits, initial definitions, and remote config.
 The fixed voter mapping and contract are sealed into storage. Existing incompatible
@@ -71,6 +73,9 @@ credential. Dispatch binds version, namespace, schedule/occurrence/attempt,
 owner/epoch, worker, payload digest and execution authority. It is an internal
 runner protocol, not a replacement for operator management. Scheduled/admission
 routers cap bodies at 512 KiB, including JSON escaping.
+
+The management request limit applies to serialized JSON (72 KiB), so heavily
+escaped source can exceed it even when the decoded source is below 64 KiB.
 
 ## Definition and calendar policy
 
@@ -153,3 +158,86 @@ store with unresolved cancellation to such a binary.
 
 See [operational recovery](../how-to/stop-scheduled-work.md) and
 [admission safety](../concepts/scheduler-admission.md).
+
+## Operator HTTP and MCP transport
+
+The runner accepts this optional top-level configuration object:
+
+```json
+{
+  "management": {
+    "addr": "127.0.0.1:4601",
+    "bearer_env": "MCP_SCHEDULER_OPERATOR_TOKEN",
+    "recovery_bearer_env": "MCP_SCHEDULER_RECOVERY_TOKEN"
+  }
+}
+```
+
+`addr` must be a loopback socket address. `bearer_env` names an existing environment
+variable. `recovery_bearer_env` is optional; omitting it disables remote recovery.
+Resolved operator and recovery credentials must differ from each other and from
+the worker, admission, and cluster credentials. Startup rejects reused credentials or a
+non-loopback management address. Credential values are never stored in the
+configuration or checkpoint. Management listener settings are per-node transport
+settings; they do not change the sealed scheduling contract.
+
+| HTTP method and path | Operation |
+|---|---|
+| `GET /scheduler/v1/status` | `status` command |
+| `GET /scheduler/v1/schedules` | `list` command |
+| `POST /scheduler/v1/commands` | One tagged JSON command from the operator command list above |
+| `POST /mcp` | Sessionless MCP tools using protocol `2026-07-28` |
+
+MCP tool names are `scheduler_status`, `scheduler_list`, `scheduler_create`,
+`scheduler_disable`, `scheduler_cancel`, `scheduler_delete`, and
+`scheduler_acknowledge_stopped`. Arguments match each stdin command with its
+`action` field removed. `status` and `list` take an empty object. Unknown fields
+and unknown tools are rejected. No update, enable, retry, or new recovery
+operation is introduced.
+
+The MCP endpoint uses per-request negotiation and authorization; it does not
+create legacy MCP sessions. Every request needs a bearer header. Management
+requests are limited to 72 KiB and enter a bounded queue of 64 commands. HTTP
+and MCP requests with an `Origin` header are rejected; this listener has no
+browser flow. Fixed-voter Raft separately requires its cluster bearer and private,
+encrypted remote network boundary as described in [feature status](scheduler-http-status.md).
+Management authentication neither encrypts Raft traffic nor grants cluster authority.
+
+### Authorization matrix
+
+| Caller credential | Status, list, create, disable, cancel, delete | Acknowledge stopped |
+|---|---|---|
+| Missing, invalid, worker, admission, or cluster credential | Denied before body parsing | Denied before body parsing |
+| Management operator credential | Allowed | Denied; recovery tool omitted from discovery |
+| Separate management recovery credential | Allowed | Allowed only with explicit `dispatcher_and_work_quiesced: true` |
+| Local operator stdin | Existing process authority | Existing explicit attestation requirement |
+
+The recovery credential proves authorization, not quiescence. A human operator
+must first establish that the old dispatcher cannot submit and accepted work has
+stopped. An agent must not infer or automatically approve that attestation.
+Acknowledgement accepts `Unknown` or unresolved `Cancelling`; without explicit
+attestation and a committed transition, their capacity remains reserved.
+
+### Error behavior
+
+| HTTP status | Management meaning |
+|---|---|
+| 400 | Malformed command or missing/false explicit quiescence attestation |
+| 401 | Missing or invalid management bearer |
+| 403 | Insufficient recovery authority or an `Origin` header |
+| 409 | No acquired owner; command not accepted |
+| 413 | Request body exceeds transport limit |
+| 503 | Queue/runner unavailable, or core operation failed with potentially uncertain outcome |
+
+Remote responses redact source, storage paths, and internal errors. Errors after
+queue admission conservatively report `outcome: "uncertain"` and
+`retry_safe: false`; the core does not classify validation and storage errors
+separately. A queue rejection reports `accepted: false`. Inspect state and
+operator diagnostics after an uncertain mutation; never retry creation blindly.
+Disconnecting does not withdraw a queued command.
+
+MCP operation failures use `isError: true` with the same safe JSON error and a
+numeric `status` in text content. Invalid MCP tool names or argument shapes use
+JSON-RPC invalid-parameters errors. HTTP authentication failures precede MCP
+handling. List remains a stale local view, and successful cancellation still
+means only that cancellation intent was recorded.

@@ -132,3 +132,27 @@ with subtest("conditional replacements and tombstones survive service restart an
                                    headers={"If-None-Match": "*"}), 200)
     assert recreated["headers"]["etag"] not in [revision, new_revision]
     assert_status(call("DELETE", management + "/echo", headers={"If-Match": new_revision}), 412)
+
+with subtest("MCP management uses HTTP revisions and verified transport authority"):
+    args = {"name": "mcp-managed", "definition": definition(
+        "function handler(r) {return {status:200,body:r.method};}")}
+    for token in [None, "invalid.jwt.token"]:
+        assert_status(mcp_call(machine, "http_function_create", args, token), 401)
+    created = mcp_result(mcp_call(machine, "http_function_create", args, bearer_token()))
+    assert "source" not in created
+    found = json.loads(assert_status(call("GET", management + "/mcp-managed"), 200)["body"])
+    assert found["revision"] == created["revision"]
+    replacement = definition("function handler() {return {status:200,body:'new'};}")
+    updated = assert_status(call("PUT", management + "/mcp-managed", replacement,
+                                headers={"If-Match": '"' + created["revision"] + '"'}), 200)
+    stale = mcp_result(mcp_call(machine, "http_function_delete", {
+        "name": "mcp-managed", "revision": created["revision"]}, bearer_token()), error=True)
+    assert stale["status"] == 412
+    invoked = mcp_result(mcp_call(machine, "http_function_invoke", {
+        "name": "mcp-managed", "method": "POST"}, bearer_token()))
+    assert invoked["status"] == 200 and base64.b64decode(invoked["body_base64"]) == b"new"
+    current = json.loads(updated["body"])
+    deleted = mcp_result(mcp_call(machine, "http_function_delete", {
+        "name": "mcp-managed", "revision": current["revision"]}, bearer_token()))
+    assert deleted["deleted"] is True
+    assert_status(call("GET", management + "/mcp-managed"), 404)

@@ -197,13 +197,23 @@ fn sessionless_run_js_body() -> Value {
 }
 
 fn sessionless_request(client: &Client, url: &str, token: Option<&str>) -> reqwest::RequestBuilder {
+    management_request(client, url, token, "run_js", sessionless_run_js_body())
+}
+
+fn management_request(
+    client: &Client,
+    url: &str,
+    token: Option<&str>,
+    name: &str,
+    body: Value,
+) -> reqwest::RequestBuilder {
     let mut req = client
         .post(url)
         .header("Accept", "application/json, text/event-stream")
         .header("MCP-Protocol-Version", PROTOCOL_VERSION)
         .header("Mcp-Method", "tools/call")
-        .header("Mcp-Name", "run_js")
-        .json(&sessionless_run_js_body());
+        .header("Mcp-Name", name)
+        .json(&body);
     if let Some(token) = token {
         req = req.header("Authorization", format!("Bearer {token}"));
     }
@@ -352,6 +362,97 @@ async fn scheduled_only_transport_does_not_mount_function_or_legacy_routes() {
             .unwrap();
         assert_eq!(reply.status().as_u16(), 404, "{method} {path}");
     }
+    server.stop().await;
+    jwks_task.abort();
+}
+
+#[tokio::test]
+async fn function_mcp_management_requires_transport_authorization_for_every_tool() {
+    let (jwks_url, jwks_task) = start_jwks_server().await;
+    let mut server = HttpServer::start(&jwks_url).await.unwrap();
+    let client = Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .unwrap();
+    let definition = json!({"version":1,"methods":["POST"],"export":"handler",
+        "source":"function handler(){return {status:200,body:'authorized'}}",
+        "limits":{"timeout_seconds":3,"heap_mb":32}});
+    for (name, arguments) in [
+        (
+            "http_function_create",
+            json!({"name":"protected","definition":definition}),
+        ),
+        ("http_function_list", json!({})),
+        ("http_function_lookup", json!({"name":"protected"})),
+        (
+            "http_function_update",
+            json!({"name":"protected","revision":"00000000-0000-0000-0000-000000000000","definition":definition}),
+        ),
+        (
+            "http_function_delete",
+            json!({"name":"protected","revision":"00000000-0000-0000-0000-000000000000"}),
+        ),
+        (
+            "http_function_invoke",
+            json!({"name":"protected","method":"POST"}),
+        ),
+    ] {
+        let mut body = sessionless_run_js_body();
+        body["params"]["name"] = json!(name);
+        body["params"]["arguments"] = arguments;
+        for token in [None, Some("unverifiable-token")] {
+            let response =
+                management_request(&client, &server.mcp_url(), token, name, body.clone())
+                    .send()
+                    .await
+                    .unwrap();
+            assert_eq!(response.status().as_u16(), 401, "{name}");
+            assert!(!response.text().await.unwrap().contains("function handler"));
+        }
+    }
+    // Denied create did not mutate the shared registry.
+    let token = valid_token();
+    let url = format!(
+        "{}/api/http-functions/v1/definitions/protected",
+        server.base_url
+    );
+    assert_eq!(
+        client
+            .get(&url)
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .as_u16(),
+        404
+    );
+    let mut body = sessionless_run_js_body();
+    body["params"]["name"] = json!("http_function_create");
+    body["params"]["arguments"] = json!({"name":"protected","definition":definition});
+    let response = management_request(
+        &client,
+        &server.mcp_url(),
+        Some(&token),
+        "http_function_create",
+        body,
+    )
+    .send()
+    .await
+    .unwrap();
+    assert!(response.status().is_success());
+    let text = response.text().await.unwrap();
+    assert!(!text.contains("\"isError\":true"), "{text}");
+    let metadata = client.get(&url).bearer_auth(&token).send().await.unwrap();
+    assert_eq!(metadata.status().as_u16(), 200);
+    assert!(
+        metadata
+            .json::<Value>()
+            .await
+            .unwrap()
+            .get("source")
+            .is_none()
+    );
     server.stop().await;
     jwks_task.abort();
 }
