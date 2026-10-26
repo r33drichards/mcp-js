@@ -1,0 +1,5 @@
+config	exit	result
+TaskScheduleCron_safe	0	Model checking completed. No error has been found.
+TaskScheduleCron_overlap	12	Invariant NoOverlapDiagnostic is violated.
+TaskScheduleCron_catchup	12	Invariant NoCatchUp is violated.
+TaskScheduleCron_retry	12	Invariant NoAutomaticRetry is violated.
