@@ -1,11 +1,8 @@
 name: Node Compatibility Full
+# Intentionally opt-in: the full 16-shard suite requires self-hosted Railway
+# runners. Dispatch manually when that runner capacity is available.
 on:
-  pull_request:
-    branches: [main]
-    paths: ['server/src/**','server/tests/node_compat/**','server/examples/node_compat_full.rs','server/examples/node_compat_full/**','tools/compat/**','.github/workflows/node-compat-full.yml']
   workflow_dispatch:
-  schedule:
-    - cron: '17 3 * * *'
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true

@@ -76,6 +76,9 @@ jobs:
           retention-days: 7
 
   node-library-e2e:
+    # Intentionally opt-in: Node, Python and pi E2E each rebuild the costly
+    # native shared library. Keep the other jobs automatic; dispatch for this E2E.
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:

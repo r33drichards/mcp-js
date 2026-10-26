@@ -60,6 +60,9 @@ jobs:
         run: nix develop --command ./scripts/check-uniffi-bindings.sh
 
   python-library-e2e:
+    # Intentionally opt-in: Node, Python and pi E2E each rebuild the costly
+    # native shared library. Keep the other jobs automatic; dispatch for this E2E.
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
