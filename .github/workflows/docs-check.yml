@@ -2,7 +2,7 @@ name: Docs Check
 
 on:
   pull_request:
-    branches: [ main ]
+    branches: [ main, impl/dynamic-http-functions ]
   workflow_dispatch:
 
 permissions:

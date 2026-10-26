@@ -111,8 +111,8 @@ its result. Neither case resubmits the attempt. There is no atomic transaction
 with external execution and no exactly-once external-effects guarantee. The
 caller of the low-level `claim` API must not reuse returned invocations.
 
-Unknown receipts hold both overlap and global capacity slots. After separately
-establishing that execution stopped, `acknowledge_stopped` makes a receipt
+Unknown and Cancelling receipts hold both overlap and global capacity slots. After
+separately establishing that the dispatcher and accepted execution are quiescent, `acknowledge_stopped` makes a receipt
 `Abandoned`, releases its slot, and never retries it. Its effect outcome remains
 unresolved. Failure to persist any transition poisons the instance, preventing
 further claims until it is reopened. The fault tests cover a failed write and an
