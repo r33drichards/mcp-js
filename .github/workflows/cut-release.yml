@@ -36,13 +36,26 @@ jobs:
   cut-release:
     runs-on: ubuntu-latest
     steps:
-      - name: Validate version
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Validate release policy and exact main commit
+        id: policy
         env:
           VERSION: ${{ inputs.version }}
+          SHA: ${{ inputs.sha || github.sha }}
         run: |
           set -euo pipefail
-          [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] \
-            || { echo "::error::version must look like v1.2.3 or v1.2.3-rc.1, got '$VERSION'"; exit 1; }
+          policy=$(node scripts/release-policy.mjs classify "$VERSION")
+          echo "prerelease=$(jq -r '.prerelease' <<< "$policy")" >> "$GITHUB_OUTPUT"
+          [[ "$SHA" =~ ^[0-9a-fA-F]{40}$ ]] \
+            || { echo "::error::sha must be an exact 40-character commit SHA"; exit 1; }
+          git fetch --no-tags origin main
+          git cat-file -e "${SHA}^{commit}"
+          git merge-base --is-ancestor "$SHA" origin/main \
+            || { echo "::error::release target must be contained in main"; exit 1; }
 
       - name: Create tag
         env:
@@ -59,14 +72,19 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ inputs.version }}
           NOTES: ${{ inputs.notes }}
+          PRERELEASE: ${{ steps.policy.outputs.prerelease }}
         run: |
           set -euo pipefail
+          args=(--repo "$GITHUB_REPOSITORY" --title "$VERSION" --verify-tag)
+          case "$PRERELEASE" in
+            true) args+=(--prerelease=true --latest=false) ;;
+            false) args+=(--prerelease=false) ;;
+            *) echo "::error::invalid release policy"; exit 1 ;;
+          esac
           if [ -n "$NOTES" ]; then
-            gh release create "$VERSION" --repo "$GITHUB_REPOSITORY" \
-              --title "$VERSION" --notes "$NOTES" --verify-tag
+            gh release create "$VERSION" "${args[@]}" --notes "$NOTES"
           else
-            gh release create "$VERSION" --repo "$GITHUB_REPOSITORY" \
-              --title "$VERSION" --generate-notes --verify-tag
+            gh release create "$VERSION" "${args[@]}" --generate-notes
           fi
 
       - name: Dispatch binary release build

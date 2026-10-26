@@ -223,6 +223,7 @@ jobs:
 
   # ── Assemble GitHub Release ────────────────────────────────────────────────
   release:
+    if: startsWith(github.ref, 'refs/tags/v')
     needs: [build-cli, build-server]
     runs-on: ubuntu-latest
     steps:
@@ -265,9 +266,21 @@ jobs:
           echo "Release assets:"
           ls -lh dist/final/
 
+      - name: Classify GitHub release
+        id: policy
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          policy=$(node scripts/release-policy.mjs classify "$TAG")
+          echo "prerelease=$(jq -r '.prerelease' <<< "$policy")" >> "$GITHUB_OUTPUT"
+          echo "make_latest=$(jq -r '.make_latest' <<< "$policy")" >> "$GITHUB_OUTPUT"
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: dist/final/*
+          prerelease: ${{ steps.policy.outputs.prerelease == 'true' }}
+          make_latest: ${{ steps.policy.outputs.make_latest }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
