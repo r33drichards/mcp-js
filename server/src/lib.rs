@@ -14,3 +14,5 @@ uniffi::setup_scaffolding!();
 
 pub mod scheduled_protocol;
 pub mod scheduled_worker;
+
+pub mod http_functions;
