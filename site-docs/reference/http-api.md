@@ -793,6 +793,161 @@ Authentication: none.
 Authentication: none.
 
 
+## HTTP Functions
+
+
+### list
+
+
+<a id="opIdlist"></a>
+
+`GET /api/http-functions/v1/definitions`
+
+<a id="list-responses"></a>
+#### Responses
+
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Active definition metadata; source omitted|None|
+|503|[Service Unavailable](https://tools.ietf.org/html/rfc7231#section-6.6.4)|Registry unavailable|None|
+
+Authentication: none.
+
+
+### lookup
+
+
+<a id="opIdlookup"></a>
+
+`GET /api/http-functions/v1/definitions/{name}`
+
+<a id="lookup-parameters"></a>
+#### Parameters
+
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|name|path|string|true|Function name|
+
+<a id="lookup-responses"></a>
+#### Responses
+
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Metadata with revision ETag|None|
+|404|[Not Found](https://tools.ietf.org/html/rfc7231#section-6.5.4)|Missing function|None|
+
+Authentication: none.
+
+
+### put
+
+
+<a id="opIdput"></a>
+
+`PUT /api/http-functions/v1/definitions/{name}`
+
+> Body parameter
+
+```json
+{
+  "export": "string",
+  "limits": {
+    "heap_mb": 0,
+    "timeout_seconds": 0
+  },
+  "methods": [
+    "string"
+  ],
+  "source": "string",
+  "version": 0
+}
+```
+
+<a id="put-parameters"></a>
+#### Parameters
+
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|name|path|string|true|Function name|
+|body|body|[Definition](#schemadefinition)|true|none|
+
+<a id="put-responses"></a>
+#### Responses
+
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Committed definition with ETag|None|
+|412|[Precondition Failed](https://tools.ietf.org/html/rfc7232#section-4.2)|Stale revision|None|
+|428|[Precondition Required](https://tools.ietf.org/html/rfc6585#section-3)|Conditional header required|None|
+
+Authentication: none.
+
+
+### delete
+
+
+<a id="opIddelete"></a>
+
+`DELETE /api/http-functions/v1/definitions/{name}`
+
+<a id="delete-parameters"></a>
+#### Parameters
+
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|name|path|string|true|Function name|
+
+<a id="delete-responses"></a>
+#### Responses
+
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Committed tombstone|None|
+|412|[Precondition Failed](https://tools.ietf.org/html/rfc7232#section-4.2)|Stale revision|None|
+
+Authentication: none.
+
+
+### invoke
+
+
+<a id="opIdinvoke"></a>
+
+`POST /functions/v1/{name}`
+
+<a id="invoke-parameters"></a>
+#### Parameters
+
+
+|Name|In|Type|Required|Description|
+|---|---|---|---|---|
+|name|path|string|true|Function name; exact registered methods apply|
+
+<a id="invoke-responses"></a>
+#### Responses
+
+
+|Status|Meaning|Description|Schema|
+|---|---|---|---|
+|200|[OK](https://tools.ietf.org/html/rfc7231#section-6.3.1)|Validated handler response; handler chooses status and content type|None|
+|404|[Not Found](https://tools.ietf.org/html/rfc7231#section-6.5.4)|Missing function|None|
+|405|[Method Not Allowed](https://tools.ietf.org/html/rfc7231#section-6.5.5)|Method not registered|None|
+|409|[Conflict](https://tools.ietf.org/html/rfc7231#section-6.5.8)|Invocation capacity exhausted|None|
+|413|[Payload Too Large](https://tools.ietf.org/html/rfc7231#section-6.5.11)|Input exceeds limit|None|
+|500|[Internal Server Error](https://tools.ietf.org/html/rfc7231#section-6.6.1)|Handler or response failed|None|
+|503|[Service Unavailable](https://tools.ietf.org/html/rfc7231#section-6.6.4)|Registry or Engine unavailable|None|
+|504|[Gateway Time-out](https://tools.ietf.org/html/rfc7231#section-6.6.5)|Execution timed out|None|
+
+Authentication: none.
+
+
 ## Sessions
 
 
@@ -1335,6 +1490,39 @@ Index of available CLI binary downloads for the running server version.
 |assets|[[CliAsset](#schemacliasset)]|true|none|Available platform binaries.|
 |version|string|true|none|Server (and CLI) version string, e.g. `"0.1.0"`.|
 
+<h2 id="tocS_Definition">Definition</h2>
+<!-- backwards compatibility -->
+<a id="schemadefinition"></a>
+<a id="schema_Definition"></a>
+<a id="tocSdefinition"></a>
+<a id="tocsdefinition"></a>
+
+```json
+{
+  "export": "string",
+  "limits": {
+    "heap_mb": 0,
+    "timeout_seconds": 0
+  },
+  "methods": [
+    "string"
+  ],
+  "source": "string",
+  "version": 0
+}
+
+```
+
+### Properties
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|export|string|true|none|none|
+|limits|[Limits](#schemalimits)|false|none|none|
+|methods|[string]|true|none|none|
+|source|string|true|none|none|
+|version|integer(int32)|true|none|none|
+
 <h2 id="tocS_ExecAccepted">ExecAccepted</h2>
 <!-- backwards compatibility -->
 <a id="schemaexecaccepted"></a>
@@ -1672,6 +1860,28 @@ Request body for `POST /api/fs/reset`.
 |ca_id|string|true|none|none|
 |label|string|true|none|none|
 |message|string¦null|false|none|Optional human note recorded on the reflog entry, like a commit message.|
+
+<h2 id="tocS_Limits">Limits</h2>
+<!-- backwards compatibility -->
+<a id="schemalimits"></a>
+<a id="schema_Limits"></a>
+<a id="tocSlimits"></a>
+<a id="tocslimits"></a>
+
+```json
+{
+  "heap_mb": 0,
+  "timeout_seconds": 0
+}
+
+```
+
+### Properties
+
+|Name|Type|Required|Restrictions|Description|
+|---|---|---|---|---|
+|heap_mb|integer(int64)|true|none|none|
+|timeout_seconds|integer(int64)|true|none|none|
 
 <h2 id="tocS_OutputQuery">OutputQuery</h2>
 <!-- backwards compatibility -->

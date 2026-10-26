@@ -108,10 +108,9 @@ scheduler-runner/target/debug/mcp-js-scheduler-runner /path/to/runner-3.json
 The runner admission listener serves HTTP; use an existing authenticated TLS
 termination arrangement for remote access. Both worker and callback clients require
 HTTPS except loopback HTTP. Redirects/retries are disabled. Callback endpoints are
-tried in configured order only after a definitive 409 (no acquired owner). Any
-network ambiguity or other error stops the attempt. An offline first endpoint can
-therefore cause lost work even if another leader is available; this is conservative
-failure behavior, not robust leader discovery. Fixed-voter scheduler networking now requires a shared cluster credential and
+tried in configured order after a definitive 409 (no acquired owner) or a definite
+connection-establishment failure. Any network ambiguity or other error stops the
+attempt; this is conservative failure behavior, not general leader discovery. Fixed-voter scheduler networking now requires a shared cluster credential and
 binds the configured advertised address. Set `cluster_bearer_env` in each runner
 config to an environment reference (see `example.json`); provide the same secret
 on every voter. It is never persisted in the checkpoint, membership or log. All

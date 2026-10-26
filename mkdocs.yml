@@ -28,12 +28,17 @@ nav:
 
   - Tutorials:
       - Overview: tutorials/overview.md
+      - Schedule your first run: tutorials/first-schedule.md
+      - Create your first HTTP function: tutorials/first-http-function.md
       - Run SQLite in WebAssembly: tutorials/sqlite-wasm.md
       - Render charts with Chart.js: tutorials/chartjs.md
       - Call Modal (serverless GPUs/sandboxes): tutorials/modal.md
 
   - How-to:
       - Overview: how-to/overview.md
+      - Stop scheduled work: how-to/stop-scheduled-work.md
+      - Update and retire HTTP handlers: how-to/manage-http-functions.md
+      - Deploy and test scheduler/HTTP on NixOS: how-to/scheduler-http-nixos.md
       - Running JavaScript & TypeScript: how-to/js-execution.md
       - Stateful sessions & heap snapshots: how-to/sessions-and-heaps.md
       - Heap storage backends: how-to/storage-backends.md
@@ -58,6 +63,8 @@ nav:
 
   - Concepts:
       - Overview: concepts/overview.md
+      - Scheduler admission and cancellation: concepts/scheduler-admission.md
+      - HTTP revisions and execution lifetime: concepts/http-functions.md
       - Running JavaScript & TypeScript: concepts/js-execution.md
       - Stateful sessions & heap snapshots: concepts/sessions-and-heaps.md
       - Heap storage backends: concepts/storage-backends.md
@@ -78,6 +85,9 @@ nav:
 
   - Reference:
       - Overview: reference/overview.md
+      - Scheduler and HTTP feature status: reference/scheduler-http-status.md
+      - Scheduler: reference/scheduler.md
+      - HTTP functions: reference/http-functions.md
       - CLI Flags: reference/cli-flags.md
       - Configuration file: reference/config-file.md
       - HTTP API: reference/http-api.md

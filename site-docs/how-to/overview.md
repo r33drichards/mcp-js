@@ -28,3 +28,9 @@ end-to-end, build-something-real walkthroughs, see the
 
 - [Concepts](../concepts/overview.md) — the reasoning behind these tasks.
 - [Reference](../reference/overview.md) — every flag, tool, and API field.
+
+## Scheduler and HTTP functions
+
+- [Stop scheduled work](stop-scheduled-work.md) — disable, cancel, and investigate uncertain outcomes.
+- [Update and retire HTTP handlers](manage-http-functions.md) — conditional revisions and safe retries.
+- [Deploy and test scheduler/HTTP on NixOS](scheduler-http-nixos.md) — module setup and VM checks.

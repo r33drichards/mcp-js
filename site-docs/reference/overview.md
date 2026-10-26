@@ -19,3 +19,9 @@ Hand-written platform reference:
 For feature-level explanations and behaviour, see the
 [Concepts](../concepts/overview.md) section; for task recipes, see the
 [How-to guides](../how-to/overview.md).
+
+## Scheduler and HTTP functions
+
+- [Scheduler and HTTP feature status](scheduler-http-status.md) — implemented baseline and pending parent integration.
+- [Scheduler](scheduler.md) — configuration, calendar policies, commands, and limits.
+- [HTTP functions](http-functions.md) — routes, definitions, handler contract, and bounds.
