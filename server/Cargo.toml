@@ -74,6 +74,9 @@ regorus = "0.5"
 # "http2" lets fetch() negotiate HTTP/2 via ALPN on https URLs (h1 remains the
 # floor; plaintext http stays h1 because h2c needs prior knowledge).
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "http2"], default-features = false }
+# rmcp 3.x uses reqwest 0.13. Keep its downstream bearer client separate from
+# the existing fetch/OAuth reqwest 0.12 integrations.
+reqwest_mcp = { package = "reqwest", version = "0.13.4", default-features = false, features = ["json", "stream", "rustls"] }
 # WebSocket client for the policy-gated `WebSocket` global. rustls to match
 # reqwest's TLS stack (rustls 0.23 / tokio-rustls 0.26 already in-tree).
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
