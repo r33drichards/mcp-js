@@ -1,49 +1,102 @@
-//! Reproduction: heap persistence + a large session working set crashes the
-//! whole server process at snapshot time, killing every session.
+//! Reproduction: with heap persistence on, an execution that runs out of heap
+//! after it has suspended at an `await` crashes the whole server process,
+//! killing every session.
 //!
-//! Symptom (reported from the pi-irc deployment, image built from `main`):
-//! with `--heap-store dir` (heap persistence on) alongside `--fs-store dir`, a
-//! `run_js` that performs a large `isomorphic-git` clone into the session
-//! filesystem makes the engine abort when it serializes the post-run V8 heap
-//! snapshot. The abort is a V8 `SnapshotCreator` fatal, printed as:
+//! Originally reported from the pi-irc deployment as "a large isomorphic-git
+//! clone crashes the engine at snapshot time" (`--heap-store dir` plus
+//! `--fs-store dir`). Bisecting that report against a stateful server showed
+//! the clone, the filesystem store, the network, and the data size are all
+//! incidental; the trigger is:
+//!
+//!   heap persistence ON  +  the run hits the V8 heap limit  +  the OOM happens
+//!   after the module's top level has suspended at an `await` (a resolved
+//!   promise is enough; a timer or a completed `fetch` behave the same).
+//!
+//! Observed matrix (all on `main` at 4b7daaff, 64 MiB heap cap):
+//!
+//! | run                                            | `--heap-store none` | `--heap-store dir`          |
+//! |------------------------------------------------|---------------------|-----------------------------|
+//! | OOM at top level, no `await`                   | graceful OOM error  | graceful OOM error          |
+//! | `await Promise.resolve()` then OOM             | graceful OOM error  | **process abort**           |
+//! | `await` timer then OOM                         | graceful OOM error  | **process abort**           |
+//! | 4 KB `fetch` then OOM                          | graceful OOM error  | **process abort**           |
+//! | 60 MiB `fetch` body (OOMs decoding base64)     | graceful OOM error  | **process abort**           |
+//! | 56 MiB `fetch` body (fits)                     | ok                  | ok                          |
+//! | large clone of trycua/cua (OOMs at 2 GiB cap)  | graceful OOM error  | **process abort**           |
+//!
+//! Crash signature, printed by V8 right before the process exits (wait status
+//! 5 / `Trace/BPT trap`):
 //!
 //! ```text
 //! Unknown external reference 0x....
 //! <unresolved>
 //! ```
 //!
-//! Because this is a C++ `abort()` inside `runtime.snapshot()`
-//! (`server/src/engine/mod.rs`, `let snapshot_data = runtime.snapshot();`), it
-//! is NOT caught by the surrounding `catch_unwind`: the process dies, so every
-//! other session on the server dies with it. A small clone snapshots fine, so
-//! the trigger is the size/shape of the live heap reachable at snapshot time,
-//! not the clone itself.
+//! Why (see `server/src/engine/mod.rs`): `near_heap_limit_callback` sets the
+//! OOM flag, calls `isolate.terminate_execution()`, and doubles the limit so
+//! V8 can unwind. `execute_stateful` then calls `runtime.snapshot()`
+//! **unconditionally**, before it inspects `output_result` (which is `Err` and
+//! makes it throw the snapshot away). When the termination interrupted the
+//! event loop (anything after the first `await`), deno_core's op-driver /
+//! promise-reaction state is still reachable from the heap, and V8's
+//! `SnapshotCreator` aborts on an external pointer that is not in the
+//! registered external-reference table. The abort is a C++ `abort()`, so the
+//! surrounding `catch_unwind` cannot catch it and every session dies. A
+//! top-level OOM leaves no such state behind, which is why the sync case is
+//! fine.
 //!
-//! Expected (what this test asserts): a session that overruns snapshotting must
-//! surface a per-execution error (e.g. an OOM or "snapshot failed" result) and
-//! leave the server process and OTHER sessions alive — never take the process
-//! down. Confirmed workaround today: run with heap persistence off
-//! (`--heap-store none`) and filesystem snapshots on, which turns the crash
-//! into a graceful `Out of memory: V8 heap limit exceeded` result.
+//! What this file asserts: the process must stay alive and other sessions must
+//! keep working; the OOM must come back as a per-execution error, exactly as it
+//! does with heap persistence off. The async case is red on `main` today; the
+//! sync case is included as a green control so the contrast is explicit.
 //!
-//! This test is red on `main` today: the server process exits during the clone.
+//! Cost: the offline tests need no network, no git, no policies; they spawn the
+//! built server binary with a 64 MiB heap cap and finish in a few seconds
+//! using well under 200 MB of RAM and a few MB of disk.
 //!
-//! It needs network access (imports `isomorphic-git` from esm.sh and clones a
-//! public GitHub repo) and takes ~1 minute, so it is gated behind an env var.
-//! Run it with:
+//! The two crashing cases are `#[ignore]`d so `cargo test` (the required CI
+//! check) stays green until the engine is fixed; the green control always runs.
+//! Run the reproduction for real with:
 //!
 //! ```bash
-//! RUN_SNAPSHOT_CRASH_REPRO=1 cargo test --test heap_snapshot_large_session_crash -- --nocapture
+//! cargo test --test heap_snapshot_large_session_crash -- --ignored --nocapture
 //! ```
 //!
-//! Override the repo with `SNAPSHOT_CRASH_REPO_URL` (default: the confirmed
-//! trigger `https://github.com/trycua/cua`).
+//! Remove the `#[ignore]`s when the fix lands so they guard the behaviour.
+//!
+//! Why not fix it here: skipping `runtime.snapshot()` on a failed run is not
+//! enough — rusty_v8's `OwnedIsolate::drop` asserts that a snapshot-creator
+//! isolate produced a blob (`create_blob`) before being dropped, so the engine
+//! must either drain deno_core's pending op/promise state before snapshotting
+//! a terminated isolate, or stop running stateful executions in a
+//! snapshot-creator isolate that it cannot abandon.
+//!
+//! The original large-clone reproduction is kept as an opt-in variant (network,
+//! ~1 minute, ~1 GB of RAM, ~150 MB of disk):
+//!
+//! ```bash
+//! RUN_SNAPSHOT_CRASH_REPRO_REMOTE=1 cargo test --test heap_snapshot_large_session_crash -- --nocapture
+//! ```
 
 use reqwest::Client;
 use serde_json::{json, Value};
 use std::process::Stdio;
 use tokio::process::{Child, Command};
 use tokio::time::{sleep, Duration};
+
+/// Allocate until the V8 heap limit trips. With a 64 MiB cap this takes well
+/// under a second.
+const OOM_LOOP: &str = r#"
+globalThis.keep = [];
+for (let i = 0; ; i++) {
+    const a = new Array(4096);
+    for (let j = 0; j < 4096; j++) a[j] = { i, j, s: "v" + j };
+    globalThis.keep.push(a);
+}
+"#;
+
+const BYSTANDER: &str =
+    "globalThis.n = (globalThis.n ?? 0) + 1; console.log('bystander', globalThis.n);";
 
 fn find_available_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0")
@@ -53,7 +106,7 @@ fn find_available_port() -> u16 {
         .port()
 }
 
-/// A temp dir that cleans itself up, and a helper to write policy files into it.
+/// A temp dir that cleans itself up.
 struct Workspace {
     dir: std::path::PathBuf,
 }
@@ -92,55 +145,39 @@ impl Drop for Workspace {
     }
 }
 
-/// Policies that let the sandbox import isomorphic-git from esm.sh, fetch from
-/// GitHub, and read/write its session filesystem — the pi-irc clone setup.
-fn write_policies(ws: &Workspace) -> std::path::PathBuf {
-    let fetch = ws.write(
-        "policies/fetch.rego",
-        "package mcp.fetch\ndefault allow = true\n",
-    );
-    let modules = ws.write(
-        "policies/modules.rego",
-        "package mcp.modules\ndefault allow = true\n",
-    );
-    let fs = ws.write(
-        "policies/filesystem.rego",
-        "package mcp.filesystem\ndefault allow = true\n",
-    );
-    let config = json!({
-        "policies": {
-            "fetch": { "policies": [{ "url": format!("file://{}", fetch.display()) }] },
-            "modules": { "policies": [{ "url": format!("file://{}", modules.display()) }] },
-            "filesystem": { "policies": [{ "url": format!("file://{}", fs.display()) }] },
-        }
-    });
-    ws.write(
-        "config.json",
-        &serde_json::to_string_pretty(&config).unwrap(),
-    )
+struct TestServer {
+    child: Child,
+    base: String,
 }
 
-async fn spawn_server(port: u16, ws: &Workspace, config: &std::path::Path) -> Child {
+/// Spawn the built server binary as a child process with heap persistence on,
+/// so a crash cannot take the test runner down. `extra` appends flags.
+async fn spawn_server(ws: &Workspace, heap_mb: u32, extra: &[&str]) -> TestServer {
+    let port = find_available_port();
+    let port_string = port.to_string();
+    let heap_dir = ws.path("heaps");
+    // Every server gets its own session log: tests run in parallel and the
+    // default path is shared, which makes same-named sessions collide.
+    let sessions = ws.path("sessions");
+    let heap_mb = heap_mb.to_string();
+    let mut args: Vec<&str> = vec![
+        "--http-port",
+        &port_string,
+        "--heap-store",
+        "dir",
+        "--heap-dir",
+        heap_dir.to_str().unwrap(),
+        "--session-db-path",
+        sessions.to_str().unwrap(),
+        "--heap-memory-max",
+        &heap_mb,
+        "--execution-timeout",
+        "300",
+    ];
+    args.extend_from_slice(extra);
+
     let child = Command::new(env!("CARGO_BIN_EXE_server"))
-        .args([
-            "--http-port",
-            &port.to_string(),
-            "--heap-store",
-            "dir",
-            "--heap-dir",
-            ws.path("heaps").to_str().unwrap(),
-            "--fs-store",
-            "dir",
-            "--session-db-path",
-            ws.path("sessions").to_str().unwrap(),
-            "--heap-memory-max",
-            "2048",
-            "--execution-timeout",
-            "300",
-            "--allow-external-modules",
-            "--config",
-            config.to_str().unwrap(),
-        ])
+        .args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
@@ -148,17 +185,17 @@ async fn spawn_server(port: u16, ws: &Workspace, config: &std::path::Path) -> Ch
         .spawn()
         .expect("spawn server");
 
+    let base = format!("http://127.0.0.1:{port}");
     let client = Client::new();
-    let health = format!("http://127.0.0.1:{port}/api/executions");
     for _ in 0..150 {
         if client
-            .get(&health)
+            .get(format!("{base}/api/executions"))
             .timeout(Duration::from_millis(200))
             .send()
             .await
             .is_ok()
         {
-            return child;
+            return TestServer { child, base };
         }
         sleep(Duration::from_millis(100)).await;
     }
@@ -190,40 +227,188 @@ async fn server_alive(client: &Client, base: &str) -> bool {
         .is_ok()
 }
 
-#[tokio::test]
-async fn large_clone_with_heap_persistence_must_not_crash_the_process() {
-    if std::env::var("RUN_SNAPSHOT_CRASH_REPRO").is_err() {
-        eprintln!(
-            "skipping: set RUN_SNAPSHOT_CRASH_REPRO=1 to run (network + ~1 min). \
-             See the module docs."
+/// Poll an execution to a terminal state. Returns `None` when the server stops
+/// answering mid-run, which is the crash this file is about.
+async fn wait_terminal(client: &Client, base: &str, id: &str, max_polls: usize) -> Option<Value> {
+    for _ in 0..max_polls {
+        sleep(Duration::from_millis(250)).await;
+        let resp = client
+            .get(format!("{base}/api/executions/{id}"))
+            .timeout(Duration::from_secs(2))
+            .send()
+            .await
+            .ok()?;
+        let body: Value = resp.json().await.ok()?;
+        match body["status"].as_str().unwrap_or("") {
+            "running" | "queued" => continue,
+            _ => return Some(body),
+        }
+    }
+    panic!("execution {id} never reached a terminal state");
+}
+
+/// The shared scenario: a bystander session exists, `trigger` runs in another
+/// session and is expected to overrun the heap. Asserts the server survives,
+/// the trigger reports a graceful OOM, and the bystander still runs.
+async fn assert_oom_is_graceful(server: &mut TestServer, trigger: &str, what: &str) {
+    assert_survives(server, trigger, what, false).await;
+}
+
+/// Like `assert_oom_is_graceful`, but `allow_success` also accepts a run that
+/// completes (for triggers whose OOM depends on the configured heap cap).
+async fn assert_survives(server: &mut TestServer, trigger: &str, what: &str, allow_success: bool) {
+    let client = Client::new();
+    let base = server.base.clone();
+
+    let bystander = submit(&client, &base, "bystander", BYSTANDER).await;
+    let first = wait_terminal(&client, &base, &bystander, 200)
+        .await
+        .expect("bystander should run before the trigger");
+    assert_eq!(first["status"], "completed", "bystander warm-up: {first}");
+
+    let id = submit(&client, &base, "trigger", trigger).await;
+    let result = match wait_terminal(&client, &base, &id, 1200).await {
+        Some(result) => result,
+        None => {
+            sleep(Duration::from_millis(500)).await;
+            let exited = server.child.try_wait().ok().flatten();
+            panic!(
+                "REPRODUCED ({what}): the server process died instead of reporting the OOM. \
+                 With --heap-store dir, execute_stateful calls runtime.snapshot() even though \
+                 the run was terminated by the heap-limit callback; V8's SnapshotCreator then \
+                 aborts with 'Unknown external reference / <unresolved>' and every session dies. \
+                 Child exit: {exited:?}. Expected the same graceful \
+                 'Out of memory: V8 heap limit exceeded' result that --heap-store none returns."
+            );
+        }
+    };
+
+    assert!(
+        server_alive(&client, &base).await,
+        "server must stay alive after the OOM ({what}); result {result}"
+    );
+    if !(allow_success && result["status"] == "completed") {
+        assert_eq!(
+            result["status"], "failed",
+            "OOM must be a failed execution ({what}): {result}"
         );
-        return;
+        let error = result["error"].as_str().unwrap_or("");
+        assert!(
+            error.contains("Out of memory"),
+            "expected a graceful OOM error ({what}), got {error:?}: {result}"
+        );
     }
 
+    // Other sessions must be untouched: the bystander keeps its heap and runs.
+    let again = submit(&client, &base, "bystander", BYSTANDER).await;
+    let second = wait_terminal(&client, &base, &again, 200)
+        .await
+        .expect("bystander should still run after the OOM");
+    assert_eq!(
+        second["status"], "completed",
+        "bystander after OOM ({what}): {second}"
+    );
+    let output: Value = client
+        .get(format!("{base}/api/executions/{again}/output"))
+        .send()
+        .await
+        .expect("bystander output")
+        .json()
+        .await
+        .expect("bystander output json");
+    assert_eq!(
+        output["data"].as_str().unwrap_or("").trim(),
+        "bystander 2",
+        "bystander heap must persist across the other session's OOM ({what}); output: {output}"
+    );
+}
+
+/// Control: an OOM in top-level synchronous code is handled gracefully even
+/// with heap persistence on. Green on `main`.
+#[tokio::test]
+async fn sync_oom_with_heap_persistence_is_graceful() {
+    let ws = Workspace::new();
+    let mut server = spawn_server(&ws, 64, &[]).await;
+    assert_oom_is_graceful(&mut server, OOM_LOOP, "sync OOM").await;
+    let _ = server.child.kill().await;
+}
+
+/// The bug: the same OOM after the module has suspended at an `await` takes the
+/// whole process down. Red on `main`. Offline, seconds, no git.
+#[tokio::test]
+#[ignore = "known engine crash (heap persistence + OOM after await); run with -- --ignored"]
+async fn oom_after_await_with_heap_persistence_must_not_crash_the_process() {
+    let ws = Workspace::new();
+    let mut server = spawn_server(&ws, 64, &[]).await;
+    let trigger = format!("await Promise.resolve();\n{OOM_LOOP}");
+    assert_oom_is_graceful(&mut server, &trigger, "OOM after await").await;
+    let _ = server.child.kill().await;
+}
+
+/// Same bug through a timer, the other common way a run suspends. Red on `main`.
+#[tokio::test]
+#[ignore = "known engine crash (heap persistence + OOM after timer); run with -- --ignored"]
+async fn oom_after_timer_with_heap_persistence_must_not_crash_the_process() {
+    let ws = Workspace::new();
+    let mut server = spawn_server(&ws, 64, &[]).await;
+    let trigger = format!("await new Promise((r) => setTimeout(r, 10));\n{OOM_LOOP}");
+    assert_oom_is_graceful(&mut server, &trigger, "OOM after timer").await;
+    let _ = server.child.kill().await;
+}
+
+/// Policies that let the sandbox import isomorphic-git from esm.sh, fetch from
+/// GitHub, and use its session filesystem — the pi-irc clone setup.
+fn write_open_policies(ws: &Workspace) -> std::path::PathBuf {
+    let fetch = ws.write(
+        "policies/fetch.rego",
+        "package mcp.fetch\ndefault allow = true\n",
+    );
+    let modules = ws.write(
+        "policies/modules.rego",
+        "package mcp.modules\ndefault allow = true\n",
+    );
+    let fs = ws.write(
+        "policies/filesystem.rego",
+        "package mcp.filesystem\ndefault allow = true\n",
+    );
+    let config = json!({
+        "policies": {
+            "fetch": { "policies": [{ "url": format!("file://{}", fetch.display()) }] },
+            "modules": { "policies": [{ "url": format!("file://{}", modules.display()) }] },
+            "filesystem": { "policies": [{ "url": format!("file://{}", fs.display()) }] },
+        }
+    });
+    ws.write(
+        "config.json",
+        &serde_json::to_string_pretty(&config).unwrap(),
+    )
+}
+
+/// The original report, kept as an opt-in variant: a large isomorphic-git clone
+/// into the session filesystem overruns the heap while decoding the response
+/// bodies (after many awaits), and the process dies the same way. Needs
+/// network and about a minute; gated behind `RUN_SNAPSHOT_CRASH_REPRO_REMOTE=1`.
+/// Override the repo with `SNAPSHOT_CRASH_REPO_URL`.
+#[tokio::test]
+async fn large_remote_clone_with_heap_persistence_must_not_crash_the_process() {
+    if std::env::var("RUN_SNAPSHOT_CRASH_REPRO_REMOTE").is_err() {
+        eprintln!("skipping: set RUN_SNAPSHOT_CRASH_REPRO_REMOTE=1 to run (network, ~1 min)");
+        return;
+    }
     let repo = std::env::var("SNAPSHOT_CRASH_REPO_URL")
         .unwrap_or_else(|_| "https://github.com/trycua/cua".to_string());
 
     let ws = Workspace::new();
-    let config = write_policies(&ws);
-    let port = find_available_port();
-    let base = format!("http://127.0.0.1:{port}");
-    let mut server = spawn_server(port, &ws, &config).await;
-    let client = Client::new();
-
-    // A second, tiny session proves the blast radius: it exists before the
-    // crash and must still be serviceable afterwards.
-    let bystander = submit(
-        &client,
-        &base,
-        "bystander",
-        "globalThis.n = (globalThis.n ?? 0) + 1; console.log('bystander', globalThis.n);",
-    )
-    .await;
-
-    // The trigger: clone a large repo into the session filesystem, holding the
-    // isomorphic-git http machinery live, then let the run end so the engine
-    // serializes the heap snapshot.
-    let clone_code = format!(
+    let config = write_open_policies(&ws);
+    let extra = [
+        "--fs-store",
+        "dir",
+        "--allow-external-modules",
+        "--config",
+        config.to_str().unwrap(),
+    ];
+    let mut server = spawn_server(&ws, 2048, &extra).await;
+    let trigger = format!(
         r#"
         const git = (await import("https://esm.sh/isomorphic-git@1.27.1")).default;
         const http = (await import("https://esm.sh/isomorphic-git@1.27.1/http/web/index.js")).default;
@@ -232,99 +417,6 @@ async fn large_clone_with_heap_persistence_must_not_crash_the_process() {
         "#,
         repo = serde_json::to_string(&repo).unwrap()
     );
-    let clone_id = submit(&client, &base, "cloner", &clone_code).await;
-
-    // Poll the clone execution to a terminal state. If the process crashes, the
-    // HTTP endpoint stops answering — detect that and fail with the diagnosis.
-    let mut terminal: Option<Value> = None;
-    for _ in 0..1200 {
-        sleep(Duration::from_millis(250)).await;
-        let resp = match client
-            .get(format!("{base}/api/executions/{clone_id}"))
-            .timeout(Duration::from_secs(2))
-            .send()
-            .await
-        {
-            Ok(resp) => resp,
-            Err(_) => {
-                // The server stopped answering mid-clone. Confirm the process
-                // is actually gone, then fail with the reproduction verdict.
-                sleep(Duration::from_millis(500)).await;
-                let still_up = server_alive(&client, &base).await;
-                let exited = server.try_wait().ok().flatten();
-                assert!(
-                    still_up,
-                    "REPRODUCED: the server process died while snapshotting the large \
-                     session (clone of {repo}). Heap persistence (--heap-store dir) makes \
-                     runtime.snapshot() abort the whole process on a large heap \
-                     (V8 SnapshotCreator: 'Unknown external reference / <unresolved>'), \
-                     taking every session down. Child exit: {exited:?}. Expected a \
-                     per-execution error with the process staying alive (as \
-                     --heap-store none does, returning a graceful OOM)."
-                );
-                unreachable!("server_alive returned false above");
-            }
-        };
-        let body: Value = resp.json().await.expect("execution json");
-        match body["status"].as_str().unwrap_or("") {
-            "running" | "queued" => continue,
-            _ => {
-                terminal = Some(body);
-                break;
-            }
-        }
-    }
-
-    let clone_result = terminal.expect("clone execution never reached a terminal state");
-    let status = clone_result["status"].as_str().unwrap_or("");
-
-    // The server must still be alive and the bystander session still usable.
-    assert!(
-        server_alive(&client, &base).await,
-        "server must stay alive after the large clone; clone status was {status:?}, \
-         result {clone_result}"
-    );
-
-    // The clone execution must be a clean terminal state: either it completed,
-    // or it failed gracefully (e.g. OOM). What must never happen is a process
-    // crash, which the branch above already asserts against.
-    assert!(
-        matches!(status, "completed" | "failed" | "timed_out" | "cancelled"),
-        "unexpected clone status {status:?}: {clone_result}"
-    );
-
-    // The bystander session, created before the clone, must still resolve and
-    // its next run must still work — proving the crash did not wipe sessions.
-    let _ = bystander;
-    let bystander2 = submit(
-        &client,
-        &base,
-        "bystander",
-        "globalThis.n = (globalThis.n ?? 0) + 1; console.log('bystander', globalThis.n);",
-    )
-    .await;
-    let mut ok = false;
-    for _ in 0..120 {
-        sleep(Duration::from_millis(250)).await;
-        let body: Value = client
-            .get(format!("{base}/api/executions/{bystander2}"))
-            .send()
-            .await
-            .expect("bystander poll")
-            .json()
-            .await
-            .expect("bystander json");
-        if body["status"].as_str().unwrap_or("") != "running"
-            && body["status"].as_str().unwrap_or("") != "queued"
-        {
-            ok = body["status"] == "completed";
-            break;
-        }
-    }
-    assert!(
-        ok,
-        "bystander session should still run after the large clone"
-    );
-
-    let _ = server.kill().await;
+    assert_survives(&mut server, &trigger, "large remote clone", true).await;
+    let _ = server.child.kill().await;
 }
