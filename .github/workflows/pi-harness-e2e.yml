@@ -4,29 +4,9 @@ name: pi Harness E2E
 # and run_js tools driven against the real native engine through the generated
 # Node bindings. Mirrors node-uniffi-e2e.yml's build, then adds a pi checkout.
 
+# Intentionally opt-in: Node, Python and pi E2E each rebuild the costly native
+# shared library. Dispatch manually instead of duplicating that work on every PR.
 on:
-  push:
-    branches: [main]
-    paths:
-      - "node/**"
-      - "server/**"
-      - "mcp-v8-uniffi-python/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "flake.nix"
-      - "flake.lock"
-      - ".github/workflows/pi-harness-e2e.yml"
-  pull_request:
-    branches: [main]
-    paths:
-      - "node/**"
-      - "server/**"
-      - "mcp-v8-uniffi-python/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "flake.nix"
-      - "flake.lock"
-      - ".github/workflows/pi-harness-e2e.yml"
   workflow_dispatch:
     inputs:
       pi_ref:
