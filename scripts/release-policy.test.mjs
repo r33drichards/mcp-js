@@ -47,7 +47,7 @@ if (command === 'curl') process.stdout.write(JSON.stringify({ tag_name: process.
 if (command === 'git' && args[0] === 'rev-parse') process.stdout.write(process.env.TAG_SHA + '\n');
 if (command === 'git' && args[0] === 'merge-base' && process.env.NOT_ON_MAIN === 'true') process.exit(1);
 `;
-    for (const command of ['gh', 'git', 'curl']) {
+    for (const command of ['gh', 'git', 'curl', 'cargo']) {
       writeFileSync(join(dir, command), stub);
       chmodSync(join(dir, command), 0o755);
     }
@@ -62,6 +62,7 @@ if (command === 'git' && args[0] === 'merge-base' && process.env.NOT_ON_MAIN ===
         GITHUB_REPOSITORY: 'example/mcp-js',
         GITHUB_SHA: workflowSha,
         GH_TOKEN: '',
+        CARGO_REGISTRY_TOKEN: '',
         TAG_SHA: sha,
         RUN_SHA: sha,
         LATEST_TAG: 'v0.22.0',
@@ -188,6 +189,30 @@ test('binary release metadata preserves RC and stable channel policy', () => {
     assert.deepEqual(result.output, { prerelease, make_latest: makeLatest });
   }
 });
+
+for (const TAG of ['v0.23.0-rc.1', 'v1.2.3-beta', 'v1.2.3-0', 'v1.2.3-rc.2+build.5']) {
+  test(`crate publisher skips prerelease ${TAG}`, () => {
+    const result = runStep('release.yml', 'Publish to crates.io', { TAG });
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(result.calls, []);
+  });
+}
+
+for (const TAG of ['v0.23.0', 'v1.2.3+build-rc.1']) {
+  test(`crate publisher preserves stable publication ${TAG}`, () => {
+    const result = runStep('release.yml', 'Publish to crates.io', { TAG });
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(result.calls, [{ command: 'cargo', args: ['publish', '--token', ''] }]);
+  });
+}
+
+for (const TAG of ['', 'v1.2.3-01', 'v1.2.3\ninjected=true']) {
+  test(`crate publisher fails closed for invalid tag ${JSON.stringify(TAG)}`, () => {
+    const result = runStep('release.yml', 'Publish to crates.io', { TAG });
+    assert.notEqual(result.status, 0);
+    assert.deepEqual(result.calls, []);
+  });
+}
 
 test('all publishing consumers are wired to the tested policy', () => {
   const docker = workflow('docker-publish.yml');
