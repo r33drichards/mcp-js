@@ -1,0 +1,248 @@
+{
+  "format": 1,
+  "model": "RunnerAdmission",
+  "name": "witness_late_launch",
+  "seed": 1,
+  "max_steps": 10,
+  "max_faults": 0,
+  "expected_violation": "WitnessAbsent",
+  "mutation": null,
+  "states": [
+    {
+      "epoch": 1,
+      "attempted": [],
+      "badAdmission": false,
+      "ready": [],
+      "active": true,
+      "grants": [],
+      "consumed": [],
+      "net": 0,
+      "event": {
+        "op": "init",
+        "worker": 0
+      },
+      "launches": 0,
+      "step": 0,
+      "quorum": true,
+      "reserved": [],
+      "lateLaunch": false,
+      "up": [
+        1,
+        2
+      ],
+      "claimed": false,
+      "admitted": []
+    },
+    {
+      "epoch": 1,
+      "attempted": [],
+      "badAdmission": false,
+      "ready": [],
+      "active": true,
+      "grants": [],
+      "consumed": [],
+      "net": 0,
+      "event": {
+        "op": "claim",
+        "worker": 0
+      },
+      "launches": 0,
+      "step": 1,
+      "quorum": true,
+      "reserved": [],
+      "lateLaunch": false,
+      "up": [
+        1,
+        2
+      ],
+      "claimed": true,
+      "admitted": []
+    },
+    {
+      "epoch": 1,
+      "attempted": [],
+      "badAdmission": false,
+      "ready": [],
+      "active": true,
+      "grants": [],
+      "consumed": [],
+      "net": 1,
+      "event": {
+        "op": "send",
+        "worker": 0
+      },
+      "launches": 0,
+      "step": 2,
+      "quorum": true,
+      "reserved": [],
+      "lateLaunch": false,
+      "up": [
+        1,
+        2
+      ],
+      "claimed": true,
+      "admitted": []
+    },
+    {
+      "epoch": 1,
+      "attempted": [],
+      "badAdmission": false,
+      "ready": [],
+      "active": true,
+      "grants": [],
+      "consumed": [],
+      "net": 0,
+      "event": {
+        "op": "reserve",
+        "worker": 1
+      },
+      "launches": 0,
+      "step": 3,
+      "quorum": true,
+      "reserved": [
+        1
+      ],
+      "lateLaunch": false,
+      "up": [
+        1,
+        2
+      ],
+      "claimed": true,
+      "admitted": []
+    },
+    {
+      "epoch": 1,
+      "attempted": [
+        1
+      ],
+      "badAdmission": false,
+      "ready": [],
+      "active": true,
+      "grants": [
+        1
+      ],
+      "consumed": [],
+      "net": 0,
+      "event": {
+        "op": "admit",
+        "worker": 1
+      },
+      "launches": 0,
+      "step": 4,
+      "quorum": true,
+      "reserved": [
+        1
+      ],
+      "lateLaunch": false,
+      "up": [
+        1,
+        2
+      ],
+      "claimed": true,
+      "admitted": [
+        1
+      ]
+    },
+    {
+      "epoch": 2,
+      "attempted": [
+        1
+      ],
+      "badAdmission": false,
+      "ready": [],
+      "active": true,
+      "grants": [
+        1
+      ],
+      "consumed": [],
+      "net": 0,
+      "event": {
+        "op": "takeover",
+        "worker": 0
+      },
+      "launches": 0,
+      "step": 5,
+      "quorum": true,
+      "reserved": [
+        1
+      ],
+      "lateLaunch": false,
+      "up": [
+        1,
+        2
+      ],
+      "claimed": true,
+      "admitted": [
+        1
+      ]
+    },
+    {
+      "epoch": 2,
+      "attempted": [
+        1
+      ],
+      "badAdmission": false,
+      "ready": [
+        1
+      ],
+      "active": true,
+      "grants": [],
+      "consumed": [
+        1
+      ],
+      "net": 0,
+      "event": {
+        "op": "consume",
+        "worker": 1
+      },
+      "launches": 0,
+      "step": 6,
+      "quorum": true,
+      "reserved": [
+        1
+      ],
+      "lateLaunch": false,
+      "up": [
+        1,
+        2
+      ],
+      "claimed": true,
+      "admitted": [
+        1
+      ]
+    },
+    {
+      "epoch": 2,
+      "attempted": [
+        1
+      ],
+      "badAdmission": false,
+      "ready": [],
+      "active": true,
+      "grants": [],
+      "consumed": [
+        1
+      ],
+      "net": 0,
+      "event": {
+        "op": "launch",
+        "worker": 1
+      },
+      "launches": 1,
+      "step": 7,
+      "quorum": true,
+      "reserved": [
+        1
+      ],
+      "lateLaunch": true,
+      "up": [
+        1,
+        2
+      ],
+      "claimed": true,
+      "admitted": [
+        1
+      ]
+    }
+  ]
+}

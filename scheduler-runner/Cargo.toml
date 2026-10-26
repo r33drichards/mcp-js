@@ -1,0 +1,27 @@
+[package]
+name = "mcp-js-scheduler-runner"
+publish = false
+version = "0.1.0"
+edition = "2024"
+[workspace]
+[dependencies]
+subtle = "2.6"
+axum = "0.8"
+sha2 = "0.10"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sled = "0.34"
+tokio = { version = "1", features = ["full", "test-util"] }
+tokio-util = "0.7"
+reqwest = { version = "0.12", features = ["json"] }
+futures = "0.3"
+tracing = "0.1"
+
+mcp-js-scheduler-core = { path = "../scheduler-core" }
+chrono = { version = "0.4", features = ["serde"] }
+[dev-dependencies]
+tempfile = "3"
