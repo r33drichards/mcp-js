@@ -119,10 +119,42 @@ pub async fn run_js(
         req = req.tags(tags);
     }
     req = req.maybe_mcp_headers(mcp_headers.cloned());
+    let wait = args.get("wait").and_then(Value::as_bool).unwrap_or(false);
     let execution_id = match req.execute().await {
         Ok(id) => id,
+        Err(e) if wait => return json!({"error": e}),
         Err(e) => format!("error: {}", e),
     };
+    if wait {
+        // Keep the caller's invocation alive until the engine has flushed the
+        // filesystem and recorded the session, not merely until V8 has stopped.
+        // Never resubmit on a wait timeout: return the original execution id.
+        let settled = tokio::time::timeout(std::time::Duration::from_secs(305), async {
+            loop {
+                match runtime.get_execution(execution_id.clone()) {
+                    Ok(info) if matches!(info.status.as_str(), "completed" | "failed" | "timed_out" | "cancelled") => break,
+                    Err(_) => break,
+                    _ => tokio::time::sleep(std::time::Duration::from_millis(25)).await,
+                }
+            }
+        }).await.is_ok();
+        let mut response = get_execution(runtime, &json!({"execution_id": execution_id}));
+        response["execution_id"] = json!(execution_id.clone());
+        if settled {
+            // A later Lambda request may reach a different environment; return
+            // bounded console output now rather than requiring a local-id poll.
+            if let Ok(page) = runtime.get_execution_output(
+                execution_id, None, Some(u64::MAX), None, Some(1024 * 1024),
+            ) {
+                response["output"] = json!(page.data);
+                response["output_truncated"] = json!(page.has_more);
+            }
+        }
+        if !settled {
+            response["wait_timed_out"] = json!(true);
+        }
+        return response;
+    }
     json!({ "execution_id": execution_id })
 }
 

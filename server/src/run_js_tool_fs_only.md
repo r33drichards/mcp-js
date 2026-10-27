@@ -7,6 +7,7 @@ This server has a **persistent per-session filesystem** but **no heap persistenc
 TypeScript support is type removal only — types are stripped before execution, not checked. Invalid types will be silently removed, not reported as errors.
 
 params:
+- wait (optional, default false): hold this request until execution and snapshot persistence finish. Returns execution status, fs, and up to 1 MiB of console output (`output`, `output_truncated`) inline with execution_id, even for task-capable clients. Use true on request-scoped runtimes such as Lambda. Set the host timeout above the execution/storage deadline. Waiting is capped at 305 seconds; a wait timeout preserves execution_id and sets wait_timed_out. Do not replay the execution.
 - code (optional): the javascript or typescript code to run. Provide either `code` or `file`.
 - file (optional): path to a JavaScript/TypeScript file **on the server's own filesystem** to read and execute instead of inline `code`. Provide either `code` or `file`, not both. Disabled unless the server was started with `--allow-run-js-file` or a `run_js_file` policy.
 - fs (optional): a filesystem snapshot to mount (a label or a CA id). Omit to continue this session's filesystem, which is mounted automatically.

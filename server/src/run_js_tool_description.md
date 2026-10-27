@@ -5,6 +5,7 @@ Submits code for **async execution** in stateful MCP mode — returns an executi
 TypeScript support is type removal only — types are stripped before execution, not checked. Invalid types will be silently removed, not reported as errors.
 
 params:
+- wait (optional, default false): hold this request until execution and snapshot persistence finish. Returns execution status, snapshot ids, and up to 1 MiB of console output (`output`, `output_truncated`) inline with execution_id, even for task-capable clients. Use true on request-scoped runtimes such as Lambda. Set the host timeout above the execution/storage deadline. Waiting is capped at 305 seconds; a wait timeout preserves execution_id and sets wait_timed_out. Do not replay the execution.
 - code (optional): the javascript or typescript code to run. Provide either `code` or `file`.
 - file (optional): path to a JavaScript/TypeScript file **on the server's own filesystem** to read and execute instead of inline `code`. Provide either `code` or `file`, not both. This is disabled by default: the server must be started with `--allow-run-js-file` (allow any path) or a `run_js_file` policy in `--policies-json` (allow specific paths/dirs), otherwise the call is rejected. The path is resolved on the server, not uploaded from the client.
 - heap (optional): content hash (SHA-256 hex string) from a previous execution to resume that session, or omit for a fresh session
