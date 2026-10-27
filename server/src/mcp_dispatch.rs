@@ -94,12 +94,12 @@ fn map_arg(args: &Value, key: &str) -> Option<HashMap<String, String>> {
     Some(m)
 }
 
-pub async fn run_js(
+pub(crate) async fn submit_run_js(
     runtime: &Engine,
     session_id: Option<&str>,
     mcp_headers: Option<&Value>,
     args: &Value,
-) -> Value {
+) -> Result<String, String> {
     let mut req = runtime.run_js(string_arg(args, "code").unwrap_or_default());
     req = req.maybe_file(string_arg(args, "file"));
     if let Some(h) = string_arg(args, "heap") {
@@ -119,43 +119,56 @@ pub async fn run_js(
         req = req.tags(tags);
     }
     req = req.maybe_mcp_headers(mcp_headers.cloned());
+    req.execute().await
+}
+
+pub async fn run_js(
+    runtime: &Engine,
+    session_id: Option<&str>,
+    mcp_headers: Option<&Value>,
+    args: &Value,
+) -> Value {
     let wait = args.get("wait").and_then(Value::as_bool).unwrap_or(false);
-    let execution_id = match req.execute().await {
+    let execution_id = match submit_run_js(runtime, session_id, mcp_headers, args).await {
         Ok(id) => id,
         Err(e) if wait => return json!({"error": e}),
         Err(e) => format!("error: {}", e),
     };
     if wait {
-        // Keep the caller's invocation alive until the engine has flushed the
-        // filesystem and recorded the session, not merely until V8 has stopped.
-        // Never resubmit on a wait timeout: return the original execution id.
-        let settled = tokio::time::timeout(std::time::Duration::from_secs(305), async {
-            loop {
-                match runtime.get_execution(execution_id.clone()) {
-                    Ok(info) if matches!(info.status.as_str(), "completed" | "failed" | "timed_out" | "cancelled") => break,
-                    Err(_) => break,
-                    _ => tokio::time::sleep(std::time::Duration::from_millis(25)).await,
-                }
-            }
-        }).await.is_ok();
-        let mut response = get_execution(runtime, &json!({"execution_id": execution_id}));
-        response["execution_id"] = json!(execution_id.clone());
-        if settled {
-            // A later Lambda request may reach a different environment; return
-            // bounded console output now rather than requiring a local-id poll.
-            if let Ok(page) = runtime.get_execution_output(
-                execution_id, None, Some(u64::MAX), None, Some(1024 * 1024),
-            ) {
-                response["output"] = json!(page.data);
-                response["output_truncated"] = json!(page.has_more);
-            }
-        }
-        if !settled {
-            response["wait_timed_out"] = json!(true);
-        }
-        return response;
+        return wait_for_execution(runtime, execution_id).await;
     }
     json!({ "execution_id": execution_id })
+}
+
+/// Wait without holding the engine lifecycle lock. Cancellation changes the
+/// visible status before V8 and persistence stop; the activity guard is authoritative.
+pub(crate) async fn wait_for_execution(runtime: &Engine, execution_id: String) -> Value {
+    let settled = tokio::time::timeout(std::time::Duration::from_secs(305), async {
+        loop {
+            if runtime.scheduled_execution_stopped(&execution_id)
+                || runtime.get_execution(execution_id.clone()).is_err()
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    }).await.is_ok();
+    let mut response = get_execution(runtime, &json!({"execution_id": execution_id}));
+    response["execution_id"] = json!(execution_id.clone());
+    if settled {
+        // Byte offset selects byte mode; line mode ignores the byte limit.
+        if let Ok(page) = runtime.get_execution_output(
+            execution_id, None, None, Some(0), Some(1024 * 1024),
+        ) {
+            response["output"] = json!(page.data);
+            response["output_truncated"] = json!(page.has_more);
+        }
+    }
+    if !settled {
+        // Never resubmit: retain the original id on a bounded wait timeout.
+        response["wait_timed_out"] = json!(true);
+    }
+    response
 }
 
 /// Cap on artifact payload bytes attached inline to a stateless `run_js`

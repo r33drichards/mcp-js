@@ -1253,6 +1253,20 @@ impl Engine {
         self.ensure_running()?;
         let arguments = parse_json_object("arguments_json", &request.arguments_json)?;
         let mcp_headers = request.mcp_headers.map(mcp_headers_value);
+        if self.session_capable() && request.name == "run_js"
+            && arguments.get("wait").and_then(Value::as_bool).unwrap_or(false)
+        {
+            // Register while protected from shutdown, but let cancellation,
+            // unrelated tools and shutdown proceed while this request waits.
+            let submitted = crate::mcp_dispatch::submit_run_js(
+                self, request.session_id.as_deref(), mcp_headers.as_ref(), &arguments,
+            ).await;
+            drop(_lifecycle_guard);
+            return Ok(match submitted {
+                Ok(id) => crate::mcp_dispatch::wait_for_execution(self, id).await,
+                Err(error) => json!({"error": error}),
+            }.into());
+        }
         let result = self
             .dispatch_tool(
                 request.session_id.as_deref(),

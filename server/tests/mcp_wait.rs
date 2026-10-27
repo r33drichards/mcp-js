@@ -106,6 +106,10 @@ async fn wait_settles_execution_and_filesystem_before_reply() {
         "{rejected}"
     );
     assert!(rejected.get("execution_id").is_none());
+    let large = call(&reopened, json!({"wait":true,"code":"console.log('x'.repeat(2 * 1024 * 1024));"})).await;
+    assert_eq!(large["status"], "completed", "{large}");
+    assert!(large["output"].as_str().unwrap().len() <= 1024 * 1024);
+    assert_eq!(large["output_truncated"], true);
     // Omission keeps the old execution-id-only async response contract.
     let asynchronous = call(
         &reopened,
@@ -185,4 +189,29 @@ async fn explicit_wait_stays_inline_for_task_capable_http_clients() {
     assert!(result["output"].as_str().unwrap().contains("42"));
     child.kill().await.unwrap();
     child.wait().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn waiting_request_does_not_block_other_tools_or_cancellation() {
+    initialize_v8();
+    let dir = tempfile::tempdir().unwrap();
+    let engine = engine(dir.path());
+    let waiting_engine = engine.clone();
+    let waiting = tokio::spawn(async move {
+        call(&waiting_engine, json!({"wait":true,"code":"await new Promise(r => setTimeout(r, 10000));"})).await
+    });
+    let id = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            if let Some(item) = engine.list_executions().unwrap().first() { break item.id.clone(); }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }).await.unwrap();
+    let cancelled = tokio::time::timeout(std::time::Duration::from_secs(1), engine.invoke_tool_response(ToolCallRequest {
+        name: "cancel_execution".into(), arguments_json: json!({"execution_id": id}).to_string(),
+        session_id: Some("another-session".into()), mcp_headers: None,
+    })).await.expect("wait must not hold lifecycle lock").unwrap();
+    assert!(cancelled.json.get("error").is_none(), "{}", cancelled.json);
+    let result = waiting.await.unwrap();
+    assert_eq!(result["status"], "cancelled", "{result}");
+    engine.shutdown().await;
 }
