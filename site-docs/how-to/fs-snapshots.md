@@ -339,3 +339,19 @@ A denied operation returns an error before any pointer move happens. See [Polici
 - [How-to: Heap storage backends](storage-backends.md)
 - [How-to: Clustering & replication (Raft)](clustering.md)
 - [Concepts: Policies](../concepts/policies.md)
+
+### Runtime bookkeeping on DynamoDB
+
+Selecting `--dynamodb-table` also stores execution records, console pages,
+artifact records and upload grants in a separate `/runtime` namespace. The
+execution registry does not open a local sled database in this mode. Completed
+records and console output can be queried from a fresh process. In-flight V8
+isolates and cancellation handles remain process-local; durable metadata does
+not resume interrupted JavaScript or enable cross-process cancellation.
+
+Use `run_js` with `wait: true` on Lambda. Final metadata is acknowledged before
+that request completes, and storage failures are returned as errors. Values
+larger than 128 KiB are stored as immutable S3 blobs with DynamoDB references;
+configure `--s3-bucket` for those values. Replaced/unreferenced runtime blobs are
+not swept by filesystem GC; retain them until a dedicated runtime retention
+policy is configured. Runtime metadata currently has no automatic expiry.

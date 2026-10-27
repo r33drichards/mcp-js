@@ -90,6 +90,7 @@ impl ConsoleLogState {
         data: &[u8],
         error: &RefCell<Option<String>>,
     ) {
+        if error.borrow().is_some() { return; }
         let mut buffer = buffer.borrow_mut();
         buffer.extend_from_slice(data);
         while buffer.len() >= PAGE_SIZE {
@@ -117,6 +118,7 @@ impl ConsoleLogState {
     }
 
     fn flush_buffer(tree: &mcp_metadata_store::RuntimeTree, seq: &AtomicU64, buffer: &RefCell<Vec<u8>>, error: &RefCell<Option<String>>) {
+        if error.borrow().is_some() { return; }
         let mut buffer = buffer.borrow_mut();
         if !buffer.is_empty() {
             let page: Vec<u8> = buffer.drain(..).collect();

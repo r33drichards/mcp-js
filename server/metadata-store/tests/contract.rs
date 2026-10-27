@@ -275,3 +275,31 @@ fn runtime_sled_contract() {
     let db = sled::Config::new().temporary(true).open().unwrap();
     runtime_contract(Arc::new(SledStore(db)));
 }
+
+#[derive(Default)]
+struct TestBlobs(std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>);
+#[async_trait::async_trait]
+impl mcp_metadata_store::runtime_tree::RuntimeBlobs for TestBlobs {
+    async fn put(&self, name: &str, value: &[u8]) -> Result<(), String> {
+        self.0.lock().unwrap().insert(name.into(), value.to_vec()); Ok(())
+    }
+    async fn get(&self, name: &str) -> Result<Vec<u8>, String> {
+        self.0.lock().unwrap().get(name).cloned().ok_or("missing runtime blob".into())
+    }
+}
+#[tokio::test(flavor="current_thread")]
+async fn runtime_large_values_are_blob_references_and_missing_blobs_fail() {
+    use mcp_metadata_store::RuntimeStore;
+    let db = Arc::new(SledStore(sled::Config::new().temporary(true).open().unwrap()));
+    let blobs = Arc::new(TestBlobs::default());
+    let tree = RuntimeStore::new(db.clone()).unwrap().with_blobs(blobs.clone()).tree("large");
+    let value = vec![42; 500_000];
+    tree.insert(b"artifact", &value).unwrap();
+    assert_eq!(tree.get(b"artifact").unwrap(), Some(value.clone()));
+    let raw = db.get("large", b"artifact").await.unwrap().unwrap();
+    assert_eq!(raw[0], 2); assert!(raw.len() < 100);
+    let reopened = RuntimeStore::new(db).unwrap().with_blobs(blobs.clone()).tree("large");
+    assert_eq!(reopened.get(b"artifact").unwrap(), Some(value));
+    blobs.0.lock().unwrap().clear();
+    assert!(reopened.get(b"artifact").is_err());
+}
