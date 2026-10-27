@@ -2,15 +2,15 @@
 //! manifest CA id, plus a per-label append-only reflog enabling rollback.
 //!
 //! This is the only coordinated write in the system — blobs and manifests are
-//! immutable and idempotent. In single-node mode CAS is serialized by an
-//! in-process mutex around read-compare-write; in cluster mode (`with_cluster`)
-//! pointer moves route through the Raft leader so CAS is linearizable
-//! cluster-wide. Persistence mirrors `heap_tags.rs` (a sled DB).
+//! immutable and idempotent. Standalone CAS uses a backend transaction for
+//! both the head and reflog; in cluster mode (`with_cluster`) pointer moves
+//! route through the Raft leader. Sled is the default, DynamoDB is opt-in.
 
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::cluster::ClusterNode;
+use mcp_metadata_store::{MetadataStore, SledStore, Write};
 
 pub type CaId = [u8; 32];
 
@@ -85,9 +85,7 @@ pub struct RefLogEntry {
 
 #[derive(Clone)]
 pub struct LabelStore {
-    db: sled::Db,
-    /// Serializes read-compare-write across in-process callers so CAS is atomic.
-    lock: Arc<tokio::sync::Mutex<()>>,
+    db: Arc<dyn MetadataStore>,
     /// When set, label pointer moves are coordinated through the Raft leader so
     /// CAS is linearizable cluster-wide; otherwise they are single-node.
     cluster_node: Option<Arc<ClusterNode>>,
@@ -97,16 +95,14 @@ impl LabelStore {
     pub fn new(path: &str) -> Result<Self, String> {
         let db = sled::open(path).map_err(|e| format!("Failed to open sled db: {e}"))?;
         Ok(Self {
-            db,
-            lock: Arc::new(tokio::sync::Mutex::new(())),
+            db: Arc::new(SledStore(db)),
             cluster_node: None,
         })
     }
 
     pub fn from_db(db: sled::Db) -> Self {
         Self {
-            db,
-            lock: Arc::new(tokio::sync::Mutex::new(())),
+            db: Arc::new(SledStore(db)),
             cluster_node: None,
         }
     }
@@ -121,8 +117,11 @@ impl LabelStore {
         Self::from_db(db)
     }
 
-    /// Coordinate label pointer moves through the Raft cluster so CAS is
-    /// linearizable cluster-wide. Blobs and manifests remain node-local.
+    /// Construct a label store with an explicitly selected persistence backend.
+    pub fn from_store(db: Arc<dyn MetadataStore>) -> Self {
+        Self { db, cluster_node: None }
+    }
+
     pub fn with_cluster(mut self, node: Arc<ClusterNode>) -> Self {
         self.cluster_node = Some(node);
         self
@@ -157,35 +156,18 @@ impl LabelStore {
         Ok((key, val))
     }
 
-    fn heads(&self) -> Result<sled::Tree, String> {
-        self.db
-            .open_tree(HEAD_TREE)
-            .map_err(|e| format!("open heads tree: {e}"))
+    async fn read_head(&self, label: &str) -> Result<Option<CaId>, String> {
+        self.db.get(HEAD_TREE, label.as_bytes()).await?.map(|v| to_caid(&v)).transpose()
     }
 
-    fn logs(&self) -> Result<sled::Tree, String> {
-        self.db
-            .open_tree(LOG_TREE)
-            .map_err(|e| format!("open log tree: {e}"))
-    }
-
-    fn read_head(&self, label: &str) -> Result<Option<CaId>, String> {
-        let heads = self.heads()?;
-        match heads.get(label.as_bytes()).map_err(|e| e.to_string())? {
-            Some(v) => to_caid(&v).map(Some),
-            None => Ok(None),
-        }
-    }
-
-    /// Append a reflog entry. Keyed by a globally monotonic id so entries scan
-    /// back in insertion order within a label's prefix.
-    fn append_log(&self, label: &str, entry: &RefLogEntry) -> Result<(), String> {
-        let logs = self.logs()?;
-        let id = self.db.generate_id().map_err(|e| e.to_string())?;
-        let key = log_key(label, id);
-        let val = serde_json::to_vec(entry).map_err(|e| e.to_string())?;
-        logs.insert(key, val).map_err(|e| e.to_string())?;
-        Ok(())
+    async fn move_head(&self, label: &str, expected: Option<CaId>, target: CaId, op: RefOp, message: Option<String>) -> Result<bool, String> {
+        let id = self.db.generate_id().await?;
+        let entry = RefLogEntry { at: Self::now(), from: expected, to: target, op, message };
+        self.db.compare_and_swap(
+            Write::new(HEAD_TREE, label.as_bytes(), target.to_vec()),
+            expected.map(|v| v.to_vec()),
+            vec![Write::new(LOG_TREE, log_key(label, id), serde_json::to_vec(&entry).map_err(|e| e.to_string())?)],
+        ).await
     }
 
     fn now() -> i64 {
@@ -220,23 +202,9 @@ impl LabelStore {
             }
             return Ok(());
         }
-        let _guard = self.lock.lock().await;
-        if self.read_head(label)?.is_some() {
+        if !self.move_head(label, None, head, RefOp::Create, message).await? {
             return Err(format!("label already exists: {label}"));
         }
-        self.heads()?
-            .insert(label.as_bytes(), &head)
-            .map_err(|e| e.to_string())?;
-        self.append_log(
-            label,
-            &RefLogEntry {
-                at: Self::now(),
-                from: None,
-                to: head,
-                op: RefOp::Create,
-                message,
-            },
-        )?;
         Ok(())
     }
 
@@ -247,7 +215,7 @@ impl LabelStore {
                 None => Ok(None),
             };
         }
-        self.read_head(label)
+        self.read_head(label).await
     }
 
     /// Atomic compare-and-set. Advances `label` to `new` only if its current
@@ -276,25 +244,7 @@ impl LabelStore {
                 .await?;
             return Ok(applied);
         }
-        let _guard = self.lock.lock().await;
-        let current = self.read_head(label)?;
-        if current != expect {
-            return Ok(false);
-        }
-        self.heads()?
-            .insert(label.as_bytes(), &new)
-            .map_err(|e| e.to_string())?;
-        self.append_log(
-            label,
-            &RefLogEntry {
-                at: Self::now(),
-                from: current,
-                to: new,
-                op: RefOp::Push,
-                message,
-            },
-        )?;
-        Ok(true)
+        self.move_head(label, expect, new, RefOp::Push, message).await
     }
 
     /// Unconditionally move `label` to `target` (the `reset` verb). Records a
@@ -328,22 +278,13 @@ impl LabelStore {
                 .await?;
             return Ok(());
         }
-        let _guard = self.lock.lock().await;
-        let current = self.read_head(label)?;
-        self.heads()?
-            .insert(label.as_bytes(), &target)
-            .map_err(|e| e.to_string())?;
-        self.append_log(
-            label,
-            &RefLogEntry {
-                at: Self::now(),
-                from: current,
-                to: target,
-                op: RefOp::Reset,
-                message,
-            },
-        )?;
-        Ok(())
+        // Retry a definite CAS conflict so the reflog's `from` is truthful
+        // even with several independent Lambda writers.
+        for _ in 0..64 {
+            let current = self.read_head(label).await?;
+            if self.move_head(label, current, target, RefOp::Reset, message.clone()).await? { return Ok(()); }
+        }
+        Err("label contention: retry force".into())
     }
 
     pub async fn log(&self, label: &str) -> Result<Vec<RefLogEntry>, String> {
@@ -355,15 +296,8 @@ impl LabelStore {
             }
             return Ok(out);
         }
-        let logs = self.logs()?;
-        let prefix = log_prefix(label);
-        let mut out = Vec::new();
-        for item in logs.scan_prefix(&prefix) {
-            let (_k, v) = item.map_err(|e| e.to_string())?;
-            let entry: RefLogEntry = serde_json::from_slice(&v).map_err(|e| e.to_string())?;
-            out.push(entry);
-        }
-        Ok(out)
+        self.db.scan(LOG_TREE, &log_prefix(label), false, None).await?.into_iter()
+            .map(|(_,v)| serde_json::from_slice(&v).map_err(|e| e.to_string())).collect()
     }
 
     /// Return the most recent `limit` reflog entries for `label`, oldest-first
@@ -389,20 +323,10 @@ impl LabelStore {
             }
             return Ok(out);
         }
-        let logs = self.logs()?;
-        let prefix = log_prefix(label);
-        // scan_prefix is double-ended: take the newest `limit` entries, then
-        // flip back to oldest-first to match `log`'s ordering.
-        let mut out = Vec::with_capacity(limit);
-        for item in logs.scan_prefix(&prefix).rev() {
-            let (_k, v) = item.map_err(|e| e.to_string())?;
-            out.push(serde_json::from_slice(&v).map_err(|e| e.to_string())?);
-            if out.len() == limit {
-                break;
-            }
-        }
-        out.reverse();
-        Ok(out)
+        let mut entries: Vec<RefLogEntry> = self.db.scan(LOG_TREE, &log_prefix(label), true, Some(limit)).await?.into_iter()
+            .map(|(_,v)| serde_json::from_slice(&v).map_err(|e| e.to_string())).collect::<Result<_,_>>()?;
+        entries.reverse();
+        Ok(entries)
     }
 
     pub async fn list(&self) -> Result<Vec<(String, CaId)>, String> {
@@ -414,14 +338,8 @@ impl LabelStore {
             }
             return Ok(out);
         }
-        let heads = self.heads()?;
-        let mut out = Vec::new();
-        for item in heads.iter() {
-            let (k, v) = item.map_err(|e| e.to_string())?;
-            let label = String::from_utf8_lossy(&k).to_string();
-            out.push((label, to_caid(&v)?));
-        }
-        Ok(out)
+        self.db.scan(HEAD_TREE, b"", false, None).await?.into_iter()
+            .map(|(k,v)| Ok((String::from_utf8(k).map_err(|e| e.to_string())?, to_caid(&v)?))).collect()
     }
 }
 

@@ -12,6 +12,8 @@ name = "server"
 path = "src/main.rs"
 
 [dependencies]
+mcp-metadata-store = { path = "../metadata-store" }
+aws-sdk-dynamodb = "1"
 subtle = "2.6"
 cli-derive = { path = "cli-derive" }
 uniffi-builder-derive = { path = "uniffi-builder-derive" }

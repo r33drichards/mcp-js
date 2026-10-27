@@ -312,6 +312,8 @@ async fn async_main(cli: Cli) -> Result<()> {
             s3_bucket: cli.s3_bucket.clone(),
             cache_dir: cli.cache_dir.clone(),
             session_db_path: cli.session_db_path.clone(),
+            dynamodb_table: cli.dynamodb_table.clone(),
+            dynamodb_namespace: cli.dynamodb_namespace.clone(),
             http_port: cli.http_port,
             execution_db_path: None,
             heap_memory_max_bytes,

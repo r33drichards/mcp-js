@@ -544,6 +544,8 @@ impl Engine {
             (None, None) => (None, None),
         };
         let storage = StorageBootstrapConfig {
+            dynamodb_table: None,
+            dynamodb_namespace: "mcp-v8".into(),
             heap_store: heap.kind,
             heap_dir: heap.dir,
             fs_store: fs.kind,

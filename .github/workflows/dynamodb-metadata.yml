@@ -1,0 +1,36 @@
+name: DynamoDB metadata integration
+on:
+  pull_request:
+    paths:
+      - 'metadata-store/**'
+      - 'server/src/engine/fs_labels.rs'
+      - 'server/src/engine/session_log.rs'
+      - 'server/src/engine/heap_tags.rs'
+      - 'server/src/bootstrap.rs'
+      - 'server/src/cli.rs'
+      - 'server/tests/metadata_backends.rs'
+      - 'Cargo.toml'
+      - 'server/Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/dynamodb-metadata.yml'
+  push:
+    branches: [main]
+    paths:
+      - "metadata-store/**"
+      - "Cargo.lock"
+      - ".github/workflows/dynamodb-metadata.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  localstack:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - name: Test sled and disposable LocalStack with the same contract
+        run: >-
+          nix --extra-experimental-features 'nix-command flakes'
+          shell nixpkgs#cargo nixpkgs#rustc nixpkgs#gcc nixpkgs#cmake nixpkgs#pkg-config nixpkgs#openssl
+          -c cargo test --locked -p mcp-metadata-store --features testcontainers-tests
