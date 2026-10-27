@@ -1021,8 +1021,8 @@ pub struct ExecutionConfig<'a> {
     pub fs_mount: Option<fs::FsMountHandle>,
     pub mcp_headers: Option<serde_json::Value>,
     pub subprocess_config: Option<&'a subprocess::SubprocessConfig>,
-    pub console_tree: Option<sled::Tree>,
-    pub console_error_tree: Option<sled::Tree>,
+    pub console_tree: Option<mcp_metadata_store::RuntimeTree>,
+    pub console_error_tree: Option<mcp_metadata_store::RuntimeTree>,
     pub process_exit_state: Option<&'a console::ProcessExitState>,
     pub module_loader_config: Option<&'a module_loader::ModuleLoaderConfig>,
     pub bootstrap_script: Option<&'a str>,
@@ -1105,13 +1105,13 @@ impl<'a> ExecutionConfig<'a> {
         self
     }
 
-    pub fn console_tree(mut self, tree: sled::Tree) -> Self {
-        self.console_tree = Some(tree);
+    pub fn console_tree(mut self, tree: impl Into<mcp_metadata_store::RuntimeTree>) -> Self {
+        self.console_tree = Some(tree.into());
         self
     }
 
-    pub fn console_error_tree(mut self, tree: sled::Tree) -> Self {
-        self.console_error_tree = Some(tree);
+    pub fn console_error_tree(mut self, tree: impl Into<mcp_metadata_store::RuntimeTree>) -> Self {
+        self.console_error_tree = Some(tree.into());
         self
     }
 
@@ -1456,7 +1456,7 @@ pub fn execute_stateless(
             };
 
         // Flush any remaining console output before runtime is dropped.
-        console::flush_console(&mut runtime);
+        console::flush_console(&mut runtime)?;
 
         *isolate_handle.lock().unwrap() = None;
 
@@ -1778,7 +1778,7 @@ pub fn execute_stateful(
         };
 
         // Flush any remaining console output before snapshot.
-        console::flush_console_snapshot(&mut runtime);
+        console::flush_console_snapshot(&mut runtime)?;
 
         *isolate_handle.lock().unwrap() = None;
 
@@ -2691,7 +2691,7 @@ impl Engine {
         execution_timeout_secs: Option<u64>,
         tags: Option<HashMap<String, String>>,
         raw_snapshot: Option<Vec<u8>>,
-        console_tree: sled::Tree,
+        console_tree: mcp_metadata_store::RuntimeTree,
         mcp_headers: Option<serde_json::Value>,
     ) {
         let registry = match &self.execution_registry {
