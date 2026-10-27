@@ -41,6 +41,27 @@ With `--s3-bucket` set, blobs and tree nodes live in S3 (so every node resolves 
 
 ## Mount a snapshot in run_js
 
+### Request-scoped hosts (Lambda)
+
+Session-capable `run_js` calls are asynchronous by default. A host that freezes
+the process when an HTTP response ends can suspend the execution before its
+snapshot and session metadata are persisted. Send `"wait": true` to keep the
+call open until the execution settles, including when the client supports MCP
+tasks. The response includes `status`, `fs`, `execution_id`, and bounded console
+`output` (up to 1 MiB; check `output_truncated`).
+
+Keep the host's request timeout above the execution and storage deadlines.
+Waiting is bounded to 305 seconds; `wait_timed_out: true` preserves the original
+execution ID and is **not** permission to replay a possibly completed write.
+Execution IDs and console registries remain process-local: use the inline
+response and durable snapshot/session handles across cold starts, not a later
+request's ability to recover an old execution ID. For durable serverless files,
+combine `--fs-store s3` with `--dynamodb-table` and leave `--cache-dir` unset.
+
+```json
+{"tool":"run_js","arguments":{"code":"console.log(await fs.readFile('/work/state.txt', 'utf8'))","wait":true}}
+```
+
 Pass the `fs` parameter to `run_js`. The handle is either a **label name** (mounted at the label's current head) or a **64-hex CA id** (mounted detached/pinned). It is independent of the `heap` parameter.
 
 MCP tool call:

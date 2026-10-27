@@ -3096,6 +3096,27 @@ pub use ffi::*;
 mod execution_activity_tests {
     use super::*;
 
+    #[tokio::test]
+    async fn inline_wait_does_not_confuse_cancelled_with_stopped() {
+        use ffi_config::{BlobStoreBuilder, EngineConfigBuilder, ExecutionLimitsBuilder, StoreBackend};
+        let dir = tempfile::tempdir().unwrap();
+        let engine = Engine::create(EngineConfigBuilder::new()
+            .limits(ExecutionLimitsBuilder::new().heap_memory_max_mb(64).execution_timeout_secs(2).build().unwrap())
+            .data_dir(dir.path().to_string_lossy().to_string())
+            .fs_snapshot_store(BlobStoreBuilder::new().backend(StoreBackend::Directory).build().unwrap())
+            .build().unwrap()).unwrap();
+        let registry = engine.execution_registry.as_ref().unwrap();
+        registry.register("cancel-before-stop").unwrap();
+        registry.cancel("cancel-before-stop").unwrap();
+        let wait = crate::mcp_dispatch::wait_for_execution(&engine, "cancel-before-stop".into());
+        tokio::pin!(wait);
+        assert!(tokio::time::timeout(Duration::from_millis(75), &mut wait).await.is_err());
+        registry.mark_stopped("cancel-before-stop");
+        let result = tokio::time::timeout(Duration::from_secs(1), wait).await.unwrap();
+        assert_eq!(result["status"], "cancelled");
+        engine.shutdown().await;
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn panicking_or_aborted_driver_cannot_report_detached_execution_stopped() {
         for abort in [false, true] {

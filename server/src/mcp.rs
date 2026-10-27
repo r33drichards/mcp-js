@@ -256,6 +256,10 @@ pub struct RunJsArgs {
     pub heap: Option<String>,
     #[serde(default)]
     pub fs: Option<String>,
+    /// Wait for execution and snapshot persistence before returning. Useful for
+    /// request-scoped hosts such as Lambda; false preserves asynchronous mode.
+    #[serde(default)]
+    pub wait: bool,
     #[serde(default)]
     pub heap_memory_max_mb: Option<usize>,
     #[serde(default)]
@@ -848,8 +852,13 @@ impl ServerHandler for McpService {
             return Ok(result.into());
         }
         // SEP-2663: run_js (the long-running tool) executes as a task when
-        // the client declared the tasks extension capability.
+        // the client declared the tasks extension capability, unless it asked
+        // to hold this invocation open with wait=true.
         if request.name.as_ref() == "run_js"
+            && !request.arguments.as_ref()
+                .and_then(|args| args.get("wait"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
             && context
                 .client_capabilities()
                 .is_some_and(|caps| caps.supports_tasks())
