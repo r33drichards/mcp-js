@@ -3098,9 +3098,10 @@ mod execution_activity_tests {
 
     #[tokio::test]
     async fn inline_wait_does_not_confuse_cancelled_with_stopped() {
-        use ffi_config::{BlobStoreBuilder, EngineConfigBuilder, StoreBackend};
+        use ffi_config::{BlobStoreBuilder, EngineConfigBuilder, ExecutionLimitsBuilder, StoreBackend};
         let dir = tempfile::tempdir().unwrap();
         let engine = Engine::create(EngineConfigBuilder::new()
+            .limits(ExecutionLimitsBuilder::new().heap_memory_max_mb(64).execution_timeout_secs(2).build().unwrap())
             .data_dir(dir.path().to_string_lossy().to_string())
             .fs_snapshot_store(BlobStoreBuilder::new().backend(StoreBackend::Directory).build().unwrap())
             .build().unwrap()).unwrap();
