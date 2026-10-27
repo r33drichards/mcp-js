@@ -766,6 +766,7 @@ impl Engine {
     pub fn get_execution(&self, execution_id: String) -> Result<ExecutionInfo, RuntimeError> {
         self.execution_registry()?
             .get(&execution_id)
+            .map_err(operation_message)?
             .ok_or_else(|| operation_message(format!("Execution '{}' not found", execution_id)))
     }
 
@@ -795,7 +796,7 @@ impl Engine {
     }
 
     pub fn list_executions(&self) -> Result<Vec<ExecutionSummary>, RuntimeError> {
-        Ok(self.execution_registry()?.list())
+        self.execution_registry()?.list().map_err(operation_message)
     }
 
     pub async fn list_sessions(&self) -> Result<Vec<String>, RuntimeError> {

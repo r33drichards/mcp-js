@@ -8,7 +8,8 @@
 use std::sync::Arc;
 use dashmap::DashMap;
 use deno_core::v8;
-use serde::Serialize;
+use serde::{Serialize, Deserialize};
+use mcp_metadata_store::{MetadataStore, RuntimeStore, RuntimeTree};
 
 use super::artifacts::ArtifactMeta;
 
@@ -91,7 +92,9 @@ pub struct ConsoleOutputPage {
 #[derive(Clone)]
 pub struct ExecutionRegistry {
     executions: Arc<DashMap<ExecutionId, ExecutionRecord>>,
-    db: sled::Db,
+    db: Option<sled::Db>,
+    remote: Option<RuntimeStore>,
+    persistence_errors: Arc<DashMap<String, String>>,
 }
 
 impl ExecutionRegistry {
@@ -100,14 +103,43 @@ impl ExecutionRegistry {
             .map_err(|e| format!("Failed to open execution db at {}: {}", db_path, e))?;
         Ok(Self {
             executions: Arc::new(DashMap::new()),
-            db,
+            db: Some(db),
+            remote: None,
+            persistence_errors: Arc::new(DashMap::new()),
         })
     }
 
+    pub fn from_store(store: Arc<dyn MetadataStore>) -> Result<Self, String> {
+        Ok(Self { executions: Arc::new(DashMap::new()), db: None,
+            remote: Some(RuntimeStore::new(store)?), persistence_errors: Arc::new(DashMap::new()) })
+    }
+
+    pub fn from_runtime(remote: RuntimeStore) -> Self {
+        Self { executions: Arc::new(DashMap::new()), db: None, remote: Some(remote), persistence_errors: Arc::new(DashMap::new()) }
+    }
+
+    pub fn with_blobs(mut self, blobs: Arc<dyn mcp_metadata_store::runtime_tree::RuntimeBlobs>) -> Self {
+        self.remote = self.remote.map(|store| store.with_blobs(blobs)); self
+    }
+
+    fn tree(&self, name: &str) -> Result<RuntimeTree, String> {
+        if let Some(store) = &self.remote { return Ok(store.tree(name)); }
+        self.db.as_ref().ok_or("execution store unavailable")?.open_tree(name)
+            .map(RuntimeTree::from).map_err(|e| e.to_string())
+    }
+
+    fn persist(&self, id: &str) -> Result<(), String> {
+        if self.remote.is_none() { return Ok(()); }
+        if let Some(info) = self.local_info(id) {
+            self.tree("execution_records")?.insert(id, serde_json::to_vec(&info).map_err(|e| e.to_string())?)?;
+        }
+        Ok(())
+    }
+
     /// Register a new execution. Returns the sled tree for console output.
-    pub fn register(&self, id: &str) -> Result<sled::Tree, String> {
+    pub fn register(&self, id: &str) -> Result<RuntimeTree, String> {
         let tree_name = format!("ex:{}", id);
-        let tree = self.db.open_tree(&tree_name)
+        let tree = self.tree(&tree_name)
             .map_err(|e| format!("Failed to open console tree '{}': {}", tree_name, e))?;
 
         let record = ExecutionRecord {
@@ -125,20 +157,19 @@ impl ExecutionRegistry {
         };
         self.executions.insert(id.to_string(), record);
 
+        self.persist(id)?;
         Ok(tree)
     }
 
     /// Open the tree of outstanding artifact upload grants.
-    pub fn artifact_uploads_tree(&self) -> Result<sled::Tree, String> {
-        self.db
-            .open_tree("artifact_uploads")
+    pub fn artifact_uploads_tree(&self) -> Result<RuntimeTree, String> {
+        self.tree("artifact_uploads")
             .map_err(|e| format!("Failed to open artifact uploads tree: {}", e))
     }
 
     /// Open the shared keyed artifact tree (`"artifacts"`) in the execution db.
-    pub fn artifacts_tree(&self) -> Result<sled::Tree, String> {
-        self.db
-            .open_tree("artifacts")
+    pub fn artifacts_tree(&self) -> Result<RuntimeTree, String> {
+        self.tree("artifacts")
             .map_err(|e| format!("Failed to open artifacts tree: {}", e))
     }
 
@@ -165,6 +196,9 @@ impl ExecutionRegistry {
     }
 
     pub fn mark_stopped(&self, id: &str) {
+        if let Err(error) = self.persist(id) {
+            self.persistence_errors.insert(id.into(), error);
+        }
         if let Some(mut record) = self.executions.get_mut(id) {
             record.stopped = true;
             record.isolate_handle = None;
@@ -262,7 +296,7 @@ impl ExecutionRegistry {
     }
 
     /// Get execution status and result.
-    pub fn get(&self, id: &str) -> Option<ExecutionInfo> {
+    fn local_info(&self, id: &str) -> Option<ExecutionInfo> {
         self.executions.get(id).map(|r| ExecutionInfo {
             id: r.id.clone(),
             status: r.status.to_string(),
@@ -276,17 +310,28 @@ impl ExecutionRegistry {
         })
     }
 
+    pub fn get(&self, id: &str) -> Result<Option<ExecutionInfo>, String> {
+        if let Some(error) = self.persistence_errors.get(id) { return Err(format!("execution metadata persistence failed: {}", error.value())); }
+        if let Some(info) = self.local_info(id) { return Ok(Some(info)); }
+        if self.remote.is_none() { return Ok(None); }
+        self.tree("execution_records")?.get(id)?.map(|v| serde_json::from_slice(&v).map_err(|e| e.to_string())).transpose()
+    }
+
     /// List all executions.
-    pub fn list(&self) -> Vec<ExecutionSummary> {
-        self.executions.iter().map(|entry| {
-            let r = entry.value();
-            ExecutionSummary {
-                id: r.id.clone(),
-                status: r.status.to_string(),
-                started_at: r.started_at.clone(),
-                completed_at: r.completed_at.clone(),
+    pub fn list(&self) -> Result<Vec<ExecutionSummary>, String> {
+        let mut entries = std::collections::BTreeMap::new();
+        if self.remote.is_some() {
+            for row in self.tree("execution_records")?.iter() {
+                let (_, value) = row?;
+                let info: ExecutionInfo = serde_json::from_slice(&value).map_err(|e|e.to_string())?;
+                entries.insert(info.id.clone(), ExecutionSummary { id: info.id, status: info.status, started_at: info.started_at, completed_at: info.completed_at });
             }
-        }).collect()
+        }
+        for entry in self.executions.iter() {
+            let r = entry.value();
+            entries.insert(r.id.clone(), ExecutionSummary { id:r.id.clone(), status:r.status.to_string(), started_at:r.started_at.clone(), completed_at:r.completed_at.clone() });
+        }
+        Ok(entries.into_values().collect())
     }
 
     /// Get the execution status string for a given ID.
@@ -306,7 +351,7 @@ impl ExecutionRegistry {
         byte_limit: Option<u64>,
     ) -> Result<ConsoleOutputPage, String> {
         let tree_name = format!("ex:{}", id);
-        let tree = self.db.open_tree(&tree_name)
+        let tree = self.tree(&tree_name)
             .map_err(|e| format!("Failed to open console tree: {}", e))?;
 
         // Reconstruct full byte stream from WAL pages
@@ -392,7 +437,7 @@ impl ExecutionRegistry {
 }
 
 /// Execution info returned to callers.
-#[derive(Debug, Clone, Serialize, uniffi::Record)]
+#[derive(Debug, Clone, Serialize, Deserialize, uniffi::Record)]
 pub struct ExecutionInfo {
     pub id: ExecutionId,
     pub status: String,
@@ -426,5 +471,30 @@ mod tests {
         registry.complete("running", "late completion".to_string(), None);
         assert_eq!(registry.get_status("running").as_deref(), Some("cancelled"));
         assert_eq!(registry.cancel_all(), 0);
+    }
+}
+
+#[cfg(test)]
+mod persistence_tests {
+    use super::*;
+    #[test]
+    fn durable_execution_and_console_recover_without_local_registry() {
+        let db = sled::Config::new().temporary(true).open().unwrap();
+        let store = Arc::new(mcp_metadata_store::SledStore(db));
+        let first = ExecutionRegistry::from_store(store.clone()).unwrap();
+        let console = first.register("durable").unwrap();
+        console.insert(0u64.to_be_bytes(), b"persisted output\n").unwrap();
+        first.complete("durable", "42".into(), None);
+        first.set_fs("durable", Some("snapshot".into()));
+        first.mark_stopped("durable");
+        drop(first);
+        let second = ExecutionRegistry::from_store(store).unwrap();
+        let info = second.get("durable").unwrap().unwrap();
+        assert_eq!(info.status, "completed");
+        assert_eq!(info.result.as_deref(), Some("42"));
+        assert_eq!(info.fs.as_deref(), Some("snapshot"));
+        assert_eq!(second.list().unwrap().len(), 1);
+        assert_eq!(second.get_console_output("durable", None, None, Some(0), Some(100)).unwrap().data, "persisted output\n");
+        assert!(second.cancel("durable").is_err()); // A persisted record is not a local isolate.
     }
 }
