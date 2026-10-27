@@ -393,3 +393,11 @@ The [Diátaxis documentation map](site-docs/reference/scheduler-http-status.md)
 links guided tutorials, operational how-to guides, reference, and explanations
 for the experimental scheduler and dynamic HTTP functions. It records the #284 hardening integrated
 through #287, #293, and #295, without implying a main merge or deployment.
+
+### Optional DynamoDB metadata backend
+
+Use `--dynamodb-table TABLE --dynamodb-namespace NAME` for shared session history,
+heap tags, and filesystem label/reflog metadata. Sled remains the default;
+snapshot content stays in the independently selected S3/directory backend. See
+[metadata backends and integration tests](server/metadata-store/README.md) for table
+schema, IAM, limits, and LocalStack/Testcontainers setup.

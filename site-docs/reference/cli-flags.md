@@ -204,6 +204,21 @@ Path to the sled database for the session log (per-session heap+fs history) and 
 - Default: `/tmp/mcp-v8-sessions`
 - Value: `SESSION_DB_PATH`
 
+### `--dynamodb-table`
+
+Shared DynamoDB metadata table (String keys pk/sk). If absent, use sled. Covers session history, heap tags and filesystem labels, not Raft or the local execution registry. Incompatible with cluster mode
+
+- Environment: `MCP_V8_DYNAMODB_TABLE`
+- Value: `DYNAMODB_TABLE`
+
+### `--dynamodb-namespace`
+
+Isolation namespace within the DynamoDB metadata table
+
+- Environment: `MCP_V8_DYNAMODB_NAMESPACE`
+- Default: `mcp-v8`
+- Value: `DYNAMODB_NAMESPACE`
+
 ### `--public-url`
 
 Externally reachable base URL of this server, e.g. `https://mcp.example.com`. Used to build the absolute upload URLs returned by the `get_artifact_upload_url` tool; without it the tool returns only a path for the client to resolve against the server's address

@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::cluster::ClusterNode;
+use mcp_metadata_store::{MetadataStore, SledStore, Write};
 
 const HT_PREFIX: &str = "ht:";
 
@@ -14,7 +15,7 @@ pub struct HeapTagEntry {
 
 #[derive(Clone)]
 pub struct HeapTagStore {
-    db: sled::Db,
+    db: Arc<dyn MetadataStore>,
     cluster_node: Option<Arc<ClusterNode>>,
 }
 
@@ -22,7 +23,7 @@ impl HeapTagStore {
     pub fn new(path: &str) -> Result<Self, String> {
         let db = sled::open(path).map_err(|e| format!("Failed to open sled db: {}", e))?;
         Ok(Self {
-            db,
+            db: Arc::new(SledStore(db)),
             cluster_node: None,
         })
     }
@@ -32,9 +33,13 @@ impl HeapTagStore {
             .open()
             .map_err(|e| format!("Failed to open sled db: {}", e))?;
         Ok(Self {
-            db,
+            db: Arc::new(SledStore(db)),
             cluster_node: None,
         })
+    }
+
+    pub fn from_store(db: Arc<dyn MetadataStore>) -> Self {
+        Self { db, cluster_node: None }
     }
 
     pub fn with_cluster(mut self, node: Arc<ClusterNode>) -> Self {
@@ -57,13 +62,7 @@ impl HeapTagStore {
             return Ok(());
         }
 
-        let tree = self
-            .db
-            .open_tree("heap_tags")
-            .map_err(|e| format!("Failed to open tree: {}", e))?;
-        tree.insert(key.as_bytes(), value.as_bytes())
-            .map_err(|e| format!("Failed to insert tags: {}", e))?;
-        Ok(())
+        self.db.put(Write::new("heap_tags", key.as_bytes(), value.into_bytes())).await
     }
 
     /// Get all tags for a heap. Returns empty map if no tags exist.
@@ -83,24 +82,15 @@ impl HeapTagStore {
             return Ok(HashMap::new());
         }
 
-        let tree = self
-            .db
-            .open_tree("heap_tags")
-            .map_err(|e| format!("Failed to open tree: {}", e))?;
-        match tree.get(key.as_bytes()) {
-            Ok(Some(val)) => {
-                let tags: HashMap<String, String> = serde_json::from_slice(&val)
-                    .map_err(|e| format!("Failed to deserialize tags: {}", e))?;
-                Ok(tags)
-            }
-            Ok(None) => Ok(HashMap::new()),
-            Err(e) => Err(format!("Failed to get tags: {}", e)),
+        match self.db.get("heap_tags", key.as_bytes()).await? {
+            Some(v) => serde_json::from_slice(&v).map_err(|e| e.to_string()),
+            None => Ok(HashMap::new()),
         }
     }
 
     /// Atomically merge tags into a heap's existing tags.
     /// Existing keys not in `tags` are preserved. Keys in `tags` overwrite existing values.
-    /// This is safe for concurrent use — uses sled's atomic fetch_and_update.
+    /// This is safe for concurrent use — uses backend compare-and-swap.
     pub async fn merge_tags(
         &self,
         heap: &str,
@@ -122,23 +112,17 @@ impl HeapTagStore {
             return Ok(());
         }
 
-        let tree = self
-            .db
-            .open_tree("heap_tags")
-            .map_err(|e| format!("Failed to open tree: {}", e))?;
-
-        let tags_clone = tags;
-        tree.fetch_and_update(key.as_bytes(), move |old| {
-            let mut existing: HashMap<String, String> = match old {
-                Some(bytes) => serde_json::from_slice(bytes).unwrap_or_default(),
+        for _ in 0..64 {
+            let old = self.db.get("heap_tags", key.as_bytes()).await?;
+            let mut existing: HashMap<String, String> = match &old {
+                Some(v) => serde_json::from_slice(v).map_err(|e| e.to_string())?,
                 None => HashMap::new(),
             };
-            existing.extend(tags_clone.clone());
-            Some(serde_json::to_vec(&existing).unwrap())
-        })
-        .map_err(|e| format!("Failed to merge tags: {}", e))?;
-
-        Ok(())
+            existing.extend(tags.clone());
+            let value = serde_json::to_vec(&existing).map_err(|e| e.to_string())?;
+            if self.db.compare_and_swap(Write::new("heap_tags", key.as_bytes(), value), old, vec![]).await? { return Ok(()); }
+        }
+        Err("heap tag contention: retry merge".into())
     }
 
     /// Delete tags from a heap. If `keys` is None, delete all tags.
@@ -184,13 +168,7 @@ impl HeapTagStore {
             return Ok(results);
         }
 
-        let tree = self
-            .db
-            .open_tree("heap_tags")
-            .map_err(|e| format!("Failed to open tree: {}", e))?;
-        for item in tree.scan_prefix(HT_PREFIX.as_bytes()) {
-            let (key_bytes, val_bytes) =
-                item.map_err(|e| format!("Failed to read entry: {}", e))?;
+        for (key_bytes, val_bytes) in self.db.scan("heap_tags", HT_PREFIX.as_bytes(), false, None).await? {
             let key_str = String::from_utf8_lossy(&key_bytes);
             let heap = key_str[HT_PREFIX.len()..].to_string();
             let tags: HashMap<String, String> = serde_json::from_slice(&val_bytes)

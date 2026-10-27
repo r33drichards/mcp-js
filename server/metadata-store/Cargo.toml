@@ -1,0 +1,23 @@
+[package]
+name = "mcp-metadata-store"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+async-trait = "0.1"
+sled = "0.34"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+aws-sdk-dynamodb = "1"
+hex = "0.4"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+tempfile = "3"
+
+[features]
+testcontainers-tests = ["dep:testcontainers"]
+
+[dependencies.testcontainers]
+version = "0.25"
+optional = true

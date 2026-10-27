@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::cluster::ClusterNode;
+use mcp_metadata_store::{MetadataStore, SledStore, Write};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionLogEntry {
@@ -66,9 +67,8 @@ const SL_ENTRY_PREFIX: &str = "sl:e:";
 
 #[derive(Clone)]
 pub struct SessionLog {
-    /// Local sled database – used in standalone (non-cluster) mode and as
-    /// fallback if the cluster write fails.
-    db: sled::Db,
+    /// Standalone metadata backend. Cluster errors never fall back locally.
+    db: Arc<dyn MetadataStore>,
     /// When set, writes are routed through Raft consensus and reads come
     /// from the cluster's replicated data tree.
     cluster_node: Option<Arc<ClusterNode>>,
@@ -78,7 +78,7 @@ impl SessionLog {
     pub fn new(path: &str) -> Result<Self, String> {
         let db = sled::open(path).map_err(|e| format!("Failed to open sled db: {}", e))?;
         Ok(Self {
-            db,
+            db: Arc::new(SledStore(db)),
             cluster_node: None,
         })
     }
@@ -86,12 +86,16 @@ impl SessionLog {
     pub fn from_config(config: sled::Config) -> Result<Self, String> {
         let db = config.open().map_err(|e| format!("Failed to open sled db: {}", e))?;
         Ok(Self {
-            db,
+            db: Arc::new(SledStore(db)),
             cluster_node: None,
         })
     }
 
-    /// Attach a cluster node so that subsequent writes go through Raft.
+    /// Use an explicitly selected standalone metadata backend.
+    pub fn from_store(db: Arc<dyn MetadataStore>) -> Self {
+        Self { db, cluster_node: None }
+    }
+
     pub fn with_cluster(mut self, node: Arc<ClusterNode>) -> Self {
         self.cluster_node = Some(node);
         self
@@ -141,24 +145,9 @@ impl SessionLog {
             return Ok(0);
         }
 
-        // Standalone mode – write directly to local sled.
-        let tree = self
-            .db
-            .open_tree(session)
-            .map_err(|e| format!("Failed to open tree '{}': {}", session, e))?;
-
-        let value =
-            serde_json::to_vec(&entry).map_err(|e| format!("Failed to serialize entry: {}", e))?;
-
-        let seq = self
-            .db
-            .generate_id()
-            .map_err(|e| format!("Failed to generate id: {}", e))?;
-
-        let key = seq.to_be_bytes();
-        tree.insert(key, value)
-            .map_err(|e| format!("Failed to insert entry: {}", e))?;
-
+        let value = serde_json::to_vec(&entry).map_err(|e| e.to_string())?;
+        let seq = self.db.generate_id().await?;
+        self.db.put(Write::new(session, seq.to_be_bytes().to_vec(), value)).await?;
         Ok(seq)
     }
 
@@ -173,20 +162,7 @@ impl SessionLog {
             return Ok(names);
         }
 
-        let names: Vec<String> = self
-            .db
-            .tree_names()
-            .into_iter()
-            .filter_map(|name| {
-                let s = String::from_utf8(name.to_vec()).ok()?;
-                if s == "__sled__default" {
-                    None
-                } else {
-                    Some(s)
-                }
-            })
-            .collect();
-        Ok(names)
+        self.db.tree_names().await
     }
 
     /// List all entries for a session, oldest first.
@@ -206,31 +182,11 @@ impl SessionLog {
             return Ok(results);
         }
 
-        // Standalone mode.
-        let tree = self
-            .db
-            .open_tree(session)
-            .map_err(|e| format!("Failed to open tree '{}': {}", session, e))?;
-
-        let mut results = Vec::new();
-        for item in tree.iter() {
-            let (key_bytes, val_bytes) =
-                item.map_err(|e| format!("Failed to read entry: {}", e))?;
-
-            let index = u64::from_be_bytes(
-                key_bytes
-                    .as_ref()
-                    .try_into()
-                    .map_err(|_| "Invalid key length".to_string())?,
-            );
-
-            let entry: SessionLogEntry = serde_json::from_slice(&val_bytes)
-                .map_err(|e| format!("Failed to deserialize entry: {}", e))?;
-
-            results.push(SessionSnapshotView::new(index, entry));
-        }
-
-        Ok(results)
+        self.db.scan(session, b"", false, None).await?.into_iter().map(|(key, value)| {
+            let index = u64::from_be_bytes(key.try_into().map_err(|_| "Invalid key length")?);
+            let entry = serde_json::from_slice(&value).map_err(|e| e.to_string())?;
+            Ok(SessionSnapshotView::new(index, entry))
+        }).collect()
     }
 
     /// Get the latest entry for a session, if any.
@@ -248,20 +204,8 @@ impl SessionLog {
             };
         }
 
-        let tree = self
-            .db
-            .open_tree(session)
-            .map_err(|e| format!("Failed to open tree '{}': {}", session, e))?;
-
-        match tree.last() {
-            Ok(Some((_key, val))) => {
-                let entry: SessionLogEntry = serde_json::from_slice(&val)
-                    .map_err(|e| format!("Failed to deserialize entry: {}", e))?;
-                Ok(Some(entry))
-            }
-            Ok(None) => Ok(None),
-            Err(e) => Err(format!("Failed to get latest entry: {}", e)),
-        }
+        self.db.scan(session, b"", true, Some(1)).await?.first()
+            .map(|(_,v)| serde_json::from_slice(v).map_err(|e| e.to_string())).transpose()
     }
 
     /// Seed session `to` from session `from`'s latest snapshot (copy-on-write
@@ -297,10 +241,7 @@ impl SessionLog {
 
     /// Flush all pending writes to disk.
     pub fn flush(&self) -> Result<(), String> {
-        self.db
-            .flush()
-            .map_err(|e| format!("Failed to flush sled db: {}", e))?;
-        Ok(())
+        self.db.flush()
     }
 
     // --------------------------------------------------------------------

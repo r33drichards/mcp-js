@@ -468,6 +468,8 @@ pub struct StorageBootstrapConfig {
     pub s3_bucket: Option<String>,
     pub cache_dir: Option<String>,
     pub session_db_path: String,
+    pub dynamodb_table: Option<String>,
+    pub dynamodb_namespace: String,
     pub http_port: Option<u16>,
     pub execution_db_path: Option<String>,
     pub heap_memory_max_bytes: usize,
@@ -491,6 +493,9 @@ pub async fn build_storage_engine(
     config: StorageBootstrapConfig,
     cluster_node: Option<Arc<ClusterNode>>,
 ) -> Result<RuntimeBootstrap> {
+    if config.dynamodb_table.is_some() && cluster_node.is_some() {
+        bail!("DynamoDB metadata and Raft cluster mode cannot be combined");
+    }
     initialize_v8();
     let heap_enabled = config.heap_enabled();
 
@@ -515,7 +520,7 @@ pub async fn build_storage_engine(
     };
 
     let engine = attach_session_log(engine, &config, cluster_node.as_ref()).await?;
-    let engine = attach_heap_tags(engine, &config, cluster_node.as_ref());
+    let engine = attach_heap_tags(engine, &config, cluster_node.as_ref()).await?;
     let engine = attach_filesystem(engine, &config, cluster_node.as_ref()).await?;
     Ok(RuntimeBootstrap {
         engine: attach_execution_registry(engine, &config),
@@ -556,6 +561,18 @@ async fn build_heap_storage(config: &StorageBootstrapConfig) -> Result<AnyHeapSt
     }
 }
 
+async fn dynamodb_metadata(config: &StorageBootstrapConfig, domain: &str) -> Result<Option<Arc<dyn mcp_metadata_store::MetadataStore>>> {
+    let Some(table) = &config.dynamodb_table else { return Ok(None); };
+    let sdk = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
+    let namespace = format!("{}/{domain}", config.dynamodb_namespace);
+    let store = mcp_metadata_store::DynamoDbStore::new(aws_sdk_dynamodb::Client::new(&sdk), table, &namespace)
+        .map_err(|e| anyhow!(e))?;
+    // Probe permissions/table existence now, so an explicit backend fails
+    // startup rather than silently falling back to a local store.
+    mcp_metadata_store::MetadataStore::get(&store, "__probe", b"ready").await.map_err(|e| anyhow!(e))?;
+    Ok(Some(Arc::new(store)))
+}
+
 async fn attach_session_log(
     engine: Engine,
     config: &StorageBootstrapConfig,
@@ -564,7 +581,9 @@ async fn attach_session_log(
     if !config.heap_enabled() && !config.fs_enabled() {
         return Ok(engine);
     }
-    let log = match SessionLog::new(&config.session_db_path) {
+    let log = match if let Some(store) = dynamodb_metadata(config, "sessions").await? {
+        Ok(SessionLog::from_store(store))
+    } else { SessionLog::new(&config.session_db_path) } {
         Ok(log) => log,
         Err(error) => {
             tracing::warn!(
@@ -575,7 +594,7 @@ async fn attach_session_log(
             return Ok(engine);
         }
     };
-    tracing::info!("Session log opened at {}", config.session_db_path);
+    tracing::info!("Session log backend: {}", config.dynamodb_table.as_deref().unwrap_or(&config.session_db_path));
     let log = if let Some(cluster_node) = cluster_node {
         tracing::info!("Session log will use Raft cluster for replication");
         log.with_cluster(cluster_node.clone())
@@ -588,24 +607,26 @@ async fn attach_session_log(
     Ok(engine.with_session_log(log))
 }
 
-fn attach_heap_tags(
+async fn attach_heap_tags(
     engine: Engine,
     config: &StorageBootstrapConfig,
     cluster_node: Option<&Arc<ClusterNode>>,
-) -> Engine {
+) -> Result<Engine> {
     if !config.heap_enabled() {
-        return engine;
+        return Ok(engine);
     }
     let path = format!("{}/heap-tags", config.session_db_path);
-    match HeapTagStore::new(&path) {
+    match if let Some(store) = dynamodb_metadata(config, "tags").await? {
+        Ok(HeapTagStore::from_store(store))
+    } else { HeapTagStore::new(&path) } {
         Ok(store) => {
-            tracing::info!("Heap tag store opened at {}", path);
+            tracing::info!("Heap tag backend: {}", config.dynamodb_table.as_deref().unwrap_or(&path));
             let store = if let Some(cluster_node) = cluster_node {
                 store.with_cluster(cluster_node.clone())
             } else {
                 store
             };
-            engine.with_heap_tag_store(store)
+            Ok(engine.with_heap_tag_store(store))
         }
         Err(error) => {
             tracing::warn!(
@@ -613,7 +634,7 @@ fn attach_heap_tags(
                 path,
                 error
             );
-            engine
+            Ok(engine)
         }
     }
 }
@@ -657,12 +678,14 @@ async fn attach_filesystem(
         Arc::new(FileHeapStorage::new(&store_dir))
     };
     let store = Arc::new(FsStore::new(backend));
-    match LabelStore::new(&labels_db) {
+    match if let Some(store) = dynamodb_metadata(config, "labels").await? {
+        Ok(LabelStore::from_store(store))
+    } else { LabelStore::new(&labels_db) } {
         Ok(labels) => {
             tracing::info!(
                 "FS snapshots: ENABLED (blobs at {}, labels at {})",
                 store_dir,
-                labels_db
+                config.dynamodb_table.as_deref().unwrap_or(&labels_db)
             );
             let labels = if let Some(cluster_node) = cluster_node {
                 tracing::info!("FS label writes will route through the Raft cluster leader");
@@ -748,6 +771,8 @@ mod tests {
             s3_bucket: None,
             cache_dir: None,
             session_db_path: data_dir.to_string_lossy().into_owned(),
+            dynamodb_table: None,
+            dynamodb_namespace: "mcp-v8".into(),
             http_port: None,
             execution_db_path: None,
             heap_memory_max_bytes: 8 * 1024 * 1024,

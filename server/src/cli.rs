@@ -193,6 +193,17 @@ pub struct Cli {
     )]
     pub session_db_path: String,
 
+    /// Shared DynamoDB metadata table (String keys pk/sk). If absent, use sled.
+    /// Covers session history, heap tags and filesystem labels, not Raft or
+    /// the local execution registry. Incompatible with cluster mode.
+    #[arg(long, env = "MCP_V8_DYNAMODB_TABLE", conflicts_with = "cluster_port", help_heading = "Core")]
+    pub dynamodb_table: Option<String>,
+
+    /// Isolation namespace within the DynamoDB metadata table.
+    #[arg(long, env = "MCP_V8_DYNAMODB_NAMESPACE", default_value = "mcp-v8", help_heading = "Core")]
+    pub dynamodb_namespace: String,
+
+
     // ── Heap persistence (independent axis) ──────────────────────────────────
     /// V8 heap-snapshot backend. `none` (default) = no heap persistence; JS
     /// globals do NOT survive between runs. `dir` = node-local directory
@@ -1189,5 +1200,19 @@ mod port_env_tests {
         let mut cli = parse_argv(&[]);
         apply_port_env(&mut cli, Some(" 3000\n")).expect("valid PORT");
         assert_eq!(cli.http_port, Some(3000));
+    }
+}
+
+#[cfg(test)]
+mod dynamodb_cli_tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn dynamodb_is_explicit_and_conflicts_with_raft() {
+        let cli = Cli::try_parse_from(["server", "--dynamodb-table", "metadata", "--dynamodb-namespace", "pi"]).unwrap();
+        assert_eq!(cli.dynamodb_table.as_deref(), Some("metadata"));
+        assert_eq!(cli.dynamodb_namespace, "pi");
+        assert!(Cli::try_parse_from(["server", "--dynamodb-table", "metadata", "--cluster-port", "4000"]).is_err());
     }
 }
