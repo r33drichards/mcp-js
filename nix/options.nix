@@ -50,6 +50,16 @@
     default = null;
     description = "Port for the Raft cluster HTTP server. Enables cluster mode when set. Config-file key for the `--cluster-port` flag. Environment variable: `MCP_V8_CLUSTER_PORT`.";
   };
+  dynamodb_namespace = lib.mkOption {
+    type = lib.types.nullOr lib.types.str;
+    default = null;
+    description = "Isolation namespace within the DynamoDB metadata table. Config-file key for the `--dynamodb-namespace` flag. Environment variable: `MCP_V8_DYNAMODB_NAMESPACE`. Server default: `mcp-v8`.";
+  };
+  dynamodb_table = lib.mkOption {
+    type = lib.types.nullOr lib.types.str;
+    default = null;
+    description = "Shared DynamoDB metadata table (String keys pk/sk). If absent, use sled. Covers session history, heap tags and filesystem labels, not Raft or the local execution registry. Incompatible with cluster mode. Config-file key for the `--dynamodb-table` flag. Environment variable: `MCP_V8_DYNAMODB_TABLE`.";
+  };
   election_timeout_max = lib.mkOption {
     type = lib.types.nullOr lib.types.ints.unsigned;
     default = null;

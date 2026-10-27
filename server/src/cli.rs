@@ -1202,3 +1202,17 @@ mod port_env_tests {
         assert_eq!(cli.http_port, Some(3000));
     }
 }
+
+#[cfg(test)]
+mod dynamodb_cli_tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn dynamodb_is_explicit_and_conflicts_with_raft() {
+        let cli = Cli::try_parse_from(["server", "--dynamodb-table", "metadata", "--dynamodb-namespace", "pi"]).unwrap();
+        assert_eq!(cli.dynamodb_table.as_deref(), Some("metadata"));
+        assert_eq!(cli.dynamodb_namespace, "pi");
+        assert!(Cli::try_parse_from(["server", "--dynamodb-table", "metadata", "--cluster-port", "4000"]).is_err());
+    }
+}

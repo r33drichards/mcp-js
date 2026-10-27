@@ -399,5 +399,5 @@ through #287, #293, and #295, without implying a main merge or deployment.
 Use `--dynamodb-table TABLE --dynamodb-namespace NAME` for shared session history,
 heap tags, and filesystem label/reflog metadata. Sled remains the default;
 snapshot content stays in the independently selected S3/directory backend. See
-[metadata backends and integration tests](metadata-store/README.md) for table
+[metadata backends and integration tests](server/metadata-store/README.md) for table
 schema, IAM, limits, and LocalStack/Testcontainers setup.

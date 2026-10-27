@@ -202,3 +202,21 @@ async fn dynamodb_consumers() {
         .await
         .unwrap();
 }
+
+#[tokio::test]
+async fn reads_existing_sled_encodings() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("labels");
+    {
+        let db = sled::open(&path).unwrap();
+        db.open_tree("fs_label_heads")
+            .unwrap()
+            .insert(b"main", &[7u8; 32])
+            .unwrap();
+        db.flush().unwrap();
+    }
+    let labels = LabelStore::new(path.to_str().unwrap()).unwrap();
+    assert_eq!(labels.resolve("main").await.unwrap(), Some([7; 32]));
+    labels.force("main", [8; 32], None).await.unwrap();
+    assert_eq!(labels.log("main").await.unwrap()[0].from, Some([7; 32]));
+}

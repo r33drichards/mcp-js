@@ -1,6 +1,6 @@
 [workspace]
 members = [
-    "metadata-store",
+    "server/metadata-store",
     "server",
     "mcp-v8-client",
     "mcp-v8-uniffi",
