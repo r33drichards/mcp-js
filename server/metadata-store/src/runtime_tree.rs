@@ -74,33 +74,39 @@ async fn decode_value(value: Option<Vec<u8>>, blobs: &Option<Arc<dyn RuntimeBlob
     }
     decode(value)
 }
+fn wait<T>(rt: &tokio::runtime::Runtime, future: impl std::future::Future<Output=Result<T>>) -> Result<T> {
+    rt.block_on(async {
+        tokio::time::timeout(std::time::Duration::from_secs(10), future).await
+            .map_err(|_| "runtime metadata operation timed out; outcome may be uncertain".to_string())?
+    })
+}
 impl RuntimeTree {
     pub fn get(&self, key: impl AsRef<[u8]>) -> Result<Option<Vec<u8>>> {
         let key=key.as_ref().to_vec();
         match self {
             Self::Local(t) => t.get(key).map(|v| v.map(|v| v.to_vec())).map_err(|e| e.to_string()),
-            Self::Remote {store,name} => { let name=name.clone(); let blobs=store.blobs.clone(); store.call(move |rt,db| rt.block_on(async { decode_value(db.get(&name,&key).await?, &blobs).await })) }
+            Self::Remote {store,name} => { let name=name.clone(); let blobs=store.blobs.clone(); store.call(move |rt,db| wait(rt, async { decode_value(db.get(&name,&key).await?, &blobs).await })) }
         }
     }
     pub fn insert(&self, key: impl AsRef<[u8]>, value: impl AsRef<[u8]>) -> Result<()> {
         let key=key.as_ref().to_vec(); let value=value.as_ref().to_vec();
         match self {
             Self::Local(t) => t.insert(key,value).map(|_| ()).map_err(|e| e.to_string()),
-            Self::Remote {store,name} => { let name=name.clone(); let blobs=store.blobs.clone(); store.call(move |rt,db| rt.block_on(async { db.put(Write::new(&name,key,encode_value(&value,&blobs).await?)).await })) }
+            Self::Remote {store,name} => { let name=name.clone(); let blobs=store.blobs.clone(); store.call(move |rt,db| wait(rt, async { db.put(Write::new(&name,key,encode_value(&value,&blobs).await?)).await })) }
         }
     }
     pub fn remove(&self, key: impl AsRef<[u8]>) -> Result<()> {
         let key=key.as_ref().to_vec();
         match self {
             Self::Local(t) => t.remove(key).map(|_| ()).map_err(|e| e.to_string()),
-            Self::Remote {store,name} => { let name=name.clone(); store.call(move |rt,db| rt.block_on(db.put(Write::new(&name,key,vec![0])))) }
+            Self::Remote {store,name} => { let name=name.clone(); store.call(move |rt,db| wait(rt, db.put(Write::new(&name,key,vec![0])))) }
         }
     }
     pub fn compare_and_swap(&self, key: impl AsRef<[u8]>, old: Option<Vec<u8>>, new: Option<Vec<u8>>) -> Result<std::result::Result<(), ()>> {
         let key=key.as_ref().to_vec();
         let ok=match self {
             Self::Local(t) => t.compare_and_swap(key,old,new).map(|v|v.is_ok()).map_err(|e| e.to_string())?,
-            Self::Remote {store,name} => { let name=name.clone(); let blobs=store.blobs.clone(); store.call(move |rt,db| rt.block_on(async {
+            Self::Remote {store,name} => { let name=name.clone(); let blobs=store.blobs.clone(); store.call(move |rt,db| wait(rt, async {
                 let current=db.get(&name,&key).await?;
                 if decode_value(current.clone(), &blobs).await? != old {return Ok(false)}
                 let encoded=match new { Some(v)=>encode_value(&v,&blobs).await?, None=>vec![0] };
@@ -112,7 +118,7 @@ impl RuntimeTree {
     pub fn iter(&self) -> std::vec::IntoIter<Result<Row>> {
         let rows: Result<Vec<Row>>=match self {
             Self::Local(t) => t.iter().map(|r|r.map(|(k,v)|(k.to_vec(),v.to_vec())).map_err(|e|e.to_string())).collect(),
-            Self::Remote {store,name} => { let name=name.clone(); let blobs=store.blobs.clone(); store.call(move |rt,db| rt.block_on(async {
+            Self::Remote {store,name} => { let name=name.clone(); let blobs=store.blobs.clone(); store.call(move |rt,db| wait(rt, async {
                 let rows=db.scan(&name,b"",false,None).await?;
                 let mut out=Vec::new();
                 for (k,v) in rows { if let Some(v)=decode_value(Some(v), &blobs).await? { out.push((k,v)); } }
