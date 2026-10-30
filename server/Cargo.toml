@@ -12,6 +12,8 @@ name = "server"
 path = "src/main.rs"
 
 [dependencies]
+wgpu = "26"
+pollster = "0.4"
 cli-derive = { path = "cli-derive" }
 uniffi-builder-derive = { path = "uniffi-builder-derive" }
 anyhow = "1.0.98"

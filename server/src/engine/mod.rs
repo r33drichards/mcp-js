@@ -35,6 +35,7 @@ pub mod urlpattern_support;
 pub mod wasm_stub;
 pub mod web_compat;
 pub mod net_tcp;
+pub mod webgpu;
 pub mod websocket;
 
 pub use console::HardeningConfig;
@@ -986,6 +987,7 @@ pub struct ExecutionConfig<'a> {
     pub wasm_modules: &'a [WasmModule],
     pub wasm_default_max_bytes: usize,
     pub fetch_config: Option<&'a fetch::FetchConfig>,
+    pub gpu_config: Option<&'a webgpu::GpuConfig>,
     pub websocket_config: Option<&'a websocket::WebSocketConfig>,
     pub http2_config: Option<&'a http2::Http2Config>,
     /// Loopback-only TCP for `node:net` servers/clients (Node-compat
@@ -1021,6 +1023,7 @@ impl<'a> ExecutionConfig<'a> {
             wasm_modules: &[],
             wasm_default_max_bytes: heap_memory_max_bytes,
             fetch_config: None,
+            gpu_config: None,
             websocket_config: None,
             http2_config: None,
             net_tcp_config: None,
@@ -1127,6 +1130,11 @@ impl<'a> ExecutionConfig<'a> {
         self
     }
 
+    pub fn maybe_gpu_config(mut self, config: Option<&'a webgpu::GpuConfig>) -> Self {
+        self.gpu_config = config;
+        self
+    }
+
     pub fn maybe_websocket_config(
         mut self,
         config: Option<&'a websocket::WebSocketConfig>,
@@ -1179,6 +1187,7 @@ pub fn execute_stateless(
         wasm_modules,
         wasm_default_max_bytes,
         fetch_config,
+        gpu_config,
         websocket_config,
         http2_config,
         net_tcp_config,
@@ -1210,6 +1219,9 @@ pub fn execute_stateless(
         }
         if subprocess_config.is_some() {
             extensions.push(subprocess::create_extension());
+        }
+        if gpu_config.is_some() {
+            extensions.push(webgpu::create_extension());
         }
         if websocket_config.is_some() {
             extensions.push(websocket::create_extension());
@@ -1273,6 +1285,9 @@ pub fn execute_stateless(
             runtime.op_state().borrow_mut().put(fc.clone());
         }
 
+        if let Some(gpu) = gpu_config {
+            runtime.op_state().borrow_mut().put(gpu.clone());
+        }
         // Put websocket config in OpState if websocket policies are configured.
         if let Some(wsc) = websocket_config {
             runtime.op_state().borrow_mut().put(wsc.clone());
@@ -1393,6 +1408,11 @@ pub fn execute_stateless(
                     if let Err(e) = web_compat::inject_web_compat_extras(&mut runtime) {
                         return Err(e);
                     }
+                    if gpu_config.is_some() {
+                        if let Err(e) = webgpu::inject(&mut runtime) {
+                            return Err(e);
+                        }
+                    }
                     // Inject the WebSocket class if websocket policies are
                     // configured. Needs the web-compat layer (EventTarget,
                     // MessageEvent, DOMException, Blob).
@@ -1471,6 +1491,7 @@ pub fn execute_stateful(
         wasm_modules,
         wasm_default_max_bytes,
         fetch_config,
+        gpu_config,
         websocket_config,
         http2_config,
         net_tcp_config,
@@ -1520,6 +1541,9 @@ pub fn execute_stateful(
         }
         if subprocess_config.is_some() {
             extensions.push(subprocess::create_extension());
+        }
+        if gpu_config.is_some() {
+            extensions.push(webgpu::create_extension());
         }
         if websocket_config.is_some() {
             extensions.push(websocket::create_extension());
@@ -1584,6 +1608,9 @@ pub fn execute_stateful(
             runtime.op_state().borrow_mut().put(fc.clone());
         }
 
+        if let Some(gpu) = gpu_config {
+            runtime.op_state().borrow_mut().put(gpu.clone());
+        }
         // Put websocket config in OpState if websocket policies are configured.
         if let Some(wsc) = websocket_config {
             runtime.op_state().borrow_mut().put(wsc.clone());
@@ -1721,6 +1748,11 @@ pub fn execute_stateful(
                     if let Err(e) = web_compat::inject_web_compat_extras_snapshot(&mut runtime) {
                         return Err(e);
                     }
+                    if gpu_config.is_some() {
+                        if let Err(e) = webgpu::inject_snapshot(&mut runtime) {
+                            return Err(e);
+                        }
+                    }
                     // Inject the WebSocket class if websocket policies are
                     // configured. Needs the web-compat layer (EventTarget,
                     // MessageEvent, DOMException, Blob).
@@ -1843,6 +1875,7 @@ pub struct Engine {
     wasm_stub_config: wasm_stub::WasmStubConfig,
     /// OPA-gated fetch configuration. When Some, `fetch()` is injected into the JS runtime.
     fetch_config: Option<Arc<fetch::FetchConfig>>,
+    gpu_config: Option<Arc<webgpu::GpuConfig>>,
     websocket_config: Option<Arc<websocket::WebSocketConfig>>,
     net_tcp_config: Option<net_tcp::NetTcpConfig>,
     http2_config: Option<Arc<http2::Http2Config>>,
@@ -2052,6 +2085,7 @@ impl Engine {
             wasm_modules: Arc::new(Vec::new()),
             wasm_stub_config: wasm_stub::WasmStubConfig::default(),
             fetch_config: None,
+            gpu_config: None,
             websocket_config: None,
             http2_config: None,
             net_tcp_config: None,
@@ -2104,6 +2138,7 @@ impl Engine {
             wasm_modules: Arc::new(Vec::new()),
             wasm_stub_config: wasm_stub::WasmStubConfig::default(),
             fetch_config: None,
+            gpu_config: None,
             websocket_config: None,
             http2_config: None,
             net_tcp_config: None,
@@ -2182,6 +2217,12 @@ impl Engine {
     /// Enable OPA-gated fetch() in the JS runtime.
     pub fn with_fetch_config(mut self, config: fetch::FetchConfig) -> Self {
         self.fetch_config = Some(Arc::new(config));
+        self
+    }
+
+    /// Enable the policy-gated experimental WebGPU compute subset.
+    pub fn with_gpu_config(mut self, config: webgpu::GpuConfig) -> Self {
+        self.gpu_config = Some(Arc::new(config));
         self
     }
 
@@ -2689,6 +2730,7 @@ impl Engine {
                 let wasm_default = self.wasm_default_max_bytes;
                 let hardening = self.hardening;
                 let fc = self.fetch_config.clone();
+                let gpu = self.gpu_config.clone();
                 let wsc = self.websocket_config.clone();
                 let h2c = self.http2_config.clone();
                 let ntc = self.net_tcp_config.clone();
@@ -2719,6 +2761,7 @@ impl Engine {
                             .wasm_default_max_bytes(wasm_default)
                             .hardening(hardening)
                             .maybe_fetch_config(fc.as_deref())
+                            .maybe_gpu_config(gpu.as_deref())
                             .maybe_websocket_config(wsc.as_deref())
                             .maybe_http2_config(h2c.as_deref())
                             .maybe_net_tcp_config(ntc.clone())
@@ -2816,6 +2859,7 @@ impl Engine {
                 let wasm_default = self.wasm_default_max_bytes;
                 let hardening = self.hardening;
                 let fc = self.fetch_config.clone();
+                let gpu = self.gpu_config.clone();
                 let wsc = self.websocket_config.clone();
                 let h2c = self.http2_config.clone();
                 let ntc = self.net_tcp_config.clone();
@@ -2847,6 +2891,7 @@ impl Engine {
                             .wasm_default_max_bytes(wasm_default)
                             .hardening(hardening)
                             .maybe_fetch_config(fc.as_deref())
+                            .maybe_gpu_config(gpu.as_deref())
                             .maybe_websocket_config(wsc.as_deref())
                             .maybe_http2_config(h2c.as_deref())
                             .maybe_net_tcp_config(ntc.clone())

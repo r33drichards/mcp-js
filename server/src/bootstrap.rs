@@ -57,6 +57,7 @@ impl Default for FeatureBootstrapConfig {
 #[derive(Default, Deserialize)]
 pub struct PolicyBootstrapConfig {
     pub fetch: Option<OperationPolicies>,
+    pub gpu: Option<OperationPolicies>,
     pub websocket: Option<OperationPolicies>,
     pub http2: Option<OperationPolicies>,
     pub modules: Option<OperationPolicies>,
@@ -168,6 +169,13 @@ impl RuntimeBootstrap {
             "data.mcp.fetch.allow",
             CAPS_FULL,
         )?;
+        let gpu_hooks = build_op_hooks(
+            policies.gpu,
+            "gpu",
+            "mcp/gpu",
+            "data.mcp.gpu.allow",
+            CAPS_GATE_ONLY,
+        )?;
         let websocket_hooks = build_op_hooks(
             policies.websocket,
             "websocket",
@@ -231,6 +239,11 @@ impl RuntimeBootstrap {
                 crate::engine::fetch::FetchConfig::new_with_hooks(chain)
                     .with_header_rules(header_rules.clone()),
             );
+        }
+        if let Some(chain) = gpu_hooks {
+            self.engine = self
+                .engine
+                .with_gpu_config(crate::engine::webgpu::GpuConfig::new_with_hooks(chain));
         }
         // Handshake/per-stream header injection reuses the fetch header rules
         // (the JS WebSocket and http2 APIs cannot read these headers, so
