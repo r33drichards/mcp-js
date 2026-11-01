@@ -1,3 +1,6 @@
+// Queued-upload accounting bounds each execution to six GPU phases.
+// CPU reference computes phases outside this window; every GPU phase still
+// checks exact values and atomic counts against its independent CPU step.
 const n=CASE.n,random=rng(99);
 let gpu=Uint32Array.from({length:n},(_,i)=>CASE.name==='reverse'?n-i:CASE.name==='equal'?7:CASE.name==='sorted'?i:Math.floor(random()*9));
 // Include unsigned extremes and duplicates without any floating-point conversion.
@@ -12,6 +15,7 @@ for(let span=2;span<=n;span*=2)for(let height=span;height>=2;height/=2){
   const a=base+i,b=base+(flip?height-i-1:i+height/2);
   if(cpu[b]<cpu[a]){const t=cpu[a];cpu[a]=cpu[b];cpu[b]=t;swaps++;}
  }
+ if(steps<CASE.startStep||steps>=CASE.endStep){gpu=cpu;steps++;continue;}
  const params=new ArrayBuffer(16);new Float32Array(params,0,2).set([n,1]);new Uint32Array(params,8,2).set([algo,height]);
  // Explicitly seed output with input: upstream global phases write swapped pairs only.
  const result=await compute([gpu,gpu.slice(),params,new Uint32Array([0])],[n/16,1,1]);
@@ -21,5 +25,5 @@ for(let span=2;span<=n;span*=2)for(let height=span;height>=2;height/=2){
  totalSwaps+=counter;steps++;
 }
 assert(JSON.stringify(Array.from(gpu))===JSON.stringify(expected),'final sort differs from independent numeric sort');
-console.log(JSON.stringify({sample:'bitonic',case:CASE.name,elements:n,steps,comparisons,localAtomicSwaps:totalSwaps,exact:true}));
+console.log(JSON.stringify({sample:'bitonic',case:CASE.name,elements:n,steps,gpuPhaseWindow:[CASE.startStep,CASE.endStep],comparisons,localAtomicSwaps:totalSwaps,exact:true}));
 device.destroy();

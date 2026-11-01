@@ -9,7 +9,7 @@
     "dist/ort-wasm-simd-threaded.jsep.mjs",
     "dist/ort-wasm-simd-threaded.jsep.wasm"
   ],
-  "status": "verified matching assets; session created; FIFO input uploads supported; Add kernel blocked by writeBuffer while submissions are outstanding",
+  "status": "verified tiny float32 Add inference with WebGPU provider, disabled CPU EP fallback and failing native-dispatch-denial control",
   "model_plan": {
     "operators": [
       "Add"
@@ -46,7 +46,17 @@
   },
   "model_sha256": "98746cca6e1220569e1054caedee36a71a5b291b8d000b36c2e54ed3cb58687f",
   "model_validated_by_runtime": true,
-  "inference_verified": false,
-  "last_bootstrap_blocker": "webgpu: buffer unavailable for upload (ORT Add kernel uniform queue.writeBuffer while input uploads are outstanding)",
-  "session_created": true
+  "inference_verified": true,
+  "last_bootstrap_blocker": null,
+  "session_created": true,
+  "verified_output": [
+    11,
+    22,
+    33,
+    44
+  ],
+  "cpu_ep_fallback_disabled": true,
+  "native_dispatch_denial_control_passed": true,
+  "runtime_node_placement": "All nodes placed on [JsExecutionProvider]. Number of nodes: 1",
+  "scope": "Single Add node, float32 shape [4]; broader models/operators and backends unverified"
 }

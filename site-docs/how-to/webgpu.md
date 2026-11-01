@@ -124,8 +124,8 @@ device.destroy();
   per command buffer, including copy-only buffers. Copies require no active pass, distinct buffers, and positive four-byte-aligned
   sizes/offsets within both allocations; source and destination sizes may differ.
   One command buffer per submit, with a FIFO and one active native operation. The execution has 32
-  work units: each compute dispatch or render consumes one; a copy-only submission
-  consumes one. Units are reserved at admission and never refunded. Batching cannot multiply this allowance. Workgroup counts must be
+  work units: each compute dispatch, render, writeBuffer upload or copy-only
+  submission consumes one. Units are reserved at admission and never refunded. Batching cannot multiply this allowance. Workgroup counts must be
   positive, with product at most 65,536 per dispatch; wgpu enforces device limits.
 - A compute/copy batch references at most 16 distinct buffers (still at most eight
   bindings per dispatch), with at most 4 MiB total bytes and 64 KiB aggregate WGSL
@@ -135,7 +135,14 @@ device.destroy();
 - Uniform buffers are limited to 64 KiB each and cannot also have STORAGE usage.
 - At most 128 created buffer/shader/pipeline/bind-group/encoder/texture/view objects per device;
   WGSL source is limited to 64 KiB and entry points to 256 bytes on the native boundary.
-- Buffer upload uses `queue.writeBuffer`, which remains rejected while any submitted work is outstanding. Native buffers persist within an
+- `queue.writeBuffer` snapshots only the selected bytes at call time and queues
+  the upload in FIFO order. Snapshot bytes count against the existing cumulative
+  4 MiB resource allowance, with no refund, and each accepted upload costs one
+  work unit. Source mutation or detachment afterward cannot change the upload.
+  ArrayBuffer and typed-array/DataView sources are supported; shared buffers are
+  outside this subset. At execution, the upload patches the host mirror and
+  advances its revision. Native upload remains deferred until a GPU operation
+  passes its existing full-allocation policy checks. Native buffers persist within an
   execution, keyed by session-local identity and upload revision. Unchanged
   revisions reuse GPU contents, including binding a compute output as a vertex
   buffer on a later submission. Explicit host writes advance the revision;
@@ -160,7 +167,7 @@ device.destroy();
   WebGPU error scopes or `uncapturederror`. A failed submitted job cancels the queued suffix and terminates the session conservatively. Always await one of these promises.
 - Active plus waiting jobs retain at most 64 KiB of UTF-8 serialized metadata,
   128 buffer references and 32 job records, within the cumulative work allowance.
-  Waiting jobs retain existing charged stores, not per-job buffer snapshots.
+  Waiting GPU jobs retain existing charged stores; upload entries additionally retain their charged selected-byte snapshots.
   `onSubmittedWorkDone()` and `mapAsync()` capture the already-admitted prefix;
   later submissions do not extend that fence. Pending maps block new uses, while
   earlier accepted uses remain valid.
@@ -271,3 +278,17 @@ also terminates the bridge/session and rejects that promise unless an earlier
 authoritative native terminal outcome already exists. This fail-closed behavior is an explicit experimental
 subset limitation, not standard browser exception reporting. No GPU hard
 preemption is promised for work already submitted.
+
+
+## Verified ONNX smoke scope
+
+Pinned ONNX Runtime Web 1.23.2 all/JSEP assets execute a single float32 Add node
+with inputs [1,2,3,4] and [10,20,30,40], returning [11,22,33,44]. The opt-in test
+selects only the WebGPU provider, disables CPU EP fallback, checks the runtime's
+configuration report, and requires a native-dispatch-denied control to fail.
+This verifies this tiny model, not general ONNX model/operator compatibility.
+Assets remain external and hash-verified; the existing heap, GPU policy and
+resource budgets apply. Larger workloads can exceed the cumulative staging or
+work limits. The bitonic numerical gallery test now checks bounded phase windows
+using CPU-reference prefix/suffix state; the original full-sort host harness
+exceeds 32 units with upload accounting and is not supported unchanged.

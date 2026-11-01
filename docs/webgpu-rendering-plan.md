@@ -819,3 +819,82 @@ function; corrected to a dedicated native helper). Full Nix packaging, CTS,
 other backends and spontaneous driver-loss/OOM remain untested. The original
 SIGSEGV and Git signal-10 causes remain unestablished. No publication, original
 checkout/lock changes or broader writeBuffer implementation occurred.
+
+## Queued uploads and actual ONNX Add checkpoint (local, 2026-11-01)
+
+Based on independently reviewed FIFO `13169f4feee93fc537d4268356455aa63edd3659`,
+writeBuffer now validates ownership, usage, map state, selected ranges and queue
+capacity, snapshots only selected bytes into private staging, and admits one FIFO
+entry. Captured BufferSource intrinsics avoid caller-shadowed view properties;
+source mutation/detachment after admission cannot alter the snapshot. Shared
+buffers remain unsupported. Accepted snapshot bytes count against the existing
+cumulative 4 MiB allowance with no refund; each accepted upload consumes one of
+the existing 32 work units and one queue/reference entry. Metadata limits remain
+unchanged. These conservative charges deliberately reduce supported workload sizes.
+
+At execution position, after preceding readback, the snapshot patches the mirror
+and advances its revision. No standalone native upload op or permission was added.
+The next GPU operation must pass its existing full-allocation policy before native
+upload or dispatch. The native regression observes resident revision zero after
+a host write and after a denied copy, proving the deferred revision was never
+uploaded. Admitted uploads retain destroyed wrapper resources; later use of a dead
+wrapper still fails. Prefix fences include uploads. Failure/loss/overflow/teardown
+cancels the suffix and releases staging once, without refunding cumulative budgets.
+
+All 103 targeted checks passed: 49 shim, 14 ordinary native, six native GPU,
+30 GPU integration/gallery/security (5 + 24 + 1), two default-policy checks, and
+two actual ONNX checks. Coverage includes caller mutation/detachment, intrinsic
+view offsets, overlapping dispatch/write order, partial writes preserving GPU
+results, destroyed destinations, mapping fences, staging/work exhaustion, denied
+native work before upload, unchanged Boids GPU rendering, and callback/ownership
+regressions. The bitonic host originally exceeded the now-charged upload budget;
+its test checks all shader phases in independent windows of at most six GPU
+phases (30 units). CPU reference computes phases outside each window. This is
+phase-level numerical coverage, not full sorting in one unchanged execution.
+
+The actual pinned ONNX Runtime Web 1.23.2 Add smoke returns [11,22,33,44]. It uses
+only executionProviders:['webgpu'], graph optimization disabled, numThreads=1,
+proxy=false, and extra.session.disable_cpu_ep_fallback='1'. The runtime confirms
+that configuration and logs all one node placed on JsExecutionProvider. A second
+run allows adapter/copy operations but denies native dispatch: the same Add fails
+with `webgpu: policy denied: denied by policy`, with no verified-output marker.
+Together with the native wgpu execution path and matched numerical output, this
+establishes the tiny GPU inference result without CPU EP fallback. Default CPU EP
+registration still appears in ORT diagnostics; it does not mean the model node
+was assigned to it. No timing/benchmark, general ONNX compatibility, or full WebGPU
+conformance claim follows from this single-node test.
+
+Pinned option semantics: https://github.com/microsoft/onnxruntime/blob/a83fc4d58cb48eb68890dd689f94f28288cf2278/include/onnxruntime/core/session/onnxruntime_session_options_config_keys.h#L234
+The verified npm package's session-options.ts forwards nested extra options to
+session configuration. Package/asset/model hashes remain in onnx-smoke-plan.json.
+The positive/negative integration tests require actual pinned assets and real GPU;
+they remain ignored unless explicitly invoked. No mock native ops or CPU fallback
+are used in these two tests.
+
+Validation commands use the same installed Nix toolchain and CARGO_HOME/target
+settings as the FIFO checkpoint:
+
+```sh
+node --test tests/webgpu/shim.test.cjs
+cargo test --offline -p server --lib engine::webgpu -- --test-threads=1
+cargo test --offline -p server --lib engine::webgpu -- --ignored --test-threads=1
+cargo test --offline -p server --test webgpu_gallery --test webgpu --test webgpu_render_security -- --ignored --test-threads=1
+cargo test --offline -p server --test webgpu -- --test-threads=1
+MCP_ONNX_ASSET_DIR=/tmp/mcp-fifo-onnx-assets cargo test --offline -p server --test onnx_bootstrap -- --ignored --test-threads=1 --nocapture
+```
+
+Evidence logs in /tmp: mcp-write-shim.log, mcp-write-unit.log,
+mcp-write-native-gpu.log, mcp-write-v2-gpu.log,
+mcp-write-v2-default-policy.log, and mcp-write-onnx-final.log. The final ONNX log
+contains both provider-placement records, the output marker, dispatch denial and
+`2 passed`. The initial budget rejection remains in mcp-write-gpu.log; the first
+matched-output verification guard remains in mcp-write-v2-onnx.log. Reconnection
+inspection confirmed these logs and the six expected dirty source/test files;
+no completed tests needed repeating. Documentation and status were then updated.
+
+Remaining limits: general ONNX models, other operators/dtypes/shapes, repeated or
+larger workloads and other GPU backends are unverified. Existing rendering/API
+subset limits, no-hard-preemption, untested full Nix packaging/CTS, and untested
+spontaneous driver loss/OOM remain. Historical SIGSEGV and Git signal-10 causes
+are unresolved. Original iCloud checkout, locks and backups remain untouched.
+This checkpoint is local-only pending independent review; no PR or remote update.

@@ -4,14 +4,22 @@ use server::engine::{
     self, ExecutionConfig,
     hooks::HookChain,
     module_loader::ModuleLoaderConfig,
-    opa::{EvalMode, PolicyChain},
+    opa::{EvalMode, LocalPolicyEvaluator, PolicyChain, PolicyEvaluatorKind},
     webgpu::GpuConfig,
 };
 use sha2::{Digest, Sha256};
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 #[test]
-#[ignore = "requires verified pinned assets via MCP_ONNX_ASSET_DIR and real GPU; bootstrap APIs incomplete"]
+#[ignore = "requires verified pinned assets via MCP_ONNX_ASSET_DIR and real GPU"]
 fn pinned_add_smoke() {
+    run_pinned_add(false);
+}
+#[test]
+#[ignore = "requires verified pinned assets via MCP_ONNX_ASSET_DIR and real GPU"]
+fn pinned_add_denied_dispatch_does_not_fallback() {
+    run_pinned_add(true);
+}
+fn run_pinned_add(deny_dispatch: bool) {
     engine::initialize_v8();
     let root =
         PathBuf::from(std::env::var("MCP_ONNX_ASSET_DIR").expect("set verified asset directory"));
@@ -50,9 +58,25 @@ fn pinned_add_smoke() {
         virtual_commonjs_modules: None,
         virtual_files: None,
     };
+    let policy_dir = tempfile::tempdir().unwrap();
+    let policy_path = policy_dir.path().join("gpu.rego");
+    std::fs::write(
+        &policy_path,
+        if deny_dispatch {
+            "package mcp.gpu\ndefault allow = false\nallow if { input.operation != \"dispatch\" }\n"
+        } else {
+            "package mcp.gpu\ndefault allow = true\n"
+        },
+    )
+    .unwrap();
+    let policy =
+        LocalPolicyEvaluator::from_file(&policy_path, "data.mcp.gpu.allow".into()).unwrap();
     let gpu = GpuConfig::new_with_hooks(Arc::new(HookChain::from_policy(
         "gpu",
-        Arc::new(PolicyChain::new(vec![], EvalMode::All)),
+        Arc::new(PolicyChain::new(
+            vec![PolicyEvaluatorKind::Local(policy)],
+            EvalMode::All,
+        )),
     )));
     let chunks: Vec<_> = wasm
         .chunks(48 * 1024)
@@ -74,14 +98,12 @@ fn pinned_add_smoke() {
     ort.env.wasm.numThreads=1;ort.env.wasm.proxy=false;ort.env.wasm.initTimeout=15000;
     ort.env.wasm.wasmPaths={{mjs:'file:///onnx/ort-wasm-simd-threaded.jsep.mjs'}};
     ort.env.wasm.wasmBinary=globalThis.__onnxProbeWasmBytes;delete globalThis.__onnxProbeWasmBytes;
-    const session=await ort.InferenceSession.create(new Uint8Array({model}),{{executionProviders:['webgpu'],graphOptimizationLevel:'disabled'}});
+    const session=await ort.InferenceSession.create(new Uint8Array({model}),{{executionProviders:['webgpu'],graphOptimizationLevel:'disabled',extra:{{session:{{disable_cpu_ep_fallback:'1'}}}},logSeverityLevel:0,logVerbosityLevel:1}});
     console.log('ONNX_PROBE_SESSION_CREATED');
     const result=await session.run({{A:new ort.Tensor('float32',new Float32Array([1,2,3,4]),[4]),B:new ort.Tensor('float32',new Float32Array([10,20,30,40]),[4])}});
     if(JSON.stringify(Array.from(result.Y.data))!=='[11,22,33,44]')throw Error('Add output mismatch');
     await session.release();
-    // Output alone is not acceptance: native dispatch/no-fallback evidence is
-    // deliberately required before converting this probe into an inference test.
-    throw Error('MODEL_OUTPUT_MATCHED_BUT_GPU_PROVIDER_EVIDENCE_NOT_YET_VERIFIED');
+    console.log('ONNX_ADD_OUTPUT_VERIFIED [11,22,33,44]; CPU_EP_FALLBACK_DISABLED');
     "#
     );
     let temp = tempfile::tempdir().unwrap();
@@ -103,7 +125,52 @@ fn pinned_add_smoke() {
             eprintln!("asset console: {:.2000}", String::from_utf8_lossy(&value));
         }
     }
-    if let Err(error) = result {
-        panic!("Pinned bootstrap probe: {:.2500}", error);
+    let diagnostics: Vec<String> = stderr
+        .iter()
+        .flatten()
+        .map(|(_, value)| String::from_utf8_lossy(&value).into_owned())
+        .collect();
+    assert!(
+        diagnostics
+            .iter()
+            .any(|line| line.contains("session.disable_cpu_ep_fallback: 1")),
+        "runtime did not confirm fallback-disabled configuration"
+    );
+    for diagnostic in &diagnostics {
+        for line in diagnostic
+            .lines()
+            .filter(|line| line.contains("placed") || line.contains("VerifyEachNode"))
+        {
+            eprintln!("ONNX_PROVIDER_PLACEMENT: {line}");
+        }
+    }
+    let logs: Vec<String> = console
+        .iter()
+        .flatten()
+        .map(|(_, value)| String::from_utf8_lossy(&value).into_owned())
+        .collect();
+    assert!(
+        logs.iter()
+            .any(|line| line.contains("ONNX_PROBE_SESSION_CREATED")),
+        "session was not created"
+    );
+    if deny_dispatch {
+        let error = result.expect_err("GPU-denied Add unexpectedly succeeded");
+        assert!(
+            error.contains("policy denied"),
+            "unexpected denial: {error}"
+        );
+        assert!(
+            !logs
+                .iter()
+                .any(|line| line.contains("ONNX_ADD_OUTPUT_VERIFIED"))
+        );
+        eprintln!("ONNX_GPU_DISPATCH_DENIAL_VERIFIED: {error:.1200}");
+    } else {
+        result.unwrap_or_else(|error| panic!("Pinned bootstrap probe: {error:.2500}"));
+        assert!(
+            logs.iter()
+                .any(|line| line.contains("ONNX_ADD_OUTPUT_VERIFIED"))
+        );
     }
 }

@@ -1093,6 +1093,79 @@ mod tests {
             assert!(state.borrow().borrow::<GpuState>().session.is_none());
         }
     }
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "real GPU required"]
+    #[allow(deprecated)]
+    async fn queued_host_write_does_not_upload_before_native_policy() {
+        use crate::engine::opa::{
+            EvalMode, LocalPolicyEvaluator, PolicyChain, PolicyEvaluatorKind,
+        };
+        crate::engine::initialize_v8();
+        let mut runtime = deno_core::JsRuntime::new(deno_core::RuntimeOptions {
+            extensions: vec![create_extension()],
+            ..Default::default()
+        });
+        let state = runtime.op_state();
+        state
+            .borrow_mut()
+            .put(GpuConfig::new_with_hooks(Arc::new(HookChain::from_policy(
+                "gpu",
+                Arc::new(PolicyChain::new(vec![], EvalMode::All)),
+            ))));
+        runtime
+            .execute_script("setup", "globalThis.navigator={};")
+            .unwrap();
+        inject(&mut runtime).unwrap();
+        let ready=runtime.execute_script("initial-copy",r#"(async()=>{
+          globalThis.d=await(await navigator.gpu.requestAdapter()).requestDevice();
+          globalThis.a=d.createBuffer({size:4,usage:12});globalThis.b=d.createBuffer({size:4,usage:12});
+          globalThis.copy=()=>{const e=d.createCommandEncoder();e.copyBufferToBuffer(a,0,b,0,4);return e.finish();};
+          d.queue.submit([copy()]);await d.queue.onSubmittedWorkDone();
+        })()"#).unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            runtime.resolve_value(ready),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let session = state.borrow().borrow::<GpuState>().session.clone().unwrap();
+        assert_eq!(session.resources.lock().unwrap().entries[&1].revision, 0);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("deny.rego");
+        std::fs::write(&path, "package mcp.gpu\ndefault allow = false\n").unwrap();
+        let policy = LocalPolicyEvaluator::from_file(&path, "data.mcp.gpu.allow".into()).unwrap();
+        state
+            .borrow_mut()
+            .put(GpuConfig::new_with_hooks(Arc::new(HookChain::from_policy(
+                "gpu",
+                Arc::new(PolicyChain::new(
+                    vec![PolicyEvaluatorKind::Local(policy)],
+                    EvalMode::All,
+                )),
+            ))));
+        runtime
+            .execute_script(
+                "host-write",
+                "d.queue.writeBuffer(a,0,new Uint32Array([99]));",
+            )
+            .unwrap();
+        // The host mirror now has revision 1; resident native state stays at 0.
+        assert_eq!(session.resources.lock().unwrap().entries[&1].revision, 0);
+        let denied=runtime.execute_script("denied-copy",r#"(async()=>{
+          d.queue.submit([copy()]);let denied=false;try{await d.queue.onSubmittedWorkDone();}catch(e){denied=String(e).includes('policy denied');}if(!denied)throw Error('native work not denied');
+        })()"#).unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            runtime.resolve_value(denied),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(session.resources.lock().unwrap().entries[&1].revision, 0);
+        assert_eq!(session.resources.lock().unwrap().entries.len(), 2);
+        assert!(state.borrow().borrow::<GpuState>().session.is_none());
+    }
     #[test]
     fn resource_identity_bounds() {
         assert!(validate_refs(&[BufferRef { id: 0, revision: 0 }], 1).is_err());

@@ -94,11 +94,17 @@ fn bitonic_local_global_and_atomics() {
         ("equal", 16),
         ("sorted", 16),
     ] {
-        run(
-            &shader,
-            serde_json::json!({"name":name,"n":n}),
-            include_str!("../../tests/webgpu/gallery/bitonic.js"),
-        );
+        // Four uploads plus one dispatch per phase: keep the existing 32-unit
+        // budget by checking all numerical phases in independent windows.
+        let levels = (n as u32).ilog2();
+        let phases = levels * (levels + 1) / 2;
+        for start in (0..phases).step_by(6) {
+            run(
+                &shader,
+                serde_json::json!({"name":name,"n":n,"startStep":start,"endStep":(start+6).min(phases)}),
+                include_str!("../../tests/webgpu/gallery/bitonic.js"),
+            );
+        }
     }
 }
 #[test]
@@ -478,5 +484,22 @@ fn fifo_boids_compute_render_retains_admitted_resources() {
         BOIDS,
         serde_json::json!({"name":"fifo-boids-render"}),
         &body,
+    );
+}
+
+#[test]
+#[ignore = "real GPU required"]
+fn queued_partial_writes_preserve_native_results() {
+    run_with_common(
+        "",
+        serde_json::json!({}),
+        r#"
+ const d=await(await navigator.gpu.requestAdapter()).requestDevice(),a=d.createBuffer({size:16,usage:140}),out=d.createBuffer({size:16,usage:9});
+ const p=d.createComputePipeline({layout:'auto',compute:{module:d.createShaderModule({code:'@group(0) @binding(0) var<storage,read_write> a:array<u32>; @compute @workgroup_size(1) fn main(@builtin(global_invocation_id) id:vec3u){a[id.x]*=2u;}'})}}),g=d.createBindGroup({layout:p.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:a}}]});
+ const compute=()=>{const e=d.createCommandEncoder(),pass=e.beginComputePass();pass.setPipeline(p);pass.setBindGroup(0,g);pass.dispatchWorkgroups(4);pass.end();d.queue.submit([e.finish()]);};
+ d.queue.writeBuffer(a,0,new Uint32Array([1,2,3,4]));compute();const input=new Uint32Array([10,20]);d.queue.writeBuffer(a,4,input);input.fill(99);structuredClone(input.buffer,{transfer:[input.buffer]});compute();d.queue.writeBuffer(a,8,new Uint32Array([7]));
+ const e=d.createCommandEncoder();e.copyBufferToBuffer(a,0,out,0,16);d.queue.submit([e.finish()]);a.destroy();await out.mapAsync(1);if(Array.from(new Uint32Array(out.getMappedRange())).join()!=='4,20,7,16')throw Error('native queued partial write corrupted preceding results');out.unmap();d.destroy();
+ "#,
+        "",
     );
 }

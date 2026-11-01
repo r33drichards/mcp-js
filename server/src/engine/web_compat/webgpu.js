@@ -6,6 +6,14 @@
   // Caller-owned mapped ranges may shadow byteLength; use captured intrinsics.
   const bufferByteLength = Function.prototype.call.bind(Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, 'byteLength').get);
   const transferBuffer = Function.prototype.call.bind(ArrayBuffer.prototype.transfer);
+  const ByteArray=Uint8Array, isView=ArrayBuffer.isView;
+  const setBytes=Function.prototype.call.bind(Uint8Array.prototype.set);
+  const typedPrototype=Object.getPrototypeOf(Uint8Array.prototype);
+  const getter=(prototype,key)=>Function.prototype.call.bind(Object.getOwnPropertyDescriptor(prototype,key).get);
+  const typedName=getter(typedPrototype,Symbol.toStringTag),typedBuffer=getter(typedPrototype,'buffer');
+  const typedOffset=getter(typedPrototype,'byteOffset'),typedBytes=getter(typedPrototype,'byteLength');
+  const dataBuffer=getter(DataView.prototype,'buffer'),dataOffsetIntrinsic=getter(DataView.prototype,'byteOffset'),dataBytes=getter(DataView.prototype,'byteLength');
+  const elementBytes=Object.freeze({Int8Array:1,Uint8Array:1,Uint8ClampedArray:1,Int16Array:2,Uint16Array:2,Float16Array:2,Int32Array:4,Uint32Array:4,Float32Array:4,Float64Array:8,BigInt64Array:8,BigUint64Array:8});
   class GPUValidationError extends Error { constructor(message){super(message);this.name="GPUValidationError";} }
   class GPUOutOfMemoryError extends Error { constructor(message){super(message);this.name="GPUOutOfMemoryError";} }
   class GPUInternalError extends Error { constructor(message){super(message);this.name="GPUInternalError";} }
@@ -81,7 +89,7 @@
     const release=job=>{
       d.metadataBytes-=job.bytes;d.references-=job.targets.length;
       for(const b of job.targets){b.retained--;if(b.dead&&!b.retained)b.data=null;}
-      job.targets=[];job.meta=null;
+      job.targets=[];job.meta=null;job.staging=null;
     };
     const settleJob=(job,error)=>{
       if(job.settled)return;job.settled=true;
@@ -102,44 +110,54 @@
       if(error){if(!lossSettled){lossSettled=true;rejectLost(error);}return;}
       settleLoss({reason:'destroyed',message:'device.destroy()'});
     };
-    // No queued payload copies: only the active job serializes charged backing
-    // stores, after its predecessor's readback has updated them. Public wrapper
-    // destruction does not invalidate resources already retained at admission.
+    // Waiting GPU jobs retain metadata/backing references; upload jobs retain
+    // only their charged selected-byte snapshot. Native serialization happens
+    // after preceding readback. Admitted resources survive wrapper destruction.
     const pump=async()=>{
       if(d.running||d.dead||!d.jobs.length)return;
       d.running=true;const job=d.jobs[0];
       try{
         live(d);
         const payload=JSON.parse(job.meta),targets=job.targets;
-        const nativeTargets=job.render?targets.slice(0,-1):targets;
-        const json=JSON.stringify({...payload,refs:nativeTargets.map(b=>({id:b.id,revision:b.revision})),buffers:nativeTargets.map(b=>Array.from(b.data))});
-        const raw=await (job.render?render(token,json):batch(token,json));
-        live(d); // Includes restored-session and terminal checks at delivery.
-        if(job.settled)return;
-        if(job.render){
-          const out=targets[targets.length-1];
-          if(out.revision===0xffffffff)fail('copy revision limit');out.revision++;
-          const packed=JSON.parse(raw);out.data.fill(0);
-          for(let y=0;y<payload.height;y++)out.data.set(packed.slice(y*payload.width*4,(y+1)*payload.width*4),y*job.pitch);
+        if(job.staging!==null){
+          const b=targets[0];
+          if(b.revision===0xffffffff)fail('upload revision limit');
+          setBytes(b.data,job.staging,payload.offset);b.revision++;
         }else{
-          const result=JSON.parse(raw);
-          for(let i=0;i<targets.length;i++)targets[i].data.set(result[i]);
+          const nativeTargets=job.render?targets.slice(0,-1):targets;
+          const json=JSON.stringify({...payload,refs:nativeTargets.map(b=>({id:b.id,revision:b.revision})),buffers:nativeTargets.map(b=>Array.from(b.data))});
+          const raw=await (job.render?render(token,json):batch(token,json));
+          live(d); // Includes restored-session and terminal checks at delivery.
+          if(job.settled)return;
+          if(job.render){
+            const out=targets[targets.length-1];
+            if(out.revision===0xffffffff)fail('copy revision limit');out.revision++;
+            const packed=JSON.parse(raw);out.data.fill(0);
+            for(let y=0;y<payload.height;y++)out.data.set(packed.slice(y*payload.width*4,(y+1)*payload.width*4),y*job.pitch);
+          }else{
+            const result=JSON.parse(raw);
+            for(let i=0;i<targets.length;i++)targets[i].data.set(result[i]);
+          }
         }
         d.jobs.shift();settleJob(job);d.pending=d.jobs.length!==0;
       }catch(error){finish(error);}finally{
         d.running=false;if(!d.dead)void pump();
       }
     };
-    const admit=(c,targets,payload,units,renderJob=false,pitch=0)=>{
+    const admit=(c,targets,payload,units,renderJob=false,pitch=0,source=null)=>{
       const meta=JSON.stringify(payload),bytes=utf8Bytes(meta);
       if(d.jobs.length>=32||d.metadataBytes+bytes>65536||d.references+targets.length>128)fail('queue metadata/reference/job limit');
       if(d.submissions+units>32)fail('GPU work limit (32)');
+      const stagingBytes=source===null?0:typedBytes(source);
+      if(d.bytes+stagingBytes>4*1024*1024)fail('cumulative resource/staging limit (4 MiB)');
+      let staging=null;
+      if(source!==null){staging=new ByteArray(stagingBytes);setBytes(staging,source);}
       let resolve,reject;const fence=new Promise((a,b)=>{resolve=a;reject=b;});fence.catch(()=>{});
       // All validation precedes this synchronous reservation/consumption block.
-      c.used=true;c.sequence=null;c.render=null;d.submissions+=units;
+      c.used=true;c.sequence=null;c.render=null;d.submissions+=units;d.bytes+=stagingBytes;
       for(const b of targets)b.retained++;
       d.metadataBytes+=bytes;d.references+=targets.length;d.pending=true;
-      d.jobs.push({targets,meta,bytes,render:renderJob,pitch,resolve,reject,settled:false});
+      d.jobs.push({targets,meta,bytes,staging,render:renderJob,pitch,resolve,reject,settled:false});
       d.tail=fence;void pump();
     };
     const terminal=finish;
@@ -352,18 +370,22 @@
       },
       queue: Object.freeze({
         writeBuffer(obj, offset, data, dataOffset = 0, size) {
-          const b = buffer(obj, d);
-          if (d.pending || b.mapped || b.mapping || !(b.usage & U.COPY_DST)) fail('buffer unavailable for upload');
-          const view = ArrayBuffer.isView(data);
-          if (!view && !(data instanceof ArrayBuffer)) throw new TypeError('BufferSource required');
-          const unit = view ? (data.BYTES_PER_ELEMENT || 1) : 1;
-          const source = new Uint8Array(view ? data.buffer : data, view ? data.byteOffset : 0, data.byteLength);
-          integer(offset, b.size, 'offset'); integer(dataOffset, source.byteLength / unit, 'dataOffset');
-          const bytes = size === undefined ? source.byteLength - dataOffset * unit : integer(size, source.byteLength / unit, 'size') * unit;
-          if (offset % 4 || bytes % 4 || offset + bytes > b.size || dataOffset * unit + bytes > source.byteLength) fail('upload range/alignment');
-          if (b.revision === 0xffffffff) fail('upload revision limit');
-          b.revision++;
-          b.data.set(source.subarray(dataOffset * unit, dataOffset * unit + bytes), offset);
+          const b=buffer(obj,d);
+          if(b.mapped||b.mapping||!(b.usage&U.COPY_DST))fail('buffer unavailable for upload');
+          let backing=data,start=0,length,unit=1;
+          if(isView(data)){
+            const name=typedName(data);
+            if(name){backing=typedBuffer(data);start=typedOffset(data);length=typedBytes(data);unit=elementBytes[name];if(!unit)fail('unsupported typed array');}
+            else{backing=dataBuffer(data);start=dataOffsetIntrinsic(data);length=dataBytes(data);}
+          }else{length=bufferByteLength(data);}
+          // Shared buffers are outside this subset. Intrinsic getters avoid
+          // caller-shadowed view fields and invoke no user getters at admission.
+          bufferByteLength(backing);
+          integer(offset,b.size,'offset');integer(dataOffset,length/unit,'dataOffset');
+          const bytes=size===undefined?length-dataOffset*unit:integer(size,length/unit,'size')*unit;
+          if(offset%4||bytes%4||offset+bytes>b.size||dataOffset*unit+bytes>length)fail('upload range/alignment');
+          const selected=new ByteArray(backing,start+dataOffset*unit,bytes);
+          admit({},[b],{kind:'writeBuffer',id:b.id,usage:b.usage,offset,size:bytes},1,false,0,selected);
         },
         submit(list) {
           live(d);

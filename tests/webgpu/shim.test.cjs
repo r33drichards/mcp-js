@@ -266,7 +266,7 @@ test('work and map fences capture fixed prefixes, pending map does not invalidat
  globalThis.copy=(a,z)=>{const e=d.createCommandEncoder();e.copyBufferToBuffer(a,0,z,0,4);return e.finish();};d.queue.writeBuffer(a,0,new Uint32Array([7]));
  d.queue.submit([copy(a,b)]);globalThis.first=d.queue.onSubmittedWorkDone();d.queue.submit([copy(b,out)]);globalThis.secondDone=false;globalThis.second=d.queue.onSubmittedWorkDone().then(()=>secondDone=true);
  globalThis.mapped=out.mapAsync(1);d.queue.submit([copy(a,b)]);globalThis.last=d.queue.onSubmittedWorkDone();last.catch(()=>{});
- let bad=false;try{d.queue.writeBuffer(a,0,new Uint32Array([9]));}catch{bad=true;}if(!bad)throw Error('pending write accepted');
+ let bad=false;try{d.queue.writeBuffer(out,0,new Uint32Array([9]));}catch{bad=true;}if(!bad)throw Error('pending-map write accepted');
  `);assert.equal(r.calls(),1);gates[0]();await r.run('await first;if(secondDone)throw Error("prefix waited incorrectly");');assert.equal(r.calls(),2);
  gates[1]();await r.run('await mapped;await second;if(new Uint32Array(out.getMappedRange())[0]!==7)throw Error("map prefix data");out.unmap();');assert.equal(r.calls(),3);
  await r.run('d.destroy();await Promise.allSettled([last]);await first;');gates[2]();assert.equal(r.valid(),false);
@@ -330,4 +330,70 @@ for(const overflow of [false,true])test(`queued ${overflow?'overflow':'native lo
  r.queue({overflow,loss:overflow?null:{kind:'unknown',message:'authoritative native loss'}});
  await r.run(`d.destroy();const results=await Promise.allSettled(fences);if(results.some(x=>x.status!=='rejected'||!x.reason.message.includes(${JSON.stringify(overflow?'overflow':'authoritative native loss')})))throw Error('terminal cause lost');let value;try{value=await d.lost;}catch(e){value=e;}if(${overflow}?!value.message.includes('overflow'):value.reason!=='unknown')throw Error('loss precedence');`);
  release();assert.equal(r.calls(),1);
+});
+
+test('queued writes snapshot selected intrinsic view bytes despite caller mutation and detachment',async()=>{
+ let release;const r=runtime(undefined,{before:(_,n)=>n===1?new Promise(resolve=>release=resolve):undefined});
+ await r.run(`
+ globalThis.d=await(await navigator.gpu.requestAdapter()).requestDevice();globalThis.a=d.createBuffer({size:16,usage:12});globalThis.out=d.createBuffer({size:16,usage:9});
+ const copy=()=>{const e=d.createCommandEncoder();e.copyBufferToBuffer(a,0,out,0,16);return e.finish();};
+ d.queue.submit([copy()]);const input=new Uint32Array([1,2,3,4]),backing=input.buffer;
+ for(const key of ['buffer','byteOffset','byteLength','BYTES_PER_ELEMENT'])Object.defineProperty(input,key,{get(){throw Error('caller getter '+key);}});
+ d.queue.writeBuffer(a,4,input,1,2);input[1]=99;structuredClone(backing,{transfer:[backing]});
+ d.queue.submit([copy()]);globalThis.mapped=out.mapAsync(1);
+ `);assert.equal(r.calls(),1);assert.deepEqual(r.jobs[0].buffers[0],Array(16).fill(0));release();
+ await r.run('await mapped;if(Array.from(new Uint32Array(out.getMappedRange())).join()!=="0,2,3,0")throw Error("snapshot changed");out.unmap();d.destroy();');assert.equal(r.jobs[1].refs[0].revision,1);
+});
+test('partial queued writes preserve GPU readback and overlapping dispatch order',async()=>{
+ const r=runtime();await r.run(`
+ const d=await(await navigator.gpu.requestAdapter()).requestDevice(),a=d.createBuffer({size:16,usage:140}),out=d.createBuffer({size:16,usage:9});
+ const p=d.createComputePipeline({layout:'auto',compute:{module:d.createShaderModule({code:'mock'})}}),g=d.createBindGroup({layout:p.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:a}}]});
+ const compute=()=>{const e=d.createCommandEncoder(),pass=e.beginComputePass();pass.setPipeline(p);pass.setBindGroup(0,g);pass.dispatchWorkgroups(1);pass.end();d.queue.submit([e.finish()]);};
+ d.queue.writeBuffer(a,0,new Uint32Array([1,2,3,4]));compute();d.queue.writeBuffer(a,4,new Uint32Array([10,20]));compute();d.queue.writeBuffer(a,8,new Uint32Array([7]));
+ const e=d.createCommandEncoder();e.copyBufferToBuffer(a,0,out,0,16);d.queue.submit([e.finish()]);await out.mapAsync(1);if(Array.from(new Uint32Array(out.getMappedRange())).join()!=='4,20,7,16')throw Error('write/dispatch ordering');out.unmap();d.destroy();
+ `);assert.deepEqual(r.jobs.map(j=>j.refs[0].revision),[1,2,3]);
+});
+test('admitted writes survive destination destruction and reject future dead-wrapper use',async()=>{
+ let release;const r=runtime(undefined,{before:(_,n)=>n===1?new Promise(resolve=>release=resolve):undefined});
+ await r.run(`
+ globalThis.d=await(await navigator.gpu.requestAdapter()).requestDevice();const a=d.createBuffer({size:4,usage:12}),out=d.createBuffer({size:4,usage:9});globalThis.out=out;
+ const copy=()=>{const e=d.createCommandEncoder();e.copyBufferToBuffer(a,0,out,0,4);return e.finish();};d.queue.submit([copy()]);d.queue.writeBuffer(a,0,new Uint32Array([37]));d.queue.submit([copy()]);a.destroy();
+ let bad=false;try{d.queue.writeBuffer(a,0,new Uint32Array([99]));}catch{bad=true;}if(!bad)throw Error('dead upload accepted');globalThis.mapped=out.mapAsync(1);
+ `);release();await r.run('await mapped;if(new Uint32Array(out.getMappedRange())[0]!==37)throw Error("retained upload lost");out.unmap();d.destroy();');
+});
+test('map fence includes queued upload but excludes subsequent unrelated work',async()=>{
+ const gates=[];const r=runtime(undefined,{before:()=>new Promise(resolve=>gates.push(resolve))});
+ await r.run(`
+ globalThis.d=await(await navigator.gpu.requestAdapter()).requestDevice();const a=d.createBuffer({size:4,usage:12}),b=d.createBuffer({size:4,usage:12});globalThis.out=d.createBuffer({size:4,usage:9});
+ const copy=(z)=>{const e=d.createCommandEncoder();e.copyBufferToBuffer(a,0,z,0,4);return e.finish();};d.queue.submit([copy(out)]);d.queue.writeBuffer(out,0,new Uint32Array([51]));globalThis.mapped=out.mapAsync(1);d.queue.submit([copy(b)]);globalThis.last=d.queue.onSubmittedWorkDone();last.catch(()=>{});
+ `);gates[0]();await r.run('await mapped;if(new Uint32Array(out.getMappedRange())[0]!==51)throw Error("upload absent from prefix");out.unmap();');assert.equal(r.calls(),2);await r.run('d.destroy();await Promise.allSettled([last]);');gates[1]();
+});
+test('upload staging uses cumulative allocation budget with no refund',async()=>{
+ const r=runtime();await r.run(`
+ const d=await(await navigator.gpu.requestAdapter()).requestDevice(),b=d.createBuffer({size:2097152,usage:8}),source=new Uint8Array(1048576);
+ d.queue.writeBuffer(b,0,source);d.queue.writeBuffer(b,0,source);await d.queue.onSubmittedWorkDone();
+ let failed=false;try{d.queue.writeBuffer(b,0,new Uint32Array([1]));}catch(e){failed=e.message.includes('staging limit');}if(!failed)throw Error('staging budget refunded');b.destroy();failed=false;try{d.createBuffer({size:4,usage:8});}catch{failed=true;}if(!failed)throw Error('allocation charge lost');d.destroy();
+ `);assert.equal(r.calls(),0);
+});
+test('each upload consumes one cumulative work unit even without native dispatch',async()=>{
+ const r=runtime();await r.run(`
+ const d=await(await navigator.gpu.requestAdapter()).requestDevice(),b=d.createBuffer({size:4,usage:8});for(let i=0;i<32;i++)d.queue.writeBuffer(b,0,new Uint32Array([i]));await d.queue.onSubmittedWorkDone();let failed=false;try{d.queue.writeBuffer(b,0,new Uint32Array([33]));}catch(e){failed=e.message.includes('work limit');}if(!failed)throw Error('upload work budget refunded');d.destroy();
+ `);assert.equal(r.calls(),0);
+});
+for(const cancel of ['denied','destroy','loss','overflow'])test(`queued upload snapshot is cancelled on ${cancel}`,async()=>{
+ let release;const r=runtime(undefined,{before:()=>new Promise((resolve,reject)=>release=cancel==='denied'?()=>reject(Error('policy denied')):resolve)});
+ await r.run(`
+ globalThis.d=await(await navigator.gpu.requestAdapter()).requestDevice();const a=d.createBuffer({size:4,usage:12}),b=d.createBuffer({size:4,usage:12});const e=d.createCommandEncoder();e.copyBufferToBuffer(a,0,b,0,4);d.queue.submit([e.finish()]);d.queue.writeBuffer(a,0,new Uint32Array([99]));globalThis.f=d.queue.onSubmittedWorkDone();f.catch(()=>{});
+ `);
+ if(cancel==='denied')release();else {if(cancel==='loss')r.queue({loss:{kind:'unknown',message:'native loss'}});if(cancel==='overflow')r.queue({overflow:true});await r.run('d.destroy();');release();}
+ await assert.rejects(r.run('await f;'));assert.equal(r.calls(),1);assert.deepEqual(r.jobs[0].buffers[0],[0,0,0,0]);assert.equal(r.valid(),false);
+});
+test('BufferSource units, DataView offsets and zero-length uploads validate before admission',async()=>{
+ const r=runtime();await r.run(`
+ const d=await(await navigator.gpu.requestAdapter()).requestDevice(),b=d.createBuffer({size:16,usage:12}),out=d.createBuffer({size:16,usage:9});
+ const source=new Uint32Array([10,20,30,40]);d.queue.writeBuffer(b,0,new DataView(source.buffer,4,8),4,4);d.queue.writeBuffer(b,4,source.buffer,8,4);d.queue.writeBuffer(b,16,new ArrayBuffer(0));
+ const bad=f=>{let failed=false;try{f();}catch{failed=true;}if(!failed)throw Error('invalid upload accepted');};
+ bad(()=>d.queue.writeBuffer(b,2,source));bad(()=>d.queue.writeBuffer(b,0,source,4,1));bad(()=>d.queue.writeBuffer(b,0,new Uint8Array(3)));const detached=new ArrayBuffer(4);structuredClone(detached,{transfer:[detached]});bad(()=>d.queue.writeBuffer(b,0,detached));
+ const e=d.createCommandEncoder();e.copyBufferToBuffer(b,0,out,0,16);d.queue.submit([e.finish()]);await out.mapAsync(1);if(Array.from(new Uint32Array(out.getMappedRange())).join()!=='30,30,0,0')throw Error('BufferSource units wrong');out.unmap();d.destroy();
+ `);
 });
