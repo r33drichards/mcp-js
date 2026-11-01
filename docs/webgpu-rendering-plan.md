@@ -653,3 +653,89 @@ Commands are the previous section's shim, native unit, native GPU and GPU-galler
 commands. No mappedAtCreation changes, ONNX reattempt, publication, or unrelated
 crash retries were made in this fix. The ONNX upload blocker and unresolved earlier
 parallel SIGSEGV remain unchanged. This fix is ready for independent re-review.
+
+
+## Mapped initialization checkpoint (local, 2026-11-01)
+
+Based on reviewed `81957f5a4e673b0d004cf919fb50ade268abff3b`, this adds
+`mappedAtCreation` initialization and MAP_WRITE|COPY_SRC upload staging. Initial
+bytes are zeroed; one full-buffer mapped range aliases the charged backing store.
+Unmap transfers that store, detaches the caller's ArrayBuffer and advances upload
+revision. Buffer/device teardown detaches tracked ranges. Usage remains immutable,
+MAP_READ/MAP_WRITE combinations are validated in JS and native code, and existing
+cumulative allocation/object budgets and snapshot ownership rules are unchanged.
+General mapAsync WRITE, partial/multiple ranges and multiple submissions in flight
+remain unsupported. Native buffers strip both mapping flags because mapping uses
+separate host staging; copies and shader dispatch still execute through wgpu.
+
+Validation: 20 shim, 14 ordinary native, 4 native GPU, 4 GPU integration,
+20 gallery and 1 rendering-policy checks passed (63 total). Commands:
+
+```sh
+node --test tests/webgpu/shim.test.cjs
+cargo test --offline -p server --lib engine::webgpu -- --test-threads=1
+cargo test --offline -p server --lib engine::webgpu -- --ignored --test-threads=1
+cargo test --offline -p server --test webgpu_gallery --test webgpu --test webgpu_render_security -- --ignored --test-threads=1
+MCP_ONNX_ASSET_DIR=/path/to/verified/assets cargo test --offline -p server --test onnx_bootstrap -- --ignored --test-threads=1
+```
+
+The last command intentionally fails at the next actual compatibility gap:
+`webgpu: one command buffer and one submission in flight supported`, in ORT
+1.23.2 upload after `ONNX_PROBE_SESSION_CREATED`. No Add output, GPU inference
+or no-fallback result has been verified. ORT submits input uploads without awaiting
+each completion and destroys upload staging after submission. The next milestone
+must review bounded ordered queue admission and submitted-resource lifetime;
+removing the pending guard alone is not a correct fix.
+
+The new real-GPU test initializes [11,22,33,0], detaches the mapped range, copies
+to storage, dispatches addition and verifies [12,23,34,1]. Existing numerical
+Boids/Life/bitonic and real rasterization, policy/budget/ownership regressions pass.
+Logs outside Git in ../webgpu-validation: mapped-final-shim.log,
+mapped-trace-resident-unit.log, mapped-trace-resident-native-gpu.log,
+mapped-trace-resident-gpu.log (four integration passes, then one stale gallery
+error-message expectation), mapped-final-gpu.log (all gallery/security pass after
+correcting that assertion), and onnx-mapped-final.log. The initial native usage
+assertion also incorrectly rejected newly valid MAP_WRITE; corrected before the
+passing native run. Failed runs remain preserved as evidence.
+
+Mac build recovery is confirmed. Required source manifests and Rust cache inputs
+were File Provider dataless placeholders. Bounded Cargo/process diagnostics
+identified blocked metadata/proc-macro inputs, including librustversion. Exact
+required files were hydrated using Foundation FileManager's public download API;
+no source restore, global sync changes, cache deletion or installation occurred.
+Recovered native compilation/tests completed in 16.15 seconds; subsequent gallery
+and ONNX probes completed normally. Original dirty source backups remain preserved.
+
+The unrelated earlier parallel suite SIGSEGV remains unresolved; later passes do
+not establish its cause. Full Nix packaging, other GPU backends, CTS, spontaneous
+loss and real OOM remain unverified. This local mapping checkpoint needs independent
+review before further resource/queue semantic changes. PR #308 contains the reviewed
+81957f5 tree under public commit afda96bcb9126fe7af3a6b9335438f1bd1771581;
+this new mapping checkpoint is not part of that publication.
+
+## Mapped-range property shadowing fix (local, 2026-11-01)
+
+Independent review found that caller-defined `byteLength` properties could skip
+mapping detachment or throw before native device destruction and lost settlement.
+Mapping now uses captured intrinsic ArrayBuffer length and transfer operations.
+The first native regression also exposed the structuredClone compatibility shim's
+own property lookup, so WebGPU mapping no longer routes through that shim.
+Detachment clears tracking in finally; device cleanup catches per-range failures,
+continues other ranges, always attempts native teardown and settles lost using
+existing authoritative native terminal-outcome precedence. A cleanup failure with
+no prior native terminal outcome rejects lost; it cannot report successful cleanup.
+
+Validation: 27 shim tests and 26 real-GPU integration/gallery/security tests pass.
+Six shadow-property cases cover throwing getters and zero values across unmap,
+buffer destruction and device destruction, with actual native session invalidation.
+A synthetic transfer failure verifies later mappings are cleaned, native destroy
+runs, repeat destroy is harmless and lost rejects. Existing GPU initialization,
+numerical/rendering/policy tests pass. Commands are the preceding checkpoint's
+node shim and combined GPU-gallery Cargo commands. Logs: mapped-shadow-shim.log,
+mapped-shadow-intrinsic-gpu.log; initial structuredClone failure retained in
+mapped-shadow-gpu.log. No queue implementation or publication occurred.
+
+A post-test Git diff exited with signal 10 (status 138); a subsequent diff completed
+successfully after a delay. Cause is unestablished. This is distinct evidence from
+the earlier unresolved test-suite SIGSEGV, whose relationship to WebGPU remains
+unestablished. Source backups are retained under /tmp/mcp-mapped-shadow-ge5v04g6.

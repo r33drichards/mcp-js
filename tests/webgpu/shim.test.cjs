@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const vm = require('node:vm');
 const fs = require('node:fs');
 const source = fs.readFileSync('server/src/engine/web_compat/webgpu.js', 'utf8');
-function runtime() {
+function runtime(transfer) {
   let valid = true, calls = 0, deliver, outcome={loss:null,overflow:false};
   const jobs = [], requests = [];
   const c = vm.createContext({ navigator: {}, structuredClone, Deno: { core: { unrefOpPromise:()=>{}, ops: {
@@ -26,8 +26,9 @@ function runtime() {
       return JSON.stringify(data.map(b=>Array.from(b)));
     }
   } } } });
+  if(transfer){c.__transfer=transfer;vm.runInContext('ArrayBuffer.prototype.transfer=__transfer;delete globalThis.__transfer;',c);}
   vm.runInContext(source, c);
-  return { run: code => vm.runInContext('(async () => {' + code + '})()', c), stale: () => { valid = false; }, calls: () => calls, queue: value=>{if(!outcome.loss&&!outcome.overflow){outcome={loss:value.loss??null,overflow:!!value.overflow};}}, emit: value=>{if(!outcome.loss&&!outcome.overflow){outcome={loss:value.loss??null,overflow:!!value.overflow};}deliver(JSON.stringify(value));}, jobs, requests };
+  return { run: code => vm.runInContext('(async () => {' + code + '})()', c), valid:()=>valid, stale: () => { valid = false; }, calls: () => calls, queue: value=>{if(!outcome.loss&&!outcome.overflow){outcome={loss:value.loss??null,overflow:!!value.overflow};}}, emit: value=>{if(!outcome.loss&&!outcome.overflow){outcome={loss:value.loss??null,overflow:!!value.overflow};}deliver(JSON.stringify(value));}, jobs, requests };
 }
 test('upload, command encoding, readback and detach', async () => {
   const r = runtime();
@@ -42,7 +43,7 @@ test('bounds, unsupported descriptors, cross-device forgery and lifecycle', asyn
     bad(() => d.createBuffer({size: 4194308,usage:128}));
     bad(() => d.createBuffer({size: 3,usage:128}));
     bad(() => d.createBuffer({size: 4,usage:129}));
-    bad(() => d.createBuffer({size: 4,usage:128,mappedAtCreation:true}));
+    bad(() => d.createBuffer({size: 4,usage:128,mappedAtCreation:1}));
     bad(() => d.createShaderModule({code:'', compilationHints:[]}));
     bad(() => d.queue.writeBuffer({},0,new Uint32Array([1])));
     const b = d.createBuffer({size:4,usage:136});
@@ -194,3 +195,55 @@ for(const drained of [false,true]) for(const overflow of [false,true]) {
   await r.run(`d.destroy();d.destroy();let value;try{value=await d.lost;}catch(e){value=e.message;}if(${overflow} ? typeof value!=='string'||!value.includes('overflow') : value.reason!=='unknown'||value.message!=='earlier native loss')throw Error('earlier terminal outcome lost');`);
  });
 }
+test('mapped initialization zeroes, detaches, uploads and keeps usage immutable',async()=>{
+ const r=runtime();await r.run(`
+ const d=await(await navigator.gpu.requestAdapter()).requestDevice();const bad=f=>{let failed=false;try{f();}catch{failed=true;}if(!failed)throw Error('invalid mapping accepted');};
+ const b=d.createBuffer({size:16,usage:132,mappedAtCreation:true});if(b.mapState!=='mapped'||Reflect.set(b,'usage',140))throw Error('initial state/usage');
+ bad(()=>b.getMappedRange(4,4));bad(()=>b.getMappedRange(0,20));
+ const range=b.getMappedRange();if(new Uint32Array(range).some(x=>x))throw Error('not zeroed');new Uint32Array(range).set([1,0,3]);bad(()=>b.getMappedRange());
+ const p=d.createComputePipeline({layout:'auto',compute:{module:d.createShaderModule({code:'mock'})}}),g=d.createBindGroup({layout:p.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:b}}]});
+ const e=d.createCommandEncoder(),pass=e.beginComputePass();pass.setPipeline(p);pass.setBindGroup(0,g);pass.dispatchWorkgroups(1);pass.end();const out=d.createBuffer({size:16,usage:9});e.copyBufferToBuffer(b,0,out,0,16);const c=e.finish();bad(()=>d.queue.submit([c]));
+ b.unmap();if(range.byteLength!==0||b.mapState!=='unmapped')throw Error('unmap did not detach');bad(()=>b.getMappedRange());b.unmap();d.queue.submit([c]);await out.mapAsync(1);if(Array.from(new Uint32Array(out.getMappedRange())).join()!=='2,0,6,0')throw Error('initialized bytes lost');d.destroy();
+ `);assert.equal(r.jobs[0].refs[0].revision,1);assert.equal(r.jobs[0].usages[0],132);
+});
+test('mapped ranges detach on buffer/device destruction; detached init and invalid flags fail',async()=>{
+ const r=runtime();await r.run(`
+ const d=await(await navigator.gpu.requestAdapter()).requestDevice();const bad=f=>{let failed=false;try{f();}catch{failed=true;}if(!failed)throw Error('invalid mapping accepted');};
+ for(const usage of [3,10,130])bad(()=>d.createBuffer({size:16,usage,mappedAtCreation:true}));
+ bad(()=>d.createBuffer({size:6,usage:6,mappedAtCreation:true}));
+ const a=d.createBuffer({size:16,usage:6,mappedAtCreation:true}),ar=a.getMappedRange();a.destroy();if(ar.byteLength)throw Error('buffer destroy mapping alive');bad(()=>a.unmap());
+ const b=d.createBuffer({size:16,usage:6,mappedAtCreation:true}),br=b.getMappedRange();structuredClone(br,{transfer:[br]});bad(()=>b.unmap());b.destroy();
+ const c=d.createBuffer({size:16,usage:6,mappedAtCreation:true}),cr=c.getMappedRange();d.destroy();if(cr.byteLength||c.mapState!=='unmapped')throw Error('device destroy mapping alive');
+ `);
+});
+test('mapped initialization shares unchanged cumulative allocation budget',async()=>{
+ const r=runtime();await r.run(`
+ const d=await(await navigator.gpu.requestAdapter()).requestDevice();const b=d.createBuffer({size:4194304,usage:6,mappedAtCreation:true});const range=b.getMappedRange();if(range.byteLength!==4194304)throw Error('range size');b.unmap();b.destroy();let failed=false;try{d.createBuffer({size:4,usage:6,mappedAtCreation:true});}catch{failed=true;}if(!failed)throw Error('allocation budget refunded');d.destroy();
+ `);
+});
+
+for(const shadow of ['throw','zero']) for(const action of ['unmap','buffer','device']) {
+ test(`mapped ${shadow} byteLength cannot block ${action}`,async()=>{
+  const r=runtime();await r.run(`
+   const d=await(await navigator.gpu.requestAdapter()).requestDevice();
+   const b=d.createBuffer({size:16,usage:6,mappedAtCreation:true}),range=b.getMappedRange();
+   const length=Object.getOwnPropertyDescriptor(ArrayBuffer.prototype,'byteLength').get;
+   new Uint32Array(range)[0]=42;
+   Object.defineProperty(range,'byteLength',${shadow==='throw'?"{get(){throw Error('caller getter');}}":"{value:0}"});
+   ${action==='unmap'?'b.unmap();':action==='buffer'?'b.destroy();':'d.destroy();'}
+   if(length.call(range)!==0||b.mapState!=='unmapped')throw Error('range not detached');
+   d.destroy();d.destroy();if((await d.lost).reason!=='destroyed')throw Error('loss not settled');
+  `);assert.equal(r.valid(),false);
+ });
+}
+test('mapping cleanup failure cannot bypass native teardown or loss settlement',async()=>{
+ let attempts=0;
+ const r=runtime(function(){attempts++;if(attempts===1)throw Error('injected cleanup failure');return ArrayBuffer.prototype.transfer.call(this);});
+ await r.run(`
+  const d=await(await navigator.gpu.requestAdapter()).requestDevice();
+  const a=d.createBuffer({size:16,usage:6,mappedAtCreation:true});a.getMappedRange();
+  const b=d.createBuffer({size:16,usage:6,mappedAtCreation:true}),range=b.getMappedRange();
+  d.destroy();d.destroy();let error;try{await d.lost;}catch(e){error=e;}
+  if(!error?.message.includes('injected cleanup failure')||range.byteLength||a.mapState!=='unmapped'||b.mapState!=='unmapped')throw Error('cleanup/settlement skipped');
+ `);assert.equal(r.valid(),false);assert.equal(attempts,2);
+});

@@ -9,7 +9,7 @@
     "dist/ort-wasm-simd-threaded.jsep.mjs",
     "dist/ort-wasm-simd-threaded.jsep.wasm"
   ],
-  "status": "verified matching assets; ONNX session created; run blocked during upload by unsupported mappedAtCreation",
+  "status": "verified matching assets; session created; mapped initialization supported; run blocked by one submission in flight during input upload",
   "model_plan": {
     "operators": [
       "Add"
@@ -47,6 +47,6 @@
   "model_sha256": "98746cca6e1220569e1054caedee36a71a5b291b8d000b36c2e54ed3cb58687f",
   "model_validated_by_runtime": true,
   "inference_verified": false,
-  "last_bootstrap_blocker": "webgpu: mappedAtCreation is unsupported (session.run input upload)",
+  "last_bootstrap_blocker": "webgpu: one command buffer and one submission in flight supported (session.run input upload)",
   "session_created": true
 }

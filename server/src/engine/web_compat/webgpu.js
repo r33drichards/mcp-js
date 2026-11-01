@@ -3,10 +3,13 @@
   const { op_gpu_request: request, op_gpu_batch: batch,
           op_gpu_destroy: destroy, op_gpu_check: check, op_gpu_render: render, op_gpu_describe: describe, op_gpu_validate_device: validateDevice, op_gpu_events: receiveEvents, op_gpu_event_check: eventCheck } = Deno.core.ops;
   const unrefOp = Deno.core.unrefOpPromise;
+  // Caller-owned mapped ranges may shadow byteLength; use captured intrinsics.
+  const bufferByteLength = Function.prototype.call.bind(Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, 'byteLength').get);
+  const transferBuffer = Function.prototype.call.bind(ArrayBuffer.prototype.transfer);
   class GPUValidationError extends Error { constructor(message){super(message);this.name="GPUValidationError";} }
   class GPUOutOfMemoryError extends Error { constructor(message){super(message);this.name="GPUOutOfMemoryError";} }
   class GPUInternalError extends Error { constructor(message){super(message);this.name="GPUInternalError";} }
-  const U = Object.freeze({ MAP_READ: 1, COPY_SRC: 4, COPY_DST: 8, VERTEX: 32, UNIFORM: 64, STORAGE: 128 });
+  const U = Object.freeze({ MAP_READ: 1, MAP_WRITE: 2, COPY_SRC: 4, COPY_DST: 8, VERTEX: 32, UNIFORM: 64, STORAGE: 128 });
   const buffers = new WeakMap(), shaders = new WeakMap(), pipelines = new WeakMap();
   const layouts = new WeakMap(), groups = new WeakMap(), commands = new WeakMap();
   const textures = new WeakMap(), views = new WeakMap(), renderPipelines = new WeakMap();
@@ -59,13 +62,21 @@
     });
   }
   function makeDevice(token,caps) {
-    const d = { token, dead: false, bytes: 0, objects: 0, submissions: 0, pending: false, tail: Promise.resolve() };
+    const d = { token, dead: false, bytes: 0, objects: 0, submissions: 0, pending: false, mappedBuffers: new Set(), tail: Promise.resolve() };
     let handler=null, resolveLost, rejectLost, lossSettled=false;
     const lost=new Promise((resolve,reject)=>{resolveLost=resolve;rejectLost=reject;});
     lost.catch(()=>{}); // Terminal bridge failure stays observable without an unhandled rejection.
     const settleLoss=(info)=>{if(!lossSettled){lossSettled=true;resolveLost(Object.freeze(info));}};
+    const detachMapping=b=>{
+      try {
+        if(b.mapped && bufferByteLength(b.mapped))transferBuffer(b.mapped);
+      } finally { b.mapped=null;d.mappedBuffers.delete(b); }
+    };
     const finish=(error)=>{
       if(d.dead)return;d.dead=true;
+      for(const b of d.mappedBuffers){
+        try{detachMapping(b);}catch(cleanupError){error=error??cleanupError;}
+      }
       let outcome;
       try{outcome=JSON.parse(destroy(token));}catch(nativeError){error=error??nativeError;}
       if(outcome?.overflow)error=new Error('webgpu: native error queue overflow; session terminated');
@@ -83,23 +94,25 @@
       createBuffer(desc) {
         fields(desc, ['size', 'usage', 'mappedAtCreation']); count();
         const size = integer(desc.size, 4 * 1024 * 1024, 'buffer size');
-        const usage = integer(desc.usage, 237, 'buffer usage');
-        if (!size || size % 4 || !usage || (usage & ~237)) fail('buffer size/alignment/usage');
+        const usage = integer(desc.usage, 239, 'buffer usage');
+        if (!size || size % 4 || !usage || (usage & ~239)) fail('buffer size/alignment/usage');
         if ((usage & U.MAP_READ) && (usage & ~9)) fail('MAP_READ only supports COPY_DST');
         if ((usage & U.UNIFORM) && ((usage & U.STORAGE) || size>65536)) fail('uniform usage/size limit');
-        if (desc.mappedAtCreation) fail('mappedAtCreation is unsupported');
+        if ((usage & U.MAP_WRITE) && (usage & ~6)) fail('MAP_WRITE only supports COPY_SRC');
+        if (desc.mappedAtCreation!==undefined&&typeof desc.mappedAtCreation!=='boolean')throw new TypeError('mappedAtCreation must be boolean');
         if (d.bytes + size > 4 * 1024 * 1024) fail('cumulative buffer limit (4 MiB)');
         d.bytes += size;
-        const b = { id: d.objects, revision: 0, device: d, data: new Uint8Array(size), size, usage, dead: false, mapped: null, mapping: false, returned: false };
+        const b = { id: d.objects, revision: 0, device: d, data: new Uint8Array(size), size, usage, dead: false, mapped: null, mapping: false, returned: false, initializing: desc.mappedAtCreation===true };
+        if(b.initializing){b.mapped=b.data.buffer;d.mappedBuffers.add(b);}
         const obj = Object.freeze({ size, usage,
           get mapState() { return b.mapped ? 'mapped' : b.mapping ? 'pending' : 'unmapped'; },
-          destroy() { b.dead = true; b.mapped = null; b.data = null; },
+          destroy() { b.dead = true; try{detachMapping(b);}finally{b.data = null;} },
           async mapAsync(mode, offset = 0, length = size) {
             buffer(obj, d);
             if (mode !== 1 || !(usage & U.MAP_READ) || offset !== 0 || length !== size) fail('only full-buffer MAP_READ is supported');
             if (b.mapped || b.mapping) fail('buffer already mapping');
             b.mapping = true;
-            try { await d.tail; buffer(obj, d); b.mapped = b.data.slice().buffer; b.returned = false; }
+            try { await d.tail; buffer(obj, d); b.mapped = b.data.slice().buffer; b.returned = false; d.mappedBuffers.add(b); }
             finally { b.mapping = false; }
           },
           getMappedRange(offset = 0, length = size) {
@@ -110,9 +123,15 @@
           unmap() {
             buffer(obj, d);
             if (b.mapping) fail('map is pending');
-            // Mapped ranges are detached, matching WebGPU's lifetime contract.
-            if (b.mapped) structuredClone(b.mapped, { transfer: [b.mapped] });
-            b.mapped = null;
+            if(b.mapped && b.initializing){
+              if(bufferByteLength(b.mapped)!==b.size)fail('initial mapped range was detached');
+              if(b.revision===0xffffffff)fail('upload revision limit');
+              // Transfer preserves initialized/zero-filled bytes while detaching the
+              // caller's range, without retaining a second full initialization copy.
+              b.data=new Uint8Array(transferBuffer(b.mapped));
+              b.revision++;b.initializing=false;
+            }
+            detachMapping(b);
           }
         });
         buffers.set(obj, b); return obj;

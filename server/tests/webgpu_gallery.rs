@@ -110,7 +110,7 @@ fn remaining_api_gaps_are_explicit() {
         r#"
       async function rejects(f,pattern){let error;try{await f();}catch(e){error=String(e);}assert(error && error.includes(pattern),'expected '+pattern+' got '+error);}
       await rejects(()=>navigator.gpu.requestAdapter({featureLevel:'compatibility'}),'unsupported option');
-      await rejects(()=>device.createBuffer({size:16,usage:128,mappedAtCreation:true}),'mappedAtCreation');
+      await rejects(()=>device.createBuffer({size:16,usage:130,mappedAtCreation:true}),'MAP_WRITE only supports COPY_SRC');
       await rejects(()=>device.createComputePipeline({layout:'auto',compute:{module:device.createShaderModule({code:''}),constants:{blockSize:8}}}),'unsupported option');
       for(const method of ['createSampler','createBindGroupLayout','createPipelineLayout'])assert(typeof device[method]==='undefined',method+' unexpectedly present');
       assert(GPUBufferUsage.UNIFORM===64 && GPUBufferUsage.VERTEX===32,'usage constants incorrect');
@@ -383,4 +383,49 @@ fn event_receiver_does_not_keep_execution_alive() {
  "#,
         "",
     );
+}
+
+#[test]
+#[ignore = "real GPU required"]
+fn mapped_initialization_upload_compute_and_detach() {
+    run_with_common(
+        "",
+        serde_json::json!({}),
+        r#"
+ const d=await(await navigator.gpu.requestAdapter()).requestDevice();
+ const upload=d.createBuffer({size:16,usage:GPUBufferUsage.MAP_WRITE|GPUBufferUsage.COPY_SRC,mappedAtCreation:true});
+ const initial=upload.getMappedRange();if(new Uint32Array(initial).some(x=>x))throw Error('initial bytes not zero');new Uint32Array(initial).set([11,22,33]);upload.unmap();if(initial.byteLength)throw Error('initial range not detached');
+ const b=d.createBuffer({size:16,usage:140}),out=d.createBuffer({size:16,usage:9});
+ const p=d.createComputePipeline({layout:'auto',compute:{module:d.createShaderModule({code:'@group(0) @binding(0) var<storage,read_write> b:array<u32>; @compute @workgroup_size(1) fn main(@builtin(global_invocation_id) id:vec3u){b[id.x]+=1u;}'})}});
+ const g=d.createBindGroup({layout:p.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:b}}]});
+ const e=d.createCommandEncoder();e.copyBufferToBuffer(upload,0,b,0,16);const pass=e.beginComputePass();pass.setPipeline(p);pass.setBindGroup(0,g);pass.dispatchWorkgroups(4);pass.end();e.copyBufferToBuffer(b,0,out,0,16);d.queue.submit([e.finish()]);await out.mapAsync(1);
+ const range=out.getMappedRange();if(Array.from(new Uint32Array(range)).join()!=='12,23,34,1')throw Error('native initialization/copy/compute mismatch');
+ d.destroy();if(range.byteLength)throw Error('readback range survives device destruction');
+ "#,
+        "",
+    );
+}
+
+#[test]
+#[ignore = "real GPU required"]
+fn mapped_shadowed_length_teardown() {
+    for shadow in ["throw", "zero"] {
+        for action in ["unmap", "buffer", "device"] {
+            run_with_common(
+                "",
+                serde_json::json!({"shadow":shadow,"action":action}),
+                r#"
+ const adapter=await navigator.gpu.requestAdapter(),d=await adapter.requestDevice();
+ const b=d.createBuffer({size:16,usage:6,mappedAtCreation:true}),range=b.getMappedRange();
+ const length=Object.getOwnPropertyDescriptor(ArrayBuffer.prototype,'byteLength').get;
+ Object.defineProperty(range,'byteLength',CASE.shadow==='throw'?{get(){throw Error('caller getter');}}:{value:0});
+ if(CASE.action==='unmap')b.unmap();else if(CASE.action==='buffer')b.destroy();else d.destroy();
+ if(length.call(range)!==0||b.mapState!=='unmapped')throw Error('range remains mapped');
+ d.destroy();d.destroy();if((await d.lost).reason!=='destroyed')throw Error('loss not settled');
+ let stale=false;try{await adapter.requestAdapterInfo();}catch{stale=true;}if(!stale)throw Error('native session survived destroy');
+ "#,
+                "",
+            );
+        }
+    }
 }

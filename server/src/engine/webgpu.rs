@@ -85,8 +85,9 @@ pub(super) fn validate_buffer_usages(data: &[Vec<u8>], usages: &[u32]) -> Result
         if bytes.is_empty()
             || bytes.len() % 4 != 0
             || usage == 0
-            || usage & !237 != 0
+            || usage & !239 != 0
             || (usage & 1 != 0 && usage & !9 != 0)
+            || (usage & 2 != 0 && usage & !6 != 0)
             || (usage & 64 != 0 && (usage & 128 != 0 || bytes.len() > 65536))
         {
             return Err(err("buffer usage/size/alignment"));
@@ -149,7 +150,7 @@ pub(super) fn resident_buffers(
                     contents: bytes,
                     // Mapping is backed by separate staging/readback buffers.
                     // Retain every declared GPU role, including UNIFORM | VERTEX.
-                    usage: wgpu::BufferUsages::from_bits_truncate(usage & !1)
+                    usage: wgpu::BufferUsages::from_bits_truncate(usage & !3)
                         | wgpu::BufferUsages::COPY_SRC
                         | wgpu::BufferUsages::COPY_DST,
                 })
@@ -1082,7 +1083,12 @@ mod tests {
     #[test]
     fn declared_usage_validation() {
         assert!(validate_buffer_usages(&[vec![0; 48]], &[108]).is_ok());
-        for usage in [0, 2, 129, 192, 256] {
+        assert!(validate_buffer_usages(&[vec![0; 16]], &[6]).is_ok());
+        assert!(validate_buffer_usages(&[vec![0; 16]], &[2]).is_ok());
+        for usage in [3, 10, 130] {
+            assert!(validate_buffer_usages(&[vec![0; 16]], &[usage]).is_err());
+        }
+        for usage in [0, 129, 192, 256] {
             assert!(validate_buffer_usages(&[vec![0; 4]], &[usage]).is_err());
         }
         assert!(validate_buffer_usages(&[vec![0; 4]], &[]).is_err());

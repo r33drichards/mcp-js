@@ -154,7 +154,7 @@ device.destroy();
   wrapper immediately; resident storage is retained until device/session cleanup,
   and the cumulative budget is not refunded. Native handles never enter snapshots.
 - Mapping supports full-buffer `MAP_READ` only, one mapped range at a time.
-  `mappedAtCreation`, write mapping, partial mapping, and dynamic offsets are unsupported.
+  `mappedAtCreation` supports one full-buffer initialization range with zeroing and detach-on-unmap/destruction. `MAP_WRITE` is restricted to `COPY_SRC`; subsequent write mapping, partial mapping, and dynamic offsets are unsupported.
 - Native shader/pipeline validation is deferred until submission. Errors reject
   `queue.onSubmittedWorkDone()` and dependent `mapAsync()` calls, rather than using
   WebGPU error scopes or `uncapturederror`. Always await one of these promises.
