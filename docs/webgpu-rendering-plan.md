@@ -1,8 +1,8 @@
 # WebGPU gallery evidence and rendering milestones
 
 The published compute baseline is `de267bb5dbd24177f733020d1a0fe12476a779c7`
-on `feat/webgpu-compute`. This work is local on `feat/webgpu-rendering-local`.
-Nothing in this new scope has been pushed. The local implementation adds real
+on `feat/webgpu-compute`. This checkpoint is developed on `feat/webgpu-rendering-local`, based on the
+published compute branch so its review diff isolates rendering. The implementation adds real
 wgpu offscreen rendering and compute uniform buffers; it does not implement all
 WebGPU operations or claim browser/demo compatibility.
 
@@ -140,4 +140,4 @@ Local evidence is retained beside the checkout in `../webgpu-validation/`:
 `gallery.log` (published baseline), `render-gallery-final.log`, `render-unit.log`,
 `render-security.log`, and GPU-readback `triangle.png`, `sprite.png`, `boids.png`.
 Full Nix packaging, WebGPU CTS, other GPU backends, full browser sample execution,
-and ONNX inference remain untested. The published branch remains unchanged.
+and ONNX inference remain untested. The compute baseline remains unchanged.
