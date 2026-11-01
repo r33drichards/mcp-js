@@ -1,0 +1,62 @@
+{
+  "package": "onnxruntime-web",
+  "version": "1.23.2",
+  "source_commit": "a83fc4d58cb48eb68890dd689f94f28288cf2278",
+  "tarball": "https://registry.npmjs.org/onnxruntime-web/-/onnxruntime-web-1.23.2.tgz",
+  "integrity": "sha512-T09JUtMn+CZLk3mFwqiH0lgQf+4S7+oYHHtk6uhaYAAJI95bTcKi5bOOZYwORXfS/RLZCjDDEXGWIuOCAFlEjg==",
+  "planned_assets": [
+    "dist/ort.all.min.mjs",
+    "dist/ort-wasm-simd-threaded.jsep.mjs",
+    "dist/ort-wasm-simd-threaded.jsep.wasm"
+  ],
+  "status": "verified tiny float32 Add inference with WebGPU provider, disabled CPU EP fallback and failing native-dispatch-denial control",
+  "model_plan": {
+    "operators": [
+      "Add"
+    ],
+    "opset": 13,
+    "ir_version": 8,
+    "dtype": "float32",
+    "shape": [
+      4
+    ],
+    "A": [
+      1,
+      2,
+      3,
+      4
+    ],
+    "B": [
+      10,
+      20,
+      30,
+      40
+    ],
+    "Y": [
+      11,
+      22,
+      33,
+      44
+    ]
+  },
+  "verified_asset_sha256": {
+    "ort.all.min.mjs": "2478830b23b6d9c7aa6b1031700c17820850ef1864048037178478f229d50e11",
+    "ort-wasm-simd-threaded.jsep.mjs": "c7b70c8003f077c62849e15275d0b1f1d1cf1a6dfc63b967400567c7224bfdbe",
+    "ort-wasm-simd-threaded.jsep.wasm": "ac0d8f1cfbf2732420ad78a86072b8507253c63885a61c3fd640b3055256d31d"
+  },
+  "model_sha256": "98746cca6e1220569e1054caedee36a71a5b291b8d000b36c2e54ed3cb58687f",
+  "model_validated_by_runtime": true,
+  "inference_verified": true,
+  "last_bootstrap_blocker": null,
+  "session_created": true,
+  "verified_output": [
+    11,
+    22,
+    33,
+    44
+  ],
+  "cpu_ep_fallback_disabled": true,
+  "native_dispatch_denial_control_passed": true,
+  "runtime_node_placement": "All nodes placed on [JsExecutionProvider]. Number of nodes: 1",
+  "scope": "Single Add node, float32 shape [4]; broader models/operators and backends unverified"
+}

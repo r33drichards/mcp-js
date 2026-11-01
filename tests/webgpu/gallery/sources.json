@@ -1,0 +1,26 @@
+{
+  "repository": "https://github.com/webgpu/webgpu-samples",
+  "commit": "e040ec1a20dbbe01afed30c812e825b2639cfe5b",
+  "files": {
+    "boids.wgsl": {
+      "source": "https://github.com/webgpu/webgpu-samples/blob/e040ec1a20dbbe01afed30c812e825b2639cfe5b/sample/computeBoids/updateSprites.wgsl",
+      "sha256": "827e56aca6eff5d61f6dc0fb10f0a14255234862496fa720a67554e88f2d7efd"
+    },
+    "sprite.wgsl": {
+      "source": "https://github.com/webgpu/webgpu-samples/blob/e040ec1a20dbbe01afed30c812e825b2639cfe5b/sample/computeBoids/sprite.wgsl",
+      "sha256": "4bc5d58dae8e1e0ac8fdd28a30e56eb2b8f7b511c8798336c5819d7c21d031a3"
+    },
+    "life.wgsl": {
+      "source": "https://github.com/webgpu/webgpu-samples/blob/e040ec1a20dbbe01afed30c812e825b2639cfe5b/sample/gameOfLife/compute.wgsl",
+      "sha256": "59d96722ffd17d0e8e51db16e10076cc18a70dbeb62431bddeaa320401198542"
+    },
+    "bitonicCompute.ts": {
+      "source": "https://github.com/webgpu/webgpu-samples/blob/e040ec1a20dbbe01afed30c812e825b2639cfe5b/sample/bitonicSort/bitonicCompute.ts",
+      "sha256": "89e3ccf5b9588943889cefc0658673cf9ddb6f19d61c705b0c2c8ce0a882e164"
+    },
+    "LICENSE.txt": {
+      "source": "https://github.com/webgpu/webgpu-samples/blob/e040ec1a20dbbe01afed30c812e825b2639cfe5b/LICENSE.txt",
+      "sha256": "fa0167eceb69ca740a694e9984024c6e50399a0e1ebf913ba74e9c78f344e8d2"
+    }
+  }
+}
