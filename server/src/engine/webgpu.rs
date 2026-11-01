@@ -444,14 +444,34 @@ async fn op_gpu_dispatch(
     authorize(hooks, serde_json::json!({"operation":"dispatch", "bytes": job.buffers.iter().map(Vec::len).sum::<usize>(), "workgroups":job.workgroups})).await?;
     // A cancelled JS future cannot cancel a submitted GPU kernel. Keep the
     // session permit/handles alive until the bounded worker completes.
-    tokio::task::spawn_blocking(move || {
+    validate_live_session(&state.borrow(), &token)?;
+    let result = tokio::task::spawn_blocking(move || {
         if session.events.terminal() {
             return Err(err("GPU session terminated"));
         }
         run(&session, job)
     })
     .await
-    .map_err(err)?
+    .map_err(err)??;
+    validate_live_session(&state.borrow(), &token)?;
+    Ok(result)
+}
+// Test-only scheduling barriers exercise ownership checks with actual native
+// ops; no barrier or additional API exists in production builds.
+#[cfg(test)]
+#[derive(Clone)]
+struct BatchTestGate {
+    point: &'static str,
+    arrived: Arc<tokio::sync::Notify>,
+    resume: Arc<tokio::sync::Notify>,
+}
+#[cfg(test)]
+async fn batch_test_gate(state: &Rc<RefCell<OpState>>, point: &str) {
+    let gate = state.borrow().try_borrow::<BatchTestGate>().cloned();
+    if let Some(gate) = gate.filter(|gate| gate.point == point) {
+        gate.arrived.notify_one();
+        gate.resume.notified().await;
+    }
 }
 #[op2]
 #[string]
@@ -490,15 +510,23 @@ async fn op_gpu_batch(
     // Check every operation before any upload, shader compilation or GPU work.
     for input in job.policy_inputs() {
         authorize(hooks.clone(), input).await?;
+        #[cfg(test)]
+        batch_test_gate(&state, "authorized").await;
+        validate_live_session(&state.borrow(), &token)?;
     }
-    tokio::task::spawn_blocking(move || {
+    validate_live_session(&state.borrow(), &token)?;
+    let result = tokio::task::spawn_blocking(move || {
         if session.events.terminal() {
             return Err(err("GPU session terminated"));
         }
         super::webgpu_commands::run(&session, job)
     })
     .await
-    .map_err(err)?
+    .map_err(err)??;
+    #[cfg(test)]
+    batch_test_gate(&state, "readback").await;
+    validate_live_session(&state.borrow(), &token)?;
+    Ok(result)
 }
 #[op2]
 #[string]
@@ -535,14 +563,17 @@ async fn op_gpu_render(
         (session, hooks)
     };
     authorize(hooks, serde_json::json!({"operation":"render","width":job.width,"height":job.height,"bytes":job.bytes(),"draw":job.draw})).await?;
-    tokio::task::spawn_blocking(move || {
+    validate_live_session(&state.borrow(), &token)?;
+    let result = tokio::task::spawn_blocking(move || {
         if session.events.terminal() {
             return Err(err("GPU session terminated"));
         }
         super::webgpu_render::render(&session, job)
     })
     .await
-    .map_err(err)?
+    .map_err(err)??;
+    validate_live_session(&state.borrow(), &token)?;
+    Ok(result)
 }
 
 pub(super) fn checked<T>(device: &wgpu::Device, f: impl FnOnce() -> T) -> Result<T, JsErrorBox> {
@@ -746,6 +777,14 @@ fn session_for_token(state: &OpState, token: &str) -> Result<Arc<Session>, JsErr
         .filter(|s| s.token == token)
         .cloned()
         .ok_or_else(|| err("stale or destroyed GPU handle"))
+}
+// Recheck both execution ownership and terminal state across async boundaries.
+fn validate_live_session(state: &OpState, token: &str) -> Result<(), JsErrorBox> {
+    let session = session_for_token(state, token)?;
+    if session.events.terminal() {
+        return Err(err("GPU session terminated"));
+    }
+    Ok(())
 }
 #[op2]
 #[string]
@@ -967,6 +1006,8 @@ mod tests {
                         _permit: capacity().unwrap(),
                     })),
                 });
+                assert!(validate_live_session(&state.borrow(), "race-test").is_err());
+                assert!(validate_live_session(&state.borrow(), "other-token").is_err());
                 runtime.execute_script("destroy-race",r#"
                     const outcome=JSON.parse(Deno.core.ops.op_gpu_destroy('race-test'));
                     if(outcome.overflow!==OVERFLOW)throw Error('overflow lost');
@@ -980,6 +1021,76 @@ mod tests {
                 let repeated = collector.close();
                 assert_eq!(repeated.overflow, overflow);
             }
+        }
+    }
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "real GPU required"]
+    #[allow(deprecated)]
+    async fn native_batch_rechecks_after_authorization_and_readback() {
+        use crate::engine::opa::{EvalMode, PolicyChain};
+        crate::engine::initialize_v8();
+        for point in ["authorized", "readback"] {
+            let mut runtime = deno_core::JsRuntime::new(deno_core::RuntimeOptions {
+                extensions: vec![create_extension()],
+                ..Default::default()
+            });
+            let state = runtime.op_state();
+            state
+                .borrow_mut()
+                .put(GpuConfig::new_with_hooks(Arc::new(HookChain::from_policy(
+                    "gpu",
+                    Arc::new(PolicyChain::new(vec![], EvalMode::All)),
+                ))));
+            let ready = runtime
+                .execute_script(
+                    "adapter",
+                    "Deno.core.ops.op_gpu_request('{}').then(t=>{globalThis.token=t;})",
+                )
+                .unwrap();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                runtime.resolve_value(ready),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let session = state.borrow().borrow::<GpuState>().session.clone().unwrap();
+            let gate = BatchTestGate {
+                point,
+                arrived: Arc::new(tokio::sync::Notify::new()),
+                resume: Arc::new(tokio::sync::Notify::new()),
+            };
+            state.borrow_mut().put(gate.clone());
+            let pending = runtime.execute_script("batch", r#"
+                Deno.core.ops.op_gpu_batch(token,JSON.stringify({
+                  buffers:[[7,0,0,0],[0,0,0,0]],usages:[4,8],refs:[{id:1,revision:0},{id:2,revision:0}],
+                  commands:[{kind:'copy',source:0,destination:1,source_offset:0,destination_offset:0,size:4}]
+                })).then(()=>{throw Error('stale result delivered');},error=>{if(!String(error).includes('stale or destroyed'))throw error;})
+            "#).unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                tokio::select! {
+                    _ = gate.arrived.notified() => {},
+                    result = runtime.run_event_loop(Default::default()) => panic!("barrier not reached: {result:?}"),
+                }
+            }).await.unwrap();
+            // No allocation before authorized-boundary validation; the readback
+            // barrier proves real native copy/allocation completed before teardown.
+            assert_eq!(
+                session.resources.lock().unwrap().entries.len(),
+                if point == "authorized" { 0 } else { 2 }
+            );
+            runtime
+                .execute_script("destroy", "Deno.core.ops.op_gpu_destroy(token);")
+                .unwrap();
+            gate.resume.notify_one();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                runtime.resolve_value(pending),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert!(state.borrow().borrow::<GpuState>().session.is_none());
         }
     }
     #[test]

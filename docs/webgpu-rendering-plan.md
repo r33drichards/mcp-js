@@ -739,3 +739,83 @@ A post-test Git diff exited with signal 10 (status 138); a subsequent diff compl
 successfully after a delay. Cause is unestablished. This is distinct evidence from
 the earlier unresolved test-suite SIGSEGV, whose relationship to WebGPU remains
 unestablished. Source backups are retained under /tmp/mcp-mapped-shadow-ge5v04g6.
+
+## Bounded FIFO checkpoint (local, 2026-11-01)
+
+Developed only in the recovered non-iCloud checkout, based on recovery commit
+`8b0e0d6ae0dbcb6c7d961e74ef1391f4200f1dcc`. One command buffer is accepted per
+submit and exactly one native operation runs at a time. Admission validates all
+resources, reserves max(1, dispatch count) from the unchanged cumulative 32-unit
+allowance, and consumes the command synchronously; rejected admission does neither.
+Accepted units are never refunded. Active plus waiting jobs are bounded by 32 job
+records, 128 buffer references and 64 KiB of UTF-8 serialized command metadata.
+
+The FIFO captures immutable command metadata and usage while retaining existing,
+already-charged backing records. It does not retain a fresh 4 MiB snapshot per job.
+Only the active job serializes bytes/revisions, after preceding readback updates.
+Destroying a public buffer forbids future use but retains its backing for admitted
+jobs; its last queued use releases destroyed host storage. Native resident storage
+still follows the unchanged session cleanup and cumulative allocation rules.
+Compute and render can be queued in order; render metadata is captured before
+texture wrapper destruction. Public writeBuffer remains blocked while any work
+is outstanding. This is a deliberate subset restriction, not full WebGPU ordering.
+
+Mapping and onSubmittedWorkDone capture the current admitted prefix. Pending maps
+prevent later admission of their buffers but do not invalidate earlier jobs.
+Failures cancel the entire remaining suffix and terminate the native session
+conservatively, including policy/validation rejection; fences settle once and an
+earlier fulfilled prefix stays fulfilled. Native first-loss/overflow precedence
+remains authoritative. Device teardown cancels waiting jobs immediately; already
+submitted driver work retains the existing no-hard-preemption limitation.
+
+Every native job still validates full allocation sizes and policy for every
+operation before uploading/compiling/submitting. Copy policy counts complete source
+and destination allocations. Native operations now revalidate token/configuration
+and terminal state after asynchronous authorization and before result delivery;
+JS also checks before starting and before applying readback. The event receiver's
+separate terminal-record delivery path is unchanged.
+
+Validation: 88 targeted checks pass: 38 shim, 14 ordinary native, five native GPU,
+29 GPU integration/gallery/security, and two default-disabled/adapter-policy tests.
+The real native boundary test uses cfg(test)-only scheduling barriers after policy
+and after readback: teardown before the former leaves the native registry empty;
+teardown at the latter occurs after two native buffers were created/copied, and
+both cases reject stale delivery. The barriers add no production API. Controlled
+shim tests cover pending-operation teardown, prefix fences, stale delivery, native
+loss/overflow cancellation, metadata UTF-8/reference limits, and command/work
+reservation. Real GPU tests cover immediate staging destruction, Float32 addition
+[11,22,33,44], later write/remap [12,24,36,48], queued policy denial, and unchanged
+Boids compute/sprite shaders with ordered offscreen rendering and early wrapper
+destruction. The hand-written GPU Add is a queue regression, not ONNX inference.
+
+Commands (installed Nix Rust, CARGO_HOME=/tmp/mcp-webgpu-cargo,
+CARGO_TARGET_DIR=/tmp/mcp-webgpu-rederived-target, dev/test debug info disabled):
+
+```sh
+node --test tests/webgpu/shim.test.cjs
+cargo test --offline -p server --lib engine::webgpu -- --test-threads=1
+cargo test --offline -p server --lib engine::webgpu -- --ignored --test-threads=1
+cargo test --offline -p server --test webgpu_gallery --test webgpu --test webgpu_render_security -- --ignored --test-threads=1
+cargo test --offline -p server --test webgpu -- --test-threads=1
+MCP_ONNX_ASSET_DIR=/tmp/mcp-fifo-onnx-assets cargo test --offline -p server --test onnx_bootstrap -- --ignored --test-threads=1
+```
+
+The last command remains a failing probe, outside the 88 passes. Official ORT
+1.23.2 package SHA-512 and all three matching all/JSEP asset SHA-256 hashes were
+reverified after download into /tmp; no installation scripts ran. The actual probe
+logs ONNX_PROBE_SESSION_CREATED, passes the former FIFO admission blocker, then
+fails Add4 with `webgpu: buffer unavailable for upload`. The pinned official
+package source map identifies `../lib/wasm/jsep/backend-webgpu.ts:609`: ORT creates
+a COPY_DST|UNIFORM buffer and calls queue.writeBuffer while submitted input work
+is outstanding. Provider configuration is still ['webgpu']; no CPU fallback was
+enabled. No ORT output or GPU inference dispatch is verified. Ordered writeBuffer
+support needs a separately reviewed scope; the pending guard was not weakened.
+
+Evidence in /tmp: mcp-fifo-shim.log, mcp-fifo-final-unit.log,
+mcp-fifo-native-boundaries.log, mcp-fifo-reviewed-gpu.log,
+mcp-fifo-reviewed-default-policy.log and mcp-fifo-final-onnx.log. Earlier failed
+compile evidence remains mcp-fifo-unit.log (op-macro wrapper called as a Rust
+function; corrected to a dedicated native helper). Full Nix packaging, CTS,
+other backends and spontaneous driver-loss/OOM remain untested. The original
+SIGSEGV and Git signal-10 causes remain unestablished. No publication, original
+checkout/lock changes or broader writeBuffer implementation occurred.

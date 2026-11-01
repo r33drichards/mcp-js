@@ -429,3 +429,54 @@ fn mapped_shadowed_length_teardown() {
         }
     }
 }
+
+#[test]
+#[ignore = "real GPU required"]
+fn fifo_staging_destroy_compute_readback_and_remap() {
+    run_with_common(
+        "",
+        serde_json::json!({}),
+        r#"
+ const d=await(await navigator.gpu.requestAdapter()).requestDevice();
+ const a=d.createBuffer({size:16,usage:136}),b=d.createBuffer({size:16,usage:136}),sum=d.createBuffer({size:16,usage:132}),out=d.createBuffer({size:16,usage:9});
+ const copy=(a,b)=>{const e=d.createCommandEncoder();e.copyBufferToBuffer(a,0,b,0,16);return e.finish();};
+ for(const [destination,values] of [[a,[1,2,3,4]],[b,[10,20,30,40]]]){
+  const staging=d.createBuffer({size:16,usage:6,mappedAtCreation:true});new Float32Array(staging.getMappedRange()).set(values);staging.unmap();d.queue.submit([copy(staging,destination)]);staging.destroy();
+ }
+ const p=d.createComputePipeline({layout:'auto',compute:{module:d.createShaderModule({code:'@group(0) @binding(0) var<storage,read> a:array<f32>; @group(0) @binding(1) var<storage,read> b:array<f32>; @group(0) @binding(2) var<storage,read_write> sum:array<f32>; @compute @workgroup_size(1) fn main(@builtin(global_invocation_id) id:vec3u){sum[id.x]=a[id.x]+b[id.x];}'})}});
+ const g=d.createBindGroup({layout:p.getBindGroupLayout(0),entries:[a,b,sum].map((buffer,binding)=>({binding,resource:{buffer}}))});
+ const e=d.createCommandEncoder(),pass=e.beginComputePass();pass.setPipeline(p);pass.setBindGroup(0,g);pass.dispatchWorkgroups(4);pass.end();d.queue.submit([e.finish()]);d.queue.submit([copy(sum,out)]);
+ const fence=d.queue.onSubmittedWorkDone();await out.mapAsync(1);await fence;
+ if(Array.from(new Float32Array(out.getMappedRange())).join()!=='11,22,33,44')throw Error('native FIFO result mismatch');out.unmap();
+ d.queue.writeBuffer(a,0,new Float32Array([2,4,6,8]));
+ const e2=d.createCommandEncoder(),pass2=e2.beginComputePass();pass2.setPipeline(p);pass2.setBindGroup(0,g);pass2.dispatchWorkgroups(4);pass2.end();d.queue.submit([e2.finish()]);d.queue.submit([copy(sum,out)]);
+ await out.mapAsync(1);if(Array.from(new Float32Array(out.getMappedRange())).join()!=='12,24,36,48')throw Error('native later write/remap mismatch');out.unmap();d.destroy();
+ "#,
+        "",
+    );
+}
+
+#[test]
+#[ignore = "real GPU required"]
+fn fifo_boids_compute_render_retains_admitted_resources() {
+    let body = include_str!("../../tests/webgpu/gallery/boids-resident-render.js");
+    let shape = "const shape=new Float32Array([-.05,-.05,.05,-.05,0,.05]);\nconst triangle=device.createBuffer({size:shape.byteLength,usage:GPUBufferUsage.VERTEX|GPUBufferUsage.COPY_DST});device.queue.writeBuffer(triangle,0,shape);\n";
+    assert!(body.contains(shape));
+    // Host-only adaptation: prepare uploads before any outstanding work, queue
+    // compute and render without an intermediate fence, then destroy wrappers.
+    let body = body.replace(shape, "").replace("const ce=", &format!("{shape}const ce="))
+        .replace("await device.queue.onSubmittedWorkDone();", "")
+        .replace("await output.mapAsync", "storage.forEach(b=>b.destroy());triangle.destroy();target.destroy();\nawait output.mapAsync");
+    let body = format!(
+        "const SPRITE={};\n{body}",
+        serde_json::to_string(include_str!(
+            "../../tests/webgpu/gallery/upstream/sprite.wgsl"
+        ))
+        .unwrap()
+    );
+    run(
+        BOIDS,
+        serde_json::json!({"name":"fifo-boids-render"}),
+        &body,
+    );
+}

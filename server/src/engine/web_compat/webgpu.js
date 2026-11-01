@@ -13,6 +13,12 @@
   const buffers = new WeakMap(), shaders = new WeakMap(), pipelines = new WeakMap();
   const layouts = new WeakMap(), groups = new WeakMap(), commands = new WeakMap();
   const textures = new WeakMap(), views = new WeakMap(), renderPipelines = new WeakMap();
+  // Count the serialized metadata in UTF-8 without allocating an encoded copy.
+  function utf8Bytes(text) {
+    let bytes=0;
+    for(const char of text){const n=char.codePointAt(0);bytes+=n<128?1:n<2048?2:n<65536?3:4;}
+    return bytes;
+  }
   function fail(message) { throw new Error('webgpu: ' + message); }
   function fields(d, allowed) {
     if (!d || typeof d !== 'object') throw new TypeError('descriptor required');
@@ -62,7 +68,7 @@
     });
   }
   function makeDevice(token,caps) {
-    const d = { token, dead: false, bytes: 0, objects: 0, submissions: 0, pending: false, mappedBuffers: new Set(), tail: Promise.resolve() };
+    const d = { token, dead: false, bytes: 0, objects: 0, submissions: 0, pending: false, mappedBuffers: new Set(), jobs: [], running: false, metadataBytes: 0, references: 0, tail: Promise.resolve() };
     let handler=null, resolveLost, rejectLost, lossSettled=false;
     const lost=new Promise((resolve,reject)=>{resolveLost=resolve;rejectLost=reject;});
     lost.catch(()=>{}); // Terminal bridge failure stays observable without an unhandled rejection.
@@ -72,6 +78,15 @@
         if(b.mapped && bufferByteLength(b.mapped))transferBuffer(b.mapped);
       } finally { b.mapped=null;d.mappedBuffers.delete(b); }
     };
+    const release=job=>{
+      d.metadataBytes-=job.bytes;d.references-=job.targets.length;
+      for(const b of job.targets){b.retained--;if(b.dead&&!b.retained)b.data=null;}
+      job.targets=[];job.meta=null;
+    };
+    const settleJob=(job,error)=>{
+      if(job.settled)return;job.settled=true;
+      release(job);if(error)job.reject(error);else job.resolve();
+    };
     const finish=(error)=>{
       if(d.dead)return;d.dead=true;
       for(const b of d.mappedBuffers){
@@ -80,9 +95,52 @@
       let outcome;
       try{outcome=JSON.parse(destroy(token));}catch(nativeError){error=error??nativeError;}
       if(outcome?.overflow)error=new Error('webgpu: native error queue overflow; session terminated');
-      else if(outcome?.loss){settleLoss({reason:outcome.loss.kind,message:outcome.loss.message});return;}
+      const queueError=outcome?.loss&&!outcome.overflow ? new Error('webgpu: device lost: '+outcome.loss.message) : error??new Error('webgpu: device destroyed');
+      for(const job of d.jobs)settleJob(job,queueError);
+      d.jobs=[];d.pending=false;
+      if(outcome?.loss&&!outcome.overflow){settleLoss({reason:outcome.loss.kind,message:outcome.loss.message});return;}
       if(error){if(!lossSettled){lossSettled=true;rejectLost(error);}return;}
       settleLoss({reason:'destroyed',message:'device.destroy()'});
+    };
+    // No queued payload copies: only the active job serializes charged backing
+    // stores, after its predecessor's readback has updated them. Public wrapper
+    // destruction does not invalidate resources already retained at admission.
+    const pump=async()=>{
+      if(d.running||d.dead||!d.jobs.length)return;
+      d.running=true;const job=d.jobs[0];
+      try{
+        live(d);
+        const payload=JSON.parse(job.meta),targets=job.targets;
+        const nativeTargets=job.render?targets.slice(0,-1):targets;
+        const json=JSON.stringify({...payload,refs:nativeTargets.map(b=>({id:b.id,revision:b.revision})),buffers:nativeTargets.map(b=>Array.from(b.data))});
+        const raw=await (job.render?render(token,json):batch(token,json));
+        live(d); // Includes restored-session and terminal checks at delivery.
+        if(job.settled)return;
+        if(job.render){
+          const out=targets[targets.length-1];
+          if(out.revision===0xffffffff)fail('copy revision limit');out.revision++;
+          const packed=JSON.parse(raw);out.data.fill(0);
+          for(let y=0;y<payload.height;y++)out.data.set(packed.slice(y*payload.width*4,(y+1)*payload.width*4),y*job.pitch);
+        }else{
+          const result=JSON.parse(raw);
+          for(let i=0;i<targets.length;i++)targets[i].data.set(result[i]);
+        }
+        d.jobs.shift();settleJob(job);d.pending=d.jobs.length!==0;
+      }catch(error){finish(error);}finally{
+        d.running=false;if(!d.dead)void pump();
+      }
+    };
+    const admit=(c,targets,payload,units,renderJob=false,pitch=0)=>{
+      const meta=JSON.stringify(payload),bytes=utf8Bytes(meta);
+      if(d.jobs.length>=32||d.metadataBytes+bytes>65536||d.references+targets.length>128)fail('queue metadata/reference/job limit');
+      if(d.submissions+units>32)fail('GPU work limit (32)');
+      let resolve,reject;const fence=new Promise((a,b)=>{resolve=a;reject=b;});fence.catch(()=>{});
+      // All validation precedes this synchronous reservation/consumption block.
+      c.used=true;c.sequence=null;c.render=null;d.submissions+=units;
+      for(const b of targets)b.retained++;
+      d.metadataBytes+=bytes;d.references+=targets.length;d.pending=true;
+      d.jobs.push({targets,meta,bytes,render:renderJob,pitch,resolve,reject,settled:false});
+      d.tail=fence;void pump();
     };
     const terminal=finish;
     const count = () => { live(d); if (++d.objects > 128) fail('object creation limit (128)'); };
@@ -102,17 +160,17 @@
         if (desc.mappedAtCreation!==undefined&&typeof desc.mappedAtCreation!=='boolean')throw new TypeError('mappedAtCreation must be boolean');
         if (d.bytes + size > 4 * 1024 * 1024) fail('cumulative buffer limit (4 MiB)');
         d.bytes += size;
-        const b = { id: d.objects, revision: 0, device: d, data: new Uint8Array(size), size, usage, dead: false, mapped: null, mapping: false, returned: false, initializing: desc.mappedAtCreation===true };
+        const b = { id: d.objects, revision: 0, device: d, data: new Uint8Array(size), size, usage, dead: false, mapped: null, mapping: false, returned: false, retained: 0, initializing: desc.mappedAtCreation===true };
         if(b.initializing){b.mapped=b.data.buffer;d.mappedBuffers.add(b);}
         const obj = Object.freeze({ size, usage,
           get mapState() { return b.mapped ? 'mapped' : b.mapping ? 'pending' : 'unmapped'; },
-          destroy() { b.dead = true; try{detachMapping(b);}finally{b.data = null;} },
+          destroy() { b.dead = true; try{detachMapping(b);}finally{if(!b.retained)b.data = null;} },
           async mapAsync(mode, offset = 0, length = size) {
             buffer(obj, d);
             if (mode !== 1 || !(usage & U.MAP_READ) || offset !== 0 || length !== size) fail('only full-buffer MAP_READ is supported');
             if (b.mapped || b.mapping) fail('buffer already mapping');
-            b.mapping = true;
-            try { await d.tail; buffer(obj, d); b.mapped = b.data.slice().buffer; b.returned = false; d.mappedBuffers.add(b); }
+            const fence=d.tail; b.mapping = true;
+            try { await fence; buffer(obj, d); b.mapped = b.data.slice().buffer; b.returned = false; d.mappedBuffers.add(b); }
             finally { b.mapping = false; }
           },
           getMappedRange(offset = 0, length = size) {
@@ -309,24 +367,15 @@
         },
         submit(list) {
           live(d);
-          if (d.pending || !Array.isArray(list) || list.length !== 1) fail('one command buffer and one submission in flight supported');
-          const c = owned(commands, list[0], d); if (c.used) fail('command buffer already submitted');
-          const units=c.render?1:c.units;
-          if(d.submissions+units>32)fail('GPU work limit (32)');d.submissions+=units;
+          if(!Array.isArray(list)||list.length!==1)fail('one command buffer per submission supported');
+          const c=owned(commands,list[0],d);if(c.used)fail('command buffer already submitted');
           if(c.render){
             const r=c.render;if(r.texture.dead)fail('texture destroyed');
             const bs=Array.from(r.vertices,obj=>buffer(obj,d)),out=buffer(r.copy.buffer,d);
             if([...bs,out].some(b=>b.mapped||b.mapping))fail('mapped render buffer');
             if(bs.reduce((n,b)=>n+b.size,0)>65536)fail('vertex byte limit (64 KiB)');
-            const json=JSON.stringify({width:r.texture.width,height:r.texture.height,vertex:r.pipeline.vertex,fragment:r.pipeline.fragment,vertex_entry:r.pipeline.vertex_entry,fragment_entry:r.pipeline.fragment_entry,layouts:r.pipeline.layouts,draw:r.draw,clear:r.clear,usages:bs.map(b=>b.usage),refs:bs.map(b=>({id:b.id,revision:b.revision})),buffers:bs.map(b=>Array.from(b.data))});
-            c.used=true;d.pending=true;
-            d.tail=render(token,json).then(raw=>{
-              live(d);
-              if(out.dead||r.texture.dead)fail('render resource destroyed while pending');
-              if(out.revision===0xffffffff)fail('copy revision limit');out.revision++;
-              const packed=JSON.parse(raw);out.data.fill(0);
-              for(let y=0;y<r.texture.height;y++)out.data.set(packed.slice(y*r.texture.width*4,(y+1)*r.texture.width*4),y*r.copy.pitch);
-            }).finally(()=>{d.pending=false;});d.tail.catch(()=>{});return;
+            const payload={width:r.texture.width,height:r.texture.height,vertex:r.pipeline.vertex,fragment:r.pipeline.fragment,vertex_entry:r.pipeline.vertex_entry,fragment_entry:r.pipeline.fragment_entry,layouts:r.pipeline.layouts,draw:r.draw,clear:r.clear,usages:bs.map(b=>b.usage)};
+            admit(c,[...bs,out],payload,1,true,r.copy.pitch);return;
           }
           const targets=[],indices=new Map();
           function index(obj){
@@ -337,20 +386,10 @@
           const encoded=c.sequence.map(step=>step.kind==='copy'
             ?{kind:'copy',source:index(step.source),destination:index(step.destination),source_offset:step.source_offset,destination_offset:step.destination_offset,size:step.size}
             :{kind:'compute',code:step.pipeline.code,entry:step.pipeline.entry,workgroups:step.workgroups,bindings:step.group.entries.map(b=>({buffer:index(b.buffer),offset:b.offset,size:b.size}))});
-          const json=JSON.stringify({commands:encoded,usages:targets.map(b=>b.usage),refs:targets.map(b=>({id:b.id,revision:b.revision})),buffers:targets.map(b=>Array.from(b.data))});
-          c.used=true;d.pending=true;
-          d.tail=batch(token,json).then(raw=>{
-            live(d);
-            const result=JSON.parse(raw);
-            let destroyed=false;
-            for(let i=0;i<targets.length;i++){if(targets[i].dead)destroyed=true;else targets[i].data.set(result[i]);}
-            if(destroyed)fail('buffer destroyed during submission');
-          }).finally(()=>{d.pending=false;});
-          // Retain the rejection for mapAsync/onSubmittedWorkDone, without an
-          // unhandled rejection before callers attach their readback promise.
-          d.tail.catch(() => {});
+          admit(c,targets,{commands:encoded,usages:targets.map(b=>b.usage)},c.units);
         },
-        async onSubmittedWorkDone() { live(d); await d.tail; }
+        async onSubmittedWorkDone() { live(d); const fence=d.tail; await fence; }
+
       })
     };
     Object.freeze(api);

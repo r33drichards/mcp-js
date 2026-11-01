@@ -105,7 +105,7 @@ fn batch_policy_checks_all_commands_before_execution() {
     const p=device.createComputePipeline({layout:'auto',compute:{module:device.createShaderModule({code:'@group(0) @binding(0) var<storage,read_write> a:array<u32>; @compute @workgroup_size(1) fn main(){a[0]+=1u;}'}),entryPoint:'main'}});
     const g=device.createBindGroup({layout:p.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:b}}]});
     const e=device.createCommandEncoder(),pass=e.beginComputePass();pass.setPipeline(p);pass.setBindGroup(0,g);pass.dispatchWorkgroups(1);pass.dispatchWorkgroups(2);pass.end();device.queue.submit([e.finish()]);let denied=false;try{await device.queue.onSubmittedWorkDone();}catch(e){denied=String(e).includes('policy denied');}if(!denied)throw Error('later dispatch policy not enforced');
-    const read=device.createCommandEncoder();read.copyBufferToBuffer(b,0,out,0,4);device.queue.submit([read.finish()]);await out.mapAsync(1);if(new Uint32Array(out.getMappedRange())[0]!==0)throw Error('partially executed denied batch');out.unmap();device.destroy();
+    let dead=false;try{device.createCommandEncoder();}catch{dead=true;}if(!dead)throw Error('failed queue remained usable');device.destroy();
     "#, Some(&gpu)).unwrap();
     let deny_copy = config(
         "package mcp.gpu\ndefault allow = false\nallow if {input.operation == \"requestAdapter\"}\nallow if {input.operation == \"dispatch\"}\n",
@@ -131,4 +131,23 @@ fn partial_copy_policy_accounts_for_destination_allocation() {
     let denied=false;try{await d.queue.onSubmittedWorkDone();}catch(e){denied=String(e).includes('policy denied');}
     if(!denied)throw Error('small source bypassed destination allocation policy');d.destroy();
     "#,Some(&gpu)).unwrap();
+}
+
+#[test]
+#[ignore = "real GPU required"]
+fn fifo_policy_denial_cancels_suffix_and_terminates() {
+    let gpu = config(
+        "package mcp.gpu\ndefault allow = false\nallow if {input.operation == \"requestAdapter\"}\nallow if {input.operation == \"copyBuffer\"}\n",
+    );
+    run(r#"
+ const d=await(await navigator.gpu.requestAdapter()).requestDevice(),a=d.createBuffer({size:4,usage:140}),out=d.createBuffer({size:4,usage:9});
+ const copy=()=>{const e=d.createCommandEncoder();e.copyBufferToBuffer(a,0,out,0,4);return e.finish();};
+ d.queue.submit([copy()]);const first=d.queue.onSubmittedWorkDone();
+ const p=d.createComputePipeline({layout:'auto',compute:{module:d.createShaderModule({code:'@group(0) @binding(0) var<storage,read_write> a:u32; @compute @workgroup_size(1) fn main(){a=99u;}'})}}),g=d.createBindGroup({layout:p.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:a}}]});
+ const e=d.createCommandEncoder(),pass=e.beginComputePass();pass.setPipeline(p);pass.setBindGroup(0,g);pass.dispatchWorkgroups(1);pass.end();d.queue.submit([e.finish()]);const middle=d.queue.onSubmittedWorkDone();middle.catch(()=>{});
+ d.queue.submit([copy()]);const last=d.queue.onSubmittedWorkDone();last.catch(()=>{});
+ const results=await Promise.allSettled([first,middle,last]);if(results.map(x=>x.status).join()!=='fulfilled,rejected,rejected')throw Error('queue denial order');
+ if(!String(results[1].reason).includes('policy denied')||results[1].reason!==results[2].reason)throw Error('denial not propagated');
+ let dead=false;try{d.createCommandEncoder();}catch{dead=true;}if(!dead)throw Error('failed session reusable');try{await d.lost;}catch{}d.destroy();
+ "#,Some(&gpu)).unwrap();
 }

@@ -123,9 +123,9 @@ device.destroy();
 - Multiple compute passes/dispatches and up to eight ordered buffer copies
   per command buffer, including copy-only buffers. Copies require no active pass, distinct buffers, and positive four-byte-aligned
   sizes/offsets within both allocations; source and destination sizes may differ.
-  One command buffer per submit and one submit in flight. The execution has 32
+  One command buffer per submit, with a FIFO and one active native operation. The execution has 32
   work units: each compute dispatch or render consumes one; a copy-only submission
-  consumes one. Batching cannot multiply this allowance. Workgroup counts must be
+  consumes one. Units are reserved at admission and never refunded. Batching cannot multiply this allowance. Workgroup counts must be
   positive, with product at most 65,536 per dispatch; wgpu enforces device limits.
 - A compute/copy batch references at most 16 distinct buffers (still at most eight
   bindings per dispatch), with at most 4 MiB total bytes and 64 KiB aggregate WGSL
@@ -135,7 +135,7 @@ device.destroy();
 - Uniform buffers are limited to 64 KiB each and cannot also have STORAGE usage.
 - At most 128 created buffer/shader/pipeline/bind-group/encoder/texture/view objects per device;
   WGSL source is limited to 64 KiB and entry points to 256 bytes on the native boundary.
-- Buffer upload uses `queue.writeBuffer`. Native buffers now persist within an
+- Buffer upload uses `queue.writeBuffer`, which remains rejected while any submitted work is outstanding. Native buffers persist within an
   execution, keyed by session-local identity and upload revision. Unchanged
   revisions reuse GPU contents, including binding a compute output as a vertex
   buffer on a later submission. Explicit host writes advance the revision;
@@ -151,13 +151,19 @@ device.destroy();
 - The resident buffer registry independently enforces 4 MiB and at most 128 IDs.
   These are logical resource limits, not an exact VRAM ceiling: staging, pipelines
   and driver allocations are additional. Buffer destruction invalidates its JS
-  wrapper immediately; resident storage is retained until device/session cleanup,
+  wrapper immediately; already-admitted jobs retain its charged backing store until their last use. Resident storage is retained until device/session cleanup,
   and the cumulative budget is not refunded. Native handles never enter snapshots.
 - Mapping supports full-buffer `MAP_READ` only, one mapped range at a time.
   `mappedAtCreation` supports one full-buffer initialization range with zeroing and detach-on-unmap/destruction. `MAP_WRITE` is restricted to `COPY_SRC`; subsequent write mapping, partial mapping, and dynamic offsets are unsupported.
 - Native shader/pipeline validation is deferred until submission. Errors reject
   `queue.onSubmittedWorkDone()` and dependent `mapAsync()` calls, rather than using
-  WebGPU error scopes or `uncapturederror`. Always await one of these promises.
+  WebGPU error scopes or `uncapturederror`. A failed submitted job cancels the queued suffix and terminates the session conservatively. Always await one of these promises.
+- Active plus waiting jobs retain at most 64 KiB of UTF-8 serialized metadata,
+  128 buffer references and 32 job records, within the cumulative work allowance.
+  Waiting jobs retain existing charged stores, not per-job buffer snapshots.
+  `onSubmittedWorkDone()` and `mapAsync()` capture the already-admitted prefix;
+  later submissions do not extend that fence. Pending maps block new uses, while
+  earlier accepted uses remain valid.
 
 Descriptors reject unsupported keys. The API is not yet covered by the WebGPU
 conformance suite; code that relies on broader browser semantics needs adaptation.
@@ -180,8 +186,7 @@ conformance suite; code that relies on broader browser semantics needs adaptatio
   depth/stencil, multisampling, blending, alternate formats, or samplers yet.
 - Readback offset must be zero; bytesPerRow must be a multiple of 256 and at
   least width×4. The destination must contain exactly bytesPerRow×height bytes.
-- Compute and render passes must use separate submissions. The host must await
-  completion between them. A shared STORAGE | VERTEX buffer stays resident across
+- Compute and render passes use separate ordered FIFO submissions. A shared STORAGE | VERTEX buffer stays resident across
   them; eager readback still occurs, but the render input is not re-uploaded.
 
 Each native rendering submission independently checks the existing GPU policy

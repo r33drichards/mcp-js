@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const vm = require('node:vm');
 const fs = require('node:fs');
 const source = fs.readFileSync('server/src/engine/web_compat/webgpu.js', 'utf8');
-function runtime(transfer) {
+function runtime(transfer, options = {}) {
   let valid = true, calls = 0, deliver, outcome={loss:null,overflow:false};
   const jobs = [], requests = [];
   const c = vm.createContext({ navigator: {}, structuredClone, Deno: { core: { unrefOpPromise:()=>{}, ops: {
@@ -18,11 +18,13 @@ function runtime(transfer) {
     op_gpu_batch: async (_, json) => {
       calls++;
       const job = JSON.parse(json); jobs.push(job);
+      if(options.before)await options.before(job,calls);
       const data=job.buffers.map(b=>Uint8Array.from(b));
       for(const c of job.commands){
         if(c.kind==='copy')data[c.destination].set(data[c.source].subarray(c.source_offset,c.source_offset+c.size),c.destination_offset);
         else {const words=new Uint32Array(data[c.bindings[0].buffer].buffer,c.bindings[0].offset,c.bindings[0].size/4);for(let i=0;i<words.length;i++)words[i]*=2;}
       }
+      if(options.after)await options.after(job,calls);
       return JSON.stringify(data.map(b=>Array.from(b)));
     }
   } } } });
@@ -128,7 +130,7 @@ test('destroyed pending resource does not leave surviving CPU mirrors stale', as
  d.queue.writeBuffer(a,0,new Uint32Array([3]));
  const p=d.createComputePipeline({layout:'auto',compute:{module:d.createShaderModule({code:''})}}),g=d.createBindGroup({layout:p.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:a}}]});
  const e=d.createCommandEncoder(),pass=e.beginComputePass();pass.setPipeline(p);pass.setBindGroup(0,g);pass.dispatchWorkgroups(1);pass.end();e.copyBufferToBuffer(a,0,b,0,4);d.queue.submit([e.finish()]);a.destroy();
- let rejected=false;try{await d.queue.onSubmittedWorkDone();}catch{rejected=true;}if(!rejected)throw Error('destruction not reported');
+ await d.queue.onSubmittedWorkDone();
  const copy=d.createCommandEncoder();copy.copyBufferToBuffer(b,0,out,0,4);d.queue.submit([copy.finish()]);await out.mapAsync(1);if(new Uint32Array(out.getMappedRange())[0]!==6)throw Error('surviving mirror stale');out.unmap();d.destroy();
  `);
 });
@@ -246,4 +248,86 @@ test('mapping cleanup failure cannot bypass native teardown or loss settlement',
   d.destroy();d.destroy();let error;try{await d.lost;}catch(e){error=e;}
   if(!error?.message.includes('injected cleanup failure')||range.byteLength||a.mapState!=='unmapped'||b.mapState!=='unmapped')throw Error('cleanup/settlement skipped');
  `);assert.equal(r.valid(),false);assert.equal(attempts,2);
+});
+
+test('FIFO retains destroyed staging and maps after all admitted uses; later write/remap works',async()=>{
+ const r=runtime();await r.run(`
+ const d=await(await navigator.gpu.requestAdapter()).requestDevice(),out=d.createBuffer({size:4,usage:9}),b=d.createBuffer({size:4,usage:12});
+ const copy=(a,z)=>{const e=d.createCommandEncoder();e.copyBufferToBuffer(a,0,z,0,4);return e.finish();};
+ for(const n of [11,22]){const a=d.createBuffer({size:4,usage:6,mappedAtCreation:true});new Uint32Array(a.getMappedRange())[0]=n;a.unmap();d.queue.submit([copy(a,out)]);a.destroy();}
+ await out.mapAsync(1);if(new Uint32Array(out.getMappedRange())[0]!==22)throw Error('FIFO/mapping mismatch');out.unmap();
+ d.queue.writeBuffer(b,0,new Uint32Array([33]));d.queue.submit([copy(b,out)]);await out.mapAsync(1);if(new Uint32Array(out.getMappedRange())[0]!==33)throw Error('later write/remap mismatch');out.unmap();d.destroy();
+ `);assert.equal(r.calls(),3);
+});
+test('work and map fences capture fixed prefixes, pending map does not invalidate prior jobs',async()=>{
+ const gates=[];const r=runtime(undefined,{before:()=>new Promise(resolve=>gates.push(resolve))});
+ await r.run(`
+ globalThis.d=await(await navigator.gpu.requestAdapter()).requestDevice();globalThis.a=d.createBuffer({size:4,usage:12});globalThis.b=d.createBuffer({size:4,usage:12});globalThis.out=d.createBuffer({size:4,usage:9});
+ globalThis.copy=(a,z)=>{const e=d.createCommandEncoder();e.copyBufferToBuffer(a,0,z,0,4);return e.finish();};d.queue.writeBuffer(a,0,new Uint32Array([7]));
+ d.queue.submit([copy(a,b)]);globalThis.first=d.queue.onSubmittedWorkDone();d.queue.submit([copy(b,out)]);globalThis.secondDone=false;globalThis.second=d.queue.onSubmittedWorkDone().then(()=>secondDone=true);
+ globalThis.mapped=out.mapAsync(1);d.queue.submit([copy(a,b)]);globalThis.last=d.queue.onSubmittedWorkDone();last.catch(()=>{});
+ let bad=false;try{d.queue.writeBuffer(a,0,new Uint32Array([9]));}catch{bad=true;}if(!bad)throw Error('pending write accepted');
+ `);assert.equal(r.calls(),1);gates[0]();await r.run('await first;if(secondDone)throw Error("prefix waited incorrectly");');assert.equal(r.calls(),2);
+ gates[1]();await r.run('await mapped;await second;if(new Uint32Array(out.getMappedRange())[0]!==7)throw Error("map prefix data");out.unmap();');assert.equal(r.calls(),3);
+ await r.run('d.destroy();await Promise.allSettled([last]);await first;');gates[2]();assert.equal(r.valid(),false);
+});
+test('middle failure cancels suffix, preserves earlier fence and rejects future submission',async()=>{
+ const r=runtime(undefined,{before:(_,n)=>{if(n===2)throw Error('policy denied middle');}});
+ await r.run(`
+ const d=await(await navigator.gpu.requestAdapter()).requestDevice(),a=d.createBuffer({size:4,usage:12}),b=d.createBuffer({size:4,usage:12});
+ const copy=()=>{const e=d.createCommandEncoder();e.copyBufferToBuffer(a,0,b,0,4);return e.finish();};
+ const fences=[];for(let i=0;i<3;i++){d.queue.submit([copy()]);const f=d.queue.onSubmittedWorkDone();f.catch(()=>{});fences.push(f);}
+ const result=await Promise.allSettled(fences);if(result.map(x=>x.status).join()!=='fulfilled,rejected,rejected')throw Error('suffix not cancelled');
+ if(!result[1].reason.message.includes('policy denied middle')||result[1].reason!==result[2].reason)throw Error('failure changed');
+ let failed=false;try{d.queue.submit([{}]);}catch{failed=true;}if(!failed)throw Error('failed queue reused');try{await d.lost;}catch{}d.destroy();
+ `);assert.equal(r.calls(),2);assert.equal(r.valid(),false);
+});
+for(const phase of ['before','after'])test(`destroy during native ${phase} settles every fence before worker returns`,async()=>{
+ let release;const r=runtime(undefined,{[phase]:()=>new Promise(resolve=>release=resolve)});
+ await r.run(`
+ globalThis.d=await(await navigator.gpu.requestAdapter()).requestDevice();const a=d.createBuffer({size:4,usage:12}),b=d.createBuffer({size:4,usage:9});
+ const copy=()=>{const e=d.createCommandEncoder();e.copyBufferToBuffer(a,0,b,0,4);return e.finish();};
+ d.queue.submit([copy()]);globalThis.first=d.queue.onSubmittedWorkDone();first.catch(()=>{});d.queue.submit([copy()]);globalThis.last=d.queue.onSubmittedWorkDone();last.catch(()=>{});globalThis.mapping=b.mapAsync(1);mapping.catch(()=>{});
+ d.destroy();d.destroy();if((await d.lost).reason!=='destroyed')throw Error('loss settlement');
+ if((await Promise.allSettled([first,last,mapping])).some(x=>x.status!=='rejected'))throw Error('waiter survived teardown');
+ `);assert.equal(r.valid(),false);assert.equal(r.calls(),1);release();await r.run('await Promise.resolve();');assert.equal(r.calls(),1);
+});
+test('restored token before readback cancels queued suffix',async()=>{
+ let release;const r=runtime(undefined,{after:()=>new Promise(resolve=>release=resolve)});
+ await r.run(`globalThis.d=await(await navigator.gpu.requestAdapter()).requestDevice();const a=d.createBuffer({size:4,usage:12}),b=d.createBuffer({size:4,usage:12});for(let i=0;i<2;i++){const e=d.createCommandEncoder();e.copyBufferToBuffer(a,0,b,0,4);d.queue.submit([e.finish()]);}globalThis.f=d.queue.onSubmittedWorkDone();f.catch(()=>{});`);
+ r.stale();release();await assert.rejects(r.run('await f;'),/stale/);assert.equal(r.calls(),1);
+});
+test('FIFO charges cumulative 32 units without refund',async()=>{
+ const r=runtime();await r.run(`
+ const d=await(await navigator.gpu.requestAdapter()).requestDevice(),a=d.createBuffer({size:4,usage:12}),b=d.createBuffer({size:4,usage:12});
+ const copy=()=>{const e=d.createCommandEncoder();e.copyBufferToBuffer(a,0,b,0,4);return e.finish();};
+ for(let i=0;i<32;i++)d.queue.submit([copy()]);const c=copy();let failed=false;try{d.queue.submit([c]);}catch{failed=true;}if(!failed)throw Error('33rd outstanding admitted');
+ await d.queue.onSubmittedWorkDone();failed=false;try{d.queue.submit([c]);}catch(e){failed=e.message.includes('work limit');}if(!failed)throw Error('work budget refunded');d.destroy();
+ `);assert.equal(r.calls(),32);
+});
+test('UTF-8 aggregate metadata bound rejects before command consumption and releases after completion',async()=>{
+ let release;const r=runtime(undefined,{before:(_,n)=>n===1?new Promise(resolve=>release=resolve):undefined});
+ await r.run(`
+ globalThis.d=await(await navigator.gpu.requestAdapter()).requestDevice();const b=d.createBuffer({size:4,usage:128});
+ const p=d.createComputePipeline({layout:'auto',compute:{module:d.createShaderModule({code:'λ'.repeat(20000)})}}),g=d.createBindGroup({layout:p.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:b}}]});
+ const command=()=>{const e=d.createCommandEncoder(),pass=e.beginComputePass();pass.setPipeline(p);pass.setBindGroup(0,g);pass.dispatchWorkgroups(1);pass.end();return e.finish();};
+ d.queue.submit([command()]);globalThis.c=command();let failed=false;try{d.queue.submit([c]);}catch(e){failed=e.message.includes('metadata');}if(!failed)throw Error('UTF8 metadata unbounded');globalThis.first=d.queue.onSubmittedWorkDone();
+ `);assert.equal(r.calls(),1);release();await r.run('await first;d.queue.submit([c]);await d.queue.onSubmittedWorkDone();d.destroy();');assert.equal(r.calls(),2);
+});
+test('aggregate reference cap and invalid mapping rejection do not consume commands/work',async()=>{
+ const r=runtime();await r.run(`
+ const d=await(await navigator.gpu.requestAdapter()).requestDevice();const bs=Array.from({length:16},()=>d.createBuffer({size:4,usage:12}));
+ const command=()=>{const e=d.createCommandEncoder();for(let i=0;i<16;i+=2)e.copyBufferToBuffer(bs[i],0,bs[i+1],0,4);return e.finish();};
+ for(let i=0;i<8;i++)d.queue.submit([command()]);const c=command();let failed=false;try{d.queue.submit([c]);}catch(e){failed=e.message.includes('reference');}if(!failed)throw Error('reference limit missing');
+ await d.queue.onSubmittedWorkDone();d.queue.submit([c]);await d.queue.onSubmittedWorkDone();
+ const a=d.createBuffer({size:4,usage:6,mappedAtCreation:true}),e=d.createCommandEncoder();e.copyBufferToBuffer(a,0,bs[1],0,4);const pending=e.finish();
+ for(let i=0;i<40;i++){let bad=false;try{d.queue.submit([pending]);}catch{bad=true;}if(!bad)throw Error('mapped admitted');}a.unmap();d.queue.submit([pending]);await d.queue.onSubmittedWorkDone();d.destroy();
+ `);assert.equal(r.calls(),10);
+});
+for(const overflow of [false,true])test(`queued ${overflow?'overflow':'native loss'} cancels fences with authoritative terminal cause`,async()=>{
+ let release;const r=runtime(undefined,{after:()=>new Promise(resolve=>release=resolve)});
+ await r.run(`globalThis.d=await(await navigator.gpu.requestAdapter()).requestDevice();const a=d.createBuffer({size:4,usage:12}),b=d.createBuffer({size:4,usage:12});globalThis.fences=[];for(let i=0;i<2;i++){const e=d.createCommandEncoder();e.copyBufferToBuffer(a,0,b,0,4);d.queue.submit([e.finish()]);const f=d.queue.onSubmittedWorkDone();f.catch(()=>{});fences.push(f);}`);
+ r.queue({overflow,loss:overflow?null:{kind:'unknown',message:'authoritative native loss'}});
+ await r.run(`d.destroy();const results=await Promise.allSettled(fences);if(results.some(x=>x.status!=='rejected'||!x.reason.message.includes(${JSON.stringify(overflow?'overflow':'authoritative native loss')})))throw Error('terminal cause lost');let value;try{value=await d.lost;}catch(e){value=e;}if(${overflow}?!value.message.includes('overflow'):value.reason!=='unknown')throw Error('loss precedence');`);
+ release();assert.equal(r.calls(),1);
 });
