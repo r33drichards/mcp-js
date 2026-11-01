@@ -23,12 +23,12 @@ impl GpuConfig {
         Self { hooks }
     }
 }
-struct Session {
+pub(super) struct Session {
     token: String,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
+    pub(super) device: wgpu::Device,
+    pub(super) queue: wgpu::Queue,
     // Error scopes are device-wide. Prevent overlapping dispatch/validation.
-    busy: Mutex<()>,
+    pub(super) busy: Mutex<()>,
     _permit: tokio::sync::OwnedSemaphorePermit,
 }
 impl Drop for Session {
@@ -42,7 +42,7 @@ struct GpuState {
     submissions: u32,
     session: Option<Arc<Session>>,
 }
-fn err(e: impl std::fmt::Display) -> JsErrorBox {
+pub(super) fn err(e: impl std::fmt::Display) -> JsErrorBox {
     JsErrorBox::generic(format!("webgpu: {e}"))
 }
 fn capacity() -> Result<tokio::sync::OwnedSemaphorePermit, JsErrorBox> {
@@ -129,6 +129,8 @@ struct Job {
     workgroups: [u32; 3],
     #[serde(deserialize_with = "bounded_buffers")]
     buffers: Vec<Vec<u8>>,
+    #[serde(default)]
+    uniforms: Vec<bool>,
 }
 // Reject excessive element counts while parsing, before Vec allocation can grow.
 fn bounded_buffers<'de, D: serde::Deserializer<'de>>(
@@ -182,6 +184,17 @@ fn bounded_buffers<'de, D: serde::Deserializer<'de>>(
 
 impl Job {
     fn validate(&self) -> Result<(), JsErrorBox> {
+        if !self.uniforms.is_empty() && self.uniforms.len() != self.buffers.len() {
+            return Err(err("binding kinds mismatch"));
+        }
+        if self
+            .buffers
+            .iter()
+            .enumerate()
+            .any(|(i, b)| self.uniforms.get(i) == Some(&true) && b.len() > 65536)
+        {
+            return Err(err("uniform buffer limit"));
+        }
         if self.code.len() > MAX_SOURCE || self.entry.len() > 256 {
             return Err(err("shader source limit"));
         }
@@ -247,7 +260,47 @@ async fn op_gpu_dispatch(
         .await
         .map_err(err)?
 }
-fn checked<T>(device: &wgpu::Device, f: impl FnOnce() -> T) -> Result<T, JsErrorBox> {
+#[op2]
+#[string]
+async fn op_gpu_render(
+    state: Rc<RefCell<OpState>>,
+    #[string] token: String,
+    #[string] json: String,
+) -> Result<String, JsErrorBox> {
+    if json.len() > 1024 * 1024 {
+        return Err(err("render request size limit"));
+    }
+    let job: super::webgpu_render::RenderJob = serde_json::from_str(&json).map_err(err)?;
+    job.validate()?;
+    let (session, hooks) = {
+        let mut state = state.borrow_mut();
+        let hooks = state
+            .try_borrow::<GpuConfig>()
+            .ok_or_else(|| err("disabled"))?
+            .hooks
+            .clone();
+        let gpu = state
+            .try_borrow_mut::<GpuState>()
+            .ok_or_else(|| err("stale GPU handle; request a new adapter"))?;
+        let session = gpu
+            .session
+            .as_ref()
+            .filter(|s| s.token == token)
+            .ok_or_else(|| err("stale or destroyed GPU handle"))?
+            .clone();
+        if gpu.submissions >= MAX_SUBMISSIONS {
+            return Err(err("submission limit"));
+        }
+        gpu.submissions += 1;
+        (session, hooks)
+    };
+    authorize(hooks, serde_json::json!({"operation":"render","width":job.width,"height":job.height,"bytes":job.bytes(),"draw":job.draw})).await?;
+    tokio::task::spawn_blocking(move || super::webgpu_render::render(&session, job))
+        .await
+        .map_err(err)?
+}
+
+pub(super) fn checked<T>(device: &wgpu::Device, f: impl FnOnce() -> T) -> Result<T, JsErrorBox> {
     device.push_error_scope(wgpu::ErrorFilter::Internal);
     device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
     device.push_error_scope(wgpu::ErrorFilter::Validation);
@@ -284,11 +337,16 @@ fn run(session: &Session, job: Job) -> Result<String, JsErrorBox> {
         let buffers: Vec<_> = job
             .buffers
             .iter()
-            .map(|data| {
+            .enumerate()
+            .map(|(i, data)| {
                 device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: None,
                     contents: data,
-                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                    usage: (if job.uniforms.get(i) == Some(&true) {
+                        wgpu::BufferUsages::UNIFORM
+                    } else {
+                        wgpu::BufferUsages::STORAGE
+                    }) | wgpu::BufferUsages::COPY_SRC,
                 })
             })
             .collect();
@@ -389,7 +447,8 @@ deno_core::extension!(
         op_gpu_request,
         op_gpu_dispatch,
         op_gpu_destroy,
-        op_gpu_check
+        op_gpu_check,
+        op_gpu_render
     ]
 );
 pub fn create_extension() -> deno_core::Extension {
@@ -419,6 +478,7 @@ mod tests {
             entry: "main".into(),
             workgroups: [1; 3],
             buffers: vec![vec![0; 4]],
+            uniforms: vec![],
         };
         assert!(j.validate().is_ok());
         j.workgroups = [u32::MAX; 3];

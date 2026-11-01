@@ -1,12 +1,14 @@
-# WebGPU compute (experimental subset)
+# WebGPU compute and offscreen rendering (experimental subset)
 
 mcp-js can run WGSL compute shaders through Rust [wgpu](https://github.com/gfx-rs/wgpu).
 GPU access is off by default. Configure a `gpu` policy section to expose
-`navigator.gpu`, `GPUBufferUsage`, and `GPUMapMode`.
+`navigator.gpu`, `GPUBufferUsage`, `GPUTextureUsage`, and `GPUMapMode`.
 
-This is a compute subset, not a conformant WebGPU implementation. It uses familiar
-WebGPU calls for upload, dispatch, and readback. It has no rendering, textures,
-canvas, timestamps, indirect dispatch, optional device features, or error events.
+This is an experimental subset, not a conformant WebGPU implementation. It supports
+compute and a limited offscreen rendering path. It has no browser canvas, texture
+sampling, indexed draws, timestamps, indirect dispatch, optional device features,
+or error events. See `docs/webgpu-rendering-plan.md` in the source checkout for tested samples
+and remaining work.
 
 ## Enable access
 
@@ -87,15 +89,16 @@ device.destroy();
   Adapter/device options and optional features are unsupported.
 - At most 4 MiB of cumulative JavaScript buffer allocation per device, including
   readback buffers. Destroying a buffer does not refund this budget. Buffers must
-  have positive sizes divisible by four. Supported usage flags are `STORAGE`,
+  have positive sizes divisible by four. Supported usage flags are `STORAGE`, `UNIFORM`, `VERTEX`,
   `COPY_SRC`, `COPY_DST`, and `MAP_READ`; `MAP_READ` may combine only with `COPY_DST`.
-- One bind group at index zero, with 1–8 distinct storage buffers bound consecutively
+- One bind group at index zero, with 1–8 distinct storage or uniform buffers bound consecutively
   from zero. Only whole-buffer bindings and automatic pipeline layouts are supported.
 - One compute pass, one dispatch, and up to eight subsequent whole-buffer copies
   per command buffer. One command buffer per submit, one submit in flight, and
   at most 32 submits per execution. Workgroup counts must be positive, with product
   at most 65,536. wgpu also enforces device limits, including workgroup size.
-- At most 128 created buffer/shader/pipeline/bind-group/encoder objects per device;
+- Uniform buffers are limited to 64 KiB each and cannot also have STORAGE usage.
+- At most 128 created buffer/shader/pipeline/bind-group/encoder/texture/view objects per device;
   WGSL source is limited to 64 KiB and entry points to 256 bytes on the native boundary.
 - Buffer upload uses `queue.writeBuffer`. Native buffers are staged from CPU data
   at submission and all storage bindings are read back after dispatch. This favors
@@ -108,6 +111,33 @@ device.destroy();
 
 Descriptors reject unsupported keys. The API is not yet covered by the WebGPU
 conformance suite; code that relies on broader browser semantics needs adaptation.
+
+## Offscreen rendering milestone
+
+`createTexture`, `createView`, `createRenderPipeline`, `beginRenderPass`,
+`setVertexBuffer`, `draw`, and `copyTextureToBuffer` implement one restricted path:
+
+- One `rgba8unorm` 2D target, at most 1024×1024, with
+  `RENDER_ATTACHMENT | COPY_SRC` usage. Texture bytes count against the same
+  cumulative 4 MiB device budget as buffers; the readback buffer counts too.
+- One clear/store render pass and one triangle-list draw per command buffer,
+  followed by a whole-target readback. A fresh native target is created each
+  submission. Loading or sampling a prior target is unsupported.
+- At most four vertex-buffer slots, eight attributes per slot, 64 KiB total
+  vertex data, and 65,536 vertex×instance invocations. Formats are float32x2/3/4;
+  both vertex and instance step modes work. First vertex/instance must be zero.
+- Whole-buffer vertex bindings only. No render bind groups, index buffers,
+  depth/stencil, multisampling, blending, alternate formats, or samplers yet.
+- Readback offset must be zero; bytesPerRow must be a multiple of 256 and at
+  least width×4. The destination must contain exactly bytesPerRow×height bytes.
+- Compute and render passes must use separate submissions. The host must await
+  completion between them. This prototype stages data through CPU memory.
+
+Each native rendering submission independently checks the existing GPU policy
+with `operation: "render"`, `width`, `height`, `bytes` (unpadded color target),
+and `draw: [vertexCount, instanceCount, 0, 0]`. Denial occurs before shader
+compilation or rendering. Render and compute share the 32-submission budget,
+two-session process cap, execution tokens, and no-hard-preemption limitation.
 
 ## Cleanup, snapshots, and execution limits
 

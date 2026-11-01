@@ -53,3 +53,20 @@ test('restored native handles rejected', async () => {
   r.stale();
   await assert.rejects(r.run('device.createBuffer({size:4,usage:128});'), /stale/);
 });
+test('offscreen limits and unsupported rendering options fail before native dispatch', async () => {
+ const r=runtime();
+ await r.run(`
+ const d=await (await navigator.gpu.requestAdapter()).requestDevice();
+ const bad=f=>{let failed=false;try{f();}catch{failed=true;}if(!failed)throw Error('invalid render descriptor accepted');};
+ bad(()=>d.createTexture({size:[1025,64],format:'rgba8unorm',usage:17}));
+ bad(()=>d.createTexture({size:[64,64],format:'rgba16float',usage:17}));
+ bad(()=>d.createTexture({size:[64,64],format:'rgba8unorm',usage:17,sampleCount:4}));
+ bad(()=>d.createBuffer({size:4,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.STORAGE}));
+ bad(()=>d.createBuffer({size:65540,usage:GPUBufferUsage.UNIFORM}));
+ const t=d.createTexture({size:[64,64],format:'rgba8unorm',usage:17});
+ const e=d.createCommandEncoder();
+ bad(()=>e.beginRenderPass({colorAttachments:[{view:t.createView(),loadOp:'load',storeOp:'store'}]}));
+ d.destroy();bad(()=>t.createView());
+ `);
+ assert.equal(r.calls(),0);
+});

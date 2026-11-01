@@ -36,6 +36,7 @@ pub mod wasm_stub;
 pub mod web_compat;
 pub mod net_tcp;
 pub mod webgpu;
+mod webgpu_render;
 pub mod websocket;
 
 pub use console::HardeningConfig;
