@@ -1,9 +1,10 @@
 //! First offscreen rendering slice: one RGBA8 target, one triangle-list draw.
 //! This deliberately does not claim texture sampling or full WebGPU semantics.
-use super::webgpu::{Session, checked, err};
+use super::webgpu::{
+    BufferRef, Session, checked, err, resident_buffers, validate_buffer_usages, validate_refs,
+};
 use deno_error::JsErrorBox;
 use serde::Deserialize;
-use wgpu::util::DeviceExt;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct RenderJob {
@@ -17,6 +18,10 @@ pub(super) struct RenderJob {
     pub draw: [u32; 4],
     pub layouts: Vec<Layout>,
     pub buffers: Vec<Vec<u8>>,
+    #[serde(default)]
+    pub refs: Vec<BufferRef>,
+    #[serde(default)]
+    pub usages: Vec<u32>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -42,6 +47,11 @@ fn format(s: &str) -> Result<wgpu::VertexFormat, JsErrorBox> {
 }
 impl RenderJob {
     pub fn validate(&self) -> Result<(), JsErrorBox> {
+        validate_refs(&self.refs, self.buffers.len())?;
+        validate_buffer_usages(&self.buffers, &self.usages)?;
+        if self.usages.iter().any(|u| u & 32 == 0) {
+            return Err(err("VERTEX usage required"));
+        }
         if self.width == 0 || self.height == 0 || self.width > 1024 || self.height > 1024 {
             return Err(err("render dimensions limit"));
         }
@@ -166,6 +176,7 @@ pub(super) fn render(session: &Session, job: RenderJob) -> Result<String, JsErro
         })
     })?;
     let pitch = (job.width * 4).div_ceil(256) * 256;
+    let buffers = resident_buffers(session, &job.buffers, &job.usages, &job.refs)?;
     let readback = checked(device, || {
         let target = device.create_texture(&wgpu::TextureDescriptor {
             label: None,
@@ -182,17 +193,6 @@ pub(super) fn render(session: &Session, job: RenderJob) -> Result<String, JsErro
             view_formats: &[],
         });
         let view = target.create_view(&Default::default());
-        let buffers: Vec<_> = job
-            .buffers
-            .iter()
-            .map(|b| {
-                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: None,
-                    contents: b,
-                    usage: wgpu::BufferUsages::VERTEX,
-                })
-            })
-            .collect();
         let readback = device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
             size: u64::from(pitch) * u64::from(job.height),
@@ -306,6 +306,7 @@ mod tests {
             }],
         }];
         j.buffers = vec![vec![0; 8]];
+        j.usages = vec![32];
         assert!(j.validate().is_err());
     }
 }

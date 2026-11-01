@@ -10,6 +10,9 @@ const BOIDS: &str = include_str!("../../tests/webgpu/gallery/upstream/boids.wgsl
 const LIFE: &str = include_str!("../../tests/webgpu/gallery/upstream/life.wgsl");
 const BITONIC: &str = include_str!("../../tests/webgpu/gallery/upstream/bitonicCompute.ts");
 fn run(shader: &str, case: serde_json::Value, body: &str) {
+    run_with_common(shader, case, body, COMMON);
+}
+fn run_with_common(shader: &str, case: serde_json::Value, body: &str, common: &str) {
     INIT.call_once(engine::initialize_v8);
     let temp = tempfile::tempdir().unwrap();
     let db = sled::open(temp.path()).unwrap();
@@ -19,7 +22,7 @@ fn run(shader: &str, case: serde_json::Value, body: &str) {
         Arc::new(PolicyChain::new(vec![], EvalMode::All)),
     )));
     let code = format!(
-        "const SHADER = {}; const CASE = {};\n{COMMON}\n{body}",
+        "const SHADER = {}; const CASE = {};\n{common}\n{body}",
         serde_json::to_string(shader).unwrap(),
         case
     );
@@ -174,5 +177,210 @@ fn boids_unchanged_compute_and_gpu_render() {
         BOIDS,
         serde_json::json!({"name":"boids-compute-render"}),
         &body,
+    );
+}
+
+#[test]
+#[ignore = "real GPU required"]
+fn boids_resident_compute_to_render() {
+    let sprite = include_str!("../../tests/webgpu/gallery/upstream/sprite.wgsl");
+    let body = format!(
+        "const SPRITE = {};\n{}",
+        serde_json::to_string(sprite).unwrap(),
+        include_str!("../../tests/webgpu/gallery/boids-resident-render.js")
+    );
+    run(BOIDS, serde_json::json!({"name":"resident-boids"}), &body);
+}
+
+#[test]
+#[ignore = "real GPU required"]
+fn render_copy_updates_resident_compute_buffer() {
+    run(
+        "",
+        serde_json::json!({"name":"render-copy-revision"}),
+        r#"
+    const b=device.createBuffer({size:256,usage:140}),out=device.createBuffer({size:256,usage:9});
+    const p=device.createComputePipeline({layout:'auto',compute:{module:device.createShaderModule({code:'@group(0) @binding(0) var<storage,read_write> a:array<u32>; @compute @workgroup_size(1) fn main(){a[0]+=1u;}'}),entryPoint:'main'}});
+    const g=device.createBindGroup({layout:p.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:b}}]});
+    async function compute(){const e=device.createCommandEncoder(),pass=e.beginComputePass();pass.setPipeline(p);pass.setBindGroup(0,g);pass.dispatchWorkgroups(1);pass.end();e.copyBufferToBuffer(b,0,out,0,256);device.queue.submit([e.finish()]);await device.queue.onSubmittedWorkDone();}
+    await compute();
+    const m=device.createShaderModule({code:'@vertex fn vs(@builtin(vertex_index) i:u32)->@builtin(position) vec4f{return vec4f(0,0,0,1);} @fragment fn fs()->@location(0) vec4f{return vec4f(1,1,1,1);}'});
+    const rp=device.createRenderPipeline({layout:'auto',vertex:{module:m,entryPoint:'vs'},fragment:{module:m,entryPoint:'fs',targets:[{format:'rgba8unorm'}]}});
+    const t=device.createTexture({size:[1,1],format:'rgba8unorm',usage:17});
+    const e=device.createCommandEncoder(),pass=e.beginRenderPass({colorAttachments:[{view:t.createView(),clearValue:[0,0,0,1],loadOp:'clear',storeOp:'store'}]});pass.setPipeline(rp);pass.draw(0);pass.end();e.copyTextureToBuffer({texture:t},{buffer:b,bytesPerRow:256},[1,1]);device.queue.submit([e.finish()]);await device.queue.onSubmittedWorkDone();
+    await compute();await out.mapAsync(1);assert(new Uint32Array(out.getMappedRange())[0]===0xff000001,'render readback copy did not invalidate resident revision');out.unmap();device.destroy();
+    "#,
+    );
+}
+
+#[test]
+#[ignore = "real GPU required"]
+fn ordered_native_copies_and_multiple_dispatches() {
+    run(
+        "",
+        serde_json::json!({"name":"ordered-native-commands"}),
+        include_str!("../../tests/webgpu/gallery/commands.js"),
+    );
+}
+#[test]
+#[ignore = "real GPU required"]
+fn batch_charges_every_dispatch_to_execution_budget() {
+    run(
+        "",
+        serde_json::json!({"name":"batch-work-budget"}),
+        r#"
+    const b=device.createBuffer({size:4,usage:140}),out=device.createBuffer({size:4,usage:9});
+    const p=device.createComputePipeline({layout:'auto',compute:{module:device.createShaderModule({code:'@group(0) @binding(0) var<storage,read_write> a:array<u32>; @compute @workgroup_size(1) fn main(){a[0]+=1u;}'}),entryPoint:'main'}});
+    const g=device.createBindGroup({layout:p.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:b}}]});
+    const e=device.createCommandEncoder(),pass=e.beginComputePass();pass.setPipeline(p);pass.setBindGroup(0,g);for(let i=0;i<32;i++)pass.dispatchWorkgroups(1);pass.end();e.copyBufferToBuffer(b,0,out,0,4);device.queue.submit([e.finish()]);await out.mapAsync(1);assert(new Uint32Array(out.getMappedRange())[0]===32,'dependent dispatch result');out.unmap();
+    const e2=device.createCommandEncoder();e2.copyBufferToBuffer(b,0,out,0,4);let rejected=false;try{device.queue.submit([e2.finish()]);}catch(e){rejected=String(e).includes('work limit');}assert(rejected,'batch bypassed work budget');device.destroy();
+    "#,
+    );
+}
+
+#[test]
+#[ignore = "real GPU required for adapter capability probe"]
+fn onnx_simd_and_first_bootstrap_blocker() {
+    // SIMD probe bytes from microsoft/onnxruntime at
+    // 2927f3b3fcd2012394c8a4bb8d2d18f81cc0f768,
+    // js/web/lib/wasm/wasm-factory.ts; MIT license in upstream/ONNX-LICENSE.
+    run(
+        "",
+        serde_json::json!({"name":"onnx-bootstrap-prerequisites"}),
+        r#"
+    const simd=new Uint8Array([0,97,115,109,1,0,0,0,1,4,1,96,0,0,3,2,1,0,10,30,1,28,0,65,0,253,15,253,12,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,253,186,1,26,11]);
+    assert(WebAssembly.validate(simd),'ONNX SIMD capability probe failed');await WebAssembly.instantiate(simd);
+    assert(adapter.limits.maxComputeWorkgroupStorageSize>0&&adapter.features.size===0,'native capability profile missing');
+    assert(Reflect.set(device,'onuncapturederror',()=>{}),'native event handler unavailable');
+    assert(typeof device.lost.then==='function','loss promise unavailable');device.destroy();assert((await device.lost).reason==='destroyed','explicit destruction loss');
+    "#,
+    );
+}
+
+#[test]
+#[ignore = "real GPU required"]
+fn pooled_binding_ranges_and_partial_copy_sentinels() {
+    run(
+        "",
+        serde_json::json!({"name":"pooled-ranges"}),
+        include_str!("../../tests/webgpu/gallery/ranges.js"),
+    );
+}
+
+#[test]
+#[ignore = "real GPU required"]
+fn uniform_vertex_usage_is_stable_across_all_first_use_paths() {
+    for order in [
+        "compute-render",
+        "render-compute",
+        "copy-compute-render",
+        "copy-render-compute",
+    ] {
+        run(
+            "",
+            serde_json::json!({"order":order}),
+            include_str!("../../tests/webgpu/gallery/union-usage.js"),
+        );
+    }
+}
+
+#[test]
+#[ignore = "real GPU required"]
+fn native_capability_profile_and_request_validation() {
+    run_with_common(
+        "",
+        serde_json::json!({}),
+        r#"
+ const a=await navigator.gpu.requestAdapter({powerPreference:'high-performance',forceFallbackAdapter:false});if(!a)throw Error('GPU missing');
+ const assert=(x,m)=>{if(!x)throw Error(m);};
+ const rejects=async f=>{let failed=false;try{await f();}catch{failed=true;}assert(failed,'invalid profile accepted');};
+ assert(a.limits.maxBufferSize>0&&a.limits.maxComputeInvocationsPerWorkgroup>0,'missing native limits');
+ assert(a.features.size===0&&!a.features.has('shader-f16')&&[...a.features].length===0,'unbacked optional feature');
+ assert(typeof a.info.vendor==='string'&&typeof a.info.description==='string'&&(await a.requestAdapterInfo())===a.info,'native adapter info missing');
+ assert(Object.isFrozen(a.limits)&&Object.isFrozen(a.info)&&typeof a.features.add==='undefined','mutable capability surface');
+ await rejects(()=>a.requestDevice({requiredFeatures:['shader-f16']}));
+ await rejects(()=>a.requestDevice({requiredLimits:{maxBufferSize:a.limits.maxBufferSize+4}}));
+ await rejects(()=>a.requestDevice({requiredLimits:{maxBufferSize:4}}));
+ await rejects(()=>a.requestDevice({requiredLimits:{unknown:0}}));
+ const d=await a.requestDevice({requiredFeatures:[],requiredLimits:a.limits});
+ assert(d.limits.maxBufferSize===a.limits.maxBufferSize&&d.features.size===0,'native device profile changed');
+ let quota=false;try{d.createBuffer({size:4194308,usage:128});}catch{quota=true;}assert(quota,'native limits weakened runtime allocation budget');
+ d.destroy();await rejects(()=>a.requestAdapterInfo());
+ "#,
+        "",
+    );
+}
+
+#[test]
+#[ignore = "real GPU required"]
+fn effective_limits_compute_binding_boundary() {
+    run_with_common(
+        "",
+        serde_json::json!({}),
+        r#"
+ const a=await navigator.gpu.requestAdapter();const d=await a.requestDevice({requiredLimits:a.limits});
+ const l=d.limits;const assert=(x,m)=>{if(!x)throw Error(m);};
+ assert(l.maxBindGroups===1&&l.maxBindingsPerBindGroup===8,'binding subset overstated');
+ for(const name of ['maxSampledTexturesPerShaderStage','maxSamplersPerShaderStage','maxStorageTexturesPerShaderStage','maxDynamicUniformBuffersPerPipelineLayout','maxDynamicStorageBuffersPerPipelineLayout','maxTextureDimension1D','maxTextureDimension3D'])assert(l[name]===0,`${name} unsupported`);
+ const n=l.maxStorageBuffersPerShaderStage;
+ const buffers=Array.from({length:n},()=>d.createBuffer({size:4,usage:140}));
+ const code=buffers.map((_,i)=>`@group(0) @binding(${i}) var<storage,read_write> b${i}:u32;`).join('\n')+`@compute @workgroup_size(1) fn main(){${buffers.map((_,i)=>`b${i}=${i+11}u;`).join('')}}`;
+ const p=d.createComputePipeline({layout:'auto',compute:{module:d.createShaderModule({code})}});
+ const g=d.createBindGroup({layout:p.getBindGroupLayout(l.maxBindGroups-1),entries:buffers.map((buffer,binding)=>({binding,resource:{buffer}}))});
+ let failed=false;try{p.getBindGroupLayout(l.maxBindGroups);}catch{failed=true;}assert(failed,'out-of-profile group accepted');
+ const e=d.createCommandEncoder(),pass=e.beginComputePass();pass.setPipeline(p);pass.setBindGroup(0,g);pass.dispatchWorkgroups(1);pass.end();
+ const out=d.createBuffer({size:4,usage:9});e.copyBufferToBuffer(buffers[n-1],0,out,0,4);d.queue.submit([e.finish()]);
+ await out.mapAsync(1);assert(new Uint32Array(out.getMappedRange())[0]===n+10,'advertised storage binding boundary failed');out.unmap();d.destroy();
+ "#,
+        "",
+    );
+}
+
+#[test]
+#[ignore = "real GPU required"]
+fn effective_limits_allocation_boundaries() {
+    // Separate executions keep cumulative allocations distinct from per-object maxima.
+    run_with_common(
+        "",
+        serde_json::json!({}),
+        r#"
+ const a=await navigator.gpu.requestAdapter(),d=await a.requestDevice({requiredLimits:a.limits});
+ if(d.limits.maxBufferSize!==4194304||d.limits.maxStorageBufferBindingSize!==4194304)throw Error('buffer cap');
+ const b=d.createBuffer({size:d.limits.maxBufferSize,usage:128});
+ const p=d.createComputePipeline({layout:'auto',compute:{module:d.createShaderModule({code:'@group(0) @binding(0) var<storage,read_write> b:array<u32>; @compute @workgroup_size(1) fn main(){b[0]=17u;}'})}});
+ const g=d.createBindGroup({layout:p.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:b,size:d.limits.maxStorageBufferBindingSize}}]});
+ const e=d.createCommandEncoder(),pass=e.beginComputePass();pass.setPipeline(p);pass.setBindGroup(0,g);pass.dispatchWorkgroups(1);pass.end();d.queue.submit([e.finish()]);await d.queue.onSubmittedWorkDone();d.destroy();
+ "#,
+        " ",
+    );
+    run_with_common(
+        "",
+        serde_json::json!({}),
+        r#"
+ const a=await navigator.gpu.requestAdapter(),d=await a.requestDevice({requiredLimits:a.limits});
+ if(d.limits.maxTextureDimension2D!==1024||d.limits.maxTextureArrayLayers!==1||d.limits.maxColorAttachments!==1||d.limits.maxColorAttachmentBytesPerSample!==4)throw Error('texture cap');
+ const t=d.createTexture({size:[d.limits.maxTextureDimension2D,1,d.limits.maxTextureArrayLayers],format:'rgba8unorm',usage:17});
+ const module=d.createShaderModule({code:'@vertex fn vs(@builtin(vertex_index) i:u32)->@builtin(position) vec4f{var p=array<vec2f,3>(vec2f(-1,-1),vec2f(3,-1),vec2f(-1,3));return vec4f(p[i],0,1);} @fragment fn fs()->@location(0) vec4f{return vec4f(1,0,0,1);}'});
+ const p=d.createRenderPipeline({layout:'auto',vertex:{module,entryPoint:'vs'},fragment:{module,entryPoint:'fs',targets:[{format:'rgba8unorm'}]}});
+ const e=d.createCommandEncoder(),pass=e.beginRenderPass({colorAttachments:[{view:t.createView(),loadOp:'clear',storeOp:'store'}]});pass.setPipeline(p);pass.draw(3);pass.end();
+ const out=d.createBuffer({size:4096,usage:9});e.copyTextureToBuffer({texture:t},{buffer:out,bytesPerRow:4096},[1024,1]);d.queue.submit([e.finish()]);await out.mapAsync(1);const pixels=new Uint8Array(out.getMappedRange());if(pixels[0]!==255||pixels[4092]!==255||pixels[4095]!==255)throw Error('advertised texture width failed rendering');out.unmap();
+ let failed=false;try{d.createTexture({size:[d.limits.maxTextureDimension2D+1,1],format:'rgba8unorm',usage:17});}catch{failed=true;}if(!failed)throw Error('oversized texture accepted');d.destroy();
+ "#,
+        " ",
+    );
+}
+
+#[test]
+#[ignore = "real GPU required"]
+fn event_receiver_does_not_keep_execution_alive() {
+    run_with_common(
+        "",
+        serde_json::json!({}),
+        r#"
+ const d=await(await navigator.gpu.requestAdapter()).requestDevice();
+ d.onuncapturederror=()=>{throw Error('unexpected event');};
+ // No destroy: teardown must close a pending unreferenced receiver and GPU session.
+ "#,
+        "",
     );
 }

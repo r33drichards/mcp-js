@@ -7,7 +7,8 @@ GPU access is off by default. Configure a `gpu` policy section to expose
 This is an experimental subset, not a conformant WebGPU implementation. It supports
 compute and a limited offscreen rendering path. It has no browser canvas, texture
 sampling, indexed draws, timestamps, indirect dispatch, optional device features,
-or error events. See `docs/webgpu-rendering-plan.md` in the source checkout for tested samples
+or general error scopes/EventTarget listeners. A bounded `onuncapturederror` handler
+and `device.lost` bridge are available as described below. See `docs/webgpu-rendering-plan.md` in the source checkout for tested samples
 and remaining work.
 
 ## Enable access
@@ -29,10 +30,24 @@ allow if {
     input.operation == "dispatch"
     input.bytes <= 1048576
 }
+allow if {
+    input.operation == "copyBuffer"
+    input.bytes <= 1048576
+}
 ```
 
 The adapter gate runs before native GPU initialization. Each dispatch passes
 `{"operation":"dispatch","bytes":N,"workgroups":[x,y,z]}` to the same hook chain.
+Each native buffer copy passes `{"operation":"copyBuffer","bytes":N}`. All
+operations in a batch must be allowed before native work begins. Policy `bytes`
+counts full referenced allocations; for a copy it is the sum of the complete
+source and destination allocations, even when only a small range is copied.
+`sourceBytes` and `destinationBytes` report these allocations separately;
+`bindingBytes` and `copiedBytes` additionally report selected range sizes, with
+`sourceOffset`/`destinationOffset` for copies. Partial ranges do not reduce the
+allocation-based policy check. This is stricter than the earlier source-only
+copy accounting: an equal-sized copy now reports twice one buffer's size. Policies that
+previously allowed only dispatch must explicitly allow copies when used.
 These are gate-only hooks: mutation and post hooks are unsupported. An explicit
 `{"gpu":{"policies":[]}}` permits access within the built-in limits. Omit `gpu`
 to disable access completely. The Rust embedding API uses `Engine::with_gpu_config`.
@@ -86,25 +101,60 @@ device.destroy();
 
 - One adapter request and one device per execution; two active native sessions
   per server process. Missing adapters return `null`; device creation failures reject.
-  Adapter/device options and optional features are unsupported.
+  Adapter `powerPreference` and `forceFallbackAdapter` are validated and forwarded
+  to wgpu; forced fallback availability depends on the backend. Adapter info comes
+  from native wgpu (unknown architecture is an empty string). Adapter/device
+  limits describe the effective implemented subset, clamped to native capacity and
+  per-object ceilings. Unsupported binding categories report zero. Cumulative
+  allocation/work quotas still apply; limits are not a conformance claim. Features
+  are empty because the native
+  device enables no optional features. `requestDevice` accepts only empty features
+  and supplied limit values exactly matching that effective profile; lower/higher
+  requests and unknown limits are rejected, not silently ignored. Arbitrary
+  device negotiation remains unsupported.
 - At most 4 MiB of cumulative JavaScript buffer allocation per device, including
   readback buffers. Destroying a buffer does not refund this budget. Buffers must
   have positive sizes divisible by four. Supported usage flags are `STORAGE`, `UNIFORM`, `VERTEX`,
   `COPY_SRC`, `COPY_DST`, and `MAP_READ`; `MAP_READ` may combine only with `COPY_DST`.
 - One bind group at index zero, with 1–8 distinct storage or uniform buffers bound consecutively
-  from zero. Only whole-buffer bindings and automatic pipeline layouts are supported.
-- One compute pass, one dispatch, and up to eight subsequent whole-buffer copies
-  per command buffer. One command buffer per submit, one submit in flight, and
-  at most 32 submits per execution. Workgroup counts must be positive, with product
-  at most 65,536. wgpu also enforces device limits, including workgroup size.
+  from zero. Static binding ranges and automatic pipeline layouts are supported. Binding offsets
+  must be multiples of 256; sizes must be positive multiples of four within the
+  allocation. Aliased bindings and dynamic offsets remain unsupported.
+- Multiple compute passes/dispatches and up to eight ordered buffer copies
+  per command buffer, including copy-only buffers. Copies require no active pass, distinct buffers, and positive four-byte-aligned
+  sizes/offsets within both allocations; source and destination sizes may differ.
+  One command buffer per submit and one submit in flight. The execution has 32
+  work units: each compute dispatch or render consumes one; a copy-only submission
+  consumes one. Batching cannot multiply this allowance. Workgroup counts must be
+  positive, with product at most 65,536 per dispatch; wgpu enforces device limits.
+- A compute/copy batch references at most 16 distinct buffers (still at most eight
+  bindings per dispatch), with at most 4 MiB total bytes and 64 KiB aggregate WGSL
+  across its commands. The native encoder executes ordered copies and dispatches
+  without intermediate host readbacks. Individual JS dispatches become native
+  compute passes to order their storage dependencies.
 - Uniform buffers are limited to 64 KiB each and cannot also have STORAGE usage.
 - At most 128 created buffer/shader/pipeline/bind-group/encoder/texture/view objects per device;
   WGSL source is limited to 64 KiB and entry points to 256 bytes on the native boundary.
-- Buffer upload uses `queue.writeBuffer`. Native buffers are staged from CPU data
-  at submission and all storage bindings are read back after dispatch. This favors
-  a small, auditable implementation over throughput and GPU-resident data reuse.
+- Buffer upload uses `queue.writeBuffer`. Native buffers now persist within an
+  execution, keyed by session-local identity and upload revision. Unchanged
+  revisions reuse GPU contents, including binding a compute output as a vertex
+  buffer on a later submission. Explicit host writes advance the revision;
+  native buffer copies retain it. All batch buffers are eagerly read back after
+  the batch, and serialized jobs still include CPU bytes; reuse skips their upload.
+  The separate render path still copies its readback into the JS destination and
+  advances that destination's revision.
+- The resident buffer registry preserves each buffer's complete declared usage
+  mask across compute, copy and render paths. `UNIFORM | VERTEX` is supported;
+  an identity cannot change its declared usage after registration. Native buffers
+  include internal copy capabilities for staging; public operations still require
+  their declared usage flags. MAP_READ uses separate staging buffers.
+- The resident buffer registry independently enforces 4 MiB and at most 128 IDs.
+  These are logical resource limits, not an exact VRAM ceiling: staging, pipelines
+  and driver allocations are additional. Buffer destruction invalidates its JS
+  wrapper immediately; resident storage is retained until device/session cleanup,
+  and the cumulative budget is not refunded. Native handles never enter snapshots.
 - Mapping supports full-buffer `MAP_READ` only, one mapped range at a time.
-  `mappedAtCreation`, write mapping, offsets in bindings, and dynamic offsets are unsupported.
+  `mappedAtCreation`, write mapping, partial mapping, and dynamic offsets are unsupported.
 - Native shader/pipeline validation is deferred until submission. Errors reject
   `queue.onSubmittedWorkDone()` and dependent `mapAsync()` calls, rather than using
   WebGPU error scopes or `uncapturederror`. Always await one of these promises.
@@ -131,12 +181,13 @@ conformance suite; code that relies on broader browser semantics needs adaptatio
 - Readback offset must be zero; bytesPerRow must be a multiple of 256 and at
   least width×4. The destination must contain exactly bytesPerRow×height bytes.
 - Compute and render passes must use separate submissions. The host must await
-  completion between them. This prototype stages data through CPU memory.
+  completion between them. A shared STORAGE | VERTEX buffer stays resident across
+  them; eager readback still occurs, but the render input is not re-uploaded.
 
 Each native rendering submission independently checks the existing GPU policy
 with `operation: "render"`, `width`, `height`, `bytes` (unpadded color target),
 and `draw: [vertexCount, instanceCount, 0, 0]`. Denial occurs before shader
-compilation or rendering. Render and compute share the 32-submission budget,
+compilation or rendering. Render and compute share the 32-work-unit budget,
 two-session process cap, execution tokens, and no-hard-preemption limitation.
 
 ## Cleanup, snapshots, and execution limits
@@ -186,3 +237,32 @@ cargo test -p server --test webgpu -- --ignored --test-threads=1
 
 Use the repository's Nix Rust environment. The JavaScript tests mock the native
 boundary; only the explicitly enabled Rust GPU tests verify actual WGSL execution.
+
+
+## Native error and loss delivery
+
+`device.onuncapturederror` accepts one function or null. Actual uncaptured wgpu
+errors arrive with `event.error` classified as `GPUValidationError`,
+`GPUOutOfMemoryError`, or `GPUInternalError`. The small event facade supports
+`preventDefault()` and `defaultPrevented`; it is not a full EventTarget API.
+`device.lost` resolves on native loss or explicit `device.destroy()`.
+Existing internal native error scopes still reject invalid submissions and do not
+also emit duplicate uncaptured events. JavaScript push/pop error scopes remain
+unsupported.
+
+The receiver is unreferenced: merely holding or awaiting `device.lost` does not
+keep an otherwise idle execution alive. Delivery occurs while the runtime is
+active; teardown closes/wakes the receiver and destroys native resources. Callback
+captures are weak. Native token and terminal state are checked at delivery, even
+for events already drained from the queue, and before each JS handler invocation.
+
+At most 16 error messages of 1024 UTF-8 bytes are retained, plus a separate first
+native-loss record. This bounds retained text, not native error construction or
+formatting CPU time. Queue overflow terminates the session and **rejects** the
+loss promise with an implementation error; it never fabricates native device
+loss. Destroy atomically preserves earlier native loss or overflow, even after
+the receiver has drained those records. A throwing handler or receiver failure
+also terminates the bridge/session and rejects that promise unless an earlier
+authoritative native terminal outcome already exists. This fail-closed behavior is an explicit experimental
+subset limitation, not standard browser exception reporting. No GPU hard
+preemption is promised for work already submitted.
