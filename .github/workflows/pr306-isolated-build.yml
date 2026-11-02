@@ -1,0 +1,39 @@
+name: PR306 isolated Lambda runtime build
+on:
+  push:
+    branches: [codex/pr306-lambda-build-ec746b3]
+    paths: [.github/workflows/pr306-isolated-build.yml]
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ec746b3386f24a036c90852e30eeecf1b77f57aa
+          persist-credentials: false
+      - uses: cachix/install-nix-action@v31
+      - name: Build pinned Linux runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = ec746b3386f24a036c90852e30eeecf1b77f57aa
+          timeout 3300 nix build --extra-experimental-features 'nix-command flakes' .#packages.x86_64-linux.default --out-link result
+          mkdir artifact
+          server=$(readlink -f result)/bin/server
+          PORT= timeout 30 "$server" --version
+          nix-store -qR ./result > artifact/closure.txt
+          tar -czf artifact/closure.tar.gz --files-from=artifact/closure.txt
+          test "$(stat -c%s artifact/closure.tar.gz)" -le 1000000000
+          binary_sha=$(sha256sum "$server" | cut -d' ' -f1)
+          closure_sha=$(sha256sum artifact/closure.tar.gz | cut -d' ' -f1)
+          printf '{"sourceSha":"ec746b3386f24a036c90852e30eeecf1b77f57aa","binarySha256":"%s","entrypoint":"%s","closureSha256":"%s"}\n' "$binary_sha" "$server" "$closure_sha" > artifact/provenance.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pr306-linux-runtime-ec746b3386f24a036c90852e30eeecf1b77f57aa
+          path: artifact/
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
